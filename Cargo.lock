@@ -206,6 +206,17 @@ name = "retrace-arch"
 version = "0.0.0"
 
 [[package]]
+name = "retrace-box"
+version = "0.0.0"
+dependencies = [
+ "hv-sys",
+ "libc",
+ "retrace-arch",
+ "retrace-guest",
+ "retrace-trace",
+]
+
+[[package]]
 name = "retrace-guest"
 version = "0.0.0"
 
