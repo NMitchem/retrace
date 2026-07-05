@@ -51,3 +51,57 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> RecordSummar
     }
     RecordSummary { stdout, exit_code, events: count }
 }
+
+#[derive(Debug)]
+pub struct ReplayReport { pub stdout: Vec<u8>, pub exit_code: u64 }
+#[derive(Debug)]
+pub struct Divergence { pub landmark: usize, pub pc: u64, pub detail: String }
+
+pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
+    let events = retrace_trace::Reader::open(trace_path).expect("open trace");
+    let (regs, mem) = match events.first() {
+        Some(Event::Snapshot { regs, mem }) => (regs.clone(), mem.clone()),
+        _ => return Err(Divergence { landmark: 0, pc: 0, detail: "trace missing leading Snapshot".into() }),
+    };
+    // Rebuild the guest from the snapshot's exact regions (includes stack + trampoline);
+    // restore maps only those regions and re-establishes fixed sysregs + captured registers.
+    let mut b = Box_::restore(&mem, &regs);
+
+    let mut stdout = Vec::new();
+    let mut idx = 1usize; // events[0] is the snapshot
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } => {
+                let pc = b.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+                match events.get(idx) {
+                    Some(Event::Syscall { num: rn, args: ra, ret }) => {
+                        if num != *rn || args != *ra {
+                            return Err(Divergence { landmark: idx, pc,
+                                detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
+                        }
+                        // ASSERT NEGATIVE SPACE: we feed the recorded result; we do NOT execute the syscall.
+                        if num == SYS_WRITE && (args[0]==1 || args[0]==2) {
+                            stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
+                        }
+                        b.set_x0_and_return(*ret);
+                        idx += 1;
+                    }
+                    Some(Event::Exit { .. }) if num == SYS_EXIT => { /* fallthrough handled below */ }
+                    other => return Err(Divergence { landmark: idx, pc,
+                        detail: format!("expected recorded syscall, got {other:?}") }),
+                }
+                if num == SYS_EXIT {
+                    match events.get(idx) {
+                        Some(Event::Exit { code }) => return Ok(ReplayReport { stdout, exit_code: *code }),
+                        other => return Err(Divergence { landmark: idx, pc,
+                            detail: format!("expected recorded Exit, got {other:?}") }),
+                    }
+                }
+            }
+            Stop::Other { esr } => {
+                let pc = b.vcpu.get_reg(reg::PC).unwrap();
+                return Err(Divergence { landmark: idx, pc, detail: format!("unexpected non-syscall exit esr=0x{esr:x}") });
+            }
+        }
+    }
+}
