@@ -43,6 +43,42 @@ Warpspeed) conclude that a *general*, `rr`-fidelity record/replay debugger for m
 end-to-end** — a userspace-controlled scheduler where "deliver event at instruction N"
 needs no kernel interception. This design is that system.
 
+## Verification status (2026-07-05)
+
+The load-bearing claims below were verified on the target OS before committing to this
+architecture (Apple Silicon, macOS 26.4.1 build 25E253, non-root, SIP enabled). Working
+probes are in `spikes/`.
+
+**Empirically confirmed on this machine:**
+
+- **The entitlement is free.** Without it, `hv_vm_create` → `HV_DENIED`; ad-hoc signed with
+  `com.apple.security.hypervisor` (no Apple account, no provisioning profile, non-root, SIP
+  on) → `HV_SUCCESS`. The "a normal dev can ship this" claim holds.
+- **No instruction counter exists** — `ID_AA64DFR0_EL1` reports `PMUVer=0x0`; the SDK
+  headers contain zero PMU sysregs; only `hv_vcpu_get_exec_time` (time, not instructions).
+  This confirms software single-step is *mandatory*, not a choice.
+- **Stage-2 RWX** of a plain RW `MAP_ANON` buffer (no `MAP_JIT`) → `HV_SUCCESS`.
+- **6 HW breakpoints / 4 watchpoints**; default IPA 36 bits (64 GiB).
+- **The core loop works end-to-end:** a guest ran real instructions natively and its `HVC`
+  trapped to the VMM with a decodable `ESR_EL2` (EC=0x16). This is the whole trap-and-forward
+  architecture in miniature.
+
+**Confirmed against the Apple SDK headers:** all debug/single-step/interrupt/vtimer APIs;
+`MDSCR_EL1`/`DBGBVR0`/`HCR_EL2` sysregs; `hv_vm_config_set_ipa_granule` + `HV_IPA_GRANULE_4KB`
+(the macOS 26 4 KiB-granule claim); exactly four exit reasons.
+
+**Confirmed against primary sources:** `kallsyms/warpspeed` and `kallsyms/appbox` both carry
+**no license** (`license: null`, no LICENSE file — all rights reserved; clean-room only);
+`Impalabs/applevisor` is **Apache-2.0** (safe to depend on); the `rr.soft` magic counter
+address `0x70001000` falls inside macOS arm64's 4 GiB `__PAGEZERO` (the deferred SoftPMU
+needs address relocation).
+
+**Not yet proven (engineering-effort risks, not platform walls) — deferred to M0/M1:**
+EL0-`SVC`→`VBAR_EL1` trampoline path (spikes issue `HVC` from EL1 directly); dyld-shared-
+cache loading on Tahoe (risk #1); memory-diff fidelity across the real syscall surface. None
+of these is a capability gate — the platform allows everything the design needs; the open
+questions are all "how much work," not "is it possible."
+
 ## Prior art (and our relationship to it)
 
 - **Warpspeed** (Nick Gregory / Pete Markowsky, REcon 2023; repo `kallsyms/warpspeed`) —
