@@ -10,7 +10,7 @@ const GRANULE: usize = 0x4000; // 16 KiB default granule
 // A page-aligned host allocation mapped 1:1 into the guest at `ipa`.
 pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
 
-pub struct Box_ { pub vm: Vm, pub vcpu: Vcpu, pub backings: Vec<Backing> }
+pub struct Box_ { pub vcpu: Vcpu, pub vm: Vm, pub backings: Vec<Backing> }
 
 pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
 
