@@ -1,0 +1,7 @@
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "nondeterminism: use the seeded clock" },
+  { path = "std::time::SystemTime::now", reason = "nondeterminism" },
+]
+disallowed-types = [
+  { path = "std::thread::Thread", reason = "core is single-threaded by design" },
+]
