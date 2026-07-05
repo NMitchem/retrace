@@ -206,6 +206,10 @@ name = "retrace-arch"
 version = "0.0.0"
 
 [[package]]
+name = "retrace-guest"
+version = "0.0.0"
+
+[[package]]
 name = "retrace-trace"
 version = "0.0.0"
 dependencies = [
