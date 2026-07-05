@@ -1,0 +1,13 @@
+[package]
+name = "retrace-core"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hv-sys = { path = "../hv-sys" }
+retrace-arch = { path = "../retrace-arch" }
+retrace-box = { path = "../retrace-box" }
+retrace-guest = { path = "../retrace-guest" }
+retrace-trace = { path = "../retrace-trace" }
+libc = "0.2"
