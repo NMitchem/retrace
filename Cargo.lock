@@ -217,6 +217,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "retrace-core"
+version = "0.0.0"
+dependencies = [
+ "hv-sys",
+ "libc",
+ "retrace-arch",
+ "retrace-box",
+ "retrace-guest",
+ "retrace-trace",
+]
+
+[[package]]
 name = "retrace-guest"
 version = "0.0.0"
 
