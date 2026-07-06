@@ -15,3 +15,5 @@ retrace-guest = { path = "../retrace-guest" }
 [dev-dependencies]
 retrace-guest = { path = "../retrace-guest" }
 retrace-trace = { path = "../retrace-trace" }
+retrace-sim = { path = "../retrace-sim" }
+bincode = "1"

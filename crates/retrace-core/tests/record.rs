@@ -4,7 +4,7 @@ fn recording_hello_emits_hello_and_logs_events() {
     let loaded = retrace_guest::parse_macho(&bytes);
     let dir = std::env::temp_dir();
     let trace = dir.join(format!("retrace-rec-{}.bin", std::process::id()));
-    let s = retrace_core::record(&loaded, &trace);
+    let s = retrace_core::record(&loaded, &trace).expect("record");
     assert_eq!(s.stdout, b"hello\n");
     assert_eq!(s.exit_code, 0);
     // Trace must contain: 1 Snapshot, 1 write Syscall, 1 Exit.
