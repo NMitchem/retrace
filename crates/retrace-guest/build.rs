@@ -13,4 +13,18 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang");
     assert!(status.success(), "guest assembly failed");
+
+    // Fixture file with known contents.
+    let fixture = format!("{out}/fixture.txt");
+    std::fs::write(&fixture, b"retrace-m1-fixture\n").unwrap();
+    // Generate the path constant appended to the guest asm.
+    let gen = format!("{out}/fileio_gen.s");
+    std::fs::write(&gen, format!(".section __DATA,__data\n.p2align 3\n.global path\npath: .asciz \"{fixture}\"\n")).unwrap();
+    let src = format!("{}/asm/fileio.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/fileio");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
+        .status().expect("clang fileio");
+    assert!(status.success(), "fileio guest build failed");
 }
