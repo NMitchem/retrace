@@ -274,6 +274,12 @@ low-risk.
 
 ## Milestones (dependency-ordered)
 
+> **2026-07-05 update:** the original M1 (below) is split — the memory-diff recording engine
+> is now **M1** (see `2026-07-05-retrace-m1-memory-diff-recorder-design.md`), and the dyld/
+> DSC/MMU/PAC loader is **M2**. Everything after shifts by one (positioning → M3, signals →
+> M4, debugger → M5, interpreter → M6). The two are orthogonal risks and were bundled here
+> only for brevity; the dependency ordering is otherwise unchanged.
+
 - **M0 — Box & trace spine.** VMM loop; load a trivial static Mach-O; EL1 `SVC→HVC`
   trampoline; 1:1 mapping; first snapshot; checksummed trace format. *Exit:* record + replay
   an `/bin/echo`-class program with **zero divergence over N fresh seeds.**
