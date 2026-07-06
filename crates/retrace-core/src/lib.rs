@@ -22,14 +22,14 @@ pub fn snapshot_of(b: &Box_) -> Event {
     Event::Snapshot { regs, mem }
 }
 
-pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> RecordSummary {
+pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<RecordSummary, String> {
     let mut b = Box_::load(loaded);
-    let mut w = Writer::create(trace_path).expect("create trace");
+    let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
-    w.append(&snapshot_of(&b)).unwrap(); count += 1;
+    w.append(&snapshot_of(&b)).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
 
     let mut stdout = Vec::new();
-    let mut exit_code = 0u64;
+    let exit_code;
     loop {
         match b.run() {
             Stop::Syscall { num, args } if num == SYS_WRITE => {
@@ -37,19 +37,20 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> RecordSummar
                 let bytes = b.read_guest(args[1], args[2] as usize);
                 if args[0] == 1 || args[0] == 2 { stdout.extend_from_slice(&bytes); }
                 let ret = args[2]; // wrote all bytes into our capture
-                w.append(&Event::Syscall { num, args, ret }).unwrap(); count += 1;
+                w.append(&Event::Syscall { num, args, ret }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
                 b.set_x0_and_return(ret);
             }
             Stop::Syscall { num, args } if num == SYS_EXIT => {
                 exit_code = args[0];
-                w.append(&Event::Exit { code: exit_code }).unwrap(); count += 1;
+                w.append(&Event::Exit { code: exit_code }).map_err(|e| format!("append exit: {e}"))?; count += 1;
                 break;
             }
-            Stop::Syscall { num, .. } => panic!("M0 unhandled syscall {num} (expected write/exit only)"),
-            Stop::Other { esr } => panic!("M0 unexpected non-syscall exit esr=0x{esr:x}"),
+            // Unhandled cases become a named Err (main maps -> exit 4); the swarm never sees a raw panic.
+            Stop::Syscall { num, .. } => return Err(format!("M0 unhandled syscall {num} (expected write/exit only)")),
+            Stop::Other { esr } => return Err(format!("M0 unexpected non-syscall exit esr=0x{esr:x}")),
         }
     }
-    RecordSummary { stdout, exit_code, events: count }
+    Ok(RecordSummary { stdout, exit_code, events: count })
 }
 
 #[derive(Debug)]
@@ -58,7 +59,14 @@ pub struct ReplayReport { pub stdout: Vec<u8>, pub exit_code: u64 }
 pub struct Divergence { pub landmark: usize, pub pc: u64, pub detail: String }
 
 pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
-    let events = retrace_trace::Reader::open(trace_path).expect("open trace");
+    // open_checked keeps every whole, CRC-valid record and drops a torn/corrupt tail; a
+    // missing/unreadable file, an empty/torn trace, or a lost leading Snapshot each become
+    // a named Divergence (exit 3) rather than a panic.
+    let (events, truncated) = retrace_trace::Reader::open_checked(trace_path)
+        .map_err(|e| Divergence { landmark: 0, pc: 0, detail: format!("cannot open trace: {e}") })?;
+    if events.is_empty() {
+        return Err(Divergence { landmark: 0, pc: 0, detail: "empty/torn trace: no readable records".into() });
+    }
     let (regs, mem) = match events.first() {
         Some(Event::Snapshot { regs, mem }) => (regs.clone(), mem.clone()),
         _ => return Err(Divergence { landmark: 0, pc: 0, detail: "trace missing leading Snapshot".into() }),
@@ -88,13 +96,13 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                     }
                     Some(Event::Exit { .. }) if num == SYS_EXIT => { /* fallthrough handled below */ }
                     other => return Err(Divergence { landmark: idx, pc,
-                        detail: format!("expected recorded syscall, got {other:?}") }),
+                        detail: format!("expected recorded syscall, got {other:?} (trace truncated={truncated})") }),
                 }
                 if num == SYS_EXIT {
                     match events.get(idx) {
                         Some(Event::Exit { code }) => return Ok(ReplayReport { stdout, exit_code: *code }),
                         other => return Err(Divergence { landmark: idx, pc,
-                            detail: format!("expected recorded Exit, got {other:?}") }),
+                            detail: format!("expected recorded Exit, got {other:?} (trace truncated={truncated})") }),
                     }
                 }
             }

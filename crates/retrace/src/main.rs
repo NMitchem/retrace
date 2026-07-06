@@ -10,10 +10,14 @@ fn main() {
             let out = a.iter().position(|s| s == "-o").map(|i| a[i+1].clone()).expect("-o <trace>");
             let bytes = std::fs::read(guest).expect("read guest");
             let loaded = retrace_guest::parse_macho(&bytes);
-            let s = retrace_core::record(&loaded, Path::new(&out));
-            use std::io::Write;
-            std::io::stdout().write_all(&s.stdout).unwrap();
-            exit(s.exit_code as i32);
+            match retrace_core::record(&loaded, Path::new(&out)) {
+                Ok(s) => {
+                    use std::io::Write;
+                    std::io::stdout().write_all(&s.stdout).unwrap();
+                    exit(s.exit_code as i32);
+                }
+                Err(e) => { eprintln!("RECORD ERROR: {e}"); exit(4); }
+            }
         }
         Some("replay") => {
             let trace = &a[2];
