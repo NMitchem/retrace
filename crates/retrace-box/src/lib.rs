@@ -37,6 +37,7 @@ impl Box_ {
         let map = |vm: &Vm, backings: &mut Vec<Backing>, ipa: u64, src: &[u8], memsz: usize| {
             let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
             unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), host, src.len()); }
+            assert!(ipa.is_multiple_of(GRANULE as u64), "retrace-box: guest region IPA {ipa:#x} is not 16 KiB-granule-aligned (hv_vm_map requires it); a differently-linked guest needs 16 KiB-aligned segments");
             vm.map(host, ipa, len, MemFlags::RWX).expect("hv_vm_map");
             backings.push(Backing { host, ipa, len });
         };

@@ -29,7 +29,7 @@ fn main() {
                 }
                 Err(d) => {
                     eprintln!("DIVERGENCE at landmark {} pc=0x{:x}: {}", d.landmark, d.pc, d.detail);
-                    eprintln!("repro: RETRACE_SEED=<seed> retrace replay {trace}");
+                    eprintln!("repro: retrace replay {trace}");
                     exit(3);
                 }
             }
