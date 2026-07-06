@@ -60,6 +60,10 @@ fn n_seeds_never_diverge_silently() {
         if code == 0 {
             assert_eq!(rep.stdout, b"hello\n", "seed {seed} fault {fault:?}: exit 0 but wrong output");
         }
+        if code == 3 {
+            assert!(String::from_utf8_lossy(&rep.stderr).contains("DIVERGENCE"),
+                "seed {seed}: exit 3 but stderr did not name the divergence: {}", String::from_utf8_lossy(&rep.stderr));
+        }
 
         let _ = std::fs::remove_file(&trace);
     }

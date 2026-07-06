@@ -9,6 +9,17 @@ Records a freestanding ARM64 guest inside a single-vCPU Hypervisor.framework VM 
 replays it bit-for-bit from a snapshot, proving zero divergence over 200 fault-injection
 seeds. Requires macOS 26.x on Apple Silicon.
 
+M0's guest is a **freestanding synthetic binary** (`crates/retrace-guest/asm/hello.s`,
+raw `write`/`exit` syscalls with the MMU off) — not the spec's `/bin/echo`-class
+dynamically-linked program. Real dynamically-linked binaries need the dyld-shared-cache
+loader, deferred to M1 (see below).
+
+The divergence checker compares, per traced syscall, the `(num, args)` tuple and the
+final exit code; byte-level memory/register landmark comparison (the spec's full oracle)
+is deferred to M2. M0's bit-for-bit guarantee currently rests on determinism-by-construction
+(the same recorded inputs replayed through the same deterministic handler) plus
+CRC-checked trace integrity, not on an exhaustive state comparison.
+
 ```
 just m0                                   # run the full gate
 cargo run -p retrace -- record <macho> -o t.bin
