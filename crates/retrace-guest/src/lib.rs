@@ -47,6 +47,8 @@ pub fn parse_macho(b: &[u8]) -> Loaded {
 }
 
 pub const HELLO: &str = concat!(env!("OUT_DIR"), "/hello");
+pub const FILEIO: &str = concat!(env!("OUT_DIR"), "/fileio");
+pub const FIXTURE: &str = concat!(env!("OUT_DIR"), "/fixture.txt");
 
 #[cfg(test)]
 mod tests {
@@ -61,5 +63,12 @@ mod tests {
                 "entry 0x{:x} not inside any segment", l.entry);
         // __DATA must contain "hello\n" somewhere
         assert!(l.segments.iter().any(|s| s.data.windows(6).any(|w| w == b"hello\n")));
+    }
+
+    #[test]
+    fn fileio_guest_parses() {
+        let l = parse_macho(&std::fs::read(FILEIO).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+        assert_eq!(std::fs::read(FIXTURE).unwrap(), b"retrace-m1-fixture\n");
     }
 }
