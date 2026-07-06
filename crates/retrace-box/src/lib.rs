@@ -14,7 +14,12 @@ pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
 // requires `hv_vcpu_destroy` before `hv_vm_destroy` — reordering `vm` before `vcpu` would
 // silently reintroduce an HV_BUSY bug on the second in-process VM. `vcpu` MUST stay
 // declared before `vm`.
-pub struct Box_ { pub vcpu: Vcpu, pub vm: Vm, pub backings: Vec<Backing> }
+pub struct Box_ {
+    vcpu: Vcpu,
+    #[allow(dead_code)] // never read; held only so Drop runs hv_vm_destroy after vcpu's
+    vm: Vm,
+    backings: Vec<Backing>,
+}
 
 pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
 
@@ -119,4 +124,25 @@ impl Box_ {
         }
         panic!("read_guest: ipa 0x{ipa:x} len {len} not mapped");
     }
+
+    /// Capture all backings + architectural registers as an Event::Snapshot.
+    pub fn snapshot(&self) -> retrace_trace::Event {
+        let mut mem = Vec::new();
+        for bk in &self.backings {
+            let bytes = unsafe { std::slice::from_raw_parts(bk.host, bk.len) }.to_vec();
+            mem.push(Region { ipa: bk.ipa, bytes });
+        }
+        let mut x = [0u64;31];
+        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+        let regs = Regs {
+            x, pc: self.vcpu.get_reg(reg::PC).unwrap(),
+            sp_el0: self.vcpu.get_sys(sysreg::SP_EL0).unwrap(),
+            cpsr: self.vcpu.get_reg(reg::CPSR).unwrap(),
+        };
+        retrace_trace::Event::Snapshot { regs, mem }
+    }
+    /// The post-`svc` return address (ELR_EL1) — the execution position at a syscall trap.
+    pub fn position(&self) -> u64 { self.vcpu.get_sys(sysreg::ELR_EL1).unwrap() }
+    /// The current PC (for non-syscall exits).
+    pub fn pc(&self) -> u64 { self.vcpu.get_reg(reg::PC).unwrap() }
 }

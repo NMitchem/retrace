@@ -231,7 +231,6 @@ dependencies = [
 name = "retrace-core"
 version = "0.0.0"
 dependencies = [
- "hv-sys",
  "retrace-arch",
  "retrace-box",
  "retrace-guest",

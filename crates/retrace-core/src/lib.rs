@@ -1,32 +1,15 @@
 use std::path::Path;
 use retrace_box::{Box_, Stop};
-use retrace_trace::{Writer, Event, Regs, Region};
+use retrace_trace::{Writer, Event};
 use retrace_arch::{SYS_WRITE, SYS_EXIT};
-use hv_sys::{reg, sysreg};
 
 pub struct RecordSummary { pub stdout: Vec<u8>, pub exit_code: u64, pub events: usize }
-
-pub fn snapshot_of(b: &Box_) -> Event {
-    let mut mem = Vec::new();
-    for bk in &b.backings {
-        let bytes = unsafe { std::slice::from_raw_parts(bk.host, bk.len) }.to_vec();
-        mem.push(Region { ipa: bk.ipa, bytes });
-    }
-    let mut x = [0u64;31];
-    for (i, xi) in x.iter_mut().enumerate() { *xi = b.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
-    let regs = Regs {
-        x, pc: b.vcpu.get_reg(reg::PC).unwrap(),
-        sp_el0: b.vcpu.get_sys(sysreg::SP_EL0).unwrap(),
-        cpsr: b.vcpu.get_reg(reg::CPSR).unwrap(),
-    };
-    Event::Snapshot { regs, mem }
-}
 
 pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<RecordSummary, String> {
     let mut b = Box_::load(loaded);
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
-    w.append(&snapshot_of(&b)).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
+    w.append(&b.snapshot()).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
 
     let mut stdout = Vec::new();
     let exit_code;
@@ -80,7 +63,7 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
     loop {
         match b.run() {
             Stop::Syscall { num, args } => {
-                let pc = b.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+                let pc = b.position();
                 match events.get(idx) {
                     Some(Event::Syscall { num: rn, args: ra, ret }) => {
                         if num != *rn || args != *ra {
@@ -107,7 +90,7 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                 }
             }
             Stop::Other { esr } => {
-                let pc = b.vcpu.get_reg(reg::PC).unwrap();
+                let pc = b.pc();
                 return Err(Divergence { landmark: idx, pc, detail: format!("unexpected non-syscall exit esr=0x{esr:x}") });
             }
         }
