@@ -10,6 +10,10 @@ const GRANULE: usize = 0x4000; // 16 KiB default granule
 // A page-aligned host allocation mapped 1:1 into the guest at `ipa`.
 pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
 
+// Field order is load-bearing: Rust drops struct fields in declaration order, and HVF
+// requires `hv_vcpu_destroy` before `hv_vm_destroy` — reordering `vm` before `vcpu` would
+// silently reintroduce an HV_BUSY bug on the second in-process VM. `vcpu` MUST stay
+// declared before `vm`.
 pub struct Box_ { pub vcpu: Vcpu, pub vm: Vm, pub backings: Vec<Backing> }
 
 pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
@@ -28,9 +32,9 @@ fn alloc_pages(len: usize) -> (*mut u8, usize) {
 impl Box_ {
     pub fn load(loaded: &Loaded) -> Box_ {
         let vm = Vm::create().expect("hv_vm_create");
-        let mut vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
+        let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         let mut backings = Vec::new();
-        let mut map = |vm: &Vm, backings: &mut Vec<Backing>, ipa: u64, src: &[u8], memsz: usize| {
+        let map = |vm: &Vm, backings: &mut Vec<Backing>, ipa: u64, src: &[u8], memsz: usize| {
             let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
             unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), host, src.len()); }
             vm.map(host, ipa, len, MemFlags::RWX).expect("hv_vm_map");
@@ -65,7 +69,7 @@ impl Box_ {
                     assert_eq!(ec_of(esr1), Ec::Svc, "trampoline reached by non-SVC cause");
                     let num = self.vcpu.get_reg(reg::x(16)).unwrap();
                     let mut args = [0u64;7];
-                    for i in 0..7 { args[i] = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+                    for (i, a) in args.iter_mut().enumerate() { *a = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
                     return Stop::Syscall { num, args };
                 }
                 _ => return Stop::Other { esr: e.syndrome },

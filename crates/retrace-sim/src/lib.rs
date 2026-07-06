@@ -3,12 +3,12 @@ impl Rng {
     pub fn seed(seed: u64) -> Rng {
         // SplitMix64 to fill the state deterministically.
         let mut z = seed; let mut s = [0u64;4];
-        for i in 0..4 {
+        for x in s.iter_mut() {
             z = z.wrapping_add(0x9E3779B97F4A7C15);
-            let mut x = z;
-            x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
-            s[i] = x ^ (x >> 31);
+            let mut y = z;
+            y = (y ^ (y >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            y = (y ^ (y >> 27)).wrapping_mul(0x94D049BB133111EB);
+            *x = y ^ (y >> 31);
         }
         Rng { s }
     }

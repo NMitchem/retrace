@@ -9,6 +9,8 @@ pub struct Regs { pub x: [u64;31], pub pc: u64, pub sp_el0: u64, pub cpsr: u64 }
 pub struct Region { pub ipa: u64, pub bytes: Vec<u8> }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// exact shape is a cross-crate contract; boxing a variant would change the trace format
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Snapshot { regs: Regs, mem: Vec<Region> },
     Syscall { num: u64, args: [u64;7], ret: u64 },
