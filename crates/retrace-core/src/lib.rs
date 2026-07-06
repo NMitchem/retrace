@@ -13,7 +13,7 @@ pub fn snapshot_of(b: &Box_) -> Event {
         mem.push(Region { ipa: bk.ipa, bytes });
     }
     let mut x = [0u64;31];
-    for i in 0..31 { x[i] = b.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+    for (i, xi) in x.iter_mut().enumerate() { *xi = b.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
     let regs = Regs {
         x, pc: b.vcpu.get_reg(reg::PC).unwrap(),
         sp_el0: b.vcpu.get_sys(sysreg::SP_EL0).unwrap(),

@@ -10,4 +10,3 @@ retrace-arch = { path = "../retrace-arch" }
 retrace-box = { path = "../retrace-box" }
 retrace-guest = { path = "../retrace-guest" }
 retrace-trace = { path = "../retrace-trace" }
-libc = "0.2"
