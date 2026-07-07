@@ -49,6 +49,7 @@ pub fn parse_macho(b: &[u8]) -> Loaded {
 pub const HELLO: &str = concat!(env!("OUT_DIR"), "/hello");
 pub const FILEIO: &str = concat!(env!("OUT_DIR"), "/fileio");
 pub const FIXTURE: &str = concat!(env!("OUT_DIR"), "/fixture.txt");
+pub const MMAPGUEST: &str = concat!(env!("OUT_DIR"), "/mmapguest");
 
 #[cfg(test)]
 mod tests {

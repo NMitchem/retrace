@@ -6,6 +6,9 @@ use retrace_trace::{Regs, Region};
 pub const TRAMPOLINE_IPA: u64 = 0x0000_4000; // 16 KiB-aligned (hv_vm_map rejects 4 KiB alignment under the default granule)
 pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
 pub const PTR_WINDOW_CAP: usize = 64 * 1024;
+// Bump-allocation base for guest_mmap regions: 8 GiB, within the 36-bit IPA space and above
+// the guest's 0x1_0000_0000 segments, so mmap'd regions never collide with loaded segments.
+pub const MMAP_BASE: u64 = 0x2_0000_0000;
 const GRANULE: usize = 0x4000; // 16 KiB default granule
 
 // A page-aligned host allocation mapped 1:1 into the guest at `ipa`.
@@ -20,6 +23,9 @@ pub struct Box_ {
     #[allow(dead_code)] // never read; held only so Drop runs hv_vm_destroy after vcpu's
     vm: Vm,
     backings: Vec<Backing>,
+    // Next fresh IPA for guest_mmap. Plain u64 (no Drop), declared after `backings` so the
+    // load-bearing vcpu-before-vm drop order is unaffected.
+    mmap_next: u64,
 }
 
 pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
@@ -62,7 +68,18 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE }
+    }
+
+    /// Special case for mmap: allocate host pages, map 1:1 at a deterministic fresh IPA,
+    /// track as a backing, return the guest IPA. Same call sequence => same IPAs on replay.
+    pub fn guest_mmap(&mut self, len: u64) -> u64 {
+        let (host, rlen) = alloc_pages(len as usize);
+        let ipa = self.mmap_next;
+        self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_mmap)");
+        self.backings.push(Backing { host, ipa, len: rlen });
+        self.mmap_next += rlen as u64;
+        ipa
     }
 
     pub fn run(&mut self) -> Stop {
@@ -103,7 +120,7 @@ impl Box_ {
         vcpu.set_reg(reg::PC, regs.pc).unwrap();
         vcpu.set_reg(reg::CPSR, regs.cpsr).unwrap();
         vcpu.set_sys(sysreg::SP_EL0, regs.sp_el0).unwrap();
-        Box_ { vm, vcpu, backings }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
