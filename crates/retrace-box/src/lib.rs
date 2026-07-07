@@ -76,6 +76,30 @@ fn alloc_pages(len: usize) -> (*mut u8, usize) {
     (p as *mut u8, len)
 }
 
+// Raw macOS BSD syscall: x16 = number, args in x0..x7, `svc #0x80`. Returns (x0, carry).
+// Carry set => error (x0 = errno); clear => success (x0 = full 64-bit result, e.g. an mmap ptr).
+// The kernel may clobber the caller-saved scratch registers (x8-x15, x17); they are declared
+// clobbered so the compiler keeps no live value across the svc. x18 is platform-reserved — never
+// touch it. Flags are NOT preserved (we read the carry via `cset`), so no `preserves_flags`.
+// SAFETY: record-only; the caller has already translated guest pointers to host addresses.
+unsafe fn host_svc(num: u64, a: [u64; 8]) -> (u64, bool) {
+    let ret: u64;
+    let carry: u64;
+    core::arch::asm!(
+        "svc #0x80",
+        "cset {c}, cs",
+        in("x16") num,
+        inout("x0") a[0] => ret,
+        in("x1") a[1], in("x2") a[2], in("x3") a[3],
+        in("x4") a[4], in("x5") a[5], in("x6") a[6], in("x7") a[7],
+        c = out(reg) carry,
+        out("x8") _, out("x9") _, out("x10") _, out("x11") _,
+        out("x12") _, out("x13") _, out("x14") _, out("x15") _, out("x17") _,
+        options(nostack),
+    );
+    (ret, carry != 0)
+}
+
 impl Box_ {
     // W^X identity stage-1 map. Default: every 32 MiB L2 entry is a data BLOCK (RW, non-exec) —
     // covers stack/data/heap/mmap-data and identity-covers the whole 36 GiB space. Each exec range
@@ -235,6 +259,18 @@ impl Box_ {
         self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
     }
 
+    /// Carry-aware resume: like set_x0_and_return, but also forces PSTATE.C in the restored
+    /// CPSR from `err` (carry set => the syscall failed and x0 = errno). This lets a
+    /// deliberately-failing syscall replay identically to how it was recorded.
+    pub fn set_x0_err_and_return(&mut self, ret: u64, err: bool) {
+        let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+        let spsr = (spsr & !retrace_arch::PSTATE_C) | if err { retrace_arch::PSTATE_C } else { 0 };
+        self.vcpu.set_reg(reg::x(0), ret).unwrap();
+        self.vcpu.set_reg(reg::PC, elr).unwrap();
+        self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
+    }
+
     // Translate a guest IPA to (host pointer, bytes available to the end of its backing).
     fn host_span(&self, ipa: u64) -> Option<(*mut u8, usize)> {
         for bk in &self.backings {
@@ -252,9 +288,10 @@ impl Box_ {
     pub fn clamp_count(avail: usize, count: usize) -> usize { count.min(avail) }
 
     /// Record-side memory-diff. For each arg that points into a mapped region, snapshot a
-    /// window (capped) and translate it to a host address; forward the real syscall; diff.
-    /// M1 assumes the syscall succeeds (see plan's error-ABI note).
-    pub fn forward_and_diff(&self, num: u64, args: [u64;7]) -> (u64, Vec<Region>) {
+    /// window (capped) and translate it to a host address; forward the real syscall via the
+    /// raw-svc shim; diff. Returns the full 64-bit x0, the BSD carry flag (`err`), and any
+    /// kernel writes. On error (`err`) no writes are captured — a failed syscall wrote nothing.
+    pub fn forward_and_diff(&self, num: u64, args: [u64;7]) -> (u64, bool, Vec<Region>) {
         let mut windows: Vec<(u64, usize, Vec<u8>)> = Vec::new(); // (guest_ipa, len, pre-image)
         let mut hargs = [0i64; 7];
         for i in 0..7 {
@@ -277,25 +314,29 @@ impl Box_ {
                 hargs[2] = Self::clamp_count(avail, hargs[2] as usize) as i64;
             }
         }
-        // macOS binds `syscall(2)` as `int syscall(int, ...)` (BSD ABI); num is c_int, not
-        // c_long. The 7 pointer/scalar args go through the variadic tail unchanged.
-        let ret = unsafe {
-            libc::syscall(num as libc::c_int, hargs[0], hargs[1], hargs[2],
-                          hargs[3], hargs[4], hargs[5], hargs[6])
-        } as u64;
+        // Forward via a raw `svc #0x80` shim (not `libc::syscall`, which narrows the return
+        // toward 32 bits and hides the BSD carry flag). `hargs` is [i64;7] (x0..x6); build the
+        // shim's [u64;8] explicitly, padding x7 = 0.
+        let mut sa = [0u64; 8];
+        for i in 0..7 { sa[i] = hargs[i] as u64; }
+        let (ret, err) = unsafe { host_svc(num, sa) };
+        // A failed syscall (carry set) wrote nothing to the guest's buffers, so skip the
+        // post-diff write capture entirely.
         let mut writes = Vec::new();
-        for (ipa, len, pre) in windows {
-            let (hp, _) = self.host_span(ipa).unwrap();
-            let post = unsafe { std::slice::from_raw_parts(hp, len) };
-            if post != pre.as_slice() {
-                writes.push(Region { ipa, bytes: post.to_vec() });
+        if !err {
+            for (ipa, len, pre) in windows {
+                let (hp, _) = self.host_span(ipa).unwrap();
+                let post = unsafe { std::slice::from_raw_parts(hp, len) };
+                if post != pre.as_slice() {
+                    writes.push(Region { ipa, bytes: post.to_vec() });
+                }
             }
         }
-        (ret, writes)
+        (ret, err, writes)
     }
 
     /// Replay-side: apply recorded writes to guest memory, then resume. Never executes a syscall.
-    pub fn apply_and_return(&mut self, ret: u64, writes: &[Region]) {
+    pub fn apply_and_return(&mut self, ret: u64, err: bool, writes: &[Region]) {
         for w in writes {
             let (hp, avail) = self.host_span(w.ipa)
                 .unwrap_or_else(|| panic!("apply_and_return: write ipa {:#x} outside any mapped region", w.ipa));
@@ -303,7 +344,7 @@ impl Box_ {
                 "apply_and_return: write at {:#x} ({} bytes) overruns backing ({} avail)", w.ipa, w.bytes.len(), avail);
             unsafe { std::ptr::copy_nonoverlapping(w.bytes.as_ptr(), hp, w.bytes.len()); }
         }
-        self.set_x0_and_return(ret);
+        self.set_x0_err_and_return(ret, err);
     }
 
     /// Compare current guest memory against `expected`; return the first divergence, or None.
