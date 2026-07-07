@@ -88,6 +88,77 @@ pub fn modifier(p: &SlidePtr5, slot_slid_va: u64) -> u64 {
     }
 }
 
+/// A collected **auth** (PAC-signed) pointer slot from a page's v5 fixup chain, awaiting
+/// re-signing by the guest's own PAC keys. That signing is a later guest-side oracle's job (it
+/// needs the guest's key material); this module only walks the chain and computes the
+/// arithmetic (`target_va`/`modifier`) the oracle will need — it never signs anything itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthSlot {
+    /// Byte offset of this slot within its 16 KiB page.
+    pub offset: usize,
+    /// The (unsigned) VA this slot's pointer targets, per `target_va`.
+    pub target_va: u64,
+    /// Which A-family key to sign with (`true` => DA, `false` => IA).
+    pub key_is_data: bool,
+    /// The PAC signing modifier for this slot, per `modifier`.
+    pub modifier: u64,
+}
+
+/// Walk one 16 KiB DATA page's v5 chained-fixup list and rebase it in place.
+///
+/// `si.page_starts[page_index]` is the byte offset of the chain's first slot within the page
+/// (`0xFFFF` => no fixups on this page, returns empty and leaves `page` untouched). Each 8-byte
+/// slot's `next` field (8-byte units, `0` ends the chain) advances the walk; per
+/// `spikes/cacheprobe.c` the chain is always self-contained within one page.
+///
+/// **Regular** slots are rewritten in place to their final on-disk pointer value —
+/// `(value_add + runtime_offset + slide) | (high8 << 56)` — pure host arithmetic, no PAC key
+/// needed. **Auth** slots are left untouched in `page` and instead collected into the returned
+/// `Vec`, because signing them needs the guest's PAC keys (a later task's guest-side oracle, not
+/// this one).
+///
+/// `mapping_base` is the VA of the DATA mapping this page belongs to (`page_index` is relative
+/// to that mapping's own page array, not the whole cache) — combined with `page_index` and each
+/// slot's byte offset, it gives the slot's own unslid VA, which an auth slot's `modifier` blends
+/// in when `addr_div` is set (see `modifier`'s doc comment for `slot_slid_va`).
+pub fn walk_page(page: &mut [u8; 16384], si: &SlideInfo5, page_index: usize, slide: u64, mapping_base: u64) -> Vec<AuthSlot> {
+    let mut auth_slots = Vec::new();
+
+    let start = si.page_starts[page_index];
+    if start == 0xFFFF {
+        return auth_slots;
+    }
+
+    let mut off = start as usize;
+    loop {
+        assert!(off + 8 <= page.len(), "v5 fixup chain left its page (page_index {page_index}, offset 0x{off:x})");
+        let raw = u64::from_le_bytes(page[off..off + 8].try_into().unwrap());
+        let p = decode5(raw);
+        let target = target_va(&p, si.value_add, slide);
+
+        if p.auth {
+            let slot_unslid_va = mapping_base.wrapping_add(page_index as u64 * si.page_size as u64).wrapping_add(off as u64);
+            let slot_slid_va = slot_unslid_va.wrapping_add(slide);
+            auth_slots.push(AuthSlot {
+                offset: off,
+                target_va: target,
+                key_is_data: p.key_is_data,
+                modifier: modifier(&p, slot_slid_va),
+            });
+        } else {
+            let final_ptr = target | ((p.high8 as u64) << 56);
+            page[off..off + 8].copy_from_slice(&final_ptr.to_le_bytes());
+        }
+
+        if p.next == 0 {
+            break;
+        }
+        off += p.next as usize * 8;
+    }
+
+    auth_slots
+}
+
 // ---- cache metadata loader + IPA routing table (Task 2) ----
 //
 // Layout verified against real bytes in `spikes/cacheprobe.c` / `.superpowers/sdd/m2cache-spike-findings.md`:
@@ -383,6 +454,125 @@ mod tests {
         ];
         let size = 0x3000;
         assert_covers_window(base, size, &subcaches);
+    }
+
+    /// Hand-encode a raw v5 slide-info slot value from its decoded fields (inverse of
+    /// `decode5`), for building synthetic test pages.
+    fn encode5(auth: bool, runtime_offset: u64, diversity: u16, addr_div: bool, key_is_data: bool, high8: u8, next: u16) -> u64 {
+        let mut v = (runtime_offset & 0x3_FFFF_FFFF) | ((next as u64) << 52);
+        if auth {
+            v |= 1u64 << 63;
+            v |= (diversity as u64) << 34;
+            if addr_div {
+                v |= 1u64 << 50;
+            }
+            if key_is_data {
+                v |= 1u64 << 51;
+            }
+        } else {
+            v |= (high8 as u64) << 34;
+        }
+        v
+    }
+
+    #[test]
+    fn walk_page_rebases_regular_in_place_and_collects_auth_slots() {
+        let value_add = 0x1_8000_0000u64;
+        let page_size = 0x4000u32;
+        let mapping_base = 0x1_ec00_0000u64;
+        let page_index = 3usize;
+        let slide = 0u64;
+
+        let mut page = [0u8; 16384];
+        let start_off = 0x100usize;
+
+        // slot 0: regular — chains to slot 1.
+        let reg_runtime_offset = 0x0012_3456u64;
+        let reg_high8 = 0xABu8;
+        let reg_raw = encode5(false, reg_runtime_offset, 0, false, false, reg_high8, 1);
+        page[start_off..start_off + 8].copy_from_slice(&reg_raw.to_le_bytes());
+
+        // slot 1: auth, addr_div=1 (blended modifier), DA — chains to slot 2.
+        let auth1_off = start_off + 8;
+        let auth1_runtime_offset = 0x0abc_def0u64;
+        let auth1_div = 0x6ae1u16;
+        let auth1_raw = encode5(true, auth1_runtime_offset, auth1_div, true, true, 0, 1);
+        page[auth1_off..auth1_off + 8].copy_from_slice(&auth1_raw.to_le_bytes());
+
+        // slot 2: auth, addr_div=0 (plain diversity modifier), DA — chains to slot 3.
+        // [folds in the T1 coverage gap: T1's own tests only covered addr_div=1 + DA]
+        let auth2_off = auth1_off + 8;
+        let auth2_runtime_offset = 0x0011_2233u64;
+        let auth2_div = 0x1234u16;
+        let auth2_raw = encode5(true, auth2_runtime_offset, auth2_div, false, true, 0, 1);
+        page[auth2_off..auth2_off + 8].copy_from_slice(&auth2_raw.to_le_bytes());
+
+        // slot 3: auth, addr_div=1, IA (key_is_data=0) — ends the chain.
+        // [folds in the T1 coverage gap: T1's own tests never exercised key_is_data=0]
+        let auth3_off = auth2_off + 8;
+        let auth3_runtime_offset = 0x0099_8877u64;
+        let auth3_div = 0x5566u16;
+        let auth3_raw = encode5(true, auth3_runtime_offset, auth3_div, true, false, 0, 0);
+        page[auth3_off..auth3_off + 8].copy_from_slice(&auth3_raw.to_le_bytes());
+
+        let mut page_starts = vec![0xFFFFu16; page_index + 1];
+        page_starts[page_index] = start_off as u16;
+        let si = SlideInfo5 { page_size, value_add, page_starts };
+
+        let orig_auth_bytes: Vec<([u8; 8], usize)> = [auth1_off, auth2_off, auth3_off]
+            .iter()
+            .map(|&o| (page[o..o + 8].try_into().unwrap(), o))
+            .collect();
+
+        let auth_slots = walk_page(&mut page, &si, page_index, slide, mapping_base);
+
+        // Regular slot rebased in place: (value_add + runtime_offset + slide) | (high8 << 56).
+        let expected_reg = value_add.wrapping_add(reg_runtime_offset).wrapping_add(slide) | ((reg_high8 as u64) << 56);
+        let got_reg = u64::from_le_bytes(page[start_off..start_off + 8].try_into().unwrap());
+        assert_eq!(got_reg, expected_reg);
+
+        // Auth slots are NOT written — bytes at their offsets are untouched.
+        for (orig, off) in &orig_auth_bytes {
+            assert_eq!(&page[*off..*off + 8], &orig[..]);
+        }
+
+        assert_eq!(auth_slots.len(), 3);
+
+        // Auth slot 1: addr_div=1 => modifier = blend(slot_slid_va, diversity); DA.
+        let slot1_va = mapping_base + page_index as u64 * page_size as u64 + auth1_off as u64 + slide;
+        assert_eq!(auth_slots[0].offset, auth1_off);
+        assert_eq!(auth_slots[0].target_va, value_add.wrapping_add(auth1_runtime_offset).wrapping_add(slide));
+        assert!(auth_slots[0].key_is_data);
+        assert_eq!(auth_slots[0].modifier, blend(slot1_va, auth1_div));
+
+        // Auth slot 2: addr_div=0 => modifier = diversity alone; DA.
+        assert_eq!(auth_slots[1].offset, auth2_off);
+        assert_eq!(auth_slots[1].target_va, value_add.wrapping_add(auth2_runtime_offset).wrapping_add(slide));
+        assert!(auth_slots[1].key_is_data);
+        assert_eq!(auth_slots[1].modifier, auth2_div as u64);
+
+        // Auth slot 3: IA (key_is_data=0), addr_div=1 => modifier still blends.
+        let slot3_va = mapping_base + page_index as u64 * page_size as u64 + auth3_off as u64 + slide;
+        assert_eq!(auth_slots[2].offset, auth3_off);
+        assert_eq!(auth_slots[2].target_va, value_add.wrapping_add(auth3_runtime_offset).wrapping_add(slide));
+        assert!(!auth_slots[2].key_is_data);
+        assert_eq!(auth_slots[2].modifier, blend(slot3_va, auth3_div));
+    }
+
+    #[test]
+    fn walk_page_no_rebase_returns_empty_and_leaves_page_unchanged() {
+        let si = SlideInfo5 { page_size: 0x4000, value_add: 0x1_8000_0000, page_starts: vec![0xFFFF] };
+        let mut page = [0u8; 16384];
+        // Poison the page with non-zero bytes so an accidental write would be detectable.
+        for (i, b) in page.iter_mut().enumerate() {
+            *b = (i % 256) as u8;
+        }
+        let before = page;
+
+        let auth_slots = walk_page(&mut page, &si, 0, 0, 0x1_ec00_0000);
+
+        assert!(auth_slots.is_empty());
+        assert_eq!(page, before);
     }
 
     #[test]
