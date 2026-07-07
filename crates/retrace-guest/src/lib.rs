@@ -1,5 +1,5 @@
 #[derive(Debug, Clone)]
-pub struct Segment { pub vaddr: u64, pub data: Vec<u8>, pub memsz: usize }
+pub struct Segment { pub vaddr: u64, pub data: Vec<u8>, pub memsz: usize, pub exec: bool }
 #[derive(Debug, Clone)]
 pub struct Loaded { pub segments: Vec<Segment>, pub entry: u64 }
 
@@ -23,11 +23,12 @@ pub fn parse_macho(b: &[u8]) -> Loaded {
                 let vmsize = u64le(b, off+32) as usize;
                 let fileoff = u64le(b, off+40) as usize;
                 let filesize = u64le(b, off+48) as usize;
+                let initprot = u32le(b, off+56); // VM_PROT_EXECUTE = 0x4
                 let name = &b[off+8..off+24];
                 if name.starts_with(b"__TEXT") { text_vmaddr = vmaddr; text_fileoff = fileoff as u64; }
                 if vmsize > 0 && name != b"__PAGEZERO\0\0\0\0\0\0" {
                     segments.push(Segment { vaddr: vmaddr, memsz: vmsize,
-                        data: b[fileoff..fileoff+filesize].to_vec() });
+                        data: b[fileoff..fileoff+filesize].to_vec(), exec: initprot & 0x4 != 0 });
                 }
             }
             0x80000028 => { // LC_MAIN: entryoff is file offset from start of file
@@ -50,6 +51,7 @@ pub const HELLO: &str = concat!(env!("OUT_DIR"), "/hello");
 pub const FILEIO: &str = concat!(env!("OUT_DIR"), "/fileio");
 pub const FIXTURE: &str = concat!(env!("OUT_DIR"), "/fixture.txt");
 pub const MMAPGUEST: &str = concat!(env!("OUT_DIR"), "/mmapguest");
+pub const UNALIGNED: &str = concat!(env!("OUT_DIR"), "/unaligned");
 
 #[cfg(test)]
 mod tests {
