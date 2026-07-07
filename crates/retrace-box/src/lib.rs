@@ -65,6 +65,13 @@ pub struct Box_ {
     // Next fresh IPA for guest_mmap. Plain u64 (no Drop), declared after `backings` so the
     // load-bearing vcpu-before-vm drop order is unaffected.
     mmap_next: u64,
+    // Live page-table state, hoisted here so runtime exec-mmap promotion (set_region_exec) can
+    // edit the SAME L2 that build_tables built and continue the SAME L3 allocation window.
+    // Both are plain (no Drop) and declared after `mmap_next`, so the vcpu-before-vm drop order
+    // is unaffected. `l2_host` is the host pointer of the L2 table backing (at PT_L2_IPA);
+    // `next_l3` is the next free L3 IPA (bumped as blocks are promoted).
+    l2_host: *mut u8,
+    next_l3: u64,
 }
 
 pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
@@ -106,47 +113,106 @@ unsafe fn host_svc(num: u64, a: [u64; 8]) -> (u64, bool) {
 }
 
 impl Box_ {
+    // Promote every 32 MiB L2 block covering [ipa, ipa+len) from a data BLOCK to an L3 TABLE
+    // (identity-filled with ATTR_DATA), then set the pages this range covers to `attr`. A block
+    // already promoted to a table (by an earlier call/range) is REUSED, not re-promoted: its
+    // existing L3 host is resolved from `backings` by the table descriptor's IPA. `alloc_l3`
+    // mints a fresh L3, returning its (ipa, host); the returned Vec is the new L3 backings the
+    // caller must register (push as a backing; the runtime path also stage-2-maps them). This is
+    // the single implementation shared by load-time (`build_tables`) and runtime
+    // (`set_region_exec`) so both promote identically.
+    fn promote_and_set(
+        l2: &mut [u64],
+        backings: &[Backing],
+        ipa: u64, len: u64, attr: u64,
+        mut alloc_l3: impl FnMut() -> (u64, *mut u8),
+    ) -> Vec<Backing> {
+        let mut created = Vec::new();
+        for bi in (ipa / BLK)..=((ipa + len - 1) / BLK) {
+            let base = bi * BLK;
+            let l3_host = if l2[bi as usize] & 0x3 == DESC_TABLE {
+                // Already promoted: reuse the existing L3 (resolve its host by IPA).
+                let l3_ipa = l2[bi as usize] & !(GRANULE as u64 - 1);
+                backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host)
+                    .expect("promote_and_set: promoted L3 table backing not found")
+            } else {
+                // Fresh promotion: allocate an L3, identity-fill it with ATTR_DATA, point L2 at it.
+                let (l3_ipa, l3_host) = alloc_l3();
+                let l3 = unsafe { std::slice::from_raw_parts_mut(l3_host as *mut u64, 2048) };
+                for (j, e) in l3.iter_mut().enumerate() {
+                    *e = (base + (j as u64) * GRANULE as u64) | ATTR_DATA | DESC_PAGE;
+                }
+                l2[bi as usize] = l3_ipa | DESC_TABLE;
+                created.push(Backing { host: l3_host, ipa: l3_ipa, len: GRANULE });
+                l3_host
+            };
+            // Set the pages this range covers within this block to `attr`.
+            let l3 = unsafe { std::slice::from_raw_parts_mut(l3_host as *mut u64, 2048) };
+            let s = ipa.max(base);
+            let e = (ipa + len).min(base + BLK);
+            let mut p = s & !(GRANULE as u64 - 1);
+            while p < e {
+                l3[((p - base) / GRANULE as u64) as usize] = p | attr | DESC_PAGE;
+                p += GRANULE as u64;
+            }
+        }
+        created
+    }
+
     // W^X identity stage-1 map. Default: every 32 MiB L2 entry is a data BLOCK (RW, non-exec) —
     // covers stack/data/heap/mmap-data and identity-covers the whole 36 GiB space. Each exec range
-    // (ipa,len,attr) gets page-granularity pages with `attr`; its covering block(s) are promoted to
-    // an L3 table (identity-filled with ATTR_DATA, then exec pages overwritten). Returns PT_L2_IPA.
-    // Pushes the L2 + every L3 as backings; the caller stage-2-maps them. NEVER file-backed (SPTM).
-    fn build_tables(backings: &mut Vec<Backing>, exec: &[(u64, u64, u64)]) -> u64 {
+    // (ipa,len,attr) gets page-granularity pages with `attr` via `promote_and_set` (its covering
+    // block(s) are promoted to an L3 table, identity-filled with ATTR_DATA, then exec pages
+    // overwritten). Pushes the L2 + every L3 as backings; the caller stage-2-maps them. NEVER
+    // file-backed (SPTM). Returns (ttbr0 = PT_L2_IPA, l2_host, next_l3) so runtime promotion can
+    // edit the live L2 and continue the same L3 allocation window.
+    fn build_tables(backings: &mut Vec<Backing>, exec: &[(u64, u64, u64)]) -> (u64, *mut u8, u64) {
         debug_assert!(exec.iter().all(|&(_, len, _)| len > 0), "exec ranges must be non-empty");
         let (l2_host, l2_len) = alloc_pages(GRANULE);
         let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
         for (i, e) in l2.iter_mut().enumerate() { *e = ((i as u64) * BLK) | ATTR_DATA | DESC_BLOCK; }
         backings.push(Backing { host: l2_host, ipa: PT_L2_IPA, len: l2_len });
 
-        // Which 32 MiB blocks contain an exec range? (sorted, deduped)
-        let mut blocks: Vec<u64> = exec.iter()
-            .flat_map(|&(va, len, _)| (va / BLK)..=((va + len - 1) / BLK)).collect();
-        blocks.sort_unstable(); blocks.dedup();
-
         let mut next_l3 = PT_L3_BASE;
-        for bi in blocks {
-            let (l3_host, l3_len) = alloc_pages(GRANULE);
-            let l3 = unsafe { std::slice::from_raw_parts_mut(l3_host as *mut u64, 2048) };
-            let base = bi * BLK;
-            for (j, e) in l3.iter_mut().enumerate() {
-                *e = (base + (j as u64) * GRANULE as u64) | ATTR_DATA | DESC_PAGE;
-            }
-            assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "build_tables: too many exec blocks; L3 window exhausted");
-            l2[bi as usize] = next_l3 | DESC_TABLE;
-            backings.push(Backing { host: l3_host, ipa: next_l3, len: l3_len });
-            // overwrite pages this block's exec ranges cover
-            for &(va, len, attr) in exec {
-                let s = va.max(base);
-                let e = (va + len).min(base + BLK);
-                let mut p = s & !(GRANULE as u64 - 1);
-                while p < e {
-                    l3[((p - base) / GRANULE as u64) as usize] = p | attr | DESC_PAGE;
-                    p += GRANULE as u64;
-                }
-            }
-            next_l3 += GRANULE as u64;
+        for &(va, len, attr) in exec {
+            let created = {
+                let mut alloc_l3 = || {
+                    assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "build_tables: too many exec blocks; L3 window exhausted");
+                    let (h, _) = alloc_pages(GRANULE);
+                    let a = next_l3; next_l3 += GRANULE as u64; (a, h)
+                };
+                Self::promote_and_set(l2, backings, va, len, attr, &mut alloc_l3)
+            };
+            backings.extend(created);
         }
-        PT_L2_IPA
+        (PT_L2_IPA, l2_host, next_l3)
+    }
+
+    /// Runtime exec-mmap promotion: install RO+exec (`ATTR_CODE`) stage-1 pages for [ipa, ipa+len)
+    /// by editing the LIVE page tables, so a `PROT_EXEC` mmap becomes executable under W^X. Any
+    /// newly-needed L3 tables are anon-allocated (SPTM: never file-backed), stage-2-mapped
+    /// immediately (the walker must reach them) AND tracked as backings. No TLB invalidation:
+    /// mmap regions are freshly-mapped IPAs the guest has never translated before, so the first
+    /// access does a fresh walk and sees ATTR_CODE.
+    pub fn set_region_exec(&mut self, ipa: u64, len: u64) {
+        let l2_host = self.l2_host;
+        assert!(!l2_host.is_null(), "set_region_exec: no live L2 table (restore had no PT_L2 region)");
+        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
+        let mut next_l3 = self.next_l3;
+        let created = {
+            let mut alloc_l3 = || {
+                assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "set_region_exec: too many exec blocks; L3 window exhausted");
+                let (h, _) = alloc_pages(GRANULE);
+                let a = next_l3; next_l3 += GRANULE as u64; (a, h)
+            };
+            Self::promote_and_set(l2, &self.backings, ipa, len, ATTR_CODE, &mut alloc_l3)
+        };
+        self.next_l3 = next_l3;
+        // Register each new L3: stage-2-map it (freshly, so the walker reaches it) then track it.
+        for bk in created {
+            self.vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (set_region_exec l3)");
+            self.backings.push(bk);
+        }
     }
 
     fn set_pac_keys(vcpu: &Vcpu) {
@@ -178,7 +244,7 @@ impl Box_ {
         let mut exec = vec![(TRAMPOLINE_IPA, 0x800u64, ATTR_TRAMP)];
         for s in &loaded.segments { if s.exec { exec.push((s.vaddr, s.memsz as u64, ATTR_CODE)); } }
         let pt_start = backings.len();
-        let ttbr0 = Self::build_tables(&mut backings, &exec);
+        let (ttbr0, l2_host, next_l3) = Self::build_tables(&mut backings, &exec);
         for bk in &backings[pt_start..] {          // stage-2-map the new table backings (all anon)
             vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (pt)");
         }
@@ -193,7 +259,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3 }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -233,7 +299,7 @@ impl Box_ {
         for s in &exe.segments  { if s.exec { exec.push((s.vaddr,             s.memsz as u64, ATTR_CODE)); } }
         for s in &dyld.segments { if s.exec { exec.push((s.vaddr + DYLD_BASE, s.memsz as u64, ATTR_CODE)); } }
         let pt_start = backings.len();
-        let ttbr0 = Self::build_tables(&mut backings, &exec);
+        let (ttbr0, l2_host, next_l3) = Self::build_tables(&mut backings, &exec);
         for bk in &backings[pt_start..] { vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (pt)"); }
 
         Self::set_pac_keys(&vcpu);
@@ -245,7 +311,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3 }
     }
 
     // Build the XNU start stack in the (already-mapped, zeroed) stack backing; return the guest SP.
@@ -384,7 +450,17 @@ impl Box_ {
         vcpu.set_reg(reg::PC, regs.pc).unwrap();
         vcpu.set_reg(reg::CPSR, regs.cpsr).unwrap();
         vcpu.set_sys(sysreg::SP_EL0, regs.sp_el0).unwrap();
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE }
+        // Recover live page-table state from the snapshot regions so replay can honor runtime
+        // exec-mmap promotion too: l2_host is the restored L2 backing (at PT_L2_IPA); next_l3 is
+        // the next free L3 slot after every L3 table already present (they were built at load and
+        // captured in the initial snapshot), so runtime promotion on replay continues the SAME
+        // allocation window and mints IPAs matching the record run.
+        let l2_host = backings.iter().find(|b| b.ipa == PT_L2_IPA).map(|b| b.host)
+            .unwrap_or(std::ptr::null_mut());
+        let next_l3 = backings.iter()
+            .filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL)
+            .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3 }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {

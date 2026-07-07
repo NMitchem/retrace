@@ -94,6 +94,23 @@ fn main() {
         .status().expect("clang mmapfile");
     assert!(status.success(), "mmapfile guest build failed");
 
+    // execmap: mmap()s a tiny FILE of code PROT_READ|PROT_EXEC (prot=5, MAP_PRIVATE) and blr's
+    // into it, exiting with its return value (42). Proves runtime exec-mmap promotion: the VMM
+    // installs RO+exec (ATTR_CODE) stage-1 pages for a PROT_EXEC mmap by editing the live page
+    // tables, so the guest can execute mmap'd code under W^X. The fixture is the raw machine code
+    // of `movz x0, #42 ; ret` (0xD2800540, 0xD65F03C0), little-endian.
+    let fixture = format!("{out}/execmap_fixture.bin");
+    std::fs::write(&fixture, [0x40u8, 0x05, 0x80, 0xD2, 0xC0, 0x03, 0x5F, 0xD6]).unwrap();
+    let gen = format!("{out}/execmap_gen.s");
+    std::fs::write(&gen, format!(".section __DATA,__data\n.p2align 3\n.global path\npath: .asciz \"{fixture}\"\n")).unwrap();
+    let src = format!("{}/asm/execmap.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/execmap");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
+        .status().expect("clang execmap");
+    assert!(status.success(), "execmap guest build failed");
+
     // hello_dyn: a real dynamically-linked arm64 executable (normal toolchain, links libSystem).
     // Plain -arch arm64 (NOT arm64e — third-party arm64e builds are gated; the arm64e dyld loads a
     // plain-arm64 exe fine). Task 7 maps this + /usr/lib/dyld and builds dyld's process-start stack.
