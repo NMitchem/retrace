@@ -9,11 +9,10 @@ use retrace_guest::{parse_macho, UNALIGNED};
 fn unaligned_store_runs_under_mmu_on() {
     let loaded = parse_macho(&std::fs::read(UNALIGNED).unwrap());
     let mut b = Box_::load(&loaded);
-    loop {
-        match b.run() {
-            Stop::Syscall { num, args } if num == SYS_EXIT => { assert_eq!(args[0], 0, "unaligned readback mismatch => MMU/Normal-memory wrong"); break; }
-            Stop::Syscall { .. } => panic!("unexpected syscall before exit"),
-            Stop::Other { esr } => panic!("guest faulted esr=0x{esr:x} (MMU likely misconfigured)"),
-        }
+    // The guest makes exactly one syscall (exit), so a single run suffices.
+    match b.run() {
+        Stop::Syscall { num, args } if num == SYS_EXIT => assert_eq!(args[0], 0, "unaligned readback mismatch => MMU/Normal-memory wrong"),
+        Stop::Syscall { .. } => panic!("unexpected syscall before exit"),
+        Stop::Other { esr } => panic!("guest faulted esr=0x{esr:x} (MMU likely misconfigured)"),
     }
 }
