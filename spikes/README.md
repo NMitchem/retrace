@@ -81,6 +81,47 @@ $ ./dscprobe                          # &printf INSIDE kernel shared region  (ex
 $ DYLD_SHARED_REGION=private ./dscprobe # &printf OUTSIDE — PRIVATE mapping   (exit 20)
 ```
 
+## `cacheprobe.c` — shared-cache slide/fixup format dump (M2 re-signing spike)
+
+Pure host file parse (no HVF, no cache mmap — safe). Parses each subcache's `dyld_cache_header`,
+the `mapping_and_slide` entries, the slide-info blob, and **decodes real fixup slots by hand**,
+then walks every chain:
+
+```
+offsetof mappingWithSlideOffset=0x138 (expect 0x138) ...
+slide-info: version=5 page_size=16384 page_starts_count=... value_add=0x180000000
+[ 0] AUTH raw=0x801dab846c2f15c8 roff=0x6c2f15c8 div=0x6ae1 addrDiv=1 key=DA next=1
+SCANNED 7876 fixup pages: 9476030 slots (3713323 auth, 39.2%), max 2048/page
+```
+
+Findings (this host, Tahoe/arm64e): **all 14 slide regions are v5, 16 KiB pages,
+`value_add=0x180000000`**; auth pointers use **A-family keys only** (IA/DA); every fixup chain is
+**self-contained within its page** (0 cross-page chains over ~27M slots walked). Full decode
+formulas + a worked example are in `.superpowers/sdd/m2cache-spike-findings.md`.
+
+## `pacsign.c` — guest signing-oracle proof (M2 re-signing spike)
+
+Proves we can re-sign cache auth pointers with the **guest's fixed PAC keys** by executing `pac*`
+inside the VM (not reimplementing QARMA on the host). Sets the `retrace-box` `PAC_KEYS`, enables
+PAC for all four families, and:
+
+```
+IA/DA/IB/DB signed != raw, aut* round-trips, signatures distinct, modifier load-bearing  => PASS
+wrong-modifier autia => guest ESR_EL1 EC=0x1C (FEAT_FPAC auth-failure)  => PASS  (== task-9b wall)
+```
+
+Run under a bounded perl process-group timeout (there is no `timeout` binary); MMU off, only
+anonymous guest memory mapped:
+
+```sh
+clang -O2 -o pacsign pacsign.c -framework Hypervisor
+codesign -s - -f --entitlements ent.plist pacsign
+perl -e '$p=fork;if(!$p){setpgrp;exec@ARGV or exit 127}$SIG{ALRM}=sub{kill"-KILL",$p;exit 124};alarm 15;wait;exit($?>>8)' ./pacsign
+```
+
+Verdict: the **lazy-per-page-map + fixup-walk + guest-oracle-sign** design is **GO** (per-page
+batched signing, one vCPU run per demand-faulted DATA page; ≤2048 pointers/page).
+
 ## Proven for M2; still open for later milestones
 
 - MMU-on paging, PAC, and DSC reachability — **proven** (`m2spike.c`); `private` cache
