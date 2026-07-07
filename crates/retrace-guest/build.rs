@@ -77,4 +77,15 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang remap");
     assert!(status.success(), "remap guest build failed");
+
+    // hello_dyn: a real dynamically-linked arm64 executable (normal toolchain, links libSystem).
+    // Plain -arch arm64 (NOT arm64e — third-party arm64e builds are gated; the arm64e dyld loads a
+    // plain-arm64 exe fine). Task 7 maps this + /usr/lib/dyld and builds dyld's process-start stack.
+    let src = format!("{}/c/hello_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/hello_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang hello_dyn");
+    assert!(status.success(), "hello_dyn guest build failed");
 }

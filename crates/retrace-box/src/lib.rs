@@ -5,6 +5,11 @@ use retrace_trace::{Regs, Region};
 
 pub const TRAMPOLINE_IPA: u64 = 0x0000_4000; // 16 KiB-aligned (hv_vm_map rejects 4 KiB alignment under the default granule)
 pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
+// Dynamic-path constants (M1 static path is untouched). dyld is a PIE MH_DYLINKER at vmaddr 0,
+// so it must be slid to a free base: 5 GiB is above the exe (~4 GiB) and below guest_mmap (8 GiB).
+pub const DYLD_BASE: u64 = 0x1_4000_0000;      // 5 GiB slide for dyld
+const DYN_STACK_TOP:  u64 = 0x0020_0000;       // 2 MiB (block 0, RW+non-exec by default, below PT_L3_BASE)
+const DYN_STACK_SIZE: u64 = 0x0004_0000;       // 256 KiB
 pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 // Bump-allocation base for guest_mmap regions: 8 GiB, within the 36-bit IPA space and above
 // the guest's 0x1_0000_0000 segments, so mmap'd regions never collide with loaded segments.
@@ -189,6 +194,85 @@ impl Box_ {
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
         Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE }
+    }
+
+    pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
+
+    /// Dynamic loader: map a dynamically-linked exe at its own vmaddrs + `/usr/lib/dyld` slid to
+    /// `DYLD_BASE`, build the XNU process-start stack, and set PC = dyld's slid entry. Constructs
+    /// the initial box state only — running dyld is Task 9. The M1 static `load` path is untouched.
+    pub fn load_dynamic(exe: &Loaded, dyld: &Loaded, argv0: &str) -> Box_ {
+        let vm = Vm::create().expect("hv_vm_create");
+        let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
+        let mut backings = Vec::new();
+        let map = |vm: &Vm, backings: &mut Vec<Backing>, ipa: u64, src: &[u8], memsz: usize| {
+            let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
+            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), host, src.len()); }
+            assert!(ipa.is_multiple_of(GRANULE as u64), "retrace-box: guest region IPA {ipa:#x} is not 16 KiB-granule-aligned (hv_vm_map requires it); a differently-linked guest needs 16 KiB-aligned segments");
+            vm.map(host, ipa, len, MemFlags::RWX).expect("hv_vm_map");
+            backings.push(Backing { host, ipa, len });
+        };
+        // exe at its own vmaddrs (arm64 PIE: __PAGEZERO skipped, __TEXT at 4 GiB).
+        for s in &exe.segments  { map(&vm, &mut backings, s.vaddr, &s.data, s.memsz); }
+        // dyld slid to DYLD_BASE (it is PIE at vmaddr 0 and self-relocates from PC — map raw bytes).
+        for s in &dyld.segments { map(&vm, &mut backings, s.vaddr + DYLD_BASE, &s.data, s.memsz); }
+        // Dynamic stack (anon, zero-filled). Capture its index NOW, before build_tables pushes the
+        // page-table backings, so build_start_stack can address the stack backing by index.
+        let stack_idx = backings.len();
+        map(&vm, &mut backings, DYN_STACK_TOP - DYN_STACK_SIZE, &[], DYN_STACK_SIZE as usize);
+        // EL1 vector table: 16 slots * 0x80; every slot begins with `hvc #0`.
+        let mut vectors = vec![0u8; 0x800];
+        for slot in 0..16 { vectors[slot*0x80..slot*0x80+4].copy_from_slice(&0xd4000002u32.to_le_bytes()); }
+        map(&vm, &mut backings, TRAMPOLINE_IPA, &vectors, 0x800);
+
+        // Build the XNU start stack in the (already-mapped, zeroed) stack backing; get guest SP.
+        let sp = Self::build_start_stack(&backings[stack_idx], argv0);
+
+        // W^X exec ranges: trampoline + exe exec segs (unslid) + dyld exec segs (slid).
+        let mut exec = vec![(TRAMPOLINE_IPA, 0x800u64, ATTR_TRAMP)];
+        for s in &exe.segments  { if s.exec { exec.push((s.vaddr,             s.memsz as u64, ATTR_CODE)); } }
+        for s in &dyld.segments { if s.exec { exec.push((s.vaddr + DYLD_BASE, s.memsz as u64, ATTR_CODE)); } }
+        let pt_start = backings.len();
+        let ttbr0 = Self::build_tables(&mut backings, &exec);
+        for bk in &backings[pt_start..] { vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (pt)"); }
+
+        Self::set_pac_keys(&vcpu);
+        vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
+        vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
+        vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
+        vcpu.set_sys(sysreg::TTBR0_EL1, ttbr0).unwrap();
+        vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();
+        vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
+        vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
+        vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE }
+    }
+
+    // Build the XNU start stack in the (already-mapped, zeroed) stack backing; return the guest SP.
+    // Layout at SP (low->high): argc, argv[0..argc], NULL, envp..., NULL, apple..., NULL, then C-strings.
+    // First cut — the exact apple[]/env set dyld requires is discovered empirically in Task 9.
+    fn build_start_stack(stack: &Backing, argv0: &str) -> u64 {
+        let base_ipa = stack.ipa;
+        let top = stack.ipa + stack.len as u64;
+        let strings: [Vec<u8>; 3] = [
+            { let mut v = argv0.as_bytes().to_vec(); v.push(0); v },                 // argv[0]
+            b"DYLD_SHARED_REGION=private\0".to_vec(),                                 // envp[0]
+            { let mut v = format!("executable_path={argv0}").into_bytes(); v.push(0); v }, // apple[0]
+        ];
+        let mut p = top;
+        let mut addr = [0u64; 3];
+        for (i, s) in strings.iter().enumerate() {
+            p -= s.len() as u64;
+            addr[i] = p;
+            unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), stack.host.add((p - base_ipa) as usize), s.len()); }
+        }
+        let words = [1u64, addr[0], 0, addr[1], 0, addr[2], 0];     // argc, argv, NULL, envp, NULL, apple, NULL
+        let sp = (p - words.len() as u64 * 8) & !15u64;             // 16-byte aligned
+        for (i, w) in words.iter().enumerate() {
+            let off = (sp - base_ipa) as usize + i * 8;
+            unsafe { std::ptr::copy_nonoverlapping(w.to_le_bytes().as_ptr(), stack.host.add(off), 8); }
+        }
+        sp
     }
 
     /// Special case for mmap: allocate host pages, map 1:1 at a deterministic fresh IPA,
