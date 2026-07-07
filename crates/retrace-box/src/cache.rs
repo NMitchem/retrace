@@ -95,7 +95,9 @@ pub fn modifier(p: &SlidePtr5, slot_slid_va: u64) -> u64 {
 //                       mappingWithSlideOffset@0x138 (u32), mappingWithSlideCount@0x13C (u32).
 //   dyld_cache_mapping_and_slide_info (56 bytes): address@0, size@8, fileOffset@16,
 //                       slideInfoFileOffset@24, slideInfoFileSize@32, flags@40 (u64),
-//                       maxProt@44 (u32), initProt@48 (u32).
+//                       maxProt@48 (u32), initProt@52 (u32). (Confirmed via
+//                       `offsetof`/`sizeof` on the real struct in `spikes/covprobe.c`: flags is
+//                       8 bytes, so the two trailing u32 prot fields sit at 48/52, not 44/48.)
 //   slide_info5 (v5 only): version@0 (u32), page_size@4 (u32), page_starts_count@8 (u32),
 //                       value_add@0x10 (u64), page_starts[]@0x18 (u16 each, 0xFFFF = no rebase).
 //
@@ -183,7 +185,7 @@ fn read_subcache(path: &Path) -> io::Result<(u64, u64, Vec<Mapping>)> {
         let file_offset = u64le(&m, 16);
         let slide_info_file_offset = u64le(&m, 24);
         let slide_info_file_size = u64le(&m, 32);
-        let init_prot = u32le(&m, 48);
+        let init_prot = u32le(&m, 52);
         let is_exec = init_prot & 0x4 != 0; // VM_PROT_EXECUTE
 
         let slide_info = if slide_info_file_offset != 0 && slide_info_file_size != 0 {
@@ -220,6 +222,50 @@ fn read_slide_info5(file: &File, path: &Path, offset: u64) -> io::Result<SlideIn
     Ok(SlideInfo5 { page_size, value_add, page_starts })
 }
 
+/// Assert that the subcaches discovered by [`CacheMeta::load`]'s suffix-probe loop actually
+/// cover the cache's whole VA window `[base, base + size)`, so an enumeration that stopped
+/// early (a missing/renamed subcache file) is a loud load-time panic instead of a silent
+/// `region_of` -> `None` for the un-enumerated tail.
+///
+/// Calibrated against the real cache (`spikes/covprobe.c`, run against
+/// `dyld_shared_cache_arm64e` + its 12 subcaches on this host): mappings are **not** gapless
+/// byte-for-byte — a subcache's own mapping list can have multi-megabyte gaps between segments
+/// (e.g. unmapped guard space between `.02.dylddata`'s `__DATA_CONST` and `__AUTH_CONST`
+/// mappings), so we don't require that. But every subcache *file* boundary is exactly
+/// contiguous with the next (main -> `.01` -> `.02.dylddata` -> ... -> `.12.dyldlinkedit`, each
+/// one's lowest mapping address equals the previous file's highest mapping end, verified on the
+/// real cache), and the whole chain ends within one `CACHE_PAGE_SIZE` of the window's end (the
+/// real cache's last 0x4000 bytes are an unmapped trailing guard page). So: assert each
+/// subcache file's mappings pick up exactly where the previous file's left off, and that the
+/// last one reaches within a page of the window end.
+fn assert_covers_window(base: u64, size: u64, subcaches: &[Subcache]) {
+    let window_end = base + size;
+    let mut cover_end = base;
+    for sc in subcaches {
+        if sc.mappings.is_empty() {
+            continue;
+        }
+        let sc_min = sc.mappings.iter().map(|m| m.address).min().unwrap();
+        let sc_max = sc.mappings.iter().map(|m| m.address + m.size).max().unwrap();
+        assert_eq!(
+            sc_min, cover_end,
+            "cache routing table incomplete: {} subcache file(s) found, but {} starts at 0x{sc_min:x} \
+             while the previous subcache(s) only covered up to 0x{cover_end:x} — first uncovered \
+             address 0x{cover_end:x}. Subcache enumeration likely stopped early or skipped a file.",
+            subcaches.len(),
+            sc.path.display(),
+        );
+        cover_end = cover_end.max(sc_max);
+    }
+    assert!(
+        cover_end + CACHE_PAGE_SIZE >= window_end,
+        "cache routing table incomplete: {} subcache file(s) found, covering only up to 0x{cover_end:x}, \
+         but the cache window is [0x{base:x}, 0x{window_end:x}) — first uncovered address 0x{cover_end:x}. \
+         Subcache enumeration likely stopped before the last subcache.",
+        subcaches.len(),
+    );
+}
+
 impl CacheMeta {
     /// Parse the main cache file plus its numbered subcache files (`<main_path>.NN[.suffix]`,
     /// contiguous from `01`, each a full `dyld_cache_header`) into a routing table.
@@ -227,8 +273,12 @@ impl CacheMeta {
     /// Subcache enumeration: per `spikes/cacheprobe.c` / the spike findings, subcache files sit
     /// alongside the main file as `.NN` (TEXT) or `.NN.<suffix>` for a small, fixed suffix set
     /// (`dylddata`, `dyldreadonly`, `dyldlinkedit`). We probe `NN = 1, 2, ...` against each known
-    /// suffix and stop at the first `NN` with no match — this cache's subcaches are contiguous
-    /// (`.01` .. `.12` on the verified host, no gaps).
+    /// suffix and stop at the first `NN` with no match. This is a heuristic (no documented
+    /// "subcache count" header field to parse instead), so `load` asserts afterwards
+    /// (`assert_covers_window`) that the discovered mappings actually cover the whole
+    /// `[sharedRegionStart, sharedRegionStart + sharedRegionSize)` window — if the probe stopped
+    /// before the real last subcache (e.g. a future suffix we don't know about), that is a
+    /// load-time panic naming the gap, not a silent `region_of(ipa) -> None` later.
     pub fn load(main_path: impl AsRef<Path>) -> io::Result<CacheMeta> {
         let main_path = main_path.as_ref();
 
@@ -247,6 +297,8 @@ impl CacheMeta {
             subcaches.push(Subcache { path, mappings });
             n += 1;
         }
+
+        assert_covers_window(base, size, &subcaches);
 
         Ok(CacheMeta { base, size, subcaches })
     }
@@ -282,6 +334,56 @@ impl CacheMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_subcache(name: &str, ranges: &[(u64, u64)]) -> Subcache {
+        Subcache {
+            path: PathBuf::from(name),
+            mappings: ranges
+                .iter()
+                .map(|&(address, size)| Mapping { address, size, file_offset: 0, is_exec: false, slide_info: None })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn coverage_assertion_accepts_contiguous_subcaches_and_trailing_guard_page() {
+        // Mirrors the real cache's shape: subcache files are exactly contiguous with each
+        // other, and the window's last CACHE_PAGE_SIZE bytes are an unmapped trailing guard
+        // page with no backing mapping at all.
+        let base = 0x1_8000_0000u64;
+        let subcaches = vec![
+            fake_subcache("main", &[(base, 0x1000)]),
+            fake_subcache(".01", &[(base + 0x1000, 0x2000)]),
+        ];
+        let covered_end = base + 0x1000 + 0x2000;
+        let size = (covered_end - base) + CACHE_PAGE_SIZE; // window extends one guard page past coverage
+        assert_covers_window(base, size, &subcaches); // must not panic
+    }
+
+    #[test]
+    #[should_panic(expected = "Subcache enumeration likely stopped before the last subcache")]
+    fn coverage_assertion_rejects_incomplete_enumeration() {
+        // Simulates a suffix-probe loop that stopped early: the discovered subcaches only
+        // cover the first slice of the window, well beyond one guard page short of the end.
+        let base = 0x1_8000_0000u64;
+        let subcaches = vec![fake_subcache("main", &[(base, 0x1000)])];
+        let size = 0x10_0000; // window is far larger than what got discovered
+        assert_covers_window(base, size, &subcaches);
+    }
+
+    #[test]
+    #[should_panic(expected = "Subcache enumeration likely stopped early or skipped a file")]
+    fn coverage_assertion_rejects_gap_between_subcache_files() {
+        // A gap between two discovered subcache files' mapping ranges: real subcache-file
+        // boundaries are always exactly contiguous, so this signals a skipped/misrouted file.
+        let base = 0x1_8000_0000u64;
+        let subcaches = vec![
+            fake_subcache("main", &[(base, 0x1000)]),
+            fake_subcache(".01", &[(base + 0x2000, 0x1000)]), // gap: [base+0x1000, base+0x2000)
+        ];
+        let size = 0x3000;
+        assert_covers_window(base, size, &subcaches);
+    }
 
     #[test]
     fn decodes_spike_auth_slot() {
