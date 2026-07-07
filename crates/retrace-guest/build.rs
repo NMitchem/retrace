@@ -36,4 +36,14 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang mmapguest");
     assert!(status.success(), "mmapguest build failed");
+
+    // unaligned guest: an unaligned qword store faults MMU-off (Device memory), works
+    // MMU-on with Normal memory; proves the stage-1 identity map is live with Normal attrs.
+    let src = format!("{}/asm/unaligned.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/unaligned");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang unaligned");
+    assert!(status.success(), "unaligned guest build failed");
 }

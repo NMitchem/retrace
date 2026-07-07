@@ -11,6 +11,26 @@ pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 pub const MMAP_BASE: u64 = 0x2_0000_0000;
 const GRANULE: usize = 0x4000; // 16 KiB default granule
 
+pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (TTBR0 target); one 16 KiB page = 2048 entries
+pub const PT_L3_BASE: u64 = 0xC000;           // first L3 table; bump by GRANULE per promoted block
+const TCR_EL1_V:  u64 = 0x1_0080_B51C;        // T0SZ=28, TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit (spike-proven)
+const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
+// base 0x30d00800 + M(1) + C(4) + I(0x1000). PAC enable bits are added in Task 3.
+const SCTLR_MMU_ON: u64 = 0x30d0_0800 | 1 | 4 | 0x1000;
+
+// Descriptor low/high attribute bundles (without base address or type bits). AF|SH-inner|AttrIndx0,
+// then AP + execute-never bits. W^X: data is writable+non-exec; code/tramp are read-only+exec.
+const A_COMMON: u64 = 0x400 /*AF*/ | 0x300 /*SH inner*/;   // AttrIndx 0 = Normal WBWA
+const UXN: u64 = 1 << 54;                     // unprivileged (EL0) execute-never
+const PXN: u64 = 1 << 53;                     // privileged (EL1) execute-never
+const ATTR_DATA:  u64 = A_COMMON | 0x40 /*AP EL0RW*/ | UXN | PXN;   // RW, never executable
+const ATTR_CODE:  u64 = A_COMMON | 0xC0 /*AP RO both ELs*/ | PXN;   // RO, EL0-exec (UXN clear), EL1 no-exec
+const ATTR_TRAMP: u64 = A_COMMON | 0x80 /*AP EL1-RO, EL0 none*/ | UXN; // RO, EL1-exec (PXN clear)
+const DESC_BLOCK: u64 = 0x1;                  // L2 block descriptor
+const DESC_TABLE: u64 = 0x3;                  // L2 -> L3 table descriptor
+const DESC_PAGE:  u64 = 0x3;                  // L3 page descriptor
+const BLK: u64 = 1 << 25;                     // 32 MiB per L2 entry
+
 // A page-aligned host allocation mapped 1:1 into the guest at `ipa`.
 pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
 
@@ -42,6 +62,47 @@ fn alloc_pages(len: usize) -> (*mut u8, usize) {
 }
 
 impl Box_ {
+    // W^X identity stage-1 map. Default: every 32 MiB L2 entry is a data BLOCK (RW, non-exec) —
+    // covers stack/data/heap/mmap-data and identity-covers the whole 36 GiB space. Each exec range
+    // (ipa,len,attr) gets page-granularity pages with `attr`; its covering block(s) are promoted to
+    // an L3 table (identity-filled with ATTR_DATA, then exec pages overwritten). Returns PT_L2_IPA.
+    // Pushes the L2 + every L3 as backings; the caller stage-2-maps them. NEVER file-backed (SPTM).
+    fn build_tables(backings: &mut Vec<Backing>, exec: &[(u64, u64, u64)]) -> u64 {
+        let (l2_host, l2_len) = alloc_pages(GRANULE);
+        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
+        for (i, e) in l2.iter_mut().enumerate() { *e = ((i as u64) * BLK) | ATTR_DATA | DESC_BLOCK; }
+        backings.push(Backing { host: l2_host, ipa: PT_L2_IPA, len: l2_len });
+
+        // Which 32 MiB blocks contain an exec range? (sorted, deduped)
+        let mut blocks: Vec<u64> = exec.iter()
+            .flat_map(|&(va, len, _)| (va / BLK)..=((va + len - 1) / BLK)).collect();
+        blocks.sort_unstable(); blocks.dedup();
+
+        let mut next_l3 = PT_L3_BASE;
+        for bi in blocks {
+            let (l3_host, l3_len) = alloc_pages(GRANULE);
+            let l3 = unsafe { std::slice::from_raw_parts_mut(l3_host as *mut u64, 2048) };
+            let base = bi * BLK;
+            for (j, e) in l3.iter_mut().enumerate() {
+                *e = (base + (j as u64) * GRANULE as u64) | ATTR_DATA | DESC_PAGE;
+            }
+            l2[bi as usize] = next_l3 | DESC_TABLE;
+            backings.push(Backing { host: l3_host, ipa: next_l3, len: l3_len });
+            // overwrite pages this block's exec ranges cover
+            for &(va, len, attr) in exec {
+                let s = va.max(base);
+                let e = (va + len).min(base + BLK);
+                let mut p = s & !(GRANULE as u64 - 1);
+                while p < e {
+                    l3[((p - base) / GRANULE as u64) as usize] = p | attr | DESC_PAGE;
+                    p += GRANULE as u64;
+                }
+            }
+            next_l3 += GRANULE as u64;
+        }
+        PT_L2_IPA
+    }
+
     pub fn load(loaded: &Loaded) -> Box_ {
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
@@ -62,8 +123,21 @@ impl Box_ {
         for slot in 0..16 { vectors[slot*0x80..slot*0x80+4].copy_from_slice(&0xd4000002u32.to_le_bytes()); }
         map(&vm, &mut backings, TRAMPOLINE_IPA, &vectors, 0x800);
 
-        // Initial CPU state: EL0t, MMU off, VBAR_EL1 -> trampoline, SP set, PC = entry.
-        vcpu.set_sys(sysreg::SCTLR_EL1, 0x30d0_0800).unwrap();  // M(bit0)=0 => MMU off
+        // Build the W^X identity stage-1 map: the EL1 trampoline + every executable guest
+        // segment are RO+exec; everything else defaults to RW+non-exec data blocks.
+        let mut exec = vec![(TRAMPOLINE_IPA, 0x800u64, ATTR_TRAMP)];
+        for s in &loaded.segments { if s.exec { exec.push((s.vaddr, s.memsz as u64, ATTR_CODE)); } }
+        let pt_start = backings.len();
+        let ttbr0 = Self::build_tables(&mut backings, &exec);
+        for bk in &backings[pt_start..] {          // stage-2-map the new table backings (all anon)
+            vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (pt)");
+        }
+
+        // Initial CPU state: EL0t, MMU on with identity map, VBAR_EL1 -> trampoline, SP set, PC = entry.
+        vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
+        vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
+        vcpu.set_sys(sysreg::TTBR0_EL1, ttbr0).unwrap();
+        vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();   // was 0x30d00800 (MMU off)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
@@ -112,8 +186,14 @@ impl Box_ {
             vm.map(host, r.ipa, len, MemFlags::RWX).expect("hv_vm_map (restore)");
             backings.push(Backing { host, ipa: r.ipa, len });
         }
-        // Fixed sysregs are not stored in the M0 snapshot; re-establish them.
-        vcpu.set_sys(sysreg::SCTLR_EL1, 0x30d0_0800).unwrap(); // MMU off
+        // Fixed sysregs are not stored in the M0 snapshot; re-establish them. The page tables are
+        // already in the snapshot regions (captured from load's backings and re-mapped by the loop
+        // above), so re-point TTBR0 at them and enable the MMU — do NOT rebuild (that would
+        // double-map PT_L2_IPA -> HV_BAD_ARGUMENT and break every M1 replay test).
+        vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
+        vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
+        vcpu.set_sys(sysreg::TTBR0_EL1, PT_L2_IPA).unwrap();
+        vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         // Restore captured architectural state.
         for i in 0..31 { vcpu.set_reg(reg::x(i as u32), regs.x[i]).unwrap(); }
