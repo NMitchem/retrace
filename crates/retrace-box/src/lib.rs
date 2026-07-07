@@ -4,6 +4,7 @@ use retrace_guest::Loaded;
 use retrace_trace::{Regs, Region};
 
 mod cache;
+pub use cache::AuthSlot;
 
 pub const TRAMPOLINE_IPA: u64 = 0x0000_4000; // 16 KiB-aligned (hv_vm_map rejects 4 KiB alignment under the default granule)
 pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
@@ -74,6 +75,62 @@ const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
     (sysreg::APDBKEYLO_EL1, 0x5555555566666666), (sysreg::APDBKEYHI_EL1, 0x7777777788888888),
     (sysreg::APGAKEYLO_EL1, 0x99999999aaaaaaaa), (sysreg::APGAKEYHI_EL1, 0xbbbbbbbbcccccccc),
 ];
+
+// --- Guest signing oracle (M2-cache Task 4) ---
+// Two anon scratch pages, lazy-init'd on the first sign_slots/authenticate, at fixed reserved IPAs
+// in block 0's free area [TSD_end 0x34000, DYN_STACK 0x1C0000) — clear of trampoline (0x4000),
+// PT_L2 (0x8000), stack (0x1C000), TSD (0x30000), dyn stack, PT_L3 (0x800000+), segments (>=4GiB),
+// mmap (>=16GiB), and the cache (>=6GiB). W^X: the STUB page is code (RO+exec, ATTR_CODE) — a fresh
+// IPA promoted via set_region_exec; the TABLE page is data (RW+non-exec, block 0's default
+// ATTR_DATA). Executing a writable page would HANG hv_vcpu_run (Apple-Silicon W^X). Both anon
+// (SPTM: never file-backed).
+const SIGN_STUB_IPA:  u64 = 0x0004_0000; // 256 KiB: the signing stub (RO+exec)
+const SIGN_TABLE_IPA: u64 = 0x0004_4000; // 272 KiB: the (value, modifier, op) I/O table (RW+non-exec)
+// Table entry: value(8) + modifier(8) + op(8). The stub writes the pac*/aut* result back over the
+// value field (offset 0). At 24 B/entry a 16 KiB table page holds up to SIGN_CHUNK entries; larger
+// batches are processed in successive runs (see run_pac_batch's chunk loop).
+const PAC_ENTRY_BYTES: usize = 24;
+const SIGN_CHUNK: usize = GRANULE / PAC_ENTRY_BYTES; // 682 entries per 16 KiB table page
+// Per-entry op selector (bit1 = authenticate, bit0 = DA/data key), matched by the stub's tbnz
+// dispatch: 0=pacia, 1=pacda, 2=autia, 3=autda. A/family only (the v5 cache uses IA/DA).
+const OP_PACIA: u64 = 0;
+const OP_PACDA: u64 = 1;
+const OP_AUTIA: u64 = 2;
+const OP_AUTDA: u64 = 3;
+// Safety net for the stub's own run() loop: a correct stub reaches its terminating `svc` in ONE
+// hv_vcpu_run (its per-entry loop never exits to EL2 until done), so any higher count means a bug.
+const SIGN_STUB_BOUND: u32 = 8;
+// The signing stub, hand-assembled (verified against spikes/pacsign.c's pac*/aut* encodings; see
+// scratchpad stub.s). x9 = table IPA, x10 = entry count; runs at EL0 (ATTR_CODE is EL0-exec) and
+// ends with `svc #0` (EL0 cannot HVC) → trampoline → EL2. Uses GPRs + the table only (no stack).
+//   loop: cbz x10,done; ldr x0,[x9]; ldr x1,[x9,#8]; ldr x2,[x9,#16]
+//         tbnz w2,#1,is_auth; tbnz w2,#0,do_pacda; pacia x0,x1; b store
+//   do_pacda: pacda x0,x1; b store
+//   is_auth:  tbnz w2,#0,do_autda; autia x0,x1; b store
+//   do_autda: autda x0,x1
+//   store: str x0,[x9]; add x9,x9,#24; sub x10,x10,#1; b loop
+//   done: svc #0
+const SIGN_STUB: [u32; 19] = [
+    0xb400_024a, 0xf940_0120, 0xf940_0521, 0xf940_0922,
+    0x3708_00c2, 0x3700_0062, 0xdac1_0020, 0x1400_0007,
+    0xdac1_0820, 0x1400_0005, 0x3700_0062, 0xdac1_1020,
+    0x1400_0002, 0xdac1_1820, 0xf900_0120, 0x9100_6129,
+    0xd100_054a, 0x17ff_ffef, 0xd400_0001,
+];
+
+// The full architectural state sign_slots saves before running its stub and restores after, so a
+// mid-run caller (the cache pager) sees no disturbance. The stub's `svc` overwrites ELR/SPSR/ESR/
+// FAR_EL1; ELR_EL1 & SPSR_EL1 are load-bearing (set_x0_and_return resumes EL0 from them).
+struct SavedState {
+    x: [u64; 31],
+    pc: u64,
+    cpsr: u64,
+    sp_el0: u64,
+    elr_el1: u64,
+    spsr_el1: u64,
+    esr_el1: u64,
+    far_el1: u64,
+}
 
 // Descriptor low/high attribute bundles (without base address or type bits). AF|SH-inner|AttrIndx0,
 // then AP + execute-never bits. W^X: data is writable+non-exec; code/tramp are read-only+exec.
@@ -401,6 +458,151 @@ impl Box_ {
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
+
+    /// Re-sign a batch of shared-cache auth slots with the GUEST's fixed PAC keys, returning the
+    /// signed pointers (in slot order). Each slot is signed in-guest with `pacia` (IA,
+    /// `key_is_data == false`) or `pacda` (DA, `key_is_data == true`) — the guest's own keys sign by
+    /// definition, so the result authenticates under the same keys the guest will use to load the
+    /// cache. Does NOT disturb the caller's guest state: the stub runs on a dedicated scratch region
+    /// and the full architectural state is saved and restored around it (see `run_pac_batch`).
+    pub fn sign_slots(&mut self, slots: &[AuthSlot]) -> Vec<u64> {
+        let entries: Vec<(u64, u64, u64)> = slots
+            .iter()
+            .map(|s| (s.target_va, s.modifier, if s.key_is_data { OP_PACDA } else { OP_PACIA }))
+            .collect();
+        self.run_pac_batch(&entries)
+    }
+
+    /// The inverse in-guest oracle: authenticate each `(signed_ptr, modifier, key_is_data)` via
+    /// `autia`/`autda` and return the recovered pointer — equal to the original target iff the
+    /// signature is valid under the guest's keys. Used to round-trip-verify `sign_slots` (and to
+    /// audit a re-signed cache). Same scratch + full save/restore. NB: a WRONG modifier makes
+    /// `autia`/`autda` fault under FEAT_FPAC (surfaced as a loud panic by `run_sign_stub`).
+    pub fn authenticate(&mut self, items: &[(u64, u64, bool)]) -> Vec<u64> {
+        let entries: Vec<(u64, u64, u64)> = items
+            .iter()
+            .map(|&(p, m, kd)| (p, m, if kd { OP_AUTDA } else { OP_AUTIA }))
+            .collect();
+        self.run_pac_batch(&entries)
+    }
+
+    /// Lazy-init the signing scratch on first use: a stub CODE page (RO+exec, ATTR_CODE) and an I/O
+    /// TABLE page (RW+non-exec) at fixed reserved IPAs. W^X: the stub is code, so it is promoted to
+    /// ATTR_CODE via the live-page-table path (`set_region_exec`) — never mapped writable+exec at
+    /// stage-1 (that HANGS the vCPU on Apple Silicon). Both are anon (SPTM: never file-backed). A
+    /// stage-2 backing at SIGN_STUB_IPA means already-initialized (nothing else ever maps there).
+    fn ensure_sign_scratch(&mut self) {
+        if self.host_span(SIGN_STUB_IPA).is_some() { return; }
+        // Stub page: write the stub bytes, stage-2-map, then promote its stage-1 to RO+exec.
+        let (stub_host, stub_len) = alloc_pages(GRANULE);
+        for (i, w) in SIGN_STUB.iter().enumerate() {
+            unsafe { std::ptr::copy_nonoverlapping(w.to_le_bytes().as_ptr(), stub_host.add(i * 4), 4); }
+        }
+        self.vm.map(stub_host, SIGN_STUB_IPA, stub_len, MemFlags::RWX).expect("hv_vm_map (sign stub)");
+        self.backings.push(Backing { host: stub_host, ipa: SIGN_STUB_IPA, len: stub_len });
+        // Table page: RW+non-exec (block 0's default ATTR_DATA); just stage-2-map it.
+        let (tbl_host, tbl_len) = alloc_pages(GRANULE);
+        self.vm.map(tbl_host, SIGN_TABLE_IPA, tbl_len, MemFlags::RWX).expect("hv_vm_map (sign table)");
+        self.backings.push(Backing { host: tbl_host, ipa: SIGN_TABLE_IPA, len: tbl_len });
+        // W^X: RO+exec stage-1 for the stub page only (the table stays ATTR_DATA). Sound without a
+        // TLBI: SIGN_STUB_IPA is a fresh IPA the guest has never translated (set_region_exec's
+        // invariant), so its first fetch does a clean walk and sees ATTR_CODE.
+        self.set_region_exec(SIGN_STUB_IPA, GRANULE as u64);
+    }
+
+    /// Run the in-guest pac*/aut* stub over `entries` (`(value, modifier, op)`), returning the
+    /// per-entry result. Batched: one `hv_vcpu_run` per SIGN_CHUNK-sized table-full of entries.
+    /// Saves the FULL architectural state up front and restores it after every chunk completes, so
+    /// a mid-run caller sees byte-identical registers. Drives its OWN run loop (not the main
+    /// dispatch), so the stub's terminating `svc` is unambiguous.
+    fn run_pac_batch(&mut self, entries: &[(u64, u64, u64)]) -> Vec<u64> {
+        self.ensure_sign_scratch();
+        let saved = self.save_state();
+        let mut out = Vec::with_capacity(entries.len());
+        for chunk in entries.chunks(SIGN_CHUNK) {
+            // Fill the table page: [value, modifier, op] per 24-byte entry.
+            let (tbl, avail) = self.host_span(SIGN_TABLE_IPA).expect("sign table not mapped");
+            assert!(chunk.len() * PAC_ENTRY_BYTES <= avail, "sign chunk overflows table page");
+            for (i, &(value, modifier, op)) in chunk.iter().enumerate() {
+                let base = i * PAC_ENTRY_BYTES;
+                for (k, word) in [value, modifier, op].into_iter().enumerate() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(word.to_le_bytes().as_ptr(), tbl.add(base + k * 8), 8);
+                    }
+                }
+            }
+            // Point the vCPU at the stub: x9 = table, x10 = count, PC = stub, EL0t.
+            self.vcpu.set_reg(reg::x(9), SIGN_TABLE_IPA).unwrap();
+            self.vcpu.set_reg(reg::x(10), chunk.len() as u64).unwrap();
+            self.vcpu.set_reg(reg::PC, SIGN_STUB_IPA).unwrap();
+            self.vcpu.set_reg(reg::CPSR, 0).unwrap(); // EL0t (matches the guest's normal execution EL)
+            self.run_sign_stub();
+            // Read each result back (written over the value field at offset 0).
+            let (tbl, _) = self.host_span(SIGN_TABLE_IPA).expect("sign table not mapped");
+            for i in 0..chunk.len() {
+                let mut b = [0u8; 8];
+                unsafe { std::ptr::copy_nonoverlapping(tbl.add(i * PAC_ENTRY_BYTES), b.as_mut_ptr(), 8); }
+                out.push(u64::from_le_bytes(b));
+            }
+        }
+        self.restore_state(&saved);
+        out
+    }
+
+    /// Drive the stub to its terminating `svc`. The stub's per-entry loop stays in EL0 until done,
+    /// so exactly one `hv_vcpu_run` should reach the `svc` → trampoline → EL2 (EC=HVC); we confirm
+    /// the underlying EL1 syndrome is SVC (not an FPAC auth-failure / abort). The bounded loop +
+    /// panics turn a stub/W^X mistake into a loud failure instead of silent garbage. (A W^X hang
+    /// where `hv_vcpu_run` never returns is caught by the external process-group timeout.)
+    fn run_sign_stub(&mut self) {
+        for _ in 0..SIGN_STUB_BOUND {
+            let e = self.vcpu.run().expect("hv_vcpu_run (sign stub)");
+            if e.reason != EXIT_EXCEPTION { continue; }
+            match ec_of(e.syndrome) {
+                Ec::Hvc => {
+                    let esr1 = self.vcpu.get_sys(sysreg::ESR_EL1).unwrap();
+                    match ec_of(esr1) {
+                        Ec::Svc => return, // the stub's terminating svc: this chunk is done
+                        other => panic!(
+                            "sign stub faulted at EL0: ESR_EL1 EC={other:?} (esr={esr1:#x}) — wrong \
+                             modifier (FEAT_FPAC) or a stub bug (bad encoding / non-exec stub page)"
+                        ),
+                    }
+                }
+                _ => panic!(
+                    "unexpected VM exit during sign stub: syndrome={:#x} far={:#x} (scratch mis-mapped?)",
+                    e.syndrome, e.virtual_address
+                ),
+            }
+        }
+        panic!("sign stub did not reach its terminating svc within {SIGN_STUB_BOUND} runs (W^X hang / bad stub)");
+    }
+
+    fn save_state(&self) -> SavedState {
+        let mut x = [0u64; 31];
+        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+        SavedState {
+            x,
+            pc: self.vcpu.get_reg(reg::PC).unwrap(),
+            cpsr: self.vcpu.get_reg(reg::CPSR).unwrap(),
+            sp_el0: self.vcpu.get_sys(sysreg::SP_EL0).unwrap(),
+            elr_el1: self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(),
+            spsr_el1: self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap(),
+            esr_el1: self.vcpu.get_sys(sysreg::ESR_EL1).unwrap(),
+            far_el1: self.vcpu.get_sys(sysreg::FAR_EL1).unwrap(),
+        }
+    }
+
+    fn restore_state(&self, s: &SavedState) {
+        for (i, &xi) in s.x.iter().enumerate() { self.vcpu.set_reg(reg::x(i as u32), xi).unwrap(); }
+        self.vcpu.set_reg(reg::PC, s.pc).unwrap();
+        self.vcpu.set_reg(reg::CPSR, s.cpsr).unwrap();
+        self.vcpu.set_sys(sysreg::SP_EL0, s.sp_el0).unwrap();
+        self.vcpu.set_sys(sysreg::ELR_EL1, s.elr_el1).unwrap();
+        self.vcpu.set_sys(sysreg::SPSR_EL1, s.spsr_el1).unwrap();
+        self.vcpu.set_sys(sysreg::ESR_EL1, s.esr_el1).unwrap();
+        self.vcpu.set_sys(sysreg::FAR_EL1, s.far_el1).unwrap();
+    }
 
     /// Dynamic loader: map a dynamically-linked exe at its own vmaddrs + `/usr/lib/dyld` slid to
     /// `DYLD_BASE`, build the XNU process-start stack, and set PC = dyld's slid entry. Constructs
