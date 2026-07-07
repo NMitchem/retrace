@@ -88,6 +88,10 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                     // Verify Exit, then the final-memory landmark.
                     match events.get(idx) {
                         Some(Event::Exit { code }) => {
+                            if args[0] != *code {
+                                return Err(Divergence { landmark: idx, pc,
+                                    detail: format!("exit code mismatch: live {} != recorded {}", args[0], code) });
+                            }
                             match events.get(idx + 1) {
                                 Some(Event::Snapshot { mem: final_mem, .. }) => {
                                     if let Some(d) = b.diff_memory(final_mem) {
