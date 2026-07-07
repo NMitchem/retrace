@@ -1,3 +1,6 @@
+// Shared test helper module: each test binary `mod util;`s it but uses only the subset of helpers
+// it needs, so some are legitimately unused per-binary.
+#![allow(dead_code)]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
