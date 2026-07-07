@@ -65,39 +65,50 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
     let mut b = Box_::restore(&mem, &regs);
 
     let mut stdout = Vec::new();
-    let mut idx = 1usize; // events[0] is the snapshot
+    let mut idx = 1usize; // events[0] is the initial snapshot
     loop {
         match b.run() {
             Stop::Syscall { num, args } => {
                 let pc = b.position();
+                if num == SYS_EXIT {
+                    // Verify Exit, then the final-memory landmark.
+                    match events.get(idx) {
+                        Some(Event::Exit { code }) => {
+                            match events.get(idx + 1) {
+                                Some(Event::Snapshot { mem: final_mem, .. }) => {
+                                    if let Some(d) = b.diff_memory(final_mem) {
+                                        return Err(Divergence { landmark: idx + 1, pc, detail: d });
+                                    }
+                                    return Ok(ReplayReport { stdout, exit_code: *code });
+                                }
+                                other => return Err(Divergence { landmark: idx + 1, pc,
+                                    detail: format!("expected final memory Snapshot, got {other:?}") }),
+                            }
+                        }
+                        other => return Err(Divergence { landmark: idx, pc,
+                            detail: format!("expected recorded Exit, got {other:?}") }),
+                    }
+                }
                 match events.get(idx) {
-                    Some(Event::Syscall { num: rn, args: ra, ret, writes: _ }) => {
+                    Some(Event::Syscall { num: rn, args: ra, ret, writes }) => {
                         if num != *rn || args != *ra {
                             return Err(Divergence { landmark: idx, pc,
                                 detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
                         }
-                        // ASSERT NEGATIVE SPACE: we feed the recorded result; we do NOT execute the syscall.
-                        if num == SYS_WRITE && (args[0]==1 || args[0]==2) {
+                        // Mirror fd-1/2 write output (the buffer is already filled by prior applied reads).
+                        if num == SYS_WRITE && (args[0] == 1 || args[0] == 2) {
                             stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
                         }
-                        b.set_x0_and_return(*ret);
+                        // Apply recorded kernel writes + feed ret; NO real syscall executes.
+                        b.apply_and_return(*ret, writes);
                         idx += 1;
                     }
-                    Some(Event::Exit { .. }) if num == SYS_EXIT => { /* fallthrough handled below */ }
                     other => return Err(Divergence { landmark: idx, pc,
-                        detail: format!("expected recorded syscall, got {other:?} (trace truncated={truncated})") }),
-                }
-                if num == SYS_EXIT {
-                    match events.get(idx) {
-                        Some(Event::Exit { code }) => return Ok(ReplayReport { stdout, exit_code: *code }),
-                        other => return Err(Divergence { landmark: idx, pc,
-                            detail: format!("expected recorded Exit, got {other:?} (trace truncated={truncated})") }),
-                    }
+                        detail: format!("expected recorded syscall, got {other:?} (truncated={truncated})") }),
                 }
             }
             Stop::Other { esr } => {
-                let pc = b.pc();
-                return Err(Divergence { landmark: idx, pc, detail: format!("unexpected non-syscall exit esr=0x{esr:x}") });
+                return Err(Divergence { landmark: idx, pc: b.pc(), detail: format!("unexpected non-syscall exit esr=0x{esr:x}") });
             }
         }
     }
