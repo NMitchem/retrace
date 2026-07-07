@@ -23,7 +23,7 @@ pub fn parse_macho(b: &[u8]) -> Loaded {
                 let vmsize = u64le(b, off+32) as usize;
                 let fileoff = u64le(b, off+40) as usize;
                 let filesize = u64le(b, off+48) as usize;
-                let initprot = u32le(b, off+56); // VM_PROT_EXECUTE = 0x4
+                let initprot = u32le(b, off+60); // initprot (maxprot is off+56); VM_PROT_EXECUTE = 0x4
                 let name = &b[off+8..off+24];
                 if name.starts_with(b"__TEXT") { text_vmaddr = vmaddr; text_fileoff = fileoff as u64; }
                 if vmsize > 0 && name != b"__PAGEZERO\0\0\0\0\0\0" {

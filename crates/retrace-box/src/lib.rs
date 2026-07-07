@@ -12,7 +12,11 @@ pub const MMAP_BASE: u64 = 0x2_0000_0000;
 const GRANULE: usize = 0x4000; // 16 KiB default granule
 
 pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (TTBR0 target); one 16 KiB page = 2048 entries
-pub const PT_L3_BASE: u64 = 0xC000;           // first L3 table; bump by GRANULE per promoted block
+// L3 tables live at 8 MiB..32 MiB inside block 0 (above the stack IPA at 0x1C000, below the
+// 32 MiB block boundary), so they're identity-covered by block 0's own L3 (block 0 is already
+// L3-promoted for the trampoline). ~1500 tables' worth of room; bump by GRANULE per promoted block.
+pub const PT_L3_BASE: u64 = 0x0080_0000;
+const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 const TCR_EL1_V:  u64 = 0x1_0080_B51C;        // T0SZ=28, TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit (spike-proven)
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // base 0x30d00800 + M(1) + C(4) + I(0x1000). PAC enable bits are added in Task 3.
@@ -52,7 +56,8 @@ pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
     let len = (len + GRANULE - 1) & !(GRANULE - 1);
-    // SAFETY: plain RW anon mapping; guest exec comes from stage-2 RWX (verified in spikes).
+    // SAFETY: plain RW anon mapping; guest exec permission is governed by stage-1 W^X (stage-2
+    // stays RWX, the permissive term of the AND).
     let p = unsafe {
         libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ|libc::PROT_WRITE,
                    libc::MAP_ANON|libc::MAP_PRIVATE, -1, 0)
@@ -68,6 +73,7 @@ impl Box_ {
     // an L3 table (identity-filled with ATTR_DATA, then exec pages overwritten). Returns PT_L2_IPA.
     // Pushes the L2 + every L3 as backings; the caller stage-2-maps them. NEVER file-backed (SPTM).
     fn build_tables(backings: &mut Vec<Backing>, exec: &[(u64, u64, u64)]) -> u64 {
+        debug_assert!(exec.iter().all(|&(_, len, _)| len > 0), "exec ranges must be non-empty");
         let (l2_host, l2_len) = alloc_pages(GRANULE);
         let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
         for (i, e) in l2.iter_mut().enumerate() { *e = ((i as u64) * BLK) | ATTR_DATA | DESC_BLOCK; }
@@ -86,6 +92,7 @@ impl Box_ {
             for (j, e) in l3.iter_mut().enumerate() {
                 *e = (base + (j as u64) * GRANULE as u64) | ATTR_DATA | DESC_PAGE;
             }
+            assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "build_tables: too many exec blocks; L3 window exhausted");
             l2[bi as usize] = next_l3 | DESC_TABLE;
             backings.push(Backing { host: l3_host, ipa: next_l3, len: l3_len });
             // overwrite pages this block's exec ranges cover
