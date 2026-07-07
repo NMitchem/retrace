@@ -57,11 +57,13 @@ fn fileio_replays_identically_even_after_fixture_deleted() {
     let trace = record_fileio();
     // Delete the fixture the guest read: replay must still reproduce it from the trace.
     let _ = std::fs::remove_file(retrace_guest::FIXTURE);
-    let r = retrace_core::replay(&trace).expect("replay must not diverge");
+    let result = retrace_core::replay(&trace);
+    // Restore the fixture for other tests in the same binary BEFORE asserting, so a failed
+    // assertion here can't leave the fixture deleted and poison later runs.
+    std::fs::write(retrace_guest::FIXTURE, b"retrace-m1-fixture\n").unwrap();
+    let r = result.expect("replay must not diverge");
     assert_eq!(r.stdout, b"retrace-m1-fixture\n");
     assert_eq!(r.exit_code, 0);
-    // Restore the fixture for other tests in the same binary.
-    std::fs::write(retrace_guest::FIXTURE, b"retrace-m1-fixture\n").unwrap();
 }
 #[test]
 fn tampered_read_write_is_caught_by_final_memory() {

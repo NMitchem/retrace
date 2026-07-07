@@ -73,8 +73,11 @@ On each syscall trap:
    `Divergence`.
 2. **Apply** the recorded `writes` to guest memory and feed the recorded `ret` — **never
    execute the syscall.** This is the negative-space invariant that makes the recording
-   independent of the host (deleted files, changed cwd, etc. do not affect replay), asserted
-   in release: no host syscall is issued during replay.
+   independent of the host (deleted files, changed cwd, etc. do not affect replay), enforced
+   by construction: `retrace-core` has no path to issue a host syscall (no `hv_sys`/`libc`
+   dependency). `Box_::guest_mmap` does legitimately call `libc::mmap` during replay, but
+   that allocates host-side backing at a deterministic address — it is not forwarding the
+   guest's syscall for its effect — so it does not violate the invariant.
 3. **Resume** the guest.
 
 ### Map-changing special cases
@@ -108,9 +111,12 @@ strengthens it:
   makes replay's memory diverge here (or earlier, as a syscall-arg mismatch, if it changes
   control flow). This directly implements the byte-level comparison the M0 final review
   flagged as missing (Important #2), at the final landmark.
-- **Negative-space assertions** (release-on): no host syscall executes during replay; the
-  recorded `writes` never fall outside a mapped region on apply; the map-changing special
-  cases keep the guest map and the trace in agreement.
+- **Negative-space invariants:** no host syscall executes during replay — enforced by
+  construction (`retrace-core` has no `hv_sys`/`libc` dependency; `Box_::guest_mmap`'s
+  `libc::mmap` call during replay allocates host-side backing at a deterministic address
+  rather than forwarding the guest's syscall, so it does not violate this). Release-on
+  assertions guard the rest: the recorded `writes` never fall outside a mapped region on
+  apply; the map-changing special cases keep the guest map and the trace in agreement.
 
 ## Components (building on M0's crates)
 
