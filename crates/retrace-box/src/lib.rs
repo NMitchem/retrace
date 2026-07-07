@@ -246,6 +246,11 @@ impl Box_ {
         None
     }
 
+    /// Memory-safety clamp (debt #1): a buffer-filling syscall must not have the host kernel write
+    /// past the destination backing, so its forwarded byte count is capped at the buffer's
+    /// available bytes. Inert when the guest's count already fits (the normal case).
+    pub fn clamp_count(avail: usize, count: usize) -> usize { count.min(avail) }
+
     /// Record-side memory-diff. For each arg that points into a mapped region, snapshot a
     /// window (capped) and translate it to a host address; forward the real syscall; diff.
     /// M1 assumes the syscall succeeds (see plan's error-ABI note).
@@ -261,6 +266,15 @@ impl Box_ {
                     hargs[i] = hp as i64;
                 }
                 None => hargs[i] = args[i] as i64,
+            }
+        }
+        // Debt #1: read/pread fill the x1 buffer with up to x2 bytes; cap x2 at that buffer's
+        // backing so the host kernel can never write past it. Normal guests already fit (inert).
+        if num == retrace_arch::SYS_READ || num == retrace_arch::SYS_PREAD {
+            if let Some((_, avail)) = self.host_span(args[1]) {
+                debug_assert!((hargs[2] as usize) <= avail,
+                    "forward_and_diff: syscall {num} count {} exceeds x1 buffer backing {avail}", hargs[2]);
+                hargs[2] = Self::clamp_count(avail, hargs[2] as usize) as i64;
             }
         }
         // macOS binds `syscall(2)` as `int syscall(int, ...)` (BSD ABI); num is c_int, not
