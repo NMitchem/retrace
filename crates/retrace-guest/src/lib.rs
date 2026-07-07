@@ -54,6 +54,7 @@ pub const MMAPGUEST: &str = concat!(env!("OUT_DIR"), "/mmapguest");
 pub const UNALIGNED: &str = concat!(env!("OUT_DIR"), "/unaligned");
 pub const PACGUEST: &str = concat!(env!("OUT_DIR"), "/pacguest");
 pub const FAILSYS: &str = concat!(env!("OUT_DIR"), "/failsys");
+pub const REMAP: &str = concat!(env!("OUT_DIR"), "/remap");
 
 #[cfg(test)]
 mod tests {

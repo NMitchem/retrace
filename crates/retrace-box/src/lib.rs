@@ -202,6 +202,31 @@ impl Box_ {
         ipa
     }
 
+    /// Honor munmap (debt #2): drop the backing covering `ipa` and `hv_vm_unmap` its stage-2
+    /// range, then release the anon host allocation. No-op if `ipa` isn't a tracked backing
+    /// (e.g. munmap of something retrace never mapped itself).
+    pub fn guest_munmap(&mut self, ipa: u64, len: u64) {
+        if let Some(pos) = self.backings.iter().position(|b| ipa >= b.ipa && ipa < b.ipa + b.len as u64) {
+            let bk = self.backings.remove(pos);
+            let _ = self.vm.unmap(bk.ipa, bk.len);       // stage-1 identity block stays; stage-2 removed
+            // SAFETY: the anon host backing is no longer mapped into the guest; release it.
+            unsafe { libc::munmap(bk.host as *mut _, bk.len); }
+            let _ = len; // whole-backing unmap for M2's page-granular guests
+        }
+    }
+
+    /// Honor mprotect (debt #2), best-effort: re-`hv_vm_protect`s the stage-2 range. Fidelity
+    /// only — our security boundary is the VMM, so stage-2 stays RWX (the permissive term of
+    /// the AND with stage-1 W^X), but accepting the call keeps record/replay from diverging.
+    /// A finer prot map lands if a guest ever needs a fault from this.
+    pub fn guest_mprotect(&mut self, ipa: u64, len: u64, _prot: u64) {
+        let _ = self.vm.protect(ipa, len as usize, MemFlags::RWX);
+    }
+
+    /// Sum of tracked backing lengths (test observability: proves mmap grows / munmap shrinks
+    /// the map set without exposing `backings` itself).
+    pub fn mapped_len(&self) -> usize { self.backings.iter().map(|b| b.len).sum() }
+
     pub fn run(&mut self) -> Stop {
         loop {
             let e = self.vcpu.run().expect("hv_vcpu_run");

@@ -28,7 +28,7 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<Recor
                 stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
                 let ret = args[2];
                 w.append(&Event::Syscall { num, args, ret, err: false, writes: vec![] }).map_err(|e| format!("append write: {e}"))?; count += 1;
-                b.set_x0_and_return(ret);
+                b.set_x0_err_and_return(ret, false);
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
             // stores (no syscall), so it cannot go through forward_and_diff. guest_mmap maps a
@@ -36,13 +36,21 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<Recor
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
                 let ipa = b.guest_mmap(args[1]);       // args[1] = length
                 w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
-                b.set_x0_and_return(ipa);
+                b.set_x0_err_and_return(ipa, false);
             }
-            // munmap/mprotect write no guest memory; keep the mapping (M1 does not honor
-            // unmap/protect). Recorded no-ops with ret = 0.
-            Stop::Syscall { num, args } if num == retrace_arch::SYS_MUNMAP || num == retrace_arch::SYS_MPROTECT => {
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append map-op: {e}"))?; count += 1;
-                b.set_x0_and_return(0);
+            // munmap/mprotect (debt #2): honor them for real — drop + hv_vm_unmap the backing on
+            // munmap so a later mmap can reuse the address; best-effort hv_vm_protect on
+            // mprotect. Neither writes guest memory itself (the guest's own subsequent stores
+            // do), so they're recorded like mmap: ret=0, no writes, reproduced by re-execution.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MUNMAP => {
+                b.guest_munmap(args[0], args[1]);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append munmap: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
+            }
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MPROTECT => {
+                b.guest_mprotect(args[0], args[1], args[2]);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mprotect: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
             }
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
@@ -125,12 +133,25 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                                 return Err(Divergence { landmark: idx, pc,
                                     detail: format!("mmap ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
                             }
-                            b.set_x0_and_return(*ret);
+                            b.set_x0_err_and_return(*ret, false);
+                            idx += 1;
+                            continue;
+                        }
+                        // munmap/mprotect (debt #2): honor them for real on replay too, so a later
+                        // mmap in the trace can reuse the address exactly like it did on record.
+                        if num == retrace_arch::SYS_MUNMAP {
+                            b.guest_munmap(args[0], args[1]);
+                            b.set_x0_err_and_return(0, false);
+                            idx += 1;
+                            continue;
+                        }
+                        if num == retrace_arch::SYS_MPROTECT {
+                            b.guest_mprotect(args[0], args[1], args[2]);
+                            b.set_x0_err_and_return(0, false);
                             idx += 1;
                             continue;
                         }
                         // Apply recorded kernel writes + feed ret; NO real syscall executes.
-                        // (munmap/mprotect land here with empty writes + ret 0: applies nothing.)
                         b.apply_and_return(*ret, *err, writes);
                         idx += 1;
                     }
