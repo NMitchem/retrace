@@ -15,22 +15,28 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<Recor
     let exit_code;
     loop {
         match b.run() {
-            Stop::Syscall { num, args } if num == SYS_WRITE => {
-                // Forward write() against the 1:1 buffer, capture bytes + return value.
-                let bytes = b.read_guest(args[1], args[2] as usize);
-                if args[0] == 1 || args[0] == 2 { stdout.extend_from_slice(&bytes); }
-                let ret = args[2]; // wrote all bytes into our capture
-                w.append(&Event::Syscall { num, args, ret }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
-                b.set_x0_and_return(ret);
-            }
             Stop::Syscall { num, args } if num == SYS_EXIT => {
+                let final_snap = b.snapshot();          // final-memory landmark
+                w.append(&Event::Exit { code: args[0] }).map_err(|e| format!("append exit: {e}"))?; count += 1;
+                w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
                 exit_code = args[0];
-                w.append(&Event::Exit { code: exit_code }).map_err(|e| format!("append exit: {e}"))?; count += 1;
                 break;
             }
-            // Unhandled cases become a named Err (main maps -> exit 4); the swarm never sees a raw panic.
-            Stop::Syscall { num, .. } => return Err(format!("M0 unhandled syscall {num} (expected write/exit only)")),
-            Stop::Other { esr } => return Err(format!("M0 unexpected non-syscall exit esr=0x{esr:x}")),
+            // Console writes are mirrored + faked (NOT forwarded) so record doesn't emit to the
+            // record process's real stdout AND double the mirror; replay reproduces from the mirror.
+            Stop::Syscall { num, args } if num == SYS_WRITE && (args[0] == 1 || args[0] == 2) => {
+                stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
+                let ret = args[2];
+                w.append(&Event::Syscall { num, args, ret, writes: vec![] }).map_err(|e| format!("append write: {e}"))?; count += 1;
+                b.set_x0_and_return(ret);
+            }
+            // Every other syscall goes through the general memory-diff engine (forwarded once).
+            Stop::Syscall { num, args } => {
+                let (ret, writes) = b.forward_and_diff(num, args);
+                w.append(&Event::Syscall { num, args, ret, writes }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
+                b.set_x0_and_return(ret);
+            }
+            Stop::Other { esr } => return Err(format!("M1 unexpected non-syscall exit esr=0x{esr:x}")),
         }
     }
     Ok(RecordSummary { stdout, exit_code, events: count })
@@ -65,7 +71,7 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
             Stop::Syscall { num, args } => {
                 let pc = b.position();
                 match events.get(idx) {
-                    Some(Event::Syscall { num: rn, args: ra, ret }) => {
+                    Some(Event::Syscall { num: rn, args: ra, ret, writes: _ }) => {
                         if num != *rn || args != *ra {
                             return Err(Divergence { landmark: idx, pc,
                                 detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
