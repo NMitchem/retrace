@@ -286,6 +286,34 @@ impl Box_ {
         ipa
     }
 
+    const MAP_FIXED: u64 = 0x10;
+    /// Address + stage-2-map an anon backing for an mmap. FIXED → `addr`; else bump `mmap_next`.
+    /// Identical on record and replay. Returns the chosen guest IPA.
+    fn map_mmap_region(&mut self, host: *mut u8, rlen: usize, addr: u64, flags: u64) -> u64 {
+        let ipa = if flags & Self::MAP_FIXED != 0 { addr } else { self.mmap_next };
+        self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
+        self.backings.push(Backing { host, ipa, len: rlen });
+        if flags & Self::MAP_FIXED == 0 { self.mmap_next += rlen as u64; }
+        ipa
+    }
+    /// RECORD: anon-alloc, `pread` the file extent into it (SPTM: never map the file page itself),
+    /// map, return (ipa, staged bytes to record so replay needs no file).
+    pub fn guest_mmap_file(&mut self, addr: u64, len: u64, _prot: u64, flags: u64, fd: i32, off: u64)
+        -> (u64, Vec<Region>) {
+        let (host, rlen) = alloc_pages(len as usize);
+        let n = unsafe { libc::pread(fd, host as *mut _, rlen, off as libc::off_t) };
+        assert!(n >= 0, "guest_mmap_file: pread failed");
+        let ipa = self.map_mmap_region(host, rlen, addr, flags);
+        let bytes = unsafe { std::slice::from_raw_parts(host, rlen) }.to_vec();
+        (ipa, vec![Region { ipa, bytes }])
+    }
+    /// REPLAY: anon-alloc (zeroed), address identically (no file access); caller applies the
+    /// recorded writes to fill it. Returns the chosen IPA (must equal the recorded `ret`).
+    pub fn guest_mmap_replay(&mut self, addr: u64, len: u64, flags: u64) -> u64 {
+        let (host, rlen) = alloc_pages(len as usize);
+        self.map_mmap_region(host, rlen, addr, flags)
+    }
+
     /// Honor munmap (debt #2): drop the backing covering `ipa` and `hv_vm_unmap` its stage-2
     /// range, then release the anon host allocation. No-op if `ipa` isn't a tracked backing
     /// (e.g. munmap of something retrace never mapped itself).

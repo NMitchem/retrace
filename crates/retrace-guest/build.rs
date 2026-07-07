@@ -78,6 +78,22 @@ fn main() {
         .status().expect("clang remap");
     assert!(status.success(), "remap guest build failed");
 
+    // mmapfile: opens a fixture, mmap()s it PROT_READ file-backed (no MAP_ANON), reads the first
+    // byte, writes it to stdout. Proves Task 8's anon-staged file-backed mmap: record pread()s
+    // the file into anon guest pages and stages the bytes as recorded writes; replay reproduces
+    // them with zero file access (the fixture may be deleted).
+    let fixture = format!("{out}/mmapfile_fixture.txt");
+    std::fs::write(&fixture, b"MMAPFILE-OK\n").unwrap();
+    let gen = format!("{out}/mmapfile_gen.s");
+    std::fs::write(&gen, format!(".section __DATA,__data\n.p2align 3\n.global path\npath: .asciz \"{fixture}\"\n")).unwrap();
+    let src = format!("{}/asm/mmapfile.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/mmapfile");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
+        .status().expect("clang mmapfile");
+    assert!(status.success(), "mmapfile guest build failed");
+
     // hello_dyn: a real dynamically-linked arm64 executable (normal toolchain, links libSystem).
     // Plain -arch arm64 (NOT arm64e — third-party arm64e builds are gated; the arm64e dyld loads a
     // plain-arm64 exe fine). Task 7 maps this + /usr/lib/dyld and builds dyld's process-start stack.

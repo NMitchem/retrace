@@ -3,6 +3,10 @@ use retrace_box::{Box_, Stop};
 use retrace_trace::{Writer, Event};
 use retrace_arch::{SYS_WRITE, SYS_EXIT};
 
+// mmap flag bit: set => anonymous (M1's guest_mmap path); clear => file-backed (Task 8's
+// anon-staged path — dyld maps the shared cache + dylibs this way).
+const MAP_ANON: u64 = 0x1000;
+
 pub struct RecordSummary { pub stdout: Vec<u8>, pub exit_code: u64, pub events: usize }
 
 pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<RecordSummary, String> {
@@ -32,10 +36,18 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<Recor
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
             // stores (no syscall), so it cannot go through forward_and_diff. guest_mmap maps a
-            // deterministically-addressed tracked backing and returns its IPA.
-            Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
+            // deterministically-addressed tracked backing and returns its IPA. Anon vs
+            // file-backed is split on the MAP_ANON flag bit (dyld maps the shared cache +
+            // dylibs file-backed; SPTM forbids ever hv_vm_map'ing a file page, so file-backed
+            // mmap is anon-staged: pread the file into anon pages and record the bytes as writes).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP && args[3] & MAP_ANON != 0 => {
                 let ipa = b.guest_mmap(args[1]);       // args[1] = length
                 w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ipa, false);
+            }
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
+                let (ipa, writes) = b.guest_mmap_file(args[0], args[1], args[2], args[3], args[4] as i32, args[5]);
+                w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes }).map_err(|e| format!("append mmap_file: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ipa, false);
             }
             // munmap/mprotect (debt #2): honor them for real — drop + hv_vm_unmap the backing on
@@ -127,13 +139,26 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                         }
                         // mmap: recreate the mapping deterministically (the guest reproduces its own
                         // stores by re-execution). The IPA must match the recording exactly.
-                        if num == retrace_arch::SYS_MMAP {
+                        if num == retrace_arch::SYS_MMAP && args[3] & MAP_ANON != 0 {
                             let ipa = b.guest_mmap(args[1]);
                             if ipa != *ret {
                                 return Err(Divergence { landmark: idx, pc,
                                     detail: format!("mmap ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
                             }
                             b.set_x0_err_and_return(*ret, false);
+                            idx += 1;
+                            continue;
+                        }
+                        // file-backed mmap (Task 8): anon-alloc + address identically (no file
+                        // access), verify the recreated IPA equals the recorded ret (this is what
+                        // makes MAP_FIXED correct on replay), then stage the recorded bytes.
+                        if num == retrace_arch::SYS_MMAP {
+                            let ipa = b.guest_mmap_replay(args[0], args[1], args[3]);
+                            if ipa != *ret {
+                                return Err(Divergence { landmark: idx, pc,
+                                    detail: format!("mmap_file ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
+                            }
+                            b.apply_and_return(*ret, *err, writes);
                             idx += 1;
                             continue;
                         }
