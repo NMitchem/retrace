@@ -63,7 +63,8 @@ pub fn slice_arm64e(fat: &[u8]) -> &[u8] {
     let is64 = fatmagic == retrace_arch::FAT_MAGIC_64;
     assert!(fatmagic == retrace_arch::FAT_MAGIC || is64, "not a fat binary");
     let nfat = be32(4) as usize;
-    let (entry_sz, off_field) = if is64 { (32usize, 16usize) } else { (20usize, 8usize) };
+    // fat_arch{,_64}.offset is at struct byte 8 in BOTH layouts; only the stride differs (20 vs 32).
+    let (entry_sz, off_field) = if is64 { (32usize, 8usize) } else { (20usize, 8usize) };
     for i in 0..nfat {
         let e = 8 + i * entry_sz;                                   // fat_arch[i]
         let cputype = be32(e);
