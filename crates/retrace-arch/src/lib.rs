@@ -14,6 +14,13 @@ pub const SYS_FSTAT: u64 = 189;
 pub const SYS_MMAP: u64 = 197;
 pub const SYS_LSEEK: u64 = 199;
 
+pub const LC_LOAD_DYLINKER: u32 = 0xe;
+pub const FAT_MAGIC: u32 = 0xcafe_babe;      // big-endian on disk; read with from_be
+pub const FAT_MAGIC_64: u32 = 0xcafe_babf;
+pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+pub const CPU_SUBTYPE_ARM64E: u32 = 2;
+pub const PSTATE_C: u64 = 1 << 29;           // carry bit in NZCV (SPSR_EL1 / CPSR)
+
 pub fn ec_of(esr_el2: u64) -> Ec {
     match ((esr_el2 >> 26) & 0x3f) as u8 {
         0x15 => Ec::Svc,
