@@ -91,6 +91,8 @@ pub const UNALIGNED: &str = concat!(env!("OUT_DIR"), "/unaligned");
 pub const PACGUEST: &str = concat!(env!("OUT_DIR"), "/pacguest");
 pub const FAILSYS: &str = concat!(env!("OUT_DIR"), "/failsys");
 pub const REMAP: &str = concat!(env!("OUT_DIR"), "/remap");
+pub const MMAPFILE: &str = concat!(env!("OUT_DIR"), "/mmapfile");
+pub const MMAPFILE_FIXTURE: &str = concat!(env!("OUT_DIR"), "/mmapfile_fixture.txt");
 pub const HELLO_DYN: &str = concat!(env!("OUT_DIR"), "/hello_dyn");
 pub const DYLD_PATH: &str = "/usr/lib/dyld";
 
