@@ -67,4 +67,14 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang failsys");
     assert!(status.success(), "failsys guest build failed");
+
+    // remap: mmap A, store, munmap A, mmap B, store, load-back, exit x0=0 on match. Proves
+    // honored munmap (debt #2) lets the guest go on to reuse address space afterward.
+    let src = format!("{}/asm/remap.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/remap");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang remap");
+    assert!(status.success(), "remap guest build failed");
 }
