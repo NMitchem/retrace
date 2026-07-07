@@ -6,6 +6,7 @@ pub const SYS_EXIT: u64 = 1;
 pub const SVC_IMM: u64 = 0x80;
 
 pub const SYS_READ: u64 = 3;
+pub const SYS_PREAD: u64 = 153;
 pub const SYS_OPEN: u64 = 5;
 pub const SYS_CLOSE: u64 = 6;
 pub const SYS_MUNMAP: u64 = 73;
