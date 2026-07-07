@@ -15,9 +15,6 @@ const MAC_SYSCALL_MAGIC: u64 = 0x8000_0000;
 // force it to fail so dyld takes the DYLD_SHARED_REGION=private path and maps the cache file
 // itself (through our anon-staged file-mmap), instead of using the host's kernel-mapped shared
 // region, which lives in retrace's address space and is not in the guest's stage-2.
-const SYS_SHARED_REGION_CHECK_NP: u64 = 294;
-const ENOENT: u64 = 2;
-
 // Mach vm traps (negative x16). dyld uses these to manage its OWN address space; they must act on
 // GUEST memory, never be forwarded to the host task (whose address space is retrace's own). We
 // intercept them and allocate/free/relabel guest IPAs, exactly like the BSD mmap special cases.
@@ -125,12 +122,6 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.guest_mprotect(args[0], args[1], args[2]);
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mprotect: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
-            }
-            // shared_region_check_np: force ENOENT so dyld maps the cache privately (see const).
-            Stop::Syscall { num, args } if num == SYS_SHARED_REGION_CHECK_NP => {
-                eprintln!("[retrace warn] shared_region_check_np -> ENOENT (forcing DYLD_SHARED_REGION=private cache mapping)");
-                w.append(&Event::Syscall { num, args, ret: ENOENT, err: true, writes: vec![] }).map_err(|e| format!("append shared_region_check: {e}"))?; count += 1;
-                b.set_x0_err_and_return(ENOENT, true);
             }
             // dyld's inline __mac_syscall sandbox check (x16 = MAC_SYSCALL_MAGIC): cannot be
             // forwarded (host faults) — synthesize the unsandboxed result deterministically:
