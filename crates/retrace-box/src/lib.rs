@@ -5,6 +5,7 @@ use retrace_trace::{Regs, Region};
 
 pub const TRAMPOLINE_IPA: u64 = 0x0000_4000; // 16 KiB-aligned (hv_vm_map rejects 4 KiB alignment under the default granule)
 pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
+pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 const GRANULE: usize = 0x4000; // 16 KiB default granule
 
 // A page-aligned host allocation mapped 1:1 into the guest at `ipa`.
@@ -112,6 +113,81 @@ impl Box_ {
         self.vcpu.set_reg(reg::x(0), ret).unwrap();
         self.vcpu.set_reg(reg::PC, elr).unwrap();
         self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
+    }
+
+    // Translate a guest IPA to (host pointer, bytes available to the end of its backing).
+    fn host_span(&self, ipa: u64) -> Option<(*mut u8, usize)> {
+        for bk in &self.backings {
+            if ipa >= bk.ipa && ipa < bk.ipa + bk.len as u64 {
+                let off = (ipa - bk.ipa) as usize;
+                return Some((unsafe { bk.host.add(off) }, bk.len - off));
+            }
+        }
+        None
+    }
+
+    /// Record-side memory-diff. For each arg that points into a mapped region, snapshot a
+    /// window (capped) and translate it to a host address; forward the real syscall; diff.
+    /// M1 assumes the syscall succeeds (see plan's error-ABI note).
+    pub fn forward_and_diff(&self, num: u64, args: [u64;7]) -> (u64, Vec<Region>) {
+        let mut windows: Vec<(u64, usize, Vec<u8>)> = Vec::new(); // (guest_ipa, len, pre-image)
+        let mut hargs = [0i64; 7];
+        for i in 0..7 {
+            match self.host_span(args[i]) {
+                Some((hp, avail)) => {
+                    let win = avail.min(PTR_WINDOW_CAP);
+                    let pre = unsafe { std::slice::from_raw_parts(hp, win) }.to_vec();
+                    windows.push((args[i], win, pre));
+                    hargs[i] = hp as i64;
+                }
+                None => hargs[i] = args[i] as i64,
+            }
+        }
+        // macOS binds `syscall(2)` as `int syscall(int, ...)` (BSD ABI); num is c_int, not
+        // c_long. The 7 pointer/scalar args go through the variadic tail unchanged.
+        let ret = unsafe {
+            libc::syscall(num as libc::c_int, hargs[0], hargs[1], hargs[2],
+                          hargs[3], hargs[4], hargs[5], hargs[6])
+        } as u64;
+        let mut writes = Vec::new();
+        for (ipa, len, pre) in windows {
+            let (hp, _) = self.host_span(ipa).unwrap();
+            let post = unsafe { std::slice::from_raw_parts(hp, len) };
+            if post != pre.as_slice() {
+                writes.push(Region { ipa, bytes: post.to_vec() });
+            }
+        }
+        (ret, writes)
+    }
+
+    /// Replay-side: apply recorded writes to guest memory, then resume. Never executes a syscall.
+    pub fn apply_and_return(&mut self, ret: u64, writes: &[Region]) {
+        for w in writes {
+            let (hp, avail) = self.host_span(w.ipa)
+                .unwrap_or_else(|| panic!("apply_and_return: write ipa {:#x} outside any mapped region", w.ipa));
+            assert!(w.bytes.len() <= avail,
+                "apply_and_return: write at {:#x} ({} bytes) overruns backing ({} avail)", w.ipa, w.bytes.len(), avail);
+            unsafe { std::ptr::copy_nonoverlapping(w.bytes.as_ptr(), hp, w.bytes.len()); }
+        }
+        self.set_x0_and_return(ret);
+    }
+
+    /// Compare current guest memory against `expected`; return the first divergence, or None.
+    pub fn diff_memory(&self, expected: &[Region]) -> Option<String> {
+        for r in expected {
+            let (hp, avail) = match self.host_span(r.ipa) {
+                Some(s) => s,
+                None => return Some(format!("expected region at {:#x} is not mapped in replay", r.ipa)),
+            };
+            let n = r.bytes.len().min(avail);
+            let cur = unsafe { std::slice::from_raw_parts(hp, n) };
+            if let Some(off) = (0..n).find(|&i| cur[i] != r.bytes[i]) {
+                return Some(format!(
+                    "memory divergence at ipa {:#x}: replay=0x{:02x} recorded=0x{:02x}",
+                    r.ipa + off as u64, cur[off], r.bytes[off]));
+            }
+        }
+        None
     }
 
     /// Read `len` bytes of guest memory at `ipa` (1:1, so directly from the backing).
