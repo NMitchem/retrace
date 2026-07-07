@@ -59,6 +59,9 @@ pub mod sysreg {
     pub const ELR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_ELR_EL1);
     pub const SPSR_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_SPSR_EL1);
     pub const ESR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_ESR_EL1);
+    pub const FAR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_FAR_EL1);
+    pub const CPACR_EL1:SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_CPACR_EL1);
+    pub const TPIDRRO_EL0:SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TPIDRRO_EL0);
     pub const TTBR0_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TTBR0_EL1);
     pub const TCR_EL1:   SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TCR_EL1);
     pub const MAIR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_MAIR_EL1);
