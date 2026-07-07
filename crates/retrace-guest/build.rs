@@ -46,4 +46,14 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang unaligned");
     assert!(status.success(), "unaligned guest build failed");
+
+    // pacguest: signs and authenticates a code pointer with pacia/autia; proves PAC engaged
+    // (SCTLR_EL1.EnIA=1 + fixed APIA keys) and the sign/auth round-trip recovers the original.
+    let src = format!("{}/asm/pacguest.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/pacguest");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang pacguest");
+    assert!(status.success(), "pacguest build failed");
 }

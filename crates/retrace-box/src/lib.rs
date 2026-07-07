@@ -19,8 +19,18 @@ pub const PT_L3_BASE: u64 = 0x0080_0000;
 const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 const TCR_EL1_V:  u64 = 0x1_0080_B51C;        // T0SZ=28, TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit (spike-proven)
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
-// base 0x30d00800 + M(1) + C(4) + I(0x1000). PAC enable bits are added in Task 3.
-const SCTLR_MMU_ON: u64 = 0x30d0_0800 | 1 | 4 | 0x1000;
+// base 0x30d00800 + M(1) + C(4) + I(0x1000), plus PAC enable bits:
+// EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
+const SCTLR_MMU_ON: u64 = (0x30d0_0800 | 1 | 4 | 0x1000) | 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
+
+// Fixed PAC keys (arbitrary constants; identical on record & replay => deterministic signing).
+const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
+    (sysreg::APIAKEYLO_EL1, 0x5245545241434531), (sysreg::APIAKEYHI_EL1, 0x4D325350494B4559),
+    (sysreg::APIBKEYLO_EL1, 0x0badc0de0badc0de), (sysreg::APIBKEYHI_EL1, 0xfeedface_feedface),
+    (sysreg::APDAKEYLO_EL1, 0x1111111122222222), (sysreg::APDAKEYHI_EL1, 0x3333333344444444),
+    (sysreg::APDBKEYLO_EL1, 0x5555555566666666), (sysreg::APDBKEYHI_EL1, 0x7777777788888888),
+    (sysreg::APGAKEYLO_EL1, 0x99999999aaaaaaaa), (sysreg::APGAKEYHI_EL1, 0xbbbbbbbbcccccccc),
+];
 
 // Descriptor low/high attribute bundles (without base address or type bits). AF|SH-inner|AttrIndx0,
 // then AP + execute-never bits. W^X: data is writable+non-exec; code/tramp are read-only+exec.
@@ -110,6 +120,10 @@ impl Box_ {
         PT_L2_IPA
     }
 
+    fn set_pac_keys(vcpu: &Vcpu) {
+        for (r, v) in PAC_KEYS { vcpu.set_sys(r, v).unwrap(); }
+    }
+
     pub fn load(loaded: &Loaded) -> Box_ {
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
@@ -144,6 +158,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, ttbr0).unwrap();
+        Self::set_pac_keys(&vcpu);
         vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();   // was 0x30d00800 (MMU off)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
@@ -200,6 +215,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, PT_L2_IPA).unwrap();
+        Self::set_pac_keys(&vcpu);
         vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         // Restore captured architectural state.
