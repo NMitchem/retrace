@@ -56,4 +56,15 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang pacguest");
     assert!(status.success(), "pacguest build failed");
+
+    // failsys: opens a path that does not exist; the failing open sets the carry flag and
+    // returns errno (ENOENT=2) in x0, which the guest then exits with. Exercises the raw-svc
+    // forwarder's error-ABI carry recording.
+    let src = format!("{}/asm/failsys.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/failsys");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang failsys");
+    assert!(status.success(), "failsys guest build failed");
 }
