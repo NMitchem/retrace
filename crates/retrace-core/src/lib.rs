@@ -30,6 +30,20 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<Recor
                 w.append(&Event::Syscall { num, args, ret, writes: vec![] }).map_err(|e| format!("append write: {e}"))?; count += 1;
                 b.set_x0_and_return(ret);
             }
+            // mmap is special-cased: it creates guest memory the program then writes with plain
+            // stores (no syscall), so it cannot go through forward_and_diff. guest_mmap maps a
+            // deterministically-addressed tracked backing and returns its IPA.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
+                let ipa = b.guest_mmap(args[1]);       // args[1] = length
+                w.append(&Event::Syscall { num, args, ret: ipa, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
+                b.set_x0_and_return(ipa);
+            }
+            // munmap/mprotect write no guest memory; keep the mapping (M1 does not honor
+            // unmap/protect). Recorded no-ops with ret = 0.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MUNMAP || num == retrace_arch::SYS_MPROTECT => {
+                w.append(&Event::Syscall { num, args, ret: 0, writes: vec![] }).map_err(|e| format!("append map-op: {e}"))?; count += 1;
+                b.set_x0_and_return(0);
+            }
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
                 let (ret, writes) = b.forward_and_diff(num, args);
@@ -99,7 +113,20 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                         if num == SYS_WRITE && (args[0] == 1 || args[0] == 2) {
                             stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
                         }
+                        // mmap: recreate the mapping deterministically (the guest reproduces its own
+                        // stores by re-execution). The IPA must match the recording exactly.
+                        if num == retrace_arch::SYS_MMAP {
+                            let ipa = b.guest_mmap(args[1]);
+                            if ipa != *ret {
+                                return Err(Divergence { landmark: idx, pc,
+                                    detail: format!("mmap ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
+                            }
+                            b.set_x0_and_return(*ret);
+                            idx += 1;
+                            continue;
+                        }
                         // Apply recorded kernel writes + feed ret; NO real syscall executes.
+                        // (munmap/mprotect land here with empty writes + ret 0: applies nothing.)
                         b.apply_and_return(*ret, writes);
                         idx += 1;
                     }

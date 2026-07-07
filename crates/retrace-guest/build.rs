@@ -27,4 +27,13 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
         .status().expect("clang fileio");
     assert!(status.success(), "fileio guest build failed");
+
+    // mmap guest: allocates via SYS_mmap, writes the mapping with plain stores, munmaps.
+    let src = format!("{}/asm/mmapguest.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/mmapguest");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang mmapguest");
+    assert!(status.success(), "mmapguest build failed");
 }
