@@ -42,10 +42,16 @@ pub const COMMPAGE_IPA: u64 = 0x0000_000F_FFFF_C000;
 pub const COMMPAGE2_IPA: u64 = 0x0000_000F_FFFF_4000;
 // Thread-pointer TSD block. The kernel points TPIDRRO_EL0 at the main thread's thread-specific
 // data; dyld/libSystem read it (errno slot, pthread self) via `mrs x, TPIDRRO_EL0; ldr .., [x,#N]`.
-// We stage one zeroed granule at this fixed IPA (block 0, RW data) and set TPIDRRO_EL0/TPIDR_EL0 to
-// it in load_dynamic AND restore, so record and replay share the same thread pointer. Fixed IPA so
-// restore can re-establish it without threading the value through the snapshot.
+// We stage a zeroed region and set TPIDRRO_EL0/TPIDR_EL0 to `TSD_IPA` in load_dynamic AND restore,
+// so record and replay share the same thread pointer. Fixed IPA so restore can re-establish it
+// without threading the value through the snapshot. The thread pointer points into the MIDDLE of the
+// staged region [TSD_REGION_BASE, TSD_REGION_BASE+TSD_REGION_SIZE): libpthread/libplatform touch
+// both positive TSD-key slots (`[tp,#+N]`) AND negative pthread-struct fields (`[tp,#-N]`, observed
+// as low as tp-0xE0), so the backing must span generously below and above tp. The whole region sits
+// in block 0's free area below the sign scratch (0x40000) and above PT_L2 (0x8000).
 pub const TSD_IPA: u64 = 0x0003_0000;
+const TSD_REGION_BASE: u64 = 0x0002_8000; // 0x8000 below tp
+const TSD_REGION_SIZE: u64 = 0x0001_0000; // 4 granules; tp = TSD_IPA sits 0x8000 into it
 // Deterministic synthetic timebase: an emulated timebase MRS (Apple fast counter / CNTVCT)
 // returns SYNTH_TSC_START + k*SYNTH_TSC_STRIDE for the k-th read. Identical on record & replay
 // (both re-execute the same reads from the same entry), so timing dyld folds into memory can't
@@ -146,48 +152,6 @@ const DESC_TABLE: u64 = 0x3;                  // L2 -> L3 table descriptor
 const DESC_PAGE:  u64 = 0x3;                  // L3 page descriptor
 const BLK: u64 = 1 << 25;                     // 32 MiB per L2 entry
 
-// Minimal mach VM FFI for shared-cache staging (not in the libc crate).
-mod machffi {
-    extern "C" {
-        pub static mach_task_self_: u32;
-        // kern_return_t mach_vm_region_recurse(vm_map_t, mach_vm_address_t*, mach_vm_size_t*,
-        //     natural_t* nesting_depth, vm_region_recurse_info_t, mach_msg_type_number_t*);
-        pub fn mach_vm_region_recurse(target: u32, address: *mut u64, size: *mut u64,
-            nesting_depth: *mut u32, info: *mut i32, info_cnt: *mut u32) -> i32;
-    }
-}
-
-// Enumerate retrace's OWN executable memory regions in [start, end). The shared cache lives in a
-// nested VM submap, so recurse (VM_REGION_SUBMAP_INFO_64) to see real per-region protections
-// rather than the flat submap. Returns clamped [(addr, size)] for every VM_PROT_EXECUTE region.
-fn host_exec_regions(start: u64, end: u64) -> Vec<(u64, u64)> {
-    let mut out = Vec::new();
-    let mut a = start;
-    loop {
-        let (mut sz, mut depth, mut cnt) = (0u64, 1000u32, 19u32); // VM_REGION_SUBMAP_INFO_COUNT_64
-        let mut info = [0i32; 19]; // vm_region_submap_info_64; info[0] = protection
-        let kr = unsafe {
-            machffi::mach_vm_region_recurse(machffi::mach_task_self_, &mut a, &mut sz,
-                &mut depth, info.as_mut_ptr(), &mut cnt)
-        };
-        if kr != 0 || sz == 0 || a >= end { break; }
-        if info[0] & 0x4 != 0 { // VM_PROT_EXECUTE
-            let e = (a + sz).min(end);
-            if e > a { out.push((a, e - a)); }
-        }
-        a = a.saturating_add(sz);
-    }
-    out
-}
-
-// Is the host page at `page` (GRANULE-aligned) currently mapped in retrace? mincore returns
-// ENOMEM for a range with any unmapped page, so a 0 return means safe to read (used to avoid
-// faulting retrace when the guest touches an unmapped hole inside the shared-region window).
-fn host_page_mapped(page: u64) -> bool {
-    let mut vec = [0u8; 1];
-    unsafe { libc::mincore(page as *mut libc::c_void, GRANULE, vec.as_mut_ptr() as *mut libc::c_char) == 0 }
-}
-
 // A page-aligned host allocation mapped 1:1 into the guest at `ipa`.
 pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
 
@@ -216,6 +180,11 @@ pub struct Box_ {
     // Deterministic synthetic timebase counter (see SYNTH_TSC_*), advanced per emulated timebase
     // MRS. Plain u64; declared last, so the vcpu-before-vm drop order is unaffected.
     synthetic_tsc: u64,
+    // Re-fault loop guard (page_in_cache): the last already-mapped cache IPA that re-faulted and how
+    // many times in a row, so an unfixable re-fault panics loudly instead of hanging the VM. Plain
+    // u64s; declared before `cache`, so the vcpu-before-vm drop order is unaffected.
+    cache_refault_ipa: u64,
+    cache_refault_count: u64,
     // The dyld-shared-cache demand-pager's routing table (built by install_cache_pager on the #536
     // cache-mapping syscall; None until then). Holds the parsed subcache headers + open file
     // handles that page_in_cache reads pristine pages from. Its `File`s have Drop, but it is
@@ -368,27 +337,6 @@ impl Box_ {
         for (r, v) in PAC_KEYS { vcpu.set_sys(r, v).unwrap(); }
     }
 
-    /// Demand-page a shared-cache page on a guest stage-2 fault: if `ipa` is in the shared-region
-    /// window and the corresponding host page is mapped in retrace, copy that page into a fresh
-    /// anon backing at the same IPA (the guest then reads/executes the cache there). Returns true
-    /// if paged in, false if `ipa` is outside the window / already mapped / an unmapped hole (a
-    /// real fault to surface). Deterministic: record and replay fault on the same cache pages and
-    /// copy identical host bytes (the cache is read-only and stable within a boot); cache text
-    /// stage-1 is pre-set ATTR_CODE at load, so this adds only a stage-2 backing — no promotion,
-    /// no TLB invalidation.
-    fn try_demand_page(&mut self, ipa: u64) -> bool {
-        if !(SHARED_REGION_START..SHARED_REGION_END).contains(&ipa) { return false; }
-        let page = ipa & !(GRANULE as u64 - 1);
-        if self.host_span(page).is_some() { return false; }  // already mapped => not a missing page
-        if !host_page_mapped(page) { return false; }         // unmapped hole => genuine fault
-        let (host, rlen) = alloc_pages(GRANULE);
-        // SAFETY: host_page_mapped confirmed [page, page+GRANULE) is mapped RO in retrace.
-        unsafe { std::ptr::copy_nonoverlapping(page as *const u8, host, GRANULE); }
-        self.vm.map(host, page, rlen, MemFlags::RWX).expect("hv_vm_map (demand cache page)");
-        self.backings.push(Backing { host, ipa: page, len: rlen });
-        true
-    }
-
     /// If `esr1` (an EC=0x18 trapped MSR/MRS) is a READ of a timebase register — Apple's fast
     /// counter `S3_4_C15_C10_6` or the architectural `CNTVCT_EL0`/`CNTPCT_EL0` — service it with a
     /// deterministic synthetic value and skip the instruction (EL0 resumes at ELR+4). Returns true
@@ -414,6 +362,36 @@ impl Box_ {
         // Skip the trapping instruction: for a synchronous trap ELR_EL1 points AT the mrs, so
         // resume EL0 at ELR+4, restoring the saved EL0 PSTATE.
         let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+        self.vcpu.set_reg(reg::PC, elr + 4).unwrap();
+        self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
+        true
+    }
+
+    /// Emulate a trapped Apple IMPDEF `MRS` that surfaces as an UNDEFINED instruction (EC=0x00,
+    /// not the EC=0x18 sysreg-trap path) because HVF does not expose the register to the guest.
+    /// Reads the instruction at ELR_EL1; if it is `MRS Xt, S3_6_C15_C1_5` (an Apple CPU
+    /// feature/config register libdyld probes), writes a deterministic 0 into Xt (the guest tests a
+    /// bit and, seeing it clear, takes its normal PAC-authenticated path) and skips the instruction.
+    /// Returns true iff emulated. Deterministic and identical on record & replay (both re-execute
+    /// the same probe), so no clock/CPU state leaks into memory. Any other undefined instruction
+    /// returns false → surfaced as `Stop::Other` for diagnosis.
+    fn try_emulate_undef_mrs(&mut self) -> bool {
+        let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        if self.host_span(elr).is_none() { return false; }
+        let insn = u32::from_le_bytes(self.read_guest(elr, 4).try_into().unwrap());
+        // MRS: bits[31:20] == 0xD53. Decode the sysreg selector (op0,op1,CRn,CRm,op2).
+        if insn & 0xFFF0_0000 != 0xD530_0000 { return false; }
+        let o0  = (insn >> 19) & 1;         // op0 = 0b10 | o0  => 2 or 3
+        let op1 = (insn >> 16) & 0x7;
+        let crn = (insn >> 12) & 0xf;
+        let crm = (insn >> 8) & 0xf;
+        let op2 = (insn >> 5) & 0x7;
+        let rt  = insn & 0x1f;
+        // S3_6_C15_C1_5: op0=3 (o0=1), op1=6, CRn=15, CRm=1, op2=5.
+        let is_apple_feat = o0 == 1 && op1 == 6 && crn == 15 && crm == 1 && op2 == 5;
+        if !is_apple_feat { return false; }
+        if rt != 31 { self.vcpu.set_reg(reg::x(rt), 0).unwrap(); } // x31 = XZR: value discarded
         let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
         self.vcpu.set_reg(reg::PC, elr + 4).unwrap();
         self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
@@ -460,7 +438,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache: None }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -524,21 +502,67 @@ impl Box_ {
         // `self`, so this is a plain take/put.
         let Some(cache) = self.cache.take() else { return false }; // no pager installed
         let page_base = ipa & !(GRANULE as u64 - 1);
+        // Safety net: an ALREADY-mapped cache page that keeps re-faulting is a bug the VMM cannot
+        // fix by re-running (e.g. a stale-TLB permission fault), and would otherwise hang the VM.
+        // Track consecutive re-faults of the same already-mapped IPA and panic loudly instead.
+        if self.host_span(page_base).is_some() {
+            if self.cache_refault_ipa == page_base {
+                self.cache_refault_count += 1;
+                assert!(self.cache_refault_count < 8,
+                    "cache page {page_base:#x} re-faults while already mapped — likely a stale-TLB \
+                     permission fault (stage-1 attr wrong / block promoted without TLBI)");
+            } else {
+                self.cache_refault_ipa = page_base;
+                self.cache_refault_count = 1;
+            }
+        } else {
+            self.cache_refault_ipa = 0;
+            self.cache_refault_count = 0;
+        }
         let mut page = [0u8; GRANULE];
         let handled = match cache.stage_page(ipa, &mut page) {
-            None => false, // not a cache IPA — a genuine fault
+            None => {
+                // Not one of the cache's file mappings. The one legitimate in-window address that
+                // is not a file mapping is the kernel-created per-process DYNAMIC DATA region at the
+                // top of the shared region. dyld REQUIRES it: `dynamicRegion()` checks a
+                // `"dyld_data    v3"` magic (else "mapped cache does not contain dynamic config
+                // data" → fatal) and `getDyldCacheFileID` needs a non-zero FileIdTuple. Stage an
+                // anon page carrying the header (magic + the cache file's dev/ino) at the region
+                // base. Deterministic; identical on record & replay. Any other in-window miss is a
+                // genuine fault (returns false → surfaced loudly).
+                match cache.dynamic_data_region() {
+                    Some((dda, dds)) if (dda..dda.wrapping_add(dds)).contains(&page_base) => {
+                        if self.host_span(page_base).is_none() {
+                            let (host, rlen) = alloc_pages(GRANULE); // zero-filled
+                            if page_base == dda {
+                                let hdr = cache.dynamic_data_header();
+                                unsafe { std::ptr::copy_nonoverlapping(hdr.as_ptr(), host, hdr.len()); }
+                            }
+                            self.vm.map(host, page_base, rlen, MemFlags::RWX).expect("hv_vm_map (cache dyn-data page)");
+                            self.backings.push(Backing { host, ipa: page_base, len: rlen });
+                        }
+                        true
+                    }
+                    _ => false, // not a cache IPA — a genuine fault
+                }
+            }
             Some(region) => {
                 if self.host_span(page_base).is_none() {
                     if region.is_exec {
-                        // TEXT: stage pristine bytes, then promote stage-1 to RO+exec (no fixups).
+                        // TEXT: stage pristine bytes (no fixups), then ensure RO+exec (`ATTR_CODE`)
+                        // stage-1. In the dynamic path this is a NO-OP: load_dynamic pre-promotes
+                        // every cache exec mapping to ATTR_CODE from the cache's OWN mappings BEFORE
+                        // the guest translates them (so a text fault is a pure stage-2 fault with no
+                        // stale-block-TLB gap, and the block is already an L3 table with the page
+                        // already ATTR_CODE — set_region_exec finds it and changes nothing). It is
+                        // load-bearing only for a pager driven without that pre-promotion (tests).
                         let (host, rlen) = alloc_pages(GRANULE);
                         unsafe { std::ptr::copy_nonoverlapping(page.as_ptr(), host, GRANULE); }
                         self.vm.map(host, page_base, rlen, MemFlags::RWX).expect("hv_vm_map (cache text page)");
                         self.backings.push(Backing { host, ipa: page_base, len: rlen });
                         self.set_region_exec(page_base, GRANULE as u64);
-                    } else {
-                        // DATA: rebase regulars in place, re-sign auth slots with the guest keys.
-                        let si = region.slide_info.expect("cache DATA mapping must carry v5 slide-info");
+                    } else if let Some(si) = region.slide_info {
+                        // DATA with fixups: rebase regulars in place, re-sign auth slots (guest keys).
                         let auth = walk_page(&mut page, si, region.page_index, 0 /* slide 0 */, region.mapping_base);
                         let signed = self.sign_slots(&auth);
                         for (slot, val) in auth.iter().zip(signed) {
@@ -547,6 +571,14 @@ impl Box_ {
                         let (host, rlen) = alloc_pages(GRANULE);
                         unsafe { std::ptr::copy_nonoverlapping(page.as_ptr(), host, GRANULE); }
                         self.vm.map(host, page_base, rlen, MemFlags::RWX).expect("hv_vm_map (cache data page)");
+                        self.backings.push(Backing { host, ipa: page_base, len: rlen });
+                    } else {
+                        // Read-only DATA with no slide-info (e.g. __LINKEDIT, read-only const with no
+                        // pointers): stage the pristine bytes as-is — no rebase, no re-sign. Maps
+                        // under the default RW+non-exec stage-1 (the identity block already covers it).
+                        let (host, rlen) = alloc_pages(GRANULE);
+                        unsafe { std::ptr::copy_nonoverlapping(page.as_ptr(), host, GRANULE); }
+                        self.vm.map(host, page_base, rlen, MemFlags::RWX).expect("hv_vm_map (cache ro-data page)");
                         self.backings.push(Backing { host, ipa: page_base, len: rlen });
                     }
                 }
@@ -733,8 +765,9 @@ impl Box_ {
             let bytes = unsafe { std::slice::from_raw_parts(cp as *const u8, GRANULE) }.to_vec();
             map(&vm, &mut backings, cp, &bytes, GRANULE);
         }
-        // Thread-pointer TSD block (see TSD_IPA): one zeroed granule; TPIDRRO_EL0 points here.
-        map(&vm, &mut backings, TSD_IPA, &[], GRANULE);
+        // Thread-pointer TSD region (see TSD_IPA): a zeroed region spanning below+above the thread
+        // pointer (TPIDRRO_EL0 = TSD_IPA sits in its middle) so both TSD-key and pthread-field accesses land in it.
+        map(&vm, &mut backings, TSD_REGION_BASE, &[], TSD_REGION_SIZE as usize);
 
         // The main executable's mach-header address (dyld4's KernelArgs.mainExecutable): the exe
         // segment whose bytes begin with MH_MAGIC_64. dyld dereferences this to parse the main exe.
@@ -746,14 +779,20 @@ impl Box_ {
         let sp = Self::build_start_stack(&backings[stack_idx], argv0, main_hdr);
 
         // W^X exec ranges: trampoline + exe exec segs (unslid) + dyld exec segs (slid) + the shared
-        // cache's executable regions. The cache text stage-1 must be ATTR_CODE BEFORE the guest
-        // translates it, so demand-paging a text page is a pure stage-2 fault (no runtime block
-        // promotion, hence no stale-TLB gap). Enumerate retrace's own cache text regions and add
-        // them; only pages the guest actually touches get stage-2 backings (demand-paged).
+        // cache's executable regions. The cache text stage-1 MUST be ATTR_CODE BEFORE the guest ever
+        // translates it, so demand-paging a text page is a pure stage-2 fault needing no runtime
+        // stage-1 change. Otherwise a cache page first read as data would translate its covering
+        // 32 MiB block as a default RW/UXN block (caching that block-granule TLB entry); a later
+        // runtime data→exec promotion of a page in that block cannot be made visible (the VMM cannot
+        // issue a guest TLBI), so the instruction fetch keeps hitting the stale non-exec entry and
+        // re-faults forever. Pre-setting the real per-page attrs from the cache's OWN mappings (at
+        // slide 0, exactly where page_in_cache maps them) closes that gap. `CacheMeta` is loaded here
+        // and kept as the pager so #294/#536 need only confirm it.
+        let cache_meta = CacheMeta::load(DEFAULT_CACHE_PATH).expect("load_dynamic: load dyld shared cache");
         let mut exec = vec![(TRAMPOLINE_IPA, 0x800u64, ATTR_TRAMP)];
         for s in &exe.segments  { if s.exec { exec.push((s.vaddr,             s.memsz as u64, ATTR_CODE)); } }
         for s in &dyld.segments { if s.exec { exec.push((s.vaddr + DYLD_BASE, s.memsz as u64, ATTR_CODE)); } }
-        for (addr, size) in host_exec_regions(SHARED_REGION_START, SHARED_REGION_END) {
+        for (addr, size) in cache_meta.exec_mappings() {
             exec.push((addr, size, ATTR_CODE));
         }
         let pt_start = backings.len();
@@ -772,7 +811,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache: None }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta) }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -780,30 +819,42 @@ impl Box_ {
     //   [0]  mainExecutable  (pointer to the main exe's mach_header)
     //   [8]  argc
     //   [16] argv[0..argc], NULL
-    //        envp[..], NULL
+    //        envp[..], NULL          (empty: dyld uses the standard shared region, demand-paged)
     //        apple[..], NULL
     // (mainExecutable is the dyld4 addition over the classic XNU `argc,argv,envp,apple` frame.)
-    // The exact apple[]/env set is refined empirically; this carries argv[0], one env
-    // (DYLD_SHARED_REGION=private, so dyld maps a private cache through our file-mmap path), and the
-    // `executable_path` apple entry. No env vars (empty envp): dyld then uses the standard shared
-    // region (which retrace demand-pages), rather than the DYLD_SHARED_REGION=private path whose
-    // cache-mapping syscall retrace does not emulate.
+    //
+    // The `apple[]` array carries the kernel-provided launch tokens that libSystem's initializers
+    // parse. libpthread REQUIRES `ptr_munge=` (its pointer-mangling cookie) — a zero token makes
+    // its init `brk` with "BUG IN LIBPTHREAD: Token from the kernel is 0". libc reads `stack_guard=`
+    // (the `__stack_chk_guard` canary) and libmalloc `malloc_entropy=`. We synthesize fixed,
+    // non-zero values (identical on record & replay — deterministic; these are opaque cookies the
+    // guest only XORs/stores, never checks against anything external). `executable_path=` gives dyld
+    // the main exe's path.
     fn build_start_stack(stack: &Backing, argv0: &str, main_hdr: u64) -> u64 {
         let base_ipa = stack.ipa;
         let top = stack.ipa + stack.len as u64;
-        let strings: [Vec<u8>; 2] = [
-            { let mut v = argv0.as_bytes().to_vec(); v.push(0); v },                       // argv[0]
-            { let mut v = format!("executable_path={argv0}").into_bytes(); v.push(0); v },  // apple[0]
-        ];
+        // strings[0] = argv[0]; strings[1..] = apple[] entries (order irrelevant — parsed by key).
+        let mut strings: Vec<Vec<u8>> = Vec::new();
+        let push = |s: String, out: &mut Vec<Vec<u8>>| { let mut v = s.into_bytes(); v.push(0); out.push(v); };
+        push(argv0.to_string(), &mut strings);                                   // argv[0]
+        push(format!("executable_path={argv0}"), &mut strings);                  // apple[0]
+        push("ptr_munge=0x1a2b3c4d5e6f7a8b".to_string(), &mut strings);          // libpthread cookie (nonzero)
+        push("stack_guard=0x000a0b0c0d0e0f00".to_string(), &mut strings);        // __stack_chk_guard (low byte 0)
+        push("malloc_entropy=0x00112233445566778899aabbccddeeff".to_string(), &mut strings); // libmalloc 2x64 entropy
+        let n_apple = strings.len() - 1;
+
+        // Lay the strings down from the top of the stack; record each one's guest address.
         let mut p = top;
-        let mut addr = [0u64; 2];
+        let mut addr = vec![0u64; strings.len()];
         for (i, s) in strings.iter().enumerate() {
             p -= s.len() as u64;
             addr[i] = p;
             unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), stack.host.add((p - base_ipa) as usize), s.len()); }
         }
-        // KernelArgs: mainExecutable, argc, argv[0], NULL(argv end), NULL(envp empty), apple[0], NULL
-        let words = [main_hdr, 1u64, addr[0], 0, 0, addr[1], 0];
+        // KernelArgs words: mainExecutable, argc, argv[0], NULL, NULL(envp), apple[0..], NULL.
+        let mut words = vec![main_hdr, 1u64, addr[0], 0, 0];
+        words.extend((0..n_apple).map(|i| addr[1 + i]));
+        words.push(0); // apple[] terminator
         let sp = (p - words.len() as u64 * 8) & !15u64;             // 16-byte aligned
         for (i, w) in words.iter().enumerate() {
             let off = (sp - base_ipa) as usize + i * 8;
@@ -821,14 +872,60 @@ impl Box_ {
     pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
         let (host, rlen) = alloc_pages(size as usize);
         let ipa = if anywhere {
-            if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
-            let a = self.mmap_next; self.mmap_next += rlen as u64; a
-        } else { addr };
+            // Honor a non-zero address HINT when its range is free (libmalloc reserves its mandatory
+            // "pointer range" as ANYWHERE with a hint at the nano base 0x600000000 and then validates
+            // the result lands there); otherwise bump-allocate a fresh deterministic IPA.
+            if addr != 0 && self.range_is_free(addr, rlen as u64) {
+                addr
+            } else {
+                if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
+                let a = self.mmap_next; self.mmap_next += rlen as u64; a
+            }
+        } else {
+            // FIXED (dyld/libmalloc often pass VM_FLAGS_OVERWRITE): the guest may be replacing a
+            // region it previously bump-allocated. Free any tracked backing overlapping the target
+            // range so the fresh stage-2 map doesn't collide (hv_vm_map rejects an overlap).
+            self.unmap_overlapping(addr, rlen as u64);
+            addr
+        };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_vm_map)");
         self.backings.push(Backing { host, ipa, len: rlen });
         if exec { self.set_region_exec(ipa, size); }
         ipa
     }
+
+    /// Is `[ipa, ipa+len)` free of any tracked backing, clear of the shared-cache window, and within
+    /// the 36-bit IPA space? (Used to decide whether an ANYWHERE map may honor its address hint.)
+    fn range_is_free(&self, ipa: u64, len: u64) -> bool {
+        let end = ipa.saturating_add(len);
+        end <= (1u64 << 36)
+            && !(ipa < SHARED_REGION_END && SHARED_REGION_START < end)
+            && !self.backings.iter().any(|b| ipa < b.ipa + b.len as u64 && b.ipa < end)
+    }
+
+    /// Free every tracked backing that overlaps `[ipa, ipa+len)` (stage-2 unmap + release the anon
+    /// host allocation), for a FIXED/OVERWRITE remap. A backing that straddles the range boundary is
+    /// removed wholesale (the guest is deliberately overwriting the range); such straddles are not
+    /// expected for the page-granular, self-allocated regions the guest remaps.
+    fn unmap_overlapping(&mut self, ipa: u64, len: u64) {
+        let end = ipa + len;
+        let mut i = 0;
+        while i < self.backings.len() {
+            let b = &self.backings[i];
+            let bend = b.ipa + b.len as u64;
+            if b.ipa < end && ipa < bend {
+                let bk = self.backings.remove(i);
+                let _ = self.vm.unmap(bk.ipa, bk.len);
+                unsafe { libc::munmap(bk.host as *mut _, bk.len); }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Is `ipa` inside any tracked guest backing? (For a handler that must not write through a
+    /// null/unmapped pointer arg.)
+    pub fn is_mapped(&self, ipa: u64) -> bool { self.host_span(ipa).is_some() }
 
     /// Read an 8-byte little-endian word from guest memory (for reading in/out pointer args).
     pub fn read_u64(&self, ipa: u64) -> u64 {
@@ -868,13 +965,26 @@ impl Box_ {
         if flags & Self::MAP_FIXED == 0 { self.mmap_next += rlen as u64; }
         ipa
     }
-    /// RECORD: anon-alloc, `pread` the file extent into it (SPTM: never map the file page itself),
-    /// map, return (ipa, staged bytes to record so replay needs no file).
+    /// RECORD: anon-alloc, stage the fd's bytes into it (SPTM: never map the file page itself), map,
+    /// return (ipa, staged bytes to record so replay needs no file). Primary path is `pread`; if that
+    /// fails (e.g. a POSIX shared-memory object — `com.apple.featureflags.shm` — which supports only
+    /// `mmap`, not `pread`), fall back to mapping the fd read-only in RETRACE's own address space and
+    /// copying the bytes out (a deterministic snapshot, captured in the trace). Either way the guest
+    /// gets an anon page, never a file/shm page.
     pub fn guest_mmap_file(&mut self, addr: u64, len: u64, prot: u64, flags: u64, fd: i32, off: u64)
         -> (u64, Vec<Region>) {
         let (host, rlen) = alloc_pages(len as usize);
         let n = unsafe { libc::pread(fd, host as *mut _, rlen, off as libc::off_t) };
-        assert!(n >= 0, "guest_mmap_file: pread failed");
+        if n < 0 {
+            // pread unsupported on this fd: snapshot via a host mmap + copy. Clamp the copy to the
+            // object's size (rounded up to a page) so we never read past its end (SIGBUS).
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            let sz = if unsafe { libc::fstat(fd, &mut st) } == 0 { st.st_size as usize } else { rlen };
+            let copy_len = rlen.min(((sz + GRANULE - 1) & !(GRANULE - 1)).max(GRANULE));
+            let src = unsafe { libc::mmap(std::ptr::null_mut(), copy_len, libc::PROT_READ, libc::MAP_SHARED, fd, off as libc::off_t) };
+            assert!(src != libc::MAP_FAILED, "guest_mmap_file: neither pread nor mmap works on fd {fd}");
+            unsafe { std::ptr::copy_nonoverlapping(src as *const u8, host, copy_len); libc::munmap(src, copy_len); }
+        }
         let ipa = self.map_mmap_region(host, rlen, addr, prot, flags);
         let bytes = unsafe { std::slice::from_raw_parts(host, rlen) }.to_vec();
         (ipa, vec![Region { ipa, bytes }])
@@ -929,6 +1039,10 @@ impl Box_ {
                         // without ever surfacing to the record/replay loop (so both stay in
                         // lockstep automatically).
                         Ec::SysReg if self.try_emulate_timebase(esr1) => continue,
+                        // An undefined-instruction trap (EC=0x00) that is really an Apple IMPDEF
+                        // `MRS` HVF won't expose: emulate + skip it (like the timebase), staying in
+                        // lockstep without surfacing to the record/replay loop.
+                        Ec::Other(0) if self.try_emulate_undef_mrs() => continue,
                         _ => {
                             self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             return Stop::Other { esr: esr1 };
@@ -940,14 +1054,10 @@ impl Box_ {
                     return Stop::Syscall { num, args };
                 }
                 _ => {
-                    // Stage-2 abort taken by the hypervisor (not via the guest VBAR). With a cache
-                    // pager installed, cache-window faults are serviced by the record/replay
-                    // dispatch via `page_in_cache` (file → walk → re-sign → map, identical on record
-                    // and replay), so surface them as `Stop::Other` carrying the fault IPA. Without a
-                    // pager, fall back to the legacy host-copy demand-pager for a missing cache page.
-                    let ec = (e.syndrome >> 26) & 0x3f;
-                    let is_abort = matches!(ec, 0x20 | 0x21 | 0x24 | 0x25);
-                    if is_abort && self.cache.is_none() && self.try_demand_page(e.virtual_address) { continue; }
+                    // A stage-2 abort taken by the hypervisor (not via the guest VBAR). Cache-window
+                    // faults are serviced by the record/replay dispatch via `page_in_cache` (file →
+                    // walk → re-sign → map, identical on record and replay), so surface the fault IPA
+                    // as `Stop::Other` for it to route.
                     self.last_far = e.virtual_address;
                     return Stop::Other { esr: e.syndrome };
                 }
@@ -1002,7 +1112,7 @@ impl Box_ {
         let next_l3 = backings.iter()
             .filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL)
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache: None }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -1166,6 +1276,26 @@ impl Box_ {
         s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x}",
             self.vcpu.get_sys(sysreg::SP_EL0).unwrap(), self.pc(),
             self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(), self.last_far);
+        s
+    }
+
+    /// Bring-up diagnostic: walk the guest AArch64 frame-pointer chain from x29, returning up to
+    /// `max` return addresses (PAC bits stripped by masking to the 36-bit IPA space). Return
+    /// addresses are `pacibsp`-signed on the stack; masking recovers the raw VA (dyld ~0x1_4000_0000).
+    pub fn dbg_backtrace(&self, max: usize) -> String {
+        let mut s = String::new();
+        let mut fp = self.vcpu.get_reg(reg::x(29)).unwrap();
+        let pc = self.vcpu.get_reg(reg::PC).unwrap();
+        s += &format!("  pc  {pc:#x}\n");
+        for _ in 0..max {
+            if fp == 0 || self.host_span(fp).is_none() || fp & 0x7 != 0 { break; }
+            let saved_fp = self.read_u64(fp);
+            let ret = self.read_u64(fp + 8) & 0x0000_000F_FFFF_FFFF; // strip PAC bits
+            if ret == 0 { break; }
+            s += &format!("  ret {ret:#x}\n");
+            if saved_fp <= fp { break; } // stacks grow down; fp must increase up the chain
+            fp = saved_fp;
+        }
         s
     }
 
