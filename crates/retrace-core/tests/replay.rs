@@ -45,3 +45,38 @@ fn missing_trace_is_a_named_divergence_not_a_panic() {
     let err = retrace_core::replay(&trace).unwrap_err();
     assert!(err.detail.contains("cannot open trace"), "missing trace should name the failure: {}", err.detail);
 }
+
+fn record_fileio() -> PathBuf {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
+    let p = std::env::temp_dir().join(format!("retrace-replay-fileio-{}.bin", std::process::id()));
+    retrace_core::record(&loaded, &p).expect("record");
+    p
+}
+#[test]
+fn fileio_replays_identically_even_after_fixture_deleted() {
+    let trace = record_fileio();
+    // Delete the fixture the guest read: replay must still reproduce it from the trace.
+    let _ = std::fs::remove_file(retrace_guest::FIXTURE);
+    let r = retrace_core::replay(&trace).expect("replay must not diverge");
+    assert_eq!(r.stdout, b"retrace-m1-fixture\n");
+    assert_eq!(r.exit_code, 0);
+    // Restore the fixture for other tests in the same binary.
+    std::fs::write(retrace_guest::FIXTURE, b"retrace-m1-fixture\n").unwrap();
+}
+#[test]
+fn tampered_read_write_is_caught_by_final_memory() {
+    let trace = record_fileio();
+    // Corrupt a recorded read()'s writes so replay's buffer diverges from the recorded final memory.
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    for e in events.iter_mut() {
+        if let retrace_trace::Event::Syscall { num, writes, .. } = e {
+            if *num == 3 { if let Some(w) = writes.first_mut() { w.bytes[0] ^= 0xff; } }
+        }
+    }
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+    let err = retrace_core::replay(&trace).unwrap_err();
+    assert!(err.detail.contains("memory divergence") || err.detail.contains("syscall"),
+        "expected a named divergence, got: {}", err.detail);
+}
