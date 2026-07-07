@@ -47,6 +47,10 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<Recor
             }
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
                 let (ipa, writes) = b.guest_mmap_file(args[0], args[1], args[2], args[3], args[4] as i32, args[5]);
+                // PROT_EXEC (0x4): promote the freshly-mapped region to RO+exec (ATTR_CODE) stage-1
+                // pages so the guest can execute from it under W^X (e.g. dyld mapping the shared
+                // cache's __TEXT). Done BEFORE resuming the guest, on record AND replay.
+                if args[2] & 0x4 != 0 { b.set_region_exec(ipa, args[1]); }
                 w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes }).map_err(|e| format!("append mmap_file: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ipa, false);
             }
@@ -158,6 +162,10 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                                 return Err(Divergence { landmark: idx, pc,
                                     detail: format!("mmap_file ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
                             }
+                            // Same exec promotion as record: the guest executes the mmap'd code on
+                            // replay too (replay runs the guest, only faking syscall results), so the
+                            // exec pages must exist here as well — before the recorded bytes are staged.
+                            if args[2] & 0x4 != 0 { b.set_region_exec(ipa, args[1]); }
                             b.apply_and_return(*ret, *err, writes);
                             idx += 1;
                             continue;
