@@ -127,10 +127,25 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // (0x180000000) as the shared region's start — dyld then computes slide 0 and lays the
             // cache at exactly the VAs page_in_cache maps. Writes the base into the guest out-pointer
             // (arg0) and returns success; regenerated identically on replay via the generic apply.
+            //
+            // Reporting success tells dyld the cache is ALREADY mapped at this base, so dyld reads it
+            // directly and never calls #536 — therefore the demand-pager must be installed HERE (not
+            // deferred to #536, which never fires for a cache dyld already believes is present). Done
+            // on record AND replay so both page identical bytes.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SHARED_REGION_CHECK_NP => {
-                let writes = vec![Region { ipa: args[0], bytes: retrace_box::SHARED_REGION_START.to_le_bytes().to_vec() }];
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append shared_region_check: {e}"))?; count += 1;
-                b.apply_and_return(0, false, &writes);
+                b.install_cache_pager();
+                if b.is_mapped(args[0]) {
+                    let writes = vec![Region { ipa: args[0], bytes: retrace_box::SHARED_REGION_START.to_le_bytes().to_vec() }];
+                    w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append shared_region_check: {e}"))?; count += 1;
+                    b.apply_and_return(0, false, &writes);
+                } else {
+                    // dyld's deliberate error path (e.g. `shared_region_check_np((void*)-1)` to
+                    // return a failure code): the kernel's copyout to the bad pointer yields EFAULT.
+                    // Reproduce it deterministically — carry set, x0 = EFAULT, no writes.
+                    const EFAULT: u64 = 14;
+                    w.append(&Event::Syscall { num, args, ret: EFAULT, err: true, writes: vec![] }).map_err(|e| format!("append shared_region_check(bad ptr): {e}"))?; count += 1;
+                    b.set_x0_err_and_return(EFAULT, true);
+                }
             }
             // shared_region_map_and_slide_2_np (#536): the kernel cache-mapping syscall. We do NOT
             // map here — the cache is lazily demand-paged (page_in_cache) on stage-2 faults. Install
@@ -147,7 +162,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // as a normal syscall event so replay reproduces it via the generic apply path.
             Stop::Syscall { num, args } if num == MAC_SYSCALL_MAGIC => {
                 eprintln!("[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)");
-                let writes = vec![Region { ipa: args[2], bytes: vec![0u8; 8] }];
+                // Clear the out-buffer (arg2) ONLY when it is a real mapped pointer — the on-disk
+                // dyld passes a query buffer there, but the cache-resident dyld's check passes a null
+                // arg2 (result is purely the x0 return). Writing 8 bytes to a null/unmapped arg2
+                // would panic apply_and_return.
+                let writes = if args[2] != 0 && b.is_mapped(args[2]) {
+                    vec![Region { ipa: args[2], bytes: vec![0u8; 8] }]
+                } else { vec![] };
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append mac_syscall: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
@@ -159,7 +180,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                 let exec = prot & PROT_EXEC != 0;
                 if exec { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
-                let req = if anywhere { 0 } else { b.read_u64(addr_ptr) };
+                let req = if b.is_mapped(addr_ptr) { b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
                 let ipa = b.guest_vm_map(req, size, anywhere, exec);
                 let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
@@ -200,7 +221,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // real bring-up failure — decode the ESR class + faulting IPA so it names itself.
             Stop::Other { esr } => {
                 if b.page_in_cache(b.fault_ipa()) { continue; }
-                if trace_log { eprintln!("[regs]\n{}", b.dbg_regs()); }
+                if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
                 return Err(b.describe_stop(esr));
             }
         }
@@ -306,7 +327,7 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                             let (addr_ptr, size, flags, prot) = vm_map_args(num, &args);
                             let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                             let exec = prot & PROT_EXEC != 0;
-                            let req = if anywhere { 0 } else { b.read_u64(addr_ptr) };
+                            let req = if b.is_mapped(addr_ptr) { b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
                             let ipa = b.guest_vm_map(req, size, anywhere, exec);
                             let recorded_ipa = writes.first()
                                 .map(|w| u64::from_le_bytes(w.bytes[..8].try_into().unwrap())).unwrap_or(ipa);
@@ -329,10 +350,18 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                             idx += 1;
                             continue;
                         }
+                        // shared_region_check_np (#294): install the demand-pager on replay too
+                        // (record installed it here), so cache faults regenerate identical pages, then
+                        // apply the recorded base write via the generic path.
+                        if num == retrace_arch::SYS_SHARED_REGION_CHECK_NP {
+                            b.install_cache_pager();
+                            b.apply_and_return(*ret, *err, writes);
+                            idx += 1;
+                            continue;
+                        }
                         // shared_region_map_and_slide_2_np (#536): install the demand-pager on
                         // replay too (record installed it here), so cache faults regenerate identical
-                        // pages. #294 needs no special case — its base write replays via the generic
-                        // apply path below.
+                        // pages.
                         if num == retrace_arch::SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP {
                             b.install_cache_pager();
                             b.set_x0_err_and_return(*ret, *err);

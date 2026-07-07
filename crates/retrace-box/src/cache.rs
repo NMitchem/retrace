@@ -25,7 +25,8 @@
 
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::FileExt;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 /// A decoded v5 shared-cache slide-info pointer slot.
@@ -239,6 +240,17 @@ pub struct CacheRegion<'a> {
 pub struct CacheMeta {
     base: u64,
     size: u64,
+    /// The per-process dynamic data region the kernel creates at the top of the shared region
+    /// (`base + dynamicDataOffset`, header field at 0x1f0) and its max size (header field at
+    /// 0x1f8). NOT a file mapping — dyld reads a `"dyld_data"` magic header here to fetch the
+    /// cache's file id. `(0, 0)` if the header carries no dynamic data region.
+    dynamic_data_addr: u64,
+    dynamic_data_size: u64,
+    /// The cache file's `(st_dev, st_ino)` — the `FileIdTuple` (fsid, fsobjid) the kernel writes
+    /// into the dynamic data region so dyld's `getDyldCacheFileID` succeeds (both must be
+    /// non-zero). Deterministic function of the on-disk cache file.
+    file_dev: u64,
+    file_ino: u64,
     subcaches: Vec<Subcache>,
 }
 
@@ -364,6 +376,16 @@ impl CacheMeta {
         let main_path = main_path.as_ref();
 
         let (base, size, main_mappings, main_file) = read_subcache(main_path)?;
+        // dyld_cache_header.dynamicDataOffset (0x1f0) / dynamicDataMaxSize (0x1f8): the kernel-made
+        // per-process region at the top of the shared region (see `dynamic_data_region`).
+        let mut dd = [0u8; 16];
+        main_file.read_exact_at(&mut dd, 0x1f0)?;
+        let dyn_off = u64le(&dd, 0);
+        let dyn_size = u64le(&dd, 8);
+        let dynamic_data_addr = if dyn_off != 0 { base.wrapping_add(dyn_off) } else { 0 };
+        // The cache file's (dev, ino): the kernel's FileIdTuple in the dynamic data region.
+        let cmeta = std::fs::metadata(main_path)?;
+        let (file_dev, file_ino) = (cmeta.dev(), cmeta.ino());
         let mut subcaches = vec![Subcache { path: main_path.to_path_buf(), file: Some(main_file), mappings: main_mappings }];
 
         const SUFFIXES: [&str; 4] = ["", ".dylddata", ".dyldreadonly", ".dyldlinkedit"];
@@ -381,12 +403,60 @@ impl CacheMeta {
 
         assert_covers_window(base, size, &subcaches);
 
-        Ok(CacheMeta { base, size, subcaches })
+        Ok(CacheMeta { base, size, dynamic_data_addr, dynamic_data_size: dyn_size, file_dev, file_ino, subcaches })
+    }
+
+    /// The `dyld_cache_dynamic_data_header` (plus the cache-path string) the kernel writes at the
+    /// start of the dynamic data region. dyld reads several fields here during launch:
+    /// - `+0x00` magic `"dyld_data    v3"` (16 bytes) — `dynamicRegion()` checks it, else returns
+    ///   null → fatal "mapped cache does not contain dynamic config data".
+    /// - `+0x10` fsid, `+0x18` fsobjid — the `FileIdTuple` (`getDyldCacheFileID` requires both
+    ///   non-zero); we use the cache file's `(st_dev, st_ino)`.
+    /// - `+0x24` cachePathOffset (u32) — byte offset from the region base to a NUL-terminated cache
+    ///   path string (`DynamicRegion::cachePath()`; used to build the process-info atlas —
+    ///   `gatherAtlasProcessInfo` `strlen`s it, so it must be a real non-null string).
+    ///
+    /// We lay the path at `+0x30`. Deterministic function of the on-disk cache file.
+    pub fn dynamic_data_header(&self) -> Vec<u8> {
+        const PATH_OFF: usize = 0x30;
+        let path = self.subcaches[0].path.as_os_str().as_bytes();
+        let mut h = vec![0u8; PATH_OFF + path.len() + 1]; // +1: NUL terminator (stays 0)
+        h[0..16].copy_from_slice(b"dyld_data    v3\0");
+        h[16..24].copy_from_slice(&self.file_dev.to_le_bytes());
+        h[24..32].copy_from_slice(&self.file_ino.to_le_bytes());
+        h[0x24..0x28].copy_from_slice(&(PATH_OFF as u32).to_le_bytes());
+        h[PATH_OFF..PATH_OFF + path.len()].copy_from_slice(path);
+        h
     }
 
     /// The cache's VA window: `(sharedRegionStart, sharedRegionSize)` from the main header.
     pub fn window(&self) -> (u64, u64) {
         (self.base, self.size)
+    }
+
+    /// Every executable cache mapping as `(address, size)` at the unslid base (slide 0). The loader
+    /// pre-sets these ranges' stage-1 to RO+exec (`ATTR_CODE`) BEFORE the guest translates them, so
+    /// a cache TEXT page faults in as a pure stage-2 translation fault with no runtime stage-1
+    /// change — avoiding the stale-block-TLB gap that a runtime data→exec promotion would leave
+    /// (a page first translated as a default 32 MiB RW/UXN block would keep executing under the
+    /// stale non-exec entry with no way for the VMM to issue a guest TLBI).
+    pub fn exec_mappings(&self) -> Vec<(u64, u64)> {
+        self.subcaches
+            .iter()
+            .flat_map(|sc| sc.mappings.iter())
+            .filter(|m| m.is_exec && m.size > 0)
+            .map(|m| (m.address, m.size))
+            .collect()
+    }
+
+    /// The kernel-created per-process **dynamic data region** `(addr, size)` at the top of the
+    /// shared region (`base + dynamicDataOffset`), or `None` if the header declares none. This is
+    /// NOT one of the cache's file mappings — dyld reads a `"dyld_data"` magic header here to fetch
+    /// the cache file id, so the pager must stage it (we zero it → magic mismatch → dyld's
+    /// `dynamicRegion()` returns null, i.e. "no dynamic data", which it tolerates).
+    pub fn dynamic_data_region(&self) -> Option<(u64, u64)> {
+        (self.dynamic_data_addr != 0 && self.dynamic_data_size != 0)
+            .then_some((self.dynamic_data_addr, self.dynamic_data_size))
     }
 
     /// Route a cache IPA to its containing subcache/mapping and page index (relative to that
