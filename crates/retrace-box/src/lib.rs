@@ -15,6 +15,28 @@ pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 // the guest's 0x1_0000_0000 segments, so mmap'd regions never collide with loaded segments.
 pub const MMAP_BASE: u64 = 0x2_0000_0000;
 const GRANULE: usize = 0x4000; // 16 KiB default granule
+// The kernel maps a read-only "commpage" of CPU capabilities / cached timing into every process
+// at this fixed high VA; dyld reads it during early init. It is within the 36-bit identity space
+// (block 2047, a default RW/non-exec data block) but not in the guest's stage-2, so load_dynamic
+// stages a FROZEN anon copy of the host commpage here (one granule). Freezing a copy — not the
+// live kernel page — makes record and replay read identical bytes; the copy is captured in the
+// initial snapshot, so restore re-maps it and replay diverges nowhere.
+pub const COMMPAGE_IPA: u64 = 0x0000_000F_FFFF_C000;
+// A second commpage-region page the kernel maps just below the data commpage (dyld reads it in
+// early init). Same treatment: freeze a host copy. Both pages are one granule each.
+pub const COMMPAGE2_IPA: u64 = 0x0000_000F_FFFF_4000;
+// Thread-pointer TSD block. The kernel points TPIDRRO_EL0 at the main thread's thread-specific
+// data; dyld/libSystem read it (errno slot, pthread self) via `mrs x, TPIDRRO_EL0; ldr .., [x,#N]`.
+// We stage one zeroed granule at this fixed IPA (block 0, RW data) and set TPIDRRO_EL0/TPIDR_EL0 to
+// it in load_dynamic AND restore, so record and replay share the same thread pointer. Fixed IPA so
+// restore can re-establish it without threading the value through the snapshot.
+pub const TSD_IPA: u64 = 0x0003_0000;
+// Deterministic synthetic timebase: an emulated timebase MRS (Apple fast counter / CNTVCT)
+// returns SYNTH_TSC_START + k*SYNTH_TSC_STRIDE for the k-th read. Identical on record & replay
+// (both re-execute the same reads from the same entry), so timing dyld folds into memory can't
+// diverge. Monotonic and nonzero so a delta is always positive.
+const SYNTH_TSC_START:  u64 = 0x0000_0001_0000_0000;
+const SYNTH_TSC_STRIDE: u64 = 0x2400; // ~ one 24 MHz-ish tick step per read (value is arbitrary)
 
 pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (TTBR0 target); one 16 KiB page = 2048 entries
 // L3 tables live at 8 MiB..32 MiB inside block 0 (above the stack IPA at 0x1C000, below the
@@ -27,6 +49,9 @@ const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // base 0x30d00800 + M(1) + C(4) + I(0x1000), plus PAC enable bits:
 // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
 const SCTLR_MMU_ON: u64 = (0x30d0_0800 | 1 | 4 | 0x1000) | 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
+// CPACR_EL1.FPEN = 0b11 (bits [21:20]): EL0 and EL1 may use FP/SIMD without trapping. dyld's
+// early code uses NEON (memcpy, hashing); without this an FP access traps EC=0x07.
+const CPACR_FP_ON: u64 = 0x3 << 20;
 
 // Fixed PAC keys (arbitrary constants; identical on record & replay => deterministic signing).
 const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
@@ -72,6 +97,12 @@ pub struct Box_ {
     // `next_l3` is the next free L3 IPA (bumped as blocks are promoted).
     l2_host: *mut u8,
     next_l3: u64,
+    // Fault VA (FAR) of the most recent non-syscall VM exit, for legible bring-up diagnostics
+    // (describe_stop). Plain u64, declared last so the vcpu-before-vm drop order is unaffected.
+    last_far: u64,
+    // Deterministic synthetic timebase counter (see SYNTH_TSC_*), advanced per emulated timebase
+    // MRS. Plain u64; declared last, so the vcpu-before-vm drop order is unaffected.
+    synthetic_tsc: u64,
 }
 
 pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
@@ -219,6 +250,37 @@ impl Box_ {
         for (r, v) in PAC_KEYS { vcpu.set_sys(r, v).unwrap(); }
     }
 
+    /// If `esr1` (an EC=0x18 trapped MSR/MRS) is a READ of a timebase register — Apple's fast
+    /// counter `S3_4_C15_C10_6` or the architectural `CNTVCT_EL0`/`CNTPCT_EL0` — service it with a
+    /// deterministic synthetic value and skip the instruction (EL0 resumes at ELR+4). Returns true
+    /// if emulated. These registers trap under HVF (Apple IMPDEF / counter virtualization) and are
+    /// nondeterministic time sources; a monotonic synthetic value identical on record and replay
+    /// keeps any timing dyld folds into memory divergence-free. Non-timebase sysreg traps return
+    /// false (surfaced as Stop::Other for diagnosis).
+    fn try_emulate_timebase(&mut self, esr1: u64) -> bool {
+        let iss = esr1 & 0x1ff_ffff;
+        let dir = iss & 1;                       // 1 = read (MRS)
+        let crm = (iss >> 1) & 0xf;
+        let rt  = ((iss >> 5) & 0x1f) as u32;
+        let crn = (iss >> 10) & 0xf;
+        let op1 = (iss >> 14) & 0x7;
+        let op2 = (iss >> 17) & 0x7;
+        let op0 = (iss >> 20) & 0x3;
+        let apple_tb = op0 == 3 && op1 == 4 && crn == 15 && crm == 10 && op2 == 6; // S3_4_C15_C10_6
+        let cntvct   = op0 == 3 && op1 == 3 && crn == 14 && crm == 0 && (op2 == 1 || op2 == 2);
+        if dir != 1 || !(apple_tb || cntvct) { return false; }
+        self.synthetic_tsc = self.synthetic_tsc.wrapping_add(SYNTH_TSC_STRIDE);
+        let v = self.synthetic_tsc;
+        if rt != 31 { self.vcpu.set_reg(reg::x(rt), v).unwrap(); } // x31 = XZR: value discarded
+        // Skip the trapping instruction: for a synchronous trap ELR_EL1 points AT the mrs, so
+        // resume EL0 at ELR+4, restoring the saved EL0 PSTATE.
+        let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+        self.vcpu.set_reg(reg::PC, elr + 4).unwrap();
+        self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
+        true
+    }
+
     pub fn load(loaded: &Loaded) -> Box_ {
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
@@ -259,7 +321,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3 }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -290,9 +352,23 @@ impl Box_ {
         let mut vectors = vec![0u8; 0x800];
         for slot in 0..16 { vectors[slot*0x80..slot*0x80+4].copy_from_slice(&0xd4000002u32.to_le_bytes()); }
         map(&vm, &mut backings, TRAMPOLINE_IPA, &vectors, 0x800);
+        // Frozen commpage copies (see COMMPAGE_IPA / COMMPAGE2_IPA): SAFETY — each is a live RO
+        // kernel mapping at this exact VA in every process; read one granule of each.
+        for &cp in &[COMMPAGE_IPA, COMMPAGE2_IPA] {
+            let bytes = unsafe { std::slice::from_raw_parts(cp as *const u8, GRANULE) }.to_vec();
+            map(&vm, &mut backings, cp, &bytes, GRANULE);
+        }
+        // Thread-pointer TSD block (see TSD_IPA): one zeroed granule; TPIDRRO_EL0 points here.
+        map(&vm, &mut backings, TSD_IPA, &[], GRANULE);
 
+        // The main executable's mach-header address (dyld4's KernelArgs.mainExecutable): the exe
+        // segment whose bytes begin with MH_MAGIC_64. dyld dereferences this to parse the main exe.
+        let main_hdr = exe.segments.iter()
+            .find(|s| s.data.len() >= 4 && s.data[0..4] == [0xcf, 0xfa, 0xed, 0xfe])
+            .map(|s| s.vaddr)
+            .expect("load_dynamic: no exe segment carries the Mach-O header (MH_MAGIC_64)");
         // Build the XNU start stack in the (already-mapped, zeroed) stack backing; get guest SP.
-        let sp = Self::build_start_stack(&backings[stack_idx], argv0);
+        let sp = Self::build_start_stack(&backings[stack_idx], argv0, main_hdr);
 
         // W^X exec ranges: trampoline + exe exec segs (unslid) + dyld exec segs (slid).
         let mut exec = vec![(TRAMPOLINE_IPA, 0x800u64, ATTR_TRAMP)];
@@ -307,17 +383,28 @@ impl Box_ {
         vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, ttbr0).unwrap();
+        vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap(); // FPEN=0b11: EL0/EL1 FP/SIMD (dyld uses NEON)
+        vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();   // thread pointer (kernel-provided TSD)
+        vcpu.set_sys(sysreg::TPIDR_EL0,   TSD_IPA).unwrap();
         vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3 }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START }
     }
 
-    // Build the XNU start stack in the (already-mapped, zeroed) stack backing; return the guest SP.
-    // Layout at SP (low->high): argc, argv[0..argc], NULL, envp..., NULL, apple..., NULL, then C-strings.
-    // First cut — the exact apple[]/env set dyld requires is discovered empirically in Task 9.
-    fn build_start_stack(stack: &Backing, argv0: &str) -> u64 {
+    // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
+    // `__dyld_start` does `x0 = sp; b start`, and dyld reads the struct at SP as:
+    //   [0]  mainExecutable  (pointer to the main exe's mach_header)
+    //   [8]  argc
+    //   [16] argv[0..argc], NULL
+    //        envp[..], NULL
+    //        apple[..], NULL
+    // (mainExecutable is the dyld4 addition over the classic XNU `argc,argv,envp,apple` frame.)
+    // The exact apple[]/env set is refined empirically; this carries argv[0], one env
+    // (DYLD_SHARED_REGION=private, so dyld maps a private cache through our file-mmap path), and the
+    // `executable_path` apple entry.
+    fn build_start_stack(stack: &Backing, argv0: &str, main_hdr: u64) -> u64 {
         let base_ipa = stack.ipa;
         let top = stack.ipa + stack.len as u64;
         let strings: [Vec<u8>; 3] = [
@@ -332,13 +419,37 @@ impl Box_ {
             addr[i] = p;
             unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), stack.host.add((p - base_ipa) as usize), s.len()); }
         }
-        let words = [1u64, addr[0], 0, addr[1], 0, addr[2], 0];     // argc, argv, NULL, envp, NULL, apple, NULL
+        // KernelArgs: mainExecutable, argc, argv[0], NULL, envp[0], NULL, apple[0], NULL
+        let words = [main_hdr, 1u64, addr[0], 0, addr[1], 0, addr[2], 0];
         let sp = (p - words.len() as u64 * 8) & !15u64;             // 16-byte aligned
         for (i, w) in words.iter().enumerate() {
             let off = (sp - base_ipa) as usize + i * 8;
             unsafe { std::ptr::copy_nonoverlapping(w.to_le_bytes().as_ptr(), stack.host.add(off), 8); }
         }
         sp
+    }
+
+    /// mach_vm_allocate / _kernelrpc_mach_vm_map_trap (anonymous): allocate `size` bytes of GUEST
+    /// memory (these must land in guest IPA space, not be forwarded to the host task). ANYWHERE =>
+    /// a fresh deterministic bump IPA (exec regions block-aligned, matching the file-mmap TLB-gap
+    /// fix); otherwise map at the requested `addr` (MAP_FIXED-like). `exec` promotes the region to
+    /// RO+exec. Returns the chosen IPA. Deterministic: identical call sequence => identical IPAs on
+    /// replay.
+    pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
+        let (host, rlen) = alloc_pages(size as usize);
+        let ipa = if anywhere {
+            if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
+            let a = self.mmap_next; self.mmap_next += rlen as u64; a
+        } else { addr };
+        self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_vm_map)");
+        self.backings.push(Backing { host, ipa, len: rlen });
+        if exec { self.set_region_exec(ipa, size); }
+        ipa
+    }
+
+    /// Read an 8-byte little-endian word from guest memory (for reading in/out pointer args).
+    pub fn read_u64(&self, ipa: u64) -> u64 {
+        u64::from_le_bytes(self.read_guest(ipa, 8).try_into().unwrap())
     }
 
     /// Special case for mmap: allocate host pages, map 1:1 at a deterministic fresh IPA,
@@ -353,9 +464,21 @@ impl Box_ {
     }
 
     const MAP_FIXED: u64 = 0x10;
+    const PROT_EXEC: u64 = 0x4;
     /// Address + stage-2-map an anon backing for an mmap. FIXED → `addr`; else bump `mmap_next`.
     /// Identical on record and replay. Returns the chosen guest IPA.
-    fn map_mmap_region(&mut self, host: *mut u8, rlen: usize, addr: u64, flags: u64) -> u64 {
+    ///
+    /// Step 3c (TLB-gap fix): a non-FIXED `PROT_EXEC` mmap is placed in a FRESH, block-exclusive
+    /// 32 MiB block — round `mmap_next` up to the next `BLK` boundary before choosing the IPA.
+    /// `set_region_exec` promotes an entire 32 MiB block from a data BLOCK to an L3 TABLE without
+    /// TLB invalidation, which is only sound if that block was never translated before. Data mmaps
+    /// pack normally and never promote; keeping exec regions block-exclusive guarantees promotion
+    /// always hits a pristine block. (A MAP_FIXED exec mmap onto a touched block would need a TLBI;
+    /// dyld in private mode is not expected to do that — if a run shows it, add a guest-side TLBI.)
+    fn map_mmap_region(&mut self, host: *mut u8, rlen: usize, addr: u64, prot: u64, flags: u64) -> u64 {
+        if flags & Self::MAP_FIXED == 0 && prot & Self::PROT_EXEC != 0 {
+            self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1);
+        }
         let ipa = if flags & Self::MAP_FIXED != 0 { addr } else { self.mmap_next };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
         self.backings.push(Backing { host, ipa, len: rlen });
@@ -364,20 +487,21 @@ impl Box_ {
     }
     /// RECORD: anon-alloc, `pread` the file extent into it (SPTM: never map the file page itself),
     /// map, return (ipa, staged bytes to record so replay needs no file).
-    pub fn guest_mmap_file(&mut self, addr: u64, len: u64, _prot: u64, flags: u64, fd: i32, off: u64)
+    pub fn guest_mmap_file(&mut self, addr: u64, len: u64, prot: u64, flags: u64, fd: i32, off: u64)
         -> (u64, Vec<Region>) {
         let (host, rlen) = alloc_pages(len as usize);
         let n = unsafe { libc::pread(fd, host as *mut _, rlen, off as libc::off_t) };
         assert!(n >= 0, "guest_mmap_file: pread failed");
-        let ipa = self.map_mmap_region(host, rlen, addr, flags);
+        let ipa = self.map_mmap_region(host, rlen, addr, prot, flags);
         let bytes = unsafe { std::slice::from_raw_parts(host, rlen) }.to_vec();
         (ipa, vec![Region { ipa, bytes }])
     }
     /// REPLAY: anon-alloc (zeroed), address identically (no file access); caller applies the
-    /// recorded writes to fill it. Returns the chosen IPA (must equal the recorded `ret`).
-    pub fn guest_mmap_replay(&mut self, addr: u64, len: u64, flags: u64) -> u64 {
+    /// recorded writes to fill it. Returns the chosen IPA (must equal the recorded `ret`). `prot`
+    /// must match record so the exec block-alignment in `map_mmap_region` chooses the same IPA.
+    pub fn guest_mmap_replay(&mut self, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
         let (host, rlen) = alloc_pages(len as usize);
-        self.map_mmap_region(host, rlen, addr, flags)
+        self.map_mmap_region(host, rlen, addr, prot, flags)
     }
 
     /// Honor munmap (debt #2): drop the backing covering `ipa` and `hv_vm_unmap` its stage-2
@@ -411,15 +535,28 @@ impl Box_ {
             if e.reason != EXIT_EXCEPTION { continue; }         // vtimer/canceled: control-plane only
             match ec_of(e.syndrome) {
                 Ec::Hvc => {
-                    // The trampoline fired because EL0 executed SVC; ESR_EL1 confirms the cause.
+                    // The trampoline (VBAR_EL1) fires `hvc #0` for ANY exception EL0 takes to EL1;
+                    // ESR_EL1 says which. SVC => a syscall/mach-trap. Anything else (a trapped
+                    // sysreg access, an EL0 fault) is surfaced as Stop::Other carrying the EL1 ESR
+                    // so describe_stop can decode it, instead of panicking.
                     let esr1 = self.vcpu.get_sys(sysreg::ESR_EL1).unwrap();
-                    assert_eq!(ec_of(esr1), Ec::Svc, "trampoline reached by non-SVC cause");
+                    match ec_of(esr1) {
+                        Ec::Svc => {}
+                        // A trapped timebase MRS: emulate it deterministically and resume EL0
+                        // without ever surfacing to the record/replay loop (so both stay in
+                        // lockstep automatically).
+                        Ec::SysReg if self.try_emulate_timebase(esr1) => continue,
+                        _ => {
+                            self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
+                            return Stop::Other { esr: esr1 };
+                        }
+                    }
                     let num = self.vcpu.get_reg(reg::x(16)).unwrap();
                     let mut args = [0u64;7];
                     for (i, a) in args.iter_mut().enumerate() { *a = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
                     return Stop::Syscall { num, args };
                 }
-                _ => return Stop::Other { esr: e.syndrome },
+                _ => { self.last_far = e.virtual_address; return Stop::Other { esr: e.syndrome }; }
             }
         }
     }
@@ -442,6 +579,9 @@ impl Box_ {
         vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, PT_L2_IPA).unwrap();
+        vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap(); // match load: EL0/EL1 FP/SIMD enabled
+        vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();   // match load: thread pointer (harmless for M1)
+        vcpu.set_sys(sysreg::TPIDR_EL0,   TSD_IPA).unwrap();
         Self::set_pac_keys(&vcpu);
         vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
@@ -457,10 +597,18 @@ impl Box_ {
         // allocation window and mints IPAs matching the record run.
         let l2_host = backings.iter().find(|b| b.ipa == PT_L2_IPA).map(|b| b.host)
             .unwrap_or(std::ptr::null_mut());
+        // Minor (a): the `next_l3` recovery below assumes every backing in the L3 window
+        // [PT_L3_BASE, PT_L3_CEIL) is a single-GRANULE L3 table (that is the only thing load
+        // ever allocates there). Pin that invariant so a stray non-table region in the window
+        // can never silently corrupt the recovered allocation cursor.
+        for b in backings.iter().filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL) {
+            assert_eq!(b.len, GRANULE,
+                "restore: backing at L3-window ipa {:#x} has len {} != GRANULE (only L3 tables belong here)", b.ipa, b.len);
+        }
         let next_l3 = backings.iter()
             .filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL)
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3 }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -519,13 +667,17 @@ impl Box_ {
             }
         }
         // Debt #1: read/pread fill the x1 buffer with up to x2 bytes; cap x2 at that buffer's
-        // backing so the host kernel can never write past it. Normal guests already fit (inert).
+        // backing so the host kernel can never write past it. x2 is a COUNT, never a pointer, so
+        // use the ORIGINAL arg (the generic loop above may have mis-"translated" it to a host
+        // pointer if the count value happened to equal a mapped low IPA — e.g. dyld's pread count
+        // 0x4000 collides with the trampoline IPA). This both fixes that mis-forward and keeps the
+        // host kernel from writing past the destination backing.
         if num == retrace_arch::SYS_READ || num == retrace_arch::SYS_PREAD {
-            if let Some((_, avail)) = self.host_span(args[1]) {
-                debug_assert!((hargs[2] as usize) <= avail,
-                    "forward_and_diff: syscall {num} count {} exceeds x1 buffer backing {avail}", hargs[2]);
-                hargs[2] = Self::clamp_count(avail, hargs[2] as usize) as i64;
-            }
+            let count = args[2] as usize;
+            hargs[2] = match self.host_span(args[1]) {
+                Some((_, avail)) => Self::clamp_count(avail, count) as i64,
+                None => count as i64,
+            };
         }
         // Forward via a raw `svc #0x80` shim (not `libc::syscall`, which narrows the return
         // toward 32 bits and hides the BSD carry flag). `hargs` is [i64;7] (x0..x6); build the
@@ -609,4 +761,41 @@ impl Box_ {
     pub fn position(&self) -> u64 { self.vcpu.get_sys(sysreg::ELR_EL1).unwrap() }
     /// The current PC (for non-syscall exits).
     pub fn pc(&self) -> u64 { self.vcpu.get_reg(reg::PC).unwrap() }
+
+    /// Bring-up diagnostic: dump x0..x30, SP_EL0, PC, ELR/SPSR/FAR as a multi-line string.
+    pub fn dbg_regs(&self) -> String {
+        let mut s = String::new();
+        for i in 0..31 {
+            s += &format!("x{i:<2}={:#018x}  ", self.vcpu.get_reg(reg::x(i as u32)).unwrap());
+            if i % 4 == 3 { s.push('\n'); }
+        }
+        s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x}",
+            self.vcpu.get_sys(sysreg::SP_EL0).unwrap(), self.pc(),
+            self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(), self.last_far);
+        s
+    }
+
+    /// Decode a non-syscall VM exit into a legible one-line diagnostic: the ESR exception class,
+    /// the ISS, the faulting VA/IPA (VA==IPA under our identity map) and whether that IPA is
+    /// staged in any backing, and the PC. This turns a dyld bring-up failure ("Stop::Other
+    /// esr=0x…") into a classified, addressable clue (data/instruction abort at an unmapped IPA,
+    /// a trapped MSR/MRS, etc.).
+    pub fn describe_stop(&self, esr: u64) -> String {
+        let ec = (esr >> 26) & 0x3f;
+        let iss = esr & 0x1ff_ffff;
+        let class = match ec {
+            0x20 | 0x21 => "instruction abort",
+            0x24 | 0x25 => "data abort",
+            0x18        => "MSR/MRS/sysreg trap",
+            0x00        => "unknown/uncategorized",
+            _           => "exception",
+        };
+        let far = self.last_far;
+        let mapped = if self.host_span(far).is_some() { "mapped" } else { "UNMAPPED" };
+        // For a trampoline-relayed EL0 exception the live PC is the trampoline; the faulting EL0
+        // PC is in ELR_EL1. Report both. For a data/instruction abort, ISS[5:0] is the DFSC/IFSC.
+        let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        format!("non-syscall exit: {class} (EC={ec:#04x} ISS={iss:#x} FSC={:#x}) far/ipa={far:#x} ({mapped}) pc={:#x} elr={elr:#x}",
+                iss & 0x3f, self.pc())
+    }
 }

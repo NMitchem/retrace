@@ -42,4 +42,11 @@ pub fn replay(trace: &std::path::Path) -> RunOut {
     run(&["replay", trace.to_str().unwrap()])
 }
 
-// record_dynamic is added in T9 once the CLI's --dynamic path exists.
+// Record a dynamically-linked guest through real dyld via the CLI's `record-dyn` path.
+pub fn record_dynamic(guest: &str) -> (RunOut, std::path::PathBuf) {
+    static NEXT: AtomicU64 = AtomicU64::new(1_000_000);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let trace = std::env::temp_dir().join(format!("retrace-dyn-{}-{n}.bin", std::process::id()));
+    let out = run(&["record-dyn", guest, "-o", trace.to_str().unwrap()]);
+    (out, trace)
+}
