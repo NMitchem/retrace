@@ -14,6 +14,8 @@ pub const SYS_MPROTECT: u64 = 74;
 pub const SYS_FSTAT: u64 = 189;
 pub const SYS_MMAP: u64 = 197;
 pub const SYS_LSEEK: u64 = 199;
+pub const SYS_SHARED_REGION_CHECK_NP: u64 = 294;
+pub const SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP: u64 = 536;
 
 pub const LC_LOAD_DYLINKER: u32 = 0xe;
 pub const FAT_MAGIC: u32 = 0xcafe_babe;      // big-endian on disk; read with from_be
@@ -52,5 +54,6 @@ mod tests {
     fn syscall_numbers() {
         assert_eq!((SYS_READ, SYS_WRITE, SYS_OPEN, SYS_CLOSE, SYS_EXIT), (3,4,5,6,1));
         assert_eq!((SYS_FSTAT, SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT), (189,199,197,73,74));
+        assert_eq!((SYS_SHARED_REGION_CHECK_NP, SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP), (294, 536));
     }
 }
