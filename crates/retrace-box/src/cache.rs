@@ -184,6 +184,11 @@ fn u64le(b: &[u8], o: usize) -> u64 { u64::from_le_bytes(b[o..o + 8].try_into().
 /// mappings that carry no slide-info (TEXT) since those still route/page at this stride.
 const CACHE_PAGE_SIZE: u64 = 0x4000;
 
+/// The system dyld shared cache for this architecture (arm64e); `Box_::install_cache_pager`
+/// loads this file (plus its subcaches) into a [`CacheMeta`] routing table.
+pub const DEFAULT_CACHE_PATH: &str =
+    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e";
+
 /// A parsed v5 slide-info blob (`dyld_cache_slide_info5`) for one DATA mapping.
 #[derive(Debug, Clone)]
 pub struct SlideInfo5 {
@@ -204,16 +209,20 @@ struct Mapping {
 }
 
 /// A subcache file (the main cache file, or one of its numbered `.NN[.suffix]` companions) and
-/// its parsed mappings.
+/// its parsed mappings. `file` is kept open (the pager `pread`s pristine cache pages from it on
+/// demand — SPTM forbids ever `hv_vm_map`ing a file page); `None` only for synthetic
+/// (test-constructed) subcaches that carry no backing file.
 #[derive(Debug)]
 struct Subcache {
     path: PathBuf,
+    file: Option<File>,
     mappings: Vec<Mapping>,
 }
 
 /// Where a faulting cache IPA lives: which subcache file backs it, the file offset of the page
-/// containing it, its v5 slide-info (DATA only), whether it's executable, and its page index
-/// within that mapping.
+/// containing it, its v5 slide-info (DATA only), whether it's executable, its page index within
+/// that mapping, and that mapping's base VA (the `mapping_base` a v5 auth slot's `addrDiv`
+/// modifier blends in — see [`walk_page`]).
 #[derive(Debug)]
 pub struct CacheRegion<'a> {
     pub subcache_path: &'a Path,
@@ -221,6 +230,7 @@ pub struct CacheRegion<'a> {
     pub slide_info: Option<&'a SlideInfo5>,
     pub is_exec: bool,
     pub page_index: usize,
+    pub mapping_base: u64,
 }
 
 /// Parsed metadata for the whole dyld shared cache (main file + subcache files): enough to
@@ -235,7 +245,7 @@ pub struct CacheMeta {
 /// Read one subcache file's `dyld_cache_header` + `mapping_and_slide_info[]` (and each
 /// mapping's slide-info blob, if any). Panics loudly if a slide-info blob isn't version 5 —
 /// this loader only understands v5 and must never silently mis-load an unsupported format.
-fn read_subcache(path: &Path) -> io::Result<(u64, u64, Vec<Mapping>)> {
+fn read_subcache(path: &Path) -> io::Result<(u64, u64, Vec<Mapping>, File)> {
     let file = File::open(path)?;
 
     let mut hdr = [0u8; 0x140];
@@ -268,7 +278,7 @@ fn read_subcache(path: &Path) -> io::Result<(u64, u64, Vec<Mapping>)> {
         mappings.push(Mapping { address, size, file_offset, is_exec, slide_info });
     }
 
-    Ok((shared_region_start, shared_region_size, mappings))
+    Ok((shared_region_start, shared_region_size, mappings, file))
 }
 
 /// Read one `dyld_cache_slide_info5` blob at file offset `offset`. Asserts `version == 5`
@@ -353,8 +363,8 @@ impl CacheMeta {
     pub fn load(main_path: impl AsRef<Path>) -> io::Result<CacheMeta> {
         let main_path = main_path.as_ref();
 
-        let (base, size, main_mappings) = read_subcache(main_path)?;
-        let mut subcaches = vec![Subcache { path: main_path.to_path_buf(), mappings: main_mappings }];
+        let (base, size, main_mappings, main_file) = read_subcache(main_path)?;
+        let mut subcaches = vec![Subcache { path: main_path.to_path_buf(), file: Some(main_file), mappings: main_mappings }];
 
         const SUFFIXES: [&str; 4] = ["", ".dylddata", ".dyldreadonly", ".dyldlinkedit"];
         let mut n = 1u32;
@@ -364,8 +374,8 @@ impl CacheMeta {
                 .map(|suf| PathBuf::from(format!("{}.{n:02}{suf}", main_path.display())))
                 .find(|p| p.is_file());
             let Some(path) = found else { break };
-            let (_, _, mappings) = read_subcache(&path)?;
-            subcaches.push(Subcache { path, mappings });
+            let (_, _, mappings, file) = read_subcache(&path)?;
+            subcaches.push(Subcache { path, file: Some(file), mappings });
             n += 1;
         }
 
@@ -379,8 +389,10 @@ impl CacheMeta {
         (self.base, self.size)
     }
 
-    /// Route a cache IPA to its containing subcache/mapping, if any.
-    pub fn region_of(&self, ipa: u64) -> Option<CacheRegion<'_>> {
+    /// Route a cache IPA to its containing subcache/mapping and page index (relative to that
+    /// mapping's own page array), plus the page granularity for that mapping. Shared by
+    /// [`region_of`](Self::region_of) and [`stage_page`](Self::stage_page).
+    fn locate(&self, ipa: u64) -> Option<(&Subcache, &Mapping, usize, u64)> {
         for sc in &self.subcaches {
             for m in &sc.mappings {
                 if ipa < m.address || ipa >= m.address + m.size {
@@ -388,17 +400,43 @@ impl CacheMeta {
                 }
                 let page_size = m.slide_info.as_ref().map_or(CACHE_PAGE_SIZE, |si| si.page_size as u64);
                 let page_index = ((ipa - m.address) / page_size) as usize;
-                let file_offset_of_page = m.file_offset + page_index as u64 * page_size;
-                return Some(CacheRegion {
-                    subcache_path: &sc.path,
-                    file_offset_of_page,
-                    slide_info: m.slide_info.as_ref(),
-                    is_exec: m.is_exec,
-                    page_index,
-                });
+                return Some((sc, m, page_index, page_size));
             }
         }
         None
+    }
+
+    /// Route a cache IPA to its containing subcache/mapping, if any (metadata only, no I/O).
+    pub fn region_of(&self, ipa: u64) -> Option<CacheRegion<'_>> {
+        let (sc, m, page_index, page_size) = self.locate(ipa)?;
+        Some(CacheRegion {
+            subcache_path: &sc.path,
+            file_offset_of_page: m.file_offset + page_index as u64 * page_size,
+            slide_info: m.slide_info.as_ref(),
+            is_exec: m.is_exec,
+            page_index,
+            mapping_base: m.address,
+        })
+    }
+
+    /// Route `ipa` to its cache page and `pread` that page's pristine bytes from the backing
+    /// subcache file into `page`, returning the routing metadata. The bytes are the on-disk,
+    /// slide-info-encoded page (DATA still needs [`walk_page`] + re-signing before use; TEXT is
+    /// final). SPTM-safe: the caller stages these bytes into an anonymous guest page — a file page
+    /// is never mapped into the guest. Returns `None` if `ipa` is outside every cache mapping.
+    pub fn stage_page(&self, ipa: u64, page: &mut [u8; 16384]) -> Option<CacheRegion<'_>> {
+        let (sc, m, page_index, page_size) = self.locate(ipa)?;
+        let file_offset_of_page = m.file_offset + page_index as u64 * page_size;
+        let file = sc.file.as_ref().expect("stage_page: subcache has no open file (synthetic CacheMeta?)");
+        file.read_exact_at(page, file_offset_of_page).expect("stage_page: pread cache page");
+        Some(CacheRegion {
+            subcache_path: &sc.path,
+            file_offset_of_page,
+            slide_info: m.slide_info.as_ref(),
+            is_exec: m.is_exec,
+            page_index,
+            mapping_base: m.address,
+        })
     }
 }
 
@@ -409,6 +447,7 @@ mod tests {
     fn fake_subcache(name: &str, ranges: &[(u64, u64)]) -> Subcache {
         Subcache {
             path: PathBuf::from(name),
+            file: None,
             mappings: ranges
                 .iter()
                 .map(|&(address, size)| Mapping { address, size, file_offset: 0, is_exec: false, slide_info: None })

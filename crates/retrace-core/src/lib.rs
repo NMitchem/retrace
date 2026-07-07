@@ -123,6 +123,24 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mprotect: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
+            // shared_region_check_np (#294): pin the cache slide to 0 by reporting the UNSLID base
+            // (0x180000000) as the shared region's start — dyld then computes slide 0 and lays the
+            // cache at exactly the VAs page_in_cache maps. Writes the base into the guest out-pointer
+            // (arg0) and returns success; regenerated identically on replay via the generic apply.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SHARED_REGION_CHECK_NP => {
+                let writes = vec![Region { ipa: args[0], bytes: retrace_box::SHARED_REGION_START.to_le_bytes().to_vec() }];
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append shared_region_check: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
+            }
+            // shared_region_map_and_slide_2_np (#536): the kernel cache-mapping syscall. We do NOT
+            // map here — the cache is lazily demand-paged (page_in_cache) on stage-2 faults. Install
+            // the pager and return success. Installed on BOTH record and replay so both page
+            // identical bytes; no cache bytes are ever written to the trace.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP => {
+                b.install_cache_pager();
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append shared_region_map: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
+            }
             // dyld's inline __mac_syscall sandbox check (x16 = MAC_SYSCALL_MAGIC): cannot be
             // forwarded (host faults) — synthesize the unsandboxed result deterministically:
             // success (x0=0) and the out buffer (x2) cleared to 0 (= "not in a sandbox"). Recorded
@@ -176,9 +194,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
-            // Legible bring-up failure: decode the ESR class + faulting IPA so each non-syscall
-            // exit (typically a data/instruction abort at a not-yet-staged IPA) names itself.
+            // A cache-window stage-2 fault: stage/fixup/re-sign/map the page (page_in_cache) and
+            // re-run. Regenerated deterministically here on record AND replay, so nothing about the
+            // cache page goes into the trace. A non-cache fault (page_in_cache returns false) is a
+            // real bring-up failure — decode the ESR class + faulting IPA so it names itself.
             Stop::Other { esr } => {
+                if b.page_in_cache(b.fault_ipa()) { continue; }
                 if trace_log { eprintln!("[regs]\n{}", b.dbg_regs()); }
                 return Err(b.describe_stop(esr));
             }
@@ -308,6 +329,16 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                             idx += 1;
                             continue;
                         }
+                        // shared_region_map_and_slide_2_np (#536): install the demand-pager on
+                        // replay too (record installed it here), so cache faults regenerate identical
+                        // pages. #294 needs no special case — its base write replays via the generic
+                        // apply path below.
+                        if num == retrace_arch::SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP {
+                            b.install_cache_pager();
+                            b.set_x0_err_and_return(*ret, *err);
+                            idx += 1;
+                            continue;
+                        }
                         // munmap/mprotect (debt #2): honor them for real on replay too, so a later
                         // mmap in the trace can reuse the address exactly like it did on record.
                         if num == retrace_arch::SYS_MUNMAP {
@@ -331,6 +362,8 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                 }
             }
             Stop::Other { esr } => {
+                // Cache-window fault: page it in (regenerated identically to record) and re-run.
+                if b.page_in_cache(b.fault_ipa()) { continue; }
                 return Err(Divergence { landmark: idx, pc: b.pc(), detail: b.describe_stop(esr) });
             }
         }

@@ -5,6 +5,7 @@ use retrace_trace::{Regs, Region};
 
 mod cache;
 pub use cache::AuthSlot;
+use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 pub const TRAMPOLINE_IPA: u64 = 0x0000_4000; // 16 KiB-aligned (hv_vm_map rejects 4 KiB alignment under the default granule)
 pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
@@ -215,6 +216,11 @@ pub struct Box_ {
     // Deterministic synthetic timebase counter (see SYNTH_TSC_*), advanced per emulated timebase
     // MRS. Plain u64; declared last, so the vcpu-before-vm drop order is unaffected.
     synthetic_tsc: u64,
+    // The dyld-shared-cache demand-pager's routing table (built by install_cache_pager on the #536
+    // cache-mapping syscall; None until then). Holds the parsed subcache headers + open file
+    // handles that page_in_cache reads pristine pages from. Its `File`s have Drop, but it is
+    // declared LAST — after vcpu/vm — so the load-bearing vcpu-before-vm drop order is unaffected.
+    cache: Option<CacheMeta>,
 }
 
 pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
@@ -454,7 +460,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -484,6 +490,97 @@ impl Box_ {
             .map(|&(p, m, kd)| (p, m, if kd { OP_AUTDA } else { OP_AUTIA }))
             .collect();
         self.run_pac_batch(&entries)
+    }
+
+    /// Install the dyld-shared-cache demand-pager: parse the system cache (`DEFAULT_CACHE_PATH`) +
+    /// its subcaches into an IPA routing table and keep the subcache files open for
+    /// [`page_in_cache`](Self::page_in_cache) to `pread` pristine pages from. Called by the
+    /// record/replay dispatch on the kernel cache-mapping syscall (#536) — on BOTH record and
+    /// replay, so both sides page identical bytes. Idempotent (a second #536 is a no-op).
+    pub fn install_cache_pager(&mut self) {
+        if self.cache.is_none() {
+            self.cache = Some(CacheMeta::load(DEFAULT_CACHE_PATH).expect("install_cache_pager: load dyld shared cache"));
+        }
+    }
+
+    /// Demand-page one shared-cache page at the faulting IPA `ipa`, staging it into an anonymous
+    /// guest page (SPTM: never a file-backed map). Returns `true` iff `ipa` fell inside a cache
+    /// mapping and was serviced (or was already staged); `false` if no pager is installed or `ipa`
+    /// is outside every cache mapping (a genuine fault for the caller to surface).
+    ///
+    /// A pure deterministic function of (file bytes, slide 0, the guest's fixed PAC keys), so the
+    /// record/replay dispatch routes cache faults here on BOTH sides and NEVER writes the page
+    /// bytes into the trace (they are regenerated). Order:
+    /// - **DATA** (v5 slide-info): `pread` the pristine page → [`walk_page`] rebases regular slots
+    ///   in place and collects the auth slots → [`sign_slots`](Self::sign_slots) re-signs them with
+    ///   the guest keys → write each signed pointer back at its slot offset → map at the cache IPA
+    ///   under the default RW+non-exec stage-1 (the identity block map already covers the window).
+    /// - **TEXT** (no slide-info): `pread` → map + [`set_region_exec`](Self::set_region_exec)
+    ///   (RO+exec `ATTR_CODE`), no fixups. Sound without a TLBI: the cache window's blocks are
+    ///   pristine (never translated) until the guest first faults them in here.
+    pub fn page_in_cache(&mut self, ipa: u64) -> bool {
+        // Move the routing table out so its borrows don't collide with `&mut self` (sign_slots /
+        // vm.map / set_region_exec); restore it before returning. `CacheMeta` never references
+        // `self`, so this is a plain take/put.
+        let Some(cache) = self.cache.take() else { return false }; // no pager installed
+        let page_base = ipa & !(GRANULE as u64 - 1);
+        let mut page = [0u8; GRANULE];
+        let handled = match cache.stage_page(ipa, &mut page) {
+            None => false, // not a cache IPA — a genuine fault
+            Some(region) => {
+                if self.host_span(page_base).is_none() {
+                    if region.is_exec {
+                        // TEXT: stage pristine bytes, then promote stage-1 to RO+exec (no fixups).
+                        let (host, rlen) = alloc_pages(GRANULE);
+                        unsafe { std::ptr::copy_nonoverlapping(page.as_ptr(), host, GRANULE); }
+                        self.vm.map(host, page_base, rlen, MemFlags::RWX).expect("hv_vm_map (cache text page)");
+                        self.backings.push(Backing { host, ipa: page_base, len: rlen });
+                        self.set_region_exec(page_base, GRANULE as u64);
+                    } else {
+                        // DATA: rebase regulars in place, re-sign auth slots with the guest keys.
+                        let si = region.slide_info.expect("cache DATA mapping must carry v5 slide-info");
+                        let auth = walk_page(&mut page, si, region.page_index, 0 /* slide 0 */, region.mapping_base);
+                        let signed = self.sign_slots(&auth);
+                        for (slot, val) in auth.iter().zip(signed) {
+                            page[slot.offset..slot.offset + 8].copy_from_slice(&val.to_le_bytes());
+                        }
+                        let (host, rlen) = alloc_pages(GRANULE);
+                        unsafe { std::ptr::copy_nonoverlapping(page.as_ptr(), host, GRANULE); }
+                        self.vm.map(host, page_base, rlen, MemFlags::RWX).expect("hv_vm_map (cache data page)");
+                        self.backings.push(Backing { host, ipa: page_base, len: rlen });
+                    }
+                }
+                true
+            }
+        };
+        self.cache = Some(cache);
+        handled
+    }
+
+    /// The faulting guest-physical address (FAR/IPA) of the most recent non-syscall VM exit
+    /// (`Stop::Other`). The record/replay dispatch feeds this to [`page_in_cache`](Self::page_in_cache)
+    /// to service cache-window stage-2 faults.
+    pub fn fault_ipa(&self) -> u64 { self.last_far }
+
+    /// Test/diagnostic observable: is the stage-1 leaf mapping for `ipa` executable at EL0
+    /// (`ATTR_CODE`: UXN clear)? A default data block (or a promoted `ATTR_DATA` page) is
+    /// non-exec; only a `set_region_exec` page (guest code, the sign stub, or a paged-in cache
+    /// TEXT page) is. Walks the live L2/L3 the box maintains.
+    pub fn ipa_is_exec(&self, ipa: u64) -> bool {
+        if self.l2_host.is_null() { return false; }
+        let bi = (ipa / BLK) as usize;
+        if bi >= 2048 { return false; }
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        let leaf = if l2[bi] & 0x3 == DESC_TABLE {
+            let l3_ipa = l2[bi] & !(GRANULE as u64 - 1);
+            let Some(host) = self.backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host) else { return false };
+            let l3 = unsafe { std::slice::from_raw_parts(host as *const u64, 2048) };
+            let idx = ((ipa - bi as u64 * BLK) / GRANULE as u64) as usize;
+            l3[idx]
+        } else {
+            l2[bi] // block descriptor: identity data block, never executable
+        };
+        leaf & 0x3 != 0 && leaf & UXN == 0
     }
 
     /// Lazy-init the signing scratch on first use: a stub CODE page (RO+exec, ATTR_CODE) and an I/O
@@ -675,7 +772,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache: None }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -843,12 +940,14 @@ impl Box_ {
                     return Stop::Syscall { num, args };
                 }
                 _ => {
-                    // Stage-2 abort taken by the hypervisor (not via the guest VBAR). If it is a
-                    // data/instruction abort on a missing shared-cache page, demand-page it and
-                    // resume; otherwise surface it for diagnosis.
+                    // Stage-2 abort taken by the hypervisor (not via the guest VBAR). With a cache
+                    // pager installed, cache-window faults are serviced by the record/replay
+                    // dispatch via `page_in_cache` (file → walk → re-sign → map, identical on record
+                    // and replay), so surface them as `Stop::Other` carrying the fault IPA. Without a
+                    // pager, fall back to the legacy host-copy demand-pager for a missing cache page.
                     let ec = (e.syndrome >> 26) & 0x3f;
                     let is_abort = matches!(ec, 0x20 | 0x21 | 0x24 | 0x25);
-                    if is_abort && self.try_demand_page(e.virtual_address) { continue; }
+                    if is_abort && self.cache.is_none() && self.try_demand_page(e.virtual_address) { continue; }
                     self.last_far = e.virtual_address;
                     return Stop::Other { esr: e.syndrome };
                 }
@@ -903,7 +1002,7 @@ impl Box_ {
         let next_l3 = backings.iter()
             .filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL)
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START }
+        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache: None }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
