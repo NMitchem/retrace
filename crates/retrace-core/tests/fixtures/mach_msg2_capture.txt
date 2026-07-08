@@ -25,14 +25,37 @@
 #
 # IMPORTANT ANNOTATION — msgh_id 4811 (_kernelrpc_mach_vm_map) reply framing:
 #   rcv_size for 4811 is reported as 52, but the diff `writes` region captured here spans a
-#   wider x0-window (100 bytes on the guest's reply/scratch buffer) because forward_and_diff
-#   snapshots a fixed IPA window around x0 rather than exactly rcv_size bytes. The REPLY PROPER
-#   is only the FIRST 52 BYTES of the reply@... hexdump below: a 44-byte MIG reply
-#   (mach_msg_header_t[24] + NDR[8] + retcode[4] + address-out[8] = 44) followed by an 8-byte
-#   mach_msg trailer (mach_msg_trailer_t, MACH_MSG_TRAILER_FORMAT_0, size=8) = 52 bytes total.
-#   Bytes beyond offset +0x34 (52) in the two 4811 reply dumps below are residual bytes from the
-#   guest's stack/prior request buffer content that happened to fall inside the diffed window —
-#   NOT part of the kernel's actual reply. The codec must only decode the first 52 bytes.
+#   wider x0-window (up to 256 bytes — the RETRACE_TRACE diagnostic's fixed `.min(256)` dump
+#   cap, applied over forward_and_diff's snapshot window around x0, not exactly rcv_size bytes).
+#   The REPLY PROPER is only the FIRST 52 BYTES of the reply@... hexdump below: a 44-byte MIG
+#   reply (mach_msg_header_t[24] + NDR[8] + retcode[4] + address-out[8] = 44) followed by an
+#   8-byte mach_msg trailer (mach_msg_trailer_t, MACH_MSG_TRAILER_FORMAT_0, size=8) = 52 bytes
+#   total. Bytes beyond offset +0x34 (52) in the two 4811 reply dumps below are residual bytes
+#   from the guest's stack/prior request buffer content that happened to fall inside the diffed
+#   window — NOT part of the kernel's actual reply. The codec must only decode the first 52 bytes.
+#
+# GROUND-TRUTH DECODE (offsets verified via offsetof against this SDK's mig struct; reply
+# offsets Head[24]+NDR[24..32]+RetCode[32..36]+address[36..44]+trailer[44..52]). Downstream
+# tasks (codec unit tests + servicing) MUST use these real values, NOT idealized guesses:
+#
+#   msg 4 (1st 4811): REQ address=0x0  size=0x4a0000  mask=0  flags=0x01000001 (ANYWHERE|0x01000000)
+#                         cur_prot=0 (PROT_NONE, i.e. an address-space RESERVATION) max_prot=0 inherit=1
+#                     REPLY RetCode=0 (KERN_SUCCESS) address=0x109674000  <-- a HOST address in
+#                         retrace's OWN space (~4.15 GiB); libmalloc wanted it in the guest nano
+#                         band and rejects it. This is the M2c-6 "out-of-nano-range" failure.
+#   msg 6 (2nd 4811): REQ address=0x400000000  size=0x600000000 (24 GiB!)  mask=0  flags=0x0 (FIXED)
+#                         cur_prot=0 (PROT_NONE reservation) max_prot=0 inherit=1
+#                     REPLY RetCode=3 (KERN_NO_SPACE) address=0x800000000  <-- the FIXED 24 GiB
+#                         reservation could not be placed in retrace's host space.
+#
+#   SERVICING IMPLICATIONS (for Tasks 5/7, flagged here so they aren't a surprise):
+#   - Both 4811s are PROT_NONE reservations, not backed allocations. cur_protection=0.
+#   - msg 4 is ANYWHERE (flags&1=1); msg 6 is FIXED (flags&1=0) at 0x400000000. The two are NOT
+#     interchangeable — a decoder/servicing test must cover both shapes.
+#   - msg 6 requests a 24 GiB region. Naively backing it (alloc_pages(0x600000000) + hv_vm_map of
+#     24 GiB) is the open servicing risk: it may exceed host/hv limits, and guest stage-1 identity
+#     coverage of IPA 0x4_0000_0000..0xA_0000_0000 is unverified. The empirical walk (Task 7) is
+#     where this resolves; Task 5 only needs the FIRST serviceable 4811 to move the wall.
 #
 # Routine names (msgh_id -> name), from Mach kernel MIG subsystem numbering:
 #   200  = host_info
