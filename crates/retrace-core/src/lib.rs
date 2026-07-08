@@ -1,3 +1,5 @@
+pub mod machmsg;
+
 use std::path::Path;
 use retrace_box::{Box_, Stop};
 use retrace_trace::{Writer, Event, Region};
