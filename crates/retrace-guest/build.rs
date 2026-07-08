@@ -36,4 +36,89 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang mmapguest");
     assert!(status.success(), "mmapguest build failed");
+
+    // unaligned guest: an unaligned qword store faults MMU-off (Device memory), works
+    // MMU-on with Normal memory; proves the stage-1 identity map is live with Normal attrs.
+    let src = format!("{}/asm/unaligned.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/unaligned");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang unaligned");
+    assert!(status.success(), "unaligned guest build failed");
+
+    // pacguest: signs and authenticates a code pointer with pacia/autia; proves PAC engaged
+    // (SCTLR_EL1.EnIA=1 + fixed APIA keys) and the sign/auth round-trip recovers the original.
+    let src = format!("{}/asm/pacguest.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/pacguest");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang pacguest");
+    assert!(status.success(), "pacguest build failed");
+
+    // failsys: opens a path that does not exist; the failing open sets the carry flag and
+    // returns errno (ENOENT=2) in x0, which the guest then exits with. Exercises the raw-svc
+    // forwarder's error-ABI carry recording.
+    let src = format!("{}/asm/failsys.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/failsys");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang failsys");
+    assert!(status.success(), "failsys guest build failed");
+
+    // remap: mmap A, store, munmap A, mmap B, store, load-back, exit x0=0 on match. Proves
+    // honored munmap (debt #2) lets the guest go on to reuse address space afterward.
+    let src = format!("{}/asm/remap.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/remap");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang remap");
+    assert!(status.success(), "remap guest build failed");
+
+    // mmapfile: opens a fixture, mmap()s it PROT_READ file-backed (no MAP_ANON), reads the first
+    // byte, writes it to stdout. Proves Task 8's anon-staged file-backed mmap: record pread()s
+    // the file into anon guest pages and stages the bytes as recorded writes; replay reproduces
+    // them with zero file access (the fixture may be deleted).
+    let fixture = format!("{out}/mmapfile_fixture.txt");
+    std::fs::write(&fixture, b"MMAPFILE-OK\n").unwrap();
+    let gen = format!("{out}/mmapfile_gen.s");
+    std::fs::write(&gen, format!(".section __DATA,__data\n.p2align 3\n.global path\npath: .asciz \"{fixture}\"\n")).unwrap();
+    let src = format!("{}/asm/mmapfile.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/mmapfile");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
+        .status().expect("clang mmapfile");
+    assert!(status.success(), "mmapfile guest build failed");
+
+    // execmap: mmap()s a tiny FILE of code PROT_READ|PROT_EXEC (prot=5, MAP_PRIVATE) and blr's
+    // into it, exiting with its return value (42). Proves runtime exec-mmap promotion: the VMM
+    // installs RO+exec (ATTR_CODE) stage-1 pages for a PROT_EXEC mmap by editing the live page
+    // tables, so the guest can execute mmap'd code under W^X. The fixture is the raw machine code
+    // of `movz x0, #42 ; ret` (0xD2800540, 0xD65F03C0), little-endian.
+    let fixture = format!("{out}/execmap_fixture.bin");
+    std::fs::write(&fixture, [0x40u8, 0x05, 0x80, 0xD2, 0xC0, 0x03, 0x5F, 0xD6]).unwrap();
+    let gen = format!("{out}/execmap_gen.s");
+    std::fs::write(&gen, format!(".section __DATA,__data\n.p2align 3\n.global path\npath: .asciz \"{fixture}\"\n")).unwrap();
+    let src = format!("{}/asm/execmap.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/execmap");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
+        .status().expect("clang execmap");
+    assert!(status.success(), "execmap guest build failed");
+
+    // hello_dyn: a real dynamically-linked arm64 executable (normal toolchain, links libSystem).
+    // Plain -arch arm64 (NOT arm64e — third-party arm64e builds are gated; the arm64e dyld loads a
+    // plain-arm64 exe fine). Task 7 maps this + /usr/lib/dyld and builds dyld's process-start stack.
+    let src = format!("{}/c/hello_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/hello_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang hello_dyn");
+    assert!(status.success(), "hello_dyn guest build failed");
 }

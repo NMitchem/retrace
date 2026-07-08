@@ -9,14 +9,14 @@ fn forward_and_diff_captures_read_bytes() {
     loop {
         match b.run() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_READ => {
-                let (ret, writes) = b.forward_and_diff(num, args);
+                let (ret, _err, writes) = b.forward_and_diff(num, args);
                 assert_eq!(ret, 19, "read should return the 19 fixture bytes");
                 // the write must land at the read buffer (args[1]) and contain the fixture
                 let w = writes.iter().find(|w| w.ipa == args[1]).expect("no write at read buf");
                 assert!(w.bytes.starts_with(b"retrace-m1-fixture\n"));
                 return;
             }
-            Stop::Syscall { num, args } => { let (ret, _) = b.forward_and_diff(num, args); b.set_x0_and_return(ret); }
+            Stop::Syscall { num, args } => { let (ret, _err, _) = b.forward_and_diff(num, args); b.set_x0_and_return(ret); }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
         }
     }

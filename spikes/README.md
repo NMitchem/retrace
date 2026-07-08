@@ -47,10 +47,86 @@ guest: movz x0,#0x1234 ; add x0,x0,#1 ; hvc #0
 
 This is the trap-and-forward mechanism `retrace-box` is built on, proven end-to-end.
 
-## Not yet proven here (M0/M1 spike targets)
+## `m2spike.c` — MMU-on, PAC, and shared-cache reachability (M2 loader spike)
 
-- **EL0 `SVC` → guest EL1 (not the VMM).** These spikes issue `HVC` from EL1 directly.
-  The claim that an EL0 `SVC` requires a `VBAR_EL1` `SVC→HVC` trampoline to reach the VMM
-  is architectural (well-established) but not re-proven here. First M0 spike.
-- **dyld shared cache loading on Tahoe** (the AppBox-hard-part) — unproven; risk #1.
-- **Memory-diff fidelity across the real syscall surface** — the long tail; M1+.
+Runs real EL0 guest code under **guest-built stage-1 page tables** (16 KiB granule,
+`T0SZ=28`, start level 2, `MAIR` attr0 = Normal WBWA), three phases:
+
+```
+[A mmu-on enia=1] page-unaligned RW=1  block-unaligned RW=1  pac-roundtrip=1
+                  signed ptr=0x54470c30_0001c001 (PAC bits ENGAGED)
+                  DSC header read in-guest = "dyld_v1 " (matches host)
+[B mmu-on enia=0] same, but PAC is identity (signing off is deterministic)
+[D mmu-off ctrl ] same code faults: EC=0x24 data abort, alignment DFSC 0x21
+=> MMU-on identity map + Normal memory + PAC verified
+```
+
+Establishes the M2 load-bearing claims: unaligned access needs MMU-on Normal memory
+(phase D is the negative control), PAC keys set via `hv_vcpu_set_sys_reg` sign/auth
+correctly in-guest, and the shared cache is readable through guest translation.
+
+**SPTM safety finding (learned the hard way):** an earlier version mapped the cache file
+into the guest with a **file-backed** `hv_vm_map`. On macOS 26 this **hard-panics the
+machine** — `[SPTM] VIOLATION_ILLEGAL_MAPPING_TYPE`, an unrecoverable kernel reset. **All
+guest memory must be anonymous; stage file bytes into anon pages (`pread`/`fread` then
+map), never map a file page directly.** This spike and the M2 design now do exactly that.
+
+## `dscprobe.c` — `DYLD_SHARED_REGION=private` host probe
+
+Confirms dyld will map the shared cache itself (via ordinary syscalls the M1 recorder
+handles) rather than joining the kernel-managed shared region:
+
+```
+$ ./dscprobe                          # &printf INSIDE kernel shared region  (exit 10)
+$ DYLD_SHARED_REGION=private ./dscprobe # &printf OUTSIDE — PRIVATE mapping   (exit 20)
+```
+
+## `cacheprobe.c` — shared-cache slide/fixup format dump (M2 re-signing spike)
+
+Pure host file parse (no HVF, no cache mmap — safe). Parses each subcache's `dyld_cache_header`,
+the `mapping_and_slide` entries, the slide-info blob, and **decodes real fixup slots by hand**,
+then walks every chain:
+
+```
+offsetof mappingWithSlideOffset=0x138 (expect 0x138) ...
+slide-info: version=5 page_size=16384 page_starts_count=... value_add=0x180000000
+[ 0] AUTH raw=0x801dab846c2f15c8 roff=0x6c2f15c8 div=0x6ae1 addrDiv=1 key=DA next=1
+SCANNED 7876 fixup pages: 9476030 slots (3713323 auth, 39.2%), max 2048/page
+```
+
+Findings (this host, Tahoe/arm64e): **all 14 slide regions are v5, 16 KiB pages,
+`value_add=0x180000000`**; auth pointers use **A-family keys only** (IA/DA); every fixup chain is
+**self-contained within its page** (0 cross-page chains over ~27M slots walked). Full decode
+formulas + a worked example are in `.superpowers/sdd/m2cache-spike-findings.md`.
+
+## `pacsign.c` — guest signing-oracle proof (M2 re-signing spike)
+
+Proves we can re-sign cache auth pointers with the **guest's fixed PAC keys** by executing `pac*`
+inside the VM (not reimplementing QARMA on the host). Sets the `retrace-box` `PAC_KEYS`, enables
+PAC for all four families, and:
+
+```
+IA/DA/IB/DB signed != raw, aut* round-trips, signatures distinct, modifier load-bearing  => PASS
+wrong-modifier autia => guest ESR_EL1 EC=0x1C (FEAT_FPAC auth-failure)  => PASS  (== task-9b wall)
+```
+
+Run under a bounded perl process-group timeout (there is no `timeout` binary); MMU off, only
+anonymous guest memory mapped:
+
+```sh
+clang -O2 -o pacsign pacsign.c -framework Hypervisor
+codesign -s - -f --entitlements ent.plist pacsign
+perl -e '$p=fork;if(!$p){setpgrp;exec@ARGV or exit 127}$SIG{ALRM}=sub{kill"-KILL",$p;exit 124};alarm 15;wait;exit($?>>8)' ./pacsign
+```
+
+Verdict: the **lazy-per-page-map + fixup-walk + guest-oracle-sign** design is **GO** (per-page
+batched signing, one vCPU run per demand-faulted DATA page; ≤2048 pointers/page).
+
+## Proven for M2; still open for later milestones
+
+- MMU-on paging, PAC, and DSC reachability — **proven** (`m2spike.c`); `private` cache
+  mapping — **proven** (`dscprobe.c`).
+- **Full dyld startup to `main` under the oracle** — the M2 bring-up itself; not a spike.
+- **Instruction-exact positioning, signals, threads** — M3+.
+- **Memory-diff fidelity across the real syscall surface** — the long tail; M2 pays the
+  four carried-forward recorder debts (clamp, `munmap`/`mprotect`, error ABI, raw `svc`).

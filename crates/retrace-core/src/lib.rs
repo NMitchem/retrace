@@ -1,20 +1,73 @@
 use std::path::Path;
 use retrace_box::{Box_, Stop};
-use retrace_trace::{Writer, Event};
+use retrace_trace::{Writer, Event, Region};
 use retrace_arch::{SYS_WRITE, SYS_EXIT};
+
+// mmap flag bit: set => anonymous (M1's guest_mmap path); clear => file-backed (Task 8's
+// anon-staged path — dyld maps the shared cache + dylibs this way).
+const MAP_ANON: u64 = 0x1000;
+
+// dyld's inline `__mac_syscall("Sandbox", ...)` loads this magic value into x16 (movz x16,
+// #0x8000,lsl#16) — NOT a normal syscall selector. Only a platform binary (real dyld) may issue
+// it; a normal process — and our forwarder — takes SIGSEGV. So it is synthesized, never forwarded.
+const MAC_SYSCALL_MAGIC: u64 = 0x8000_0000;
+// BSD syscall: dyld asks the kernel for the base of an already-mapped shared cache region. We
+// force it to fail so dyld takes the DYLD_SHARED_REGION=private path and maps the cache file
+// itself (through our anon-staged file-mmap), instead of using the host's kernel-mapped shared
+// region, which lives in retrace's address space and is not in the guest's stage-2.
+// Mach vm traps (negative x16). dyld uses these to manage its OWN address space; they must act on
+// GUEST memory, never be forwarded to the host task (whose address space is retrace's own). We
+// intercept them and allocate/free/relabel guest IPAs, exactly like the BSD mmap special cases.
+const MACH_VM_ALLOCATE:   u64 = (-10i64) as u64; // _kernelrpc_mach_vm_allocate_trap(target,&addr,size,flags)
+const MACH_VM_DEALLOCATE: u64 = (-12i64) as u64; // _kernelrpc_mach_vm_deallocate_trap(target,addr,size)
+const MACH_VM_PROTECT:    u64 = (-14i64) as u64; // _kernelrpc_mach_vm_protect_trap(target,addr,size,setmax,prot)
+const MACH_VM_MAP:        u64 = (-15i64) as u64; // _kernelrpc_mach_vm_map_trap(target,&addr,size,mask,flags,prot)
+const VM_FLAGS_ANYWHERE:  u64 = 0x1;
+const PROT_EXEC:          u64 = 0x4;
+
+// Extract (address-pointer, size, flags, cur_prot) for an anonymous mach_vm_map/allocate trap.
+fn vm_map_args(num: u64, args: &[u64; 7]) -> (u64, u64, u64, u64) {
+    if num == MACH_VM_MAP { (args[1], args[2], args[4], args[5]) }
+    else                  { (args[1], args[2], args[3], 0x3 /*RW*/) } // allocate: always RW anon
+}
 
 pub struct RecordSummary { pub stdout: Vec<u8>, pub exit_code: u64, pub events: usize }
 
 pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<RecordSummary, String> {
-    let mut b = Box_::load(loaded);
+    record_box(Box_::load(loaded), trace_path)
+}
+
+/// Dynamic record: run the exe through real dyld (mapped via `load_dynamic`) and record. Same
+/// record loop as the static path — dyld's syscalls/mach-traps flow through the shared engine.
+pub fn record_dynamic(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded, argv0: &str,
+                      trace_path: &Path) -> Result<RecordSummary, String> {
+    record_box(Box_::load_dynamic(exe, dyld, argv0), trace_path)
+}
+
+fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
     w.append(&b.snapshot()).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
 
     let mut stdout = Vec::new();
     let exit_code;
+    // Bring-up diagnostic (RETRACE_TRACE=1): log every trap the record loop dispatches, so a
+    // forwarded syscall/mach-trap that misbehaves is identifiable from the last line printed.
+    let trace_log = std::env::var_os("RETRACE_TRACE").is_some();
     loop {
-        match b.run() {
+        let stop = b.run();
+        if trace_log {
+            if let Stop::Syscall { num, args } = &stop {
+                eprintln!("[trap] num={} (0x{:x}) pc={:#x} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
+                    *num as i64, num, b.position(), args[0], args[1], args[2], args[3], args[4], args[5]);
+                // Echo dyld's fd-1/2 diagnostics so a fatal error message is visible.
+                if *num == SYS_WRITE && (args[0] == 1 || args[0] == 2) {
+                    let bytes = b.read_guest(args[1], args[2] as usize);
+                    eprintln!("[fd{}] {}", args[0], String::from_utf8_lossy(&bytes));
+                }
+            }
+        }
+        match stop {
             Stop::Syscall { num, args } if num == SYS_EXIT => {
                 let final_snap = b.snapshot();          // final-memory landmark
                 w.append(&Event::Exit { code: args[0] }).map_err(|e| format!("append exit: {e}"))?; count += 1;
@@ -27,30 +80,150 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<Recor
             Stop::Syscall { num, args } if num == SYS_WRITE && (args[0] == 1 || args[0] == 2) => {
                 stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
                 let ret = args[2];
-                w.append(&Event::Syscall { num, args, ret, writes: vec![] }).map_err(|e| format!("append write: {e}"))?; count += 1;
-                b.set_x0_and_return(ret);
+                w.append(&Event::Syscall { num, args, ret, err: false, writes: vec![] }).map_err(|e| format!("append write: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, false);
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
             // stores (no syscall), so it cannot go through forward_and_diff. guest_mmap maps a
-            // deterministically-addressed tracked backing and returns its IPA.
-            Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
+            // deterministically-addressed tracked backing and returns its IPA. Anon vs
+            // file-backed is split on the MAP_ANON flag bit (dyld maps the shared cache +
+            // dylibs file-backed; SPTM forbids ever hv_vm_map'ing a file page, so file-backed
+            // mmap is anon-staged: pread the file into anon pages and record the bytes as writes).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP && args[3] & MAP_ANON != 0 => {
+                // Minor (b): an anonymous PROT_EXEC (JIT) mmap would need exec promotion but
+                // guest_mmap installs plain RW+non-exec data pages. JIT is out of M2 scope; warn
+                // loudly rather than silently hand back a non-exec page the guest can't run.
+                if args[2] & 0x4 != 0 {
+                    eprintln!("[retrace warn] anon PROT_EXEC mmap (len {:#x}) not promoted to exec (JIT out of M2 scope)", args[1]);
+                }
                 let ipa = b.guest_mmap(args[1]);       // args[1] = length
-                w.append(&Event::Syscall { num, args, ret: ipa, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
-                b.set_x0_and_return(ipa);
+                w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ipa, false);
             }
-            // munmap/mprotect write no guest memory; keep the mapping (M1 does not honor
-            // unmap/protect). Recorded no-ops with ret = 0.
-            Stop::Syscall { num, args } if num == retrace_arch::SYS_MUNMAP || num == retrace_arch::SYS_MPROTECT => {
-                w.append(&Event::Syscall { num, args, ret: 0, writes: vec![] }).map_err(|e| format!("append map-op: {e}"))?; count += 1;
-                b.set_x0_and_return(0);
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
+                let (ipa, writes) = b.guest_mmap_file(args[0], args[1], args[2], args[3], args[4] as i32, args[5]);
+                // PROT_EXEC (0x4): promote the freshly-mapped region to RO+exec (ATTR_CODE) stage-1
+                // pages so the guest can execute from it under W^X (e.g. dyld mapping the shared
+                // cache's __TEXT). Done BEFORE resuming the guest, on record AND replay.
+                if args[2] & 0x4 != 0 { b.set_region_exec(ipa, args[1]); }
+                w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes }).map_err(|e| format!("append mmap_file: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ipa, false);
+            }
+            // munmap/mprotect (debt #2): honor them for real — drop + hv_vm_unmap the backing on
+            // munmap so a later mmap can reuse the address; best-effort hv_vm_protect on
+            // mprotect. Neither writes guest memory itself (the guest's own subsequent stores
+            // do), so they're recorded like mmap: ret=0, no writes, reproduced by re-execution.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MUNMAP => {
+                b.guest_munmap(args[0], args[1]);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append munmap: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
+            }
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MPROTECT => {
+                b.guest_mprotect(args[0], args[1], args[2]);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mprotect: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
+            }
+            // shared_region_check_np (#294): pin the cache slide to 0 by reporting the UNSLID base
+            // (0x180000000) as the shared region's start — dyld then computes slide 0 and lays the
+            // cache at exactly the VAs page_in_cache maps. Writes the base into the guest out-pointer
+            // (arg0) and returns success; regenerated identically on replay via the generic apply.
+            //
+            // Reporting success tells dyld the cache is ALREADY mapped at this base, so dyld reads it
+            // directly and never calls #536 — therefore the demand-pager must be installed HERE (not
+            // deferred to #536, which never fires for a cache dyld already believes is present). Done
+            // on record AND replay so both page identical bytes.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SHARED_REGION_CHECK_NP => {
+                b.install_cache_pager();
+                if b.is_mapped(args[0]) {
+                    let writes = vec![Region { ipa: args[0], bytes: retrace_box::SHARED_REGION_START.to_le_bytes().to_vec() }];
+                    w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append shared_region_check: {e}"))?; count += 1;
+                    b.apply_and_return(0, false, &writes);
+                } else {
+                    // dyld's deliberate error path (e.g. `shared_region_check_np((void*)-1)` to
+                    // return a failure code): the kernel's copyout to the bad pointer yields EFAULT.
+                    // Reproduce it deterministically — carry set, x0 = EFAULT, no writes.
+                    const EFAULT: u64 = 14;
+                    w.append(&Event::Syscall { num, args, ret: EFAULT, err: true, writes: vec![] }).map_err(|e| format!("append shared_region_check(bad ptr): {e}"))?; count += 1;
+                    b.set_x0_err_and_return(EFAULT, true);
+                }
+            }
+            // shared_region_map_and_slide_2_np (#536): the kernel cache-mapping syscall. We do NOT
+            // map here — the cache is lazily demand-paged (page_in_cache) on stage-2 faults. Install
+            // the pager and return success. Installed on BOTH record and replay so both page
+            // identical bytes; no cache bytes are ever written to the trace.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP => {
+                b.install_cache_pager();
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append shared_region_map: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
+            }
+            // dyld's inline __mac_syscall sandbox check (x16 = MAC_SYSCALL_MAGIC): cannot be
+            // forwarded (host faults) — synthesize the unsandboxed result deterministically:
+            // success (x0=0) and the out buffer (x2) cleared to 0 (= "not in a sandbox"). Recorded
+            // as a normal syscall event so replay reproduces it via the generic apply path.
+            Stop::Syscall { num, args } if num == MAC_SYSCALL_MAGIC => {
+                eprintln!("[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)");
+                // Clear the out-buffer (arg2) ONLY when it is a real mapped pointer — the on-disk
+                // dyld passes a query buffer there, but the cache-resident dyld's check passes a null
+                // arg2 (result is purely the x0 return). Writing 8 bytes to a null/unmapped arg2
+                // would panic apply_and_return.
+                let writes = if args[2] != 0 && b.is_mapped(args[2]) {
+                    vec![Region { ipa: args[2], bytes: vec![0u8; 8] }]
+                } else { vec![] };
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append mac_syscall: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
+            }
+            // mach_vm_allocate / mach_vm_map: allocate anonymous GUEST memory (never forward). The
+            // kernel writes the chosen address into *args[1]; we allocate a deterministic guest IPA
+            // and store it there, returning KERN_SUCCESS.
+            Stop::Syscall { num, args } if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP => {
+                let (addr_ptr, size, flags, prot) = vm_map_args(num, &args);
+                let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
+                let exec = prot & PROT_EXEC != 0;
+                if exec { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
+                let req = if b.is_mapped(addr_ptr) { b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
+                let ipa = b.guest_vm_map(req, size, anywhere, exec);
+                let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
+            }
+            // mach_vm_deallocate: free guest memory (drop the backing + stage-2 unmap).
+            Stop::Syscall { num, args } if num == MACH_VM_DEALLOCATE => {
+                b.guest_munmap(args[1], args[2]);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mach_vm_dealloc: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
+            }
+            // mach_vm_protect: no-op success. Stage-2 stays RWX; stage-1 W^X is already correct, so
+            // a guest protect changes nothing we model — returning KERN_SUCCESS keeps dyld happy.
+            Stop::Syscall { num, args } if num == MACH_VM_PROTECT => {
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mach_vm_protect: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
+            }
+            // Mach traps arrive as `svc #0x80` with a NEGATIVE trap number in x16. They forward +
+            // memory-diff exactly like a BSD syscall (a negative x16 is a valid mach-trap selector
+            // to the kernel; the reply is either in x0 — captured as `ret` — or written into a
+            // guest message buffer — captured as `writes`). Special cases that hand back fresh
+            // kernel state the diff can't reproduce (ports mapped into the guest, allocations that
+            // must land in guest IPA space) are added here as they are discovered.
+            Stop::Syscall { num, args } if (num as i64) < 0 => {
+                let (ret, err, writes) = b.forward_and_diff(num, args);
+                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append mach-trap: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
             }
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
-                let (ret, writes) = b.forward_and_diff(num, args);
-                w.append(&Event::Syscall { num, args, ret, writes }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
-                b.set_x0_and_return(ret);
+                let (ret, err, writes) = b.forward_and_diff(num, args);
+                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
             }
-            Stop::Other { esr } => return Err(format!("M1 unexpected non-syscall exit esr=0x{esr:x}")),
+            // A cache-window stage-2 fault: stage/fixup/re-sign/map the page (page_in_cache) and
+            // re-run. Regenerated deterministically here on record AND replay, so nothing about the
+            // cache page goes into the trace. A non-cache fault (page_in_cache returns false) is a
+            // real bring-up failure — decode the ESR class + faulting IPA so it names itself.
+            Stop::Other { esr } => {
+                if b.page_in_cache(b.fault_ipa()) { continue; }
+                if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
+                return Err(b.describe_stop(esr));
+            }
         }
     }
     Ok(RecordSummary { stdout, exit_code, events: count })
@@ -108,7 +281,7 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                     }
                 }
                 match events.get(idx) {
-                    Some(Event::Syscall { num: rn, args: ra, ret, writes }) => {
+                    Some(Event::Syscall { num: rn, args: ra, ret, err, writes }) => {
                         if num != *rn || args != *ra {
                             return Err(Divergence { landmark: idx, pc,
                                 detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
@@ -119,19 +292,98 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                         }
                         // mmap: recreate the mapping deterministically (the guest reproduces its own
                         // stores by re-execution). The IPA must match the recording exactly.
-                        if num == retrace_arch::SYS_MMAP {
+                        if num == retrace_arch::SYS_MMAP && args[3] & MAP_ANON != 0 {
                             let ipa = b.guest_mmap(args[1]);
                             if ipa != *ret {
                                 return Err(Divergence { landmark: idx, pc,
                                     detail: format!("mmap ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
                             }
-                            b.set_x0_and_return(*ret);
+                            b.set_x0_err_and_return(*ret, false);
+                            idx += 1;
+                            continue;
+                        }
+                        // file-backed mmap (Task 8): anon-alloc + address identically (no file
+                        // access), verify the recreated IPA equals the recorded ret (this is what
+                        // makes MAP_FIXED correct on replay), then stage the recorded bytes.
+                        if num == retrace_arch::SYS_MMAP {
+                            let ipa = b.guest_mmap_replay(args[0], args[1], args[2], args[3]);
+                            if ipa != *ret {
+                                return Err(Divergence { landmark: idx, pc,
+                                    detail: format!("mmap_file ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
+                            }
+                            // Same exec promotion as record: the guest executes the mmap'd code on
+                            // replay too (replay runs the guest, only faking syscall results), so the
+                            // exec pages must exist here as well — before the recorded bytes are staged.
+                            if args[2] & 0x4 != 0 { b.set_region_exec(ipa, args[1]); }
+                            b.apply_and_return(*ret, *err, writes);
+                            idx += 1;
+                            continue;
+                        }
+                        // mach_vm_allocate / mach_vm_map: recreate the guest allocation
+                        // deterministically (so the memory exists in stage-2 for the guest to use),
+                        // then apply the recorded IPA write + KERN_SUCCESS. The recomputed IPA must
+                        // equal what was recorded (bump allocator is deterministic).
+                        if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP {
+                            let (addr_ptr, size, flags, prot) = vm_map_args(num, &args);
+                            let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
+                            let exec = prot & PROT_EXEC != 0;
+                            let req = if b.is_mapped(addr_ptr) { b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
+                            let ipa = b.guest_vm_map(req, size, anywhere, exec);
+                            let recorded_ipa = writes.first()
+                                .map(|w| u64::from_le_bytes(w.bytes[..8].try_into().unwrap())).unwrap_or(ipa);
+                            if ipa != recorded_ipa {
+                                return Err(Divergence { landmark: idx, pc,
+                                    detail: format!("mach_vm_map ipa mismatch: replay {ipa:#x} != recorded {recorded_ipa:#x}") });
+                            }
+                            b.apply_and_return(*ret, *err, writes);
+                            idx += 1;
+                            continue;
+                        }
+                        if num == MACH_VM_DEALLOCATE {
+                            b.guest_munmap(args[1], args[2]);
+                            b.set_x0_err_and_return(*ret, *err);
+                            idx += 1;
+                            continue;
+                        }
+                        if num == MACH_VM_PROTECT {
+                            b.set_x0_err_and_return(*ret, *err);
+                            idx += 1;
+                            continue;
+                        }
+                        // shared_region_check_np (#294): install the demand-pager on replay too
+                        // (record installed it here), so cache faults regenerate identical pages, then
+                        // apply the recorded base write via the generic path.
+                        if num == retrace_arch::SYS_SHARED_REGION_CHECK_NP {
+                            b.install_cache_pager();
+                            b.apply_and_return(*ret, *err, writes);
+                            idx += 1;
+                            continue;
+                        }
+                        // shared_region_map_and_slide_2_np (#536): install the demand-pager on
+                        // replay too (record installed it here), so cache faults regenerate identical
+                        // pages.
+                        if num == retrace_arch::SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP {
+                            b.install_cache_pager();
+                            b.set_x0_err_and_return(*ret, *err);
+                            idx += 1;
+                            continue;
+                        }
+                        // munmap/mprotect (debt #2): honor them for real on replay too, so a later
+                        // mmap in the trace can reuse the address exactly like it did on record.
+                        if num == retrace_arch::SYS_MUNMAP {
+                            b.guest_munmap(args[0], args[1]);
+                            b.set_x0_err_and_return(0, false);
+                            idx += 1;
+                            continue;
+                        }
+                        if num == retrace_arch::SYS_MPROTECT {
+                            b.guest_mprotect(args[0], args[1], args[2]);
+                            b.set_x0_err_and_return(0, false);
                             idx += 1;
                             continue;
                         }
                         // Apply recorded kernel writes + feed ret; NO real syscall executes.
-                        // (munmap/mprotect land here with empty writes + ret 0: applies nothing.)
-                        b.apply_and_return(*ret, writes);
+                        b.apply_and_return(*ret, *err, writes);
                         idx += 1;
                     }
                     other => return Err(Divergence { landmark: idx, pc,
@@ -139,7 +391,9 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                 }
             }
             Stop::Other { esr } => {
-                return Err(Divergence { landmark: idx, pc: b.pc(), detail: format!("unexpected non-syscall exit esr=0x{esr:x}") });
+                // Cache-window fault: page it in (regenerated identically to record) and re-run.
+                if b.page_in_cache(b.fault_ipa()) { continue; }
+                return Err(Divergence { landmark: idx, pc: b.pc(), detail: b.describe_stop(esr) });
             }
         }
     }
