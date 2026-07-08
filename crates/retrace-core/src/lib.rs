@@ -25,6 +25,7 @@ const MACH_VM_DEALLOCATE: u64 = (-12i64) as u64; // _kernelrpc_mach_vm_deallocat
 const MACH_VM_PROTECT:    u64 = (-14i64) as u64; // _kernelrpc_mach_vm_protect_trap(target,addr,size,setmax,prot)
 const MACH_VM_MAP:        u64 = (-15i64) as u64; // _kernelrpc_mach_vm_map_trap(target,&addr,size,mask,flags,prot)
 const MACH_MSG2: u64 = (-47i64) as u64; // mach_msg2_trap(data, options, bits|send_size, dest|reply, voucher|id, desc|rcv_name, rcv_size|prio, timeout)
+const MACH_TASK_SELF: u64 = (-28i64) as u64; // task_self_trap: its result names the guest's task port
 const VM_FLAGS_ANYWHERE:  u64 = 0x1;
 const PROT_EXEC:          u64 = 0x4;
 
@@ -57,6 +58,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
     // Bring-up diagnostic (RETRACE_TRACE=1): log every trap the record loop dispatches, so a
     // forwarded syscall/mach-trap that misbehaves is identifiable from the last line printed.
     let trace_log = std::env::var_os("RETRACE_TRACE").is_some();
+    // The guest's task-port NAME (the result of task_self_trap −28, still host-forwarded this
+    // milestone): machmsg routing needs it to recognize task-destined kernel RPCs. Learned
+    // identically on record (forwarded result) and replay (recorded result).
+    let mut guest_task_port: Option<u64> = None;
     loop {
         let stop = b.run();
         if trace_log {
@@ -212,6 +217,70 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mach_vm_protect: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
+            // mach_msg2 (−47): MIG kernel RPCs. Address-space ops are serviced against GUEST
+            // IPAs (forwarding them lets the host kernel mutate retrace's own address space —
+            // the M2-mach wall); a decided read-only/create-once allowlist still forwards;
+            // anything unrecognized fails loudly with its decoded name (spec §Mechanism).
+            Stop::Syscall { num, args } if num == MACH_MSG2 => {
+                let m = machmsg::Msg2::unpack(&args);
+                assert!(m.send_size as usize <= 0x1000,
+                    "mach_msg2 send_size {:#x} implausibly large", m.send_size);
+                match machmsg::route(&m, guest_task_port) {
+                    machmsg::Route::ServiceVmMap => {
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let req = machmsg::decode_vm_map(&buf)
+                            .unwrap_or_else(|e| panic!("mach_vm_map (4811) decode: {e}"));
+                        let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
+                        // cur_protection == 0 => a PROT_NONE address-space reservation (no backing,
+                        // e.g. libmalloc's 24 GiB nano pointer range); anything else is a real
+                        // backed map. See guest_vm_reserve / guest_vm_map.
+                        let ipa = if req.cur_protection == 0 {
+                            b.guest_vm_reserve(req.address, req.size, anywhere)
+                        } else {
+                            let exec = req.cur_protection as u64 & PROT_EXEC != 0;
+                            b.guest_vm_map(req.address, req.size, anywhere, exec)
+                        };
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_vm_map_reply(m.reply_port, ipa) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
+                            err: false, writes: writes.clone() })
+                            .map_err(|e| format!("append mach_msg2 vm_map: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
+                    machmsg::Route::StubReclamation => {
+                        // Optional vm_reclaim feature: deterministic unavailable (libmalloc
+                        // takes its no-reclaim fallback). Retcode verified in the Task 7 walk.
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port,
+                                                             machmsg::KERN_NOT_SUPPORTED) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
+                            err: false, writes: writes.clone() })
+                            .map_err(|e| format!("append mach_msg2 stub: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
+                    machmsg::Route::Forward(name) => {
+                        eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id);
+                        let (ret, err, writes) = b.forward_and_diff(num, args);
+                        if trace_log {
+                            eprintln!("[mach_msg2] host ret={ret:#x} err={err}");
+                            for w_ in &writes {
+                                let shown = &w_.bytes[..w_.bytes.len().min(256)];
+                                for (i, chunk) in shown.chunks(16).enumerate() {
+                                    eprintln!("  reply@{:#x}+{:03x}: {}", w_.ipa, i * 16,
+                                        chunk.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "));
+                                }
+                            }
+                        }
+                        w.append(&Event::Syscall { num, args, ret, err, writes })
+                            .map_err(|e| format!("append mach_msg2 fwd: {e}"))?; count += 1;
+                        b.set_x0_err_and_return(ret, err);
+                    }
+                    machmsg::Route::Unsupported(why) => {
+                        if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
+                        return Err(format!("unsupported mach_msg2 at pc {:#x}: {why}", b.position()));
+                    }
+                }
+            }
             // Mach traps arrive as `svc #0x80` with a NEGATIVE trap number in x16. They forward +
             // memory-diff exactly like a BSD syscall (a negative x16 is a valid mach-trap selector
             // to the kernel; the reply is either in x0 — captured as `ret` — or written into a
@@ -220,16 +289,9 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // must land in guest IPA space) are added here as they are discovered.
             Stop::Syscall { num, args } if (num as i64) < 0 => {
                 let (ret, err, writes) = b.forward_and_diff(num, args);
-                if trace_log && num == MACH_MSG2 {
-                    eprintln!("[mach_msg2] host ret={ret:#x} err={err}");
-                    for w_ in &writes {
-                        let shown = &w_.bytes[..w_.bytes.len().min(256)];
-                        for (i, chunk) in shown.chunks(16).enumerate() {
-                            eprintln!("  reply@{:#x}+{:03x}: {}", w_.ipa, i * 16,
-                                chunk.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "));
-                        }
-                    }
-                }
+                // Learn the guest's task-port name from task_self_trap (−28) so machmsg routing can
+                // recognize task-destined kernel RPCs. Mirrored on replay from the recorded result.
+                if num == MACH_TASK_SELF && !err { guest_task_port = Some(ret); }
                 w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append mach-trap: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
@@ -277,6 +339,9 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
 
     let mut stdout = Vec::new();
     let mut idx = 1usize; // events[0] is the initial snapshot
+    // Mirror of record's task-port learning (see record_box): learned from the RECORDED
+    // task_self_trap (−28) result so routing decides identically on replay.
+    let mut guest_task_port: Option<u64> = None;
     loop {
         match b.run() {
             Stop::Syscall { num, args } => {
@@ -310,9 +375,55 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                             return Err(Divergence { landmark: idx, pc,
                                 detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
                         }
+                        // Learn the guest's task-port name (mirror of record) from the recorded −28 result.
+                        if num == MACH_TASK_SELF && !*err { guest_task_port = Some(*ret); }
                         // Mirror fd-1/2 write output (the buffer is already filled by prior applied reads).
                         if num == SYS_WRITE && (args[0] == 1 || args[0] == 2) {
                             stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
+                        }
+                        // mach_msg2: re-service (the mapping must exist on replay too), verify
+                        // the recomputed reply byte-equals the recording (divergence landmark),
+                        // then apply. Forwarded allowlist entries just apply recorded writes.
+                        if num == MACH_MSG2 {
+                            let m = machmsg::Msg2::unpack(&args);
+                            match machmsg::route(&m, guest_task_port) {
+                                machmsg::Route::ServiceVmMap => {
+                                    let buf = b.read_guest(m.data, m.send_size as usize);
+                                    let req = machmsg::decode_vm_map(&buf).map_err(|e| Divergence {
+                                        landmark: idx, pc, detail: format!("replay vm_map decode: {e}") })?;
+                                    let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
+                                    // Same reservation/commit split as record (must reproduce the
+                                    // identical returned address for the byte-equality check below).
+                                    let ipa = if req.cur_protection == 0 {
+                                        b.guest_vm_reserve(req.address, req.size, anywhere)
+                                    } else {
+                                        let exec = req.cur_protection as u64 & PROT_EXEC != 0;
+                                        b.guest_vm_map(req.address, req.size, anywhere, exec)
+                                    };
+                                    let reply = machmsg::encode_vm_map_reply(m.reply_port, ipa);
+                                    if writes.len() != 1 || writes[0].bytes != reply {
+                                        return Err(Divergence { landmark: idx, pc,
+                                            detail: format!("mach_vm_map reply mismatch: replay ipa {ipa:#x}") });
+                                    }
+                                    b.apply_and_return(*ret, *err, writes);
+                                }
+                                machmsg::Route::StubReclamation => {
+                                    let reply = machmsg::encode_mig_error(m.msgh_id, m.reply_port,
+                                                                          machmsg::KERN_NOT_SUPPORTED);
+                                    if writes.len() != 1 || writes[0].bytes != reply {
+                                        return Err(Divergence { landmark: idx, pc,
+                                            detail: "mach_msg2 stub reply mismatch".into() });
+                                    }
+                                    b.apply_and_return(*ret, *err, writes);
+                                }
+                                machmsg::Route::Forward(_) => b.apply_and_return(*ret, *err, writes),
+                                machmsg::Route::Unsupported(why) => {
+                                    return Err(Divergence { landmark: idx, pc,
+                                        detail: format!("unsupported mach_msg2 on replay: {why}") });
+                                }
+                            }
+                            idx += 1;
+                            continue;
                         }
                         // mmap: recreate the mapping deterministically (the guest reproduces its own
                         // stores by re-execution). The IPA must match the recording exactly.

@@ -894,6 +894,23 @@ impl Box_ {
         ipa
     }
 
+    /// Service a PROT_NONE address-space RESERVATION (mach_vm_map with cur_protection == 0):
+    /// bookkeeping only — no host allocation, no stage-2 map. libmalloc's nano allocator reserves
+    /// a large "pointer range" (observed: a FIXED 24 GiB region) this way and commits sub-ranges
+    /// later with a real-protection mach_vm_map; eagerly backing the whole reservation would be
+    /// infeasible and serves no purpose. FIXED honors the requested base; ANYWHERE hands out a
+    /// fresh deterministic bump address (advancing `mmap_next` so nothing later collides).
+    /// Deterministic: identical call sequence => identical returned address on replay.
+    pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
+        if anywhere {
+            let a = self.mmap_next;
+            self.mmap_next += (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
+            a
+        } else {
+            addr
+        }
+    }
+
     /// Is `[ipa, ipa+len)` free of any tracked backing, clear of the shared-cache window, and within
     /// the 36-bit IPA space? (Used to decide whether an ANYWHERE map may honor its address hint.)
     fn range_is_free(&self, ipa: u64, len: u64) -> bool {
