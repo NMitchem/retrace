@@ -327,24 +327,30 @@ git add -A && git commit -m "M2-mach t3: machmsg codec — mach_msg2 register un
   - `pub fn decode_vm_map(buf: &[u8]) -> Result<VmMapReq, String>`
   - `pub fn encode_vm_map_reply(reply_port: u32, address: u64) -> Vec<u8>` (52 bytes: 44-byte reply + 8-byte trailer)
   - `pub fn encode_mig_error(request_msgh_id: u32, reply_port: u32, retcode: i32) -> Vec<u8>` (44 bytes: 36-byte error reply + trailer)
-  - `pub const MACH_MSG_SUCCESS: u64 = 0;` `pub const KERN_NOT_SUPPORTED: i32 = 46;`
+  - `pub const MACH_MSG_SUCCESS: u64 = 0;` `pub const KERN_NOT_SUPPORTED: i32 = 46;` `pub const KERN_NO_SPACE: i32 = 3;`
 
-Wire layout of `__Request___kernelrpc_mach_vm_map_t` (mig, `#pragma pack(4)`, 100 bytes — quoted in the spec §Verified facts): header 24 (`bits u32, size u32, remote u32, local u32, voucher u32, id i32`); body `desc_count u32` @24; port descriptor 12 @28 (`name u32, pad1 u32, pad2:16|disposition:8|type:8 u32`); NDR 8 @40; then @48: `address u64, size u64, mask u64, flags u32(@72), offset u64(@76), copy u32(@84), cur_protection u32(@88), max_protection u32(@92), inheritance u32(@96)`. **The in-buffer `msgh_size` field may be stale — mig passes the size out-of-band for mach_msg2; validate against `Msg2::send_size`, never the header field.**
+Wire layout of `__Request___kernelrpc_mach_vm_map_t` (mig, `#pragma pack(4)`, 100 bytes — offsets **verified via `offsetof` against this SDK's mig struct**, recorded in the fixture's ground-truth table): header 24 (`bits u32, size u32, remote u32, local u32, voucher u32, id i32`); body `desc_count u32` @24; port descriptor 12 @28 (`name u32, pad1 u32, pad2:16|disposition:8|type:8 u32`); NDR 8 @40; then @48: `address u64, size u64, mask u64, flags u32(@72), offset u64(@76), copy u32(@84), cur_protection u32(@88), max_protection u32(@92), inheritance u32(@96)`. **The in-buffer `msgh_size` field may be stale — mig passes the size out-of-band for mach_msg2; validate against `Msg2::send_size`, never the header field.**
 
-- [ ] **Step 1: Write failing tests.** Add to the test module. **Transcribe `FIXTURE_VM_MAP_REQ` (100 bytes) and `FIXTURE_VM_MAP_REPLY` (first 52 bytes of the reply write) from `crates/retrace-core/tests/fixtures/mach_msg2_capture.txt` — real bytes, not the illustrative comments below:**
+**GROUND TRUTH — the two real 4811 calls in the fixture (do not use idealized values; see the fixture's ground-truth decode table):**
+- **msg 6** (send buffer at IPA 0x1fb638, matching Task 3's `VM_MAP_ARGS`): `address=0x400000000, size=0x600000000, mask=0, flags=0x0` (FIXED), `cur_protection=0` (PROT_NONE reservation), `inheritance=1`. Its reply is a **`mig_reply_error`** (KERN_NO_SPACE=3): `msgh_size=36`, reply_id=4911, no address field.
+- **msg 4** (send buffer at IPA 0x1fbac8): `address=0, size=0x4a0000, flags=0x01000001` (ANYWHERE|0x01000000), `cur_protection=0`. Its reply is a **success** reply: `msgh_size=44`, reply_id=4911, `address=0x109674000`.
+
+- [ ] **Step 1: Write failing tests.** Add to the test module. **Transcribe all three byte arrays from `crates/retrace-core/tests/fixtures/mach_msg2_capture.txt` — real captured bytes, from the message sections named in each comment (the illustrative `[...]` below are placeholders):**
 
 ```rust
-    // 4811 request + kernel reply, transcribed from tests/fixtures/mach_msg2_capture.txt.
-    const FIXTURE_VM_MAP_REQ: [u8; 100] = [ /* send+000..send+063 hexdump bytes */ ];
-    const FIXTURE_VM_MAP_REPLY: [u8; 52] = [ /* first 52 bytes of the reply@... hexdump */ ];
+    // msg 6's 100-byte send buffer (the FIXED 24-GiB PROT_NONE reservation; matches VM_MAP_ARGS).
+    const FIXTURE_VM_MAP_REQ: [u8; 100] = [ /* msg 6/6 send+000..send+063 */ ];
+    // msg 4's reply — a 44-byte SUCCESS reply + 8-byte trailer = first 52 bytes of its reply dump.
+    const FIXTURE_VM_MAP_SUCCESS_REPLY: [u8; 52] = [ /* msg 4/6 reply@... first 52 bytes */ ];
+    // msg 6's reply — a 36-byte mig_reply_error (KERN_NO_SPACE) + 8-byte trailer = first 44 bytes.
+    const FIXTURE_MIG_ERROR_REPLY: [u8; 44] = [ /* msg 6/6 reply@... first 44 bytes */ ];
     #[test]
     fn decodes_the_captured_vm_map_request() {
-        let r = decode_vm_map(&FIXTURE_VM_MAP_REQ).unwrap();
-        // libmalloc's nano reservation: ANYWHERE with the nano-base hint. Sizes/prot per capture.
-        assert_eq!(r.address, 0x6_0000_0000);
-        assert!(r.size > 0 && r.size % 0x4000 == 0);
-        assert_eq!(r.flags & 0x1, 0x1);            // VM_FLAGS_ANYWHERE
-        assert_eq!(r.cur_protection & !0x7, 0);    // a plain R/W/X subset
+        let r = decode_vm_map(&FIXTURE_VM_MAP_REQ).unwrap();       // msg 6: FIXED 24-GiB reservation
+        assert_eq!(r.address, 0x4_0000_0000);
+        assert_eq!(r.size, 0x6_0000_0000);
+        assert_eq!(r.flags & 0x1, 0);              // NOT ANYWHERE (FIXED)
+        assert_eq!(r.cur_protection, 0);           // PROT_NONE => a reservation, not a commit
     }
     #[test]
     fn decode_rejects_malformed() {
@@ -355,21 +361,29 @@ Wire layout of `__Request___kernelrpc_mach_vm_map_t` (mig, `#pragma pack(4)`, 10
         assert!(decode_vm_map(&bad).is_err());
     }
     #[test]
-    fn encodes_a_byte_identical_kernel_reply() {
-        // Same reply port + same (host-returned) address as the capture => byte-identical.
-        let port = u32::from_le_bytes(FIXTURE_VM_MAP_REPLY[12..16].try_into().unwrap());
-        let addr = u64::from_le_bytes(FIXTURE_VM_MAP_REPLY[36..44].try_into().unwrap());
-        assert_eq!(encode_vm_map_reply(port, addr), FIXTURE_VM_MAP_REPLY.to_vec());
+    fn encodes_a_byte_identical_success_reply() {
+        // msg 4's real success reply: reply-local port @12, host-returned address @36.
+        let port = u32::from_le_bytes(FIXTURE_VM_MAP_SUCCESS_REPLY[12..16].try_into().unwrap());
+        let addr = u64::from_le_bytes(FIXTURE_VM_MAP_SUCCESS_REPLY[36..44].try_into().unwrap());
+        assert_eq!(encode_vm_map_reply(port, addr), FIXTURE_VM_MAP_SUCCESS_REPLY.to_vec());
+    }
+    #[test]
+    fn encodes_a_byte_identical_mig_error_reply() {
+        // msg 6's real error reply (KERN_NO_SPACE=3); request id 4811 => reply id 4911.
+        let port = u32::from_le_bytes(FIXTURE_MIG_ERROR_REPLY[12..16].try_into().unwrap());
+        assert_eq!(encode_mig_error(4811, port, KERN_NO_SPACE), FIXTURE_MIG_ERROR_REPLY.to_vec());
     }
     #[test]
     fn mig_error_reply_has_the_documented_shape() {
-        let e = encode_mig_error(4822, 0x1603, KERN_NOT_SUPPORTED);
+        let e = encode_mig_error(4822, 0x1603, KERN_NOT_SUPPORTED);          // the 4822 stub case
         assert_eq!(e.len(), 44);
         assert_eq!(u32::from_le_bytes(e[4..8].try_into().unwrap()), 36);     // msgh_size
         assert_eq!(i32::from_le_bytes(e[20..24].try_into().unwrap()), 4922); // reply id
         assert_eq!(i32::from_le_bytes(e[32..36].try_into().unwrap()), KERN_NOT_SUPPORTED);
     }
 ```
+
+**Note on the two reply forms:** a successful `mach_vm_map` reply is 44 bytes (header+NDR+RetCode+address); a failed one is a 36-byte `mig_reply_error` (header+NDR+RetCode, no address) — MIG drops the out-args on error. `encode_vm_map_reply` emits the 44-byte success form; `encode_mig_error` emits the 36-byte form. Both real captured replies must round-trip byte-identically. If either byte-equality test fails, the fixture is authoritative — correct `REPLY_BITS`/`NDR`/`TRAILER`/header field order to match, and note the corrected values in the fixture header.
 
 - [ ] **Step 2: Run to verify red.** `cargo test -p retrace-core machmsg -- --test-threads=1` — Expected: compile FAIL (`decode_vm_map` not found).
 
@@ -378,6 +392,7 @@ Wire layout of `__Request___kernelrpc_mach_vm_map_t` (mig, `#pragma pack(4)`, 10
 ```rust
 pub const MACH_MSG_SUCCESS: u64 = 0;
 pub const KERN_NOT_SUPPORTED: i32 = 46;
+pub const KERN_NO_SPACE: i32 = 3;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 
 /// _kernelrpc_mach_vm_map (4811) request body (mig __Request__, pack(4); offsets in the plan).
@@ -453,16 +468,40 @@ git add -A && git commit -m "M2-mach t4: machmsg codec — vm_map request decode
 ### Task 5: Record + replay −47 dispatch arms, task-port learning, allowlist logging
 
 **Files:**
+- Modify: `crates/retrace-box/src/lib.rs` (add `guest_vm_reserve`)
 - Modify: `crates/retrace-core/src/lib.rs` (`record_box` and `replay`)
 
 **Interfaces:**
-- Consumes: `machmsg::{Msg2, Route, route, decode_vm_map, encode_vm_map_reply, encode_mig_error, MACH_MSG_SUCCESS, KERN_NOT_SUPPORTED}`; `MACH_MSG2`; `Box_::{read_guest, guest_vm_map, apply_and_return, forward_and_diff}`; existing consts `VM_FLAGS_ANYWHERE`, `PROT_EXEC`.
-- Produces: `const MACH_TASK_SELF: u64 = (-28i64) as u64;` and the serviced −47 semantics the Task 6 guest and Task 7 walk rely on.
+- Consumes: `machmsg::{Msg2, Route, route, decode_vm_map, encode_vm_map_reply, encode_mig_error, MACH_MSG_SUCCESS, KERN_NOT_SUPPORTED}`; `MACH_MSG2`; `Box_::{read_guest, guest_vm_map, guest_vm_reserve, apply_and_return, forward_and_diff}`; existing consts `VM_FLAGS_ANYWHERE`, `PROT_EXEC`.
+- Produces: `const MACH_TASK_SELF: u64 = (-28i64) as u64;`; `Box_::guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64`; and the serviced −47 semantics the Task 6 guest and Task 7 walk rely on.
+
+**Why servicing splits on `cur_protection` (ground truth from the fixture):** both real 4811 calls are **PROT_NONE reservations** (`cur_protection == 0`) — libmalloc's nano allocator reserves a large "pointer range" (msg 6: a **FIXED 24 GiB** region at `0x400000000`) as unbacked address space, then commits small sub-ranges later with a real-protection `mach_vm_map`. Backing a reservation would mean `alloc_pages(0x600000000)` + a 24 GiB `hv_vm_map` — infeasible and pointless. So a PROT_NONE map is serviced as bookkeeping-only (`guest_vm_reserve`, returns an address, maps nothing); only a real-protection map goes through `guest_vm_map` (which actually backs pages). The later commits are discovered/handled in the Task 7 walk.
 
 - [ ] **Step 1: Add const** next to the mach consts:
 
 ```rust
 const MACH_TASK_SELF: u64 = (-28i64) as u64; // task_self_trap: its result names the guest's task port
+```
+
+- [ ] **Step 1b: Add `guest_vm_reserve` to `crates/retrace-box/src/lib.rs`** (next to `guest_vm_map`):
+
+```rust
+    /// Service a PROT_NONE address-space RESERVATION (mach_vm_map with cur_protection == 0):
+    /// bookkeeping only — no host allocation, no stage-2 map. libmalloc's nano allocator reserves
+    /// a large "pointer range" (observed: a FIXED 24 GiB region) this way and commits sub-ranges
+    /// later with a real-protection mach_vm_map; eagerly backing the whole reservation would be
+    /// infeasible and serves no purpose. FIXED honors the requested base; ANYWHERE hands out a
+    /// fresh deterministic bump address (advancing `mmap_next` so nothing later collides).
+    /// Deterministic: identical call sequence => identical returned address on replay.
+    pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
+        if anywhere {
+            let a = self.mmap_next;
+            self.mmap_next += (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
+            a
+        } else {
+            addr
+        }
+    }
 ```
 
 - [ ] **Step 2: Task-port learning + record arm.** In `record_box`, declare after `let trace_log = ...`:
@@ -491,8 +530,15 @@ Insert this arm BEFORE the generic `(num as i64) < 0` arm (and move the Task 2 r
                         let req = machmsg::decode_vm_map(&buf)
                             .unwrap_or_else(|e| panic!("mach_vm_map (4811) decode: {e}"));
                         let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
-                        let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                        let ipa = b.guest_vm_map(req.address, req.size, anywhere, exec);
+                        // cur_protection == 0 => a PROT_NONE address-space reservation (no backing,
+                        // e.g. libmalloc's 24 GiB nano pointer range); anything else is a real
+                        // backed map. See guest_vm_reserve / guest_vm_map.
+                        let ipa = if req.cur_protection == 0 {
+                            b.guest_vm_reserve(req.address, req.size, anywhere)
+                        } else {
+                            let exec = req.cur_protection as u64 & PROT_EXEC != 0;
+                            b.guest_vm_map(req.address, req.size, anywhere, exec)
+                        };
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_vm_map_reply(m.reply_port, ipa) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
@@ -546,8 +592,14 @@ In the generic mach-trap arm, after `forward_and_diff`, add the learning line:
                                     let req = machmsg::decode_vm_map(&buf).map_err(|e| Divergence {
                                         landmark: idx, pc, detail: format!("replay vm_map decode: {e}") })?;
                                     let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
-                                    let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                                    let ipa = b.guest_vm_map(req.address, req.size, anywhere, exec);
+                                    // Same reservation/commit split as record (must reproduce the
+                                    // identical returned address for the byte-equality check below).
+                                    let ipa = if req.cur_protection == 0 {
+                                        b.guest_vm_reserve(req.address, req.size, anywhere)
+                                    } else {
+                                        let exec = req.cur_protection as u64 & PROT_EXEC != 0;
+                                        b.guest_vm_map(req.address, req.size, anywhere, exec)
+                                    };
                                     let reply = machmsg::encode_vm_map_reply(m.reply_port, ipa);
                                     if writes.len() != 1 || writes[0].bytes != reply {
                                         return Err(Divergence { landmark: idx, pc,
