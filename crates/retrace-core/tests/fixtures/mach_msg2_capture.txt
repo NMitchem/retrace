@@ -48,6 +48,12 @@
 #                     REPLY RetCode=3 (KERN_NO_SPACE) address=0x800000000  <-- the FIXED 24 GiB
 #                         reservation could not be placed in retrace's host space.
 #
+#   M2-mach Task 4 CORRECTION: both real 4811 reply headers (msg 4/6 and msg 6/6 above) have
+#   msgh_bits bytes `00 12 00 00`, i.e. u32::from_le_bytes = 0x00001200 — NOT 0x12. Task 4's
+#   codec starting-guess constant (`REPLY_BITS: u32 = 0x12`) failed the byte-equality tests
+#   against these captured bytes and was corrected to `0x1200` in machmsg.rs. NDR ([0,0,0,0,
+#   1,0,0,0]) and the trailer ([0,0,0,0,8,0,0,0]) matched the starting guess exactly.
+#
 #   SERVICING IMPLICATIONS (for Tasks 5/7, flagged here so they aren't a surprise):
 #   - Both 4811s are PROT_NONE reservations, not backed allocations. cur_protection=0.
 #   - msg 4 is ANYWHERE (flags&1=1); msg 6 is FIXED (flags&1=0) at 0x400000000. The two are NOT
