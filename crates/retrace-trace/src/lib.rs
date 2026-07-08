@@ -13,12 +13,12 @@ pub struct Region { pub ipa: u64, pub bytes: Vec<u8> }
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     Snapshot { regs: Regs, mem: Vec<Region> },
-    Syscall { num: u64, args: [u64;7], ret: u64, err: bool, writes: Vec<Region> },
+    Syscall { num: u64, args: [u64;8], ret: u64, err: bool, writes: Vec<Region> },
     Sched { thread: u32, until: u64 },
     Exit { code: u64 },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x02"; // "RT" + format version 0x0002
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x03"; // "RT" + format version 0x0003 (M2-mach: 8-wide args)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -87,7 +87,7 @@ mod tests {
         vec![
             Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000000, sp_el0:0x2000_0000, cpsr:0 },
                               mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,4] }] },
-            Event::Syscall { num:3, args:[5,0x100000100,6,0,0,0,0], ret:6, err:false,
+            Event::Syscall { num:3, args:[5,0x100000100,6,0,0,0,0,0], ret:6, err:false,
                              writes: vec![Region{ ipa:0x100000100, bytes: vec![9,9,9,9,9,9] }] },
             Event::Exit { code:0 },
         ]
@@ -96,6 +96,24 @@ mod tests {
     fn wrong_version_is_rejected() {
         let f = tempfile();
         std::fs::write(&f, b"XX\x00\x01some garbage").unwrap();
+        let (got, truncated) = Reader::open_checked(&f).unwrap();
+        assert!(truncated);
+        assert!(got.is_empty());
+    }
+    #[test]
+    fn rejects_prior_format_version() {
+        // A genuine prior-version trace (RT\x00\x02) with an otherwise well-formed, correctly
+        // CRC'd record: proves rejection is by MAGIC, not by CRC/framing.
+        let f = tempfile();
+        let prior_magic = b"RT\x00\x02";
+        let body = b"plausible record body bytes";
+        let crc = crc32(body);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(prior_magic);
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes.extend_from_slice(body);
+        std::fs::write(&f, &bytes).unwrap();
         let (got, truncated) = Reader::open_checked(&f).unwrap();
         assert!(truncated);
         assert!(got.is_empty());
