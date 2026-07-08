@@ -35,10 +35,11 @@ impl Msg2 {
     }
 }
 
-/// Where a mach_msg2 goes. ServiceVmMap/StubReclamation are emulated against the guest;
-/// Forward is the decided read-only/create-once allowlist (memory-diff'd like any mach trap);
-/// Unsupported carries a decoded description for the fail-loud error.
-pub enum Route { ServiceVmMap, StubReclamation, Forward(&'static str), Unsupported(String) }
+/// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; StubMigReply(retcode)
+/// answers an optional/no-op kernel routine (no out-params) with a mig_reply_error carrying
+/// `retcode`; Forward is the decided read-only/create-once allowlist (memory-diff'd like any
+/// mach trap); Unsupported carries a decoded description for the fail-loud error.
+pub enum Route { ServiceVmMap, StubMigReply(i32), Forward(&'static str), Unsupported(String) }
 
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
 /// msgh_id alone: these are kernel-subsystem ids, unambiguous under the KOBJECT options shape.
@@ -56,7 +57,15 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     if guest_task_port == Some(m.dest as u64) {
         match m.msgh_id {
             4811 => return Route::ServiceVmMap,
-            4822 => return Route::StubReclamation,
+            // vm_reclaim (deferred reclamation): optional. Report unavailable so libmalloc takes
+            // its no-reclaim fallback.
+            4822 => return Route::StubMigReply(KERN_NOT_SUPPORTED),
+            // Private task_restartable subsystem (base 8000): _register(8000) records
+            // libplatform's os_unfair_lock restartable critical sections; _synchronize(8001) is a
+            // barrier over them. On a single vCPU with no preemption those ranges can never fire,
+            // so a KERN_SUCCESS no-op is a faithful, deterministic answer (both routines have no
+            // out-params → mig_reply_error).
+            8000 | 8001 => return Route::StubMigReply(KERN_SUCCESS),
             _ => {}
         }
     }
@@ -66,6 +75,7 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
 }
 
 pub const MACH_MSG_SUCCESS: u64 = 0;
+pub const KERN_SUCCESS: i32 = 0;
 pub const KERN_NOT_SUPPORTED: i32 = 46;
 pub const KERN_NO_SPACE: i32 = 3;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
@@ -160,9 +170,15 @@ mod tests {
     }
     const KOBJ: u64 = 0x2_0000_0003;
     #[test]
-    fn routes_vm_map_to_service_and_reclamation_to_stub() {
+    fn routes_vm_map_to_service_and_stubs_to_mig_reply() {
         assert!(matches!(route(&msg(4811, 0x203, KOBJ), Some(0x203)), Route::ServiceVmMap));
-        assert!(matches!(route(&msg(4822, 0x203, KOBJ), Some(0x203)), Route::StubReclamation));
+        // 4822 vm_reclaim => KERN_NOT_SUPPORTED; 8000/8001 task_restartable => KERN_SUCCESS.
+        assert!(matches!(route(&msg(4822, 0x203, KOBJ), Some(0x203)),
+                         Route::StubMigReply(KERN_NOT_SUPPORTED)));
+        assert!(matches!(route(&msg(8000, 0x203, KOBJ), Some(0x203)),
+                         Route::StubMigReply(KERN_SUCCESS)));
+        assert!(matches!(route(&msg(8001, 0x203, KOBJ), Some(0x203)),
+                         Route::StubMigReply(KERN_SUCCESS)));
     }
     #[test]
     fn routes_the_decided_allowlist_to_forward() {
@@ -242,5 +258,16 @@ mod tests {
         assert_eq!(u32::from_le_bytes(e[4..8].try_into().unwrap()), 36);     // msgh_size
         assert_eq!(i32::from_le_bytes(e[20..24].try_into().unwrap()), 4922); // reply id
         assert_eq!(i32::from_le_bytes(e[32..36].try_into().unwrap()), KERN_NOT_SUPPORTED);
+    }
+    #[test]
+    fn restartable_register_stub_replies_success() {
+        // task_restartable_ranges_register (8000) has no out-params: its reply is a mig_reply_error
+        // with RetCode = KERN_SUCCESS. Reply id = 8000 + 100 = 8100; rcv_size 44 = 36 + 8 trailer.
+        let e = encode_mig_error(8000, 0x1703, KERN_SUCCESS);
+        assert_eq!(e.len(), 44);
+        assert_eq!(u32::from_le_bytes(e[4..8].try_into().unwrap()), 36);     // msgh_size
+        assert_eq!(u32::from_le_bytes(e[12..16].try_into().unwrap()), 0x1703); // reply-local port
+        assert_eq!(i32::from_le_bytes(e[20..24].try_into().unwrap()), 8100); // reply id
+        assert_eq!(i32::from_le_bytes(e[32..36].try_into().unwrap()), 0);    // KERN_SUCCESS
     }
 }
