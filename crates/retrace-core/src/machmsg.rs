@@ -65,6 +65,74 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
         m.msgh_id, m.dest, guest_task_port, m.send_size))
 }
 
+pub const MACH_MSG_SUCCESS: u64 = 0;
+pub const KERN_NOT_SUPPORTED: i32 = 46;
+pub const KERN_NO_SPACE: i32 = 3;
+const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
+
+/// _kernelrpc_mach_vm_map (4811) request body (mig __Request__, pack(4); offsets in the plan).
+pub struct VmMapReq {
+    pub address: u64, pub size: u64, pub mask: u64, pub flags: u32,
+    pub offset: u64, pub copy: u32,
+    pub cur_protection: u32, pub max_protection: u32, pub inheritance: u32,
+}
+
+fn u32_at(b: &[u8], o: usize) -> u32 { u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) }
+fn u64_at(b: &[u8], o: usize) -> u64 { u64::from_le_bytes(b[o..o + 8].try_into().unwrap()) }
+
+pub fn decode_vm_map(buf: &[u8]) -> Result<VmMapReq, String> {
+    if buf.len() < 100 { return Err(format!("vm_map request short: {} < 100", buf.len())); }
+    let (bits, id, descs) = (u32_at(buf, 0), u32_at(buf, 20), u32_at(buf, 24));
+    if id != 4811 { return Err(format!("msgh_id {id} != 4811")); }
+    if bits & MACH_MSGH_BITS_COMPLEX == 0 { return Err("complex bit clear".into()); }
+    if descs != 1 { return Err(format!("descriptor count {descs} != 1")); }
+    Ok(VmMapReq {
+        address: u64_at(buf, 48), size: u64_at(buf, 56), mask: u64_at(buf, 64),
+        flags: u32_at(buf, 72), offset: u64_at(buf, 76), copy: u32_at(buf, 84),
+        cur_protection: u32_at(buf, 88), max_protection: u32_at(buf, 92),
+        inheritance: u32_at(buf, 96),
+    })
+}
+
+// Received-reply header constants, golden-copied from the captured kernel reply (fixture is
+// authoritative; if the byte-equality test disagrees with these, correct THESE to the fixture).
+// NOTE: corrected against the real capture — the brief's starting guess for REPLY_BITS was
+// 0x12, but the captured reply header bytes are `00 12 00 00`, i.e. u32::from_le_bytes gives
+// 0x00001200, not 0x12. NDR and TRAILER matched the brief's guess exactly (no change needed).
+const REPLY_BITS: u32 = 0x1200; // captured bytes 00 12 00 00 (local=MOVE_SEND_ONCE=0x12 << 8)
+const NDR: [u8; 8] = [0, 0, 0, 0, 1, 0, 0, 0];
+const TRAILER: [u8; 8] = [0, 0, 0, 0, 8, 0, 0, 0]; // mach_msg_trailer_t { type 0, size 8 }
+
+fn reply_header(out: &mut Vec<u8>, msgh_size: u32, reply_port: u32, reply_id: u32) {
+    out.extend_from_slice(&REPLY_BITS.to_le_bytes());
+    out.extend_from_slice(&msgh_size.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());            // remote: send-once right consumed
+    out.extend_from_slice(&reply_port.to_le_bytes());      // local: the port it "arrived" on
+    out.extend_from_slice(&0u32.to_le_bytes());            // voucher
+    out.extend_from_slice(&reply_id.to_le_bytes());
+}
+
+/// KERN_SUCCESS reply for 4811: header(24) + NDR(8) + RetCode(4) + address(8) + trailer(8).
+pub fn encode_vm_map_reply(reply_port: u32, address: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(52);
+    reply_header(&mut out, 44, reply_port, 4911);
+    out.extend_from_slice(&NDR);
+    out.extend_from_slice(&0i32.to_le_bytes());            // KERN_SUCCESS
+    out.extend_from_slice(&address.to_le_bytes());
+    out.extend_from_slice(&TRAILER);
+    out
+}
+
+/// mig_reply_error_t for any request id: header(24) + NDR(8) + RetCode(4) + trailer(8).
+pub fn encode_mig_error(request_msgh_id: u32, reply_port: u32, retcode: i32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(44);
+    reply_header(&mut out, 36, reply_port, request_msgh_id + 100);
+    out.extend_from_slice(&NDR);
+    out.extend_from_slice(&retcode.to_le_bytes());
+    out.extend_from_slice(&TRAILER);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +181,66 @@ mod tests {
         // Non-KOBJECT options (daemon IPC shape) and vector-form both refuse.
         assert!(matches!(route(&msg(4811, 0x203, 0x3), Some(0x203)), Route::Unsupported(_)));
         assert!(matches!(route(&msg(4811, 0x203, 0x3_0000_0003), Some(0x203)), Route::Unsupported(_)));
+    }
+
+    // msg 6's 100-byte send buffer (the FIXED 24-GiB PROT_NONE reservation; matches VM_MAP_ARGS).
+    const FIXTURE_VM_MAP_REQ: [u8; 100] = [
+        0x13, 0x15, 0x00, 0x80, 0x64, 0x00, 0x00, 0x00, 0x03, 0x02, 0x00, 0x00, 0x03, 0x16, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0xcb, 0x12, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+    ];
+    // msg 4's reply — a 44-byte SUCCESS reply + 8-byte trailer = first 52 bytes of its reply dump.
+    const FIXTURE_VM_MAP_SUCCESS_REPLY: [u8; 52] = [
+        0x00, 0x12, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x16, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x2f, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x67, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x08, 0x00, 0x00, 0x00,
+    ];
+    // msg 6's reply — a 36-byte mig_reply_error (KERN_NO_SPACE) + 8-byte trailer = first 44 bytes.
+    const FIXTURE_MIG_ERROR_REPLY: [u8; 44] = [
+        0x00, 0x12, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x16, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x2f, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+    ];
+    #[test]
+    fn decodes_the_captured_vm_map_request() {
+        let r = decode_vm_map(&FIXTURE_VM_MAP_REQ).unwrap();       // msg 6: FIXED 24-GiB reservation
+        assert_eq!(r.address, 0x4_0000_0000);
+        assert_eq!(r.size, 0x6_0000_0000);
+        assert_eq!(r.flags & 0x1, 0);              // NOT ANYWHERE (FIXED)
+        assert_eq!(r.cur_protection, 0);           // PROT_NONE => a reservation, not a commit
+    }
+    #[test]
+    fn decode_rejects_malformed() {
+        assert!(decode_vm_map(&FIXTURE_VM_MAP_REQ[..96]).is_err());          // short
+        let mut bad = FIXTURE_VM_MAP_REQ; bad[20] = 0xcc;                    // msgh_id byte
+        assert!(decode_vm_map(&bad).is_err());
+        let mut bad = FIXTURE_VM_MAP_REQ; bad[24] = 2;                       // desc_count
+        assert!(decode_vm_map(&bad).is_err());
+    }
+    #[test]
+    fn encodes_a_byte_identical_success_reply() {
+        // msg 4's real success reply: reply-local port @12, host-returned address @36.
+        let port = u32::from_le_bytes(FIXTURE_VM_MAP_SUCCESS_REPLY[12..16].try_into().unwrap());
+        let addr = u64::from_le_bytes(FIXTURE_VM_MAP_SUCCESS_REPLY[36..44].try_into().unwrap());
+        assert_eq!(encode_vm_map_reply(port, addr), FIXTURE_VM_MAP_SUCCESS_REPLY.to_vec());
+    }
+    #[test]
+    fn encodes_a_byte_identical_mig_error_reply() {
+        // msg 6's real error reply (KERN_NO_SPACE=3); request id 4811 => reply id 4911.
+        let port = u32::from_le_bytes(FIXTURE_MIG_ERROR_REPLY[12..16].try_into().unwrap());
+        assert_eq!(encode_mig_error(4811, port, KERN_NO_SPACE), FIXTURE_MIG_ERROR_REPLY.to_vec());
+    }
+    #[test]
+    fn mig_error_reply_has_the_documented_shape() {
+        let e = encode_mig_error(4822, 0x1603, KERN_NOT_SUPPORTED);          // the 4822 stub case
+        assert_eq!(e.len(), 44);
+        assert_eq!(u32::from_le_bytes(e[4..8].try_into().unwrap()), 36);     // msgh_size
+        assert_eq!(i32::from_le_bytes(e[20..24].try_into().unwrap()), 4922); // reply id
+        assert_eq!(i32::from_le_bytes(e[32..36].try_into().unwrap()), KERN_NOT_SUPPORTED);
     }
 }
