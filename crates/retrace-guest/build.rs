@@ -111,6 +111,17 @@ fn main() {
         .status().expect("clang execmap");
     assert!(status.success(), "execmap guest build failed");
 
+    // machmsg: hand-builds a wire-format _kernelrpc_mach_vm_map (4811) MIG request and issues
+    // mach_msg2 (svc -47); the box must service it on guest IPAs. Proves the M2-mach codec +
+    // dispatch without dyld/libSystem in the loop.
+    let src = format!("{}/asm/machmsg.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/machmsg");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang machmsg");
+    assert!(status.success(), "machmsg guest build failed");
+
     // hello_dyn: a real dynamically-linked arm64 executable (normal toolchain, links libSystem).
     // Plain -arch arm64 (NOT arm64e — third-party arm64e builds are gated; the arm64e dyld loads a
     // plain-arm64 exe fine). Task 7 maps this + /usr/lib/dyld and builds dyld's process-start stack.
