@@ -31,6 +31,9 @@ impl Vm {
     pub fn protect(&self, ipa: u64, len: usize, flags: MemFlags) -> Result<(), HvError> {
         check(unsafe { hv_vm_protect(ipa, len, flags.0) })
     }
+    pub fn unmap(&self, ipa: u64, len: usize) -> Result<(), HvError> {
+        check(unsafe { hv_vm_unmap(ipa, len) })
+    }
 }
 impl Drop for Vm {
     fn drop(&mut self) { unsafe { hv_vm_destroy(); } }
@@ -56,6 +59,23 @@ pub mod sysreg {
     pub const ELR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_ELR_EL1);
     pub const SPSR_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_SPSR_EL1);
     pub const ESR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_ESR_EL1);
+    pub const FAR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_FAR_EL1);
+    pub const CPACR_EL1:SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_CPACR_EL1);
+    pub const TPIDRRO_EL0:SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TPIDRRO_EL0);
+    pub const TTBR0_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TTBR0_EL1);
+    pub const TCR_EL1:   SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TCR_EL1);
+    pub const MAIR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_MAIR_EL1);
+    pub const TPIDR_EL0: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TPIDR_EL0);
+    pub const APIAKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIAKEYLO_EL1);
+    pub const APIAKEYHI_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIAKEYHI_EL1);
+    pub const APIBKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIBKEYLO_EL1);
+    pub const APIBKEYHI_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIBKEYHI_EL1);
+    pub const APDAKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APDAKEYLO_EL1);
+    pub const APDAKEYHI_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APDAKEYHI_EL1);
+    pub const APDBKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APDBKEYLO_EL1);
+    pub const APDBKEYHI_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APDBKEYHI_EL1);
+    pub const APGAKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APGAKEYLO_EL1);
+    pub const APGAKEYHI_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APGAKEYHI_EL1);
 }
 
 pub struct Vcpu { id: hv_vcpu_t, exit: *mut hv_vcpu_exit_t }

@@ -13,12 +13,12 @@ pub struct Region { pub ipa: u64, pub bytes: Vec<u8> }
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     Snapshot { regs: Regs, mem: Vec<Region> },
-    Syscall { num: u64, args: [u64;7], ret: u64, writes: Vec<Region> },
+    Syscall { num: u64, args: [u64;7], ret: u64, err: bool, writes: Vec<Region> },
     Sched { thread: u32, until: u64 },
     Exit { code: u64 },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x01"; // "RT" + format version 0x0001
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x02"; // "RT" + format version 0x0002
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -87,7 +87,7 @@ mod tests {
         vec![
             Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000000, sp_el0:0x2000_0000, cpsr:0 },
                               mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,4] }] },
-            Event::Syscall { num:3, args:[5,0x100000100,6,0,0,0,0], ret:6,
+            Event::Syscall { num:3, args:[5,0x100000100,6,0,0,0,0], ret:6, err:false,
                              writes: vec![Region{ ipa:0x100000100, bytes: vec![9,9,9,9,9,9] }] },
             Event::Exit { code:0 },
         ]

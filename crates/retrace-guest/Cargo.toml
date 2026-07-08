@@ -3,3 +3,6 @@ name = "retrace-guest"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+retrace-arch = { path = "../retrace-arch" }
