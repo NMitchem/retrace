@@ -26,7 +26,7 @@ const VM_FLAGS_ANYWHERE:  u64 = 0x1;
 const PROT_EXEC:          u64 = 0x4;
 
 // Extract (address-pointer, size, flags, cur_prot) for an anonymous mach_vm_map/allocate trap.
-fn vm_map_args(num: u64, args: &[u64; 7]) -> (u64, u64, u64, u64) {
+fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64) {
     if num == MACH_VM_MAP { (args[1], args[2], args[4], args[5]) }
     else                  { (args[1], args[2], args[3], 0x3 /*RW*/) } // allocate: always RW anon
 }

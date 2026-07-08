@@ -192,7 +192,7 @@ pub struct Box_ {
     cache: Option<CacheMeta>,
 }
 
-pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
+pub enum Stop { Syscall { num: u64, args: [u64;8] }, Other { esr: u64 } }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
     let len = (len + GRANULE - 1) & !(GRANULE - 1);
@@ -1049,7 +1049,7 @@ impl Box_ {
                         }
                     }
                     let num = self.vcpu.get_reg(reg::x(16)).unwrap();
-                    let mut args = [0u64;7];
+                    let mut args = [0u64;8];
                     for (i, a) in args.iter_mut().enumerate() { *a = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
                     return Stop::Syscall { num, args };
                 }
@@ -1156,10 +1156,10 @@ impl Box_ {
     /// window (capped) and translate it to a host address; forward the real syscall via the
     /// raw-svc shim; diff. Returns the full 64-bit x0, the BSD carry flag (`err`), and any
     /// kernel writes. On error (`err`) no writes are captured — a failed syscall wrote nothing.
-    pub fn forward_and_diff(&self, num: u64, args: [u64;7]) -> (u64, bool, Vec<Region>) {
+    pub fn forward_and_diff(&self, num: u64, args: [u64;8]) -> (u64, bool, Vec<Region>) {
         let mut windows: Vec<(u64, usize, Vec<u8>)> = Vec::new(); // (guest_ipa, len, pre-image)
-        let mut hargs = [0i64; 7];
-        for i in 0..7 {
+        let mut hargs = [0i64; 8];
+        for i in 0..8 {
             match self.host_span(args[i]) {
                 Some((hp, avail)) => {
                     let win = avail.min(PTR_WINDOW_CAP);
@@ -1184,10 +1184,10 @@ impl Box_ {
             };
         }
         // Forward via a raw `svc #0x80` shim (not `libc::syscall`, which narrows the return
-        // toward 32 bits and hides the BSD carry flag). `hargs` is [i64;7] (x0..x6); build the
-        // shim's [u64;8] explicitly, padding x7 = 0.
+        // toward 32 bits and hides the BSD carry flag). `hargs` is [i64;8] (x0..x7); no more x7
+        // padding.
         let mut sa = [0u64; 8];
-        for i in 0..7 { sa[i] = hargs[i] as u64; }
+        for i in 0..8 { sa[i] = hargs[i] as u64; }
         let (ret, err) = unsafe { host_svc(num, sa) };
         // A failed syscall (carry set) wrote nothing to the guest's buffers, so skip the
         // post-diff write capture entirely.
