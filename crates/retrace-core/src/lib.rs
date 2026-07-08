@@ -22,6 +22,7 @@ const MACH_VM_ALLOCATE:   u64 = (-10i64) as u64; // _kernelrpc_mach_vm_allocate_
 const MACH_VM_DEALLOCATE: u64 = (-12i64) as u64; // _kernelrpc_mach_vm_deallocate_trap(target,addr,size)
 const MACH_VM_PROTECT:    u64 = (-14i64) as u64; // _kernelrpc_mach_vm_protect_trap(target,addr,size,setmax,prot)
 const MACH_VM_MAP:        u64 = (-15i64) as u64; // _kernelrpc_mach_vm_map_trap(target,&addr,size,mask,flags,prot)
+const MACH_MSG2: u64 = (-47i64) as u64; // mach_msg2_trap(data, options, bits|send_size, dest|reply, voucher|id, desc|rcv_name, rcv_size|prio, timeout)
 const VM_FLAGS_ANYWHERE:  u64 = 0x1;
 const PROT_EXEC:          u64 = 0x4;
 
@@ -64,6 +65,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 if *num == SYS_WRITE && (args[0] == 1 || args[0] == 2) {
                     let bytes = b.read_guest(args[1], args[2] as usize);
                     eprintln!("[fd{}] {}", args[0], String::from_utf8_lossy(&bytes));
+                }
+                // M2-mach diagnostic: decode + hexdump mach_msg2 sends (golden capture for the codec).
+                if *num == MACH_MSG2 {
+                    let send_size = ((args[2] >> 32) as usize).min(256);
+                    eprintln!("[mach_msg2] msgh_id={} dest={:#x} reply={:#x} options={:#x} bits={:#x} send_size={} rcv_size={}",
+                        args[4] >> 32, args[3] & 0xffff_ffff, args[3] >> 32, args[1],
+                        args[2] & 0xffff_ffff, args[2] >> 32, args[6] & 0xffff_ffff);
+                    for (i, chunk) in b.read_guest(args[0], send_size).chunks(16).enumerate() {
+                        eprintln!("  send+{:03x}: {}", i * 16,
+                            chunk.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "));
+                    }
                 }
             }
         }
@@ -206,6 +218,16 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // must land in guest IPA space) are added here as they are discovered.
             Stop::Syscall { num, args } if (num as i64) < 0 => {
                 let (ret, err, writes) = b.forward_and_diff(num, args);
+                if trace_log && num == MACH_MSG2 {
+                    eprintln!("[mach_msg2] host ret={ret:#x} err={err}");
+                    for w_ in &writes {
+                        let shown = &w_.bytes[..w_.bytes.len().min(256)];
+                        for (i, chunk) in shown.chunks(16).enumerate() {
+                            eprintln!("  reply@{:#x}+{:03x}: {}", w_.ipa, i * 16,
+                                chunk.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "));
+                        }
+                    }
+                }
                 w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append mach-trap: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
