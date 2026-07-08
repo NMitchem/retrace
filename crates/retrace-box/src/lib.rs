@@ -285,7 +285,7 @@ impl Box_ {
     // file-backed (SPTM). Returns (ttbr0 = PT_L2_IPA, l2_host, next_l3) so runtime promotion can
     // edit the live L2 and continue the same L3 allocation window.
     fn build_tables(backings: &mut Vec<Backing>, exec: &[(u64, u64, u64)]) -> (u64, *mut u8, u64) {
-        debug_assert!(exec.iter().all(|&(_, len, _)| len > 0), "exec ranges must be non-empty");
+        assert!(exec.iter().all(|&(_, len, _)| len > 0), "exec ranges must be non-empty");
         let (l2_host, l2_len) = alloc_pages(GRANULE);
         let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
         for (i, e) in l2.iter_mut().enumerate() { *e = ((i as u64) * BLK) | ATTR_DATA | DESC_BLOCK; }
