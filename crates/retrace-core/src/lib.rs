@@ -247,12 +247,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append mach_msg2 vm_map: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
-                    machmsg::Route::StubReclamation => {
-                        // Optional vm_reclaim feature: deterministic unavailable (libmalloc
-                        // takes its no-reclaim fallback). Retcode verified in the Task 7 walk.
+                    machmsg::Route::StubMigReply(retcode) => {
+                        // Optional/no-op kernel routine (no out-params): reply with a mig_reply_error
+                        // carrying `retcode` (chosen in route() — 4822 vm_reclaim => KERN_NOT_SUPPORTED
+                        // so libmalloc takes its no-reclaim fallback; 8000 task_restartable => success).
+                        // Retcode tolerance verified in the Task 7 walk.
                         let writes = vec![Region { ipa: m.data,
-                            bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port,
-                                                             machmsg::KERN_NOT_SUPPORTED) }];
+                            bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, retcode) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
                             err: false, writes: writes.clone() })
                             .map_err(|e| format!("append mach_msg2 stub: {e}"))?; count += 1;
@@ -407,9 +408,9 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                                     }
                                     b.apply_and_return(*ret, *err, writes);
                                 }
-                                machmsg::Route::StubReclamation => {
+                                machmsg::Route::StubMigReply(retcode) => {
                                     let reply = machmsg::encode_mig_error(m.msgh_id, m.reply_port,
-                                                                          machmsg::KERN_NOT_SUPPORTED);
+                                                                          retcode);
                                     if writes.len() != 1 || writes[0].bytes != reply {
                                         return Err(Divergence { landmark: idx, pc,
                                             detail: "mach_msg2 stub reply mismatch".into() });
