@@ -910,8 +910,12 @@ impl Box_ {
     /// Deterministic: identical call sequence => identical returned address on replay.
     pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
         if anywhere {
+            let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
+            let end = self.mmap_next + rounded;
+            assert!(end <= (1u64 << 36),
+                "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
             let a = self.mmap_next;
-            self.mmap_next += (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
+            self.mmap_next = end;
             a
         } else {
             // Defensive: if the bump cursor sits inside a FIXED reservation, jump it past the
