@@ -2,6 +2,14 @@
 
 **Design spec — 2026-07-06**
 
+> **Outcome (2026-07-07):** the loader (MMU-on W^X, PAC, real Mach-O + dyld) is built and merged on
+> `m2-loader`. The shared-cache piece proved harder than "let dyld map it" — the arm64e cache is
+> host-process-bound (per-process PAC keys + dirtied `__DATA`) — and was split into its own effort,
+> **M2-cache** (`2026-07-07-retrace-m2-cache-resign-design.md`), which re-signs the cache with the
+> guest's keys and is validated end-to-end. The original exit gate (a dynamically-linked binary
+> records/replays) is **deferred**: past the cache, real dyld hits the libSystem mach-IPC runtime
+> (`mach_msg2` RPCs + absent system daemons) — the next milestone.
+
 ## What this is
 
 M0 proved the box & trace spine; M1 proved a general memory-diff syscall recorder — both on

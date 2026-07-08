@@ -2,6 +2,15 @@
 
 **Design spec — 2026-07-07**
 
+> **Outcome (2026-07-07): BUILT AND VALIDATED.** The lazy per-page re-signing pager is implemented
+> (Tasks 1–5, all reviewed) and proven end-to-end: real dyld maps the re-signed cache, restarts into
+> the cache-resident dyld, and authenticates + executes thousands of guest-key re-signed arm64e
+> pointers with **zero FPAC faults**, running deep into libSystem init. Both facets of the
+> host-binding wall are closed. The `hello_dyn_e2e` gate is still `#[ignore]`d because a NEW wall
+> appears beyond the cache — libSystem/libmalloc init reserves memory via a `mach_msg2` RPC that must
+> be serviced against the guest (the libSystem mach-IPC runtime milestone). See
+> `.superpowers/sdd/task-m2c6-report.md` and `.superpowers/sdd/m2cache-runtime-depth-findings.md`.
+
 ## What this is
 
 The M2 dyld bring-up (Task 9b) got real `/usr/lib/dyld` booting inside the box and executing
