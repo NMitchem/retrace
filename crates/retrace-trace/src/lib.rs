@@ -101,6 +101,24 @@ mod tests {
         assert!(got.is_empty());
     }
     #[test]
+    fn rejects_prior_format_version() {
+        // A genuine prior-version trace (RT\x00\x02) with an otherwise well-formed, correctly
+        // CRC'd record: proves rejection is by MAGIC, not by CRC/framing.
+        let f = tempfile();
+        let prior_magic = b"RT\x00\x02";
+        let body = b"plausible record body bytes";
+        let crc = crc32(body);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(prior_magic);
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes.extend_from_slice(body);
+        std::fs::write(&f, &bytes).unwrap();
+        let (got, truncated) = Reader::open_checked(&f).unwrap();
+        assert!(truncated);
+        assert!(got.is_empty());
+    }
+    #[test]
     fn roundtrip() {
         let f = tempfile();
         let mut w = Writer::create(&f).unwrap();

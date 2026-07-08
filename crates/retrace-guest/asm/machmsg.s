@@ -31,7 +31,9 @@ _start:
     movz w9, #0x13, lsl #16     // +36 pad2:16=0 | disposition:8=19 (COPY_SEND) | type:8=0 (PORT)
     str  w9, [x21, #36]
     str  xzr, [x21, #40]        // +40 NDR (ignored by the box's decoder)
-    movz x9, #0x7, lsl #32      // address hint 0x700000000 (free, distinct from nano)
+    movz x9, #0x7, lsl #32      // address hint 0x700000000: ANYWHERE hint, box may honor or
+                                // relocate it; falls inside the 4-40 GiB nano band but this
+                                // standalone guest reserves no nano range, so it's free here
     str  x9, [x21, #48]         // +48 address
     movz x9, #0x8000
     str  x9, [x21, #56]         // +56 size = 0x8000
