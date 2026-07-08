@@ -1,0 +1,225 @@
+# mach_msg2 (trap -47) golden capture — M2-mach Task 2
+#
+# Captured from a REAL, live, bounded run of the currently-blocked dynamic guest:
+#
+#   cargo build -p retrace
+#   codesign -s - -f --entitlements retrace.entitlements target/aarch64-apple-darwin/debug/retrace
+#   HD=$(find target -name hello_dyn -path "*out*" | head -1)
+#   RETRACE_TRACE=1 perl -e 'alarm 60; exec @ARGV' -- \
+#     ./target/aarch64-apple-darwin/debug/retrace record-dyn "$HD" -o /tmp/m2mach-capture.bin 2>capture.log
+#
+# Host OS (`sw_vers`):
+#   ProductName:    macOS
+#   ProductVersion: 26.4.1
+#   BuildVersion:   25E253
+#
+# These are AUTHENTIC wire bytes: the guest's mach_msg2 send buffers (hexdumped from guest
+# memory at args[0] before the trap is forwarded to the host kernel) and the host kernel's
+# reply bytes (hexdumped from the memory-diff `writes` produced by forward_and_diff after the
+# trap returns). Nothing here is transcribed from documentation or round-tripped by hand.
+#
+# The run reaches 6 mach_msg2 calls (msgh_id 200, 206, 3418, 4811, 4822, 4811 again) and then
+# hits the known libmalloc wall this milestone is working to remove: "pointer range initial
+# reservation failed" surfaces later as a BRK (EC=0x3c ISS=0x1 FSC=0x1) in libmalloc/libsystem,
+# not shown here because it is not a mach_msg2 event — see capture.log tail for the abort.
+#
+# IMPORTANT ANNOTATION — msgh_id 4811 (_kernelrpc_mach_vm_map) reply framing:
+#   rcv_size for 4811 is reported as 52, but the diff `writes` region captured here spans a
+#   wider x0-window (100 bytes on the guest's reply/scratch buffer) because forward_and_diff
+#   snapshots a fixed IPA window around x0 rather than exactly rcv_size bytes. The REPLY PROPER
+#   is only the FIRST 52 BYTES of the reply@... hexdump below: a 44-byte MIG reply
+#   (mach_msg_header_t[24] + NDR[8] + retcode[4] + address-out[8] = 44) followed by an 8-byte
+#   mach_msg trailer (mach_msg_trailer_t, MACH_MSG_TRAILER_FORMAT_0, size=8) = 52 bytes total.
+#   Bytes beyond offset +0x34 (52) in the two 4811 reply dumps below are residual bytes from the
+#   guest's stack/prior request buffer content that happened to fall inside the diffed window —
+#   NOT part of the kernel's actual reply. The codec must only decode the first 52 bytes.
+#
+# Routine names (msgh_id -> name), from Mach kernel MIG subsystem numbering:
+#   200  = host_info
+#   206  = host_get_clock_service
+#   3418 = semaphore_create (task subsystem base 3400 + selector 18)
+#   4811 = _kernelrpc_mach_vm_map (mach_vm subsystem base 4800 + selector 11)
+#   4822 = mach_vm_deferred_reclamation_buffer_allocate (mach_vm subsystem base 4800 + selector 22)
+#
+# ============================================================================
+# Message 1/6 — msgh_id=200 host_info
+# ============================================================================
+[trap] num=-47 (0xffffffffffffffd1) pc=0x1804abc34 args=[0x1fbf70,0x200000003,0x2800001513,0x150300000d03,0xc800000000,0x150300000000]
+[mach_msg2] msgh_id=200 dest=0xd03 reply=0x1503 options=0x200000003 bits=0x1513 send_size=40 rcv_size=320
+  send+000: 13 15 00 00 28 00 00 00 03 0d 00 00 03 15 00 00
+  send+010: 00 00 00 00 c8 00 00 00 00 00 00 00 01 00 00 00
+  send+020: 05 00 00 00 08 00 00 00
+[mach_msg2] host ret=0x0 err=false
+  reply@0x1fbf70+000: 00 12 00 00 48 00 00 00 00 00 00 00 03 15 00 00
+  reply@0x1fbf70+010: 00 00 00 00 2c 01 00 00 00 00 00 00 01 00 00 00
+  reply@0x1fbf70+020: 00 00 00 00 08 00 00 00 50 00 00 00 50 00 00 00
+  reply@0x1fbf70+030: 40 00 00 00 1f 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+040: 00 00 00 00 4f 00 00 00 00 00 00 00 08 00 00 00
+  reply@0x1fbf70+050: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+060: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+070: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+080: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+090: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+0a0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+0b0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+0c0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+0d0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+0e0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbf70+0f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+# ============================================================================
+# Message 2/6 — msgh_id=206 host_get_clock_service
+# ============================================================================
+[trap] num=-47 (0xffffffffffffffd1) pc=0x1804abc34 args=[0x1fc140,0x200000003,0x2400001513,0x160300000d03,0xce00000000,0x160300000000]
+[mach_msg2] msgh_id=206 dest=0xd03 reply=0x1603 options=0x200000003 bits=0x1513 send_size=36 rcv_size=48
+  send+000: 13 15 00 00 24 00 00 00 03 0d 00 00 03 16 00 00
+  send+010: 00 00 00 00 ce 00 00 00 00 00 00 00 01 00 00 00
+  send+020: 00 00 00 00
+[mach_msg2] host ret=0x0 err=false
+  reply@0x1fc140+000: 00 12 00 80 28 00 00 00 00 00 00 00 03 16 00 00
+  reply@0x1fc140+010: 00 00 00 00 32 01 00 00 01 00 00 00 03 09 00 00
+  reply@0x1fc140+020: 00 00 00 00 00 00 11 00 00 00 00 00 08 00 00 00
+  reply@0x1fc140+030: f0 61 86 ee 01 00 00 00 03 0d 00 00 00 00 00 00
+  reply@0x1fc140+040: a0 c1 1f 00 00 00 00 00 68 ce 39 80 a1 8b 47 ca
+  reply@0x1fc140+050: f0 61 86 ee 01 00 00 00 a8 fe 1f 00 00 00 00 00
+  reply@0x1fc140+060: c0 c1 1f 00 00 00 00 00 f4 cc 39 80 a1 d5 25 9c
+  reply@0x1fc140+070: 48 54 04 ec 01 00 00 00 a8 fe 1f 00 00 00 00 00
+  reply@0x1fc140+080: 30 c2 1f 00 00 00 00 00 04 33 31 90 01 fc 2e fd
+  reply@0x1fc140+090: b0 15 5c e5 01 00 00 00 01 00 00 00 00 00 00 00
+  reply@0x1fc140+0a0: 10 00 00 00 00 00 00 00 c0 20 31 90 01 00 00 00
+  reply@0x1fc140+0b0: 48 22 31 90 01 00 00 00 a0 00 00 00 00 00 00 00
+  reply@0x1fc140+0c0: 06 00 00 00 00 00 00 00 18 21 31 90 01 00 00 00
+  reply@0x1fc140+0d0: c0 3b 31 90 01 00 00 00 5c 32 31 90 11 e3 18 e4
+  reply@0x1fc140+0e0: d0 53 04 ec 01 00 00 00 48 40 04 ec 01 00 00 00
+  reply@0x1fc140+0f0: 20 c3 1f 00 00 00 00 00 34 b7 15 80 41 70 40 a2
+
+# ============================================================================
+# Message 3/6 — msgh_id=3418 semaphore_create
+# ============================================================================
+[trap] num=-47 (0xffffffffffffffd1) pc=0x1804abc34 args=[0x1fc140,0x200000003,0x2800001513,0x160300000203,0xd5a00000000,0x160300000000]
+[mach_msg2] msgh_id=3418 dest=0x203 reply=0x1603 options=0x200000003 bits=0x1513 send_size=40 rcv_size=48
+  send+000: 13 15 00 00 28 00 00 00 03 02 00 00 03 16 00 00
+  send+010: 00 00 00 00 5a 0d 00 00 00 00 00 00 01 00 00 00
+  send+020: 00 00 00 00 00 00 00 00
+[mach_msg2] host ret=0x0 err=false
+  reply@0x1fc140+000: 00 12 00 80 28 00 00 00 00 00 00 00 03 16 00 00
+  reply@0x1fc140+010: 00 00 00 00 be 0d 00 00 01 00 00 00 03 19 00 00
+  reply@0x1fc140+020: 00 00 00 00 00 00 11 00 00 00 00 00 08 00 00 00
+  reply@0x1fc140+030: 18 59 30 ec 01 00 00 00 03 0d 00 00 00 00 00 00
+  reply@0x1fc140+040: a0 c1 1f 00 00 00 00 00 8c ce 39 80 f1 5c 5d 39
+  reply@0x1fc140+050: f0 61 86 ee 01 00 00 00 a8 fe 1f 00 00 00 00 00
+  reply@0x1fc140+060: c0 c1 1f 00 00 00 00 00 f4 cc 39 80 a1 d5 25 9c
+  reply@0x1fc140+070: 48 54 04 ec 01 00 00 00 a8 fe 1f 00 00 00 00 00
+  reply@0x1fc140+080: 30 c2 1f 00 00 00 00 00 04 33 31 90 01 fc 2e fd
+  reply@0x1fc140+090: b0 15 5c e5 01 00 00 00 01 00 00 00 00 00 00 00
+  reply@0x1fc140+0a0: 10 00 00 00 00 00 00 00 c0 20 31 90 01 00 00 00
+  reply@0x1fc140+0b0: 48 22 31 90 01 00 00 00 a0 00 00 00 00 00 00 00
+  reply@0x1fc140+0c0: 06 00 00 00 00 00 00 00 18 21 31 90 01 00 00 00
+  reply@0x1fc140+0d0: c0 3b 31 90 01 00 00 00 5c 32 31 90 11 e3 18 e4
+  reply@0x1fc140+0e0: d0 53 04 ec 01 00 00 00 48 40 04 ec 01 00 00 00
+  reply@0x1fc140+0f0: 20 c3 1f 00 00 00 00 00 34 b7 15 80 41 70 40 a2
+
+# ============================================================================
+# Message 4/6 — msgh_id=4811 _kernelrpc_mach_vm_map (1st call)
+#
+# See the header note above: the reply proper is ONLY the first 52 bytes
+# (offsets +000..+033) of the reply@... hexdump below — 44-byte MIG reply +
+# 8-byte mach_msg trailer. Everything from +034 onward is residual
+# request/stack content inside the diffed x0-window, NOT part of the reply.
+# ============================================================================
+[trap] num=-47 (0xffffffffffffffd1) pc=0x1804abc34 args=[0x1fbac8,0x200000003,0x6480001513,0x160300000203,0x12cb00000000,0x160300000001]
+[mach_msg2] msgh_id=4811 dest=0x203 reply=0x1603 options=0x200000003 bits=0x80001513 send_size=100 rcv_size=52
+  send+000: 13 15 00 80 64 00 00 00 03 02 00 00 03 16 00 00
+  send+010: 00 00 00 00 cb 12 00 00 01 00 00 00 00 00 00 00
+  send+020: 00 00 00 00 00 00 13 00 00 00 00 00 01 00 00 00
+  send+030: 00 00 00 00 00 00 00 00 00 00 4a 00 00 00 00 00
+  send+040: 00 00 00 00 00 00 00 00 01 00 00 01 00 00 00 00
+  send+050: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  send+060: 01 00 00 00
+[mach_msg2] host ret=0x0 err=false
+  reply@0x1fbac8+000: 00 12 00 00 2c 00 00 00 00 00 00 00 03 16 00 00
+  reply@0x1fbac8+010: 00 00 00 00 2f 13 00 00 00 00 00 00 01 00 00 00
+  reply@0x1fbac8+020: 00 00 00 00 00 40 67 09 01 00 00 00 00 00 00 00
+  reply@0x1fbac8+030: 08 00 00 00 00 00 00 00 00 00 4a 00 00 00 00 00
+  reply@0x1fbac8+040: 00 00 00 00 00 00 00 00 01 00 00 01 00 00 00 00
+  reply@0x1fbac8+050: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fbac8+060: 01 00 00 00 01 00 00 00 01 00 00 01 00 00 00 00
+  reply@0x1fbac8+070: 03 02 00 00 00 00 00 00 e8 bb 1f 00 00 00 00 00
+  reply@0x1fbac8+080: 00 00 4a 00 00 00 00 00 c0 bb 1f 00 00 00 00 00
+  reply@0x1fbac8+090: 1c ba 4a 80 51 45 4d a8 00 00 00 00 00 00 00 00
+  reply@0x1fbac8+0a0: 01 00 00 00 00 00 00 00 00 d0 2f ec 01 00 00 00
+  reply@0x1fbac8+0b0: 2f c0 ff ff 0f 00 00 00 00 50 86 e9 01 00 00 00
+  reply@0x1fbac8+0c0: a8 fe 1f 00 00 00 00 00 00 d0 2f ec 01 00 00 00
+  reply@0x1fbac8+0d0: 00 d0 2f ec 01 00 00 00 18 59 30 ec 01 00 00 00
+  reply@0x1fbac8+0e0: 00 00 28 00 00 00 00 00 e0 58 30 ec 01 00 00 00
+  reply@0x1fbac8+0f0: 00 00 4a 00 00 00 00 00 10 bc 1f 00 00 00 00 00
+
+# ============================================================================
+# Message 5/6 — msgh_id=4822 mach_vm_deferred_reclamation_buffer_allocate
+# ============================================================================
+[trap] num=-47 (0xffffffffffffffd1) pc=0x1804abc34 args=[0x1fb6a0,0x200000003,0x2800001513,0x160300000203,0x12d600000000,0x160300000000]
+[mach_msg2] msgh_id=4822 dest=0x203 reply=0x1603 options=0x200000003 bits=0x1513 send_size=40 rcv_size=60
+  send+000: 13 15 00 00 28 00 00 00 03 02 00 00 03 16 00 00
+  send+010: 00 00 00 00 d6 12 00 00 00 00 00 00 01 00 00 00
+  send+020: f8 03 00 00 f8 03 40 00
+[mach_msg2] host ret=0x0 err=false
+  reply@0x1fb6a0+000: 00 12 00 00 24 00 00 00 00 00 00 00 03 16 00 00
+  reply@0x1fb6a0+010: 00 00 00 00 3a 13 00 00 00 00 00 00 01 00 00 00
+  reply@0x1fb6a0+020: 06 40 00 20 00 00 00 00 08 00 00 00 00 00 00 00
+  reply@0x1fb6a0+030: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fb6a0+040: 00 f0 03 00 01 00 00 00 f8 03 00 00 00 00 00 00
+  reply@0x1fb6a0+050: f8 03 40 00 00 00 00 00 50 d1 2f ec 01 00 00 00
+  reply@0x1fb6a0+060: 40 b7 1f 00 00 00 00 00 08 ef 4b 80 21 45 44 2d
+  reply@0x1fb6a0+070: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fb6a0+080: 50 d1 2f ec 01 00 00 00 f8 03 00 00 00 00 00 00
+  reply@0x1fb6a0+090: 00 40 67 09 01 00 00 00 f8 03 40 00 00 00 00 00
+  reply@0x1fb6a0+0a0: 80 b7 1f 00 00 00 00 00 e4 46 2f 80 81 cd 22 29
+  reply@0x1fb6a0+0b0: 40 00 00 00 00 01 00 00 00 04 00 00 00 00 00 00
+  reply@0x1fb6a0+0c0: 05 00 00 00 00 00 00 00 0f 00 00 00 00 00 00 00
+  reply@0x1fb6a0+0d0: 1c 00 00 00 00 00 00 00 00 b8 1f 00 00 00 00 00
+  reply@0x1fb6a0+0e0: 10 bc 1f 00 00 00 00 00 3c ff 30 80 a1 4c 75 94
+  reply@0x1fb6a0+0f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+# ============================================================================
+# Message 6/6 — msgh_id=4811 _kernelrpc_mach_vm_map (2nd call)
+#
+# Same reply-framing note as Message 4/6 applies: only offsets +000..+033
+# (52 bytes: 44-byte MIG reply + 8-byte trailer) are the reply proper.
+# ============================================================================
+[trap] num=-47 (0xffffffffffffffd1) pc=0x1804abc34 args=[0x1fb638,0x200000003,0x6480001513,0x160300000203,0x12cb00000000,0x160300000001]
+[mach_msg2] msgh_id=4811 dest=0x203 reply=0x1603 options=0x200000003 bits=0x80001513 send_size=100 rcv_size=52
+  send+000: 13 15 00 80 64 00 00 00 03 02 00 00 03 16 00 00
+  send+010: 00 00 00 00 cb 12 00 00 01 00 00 00 00 00 00 00
+  send+020: 00 00 00 00 00 00 13 00 00 00 00 00 01 00 00 00
+  send+030: 00 00 00 00 04 00 00 00 00 00 00 00 06 00 00 00
+  send+040: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  send+050: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  send+060: 01 00 00 00
+[mach_msg2] host ret=0x0 err=false
+  reply@0x1fb638+000: 00 12 00 00 24 00 00 00 00 00 00 00 03 16 00 00
+  reply@0x1fb638+010: 00 00 00 00 2f 13 00 00 00 00 00 00 01 00 00 00
+  reply@0x1fb638+020: 03 00 00 00 00 00 00 00 08 00 00 00 01 00 00 00
+  reply@0x1fb638+030: 00 00 00 00 04 00 00 00 00 00 00 00 06 00 00 00
+  reply@0x1fb638+040: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fb638+050: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fb638+060: 01 00 00 00 e1 d5 7a 4c 00 00 00 00 00 00 00 00
+  reply@0x1fb638+070: 03 02 00 00 00 00 00 00 58 b7 1f 00 00 00 00 00
+  reply@0x1fb638+080: 00 00 00 00 06 00 00 00 30 b7 1f 00 00 00 00 00
+  reply@0x1fb638+090: 1c ba 4a 80 21 76 01 8c 00 00 00 00 00 00 00 00
+  reply@0x1fb638+0a0: 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fb638+0b0: a0 fe 1f 00 00 00 00 00 00 01 00 00 00 00 00 00
+  reply@0x1fb638+0c0: 00 40 67 09 01 00 00 00 02 00 00 00 00 00 00 00
+  reply@0x1fb638+0d0: 00 00 00 00 00 00 00 00 98 d3 2f ec 01 00 00 00
+  reply@0x1fb638+0e0: 00 00 00 00 04 00 00 00 00 00 00 00 00 00 00 00
+  reply@0x1fb638+0f0: 00 40 67 09 01 00 00 00 80 b7 1f 00 00 00 00 00
+
+# ============================================================================
+# End of pre-wall mach_msg2 traffic. The run then continues past a handful of
+# non-mach_msg2 traps (-12 mach_vm_deallocate, -15 mach_vm_protect, -89, etc.)
+# and hits the known libmalloc "pointer range initial reservation failed"
+# wall this milestone is working to clear, surfacing as:
+#
+#   RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x4404 elr=0x180322818
+#
+# This is the EXPECTED, correct outcome for this capture run.
+# ============================================================================
