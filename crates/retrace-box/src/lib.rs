@@ -15,11 +15,18 @@ pub const DYLD_BASE: u64 = 0x1_4000_0000;      // 5 GiB slide for dyld
 const DYN_STACK_TOP:  u64 = 0x0020_0000;       // 2 MiB (block 0, RW+non-exec by default, below PT_L3_BASE)
 const DYN_STACK_SIZE: u64 = 0x0004_0000;       // 256 KiB
 pub const PTR_WINDOW_CAP: usize = 64 * 1024;
-// Bump-allocation base for guest_mmap / mach_vm allocations: 16 GiB. Within the 36-bit (64 GiB)
-// IPA space and ABOVE both the loaded segments (~4-5 GiB) and the demand-paged shared-cache
-// window [SHARED_REGION_START, SHARED_REGION_END) below, so guest allocations never collide with
-// either.
-pub const MMAP_BASE: u64 = 0x4_0000_0000;
+// Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 36-bit (64 GiB)
+// IPA space and ABOVE the loaded segments (~4-5 GiB), the demand-paged shared-cache window
+// [SHARED_REGION_START, SHARED_REGION_END), AND libmalloc's FIXED 24-GiB nano "pointer range"
+// reservation [NANO_BAND_START, NANO_BAND_END). The last is critical: libmalloc reserves that
+// band FIXED and then commits nano sub-ranges at EXACT hint addresses inside it, validating that
+// each commit landed where it asked. If the bump allocator's IPAs fell inside the band, an early
+// dyld allocation would occupy a nano sub-range and libmalloc's hinted commit there would be
+// rejected (range_is_free=false) and relocated — leaving libmalloc's nano zone pointing at the
+// wrong page (wild-pointer abort). Basing bumps ABOVE the band keeps it pristine for libmalloc.
+pub const NANO_BAND_START: u64 = 0x4_0000_0000;
+pub const NANO_BAND_END:   u64 = 0xA_0000_0000; // 0x4_0000_0000 + 0x6_0000_0000 (24 GiB)
+pub const MMAP_BASE: u64 = NANO_BAND_END;
 const GRANULE: usize = 0x4000; // 16 KiB default granule
 // The dyld shared cache is mapped into every process (a nested VM submap) in this fixed VA window
 // (~6 GiB base + boot slide, up to ~11.6 GiB). dyld reads/executes it directly at these addresses,
@@ -192,7 +199,7 @@ pub struct Box_ {
     cache: Option<CacheMeta>,
 }
 
-pub enum Stop { Syscall { num: u64, args: [u64;7] }, Other { esr: u64 } }
+pub enum Stop { Syscall { num: u64, args: [u64;8] }, Other { esr: u64 } }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
     let len = (len + GRANULE - 1) & !(GRANULE - 1);
@@ -894,6 +901,35 @@ impl Box_ {
         ipa
     }
 
+    /// Service a PROT_NONE address-space RESERVATION (mach_vm_map with cur_protection == 0):
+    /// bookkeeping only — no host allocation, no stage-2 map. libmalloc's nano allocator reserves
+    /// a large "pointer range" (observed: a FIXED 24 GiB region) this way and commits sub-ranges
+    /// later with a real-protection mach_vm_map; eagerly backing the whole reservation would be
+    /// infeasible and serves no purpose. FIXED honors the requested base; ANYWHERE hands out a
+    /// fresh deterministic bump address (advancing `mmap_next` so nothing later collides).
+    /// Deterministic: identical call sequence => identical returned address on replay.
+    pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
+        if anywhere {
+            let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
+            let end = self.mmap_next + rounded;
+            assert!(end <= (1u64 << 36),
+                "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
+            let a = self.mmap_next;
+            self.mmap_next = end;
+            a
+        } else {
+            // Defensive: if the bump cursor sits inside a FIXED reservation, jump it past the
+            // reserved band so no later ANYWHERE bump can hand out an IPA the guest believes is
+            // its private reserved range. (With MMAP_BASE above the nano band this never fires for
+            // that band, but it keeps guest_vm_reserve sound for any FIXED reservation.)
+            let end = addr.saturating_add(size);
+            if self.mmap_next >= addr && self.mmap_next < end {
+                self.mmap_next = end;
+            }
+            addr
+        }
+    }
+
     /// Is `[ipa, ipa+len)` free of any tracked backing, clear of the shared-cache window, and within
     /// the 36-bit IPA space? (Used to decide whether an ANYWHERE map may honor its address hint.)
     fn range_is_free(&self, ipa: u64, len: u64) -> bool {
@@ -1049,7 +1085,7 @@ impl Box_ {
                         }
                     }
                     let num = self.vcpu.get_reg(reg::x(16)).unwrap();
-                    let mut args = [0u64;7];
+                    let mut args = [0u64;8];
                     for (i, a) in args.iter_mut().enumerate() { *a = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
                     return Stop::Syscall { num, args };
                 }
@@ -1156,10 +1192,10 @@ impl Box_ {
     /// window (capped) and translate it to a host address; forward the real syscall via the
     /// raw-svc shim; diff. Returns the full 64-bit x0, the BSD carry flag (`err`), and any
     /// kernel writes. On error (`err`) no writes are captured — a failed syscall wrote nothing.
-    pub fn forward_and_diff(&self, num: u64, args: [u64;7]) -> (u64, bool, Vec<Region>) {
+    pub fn forward_and_diff(&self, num: u64, args: [u64;8]) -> (u64, bool, Vec<Region>) {
         let mut windows: Vec<(u64, usize, Vec<u8>)> = Vec::new(); // (guest_ipa, len, pre-image)
-        let mut hargs = [0i64; 7];
-        for i in 0..7 {
+        let mut hargs = [0i64; 8];
+        for i in 0..8 {
             match self.host_span(args[i]) {
                 Some((hp, avail)) => {
                     let win = avail.min(PTR_WINDOW_CAP);
@@ -1184,10 +1220,10 @@ impl Box_ {
             };
         }
         // Forward via a raw `svc #0x80` shim (not `libc::syscall`, which narrows the return
-        // toward 32 bits and hides the BSD carry flag). `hargs` is [i64;7] (x0..x6); build the
-        // shim's [u64;8] explicitly, padding x7 = 0.
+        // toward 32 bits and hides the BSD carry flag). `hargs` is [i64;8] (x0..x7); no more x7
+        // padding.
         let mut sa = [0u64; 8];
-        for i in 0..7 { sa[i] = hargs[i] as u64; }
+        for i in 0..8 { sa[i] = hargs[i] as u64; }
         let (ret, err) = unsafe { host_svc(num, sa) };
         // A failed syscall (carry set) wrote nothing to the guest's buffers, so skip the
         // post-diff write capture entirely.
