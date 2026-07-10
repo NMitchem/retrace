@@ -278,10 +278,11 @@ low-risk.
 > is now **M1** (see `2026-07-05-retrace-m1-memory-diff-recorder-design.md`), and the dyld/
 > DSC/MMU/PAC loader is **M2**. Everything after shifts by one (positioning → M3, signals →
 > M4, debugger → M5, interpreter → M6). The two are orthogonal risks and were bundled here
-> only for brevity; the dependency ordering is otherwise unchanged. M2 itself later grew two
+> only for brevity; the dependency ordering is otherwise unchanged. M2 itself later grew three
 > loader-revealed sub-milestones — **M2-cache** (shared-cache re-signing, landed 2026-07-07,
-> `2026-07-07-retrace-m2-cache-resign-design.md`) and **M2-mach** (mach-IPC kernel-RPC
-> servicing, `2026-07-07-retrace-m2-mach-design.md`) — without renumbering M3–M6.
+> `2026-07-07-retrace-m2-cache-resign-design.md`), **M2-mach** (mach-IPC kernel-RPC
+> servicing, `2026-07-07-retrace-m2-mach-design.md`), and **M2-va47** (47-bit guest VA,
+> `2026-07-10-retrace-m2-va47-design.md`) — without renumbering M3–M6.
 
 - **M0 — Box & trace spine.** VMM loop; load a trivial static Mach-O; EL1 `SVC→HVC`
   trampoline; 1:1 mapping; first snapshot; checksummed trace format. *Exit:* record + replay
