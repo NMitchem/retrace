@@ -66,7 +66,7 @@ const TSD_REGION_SIZE: u64 = 0x0001_0000; // 4 granules; tp = TSD_IPA sits 0x800
 const SYNTH_TSC_START:  u64 = 0x0000_0001_0000_0000;
 const SYNTH_TSC_STRIDE: u64 = 0x2400; // ~ one 24 MHz-ish tick step per read (value is arbitrary)
 
-pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (TTBR0 target); one 16 KiB page = 2048 entries
+pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (one level below the L1 TTBR0 target); one 16 KiB page = 2048 entries
 pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under the 47-bit VA); one
                                               // 16 KiB page, only entry[0] valid (-> L2). Free
                                               // block-0 page between L2 (0x8000) and the stack (0x1C000).
