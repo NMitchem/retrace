@@ -37,6 +37,22 @@ pub fn ec_of(esr_el2: u64) -> Ec {
     }
 }
 
+/// If `insn` is an AArch64 pointer-authentication AUT* instruction whose authenticated result
+/// lands in a destination register — the `AUTIA/AUTIB/AUTDA/AUTDB` register-modifier variants and
+/// their `AUTIZA/AUTIZB/AUTDZA/AUTDZB` zero-modifier forms — return that register number (Rd).
+/// Returns None otherwise. Used to emulate a B-family auth that FEAT_FPAC-faulted by stripping Rd
+/// to canonical (see `Box_::try_emulate_fpac_auth`). Combined auth-and-{branch,load} forms
+/// (`braab`/`ldrab`/…) have no Rd to fix and are intentionally NOT matched (they fail loud).
+pub fn decode_aut_rd(insn: u32) -> Option<u32> {
+    // "Data-processing (1 source)" PAC encodings: [31:10] fixed per op, [9:5] Rn, [4:0] Rd.
+    match insn & 0xFFFF_FC00 {
+        0xDAC1_1000 | 0xDAC1_1400 | 0xDAC1_1800 | 0xDAC1_1C00   // AUTIA/AUTIB/AUTDA/AUTDB Xd,Xn
+        | 0xDAC1_3000 | 0xDAC1_3400 | 0xDAC1_3800 | 0xDAC1_3C00 // AUTIZA/AUTIZB/AUTDZA/AUTDZB Xd
+            => Some(insn & 0x1F),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +71,19 @@ mod tests {
         assert_eq!((SYS_READ, SYS_WRITE, SYS_OPEN, SYS_CLOSE, SYS_EXIT), (3,4,5,6,1));
         assert_eq!((SYS_FSTAT, SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT), (189,199,197,73,74));
         assert_eq!((SYS_SHARED_REGION_CHECK_NP, SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP), (294, 536));
+    }
+
+    #[test]
+    fn decodes_aut_destination_register() {
+        // AUTDB x16, x17 — the observed objc fault at addClassTableEntry+0x70.
+        assert_eq!(decode_aut_rd(0xDAC1_1E30), Some(16));
+        // Each register variant returns Rd (bits [4:0]).
+        assert_eq!(decode_aut_rd(0xDAC1_1000 | (1 << 5)), Some(0));        // AUTIA x0, x1
+        assert_eq!(decode_aut_rd(0xDAC1_1400 | (2 << 5) | 3), Some(3));    // AUTIB x3, x2
+        assert_eq!(decode_aut_rd(0xDAC1_1800 | (10 << 5) | 9), Some(9));   // AUTDA x9, x10
+        assert_eq!(decode_aut_rd(0xDAC1_3800 | 30), Some(30));            // AUTDZA x30 (Z form)
+        // Not an AUT-with-Rd: NOP, and PACIA (a SIGN, base 0xDAC1_0000) must return None.
+        assert_eq!(decode_aut_rd(0xD503_201F), None);                     // NOP
+        assert_eq!(decode_aut_rd(0xDAC1_0000 | (1 << 5)), None);          // PACIA x0, x1 (sign)
     }
 }

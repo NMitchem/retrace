@@ -205,3 +205,53 @@ a distinct, larger subsystem from widening the VA, and the honest next milestone
 
 **Deferred:** an arm64e guest path, 4 KiB-granule VA layouts, and the swarm extension to the dyld
 guest. See `docs/superpowers/specs/2026-07-10-retrace-m2-va47-design.md`.
+
+## Status: M2-bfam — objc B-family PAC ✅
+
+**M2-bfam** clears the wall M2-va47's landing left behind: past the 47-bit-VA isa strip,
+`addClassTableEntry+0x70` executes `autdb x16, x17` — a hardware **authenticate** (not a strip) of
+the class `data()` pointer with the **DATA-B key**, which FPAC-faults (EC=0x1C) because M2-cache's
+re-signer is **A-family only** (the dyld v5 slide-info format has room for only one IA/DA key bit,
+so B-family-signed cache pointers were never re-signed at all). M2-bfam adds a new arm to the
+shared run loop, `Box_::try_emulate_fpac_auth`: on an FPAC fault it decodes the faulting `aut*`
+instruction at `ELR_EL1` (`retrace_arch::decode_aut_rd`, covering the register and zero-modifier
+`AUTI*/AUTD*` forms), strips its destination register to the canonical 47-bit VA, and skips the
+instruction — emulating a successful authenticate. Like the existing timebase/undef-MRS arms, this
+lives *below* the record/replay layer (`run()` is shared), so it fires identically on both sides
+and nothing enters the trace — determinism is automatic.
+
+This is **proven** two ways. First, a dedicated micro-test, `bfamstrip` (`crates/retrace/tests/
+bfamstrip_e2e.rs`): a guest DATA-B-signs a pointer, corrupts a PAC bit so `autdb` FEAT_FPAC-faults,
+and the test asserts the box strips it back to the original — genuinely exercising the fault path
+end-to-end, record and replay. `decode_aut_rd` also carries its own unit test covering every
+register/zero-modifier encoding. Second, in the live dynamic run the arm fires **exactly 3 times**,
+every one an `autdb x16, x17` inside libobjc (`addClassTableEntry`, `dataSegmentsContain`,
+`realizeClassWithoutSwift`), each recovering a well-formed pointer landing cleanly inside libobjc's
+`__AUTH_CONST` segment — mathematically-correct strips, not garbage — carrying `hello_dyn` from
+~208 to ~216 traps **past** the original `addClassTableEntry+0x70` `autdb` wall.
+
+**Honestly blocked — by a new, distinct wall, not the one this milestone targeted.** The
+end-to-end gate (`hello_dyn_e2e`) stays `#[ignore]`d. Past the B-family auth, objc self-aborts
+(exit 134) inside `realizeClassWithoutSwift → validateAlreadyRealizedClass`: "realized class ...
+has corrupt data pointer: malloc_size(...)=0". objc is **dynamically realizing** a class that
+already lives in the shared cache, and its `data()` pointer correctly strips to a **preoptimized,
+cache-resident** `class_rw_t` in libobjc `__AUTH_CONST` — legitimately not a `malloc`-heap
+allocation, so `malloc_size` returns 0 and objc fatals. A real process never takes this path: it
+uses objc's **shared-cache preoptimization** fast path, where cache classes are pre-realized *in
+the cache* and `realizeClassWithoutSwift` is never called on them. That fast path is disabled in
+the guest — the re-signed, demand-paged cache no longer presents as a trusted objc-optimized cache
+(the very re-signing M2-cache does to defeat FPAC invalidates the pointers objc's preoptimization
+vouches for) — so libobjc falls back to dynamic realization, which is fundamentally incompatible
+with preoptimized cache-resident metadata. Clearing this needs the guest to present a valid,
+trusted objc-optimized shared cache (`objc_opt` header, selector/class/protocol hash tables,
+cache-trust) — a distinct, larger subsystem entangled with the M2-cache re-signer design itself,
+not another `aut` to strip. That's the honest next milestone, not B-family PAC. Full anatomy in
+`.superpowers/sdd/task-m2bfam-2-report.md`.
+
+**What runs today:** everything from M2/M2-cache/M2-mach/M2-va47, plus the strip-on-FPAC B-family
+auth emulation — `just m1` reports **58 passed, 0 failed, 1 ignored**, clippy clean.
+
+**Deferred:** combined auth-and-use B-family forms (`braab`/`blraab`, `ldraa`/`ldrab` — no
+destination register to strip, the auth is implicit in a branch or load), an arm64e guest, and the
+swarm extension to the dyld guest. See
+`docs/superpowers/specs/2026-07-10-retrace-m2-bfam-design.md`.
