@@ -67,12 +67,15 @@ const SYNTH_TSC_START:  u64 = 0x0000_0001_0000_0000;
 const SYNTH_TSC_STRIDE: u64 = 0x2400; // ~ one 24 MHz-ish tick step per read (value is arbitrary)
 
 pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (TTBR0 target); one 16 KiB page = 2048 entries
+pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under the 47-bit VA); one
+                                              // 16 KiB page, only entry[0] valid (-> L2). Free
+                                              // block-0 page between L2 (0x8000) and the stack (0x1C000).
 // L3 tables live at 8 MiB..32 MiB inside block 0 (above the stack IPA at 0x1C000, below the
 // 32 MiB block boundary), so they're identity-covered by block 0's own L3 (block 0 is already
 // L3-promoted for the trampoline). ~1500 tables' worth of room; bump by GRANULE per promoted block.
 pub const PT_L3_BASE: u64 = 0x0080_0000;
 const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
-const TCR_EL1_V:  u64 = 0x1_0080_B51C;        // T0SZ=28, TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit (spike-proven)
+const TCR_EL1_V:  u64 = 0x1_0080_B511;        // T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // base 0x30d00800 + M(1) + C(4) + I(0x1000), plus PAC enable bits:
 // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
@@ -289,7 +292,7 @@ impl Box_ {
     // (ipa,len,attr) gets page-granularity pages with `attr` via `promote_and_set` (its covering
     // block(s) are promoted to an L3 table, identity-filled with ATTR_DATA, then exec pages
     // overwritten). Pushes the L2 + every L3 as backings; the caller stage-2-maps them. NEVER
-    // file-backed (SPTM). Returns (ttbr0 = PT_L2_IPA, l2_host, next_l3) so runtime promotion can
+    // file-backed (SPTM). Returns (ttbr0 = PT_L1_IPA, l2_host, next_l3) so runtime promotion can
     // edit the live L2 and continue the same L3 allocation window.
     fn build_tables(backings: &mut Vec<Backing>, exec: &[(u64, u64, u64)]) -> (u64, *mut u8, u64) {
         assert!(exec.iter().all(|&(_, len, _)| len > 0), "exec ranges must be non-empty");
@@ -297,6 +300,16 @@ impl Box_ {
         let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
         for (i, e) in l2.iter_mut().enumerate() { *e = ((i as u64) * BLK) | ATTR_DATA | DESC_BLOCK; }
         backings.push(Backing { host: l2_host, ipa: PT_L2_IPA, len: l2_len });
+
+        // 47-bit VA (T0SZ=17) is a 3-level walk: TTBR0 -> L1 -> L2 -> L3. Every mapped IPA is
+        // < 2^36 (one L1 entry spans 64 GiB), so only L1[0] is valid; it points at the L2 above.
+        // The wider VA moves the hardware PAC signature to bits [54:47], above objc's 47-bit
+        // ISA_MASK, so a plain-arm64 isa strip is lossless. alloc_pages returns zeroed anon pages,
+        // so L1[1..] are already invalid (a VA >= 2^36 faults).
+        let (l1_host, l1_len) = alloc_pages(GRANULE);
+        let l1 = unsafe { std::slice::from_raw_parts_mut(l1_host as *mut u64, 2048) };
+        l1[0] = PT_L2_IPA | DESC_TABLE;
+        backings.push(Backing { host: l1_host, ipa: PT_L1_IPA, len: l1_len });
 
         let mut next_l3 = PT_L3_BASE;
         for &(va, len, attr) in exec {
@@ -310,7 +323,7 @@ impl Box_ {
             };
             backings.extend(created);
         }
-        (PT_L2_IPA, l2_host, next_l3)
+        (PT_L1_IPA, l2_host, next_l3)
     }
 
     /// Runtime exec-mmap promotion: install RO+exec (`ATTR_CODE`) stage-1 pages for [ipa, ipa+len)
@@ -1118,7 +1131,7 @@ impl Box_ {
         // double-map PT_L2_IPA -> HV_BAD_ARGUMENT and break every M1 replay test).
         vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
-        vcpu.set_sys(sysreg::TTBR0_EL1, PT_L2_IPA).unwrap();
+        vcpu.set_sys(sysreg::TTBR0_EL1, PT_L1_IPA).unwrap();
         vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap(); // match load: EL0/EL1 FP/SIMD enabled
         vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();   // match load: thread pointer (harmless for M1)
         vcpu.set_sys(sysreg::TPIDR_EL0,   TSD_IPA).unwrap();
