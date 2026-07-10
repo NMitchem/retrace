@@ -99,6 +99,7 @@ pub const MACHMSG: &str = concat!(env!("OUT_DIR"), "/machmsg");
 pub const HELLO_DYN: &str = concat!(env!("OUT_DIR"), "/hello_dyn");
 pub const DYLD_PATH: &str = "/usr/lib/dyld";
 pub const STRIP47: &str = concat!(env!("OUT_DIR"), "/strip47");
+pub const BFAMSTRIP: &str = concat!(env!("OUT_DIR"), "/bfamstrip");
 
 #[cfg(test)]
 mod tests {
