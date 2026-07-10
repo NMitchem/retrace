@@ -170,3 +170,38 @@ macOS uses a 47-bit user VA (PAC bits cleanly above the mask) while retrace uses
 Clearing it needs a 47-bit guest VA (`T0SZ=17`, a 3-level 16 KiB page-table walk instead of
 today's 2-level) or an arm64e guest — core MMU/PAC work, distinct from mach-IPC servicing, and
 the honest next milestone. See `docs/superpowers/specs/2026-07-07-retrace-m2-mach-design.md`.
+
+## Status: M2-va47 — 47-bit Guest VA ✅
+
+**M2-va47** clears the wall M2-mach's landing left behind: it widens the guest's stage-1
+translation from a 36-bit to a **47-bit VA**. Concretely, it inserts one new **L1 table**
+(`TTBR0 → L1 → L2 → L3`, a 3-level 16 KiB-granule walk instead of the old 2-level one) and sets
+`TCR_EL1.T0SZ=17`. IPA/stage-2 stays 36-bit — this is purely a stage-1 (guest-VA) change, applied
+universally across all guests in one config. This moves the hardware PAC signature into VA bits
+[54:47], entirely above objc's compile-time 47-bit `ISA_MASK`, so libobjc's plain-arm64 isa strip
+(`addClassTableEntry`) is now **lossless** instead of leaving live signature bits behind. Like
+every other page table in the box, the new L1 rides in the snapshot, so determinism is preserved:
+`restore` re-points `TTBR0` at it without rebuilding.
+
+This is **proven** two ways. First, a dedicated guest+test, `strip47` (`crates/retrace/tests/
+strip47_e2e.rs`): it `pacda`-signs a fixed pointer and objc-style-ANDs it with `ISA_MASK`, and the
+test asserts the strip is lossless — genuinely **RED** under the old 36-bit VA (PAC bits `0xB0,
+0x5E` survived the mask) and **GREEN** under the widened 47-bit VA. Second, the full suite stays
+green under the new config: `just m1` reports **56 passed, 0 failed, 1 ignored**, clippy clean.
+
+**Honestly blocked — by a new, distinct wall, not the one this milestone targeted.** The
+end-to-end gate (`hello_dyn_e2e`) stays `#[ignore]`d. The VA widening does clear the isa-strip
+wall — the old poisoned-isa data abort is gone, and the run advances past the isa load in
+`addClassTableEntry` — but objc doesn't stop there: 8 instructions later, `addClassTableEntry+0x70`
+executes `autdb x16, x17`, **authenticating** (not stripping) the class `data()`/`bits` pointer
+with the **DATA-B key**, address-diversified and blended with discriminator `0xc93a`. This
+hardware-faults FPAC (EC=0x1c), because retrace's M2-cache re-signer is **A-family only**: the
+dyld v5 slide-info format cannot express B-family keys at all (`cache.rs::decode5` carries a
+single IA/DA key bit), and the in-guest signing stub implements only `pacia`/`pacda`/`autia`/
+`autda` — no `pacib`/`pacdb`/`autib`/`autdb`. So this DB-signed cache pointer keeps its host-key
+signature and fails to authenticate under the guest's DB key. Clearing it needs **B-family
+(DB/IB) PAC re-signing** — extending the re-signer and signing stub, likely objc-structure-aware —
+a distinct, larger subsystem from widening the VA, and the honest next milestone.
+
+**Deferred:** an arm64e guest path, 4 KiB-granule VA layouts, and the swarm extension to the dyld
+guest. See `docs/superpowers/specs/2026-07-10-retrace-m2-va47-design.md`.
