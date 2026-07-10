@@ -143,4 +143,14 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang strip47");
     assert!(status.success(), "strip47 guest build failed");
+
+    // bfamstrip: pacdb-sign + corrupt + autdb -> FEAT_FPAC fault the box emulates by stripping.
+    // The M2-bfam strip-on-FPAC property test.
+    let src = format!("{}/asm/bfamstrip.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/bfamstrip");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang bfamstrip");
+    assert!(status.success(), "bfamstrip guest build failed");
 }

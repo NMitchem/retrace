@@ -418,6 +418,31 @@ impl Box_ {
         true
     }
 
+    /// Emulate a B-family pointer authentication that FEAT_FPAC-faulted (ESR EC=0x1C). objc
+    /// authenticates arm64e shared-cache pointers with the DATA-B/INSTR-B keys, but those cache
+    /// pointers carry their host-process signature while the guest uses fixed guest keys, so
+    /// `autdb`/`autib` fault; retrace's A-family cache re-signer can't reach them (v5 slide-info
+    /// encodes only IA/DA). We trust the cache and emulate a *successful* authenticate: strip the
+    /// aut*'s destination register to its canonical VA (the 47-bit strip proven by strip47) and
+    /// skip the instruction. A pure function of the faulting register (deterministic) and below
+    /// the record/replay layer, so both sides strip identically — nothing enters the trace.
+    /// Returns false (→ Stop::Other) for any non-AUT-with-Rd instruction, so a combined
+    /// auth+branch/load form fails loud rather than being silently mis-emulated.
+    fn try_emulate_fpac_auth(&mut self) -> bool {
+        let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        if self.host_span(elr).is_none() { return false; }
+        let insn = u32::from_le_bytes(self.read_guest(elr, 4).try_into().unwrap());
+        let Some(rd) = retrace_arch::decode_aut_rd(insn) else { return false; };
+        if rd != 31 {                                    // x31 = XZR: nothing to strip/write
+            let signed = self.vcpu.get_reg(reg::x(rd)).unwrap();
+            self.vcpu.set_reg(reg::x(rd), signed & 0x0000_7FFF_FFFF_FFFF).unwrap();
+        }
+        let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+        self.vcpu.set_reg(reg::PC, elr + 4).unwrap();
+        self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
+        true
+    }
+
     pub fn load(loaded: &Loaded) -> Box_ {
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
@@ -1092,6 +1117,11 @@ impl Box_ {
                         // `MRS` HVF won't expose: emulate + skip it (like the timebase), staying in
                         // lockstep without surfacing to the record/replay loop.
                         Ec::Other(0) if self.try_emulate_undef_mrs() => continue,
+                        // A B-family pointer-auth (autdb/autib) that FEAT_FPAC-faulted: objc auths
+                        // arm64e cache pointers the A-family re-signer can't reach. Emulate the
+                        // authenticate by stripping the aut* destination + skip, like the MRS
+                        // emulations above — below the record/replay loop, so both stay in lockstep.
+                        Ec::Other(0x1C) if self.try_emulate_fpac_auth() => continue,
                         _ => {
                             self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             return Stop::Other { esr: esr1 };
