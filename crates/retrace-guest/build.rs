@@ -132,4 +132,15 @@ fn main() {
         .args(["-arch","arm64","-o",&bin,&src])
         .status().expect("clang hello_dyn");
     assert!(status.success(), "hello_dyn guest build failed");
+
+    // strip47: signs a pointer with pacda then strips it with objc's 47-bit ISA_MASK; the result
+    // equals the original ONLY if the PAC signature lands above bit 46 — i.e. only under a 47-bit
+    // guest VA. The M2-va47 property test.
+    let src = format!("{}/asm/strip47.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/strip47");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang strip47");
+    assert!(status.success(), "strip47 guest build failed");
 }
