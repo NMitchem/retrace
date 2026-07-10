@@ -19,20 +19,32 @@ mod util;
 //     the old poisoned-isa data abort is GONE and execution advances past the isa load. Proven by
 //     the strip47 micro-test (an objc-style 47-bit strip of a pacda-signed pointer: RED under the
 //     old 36-bit VA, GREEN under 47-bit) and confirmed empirically in the live run.
-// NEW WALL (a DISTINCT subsystem — objc B-family PAC re-signing, not VA size): 8 instructions past
-// the now-successful isa load, addClassTableEntry+0x70 executes `autdb x16, x17`, authenticating
-// objc's class data()/bits pointer (`class_data_bits_t` at `cls+0x20`, a compiler
-// `__ptrauth`-qualified field) with the DATA-B key (APDBKey), address-diversified and blended with
-// discriminator 0xc93a. This hardware-faults FPAC (EC=0x1c) because retrace's M2-cache re-signer is
-// A-family only: the dyld v5 slide-info format cannot express B-family keys at all
-// (`cache.rs::decode5` carries a single IA/DA `key_is_data` bit), and the in-guest signing stub
-// implements only `pacia`/`pacda`/`autia`/`autda` — no `pacib`/`pacdb`/`autib`/`autdb`. So this
-// DB-signed cache pointer keeps its host-key signature and fails to authenticate under the guest's
-// DB key. Clearing it needs B-family (DB/IB) PAC re-signing — extending the re-signer and the
-// in-guest signing stub, likely objc-structure-aware — a distinct, larger subsystem from widening
-// the VA. Full anatomy in task-m2va47-2-report.md. Ignored (not deleted) so it stays the living M2
-// gate, re-runnable with `--ignored` as the approach evolves.
-#[ignore = "blocked BEYOND the isa-strip wall (fixed in M2-va47's 47-bit guest VA) on objc B-family PAC: addClassTableEntry+0x70 autdb-authenticates the class data() pointer with the DATA-B key (disc 0xc93a) -> FPAC (EC=0x1c), because retrace's M2-cache re-signer is A-family only (v5 slide-info can't express B-family keys; the signing stub has no pacib/pacdb/autib/autdb); needs B-family (DB/IB) PAC re-signing — see task-m2va47-2-report.md"]
+// The B-family autdb wall FELL in M2-bfam t1 (strip-on-FPAC arm): addClassTableEntry+0x70's
+// `autdb x16, x17` (DATA-B key, disc 0xc93a) FPAC-faults (EC=0x1c) because the A-family-only cache
+// re-signer can't reach DB-signed cache pointers; `Box_::try_emulate_fpac_auth` now emulates a
+// successful authenticate by stripping Rd to its 47-bit canonical VA and skipping the insn (a pure,
+// deterministic, below-the-trace op — nothing enters the trace). This carries the run PAST
+// addClassTableEntry (verified: only three autdb strips occur, all recovering well-formed libobjc
+// __AUTH_CONST pointers — not garbage; the strip is mathematically correct).
+//
+// NEW WALL (a DISTINCT subsystem — objc SHARED-CACHE PREOPTIMIZATION, not PAC): the run now reaches
+// _objc_init -> map_images -> map_images_nolock -> realizeClassWithoutSwift and aborts (objc _objc_fatal
+// "realized class 0x1ec2f1618 has corrupt data pointer: malloc_size(0x1ed950f80) = 0"). This is
+// objc's validateAlreadyRealizedClass (realizeClassWithoutSwift+1188): objc is DYNAMICALLY realizing
+// a class that lives in the shared cache (0x1ec2f1618 is in libobjc __DATA_DIRTY) whose data() bits
+// correctly authenticate/strip to a PREOPTIMIZED, cache-resident class_rw_t in libobjc __AUTH_CONST
+// (0x1ED950140..0x1ED950FC8) — legitimately NOT a malloc heap allocation, so malloc_size == 0 and
+// objc fatals. A real process never hits this: it takes the objc shared-cache-preoptimization fast
+// path (classes are pre-realized in the cache; realizeClassWithoutSwift is never called on them).
+// That fast path is disabled in the guest — the re-signed + demand-paged cache no longer presents as
+// a valid/trusted objc-optimized cache (the M2-cache re-signer rewrites the very pointers objc's
+// preoptimization vouches for), so libobjc falls back to dynamic realization, which is incompatible
+// with the preoptimized cache-resident metadata. Clearing this is NOT another aut to strip or syscall
+// to forward: it needs the guest cache to present valid objc preoptimization (objc_opt header +
+// selector/class/protocol tables + cache-trust), a distinct, larger subsystem than B-family strip.
+// Full anatomy in .superpowers/sdd/task-m2bfam-2-report.md. Ignored (not deleted) so it stays the
+// living M2 gate, re-runnable with `--ignored` as the approach evolves.
+#[ignore = "blocked BEYOND the B-family autdb wall (emulated in M2-bfam t1's strip-on-FPAC arm, which carries past addClassTableEntry+0x70) on objc SHARED-CACHE PREOPTIMIZATION: _objc_init->map_images->realizeClassWithoutSwift dynamically realizes cache-resident classes and aborts in validateAlreadyRealizedClass ('realized class 0x1ec2f1618 has corrupt data pointer: malloc_size(0x1ed950f80)=0') because data() correctly points to a preoptimized class_rw_t in libobjc __AUTH_CONST (not a malloc heap alloc). A real process skips this via objc preoptimization, which is disabled in-guest since the re-signed/demand-paged cache no longer presents as a trusted objc-optimized cache; needs valid guest-side objc preoptimization (objc_opt + hash tables + cache-trust) — see task-m2bfam-2-report.md"]
 #[test]
 fn hello_dyn_records_and_replays() {
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
