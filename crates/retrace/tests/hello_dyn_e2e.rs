@@ -1,8 +1,8 @@
 // The headline M2 gate: a normal dynamically-linked C program records and replays with zero
 // divergence, dyld having mapped the shared cache itself.
 mod util;
-// BLOCKED (tracked). Two prior walls have FALLEN and the run now advances deep into libSystem's
-// image initializers:
+// BLOCKED (tracked). Three prior walls have FALLEN and the run now advances deep into libSystem's
+// image initializers and into objc class realization itself:
 //   * The shared-cache wall fell in M2-cache (re-signing demand-pager): dyld maps the re-signed
 //     cache and executes thousands of guest-key-re-signed arm64e pointers with zero FPAC faults.
 //   * The mach_msg2 wall fell across M2-mach: libmalloc's mandatory "pointer range" reservation
@@ -13,19 +13,26 @@ mod util;
 //     nano-band soundness bug (bump base collided with libmalloc's FIXED 24-GiB reservation) was
 //     also fixed (MMAP_BASE moved above [0x4_0000_0000, 0xA_0000_0000)). The run advances from
 //     ~177 traps to ~208.
-// NEW WALL (a DISTINCT subsystem — guest MMU VA-size vs the arm64e cache's PAC layout): objc's
-// class realization faults in _map_images_nolock -> addClassTableEntry, dereferencing a mis-stripped
-// class/isa pointer. hello_dyn is a plain arm64 (NOT arm64e) process, so libobjc STRIPS the arm64e
-// shared-cache isa pointers with a compile-time ISA_MASK (47-bit) instead of authenticating them.
-// retrace's guest runs with TCR_EL1.T0SZ=28 (a 36-bit VA), so the guest's PACDA places the isa
-// signature in bits [54:36]; the ISA_MASK strip (bits [46:0]) leaves the signature bits in [46:36]
-// -> a poisoned pointer -> data abort. retrace's re-signing is itself correct (in-guest sign+AUTDA
-// round-trips exactly); the mismatch is purely that real macOS uses a 47-bit user VA (PAC above bit
-// 47, cleanly masked away) while retrace uses 36-bit. Clearing it needs a 47-bit guest VA (T0SZ=17,
-// a 3-level 16 KiB page-table walk instead of today's 2-level) or an arm64e guest — core MMU work,
-// distinct from mach_msg2 servicing. Full anatomy in task-m2mach-7-report.md. Ignored (not deleted)
-// so it stays the living M2 gate, re-runnable with `--ignored` as the approach evolves.
-#[ignore = "blocked BEYOND mach_msg2 on a guest-VA/arm64e-PAC boundary: arm64 objc ISA_MASK-strips cache isas but retrace's 36-bit guest VA (T0SZ=28) puts the PAC below bit 47 -> poisoned deref in objc class realization; needs a 47-bit guest VA (T0SZ=17) or arm64e guest — see task-m2mach-7-report.md"]
+//   * The isa-STRIP wall fell in M2-va47: widening the guest VA to 47 bits (TCR_EL1.T0SZ=17, an
+//     added L1 table) moves the hardware PAC signature into bits [54:47], entirely above objc's
+//     47-bit ISA_MASK, so libobjc's plain-arm64 isa strip in addClassTableEntry is now lossless —
+//     the old poisoned-isa data abort is GONE and execution advances past the isa load. Proven by
+//     the strip47 micro-test (an objc-style 47-bit strip of a pacda-signed pointer: RED under the
+//     old 36-bit VA, GREEN under 47-bit) and confirmed empirically in the live run.
+// NEW WALL (a DISTINCT subsystem — objc B-family PAC re-signing, not VA size): 8 instructions past
+// the now-successful isa load, addClassTableEntry+0x70 executes `autdb x16, x17`, authenticating
+// objc's class data()/bits pointer (`class_data_bits_t` at `cls+0x20`, a compiler
+// `__ptrauth`-qualified field) with the DATA-B key (APDBKey), address-diversified and blended with
+// discriminator 0xc93a. This hardware-faults FPAC (EC=0x1c) because retrace's M2-cache re-signer is
+// A-family only: the dyld v5 slide-info format cannot express B-family keys at all
+// (`cache.rs::decode5` carries a single IA/DA `key_is_data` bit), and the in-guest signing stub
+// implements only `pacia`/`pacda`/`autia`/`autda` — no `pacib`/`pacdb`/`autib`/`autdb`. So this
+// DB-signed cache pointer keeps its host-key signature and fails to authenticate under the guest's
+// DB key. Clearing it needs B-family (DB/IB) PAC re-signing — extending the re-signer and the
+// in-guest signing stub, likely objc-structure-aware — a distinct, larger subsystem from widening
+// the VA. Full anatomy in task-m2va47-2-report.md. Ignored (not deleted) so it stays the living M2
+// gate, re-runnable with `--ignored` as the approach evolves.
+#[ignore = "blocked BEYOND the isa-strip wall (fixed in M2-va47's 47-bit guest VA) on objc B-family PAC: addClassTableEntry+0x70 autdb-authenticates the class data() pointer with the DATA-B key (disc 0xc93a) -> FPAC (EC=0x1c), because retrace's M2-cache re-signer is A-family only (v5 slide-info can't express B-family keys; the signing stub has no pacib/pacdb/autib/autdb); needs B-family (DB/IB) PAC re-signing — see task-m2va47-2-report.md"]
 #[test]
 fn hello_dyn_records_and_replays() {
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
