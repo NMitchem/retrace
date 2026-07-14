@@ -5,6 +5,18 @@ M2-va47 — the final loader-completion step that clears the boundary documented
 `retrace-objc-bfamily-pac-resign-wall` and `.superpowers/sdd/task-m2va47-2-report.md`, and (if the
 walk reaches `main`) un-ignores the headline M2 gate `hello_dyn_e2e`.
 
+> **⚠ Closeout correction (M2-tbi, 2026-07-14).** The strip-on-FPAC arm this spec designs is **sound
+> and unaffected**. But the *next wall* the M2-bfam close-out reported past it — objc's
+> `validateAlreadyRealizedClass` fatal, blamed on "objc shared-cache **preoptimization** / a
+> preoptimized cache-resident `class_rw_t` / cache-trust" (see the gating-spike report
+> `.superpowers/sdd/task-m2bfam-2-report.md` §2–§4) — was a **misdiagnosis**. The verified root cause
+> is a one-line guest-MMU bug: the guest `TCR_EL1` left **TBI off**, so a re-signed data-pointer PAC
+> occupied **bit 63** and collided with objc's `FAST_IS_RW_POINTER` realized-flag (the fatal class is
+> `NSObject`; its `data()` points to `_OBJC_CLASS_RO_$_NSObject`, a `class_ro_t`, not a `class_rw_t`).
+> The fix is TCR **TBI0+TBID0**. No objc-opt / cache-trust subsystem is needed. See
+> `docs/superpowers/specs/2026-07-14-retrace-m2-tbi-design.md` for the full root cause, evidence, and
+> fix. This spec is preserved as-is (history); only this annotation is added.
+
 ## What this is
 
 Past the re-signed shared cache (M2-cache), the mach-IPC servicing (M2-mach), and the 47-bit guest
