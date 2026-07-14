@@ -75,7 +75,12 @@ pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under th
 // L3-promoted for the trampoline). ~1500 tables' worth of room; bump by GRANULE per promoted block.
 pub const PT_L3_BASE: u64 = 0x0080_0000;
 const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
-const TCR_EL1_V:  u64 = 0x1_0080_B511;        // T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit
+// arm64e data-pointer PAC placement: TBI0(bit37)+TBID0(bit51) match Apple's user TCR so a signed
+// DATA pointer's PAC lands in [54:47] with the top byte (incl. bit 63) preserved = 0. Without TBI
+// the 47-bit-VA PAC field spans [63:56]∪[54:47]; a re-signed class_data_bits pointer then sets
+// bit 63, which objc reads as FAST_IS_RW_POINTER (isRealized) → spurious already-realized →
+// validateAlreadyRealizedClass fatal. See docs/.../2026-07-14-retrace-m2-tbi-design.md.
+const TCR_EL1_V:  u64 = 0x8_0021_0080_B511;    // +TBI0+TBID0. T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // base 0x30d00800 + M(1) + C(4) + I(0x1000), plus PAC enable bits:
 // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
