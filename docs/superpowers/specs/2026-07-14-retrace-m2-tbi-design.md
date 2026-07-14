@@ -70,11 +70,11 @@ byte (including bit 63) is preserved from the original canonical pointer = 0. `T
 posture). Result: a re-signed data pointer's bit 63 stays 0, `has_rw_pointer()` correctly reads
 `NSObject` as unrealized, objc realizes it normally, and the `validateAlreadyRealizedClass` fatal
 disappears. This is a **load-bearing MMU invariant** in the same class as W^X / `T0SZ` — the value
-is a single constant (`TCR_EL1_V`) consumed by all three CPU-init sites (`load`, `load_dynamic`, and
-the swarm path).
+is a single constant (`TCR_EL1_V`) consumed by all three CPU-init sites: record's `load` and
+`load_dynamic`, and replay's `restore`.
 
-**Determinism:** `TCR_EL1` is set in the shared `load` / `load_dynamic` path (below the trace),
-identical on record and replay — same posture as every other CPU-init sysreg. Nothing enters the
+**Determinism:** the same constant is read by every CPU-init constructor — record's `load` /
+`load_dynamic` and replay's `restore` — so both sides configure TBI identically; nothing enters the
 trace.
 
 ## Verified facts (spike, 2026-07-14)
@@ -151,7 +151,8 @@ bit-63 flag read that precedes it).
 ## Components
 
 - `crates/retrace-box/src/lib.rs` — the `TCR_EL1_V` constant + rationale comment. (Consumed
-  unchanged at all three CPU-init sites — no per-site edit.)
+  unchanged at all three CPU-init sites — record's `load`/`load_dynamic` and replay's `restore` —
+  no per-site edit.)
 - `crates/retrace/tests/hello_dyn_e2e.rs` — rewrite the `#[ignore]` reason to the mmap demand-commit
   boundary.
 - `README.md` — correct the M2-bfam Status "next wall" paragraph; add an M2-tbi Status section.
