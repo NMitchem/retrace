@@ -300,8 +300,8 @@ guest value `0x964a8001ed950f80` has **bit 63 set** (top byte `0x96`). So objc r
 `NSObject` as already-realized, skips realization, and validates its `data()` (the `class_ro_t`,
 `malloc_size` = 0) → fatal. Bit 63 is polluted because the guest `TCR_EL1` leaves **TBI off**: under
 the 47-bit VA the re-signed data-pointer PAC field spans bits [63:56] ∪ [54:47] — **including bit
-63** — so the M2-cache re-signer's A-family auth stored in `class_data_bits` lands its PAC on objc's
-realized flag. On real hardware that same word has bit 63 clear. This slipped past every prior wall
+63** — so, most likely, the M2-cache re-signer's A-family auth stored in `class_data_bits` lands its
+PAC on objc's realized flag. On real hardware that same word has bit 63 clear. This slipped past every prior wall
 because the box signs/authenticates with its own keys (internally symmetric); the break surfaces
 only when objc reads the **raw** bits and treats bit 63 as a semantic flag — a guest-vs-host ABI
 mismatch, not a PAC or objc-opt gap.
@@ -312,9 +312,10 @@ pointers top-byte-ignore, so their PAC lands in [54:47] and the top byte (incl. 
 from the canonical pointer = 0; `TBID0` exempts **instruction** pointers from TBI, keeping their PAC
 full-strength (Apple's TBID posture). A re-signed data pointer's bit 63 now stays 0,
 `has_rw_pointer()` reads `NSObject` as unrealized, objc realizes it normally, and the
-`validateAlreadyRealizedClass` fatal is **gone**. `TCR_EL1` is set in the shared `load`/`load_dynamic`
-path (below the trace), identical on record and replay — a load-bearing MMU invariant in the same
-class as W^X / `T0SZ`; nothing enters the trace. The M2-bfam strip-on-FPAC arm is unaffected (it still
+`validateAlreadyRealizedClass` fatal is **gone**. The same constant is read by every CPU-init
+constructor — record's `load`/`load_dynamic` and replay's `restore` — so both sides configure TBI
+identically; nothing enters the trace. This is a load-bearing MMU invariant in the same class as
+W^X / `T0SZ`. The M2-bfam strip-on-FPAC arm is unaffected (it still
 strips the DB-key `autdb` at `data()`; the fix corrects the separate bit-63 flag read that precedes it).
 
 **Honestly blocked — at the new mmap demand-commit wall.** The end-to-end gate (`hello_dyn_e2e`)
