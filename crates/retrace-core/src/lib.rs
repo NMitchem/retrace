@@ -200,7 +200,16 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 let exec = prot & PROT_EXEC != 0;
                 if exec { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
                 let req = if b.is_mapped(addr_ptr) { b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
-                let ipa = b.guest_vm_map(req, size, anywhere, exec);
+                // cur_protection == 0 => a PROT_NONE address-space reservation (bookkeeping only,
+                // demand-committed page-by-page on first touch by commit_reserved_page); anything
+                // else is an eagerly-backed map. Mirrors the MIG 4811 split below (guest_vm_reserve
+                // vs guest_vm_map) so a reservation arriving via the trap route genuinely reserves
+                // and is never eager-backed (fatal at 24 GiB). MACH_VM_ALLOCATE always carries RW.
+                let ipa = if prot == 0 {
+                    b.guest_vm_reserve(req, size, anywhere)
+                } else {
+                    b.guest_vm_map(req, size, anywhere, exec)
+                };
                 let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
@@ -308,6 +317,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // real bring-up failure — decode the ESR class + faulting IPA so it names itself.
             Stop::Other { esr } => {
                 if b.page_in_cache(b.fault_ipa()) { continue; }
+                if b.commit_reserved_page(b.fault_ipa()) { continue; }
                 if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
                 return Err(b.describe_stop(esr));
             }
@@ -464,7 +474,14 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                             let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                             let exec = prot & PROT_EXEC != 0;
                             let req = if b.is_mapped(addr_ptr) { b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
-                            let ipa = b.guest_vm_map(req, size, anywhere, exec);
+                            // Same reservation/commit split as record (cur_protection == 0 =>
+                            // reserve, else eagerly back); must reproduce the identical returned IPA
+                            // for the byte-equality check below.
+                            let ipa = if prot == 0 {
+                                b.guest_vm_reserve(req, size, anywhere)
+                            } else {
+                                b.guest_vm_map(req, size, anywhere, exec)
+                            };
                             let recorded_ipa = writes.first()
                                 .map(|w| u64::from_le_bytes(w.bytes[..8].try_into().unwrap())).unwrap_or(ipa);
                             if ipa != recorded_ipa {
@@ -529,6 +546,7 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
             Stop::Other { esr } => {
                 // Cache-window fault: page it in (regenerated identically to record) and re-run.
                 if b.page_in_cache(b.fault_ipa()) { continue; }
+                if b.commit_reserved_page(b.fault_ipa()) { continue; }
                 return Err(Divergence { landmark: idx, pc: b.pc(), detail: b.describe_stop(esr) });
             }
         }

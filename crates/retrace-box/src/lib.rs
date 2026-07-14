@@ -179,6 +179,12 @@ pub struct Box_ {
     #[allow(dead_code)] // never read; held only so Drop runs hv_vm_destroy after vcpu's
     vm: Vm,
     backings: Vec<Backing>,
+    // PROT_NONE address-space reservations as (start, len), recorded by guest_vm_reserve and
+    // demand-committed page-by-page on first touch by commit_reserved_page (the moral twin of the
+    // cache demand-pager). Reset to empty in restore() alongside `mmap_next` so replay's address
+    // space matches record. Plain Vec (its Drop only frees its own buffer), declared after
+    // `backings` so the load-bearing vcpu-before-vm drop order is unaffected.
+    reservations: Vec<(u64, u64)>,
     // Next fresh IPA for guest_mmap. Plain u64 (no Drop), declared after `backings` so the
     // load-bearing vcpu-before-vm drop order is unaffected.
     mmap_next: u64,
@@ -488,7 +494,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -637,6 +643,39 @@ impl Box_ {
         };
         self.cache = Some(cache);
         handled
+    }
+
+    /// Demand-commit one page inside a tracked PROT_NONE reservation on first touch — the moral
+    /// twin of [`page_in_cache`](Self::page_in_cache), minus the file read and re-sign. On a
+    /// stage-2 translation fault, if the faulting page base lies inside a reservation recorded by
+    /// [`guest_vm_reserve`](Self::guest_vm_reserve) and is not already backed, back exactly that one
+    /// page with a fresh zeroed anon page (`MemFlags::RWX`; stage-1 `ATTR_DATA` governs — a data
+    /// page, W^X preserved) and return `true`. A fault outside every reservation (a genuine wild
+    /// pointer) returns `false` and stays fatal: the committer must never materialize untracked
+    /// memory. No TLBI — a fresh IPA the guest never translated (same soundness as the cache pager).
+    ///
+    /// Deterministic and trace-free: record and replay re-execute the guest's own stores, fault at
+    /// the same IPAs in the same order, and commit identical all-zero pages, so nothing about a
+    /// committed page enters the trace (same posture as the cache pager, timebase MRS, FPAC strip).
+    pub fn commit_reserved_page(&mut self, ipa: u64) -> bool {
+        let page_base = ipa & !(GRANULE as u64 - 1);
+        // Strict gate: only pages inside a tracked reservation are demand-committable. Everything
+        // else stays fatal (the dispatch surfaces it via describe_stop) — no wild materialization.
+        if !self.reservations.iter().any(|&(start, len)| page_base >= start && page_base < start + len) {
+            return false;
+        }
+        // Already backed (host_span hit): don't double-map. Returning false here is the refault
+        // guard — unlike page_in_cache, which re-runs already-mapped cache pages and thus needs an
+        // 8-strike anti-spin counter, the committer cannot spin: a re-fault on an already-committed
+        // data page is an unfixable bug (stale-TLB / permission) that goes straight to the fatal
+        // describe_stop path, so it fails loud rather than livelocking.
+        if self.host_span(page_base).is_some() {
+            return false;
+        }
+        let (host, rlen) = alloc_pages(GRANULE); // zero-filled
+        self.vm.map(host, page_base, rlen, MemFlags::RWX).expect("hv_vm_map (commit reserved page)");
+        self.backings.push(Backing { host, ipa: page_base, len: rlen });
+        true
     }
 
     /// The faulting guest-physical address (FAR/IPA) of the most recent non-syscall VM exit
@@ -861,7 +900,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta) }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta) }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -952,8 +991,9 @@ impl Box_ {
     /// fresh deterministic bump address (advancing `mmap_next` so nothing later collides).
     /// Deterministic: identical call sequence => identical returned address on replay.
     pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
-        if anywhere {
-            let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
+        // Page-granular extent: commit_reserved_page backs whole pages, so track whole pages.
+        let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
+        let base = if anywhere {
             let end = self.mmap_next + rounded;
             assert!(end <= (1u64 << 36),
                 "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
@@ -970,7 +1010,11 @@ impl Box_ {
                 self.mmap_next = end;
             }
             addr
-        }
+        };
+        // Record the extent so commit_reserved_page can demand-commit its pages on first touch.
+        // Deterministic: the same call sequence records the same (base, rounded) on record & replay.
+        self.reservations.push((base, rounded));
+        base
     }
 
     /// Is `[ipa, ipa+len)` free of any tracked backing, clear of the shared-cache window, and within
@@ -1196,7 +1240,9 @@ impl Box_ {
         let next_l3 = backings.iter()
             .filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL)
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
-        Box_ { vm, vcpu, backings, mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
+        // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
+        // address sequence matches record's from a clean slate.
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
