@@ -27,24 +27,36 @@ mod util;
 // addClassTableEntry (verified: only three autdb strips occur, all recovering well-formed libobjc
 // __AUTH_CONST pointers — not garbage; the strip is mathematically correct).
 //
-// NEW WALL (a DISTINCT subsystem — objc SHARED-CACHE PREOPTIMIZATION, not PAC): the run now reaches
-// _objc_init -> map_images -> map_images_nolock -> realizeClassWithoutSwift and aborts (objc _objc_fatal
-// "realized class 0x1ec2f1618 has corrupt data pointer: malloc_size(0x1ed950f80) = 0"). This is
-// objc's validateAlreadyRealizedClass (realizeClassWithoutSwift+1188): objc is DYNAMICALLY realizing
-// a class that lives in the shared cache (0x1ec2f1618 is in libobjc __DATA_DIRTY) whose data() bits
-// correctly authenticate/strip to a PREOPTIMIZED, cache-resident class_rw_t in libobjc __AUTH_CONST
-// (0x1ED950140..0x1ED950FC8) — legitimately NOT a malloc heap allocation, so malloc_size == 0 and
-// objc fatals. A real process never hits this: it takes the objc shared-cache-preoptimization fast
-// path (classes are pre-realized in the cache; realizeClassWithoutSwift is never called on them).
-// That fast path is disabled in the guest — the re-signed + demand-paged cache no longer presents as
-// a valid/trusted objc-optimized cache (the M2-cache re-signer rewrites the very pointers objc's
-// preoptimization vouches for), so libobjc falls back to dynamic realization, which is incompatible
-// with the preoptimized cache-resident metadata. Clearing this is NOT another aut to strip or syscall
-// to forward: it needs the guest cache to present valid objc preoptimization (objc_opt header +
-// selector/class/protocol tables + cache-trust), a distinct, larger subsystem than B-family strip.
-// Full anatomy in .superpowers/sdd/task-m2bfam-2-report.md. Ignored (not deleted) so it stays the
-// living M2 gate, re-runnable with `--ignored` as the approach evolves.
-#[ignore = "blocked BEYOND the B-family autdb wall (emulated in M2-bfam t1's strip-on-FPAC arm, which carries past addClassTableEntry+0x70) on objc SHARED-CACHE PREOPTIMIZATION: _objc_init->map_images->realizeClassWithoutSwift dynamically realizes cache-resident classes and aborts in validateAlreadyRealizedClass ('realized class 0x1ec2f1618 has corrupt data pointer: malloc_size(0x1ed950f80)=0') because data() correctly points to a preoptimized class_rw_t in libobjc __AUTH_CONST (not a malloc heap alloc). A real process skips this via objc preoptimization, which is disabled in-guest since the re-signed/demand-paged cache no longer presents as a trusted objc-optimized cache; needs valid guest-side objc preoptimization (objc_opt + hash tables + cache-trust) — see task-m2bfam-2-report.md"]
+// CORRECTED (M2-tbi, 2026-07-14): what the M2-bfam close-out documented here as a DISTINCT
+// "objc SHARED-CACHE PREOPTIMIZATION" wall was a MISDIAGNOSIS. objc did abort (exit 134) in
+// _objc_init -> map_images -> realizeClassWithoutSwift -> validateAlreadyRealizedClass
+// ("realized class 0x1ec2f1618 has corrupt data pointer: malloc_size(0x1ed950f80)=0"), but the root
+// cause was a one-line guest-MMU bug, not an objc-opt / cache-trust gap. The fatal class is NSObject;
+// its data() pointer 0x1ed950f80 symbolicates to _OBJC_CLASS_RO_$_NSObject (a class_ro_t, NOT a
+// preoptimized class_rw_t). objc's has_rw_pointer()/isRealized() reads bit 63 (FAST_IS_RW_POINTER)
+// of the RAW class_data_bits::bits word; the guest value 0x964a8001ed950f80 had bit 63 SET, so objc
+// read unrealized NSObject as already-realized and validated its class_ro_t (malloc_size 0) -> fatal.
+// (Confirmed independently: the host runs hello_dyn fine with OBJC_DISABLE_PREOPTIMIZATION=YES, so
+// "preopt disabled -> this fatal" is disproven; and validateAlreadyRealizedClass has NO cache-trust
+// guard — it is an unconditional malloc_size check.) Bit 63 was polluted because the guest TCR left
+// TBI OFF: under a 47-bit VA the re-signed data-pointer PAC field spans [63:56]∪[54:47], landing on
+// objc's realized flag. M2-tbi enables TBI0+TBID0 in the guest TCR (Apple's arm64e user posture),
+// placing data-pointer PACs in [54:47] with the top byte (incl. bit 63) preserved = 0 —
+// has_rw_pointer() now reads NSObject as unrealized, objc realizes it normally, and the
+// validateAlreadyRealizedClass fatal is GONE. See docs/superpowers/specs/2026-07-14-retrace-m2-tbi-design.md.
+//
+// NEW WALL (M2-tbi's honest boundary — mmap DEMAND-COMMIT, a memory-management gap, not objc): with
+// classes realizing correctly, objc heap-allocates each class_rw_t (objc::zalloc -> calloc ->
+// libmalloc -> mmap) and first-touches the allocation, which faults with a level-3 translation fault
+// (data abort EC=0x24, FSC=0x7) on an UNMAPPED page in the mmap region (MMAP_BASE = 0xA_0000_0000)
+// that libmalloc obtained via an anonymous mmap but retrace reserved without backing/committing.
+// (Observed at far=0xa0010e744 = MMAP_BASE+0x10e744 on one run; the exact offset is NOT invariant —
+// it shifts with argv layout, e.g. the -o path length. The invariant is the first-touch fault on an
+// unmapped page in [MMAP_BASE, …).) Clearing it needs retrace to back first-touched mmap pages with
+// anon memory and, on record, capture the zero-fill as writes so replay reproduces it — the next
+// milestone, materially smaller than the objc-opt subsystem the misdiagnosis feared. Ignored (not
+// deleted) so it stays the living M2 gate, re-runnable with `--ignored` as the approach evolves.
+#[ignore = "blocked at the mmap DEMAND-COMMIT wall (M2-tbi's honest boundary). The prior objc validateAlreadyRealizedClass abort ('realized class 0x1ec2f1618 has corrupt data pointer: malloc_size(0x1ed950f80)=0') was a MISDIAGNOSIS — not objc shared-cache preoptimization but a bit-63/FAST_IS_RW_POINTER collision: the guest TCR left TBI off, so the re-signed data-pointer PAC spanned [63:56] u [54:47] and set bit 63, which objc reads as its class-realized flag (NSObject's data() points to _OBJC_CLASS_RO_$_NSObject, a class_ro_t with malloc_size 0). M2-tbi's TBI0+TBID0 fix clears it — objc now realizes classes normally, then blocks on a level-3 translation fault (data abort EC=0x24 FSC=0x7) on a first-touch UNMAPPED page in the mmap region (MMAP_BASE=0xA_0000_0000; observed far=0xa0010e744, offset varies with argv layout) that libmalloc obtained via anon mmap (calloc->libmalloc->mmap for objc's class_rw_t) but retrace reserved without backing. Needs mmap demand-commit + record-side zero-fill capture — see docs/superpowers/specs/2026-07-14-retrace-m2-tbi-design.md"]
 #[test]
 fn hello_dyn_records_and_replays() {
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
