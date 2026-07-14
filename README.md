@@ -230,23 +230,35 @@ every one an `autdb x16, x17` inside libobjc (`addClassTableEntry`, `dataSegment
 `__AUTH_CONST` segment — mathematically-correct strips, not garbage — carrying `hello_dyn` from
 ~208 to ~216 traps **past** the original `addClassTableEntry+0x70` `autdb` wall.
 
-**Honestly blocked — by a new, distinct wall, not the one this milestone targeted.** The
-end-to-end gate (`hello_dyn_e2e`) stays `#[ignore]`d. Past the B-family auth, objc self-aborts
-(exit 134) inside `realizeClassWithoutSwift → validateAlreadyRealizedClass`: "realized class ...
-has corrupt data pointer: malloc_size(...)=0". objc is **dynamically realizing** a class that
-already lives in the shared cache, and its `data()` pointer correctly strips to a **preoptimized,
-cache-resident** `class_rw_t` in libobjc `__AUTH_CONST` — legitimately not a `malloc`-heap
-allocation, so `malloc_size` returns 0 and objc fatals. A real process never takes this path: it
-uses objc's **shared-cache preoptimization** fast path, where cache classes are pre-realized *in
-the cache* and `realizeClassWithoutSwift` is never called on them. That fast path is disabled in
-the guest — the re-signed, demand-paged cache no longer presents as a trusted objc-optimized cache
-(the very re-signing M2-cache does to defeat FPAC invalidates the pointers objc's preoptimization
-vouches for) — so libobjc falls back to dynamic realization, which is fundamentally incompatible
-with preoptimized cache-resident metadata. Clearing this needs the guest to present a valid,
-trusted objc-optimized shared cache (`objc_opt` header, selector/class/protocol hash tables,
-cache-trust) — a distinct, larger subsystem entangled with the M2-cache re-signer design itself,
-not another `aut` to strip. That's the honest next milestone, not B-family PAC. Full anatomy in
-`.superpowers/sdd/task-m2bfam-2-report.md`.
+**Honestly blocked — by a new, distinct wall, not the one this milestone targeted.**
+**⚠ SUPERSEDED / CORRECTED (M2-tbi, 2026-07-14):** the diagnosis in the paragraph below was **wrong**.
+The wall past the B-family auth was **not** objc shared-cache preoptimization / cache-trust; it was a
+one-line guest-MMU bug — a bit-63 / `FAST_IS_RW_POINTER` PAC collision because the guest `TCR_EL1`
+left **TBI off**. It is fixed in M2-tbi. The paragraph is kept below as milestone history; see
+**"Status: M2-tbi — arm64e data-pointer PAC (TCR TBI)"** for the verified root cause and fix.
+
+> The end-to-end gate (`hello_dyn_e2e`) stays `#[ignore]`d. Past the B-family auth, objc self-aborts
+> (exit 134) inside `realizeClassWithoutSwift → validateAlreadyRealizedClass`: "realized class ...
+> has corrupt data pointer: malloc_size(...)=0". objc is **dynamically realizing** a class that
+> already lives in the shared cache, and its `data()` pointer correctly strips to a **preoptimized,
+> cache-resident** `class_rw_t` in libobjc `__AUTH_CONST` — legitimately not a `malloc`-heap
+> allocation, so `malloc_size` returns 0 and objc fatals. A real process never takes this path: it
+> uses objc's **shared-cache preoptimization** fast path, where cache classes are pre-realized *in
+> the cache* and `realizeClassWithoutSwift` is never called on them. That fast path is disabled in
+> the guest — the re-signed, demand-paged cache no longer presents as a trusted objc-optimized cache
+> (the very re-signing M2-cache does to defeat FPAC invalidates the pointers objc's preoptimization
+> vouches for) — so libobjc falls back to dynamic realization, which is fundamentally incompatible
+> with preoptimized cache-resident metadata. Clearing this needs the guest to present a valid,
+> trusted objc-optimized shared cache (`objc_opt` header, selector/class/protocol hash tables,
+> cache-trust) — a distinct, larger subsystem entangled with the M2-cache re-signer design itself,
+> not another `aut` to strip. That's the honest next milestone, not B-family PAC. Full anatomy in
+> `.superpowers/sdd/task-m2bfam-2-report.md`.
+>
+> *(Correction: the `data()` value was **not** a cache-resident `class_rw_t` — it symbolicates to
+> `_OBJC_CLASS_RO_$_NSObject`, a read-only `class_ro_t`. objc only reached `validateAlreadyRealizedClass`
+> because it misread unrealized `NSObject` as already-realized: `has_rw_pointer()` tests bit 63 of the
+> raw `class_data_bits::bits` word, and the guest value `0x964a8001ed950f80` had bit 63 set by the
+> re-signed data-pointer PAC (TBI off). No objc-opt subsystem was ever needed.)*
 
 **What runs today:** everything from M2/M2-cache/M2-mach/M2-va47, plus the strip-on-FPAC B-family
 auth emulation — `just m1` reports **58 passed, 0 failed, 1 ignored**, clippy clean.
@@ -255,3 +267,72 @@ auth emulation — `just m1` reports **58 passed, 0 failed, 1 ignored**, clippy 
 destination register to strip, the auth is implicit in a branch or load), an arm64e guest, and the
 swarm extension to the dyld guest. See
 `docs/superpowers/specs/2026-07-10-retrace-m2-bfam-design.md`.
+
+## Status: M2-tbi — arm64e data-pointer PAC (TCR TBI) ✅
+
+**M2-tbi is a correction, not a feature.** The wall M2-bfam's close-out documented as "objc
+shared-cache preoptimization / cache-trust" (see the ⚠ note above) was a **misdiagnosis**. Past the
+B-family strip, objc self-aborts (exit 134) in `realizeClassWithoutSwift → validateAlreadyRealizedClass`
+("realized class `0x1ec2f1618` has corrupt data pointer: malloc_size(`0x1ed950f80`)=0"). M2-bfam read
+this as objc dynamically realizing a *preoptimized, cache-resident `class_rw_t`* and concluded the
+guest needed a trusted objc-optimized cache. **That was wrong.** The verified root cause is a
+one-line guest-MMU bug.
+
+**The evidence that disproves the old narrative:**
+
+- The fatal class `0x1ec2f1618` is **`NSObject`**, and its `data()` pointer `0x1ed950f80`
+  symbolicates (guest coords, libobjc `__TEXT` @ `0x18008C000`) to **`_OBJC_CLASS_RO_$_NSObject` — a
+  `class_ro_t`, not a `class_rw_t`.** A correctly-realized class never points `data()` at its own
+  read-only `class_ro_t`; this only happens if objc took the already-realized branch on a class that
+  is actually **unrealized**.
+- `validateAlreadyRealizedClass` (objc4-951.7, `objc-runtime-new.mm:2942`) is an **unconditional**
+  `malloc_size(rw) >= sizeof(class_rw_t)` check — there is **no** `inSharedCache` / cache-range /
+  trust guard to satisfy, and no cache-resident `class_rw_t` in this ABI (`RW_REALIZED`/`setData` is
+  set at 3 `calloc`-backed objc4 sites, 0 in dyld). The whole "present a trusted preoptimized cache"
+  premise had nothing to satisfy.
+- The host runs `hello_dyn` **fine** with `OBJC_DISABLE_PREOPTIMIZATION=YES` — preopt fully disabled
+  is not this fatal. So "guest preopt disabled → this fatal" is disproven directly.
+
+**The real mechanism (a bit-63 PAC collision).** objc's `has_rw_pointer()`/`isRealized()`
+(`objc-runtime-new.h`) reads **bit 63** (`FAST_IS_RW_POINTER = 0x8000000000000000`) of the **raw**
+`class_data_bits_t::bits` word in guest memory — a plain `bits & FAST_IS_RW_POINTER`. The observed
+guest value `0x964a8001ed950f80` has **bit 63 set** (top byte `0x96`). So objc reads unrealized
+`NSObject` as already-realized, skips realization, and validates its `data()` (the `class_ro_t`,
+`malloc_size` = 0) → fatal. Bit 63 is polluted because the guest `TCR_EL1` leaves **TBI off**: under
+the 47-bit VA the re-signed data-pointer PAC field spans bits [63:56] ∪ [54:47] — **including bit
+63** — so the M2-cache re-signer's A-family auth stored in `class_data_bits` lands its PAC on objc's
+realized flag. On real hardware that same word has bit 63 clear. This slipped past every prior wall
+because the box signs/authenticates with its own keys (internally symmetric); the break surfaces
+only when objc reads the **raw** bits and treats bit 63 as a semantic flag — a guest-vs-host ABI
+mismatch, not a PAC or objc-opt gap.
+
+**The fix (one constant).** Match Apple's arm64e user configuration: enable **TBI0 (bit 37)** and
+**TBID0 (bit 51)** in the guest `TCR_EL1` (`0x1_0080_B511 → 0x8_0021_0080_B511`). `TBI0` gives data
+pointers top-byte-ignore, so their PAC lands in [54:47] and the top byte (incl. bit 63) is preserved
+from the canonical pointer = 0; `TBID0` exempts **instruction** pointers from TBI, keeping their PAC
+full-strength (Apple's TBID posture). A re-signed data pointer's bit 63 now stays 0,
+`has_rw_pointer()` reads `NSObject` as unrealized, objc realizes it normally, and the
+`validateAlreadyRealizedClass` fatal is **gone**. `TCR_EL1` is set in the shared `load`/`load_dynamic`
+path (below the trace), identical on record and replay — a load-bearing MMU invariant in the same
+class as W^X / `T0SZ`; nothing enters the trace. The M2-bfam strip-on-FPAC arm is unaffected (it still
+strips the DB-key `autdb` at `data()`; the fix corrects the separate bit-63 flag read that precedes it).
+
+**Honestly blocked — at the new mmap demand-commit wall.** The end-to-end gate (`hello_dyn_e2e`)
+stays `#[ignore]`d. With classes realizing correctly, objc heap-allocates each `class_rw_t`
+(`objc::zalloc → calloc → libmalloc → mmap`) and first-touches the allocation, which faults with a
+**level-3 translation fault** (data abort EC=0x24, FSC=0x7) on an **unmapped** page in the mmap
+region (`MMAP_BASE = 0xA_0000_0000`) that libmalloc obtained via an anonymous `mmap` but retrace
+reserved without backing. (One run faults at `far=0xa0010e744 = MMAP_BASE+0x10e744`; the exact offset
+is **not** invariant — it shifts with argv layout, e.g. the `-o` path length. The invariant is the
+first-touch fault on an unmapped page in `[MMAP_BASE, …)`.) Clearing it needs retrace to back
+first-touched mmap pages with anon memory and, on record, capture the zero-fill as writes so replay
+reproduces it — a **memory-management** task, materially smaller than the objc-opt subsystem the
+misdiagnosis feared, and the next milestone.
+
+**What runs today:** everything from M2/M2-cache/M2-mach/M2-va47/M2-bfam, now with objc class
+realization working past the (disproven) preoptimization wall — `just gate` reports **58 passed, 0
+failed, 1 ignored**, clippy clean. The TCR change perturbs no existing test.
+
+**Deferred:** the mmap demand-commit wall itself (its own milestone); un-ignoring `hello_dyn_e2e`
+green (the guest doesn't reach `main → write → exit` yet); an arm64e guest; the swarm extension. See
+`docs/superpowers/specs/2026-07-14-retrace-m2-tbi-design.md`.
