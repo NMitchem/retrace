@@ -86,8 +86,11 @@ pub const KERN_NOT_SUPPORTED: i32 = 46;
 pub const KERN_NO_SPACE: i32 = 3;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 
-/// The synthetic name handed back for TASK_BOOTSTRAP_PORT. A fixed constant (determinism), chosen
-/// high and distinctive so it cannot collide with any port name observed in the run (task 0x203,
+/// A fixed sample port name. NOTE (M2-xpcport): its runtime role is RETIRED — the 3409 handler now
+/// mints a REAL kernel-valid send right (Box_::mint_bootstrap_port) and hands that name back instead.
+/// This const survives only as the fixed sample for `encodes_a_byte_identical_get_special_port_reply`
+/// (a byte-golden test of the pure encoder). It is high and distinctive so it cannot collide with any
+/// port name observed in the run (task 0x203,
 /// host 0x1c03/0x1f03, reply ports ~0xe03/0x1603) nor a name the host kernel assigns via a
 /// forwarded allocation trap. It is NEVER forwarded — the guest just stashes it opaquely (ports are
 /// bare u32 names with no namespace). A collision would let a later send to a different port
