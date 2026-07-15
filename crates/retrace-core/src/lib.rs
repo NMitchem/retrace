@@ -275,6 +275,24 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append mach_msg2 get_special_port: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
+                    machmsg::Route::ServiceSetSpecialPort => {
+                        // task_set_special_port(3410): libsystem_trace's initializer sets its
+                        // TASK_DEBUG_CONTROL_PORT. No out-params → reply a mig_reply_error KERN_SUCCESS
+                        // (id 3510) — never forwarded (would set retrace's OWN debug-control port); the
+                        // inbound COPY_SEND descriptor is ignored. Only which==10 modeled. The reply is
+                        // DETERMINISTIC → STANDARD symmetric posture (replay recomputes + byte-compares).
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let which = machmsg::decode_set_special_port(&buf)
+                            .unwrap_or_else(|e| panic!("task_set_special_port (3410) decode: {e}"));
+                        assert_eq!(which, 10,
+                            "only TASK_DEBUG_CONTROL_PORT (10) is modeled; got which={which}");
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
+                            err: false, writes: writes.clone() })
+                            .map_err(|e| format!("append mach_msg2 set_special_port: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
                     machmsg::Route::StubMigReply(retcode) => {
                         // Optional/no-op kernel routine (no out-params): reply with a mig_reply_error
                         // carrying `retcode` (chosen in route() — 4822 vm_reclaim => KERN_NOT_SUPPORTED
@@ -448,6 +466,24 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                                         landmark: idx, pc, detail: format!("replay get_special_port decode: {e}") })?;
                                     assert_eq!(which, 4,
                                         "only TASK_BOOTSTRAP_PORT (4) is modeled; got which={which}");
+                                    b.apply_and_return(*ret, *err, writes);
+                                }
+                                machmsg::Route::ServiceSetSpecialPort => {
+                                    // Deterministic mig_reply_error reply (M2-setport) → STANDARD
+                                    // symmetric posture: recompute and byte-compare against the
+                                    // recording (the divergence oracle), then apply. (Contrast
+                                    // ServiceGetSpecialPort, whose nondeterministic minted name forces
+                                    // verbatim-apply — do NOT copy that here.)
+                                    let buf = b.read_guest(m.data, m.send_size as usize);
+                                    let which = machmsg::decode_set_special_port(&buf).map_err(|e| Divergence {
+                                        landmark: idx, pc, detail: format!("replay set_special_port decode: {e}") })?;
+                                    assert_eq!(which, 10,
+                                        "only TASK_DEBUG_CONTROL_PORT (10) is modeled; got which={which}");
+                                    let reply = machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS);
+                                    if writes.len() != 1 || writes[0].bytes != reply {
+                                        return Err(Divergence { landmark: idx, pc,
+                                            detail: "task_set_special_port reply mismatch".into() });
+                                    }
                                     b.apply_and_return(*ret, *err, writes);
                                 }
                                 machmsg::Route::StubMigReply(retcode) => {
