@@ -197,6 +197,14 @@ pub struct Box_ {
     // Next fresh IPA for guest_mmap. Plain u64 (no Drop), declared after `backings` so the
     // load-bearing vcpu-before-vm drop order is unaffected.
     mmap_next: u64,
+    // M2-xpcport: the name of a real kernel-valid send right minted in retrace's OWN IPC space (==
+    // the guest's, since Mach traps forward through), handed back as the task_get_special_port(
+    // BOOTSTRAP) reply's port name so libxpc's mach_port_mod_refs(SEND,+1) succeeds. Nondeterministic
+    // (kernel-assigned) → recorded and replayed like task_self, never regenerated on replay (restore
+    // leaves it None). Minted once and cached (idempotent). Plain Option<u32> (no Drop), so the
+    // load-bearing vcpu-before-vm drop order is unaffected; retrace holds the receive right for the
+    // process lifetime (the name stays valid), so the port is deliberately never deallocated.
+    bootstrap_port: Option<u32>,
     // Live page-table state, hoisted here so runtime exec-mmap promotion (set_region_exec) can
     // edit the SAME L2 that build_tables built and continue the SAME L3 allocation window.
     // Both are plain (no Drop) and declared after `mmap_next`, so the vcpu-before-vm drop order
@@ -258,6 +266,18 @@ unsafe fn host_svc(num: u64, a: [u64; 8]) -> (u64, bool) {
         options(nostack),
     );
     (ret, carry != 0)
+}
+
+// --- M2-xpcport: mint a real bootstrap send right in retrace's own IPC space ---
+// mach_port_options_t (<mach/port.h>): { uint32_t flags; mach_port_limits_t mpl; uint64_t reserved[2] }
+// where mach_port_limits_t = { mach_port_msgcount_t mpl_qlimit } (one u32). 24 bytes, repr(C).
+#[repr(C)]
+struct MachPortOptions { flags: u32, mpl_qlimit: u32, reserved: [u64; 2] }
+const MPO_INSERT_SEND_RIGHT: u32 = 0x10; // <mach/port.h>
+extern "C" {
+    static mach_task_self_: u32; // mach_task_self() is a C macro for this global
+    // kern_return_t mach_port_construct(ipc_space_t, mach_port_options_t*, mach_port_context_t, mach_port_name_t*)
+    fn mach_port_construct(task: u32, options: *const MachPortOptions, context: u64, name: *mut u32) -> i32;
 }
 
 impl Box_ {
@@ -503,7 +523,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -914,7 +934,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta) }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta) }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -1110,6 +1130,25 @@ impl Box_ {
     /// Read an 8-byte little-endian word from guest memory (for reading in/out pointer args).
     pub fn read_u64(&self, ipa: u64) -> u64 {
         u64::from_le_bytes(self.read_guest(ipa, 8).try_into().unwrap())
+    }
+
+    /// Mint (once, then cache) a real kernel-valid send right in retrace's OWN IPC space — which is
+    /// the guest's space (Mach traps forward through), so the guest's forwarded
+    /// `mach_port_mod_refs(SEND, +1)` on this name succeeds. Handed back as the synthetic
+    /// `task_get_special_port(BOOTSTRAP)` reply's port name (M2-xpcport). The name is nondeterministic
+    /// (kernel-assigned), so record records it and replay applies it verbatim — the `task_self`
+    /// posture — never regenerated on replay. retrace holds the receive right for the process lifetime
+    /// (the name stays valid); the port is deliberately never deallocated.
+    pub fn mint_bootstrap_port(&mut self) -> u32 {
+        if let Some(name) = self.bootstrap_port { return name; }
+        let opts = MachPortOptions { flags: MPO_INSERT_SEND_RIGHT, mpl_qlimit: 0, reserved: [0, 0] };
+        let mut name: u32 = 0;
+        // SAFETY: a plain Mach call in retrace's own task; MPO_INSERT_SEND_RIGHT yields a name holding
+        // a receive right (we keep it) AND a send right (for the guest's forwarded mod_refs).
+        let kr = unsafe { mach_port_construct(mach_task_self_, &opts, 0, &mut name) };
+        assert_eq!(kr, 0, "mach_port_construct failed: kr={kr:#x}");
+        self.bootstrap_port = Some(name);
+        name
     }
 
     /// Special case for mmap: allocate host pages, map 1:1 at a deterministic fresh IPA,
@@ -1332,7 +1371,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
