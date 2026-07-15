@@ -19,11 +19,16 @@ pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 // IPA space and ABOVE the loaded segments (~4-5 GiB), the demand-paged shared-cache window
 // [SHARED_REGION_START, SHARED_REGION_END), AND libmalloc's FIXED 24-GiB nano "pointer range"
 // reservation [NANO_BAND_START, NANO_BAND_END). The last is critical: libmalloc reserves that
-// band FIXED and then commits nano sub-ranges at EXACT hint addresses inside it, validating that
-// each commit landed where it asked. If the bump allocator's IPAs fell inside the band, an early
-// dyld allocation would occupy a nano sub-range and libmalloc's hinted commit there would be
-// rejected (range_is_free=false) and relocated — leaving libmalloc's nano zone pointing at the
-// wrong page (wild-pointer abort). Basing bumps ABOVE the band keeps it pristine for libmalloc.
+// band and then commits nano sub-ranges at EXACT addresses inside it, both with the ANYWHERE bit
+// CLEAR (`_nano_common_map_vm_space` in nano_malloc_common.c) — i.e. plain FIXED placement, not a
+// hinted-ANYWHERE request. Retrace's FIXED map path (`unmap_overlapping` + map) never consults
+// `range_is_free`, so nano's commits are unaffected by whether `range_is_free` treats reservations
+// as occupied (see M2-carveout, which made `range_is_free` reservation-aware for ANYWHERE placement
+// only — `nano_fixed_commit_lands_at_requested_base_inside_a_reservation` in
+// crates/retrace-box/tests/carveout.rs is the regression guard). If the bump allocator's IPAs fell
+// inside the band, an early dyld allocation would still occupy a nano sub-range and nano's FIXED
+// commit there would unmap-and-overwrite it — leaving libmalloc's nano zone pointing at the wrong
+// page (wild-pointer abort). Basing bumps ABOVE the band keeps it pristine for libmalloc.
 pub const NANO_BAND_START: u64 = 0x4_0000_0000;
 pub const NANO_BAND_END:   u64 = 0xA_0000_0000; // 0x4_0000_0000 + 0x6_0000_0000 (24 GiB)
 pub const MMAP_BASE: u64 = NANO_BAND_END;
