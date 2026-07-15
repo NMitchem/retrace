@@ -47,7 +47,12 @@ pub enum Route { ServiceVmMap, ServiceGetSpecialPort, ServiceSetSpecialPort, Stu
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
 /// msgh_id alone: these are kernel-subsystem ids, unambiguous under the KOBJECT options shape.
 const FORWARD_ALLOWLIST: &[(u32, &str)] =
-    &[(200, "host_info"), (206, "host_get_clock_service"), (3418, "semaphore_create")];
+    &[(200, "host_info"), (206, "host_get_clock_service"), (3418, "semaphore_create"),
+      // task_info (task subsystem base 3400, slot 5): libsecinit's app-sandbox check reads the
+      // process's audit token (flavor 15 = TASK_AUDIT_TOKEN). A read-only DATA query with no ports —
+      // forwarded to retrace's own task (== the process) and recorded (forward-and-record; the token
+      // is nondeterministic). NOT synthesized like the port RPCs 3409/3410 (M2-taskinfo).
+      (3405, "task_info")];
 
 pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     if m.options != MACH64_SEND_MSG | MACH64_RCV_MSG | MACH64_SEND_KOBJECT_CALL {
@@ -255,6 +260,7 @@ mod tests {
         assert!(matches!(route(&msg(200,  0x1f03, KOBJ), Some(0x203)), Route::Forward("host_info")));
         assert!(matches!(route(&msg(206,  0x1f03, KOBJ), Some(0x203)), Route::Forward("host_get_clock_service")));
         assert!(matches!(route(&msg(3418, 0x203,  KOBJ), Some(0x203)), Route::Forward("semaphore_create")));
+        assert!(matches!(route(&msg(3405, 0x203,  KOBJ), Some(0x203)), Route::Forward("task_info")));
     }
     #[test]
     fn everything_else_fails_loudly() {
