@@ -530,3 +530,54 @@ gate is still **red** (`#[ignore]`d): the guest does not yet reach `main → wri
 **Deferred:** the `task_get_special_port` (msgh_id 3409) task-port MIG wall (M2-mach lineage — route
 and service the task special-port surface); the single-vCPU commpage-topology synthesis (host-topology
 leak hygiene); un-ignoring `hello_dyn_e2e` green; an arm64e guest.
+
+## Status: M2-bootstrap — `task_get_special_port(BOOTSTRAP)` Servicing ✅ (walk re-parks at the XPC pipe)
+
+**Root cause of the M2-cpuid wall.** libxpc's image initializer (`_libxpc_initializer`, run inside
+`libSystem_initializer` at process launch, before `main`) calls
+`task_get_special_port(TASK_BOOTSTRAP_PORT)` — a `mach_msg2` (trap -47) to the guest task port with
+**msgh_id 3409** (Mach `task` subsystem base 3400, routine 9). retrace's MIG router had no handler for
+that id and failed loud. The 36-byte request is `header(24) + NDR(8) + which_port:int(4)` with
+`which_port = 4 = TASK_BOOTSTRAP_PORT`.
+
+**The fix — a synthetic-port complex MIG reply.** `machmsg::route` now maps `dest == guest_task_port &&
+msgh_id == 3409` to `ServiceGetSpecialPort`; the mirrored record/replay dispatch decodes `which`
+(asserting `== 4`, fail-loud on any other special port) and synthesizes the 48-byte **complex** reply
+(`MACH_MSGH_BITS_COMPLEX` set, one `mach_msg_port_descriptor_t`, disposition `MOVE_SEND`) carrying a
+**fixed synthetic bootstrap-port name `SYNTHETIC_BOOTSTRAP_PORT = 0x0BAD_0B03`**. The reply is a pure
+function of `(reply_port, name)` — both deterministic — built identically on record and replay, and the
+divergence oracle byte-compares the recomputed reply, so nothing nondeterministic enters the trace. The
+synthetic name is a fixed constant, chosen distinct from every port name the run uses, and is **never
+forwarded** (forwarding 3409 would hand the guest the host's real launchd bootstrap port).
+
+**The walk — libxpc accepts the reply, then the "dormant" hypothesis is falsified.** The bounded traced
+`record-dyn hello_dyn` advances from ~218 to **~228 traps**. libxpc's initializer **accepts** the reply:
+`__MIG_check__Reply__task_get_special_port` passes, it extracts `0x0BAD_0B03`, retains its send right
+(three deterministically-forwarded `_kernelrpc_mach_port_mod_refs_trap` calls), and passes it to
+`xpc_pipe_create_from_port`. But the design spec's **"fetch-and-cache, dormant" scope guess is
+empirically wrong for this binary — libxpc's initializer is not lazy.** No `mach_msg2` ever targets
+`0x0BAD_0B03` (grep-confirmed: no `bootstrap_look_up` send), and the synthetic name is collision-free
+(it appears only as the `name` argument of the three bootstrap-caching `mod_refs`, never as a
+differently-sourced forwarded name).
+
+**Honestly blocked — at the XPC bootstrap-PIPE subsystem (distinct from the now-serviced MIG).** At
+~228 traps the run aborts in `libxpc.dylib`_xpc_create_bootstrap_pipe.cold.1` with `brk #0x1`
+(`EC=0x3c`) at guest `pc 0x180201190`, crash string **"Bug in libxpc: Could not create pipe to
+bootstrap server!"**, called from `_libxpc_initializer+0x42c ← libSystem_initializer+0x100` (all
+symbolicated live against the arm64e shared cache with the runtime slide backed out). The hot path:
+after the send-right retain, `xpc_pipe_create_from_port(bootstrap_port = 0x0BAD_0B03, flags = 4)`
+returns **NULL** — a real Mach dispatch channel to launchd cannot be stood up over the synthetic token —
+so `cbz x0` takes the cold `__builtin_trap`. This is **not** a reply-format bug: the trap is downstream
+of `__MIG_check__Reply`, and `0x0BAD_0B03` flows through cleanly, proving the complex reply decoded
+correctly. Servicing this means standing up the **XPC pipe / dispatch-mach channel** subsystem against a
+real bootstrap port — a distinct new milestone, explicitly **deferred** (do not pre-stub launchd/XPC).
+The gate (`hello_dyn_e2e`) stays `#[ignore]`d and re-parked at this wall.
+
+**What runs today:** everything through M2-cpuid, plus a serviced `task_get_special_port(BOOTSTRAP)` —
+`just gate` reports **73 passed, 0 failed, 1 ignored**, clippy clean. The headline `hello_dyn_e2e` gate
+is still **red** (`#[ignore]`d): the guest reaches libxpc's XPC-pipe construction but not yet
+`main → write → exit`. See `docs/superpowers/specs/2026-07-15-retrace-m2-bootstrap-design.md`.
+
+**Deferred:** the XPC bootstrap-pipe / dispatch-mach channel subsystem (`xpc_pipe_create_from_port` over
+a real bootstrap port — a launchd/XPC front door); the single-vCPU commpage-topology synthesis
+(host-topology leak hygiene); un-ignoring `hello_dyn_e2e` green; an arm64e guest.

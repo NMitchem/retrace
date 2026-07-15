@@ -35,11 +35,12 @@ impl Msg2 {
     }
 }
 
-/// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; StubMigReply(retcode)
-/// answers an optional/no-op kernel routine (no out-params) with a mig_reply_error carrying
-/// `retcode`; Forward is the decided read-only/create-once allowlist (memory-diff'd like any
-/// mach trap); Unsupported carries a decoded description for the fail-loud error.
-pub enum Route { ServiceVmMap, StubMigReply(i32), Forward(&'static str), Unsupported(String) }
+/// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; ServiceGetSpecialPort
+/// answers task_get_special_port(BOOTSTRAP) with a synthetic port right (complex reply);
+/// StubMigReply(retcode) answers an optional/no-op kernel routine (no out-params) with a
+/// mig_reply_error carrying `retcode`; Forward is the decided read-only/create-once allowlist
+/// (memory-diff'd like any mach trap); Unsupported carries a decoded description for the fail-loud error.
+pub enum Route { ServiceVmMap, ServiceGetSpecialPort, StubMigReply(i32), Forward(&'static str), Unsupported(String) }
 
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
 /// msgh_id alone: these are kernel-subsystem ids, unambiguous under the KOBJECT options shape.
@@ -57,6 +58,11 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     if guest_task_port == Some(m.dest as u64) {
         match m.msgh_id {
             4811 => return Route::ServiceVmMap,
+            // task_get_special_port (task subsystem base 3400, slot 9): libxpc's initializer
+            // fetches TASK_BOOTSTRAP_PORT (which=4) at launch. Serviced synthetically with a
+            // fixed synthetic port right (never forwarded — that would hand over the host's real
+            // launchd port). `which` is decoded in dispatch (like vm_map's body) and asserted == 4.
+            3409 => return Route::ServiceGetSpecialPort,
             // vm_reclaim (deferred reclamation): optional. Report unavailable so libmalloc takes
             // its no-reclaim fallback.
             4822 => return Route::StubMigReply(KERN_NOT_SUPPORTED),
@@ -79,6 +85,14 @@ pub const KERN_SUCCESS: i32 = 0;
 pub const KERN_NOT_SUPPORTED: i32 = 46;
 pub const KERN_NO_SPACE: i32 = 3;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
+
+/// The synthetic name handed back for TASK_BOOTSTRAP_PORT. A fixed constant (determinism), chosen
+/// high and distinctive so it cannot collide with any port name observed in the run (task 0x203,
+/// host 0x1c03/0x1f03, reply ports ~0xe03/0x1603) nor a name the host kernel assigns via a
+/// forwarded allocation trap. It is NEVER forwarded — the guest just stashes it opaquely (ports are
+/// bare u32 names with no namespace). A collision would let a later send to a different port
+/// mis-route; the Task 2 walk confirms non-collision.
+pub const SYNTHETIC_BOOTSTRAP_PORT: u32 = 0x0BAD_0B03;
 
 /// _kernelrpc_mach_vm_map (4811) request body (mig __Request__, pack(4); offsets in the plan).
 pub struct VmMapReq {
@@ -104,6 +118,16 @@ pub fn decode_vm_map(buf: &[u8]) -> Result<VmMapReq, String> {
     })
 }
 
+/// task_get_special_port (3409) request body: header(24) + NDR(8) + `which_port: int`(4) = 36 bytes.
+/// Returns `which_port` (offset 32); dispatch asserts it == 4 (TASK_BOOTSTRAP_PORT) — the only one
+/// modeled. Validates the length and msgh_id so a malformed/mis-routed request fails loud.
+pub fn decode_get_special_port(buf: &[u8]) -> Result<u32, String> {
+    if buf.len() < 36 { return Err(format!("get_special_port request short: {} < 36", buf.len())); }
+    let id = u32_at(buf, 20);
+    if id != 3409 { return Err(format!("msgh_id {id} != 3409")); }
+    Ok(u32_at(buf, 32)) // which_port = header(24) + NDR(8)
+}
+
 // Received-reply header constants, golden-copied from the captured kernel reply (fixture is
 // authoritative; if the byte-equality test disagrees with these, correct THESE to the fixture).
 // NOTE: corrected against the real capture — the brief's starting guess for REPLY_BITS was
@@ -113,13 +137,21 @@ const REPLY_BITS: u32 = 0x1200; // captured bytes 00 12 00 00 (local=MOVE_SEND_O
 const NDR: [u8; 8] = [0, 0, 0, 0, 1, 0, 0, 0];
 const TRAILER: [u8; 8] = [0, 0, 0, 0, 8, 0, 0, 0]; // mach_msg_trailer_t { type 0, size 8 }
 
-fn reply_header(out: &mut Vec<u8>, msgh_size: u32, reply_port: u32, reply_id: u32) {
-    out.extend_from_slice(&REPLY_BITS.to_le_bytes());
+// The 24-byte reply header. `bits` is the full msgh_bits word: REPLY_BITS for a simple reply, or
+// REPLY_BITS | MACH_MSGH_BITS_COMPLEX for one carrying descriptors. Factoring `bits` out keeps the
+// simple callers (encode_vm_map_reply / encode_mig_error) byte-identical (they pass REPLY_BITS via
+// reply_header) while letting the complex reply set the COMPLEX bit.
+fn reply_header_bits(out: &mut Vec<u8>, bits: u32, msgh_size: u32, reply_port: u32, reply_id: u32) {
+    out.extend_from_slice(&bits.to_le_bytes());
     out.extend_from_slice(&msgh_size.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes());            // remote: send-once right consumed
     out.extend_from_slice(&reply_port.to_le_bytes());      // local: the port it "arrived" on
     out.extend_from_slice(&0u32.to_le_bytes());            // voucher
     out.extend_from_slice(&reply_id.to_le_bytes());
+}
+
+fn reply_header(out: &mut Vec<u8>, msgh_size: u32, reply_port: u32, reply_id: u32) {
+    reply_header_bits(out, REPLY_BITS, msgh_size, reply_port, reply_id);
 }
 
 /// KERN_SUCCESS reply for 4811: header(24) + NDR(8) + RetCode(4) + address(8) + trailer(8).
@@ -139,6 +171,21 @@ pub fn encode_mig_error(request_msgh_id: u32, reply_port: u32, retcode: i32) -> 
     reply_header(&mut out, 36, reply_port, request_msgh_id + 100);
     out.extend_from_slice(&NDR);
     out.extend_from_slice(&retcode.to_le_bytes());
+    out.extend_from_slice(&TRAILER);
+    out
+}
+
+/// task_get_special_port (3409) success reply: a COMPLEX message carrying one port right. 48 bytes:
+/// header(24) + descriptor_count(4)=1 + mach_msg_port_descriptor_t(12) + trailer(8). msgh_size = 40
+/// (excludes the trailer). The descriptor word packs (type=0x00 PORT_DESCRIPTOR << 24) |
+/// (disposition=0x11 MACH_MSG_TYPE_MOVE_SEND << 16); the guest's __MIG_check__Reply validates it.
+pub fn encode_get_special_port_reply(reply_port: u32, name: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(48);
+    reply_header_bits(&mut out, REPLY_BITS | MACH_MSGH_BITS_COMPLEX, 40, reply_port, 3509);
+    out.extend_from_slice(&1u32.to_le_bytes());           // msgh_descriptor_count
+    out.extend_from_slice(&name.to_le_bytes());           // port descriptor: name
+    out.extend_from_slice(&0u32.to_le_bytes());           // pad1
+    out.extend_from_slice(&0x0011_0000u32.to_le_bytes()); // (type 0x00 << 24) | (disp 0x11 << 16) | pad2
     out.extend_from_slice(&TRAILER);
     out
 }
@@ -269,5 +316,51 @@ mod tests {
         assert_eq!(u32::from_le_bytes(e[12..16].try_into().unwrap()), 0x1703); // reply-local port
         assert_eq!(i32::from_le_bytes(e[20..24].try_into().unwrap()), 8100); // reply id
         assert_eq!(i32::from_le_bytes(e[32..36].try_into().unwrap()), 0);    // KERN_SUCCESS
+    }
+
+    // --- task_get_special_port (3409) — synthetic bootstrap-port service (M2-bootstrap t1) ---
+    #[test]
+    fn routes_get_special_port_to_service() {
+        // task_get_special_port (3409) to the guest task port is serviced synthetically.
+        assert!(matches!(route(&msg(3409, 0x203, KOBJ), Some(0x203)),
+                         Route::ServiceGetSpecialPort));
+        // 3409 to a NON-task port is not ours to service (fail loud).
+        assert!(matches!(route(&msg(3409, 0x999, KOBJ), Some(0x203)), Route::Unsupported(_)));
+    }
+
+    // Hand-built task_get_special_port request: header(24)+NDR(8)+which_port:int(4) = 36 bytes,
+    // msgh_id at offset 20, which_port at offset 32 (= header 24 + NDR 8).
+    fn get_special_port_req(id: u32, which: u32) -> Vec<u8> {
+        let mut b = vec![0u8; 36];
+        b[20..24].copy_from_slice(&id.to_le_bytes());
+        b[24..32].copy_from_slice(&NDR);
+        b[32..36].copy_from_slice(&which.to_le_bytes());
+        b
+    }
+    #[test]
+    fn decodes_get_special_port_which() {
+        // which_port = 4 = TASK_BOOTSTRAP_PORT (the only one modeled; decode returns it, dispatch asserts).
+        assert_eq!(decode_get_special_port(&get_special_port_req(3409, 4)).unwrap(), 4);
+    }
+    #[test]
+    fn decode_get_special_port_rejects_malformed() {
+        assert!(decode_get_special_port(&get_special_port_req(3409, 4)[..35]).is_err()); // short (<36)
+        assert!(decode_get_special_port(&get_special_port_req(3410, 4)).is_err());       // wrong id
+    }
+    #[test]
+    fn encodes_a_byte_identical_get_special_port_reply() {
+        // 48-byte complex reply built by hand from the spec's layout (reply_port 0xe03):
+        //   header(24): bits 0x8000_1200 (00 12 00 80) | size 40 | remote 0 | local 0xe03 |
+        //               voucher 0 | id 3509 (3409+100)
+        //   desc_count(4) = 1 | port descriptor(12): name / pad0 / (type0<<24 | disp0x11<<16) |
+        //   trailer(8).
+        const EXPECTED: [u8; 48] = [
+            0x00, 0x12, 0x00, 0x80, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x0e, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0xb5, 0x0d, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x0b, 0xad, 0x0b,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(encode_get_special_port_reply(0xe03, SYNTHETIC_BOOTSTRAP_PORT), EXPECTED.to_vec());
+        // The descriptor's name field is exactly the synthetic constant (guards an accidental swap).
+        assert_eq!(u32::from_le_bytes(EXPECTED[28..32].try_into().unwrap()), SYNTHETIC_BOOTSTRAP_PORT);
     }
 }
