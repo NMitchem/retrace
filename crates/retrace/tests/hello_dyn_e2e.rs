@@ -103,7 +103,36 @@ mod util;
 // re-parking the gate here. Ignored (not deleted) so it stays the living M2 gate, re-runnable with
 // `--ignored` as the approach evolves. (Trap count varies run-to-run because getentropy/PID are
 // forwarded and recorded per-trace; that is normal record/replay, not a determinism defect.)
-#[ignore = "blocked at the Mach task-port MIG wall (M2-cpuid's honest boundary). The prior xzone SEGMENT-GROUP indexing wall FELL in M2-cpuid: it was a ONE-VALUE bug, not the per-CPU/cluster commpage-topology subsystem the M2-carveout walk guessed. macOS 26 reads _os_cpu_cluster_number() = (uint32_t)TPIDR_EL0 >> 12; retrace had set guest TPIDR_EL0 = TSD_IPA = 0x30000 (conflating it with the thread-self pointer — TPIDRRO_EL0 is the real TSD base), so cluster read as 0x30000>>12 = 48 (garbage) and xzone's sg_index = front_count*clusterid + sg_front_index overshot ~253 slots past the 0x3e000 main-zone block, faulting UNMAPPED. M2-cpuid sets guest TPIDR_EL0 = 0 (single vCPU = cpu 0 / cluster 0), below the trace, identical on record and replay. The xzone fault is GONE; the run advances ~205 -> ~218 traps past _xzm_segment_group_alloc_chunk with no earlier fault. NEW wall: a mach_msg2 (trap -47) to the GUEST TASK PORT — `msgh_id 3409 dest 0x203 (guest task port Some(515)) send_size 36` at pc 0x1804abc34. msgh_id 3409 = Mach task subsystem (base 3400) routine index 9 = task_get_special_port; the 36-byte body is header(24)+NDR(8)+which_port:int(4) with which_port = 4 = TASK_BOOTSTRAP_PORT (libSystem fetching its bootstrap port). Unsupported because retrace's MIG router (machmsg::route) has NO handler for this task-subsystem id (it services 4811, stubs 4822/8000/8001, forwards {200,206,3418}, and fails loud otherwise). Servicing it is M2-mach-lineage work, DISTINCT from the now-fixed CPU-identity bug — deferred. Deferred debt: the frozen HOST commpage still carries 12-CPU/2-cluster COUNTS (harmless once the index is pinned to 0; a single-vCPU commpage synthesis is the hygiene follow-up)."]
+//
+// The Mach task-port MIG wall (M2-cpuid's honest boundary) FELL in M2-bootstrap: retrace's MIG router
+// (machmsg::route) now services task_get_special_port(TASK_BOOTSTRAP_PORT) (msgh_id 3409) by
+// synthesizing a COMPLEX MIG reply carrying a FIXED synthetic bootstrap-port name
+// (SYNTHETIC_BOOTSTRAP_PORT = 0x0BAD_0B03) — a pure function of (reply_port, name), mirrored textually
+// in record and replay (the divergence oracle byte-compares the recomputed reply). libxpc's image
+// initializer ACCEPTS the reply: __MIG_check__Reply__task_get_special_port passes, libxpc extracts the
+// synthetic name and flows it into _xpc_mach_port_retain_send (three deterministically-forwarded
+// _kernelrpc_mach_port_mod_refs_trap send-right retains) and then xpc_pipe_create_from_port. The run
+// advances from ~218 to ~228 traps.
+//
+// NEW WALL (M2-bootstrap's honest boundary — the XPC bootstrap-PIPE subsystem, DISTINCT from the
+// now-serviced task_get_special_port MIG): the design spec's "fetch-and-cache, dormant" hypothesis is
+// empirically FALSIFIED for this hello_dyn — libxpc's initializer is NOT lazy. At ~228 traps the run
+// aborts in `libxpc.dylib`_xpc_create_bootstrap_pipe.cold.1` with `brk #0x1` (EC=0x3c) at guest
+// pc 0x180201190, crash string "Bug in libxpc: Could not create pipe to bootstrap server!", called from
+// _libxpc_initializer+0x42c <- libSystem_initializer+0x100 (all symbolicated live against the arm64e
+// shared cache, runtime slide backed out). Hot path: after the send-right retain,
+// `xpc_pipe_create_from_port(bootstrap_port = 0x0BAD_0B03, flags = 4)` returns NULL — a real Mach
+// dispatch channel to launchd cannot be stood up over the synthetic token — so `cbz x0` takes the cold
+// __builtin_trap. This is NOT a Task-1 reply-format bug: the BRK is DOWNSTREAM of __MIG_check__Reply and
+// 0x0BAD_0B03 flows through cleanly (retain + pipe-create), proving the complex reply decoded correctly.
+// It is also NOT the predicted eager bootstrap_look_up: NO mach_msg2 ever targets 0x0BAD_0B03
+// (grep-confirmed) — the abort precedes any send, so the blast radius is one message, not an unbounded
+// look-up chain. Risk-check 2 (name collision): 0x0BAD_0B03 is collision-free — it appears ONLY as the
+// `name` argument of the three bootstrap-caching mach_port_mod_refs traps, never as a differently-sourced
+// forwarded port name. Servicing this wall means standing up the XPC pipe / dispatch-mach channel
+// subsystem against a real bootstrap port — explicitly DEFERRED (do NOT pre-stub launchd/XPC). Ignored
+// (not deleted) so it stays the living M2 gate, re-runnable with `--ignored`.
+#[ignore = "blocked at the XPC bootstrap-PIPE wall (M2-bootstrap's honest boundary). The prior Mach task-port MIG wall FELL in M2-bootstrap: machmsg::route now services task_get_special_port(TASK_BOOTSTRAP_PORT) (msgh_id 3409) with a synthetic complex MIG reply carrying a fixed bootstrap-port name (SYNTHETIC_BOOTSTRAP_PORT = 0x0BAD_0B03), mirrored in record and replay and byte-compared by the oracle. libxpc's initializer ACCEPTS the reply (__MIG_check__Reply passes; it extracts 0x0BAD_0B03 and retains its send right via three mach_port_mod_refs), advancing ~218 -> ~228 traps. NEW wall: libxpc's initializer is NOT lazy (the spec's fetch-and-cache-dormant hypothesis is falsified) — it eagerly calls xpc_pipe_create_from_port(0x0BAD_0B03, 4), which returns NULL (no real Mach channel to launchd over the synthetic token), so `libxpc.dylib`_xpc_create_bootstrap_pipe.cold.1` executes `brk #0x1` (EC=0x3c) at guest pc 0x180201190, crash string \"Bug in libxpc: Could not create pipe to bootstrap server!\", from _libxpc_initializer+0x42c <- libSystem_initializer+0x100. This is a DISTINCT subsystem (XPC pipe / dispatch-mach channel), NOT a Task-1 reply-format bug (the BRK is downstream of __MIG_check__Reply; 0x0BAD_0B03 flows through cleanly) and NOT a bootstrap_look_up send (no mach_msg2 targets 0x0BAD_0B03; the abort precedes any send). Standing up XPC is DEFERRED — do not pre-stub launchd/XPC. (Predecessor walls, all fallen: the xzone segment-group index (M2-cpuid, TPIDR_EL0 = 0), the reservation carveout/demand-commit (M2-carveout/M2-mmapcommit), arm64e data-pointer PAC TBI (M2-tbi), and the task_get_special_port MIG (this milestone). Deferred debt unchanged: the frozen HOST commpage still carries 12-CPU/2-cluster COUNTS — harmless once the cpu/cluster index is pinned to 0; a single-vCPU commpage synthesis is the hygiene follow-up.)"]
 #[test]
 fn hello_dyn_records_and_replays() {
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
