@@ -67,32 +67,43 @@ mod util;
 // The prior NULL deref (`ldrb [x8,#0x178]`, x8 = sg->xzsg_main_ref = 0 read from a demand-zeroed page)
 // is GONE: with the metadata block landed at the hole base, the segment group's back-pointers resolve.
 //
-// NEW WALL (M2-carveout's honest boundary — libmalloc xzone SEGMENT-GROUP indexing, NOT placement):
-// objc class realization (map_images -> realizeClassWithoutSwift -> _xzm_xzone_malloc_freelist_outlined
-// -> _xzm_xzone_find_and_malloc_from_freelist_chunk -> xzm_segment_group_alloc_chunk+0x1c4) faults
-// UNMAPPED (data abort EC=0x24 FSC=0x7) accessing sg+4 (the xzsg_lock) of a segment group
-// `sg = &main->xzmz_segment_groups[sg_index]`. VERIFIED anatomy (three traced runs; addresses shift
-// per run because libmalloc's carveout offset is entropy-derived): the main-zone metadata block's own
-// `xzmz_total_size` field (read from committed memory) is 0x3e000 and the box committed EXACTLY that
-// (mach_vm_map size 0x3e000, rlen 0x40000, fully backed) — yet xzm derives sg at main + ~0x4e4c8, i.e.
-// ~0x104c8 PAST the block the guest itself sized. The offset VARIES run-to-run (0x4e4c8/0x4e740),
-// the fingerprint of an INDEX-derived address, not a fixed struct offset. sg_index =
-// segment_group_front_count * clusterid + sg_front_index, where clusterid/front come from
-// _os_cpu_number()/_os_cpu_cluster_number() at alloc time while segment_group_count (which sizes
-// total_size) is computed at zone-init from the commpage CPU topology. retrace stages a FROZEN copy of
-// the HOST commpage (12 logical CPUs / 2 perflevel clusters), so the guest lays out per-CPU/cluster
-// segment-group metadata for a 12-CPU host but executes on a single vCPU: the per-CPU segment-group
-// index overshoots the block. This is an xzone per-CPU/cluster segment-group indexing subsystem —
-// DISTINCT from carveout placement (now correct) and from demand-commit (M2-mmapcommit, which did its
-// job) — deferred to a future milestone, NOT walked into here (a documented escape hatch exists:
-// _COMM_PAGE_DEV_FIRM + MallocAllowInternalSecurity=1 + MallocSecureAllocator=0 in envp disables xzone
-// entirely, see .superpowers/sdd/xzone-research.md §5; a principled single-vCPU commpage-topology model
-// is the deeper fix). Determinism note: within a record/replay pair the reads are reproduced from the
-// trace, so record and replay stay in lockstep; only the wall's exact fault address varies ACROSS
-// record runs. A ~12-17x gettimeofday deadline-spin (a timed backoff with no second thread to make
-// progress) precedes the fault. Ignored (not deleted) so it stays the living M2 gate, re-runnable with
-// `--ignored` as the approach evolves.
-#[ignore = "blocked at the libmalloc xzone SEGMENT-GROUP indexing wall (M2-carveout's honest boundary). The prior xzone NULL-METADATA wall FELL: it was a placement gap. M2-carveout t1 taught the box to punch mach_vm_deallocate holes in tracked PROT_NONE reservations (subtract_reservations) and to first-fit ANYWHERE-with-hint forward past reservations (first_fit), so libmalloc's guarded-metadata commit (mach_vm_map ANYWHERE, hint = reservation base) now lands in the 1 MiB carveout hole exactly as the real kernel forces it — the prior `ldrb [x8,#0x178]` x8=sg->xzsg_main_ref=0 NULL deref is GONE. The run advances into xzm_segment_group_alloc_chunk+0x1c4, which faults UNMAPPED (EC=0x24 FSC=0x7) at sg+4 (xzsg_lock) of sg=&main->xzmz_segment_groups[sg_index]. VERIFIED (3 runs): the main-zone block's own xzmz_total_size = 0x3e000 and the box committed exactly that (fully backed), but xzm indexes sg at main+~0x4e4c8 — ~0x104c8 PAST the block the guest itself sized. The offset VARIES per run (0x4e4c8/0x4e740) => an index-derived address: sg_index = segment_group_front_count*clusterid + sg_front_index (clusterid from _os_cpu_cluster_number() at alloc time) overshoots a segment_group_count sized at zone-init from the FROZEN HOST commpage (12 CPUs / 2 clusters) while executing on a single vCPU. An xzone per-CPU/cluster segment-group indexing subsystem, DISTINCT from carveout placement (now correct) — deferred. Escape hatch: MallocSecureAllocator=0 (+ _COMM_PAGE_DEV_FIRM, MallocAllowInternalSecurity=1) disables xzone; see .superpowers/sdd/xzone-research.md"]
+// The xzone SEGMENT-GROUP indexing wall (M2-carveout's honest boundary) FELL in M2-cpuid, and it was
+// a ONE-VALUE bug — NOT the "per-CPU/cluster commpage-topology subsystem" the M2-carveout walk guessed.
+// libmalloc's xzone computes sg_index = segment_group_front_count*clusterid + sg_front_index, where
+// clusterid = _os_cpu_cluster_number() = (uint32_t)TPIDR_EL0 >> 12 on macOS 26 arm64e (verified by
+// live lldb disassembly of _xzm_xzone_find_and_malloc_from_freelist_chunk; _os_cpu_number() reads
+// TPIDR_EL0 & 0xFFF). retrace had set the guest TPIDR_EL0 = TSD_IPA = 0x30000, conflating it with the
+// thread-self pointer — but TPIDRRO_EL0 (unchanged) is the real TSD base; TPIDR_EL0 carries the
+// cpu/cluster id. So cpu = 0x30000 & 0xFFF = 0 (accidentally right) but cluster = 0x30000 >> 12 = 48
+// (garbage — there is no cluster 48), and sg_index overshot ~253 slots (main + ~0x4e4c8), past the
+// 0x3e000 main-zone block, faulting UNMAPPED on the segment-group lock. M2-cpuid sets guest
+// TPIDR_EL0 = 0 (single vCPU is always cpu 0 / cluster 0) at both constructor sites (load_dynamic /
+// restore), below the trace and identical on record and replay (a fixed constant, like the PAC keys
+// and synthetic timebase — nothing enters the trace). The xzone segment-group fault is GONE; the run
+// advances from ~205 to ~218 traps, past _xzm_segment_group_alloc_chunk, with no earlier fault
+// (confirming nothing dereferences TPIDR_EL0 as a TSD base). The "per-run variance" the M2-carveout
+// walk saw (0x4e4c8 vs 0x4e740, delta = one sizeof(xzm_segment_group_s)) was forwarded-entropy drift
+// in the pre-fault gettimeofday spin, not the index — the register-derived overshoot itself was fixed.
+// Known debt (deferred, not fatal, not a determinism bug): retrace still memcpy's the whole HOST
+// commpage into the guest, so the per-CPU/cluster COUNT arrays carry the host's 12-CPU/2-cluster
+// values; harmless once the INDEX is pinned to 0 by this fix (the bytes are frozen identically on both
+// runs). A principled single-vCPU commpage synthesis is the hygiene follow-up.
+//
+// NEW WALL (M2-cpuid's honest boundary — an unhandled Mach task-port MIG message, mach-IPC lineage,
+// DISTINCT from the now-fixed CPU-identity bug): at ~218 traps the run hits
+// `RECORD ERROR: unsupported mach_msg2 at pc 0x1804abc34: msgh_id 3409 dest 0x203 (guest task port
+// Some(515)) send_size 36` — a mach_msg2 (trap -47) to the GUEST TASK PORT. msgh_id 3409 is the Mach
+// `task` subsystem (MIG base 3400), routine index 9 = task_get_special_port (task.defs slot 9, macOS
+// 26.4 SDK): the 36-byte request is header(24) + NDR(8) + which_port:int(4), and which_port = 4 =
+// TASK_BOOTSTRAP_PORT — libSystem fetching its bootstrap port. It is Unsupported because retrace's MIG
+// router (retrace-core::machmsg::route) has NO handler for this task-subsystem id: it services 4811
+// (_kernelrpc_mach_vm_map), stubs 4822 (vm_reclaim) / 8000-8001 (task_restartable), forwards the
+// read-only allowlist {200,206,3418}, and fails LOUD on every other id to the task port. Servicing one
+// more MIG id is M2-mach-lineage work, NOT in scope for M2-cpuid (a CPU-identity milestone) beyond
+// re-parking the gate here. Ignored (not deleted) so it stays the living M2 gate, re-runnable with
+// `--ignored` as the approach evolves. (Trap count varies run-to-run because getentropy/PID are
+// forwarded and recorded per-trace; that is normal record/replay, not a determinism defect.)
+#[ignore = "blocked at the Mach task-port MIG wall (M2-cpuid's honest boundary). The prior xzone SEGMENT-GROUP indexing wall FELL in M2-cpuid: it was a ONE-VALUE bug, not the per-CPU/cluster commpage-topology subsystem the M2-carveout walk guessed. macOS 26 reads _os_cpu_cluster_number() = (uint32_t)TPIDR_EL0 >> 12; retrace had set guest TPIDR_EL0 = TSD_IPA = 0x30000 (conflating it with the thread-self pointer — TPIDRRO_EL0 is the real TSD base), so cluster read as 0x30000>>12 = 48 (garbage) and xzone's sg_index = front_count*clusterid + sg_front_index overshot ~253 slots past the 0x3e000 main-zone block, faulting UNMAPPED. M2-cpuid sets guest TPIDR_EL0 = 0 (single vCPU = cpu 0 / cluster 0), below the trace, identical on record and replay. The xzone fault is GONE; the run advances ~205 -> ~218 traps past _xzm_segment_group_alloc_chunk with no earlier fault. NEW wall: a mach_msg2 (trap -47) to the GUEST TASK PORT — `msgh_id 3409 dest 0x203 (guest task port Some(515)) send_size 36` at pc 0x1804abc34. msgh_id 3409 = Mach task subsystem (base 3400) routine index 9 = task_get_special_port; the 36-byte body is header(24)+NDR(8)+which_port:int(4) with which_port = 4 = TASK_BOOTSTRAP_PORT (libSystem fetching its bootstrap port). Unsupported because retrace's MIG router (machmsg::route) has NO handler for this task-subsystem id (it services 4811, stubs 4822/8000/8001, forwards {200,206,3418}, and fails loud otherwise). Servicing it is M2-mach-lineage work, DISTINCT from the now-fixed CPU-identity bug — deferred. Deferred debt: the frozen HOST commpage still carries 12-CPU/2-cluster COUNTS (harmless once the index is pinned to 0; a single-vCPU commpage synthesis is the hygiene follow-up)."]
 #[test]
 fn hello_dyn_records_and_replays() {
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
