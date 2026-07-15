@@ -175,4 +175,16 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang wildstore");
     assert!(status.success(), "wildstore guest build failed");
+
+    // carveout: reserves a PROT_NONE band (svc -15, cur_protection=0), punches an interior hole with
+    // mach_vm_deallocate (svc -12), then commits ANYWHERE with hint = reservation base. The commit
+    // must be forced into the carveout hole (base+0x10000), not honored at the raw hint — libmalloc's
+    // guarded-metadata protocol in miniature. The M2-carveout Task 1 micro-guest.
+    let src = format!("{}/asm/carveout.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/carveout");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang carveout");
+    assert!(status.success(), "carveout guest build failed");
 }

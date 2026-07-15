@@ -102,6 +102,7 @@ pub const STRIP47: &str = concat!(env!("OUT_DIR"), "/strip47");
 pub const BFAMSTRIP: &str = concat!(env!("OUT_DIR"), "/bfamstrip");
 pub const RESERVECOMMIT: &str = concat!(env!("OUT_DIR"), "/reservecommit");
 pub const WILDSTORE: &str = concat!(env!("OUT_DIR"), "/wildstore");
+pub const CARVEOUT: &str = concat!(env!("OUT_DIR"), "/carveout");
 
 #[cfg(test)]
 mod tests {
