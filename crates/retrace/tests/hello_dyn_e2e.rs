@@ -57,24 +57,42 @@ mod util;
 // the forwarded-gettimeofday deadline-spin below, not a determinism defect — record forwards real
 // time, replay reproduces the recorded values).
 //
-// NEW WALL (M2-mmapcommit's honest boundary — libmalloc xzone SEGMENT allocator, NOT demand-commit):
-// with reservation pages demand-committed, objc class realization (libdispatch_init -> _objc_init ->
-// map_images -> realizeClassWithoutSwift -> _xzm_xzone_malloc_freelist_outlined+0x144 ->
-// _xzm_xzone_find_and_malloc_from_freelist_chunk+0x51c -> xzm_segment_group_alloc_chunk+0x274) reaches
-// _xzm_segment_group_alloc_segment+0x90, which faults NEAR-NULL (data abort EC=0x24 FSC=0x7,
-// far=0x178). The faulting insn is `ldrb w9, [x8, #0x178]` with x8 = 0; x8 was just loaded by
-// `ldp x27, x8, [x20, #0x10]` from x20 = 0xa0010e4c8 (a demand-committed xzone segment-group metadata
-// page — the LDP itself SUCCEEDS, proving the page IS backed), whose +0x18 slot is 0. So xzm reads a
-// NULL *segment* pointer out of its own committed metadata and dereferences it. This is DISTINCT from
-// the demand-commit wall M2-mmapcommit cleared: commit_reserved_page did its job (the metadata page is
-// mapped); the fault is an xzone allocator-state inconsistency — a null segment link where a real
-// kernel-backed run has a valid pointer — under retrace's approximated VM-op semantics and single-vCPU
-// (no-preemption) model. A 12x gettimeofday deadline-spin (an xzone/libdispatch timed backoff with no
-// second thread to make progress) immediately precedes the fault. Investigating xzone's segment-group
-// allocation protocol is a distinct subsystem, deferred to a future milestone — NOT walked into here
-// (see docs/superpowers/specs/2026-07-14-retrace-m2-mmapcommit-design.md, risk register #1). Ignored
-// (not deleted) so it stays the living M2 gate, re-runnable with `--ignored` as the approach evolves.
-#[ignore = "blocked at the libmalloc xzone SEGMENT-allocator wall (M2-mmapcommit's honest boundary). The prior mmap DEMAND-COMMIT wall FELL: Box_::commit_reserved_page now demand-commits pages inside tracked mach_vm_map PROT_NONE reservations (cur_protection==0) on first touch, below the trace and mirrored in record/replay. The run advances one frame deeper — from the xzone chunk allocator into _xzm_segment_group_alloc_segment+0x90 (via realizeClassWithoutSwift -> xzm_xzone_malloc -> xzm_segment_group_alloc_chunk), which faults NEAR-NULL (data abort EC=0x24 FSC=0x7, far=0x178): `ldrb w9,[x8,#0x178]` with x8=0, where x8 was loaded by `ldp x27,x8,[x20,#0x10]` from x20=0xa0010e4c8 — a demand-committed xzone segment-group metadata page (the LDP SUCCEEDS, so the page IS backed) whose +0x18 slot is 0. xzm dereferences a NULL segment pointer read from its own committed metadata: an xzone allocator-state inconsistency under retrace's approximated VM-op / single-vCPU (no-preemption) model, DISTINCT from demand-commit (which did its job). A 12x gettimeofday deadline-spin precedes the fault. Deferred as a future milestone — see docs/superpowers/specs/2026-07-14-retrace-m2-mmapcommit-design.md risk #1"]
+// The xzone NULL-METADATA wall (M2-mmapcommit's honest boundary) FELL in M2-carveout: it was a
+// placement gap, not an allocator-state bug. libmalloc's guarded-metadata protocol reserves a ~5 MiB
+// PROT_NONE band, mach_vm_deallocate's a 1 MiB carveout hole inside it, then commits its zone metadata
+// with mach_vm_map(VM_FLAGS_ANYWHERE, hint = reservation base) — which the real kernel is FORCED to
+// place in the hole (the band around it is occupied). M2-carveout t1 taught the box to punch holes in
+// tracked reservations (subtract_reservations) and to first-fit ANYWHERE-with-hint forward past
+// reservations (first_fit); the guarded commit now lands in the carveout hole exactly as on hardware.
+// The prior NULL deref (`ldrb [x8,#0x178]`, x8 = sg->xzsg_main_ref = 0 read from a demand-zeroed page)
+// is GONE: with the metadata block landed at the hole base, the segment group's back-pointers resolve.
+//
+// NEW WALL (M2-carveout's honest boundary — libmalloc xzone SEGMENT-GROUP indexing, NOT placement):
+// objc class realization (map_images -> realizeClassWithoutSwift -> _xzm_xzone_malloc_freelist_outlined
+// -> _xzm_xzone_find_and_malloc_from_freelist_chunk -> xzm_segment_group_alloc_chunk+0x1c4) faults
+// UNMAPPED (data abort EC=0x24 FSC=0x7) accessing sg+4 (the xzsg_lock) of a segment group
+// `sg = &main->xzmz_segment_groups[sg_index]`. VERIFIED anatomy (three traced runs; addresses shift
+// per run because libmalloc's carveout offset is entropy-derived): the main-zone metadata block's own
+// `xzmz_total_size` field (read from committed memory) is 0x3e000 and the box committed EXACTLY that
+// (mach_vm_map size 0x3e000, rlen 0x40000, fully backed) — yet xzm derives sg at main + ~0x4e4c8, i.e.
+// ~0x104c8 PAST the block the guest itself sized. The offset VARIES run-to-run (0x4e4c8/0x4e740),
+// the fingerprint of an INDEX-derived address, not a fixed struct offset. sg_index =
+// segment_group_front_count * clusterid + sg_front_index, where clusterid/front come from
+// _os_cpu_number()/_os_cpu_cluster_number() at alloc time while segment_group_count (which sizes
+// total_size) is computed at zone-init from the commpage CPU topology. retrace stages a FROZEN copy of
+// the HOST commpage (12 logical CPUs / 2 perflevel clusters), so the guest lays out per-CPU/cluster
+// segment-group metadata for a 12-CPU host but executes on a single vCPU: the per-CPU segment-group
+// index overshoots the block. This is an xzone per-CPU/cluster segment-group indexing subsystem —
+// DISTINCT from carveout placement (now correct) and from demand-commit (M2-mmapcommit, which did its
+// job) — deferred to a future milestone, NOT walked into here (a documented escape hatch exists:
+// _COMM_PAGE_DEV_FIRM + MallocAllowInternalSecurity=1 + MallocSecureAllocator=0 in envp disables xzone
+// entirely, see .superpowers/sdd/xzone-research.md §5; a principled single-vCPU commpage-topology model
+// is the deeper fix). Determinism note: within a record/replay pair the reads are reproduced from the
+// trace, so record and replay stay in lockstep; only the wall's exact fault address varies ACROSS
+// record runs. A ~12-17x gettimeofday deadline-spin (a timed backoff with no second thread to make
+// progress) precedes the fault. Ignored (not deleted) so it stays the living M2 gate, re-runnable with
+// `--ignored` as the approach evolves.
+#[ignore = "blocked at the libmalloc xzone SEGMENT-GROUP indexing wall (M2-carveout's honest boundary). The prior xzone NULL-METADATA wall FELL: it was a placement gap. M2-carveout t1 taught the box to punch mach_vm_deallocate holes in tracked PROT_NONE reservations (subtract_reservations) and to first-fit ANYWHERE-with-hint forward past reservations (first_fit), so libmalloc's guarded-metadata commit (mach_vm_map ANYWHERE, hint = reservation base) now lands in the 1 MiB carveout hole exactly as the real kernel forces it — the prior `ldrb [x8,#0x178]` x8=sg->xzsg_main_ref=0 NULL deref is GONE. The run advances into xzm_segment_group_alloc_chunk+0x1c4, which faults UNMAPPED (EC=0x24 FSC=0x7) at sg+4 (xzsg_lock) of sg=&main->xzmz_segment_groups[sg_index]. VERIFIED (3 runs): the main-zone block's own xzmz_total_size = 0x3e000 and the box committed exactly that (fully backed), but xzm indexes sg at main+~0x4e4c8 — ~0x104c8 PAST the block the guest itself sized. The offset VARIES per run (0x4e4c8/0x4e740) => an index-derived address: sg_index = segment_group_front_count*clusterid + sg_front_index (clusterid from _os_cpu_cluster_number() at alloc time) overshoots a segment_group_count sized at zone-init from the FROZEN HOST commpage (12 CPUs / 2 clusters) while executing on a single vCPU. An xzone per-CPU/cluster segment-group indexing subsystem, DISTINCT from carveout placement (now correct) — deferred. Escape hatch: MallocSecureAllocator=0 (+ _COMM_PAGE_DEV_FIRM, MallocAllowInternalSecurity=1) disables xzone; see .superpowers/sdd/xzone-research.md"]
 #[test]
 fn hello_dyn_records_and_replays() {
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
