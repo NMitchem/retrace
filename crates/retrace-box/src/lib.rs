@@ -54,13 +54,17 @@ pub const COMMPAGE_IPA: u64 = 0x0000_000F_FFFF_C000;
 pub const COMMPAGE2_IPA: u64 = 0x0000_000F_FFFF_4000;
 // Thread-pointer TSD block. The kernel points TPIDRRO_EL0 at the main thread's thread-specific
 // data; dyld/libSystem read it (errno slot, pthread self) via `mrs x, TPIDRRO_EL0; ldr .., [x,#N]`.
-// We stage a zeroed region and set TPIDRRO_EL0/TPIDR_EL0 to `TSD_IPA` in load_dynamic AND restore,
-// so record and replay share the same thread pointer. Fixed IPA so restore can re-establish it
-// without threading the value through the snapshot. The thread pointer points into the MIDDLE of the
+// We stage a zeroed region and set TPIDRRO_EL0 to `TSD_IPA` in load_dynamic AND restore, so record
+// and replay share the same thread pointer. Fixed IPA so restore can re-establish it without
+// threading the value through the snapshot. The thread pointer points into the MIDDLE of the
 // staged region [TSD_REGION_BASE, TSD_REGION_BASE+TSD_REGION_SIZE): libpthread/libplatform touch
 // both positive TSD-key slots (`[tp,#+N]`) AND negative pthread-struct fields (`[tp,#-N]`, observed
 // as low as tp-0xE0), so the backing must span generously below and above tp. The whole region sits
 // in block 0's free area below the sign scratch (0x40000) and above PT_L2 (0x8000).
+// TPIDR_EL0 is a SEPARATE register and is NOT a second TSD pointer: macOS 26 reads the guest's
+// current CPU number from TPIDR_EL0[11:0] and cluster number from TPIDR_EL0[>=12] (see the
+// set-sys call sites in load_dynamic/restore for the full rationale); it is set to 0 (cpu 0 /
+// cluster 0), never to `TSD_IPA` (M2-cpuid).
 pub const TSD_IPA: u64 = 0x0003_0000;
 const TSD_REGION_BASE: u64 = 0x0002_8000; // 0x8000 below tp
 const TSD_REGION_SIZE: u64 = 0x0001_0000; // 4 granules; tp = TSD_IPA sits 0x8000 into it
@@ -900,7 +904,12 @@ impl Box_ {
         vcpu.set_sys(sysreg::TTBR0_EL1, ttbr0).unwrap();
         vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap(); // FPEN=0b11: EL0/EL1 FP/SIMD (dyld uses NEON)
         vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();   // thread pointer (kernel-provided TSD)
-        vcpu.set_sys(sysreg::TPIDR_EL0,   TSD_IPA).unwrap();
+        // TPIDR_EL0 is NOT a second TSD pointer: macOS 26 reads the current CPU number from
+        // TPIDR_EL0[11:0] and the cluster number from TPIDR_EL0[>=12] (_os_cpu_number /
+        // _os_cpu_cluster_number). A single-vCPU guest is always cpu 0 / cluster 0, so TPIDR_EL0
+        // must be 0 -- TSD_IPA (0x30000) would read as cluster 48 and blow libmalloc xzone's
+        // per-cluster segment-group index out of bounds (M2-cpuid).
+        vcpu.set_sys(sysreg::TPIDR_EL0,   0).unwrap();
         vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
@@ -1294,7 +1303,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::TTBR0_EL1, PT_L1_IPA).unwrap();
         vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap(); // match load: EL0/EL1 FP/SIMD enabled
         vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();   // match load: thread pointer (harmless for M1)
-        vcpu.set_sys(sysreg::TPIDR_EL0,   TSD_IPA).unwrap();
+        vcpu.set_sys(sysreg::TPIDR_EL0,   0).unwrap();         // match load: cpu 0 / cluster 0 (M2-cpuid)
         Self::set_pac_keys(&vcpu);
         vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
@@ -1476,6 +1485,13 @@ impl Box_ {
     pub fn position(&self) -> u64 { self.vcpu.get_sys(sysreg::ELR_EL1).unwrap() }
     /// The current PC (for non-syscall exits).
     pub fn pc(&self) -> u64 { self.vcpu.get_reg(reg::PC).unwrap() }
+    /// macOS 26 reads the guest's current CPU number from TPIDR_EL0[11:0] and cluster number from
+    /// TPIDR_EL0[>=12] (`_os_cpu_number` / `_os_cpu_cluster_number`); a single-vCPU guest must
+    /// present 0 here (cpu 0 / cluster 0). Test-facing accessor (M2-cpuid).
+    pub fn tpidr_el0(&self) -> u64 { self.vcpu.get_sys(sysreg::TPIDR_EL0).unwrap() }
+    /// The guest's TSD base (thread pointer): errno slot, pthread-self, etc. are read through it.
+    /// Test-facing accessor (M2-cpuid).
+    pub fn tpidrro_el0(&self) -> u64 { self.vcpu.get_sys(sysreg::TPIDRRO_EL0).unwrap() }
 
     /// Bring-up diagnostic: dump x0..x30, SP_EL0, PC, ELR/SPSR/FAR as a multi-line string.
     pub fn dbg_regs(&self) -> String {
