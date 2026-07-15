@@ -37,10 +37,12 @@ impl Msg2 {
 
 /// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; ServiceGetSpecialPort
 /// answers task_get_special_port(BOOTSTRAP) with a synthetic port right (complex reply);
-/// StubMigReply(retcode) answers an optional/no-op kernel routine (no out-params) with a
-/// mig_reply_error carrying `retcode`; Forward is the decided read-only/create-once allowlist
-/// (memory-diff'd like any mach trap); Unsupported carries a decoded description for the fail-loud error.
-pub enum Route { ServiceVmMap, ServiceGetSpecialPort, StubMigReply(i32), Forward(&'static str), Unsupported(String) }
+/// ServiceSetSpecialPort answers task_set_special_port(DEBUG_CONTROL_PORT) with a mig_reply_error
+/// KERN_SUCCESS (deterministic — standard symmetric posture); StubMigReply(retcode) answers an
+/// optional/no-op kernel routine (no out-params) with a mig_reply_error carrying `retcode`; Forward
+/// is the decided read-only/create-once allowlist (memory-diff'd like any mach trap); Unsupported
+/// carries a decoded description for the fail-loud error.
+pub enum Route { ServiceVmMap, ServiceGetSpecialPort, ServiceSetSpecialPort, StubMigReply(i32), Forward(&'static str), Unsupported(String) }
 
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
 /// msgh_id alone: these are kernel-subsystem ids, unambiguous under the KOBJECT options shape.
@@ -63,6 +65,11 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
             // fixed synthetic port right (never forwarded — that would hand over the host's real
             // launchd port). `which` is decoded in dispatch (like vm_map's body) and asserted == 4.
             3409 => return Route::ServiceGetSpecialPort,
+            // task_set_special_port (task subsystem base 3400, slot 10): libsystem_trace's
+            // initializer sets which=10=TASK_DEBUG_CONTROL_PORT at launch. Serviced with a
+            // mig_reply_error KERN_SUCCESS (no out-params) — never forwarded (that would set
+            // retrace's OWN debug-control port). `which` is decoded in dispatch and asserted == 10 (M2-setport).
+            3410 => return Route::ServiceSetSpecialPort,
             // vm_reclaim (deferred reclamation): optional. Report unavailable so libmalloc takes
             // its no-reclaim fallback.
             4822 => return Route::StubMigReply(KERN_NOT_SUPPORTED),
@@ -129,6 +136,19 @@ pub fn decode_get_special_port(buf: &[u8]) -> Result<u32, String> {
     let id = u32_at(buf, 20);
     if id != 3409 { return Err(format!("msgh_id {id} != 3409")); }
     Ok(u32_at(buf, 32)) // which_port = header(24) + NDR(8)
+}
+
+/// task_set_special_port (3410) request body: a COMPLEX message —
+/// header(24) + desc_count(4) + port_descriptor(12) + NDR(8) + `which_port: int`(4) = 52 bytes.
+/// Returns `which_port` (offset 48 = header 24 + desc_count 4 + descriptor 12 + NDR 8); dispatch
+/// asserts it == 10 (TASK_DEBUG_CONTROL_PORT) — the only one modeled. Validates the length and
+/// msgh_id so a malformed/mis-routed request fails loud. The inbound COPY_SEND descriptor (offset 28)
+/// is ignored — never consumed or forwarded.
+pub fn decode_set_special_port(buf: &[u8]) -> Result<u32, String> {
+    if buf.len() < 52 { return Err(format!("set_special_port request short: {} < 52", buf.len())); }
+    let id = u32_at(buf, 20);
+    if id != 3410 { return Err(format!("msgh_id {id} != 3410")); }
+    Ok(u32_at(buf, 48)) // which_port = header(24) + desc_count(4) + descriptor(12) + NDR(8)
 }
 
 // Received-reply header constants, golden-copied from the captured kernel reply (fixture is
@@ -365,5 +385,38 @@ mod tests {
         assert_eq!(encode_get_special_port_reply(0xe03, SYNTHETIC_BOOTSTRAP_PORT), EXPECTED.to_vec());
         // The descriptor's name field is exactly the synthetic constant (guards an accidental swap).
         assert_eq!(u32::from_le_bytes(EXPECTED[28..32].try_into().unwrap()), SYNTHETIC_BOOTSTRAP_PORT);
+    }
+
+    // --- task_set_special_port (3410) — debug-control-port service (M2-setport) ---
+    #[test]
+    fn routes_set_special_port_to_service() {
+        // 3410 to the guest task port is serviced (mig_reply_error KERN_SUCCESS).
+        assert!(matches!(route(&msg(3410, 0x203, KOBJ), Some(0x203)),
+                         Route::ServiceSetSpecialPort));
+        // 3410 to a NON-task port is not ours to service (fail loud).
+        assert!(matches!(route(&msg(3410, 0x999, KOBJ), Some(0x203)), Route::Unsupported(_)));
+    }
+
+    // Hand-built task_set_special_port request from the M2-xpcport walk's exact 52 bytes:
+    // header(24) + desc_count(4)=1 + port_descriptor(12) + NDR(8) + which_port:int(4).
+    // msgh_id at offset 20, which_port at offset 48.
+    fn set_special_port_req(id: u32, which: u32) -> Vec<u8> {
+        let mut b = vec![0u8; 52];
+        b[20..24].copy_from_slice(&id.to_le_bytes());          // msgh_id
+        b[24..28].copy_from_slice(&1u32.to_le_bytes());        // desc_count = 1
+        b[28..32].copy_from_slice(&0x1103u32.to_le_bytes());   // port descriptor: name (offset 28)
+        b[40..48].copy_from_slice(&NDR);                        // NDR record (offset 40)
+        b[48..52].copy_from_slice(&which.to_le_bytes());        // which_port (offset 48)
+        b
+    }
+    #[test]
+    fn decodes_set_special_port_which() {
+        // which_port = 10 = TASK_DEBUG_CONTROL_PORT (the only one modeled; decode returns it, dispatch asserts).
+        assert_eq!(decode_set_special_port(&set_special_port_req(3410, 10)).unwrap(), 10);
+    }
+    #[test]
+    fn decode_set_special_port_rejects_malformed() {
+        assert!(decode_set_special_port(&set_special_port_req(3410, 10)[..51]).is_err()); // short (<52)
+        assert!(decode_set_special_port(&set_special_port_req(3411, 10)).is_err());       // wrong id
     }
 }
