@@ -45,18 +45,36 @@ mod util;
 // has_rw_pointer() now reads NSObject as unrealized, objc realizes it normally, and the
 // validateAlreadyRealizedClass fatal is GONE. See docs/superpowers/specs/2026-07-14-retrace-m2-tbi-design.md.
 //
-// NEW WALL (M2-tbi's honest boundary — mmap DEMAND-COMMIT, a memory-management gap, not objc): with
-// classes realizing correctly, objc heap-allocates each class_rw_t (objc::zalloc -> calloc ->
-// libmalloc -> mmap) and first-touches the allocation, which faults with a level-3 translation fault
-// (data abort EC=0x24, FSC=0x7) on an UNMAPPED page in the mmap region (MMAP_BASE = 0xA_0000_0000)
-// that libmalloc obtained via an anonymous mmap but retrace reserved without backing/committing.
-// (Observed at far=0xa0010e744 = MMAP_BASE+0x10e744 on one run; the exact offset is NOT invariant —
-// it shifts with argv layout, e.g. the -o path length. The invariant is the first-touch fault on an
-// unmapped page in [MMAP_BASE, …).) Clearing it needs retrace to back first-touched mmap pages with
-// anon memory and, on record, capture the zero-fill as writes so replay reproduces it — the next
-// milestone, materially smaller than the objc-opt subsystem the misdiagnosis feared. Ignored (not
-// deleted) so it stays the living M2 gate, re-runnable with `--ignored` as the approach evolves.
-#[ignore = "blocked at the mmap DEMAND-COMMIT wall (M2-tbi's honest boundary). The prior objc validateAlreadyRealizedClass abort ('realized class 0x1ec2f1618 has corrupt data pointer: malloc_size(0x1ed950f80)=0') was a MISDIAGNOSIS — not objc shared-cache preoptimization but a bit-63/FAST_IS_RW_POINTER collision: the guest TCR left TBI off, so the re-signed data-pointer PAC spanned [63:56] u [54:47] and set bit 63, which objc reads as its class-realized flag (NSObject's data() points to _OBJC_CLASS_RO_$_NSObject, a class_ro_t with malloc_size 0). M2-tbi's TBI0+TBID0 fix clears it — objc now realizes classes normally, then blocks on a level-3 translation fault (data abort EC=0x24 FSC=0x7) on a first-touch UNMAPPED page in the mmap region (MMAP_BASE=0xA_0000_0000; observed far=0xa0010e744, offset varies with argv layout) that libmalloc obtained via anon mmap (calloc->libmalloc->mmap for objc's class_rw_t) but retrace reserved without backing. Needs mmap demand-commit + record-side zero-fill capture — see docs/superpowers/specs/2026-07-14-retrace-m2-tbi-design.md"]
+// The mmap DEMAND-COMMIT wall (M2-tbi's honest boundary) FELL in M2-mmapcommit: the class_rw_t
+// first-touch fault was on a page inside a mach_vm_map PROT_NONE reservation (cur_protection == 0)
+// that guest_vm_reserve deliberately never backed. Box_::commit_reserved_page now demand-commits
+// exactly the faulting page with a fresh zeroed anon page on a stage-2 fault inside a tracked
+// reservation — the moral twin of the shared-cache demand-pager, minus the file read and re-sign,
+// dispatched by a second below-the-trace guard mirrored textually in record and replay's Stop::Other
+// arms. Pure zero-fill + the guest's own re-executed stores, so nothing enters the trace (same
+// posture as the cache pager / timebase MRS / FPAC strip). The run advances from the xzone CHUNK
+// allocator one frame deeper into the xzone SEGMENT allocator (~206-214 traps; the count varies with
+// the forwarded-gettimeofday deadline-spin below, not a determinism defect — record forwards real
+// time, replay reproduces the recorded values).
+//
+// NEW WALL (M2-mmapcommit's honest boundary — libmalloc xzone SEGMENT allocator, NOT demand-commit):
+// with reservation pages demand-committed, objc class realization (libdispatch_init -> _objc_init ->
+// map_images -> realizeClassWithoutSwift -> _xzm_xzone_malloc_freelist_outlined+0x144 ->
+// _xzm_xzone_find_and_malloc_from_freelist_chunk+0x51c -> xzm_segment_group_alloc_chunk+0x274) reaches
+// _xzm_segment_group_alloc_segment+0x90, which faults NEAR-NULL (data abort EC=0x24 FSC=0x7,
+// far=0x178). The faulting insn is `ldrb w9, [x8, #0x178]` with x8 = 0; x8 was just loaded by
+// `ldp x27, x8, [x20, #0x10]` from x20 = 0xa0010e4c8 (a demand-committed xzone segment-group metadata
+// page — the LDP itself SUCCEEDS, proving the page IS backed), whose +0x18 slot is 0. So xzm reads a
+// NULL *segment* pointer out of its own committed metadata and dereferences it. This is DISTINCT from
+// the demand-commit wall M2-mmapcommit cleared: commit_reserved_page did its job (the metadata page is
+// mapped); the fault is an xzone allocator-state inconsistency — a null segment link where a real
+// kernel-backed run has a valid pointer — under retrace's approximated VM-op semantics and single-vCPU
+// (no-preemption) model. A 12x gettimeofday deadline-spin (an xzone/libdispatch timed backoff with no
+// second thread to make progress) immediately precedes the fault. Investigating xzone's segment-group
+// allocation protocol is a distinct subsystem, deferred to a future milestone — NOT walked into here
+// (see docs/superpowers/specs/2026-07-14-retrace-m2-mmapcommit-design.md, risk register #1). Ignored
+// (not deleted) so it stays the living M2 gate, re-runnable with `--ignored` as the approach evolves.
+#[ignore = "blocked at the libmalloc xzone SEGMENT-allocator wall (M2-mmapcommit's honest boundary). The prior mmap DEMAND-COMMIT wall FELL: Box_::commit_reserved_page now demand-commits pages inside tracked mach_vm_map PROT_NONE reservations (cur_protection==0) on first touch, below the trace and mirrored in record/replay. The run advances one frame deeper — from the xzone chunk allocator into _xzm_segment_group_alloc_segment+0x90 (via realizeClassWithoutSwift -> xzm_xzone_malloc -> xzm_segment_group_alloc_chunk), which faults NEAR-NULL (data abort EC=0x24 FSC=0x7, far=0x178): `ldrb w9,[x8,#0x178]` with x8=0, where x8 was loaded by `ldp x27,x8,[x20,#0x10]` from x20=0xa0010e4c8 — a demand-committed xzone segment-group metadata page (the LDP SUCCEEDS, so the page IS backed) whose +0x18 slot is 0. xzm dereferences a NULL segment pointer read from its own committed metadata: an xzone allocator-state inconsistency under retrace's approximated VM-op / single-vCPU (no-preemption) model, DISTINCT from demand-commit (which did its job). A 12x gettimeofday deadline-spin precedes the fault. Deferred as a future milestone — see docs/superpowers/specs/2026-07-14-retrace-m2-mmapcommit-design.md risk #1"]
 #[test]
 fn hello_dyn_records_and_replays() {
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);

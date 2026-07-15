@@ -153,4 +153,26 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang bfamstrip");
     assert!(status.success(), "bfamstrip guest build failed");
+
+    // reservecommit: reserves a PROT_NONE region via _kernelrpc_mach_vm_map_trap (svc -15,
+    // cur_protection=0), then first-touches two different pages inside it. Each touch faults (the
+    // reservation is unbacked) and must be demand-committed by commit_reserved_page. The
+    // M2-mmapcommit Task 1 micro-guest: proves reserve -> fault -> zero-fill commit -> store -> load.
+    let src = format!("{}/asm/reservecommit.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/reservecommit");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang reservecommit");
+    assert!(status.success(), "reservecommit guest build failed");
+
+    // wildstore: stores to a wild unbacked, unreserved address (0xB_0000_0000). The fault must stay
+    // fatal — the M2-mmapcommit fail-loud negative guest (commit_reserved_page must refuse it).
+    let src = format!("{}/asm/wildstore.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/wildstore");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang wildstore");
+    assert!(status.success(), "wildstore guest build failed");
 }

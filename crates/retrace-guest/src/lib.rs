@@ -100,6 +100,8 @@ pub const HELLO_DYN: &str = concat!(env!("OUT_DIR"), "/hello_dyn");
 pub const DYLD_PATH: &str = "/usr/lib/dyld";
 pub const STRIP47: &str = concat!(env!("OUT_DIR"), "/strip47");
 pub const BFAMSTRIP: &str = concat!(env!("OUT_DIR"), "/bfamstrip");
+pub const RESERVECOMMIT: &str = concat!(env!("OUT_DIR"), "/reservecommit");
+pub const WILDSTORE: &str = concat!(env!("OUT_DIR"), "/wildstore");
 
 #[cfg(test)]
 mod tests {
