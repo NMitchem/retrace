@@ -132,7 +132,46 @@ mod util;
 // forwarded port name. Servicing this wall means standing up the XPC pipe / dispatch-mach channel
 // subsystem against a real bootstrap port — explicitly DEFERRED (do NOT pre-stub launchd/XPC). Ignored
 // (not deleted) so it stays the living M2 gate, re-runnable with `--ignored`.
-#[ignore = "blocked at the XPC bootstrap-PIPE wall (M2-bootstrap's honest boundary). The prior Mach task-port MIG wall FELL in M2-bootstrap: machmsg::route now services task_get_special_port(TASK_BOOTSTRAP_PORT) (msgh_id 3409) with a synthetic complex MIG reply carrying a fixed bootstrap-port name (SYNTHETIC_BOOTSTRAP_PORT = 0x0BAD_0B03), mirrored in record and replay and byte-compared by the oracle. libxpc's initializer ACCEPTS the reply (__MIG_check__Reply passes; it extracts 0x0BAD_0B03 and retains its send right via three mach_port_mod_refs), advancing ~218 -> ~228 traps. NEW wall: libxpc's initializer is NOT lazy (the spec's fetch-and-cache-dormant hypothesis is falsified) — it eagerly calls xpc_pipe_create_from_port(0x0BAD_0B03, 4), which returns NULL (no real Mach channel to launchd over the synthetic token), so `libxpc.dylib`_xpc_create_bootstrap_pipe.cold.1` executes `brk #0x1` (EC=0x3c) at guest pc 0x180201190, crash string \"Bug in libxpc: Could not create pipe to bootstrap server!\", from _libxpc_initializer+0x42c <- libSystem_initializer+0x100. This is a DISTINCT subsystem (XPC pipe / dispatch-mach channel), NOT a Task-1 reply-format bug (the BRK is downstream of __MIG_check__Reply; 0x0BAD_0B03 flows through cleanly) and NOT a bootstrap_look_up send (no mach_msg2 targets 0x0BAD_0B03; the abort precedes any send). Standing up XPC is DEFERRED — do not pre-stub launchd/XPC. (Predecessor walls, all fallen: the xzone segment-group index (M2-cpuid, TPIDR_EL0 = 0), the reservation carveout/demand-commit (M2-carveout/M2-mmapcommit), arm64e data-pointer PAC TBI (M2-tbi), and the task_get_special_port MIG (this milestone). Deferred debt unchanged: the frozen HOST commpage still carries 12-CPU/2-cluster COUNTS — harmless once the cpu/cluster index is pinned to 0; a single-vCPU commpage synthesis is the hygiene follow-up.)"]
+//
+// The XPC bootstrap-PIPE wall FELL in M2-xpcport, and M2-bootstrap's guess just above (that clearing it
+// meant standing up a real XPC pipe / dispatch-mach subsystem) was WRONG: the pipe never needed a live
+// channel to launchd — only a genuinely valid send right. task_get_special_port(BOOTSTRAP) now hands
+// back a REAL kernel-minted send right (Box_::mint_bootstrap_port via mach_port_construct with
+// MPO_INSERT_SEND_RIGHT in retrace's OWN IPC space, which is the guest's; name observed = 0x1003)
+// instead of the synthetic 0x0BAD_0B03. Because the minted name is nondeterministic (the kernel picks
+// it, like task_self's name), the ServiceGetSpecialPort handler moved from M2-bootstrap's
+// synthesize-and-byte-compare posture to the forward-and-record posture: record mints + records the
+// reply bytes; replay applies the recorded reply VERBATIM (no recompute/byte-compare — the name can't
+// be regenerated), exactly as task_self's port name is already replayed. libxpc's three
+// __xpc_mach_port_retain_send sites (mach_port_mod_refs(SEND,+1), trap -19, name 0x1003) now return
+// KERN_SUCCESS instead of KERN_INVALID_NAME, so xpc_pipe_create_from_port returns non-NULL, the
+// `brk #0x1` in `libxpc.dylib`_xpc_create_bootstrap_pipe.cold.1` (pc 0x180201190) is GONE, and
+// _libxpc_initializer completes. The run advances ~228 -> ~242 traps.
+//
+// NEW WALL (M2-xpcport's honest boundary — a SECOND task-subsystem MIG id, DISTINCT from the now-fixed
+// pipe and NOT the deferred XPC send): at ~242 traps the run fail-louds on
+// `RECORD ERROR: unsupported mach_msg2 at pc 0x1804abc34: msgh_id 3410 dest 0x203 (guest task port
+// Some(515)) send_size 52`. This is NOT a CPU fault (no ESR/EC, unlike the prior brk) — it is retrace's
+// MIG router (machmsg::route) fail-louding on an unhandled id. msgh_id 3410 is the Mach `task`
+// subsystem (base 3400) routine 10 = task_set_special_port (mach/task.h, macOS 26 SDK): a COMPLEX
+// message (msgh_bits 0x80001513) carrying one COPY_SEND mach_msg_port_descriptor (port name 0x1103)
+// followed by which_port = 10 = TASK_DEBUG_CONTROL_PORT (mach/task_special_ports.h), with reply port
+// 0x1603 (MAKE_SEND_ONCE — it awaits a reply). Symbolicated LIVE against the arm64e shared cache (box
+// loads at slide 0, so trace pcs are unslid VAs; ASLR slide backed out via lldb): the caller is NOT
+// libxpc — the 0x1802xxxxx range is shared with libsystem_trace, and the real stack is
+// `libsystem_trace.dylib`_os_trace_create_debug_control_port+0x60` <- `_libtrace_init+0xfc` <-
+// `libSystem.B.dylib`libSystem_initializer+0x10c` <- dyld's findAndRunAllInitializers. So this is the
+// os_log/os_trace image initializer installing its task debug-control port — a SIBLING libSystem
+// sub-initializer that runs just AFTER _libxpc_initializer (libSystem_initializer+0x100 called libxpc;
+// +0x10c calls libtrace), which is exactly why widening past the pipe brk surfaced it. It is a SMALL
+// next-init MIG step (same task-subsystem lineage as the SERVICED 3409 task_get_special_port and the
+// stubbed vm_reclaim / task_restartable): servicing it means accepting the complex request, handling
+// the inbound debug-control-port descriptor, and synthesizing a __Reply__task_set_special_port_t that
+// returns KERN_SUCCESS, mirrored textually in record and replay. It is NOT the deferred XPC send /
+// dispatch-mach subsystem — no mach_msg2 targets the minted bootstrap port (0x1003), and no
+// bootstrap_look_up has appeared. Deferred to the next milestone; do NOT pre-stub. Ignored (not
+// deleted) so it stays the living M2 gate, re-runnable with `--ignored`.
+#[ignore = "blocked at the libsystem_trace task_set_special_port wall (M2-xpcport's honest boundary). The XPC bootstrap-PIPE wall FELL in M2-xpcport: task_get_special_port(TASK_BOOTSTRAP_PORT) (msgh_id 3409) now hands back a REAL kernel-minted send right (Box_::mint_bootstrap_port via mach_port_construct with MPO_INSERT_SEND_RIGHT in retrace's own IPC space, name 0x1003) instead of the synthetic 0x0BAD_0B03. The minted name is nondeterministic, so the handler moved from synthesize-and-byte-compare to forward-and-record: record mints + records the reply; replay applies it VERBATIM (no recompute), exactly like task_self's port name. libxpc's three mach_port_mod_refs(SEND,+1) retains (trap -19, name 0x1003) now return KERN_SUCCESS instead of KERN_INVALID_NAME, so xpc_pipe_create_from_port returns non-NULL, the `brk #0x1` in _xpc_create_bootstrap_pipe.cold.1 (pc 0x180201190) is GONE, and _libxpc_initializer completes. The run advances ~228 -> ~242 traps. NEW wall (a SECOND task-subsystem MIG, NOT the deferred XPC send): at ~242 traps machmsg::route fail-louds `unsupported mach_msg2 at pc 0x1804abc34: msgh_id 3410 dest 0x203 (guest task port Some(515)) send_size 52` (no ESR/EC — it is retrace's router rejecting an unhandled id, not a CPU fault). msgh_id 3410 = task_set_special_port (Mach task subsystem, base 3400, routine 10; mach/task.h): a COMPLEX message (bits 0x80001513) carrying one COPY_SEND port descriptor (name 0x1103) with which_port = 10 = TASK_DEBUG_CONTROL_PORT (mach/task_special_ports.h), reply port 0x1603 (MAKE_SEND_ONCE). Symbolicated live against the arm64e shared cache (slide backed out via lldb; box loads at slide 0): the caller is NOT libxpc but libsystem_trace — `libsystem_trace.dylib`_os_trace_create_debug_control_port+0x60` <- `_libtrace_init+0xfc` <- `libSystem.B.dylib`libSystem_initializer+0x10c` <- dyld's findAndRunAllInitializers — the os_log/os_trace image initializer installing its task debug-control port, a sibling libSystem sub-initializer right after _libxpc_initializer (libSystem_initializer+0x100 vs +0x10c). SMALL next-init MIG step (same lineage as the serviced 3409 task_get_special_port): service it by accepting the complex request, handling the inbound port descriptor, and replying __Reply__task_set_special_port_t KERN_SUCCESS, mirrored record/replay. NOT the deferred XPC send / dispatch-mach subsystem (no mach_msg2 targets the minted 0x1003; no bootstrap_look_up yet). Deferred to the next milestone; do NOT pre-stub. (Predecessor walls, all fallen: the XPC bootstrap-pipe brk (this milestone), the task_get_special_port MIG (M2-bootstrap), the xzone segment-group index (M2-cpuid, TPIDR_EL0 = 0), the reservation carveout/demand-commit (M2-carveout/M2-mmapcommit), and arm64e data-pointer PAC TBI (M2-tbi). Deferred debt unchanged: the frozen HOST commpage still carries 12-CPU/2-cluster COUNTS — harmless once the cpu/cluster index is pinned to 0; a single-vCPU commpage synthesis is the hygiene follow-up.)"]
 #[test]
 fn hello_dyn_records_and_replays() {
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
