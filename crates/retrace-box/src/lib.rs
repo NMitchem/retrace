@@ -19,11 +19,16 @@ pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 // IPA space and ABOVE the loaded segments (~4-5 GiB), the demand-paged shared-cache window
 // [SHARED_REGION_START, SHARED_REGION_END), AND libmalloc's FIXED 24-GiB nano "pointer range"
 // reservation [NANO_BAND_START, NANO_BAND_END). The last is critical: libmalloc reserves that
-// band FIXED and then commits nano sub-ranges at EXACT hint addresses inside it, validating that
-// each commit landed where it asked. If the bump allocator's IPAs fell inside the band, an early
-// dyld allocation would occupy a nano sub-range and libmalloc's hinted commit there would be
-// rejected (range_is_free=false) and relocated — leaving libmalloc's nano zone pointing at the
-// wrong page (wild-pointer abort). Basing bumps ABOVE the band keeps it pristine for libmalloc.
+// band and then commits nano sub-ranges at EXACT addresses inside it, both with the ANYWHERE bit
+// CLEAR (`_nano_common_map_vm_space` in nano_malloc_common.c) — i.e. plain FIXED placement, not a
+// hinted-ANYWHERE request. Retrace's FIXED map path (`unmap_overlapping` + map) never consults
+// `range_is_free`, so nano's commits are unaffected by whether `range_is_free` treats reservations
+// as occupied (see M2-carveout, which made `range_is_free` reservation-aware for ANYWHERE placement
+// only — `nano_fixed_commit_lands_at_requested_base_inside_a_reservation` in
+// crates/retrace-box/tests/carveout.rs is the regression guard). If the bump allocator's IPAs fell
+// inside the band, an early dyld allocation would still occupy a nano sub-range and nano's FIXED
+// commit there would unmap-and-overwrite it — leaving libmalloc's nano zone pointing at the wrong
+// page (wild-pointer abort). Basing bumps ABOVE the band keeps it pristine for libmalloc.
 pub const NANO_BAND_START: u64 = 0x4_0000_0000;
 pub const NANO_BAND_END:   u64 = 0xA_0000_0000; // 0x4_0000_0000 + 0x6_0000_0000 (24 GiB)
 pub const MMAP_BASE: u64 = NANO_BAND_END;
@@ -961,14 +966,25 @@ impl Box_ {
     pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
         let (host, rlen) = alloc_pages(size as usize);
         let ipa = if anywhere {
-            // Honor a non-zero address HINT when its range is free (libmalloc reserves its mandatory
-            // "pointer range" as ANYWHERE with a hint at the nano base 0x600000000 and then validates
-            // the result lands there); otherwise bump-allocate a fresh deterministic IPA.
-            if addr != 0 && self.range_is_free(addr, rlen as u64) {
-                addr
-            } else {
-                if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
-                let a = self.mmap_next; self.mmap_next += rlen as u64; a
+            // Kernel-faithful VM_FLAGS_ANYWHERE-with-hint: search FORWARD from a non-zero hint for
+            // the first free gap, treating reservations as occupied (what vm_map_enter does). When
+            // the hint's own range is free, first_fit returns the hint verbatim (the common case);
+            // when it collides — e.g. libmalloc's guarded-metadata commit whose hint is a reserved
+            // band with an interior carveout — it lands in the first free gap (the hole). A zero hint
+            // or no fit falls back to the deterministic bump allocator.
+            match if addr != 0 { self.first_fit(addr, rlen as u64) } else { None } {
+                Some(a) => {
+                    // A first-fit hit may land at/above the bump cursor (a hinted commit past every
+                    // reservation); float mmap_next past it so no later bump hands out an overlapping
+                    // IPA. A no-op in the common case (hint honored below the cursor, e.g. the xzone
+                    // carveout hole). Pure max of reset-on-restore state — deterministic.
+                    self.mmap_next = self.mmap_next.max((a + rlen as u64 + (GRANULE as u64 - 1)) & !(GRANULE as u64 - 1));
+                    a
+                }
+                None => {
+                    if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
+                    let a = self.mmap_next; self.mmap_next += rlen as u64; a
+                }
             }
         } else {
             // FIXED (dyld/libmalloc often pass VM_FLAGS_OVERWRITE): the guest may be replacing a
@@ -1017,13 +1033,45 @@ impl Box_ {
         base
     }
 
-    /// Is `[ipa, ipa+len)` free of any tracked backing, clear of the shared-cache window, and within
-    /// the 36-bit IPA space? (Used to decide whether an ANYWHERE map may honor its address hint.)
+    /// Is `[ipa, ipa+len)` free of any tracked backing AND any PROT_NONE reservation, clear of the
+    /// shared-cache window, and within the 36-bit IPA space? A real `vm_map_entry` (a reservation)
+    /// occupies its VA on the kernel, so an ANYWHERE placement can never land inside one; excluding
+    /// `reservations` here makes the emulated VM agree. (Used to decide ANYWHERE hint placement.)
     fn range_is_free(&self, ipa: u64, len: u64) -> bool {
         let end = ipa.saturating_add(len);
-        end <= (1u64 << 36)
-            && !(ipa < SHARED_REGION_END && SHARED_REGION_START < end)
-            && !self.backings.iter().any(|b| ipa < b.ipa + b.len as u64 && b.ipa < end)
+        if end > (1u64 << 36) { return false; }                            // out of 36-bit IPA space
+        if ipa < SHARED_REGION_END && SHARED_REGION_START < end { return false; } // shared-cache window
+        if self.backings.iter().any(|b| ipa < b.ipa + b.len as u64 && b.ipa < end) { return false; }
+        if self.reservations.iter().any(|&(s, l)| ipa < s + l && s < end) { return false; }
+        true
+    }
+
+    /// Kernel-faithful `VM_FLAGS_ANYWHERE`-with-hint placement: the lowest address `a >=`
+    /// page-rounded `hint` such that `[a, a+len)` clears every backing, reservation, and forbidden
+    /// window (`range_is_free`). The optimal `a` is always either the hint itself or the page-rounded
+    /// end of some occupied extent (slide right until clear stops exactly at an extent's end), so we
+    /// test just those candidates in address order and take the first that fits — a deterministic
+    /// gap-edge first-fit. `None` if nothing fits below the 36-bit ceiling (caller falls back to the
+    /// bump allocator). Pure function of (hint, len, backings, reservations) — identical on record &
+    /// replay, so a first-fit-placed returned address is recomputed identically and byte-checked by
+    /// the replay oracle (no new mirror needed; symmetry is structural).
+    fn first_fit(&self, hint: u64, len: u64) -> Option<u64> {
+        let g = GRANULE as u64;
+        let base = hint & !(g - 1);
+        let round_up = |x: u64| (x + g - 1) & !(g - 1);
+        let mut cands = vec![base];
+        for b in &self.backings {
+            let end = round_up(b.ipa + b.len as u64);
+            if end > base { cands.push(end); }
+        }
+        for &(s, l) in &self.reservations {
+            let end = round_up(s + l);
+            if end > base { cands.push(end); }
+        }
+        if SHARED_REGION_END > base { cands.push(SHARED_REGION_END); }
+        cands.sort_unstable();
+        cands.dedup();
+        cands.into_iter().find(|&a| self.range_is_free(a, len))
     }
 
     /// Free every tracked backing that overlaps `[ipa, ipa+len)` (stage-2 unmap + release the anon
@@ -1120,10 +1168,39 @@ impl Box_ {
         self.map_mmap_region(host, rlen, addr, prot, flags)
     }
 
-    /// Honor munmap (debt #2): drop the backing covering `ipa` and `hv_vm_unmap` its stage-2
-    /// range, then release the anon host allocation. No-op if `ipa` isn't a tracked backing
-    /// (e.g. munmap of something retrace never mapped itself).
+    /// Subtract the deallocated range `[addr, addr+len)` from every overlapping PROT_NONE reservation
+    /// (kernel `mach_vm_deallocate` rounds the range out to whole pages: start down, end up). A full
+    /// cover removes the entry; a head/tail overlap trims it; a strictly-interior punch SPLITS it into
+    /// two entries — libmalloc's guarded-metadata carveout. The punched pages become genuinely
+    /// free-and-unreserved: [`commit_reserved_page`](Self::commit_reserved_page) no longer materializes
+    /// them (a touch there is fatal again, matching deallocated address space) and first-fit placement
+    /// stops treating them as occupied. Deterministic: an identical `(addr, len)` sequence rebuilds the
+    /// identical table on record & replay.
+    fn subtract_reservations(&mut self, addr: u64, len: u64) {
+        let g = GRANULE as u64;
+        let s = addr & !(g - 1);                                 // trunc_page(addr)
+        let e = (addr.saturating_add(len) + g - 1) & !(g - 1);   // round_page(addr + len)
+        if e <= s { return; }
+        let mut out = Vec::with_capacity(self.reservations.len() + 1);
+        for &(start, rlen) in &self.reservations {
+            let end = start + rlen;
+            if e <= start || s >= end {
+                out.push((start, rlen));                         // disjoint: keep whole
+                continue;
+            }
+            if s > start { out.push((start, s - start)); }       // head remnant below the cut
+            if e < end   { out.push((e, end - e)); }             // tail remnant above the cut
+            // [s, e) fully covers [start, end): push nothing (entry removed)
+        }
+        self.reservations = out;
+    }
+
+    /// Honor munmap (debt #2): punch the deallocated range out of any overlapping reservation
+    /// (`subtract_reservations` — the carveout), then drop the backing covering `ipa` and
+    /// `hv_vm_unmap` its stage-2 range, releasing the anon host allocation. The reservation subtract
+    /// runs even when nothing is backed (the carveout case: a PROT_NONE reservation has no backing).
     pub fn guest_munmap(&mut self, ipa: u64, len: u64) {
+        self.subtract_reservations(ipa, len);
         if let Some(pos) = self.backings.iter().position(|b| ipa >= b.ipa && ipa < b.ipa + b.len as u64) {
             let bk = self.backings.remove(pos);
             let _ = self.vm.unmap(bk.ipa, bk.len);       // stage-1 identity block stays; stage-2 removed
@@ -1144,6 +1221,10 @@ impl Box_ {
     /// Sum of tracked backing lengths (test observability: proves mmap grows / munmap shrinks
     /// the map set without exposing `backings` itself).
     pub fn mapped_len(&self) -> usize { self.backings.iter().map(|b| b.len).sum() }
+
+    /// The tracked PROT_NONE reservation extents as `(start, len)` (test/diagnostic observability:
+    /// proves a `mach_vm_deallocate` hole-punch splits/trims the table with exact bounds).
+    pub fn reservations(&self) -> &[(u64, u64)] { &self.reservations }
 
     pub fn run(&mut self) -> Stop {
         loop {
