@@ -256,6 +256,23 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append mach_msg2 vm_map: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
+                    machmsg::Route::ServiceGetSpecialPort => {
+                        // task_get_special_port(3409): libxpc's initializer fetches TASK_BOOTSTRAP_PORT.
+                        // Answer with a fixed synthetic port right (complex reply) — never forwarded
+                        // (that would hand the guest the host's real launchd port). Only which==4 modeled.
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let which = machmsg::decode_get_special_port(&buf)
+                            .unwrap_or_else(|e| panic!("task_get_special_port (3409) decode: {e}"));
+                        assert_eq!(which, 4,
+                            "only TASK_BOOTSTRAP_PORT (4) is modeled; got which={which}");
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_get_special_port_reply(m.reply_port,
+                                                                          machmsg::SYNTHETIC_BOOTSTRAP_PORT) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
+                            err: false, writes: writes.clone() })
+                            .map_err(|e| format!("append mach_msg2 get_special_port: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
                     machmsg::Route::StubMigReply(retcode) => {
                         // Optional/no-op kernel routine (no out-params): reply with a mig_reply_error
                         // carrying `retcode` (chosen in route() — 4822 vm_reclaim => KERN_NOT_SUPPORTED
@@ -415,6 +432,23 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                                     if writes.len() != 1 || writes[0].bytes != reply {
                                         return Err(Divergence { landmark: idx, pc,
                                             detail: format!("mach_vm_map reply mismatch: replay ipa {ipa:#x}") });
+                                    }
+                                    b.apply_and_return(*ret, *err, writes);
+                                }
+                                machmsg::Route::ServiceGetSpecialPort => {
+                                    // Mirror of record: re-decode (asserting which==4), rebuild the
+                                    // synthetic-port reply, and byte-compare against the recording
+                                    // (the divergence oracle), then apply.
+                                    let buf = b.read_guest(m.data, m.send_size as usize);
+                                    let which = machmsg::decode_get_special_port(&buf).map_err(|e| Divergence {
+                                        landmark: idx, pc, detail: format!("replay get_special_port decode: {e}") })?;
+                                    assert_eq!(which, 4,
+                                        "only TASK_BOOTSTRAP_PORT (4) is modeled; got which={which}");
+                                    let reply = machmsg::encode_get_special_port_reply(m.reply_port,
+                                                                                       machmsg::SYNTHETIC_BOOTSTRAP_PORT);
+                                    if writes.len() != 1 || writes[0].bytes != reply {
+                                        return Err(Divergence { landmark: idx, pc,
+                                            detail: "task_get_special_port reply mismatch".into() });
                                     }
                                     b.apply_and_return(*ret, *err, writes);
                                 }
