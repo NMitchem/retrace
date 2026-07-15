@@ -26,7 +26,14 @@ small, bounded handler, not the front door to XPC/launchd.
   header's COMPLEX bit set. The guest's `__MIG_check__Reply__task_get_special_port` validates the
   descriptor's disposition and type — those bytes are load-bearing.
 
-**Scope (the decisive finding):** **fetch-and-cache, not the front door to XPC.** libxpc's
+**Scope (the design-time finding — PARTLY SUPERSEDED by the Task 2 walk; see the README M2-bootstrap
+Status for the authoritative outcome):** the walk confirmed the reply is accepted and no send to the
+synthetic port occurs, but falsified "dormant" — libxpc's initializer is **not** lazy: it eagerly
+calls `xpc_pipe_create_from_port` on the synthetic name and aborts when the pipe can't be built. The
+next wall is thus the XPC-pipe subsystem, one op past the fetch, still contained (no unbounded chain).
+Original design-time reasoning below:
+
+**fetch-and-cache, not the front door to XPC.** libxpc's
 initializer fetches the bootstrap port and stashes it in the `bootstrap_port` global; for a
 write-only `hello_dyn` that uses no XPC services, it is never sent to before `main → write → exit`.
 Every mach_msg2 before the wall is pure infrastructure (clock, semaphore, malloc, restartable
