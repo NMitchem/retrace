@@ -337,3 +337,65 @@ failed, 1 ignored**, clippy clean. The TCR change perturbs no existing test.
 **Deferred:** the mmap demand-commit wall itself (its own milestone); un-ignoring `hello_dyn_e2e`
 green (the guest doesn't reach `main → write → exit` yet); an arm64e guest; the swarm extension. See
 `docs/superpowers/specs/2026-07-14-retrace-m2-tbi-design.md`.
+
+## Status: M2-mmapcommit — mach-VM Reservation Demand-Commit ✅
+
+**The wall M2-tbi left behind falls with a below-the-trace demand-committer.** Past objc class
+realization, libmalloc's **xzone** allocator manages memory in two states no prior retrace path
+produced: it `mach_vm_map`s a large **PROT_NONE reservation** (`cur_protection == 0`) — pure address
+space, no backing — then commits and first-touches pages inside it lazily. retrace's
+`guest_vm_reserve` produced the reservation as *bookkeeping only* (a returned address, no stage-2
+map), so the guest died at a **level-3 translation fault** (data abort EC=0x24 FSC=0x7) the first time
+xzone touched an uncommitted reservation page (`_xzm_segment_group_alloc_chunk`, reached via
+`realizeClassWithoutSwift`). Eager backing is a non-starter — libmalloc's nano-band reservation alone
+is **24 GiB**, larger than the entire 36-bit IPA space.
+
+**The fix (below the trace, mirrored).** `guest_vm_reserve` now records each reservation's
+page-granular extent in a `reservations: Vec<(start, len)>` on `Box_` (reset to empty in `restore`
+alongside `mmap_next`, so replay's address space matches record's). On a stage-2 fault,
+`Box_::commit_reserved_page(ipa)` — the moral twin of the shared-cache demand-pager, minus the file
+read and re-sign — backs *exactly* the faulting page with a fresh **zeroed** anon page iff it lies
+inside a tracked reservation and isn't already backed; a fault outside every reservation stays
+**fatal** (a wild pointer must never be silently materialized). It is dispatched by a second guard
+inserted immediately after the cache pager's, **textually identical** in record and replay's
+`Stop::Other` arms (symmetry rule 1). Zero-fill plus the guest's own re-executed stores are identical
+on both sides, so **nothing about a committed page enters the trace** — the same posture as the cache
+pager, the timebase MRS, and the FPAC strip. The trap-path `mach_vm_map` (num −15) got the same
+`cur_protection == 0 → reserve` split as the MIG 4811 route, so a reservation can't arrive via the
+trap and be eager-backed (fatal at 24 GiB).
+
+**⚠ A deliberate, spec-sanctioned loss of wild-pointer detection.** Once the run reserves libmalloc's
+24 GiB nano band `[0x4_0000_0000, 0xA_0000_0000)`, a stray pointer landing anywhere in that band now
+demand-commits a zero page instead of staying a fatal fault. retrace is a **recorder, not a memory
+protector** — it will satisfy a first-touch inside a reservation even where a real kernel would
+`SIGSEGV` a PROT_NONE guard page. Stage-1 W^X still holds (committed pages are data-only, non-exec).
+We accept this: enforcing PROT_NONE guard-fault semantics is explicitly out of scope.
+
+**Honestly blocked — at the libmalloc xzone SEGMENT-allocator wall (a new, distinct boundary).** With
+reservation pages demand-committed, the run advances **one frame deeper** — from the xzone *chunk*
+allocator into `_xzm_segment_group_alloc_segment+0x90` — then faults NEAR-NULL (data abort EC=0x24
+FSC=0x7, `far=0x178`). The faulting instruction is `ldrb w9, [x8, #0x178]` with **x8 = 0**; x8 was
+just loaded by `ldp x27, x8, [x20, #0x10]` from `x20 = 0xa0010e4c8` — a **demand-committed** xzone
+segment-group metadata page (the `ldp` itself **succeeds**, proving `commit_reserved_page` backed it),
+whose `+0x18` slot is `0`. So xzone reads a **NULL segment pointer out of its own committed metadata**
+and dereferences it. This is **distinct from demand-commit, which did its job**: the fault is an
+xzone allocator-state inconsistency — a null segment link where a real kernel-backed run holds a valid
+pointer — under retrace's approximated VM-op semantics and single-vCPU (no-preemption) model (a 12×
+`gettimeofday` deadline-spin, with no second thread to make progress, immediately precedes it).
+Investigating xzone's segment-group allocation protocol is a **distinct subsystem, deferred** — not
+walked into (design spec, risk register #1). The gate (`hello_dyn_e2e`) stays `#[ignore]`d, re-parked
+with the verified anatomy above. Trap count varies (~206–214) with the forwarded-`gettimeofday`
+deadline-spin — not a determinism defect: record forwards real time, replay reproduces the recorded
+values.
+
+**What runs today:** everything from M2/M2-cache/M2-mach/M2-va47/M2-bfam/M2-tbi, plus mach-VM
+reservation demand-commit — `just gate` reports **61 passed, 0 failed, 1 ignored**, clippy clean. The
+new arm is inert for every existing test (none fault inside `[MMAP_BASE, …)`); the reservation
+round-trip is proven by `reservecommit` (reserve → first-touch commit → store → load, byte-identical
+replay; a two-page store proves per-page, not per-reservation, granularity) and the fail-loud
+negative (`wild_store_outside_any_reservation_stays_fatal`).
+
+**Deferred:** the xzone segment-allocator wall (its own milestone); un-ignoring `hello_dyn_e2e` green
+(the guest still doesn't reach `main → write → exit`); partial-reservation munmap splitting and
+reservation-aware `range_is_free`/ANYWHERE placement (no walk has forced them); an arm64e guest. See
+`docs/superpowers/specs/2026-07-14-retrace-m2-mmapcommit-design.md`.
