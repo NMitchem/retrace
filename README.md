@@ -649,3 +649,76 @@ clears `_libxpc_initializer` and reaches libsystem_trace's `_libtrace_init`, but
 serviced-3409 lineage); the XPC send / dispatch-mach subsystem proper (a real `bootstrap_look_up` round-trip
 — still unseen); the single-vCPU commpage-topology synthesis (host-topology leak hygiene); un-ignoring
 `hello_dyn_e2e` green; an arm64e guest.
+
+## Status: M2-setport — `task_set_special_port(DEBUG_CONTROL_PORT)` ✅ (walk re-parks at libsystem_secinit)
+
+**Root cause of the M2-xpcport wall.** After the XPC-pipe wall fell, `_libxpc_initializer` completed and
+`libSystem_initializer` ran its next sub-initializer, libsystem_trace's `_libtrace_init`. That initializer's
+`_os_trace_create_debug_control_port` sends `task_set_special_port(TASK_DEBUG_CONTROL_PORT)` (msgh_id
+**3410**) to the guest task port — a **complex** message (`msgh_bits 0x80001513`) carrying one `COPY_SEND`
+port descriptor (name `0x1103`) with `which_port = 10`, reply port `0x1603` (`MAKE_SEND_ONCE`). retrace's
+MIG router had no handler, so it fail-louded.
+
+**The fix — a deterministic `mig_reply_error` KERN_SUCCESS.** The reply MIG stub expects on the
+send-once reply port, `__Reply__task_set_special_port_t`, is byte-identical to a `mig_reply_error_t`: a
+non-complex 36-byte message with reply id `3410 + 100 = 3510` and `RetCode = KERN_SUCCESS`. So the
+`Route::ServiceSetSpecialPort` arm decodes the complex request, asserts `which_port == 10`
+(`TASK_DEBUG_CONTROL_PORT`), and emits `machmsg::encode_mig_error(3410, reply_port, KERN_SUCCESS)`. The
+request's inbound `COPY_SEND` port descriptor is decoded but **deliberately dropped** — it is *never*
+forwarded, because forwarding a real `task_set_special_port` would install retrace's **own** debug-control
+port. A single-vCPU deterministic replay has no debugger to attach, so acknowledging success and discarding
+the port is both correct and side-effect-free.
+
+**The STANDARD symmetric posture (not M2-xpcport's special case).** Unlike the bootstrap send right — whose
+kernel-minted name is nondeterministic, forcing the forward-and-record / apply-verbatim posture — this reply
+is a **pure function of `(msgh_id, reply_port, KERN_SUCCESS)`**. So the handler uses the ordinary symmetric
+rule: **record** synthesizes the reply and appends it; **replay** *recomputes* the identical reply and
+**byte-compares** it against the recording. That byte-compare *is* the divergence oracle for the handler —
+an asymmetry would surface as a divergence, not silent corruption. (This is the posture of `ServiceVmMap` /
+`StubMigReply`, deliberately *not* the verbatim-apply of `ServiceGetSpecialPort`.)
+
+**The walk — the 3410 wall falls, re-parked at libsystem_secinit's sandbox check.** The bounded traced
+`record-dyn hello_dyn` now services msgh_id 3410 (no `RECORD ERROR`), `_os_trace_create_debug_control_port`
+accepts the reply, `_libtrace_init` completes, and the run advances one MIG call further (**~241–242 traps**,
+the count within forwarded-entropy noise).
+
+**Honestly blocked — at `task_info(TASK_AUDIT_TOKEN)` from libsystem_secinit (a distinct, small init MIG).**
+At ~241 traps the run fail-louds: `RECORD ERROR: unsupported mach_msg2 at pc 0x1804abc34: msgh_id 3405 dest
+0x203 (guest task port Some(515)) send_size 40`. Again **not** a CPU fault (no ESR/EC) — retrace's MIG router
+rejecting an unhandled id. **msgh_id 3405** = `task_info` (Mach `task` subsystem base 3400, routine 5): a
+**simple** message (`bits 0x1513`), 40 bytes = `header(24) + NDR(8) + flavor:int(4) + task_info_outCnt:int(4)`,
+with `flavor = 15 = TASK_AUDIT_TOKEN` and `count = 8 = TASK_AUDIT_TOKEN_COUNT` (an `audit_token_t` is 8
+words), reply port `0x1603` (`MAKE_SEND_ONCE`). Symbolicated against the arm64e shared cache (the box loads
+at slide 0, so trace pcs are unslid VAs, resolved statically in lldb): the caller is **not** libsystem_trace
+(that was the fallen 3410) but **libsystem_secinit's app-sandbox check** —
+`libsystem_kernel.dylib`task_info+224` ← `libxpc.dylib`_fetch_self_token+60` ← (via `dispatch_once`)
+`libxpc.dylib`_xpc_get_self_audit_token+144` ← `libxpc.dylib`xpc_copy_entitlements_for_self+20` ←
+`libsystem_secinit.dylib`_libsecinit_appsandbox_check+72` ← `_libsecinit_initializer+160` ←
+`libSystem.B.dylib`libSystem_initializer+0x118` ← dyld's `findAndRunAllInitializers`. So this is the
+**sandbox-init image initializer fetching the process's own audit token** (process identity) — the sibling
+`libSystem` sub-initializer that runs right after libtrace (`libSystem_initializer+0x10c` ran libtrace / 3410;
+`+0x118` runs libsecinit), which is exactly why widening past the 3410 wall surfaced it. It is a **small**
+next-init MIG step, the same task-subsystem lineage as the serviced 3409 `task_get_special_port` and 3410
+`task_set_special_port`: service it by synthesizing a `__Reply__task_info_t` carrying an `audit_token_t` (8
+words). Because the audit token holds host process identity (`pid`/`asid`/`pidversion` vary run-to-run), the
+reply is **nondeterministic** — so this likely wants the **forward-and-record** posture (record forwards the
+real `task_info` and records the reply; replay applies it verbatim), like `task_self`'s port name and
+`getentropy`, **not** synthesize-and-byte-compare. Note the caller is libsecinit's **sandbox** check (via
+`xpc_copy_entitlements_for_self`), so servicing `task_info` may surface a further libsecinit step (an
+entitlement / sandbox query) once the token flows — to be discovered, **not** pre-stubbed. It is **not** the
+deferred XPC send / dispatch-mach subsystem — dest is the guest task port (`0x203`), no `mach_msg2` targets
+the minted bootstrap port (`0x1003`), and no `bootstrap_look_up` has appeared. Deferred to the next
+milestone; **do not pre-stub**.
+
+**What runs today:** everything through M2-xpcport, plus serviced `task_set_special_port(DEBUG_CONTROL_PORT)`
+that carries the guest past libsystem_trace's debug-control-port install into libsystem_secinit's sandbox
+initializer — `just gate` reports **77 passed, 0 failed, 1 ignored**, clippy clean. The headline
+`hello_dyn_e2e` gate is still **red** (`#[ignore]`d): the guest now clears `_libtrace_init` and reaches
+libsystem_secinit's `_libsecinit_appsandbox_check`, but not yet `main → write → exit`. See
+`docs/superpowers/specs/2026-07-15-retrace-m2-setport-design.md`.
+
+**Deferred:** `task_info(TASK_AUDIT_TOKEN)` servicing (the next small init MIG, in the serviced-3409/3410
+lineage — likely forward-and-record for the nondeterministic audit token); whatever libsecinit's sandbox
+check does after the token (an entitlement / sandbox query, still unseen); the XPC send / dispatch-mach
+subsystem proper (a real `bootstrap_look_up` round-trip — still unseen); the single-vCPU commpage-topology
+synthesis (host-topology leak hygiene); un-ignoring `hello_dyn_e2e` green; an arm64e guest.
