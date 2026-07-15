@@ -471,3 +471,62 @@ escape hatch); un-ignoring `hello_dyn_e2e` green (the guest still doesn't reach 
 exit`); `VM_FLAGS_OVERWRITE` modeling and PROT_NONE guard-fault semantics (out of scope); reservation
 merging (not observed); an arm64e guest. See
 `docs/superpowers/specs/2026-07-14-retrace-m2-carveout-design.md`.
+
+## Status: M2-cpuid — Guest CPU/Cluster Identity (TPIDR_EL0) ✅
+
+**The xzone segment-group indexing wall M2-carveout re-parked at was a ONE-VALUE bug, not the
+"per-CPU/cluster commpage-topology subsystem" that walk guessed.** Live lldb disassembly of the macOS
+26 arm64e shared cache settled it: `_os_cpu_number() = TPIDR_EL0 & 0xFFF` and
+`_os_cpu_cluster_number() = (uint32_t)TPIDR_EL0 >> 12` (verified inside
+`_xzm_xzone_find_and_malloc_from_freelist_chunk`). retrace had set the guest **`TPIDR_EL0 = TSD_IPA =
+0x30000`**, conflating it with the thread-self pointer — but `TPIDRRO_EL0` (untouched) is the real TSD
+base; `TPIDR_EL0` carries the cpu/cluster id. So the guest's cpu number read as `0x30000 & 0xFFF = 0`
+(accidentally correct) while its **cluster number read as `0x30000 >> 12 = 48`** — garbage, there is no
+cluster 48. xzone's `sg_index = segment_group_front_count · clusterid + sg_front_index` overshot ~253
+slots (`main + ~0x4e4c8`), past the `0x3e000` main-zone metadata block, and faulted **UNMAPPED** on the
+segment-group lock. Deterministic-but-wrong: the "per-run variance" the M2-carveout walk saw
+(`0x4e4c8` vs `0x4e740`, delta = one `sizeof(xzm_segment_group_s)`) was forwarded-entropy drift in the
+pre-fault `gettimeofday` spin, not the index — the register-derived overshoot itself was fixed.
+
+**The fix — one value.** Set the guest **`TPIDR_EL0 = 0`** (a single-vCPU guest is always cpu 0 /
+cluster 0) at both constructor sites (`load_dynamic` and `restore`), leaving `TPIDRRO_EL0 = TSD_IPA`
+alone. It is written **below the trace and is identical on record and replay** — a fixed constant, like
+the PAC keys and the synthetic timebase — so nothing enters the trace and no `retrace-core`/trace-format
+change is needed. With cpu and cluster both reading 0, every per-CPU/per-cluster index is in bounds.
+
+**The xzone fault is gone.** The bounded traced `record-dyn hello_dyn` walk advances from ~205 to
+**~218 traps**, past `_xzm_segment_group_alloc_chunk`, with **no earlier fault** — confirming nothing
+the guest exercises dereferences `TPIDR_EL0` as a TSD base (that role is `TPIDRRO_EL0`'s). The
+`cpuid` box unit proves the box presents guest `TPIDR_EL0 == 0` on both the dynamic and replay paths.
+
+**Honestly blocked — at an unhandled Mach task-port MIG message (mach-IPC lineage, distinct from CPU
+identity).** At ~218 traps the run hits `RECORD ERROR: unsupported mach_msg2 at pc 0x1804abc34:
+msgh_id 3409 dest 0x203 (guest task port Some(515)) send_size 36` — a `mach_msg2` (trap -47) to the
+**guest task port**. **msgh_id 3409 is the Mach `task` subsystem (MIG base 3400), routine index 9 =
+`task_get_special_port`** (`task.defs` slot 9, macOS 26.4 SDK): the 36-byte request is `header(24) +
+NDR(8) + which_port:int(4)`, and `which_port = 4 = TASK_BOOTSTRAP_PORT` — libSystem fetching its
+bootstrap port. It is **Unsupported** because retrace's MIG router (`retrace-core::machmsg::route`) has
+**no handler for this task-subsystem id**: it services `4811` (`_kernelrpc_mach_vm_map`), stubs `4822`
+(`vm_reclaim`) / `8000`-`8001` (`task_restartable`), forwards the read-only allowlist `{200, 206,
+3418}`, and **fails loud** on every other id to the task port. Servicing one more MIG id is
+**M2-mach-lineage work — a distinct next milestone**, not walked into here beyond re-parking the gate.
+The gate (`hello_dyn_e2e`) stays `#[ignore]`d and re-parked at this wall. (The exact trap count and
+ports vary run-to-run because `getentropy`/PID are forwarded and recorded per-trace — normal
+record/replay, enforced in lockstep by the divergence oracle, not a determinism defect.)
+
+**Known debt (deferred hygiene, not fatal, not a determinism bug):** retrace still `memcpy`s the entire
+**host** commpage into the guest, so `_COMM_PAGE_*` CPU/cluster **count** fields carry the host's
+12-CPU / 2-cluster values. This is a latent host-topology leak, but harmless once the *index* is pinned
+to 0 by this fix — the bytes are frozen once at setup, so a record/replay pair sees identical bytes, and
+the oversized per-CPU arrays are never indexed past slot 0. A principled single-vCPU commpage synthesis
+(counts = 1, pinned `MEMORY_SIZE`, `DEV_FIRM` policy) is the hygiene follow-up; deferred to keep this
+milestone's fix isolated.
+
+**What runs today:** everything through M2-carveout, plus a correct guest CPU/cluster identity —
+`just gate` reports **69 passed, 0 failed, 1 ignored**, clippy clean. The headline `hello_dyn_e2e`
+gate is still **red** (`#[ignore]`d): the guest does not yet reach `main → write → exit`. See
+`docs/superpowers/specs/2026-07-14-retrace-m2-cpuid-design.md`.
+
+**Deferred:** the `task_get_special_port` (msgh_id 3409) task-port MIG wall (M2-mach lineage — route
+and service the task special-port surface); the single-vCPU commpage-topology synthesis (host-topology
+leak hygiene); un-ignoring `hello_dyn_e2e` green; an arm64e guest.
