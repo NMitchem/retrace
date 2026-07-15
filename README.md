@@ -399,3 +399,75 @@ negative (`wild_store_outside_any_reservation_stays_fatal`).
 (the guest still doesn't reach `main → write → exit`); partial-reservation munmap splitting and
 reservation-aware `range_is_free`/ANYWHERE placement (no walk has forced them); an arm64e guest. See
 `docs/superpowers/specs/2026-07-14-retrace-m2-mmapcommit-design.md`.
+
+## Status: M2-carveout — Reservation Holes & Kernel-Faithful ANYWHERE Placement ✅
+
+**The xzone "NULL segment pointer" wall M2-mmapcommit re-parked at was a placement gap, and it
+falls with two pieces of the guarded-metadata protocol.** libmalloc protects its zone metadata with a
+**guarded range**: it `mach_vm_map`s a ~5 MiB **PROT_NONE reservation**, `mach_vm_deallocate`s a
+**1 MiB carveout hole** at an entropy-derived offset inside it, then commits the metadata with
+`mach_vm_map(VM_FLAGS_ANYWHERE, address = reservation_base_as_hint, RW)`. On a real kernel the band
+around the hole is occupied, so the ANYWHERE-with-hint search is **forced into the carveout hole** —
+the metadata legitimately lands mid-reservation, flanked by PROT_NONE guard pages. retrace modeled
+neither step: `mach_vm_deallocate` was a **no-op** on reservations (the hole never existed) and
+ANYWHERE placement consulted only backings (so the hinted commit landed at the raw reservation base).
+The metadata block then straddled pages retrace only demand-zeroed, and xzone read a **NULL back-
+pointer** (`sg->xzsg_main_ref == 0`) out of its own "committed" metadata and dereferenced it — fatal.
+
+**The fix (below the trace, mirrored structurally).** Two changes, both in the shared `Box_` VM code
+so record and replay recompute identical addresses (the replay oracle byte-compares the returned
+address — asymmetry surfaces as divergence, not corruption):
+
+- **`subtract_reservations` on deallocate.** `guest_munmap` now punches `[addr, addr+len)` out of
+  every overlapping reservation (GRANULE-aligned): full cover removes the entry, head/tail overlap
+  trims it, a **strictly-interior punch splits it into two** — the carveout. The hole becomes
+  genuinely free-and-unreserved: `commit_reserved_page` no longer materializes it (a touch there is
+  fatal again, matching deallocated address space), and placement stops treating it as occupied.
+- **Kernel-faithful hint-forward first-fit.** `range_is_free` additionally excludes reservations (a
+  real `vm_map_entry` occupies its VA, so ANYWHERE can never land inside one), and `guest_vm_map`'s
+  ANYWHERE branch searches forward from a non-zero hint via `first_fit` — a deterministic sorted
+  gap-edge walk. A free hint returns verbatim (the common case, unchanged); a hint colliding with a
+  reservation is pushed to the first free gap. With the hole modeled, the guarded commit's
+  `hint = reservation_base` lands **exactly in the carveout hole**, reproducing the kernel's forced
+  placement. Verified empirically: the commit's hint = reservation base first-fits to the hole base,
+  identically to hardware. (`nano`'s band is reserved and committed **FIXED**, never ANYWHERE-with-hint
+  — confirmed from libmalloc source + the trace — so the FIXED path is untouched and nano is
+  preserved.)
+
+**The NULL deref is gone.** With the metadata block landed at the carveout hole base, its segment
+group's back-pointers resolve — the prior `ldrb [x8,#0x178]`, `x8 = 0` fault no longer occurs.
+
+**Honestly blocked — at the libmalloc xzone SEGMENT-GROUP *indexing* wall (a new, distinct boundary).**
+The run advances into `xzm_segment_group_alloc_chunk+0x1c4`, which faults **UNMAPPED** (data abort
+EC=0x24 FSC=0x7) accessing `sg+4` (the segment-group lock) of `sg = &main->xzmz_segment_groups[
+sg_index]`. Verified across **three traced runs** (fault addresses shift per run because the carveout
+offset is entropy-derived): the main-zone block's own **`xzmz_total_size` field is `0x3e000`** and the
+box committed **exactly that** (the `mach_vm_map` size *is* `0x3e000`, fully backed) — yet xzone
+derives `sg` at `main + ~0x4e4c8`, **~`0x104c8` past the block the guest itself sized**. The offset
+**varies run-to-run** (`0x4e4c8`/`0x4e740`) — the fingerprint of an *index*-derived address, not a
+fixed struct offset. `sg_index = segment_group_front_count · clusterid + sg_front_index`, where
+`clusterid`/front come from `_os_cpu_number()`/`_os_cpu_cluster_number()` **at alloc time** while
+`segment_group_count` (which sizes `total_size`) is computed **at zone-init** from the commpage CPU
+topology. retrace stages a **frozen copy of the host commpage (12 logical CPUs / 2 perflevel
+clusters)**, so the guest lays out per-CPU/cluster segment-group metadata for a 12-CPU host but runs on
+a **single vCPU** — the per-CPU segment-group index overshoots the block. This is an **xzone
+per-CPU/cluster segment-group subsystem, distinct from carveout placement (now correct) and from
+demand-commit (M2-mmapcommit's job) — deferred**, not walked into. A documented escape hatch exists
+(`_COMM_PAGE_DEV_FIRM` + `MallocAllowInternalSecurity=1` + `MallocSecureAllocator=0` disables xzone
+entirely); a principled single-vCPU commpage-topology model is the deeper fix. Determinism note:
+within a record/replay pair the CPU/index reads are reproduced from the trace, so record and replay
+stay in lockstep — only the wall's exact fault address varies **across** record runs. The gate
+(`hello_dyn_e2e`) stays `#[ignore]`d, re-parked with the verified anatomy above.
+
+**What runs today:** everything through M2-mmapcommit, plus reservation hole-punching and
+kernel-faithful ANYWHERE placement — `just gate` reports **68 passed, 0 failed, 1 ignored**, clippy
+clean. The carveout protocol is proven end-to-end by the `carveout` box units (interior-punch split,
+head/tail trim, full-cover removal, hinted-ANYWHERE-into-the-hole, hole-touch-fatal, nano FIXED
+regression guard) and the `carveout_e2e` guest (reserve → punch → hinted commit → sentinel round-trip,
+byte-identical replay); existing tests (`reservecommit`, `machmsg`/nano, `wildstore`) stay green.
+
+**Deferred:** the xzone per-CPU/cluster segment-group indexing wall (its own milestone or the envp
+escape hatch); un-ignoring `hello_dyn_e2e` green (the guest still doesn't reach `main → write →
+exit`); `VM_FLAGS_OVERWRITE` modeling and PROT_NONE guard-fault semantics (out of scope); reservation
+merging (not observed); an arm64e guest. See
+`docs/superpowers/specs/2026-07-14-retrace-m2-carveout-design.md`.

@@ -968,7 +968,14 @@ impl Box_ {
             // band with an interior carveout — it lands in the first free gap (the hole). A zero hint
             // or no fit falls back to the deterministic bump allocator.
             match if addr != 0 { self.first_fit(addr, rlen as u64) } else { None } {
-                Some(a) => a,
+                Some(a) => {
+                    // A first-fit hit may land at/above the bump cursor (a hinted commit past every
+                    // reservation); float mmap_next past it so no later bump hands out an overlapping
+                    // IPA. A no-op in the common case (hint honored below the cursor, e.g. the xzone
+                    // carveout hole). Pure max of reset-on-restore state — deterministic.
+                    self.mmap_next = self.mmap_next.max((a + rlen as u64 + (GRANULE as u64 - 1)) & !(GRANULE as u64 - 1));
+                    a
+                }
                 None => {
                     if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
                     let a = self.mmap_next; self.mmap_next += rlen as u64; a
