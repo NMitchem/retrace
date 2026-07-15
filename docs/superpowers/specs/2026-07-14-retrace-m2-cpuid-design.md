@@ -65,6 +65,9 @@ Set `TPIDR_EL0 = 0` at both sites, rebuilt, ran the bounded traced `record-dyn h
 - **New wall reached** (see below), i.e. the fix cleanly exposes the next boundary.
 
 The spike was reverted; the tree is clean. These are the actual observed results, not projections.
+(The trap count is approximate: the committed Task 2 walk landed at ~218 rather than the spike's
+~223 — normal run-to-run drift from forwarded `getentropy`/PID, not a determinism defect. The
+landing point — past `_xzm_segment_group_alloc_chunk`, at the msgh_id 3409 wall — is invariant.)
 
 ## The new wall (M2-cpuid's honest boundary)
 
