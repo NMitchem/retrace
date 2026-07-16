@@ -694,6 +694,16 @@ impl ReplaySession {
 
     /// The current landmark index (how many trace events have been consumed).
     pub fn landmark(&self) -> usize { self.idx }
+    /// Peek the NEXT trace event to be consumed: its `(num, args)` when it is a `Syscall`, else
+    /// `None` (a `Snapshot`/`Exit`, or past the last event). Read-only — does NOT advance the guest.
+    /// Lets a discovery session recognize a target syscall landmark (e.g. `write(1, …)`) before
+    /// choosing to `advance()` past it, without executing further.
+    pub fn peek_syscall(&self) -> Option<(u64, [u64; 8])> {
+        match self.events.get(self.idx) {
+            Some(Event::Syscall { num, args, .. }) => Some((*num, *args)),
+            _ => None,
+        }
+    }
     /// The guest's execution position (ELR_EL1 at a syscall trap).
     pub fn pc(&self) -> u64 { self.b.position() }
     /// The live instruction pointer (reg PC) — the true position at an arbitrary (N, K) coordinate.
