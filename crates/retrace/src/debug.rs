@@ -114,7 +114,7 @@ fn resolve_hit_k(trace: &Path, n: usize, pc: u64, from_k: u64) -> Result<u64, St
     let mut s = seek(trace, n, from_k)?;
     let mut k = from_k;
     loop {
-        if s.cur_pc() == pc { return Ok(k); }
+        if s.pc() == pc { return Ok(k); }
         s.step_insns(1).map_err(|e| format!("resolve K in window {n}: {e}"))?;
         k += 1;
     }
@@ -176,7 +176,10 @@ impl<'a> Exec<'a> {
 
     fn cmd_break<W: Write>(&mut self, addr: u64, out: &mut W) -> Result<(), String> {
         if let Err(i) = self.breakpoints.binary_search(&addr) {
-            self.breakpoints.insert(i, addr); // sorted + deduped
+            if self.breakpoints.len() >= 6 {
+                return Err("cannot arm more than 6 breakpoints (hardware limit: DBGBVR0-5)".into());
+            }
+            self.breakpoints.insert(i, addr); // sorted + deduped (≤ 6: one per DBGBVR slot)
         }
         line(out, format_args!("breakpoint at {addr:#x}"))
     }
@@ -194,7 +197,7 @@ impl<'a> Exec<'a> {
     }
 
     fn cmd_where<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
-        let pc = self.sess().cur_pc();
+        let pc = self.sess().pc();
         line(out, format_args!("at ({}, {}) pc={pc:#x}", self.n, self.k))
     }
 
@@ -254,6 +257,33 @@ impl<'a> Exec<'a> {
     /// check catches a breakpoint that lands exactly on a landmark boundary (any breakpoint, incl.
     /// the 7th+). With no breakpoints set, runs to exit.
     fn cmd_continue<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
+        // Pre-step rule: if we are parked exactly ON a breakpoint, advance one instruction BEFORE
+        // arming BVRs, so the scan below does not immediately re-report the current position as a hit
+        // (which would otherwise re-fire at 0 progress and error, exit 5). Fixes back-to-back
+        // `continue` on a once-executed breakpoint and the boundary-bp K=0 edge. Re-seek to (N, K+1);
+        // if that walks off the window end, cross into the next window at (N+1, 0) via one advance();
+        // if THAT advance exits, print the exit and the command is over. The boundary check at the
+        // new position is left to the scan loop below (do NOT report a hit at the pre-step position).
+        if self.breakpoints.contains(&self.sess().pc()) {
+            let (n, k) = (self.n, self.k);
+            match self.reseek(n, k + 1) {
+                Ok(()) => {}
+                Err(e) if e.contains("ends after") => {
+                    self.reseek(n, k)?; // window end: re-establish (N, K), then advance to (N+1, 0)
+                    match self.sess_mut().advance().map_err(|d|
+                        format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?
+                    {
+                        Advance::Exited(report) => {
+                            line(out, format_args!("exited (code {})", report.exit_code))?;
+                            let e = self.sess().landmark();
+                            return self.reseek(e, 0);
+                        }
+                        _ => { self.n = self.sess().landmark(); self.k = 0; }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
         let (start_n, start_k) = (self.n, self.k);
         let bps = self.breakpoints.clone();
         self.sess_mut().arm_breakpoints(&bps);
@@ -263,7 +293,7 @@ impl<'a> Exec<'a> {
             match adv {
                 Advance::Break => {
                     let n = self.sess().landmark();
-                    let p_hit = self.sess().cur_pc();
+                    let p_hit = self.sess().pc();
                     line(out, format_args!("hit {p_hit:#x} at ({n}, +?)"))?;
                     // K_cur = the pre-continue step only if the hit is in that same window; else 0
                     // (we entered window n via a landmark). Resolve the FIRST occurrence past it.
@@ -274,7 +304,7 @@ impl<'a> Exec<'a> {
                     return self.reseek(n, k);
                 }
                 Advance::Event => {
-                    let pc = self.sess().cur_pc();
+                    let pc = self.sess().pc();
                     if bps.contains(&pc) {
                         let n = self.sess().landmark();
                         line(out, format_args!("hit {pc:#x} at ({n}, 0)"))?;
@@ -308,7 +338,7 @@ impl<'a> Exec<'a> {
             s.arm_breakpoints(&bps);
             let hit = loop {
                 match s.advance().map_err(|d| format!("reverse-continue diverged: {}", d.detail))? {
-                    Advance::Break => break Some((s.landmark(), s.cur_pc())),
+                    Advance::Break => break Some((s.landmark(), s.pc())),
                     Advance::Event => continue,
                     Advance::Exited(_) => break None,
                 }
