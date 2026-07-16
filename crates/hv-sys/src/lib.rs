@@ -66,6 +66,22 @@ pub mod sysreg {
     pub const TCR_EL1:   SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TCR_EL1);
     pub const MAIR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_MAIR_EL1);
     pub const TPIDR_EL0: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TPIDR_EL0);
+    pub const MDSCR_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_MDSCR_EL1);
+    // Hardware instruction-breakpoint slots (6 comparators on Apple Silicon). DBGBVRn holds the
+    // match VA; DBGBCRn is the control word. Verified in the M3 sstep spike (F3): a match delivers
+    // direct to EL2 with ESR_EL2 EC=0x30 at pc==BVR, before the instruction retires.
+    pub const DBGBVR0_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBVR0_EL1);
+    pub const DBGBCR0_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBCR0_EL1);
+    pub const DBGBVR1_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBVR1_EL1);
+    pub const DBGBCR1_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBCR1_EL1);
+    pub const DBGBVR2_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBVR2_EL1);
+    pub const DBGBCR2_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBCR2_EL1);
+    pub const DBGBVR3_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBVR3_EL1);
+    pub const DBGBCR3_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBCR3_EL1);
+    pub const DBGBVR4_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBVR4_EL1);
+    pub const DBGBCR4_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBCR4_EL1);
+    pub const DBGBVR5_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBVR5_EL1);
+    pub const DBGBCR5_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBCR5_EL1);
     pub const APIAKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIAKEYLO_EL1);
     pub const APIAKEYHI_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIAKEYHI_EL1);
     pub const APIBKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIBKEYLO_EL1);

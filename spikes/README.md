@@ -122,11 +122,63 @@ perl -e '$p=fork;if(!$p){setpgrp;exec@ARGV or exit 127}$SIG{ALRM}=sub{kill"-KILL
 Verdict: the **lazy-per-page-map + fixup-walk + guest-oracle-sign** design is **GO** (per-page
 batched signing, one vCPU run per demand-faulted DATA page; ≤2048 pointers/page).
 
+## `sstep.c` — single-step + HW breakpoint delivery (M3)
+
+Proves the primitives M3 reverse-execution needs, in retrace's exact shape (guest at **EL0**,
+`VBAR_EL1` → a 16-slot trampoline of `hvc #0`, `set_trap_debug_exceptions(true)`). A code page of
+`nop ×4; mrs x1,cntvct_el0; nop ×4; hvc` is stepped with `PSTATE.SS`+`MDSCR_EL1.SS`, then a
+`DBGBVR0`/`DBGBCR0` breakpoint is armed and the guest is run free:
+
+```sh
+clang -O2 -o sstep sstep.c -framework Hypervisor
+codesign -s - -f --entitlements ent.plist sstep
+perl -e '$p=fork;if(!$p){setpgrp;exec@ARGV or exit 127}$SIG{ALRM}=sub{kill"-KILL",$p;exit 124};alarm 15;wait;exit($?>>8)' ./sstep
+```
+
+```
+set_trap_debug_exceptions -> HV_SUCCESS
+[SS] run=HV_SUCCESS reason=1 EC2=0x32 pc=0x10000004 EL0 | ESR_EL1 EC1=0x00 elr=0x0
+   step 1 -> pc=0x10000004 (expect 0x10000004) OK
+   ... (steps 2..4 each advance pc by 4, guest stays at EL0) ...
+F1: step route = DIRECT-EL2 (ESR_EL2 EC=0x32) (4/4 clean single-steps)
+[MRS] run=HV_SUCCESS reason=1 EC2=0x32 pc=0x10004400 EL1 | ESR_EL1 EC1=0x18 elr=0x10000010
+   MRS stepped -> k=6 ec1=0x18 elr=0x10000010 TRAPPED at EL1 (needs emulation)
+[F2] run=HV_SUCCESS reason=1 EC2=0x32 pc=0x10000018 EL0 | ESR_EL1 EC1=0x18 elr=0x10000010
+F2: re-arm across skipped insn -> OK (pc=0x10000018 expect 0x10000018, one clean step)
+[BVR] run=HV_SUCCESS reason=1 EC2=0x30 pc=0x10000020 EL0 | ESR_EL1 EC1=0x18 elr=0x10000010
+F3: HW breakpoint = DELIVERED, DIRECT-EL2 (ESR_EL2 EC=0x30, pc=DBGBVR0, insn not yet retired)
+
+=> F1=PASS  F2=PASS  F3=DELIVERED
+```
+
+- **(F1) A software single-step delivers DIRECTLY to the VMM as an `hv_vcpu_run` exit** — reason
+  `EXCEPTION`, `ESR_EL2` EC=**0x32** (SS from a lower EL), the guest still at EL0 with `PC` advanced
+  by one instruction. It does **not** vector through the guest's EL1 `VBAR` trampoline. So
+  `Box_::step()` reads the step off the same exit path the box already uses, discriminating on
+  `EC2 ∈ {0x32,0x33}`; one `hv_vcpu_run` retires exactly one guest instruction. Arm with
+  `MDSCR_EL1.SS=1` **and** `PSTATE.SS=1`, both re-set before every step.
+- **(F2) SS survives a trapped-then-manually-skipped instruction** (retrace's below-the-trace
+  emulation). When the stepped EL0 instruction itself traps to EL1 (here the `cntvct_el0` MRS,
+  `ESR_EL1` EC=0x18), it does **not** retire: it surfaces as a **direct-EL2 step exit** (`EC2=0x32`)
+  with the guest now at **EL1** (`PC` in the trampoline, `ELR_EL1` = the faulting-insn address,
+  `ESR_EL1` = the real trap syndrome). `Box_::step()` must detect this by the guest EL (EL1, not
+  EL0), run its existing emulation off `ESR_EL1`, then re-enter EL0 at `ELR_EL1+4` and re-arm SS —
+  the next `hv_vcpu_run` then retires **exactly one** further instruction (`0x…14 → 0x…18`). No lost
+  or doubled steps. (Note: while stepping, a below-the-trace instruction surfaces via the **step**
+  exit at EL1, *not* the usual trampoline `hvc` exit `EC2=0x16` — the `hvc` never executes.)
+- **(F3) HW instruction breakpoints DELIVER, and DIRECTLY to the VMM.** `DBGBVR0_EL1`=target +
+  `DBGBCR0_EL1`=`0x1E5` (E=1, PMC=EL0, BAS=0xF) with `MDSCR_EL1.MDE=1` and SS off: running the guest
+  free stops with `ESR_EL2` EC=**0x30** (breakpoint from a lower EL), `PC` == `DBGBVR0` and the
+  guest at EL0 — the match fires **before** the instruction at that address retires. This is the
+  positioning primitive Task 5 needs: place a breakpoint at a target PC, run free, land exactly on
+  it. (`ESR_EL1` on the F3 line is stale from F2 — irrelevant to a direct-EL2 breakpoint.)
+
 ## Proven for M2; still open for later milestones
 
 - MMU-on paging, PAC, and DSC reachability — **proven** (`m2spike.c`); `private` cache
   mapping — **proven** (`dscprobe.c`).
 - **Full dyld startup to `main` under the oracle** — the M2 bring-up itself; not a spike.
-- **Instruction-exact positioning, signals, threads** — M3+.
+- **Single-step + HW breakpoint primitives** — **proven** (`sstep.c`); the M3 reverse-execution
+  bring-up itself is not a spike. **Signals, threads** — still M3+.
 - **Memory-diff fidelity across the real syscall surface** — the long tail; M2 pays the
   four carried-forward recorder debts (clamp, `munmap`/`mprotect`, error ABI, raw `svc`).

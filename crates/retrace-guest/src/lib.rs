@@ -84,6 +84,7 @@ pub fn slice_arm64e(fat: &[u8]) -> &[u8] {
 }
 
 pub const HELLO: &str = concat!(env!("OUT_DIR"), "/hello");
+pub const STEPPY: &str = concat!(env!("OUT_DIR"), "/steppy");
 pub const FILEIO: &str = concat!(env!("OUT_DIR"), "/fileio");
 pub const FIXTURE: &str = concat!(env!("OUT_DIR"), "/fixture.txt");
 pub const MMAPGUEST: &str = concat!(env!("OUT_DIR"), "/mmapguest");
