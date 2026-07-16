@@ -12,5 +12,6 @@ fn pac_signs_and_authenticates_in_guest() {
             assert_eq!(args[0], 0, "PAC not engaged or auth failed => x0={}", args[0]),
         Stop::Syscall { .. } => panic!("unexpected syscall"),
         Stop::Other { esr } => panic!("guest faulted esr=0x{esr:x}"),
+        Stop::Step => unreachable!("run() does not single-step"),
     }
 }

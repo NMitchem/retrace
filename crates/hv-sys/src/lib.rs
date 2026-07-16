@@ -66,6 +66,7 @@ pub mod sysreg {
     pub const TCR_EL1:   SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TCR_EL1);
     pub const MAIR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_MAIR_EL1);
     pub const TPIDR_EL0: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TPIDR_EL0);
+    pub const MDSCR_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_MDSCR_EL1);
     pub const APIAKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIAKEYLO_EL1);
     pub const APIAKEYHI_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIAKEYHI_EL1);
     pub const APIBKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIBKEYLO_EL1);
