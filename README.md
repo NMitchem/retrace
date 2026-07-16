@@ -776,3 +776,73 @@ replays `write(1,"hi\n")` + `exit(0)` **byte-for-byte with zero divergence**. `j
 send / dispatch-mach subsystem proper (never exercised on this path — no `mach_msg2` targets the minted
 bootstrap port `0x1003`, no `bootstrap_look_up` appears); larger / longer-running guests and an arm64e guest
 (hello_dyn is a plain-arm64 program); broadening the record/replay surface beyond this single e2e program.
+
+## Status: M3 — Reverse Execution ✅ (the M3 headline gate is GREEN)
+
+**The idea — time is a coordinate; backward is forward.** A moment in a recorded run is named by
+**P = (landmark N, step K)**: the machine state after the first `N` trace events have been consumed and `K`
+further instructions have retired. `N` is exactly the event index replay already tracks (`idx`, the number
+`Divergence.landmark` reports); `K` counts instructions inside landmark `N`'s window. Replay of a given trace is
+bit-exact, so **P is total and deterministic — seeking the same P twice yields byte-identical machine state.**
+That is M3's oracle, the direct extension of the divergence oracle. Nothing ever executes backward: every
+reverse operation computes an *earlier* coordinate and re-seeks forward to it from the snapshot.
+
+**The engine — re-replay + hardware single-step, no checkpoints.** `seek(N, K)` = restore snapshot → replay `N`
+events at native speed (the divergence oracle verifies every trap on the way) → single-step `K` instructions.
+`reverse-stepi` from (N, K) is `seek(N, K−1)`; at K = 0 it is `seek(N−1, len(window N−1))`, the window length
+found by one forward counting pass. `reverse-continue` is one forward scan recording every breakpoint hit, then
+a seek to the last hit strictly before P (a clean `no earlier hit` if none). Each seek is O(run length) — a full
+`hello_dyn` replay is a few hundred landmarks and takes a few seconds, fine at this guest scale; checkpoints are
+a pure acceleration deferred until a guest's replay time hurts. A host-side AArch64 interpreter was rejected
+(it would reimplement Apple's PAC). Hardware makes the choice unambiguous anyway: **the HVF guest has no PMU
+instruction counter (PMUVer = 0)**, so architectural single-step is the only exact tick source on this platform.
+
+**Below the trace, settled by the M3-step spike (F1–F3).** Stepping lives entirely inside `Box_::step()` /
+`run()`, invisible to the record/replay loop (symmetry rule 2), so M3 makes **zero trace-format changes** — no
+`TRACE_MAGIC` bump, nothing about debugging enters a recording. The spike pinned down how debug exceptions route
+on macOS 26 / Apple Silicon:
+- **F1 — the step route is DIRECT-EL2.** A software single-step exception is delivered straight to the VMM
+  (`ESR_EL2` EC = 0x32), guest still at EL0, PC advanced by exactly one instruction — *not* through the guest's
+  `hvc` trampoline. `Box_::step` arms `PSTATE.SS` + `MDSCR_EL1.SS`, classifies one `hv_vcpu_run`, disarms both.
+- **F2 — the EL1-parked corollary.** When the stepped instruction itself traps to EL1 (an SVC, or a
+  below-the-trace timebase / undef-MRS / FPAC emulation), the step still surfaces as a direct-EL2 exit
+  (EC = 0x32) but with the guest now parked at **EL1**, `ESR_EL1` / `ELR_EL1` holding the real trap.
+  `run_one_for_step` dispatches off `ESR_EL1` exactly like `run()`: an emulation stands in for the step (counts
+  as one), the window-ending SVC is returned unconsumed as `Stop::Syscall`. This corollary is directly visible
+  in the gate — a `window_len_here` counting pass steps *through* the window-ending SVC and parks at the EL1
+  trampoline (`0x4400`), so its `cur_pc()` is the trampoline, not the SVC; the coordinate `(N, len)` reached by
+  `seek` instead parks at EL0 on the SVC. The e2e therefore anchors the round-trip on the `(N, K)` coordinate, not
+  a probe's pc.
+- **F3 — hardware breakpoints DELIVER.** A `DBGBVR0/DBGBCR0_EL1` instruction breakpoint fires directly to the
+  VMM (`ESR_EL2` EC = 0x30, `PC == DBGBVR0`, before the instruction retires). This accelerates `continue` /
+  `reverse-continue` mid-window hits (6 hardware slots); a hit that lands exactly on a landmark boundary is
+  caught by a landmark-granular check, which also covers the 7th-and-beyond breakpoint at those boundaries.
+
+**The command surface — `retrace debug <trace> --script '…'`.** A `;`-separated, self-echoing script; every
+printed byte derives from guest state, the script, or a fixed string (no host pointers, no timing, no map
+order), so a transcript is bit-reproducible. Commands: `break <a>` / `delete <a>` (up to 6 hardware slots,
+sorted + deduped) · `continue` / `reverse-continue` · `stepi [n]` / `reverse-stepi [n]` · `regs` (the `dbg_regs`
+dump) · `x <a> <len>` (hex bytes, or `unmapped`) · `where` (prints `(N, K)` + reg PC). A syntax error aborts the
+whole script before any output (exit 5).
+
+**The walk — the M3 headline gate is GREEN.** `reverse_debug_e2e` records a fresh `hello_dyn`, discovers the
+`write(1,"hi\n")` landmark **in-process** (`peek_syscall` + `advance` — never a hardcoded address), drops that
+session (one VM per process), then spawns `retrace debug --script 'break …; continue; where; regs; reverse-stepi;
+where; reverse-stepi; where; stepi; where; reverse-continue; where'` **twice** on the same recording. On the
+committed run: `continue` catches the breakpoint at the write-return boundary `(273, 0)` (pc `0x1804af834`);
+`reverse-stepi` backs into the write's window `(272, 178)` (pc `0x1804af830`, the write SVC); a second
+`reverse-stepi` steps to `(272, 177)`; `stepi` round-trips forward to `(272, 178)`; `reverse-continue` reports
+`no earlier hit` (the sole hit `(273, 0)` is later, not before P). The **primary oracle** is that the two
+transcripts are **byte-identical**; the coordinate lines are secondary anchors. Un-`#[ignore]`d on a genuine
+double pass (two independent runs, each a fresh recording). `just gate` reports **90 passed, 0 failed, 0
+ignored**, clippy clean.
+
+**Deferred:** checkpoints (a pure seek-time acceleration — deferred until a guest's replay time hurts);
+watchpoints (4 hardware slots exist, unused); symbolication (debugger addresses are raw guest VAs); an
+interactive REPL (only scripted sessions today); step-over and back-to-back `continue` on a single non-looping
+breakpoint (step-over was de-scoped — a `continue` while parked *on* a breakpoint re-fires at 0 progress and
+errors, exit 5); more than 6 breakpoints per session (the 7th+ is caught only at landmark boundaries); the
+mid-window-vs-boundary K = 0 resolution edge (a boundary breakpoint interacting with the `K > K_cur` rule —
+untested, the e2e uses a clean boundary hit); and the `Stop::Other`-while-stepping fault path (empirically
+unreachable on `hello_dyn` — correct by construction, untriggered). See
+`docs/superpowers/specs/2026-07-16-retrace-m3-reverse-execution-design.md`.
