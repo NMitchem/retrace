@@ -23,4 +23,11 @@ fn landmark_seek_is_deterministic() {
     assert_eq!(s.dbg_regs(), regs1);
     assert_eq!(s.pc(), pc1);
     assert!(s.diff_memory(&snap_mem).is_none(), "memory diverged between two seeks");
+
+    // read_mem is all-or-nothing: the pc's code page reads back, an unmapped va is None, and a
+    // span that runs off the end of a mapped backing is None (must NOT panic — the review fix).
+    let pc = s.pc();
+    assert!(s.read_mem(pc, 16).is_some(), "pc's code page should be readable");
+    assert!(s.read_mem(0xDEAD_0000_0000, 16).is_none(), "unmapped va should be None");
+    assert!(s.read_mem(pc, 1 << 30).is_none(), "span crossing out of the backing should be None, not panic");
 }

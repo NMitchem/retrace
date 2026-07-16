@@ -416,7 +416,8 @@ impl ReplaySession {
     /// Consume exactly ONE trace event (returning `Advance::Event`), or drive the guest to `exit`
     /// (returning `Advance::Exited`). Non-event stops — a cache-window page-in or a reservation
     /// commit — are handled internally and the guest re-run, so `advance` returns only on event
-    /// consumption or exit.
+    /// consumption or exit. Once it has returned `Advance::Exited` the run is complete; calling
+    /// `advance` again is unspecified (the guest is past its final landmark) — callers must not.
     pub fn advance(&mut self) -> Result<Advance, Divergence> {
         loop {
             match self.b.run() {
@@ -675,10 +676,10 @@ impl ReplaySession {
     pub fn pc(&self) -> u64 { self.b.position() }
     /// Bring-up register dump (x0..x30, SP, PC, ELR, FAR).
     pub fn dbg_regs(&self) -> String { self.b.dbg_regs() }
-    /// Read `len` bytes of guest memory at `va`, or None if `va` is unmapped (Box_::read_guest
-    /// would panic on an unmapped address, so gate it behind is_mapped).
+    /// Read `len` bytes of guest memory at `va`, or None if the full `[va, va+len)` span is not
+    /// mapped inside one backing (all-or-nothing — never a partial or clamped read).
     pub fn read_mem(&self, va: u64, len: usize) -> Option<Vec<u8>> {
-        if self.b.is_mapped(va) { Some(self.b.read_guest(va, len)) } else { None }
+        self.b.read_guest_checked(va, len)
     }
     /// Capture the current registers + full guest memory (for the determinism oracle / debugger).
     pub fn snapshot(&mut self) -> (retrace_trace::Regs, Vec<retrace_trace::Region>) {

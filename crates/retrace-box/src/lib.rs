@@ -1599,6 +1599,20 @@ impl Box_ {
         panic!("read_guest: ipa 0x{ipa:x} len {len} not mapped");
     }
 
+    /// Like `read_guest`, but returns None instead of panicking when the full `[ipa, ipa+len)` span
+    /// does not fit inside a single backing — deterministic all-or-nothing (no clamping, no partial
+    /// read). For callers (the M3 debugger's memory reads) that must tolerate unmapped/partial spans;
+    /// `read_guest`'s panic stays load-bearing fail-loud for internal callers.
+    pub fn read_guest_checked(&self, ipa: u64, len: usize) -> Option<Vec<u8>> {
+        for bk in &self.backings {
+            if ipa >= bk.ipa && ipa + len as u64 <= bk.ipa + bk.len as u64 {
+                let off = (ipa - bk.ipa) as usize;
+                return Some(unsafe { std::slice::from_raw_parts(bk.host.add(off), len) }.to_vec());
+            }
+        }
+        None
+    }
+
     /// Capture all backings + architectural registers as an Event::Snapshot.
     pub fn snapshot(&self) -> retrace_trace::Event {
         let mut mem = Vec::new();
