@@ -388,6 +388,18 @@ pub struct ReplaySession {
     truncated: bool,
 }
 
+// Manual Debug (the box is not Debug and dumping full guest memory would be useless): show only the
+// position bookkeeping. Needed so `Result<ReplaySession, _>::unwrap_err` can format an unexpected Ok.
+impl std::fmt::Debug for ReplaySession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplaySession")
+            .field("idx", &self.idx)
+            .field("events", &self.events.len())
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The outcome of one `advance`: either exactly one trace event was consumed (`Event`), or the
 /// guest reached `exit` and the final-memory landmark verified clean (`Exited`) — the run is done.
 pub enum Advance { Event, Exited(ReplayReport) }
@@ -692,6 +704,62 @@ impl ReplaySession {
     pub fn diff_memory(&self, expect: &[retrace_trace::Region]) -> Option<String> {
         self.b.diff_memory(expect)
     }
+
+    /// Single-step exactly `k` instructions into the current landmark's window. Deterministic replay
+    /// faults inside the window (a cache-window page-in or a reservation commit) are handled and the
+    /// instruction re-stepped, counting zero steps — identical to `advance`'s fault handling. Errs,
+    /// NAMING the window length, if the window-ending trap arrives before `k` retire (no silent
+    /// clamp; the length substring is a UX contract the reverse-stepi relies on). The session is
+    /// spent on Err — the guest is parked mid-window with `k` unsatisfied.
+    pub fn step_insns(&mut self, k: u64) -> Result<(), String> {
+        for done in 0..k {
+            loop {
+                match self.b.step() {
+                    Stop::Step => break,
+                    Stop::Other { esr } => {
+                        if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
+                        if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
+                        return Err(format!("fault during step {done}/{k}: {}", self.b.describe_stop(esr)));
+                    }
+                    // The window ends after exactly `done` instructions — name that length; the
+                    // window-ending trap is left unconsumed (the guest stays parked at it).
+                    Stop::Syscall { .. } => return Err(format!(
+                        "window {} ends after {done} instruction(s); cannot step {k}", self.idx)),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Single-step to the window-ending trap, returning the window length (instructions retired
+    /// before the trap). Faults inside the window are paged in / committed and re-stepped, exactly
+    /// as `step_insns` does. Deterministic per (trace, landmark). The session is spent (parked at
+    /// the trap).
+    pub fn window_len_here(&mut self) -> Result<u64, String> {
+        let mut n = 0u64;
+        loop {
+            match self.b.step() {
+                Stop::Step => n += 1,
+                Stop::Other { esr } => {
+                    if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
+                    if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
+                    return Err(format!("fault at step {n}: {}", self.b.describe_stop(esr)));
+                }
+                Stop::Syscall { .. } => return Ok(n),
+            }
+        }
+    }
+}
+
+/// A fresh session positioned at the M3 coordinate P = (landmark `n`, step `k`): restore from the
+/// snapshot, advance to landmark `n` (the divergence oracle verifies every trap on the way), then
+/// single-step `k` instructions into its window. One VM per process, so the caller must drop this
+/// session before opening another. Errs (no partial session) if the seek can't be satisfied.
+pub fn seek(trace_path: &Path, n: usize, k: u64) -> Result<ReplaySession, String> {
+    let mut s = ReplaySession::open(trace_path)?;
+    s.advance_to_landmark(n).map_err(|d| format!("seek to landmark {n}: {}", d.detail))?;
+    s.step_insns(k)?;
+    Ok(s)
 }
 
 pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
