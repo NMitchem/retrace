@@ -403,7 +403,7 @@ impl std::fmt::Debug for ReplaySession {
 /// The outcome of one `advance`: exactly one trace event was consumed (`Event`); the guest reached
 /// `exit` and the final-memory landmark verified clean (`Exited`, run done); or a hardware
 /// breakpoint fired mid-window (`Break`, M3 debugger only — carries nothing: the caller reads
-/// `landmark()`/`cur_pc()`). `Break` is unreachable under the plain `replay()` oracle, which never
+/// `landmark()`/`pc()`). `Break` is unreachable under the plain `replay()` oracle, which never
 /// arms breakpoints.
 pub enum Advance { Event, Exited(ReplayReport), Break }
 
@@ -680,12 +680,12 @@ impl ReplaySession {
     /// runs past the guest's exit) as a Divergence, so the debugger's positioning is fail-loud.
     pub fn advance_to_landmark(&mut self, n: usize) -> Result<(), Divergence> {
         if n < self.idx {
-            return Err(Divergence { landmark: self.idx, pc: self.pc(),
+            return Err(Divergence { landmark: self.idx, pc: self.position(),
                 detail: format!("cannot seek backward to landmark {n} (already at {})", self.idx) });
         }
         while self.idx < n {
             if let Advance::Exited(_) = self.advance()? {
-                return Err(Divergence { landmark: self.idx, pc: self.pc(),
+                return Err(Divergence { landmark: self.idx, pc: self.position(),
                     detail: format!("run exited before landmark {n}") });
             }
         }
@@ -704,18 +704,21 @@ impl ReplaySession {
             _ => None,
         }
     }
-    /// The guest's execution position (ELR_EL1 at a syscall trap).
-    pub fn pc(&self) -> u64 { self.b.position() }
-    /// The live instruction pointer (reg PC) — the true position at an arbitrary (N, K) coordinate.
-    /// This differs from `pc()`/`position()` (ELR_EL1, a syscall's return address): they coincide
-    /// only at a landmark boundary (K=0); mid-window, at the initial snapshot, and at a hardware
-    /// breakpoint hit, only reg PC names where the guest actually is. The M3 debugger reports this.
-    pub fn cur_pc(&self) -> u64 { self.b.pc() }
-    /// Arm up to 6 hardware instruction breakpoints (extra addresses beyond slot 5 are ignored — the
-    /// caller's landmark-granular check covers them) so a mid-window PC match surfaces from
-    /// `advance()` as `Advance::Break`. Cleared by `clear_breakpoints` or by dropping the session.
+    /// The landmark anchor: ELR_EL1 at a syscall trap (the last trap's return address), matching
+    /// `Box_::position()`. Coincides with `pc()` only at a landmark boundary (K=0).
+    pub fn position(&self) -> u64 { self.b.position() }
+    /// The live instruction pointer (reg PC) — the true position at an arbitrary (N, K) coordinate,
+    /// matching `Box_::pc()`. This differs from `position()` (ELR_EL1, a syscall's return address):
+    /// they coincide only at a landmark boundary (K=0); mid-window, at the initial snapshot, and at a
+    /// hardware breakpoint hit, only reg PC names where the guest actually is. The M3 debugger reports this.
+    pub fn pc(&self) -> u64 { self.b.pc() }
+    /// Arm one hardware instruction breakpoint per address (one DBGBVR slot each) so a mid-window PC
+    /// match surfaces from `advance()` as `Advance::Break`. The 6-slot hardware limit is enforced
+    /// upstream by the debugger's `break` command, so this asserts rather than silently truncating.
+    /// Cleared by `clear_breakpoints` or by dropping the session.
     pub fn arm_breakpoints(&mut self, addrs: &[u64]) {
-        for (slot, &va) in addrs.iter().take(6).enumerate() {
+        assert!(addrs.len() <= 6, "break command enforces the limit");
+        for (slot, &va) in addrs.iter().enumerate() {
             self.b.arm_hw_breakpoint(slot, va);
         }
     }

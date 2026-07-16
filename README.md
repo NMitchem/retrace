@@ -839,10 +839,9 @@ ignored**, clippy clean.
 
 **Deferred:** checkpoints (a pure seek-time acceleration — deferred until a guest's replay time hurts);
 watchpoints (4 hardware slots exist, unused); symbolication (debugger addresses are raw guest VAs); an
-interactive REPL (only scripted sessions today); step-over and back-to-back `continue` on a single non-looping
-breakpoint (step-over was de-scoped — a `continue` while parked *on* a breakpoint re-fires at 0 progress and
-errors, exit 5); more than 6 breakpoints per session (the 7th+ is caught only at landmark boundaries); the
+interactive REPL (only scripted sessions today); step-over/`next` (de-scoped — use `stepi`); the
 mid-window-vs-boundary K = 0 resolution edge (a boundary breakpoint interacting with the `K > K_cur` rule —
 untested, the e2e uses a clean boundary hit); and the `Stop::Other`-while-stepping fault path (empirically
-unreachable on `hello_dyn` — correct by construction, untriggered). See
+unreachable on `hello_dyn` — correct by construction, untriggered). `break` refuses a 7th breakpoint
+(6 DBGBVR slots, loud error); `continue` from atop a breakpoint pre-steps one instruction. See
 `docs/superpowers/specs/2026-07-16-retrace-m3-reverse-execution-design.md`.
