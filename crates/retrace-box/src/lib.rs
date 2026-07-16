@@ -104,6 +104,21 @@ const CPACR_FP_ON: u64 = 0x3 << 20;
 const PSTATE_SS: u64 = 1 << 21; // PSTATE/SPSR software-step bit
 const MDSCR_SS:  u64 = 1 << 0;  // MDSCR_EL1.SS
 
+// Hardware instruction breakpoints (M3 debugger `continue`/reverse scans). MDSCR_EL1.MDE gates the
+// whole HW breakpoint/watchpoint machine; DBGBCRn = 0x1E5 arms slot n: E=1 (bit0), PMC=0b10 (EL0,
+// bits1-2), BAS=0b1111 (bits5-8) — matched empirically in the sstep spike (F3).
+const MDSCR_MDE: u64 = 1 << 15;
+const DBGBCR_ARM: u64 = 0x1E5;
+// The 6 (DBGBVRn, DBGBCRn) comparator pairs, indexed by slot.
+const HW_BREAKPOINT_SLOTS: [(hv_sys::SysReg, hv_sys::SysReg); 6] = [
+    (sysreg::DBGBVR0_EL1, sysreg::DBGBCR0_EL1),
+    (sysreg::DBGBVR1_EL1, sysreg::DBGBCR1_EL1),
+    (sysreg::DBGBVR2_EL1, sysreg::DBGBCR2_EL1),
+    (sysreg::DBGBVR3_EL1, sysreg::DBGBCR3_EL1),
+    (sysreg::DBGBVR4_EL1, sysreg::DBGBCR4_EL1),
+    (sysreg::DBGBVR5_EL1, sysreg::DBGBCR5_EL1),
+];
+
 // Fixed PAC keys (arbitrary constants; identical on record & replay => deterministic signing).
 const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
     (sysreg::APIAKEYLO_EL1, 0x5245545241434531), (sysreg::APIAKEYHI_EL1, 0x4D325350494B4559),
@@ -1403,6 +1418,32 @@ impl Box_ {
                 }
             }
         }
+    }
+
+    /// Arm hardware instruction breakpoint slot `slot` (0..=5) to match guest VA `va`, and enable
+    /// the debug machine (MDSCR_EL1.MDE). A match surfaces from `run()` as `Stop::Other` with an
+    /// ESR_EL2 breakpoint class (EC=0x30) at pc==va, before the instruction retires (spike F3). The
+    /// M3 debugger arms these only around `advance()`/`run()` scans — NEVER while single-stepping
+    /// (a BP fires before retire and would corrupt step counts), which `step()` never touches.
+    pub fn arm_hw_breakpoint(&mut self, slot: usize, va: u64) {
+        let (bvr, bcr) = HW_BREAKPOINT_SLOTS.get(slot)
+            .copied()
+            .unwrap_or_else(|| panic!("HW breakpoint slot {slot} out of range (0..=5)"));
+        self.vcpu.set_sys(bvr, va).unwrap();
+        self.vcpu.set_sys(bcr, DBGBCR_ARM).unwrap();
+        let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
+        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_MDE).unwrap();
+    }
+
+    /// Disarm every hardware breakpoint slot and drop MDSCR_EL1.MDE, returning the vcpu to a clean
+    /// (breakpoint-free) state safe to single-step from.
+    pub fn clear_hw_breakpoints(&mut self) {
+        for (bvr, bcr) in HW_BREAKPOINT_SLOTS {
+            self.vcpu.set_sys(bvr, 0).unwrap();
+            self.vcpu.set_sys(bcr, 0).unwrap();
+        }
+        let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
+        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr & !MDSCR_MDE).unwrap();
     }
 
     /// Test-only: arm `MDSCR_EL1.SS` + `PSTATE.SS` the way `step()` does, then leave — so a

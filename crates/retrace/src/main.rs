@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::process::exit;
 
+mod debug;
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(String::as_str) {
@@ -53,6 +55,16 @@ fn main() {
                 }
             }
         }
-        _ => { eprintln!("usage: retrace <record <guest> -o <trace> | replay <trace>>"); exit(2); }
+        Some("debug") => {
+            // retrace debug <trace> --script '<cmd>; <cmd>; …'
+            let trace = &a[2];
+            let script = a.iter().position(|s| s == "--script").map(|i| a[i + 1].clone())
+                .expect("--script '<cmds>'");
+            match debug::run_script(Path::new(trace), &script, &mut std::io::stdout()) {
+                Ok(()) => exit(0),
+                Err(e) => { eprintln!("DEBUG ERROR: {e}"); exit(5); }
+            }
+        }
+        _ => { eprintln!("usage: retrace <record <guest> -o <trace> | replay <trace> | debug <trace> --script '…'>"); exit(2); }
     }
 }
