@@ -98,6 +98,12 @@ const SCTLR_MMU_ON: u64 = (0x30d0_0800 | 1 | 4 | 0x1000) | 0x8000_0000 | 0x4000_
 // early code uses NEON (memcpy, hashing); without this an FP access traps EC=0x07.
 const CPACR_FP_ON: u64 = 0x3 << 20;
 
+// Software single-step (M3). Both bits must be set together to arm one step, and cleared after,
+// so run()/forward never step: MDSCR_EL1.SS enables the step state machine, PSTATE.SS makes the
+// next instruction the one that completes before the step exception fires.
+const PSTATE_SS: u64 = 1 << 21; // PSTATE/SPSR software-step bit
+const MDSCR_SS:  u64 = 1 << 0;  // MDSCR_EL1.SS
+
 // Fixed PAC keys (arbitrary constants; identical on record & replay => deterministic signing).
 const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
     (sysreg::APIAKEYLO_EL1, 0x5245545241434531), (sysreg::APIAKEYHI_EL1, 0x4D325350494B4559),
@@ -230,7 +236,8 @@ pub struct Box_ {
     cache: Option<CacheMeta>,
 }
 
-pub enum Stop { Syscall { num: u64, args: [u64;8] }, Other { esr: u64 } }
+#[derive(Debug)]
+pub enum Stop { Syscall { num: u64, args: [u64;8] }, Other { esr: u64 }, Step }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
     let len = (len + GRANULE - 1) & !(GRANULE - 1);
@@ -520,6 +527,7 @@ impl Box_ {
         Self::set_pac_keys(&vcpu);
         vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();   // was 0x30d00800 (MMU off)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
+        vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
@@ -919,6 +927,7 @@ impl Box_ {
 
         Self::set_pac_keys(&vcpu);
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
+        vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
         vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, ttbr0).unwrap();
@@ -1310,6 +1319,12 @@ impl Box_ {
                     for (i, a) in args.iter_mut().enumerate() { *a = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
                     return Stop::Syscall { num, args };
                 }
+                // A software-step exception delivers direct to EL2 (F1: EC2=0x32/0x33), so it lands
+                // on THIS outer match — never inside the Ec::Hvc trampoline arm. run() never arms SS
+                // (only Box_::step does, disarming after), so reaching here means SS leaked; fail loud.
+                Ec::SoftStep => panic!(
+                    "software-step exception outside Box_::step() — SS leaked; pc=0x{:x}",
+                    self.vcpu.get_reg(reg::PC).unwrap()),
                 _ => {
                     // A stage-2 abort taken by the hypervisor (not via the guest VBAR). Cache-window
                     // faults are serviced by the record/replay dispatch via `page_in_cache` (file →
@@ -1320,6 +1335,85 @@ impl Box_ {
                 }
             }
         }
+    }
+
+    /// Advance the guest by exactly one instruction. Returns `Stop::Step` on a clean single-step or
+    /// when one below-the-trace emulation (timebase/undef-MRS/FPAC) stands in for the instruction;
+    /// `Stop::Syscall` if the next instruction is the window-ending trap (NOT consumed — the caller
+    /// forwards/records it); `Stop::Other` for a fault (nothing retired — the caller pages in and
+    /// retries the same step). Arms both step bits, runs one classification, then disarms both so
+    /// `run()`/forward paths never step.
+    pub fn step(&mut self) -> Stop {
+        let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
+        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_SS).unwrap();
+        let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
+        self.vcpu.set_reg(reg::CPSR, cpsr | PSTATE_SS).unwrap();
+        let stop = self.run_one_for_step();
+        // Disarm: clear SS from both MDSCR_EL1 and the live PSTATE so nothing steps outside step().
+        let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
+        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr & !MDSCR_SS).unwrap();
+        let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
+        self.vcpu.set_reg(reg::CPSR, cpsr & !PSTATE_SS).unwrap();
+        stop
+    }
+
+    /// One `hv_vcpu_run` classification for `step()`. Mirrors `run()`, but keyed on the DIRECT-EL2
+    /// step exit (F1: `Ec::SoftStep` on the outer syndrome, not the `Ec::Hvc` trampoline). A clean
+    /// step lands with the guest at EL0 and PC already advanced. If the stepped instruction itself
+    /// trapped to EL1 (F2), it does NOT retire: it surfaces as a step exit with the guest parked at
+    /// EL1 and `ESR_EL1`/`ELR_EL1` holding the real trap — so dispatch off `ESR_EL1` exactly like
+    /// `run()`'s inner match (an emulation stands in for the step and returns `Stop::Step`; the
+    /// window-ending svc is returned unconsumed as `Stop::Syscall`).
+    fn run_one_for_step(&mut self) -> Stop {
+        loop {
+            let e = self.vcpu.run().expect("hv_vcpu_run");
+            if e.reason != EXIT_EXCEPTION { continue; }
+            match ec_of(e.syndrome) {
+                Ec::SoftStep => {
+                    // Guest still at EL0 => the instruction retired cleanly; PC is already at the
+                    // next instruction (step() disarms SS). EL1 => it trapped without retiring.
+                    let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
+                    if (cpsr >> 2) & 3 == 0 { return Stop::Step; }
+                    let esr1 = self.vcpu.get_sys(sysreg::ESR_EL1).unwrap();
+                    match ec_of(esr1) {
+                        // The window-ending svc: return it unconsumed (PC still at the trap, exactly
+                        // as run() leaves a syscall) for the caller to forward/record.
+                        Ec::Svc => {}
+                        // The same below-the-trace emulations run() does, but here each one IS the
+                        // step: emulate + resume EL0 at ELR+4 (the helpers read ELR_EL1/SPSR_EL1
+                        // themselves, identical to the trampoline path) and return Stop::Step.
+                        Ec::SysReg if self.try_emulate_timebase(esr1) => return Stop::Step,
+                        Ec::Other(0) if self.try_emulate_undef_mrs() => return Stop::Step,
+                        Ec::Other(0x1C) if self.try_emulate_fpac_auth() => return Stop::Step,
+                        _ => {
+                            self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
+                            return Stop::Other { esr: esr1 };
+                        }
+                    }
+                    let num = self.vcpu.get_reg(reg::x(16)).unwrap();
+                    let mut args = [0u64;8];
+                    for (i, a) in args.iter_mut().enumerate() { *a = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+                    return Stop::Syscall { num, args };
+                }
+                // A stage-2 abort (e.g. a cache-window fault) taken direct to EL2 while stepping: the
+                // instruction did not retire. Surface it for the caller to page in and re-step.
+                _ => {
+                    self.last_far = e.virtual_address;
+                    return Stop::Other { esr: e.syndrome };
+                }
+            }
+        }
+    }
+
+    /// Test-only: arm `MDSCR_EL1.SS` + `PSTATE.SS` the way `step()` does, then leave — so a
+    /// following `run()` drives the vcpu with SS armed and must hit the fail-loud `Ec::SoftStep`
+    /// arm. Proves SS never silently leaks past `step()`.
+    #[doc(hidden)]
+    pub fn dbg_leak_ss(&mut self) {
+        let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
+        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_SS).unwrap();
+        let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
+        self.vcpu.set_reg(reg::CPSR, cpsr | PSTATE_SS).unwrap();
     }
 
     /// Replay-only: rebuild the guest from a snapshot's exact regions (no extra stack/trampoline).
@@ -1346,6 +1440,7 @@ impl Box_ {
         Self::set_pac_keys(&vcpu);
         vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
+        vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
         // Restore captured architectural state.
         for i in 0..31 { vcpu.set_reg(reg::x(i as u32), regs.x[i]).unwrap(); }
         vcpu.set_reg(reg::PC, regs.pc).unwrap();

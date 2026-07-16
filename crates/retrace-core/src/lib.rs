@@ -358,6 +358,8 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
                 return Err(b.describe_stop(esr));
             }
+            // Stop::Step is only produced by Box_::step(); record_box drives run(), never step().
+            Stop::Step => unreachable!("record_box drives run(), which never single-steps"),
         }
     }
     Ok(RecordSummary { stdout, exit_code, events: count })
@@ -617,6 +619,8 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
                 if b.commit_reserved_page(b.fault_ipa()) { continue; }
                 return Err(Divergence { landmark: idx, pc: b.pc(), detail: b.describe_stop(esr) });
             }
+            // Stop::Step is only produced by Box_::step(); replay drives run(), never step().
+            Stop::Step => unreachable!("replay drives run(), which never single-steps"),
         }
     }
 }

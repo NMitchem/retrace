@@ -12,5 +12,6 @@ fn el0_svc_reaches_vmm_via_trampoline() {
             assert_eq!(args[2], 6);          // len = 6
         }
         Stop::Other { esr } => panic!("expected SVC-via-trampoline, got esr=0x{esr:x}"),
+        Stop::Step => unreachable!("run() does not single-step"),
     }
 }

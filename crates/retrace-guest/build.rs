@@ -14,6 +14,17 @@ fn main() {
         .status().expect("clang");
     assert!(status.success(), "guest assembly failed");
 
+    // steppy: nop×4; mrs cntvct_el0 (one step whether it traps+emulates or retires natively);
+    // nop×3; then hello.s's exit(0) svc sequence. The M3 single-step micro-guest — Box_::step()
+    // must advance exactly one instruction per call.
+    let src = format!("{}/asm/steppy.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/steppy");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang steppy");
+    assert!(status.success(), "steppy guest build failed");
+
     // Fixture file with known contents.
     let fixture = format!("{out}/fixture.txt");
     std::fs::write(&fixture, b"retrace-m1-fixture\n").unwrap();

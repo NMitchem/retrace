@@ -26,6 +26,7 @@ fn wild_store_outside_any_reservation_stays_fatal() {
         }
         Stop::Syscall { num, args } =>
             panic!("expected an immediate wild-store data abort, got syscall num={num} args={args:?}"),
+        Stop::Step => unreachable!("run() does not single-step"),
     }
 }
 
