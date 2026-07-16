@@ -816,7 +816,7 @@ on macOS 26 / Apple Silicon:
 - **F3 — hardware breakpoints DELIVER.** A `DBGBVR0/DBGBCR0_EL1` instruction breakpoint fires directly to the
   VMM (`ESR_EL2` EC = 0x30, `PC == DBGBVR0`, before the instruction retires). This accelerates `continue` /
   `reverse-continue` mid-window hits (6 hardware slots); a hit that lands exactly on a landmark boundary is
-  caught by a landmark-granular check, which also covers the 7th-and-beyond breakpoint.
+  caught by a landmark-granular check, which also covers the 7th-and-beyond breakpoint at those boundaries.
 
 **The command surface — `retrace debug <trace> --script '…'`.** A `;`-separated, self-echoing script; every
 printed byte derives from guest state, the script, or a fixed string (no host pointers, no timing, no map
