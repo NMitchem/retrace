@@ -722,3 +722,57 @@ lineage — likely forward-and-record for the nondeterministic audit token); wha
 check does after the token (an entitlement / sandbox query, still unseen); the XPC send / dispatch-mach
 subsystem proper (a real `bootstrap_look_up` round-trip — still unseen); the single-vCPU commpage-topology
 synthesis (host-topology leak hygiene); un-ignoring `hello_dyn_e2e` green; an arm64e guest.
+
+## Status: M2-taskinfo — `task_info(TASK_AUDIT_TOKEN)` forwarded ✅ (the M2 headline gate is GREEN)
+
+**Root cause of the M2-setport wall.** After the `task_set_special_port(DEBUG_CONTROL_PORT)` wall fell,
+`libSystem_initializer` ran its next sub-initializer, libsystem_secinit's `_libsecinit_initializer`. Its
+`_libsecinit_appsandbox_check` calls `xpc_copy_entitlements_for_self`, which — through libxpc's
+`_xpc_get_self_audit_token` / `_fetch_self_token` (a `dispatch_once`) — sends `task_info(TASK_AUDIT_TOKEN)`
+(msgh_id **3405**) to the guest task port to fetch the process's **own audit token** (its identity). This is a
+**simple** message (`bits 0x1513`), 40 bytes = `header(24) + NDR(8) + flavor:int(4) + count:int(4)`, with
+`flavor = 15 = TASK_AUDIT_TOKEN` and `count = 8 = TASK_AUDIT_TOKEN_COUNT` (an `audit_token_t` is 8 words),
+reply port `0x1603` (`MAKE_SEND_ONCE`). retrace's MIG router had no handler, so it fail-louded.
+
+**The fix — one `FORWARD_ALLOWLIST` entry (forward, don't synthesize).** Unlike 3409/3410, this reply is *not*
+computed in the box: msgh_id **3405** is added to `machmsg`'s `FORWARD_ALLOWLIST`, joining the read-only
+allowlist (`host_info` 200, `host_get_clock_service` 206, `semaphore_create` 3418). The existing `Forward`
+route does the rest — **record** issues the *real* `task_info` trap against retrace's **own** task and captures
+what the kernel wrote back with `forward_and_diff` (the audit-token reply bytes land in the trace as ordinary
+recorded memory writes); **replay** never issues the trap — it applies the recorded writes verbatim. No
+decoder, no dispatch arm, no synthesized reply: the whole functional change is the single allowlist entry.
+
+**Why forward-and-record here, and why forwarding is safe (contrast 3409 / 3410).** The audit token embeds
+**host process identity** (`pid` / `asid` / `pidversion`), which varies run-to-run, so the reply is
+**nondeterministic** — it cannot be regenerated and byte-compared. Forwarding-and-recording is exactly the
+posture already used for `task_self`'s kernel-picked port name and for `getentropy`: record the real bytes,
+replay them verbatim (no recompute, no divergence byte-compare). Forwarding is **safe** here precisely because
+`task_info(TASK_AUDIT_TOKEN)` returns **read-only out-of-line data with no port rights** — issuing it against
+retrace's own task leaks nothing into the guest's IPC space. That is the opposite of 3409
+`task_get_special_port` and 3410 `task_set_special_port`, which carry **port descriptors**: those had to be
+minted/synthesized in the box to keep the guest's port namespace coherent (a forwarded real special port would
+be retrace's, not the guest's). Read-only data → forward; port rights → synthesize.
+
+**The walk — the LAST wall falls; `hello_dyn` runs to completion.** The bounded traced `record-dyn hello_dyn`
+now forwards msgh_id 3405 (`[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided
+allowlist)`; no `RECORD ERROR`). libsystem_secinit's sandbox check proceeds from the forwarded token alone —
+the further entitlement / sandbox query the M2-setport re-park warned *might* surface **did not appear** — so
+`_libsecinit_initializer` completes, dyld's `findAndRunAllInitializers` returns, control reaches the program's
+`main`, and hello_dyn runs to the end: `write(1, "hi\n", 3)` (trap 4) then `exit(0)` (trap 1). Record produces
+exit 0 / stdout `"hi\n"`; **replay is byte-identical** (exit 0 / `"hi\n"`, empty stderr, zero divergence),
+verified twice (double-replay). The headline `hello_dyn_e2e` gate is **un-`#[ignore]`d** and now runs green in
+the default suite — a dynamically-linked C program records and replays bit-for-bit, dyld having mapped and
+re-signed the shared cache itself.
+
+**What runs today:** the full M2 headline path — `record-dyn hello_dyn` links against real `/usr/lib/dyld`,
+demand-pages and re-signs the arm64e shared cache, runs every libSystem image initializer (libmalloc, libobjc,
+libxpc, libtrace, libsecinit) through the serviced mach-IPC / MIG surface, reaches `main`, and records +
+replays `write(1,"hi\n")` + `exit(0)` **byte-for-byte with zero divergence**. `just gate` reports **78 passed,
+0 failed, 0 ignored**, clippy clean — the headline gate is GREEN, no longer parked. See
+`docs/superpowers/specs/2026-07-15-retrace-m2-taskinfo-design.md`.
+
+**Deferred:** the single-vCPU commpage-topology synthesis (the frozen host commpage still carries
+12-CPU/2-cluster counts — harmless now the cpu/cluster index is pinned to 0, but a hygiene follow-up); the XPC
+send / dispatch-mach subsystem proper (never exercised on this path — no `mach_msg2` targets the minted
+bootstrap port `0x1003`, no `bootstrap_look_up` appears); larger / longer-running guests and an arm64e guest
+(hello_dyn is a plain-arm64 program); broadening the record/replay surface beyond this single e2e program.
