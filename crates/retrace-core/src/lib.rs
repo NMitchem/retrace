@@ -400,9 +400,12 @@ impl std::fmt::Debug for ReplaySession {
     }
 }
 
-/// The outcome of one `advance`: either exactly one trace event was consumed (`Event`), or the
-/// guest reached `exit` and the final-memory landmark verified clean (`Exited`) — the run is done.
-pub enum Advance { Event, Exited(ReplayReport) }
+/// The outcome of one `advance`: exactly one trace event was consumed (`Event`); the guest reached
+/// `exit` and the final-memory landmark verified clean (`Exited`, run done); or a hardware
+/// breakpoint fired mid-window (`Break`, M3 debugger only — carries nothing: the caller reads
+/// `landmark()`/`cur_pc()`). `Break` is unreachable under the plain `replay()` oracle, which never
+/// arms breakpoints.
+pub enum Advance { Event, Exited(ReplayReport), Break }
 
 impl ReplaySession {
     pub fn open(trace_path: &Path) -> Result<Self, String> {
@@ -655,6 +658,13 @@ impl ReplaySession {
                     }
                 }
                 Stop::Other { esr } => {
+                    // A hardware breakpoint (M3 debugger `continue`/scan) delivers here with an
+                    // ESR_EL2 breakpoint class; surface it as `Advance::Break` BEFORE the fault
+                    // fallbacks so it is not misread as a stage-2 abort. Only the debugger arms
+                    // breakpoints, so this is unreachable under the plain `replay()` oracle.
+                    if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Breakpoint) {
+                        return Ok(Advance::Break);
+                    }
                     // Cache-window fault: page it in (regenerated identically to record) and re-run.
                     if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
                     if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
@@ -686,6 +696,21 @@ impl ReplaySession {
     pub fn landmark(&self) -> usize { self.idx }
     /// The guest's execution position (ELR_EL1 at a syscall trap).
     pub fn pc(&self) -> u64 { self.b.position() }
+    /// The live instruction pointer (reg PC) — the true position at an arbitrary (N, K) coordinate.
+    /// This differs from `pc()`/`position()` (ELR_EL1, a syscall's return address): they coincide
+    /// only at a landmark boundary (K=0); mid-window, at the initial snapshot, and at a hardware
+    /// breakpoint hit, only reg PC names where the guest actually is. The M3 debugger reports this.
+    pub fn cur_pc(&self) -> u64 { self.b.pc() }
+    /// Arm up to 6 hardware instruction breakpoints (extra addresses beyond slot 5 are ignored — the
+    /// caller's landmark-granular check covers them) so a mid-window PC match surfaces from
+    /// `advance()` as `Advance::Break`. Cleared by `clear_breakpoints` or by dropping the session.
+    pub fn arm_breakpoints(&mut self, addrs: &[u64]) {
+        for (slot, &va) in addrs.iter().take(6).enumerate() {
+            self.b.arm_hw_breakpoint(slot, va);
+        }
+    }
+    /// Disarm every hardware breakpoint (return the vcpu to a clean, single-step-safe state).
+    pub fn clear_breakpoints(&mut self) { self.b.clear_hw_breakpoints(); }
     /// Bring-up register dump (x0..x30, SP, PC, ELR, FAR).
     pub fn dbg_regs(&self) -> String { self.b.dbg_regs() }
     /// Read `len` bytes of guest memory at `va`, or None if the full `[va, va+len)` span is not
