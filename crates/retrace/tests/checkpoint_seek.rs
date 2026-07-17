@@ -115,3 +115,23 @@ fn checkpointed_seek_matches_cold_across_a_neon_window() {
     assert_eq!(cold.dbg_fp_regs(), fp, "FP/SIMD state diverged across a NEON-crossing window");
     assert!(cold.diff_memory(&mem).is_none(), "memory diverged across a NEON-crossing window");
 }
+
+#[test]
+fn large_window_second_nearby_seek_is_far_cheaper_than_the_first() {
+    let (rec, trace) = util::record(retrace_guest::SPINLOOP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let trace = Path::new(&trace);
+    let mut cache = retrace_core::CheckpointCache::new(256 * 1024 * 1024, 64);
+    // Landmark 2 = the ~4003-instruction loop2 window (the M4 acceleration target).
+    let before1 = cache.total_single_steps();
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache, 2, 3990).unwrap();
+    let first_cost = cache.total_single_steps() - before1;
+    assert!(first_cost >= 3000, "the first seek into a ~4003-insn window should pay most of it, paid {first_cost}");
+
+    let before2 = cache.total_single_steps();
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache, 2, 3995).unwrap();
+    let second_cost = cache.total_single_steps() - before2;
+    assert!(second_cost <= 20, "a nearby second seek should reuse the checkpoint, paid {second_cost}");
+    assert!(second_cost * 50 < first_cost,
+        "second seek ({second_cost} steps) should be far cheaper than the first ({first_cost})");
+}

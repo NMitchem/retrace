@@ -5,11 +5,18 @@
 
 use std::io::Write;
 use std::path::Path;
-use retrace_core::{seek, Advance, ReplaySession};
+use retrace_core::{checkpointed_seek, Advance, CheckpointCache, ReplaySession};
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
 /// 5), guarding the inherited u64 span-overflow edge at the CLI boundary before any VM work.
 const MAX_EXAMINE_LEN: usize = 65536;
+
+/// Checkpoint cache sizing (M4): a byte budget generous enough to hold several tens of mid-run
+/// checkpoints without unbounded growth on a long debug session, and a single-step cost gate that
+/// only bothers caching positions genuinely expensive to reach (landmark replay is native-speed and
+/// excluded from this count).
+const CHECKPOINT_BYTE_BUDGET: usize = 256 * 1024 * 1024;
+const CHECKPOINT_COST_GATE_STEPS: u64 = 64;
 
 /// One parsed debugger command. `Break`/`Delete` carry a guest VA; `Examine` carries (VA, len);
 /// `Stepi`/`ReverseStepi` carry a repeat count (default 1).
@@ -110,8 +117,8 @@ fn line<W: Write>(out: &mut W, args: std::fmt::Arguments) -> Result<(), String> 
 /// live PC equals `pc`. Turns a mid-window hardware-breakpoint hit (which knows only the pc + its
 /// landmark) into an exact (N, K) coordinate. Deterministic; runs on its own transient session, so
 /// the caller must hold NO other live session (one VM per process).
-fn resolve_hit_k(trace: &Path, n: usize, pc: u64, from_k: u64) -> Result<u64, String> {
-    let mut s = seek(trace, n, from_k)?;
+fn resolve_hit_k(trace: &Path, cache: &mut CheckpointCache, n: usize, pc: u64, from_k: u64) -> Result<u64, String> {
+    let mut s = checkpointed_seek(trace, cache, n, from_k)?;
     let mut k = from_k;
     loop {
         if s.pc() == pc { return Ok(k); }
@@ -130,13 +137,15 @@ struct Exec<'a> {
     n: usize,
     k: u64,
     breakpoints: Vec<u64>,
+    cache: CheckpointCache,
 }
 
 impl<'a> Exec<'a> {
     /// Open at the recording start: P = (1, 0), the first landmark's window, step 0.
     fn new(trace: &'a Path) -> Result<Self, String> {
-        let session = seek(trace, 1, 0)?;
-        Ok(Exec { trace, session: Some(session), n: 1, k: 0, breakpoints: Vec::new() })
+        let mut cache = CheckpointCache::new(CHECKPOINT_BYTE_BUDGET, CHECKPOINT_COST_GATE_STEPS);
+        let session = checkpointed_seek(trace, &mut cache, 1, 0)?;
+        Ok(Exec { trace, session: Some(session), n: 1, k: 0, breakpoints: Vec::new(), cache })
     }
 
     fn sess(&self) -> &ReplaySession { self.session.as_ref().expect("live session") }
@@ -146,7 +155,7 @@ impl<'a> Exec<'a> {
     /// therefore breakpoint-clean. Updates the position coordinate.
     fn reseek(&mut self, n: usize, k: u64) -> Result<(), String> {
         self.session = None; // free the old VM BEFORE opening a new one
-        self.session = Some(seek(self.trace, n, k)?);
+        self.session = Some(checkpointed_seek(self.trace, &mut self.cache, n, k)?);
         self.n = n;
         self.k = k;
         Ok(())
@@ -156,7 +165,7 @@ impl<'a> Exec<'a> {
     /// first; the caller re-establishes one via `reseek`.
     fn probe_window_len(&mut self, n: usize) -> Result<u64, String> {
         self.session = None; // free the live VM before the probe
-        let mut probe = seek(self.trace, n, 0)?;
+        let mut probe = checkpointed_seek(self.trace, &mut self.cache, n, 0)?;
         probe.window_len_here()
     }
 
@@ -299,7 +308,7 @@ impl<'a> Exec<'a> {
                     // (we entered window n via a landmark). Resolve the FIRST occurrence past it.
                     let kctx = if n == start_n { start_k } else { 0 };
                     self.session = None; // free the VM before the resolution seek
-                    let k = resolve_hit_k(self.trace, n, p_hit, kctx + 1)?;
+                    let k = resolve_hit_k(self.trace, &mut self.cache, n, p_hit, kctx + 1)?;
                     line(out, format_args!("resolved ({n}, {k})"))?;
                     return self.reseek(n, k);
                 }
@@ -334,7 +343,7 @@ impl<'a> Exec<'a> {
         let mut last: Option<(usize, u64, u64)> = None; // (n, k, pc) of the latest hit < P
         let (mut cur_n, mut cur_k) = (1usize, 0u64);     // scan cursor
         loop {
-            let mut s = seek(self.trace, cur_n, cur_k)?;
+            let mut s = checkpointed_seek(self.trace, &mut self.cache, cur_n, cur_k)?;
             s.arm_breakpoints(&bps);
             let hit = loop {
                 match s.advance().map_err(|d| format!("reverse-continue diverged: {}", d.detail))? {
@@ -346,7 +355,7 @@ impl<'a> Exec<'a> {
             drop(s); // free the VM before resolving K
             let (n, pc) = match hit { Some(h) => h, None => break };
             let from_k = if n == cur_n { cur_k } else { 0 };
-            let k = resolve_hit_k(self.trace, n, pc, from_k)?;
+            let k = resolve_hit_k(self.trace, &mut self.cache, n, pc, from_k)?;
             if (n, k) < (pn, pk) {
                 last = Some((n, k, pc));
                 (cur_n, cur_k) = (n, k + 1); // resume strictly past this hit
