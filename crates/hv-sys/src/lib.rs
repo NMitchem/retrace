@@ -48,6 +48,8 @@ pub mod reg {
     pub const FP: Reg = Reg(hv_reg_t_HV_REG_FP);
     pub const LR: Reg = Reg(hv_reg_t_HV_REG_LR);
     pub const CPSR: Reg = Reg(hv_reg_t_HV_REG_CPSR);
+    pub const FPCR: Reg = Reg(hv_reg_t_HV_REG_FPCR);
+    pub const FPSR: Reg = Reg(hv_reg_t_HV_REG_FPSR);
     pub fn x(n: u32) -> Reg { Reg(hv_reg_t_HV_REG_X0 + n) } // X0..X30 are contiguous
 }
 pub mod sysreg {
@@ -94,6 +96,12 @@ pub mod sysreg {
     pub const APGAKEYHI_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APGAKEYHI_EL1);
 }
 
+#[derive(Clone, Copy)] pub struct SimdReg(pub hv_simd_fp_reg_t);
+pub mod simd {
+    use super::*;
+    pub fn q(n: u32) -> SimdReg { SimdReg(hv_simd_fp_reg_t_HV_SIMD_FP_REG_Q0 + n) } // Q0..Q31 contiguous
+}
+
 pub struct Vcpu { id: hv_vcpu_t, exit: *mut hv_vcpu_exit_t }
 impl Vcpu {
     pub fn create(_vm: &Vm) -> Result<Vcpu, HvError> {
@@ -107,6 +115,14 @@ impl Vcpu {
     pub fn get_reg(&self, r: Reg) -> Result<u64, HvError> { let mut v=0; check(unsafe { hv_vcpu_get_reg(self.id, r.0, &mut v) })?; Ok(v) }
     pub fn set_sys(&self, r: SysReg, v: u64) -> Result<(), HvError> { check(unsafe { hv_vcpu_set_sys_reg(self.id, r.0, v) }) }
     pub fn get_sys(&self, r: SysReg) -> Result<u64, HvError> { let mut v=0; check(unsafe { hv_vcpu_get_sys_reg(self.id, r.0, &mut v) })?; Ok(v) }
+    pub fn get_simd(&self, r: SimdReg) -> Result<u128, HvError> {
+        let mut v: u128 = 0;
+        check(unsafe { hv_vcpu_get_simd_fp_reg(self.id, r.0, &mut v) })?;
+        Ok(v)
+    }
+    pub fn set_simd(&self, r: SimdReg, v: u128) -> Result<(), HvError> {
+        check(unsafe { hv_vcpu_set_simd_fp_reg(self.id, r.0, v) })
+    }
     pub fn set_trap_debug_exceptions(&self, on: bool) -> Result<(), HvError> { check(unsafe { hv_vcpu_set_trap_debug_exceptions(self.id, on) }) }
     /// Run until VMEXIT. Returns (reason, esr_el2, far/ipa) copied out of the exit struct.
     pub fn run(&mut self) -> Result<Exit, HvError> {
