@@ -87,6 +87,9 @@ pub struct BoxState {
     fp: [u128; 32],               // V0..V31 — NEW
     fpcr: u64, fpsr: u64,         // NEW
     tpidr_el0: u64,                // captured, not assumed zero
+    elr: u64, spsr: u64,          // ELR_EL1/SPSR_EL1 — added in Task 2 (this inventory originally
+                                  // omitted them); load-bearing at syscall-trap landmarks, where
+                                  // position()/set_x0_and_return read them live
     mem: Vec<Region>,             // existing trace-format type — full backing contents
     reservations: Vec<Reservation>,
     mmap_next: u64,
