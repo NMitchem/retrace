@@ -834,8 +834,8 @@ committed run: `continue` catches the breakpoint at the write-return boundary `(
 `reverse-stepi` steps to `(272, 177)`; `stepi` round-trips forward to `(272, 178)`; `reverse-continue` reports
 `no earlier hit` (the sole hit `(273, 0)` is later, not before P). The **primary oracle** is that the two
 transcripts are **byte-identical**; the coordinate lines are secondary anchors. Un-`#[ignore]`d on a genuine
-double pass (two independent runs, each a fresh recording). `just gate` reports **90 passed, 0 failed, 0
-ignored**, clippy clean.
+double pass (two independent runs, each a fresh recording). `just gate` reports **97 passed, 0 failed, 0
+ignored**, clippy clean (90 at the M3 close; the fast-follow added 7 debug-CLI golden tests).
 
 **Deferred:** checkpoints (a pure seek-time acceleration — deferred until a guest's replay time hurts);
 watchpoints (4 hardware slots exist, unused); symbolication (debugger addresses are raw guest VAs); an
@@ -843,5 +843,7 @@ interactive REPL (only scripted sessions today); step-over/`next` (de-scoped —
 mid-window-vs-boundary K = 0 resolution edge (a boundary breakpoint interacting with the `K > K_cur` rule —
 untested, the e2e uses a clean boundary hit); and the `Stop::Other`-while-stepping fault path (empirically
 unreachable on `hello_dyn` — correct by construction, untriggered). `break` refuses a 7th breakpoint
-(6 DBGBVR slots, loud error); `continue` from atop a breakpoint pre-steps one instruction. See
+(6 DBGBVR slots, loud error); `continue` from atop a breakpoint pre-steps one instruction (untested edge: a
+pre-step that lands atop a *second* breakpoint on the adjacent instruction or the next window boundary may
+resolve late or error — adjacent breakpoint pairs are deferred). See
 `docs/superpowers/specs/2026-07-16-retrace-m3-reverse-execution-design.md`.

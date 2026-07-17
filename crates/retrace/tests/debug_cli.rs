@@ -166,9 +166,10 @@ fn continue_after_reverse_stepi_onto_boundary_bp() {
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains(&format!("hit 0x{bpc:x} at ({w}, 0)")), "boundary hit:\n{out}");
     // After reverse-stepi to (W-1, L), continue re-approaches: the boundary check fires
-    // again at (W, 0) — pin the exact relanding behavior from the real transcript.
-    let hits = out.matches(&format!("hit 0x{bpc:x}")).count();
-    assert_eq!(hits, 2, "exactly two clean hits, no loop:\n{out}");
+    // again at (W, 0) — both hits must be the exact boundary form, never a mid-window resolve.
+    let hits = out.matches(&format!("hit 0x{bpc:x} at ({w}, 0)")).count();
+    assert_eq!(hits, 2, "exactly two clean boundary-form hits, no loop:\n{out}");
+    assert!(!out.contains("+?"), "no mid-window form in this transcript:\n{out}");
 }
 
 #[test]

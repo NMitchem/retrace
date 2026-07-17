@@ -122,8 +122,8 @@ fn resolve_hit_k(trace: &Path, n: usize, pc: u64, from_k: u64) -> Result<u64, St
 
 /// The scripted-debugger executor. Holds the position coordinate P = (`n`, `k`) and at most ONE live
 /// `ReplaySession` parked exactly at P (one VM per process → every command that MOVES drops the old
-/// session before seeking a fresh one). `breakpoints` is kept sorted + deduped so the hardware-slot
-/// assignment (first 6) and any iteration are deterministic.
+/// session before seeking a fresh one). `breakpoints` is kept sorted + deduped (≤ 6, enforced by
+/// `break`) so the hardware-slot assignment and any iteration are deterministic.
 struct Exec<'a> {
     trace: &'a Path,
     session: Option<ReplaySession>,
@@ -252,10 +252,10 @@ impl<'a> Exec<'a> {
         self.reseek(n, k)
     }
 
-    /// Run forward until a breakpoint is reached or the guest exits. Hardware breakpoints (first 6)
-    /// catch mid-window hits (`Advance::Break`), resolved to an exact (N, K); the landmark-granular
-    /// check catches a breakpoint that lands exactly on a landmark boundary (any breakpoint, incl.
-    /// the 7th+). With no breakpoints set, runs to exit.
+    /// Run forward until a breakpoint is reached or the guest exits. Hardware breakpoints (one
+    /// DBGBVR slot each; ≤ 6, enforced by `break`) catch mid-window hits (`Advance::Break`),
+    /// resolved to an exact (N, K); the landmark-granular check catches a breakpoint that lands
+    /// exactly on a landmark boundary. With no breakpoints set, runs to exit.
     fn cmd_continue<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
         // Pre-step rule: if we are parked exactly ON a breakpoint, advance one instruction BEFORE
         // arming BVRs, so the scan below does not immediately re-report the current position as a hit
