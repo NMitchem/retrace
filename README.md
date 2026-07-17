@@ -852,10 +852,14 @@ resolve late or error — adjacent breakpoint pairs are deferred). See
 
 **The idea — cache mid-run machine state, keyed by the coordinate that names it.** M3 proved every seek is
 `restore snapshot → replay N landmarks at native speed → single-step K instructions`, and left checkpoints as a
-deferred pure acceleration. M4 builds them: a **`BoxState`** is a complete mid-run capture of `Box_` — every
-general register, `PSTATE`, `TTBR0_EL1`/`TCR_EL1`, PAC keys, the sign-scratch/cache/TSD bookkeeping, **and**
+deferred pure acceleration. M4 builds them: a **`BoxState`** is a complete mid-run capture of `Box_` — full
+guest memory (every backing region), all GPRs plus `PC`/`PSTATE`/`SP_EL0`, `ELR_EL1`/`SPSR_EL1`, `TPIDR_EL0`,
+and the internal bookkeeping `restore()` gets wrong mid-run (reservations, the mmap cursor, the bootstrap port,
+the cache-pager-installed flag, the last fault address, the synthetic timebase, cache-refault state), **plus**
 `V0`–`V31`/`FPCR`/`FPSR`, which `Box_::restore()` never had to touch before now because landmark-0 restore is
-always the clean pre-execution state. A `SessionCheckpoint` pairs a `BoxState` with the coordinate `(N, K)` it
+always the clean pre-execution state. Fixed EL1 sysregs (`TTBR0_EL1`/`TCR_EL1`/`MAIR_EL1`/…) and the PAC keys
+are re-established as constants on restore, exactly like `restore()` does — never captured state, by the
+determinism design. A `SessionCheckpoint` pairs a `BoxState` with the coordinate `(N, K)` it
 was captured at; a `CheckpointCache` holds a bounded set of them, **cost-gated** (only positions that cost at
 least 64 single-steps to reach are worth caching), **byte-budgeted** (256 MiB), and **LRU-evicted** past that
 budget. `checkpointed_seek(N, K)` tries, in order: an exact or same-window cache hit (resume from the nearest
@@ -879,10 +883,15 @@ single-steps instead of thousands.
 running guest — new `hv-sys` wrappers plus the capture/restore plumbing (task 1/2). `from_checkpoint` restores the
 same sysreg block `restore()` does, **plus** `set_trap_debug_exceptions(true)` right after — a call easy to drop
 when copying `restore()`'s shape, and one whose omission fails silently (checkpoint-resumed stepping simply stops
-trapping) rather than loudly. Proven by a NEON-crossing guest test: a new `spinloop` guest program (`asm/spinloop.s`)
-was probed to find a window that touches vector registers, a checkpoint was taken mid-window, and the checkpoint-
-resumed continuation was byte-compared against a cold seek to the same coordinate, with an explicit nonzero-V-regs
-assertion so the proof can't silently go vacuous if the probed window ever drifts to avoid NEON.
+trapping) rather than loudly. Proven by `checkpointed_seek_matches_cold_across_a_neon_window`: it records
+`hello_dyn` through real `/usr/lib/dyld` and exploits dyld's own early init, which uses NEON (memcpy, hashing)
+well before any application code runs — `first_window_with_len` probes for a window at least 100 instructions
+long, a checkpoint is taken mid-window, and the checkpoint-resumed continuation is byte-compared against a cold
+seek to the same coordinate (registers, the FP/SIMD dump, and full memory), with an explicit nonzero-V-regs
+assertion so the proof can't silently go vacuous. The `spinloop` guest program (`asm/spinloop.s`) is pure
+integer code — two `subs`/`b.ne` counting loops, no vector instructions — and plays a different role entirely:
+its two deliberately huge windows (~606 and ~4003 instructions) are what the cache-hit, byte-budget/LRU, and
+speedup tests exercise (the 3990→5 numbers below).
 
 **The numbers.** The first seek into `spinloop`'s ~4003-instruction window pays the full 3990 single-steps (the
 window is expensive enough to trip the cost gate and get cached); a nearby second seek into the same window pays
@@ -891,8 +900,10 @@ golden tests plus `reverse_debug_e2e`) passes unmodified — checkpointing chang
 *what* is printed, so the transcripts stay byte-identical with checkpointing wired in.
 
 **The walk — the M4 headline gate is GREEN.** `just gate` reports **104 passed, 0 failed, 0 ignored**, clippy
-clean (97 at the M3 close plus the fast-follow gate; M4 added the SIMD round-trip test, the checkpoint
-capture/restore round-trip test, and the NEON-crossing checkpointed-seek e2e). See
+clean (97 at the M3 close plus the fast-follow gate; M4 added seven new tests: `fp_and_simd_regs_roundtrip`,
+`checkpoint_round_trip_is_lossless_mid_run`, `checkpointed_seek_same_and_earlier_window_hits_match_cold`,
+`checkpoint_cache_respects_byte_budget_and_evicts_lru`, `checkpointed_seek_matches_cold_across_a_neon_window`,
+`large_window_second_nearby_seek_is_far_cheaper_than_the_first`, and `spinloop_guest_parses`). See
 `docs/superpowers/specs/2026-07-16-retrace-m4-checkpoints-design.md`.
 
 **Deferred:** window-length memoization — `probe_window_len`/`window_len_here` still single-step a full window
