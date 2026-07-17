@@ -903,7 +903,9 @@ golden tests plus `reverse_debug_e2e`) passes unmodified — checkpointing chang
 clean (97 at the M3 close plus the fast-follow gate; M4 added seven new tests: `fp_and_simd_regs_roundtrip`,
 `checkpoint_round_trip_is_lossless_mid_run`, `checkpointed_seek_same_and_earlier_window_hits_match_cold`,
 `checkpoint_cache_respects_byte_budget_and_evicts_lru`, `checkpointed_seek_matches_cold_across_a_neon_window`,
-`large_window_second_nearby_seek_is_far_cheaper_than_the_first`, and `spinloop_guest_parses`). See
+`large_window_second_nearby_seek_is_far_cheaper_than_the_first`, and `spinloop_guest_parses`). The M4
+fast-follow then added `gate_zero_same_key_reseek_does_not_double_count_bytes` and
+`window_len_is_memoized_per_landmark`, taking the gate to **106 passed, 0 failed, 0 ignored**. See
 `docs/superpowers/specs/2026-07-16-retrace-m4-checkpoints-design.md`.
 
 **Deferred:** a user-facing config knob for the byte budget / cost-gate threshold (currently compile-time
