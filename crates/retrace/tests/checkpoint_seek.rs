@@ -106,6 +106,10 @@ fn checkpointed_seek_matches_cold_across_a_neon_window() {
         let mut s = retrace_core::checkpointed_seek(trace, &mut cache, n, k1).unwrap();
         (s.dbg_regs(), s.dbg_fp_regs(), { let (_, mem) = s.snapshot(); mem })
     };
+    // Non-vacuousness: at least one of the 32 V registers must be nonzero here, or this test would
+    // silently pass even if FP/SIMD capture were completely broken (e.g. always restoring zeros).
+    assert!(fp.matches("=0x00000000000000000000000000000000").count() < 32,
+        "all 32 V registers are zero at the checkpoint — the NEON-crossing proof has gone vacuous; widen the probe candidates");
     let cold = retrace_core::seek(trace, n, k1).unwrap();
     assert_eq!(cold.dbg_regs(), regs, "registers diverged across a NEON-crossing window");
     assert_eq!(cold.dbg_fp_regs(), fp, "FP/SIMD state diverged across a NEON-crossing window");
