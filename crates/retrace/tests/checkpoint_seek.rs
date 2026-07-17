@@ -135,3 +135,39 @@ fn large_window_second_nearby_seek_is_far_cheaper_than_the_first() {
     assert!(second_cost * 50 < first_cost,
         "second seek ({second_cost} steps) should be far cheaper than the first ({first_cost})");
 }
+
+#[test]
+fn gate_zero_same_key_reseek_does_not_double_count_bytes() {
+    let (rec, trace) = util::record(retrace_guest::SPINLOOP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let trace = Path::new(&trace);
+    // cost_gate_steps = 0 is the one configuration where an exact-position hit (steps_paid = 0)
+    // still clears the gate and re-inserts at the SAME key — the overwrite path the byte
+    // accounting must survive without double-counting.
+    let mut cache = retrace_core::CheckpointCache::new(usize::MAX, 0);
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache, 1, 5).unwrap();
+    assert_eq!(cache.len(), 1);
+    let first_bytes = cache.used_bytes();
+    assert!(first_bytes > 0, "a cached checkpoint must have nonzero measured size");
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache, 1, 5).unwrap();
+    assert_eq!(cache.len(), 1, "same-key reseek must overwrite, not add an entry");
+    assert_eq!(cache.used_bytes(), first_bytes,
+        "used_bytes must not double-count on a same-key overwrite (gate 0)");
+}
+
+#[test]
+fn window_len_is_memoized_per_landmark() {
+    let (rec, trace) = util::record(retrace_guest::SPINLOOP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let trace = Path::new(&trace);
+    let mut cache = retrace_core::CheckpointCache::new(256 * 1024 * 1024, 64);
+    // Landmark 2 = spinloop's ~4003-insn loop2 window: the expensive discovery this memo exists for.
+    let len1 = cache.window_len(trace, 2).unwrap();
+    assert!(len1 > 3000, "landmark 2 should be the ~4003-insn window, got {len1}");
+    let probed_once = cache.window_probe_steps();
+    assert_eq!(probed_once, len1, "first call must pay exactly one full-window probe");
+    let len2 = cache.window_len(trace, 2).unwrap();
+    assert_eq!(len2, len1);
+    assert_eq!(cache.window_probe_steps(), probed_once,
+        "second call must be a memo hit — zero additional probe steps");
+}
