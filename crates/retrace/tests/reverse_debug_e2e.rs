@@ -17,7 +17,7 @@ use std::process::Command;
 // The single breakpoint is discovered in-process (never a hardcoded address): it is the RETURN pc
 // of `write(1, "hi\n", …)`. That pc is the first instruction of the write's next (exit) window, so
 // `continue` catches it as a landmark-boundary hit — the executor's `Advance::Event` path compares
-// `cur_pc()`, which at a K=0 boundary equals ELR/`pc()` (`set_x0_err_and_return` set PC = ELR).
+// `pc()`, which at a K=0 boundary equals ELR/`position()` (`set_x0_err_and_return` set PC = ELR).
 //
 // The adapted script (two `reverse-stepi` then a `stepi`, per the controller's Task-5-semantics
 // resolution): a single `reverse-stepi; stepi` would leave the `stepi` at the window-end position
@@ -35,16 +35,16 @@ fn reverse_debug_transcript_is_deterministic() {
     // 1. Drive a discovery session to the write(1, …) trap, advance PAST it, and capture the
     //    return-address pc + the landmark index reached. `peek_syscall` recognizes the write BEFORE
     //    consuming it; `advance()` then consumes it, leaving the guest at the K=0 boundary of the
-    //    next window. `pc()` (ELR) and `cur_pc()` (reg PC) coincide there — asserted, then we take
-    //    `cur_pc()`, the exact value the `continue` boundary check compares.
+    //    next window. `position()` (ELR) and `pc()` (reg PC) coincide there — asserted, then we take
+    //    `pc()`, the exact value the `continue` boundary check compares.
     let (bp_pc, wr_landmark) = {
         let mut s = ReplaySession::open(Path::new(&trace)).expect("open trace");
         loop {
             match s.peek_syscall() {
                 Some((4, args)) if args[0] == 1 => {
                     s.advance().expect("advance past write");
-                    assert_eq!(s.pc(), s.cur_pc(), "pc/cur_pc must coincide at the K=0 boundary");
-                    break (s.cur_pc(), s.landmark());
+                    assert_eq!(s.position(), s.pc(), "position/pc must coincide at the K=0 boundary");
+                    break (s.pc(), s.landmark());
                 }
                 _ => {
                     if let Advance::Exited(_) = s.advance().expect("advance during discovery") {
@@ -58,7 +58,7 @@ fn reverse_debug_transcript_is_deterministic() {
     // 2. The write's window is the landmark just before the captured boundary. Probe its length L
     //    — the reverse-stepi/stepi round-trip coordinate. Fresh session: the discovery one is
     //    already dropped. (Only L is taken: `window_len_here` steps THROUGH the window-ending SVC,
-    //    so it parks the guest at the EL1 trampoline — its `cur_pc()` is NOT the (write_window, L)
+    //    so it parks the guest at the EL1 trampoline — its `pc()` is NOT the (write_window, L)
     //    coordinate's pc. The coordinate's exact pc is instead proven by the transcript byte-compare
     //    and the coordinate anchors below.)
     let write_window = wr_landmark - 1;
