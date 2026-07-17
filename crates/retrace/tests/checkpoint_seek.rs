@@ -1,0 +1,76 @@
+// The M4 correctness invariant, directly generalizing M3's oracle: a checkpoint-restored-and-
+// continued session must produce byte-identical results to a cold seek() to the same (N,K). Plus
+// CheckpointCache's byte-budget/LRU eviction, proven via the observable behavior it produces
+// (never via wall-clock — this project bans timing-based assertions by policy).
+mod util;
+use std::path::Path;
+
+#[test]
+fn checkpointed_seek_same_and_earlier_window_hits_match_cold() {
+    let (rec, trace) = util::record(retrace_guest::SPINLOOP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let trace = Path::new(&trace);
+    let mut cache = retrace_core::CheckpointCache::new(256 * 1024 * 1024, 64);
+
+    // SAME-WINDOW hit: checkpoint deep in window 2 (landmark 2, ~4003 insns), then seek a few
+    // steps further — must resume from the cache, not restart from landmark 0.
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache, 2, 3990).unwrap();
+    assert_eq!(cache.len(), 1, "a >=64-step seek must clear the cost gate and get cached");
+    let before = cache.total_single_steps();
+    let (regs_a, fp_a, mem_a) = {
+        let mut s = retrace_core::checkpointed_seek(trace, &mut cache, 2, 3995).unwrap();
+        (s.dbg_regs(), s.dbg_fp_regs(), { let (_, mem) = s.snapshot(); mem })
+    };
+    let same_window_cost = cache.total_single_steps() - before;
+    assert!(same_window_cost <= 10, "same-window hit should need ~5 steps, paid {same_window_cost}");
+    let cold_a = retrace_core::seek(trace, 2, 3995).unwrap();
+    assert_eq!(cold_a.dbg_regs(), regs_a, "registers diverged: checkpointed vs cold");
+    assert_eq!(cold_a.dbg_fp_regs(), fp_a, "FP/SIMD diverged: checkpointed vs cold");
+    assert!(cold_a.diff_memory(&mem_a).is_none(), "memory diverged: checkpointed vs cold");
+    drop(cold_a); // one VM per process: release the cold session before opening the earlier-window ones
+
+    // EARLIER-WINDOW hit: checkpoint deep in window 1 (landmark 1, ~606 insns; clears the cost
+    // gate), then seek into window 2 — must resume via advance_to_landmark(2) + step_insns, not miss.
+    let mut cache2 = retrace_core::CheckpointCache::new(256 * 1024 * 1024, 64);
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache2, 1, 590).unwrap();
+    assert_eq!(cache2.len(), 1);
+    let (regs_b, fp_b, mem_b) = {
+        let mut s = retrace_core::checkpointed_seek(trace, &mut cache2, 2, 50).unwrap();
+        (s.dbg_regs(), s.dbg_fp_regs(), { let (_, mem) = s.snapshot(); mem })
+    };
+    let cold_b = retrace_core::seek(trace, 2, 50).unwrap();
+    assert_eq!(cold_b.dbg_regs(), regs_b, "registers diverged (earlier-window hit): checkpointed vs cold");
+    assert_eq!(cold_b.dbg_fp_regs(), fp_b, "FP/SIMD diverged (earlier-window hit): checkpointed vs cold");
+    assert!(cold_b.diff_memory(&mem_b).is_none(), "memory diverged (earlier-window hit): checkpointed vs cold");
+}
+
+#[test]
+fn checkpoint_cache_respects_byte_budget_and_evicts_lru() {
+    let (rec, trace) = util::record(retrace_guest::SPINLOOP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let trace = Path::new(&trace);
+
+    // Measure one checkpoint's real footprint first (cost_gate_steps=1: always cached).
+    let mut probe = retrace_core::CheckpointCache::new(usize::MAX, 1);
+    let _ = retrace_core::checkpointed_seek(trace, &mut probe, 1, 50).unwrap();
+    let one_checkpoint_bytes = probe.used_bytes();
+    assert!(one_checkpoint_bytes > 0, "a cached checkpoint must have nonzero measured size");
+
+    // A budget that comfortably fits ONE checkpoint but not three: repeated inserts must evict,
+    // never exceed budget, and keep only the most recently used entries.
+    let budget = one_checkpoint_bytes + one_checkpoint_bytes / 2;
+    let mut cache = retrace_core::CheckpointCache::new(budget, 1);
+    for k in [50u64, 150, 250, 350, 450] {
+        let _ = retrace_core::checkpointed_seek(trace, &mut cache, 1, k).unwrap();
+        assert!(cache.used_bytes() <= budget,
+            "cache exceeded its byte budget after seeking to (1,{k}): {} > {budget}", cache.used_bytes());
+    }
+    assert!(cache.len() < 5,
+        "5 inserts into a ~1.5-checkpoint budget must have evicted at least one entry, got {} entries", cache.len());
+
+    // The MOST RECENT position (1, 450) must still be resident (LRU keeps the freshest).
+    let before = cache.total_single_steps();
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache, 1, 455).unwrap();
+    let paid = cache.total_single_steps() - before;
+    assert!(paid <= 10, "the most recent checkpoint should still be resident: expected ~5 steps, paid {paid}");
+}
