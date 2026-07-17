@@ -740,7 +740,7 @@ fn checkpointed_seek_matches_cold_across_a_neon_window() {
     let k0 = len / 2;
     let mut cache = retrace_core::CheckpointCache::new(256 * 1024 * 1024, 64);
     let _ = retrace_core::checkpointed_seek(trace, &mut cache, n, k0).unwrap();
-    assert!(cache.len() >= 1, "a >=50-step seek into a >=100-insn window must clear the cost gate");
+    assert!(!cache.is_empty(), "a >=50-step seek into a >=100-insn window must clear the cost gate");
     let k1 = k0 + 10;
     let (regs, fp, mem) = {
         let mut s = retrace_core::checkpointed_seek(trace, &mut cache, n, k1).unwrap();
