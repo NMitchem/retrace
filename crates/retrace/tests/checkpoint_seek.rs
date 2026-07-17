@@ -135,3 +135,22 @@ fn large_window_second_nearby_seek_is_far_cheaper_than_the_first() {
     assert!(second_cost * 50 < first_cost,
         "second seek ({second_cost} steps) should be far cheaper than the first ({first_cost})");
 }
+
+#[test]
+fn gate_zero_same_key_reseek_does_not_double_count_bytes() {
+    let (rec, trace) = util::record(retrace_guest::SPINLOOP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let trace = Path::new(&trace);
+    // cost_gate_steps = 0 is the one configuration where an exact-position hit (steps_paid = 0)
+    // still clears the gate and re-inserts at the SAME key — the overwrite path the byte
+    // accounting must survive without double-counting.
+    let mut cache = retrace_core::CheckpointCache::new(usize::MAX, 0);
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache, 1, 5).unwrap();
+    assert_eq!(cache.len(), 1);
+    let first_bytes = cache.used_bytes();
+    assert!(first_bytes > 0, "a cached checkpoint must have nonzero measured size");
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache, 1, 5).unwrap();
+    assert_eq!(cache.len(), 1, "same-key reseek must overwrite, not add an entry");
+    assert_eq!(cache.used_bytes(), first_bytes,
+        "used_bytes must not double-count on a same-key overwrite (gate 0)");
+}
