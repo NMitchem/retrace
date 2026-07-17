@@ -74,3 +74,40 @@ fn checkpoint_cache_respects_byte_budget_and_evicts_lru() {
     let paid = cache.total_single_steps() - before;
     assert!(paid <= 10, "the most recent checkpoint should still be resident: expected ~5 steps, paid {paid}");
 }
+
+/// Probe increasing landmarks for one whose window is at least `min` instructions long (one
+/// session per probe, sequential — never two alive). If NO candidate clears `min`, widen this list
+/// rather than lowering `min` below the cache's cost gate.
+fn first_window_with_len(trace: &Path, min: u64) -> (usize, u64) {
+    for n in [3usize, 5, 8, 12, 20, 30, 50, 80, 100, 130, 160, 200, 250, 300] {
+        let mut s = retrace_core::seek(trace, n, 0).unwrap();
+        let l = s.window_len_here().unwrap();
+        drop(s);
+        if l >= min { return (n, l); }
+    }
+    panic!("no window of >= {min} insns among the probes — widen the candidate landmark list");
+}
+
+#[test]
+fn checkpointed_seek_matches_cold_across_a_neon_window() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let trace = Path::new(&trace);
+    // dyld's early init uses NEON (memcpy, hashing) well before any application code runs; a
+    // checkpoint taken partway through such a window and resumed must carry the LIVE V-register
+    // state, not the zeroed defaults Box_::restore silently assumes at landmark 0.
+    let (n, len) = first_window_with_len(trace, 100);
+    let k0 = len / 2;
+    let mut cache = retrace_core::CheckpointCache::new(256 * 1024 * 1024, 64);
+    let _ = retrace_core::checkpointed_seek(trace, &mut cache, n, k0).unwrap();
+    assert!(!cache.is_empty(), "a >=50-step seek into a >=100-insn window must clear the cost gate");
+    let k1 = k0 + 10;
+    let (regs, fp, mem) = {
+        let mut s = retrace_core::checkpointed_seek(trace, &mut cache, n, k1).unwrap();
+        (s.dbg_regs(), s.dbg_fp_regs(), { let (_, mem) = s.snapshot(); mem })
+    };
+    let cold = retrace_core::seek(trace, n, k1).unwrap();
+    assert_eq!(cold.dbg_regs(), regs, "registers diverged across a NEON-crossing window");
+    assert_eq!(cold.dbg_fp_regs(), fp, "FP/SIMD state diverged across a NEON-crossing window");
+    assert!(cold.diff_memory(&mem).is_none(), "memory diverged across a NEON-crossing window");
+}
