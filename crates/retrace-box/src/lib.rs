@@ -1,4 +1,4 @@
-use hv_sys::{Vm, Vcpu, reg, sysreg, MemFlags, EXIT_EXCEPTION};
+use hv_sys::{Vm, Vcpu, reg, sysreg, simd, MemFlags, EXIT_EXCEPTION};
 use retrace_arch::{ec_of, Ec};
 use retrace_guest::Loaded;
 use retrace_trace::{Regs, Region};
@@ -253,6 +253,32 @@ pub struct Box_ {
 
 #[derive(Debug)]
 pub enum Stop { Syscall { num: u64, args: [u64;8] }, Other { esr: u64 }, Step }
+
+/// A complete, in-memory-only capture of `Box_`'s internal state at an ARBITRARY position — unlike
+/// `Event::Snapshot` (the trace format), which is only correct to restore from at landmark 0.
+/// Never persisted, never enters a trace file. See the M4 design spec for why each field is here.
+#[derive(Clone)]
+pub struct BoxState {
+    pub regs: Regs,
+    pub fp: [u128; 32],
+    pub fpcr: u64,
+    pub fpsr: u64,
+    pub tpidr_el0: u64,
+    // EL1 exception-return pair (ELR_EL1/SPSR_EL1). Live at a syscall-trap checkpoint — `position()`
+    // reports ELR_EL1 and `set_x0_and_return` resumes off both — so a COMPLETE mid-run capture must
+    // carry them (a fresh vcpu does not reproduce them, unlike landmark-0 where they are dead/0).
+    pub elr: u64,
+    pub spsr: u64,
+    pub mem: Vec<Region>,
+    pub reservations: Vec<(u64, u64)>,
+    pub mmap_next: u64,
+    pub bootstrap_port: Option<u32>,
+    pub cache_installed: bool,
+    pub last_far: u64,
+    pub synthetic_tsc: u64,
+    pub cache_refault_ipa: u64,
+    pub cache_refault_count: u64,
+}
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
     let len = (len + GRANULE - 1) & !(GRANULE - 1);
@@ -1737,5 +1763,126 @@ impl Box_ {
         let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
         format!("non-syscall exit: {class} (EC={ec:#04x} ISS={iss:#x} FSC={:#x}) far/ipa={far:#x} ({mapped}) pc={:#x} elr={elr:#x}",
                 iss & 0x3f, self.pc())
+    }
+
+    /// Capture COMPLETE internal state at the current (arbitrary) position — the M4 checkpoint
+    /// primitive. Unlike `snapshot()` (trace format, landmark-0-only-correct on restore), this
+    /// additionally captures FP/SIMD state and the true values of every field `restore()` defaults.
+    pub fn checkpoint(&self) -> BoxState {
+        let mut mem = Vec::new();
+        for bk in &self.backings {
+            let bytes = unsafe { std::slice::from_raw_parts(bk.host, bk.len) }.to_vec();
+            mem.push(Region { ipa: bk.ipa, bytes });
+        }
+        let mut x = [0u64; 31];
+        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+        let regs = Regs {
+            x, pc: self.vcpu.get_reg(reg::PC).unwrap(),
+            sp_el0: self.vcpu.get_sys(sysreg::SP_EL0).unwrap(),
+            cpsr: self.vcpu.get_reg(reg::CPSR).unwrap(),
+        };
+        let mut fp = [0u128; 32];
+        for (i, fi) in fp.iter_mut().enumerate() { *fi = self.vcpu.get_simd(simd::q(i as u32)).unwrap(); }
+        BoxState {
+            regs, fp,
+            fpcr: self.vcpu.get_reg(reg::FPCR).unwrap(),
+            fpsr: self.vcpu.get_reg(reg::FPSR).unwrap(),
+            tpidr_el0: self.vcpu.get_sys(sysreg::TPIDR_EL0).unwrap(),
+            elr: self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(),
+            spsr: self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap(),
+            mem,
+            reservations: self.reservations.clone(),
+            mmap_next: self.mmap_next,
+            bootstrap_port: self.bootstrap_port,
+            cache_installed: self.cache.is_some(),
+            last_far: self.last_far,
+            synthetic_tsc: self.synthetic_tsc,
+            cache_refault_ipa: self.cache_refault_ipa,
+            cache_refault_count: self.cache_refault_count,
+        }
+    }
+
+    /// Rebuild a fresh guest from a `BoxState` captured at an ARBITRARY position — the M4 twin of
+    /// `restore()` (which is only correct at landmark 0). Mirrors `restore()`'s structure exactly
+    /// (fresh VM/vcpu, remap every backing, fixed EL1 sysregs, PAC keys, `set_trap_debug_exceptions`)
+    /// but restores the TRUE captured values instead of `restore()`'s landmark-0 defaults for
+    /// `reservations`/`mmap_next`/`bootstrap_port`/`cache`/`tpidr_el0`, plus FP/SIMD state `restore()`
+    /// never touched at all. `l2_host`/`next_l3` are recomputed from the freshly-allocated `backings`
+    /// — never stored raw (they are host pointers, meaningless across VM instances).
+    pub fn from_checkpoint(state: &BoxState) -> Box_ {
+        let vm = Vm::create().expect("hv_vm_create");
+        let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
+        let mut backings = Vec::new();
+        for r in &state.mem {
+            let (host, len) = alloc_pages(r.bytes.len().max(GRANULE));
+            unsafe { std::ptr::copy_nonoverlapping(r.bytes.as_ptr(), host, r.bytes.len()); }
+            vm.map(host, r.ipa, len, MemFlags::RWX).expect("hv_vm_map (from_checkpoint)");
+            backings.push(Backing { host, ipa: r.ipa, len });
+        }
+        vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
+        vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
+        vcpu.set_sys(sysreg::TTBR0_EL1, PT_L1_IPA).unwrap();
+        vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap();
+        vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();
+        vcpu.set_sys(sysreg::TPIDR_EL0, state.tpidr_el0).unwrap(); // captured, NOT forced to 0
+        Self::set_pac_keys(&vcpu);
+        vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();
+        vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
+        vcpu.set_trap_debug_exceptions(true).unwrap(); // must not be omitted or step() stops trapping
+        for i in 0..31 { vcpu.set_reg(reg::x(i as u32), state.regs.x[i]).unwrap(); }
+        vcpu.set_reg(reg::PC, state.regs.pc).unwrap();
+        vcpu.set_reg(reg::CPSR, state.regs.cpsr).unwrap();
+        vcpu.set_sys(sysreg::SP_EL0, state.regs.sp_el0).unwrap();
+        vcpu.set_sys(sysreg::ELR_EL1, state.elr).unwrap();   // captured EL1 return address (dead at a
+        vcpu.set_sys(sysreg::SPSR_EL1, state.spsr).unwrap(); // step boundary, live at a syscall trap)
+        vcpu.set_reg(reg::FPCR, state.fpcr).unwrap();
+        vcpu.set_reg(reg::FPSR, state.fpsr).unwrap();
+        for (i, &v) in state.fp.iter().enumerate() { vcpu.set_simd(simd::q(i as u32), v).unwrap(); }
+        let l2_host = backings.iter().find(|b| b.ipa == PT_L2_IPA).map(|b| b.host)
+            .unwrap_or(std::ptr::null_mut());
+        for b in backings.iter().filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL) {
+            assert_eq!(b.len, GRANULE,
+                "from_checkpoint: backing at L3-window ipa {:#x} has len {} != GRANULE", b.ipa, b.len);
+        }
+        let next_l3 = backings.iter()
+            .filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL)
+            .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
+        let mut b = Box_ {
+            vm, vcpu, backings,
+            reservations: state.reservations.clone(),
+            mmap_next: state.mmap_next,
+            bootstrap_port: state.bootstrap_port,
+            l2_host, next_l3,
+            last_far: state.last_far,
+            synthetic_tsc: state.synthetic_tsc,
+            cache_refault_ipa: state.cache_refault_ipa,
+            cache_refault_count: state.cache_refault_count,
+            cache: None,
+        };
+        if state.cache_installed { b.install_cache_pager(); }
+        b
+    }
+
+    /// Bring-up/test diagnostic: dump V0..V31, FPCR, FPSR — the checkpoint round-trip's FP half of
+    /// `dbg_regs()`. Kept separate from `dbg_regs()` deliberately: `dbg_regs()` is the `debug` CLI's
+    /// `regs` command output (a byte-compare contract for existing golden-transcript tests); this is
+    /// test-only and never wired into the CLI.
+    pub fn dbg_fp_regs(&self) -> String {
+        let mut s = String::new();
+        for i in 0..32u32 {
+            s += &format!("q{i:<2}={:#034x}  ", self.vcpu.get_simd(simd::q(i)).unwrap());
+            if i % 2 == 1 { s.push('\n'); }
+        }
+        s += &format!("fpcr={:#x} fpsr={:#x}", self.vcpu.get_reg(reg::FPCR).unwrap(), self.vcpu.get_reg(reg::FPSR).unwrap());
+        s
+    }
+
+    /// Test-only diagnostic: the internal bookkeeping fields `checkpoint()`/`from_checkpoint()` must
+    /// round-trip that have no other observable accessor. Never used by production code.
+    #[doc(hidden)]
+    pub fn dbg_internal_state(&self) -> String {
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={}",
+            self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
+            self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count)
     }
 }
