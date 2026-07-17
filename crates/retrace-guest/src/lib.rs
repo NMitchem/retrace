@@ -104,6 +104,7 @@ pub const BFAMSTRIP: &str = concat!(env!("OUT_DIR"), "/bfamstrip");
 pub const RESERVECOMMIT: &str = concat!(env!("OUT_DIR"), "/reservecommit");
 pub const WILDSTORE: &str = concat!(env!("OUT_DIR"), "/wildstore");
 pub const CARVEOUT: &str = concat!(env!("OUT_DIR"), "/carveout");
+pub const SPINLOOP: &str = concat!(env!("OUT_DIR"), "/spinloop");
 
 #[cfg(test)]
 mod tests {
@@ -125,5 +126,12 @@ mod tests {
         let l = parse_macho(&std::fs::read(FILEIO).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
         assert_eq!(std::fs::read(FIXTURE).unwrap(), b"retrace-m1-fixture\n");
+    }
+
+    #[test]
+    fn spinloop_guest_parses() {
+        let l = parse_macho(&std::fs::read(SPINLOOP).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+        assert!(l.segments.iter().any(|s| s.data.windows(6).any(|w| w == b"spin!\n")));
     }
 }

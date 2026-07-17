@@ -25,6 +25,17 @@ fn main() {
         .status().expect("clang steppy");
     assert!(status.success(), "steppy guest build failed");
 
+    // spinloop: write(1,"spin!\n",6) after a ~606-insn spin, then exit(0) after a ~4003-insn spin.
+    // Landmark 1's window is modest (clears a cost-gate cache threshold); landmark 2's window is
+    // deliberately huge — the M4 checkpoint acceleration's synthetic target.
+    let src = format!("{}/asm/spinloop.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/spinloop");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang spinloop");
+    assert!(status.success(), "spinloop guest build failed");
+
     // Fixture file with known contents.
     let fixture = format!("{out}/fixture.txt");
     std::fs::write(&fixture, b"retrace-m1-fixture\n").unwrap();
