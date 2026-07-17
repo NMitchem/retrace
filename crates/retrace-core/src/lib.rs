@@ -838,12 +838,15 @@ pub struct CheckpointCache {
     used_bytes: usize,
     cost_gate_steps: u64,
     total_single_steps: u64,
+    window_lens: std::collections::BTreeMap<usize, u64>, // landmark N -> window length (fixed per trace)
+    window_probe_steps: u64,
 }
 
 impl CheckpointCache {
     pub fn new(byte_budget: usize, cost_gate_steps: u64) -> Self {
         CheckpointCache { entries: std::collections::BTreeMap::new(), recency: Vec::new(),
-                          byte_budget, used_bytes: 0, cost_gate_steps, total_single_steps: 0 }
+                          byte_budget, used_bytes: 0, cost_gate_steps, total_single_steps: 0,
+                          window_lens: std::collections::BTreeMap::new(), window_probe_steps: 0 }
     }
 
     /// Total single-steps ever paid across every `checkpointed_seek` call against this cache — the
@@ -852,6 +855,26 @@ impl CheckpointCache {
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
     pub fn used_bytes(&self) -> usize { self.used_bytes }
+
+    /// Window length of landmark `n`, memoized: a window's length is a fixed, deterministic
+    /// property of (trace, landmark), so it is measured at most once per cache lifetime. The
+    /// measuring probe seeks via `checkpointed_seek` (benefiting from, and feeding, the position
+    /// cache) and then single-steps the full window once. The caller must hold NO live
+    /// `ReplaySession` (one VM per process). `window_probe_steps` counts the steps paid by these
+    /// probes — the deterministic proxy the tests use; deliberately separate from
+    /// `total_single_steps`, which counts only position-seek steps.
+    pub fn window_len(&mut self, trace_path: &Path, n: usize) -> Result<u64, String> {
+        if let Some(&len) = self.window_lens.get(&n) { return Ok(len); }
+        let mut probe = checkpointed_seek(trace_path, self, n, 0)?;
+        let len = probe.window_len_here()?;
+        drop(probe); // free the VM before returning control to a caller that will open a session
+        self.window_probe_steps += len;
+        self.window_lens.insert(n, len);
+        Ok(len)
+    }
+
+    /// Total single-steps ever paid by `window_len`'s discovery probes against this cache.
+    pub fn window_probe_steps(&self) -> u64 { self.window_probe_steps }
 
     fn touch(&mut self, key: (usize, u64)) {
         self.recency.retain(|&k| k != key);
