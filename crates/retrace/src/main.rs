@@ -57,12 +57,17 @@ fn main() {
         }
         Some("debug") => {
             // retrace debug <trace> --script '<cmd>; <cmd>; …'
-            let trace = &a[2];
-            let script = a.iter().position(|s| s == "--script").map(|i| a[i + 1].clone())
-                .expect("--script '<cmds>'");
-            match debug::run_script(Path::new(trace), &script, &mut std::io::stdout()) {
-                Ok(()) => exit(0),
-                Err(e) => { eprintln!("DEBUG ERROR: {e}"); exit(5); }
+            // A missing trace, a missing `--script`, or a `--script` with no value is a usage error
+            // (exit 2) — validated BEFORE any file I/O or VM work, never a panic.
+            let script = a.iter().position(|s| s == "--script").and_then(|i| a.get(i + 1));
+            match (a.get(2), script) {
+                (Some(trace), Some(script)) => {
+                    match debug::run_script(Path::new(trace), script, &mut std::io::stdout()) {
+                        Ok(()) => exit(0),
+                        Err(e) => { eprintln!("DEBUG ERROR: {e}"); exit(5); }
+                    }
+                }
+                _ => { eprintln!("usage: retrace debug <trace> --script '<cmds>'"); exit(2); }
             }
         }
         _ => { eprintln!("usage: retrace <record <guest> -o <trace> | replay <trace> | debug <trace> --script '…'>"); exit(2); }
