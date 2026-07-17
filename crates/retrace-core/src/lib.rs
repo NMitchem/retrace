@@ -787,6 +787,132 @@ impl ReplaySession {
             }
         }
     }
+
+    /// Re-open a session's trace-level constants (`events`, `truncated`) and restore a `Box_` +
+    /// position from a previously captured checkpoint, skipping the landmark-0 replay a cold `open`
+    /// would pay. `stdout` starts empty — no checkpoint consumer reads it.
+    pub fn from_checkpoint(trace_path: &Path, checkpoint: SessionCheckpoint) -> Result<Self, String> {
+        let (events, truncated) = retrace_trace::Reader::open_checked(trace_path)
+            .map_err(|e| format!("cannot open trace: {e}"))?;
+        let b = Box_::from_checkpoint(&checkpoint.box_state);
+        Ok(ReplaySession { b, events, idx: checkpoint.idx, stdout: Vec::new(),
+                            guest_task_port: checkpoint.guest_task_port, truncated })
+    }
+
+    /// Capture this session's current position as a `SessionCheckpoint`.
+    pub fn checkpoint(&self) -> SessionCheckpoint {
+        SessionCheckpoint { box_state: self.b.checkpoint(), idx: self.idx,
+                            guest_task_port: self.guest_task_port }
+    }
+
+    /// FP/SIMD register dump — the checkpoint determinism tests' FP half of `dbg_regs()`.
+    pub fn dbg_fp_regs(&self) -> String { self.b.dbg_fp_regs() }
+}
+
+/// An in-memory-only capture of a `ReplaySession`'s complete position-varying state: `Box_`'s full
+/// internal state (`BoxState`) plus the two `ReplaySession` fields that vary by position (`idx`,
+/// `guest_task_port`). `stdout` is deliberately not captured — nothing that reads a
+/// checkpoint-restored session inspects it.
+#[derive(Clone)]
+pub struct SessionCheckpoint {
+    box_state: retrace_box::BoxState,
+    idx: usize,
+    guest_task_port: Option<u64>,
+}
+
+impl SessionCheckpoint {
+    fn approx_bytes(&self) -> usize { self.box_state.mem.iter().map(|r| r.bytes.len()).sum() }
+}
+
+/// A session-scoped, single-trace cache of `SessionCheckpoint`s keyed by trace-execution-order
+/// position `(landmark N, step K)`. Purely a performance layer for `checkpointed_seek` — never
+/// consulted for correctness. Only positions expensive to REACH (single-step count >=
+/// `cost_gate_steps`) get stored, evicting the least-recently-used entry first once `byte_budget`
+/// would be exceeded. No invalidation: a checkpoint's validity depends only on (trace file,
+/// position), both fixed for this cache's lifetime — entries are only ever evicted for space.
+pub struct CheckpointCache {
+    entries: std::collections::BTreeMap<(usize, u64), SessionCheckpoint>,
+    recency: Vec<(usize, u64)>, // oldest-used first; touched entries move to the back
+    byte_budget: usize,
+    used_bytes: usize,
+    cost_gate_steps: u64,
+    total_single_steps: u64,
+}
+
+impl CheckpointCache {
+    pub fn new(byte_budget: usize, cost_gate_steps: u64) -> Self {
+        CheckpointCache { entries: std::collections::BTreeMap::new(), recency: Vec::new(),
+                          byte_budget, used_bytes: 0, cost_gate_steps, total_single_steps: 0 }
+    }
+
+    /// Total single-steps ever paid across every `checkpointed_seek` call against this cache — the
+    /// cost-gating input, and the deterministic proxy the test suite uses to prove acceleration.
+    pub fn total_single_steps(&self) -> u64 { self.total_single_steps }
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn used_bytes(&self) -> usize { self.used_bytes }
+
+    fn touch(&mut self, key: (usize, u64)) {
+        self.recency.retain(|&k| k != key);
+        self.recency.push(key);
+    }
+
+    /// The best cached position at or before `(n, k)` in execution order, if any — cloned out and
+    /// marked most-recently-used.
+    fn best_at_or_before(&mut self, n: usize, k: u64) -> Option<((usize, u64), SessionCheckpoint)> {
+        let key = *self.entries.range(..=(n, k)).next_back()?.0;
+        self.touch(key);
+        Some((key, self.entries[&key].clone()))
+    }
+
+    /// Record `steps_paid` toward the running total, and — only if it clears the cost gate — store
+    /// `checkpoint` at `(n, k)`, evicting least-recently-used entries first while over budget.
+    fn record_and_maybe_insert(&mut self, n: usize, k: u64, steps_paid: u64, checkpoint: SessionCheckpoint) {
+        self.total_single_steps += steps_paid;
+        if steps_paid < self.cost_gate_steps { return; }
+        let bytes = checkpoint.approx_bytes();
+        while self.used_bytes + bytes > self.byte_budget && !self.recency.is_empty() {
+            let oldest = self.recency.remove(0);
+            if let Some(evicted) = self.entries.remove(&oldest) { self.used_bytes -= evicted.approx_bytes(); }
+        }
+        if bytes > self.byte_budget { return; } // a single entry over budget is never cached
+        self.entries.insert((n, k), checkpoint);
+        self.used_bytes += bytes;
+        self.touch((n, k));
+    }
+}
+
+/// Same contract as `seek` — the cache is purely an accelerator; a miss falls back to the cold path,
+/// so no new failure mode reaches callers. On a same-window hit, resumes with only the remaining
+/// `step_insns`; on an earlier-window hit, resumes with `advance_to_landmark` then `step_insns`; on
+/// a miss, seeks cold. After landing, the single-step count actually paid this call (landmark
+/// replay is native-speed and deliberately excluded from the cost gate) is recorded, and the
+/// position stored as a fresh checkpoint if that count clears `cache`'s cost gate.
+pub fn checkpointed_seek(trace_path: &Path, cache: &mut CheckpointCache, n: usize, k: u64)
+    -> Result<ReplaySession, String> {
+    let hit = cache.best_at_or_before(n, k);
+    let (s, steps_paid) = match hit {
+        Some(((n0, k0), checkpoint)) if n0 == n => {
+            let mut s = ReplaySession::from_checkpoint(trace_path, checkpoint)?;
+            s.step_insns(k - k0)?;
+            (s, k - k0)
+        }
+        Some((_, checkpoint)) => {
+            let mut s = ReplaySession::from_checkpoint(trace_path, checkpoint)?;
+            s.advance_to_landmark(n).map_err(|d| format!("seek to landmark {n}: {}", d.detail))?;
+            s.step_insns(k)?;
+            (s, k)
+        }
+        None => {
+            let mut s = ReplaySession::open(trace_path)?;
+            s.advance_to_landmark(n).map_err(|d| format!("seek to landmark {n}: {}", d.detail))?;
+            s.step_insns(k)?;
+            (s, k)
+        }
+    };
+    let checkpoint = s.checkpoint();
+    cache.record_and_maybe_insert(n, k, steps_paid, checkpoint);
+    Ok(s)
 }
 
 /// A fresh session positioned at the M3 coordinate P = (landmark `n`, step `k`): restore from the
