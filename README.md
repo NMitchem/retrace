@@ -899,7 +899,7 @@ window is expensive enough to trip the cost gate and get cached); a nearby secon
 golden tests plus `reverse_debug_e2e`) passes unmodified — checkpointing changes *when* state is computed, never
 *what* is printed, so the transcripts stay byte-identical with checkpointing wired in.
 
-**The walk — the M4 headline gate is GREEN.** `just gate` reports **104 passed, 0 failed, 0 ignored**, clippy
+**The walk — the M4 headline gate is GREEN.** At the M4 close, `just gate` reported **104 passed, 0 failed, 0 ignored**, clippy
 clean (97 at the M3 close plus the fast-follow gate; M4 added seven new tests: `fp_and_simd_regs_roundtrip`,
 `checkpoint_round_trip_is_lossless_mid_run`, `checkpointed_seek_same_and_earlier_window_hits_match_cold`,
 `checkpoint_cache_respects_byte_budget_and_evicts_lru`, `checkpointed_seek_matches_cold_across_a_neon_window`,
