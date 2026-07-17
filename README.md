@@ -899,16 +899,18 @@ window is expensive enough to trip the cost gate and get cached); a nearby secon
 golden tests plus `reverse_debug_e2e`) passes unmodified — checkpointing changes *when* state is computed, never
 *what* is printed, so the transcripts stay byte-identical with checkpointing wired in.
 
-**The walk — the M4 headline gate is GREEN.** `just gate` reports **104 passed, 0 failed, 0 ignored**, clippy
+**The walk — the M4 headline gate is GREEN.** At the M4 close, `just gate` reported **104 passed, 0 failed, 0 ignored**, clippy
 clean (97 at the M3 close plus the fast-follow gate; M4 added seven new tests: `fp_and_simd_regs_roundtrip`,
 `checkpoint_round_trip_is_lossless_mid_run`, `checkpointed_seek_same_and_earlier_window_hits_match_cold`,
 `checkpoint_cache_respects_byte_budget_and_evicts_lru`, `checkpointed_seek_matches_cold_across_a_neon_window`,
-`large_window_second_nearby_seek_is_far_cheaper_than_the_first`, and `spinloop_guest_parses`). See
+`large_window_second_nearby_seek_is_far_cheaper_than_the_first`, and `spinloop_guest_parses`). The M4
+fast-follow then added `gate_zero_same_key_reseek_does_not_double_count_bytes` and
+`window_len_is_memoized_per_landmark`, taking the gate to **106 passed, 0 failed, 0 ignored**. See
 `docs/superpowers/specs/2026-07-16-retrace-m4-checkpoints-design.md`.
 
-**Deferred:** window-length memoization — `probe_window_len`/`window_len_here` still single-step a full window
-from `K = 0` on every call, so a `reverse-stepi` that crosses a landmark boundary into a large window still pays
-that window's full length on every crossing; `checkpointed_seek` accelerates *position* seeks only, not window-
-length discovery. A user-facing config knob for the byte budget / cost-gate threshold (currently compile-time
+**Deferred:** a user-facing config knob for the byte budget / cost-gate threshold (currently compile-time
 constants). Persisting checkpoints across sessions — deliberately never: a checkpoint's validity is scoped to one
-trace and one session by construction, so there is no cross-session use for one to serve.
+trace and one session by construction, so there is no cross-session use for one to serve. (Window-length
+memoization, deferred at M4 close, landed in the M4 fast-follow: `CheckpointCache::window_len` measures each
+window at most once per debug session, so a `reverse-stepi` crossing a landmark boundary into a large window pays
+that window's length once, not on every crossing; `window_len_here` itself is unchanged.)

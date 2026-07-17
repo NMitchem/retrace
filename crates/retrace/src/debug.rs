@@ -161,12 +161,13 @@ impl<'a> Exec<'a> {
         Ok(())
     }
 
-    /// Window length of landmark `n`, measured on a transient probe session. Drops the live session
-    /// first; the caller re-establishes one via `reseek`.
+    /// Window length of landmark `n`, memoized in the checkpoint cache (measured on a transient
+    /// probe session at most once per landmark per debug session). Drops the live session first —
+    /// even a memo hit re-establishes it cheaply via the position cache; the caller re-seeks via
+    /// `reseek`.
     fn probe_window_len(&mut self, n: usize) -> Result<u64, String> {
-        self.session = None; // free the live VM before the probe
-        let mut probe = checkpointed_seek(self.trace, &mut self.cache, n, 0)?;
-        probe.window_len_here()
+        self.session = None; // free the live VM before any probe (one VM per process)
+        self.cache.window_len(self.trace, n)
     }
 
     fn exec<W: Write>(&mut self, cmd: &Cmd, out: &mut W) -> Result<(), String> {
