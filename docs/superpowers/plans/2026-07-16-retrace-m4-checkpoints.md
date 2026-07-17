@@ -746,7 +746,7 @@ fn checkpointed_seek_matches_cold_across_a_neon_window() {
         let mut s = retrace_core::checkpointed_seek(trace, &mut cache, n, k1).unwrap();
         (s.dbg_regs(), s.dbg_fp_regs(), { let (_, mem) = s.snapshot(); mem })
     };
-    let mut cold = retrace_core::seek(trace, n, k1).unwrap();
+    let cold = retrace_core::seek(trace, n, k1).unwrap();
     assert_eq!(cold.dbg_regs(), regs, "registers diverged across a NEON-crossing window");
     assert_eq!(cold.dbg_fp_regs(), fp, "FP/SIMD state diverged across a NEON-crossing window");
     assert!(cold.diff_memory(&mem).is_none(), "memory diverged across a NEON-crossing window");
