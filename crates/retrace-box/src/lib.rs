@@ -258,7 +258,7 @@ pub struct Box_ {
     // The dyld-shared-cache demand-pager's routing table (built by install_cache_pager on the #536
     // cache-mapping syscall; None until then). Holds the parsed subcache headers + open file
     // handles that page_in_cache reads pristine pages from. Its `File`s have Drop, but it is
-    // declared LAST — after vcpu/vm — so the load-bearing vcpu-before-vm drop order is unaffected.
+    // declared after vcpu/vm, so the load-bearing vcpu-before-vm drop order is unaffected.
     cache: Option<CacheMeta>,
     // M5 watchpoint state. NOT captured in BoxState: checkpoints are only ever taken via
     // checkpointed_seek on freshly-seeked (unarmed) sessions, so armed state never needs to persist.
@@ -1688,10 +1688,9 @@ impl Box_ {
             // Empty watch_ranges on record and plain replay => this is a no-op is_empty check there.
             if self.syscall_watch_hit.is_none() && !self.watch_ranges.is_empty() {
                 let end = w.ipa + w.bytes.len() as u64;
-                if let Some(&(va, len)) = self.watch_ranges.iter()
+                if let Some(&(va, _)) = self.watch_ranges.iter()
                     .find(|&&(va, len)| w.ipa < va + len && va < end)
                 {
-                    let _ = len;
                     self.syscall_watch_hit = Some((va, w.ipa));
                 }
             }

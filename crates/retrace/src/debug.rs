@@ -331,12 +331,22 @@ impl<'a> Exec<'a> {
         // if that walks off the window end, cross into the next window at (N+1, 0) via one advance();
         // if THAT advance exits, print the exit and the command is over. The boundary check at the
         // new position is left to the scan loop below (do NOT report a hit at the pre-step position).
+        // A boundary-cross advances with the WATCHES armed, so a syscall write to a watched range
+        // in the crossed event is reported, not skipped.
         if self.last_watch_hit == Some((self.n, self.k)) || self.breakpoints.contains(&self.sess().pc()) {
             let (n, k) = (self.n, self.k);
             match self.reseek(n, k + 1) {
                 Ok(()) => {}
                 Err(e) if e.contains("ends after") => {
                     self.reseek(n, k)?; // window end: re-establish (N, K), then advance to (N+1, 0)
+                    // Arm the watches for this one-event crossing: the consumed boundary event may
+                    // itself be a syscall write to a watched range — without arming, that writer
+                    // would be silently skipped (M5 final-review M-1). Breakpoints stay unarmed
+                    // (the pre-step must not re-report the parked position); no instruction
+                    // retires during the crossing (the guest is parked ON the trap), so only
+                    // Event, WatchSyscall, or Exited can come back — never Watch or Break.
+                    let ws = self.watches.clone();
+                    self.sess_mut().arm_watchpoints(&ws);
                     match self.sess_mut().advance().map_err(|d|
                         format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?
                     {
@@ -345,7 +355,22 @@ impl<'a> Exec<'a> {
                             let e = self.sess().landmark();
                             return self.reseek(e, 0);
                         }
-                        _ => { self.n = self.sess().landmark(); self.k = 0; }
+                        Advance::WatchSyscall { watched } => {
+                            let n = self.sess().landmark();
+                            line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
+                            // Only watches were armed here — clear them; the session is kept.
+                            self.sess_mut().clear_watchpoints();
+                            self.n = n;
+                            self.k = 0;
+                            return Ok(());
+                        }
+                        _ => {
+                            // Plain Event: disarm before the main scan re-arms (a second
+                            // arm_watchpoints without a clear would duplicate watch_ranges).
+                            self.sess_mut().clear_watchpoints();
+                            self.n = self.sess().landmark();
+                            self.k = 0;
+                        }
                     }
                 }
                 Err(e) => return Err(e),
