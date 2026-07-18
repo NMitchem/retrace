@@ -31,6 +31,8 @@ pub enum Cmd {
     Regs,
     Examine(u64, usize),
     Where,
+    Watch(u64, u64),
+    Unwatch(u64),
 }
 
 /// The non-empty, trimmed command segments of a script, in order. `break;;continue;` → the two
@@ -80,6 +82,24 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
     match verb {
         "break"           => { one_operand(verb, &ops)?; Ok(Cmd::Break(parse_addr(ops[0])?)) }
         "delete"          => { one_operand(verb, &ops)?; Ok(Cmd::Delete(parse_addr(ops[0])?)) }
+        "watch"           => {
+            if ops.is_empty() || ops.len() > 2 {
+                return Err(format!("`watch` takes <addr> [len]; got {} operand(s)", ops.len()));
+            }
+            let addr = parse_addr(ops[0])?;
+            let len = match ops.get(1) {
+                None => 8u64,
+                Some(t) => t.parse::<u64>().map_err(|_| format!("bad watch len: {t}"))?,
+            };
+            if !matches!(len, 1 | 2 | 4 | 8) {
+                return Err(format!("watch len must be 1, 2, 4, or 8; got {len}"));
+            }
+            if addr % len != 0 {
+                return Err(format!("watch address {addr:#x} must be {len}-byte aligned"));
+            }
+            Ok(Cmd::Watch(addr, len))
+        }
+        "unwatch"         => { one_operand(verb, &ops)?; Ok(Cmd::Unwatch(parse_addr(ops[0])?)) }
         "continue"        => expect_none(Cmd::Continue, &ops),
         "reverse-continue"=> expect_none(Cmd::ReverseContinue, &ops),
         "stepi"           => { at_most_one(verb, &ops)?; Ok(Cmd::Stepi(parse_count(ops.first().copied())?)) }
@@ -127,6 +147,16 @@ fn resolve_hit_k(trace: &Path, cache: &mut CheckpointCache, n: usize, pc: u64, f
     }
 }
 
+/// The armed watch range containing `far` (exact byte), else the range overlapping `far`'s aligned
+/// doubleword (FAR may report the comparator base — spike F4b), else `far` itself (honest fallback,
+/// never a wrong range). Deterministic: `ws` is sorted, first match wins.
+fn watched_of(ws: &[(u64, u64)], far: u64) -> u64 {
+    ws.iter().find(|&&(a, l)| far >= a && far < a + l)
+        .or_else(|| ws.iter().find(|&&(a, l)| { let d = far & !7; d < a + l && a < d + 8 }))
+        .map(|&(a, _)| a)
+        .unwrap_or(far)
+}
+
 /// The scripted-debugger executor. Holds the position coordinate P = (`n`, `k`) and at most ONE live
 /// `ReplaySession` parked exactly at P (one VM per process → every command that MOVES drops the old
 /// session before seeking a fresh one). `breakpoints` is kept sorted + deduped (≤ 6, enforced by
@@ -137,6 +167,11 @@ struct Exec<'a> {
     n: usize,
     k: u64,
     breakpoints: Vec<u64>,
+    /// Armed watch ranges (addr, len), sorted by addr + deduped (≤ 4: one per DBGWVR slot).
+    watches: Vec<(u64, u64)>,
+    /// The (n, k) of the most recent watch hit reported to the user, if any — drives the
+    /// `cmd_continue` progress rule (a hardware watch parks pre-retire, at the un-retired store).
+    last_watch_hit: Option<(usize, u64)>,
     cache: CheckpointCache,
 }
 
@@ -145,7 +180,10 @@ impl<'a> Exec<'a> {
     fn new(trace: &'a Path) -> Result<Self, String> {
         let mut cache = CheckpointCache::new(CHECKPOINT_BYTE_BUDGET, CHECKPOINT_COST_GATE_STEPS);
         let session = checkpointed_seek(trace, &mut cache, 1, 0)?;
-        Ok(Exec { trace, session: Some(session), n: 1, k: 0, breakpoints: Vec::new(), cache })
+        Ok(Exec {
+            trace, session: Some(session), n: 1, k: 0,
+            breakpoints: Vec::new(), watches: Vec::new(), last_watch_hit: None, cache,
+        })
     }
 
     fn sess(&self) -> &ReplaySession { self.session.as_ref().expect("live session") }
@@ -181,6 +219,8 @@ impl<'a> Exec<'a> {
             Cmd::Regs             => self.cmd_regs(out),
             Cmd::Examine(a, len)  => self.cmd_examine(*a, *len, out),
             Cmd::Where            => self.cmd_where(out),
+            Cmd::Watch(a, l)      => self.cmd_watch(*a, *l, out),
+            Cmd::Unwatch(a)       => self.cmd_unwatch(*a, out),
         }
     }
 
@@ -199,6 +239,23 @@ impl<'a> Exec<'a> {
             self.breakpoints.remove(i);
         }
         line(out, format_args!("deleted {addr:#x}"))
+    }
+
+    fn cmd_watch<W: Write>(&mut self, addr: u64, len: u64, out: &mut W) -> Result<(), String> {
+        if let Err(i) = self.watches.binary_search_by_key(&addr, |&(a, _)| a) {
+            if self.watches.len() >= 4 {
+                return Err("cannot arm more than 4 watchpoints (hardware limit: DBGWVR0-3)".into());
+            }
+            self.watches.insert(i, (addr, len));
+        }
+        line(out, format_args!("watch at {addr:#x} len {len}"))
+    }
+
+    fn cmd_unwatch<W: Write>(&mut self, addr: u64, out: &mut W) -> Result<(), String> {
+        if let Ok(i) = self.watches.binary_search_by_key(&addr, |&(a, _)| a) {
+            self.watches.remove(i);
+        }
+        line(out, format_args!("unwatched {addr:#x}"))
     }
 
     fn cmd_regs<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
@@ -274,7 +331,7 @@ impl<'a> Exec<'a> {
         // if that walks off the window end, cross into the next window at (N+1, 0) via one advance();
         // if THAT advance exits, print the exit and the command is over. The boundary check at the
         // new position is left to the scan loop below (do NOT report a hit at the pre-step position).
-        if self.breakpoints.contains(&self.sess().pc()) {
+        if self.last_watch_hit == Some((self.n, self.k)) || self.breakpoints.contains(&self.sess().pc()) {
             let (n, k) = (self.n, self.k);
             match self.reseek(n, k + 1) {
                 Ok(()) => {}
@@ -297,6 +354,8 @@ impl<'a> Exec<'a> {
         let (start_n, start_k) = (self.n, self.k);
         let bps = self.breakpoints.clone();
         self.sess_mut().arm_breakpoints(&bps);
+        let ws = self.watches.clone();
+        self.sess_mut().arm_watchpoints(&ws);
         loop {
             let adv = self.sess_mut().advance()
                 .map_err(|d| format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?;
@@ -330,8 +389,31 @@ impl<'a> Exec<'a> {
                     let e = self.sess().landmark();
                     return self.reseek(e, 0); // park at the final landmark's window
                 }
-                Advance::Watch | Advance::WatchSyscall { .. } =>
-                    return Err("internal: watchpoint hit but none armed".into()),
+                Advance::Watch => {
+                    let n = self.sess().landmark();
+                    let p_hit = self.sess().pc();
+                    let watched = watched_of(&ws, self.sess().far());
+                    line(out, format_args!("hit watch {watched:#x} (write at {p_hit:#x}) at ({n}, +?)"))?;
+                    // Resolve from kctx, NOT kctx+1: unlike a breakpoint (whose parked-on case the
+                    // pre-step already moved off), a watched store CAN legitimately fire at the
+                    // exact parked coordinate (the user stepi'd up to it), and the store pc repeats
+                    // in loops — searching from kctx+1 would misresolve to the NEXT iteration.
+                    let kctx = if n == start_n { start_k } else { 0 };
+                    self.session = None; // free the VM before the resolution seek
+                    let k = resolve_hit_k(self.trace, &mut self.cache, n, p_hit, kctx)?;
+                    line(out, format_args!("resolved ({n}, {k})"))?;
+                    self.last_watch_hit = Some((n, k));
+                    return self.reseek(n, k);
+                }
+                Advance::WatchSyscall { watched } => {
+                    let n = self.sess().landmark();
+                    line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
+                    self.sess_mut().clear_breakpoints();  // keep this session, hit-clean
+                    self.sess_mut().clear_watchpoints();
+                    self.n = n;
+                    self.k = 0;
+                    return Ok(());
+                }
             }
         }
     }
@@ -408,5 +490,16 @@ mod tests {
     }
     #[test] fn empty_segments_are_skipped() {
         assert_eq!(parse_script("regs;; where ;").unwrap(), vec![Cmd::Regs, Cmd::Where]);
+    }
+    #[test] fn parses_watch_and_unwatch() {
+        assert_eq!(parse_script("watch 0x1000").unwrap(), vec![Cmd::Watch(0x1000, 8)]);
+        assert_eq!(parse_script("watch 0x1004 4; unwatch 0x1004").unwrap(),
+                   vec![Cmd::Watch(0x1004, 4), Cmd::Unwatch(0x1004)]);
+    }
+    #[test] fn rejects_bad_watch_len_and_alignment() {
+        assert!(parse_script("watch 0x1000 3").unwrap_err().contains("must be 1, 2, 4, or 8"));
+        assert!(parse_script("watch 0x1001 8").unwrap_err().contains("8-byte aligned"));
+        assert!(parse_script("watch").is_err());
+        assert!(parse_script("watch 0x1000 8 extra").is_err());
     }
 }
