@@ -159,3 +159,23 @@ fn syscall_writer_is_found_forward_and_backward() {
     assert_eq!(out.matches(&hit_line).count(), 2, "forward + reverse hits:\n{out}");
     assert!(out.contains(&format!("at ({after_read}, 0) pc=0x{bpc:x}")), "parked at boundary:\n{out}");
 }
+
+#[test]
+fn pre_step_boundary_cross_reports_a_watched_syscall_write() {
+    // Final-review M-1: park ON the read-svc via a breakpoint (resolves to k = window len),
+    // then `watch buf; continue`. The pre-step crosses the boundary by consuming the read
+    // event itself — the kernel write to buf must be reported, not silently skipped.
+    let (rec, trace) = util::record(retrace_guest::FILEIO);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let tp = Path::new(&trace);
+    let ts = trace.to_str().unwrap();
+    let (after_read, buf, bpc) = discover_read_cli(tp);
+    let svc_pc = bpc - 4; // ELR (return addr) = svc pc + 4 on arm64 syscalls
+    let (code, out, err) = debug_run(ts,
+        &format!("break 0x{svc_pc:x}; continue; watch 0x{buf:x}; continue; where"));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains(&format!("hit watch 0x{buf:x} (syscall write) at ({after_read}, 0)")),
+        "the crossed boundary event's write must be reported:\n{out}");
+    assert!(out.trim_end().ends_with(&format!("at ({after_read}, 0) pc=0x{bpc:x}")),
+        "parked at the post-event boundary:\n{out}");
+}

@@ -1016,3 +1016,8 @@ as breakpoints); watchpoint hits during plain `retrace replay` (the feature is `
 compares an armed *VA* against a recorded write's *IPA*, which is exact only for identity-mapped static
 guests (`WATCHLOOP`, `FILEIO` — the entirety of M5's test surface); an MMU-on dynamic guest (e.g. `hello_dyn`)
 would need VA-to-IPA translation before the intersection is meaningful, deferred as future work.
+
+The M5 fast-follow closed the final review's M-1: `cmd_continue`'s pre-step now crosses a window boundary
+with watches armed, so a syscall write to a watched range in the crossed event is reported rather than
+silently skipped (new golden-transcript test `pre_step_boundary_cross_reports_a_watched_syscall_write` in
+`crates/retrace/tests/watch_cli.rs`), taking the gate from 120 to **121 passed, 0 failed, 0 ignored**.
