@@ -378,6 +378,7 @@ impl<'a> Exec<'a> {
                         let n = self.sess().landmark();
                         line(out, format_args!("hit {pc:#x} at ({n}, 0)"))?;
                         self.sess_mut().clear_breakpoints(); // keep this session, breakpoint-clean
+                        self.sess_mut().clear_watchpoints(); // invariant: never leave WPs armed on a kept session (stepi runs on it)
                         self.n = n;
                         self.k = 0;
                         return Ok(());
