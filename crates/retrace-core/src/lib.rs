@@ -406,7 +406,7 @@ impl std::fmt::Debug for ReplaySession {
 /// breakpoint fired mid-window (`Break`, M3 debugger only — carries nothing: the caller reads
 /// `landmark()`/`pc()`). `Break` is unreachable under the plain `replay()` oracle, which never
 /// arms breakpoints.
-pub enum Advance { Event, Exited(ReplayReport), Break }
+pub enum Advance { Event, Exited(ReplayReport), Break, Watch }
 
 impl ReplaySession {
     pub fn open(trace_path: &Path) -> Result<Self, String> {
@@ -666,6 +666,11 @@ impl ReplaySession {
                     if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Breakpoint) {
                         return Ok(Advance::Break);
                     }
+                    // A hardware watchpoint (M5 debugger) delivers here identically; surface it
+                    // BEFORE the fault fallbacks. Only the debugger arms watchpoints.
+                    if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Watchpoint) {
+                        return Ok(Advance::Watch);
+                    }
                     // Cache-window fault: page it in (regenerated identically to record) and re-run.
                     if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
                     if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
@@ -725,6 +730,19 @@ impl ReplaySession {
     }
     /// Disarm every hardware breakpoint (return the vcpu to a clean, single-step-safe state).
     pub fn clear_breakpoints(&mut self) { self.b.clear_hw_breakpoints(); }
+    /// Arm one hardware write-watchpoint per (va, len) range (one DBGWVR slot each) so a watched
+    /// guest store surfaces from `advance()` as `Advance::Watch`. The 4-slot hardware limit is
+    /// enforced upstream by the debugger's `watch` command. Cleared by `clear_watchpoints` or drop.
+    pub fn arm_watchpoints(&mut self, ranges: &[(u64, u64)]) {
+        assert!(ranges.len() <= 4, "watch command enforces the limit");
+        for (slot, &(va, len)) in ranges.iter().enumerate() {
+            self.b.arm_hw_watchpoint(slot, va, len);
+        }
+    }
+    /// Disarm every hardware watchpoint (single-step-safe again).
+    pub fn clear_watchpoints(&mut self) { self.b.clear_hw_watchpoints(); }
+    /// The fault/watch address of the last `Stop::Other` (for a watchpoint hit: the accessed VA).
+    pub fn far(&self) -> u64 { self.b.fault_ipa() }
     /// Bring-up register dump (x0..x30, SP, PC, ELR, FAR).
     pub fn dbg_regs(&self) -> String { self.b.dbg_regs() }
     /// Read `len` bytes of guest memory at `va`, or None if the full `[va, va+len)` span is not

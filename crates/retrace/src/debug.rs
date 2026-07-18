@@ -330,6 +330,7 @@ impl<'a> Exec<'a> {
                     let e = self.sess().landmark();
                     return self.reseek(e, 0); // park at the final landmark's window
                 }
+                Advance::Watch => return Err("internal: watchpoint hit but none armed".into()),
             }
         }
     }
@@ -351,6 +352,7 @@ impl<'a> Exec<'a> {
                     Advance::Break => break Some((s.landmark(), s.pc())),
                     Advance::Event => continue,
                     Advance::Exited(_) => break None,
+                    Advance::Watch => return Err("internal: watchpoint hit but none armed".into()),
                 }
             };
             drop(s); // free the VM before resolving K
