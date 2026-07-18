@@ -96,3 +96,66 @@ fn unwatch_disarms() {
     assert!(out.contains("exited (code 0)"), "runs to exit:\n{out}");
     assert!(!out.contains("hit watch"), "no hit after unwatch:\n{out}");
 }
+
+#[test]
+fn reverse_continue_finds_last_store() {
+    let (rec, trace) = util::record(retrace_guest::WATCHLOOP);
+    assert_eq!(rec.code, 0);
+    let tp = Path::new(&trace);
+    let ts = trace.to_str().unwrap();
+    let t = discover_target(tp);
+    let ks = discover_store_ks(tp, t);
+    let k_last = *ks.last().unwrap();
+    let spc = { let s = retrace_core::seek(tp, 1, ks[0]).unwrap(); s.pc() };
+    // Park just past the last store via stepi (watches are never armed during stepping), then ask
+    // for the most recent writer: it must be the LAST store, not the first.
+    let (code, out, err) = debug_run(ts,
+        &format!("stepi {}; watch 0x{t:x}; reverse-continue; where", k_last + 1));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains(&format!("hit watch 0x{t:x} (write at 0x{spc:x}) at (1, {k_last})")),
+        "last-writer hit:\n{out}");
+    assert!(out.trim_end().ends_with(&format!("at (1, {k_last}) pc=0x{spc:x}")), "final where:\n{out}");
+}
+
+#[test]
+fn reverse_continue_with_no_earlier_write_reports_none() {
+    let (rec, trace) = util::record(retrace_guest::WATCHLOOP);
+    assert_eq!(rec.code, 0);
+    let tp = Path::new(&trace);
+    let ts = trace.to_str().unwrap();
+    let t = discover_target(tp);
+    // At (1, 0) nothing has written target yet.
+    let (code, out, err) = debug_run(ts, &format!("watch 0x{t:x}; reverse-continue; where"));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("no earlier hit"), "no writer before (1,0):\n{out}");
+    assert!(out.contains("at (1, 0)"), "position unchanged:\n{out}");
+}
+
+/// The read()'s buffer VA, the boundary landmark AFTER it, and that boundary's pc.
+fn discover_read_cli(trace: &Path) -> (usize, u64, u64) {
+    let mut s = retrace_core::ReplaySession::open(trace).unwrap();
+    loop {
+        if let Some((3, args)) = s.peek_syscall() {
+            s.advance().unwrap();
+            return (s.landmark(), args[1], s.position());
+        }
+        s.advance().unwrap();
+    }
+}
+
+#[test]
+fn syscall_writer_is_found_forward_and_backward() {
+    let (rec, trace) = util::record(retrace_guest::FILEIO);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let tp = Path::new(&trace);
+    let ts = trace.to_str().unwrap();
+    let (after_read, buf, bpc) = discover_read_cli(tp);
+    let hit_line = format!("hit watch 0x{buf:x} (syscall write) at ({after_read}, 0)");
+    let (code, out, err) = debug_run(ts,
+        &format!("watch 0x{buf:x}; continue; where; stepi 2; reverse-continue; where"));
+    assert_eq!(code, 0, "stderr: {err}");
+    // Forward: continue stops at the read's boundary. Backward from (after_read, 2): the same
+    // syscall hit at (after_read, 0) is strictly earlier — found again.
+    assert_eq!(out.matches(&hit_line).count(), 2, "forward + reverse hits:\n{out}");
+    assert!(out.contains(&format!("at ({after_read}, 0) pc=0x{bpc:x}")), "parked at boundary:\n{out}");
+}

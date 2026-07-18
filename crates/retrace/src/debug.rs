@@ -419,40 +419,70 @@ impl<'a> Exec<'a> {
         }
     }
 
-    /// Run backward to the latest breakpoint hit strictly before the current position P. Scans
-    /// forward from the start (the only direction replay runs), recording each hit's coordinate and
-    /// stepping the cursor past it, until a hit at/after P (all later hits are >= P too) or exit.
+    /// Run backward to the latest hit — breakpoint, hardware watch, or syscall watch — strictly
+    /// before the current position P. Scans forward from the start (the only direction replay
+    /// runs), recording each hit's coordinate and stepping the cursor past it, until a hit at/after
+    /// P or exit. A hardware watch hit resolves K from the hit pc (searching from the scan cursor,
+    /// NOT cursor+1 — a store can fire at the cursor's own coordinate); a syscall hit's coordinate
+    /// is the post-event boundary (n, 0) and its cursor resumes AT (n, 0): the writing event is
+    /// already consumed by the (unarmed) seek, so it cannot re-fire, but a first-instruction store
+    /// in window n can still be caught.
     fn cmd_reverse_continue<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
+        enum RHit { Bp(u64), Watch { watched: u64, pc: u64 }, WatchSys { watched: u64 } }
         let (pn, pk) = (self.n, self.k);
         let bps = self.breakpoints.clone();
+        let ws = self.watches.clone();
         self.session = None; // the scan uses its own transient sessions
-        let mut last: Option<(usize, u64, u64)> = None; // (n, k, pc) of the latest hit < P
+        let mut last: Option<(usize, u64, RHit)> = None; // (n, k, kind) of the latest hit < P
         let (mut cur_n, mut cur_k) = (1usize, 0u64);     // scan cursor
         loop {
             let mut s = checkpointed_seek(self.trace, &mut self.cache, cur_n, cur_k)?;
             s.arm_breakpoints(&bps);
+            s.arm_watchpoints(&ws);
             let hit = loop {
                 match s.advance().map_err(|d| format!("reverse-continue diverged: {}", d.detail))? {
-                    Advance::Break => break Some((s.landmark(), s.pc())),
+                    Advance::Break => break Some((s.landmark(), RHit::Bp(s.pc()))),
+                    Advance::Watch => {
+                        let watched = watched_of(&ws, s.far());
+                        break Some((s.landmark(), RHit::Watch { watched, pc: s.pc() }));
+                    }
+                    Advance::WatchSyscall { watched } =>
+                        break Some((s.landmark(), RHit::WatchSys { watched })),
                     Advance::Event => continue,
                     Advance::Exited(_) => break None,
-                    Advance::Watch | Advance::WatchSyscall { .. } =>
-                        return Err("internal: watchpoint hit but none armed".into()),
                 }
             };
             drop(s); // free the VM before resolving K
-            let (n, pc) = match hit { Some(h) => h, None => break };
-            let from_k = if n == cur_n { cur_k } else { 0 };
-            let k = resolve_hit_k(self.trace, &mut self.cache, n, pc, from_k)?;
+            let (n, rh) = match hit { Some(h) => h, None => break };
+            let (k, resume) = match &rh {
+                RHit::Bp(pc) | RHit::Watch { pc, .. } => {
+                    let from_k = if n == cur_n { cur_k } else { 0 };
+                    let k = resolve_hit_k(self.trace, &mut self.cache, n, *pc, from_k)?;
+                    (k, (n, k + 1)) // resume strictly past a resolved instruction hit
+                }
+                RHit::WatchSys { .. } => (0u64, (n, 0u64)),
+            };
             if (n, k) < (pn, pk) {
-                last = Some((n, k, pc));
-                (cur_n, cur_k) = (n, k + 1); // resume strictly past this hit
+                last = Some((n, k, rh));
+                (cur_n, cur_k) = resume;
             } else {
                 break; // reached P; earlier hits are already recorded
             }
         }
         match last {
-            Some((n, k, pc)) => { line(out, format_args!("hit {pc:#x} at ({n}, {k})"))?; self.reseek(n, k) }
+            Some((n, k, RHit::Bp(pc))) => {
+                line(out, format_args!("hit {pc:#x} at ({n}, {k})"))?;
+                self.reseek(n, k)
+            }
+            Some((n, k, RHit::Watch { watched, pc })) => {
+                line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k})"))?;
+                self.last_watch_hit = Some((n, k));
+                self.reseek(n, k)
+            }
+            Some((n, _, RHit::WatchSys { watched })) => {
+                line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
+                self.reseek(n, 0)
+            }
             None => { line(out, format_args!("no earlier hit"))?; self.reseek(pn, pk) }
         }
     }
