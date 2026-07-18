@@ -173,6 +173,60 @@ F3: HW breakpoint = DELIVERED, DIRECT-EL2 (ESR_EL2 EC=0x30, pc=DBGBVR0, insn not
   positioning primitive Task 5 needs: place a breakpoint at a target PC, run free, land exactly on
   it. (`ESR_EL1` on the F3 line is stale from F2 — irrelevant to a direct-EL2 breakpoint.)
 
+## `dbgw.c` — write-watchpoint (DBGWVR/DBGWCR) delivery semantics (M5)
+
+Proves the primitives M5 write-watchpoints need, in retrace's exact shape (guest at **EL0**,
+`VBAR_EL1` → a 16-slot trampoline of `hvc #0`, `set_trap_debug_exceptions(true)`, MMU off, only
+anonymous guest memory). `DBGWVR0_EL1`/`DBGWCR0_EL1` watch an 8-byte qword at `DATA_IPA`
+(`BAS=0xFF`, store-only, EL0-only) and the guest runs `mov x1,#DATA_IPA; mov x2,#0x42; str x2,[x1];
+hvc`; a second phase re-arms with `BAS=0xF0` (bytes 4..7 only) and runs a `strb` to byte 0:
+
+```sh
+clang -O2 -o dbgw dbgw.c -framework Hypervisor
+codesign -s - -f --entitlements ent.plist dbgw
+perl -e '$p=fork;if(!$p){setpgrp;exec@ARGV or exit 127}$SIG{ALRM}=sub{kill"-KILL",$p;exit 124};alarm 15;wait;exit($?>>8)' ./dbgw
+```
+
+```
+set_trap_debug_exceptions -> 0
+[F4a] reason=1 EC2=0x34 pc=0x1000000c far=0x10008000
+F4a: DELIVERED DIRECT-EL2 (EC=0x34/0x35)
+F4b: far=0x10008000 vs accessed VA 0x10008000 -> EXACT
+F4c: watched mem=0x0 -> PRE-RETIRE (store not yet landed); pc=0x1000000c (AT the str at +0xc)
+[resume] reason=1 EC2=0x16 pc=0x10004404 far=0x0
+   resume disarmed: terminal hvc, mem=0x42 (expect 0x42)
+[F4d] reason=1 EC2=0x16 pc=0x10004404 far=0x0
+F4d: strb to byte 0 under BAS=0xF0 -> NO FIRE (BAS is byte-selective) (mem=0x42)
+```
+
+All four sub-findings confirm the pre-retire hypothesis the M5 design assumed, exactly:
+
+- **(F4a) A watched EL0 store delivers DIRECTLY to the VMM as an `hv_vcpu_run` exit** — reason
+  `EXCEPTION`, `ESR_EL2` EC=**0x34** (Watchpoint from a lower EL), the guest still at EL0 with `PC`
+  parked **on** the faulting `str` (`0x1000000c`, offset `+0xc`). It does **not** vector through the
+  guest's EL1 `VBAR` trampoline — same direct-EL2 delivery shape as M3's single-step (`EC2=0x32`)
+  and HW breakpoint (`EC2=0x30`) exits, so `Box_::run()` can discriminate write-watchpoint exits by
+  `EC2 ∈ {0x34,0x35}` on the same exit path already used for those.
+- **(F4b) `hv_vcpu_exit`'s `virtual_address` (FAR) holds the exact accessed VA.** `far=0x10008000`
+  matches `DATA_IPA` exactly (not page-truncated, not offset) — the watchpoint hit can be attributed
+  to the precise address without decoding the trapped instruction's operands.
+- **(F4c) The exit is PRE-RETIRE.** At the hit, the watched qword still reads `0x0` (the `str`'s
+  value, `0x42`, has not landed) and `PC` sits **at** the `str` itself (`+0xc`), not past it — the
+  watchpoint fires *before* the store completes, mirroring F3's HW-breakpoint pre-retire semantics.
+  Resuming from the same `PC` with the watchpoint disarmed re-executes the `str` once (not
+  double-applied) and reaches the terminal `hvc` with `mem=0x42` as expected — confirming the
+  instruction is safely re-executable after disarm, the primitive M5's watchpoint-hit handling
+  needs.
+- **(F4d) BAS is byte-selective, confirmed both ways.** Arming only bytes 4..7 (`BAS=0xF0`) and
+  running a `strb` to byte 0 does **not** fire (`EC2=0x16`, straight through to the terminal `hvc`,
+  same as an unwatched run) — and the store *did* execute (`mem=0x42` afterward, from `w2`'s
+  leftover `0x42`), proving the non-overlapping byte range was correctly excluded rather than the
+  watchpoint being silently disabled.
+
+=> F4a=DELIVERED DIRECT-EL2 (EC=0x34) F4b=EXACT F4c=PRE-RETIRE F4d=NO FIRE (BAS byte-selective) — the
+M5 design's pre-retire watchpoint hypothesis holds on this OS/silicon exactly as assumed; no spec
+fallback needed.
+
 ## Proven for M2; still open for later milestones
 
 - MMU-on paging, PAC, and DSC reachability — **proven** (`m2spike.c`); `private` cache
