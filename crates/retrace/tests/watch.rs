@@ -66,3 +66,79 @@ fn mde_survives_clear_breakpoints_with_watches_armed() {
     assert!(matches!(s.advance().unwrap(), Advance::Watch),
         "watchpoint died when breakpoints were cleared (MDE sharing bug)");
 }
+
+/// The read()'s buffer VA and the landmark index AFTER consuming the read event, from the trace.
+fn discover_read(trace: &Path) -> (usize, u64) {
+    let mut s = ReplaySession::open(trace).unwrap();
+    loop {
+        if let Some((3, args)) = s.peek_syscall() {
+            s.advance().unwrap();
+            return (s.landmark(), args[1]);
+        }
+        s.advance().unwrap();
+    }
+}
+
+/// fstat()'s statbuf VA and the landmark index AFTER consuming the fstat event.
+fn discover_fstat(trace: &Path) -> (usize, u64) {
+    let mut s = ReplaySession::open(trace).unwrap();
+    loop {
+        if let Some((189, args)) = s.peek_syscall() {
+            s.advance().unwrap();
+            return (s.landmark(), args[1]);
+        }
+        s.advance().unwrap();
+    }
+}
+
+#[test]
+fn syscall_write_to_watched_buf_is_reported_and_replay_completes() {
+    let (rec, trace) = util::record(retrace_guest::FILEIO);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let tp = Path::new(&trace);
+    let (after_read, buf) = discover_read(tp);
+    let mut s = ReplaySession::open(tp).unwrap();
+    s.arm_watchpoints(&[(buf, 8)]);
+    // open consumes as Event (no writes hit); fstat writes statbuf only; read MUST report.
+    let hit_at = loop {
+        match s.advance().unwrap() {
+            Advance::WatchSyscall { watched } => { assert_eq!(watched, buf); break s.landmark(); }
+            Advance::Event => continue,
+            _ => panic!("unexpected advance kind before the read"),
+        }
+    };
+    assert_eq!(hit_at, after_read, "hit must be the read event's boundary");
+    // Detection observed, never interfered: the rest of the replay completes byte-perfectly.
+    loop {
+        match s.advance().unwrap() {
+            Advance::Event => continue,
+            Advance::Exited(report) => {
+                assert_eq!(report.exit_code, 0);
+                assert_eq!(report.stdout, b"retrace-m1-fixture\n".to_vec());
+                break;
+            }
+            _ => panic!("no further watch hits expected"),
+        }
+    }
+}
+
+#[test]
+fn fstat_statbuf_write_is_detected() {
+    let (rec, trace) = util::record(retrace_guest::FILEIO);
+    assert_eq!(rec.code, 0);
+    let tp = Path::new(&trace);
+    let (after_fstat, statbuf) = discover_fstat(tp);
+    let mut s = ReplaySession::open(tp).unwrap();
+    s.arm_watchpoints(&[(statbuf, 8)]);
+    loop {
+        match s.advance().unwrap() {
+            Advance::WatchSyscall { watched } => {
+                assert_eq!(watched, statbuf);
+                assert_eq!(s.landmark(), after_fstat);
+                break;
+            }
+            Advance::Event => continue,
+            _ => panic!("expected the fstat WatchSyscall first"),
+        }
+    }
+}

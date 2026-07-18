@@ -265,6 +265,7 @@ pub struct Box_ {
     bps_armed: bool,
     wps_armed: bool,
     watch_ranges: Vec<(u64, u64)>, // (va, len) armed write-watch ranges, for the software (syscall) check
+    syscall_watch_hit: Option<(u64, u64)>, // (watched_va, write_ipa): first overlap this event
 }
 
 #[derive(Debug)]
@@ -588,7 +589,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1000,7 +1001,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -1515,6 +1516,7 @@ impl Box_ {
             self.vcpu.set_sys(wcr, 0).unwrap();
         }
         self.watch_ranges.clear();
+        self.syscall_watch_hit = None;
         self.wps_armed = false;
         self.sync_mde();
     }
@@ -1587,7 +1589,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -1682,6 +1684,17 @@ impl Box_ {
     /// Replay-side: apply recorded writes to guest memory, then resume. Never executes a syscall.
     pub fn apply_and_return(&mut self, ret: u64, err: bool, writes: &[Region]) {
         for w in writes {
+            // M5: watched-range intersection (observation only — the copy below is unconditional).
+            // Empty watch_ranges on record and plain replay => this is a no-op is_empty check there.
+            if self.syscall_watch_hit.is_none() && !self.watch_ranges.is_empty() {
+                let end = w.ipa + w.bytes.len() as u64;
+                if let Some(&(va, len)) = self.watch_ranges.iter()
+                    .find(|&&(va, len)| w.ipa < va + len && va < end)
+                {
+                    let _ = len;
+                    self.syscall_watch_hit = Some((va, w.ipa));
+                }
+            }
             let (hp, avail) = self.host_span(w.ipa)
                 .unwrap_or_else(|| panic!("apply_and_return: write ipa {:#x} outside any mapped region", w.ipa));
             assert!(w.bytes.len() <= avail,
@@ -1690,6 +1703,9 @@ impl Box_ {
         }
         self.set_x0_err_and_return(ret, err);
     }
+
+    /// Take (and clear) the syscall-write watch hit recorded by `apply_and_return` this event.
+    pub fn take_syscall_watch_hit(&mut self) -> Option<(u64, u64)> { self.syscall_watch_hit.take() }
 
     /// Compare current guest memory against `expected`; return the first divergence, or None.
     pub fn diff_memory(&self, expected: &[Region]) -> Option<String> {
@@ -1915,6 +1931,7 @@ impl Box_ {
             bps_armed: false,
             wps_armed: false,
             watch_ranges: Vec::new(),
+            syscall_watch_hit: None,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
