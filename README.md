@@ -977,12 +977,13 @@ breakpoint's pre-step already moved the cursor off a hit it was parked on, but a
 legitimately fire at the exact coordinate the user just `stepi`'d to, and the store's PC can repeat across
 loop iterations, so searching from `kctx + 1` would silently skip to the *next* iteration instead of
 resolving the current one. A **progress rule** (hardware hits only, mirroring the existing
-parked-on-breakpoint pre-step) tracks `last_watch_hit`: if `continue`/`reverse-continue` starts parked
-exactly on the last reported hardware hit, it pre-steps one unarmed instruction first, so the still-un-retired
-store cannot re-fire forever; syscall hits never set it, since a pre-step off a post-event boundary could skip
-a legitimate watched store as the new window's first instruction. `reverse-continue`'s scan (`cmd_reverse_continue`)
-treats breakpoint, hardware-watch, and syscall-watch hits uniformly as an `RHit` enum, keeping the latest one
-strictly before P; a `WatchSys` hit resumes the next scan leg at `(n, 0)` (the writing event is already
+parked-on-breakpoint pre-step) tracks `last_watch_hit`: if `continue` starts parked exactly on the last
+reported hardware hit, it pre-steps one unarmed instruction first, so the still-un-retired store cannot
+re-fire forever; syscall hits never set it, since a pre-step off a post-event boundary could skip a
+legitimate watched store as the new window's first instruction. `reverse-continue` needs no pre-step: its
+scan keeps only hits strictly before P, which already excludes the parked-on store. `reverse-continue`'s
+scan (`cmd_reverse_continue`) treats breakpoint, hardware-watch, and syscall-watch hits uniformly as an
+`RHit` enum; a `WatchSys` hit resumes the next scan leg at `(n, 0)` (the writing event is already
 consumed by the unarmed seek that found it, so it cannot re-fire, but a first-instruction store in window `n`
 can still be caught).
 
