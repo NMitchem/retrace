@@ -119,6 +119,17 @@ const HW_BREAKPOINT_SLOTS: [(hv_sys::SysReg, hv_sys::SysReg); 6] = [
     (sysreg::DBGBVR5_EL1, sysreg::DBGBCR5_EL1),
 ];
 
+// Hardware write-watchpoints (M5 debugger `watch`). DBGWCR_BASE = E=1 (bit0) | PAC=0b10 EL0-only
+// (bits2:1) | LSC=0b10 store-only (bits4:3); the per-watch BAS byte-select mask goes in bits 12:5.
+// 4 comparator pairs on this silicon (hvprobe), vs 6 breakpoints.
+const DBGWCR_BASE: u64 = 0x15;
+const HW_WATCHPOINT_SLOTS: [(hv_sys::SysReg, hv_sys::SysReg); 4] = [
+    (sysreg::DBGWVR0_EL1, sysreg::DBGWCR0_EL1),
+    (sysreg::DBGWVR1_EL1, sysreg::DBGWCR1_EL1),
+    (sysreg::DBGWVR2_EL1, sysreg::DBGWCR2_EL1),
+    (sysreg::DBGWVR3_EL1, sysreg::DBGWCR3_EL1),
+];
+
 // Fixed PAC keys (arbitrary constants; identical on record & replay => deterministic signing).
 const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
     (sysreg::APIAKEYLO_EL1, 0x5245545241434531), (sysreg::APIAKEYHI_EL1, 0x4D325350494B4559),
@@ -249,6 +260,12 @@ pub struct Box_ {
     // handles that page_in_cache reads pristine pages from. Its `File`s have Drop, but it is
     // declared LAST — after vcpu/vm — so the load-bearing vcpu-before-vm drop order is unaffected.
     cache: Option<CacheMeta>,
+    // M5 watchpoint state. NOT captured in BoxState: checkpoints are only ever taken via
+    // checkpointed_seek on freshly-seeked (unarmed) sessions, so armed state never needs to persist.
+    bps_armed: bool,
+    wps_armed: bool,
+    watch_ranges: Vec<(u64, u64)>, // (va, len) armed write-watch ranges, for the software (syscall) check
+    syscall_watch_hit: Option<(u64, u64)>, // (watched_va, write_ipa): first overlap this event
 }
 
 #[derive(Debug)]
@@ -572,7 +589,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -984,7 +1001,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta) }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -1457,8 +1474,8 @@ impl Box_ {
             .unwrap_or_else(|| panic!("HW breakpoint slot {slot} out of range (0..=5)"));
         self.vcpu.set_sys(bvr, va).unwrap();
         self.vcpu.set_sys(bcr, DBGBCR_ARM).unwrap();
-        let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
-        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_MDE).unwrap();
+        self.bps_armed = true;
+        self.sync_mde();
     }
 
     /// Disarm every hardware breakpoint slot and drop MDSCR_EL1.MDE, returning the vcpu to a clean
@@ -1468,8 +1485,47 @@ impl Box_ {
             self.vcpu.set_sys(bvr, 0).unwrap();
             self.vcpu.set_sys(bcr, 0).unwrap();
         }
+        self.bps_armed = false;
+        self.sync_mde();
+    }
+
+    /// Arm hardware write-watchpoint slot `slot` (0..=3) over `[va, va+len)`, len ∈ {1,2,4,8},
+    /// va len-aligned (so the range sits inside one BAS doubleword — one watch, one slot). A watched
+    /// EL0 store surfaces from `run()` as `Stop::Other` with an ESR_EL2 watchpoint class (EC=0x34)
+    /// and FAR in `last_far`, before the store retires (spike F4). Armed only around
+    /// `advance()`/`run()` scans — NEVER while single-stepping (same discipline as breakpoints).
+    pub fn arm_hw_watchpoint(&mut self, slot: usize, va: u64, len: u64) {
+        assert!(matches!(len, 1 | 2 | 4 | 8), "watch len must be 1/2/4/8, got {len}");
+        assert_eq!(va % len, 0, "watch va {va:#x} must be {len}-aligned");
+        let (wvr, wcr) = HW_WATCHPOINT_SLOTS.get(slot)
+            .copied()
+            .unwrap_or_else(|| panic!("HW watchpoint slot {slot} out of range (0..=3)"));
+        let bas = ((1u64 << len) - 1) << (va & 7);
+        self.vcpu.set_sys(wvr, va & !7).unwrap();
+        self.vcpu.set_sys(wcr, DBGWCR_BASE | (bas << 5)).unwrap();
+        self.watch_ranges.push((va, len));
+        self.wps_armed = true;
+        self.sync_mde();
+    }
+
+    /// Disarm every hardware watchpoint slot and forget the watch ranges, recomputing MDE (which is
+    /// shared with breakpoints — clearing one side must not disarm the other).
+    pub fn clear_hw_watchpoints(&mut self) {
+        for (wvr, wcr) in HW_WATCHPOINT_SLOTS {
+            self.vcpu.set_sys(wvr, 0).unwrap();
+            self.vcpu.set_sys(wcr, 0).unwrap();
+        }
+        self.watch_ranges.clear();
+        self.syscall_watch_hit = None;
+        self.wps_armed = false;
+        self.sync_mde();
+    }
+
+    /// MDSCR_EL1.MDE gates breakpoints AND watchpoints; keep it set iff either side is armed.
+    fn sync_mde(&mut self) {
         let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
-        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr & !MDSCR_MDE).unwrap();
+        let v = if self.bps_armed || self.wps_armed { mdscr | MDSCR_MDE } else { mdscr & !MDSCR_MDE };
+        self.vcpu.set_sys(sysreg::MDSCR_EL1, v).unwrap();
     }
 
     /// Test-only: arm `MDSCR_EL1.SS` + `PSTATE.SS` the way `step()` does, then leave — so a
@@ -1533,7 +1589,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -1628,6 +1684,17 @@ impl Box_ {
     /// Replay-side: apply recorded writes to guest memory, then resume. Never executes a syscall.
     pub fn apply_and_return(&mut self, ret: u64, err: bool, writes: &[Region]) {
         for w in writes {
+            // M5: watched-range intersection (observation only — the copy below is unconditional).
+            // Empty watch_ranges on record and plain replay => this is a no-op is_empty check there.
+            if self.syscall_watch_hit.is_none() && !self.watch_ranges.is_empty() {
+                let end = w.ipa + w.bytes.len() as u64;
+                if let Some(&(va, len)) = self.watch_ranges.iter()
+                    .find(|&&(va, len)| w.ipa < va + len && va < end)
+                {
+                    let _ = len;
+                    self.syscall_watch_hit = Some((va, w.ipa));
+                }
+            }
             let (hp, avail) = self.host_span(w.ipa)
                 .unwrap_or_else(|| panic!("apply_and_return: write ipa {:#x} outside any mapped region", w.ipa));
             assert!(w.bytes.len() <= avail,
@@ -1636,6 +1703,9 @@ impl Box_ {
         }
         self.set_x0_err_and_return(ret, err);
     }
+
+    /// Take (and clear) the syscall-write watch hit recorded by `apply_and_return` this event.
+    pub fn take_syscall_watch_hit(&mut self) -> Option<(u64, u64)> { self.syscall_watch_hit.take() }
 
     /// Compare current guest memory against `expected`; return the first divergence, or None.
     pub fn diff_memory(&self, expected: &[Region]) -> Option<String> {
@@ -1858,6 +1928,10 @@ impl Box_ {
             cache_refault_ipa: state.cache_refault_ipa,
             cache_refault_count: state.cache_refault_count,
             cache: None,
+            bps_armed: false,
+            wps_armed: false,
+            watch_ranges: Vec::new(),
+            syscall_watch_hit: None,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b

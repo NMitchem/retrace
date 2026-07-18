@@ -406,7 +406,7 @@ impl std::fmt::Debug for ReplaySession {
 /// breakpoint fired mid-window (`Break`, M3 debugger only — carries nothing: the caller reads
 /// `landmark()`/`pc()`). `Break` is unreachable under the plain `replay()` oracle, which never
 /// arms breakpoints.
-pub enum Advance { Event, Exited(ReplayReport), Break }
+pub enum Advance { Event, Exited(ReplayReport), Break, Watch, WatchSyscall { watched: u64 } }
 
 impl ReplaySession {
     pub fn open(trace_path: &Path) -> Result<Self, String> {
@@ -427,6 +427,17 @@ impl ReplaySession {
         let b = Box_::restore(&mem, &regs);
         // events[0] is the initial snapshot; the first landmark to consume is events[1].
         Ok(ReplaySession { b, events, idx: 1, stdout: Vec::new(), guest_task_port: None, truncated })
+    }
+
+    /// Finish consuming one trace event: bump idx and report it — as `WatchSyscall` if this event's
+    /// applied writes overlapped an armed watch range (the event is consumed identically either
+    /// way; only the report differs), else as plain `Event`.
+    fn finish_event(&mut self) -> Result<Advance, Divergence> {
+        self.idx += 1;
+        if let Some((watched, _ipa)) = self.b.take_syscall_watch_hit() {
+            return Ok(Advance::WatchSyscall { watched });
+        }
+        Ok(Advance::Event)
     }
 
     /// Consume exactly ONE trace event (returning `Advance::Event`), or drive the guest to `exit`
@@ -547,8 +558,7 @@ impl ReplaySession {
                                             detail: format!("unsupported mach_msg2 on replay: {why}") });
                                     }
                                 }
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             // mmap: recreate the mapping deterministically (the guest reproduces its own
                             // stores by re-execution). The IPA must match the recording exactly.
@@ -559,8 +569,7 @@ impl ReplaySession {
                                         detail: format!("mmap ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
                                 }
                                 self.b.set_x0_err_and_return(*ret, false);
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             // file-backed mmap (Task 8): anon-alloc + address identically (no file
                             // access), verify the recreated IPA equals the recorded ret (this is what
@@ -576,8 +585,7 @@ impl ReplaySession {
                                 // exec pages must exist here as well — before the recorded bytes are staged.
                                 if args[2] & 0x4 != 0 { self.b.set_region_exec(ipa, args[1]); }
                                 self.b.apply_and_return(*ret, *err, writes);
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             // mach_vm_allocate / mach_vm_map: recreate the guest allocation
                             // deterministically (so the memory exists in stage-2 for the guest to use),
@@ -603,19 +611,16 @@ impl ReplaySession {
                                         detail: format!("mach_vm_map ipa mismatch: replay {ipa:#x} != recorded {recorded_ipa:#x}") });
                                 }
                                 self.b.apply_and_return(*ret, *err, writes);
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             if num == MACH_VM_DEALLOCATE {
                                 self.b.guest_munmap(args[1], args[2]);
                                 self.b.set_x0_err_and_return(*ret, *err);
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             if num == MACH_VM_PROTECT {
                                 self.b.set_x0_err_and_return(*ret, *err);
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             // shared_region_check_np (#294): install the demand-pager on replay too
                             // (record installed it here), so cache faults regenerate identical pages, then
@@ -623,8 +628,7 @@ impl ReplaySession {
                             if num == retrace_arch::SYS_SHARED_REGION_CHECK_NP {
                                 self.b.install_cache_pager();
                                 self.b.apply_and_return(*ret, *err, writes);
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             // shared_region_map_and_slide_2_np (#536): install the demand-pager on
                             // replay too (record installed it here), so cache faults regenerate identical
@@ -632,27 +636,23 @@ impl ReplaySession {
                             if num == retrace_arch::SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP {
                                 self.b.install_cache_pager();
                                 self.b.set_x0_err_and_return(*ret, *err);
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             // munmap/mprotect (debt #2): honor them for real on replay too, so a later
                             // mmap in the trace can reuse the address exactly like it did on record.
                             if num == retrace_arch::SYS_MUNMAP {
                                 self.b.guest_munmap(args[0], args[1]);
                                 self.b.set_x0_err_and_return(0, false);
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             if num == retrace_arch::SYS_MPROTECT {
                                 self.b.guest_mprotect(args[0], args[1], args[2]);
                                 self.b.set_x0_err_and_return(0, false);
-                                self.idx += 1;
-                                return Ok(Advance::Event);
+                                return self.finish_event();
                             }
                             // Apply recorded kernel writes + feed ret; NO real syscall executes.
                             self.b.apply_and_return(*ret, *err, writes);
-                            self.idx += 1;
-                            return Ok(Advance::Event);
+                            return self.finish_event();
                         }
                         other => return Err(Divergence { landmark: self.idx, pc,
                             detail: format!("expected recorded syscall, got {other:?} (truncated={})", self.truncated) }),
@@ -665,6 +665,11 @@ impl ReplaySession {
                     // breakpoints, so this is unreachable under the plain `replay()` oracle.
                     if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Breakpoint) {
                         return Ok(Advance::Break);
+                    }
+                    // A hardware watchpoint (M5 debugger) delivers here identically; surface it
+                    // BEFORE the fault fallbacks. Only the debugger arms watchpoints.
+                    if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Watchpoint) {
+                        return Ok(Advance::Watch);
                     }
                     // Cache-window fault: page it in (regenerated identically to record) and re-run.
                     if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
@@ -725,6 +730,19 @@ impl ReplaySession {
     }
     /// Disarm every hardware breakpoint (return the vcpu to a clean, single-step-safe state).
     pub fn clear_breakpoints(&mut self) { self.b.clear_hw_breakpoints(); }
+    /// Arm one hardware write-watchpoint per (va, len) range (one DBGWVR slot each) so a watched
+    /// guest store surfaces from `advance()` as `Advance::Watch`. The 4-slot hardware limit is
+    /// enforced upstream by the debugger's `watch` command. Cleared by `clear_watchpoints` or drop.
+    pub fn arm_watchpoints(&mut self, ranges: &[(u64, u64)]) {
+        assert!(ranges.len() <= 4, "watch command enforces the limit");
+        for (slot, &(va, len)) in ranges.iter().enumerate() {
+            self.b.arm_hw_watchpoint(slot, va, len);
+        }
+    }
+    /// Disarm every hardware watchpoint (single-step-safe again).
+    pub fn clear_watchpoints(&mut self) { self.b.clear_hw_watchpoints(); }
+    /// The fault/watch address of the last `Stop::Other` (for a watchpoint hit: the accessed VA).
+    pub fn far(&self) -> u64 { self.b.fault_ipa() }
     /// Bring-up register dump (x0..x30, SP, PC, ELR, FAR).
     pub fn dbg_regs(&self) -> String { self.b.dbg_regs() }
     /// Read `len` bytes of guest memory at `va`, or None if the full `[va, va+len)` span is not

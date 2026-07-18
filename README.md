@@ -914,3 +914,105 @@ trace and one session by construction, so there is no cross-session use for one 
 memoization, deferred at M4 close, landed in the M4 fast-follow: `CheckpointCache::window_len` measures each
 window at most once per debug session, so a `reverse-stepi` crossing a landmark boundary into a large window pays
 that window's length once, not on every crossing; `window_len_here` itself is unchanged.)
+
+## Status: M5 — write watchpoints & reverse-continue-to-last-writer ✅
+
+**The idea — watch a byte range, not just an address.** M3 gave `retrace debug` instruction breakpoints;
+M5 adds `watch <addr> [len]` / `unwatch <addr>`, so `continue` and `reverse-continue` also stop on a
+*write* to `[addr, addr+len)` (`len` ∈ {1, 2, 4, 8}, default 8, `addr` naturally aligned to `len` so the
+range sits inside one BAS-selectable doubleword). A watched write can land two ways, both surfaced through
+the same `continue`/`reverse-continue` scan: an EL0 guest store, caught by the CPU's own hardware
+write-watchpoint comparators (`DBGWVR`/`DBGWCR`), and a kernel write delivered as a recorded syscall's
+memory diff (e.g. `read()` filling a buffer), caught in software by intersecting each applied write's byte
+range against the armed watch ranges. Detection is observation-only in both cases — nothing about *what
+executes*, *what is written*, or *what enters the trace* changes; watching can only make a scan stop
+sooner.
+
+**The spike — `spikes/dbgw.c` (F4a-F4d), settled before any implementation.** Recorded in
+`spikes/README.md`: arming `DBGWVR0_EL1`/`DBGWCR0_EL1` over an 8-byte guest qword (`BAS=0xFF`, store-only,
+EL0-only) and running a `str` to it delivers **(F4a)** DIRECTLY to the VMM as an `hv_vcpu_run` exit —
+`ESR_EL2` EC=0x34 (watchpoint from a lower EL), never through the guest's `VBAR` trampoline, the same
+direct-EL2 shape as M3's single-step (EC=0x32) and HW-breakpoint (EC=0x30) exits. **(F4b)** `FAR` (the
+exit's `virtual_address`) holds the *exact* accessed VA, not a page-truncated or offset one. **(F4c)** the
+exit is **pre-retire**: at the hit, the watched qword still reads its old value and `PC` is parked *at* the
+`str` itself, not past it — disarming and resuming re-executes the store exactly once. **(F4d)** BAS is
+byte-selective, confirmed both ways: re-arming with `BAS=0xF0` (bytes 4..7) and running a `strb` to byte 0
+does not fire, and the store still executes. All four sub-findings confirmed the M5 design's pre-retire
+hypothesis exactly; no spec fallback was needed.
+
+**The hardware path (`retrace-box`).** `hv-sys` exposes the four `DBGWVR0-3_EL1`/`DBGWCR0-3_EL1` comparator
+pairs (`HW_WATCHPOINT_SLOTS`, 4 slots on this silicon vs. 6 breakpoint slots). `Box_::arm_hw_watchpoint(slot,
+va, len)` sets `DBGWVRn = va & !7` and `DBGWCRn = DBGWCR_BASE | (bas << 5)`, where `DBGWCR_BASE = 0x15`
+encodes E=1, PAC=EL0-only, LSC=store-only, and `bas` is the `len`-wide byte mask shifted to `va`'s position
+within its doubleword; `clear_hw_watchpoints` disarms all four slots and forgets the watched ranges. Both
+breakpoints and watchpoints share a single `MDSCR_EL1.MDE` enable bit, gated by the new `sync_mde` helper
+(`MDE` stays set iff *either* `bps_armed` or `wps_armed` is true) — the fix for the sharing bug an
+unconditional `MDE` clear in `clear_hw_breakpoints` would otherwise have (caught by a genuine TDD RED before
+it ever landed): clearing breakpoints alone would silently disarm any watchpoints armed alongside them. The
+regression test `mde_survives_clear_breakpoints_with_watches_armed`
+(`crates/retrace/tests/watch.rs`) arms a watch, arms an unrelated breakpoint, clears *only* the breakpoint,
+and asserts the watch still fires — proving the shared-register fix rather than just the individual arm/clear
+calls. `Box_::run()` surfaces a watchpoint exit as the same generic `Stop::Other { esr }` HW breakpoints
+already used; `ReplaySession::advance()` discriminates it by `ESR_EL2` EC ∈ {0x34, 0x35} (`retrace-arch`'s
+`Ec::Watchpoint`), *before* the cache-fault/FPAC fallbacks, into `Advance::Watch`.
+
+**The software path (`retrace-box` + `retrace-core`).** `Box_` gains `watch_ranges: Vec<(u64, u64)>` (armed
+alongside the hardware slots) and `syscall_watch_hit: Option<(u64, u64)>`. Inside `apply_and_return`'s
+per-write loop — replay-side application of a recorded syscall's memory diff, used by both `record_box` (to
+keep running after forwarding a real syscall) and `ReplaySession::advance` — each write's IPA range is
+intersected against the armed watch ranges *before* the copy runs (first overlap wins; the copy itself is
+never skipped or altered, so detection cannot perturb what gets applied). `take_syscall_watch_hit()` lets
+`ReplaySession::finish_event` report the event as `Advance::WatchSyscall { watched }` instead of plain
+`Advance::Event` once the event is fully consumed — a reviewer traced all 11 of `advance()`'s event-return
+sites to confirm every one routes through `finish_event`, so no syscall-driven write can silently bypass
+detection. On record and on plain `retrace replay`, `watch_ranges` stays empty and the added check is a
+single `is_empty` test — behaviorally invisible.
+
+**The command surface — hit semantics and the `kctx` subtlety.** A hardware hit parks *at* the storing
+instruction, before it executes (spike F4c): `hit watch 0x… (write at 0x…) at (N, +?)`, followed by
+`resolved (N, K)` once `resolve_hit_k` pins the exact step; a syscall hit parks at the post-event boundary,
+`hit watch 0x… (syscall write) at (N, 0)`. Resolving a hardware hit's K reuses M3's `resolve_hit_k`, but
+`cmd_continue` searches from `kctx` for a watch hit and from `kctx + 1` for a breakpoint hit — a
+breakpoint's pre-step already moved the cursor off a hit it was parked on, but a watched store can
+legitimately fire at the exact coordinate the user just `stepi`'d to, and the store's PC can repeat across
+loop iterations, so searching from `kctx + 1` would silently skip to the *next* iteration instead of
+resolving the current one. A **progress rule** (hardware hits only, mirroring the existing
+parked-on-breakpoint pre-step) tracks `last_watch_hit`: if `continue` starts parked exactly on the last
+reported hardware hit, it pre-steps one unarmed instruction first, so the still-un-retired store cannot
+re-fire forever; syscall hits never set it, since a pre-step off a post-event boundary could skip a
+legitimate watched store as the new window's first instruction. `reverse-continue` needs no pre-step: its
+scan keeps only hits strictly before P, which already excludes the parked-on store. `reverse-continue`'s
+scan (`cmd_reverse_continue`) treats breakpoint, hardware-watch, and syscall-watch hits uniformly as an
+`RHit` enum; a `WatchSys` hit resumes the next scan leg at `(n, 0)` (the writing event is already
+consumed by the unarmed seek that found it, so it cannot re-fire, but a first-instruction store in window `n`
+can still be caught).
+
+**The tests and the numbers.** New: `watchloop_guest_parses` (`crates/retrace-guest/src/lib.rs`) for the new
+`asm/watchloop.s` guest (eight same-PC stores to `target`, one byte-0 `strb` to `target2` as the BAS
+negative case, then `write(1, target, 8)` to publish the watched address in the trace); five session-level
+tests in `crates/retrace/tests/watch.rs` (`hw_watchpoint_fires_on_store_pre_retire_with_far`,
+`watch_on_untouched_bytes_never_fires`, `mde_survives_clear_breakpoints_with_watches_armed`,
+`syscall_write_to_watched_buf_is_reported_and_replay_completes`, `fstat_statbuf_write_is_detected` — the
+last two the first debug-surface use of the pre-existing `FILEIO` guest); six golden-transcript tests in
+`crates/retrace/tests/watch_cli.rs` (`watch_continue_hits_first_store_and_progress_rule_advances`,
+`watch_validation_is_fail_loud`, `unwatch_disarms`, `reverse_continue_finds_last_store`,
+`reverse_continue_with_no_earlier_write_reports_none`, `syscall_writer_is_found_forward_and_backward`); two
+parser unit tests in `crates/retrace/src/debug.rs` (`parses_watch_and_unwatch`,
+`rejects_bad_watch_len_and_alignment`) — 14 new tests in all. `just gate` climbed from the M4 close's
+**106 passed, 0 failed, 0 ignored** through the six M5 tasks: 107 (the spike is not a Rust test; the
+`watchloop` guest parser test), 110 (the three hardware/session watch tests), 112 (the two syscall-watch
+tests), 117 (the three `watch`/`unwatch`/progress-rule golden-transcript tests plus the two parser unit
+tests), to **120 passed, 0 failed, 0 ignored** at the M5 close (the two `reverse-continue` tests plus the
+syscall-writer forward/backward test) — clippy clean throughout, every pre-existing golden transcript (7 `debug_cli`,
+`reverse_debug_e2e`, `checkpoint_seek`) byte-identical. See
+`docs/superpowers/specs/2026-07-18-retrace-m5-watchpoints-design.md`.
+
+**Deferred:** read/access watchpoints (`rwatch`/`awatch` — the hardware's LSC field supports it, but it
+doubles the CLI/test surface for a rarer use case); printing the old and new value on a hit (a presentation
+nicety, not a capability); watch ranges wider than 8 bytes or crossing a doubleword (would need multi-slot
+arming or a software fallback); symbol- or expression-based watch addresses (only raw guest VAs today, same
+as breakpoints); watchpoint hits during plain `retrace replay` (the feature is `retrace debug`-only —
+`replay` never arms a watch). Also unexercised beyond the M5 test surface: the software syscall-write check
+compares an armed *VA* against a recorded write's *IPA*, which is exact only for identity-mapped static
+guests (`WATCHLOOP`, `FILEIO` — the entirety of M5's test surface); an MMU-on dynamic guest (e.g. `hello_dyn`)
+would need VA-to-IPA translation before the intersection is meaningful, deferred as future work.

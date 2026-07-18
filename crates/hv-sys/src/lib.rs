@@ -84,6 +84,17 @@ pub mod sysreg {
     pub const DBGBCR4_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBCR4_EL1);
     pub const DBGBVR5_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBVR5_EL1);
     pub const DBGBCR5_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGBCR5_EL1);
+    // Hardware data-watchpoint slots (4 comparators on Apple Silicon — spikes/README.md hvprobe).
+    // DBGWVRn holds the 8-aligned doubleword base; DBGWCRn is the control word (E/PAC/LSC/BAS).
+    // Verified in the M5 dbgw spike (F4): a watched EL0 store delivers direct to EL2, EC=0x34.
+    pub const DBGWVR0_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGWVR0_EL1);
+    pub const DBGWCR0_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGWCR0_EL1);
+    pub const DBGWVR1_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGWVR1_EL1);
+    pub const DBGWCR1_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGWCR1_EL1);
+    pub const DBGWVR2_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGWVR2_EL1);
+    pub const DBGWCR2_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGWCR2_EL1);
+    pub const DBGWVR3_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGWVR3_EL1);
+    pub const DBGWCR3_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_DBGWCR3_EL1);
     pub const APIAKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIAKEYLO_EL1);
     pub const APIAKEYHI_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIAKEYHI_EL1);
     pub const APIBKEYLO_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_APIBKEYLO_EL1);
