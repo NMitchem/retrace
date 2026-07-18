@@ -209,4 +209,15 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang carveout");
     assert!(status.success(), "carveout guest build failed");
+
+    // watchloop: 8 same-pc 8-byte stores to `target`, one strb to `target2` byte 0 (the BAS
+    // negative), write(1, target, 8) — publishing target's address in the trace args — exit(0).
+    // The M5 watchpoint guest: deterministic first-writer/last-writer ground truth.
+    let src = format!("{}/asm/watchloop.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/watchloop");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang watchloop");
+    assert!(status.success(), "watchloop guest build failed");
 }
