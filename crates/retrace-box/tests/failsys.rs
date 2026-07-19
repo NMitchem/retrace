@@ -21,6 +21,7 @@ fn failing_open_records_carry_and_errno() {
             Stop::Syscall { num, args } if num == SYS_EXIT => { assert_eq!(args[0], 2); break; }
             Stop::Syscall { .. } => {}
             Stop::Other { esr } => panic!("faulted esr=0x{esr:x}"),
+            Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }

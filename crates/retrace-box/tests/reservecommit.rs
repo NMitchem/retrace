@@ -26,6 +26,10 @@ fn wild_store_outside_any_reservation_stays_fatal() {
         }
         Stop::Syscall { num, args } =>
             panic!("expected an immediate wild-store data abort, got syscall num={num} args={args:?}"),
+        // The wild store is stage-1-mapped (identity) but stage-2-unbacked => an OUTER abort
+        // (Stop::Other), NEVER the INNER stage-1 crash arm — this guards that classification.
+        Stop::Fault { pc, esr, far } =>
+            panic!("wild store must stay a fatal stage-2 abort (Stop::Other), not Stop::Fault: pc={pc:#x} esr={esr:#x} far={far:#x}"),
         Stop::Step => unreachable!("run() does not single-step"),
     }
 }

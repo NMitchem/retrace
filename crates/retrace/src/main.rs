@@ -16,7 +16,13 @@ fn main() {
                 Ok(s) => {
                     use std::io::Write;
                     std::io::stdout().write_all(&s.stdout).unwrap();
-                    exit(s.exit_code as i32);
+                    match s.outcome {
+                        retrace_core::Outcome::Exit { code } => exit(code as i32),
+                        retrace_core::Outcome::Crash { pc, esr, far } => {
+                            eprintln!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}");
+                            exit(139);
+                        }
+                    }
                 }
                 Err(e) => { eprintln!("RECORD ERROR: {e}"); exit(4); }
             }
@@ -35,7 +41,13 @@ fn main() {
                 Ok(s) => {
                     use std::io::Write;
                     std::io::stdout().write_all(&s.stdout).unwrap();
-                    exit(s.exit_code as i32);
+                    match s.outcome {
+                        retrace_core::Outcome::Exit { code } => exit(code as i32),
+                        retrace_core::Outcome::Crash { pc, esr, far } => {
+                            eprintln!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}");
+                            exit(139);
+                        }
+                    }
                 }
                 Err(e) => { eprintln!("RECORD ERROR: {e}"); exit(4); }
             }
@@ -46,7 +58,13 @@ fn main() {
                 Ok(r) => {
                     use std::io::Write;
                     std::io::stdout().write_all(&r.stdout).unwrap();
-                    exit(r.exit_code as i32);
+                    match r.outcome {
+                        retrace_core::Outcome::Exit { code } => exit(code as i32),
+                        retrace_core::Outcome::Crash { pc, esr, far } => {
+                            eprintln!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}");
+                            exit(139);
+                        }
+                    }
                 }
                 Err(d) => {
                     eprintln!("DIVERGENCE at landmark {} pc=0x{:x}: {}", d.landmark, d.pc, d.detail);

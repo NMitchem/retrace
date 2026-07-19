@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use retrace_core::{checkpointed_seek, Advance, CheckpointCache, ReplaySession};
+use retrace_core::{checkpointed_seek, Advance, CheckpointCache, Outcome, ReplaySession};
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
 /// 5), guarding the inherited u64 span-overflow edge at the CLI boundary before any VM work.
@@ -351,7 +351,11 @@ impl<'a> Exec<'a> {
                         format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?
                     {
                         Advance::Exited(report) => {
-                            line(out, format_args!("exited (code {})", report.exit_code))?;
+                            match report.outcome {
+                                Outcome::Exit { code } => line(out, format_args!("exited (code {code})"))?,
+                                Outcome::Crash { pc, esr, far } =>
+                                    line(out, format_args!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"))?,
+                            }
                             let e = self.sess().landmark();
                             return self.reseek(e, 0);
                         }
@@ -411,7 +415,11 @@ impl<'a> Exec<'a> {
                     // no boundary match; keep scanning (hardware breakpoints stay armed)
                 }
                 Advance::Exited(report) => {
-                    line(out, format_args!("exited (code {})", report.exit_code))?;
+                    match report.outcome {
+                        Outcome::Exit { code } => line(out, format_args!("exited (code {code})"))?,
+                        Outcome::Crash { pc, esr, far } =>
+                            line(out, format_args!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"))?,
+                    }
                     let e = self.sess().landmark();
                     return self.reseek(e, 0); // park at the final landmark's window
                 }

@@ -37,6 +37,7 @@ fn sign_slots_signs_roundtrips_and_preserves_state() {
     match b.run() {
         Stop::Syscall { num, .. } => assert_eq!(num, SYS_WRITE, "expected write() first"),
         Stop::Other { esr } => panic!("guest faulted before first syscall: esr={esr:#x}"),
+        Stop::Fault { pc, esr, far } => panic!("guest crashed pc={pc:#x} esr={esr:#x} far={far:#x}"),
         Stop::Step => unreachable!("run() does not single-step"),
     }
 
@@ -74,6 +75,7 @@ fn sign_slots_signs_roundtrips_and_preserves_state() {
             assert_eq!(args[0], 0);
         }
         Stop::Other { esr } => panic!("guest faulted resuming after sign_slots: esr={esr:#x}"),
+        Stop::Fault { pc, esr, far } => panic!("guest crashed pc={pc:#x} esr={esr:#x} far={far:#x}"),
         Stop::Step => unreachable!("run() does not single-step"),
     }
 }

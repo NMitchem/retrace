@@ -106,6 +106,8 @@ pub const WILDSTORE: &str = concat!(env!("OUT_DIR"), "/wildstore");
 pub const CARVEOUT: &str = concat!(env!("OUT_DIR"), "/carveout");
 pub const SPINLOOP: &str = concat!(env!("OUT_DIR"), "/spinloop");
 pub const WATCHLOOP: &str = concat!(env!("OUT_DIR"), "/watchloop");
+pub const CRASH: &str = concat!(env!("OUT_DIR"), "/crash");
+pub const CRASHJMP: &str = concat!(env!("OUT_DIR"), "/crashjmp");
 
 #[cfg(test)]
 mod tests {
