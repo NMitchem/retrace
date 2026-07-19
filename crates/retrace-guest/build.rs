@@ -220,4 +220,25 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang watchloop");
     assert!(status.success(), "watchloop guest build failed");
+
+    // crash: stores to VA 0x4000_DEAD_0000 (bit 46 set), which no stage-1 table entry covers => a
+    // stage-1 translation fault delivered via the EL1 trampoline => Stop::Fault (a recordable crash,
+    // not a retrace bug). The M6 data-abort crash guest. Contrast wildstore.s (stage-2, stays fatal).
+    let src = format!("{}/asm/crash.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/crash");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang crash");
+    assert!(status.success(), "crash guest build failed");
+
+    // crashjmp: branches to the same never-mapped VA => the instruction FETCH takes a stage-1
+    // translation fault (EC 0x20, lower-EL instruction abort). The M6 instruction-abort crash guest.
+    let src = format!("{}/asm/crashjmp.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/crashjmp");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang crashjmp");
+    assert!(status.success(), "crashjmp guest build failed");
 }

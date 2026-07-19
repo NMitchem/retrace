@@ -269,7 +269,7 @@ pub struct Box_ {
 }
 
 #[derive(Debug)]
-pub enum Stop { Syscall { num: u64, args: [u64;8] }, Other { esr: u64 }, Step }
+pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, far: u64 }, Other { esr: u64 }, Step }
 
 /// A complete, in-memory-only capture of `Box_`'s internal state at an ARBITRARY position — unlike
 /// `Event::Snapshot` (the trace format), which is only correct to restore from at landmark 0.
@@ -1367,6 +1367,17 @@ impl Box_ {
                         // authenticate by stripping the aut* destination + skip, like the MRS
                         // emulations above — below the record/replay loop, so both stay in lockstep.
                         Ec::Other(0x1C) if self.try_emulate_fpac_auth() => continue,
+                        // M6: a lower-EL (EL0) data/instruction abort is a GUEST CRASH — a
+                        // recordable stop, not a retrace bug. EC bit 0 distinguishes lower-EL
+                        // (0x24/0x20, guest code faulted) from same-EL (0x25/0x21, the trampoline
+                        // itself faulted — that stays in the fail-loud arm below). The faulting
+                        // EL0 pc is ELR_EL1 (the vCPU's live PC is parked in the trampoline).
+                        Ec::DataAbort | Ec::InstrAbort if (esr1 >> 26) & 1 == 0 => {
+                            let far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
+                            let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+                            self.last_far = far;
+                            return Stop::Fault { pc, esr: esr1, far };
+                        }
                         _ => {
                             self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             return Stop::Other { esr: esr1 };
@@ -1443,6 +1454,13 @@ impl Box_ {
                         Ec::SysReg if self.try_emulate_timebase(esr1) => return Stop::Step,
                         Ec::Other(0) if self.try_emulate_undef_mrs() => return Stop::Step,
                         Ec::Other(0x1C) if self.try_emulate_fpac_auth() => return Stop::Step,
+                        // M6: mirror of run()'s crash arm — a stepped instruction that faults does not retire.
+                        Ec::DataAbort | Ec::InstrAbort if (esr1 >> 26) & 1 == 0 => {
+                            let far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
+                            let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+                            self.last_far = far;
+                            return Stop::Fault { pc, esr: esr1, far };
+                        }
                         _ => {
                             self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             return Stop::Other { esr: esr1 };

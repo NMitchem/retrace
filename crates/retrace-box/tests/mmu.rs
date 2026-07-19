@@ -14,6 +14,7 @@ fn unaligned_store_runs_under_mmu_on() {
         Stop::Syscall { num, args } if num == SYS_EXIT => assert_eq!(args[0], 0, "unaligned readback mismatch => MMU/Normal-memory wrong"),
         Stop::Syscall { .. } => panic!("unexpected syscall before exit"),
         Stop::Other { esr } => panic!("guest faulted esr=0x{esr:x} (MMU likely misconfigured)"),
+        Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
         Stop::Step => unreachable!("run() does not single-step"),
     }
 }
