@@ -560,17 +560,17 @@ git commit -m "M6 t2: Stop::Fault + mirrored record/replay crash paths (static g
 - Create: `crates/retrace-guest/c/crashy.c`
 - Modify: `crates/retrace-guest/build.rs` (copy the hello_dyn recipe `:147-156`),
   `crates/retrace-guest/src/lib.rs` (`pub const CRASHY`)
-- Modify: `crates/retrace/tests/crashy_e2e.rs` (add the dynamic test + discovery helpers)
+- Modify: `crates/retrace/tests/util/mod.rs` (shared `discover_crashy_addrs` helper),
+  `crates/retrace/tests/crashy_e2e.rs` (add the dynamic test)
 
 **Interfaces:**
 - Consumes: T2's crash machinery; `util::record_dynamic` (existing).
 - Produces: `retrace_guest::CRASHY`; the address-discovery convention later tasks reuse:
   the trace's marker write `write(1, "CRASHY:", 7)` is followed by `write(1, &g.st, 8)` then
   `write(1, &g.ptr, 8)` — so `args[1]` of those two events ARE the guest VAs of `g.st` and
-  `g.ptr`. Helper `discover_addrs(trace) -> (u64 /*&g.st*/, u64 /*&g.ptr*/)` lives in
-  `crashy_e2e.rs` this task; T4/T5 copy it into their test files (2 small test-local copies keep
-  the test binaries independent — same trade the existing suites make with `util`-adjacent
-  helpers).
+  `g.ptr`. Helper `util::discover_crashy_addrs(trace: &std::path::Path) -> (u64 /*&g.st*/, u64
+  /*&g.ptr*/)` is added to the SHARED `crates/retrace/tests/util/mod.rs` this task (one copy;
+  T4/T5 call it via `mod util;` like every other suite).
 
 - [ ] **Step 1: Write the fixture**
 
@@ -619,13 +619,12 @@ belt-and-braces against a future flag change). `lib.rs`:
 
 - [ ] **Step 2: Write the failing dynamic e2e**
 
-Append to `crates/retrace/tests/crashy_e2e.rs`:
+Add to the SHARED helper module `crates/retrace/tests/util/mod.rs`:
 
 ```rust
-const GARBAGE_VA: u64 = 0x4000_DEAD_0000; // mirrors c/crashy.c (source-defined)
-
-/// (&g.st, &g.ptr) from the recorded marker convention — see c/crashy.c's header comment.
-fn discover_addrs(trace: &std::path::Path) -> (u64, u64) {
+/// (&g.st, &g.ptr) of the crashy.c fixture, discovered from the recorded marker convention —
+/// see c/crashy.c's header comment. Shared by crashy_e2e / watch_dyn / crashy_cli.
+pub fn discover_crashy_addrs(trace: &std::path::Path) -> (u64, u64) {
     let events = retrace_trace::Reader::open(trace).unwrap();
     let mut it = events.iter().filter_map(|e| match e {
         retrace_trace::Event::Syscall { num: 4, args, .. } if args[0] == 1 => Some(*args),
@@ -640,6 +639,12 @@ fn discover_addrs(trace: &std::path::Path) -> (u64, u64) {
     }
     panic!("CRASHY: marker write not found in trace");
 }
+```
+
+Append to `crates/retrace/tests/crashy_e2e.rs`:
+
+```rust
+const GARBAGE_VA: u64 = 0x4000_DEAD_0000; // mirrors c/crashy.c (source-defined)
 
 #[test]
 fn crashy_records_through_dyld_and_replays_bit_for_bit() {
@@ -647,7 +652,7 @@ fn crashy_records_through_dyld_and_replays_bit_for_bit() {
     assert_eq!(rec.code, 139, "stderr: {}", rec.stderr);
     assert!(rec.stderr.contains("guest crashed: pc="), "stderr: {}", rec.stderr);
     assert!(rec.stderr.contains("far=0x4000dead0000"), "stderr: {}", rec.stderr);
-    let (st, ptr) = discover_addrs(&trace);
+    let (st, ptr) = util::discover_crashy_addrs(&trace);
     assert_ne!(st, 0);
     assert_eq!(ptr, st + 144 + 32, "layout: ptr directly follows st(144) + buf(32)");
     for _ in 0..2 {
@@ -804,28 +809,11 @@ Run: `cargo test -p retrace-box --test vaipa -- --test-threads=1` → PASS.
 // crashy's fstat(1, &g.st) is a recorded kernel write into a watchable global.
 mod util;
 
-fn discover_addrs(trace: &std::path::Path) -> (u64, u64) {
-    // Copy of crashy_e2e.rs::discover_addrs (see its doc comment; kept test-binary-local).
-    let events = retrace_trace::Reader::open(trace).unwrap();
-    let mut it = events.iter().filter_map(|e| match e {
-        retrace_trace::Event::Syscall { num: 4, args, .. } if args[0] == 1 => Some(*args),
-        _ => None,
-    });
-    while let Some(a) = it.next() {
-        if a[2] == 7 {
-            let st = it.next().unwrap()[1];
-            let ptr = it.next().unwrap()[1];
-            return (st, ptr);
-        }
-    }
-    panic!("CRASHY: marker not found");
-}
-
 #[test]
 fn syscall_write_watch_fires_on_a_dynamic_guest() {
     let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
     assert_eq!(rec.code, 139, "stderr: {}", rec.stderr);
-    let (st, _ptr) = discover_addrs(&trace);
+    let (st, _ptr) = util::discover_crashy_addrs(&trace);
     let st_watch = st & !7; // watch must be 8-aligned; g.st is 8-aligned by layout
     assert_eq!(st_watch, st, "g.st is 8-aligned");
     let out = std::process::Command::new(util::bin())
@@ -874,8 +862,8 @@ git commit -m "M6 t4: va_to_ipa stage-1 walker — software watch intersection s
 
 - [ ] **Step 1: Write the failing golden-transcript test**
 
-`crates/retrace/tests/crashy_cli.rs` (copy `watch_cli.rs`'s `debug_run` helper and style; copy
-`discover_addrs` per the T3 convention):
+`crates/retrace/tests/crashy_cli.rs` (copy `watch_cli.rs`'s `debug_run` helper and style;
+addresses come from the shared `util::discover_crashy_addrs`):
 
 ```rust
 // M6 golden crash-debug transcripts. Every coordinate DISCOVERED from the freshly-recorded
@@ -893,22 +881,6 @@ fn debug_run(trace: &str, script: &str) -> (i32, String, String) {
     (out.status.code().unwrap_or(-1),
      String::from_utf8(out.stdout).unwrap(),
      String::from_utf8(out.stderr).unwrap())
-}
-
-fn discover_addrs(trace: &Path) -> (u64, u64) {
-    let events = retrace_trace::Reader::open(trace).unwrap();
-    let mut it = events.iter().filter_map(|e| match e {
-        retrace_trace::Event::Syscall { num: 4, args, .. } if args[0] == 1 => Some(*args),
-        _ => None,
-    });
-    while let Some(a) = it.next() {
-        if a[2] == 7 {
-            let st = it.next().unwrap()[1];
-            let ptr = it.next().unwrap()[1];
-            return (st, ptr);
-        }
-    }
-    panic!("CRASHY: marker not found");
 }
 
 fn recorded_crash_pc(trace: &Path) -> u64 {
@@ -937,7 +909,7 @@ fn reverse_continue_from_the_crash_finds_the_corrupting_store() {
     let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
     assert_eq!(rec.code, 139, "stderr: {}", rec.stderr);
     let ts = trace.to_str().unwrap();
-    let (_st, ptr) = discover_addrs(Path::new(&trace));
+    let (_st, ptr) = util::discover_crashy_addrs(Path::new(&trace));
     // THE demo: run to the crash, watch the corrupted pointer, run BACKWARD to its last writer,
     // then prove it: g.ptr still holds the pre-store value (pre-retire), and one stepi later it
     // holds GARBAGE_VA.
@@ -1026,7 +998,7 @@ git commit -m "M6 t5: debug CLI parks at the fault — crash transcripts + rever
 
 - [ ] **Step 1: Write the headline gate (born `#[ignore]`d)**
 
-Append to `crashy_e2e.rs` (it already has `discover_addrs`, `GARBAGE_VA`):
+Append to `crashy_e2e.rs` (it already has `GARBAGE_VA`; addresses via `util::discover_crashy_addrs`):
 
 ```rust
 /// THE M6 HEADLINE GATE. One script, the whole story: record a real dynamically-linked C program
@@ -1044,7 +1016,7 @@ fn crash_demo_end_to_end() {
         assert_eq!(rep.code, 139, "replay: {}", rep.stderr);
         assert_eq!(rep.stdout, rec.stdout);
     }
-    let (_st, ptr) = discover_addrs(&trace);
+    let (_st, ptr) = util::discover_crashy_addrs(&trace);
     let script = format!(
         "continue; where; watch 0x{ptr:x}; reverse-continue; x 0x{ptr:x} 8; stepi; x 0x{ptr:x} 8");
     let out = std::process::Command::new(util::bin())
