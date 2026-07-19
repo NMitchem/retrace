@@ -16,9 +16,10 @@ pub enum Event {
     Syscall { num: u64, args: [u64;8], ret: u64, err: bool, writes: Vec<Region> },
     Sched { thread: u32, until: u64 },
     Exit { code: u64 },
+    Crash { pc: u64, esr: u64, far: u64 },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x03"; // "RT" + format version 0x0003 (M2-mach: 8-wide args)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x04"; // "RT" + format version 0x0004 (M6-crash: Event::Crash terminal)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -141,6 +142,53 @@ mod tests {
         let (got, truncated) = Reader::open_checked(&f).unwrap();
         assert!(truncated);
         assert_eq!(got, sample()[..2].to_vec()); // Exit record dropped
+    }
+    fn crash_sample() -> Vec<Event> {
+        vec![
+            Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000000, sp_el0:0x2000_0000, cpsr:0 },
+                              mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,4] }] },
+            Event::Crash { pc: 0x100000010, esr: 0x92000005, far: 0x4000DEAD0000 },
+            Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000010, sp_el0:0x2000_0000, cpsr:0 },
+                              mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,9] }] },
+        ]
+    }
+    #[test]
+    fn crash_roundtrip() {
+        let f = tempfile();
+        let mut w = Writer::create(&f).unwrap();
+        for e in crash_sample() { w.append(&e).unwrap(); }
+        drop(w);
+        let (got, truncated) = Reader::open_checked(&f).unwrap();
+        assert!(!truncated);
+        assert_eq!(got, crash_sample());
+    }
+    #[test]
+    fn rejects_v3_traces() {
+        // The M6 magic bump: a well-formed 0x03-era trace must be rejected wholesale.
+        let f = tempfile();
+        let body = b"plausible record body bytes";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RT\x00\x03");
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&crc32(body).to_le_bytes());
+        bytes.extend_from_slice(body);
+        std::fs::write(&f, &bytes).unwrap();
+        let (got, truncated) = Reader::open_checked(&f).unwrap();
+        assert!(truncated);
+        assert!(got.is_empty());
+    }
+    #[test]
+    fn torn_crash_tail_recovers_prefix() {
+        let f = tempfile();
+        let mut w = Writer::create(&f).unwrap();
+        for e in crash_sample() { w.append(&e).unwrap(); }
+        drop(w);
+        let mut bytes = std::fs::read(&f).unwrap();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        std::fs::write(&f, &bytes).unwrap();
+        let (got, truncated) = Reader::open_checked(&f).unwrap();
+        assert!(truncated);
+        assert_eq!(got, crash_sample()[..2].to_vec()); // torn final Snapshot dropped, Crash kept
     }
     fn tempfile() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
