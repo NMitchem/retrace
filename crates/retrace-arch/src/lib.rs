@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ec { Svc, Hvc, SysReg, SoftStep, Breakpoint, Watchpoint, DataAbort, Other(u8) }
+pub enum Ec { Svc, Hvc, SysReg, SoftStep, Breakpoint, Watchpoint, DataAbort, InstrAbort, Other(u8) }
 
 pub const SYS_WRITE: u64 = 4;
 pub const SYS_EXIT: u64 = 1;
@@ -33,6 +33,7 @@ pub fn ec_of(esr_el2: u64) -> Ec {
         0x30 | 0x31 => Ec::Breakpoint,
         0x34 | 0x35 => Ec::Watchpoint,
         0x24 | 0x25 => Ec::DataAbort,
+        0x20 | 0x21 => Ec::InstrAbort,
         other => Ec::Other(other),
     }
 }
@@ -85,5 +86,12 @@ mod tests {
         // Not an AUT-with-Rd: NOP, and PACIA (a SIGN, base 0xDAC1_0000) must return None.
         assert_eq!(decode_aut_rd(0xD503_201F), None);                     // NOP
         assert_eq!(decode_aut_rd(0xDAC1_0000 | (1 << 5)), None);          // PACIA x0, x1 (sign)
+    }
+
+    #[test]
+    fn decodes_instruction_and_data_aborts() {
+        assert_eq!(ec_of(0x20u64 << 26), Ec::InstrAbort);
+        assert_eq!(ec_of(0x21u64 << 26), Ec::InstrAbort);
+        assert_eq!(ec_of(0x24u64 << 26), Ec::DataAbort);
     }
 }
