@@ -155,6 +155,17 @@ fn main() {
         .status().expect("clang hello_dyn");
     assert!(status.success(), "hello_dyn guest build failed");
 
+    // crashy: the M6 planted-bug dynamic guest — same recipe as hello_dyn (real toolchain, links
+    // libSystem, plain -arch arm64). No -O, so the volatile off-by-one OOB store survives. Records
+    // through real /usr/lib/dyld, then faults at 0x4000_DEAD_0000 => Stop::Fault (a recordable crash).
+    let src = format!("{}/c/crashy.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/crashy");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang crashy");
+    assert!(status.success(), "crashy guest build failed");
+
     // strip47: signs a pointer with pacda then strips it with objc's 47-bit ISA_MASK; the result
     // equals the original ONLY if the PAC signature lands above bit 46 — i.e. only under a 47-bit
     // guest VA. The M2-va47 property test.

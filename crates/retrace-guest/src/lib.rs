@@ -98,6 +98,7 @@ pub const EXECMAP: &str = concat!(env!("OUT_DIR"), "/execmap");
 pub const EXECMAP_FIXTURE: &str = concat!(env!("OUT_DIR"), "/execmap_fixture.bin");
 pub const MACHMSG: &str = concat!(env!("OUT_DIR"), "/machmsg");
 pub const HELLO_DYN: &str = concat!(env!("OUT_DIR"), "/hello_dyn");
+pub const CRASHY: &str = concat!(env!("OUT_DIR"), "/crashy");
 pub const DYLD_PATH: &str = "/usr/lib/dyld";
 pub const STRIP47: &str = concat!(env!("OUT_DIR"), "/strip47");
 pub const BFAMSTRIP: &str = concat!(env!("OUT_DIR"), "/bfamstrip");
