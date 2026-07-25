@@ -22,13 +22,23 @@ fn blend(addr: u64, diversity: u16) -> u64 {
 }
 
 // Worked example, verified against real bytes (spikes/cacheprobe.c):
-// dyld_shared_cache_arm64e.02.dylddata, DATA map[4] (addr=0x1ec068000), page 1
-// (vmAddr=0x1ec06c000), page_starts[1]=0x22d0:
-//   raw=0x801dab846c2f15c8 -> auth, key=DA, addrDiv=1, diversity=0x6ae1, runtimeOffset=0x6c2f15c8.
-// At slide 0: slot IPA = 0x1ec06c000 + 0x22d0 = 0x1ec06e2d0; target = 0x180000000 + 0x6c2f15c8;
-// modifier = blend(slotSlidVA, diversity) = blend(0x1ec06e2d0, 0x6ae1).
-const DATA_SLOT_IPA: u64 = 0x1_ec06_e2d0;
-const DATA_TARGET: u64 = 0x1_ec2f_15c8;
+// dyld_shared_cache_arm64e.02.dylddata, DATA map[4] (addr=0x1ec468000), page 1
+// (vmAddr=0x1ec46c000), page_starts[1]=0x22e0:
+//   raw=0x801dab846c6f1a88 -> auth, key=DA, addrDiv=1, diversity=0x6ae1, runtimeOffset=0x6c6f1a88.
+// At slide 0: slot IPA = 0x1ec46c000 + 0x22e0 = 0x1ec46e2e0; target = 0x180000000 + 0x6c6f1a88;
+// modifier = blend(slotSlidVA, diversity) = blend(0x1ec46e2e0, 0x6ae1).
+//
+// These are CACHE-BUILD-SPECIFIC: they came from cache UUID 157E6D2E-2E5C-39B1-8F2A-8866EE228BED
+// on macOS 26.5.2 / 25F84 (cache dated 2026-06-25). When the host's shared cache moves, the pinned
+// slot no longer names an auth slot and this test FPAC-faults (`sign stub faulted at EL0: ESR_EL1
+// EC=Other(28)`) — that is cache drift, not a re-signing regression. Re-derive with
+// `spikes/cacheprobe.c` (see spikes/README.md): build it, run it, and read the `uuid=` line plus
+// any `AUTH ... key=DA addrDiv=1` slot's `@slide0: slotVA=… targetVA=… modifier=blend(…)` line —
+// those three numbers are exactly DATA_SLOT_IPA / DATA_TARGET / DATA_DIVERSITY. cacheprobe parses
+// the cache file's own header + slide-info by hand, independently of `cache.rs`, which is what
+// keeps the assertion below a real oracle rather than a restatement of the code under test.
+const DATA_SLOT_IPA: u64 = 0x1_ec46_e2e0;
+const DATA_TARGET: u64 = 0x1_ec6f_1a88;
 const DATA_DIVERSITY: u16 = 0x6ae1;
 // A known cache __TEXT VA in the .01 exec subcache (see cache.rs's routing test).
 const TEXT_IPA: u64 = 0x1_80cc_b568;
