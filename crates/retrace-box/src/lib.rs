@@ -1706,8 +1706,11 @@ impl Box_ {
             // Empty watch_ranges on record and plain replay => this is a no-op is_empty check there.
             if self.syscall_watch_hit.is_none() && !self.watch_ranges.is_empty() {
                 let end = w.ipa + w.bytes.len() as u64;
-                if let Some(&(va, _)) = self.watch_ranges.iter()
-                    .find(|&&(va, len)| w.ipa < va + len && va < end)
+                if let Some(&(va, _)) = self.watch_ranges.iter().find(|&&(va, len)| {
+                    // M6: translate the armed VA through the guest's own tables (identity when the
+                    // MMU is off); an unmapped VA translates to None and cannot match.
+                    self.va_to_ipa(va).is_some_and(|ipa| w.ipa < ipa + len && ipa < end)
+                })
                 {
                     self.syscall_watch_hit = Some((va, w.ipa));
                 }
@@ -1765,6 +1768,45 @@ impl Box_ {
             }
         }
         None
+    }
+
+    /// Read-only stage-1 walk of the guest's OWN page tables: VA -> IPA. MMU off => identity.
+    /// None if unmapped at any level or beyond the 47-bit VA space — an unmapped VA cannot be
+    /// the destination of an applied syscall write, so the watch check treats None as no-match.
+    /// (Today every retrace mapping is identity; this makes the software watch check sound by
+    /// construction rather than by that accident. M6.)
+    ///
+    /// The index shifts mirror `build_tables` exactly: TCR_EL1.T0SZ=17 (47-bit VA) + 16 KiB granule
+    /// is a 3-level walk of 2048-entry tables — L1 [46:36] (one entry per 64 GiB), L2 [35:25] (one
+    /// per `BLK` = 32 MiB), L3 [24:14] (one per `GRANULE`). With a 16 KiB granule a BLOCK descriptor
+    /// is architecturally permitted only at L2, so L1 must be a table.
+    ///
+    /// TBI0 is set in `TCR_EL1_V`, but this walk does NOT strip a top-byte tag: a tagged VA has
+    /// bits above 47 and returns None. Conservative (a spurious no-match, never a spurious match),
+    /// and no caller produces one — the debugger's `watch` takes a plain address.
+    pub fn va_to_ipa(&self, va: u64) -> Option<u64> {
+        const PT_ADDR: u64 = 0x0000_FFFF_FFFF_C000; // descriptor output-address bits 47:14
+        let sctlr = self.vcpu.get_sys(sysreg::SCTLR_EL1).unwrap();
+        if sctlr & 1 == 0 { return Some(va); }
+        if va >> 47 != 0 { return None; }
+        let l1e = self.pt_entry(PT_L1_IPA, (va >> 36) & 0x7FF)?;
+        if l1e & 0x3 != DESC_TABLE { return None; }
+        let l2e = self.pt_entry(l1e & PT_ADDR, (va >> 25) & 0x7FF)?;
+        match l2e & 0x3 {
+            DESC_BLOCK => Some((l2e & PT_ADDR & !(BLK - 1)) | (va & (BLK - 1))),
+            DESC_TABLE => {
+                let l3e = self.pt_entry(l2e & PT_ADDR, (va >> 14) & 0x7FF)?;
+                if l3e & 0x3 != DESC_PAGE { return None; }
+                Some((l3e & PT_ADDR) | (va & (GRANULE as u64 - 1)))
+            }
+            _ => None,
+        }
+    }
+
+    /// One 64-bit descriptor from a guest page table (None if the table page is not backed).
+    fn pt_entry(&self, table_ipa: u64, idx: u64) -> Option<u64> {
+        let bytes = self.read_guest_checked(table_ipa + idx * 8, 8)?;
+        Some(u64::from_le_bytes(bytes.try_into().unwrap()))
     }
 
     /// Capture all backings + architectural registers as an Event::Snapshot.
