@@ -1021,3 +1021,119 @@ The M5 fast-follow closed the final review's M-1: `cmd_continue`'s pre-step now 
 with watches armed, so a syscall write to a watched range in the crossed event is reported rather than
 silently skipped (new golden-transcript test `pre_step_boundary_cross_reports_a_watched_syscall_write` in
 `crates/retrace/tests/watch_cli.rs`), taking the gate from 120 to **121 passed, 0 failed, 0 ignored**.
+
+## Status: M6 — crash recording & reverse-continue-to-the-bug ✅ (the M6 headline gate is GREEN)
+
+**The idea — a crash is a recorded, replayed, seekable stop, not a retrace error.** Through M5, a guest
+synchronous fault (wild pointer, NULL deref, jump to garbage) was indistinguishable from a retrace bug: it
+surfaced as the generic `Stop::Other` diagnosis bucket, the dispatch tried to page it in, failed, and aborted
+the run with an "unexpected stop" error. Nothing about the crash entered the trace, and there was no position
+"at the crash" to seek to. M6 gives guest faults a real, deterministic identity: **stage-1 EL0 data/instruction
+aborts become `Stop::Fault { pc, esr, far }`** (`retrace-box/src/lib.rs`), recorded as a terminal
+`Event::Crash { pc, esr, far }` (`retrace-trace/src/lib.rs`, `TRACE_MAGIC` bumped `0x03 → 0x04`) and
+byte-verified on replay — exactly like `Exit`, just a different terminal shape. `RecordSummary` and
+`ReplayReport` both gain a shared `Outcome { Exit { code }, Crash { pc, esr, far } }` (`retrace-core/src/lib.rs`)
+in place of a bare exit code, and `record` / `record-dyn` / `replay` all print `guest crashed: pc=… far=… esr=…`
+and exit **139** (128 + SIGSEGV) on a crash outcome — recording a crash is a *successful recording*, and a
+verified crash replay is a *successful replay*, not a failure path.
+
+**The two abort funnels stay exactly as distinct as they already were.** `retrace-box/src/lib.rs`'s `run()`
+and `run_one_for_step` route a guest EL0 exception through the EL1 trampoline's `Ec::Hvc` arm (*inner*, decoded
+from `ESR_EL1`); the below-the-trace demand paths — shared-cache page-in, reserved-page commit, and the
+fail-loud wild-store negative — arrive as the *outer* `Ec::DataAbort` arm, decoded from the VMM's own
+`ESR_EL2`. M6 adds exactly one new inner arm: `Ec::DataAbort | Ec::InstrAbort` (the latter new to
+`retrace-arch`, decoded from EC `0x20|0x21`) with the lower-EL form of the EC (bit 0 clear) → `Stop::Fault`,
+capturing `far = FAR_EL1` and `pc = ELR_EL1` (the vCPU's own PC at the HVC exit is the trampoline; the faulting
+EL0 instruction's address is in `ELR_EL1`). A **same-EL** abort — the trampoline faulting on itself — still
+falls through to the fail-loud `Stop::Other` path unchanged: that is a retrace bug, not a guest crash, and M6
+does not touch it. The outer funnel is **completely untouched**: `asm/wildstore.s`'s store to an unbacked,
+unreserved IPA still stays fatal (`wild_store_outside_any_reservation_stays_fatal`,
+`crates/retrace-box/tests/reservecommit.rs`) — an unclaimed stage-2 abort is deliberately *not* reclassified as
+a crash (see Deferred). The divergence oracle extends rather than weakens: replay's `Stop::Fault` arm requires
+the next recorded event to be `Crash` with a byte-identical `(pc, esr, far)` triple, or the run diverges loudly
+(`crates/retrace-core/tests/crash.rs`'s `perturbed_crash_triple_is_a_loud_divergence` rewrites a recorded
+`Crash` event via `Writer` — a valid CRC, so the comparison itself is what catches it, not a checksum failure).
+`checkpointed_seek` and `retrace debug` treat a crash as an ordinary terminal `(N, K)` position exactly like
+`Exit` — both route through the single `Advance::Exited(ReplayReport)` variant, discriminated by
+`ReplayReport.outcome`, rather than a second `Advance` variant (a deliberate simplification over the design
+spec's sketch of a dedicated `Advance::Crashed`).
+
+**Parking *at* the fault, not at the crash window's start.** `retrace debug`'s `continue` reaching a crash
+parks at `(C, K_f)` — `C` the crash's landmark, `K_f` the count of instructions that *did* retire before the
+never-retiring faulting instruction (`Exec::park_at_terminal`, `crates/retrace/src/debug.rs`) — so `pc()` is
+the fault pc itself and the position orders **after every write in the recording**. That ordering is what
+makes "run backward from the corpse to the bug" possible at all: the TDD RED for this (`crashy_cli.rs`) showed
+parking at the window's *start* instead makes the corrupting store not-yet-earlier-than-P, so
+`reverse-continue` reports the wrong (older) hit and the demo's byte-flip proof goes vacuous.
+
+**The VA→IPA walker — sound by construction, not accidentally correct.** M5's software watch check compared
+an armed **VA** against a recorded write's **IPA** directly — exact only for the identity-mapped static guests
+that were M5's entire test surface, and silently wrong on any MMU-on guest. `Box_::va_to_ipa`
+(`retrace-box/src/lib.rs`) is a read-only 3-level walk of the guest's *own* stage-1 tables (MMU off → identity;
+unmapped at any level → `None`), and the watch intersection now translates the armed VA at check time before
+comparing IPAs. **This changes no currently-passing or currently-failing case** — every guest mapping in this
+repo today is identity (VA == IPA), verified by a mutation check (`crates/retrace-box/tests/vaipa.rs`: shifting
+the walker's L2 index by four bits breaks both tests, proving they constrain the walk rather than passing
+vacuously against a pass-through stub). What's genuinely new is that the fix is no longer *incidentally* right:
+`crates/retrace/tests/watch_dyn.rs` proves a syscall-write watch fires correctly on a real MMU-on dynamic guest
+(`crashy`'s `fstat(1, &g.st)`, a kernel write into a watchable global) — the deferred M5 proof, now real.
+
+**The demo — `crashy.c`, the whole point of the milestone.** `crates/retrace-guest/c/crashy.c`, built through
+real `/usr/lib/dyld` exactly like `hello_dyn`: it calls `fstat`, writes a `"CRASHY:"` marker plus two
+address-reveal writes (so tests discover `&g.st`/`&g.ptr` from the trace, never hardcoded), then runs a
+volatile off-by-one loop — `for (i = 0; i <= 4; i++) p[i] = GARBAGE_VA` over a 4-long buffer that directly
+precedes `g.ptr` in memory — so the *fifth* iteration overwrites `g.ptr` itself with an unmapped garbage
+constant. The next store through `*g.ptr` takes a stage-1 EL0 data abort with `FAR == GARBAGE_VA`. The
+headline script is entirely existing machinery pointed at this fixture:
+
+```
+continue                        # parks AT the fault: pc=<the faulting str>, far=0x4000dead0000
+where                            # (C, K_f) — the crash position
+watch 0x<&g.ptr>                 # arm a hardware write-watchpoint on the corrupted pointer
+reverse-continue                 # walks BACKWARD from the crash to the planted off-by-one store
+x 0x<&g.ptr> 8                   # still &g.buf[0] — pre-retire, the store hasn't happened yet
+stepi                            # retire the one instruction that corrupts the pointer
+x 0x<&g.ptr> 8                   # now reads GARBAGE_VA — the bug, caught in the act
+```
+
+The debugger finds the corrupting write starting **only** from the crash, with no forward knowledge of where
+the bug is — that's the reverse-debugging story this whole milestone exists to prove.
+
+**The headline gate — `crash_demo_end_to_end`, `crates/retrace/tests/crashy_e2e.rs`.** One test, the whole
+story: `record-dyn` of `CRASHY` reports the crash outcome and exit 139; `replay` verifies the trace bit-for-bit
+**twice** (a genuine double pass, run as two separate `cargo test -- --ignored` invocations before the
+`#[ignore]` was removed, per house honest-gate discipline); the scripted demo above runs against the fresh
+trace. The proof is deliberately **semantic, not a string match**: it asserts exactly two `x`-dump lines exist
+(closing a vacuous-filter hole), that the *first* does **not** contain `GARBAGE_VA`'s little-endian bytes and
+the *second* **does** — a value-flip that only the aliasing store can produce, with every address and byte
+discovered from the trace and the fixture's own source constant, never a coordinate copied out of a hand run.
+
+**The final tally.** `just gate` (full workspace `cargo test` + `cargo clippy --workspace --all-targets -- -D
+warnings`, run fresh for this task): **136 passed, 0 failed, 0 ignored**, clippy clean. New this milestone: the
+`Ec::InstrAbort` decode test (`retrace-arch`), `Event::Crash` roundtrip/torn-tail/version-reject tests
+(`retrace-trace`), `crates/retrace-core/tests/crash.rs`'s three record/replay/divergence tests, `crashy.c` +
+`crashy_e2e.rs`'s two fixture tests, `vaipa.rs`'s two walker tests, `watch_dyn.rs`'s dynamic-guest syscall-watch
+proof, `crashy_cli.rs`'s two golden crash transcripts, and this section's headline gate. (A pre-existing,
+M6-unrelated gate failure — `cache_pager::page_in_cache_data_resigns_auth_pointer_that_authenticates` FPAC-faulting
+because the host's dyld shared cache moved past the worked example `cache_pager.rs` pinned — was diagnosed
+during M6 and fixed by re-deriving the three constants independently from the current cache's own bytes; see
+`spikes/cacheprobe.c` and its README. Not a crash-recording change, but why this milestone's tally is a clean
+136/0/0 rather than 135/1/0.) See `docs/superpowers/specs/2026-07-19-retrace-m6-crash-design.md`.
+
+**Deferred, carried forward as the next boundaries:**
+
+- **Signal delivery.** The guest's `sigaction` handlers never run — a fault is terminal, matching rr's default
+  disposition for fatal signals. `sigaction`/`sigaltstack` *calls* keep recording as ordinary forwarded
+  syscalls; only their handlers being invoked on a real fault is out of scope.
+- **Unclaimed stage-2 aborts stay fatal errors, deliberately.** `asm/wildstore.s`'s semantics are unchanged: a
+  use-after-free store into a deallocated carveout hole still manifests as an outer stage-2 abort and kills the
+  run loudly instead of recording a crash. Promoting it would let a genuine retrace IPA bug masquerade as a
+  guest crash; revisiting needs a reservations-aware classifier that M6 does not build.
+- **`rwatch`/`awatch`**, watch ranges wider than 8 bytes, and old→new value printing on a hit — all present in
+  M5's own deferred list, unchanged by M6 (the VA→IPA fix makes the existing write-watch sound on MMU-on
+  guests; it adds no new watch capability).
+- arm64e guests, threads (`Sched` stays unused), and open-sourcing work — unchanged from M5.
+- **The breadth ladder — C → Rust → brew jq — is the explicit next-milestone arc**, per the design spec's
+  framing: M6 proves the crash story on one hand-planted arm64 C bug; the next milestones widen the guest
+  surface (a self-built Rust binary, then a real Homebrew-packaged tool) rather than adding debugger
+  capability, to find out what breaks when the guest is no longer a fixture written for this project.
