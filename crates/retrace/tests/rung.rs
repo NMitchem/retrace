@@ -27,7 +27,16 @@ fn the_rung_assertion_rejects_a_recorded_crash() {
         util::assert_rung_records_and_replays(retrace_guest::CRASHY, b"unreachable\n");
     });
     std::panic::set_hook(prev);
-    assert!(outcome.is_err(),
-        "the rung assertion MUST reject a guest that crashed in dyld — crashy records and replays \
-         bit-for-bit, so an agreement-only gate would pass it");
+    let payload = match outcome {
+        Ok(()) => panic!("the rung assertion ACCEPTED a recorded crash — the discriminator is gone"),
+        Err(e) => e.downcast_ref::<String>().cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_else(|| "<non-string panic payload>".to_string()),
+    };
+    // Pin WHICH assertion rejected it. crashy's stdout ("CRASHY:" + 16 raw address bytes) also
+    // differs from expect_stdout, so the stdout check is redundant fallback coverage: without this
+    // assertion, deleting the exit-code discriminator entirely would still leave this test green.
+    assert!(payload.contains("clean exit(0)"),
+        "the rung assertion must reject a crash ON THE EXIT CODE — the discriminator — not \
+         incidentally on a stdout mismatch. Got panic payload:\n{payload}");
 }
