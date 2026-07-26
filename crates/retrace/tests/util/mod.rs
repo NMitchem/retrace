@@ -71,3 +71,34 @@ pub fn discover_crashy_addrs(trace: &std::path::Path) -> (u64, u64) {
     }
     panic!("CRASHY: marker write not found in trace");
 }
+
+/// What a breadth-ladder rung guest yielded once it PROVED IT RAN.
+pub struct RungOut { pub trace: std::path::PathBuf, pub stdout: Vec<u8> }
+
+/// The breadth-ladder rung assertion: record `guest` through real dyld, then replay it twice.
+///
+/// Demands a **clean exit 0 with exactly `expect_stdout`** — not merely that record and replay
+/// agree. M6's convention makes a recorded crash a successful recording and a verified crash replay
+/// a successful replay (both exit 139), so an agreement-only check is satisfied by a guest that died
+/// inside dyld having executed none of its own code. `code == 0` is the discriminator: under M6 a
+/// crash outcome always exits 139, so only a guest that reached its own `exit(0)` can pass, and the
+/// stdout equality proves it got far enough to produce output.
+///
+/// Panics with a diagnostic on any failure — it is an assertion helper, and `tests/rung.rs` pins
+/// both polarities.
+pub fn assert_rung_records_and_replays(guest: &str, expect_stdout: &[u8]) -> RungOut {
+    let (rec, trace) = record_dynamic(guest);
+    assert_eq!(rec.code, 0,
+        "rung guest must reach a clean exit(0); 139 means it CRASHED (M6 records that as a \
+         successful recording, which is exactly what this assertion exists to reject). stderr:\n{}",
+        rec.stderr);
+    assert_eq!(rec.stdout, expect_stdout,
+        "rung guest stdout mismatch — did it reach main? got {:?}, want {:?}",
+        String::from_utf8_lossy(&rec.stdout), String::from_utf8_lossy(expect_stdout));
+    for i in 0..2 {
+        let rep = replay(&trace);
+        assert_eq!(rep.code, 0, "replay {i} must exit 0. stderr:\n{}", rep.stderr);
+        assert_eq!(rep.stdout, rec.stdout, "replay {i} stdout diverged from the recording");
+    }
+    RungOut { trace, stdout: rec.stdout }
+}
