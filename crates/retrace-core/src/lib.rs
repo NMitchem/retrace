@@ -36,7 +36,12 @@ fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64) {
     else                  { (args[1], args[2], args[3], 0x3 /*RW*/) } // allocate: always RW anon
 }
 
-pub struct RecordSummary { pub stdout: Vec<u8>, pub exit_code: u64, pub events: usize }
+/// How a recorded (or replayed) run ended: a clean exit, or a guest synchronous fault (M6). The
+/// triple is deterministic — identical guest state faults identically — so replay byte-compares it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome { Exit { code: u64 }, Crash { pc: u64, esr: u64, far: u64 } }
+
+pub struct RecordSummary { pub stdout: Vec<u8>, pub outcome: Outcome, pub events: usize }
 
 pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<RecordSummary, String> {
     record_box(Box_::load(loaded), trace_path)
@@ -55,7 +60,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
     w.append(&b.snapshot()).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
 
     let mut stdout = Vec::new();
-    let exit_code;
+    let outcome;
     // Bring-up diagnostic (RETRACE_TRACE=1): log every trap the record loop dispatches, so a
     // forwarded syscall/mach-trap that misbehaves is identifiable from the last line printed.
     let trace_log = std::env::var_os("RETRACE_TRACE").is_some();
@@ -92,7 +97,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 let final_snap = b.snapshot();          // final-memory landmark
                 w.append(&Event::Exit { code: args[0] }).map_err(|e| format!("append exit: {e}"))?; count += 1;
                 w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
-                exit_code = args[0];
+                outcome = Outcome::Exit { code: args[0] };
+                break;
+            }
+            // M6: a stage-1 guest fault ends the recording as a CRASH — a successful recording
+            // (mirror: replay's crash verify in advance()). Same terminal shape as exit:
+            // Event::Crash, then the final full-memory snapshot.
+            Stop::Fault { pc, esr, far } => {
+                let final_snap = b.snapshot();
+                w.append(&Event::Crash { pc, esr, far }).map_err(|e| format!("append crash: {e}"))?; count += 1;
+                w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
+                outcome = Outcome::Crash { pc, esr, far };
                 break;
             }
             // Console writes are mirrored + faked (NOT forwarded) so record doesn't emit to the
@@ -363,11 +378,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             Stop::Step => unreachable!("record_box drives run(), which never single-steps"),
         }
     }
-    Ok(RecordSummary { stdout, exit_code, events: count })
+    Ok(RecordSummary { stdout, outcome, events: count })
 }
 
 #[derive(Debug)]
-pub struct ReplayReport { pub stdout: Vec<u8>, pub exit_code: u64 }
+pub struct ReplayReport { pub stdout: Vec<u8>, pub outcome: Outcome }
 #[derive(Debug)]
 pub struct Divergence { pub landmark: usize, pub pc: u64, pub detail: String }
 
@@ -402,10 +417,10 @@ impl std::fmt::Debug for ReplaySession {
 }
 
 /// The outcome of one `advance`: exactly one trace event was consumed (`Event`); the guest reached
-/// `exit` and the final-memory landmark verified clean (`Exited`, run done); or a hardware
-/// breakpoint fired mid-window (`Break`, M3 debugger only — carries nothing: the caller reads
-/// `landmark()`/`pc()`). `Break` is unreachable under the plain `replay()` oracle, which never
-/// arms breakpoints.
+/// a terminal outcome — a normal `exit` OR a crash — carrying the `ReplayReport` whose `outcome`
+/// field discriminates which (`Exited`, run done); or a hardware breakpoint fired mid-window
+/// (`Break`, M3 debugger only — carries nothing: the caller reads `landmark()`/`pc()`). `Break` is
+/// unreachable under the plain `replay()` oracle, which never arms breakpoints.
 pub enum Advance { Event, Exited(ReplayReport), Break, Watch, WatchSyscall { watched: u64 } }
 
 impl ReplaySession {
@@ -440,11 +455,13 @@ impl ReplaySession {
         Ok(Advance::Event)
     }
 
-    /// Consume exactly ONE trace event (returning `Advance::Event`), or drive the guest to `exit`
-    /// (returning `Advance::Exited`). Non-event stops — a cache-window page-in or a reservation
-    /// commit — are handled internally and the guest re-run, so `advance` returns only on event
-    /// consumption or exit. Once it has returned `Advance::Exited` the run is complete; calling
-    /// `advance` again is unspecified (the guest is past its final landmark) — callers must not.
+    /// Consume exactly ONE trace event (returning `Advance::Event`), or drive the guest to a
+    /// terminal outcome — `exit` OR a crash — (returning `Advance::Exited`, carrying the
+    /// `ReplayReport` whose `outcome` field discriminates which). Non-event stops — a cache-window
+    /// page-in or a reservation commit — are handled internally and the guest re-run, so `advance`
+    /// returns only on event consumption or a terminal outcome. Once it has returned
+    /// `Advance::Exited` the run is complete; calling `advance` again is unspecified (the guest is
+    /// past its final landmark) — callers must not.
     pub fn advance(&mut self) -> Result<Advance, Divergence> {
         loop {
             match self.b.run() {
@@ -464,7 +481,8 @@ impl ReplaySession {
                                             return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
                                         }
                                         return Ok(Advance::Exited(ReplayReport {
-                                            stdout: std::mem::take(&mut self.stdout), exit_code: *code }));
+                                            stdout: std::mem::take(&mut self.stdout),
+                                            outcome: Outcome::Exit { code: *code } }));
                                     }
                                     other => return Err(Divergence { landmark: self.idx + 1, pc,
                                         detail: format!("expected final memory Snapshot, got {other:?}") }),
@@ -658,6 +676,32 @@ impl ReplaySession {
                             detail: format!("expected recorded syscall, got {other:?} (truncated={})", self.truncated) }),
                     }
                 }
+                Stop::Fault { pc, esr, far } => {
+                    // M6 mirror of record's crash arm. The triple compare IS the divergence check
+                    // (symmetry rule 1); then the final-memory landmark, exactly like Exit.
+                    match self.events.get(self.idx) {
+                        Some(Event::Crash { pc: rpc, esr: resr, far: rfar }) => {
+                            if pc != *rpc || esr != *resr || far != *rfar {
+                                return Err(Divergence { landmark: self.idx, pc,
+                                    detail: format!("crash mismatch: live (pc={pc:#x}, esr={esr:#x}, far={far:#x}) != recorded (pc={rpc:#x}, esr={resr:#x}, far={rfar:#x})") });
+                            }
+                            match self.events.get(self.idx + 1) {
+                                Some(Event::Snapshot { mem: final_mem, .. }) => {
+                                    if let Some(d) = self.b.diff_memory(final_mem) {
+                                        return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
+                                    }
+                                    return Ok(Advance::Exited(ReplayReport {
+                                        stdout: std::mem::take(&mut self.stdout),
+                                        outcome: Outcome::Crash { pc, esr, far } }));
+                                }
+                                other => return Err(Divergence { landmark: self.idx + 1, pc,
+                                    detail: format!("expected final memory Snapshot after Crash, got {other:?}") }),
+                            }
+                        }
+                        other => return Err(Divergence { landmark: self.idx, pc,
+                            detail: format!("expected recorded Crash, got {other:?} (live fault: pc={pc:#x} far={far:#x})") }),
+                    }
+                }
                 Stop::Other { esr } => {
                     // A hardware breakpoint (M3 debugger `continue`/scan) delivers here with an
                     // ESR_EL2 breakpoint class; surface it as `Advance::Break` BEFORE the fault
@@ -782,6 +826,10 @@ impl ReplaySession {
                     // window-ending trap is left unconsumed (the guest stays parked at it).
                     Stop::Syscall { .. } => return Err(format!(
                         "window {} ends after {done} instruction(s); cannot step {k}", self.idx)),
+                    // step_insns: stepping INTO the crash — the instruction never retires; the
+                    // session stays parked immediately before it.
+                    Stop::Fault { pc, esr: _, far } => return Err(format!(
+                        "guest crashed at step {done}/{k}: pc={pc:#x} far={far:#x}")),
                 }
             }
         }
@@ -803,6 +851,9 @@ impl ReplaySession {
                     return Err(format!("fault at step {n}: {}", self.b.describe_stop(esr)));
                 }
                 Stop::Syscall { .. } => return Ok(n),
+                // window_len_here: the crash ENDS the final window — its length is the count of
+                // retired instructions before the fault (the fault itself never retires).
+                Stop::Fault { .. } => return Ok(n),
             }
         }
     }

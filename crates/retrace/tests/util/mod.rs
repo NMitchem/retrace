@@ -53,3 +53,21 @@ pub fn record_dynamic(guest: &str) -> (RunOut, std::path::PathBuf) {
     let out = run(&["record-dyn", guest, "-o", trace.to_str().unwrap()]);
     (out, trace)
 }
+
+/// (&g.st, &g.ptr) of the crashy.c fixture, discovered from the recorded marker convention —
+/// see c/crashy.c's header comment. Shared by crashy_e2e / watch_dyn / crashy_cli.
+pub fn discover_crashy_addrs(trace: &std::path::Path) -> (u64, u64) {
+    let events = retrace_trace::Reader::open(trace).unwrap();
+    let mut it = events.iter().filter_map(|e| match e {
+        retrace_trace::Event::Syscall { num: 4, args, .. } if args[0] == 1 => Some(*args),
+        _ => None,
+    });
+    while let Some(a) = it.next() {
+        if a[2] == 7 { // the "CRASHY:" marker write
+            let st = it.next().expect("&g.st reveal write")[1];
+            let ptr = it.next().expect("&g.ptr reveal write")[1];
+            return (st, ptr);
+        }
+    }
+    panic!("CRASHY: marker write not found in trace");
+}

@@ -11,7 +11,7 @@ fn replay_reproduces_recording_with_zero_divergence() {
     let trace = record_hello();
     let r = retrace_core::replay(&trace).expect("replay must not diverge");
     assert_eq!(r.stdout, b"hello\n");
-    assert_eq!(r.exit_code, 0);
+    assert_eq!(r.outcome, retrace_core::Outcome::Exit { code: 0 });
 }
 #[test]
 fn tampered_syscall_arg_is_caught_as_divergence() {
@@ -63,7 +63,7 @@ fn fileio_replays_identically_even_after_fixture_deleted() {
     std::fs::write(retrace_guest::FIXTURE, b"retrace-m1-fixture\n").unwrap();
     let r = result.expect("replay must not diverge");
     assert_eq!(r.stdout, b"retrace-m1-fixture\n");
-    assert_eq!(r.exit_code, 0);
+    assert_eq!(r.outcome, retrace_core::Outcome::Exit { code: 0 });
 }
 #[test]
 fn tampered_read_write_is_caught_by_final_memory() {
