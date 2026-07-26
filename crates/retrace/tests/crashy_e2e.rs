@@ -1,5 +1,5 @@
-// M6 CLI crash surfaces. Static guests here; the dynamic crashy.c path lands in Task 3 and the
-// #[ignore]d headline gate in Task 6.
+// M6 CLI crash surfaces. Static guests here; the dynamic crashy.c path lands in Task 3, and the
+// headline gate (`crash_demo_end_to_end`, below) landed in Task 6 — un-ignored, not #[ignore]d.
 mod util;
 
 #[test]
