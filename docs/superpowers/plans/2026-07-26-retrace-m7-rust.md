@@ -527,17 +527,20 @@ the recommended route (rule 1 vs rule 2) **with the reason**; the blast radius (
 `cache.rs`'s re-signer, or `mach_vm_protect`'s servicing, or something else — and which existing tests
 guard it); and whether the defect looks like one pointer or a whole class (spec risk R4).
 
-- [ ] **Step 7: Commit the diagnosis**
+- [ ] **Step 7: No commit — this task produces no tracked files**
+
+`.superpowers/` is git-ignored in this repo, so there is deliberately **nothing to commit** for this
+task. Do not run `git commit` (with an empty index it exits non-zero and looks like a failure), and do
+not `git add -f` the diagnosis to force it into history — the SDD workspace is scratch by design.
+
+Instead, verify the tree is clean and report the diagnosis in full:
 
 ```bash
-git add .superpowers/sdd/2026-07-26-retrace-m7-rust/diagnosis.md 2>/dev/null || true
-git commit -m "M7 t5: diagnosis of the PAC-garbled branch in dyld
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+git status --porcelain   # expect: only the untracked .superpowers/ line
 ```
 
-Note: `.superpowers/` is git-ignored in this repo, so this commit may be empty — that is fine, the
-diagnosis lives in the SDD workspace and its content goes in the task report either way.
+Your task report **is** the deliverable for this task. Copy the diagnosis's findings and the route
+recommendation into it verbatim, so the conclusion survives even if the workspace is cleaned.
 
 ---
 
