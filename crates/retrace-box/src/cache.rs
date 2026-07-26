@@ -686,7 +686,10 @@ mod tests {
 
     #[test]
     fn decodes_spike_auth_slot() {
-        // From cacheprobe.c: .02.dylddata DATA page1 off 0x22d0
+        // From cacheprobe.c: .02.dylddata DATA page1 off 0x22d0 — historic worked example from an
+        // older cache build (see cache_pager.rs's provenance comment for the live one). This test
+        // decodes a fixed raw descriptor literal and checks arithmetic on it, cache-independent,
+        // so it does not need re-deriving.
         let p = decode5(0x801dab846c2f15c8);
         assert!(p.auth && p.key_is_data /*DA*/ && p.addr_div);
         assert_eq!(p.runtime_offset, 0x6c2f15c8);

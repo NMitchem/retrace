@@ -98,6 +98,7 @@ pub const EXECMAP: &str = concat!(env!("OUT_DIR"), "/execmap");
 pub const EXECMAP_FIXTURE: &str = concat!(env!("OUT_DIR"), "/execmap_fixture.bin");
 pub const MACHMSG: &str = concat!(env!("OUT_DIR"), "/machmsg");
 pub const HELLO_DYN: &str = concat!(env!("OUT_DIR"), "/hello_dyn");
+pub const CRASHY: &str = concat!(env!("OUT_DIR"), "/crashy");
 pub const DYLD_PATH: &str = "/usr/lib/dyld";
 pub const STRIP47: &str = concat!(env!("OUT_DIR"), "/strip47");
 pub const BFAMSTRIP: &str = concat!(env!("OUT_DIR"), "/bfamstrip");
@@ -106,6 +107,8 @@ pub const WILDSTORE: &str = concat!(env!("OUT_DIR"), "/wildstore");
 pub const CARVEOUT: &str = concat!(env!("OUT_DIR"), "/carveout");
 pub const SPINLOOP: &str = concat!(env!("OUT_DIR"), "/spinloop");
 pub const WATCHLOOP: &str = concat!(env!("OUT_DIR"), "/watchloop");
+pub const CRASH: &str = concat!(env!("OUT_DIR"), "/crash");
+pub const CRASHJMP: &str = concat!(env!("OUT_DIR"), "/crashjmp");
 
 #[cfg(test)]
 mod tests {

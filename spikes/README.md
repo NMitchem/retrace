@@ -83,21 +83,38 @@ $ DYLD_SHARED_REGION=private ./dscprobe # &printf OUTSIDE — PRIVATE mapping   
 
 ## `cacheprobe.c` — shared-cache slide/fixup format dump (M2 re-signing spike)
 
-Pure host file parse (no HVF, no cache mmap — safe). Parses each subcache's `dyld_cache_header`,
-the `mapping_and_slide` entries, the slide-info blob, and **decodes real fixup slots by hand**,
-then walks every chain:
+Pure host file parse (no HVF, no cache mmap — safe, and no entitlement/codesign needed). Parses each
+subcache's `dyld_cache_header` (including its **`uuid`**, which names the cache build), the
+`mapping_and_slide` entries, the slide-info blob, and **decodes real fixup slots by hand**, then
+walks every chain:
+
+```sh
+clang -O2 -o cacheprobe cacheprobe.c && ./cacheprobe
+```
 
 ```
 offsetof mappingWithSlideOffset=0x138 (expect 0x138) ...
-slide-info: version=5 page_size=16384 page_starts_count=... value_add=0x180000000
-[ 0] AUTH raw=0x801dab846c2f15c8 roff=0x6c2f15c8 div=0x6ae1 addrDiv=1 key=DA next=1
-SCANNED 7876 fixup pages: 9476030 slots (3713323 auth, 39.2%), max 2048/page
+   uuid=157E6D2E-2E5C-39B1-8F2A-8866EE228BED
+    slide-info: version=5 page_size=16384 page_starts_count=1543 value_add=0x180000000
+    page[1] fileOff=0x4b68000 vmAddr=0x1ec46c000 start=0x22e0
+      [ 0] @0x22e0 AUTH raw=0x801dab846c6f1a88 roff=0x06c6f1a88 div=0x6ae1 addrDiv=1 key=DA next=1
+           => @slide0: slotVA=0x1ec46e2e0 targetVA=0x1ec6f1a88 key=DA modifier=blend(0x1ec46e2e0,0x6ae1)
+    SCANNED 7888 fixup pages: 9487510 slots total (3719584 auth, 39.2%), avg 1202.8 slots/page, max 2048/page
 ```
 
-Findings (this host, Tahoe/arm64e): **all 14 slide regions are v5, 16 KiB pages,
-`value_add=0x180000000`**; auth pointers use **A-family keys only** (IA/DA); every fixup chain is
+Findings (Tahoe/arm64e; the output above re-captured on macOS 26.5.2 / 25F84 against the cache dated
+2026-06-25): **every slide region is v5** (13 of them on that build), 16 KiB pages,
+`value_add=0x180000000`; auth pointers use **A-family keys only** (IA/DA); every fixup chain is
 **self-contained within its page** (0 cross-page chains over ~27M slots walked). Full decode
 formulas + a worked example are in `.superpowers/sdd/m2cache-spike-findings.md`.
+
+**Re-deriving `cache_pager.rs`'s worked example.** `crates/retrace-box/tests/cache_pager.rs` pins one
+real auth slot (`DATA_SLOT_IPA` / `DATA_TARGET` / `DATA_DIVERSITY`) as a ground truth for the
+re-signer, derived here rather than from `cache.rs`'s own walk — that independence is what makes the
+assertion an oracle. Those constants are **cache-build-specific**: when the host cache moves, the
+test FPAC-faults (`sign stub faulted at EL0: ESR_EL1 EC=Other(28)`). To re-derive, run `cacheprobe`
+and pick any `AUTH ... addrDiv=1 key=DA` slot; its `@slide0:` line prints `slotVA`, `targetVA` and
+the diversity — exactly the three constants — and the `uuid=` line names the build to document.
 
 ## `pacsign.c` — guest signing-oracle proof (M2 re-signing spike)
 

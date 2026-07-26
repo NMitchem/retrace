@@ -2,7 +2,7 @@
 // watchloop's write(1, target, 8) publishes `target` in the recorded syscall args.
 mod util;
 use std::path::Path;
-use retrace_core::{Advance, ReplaySession};
+use retrace_core::{Advance, Outcome, ReplaySession};
 
 /// `target`'s guest VA, from the recorded write(1, target, 8): the first fd-1 write's args[1].
 fn discover_target(trace: &Path) -> u64 {
@@ -47,7 +47,7 @@ fn watch_on_untouched_bytes_never_fires() {
     loop {
         match s.advance().unwrap() {
             Advance::Event => continue,
-            Advance::Exited(report) => { assert_eq!(report.exit_code, 0); break; }
+            Advance::Exited(report) => { assert_eq!(report.outcome, Outcome::Exit { code: 0 }); break; }
             _ => panic!("watchpoint fired on untouched bytes"),
         }
     }
@@ -113,7 +113,7 @@ fn syscall_write_to_watched_buf_is_reported_and_replay_completes() {
         match s.advance().unwrap() {
             Advance::Event => continue,
             Advance::Exited(report) => {
-                assert_eq!(report.exit_code, 0);
+                assert_eq!(report.outcome, Outcome::Exit { code: 0 });
                 assert_eq!(report.stdout, b"retrace-m1-fixture\n".to_vec());
                 break;
             }

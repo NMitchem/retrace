@@ -92,8 +92,8 @@ static void *slurp(int fd, uint64_t off, uint64_t len){
     void *p = malloc(len); if(!p) return NULL;
     if (pread(fd, p, len, off) != (ssize_t)len){ free(p); return NULL; } return p; }
 
-// Decode + print one v3 slide pointer slot.
-static uint32_t decode_v3(uint64_t raw, uint64_t value_add, int idx){
+// Decode + print one v3 slide pointer slot. `slotVA` is the slot's own VA at slide 0.
+static uint32_t decode_v3(uint64_t raw, uint64_t value_add, int idx, uint64_t slotVA, uint32_t off){
     uint32_t authenticated = (raw >> 63) & 1;
     uint32_t next          = (raw >> 51) & 0x7FF;   // offsetToNextPointer (8-byte units)
     if (authenticated){
@@ -102,19 +102,23 @@ static uint32_t decode_v3(uint64_t raw, uint64_t value_add, int idx){
         uint32_t adiv  = (raw >> 48) & 1;           // hasAddressDiversity
         uint32_t key   = (raw >> 49) & 3;           // 0=IA 1=IB 2=DA 3=DB
         const char *kn[4]={"IA","IB","DA","DB"};
-        printf("      [%2d] AUTH raw=0x%016" PRIx64 " off=0x%08x div=0x%04x addrDiv=%u key=%s next=%u\n",
-               idx, raw, off32, div, adiv, kn[key], next);
-        printf("           => targetUnslidVA = base + 0x%08x (+value_add 0x%" PRIx64 ")\n", off32, value_add);
+        printf("      [%2d] @0x%04x AUTH raw=0x%016" PRIx64 " off=0x%08x div=0x%04x addrDiv=%u key=%s next=%u\n",
+               idx, off, raw, off32, div, adiv, kn[key], next);
+        printf("           => @slide0: slotVA=0x%" PRIx64 " targetVA = base + 0x%08x (+value_add 0x%" PRIx64 ")\n",
+               slotVA, off32, value_add);
     } else {
         uint64_t pv = raw & 0x7FFFFFFFFFFFF;         // pointerValue (51 bits)
-        printf("      [%2d] PLAIN raw=0x%016" PRIx64 " pointerValue=0x%013" PRIx64 " next=%u\n",
-               idx, raw, pv, next);
+        printf("      [%2d] @0x%04x PLAIN raw=0x%016" PRIx64 " pointerValue=0x%013" PRIx64 " next=%u\n",
+               idx, off, raw, pv, next);
     }
     return next;
 }
 
-// Decode + print one v5 slide pointer slot.
-static uint32_t decode_v5(uint64_t raw, uint64_t value_add, int idx){
+// Decode + print one v5 slide pointer slot. `slotVA` is the slot's own VA at slide 0 and `off` its
+// byte offset within the page — together with the printed target VA these ARE the three
+// worked-example constants `crates/retrace-box/tests/cache_pager.rs` pins (slot IPA, target,
+// diversity), so re-deriving them after a cache drift is a matter of reading an AUTH line here.
+static uint32_t decode_v5(uint64_t raw, uint64_t value_add, int idx, uint64_t slotVA, uint32_t off){
     uint32_t isAuth = (raw >> 63) & 1;
     uint32_t next   = (raw >> 52) & 0x7FF;          // 8-byte units
     uint64_t roff   = raw & 0x3FFFFFFFFULL;         // runtimeOffset (34 bits)
@@ -122,14 +126,16 @@ static uint32_t decode_v5(uint64_t raw, uint64_t value_add, int idx){
         uint32_t div  = (raw >> 34) & 0xFFFF;       // diversity
         uint32_t adiv = (raw >> 50) & 1;            // addrDiv
         uint32_t kd   = (raw >> 51) & 1;            // keyIsData: 0=IA 1=DA (A-family only)
-        printf("      [%2d] AUTH raw=0x%016" PRIx64 " roff=0x%09" PRIx64 " div=0x%04x addrDiv=%u key=%s next=%u\n",
-               idx, raw, roff, div, adiv, kd?"DA":"IA", next);
-        printf("           => targetSlidVA = cacheBase + slide + 0x%09" PRIx64 " (+value_add 0x%" PRIx64 ")\n",
-               roff, value_add);
+        printf("      [%2d] @0x%04x AUTH raw=0x%016" PRIx64 " roff=0x%09" PRIx64 " div=0x%04x addrDiv=%u key=%s next=%u\n",
+               idx, off, raw, roff, div, adiv, kd?"DA":"IA", next);
+        printf("           => @slide0: slotVA=0x%" PRIx64 " targetVA=0x%" PRIx64 " key=%s modifier=",
+               slotVA, value_add + roff, kd?"DA":"IA");
+        if (adiv) printf("blend(0x%" PRIx64 ",0x%04x)\n", slotVA, div);
+        else      printf("0x%04x\n", div);
     } else {
         uint32_t high8 = (raw >> 34) & 0xFF;
-        printf("      [%2d] REG  raw=0x%016" PRIx64 " roff=0x%09" PRIx64 " high8=0x%02x next=%u\n",
-               idx, raw, roff, high8, next);
+        printf("      [%2d] @0x%04x REG  raw=0x%016" PRIx64 " roff=0x%09" PRIx64 " high8=0x%02x next=%u\n",
+               idx, off, raw, roff, high8, next);
     }
     return next;
 }
@@ -157,18 +163,24 @@ static void dump_slideinfo(int fd, uint64_t sioff, uint64_t sisize,
     for (uint32_t i=0;i<hdr.page_starts_count;i++){
         if (ps[i]==NO_REBASE) continue;
         uint64_t pageFileOff = mapFileOff + (uint64_t)i*hdr.page_size;
+        uint64_t pageVA      = mapAddr + (uint64_t)i*hdr.page_size;   // at slide 0
         uint8_t *page = slurp(fd, pageFileOff, hdr.page_size);
         if (!page) continue;
         int show = pages_shown < 2;
         if (show) printf("    page[%u] fileOff=0x%" PRIx64 " vmAddr=0x%" PRIx64 " start=0x%x\n",
-                         i, pageFileOff, mapAddr + (uint64_t)i*hdr.page_size, ps[i]);
+                         i, pageFileOff, pageVA, ps[i]);
         uint32_t off = ps[i]; long slots=0, auth=0; int shown=0;
         for(;;){
             uint64_t raw = *(uint64_t*)(page + off);
             int isauth = (int)((raw>>63)&1);
             auth += isauth; slots++;
             uint32_t next;
-            if (show && shown<6){ next = (hdr.version==5)?decode_v5(raw,hdr.value_add,shown):decode_v3(raw,hdr.value_add,shown); shown++; }
+            if (show && shown<6){
+                uint64_t slotVA = pageVA + off;
+                next = (hdr.version==5)?decode_v5(raw,hdr.value_add,shown,slotVA,off)
+                                       :decode_v3(raw,hdr.value_add,shown,slotVA,off);
+                shown++;
+            }
             else next = (hdr.version==5)? ((uint32_t)(raw>>52)&0x7FF) : ((uint32_t)(raw>>51)&0x7FF);
             if (next==0) break;
             off += next*8;
@@ -195,6 +207,10 @@ static void probe_file(const char *path){
     printf("== %s\n", path);
     printf("   magic='%.16s' mappingOffset=0x%x mappingCount=%u  mappingWithSlideOffset=0x%x count=%u\n",
            h.magic, h.mappingOffset, h.mappingCount, h.mappingWithSlideOffset, h.mappingWithSlideCount);
+    // uuid@0x58 identifies the exact cache build — quote it when pinning a worked example.
+    printf("   uuid=%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X\n",
+           h.uuid[0],h.uuid[1],h.uuid[2],h.uuid[3], h.uuid[4],h.uuid[5], h.uuid[6],h.uuid[7],
+           h.uuid[8],h.uuid[9], h.uuid[10],h.uuid[11],h.uuid[12],h.uuid[13],h.uuid[14],h.uuid[15]);
     printf("   sharedRegionStart=0x%" PRIx64 " size=0x%" PRIx64 " maxSlide=0x%" PRIx64 " dyldInCacheMH=0x%" PRIx64 "\n",
            h.sharedRegionStart, h.sharedRegionSize, h.maxSlide, h.dyldInCacheMH);
 

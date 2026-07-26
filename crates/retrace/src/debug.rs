@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use retrace_core::{checkpointed_seek, Advance, CheckpointCache, ReplaySession};
+use retrace_core::{checkpointed_seek, Advance, CheckpointCache, Outcome, ReplayReport, ReplaySession};
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
 /// 5), guarding the inherited u64 span-overflow edge at the CLI boundary before any VM work.
@@ -319,6 +319,32 @@ impl<'a> Exec<'a> {
         self.reseek(n, k)
     }
 
+    /// Report a terminal `Advance::Exited` and park the session on it. Both of `cmd_continue`'s
+    /// `Exited` arms (main scan and pre-step boundary cross) route here so the two stay identical.
+    ///
+    /// An `exit` parks at the final landmark's window start `(E, 0)` — the exit syscall is consumed,
+    /// so there is nothing further to reach. A CRASH instead parks AT the fault: `(C, K_f)`, where
+    /// `K_f` is the crash window's full length (the count of instructions that DID retire before the
+    /// fault). Stepping that far leaves the guest immediately before the never-retiring faulting
+    /// instruction, so `pc()` IS the crash pc and a following `reverse-continue` orders after every
+    /// write in the recording — which is what makes "run backward from the crash to the corrupting
+    /// store" work.
+    fn park_at_terminal<W: Write>(&mut self, report: ReplayReport, out: &mut W) -> Result<(), String> {
+        match report.outcome {
+            Outcome::Exit { code } => {
+                line(out, format_args!("exited (code {code})"))?;
+                let e = self.sess().landmark();
+                self.reseek(e, 0)
+            }
+            Outcome::Crash { pc, esr, far } => {
+                line(out, format_args!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"))?;
+                let c = self.sess().landmark();
+                let kf = self.probe_window_len(c)?; // drops the live session (one VM per process)
+                self.reseek(c, kf)
+            }
+        }
+    }
+
     /// Run forward until a breakpoint is reached or the guest exits. Hardware breakpoints (one
     /// DBGBVR slot each; ≤ 6, enforced by `break`) catch mid-window hits (`Advance::Break`),
     /// resolved to an exact (N, K); the landmark-granular check catches a breakpoint that lands
@@ -350,11 +376,7 @@ impl<'a> Exec<'a> {
                     match self.sess_mut().advance().map_err(|d|
                         format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?
                     {
-                        Advance::Exited(report) => {
-                            line(out, format_args!("exited (code {})", report.exit_code))?;
-                            let e = self.sess().landmark();
-                            return self.reseek(e, 0);
-                        }
+                        Advance::Exited(report) => return self.park_at_terminal(report, out),
                         Advance::WatchSyscall { watched } => {
                             let n = self.sess().landmark();
                             line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
@@ -410,11 +432,7 @@ impl<'a> Exec<'a> {
                     }
                     // no boundary match; keep scanning (hardware breakpoints stay armed)
                 }
-                Advance::Exited(report) => {
-                    line(out, format_args!("exited (code {})", report.exit_code))?;
-                    let e = self.sess().landmark();
-                    return self.reseek(e, 0); // park at the final landmark's window
-                }
+                Advance::Exited(report) => return self.park_at_terminal(report, out),
                 Advance::Watch => {
                     let n = self.sess().landmark();
                     let p_hit = self.sess().pc();
@@ -474,6 +492,7 @@ impl<'a> Exec<'a> {
                     Advance::WatchSyscall { watched } =>
                         break Some((s.landmark(), RHit::WatchSys { watched })),
                     Advance::Event => continue,
+                    // Exited covers BOTH terminals (exit and crash): either way the scan is over.
                     Advance::Exited(_) => break None,
                 }
             };
