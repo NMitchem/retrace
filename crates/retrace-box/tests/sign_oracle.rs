@@ -48,6 +48,10 @@ fn sign_slots_signs_roundtrips_and_preserves_state() {
     // The spike's worked example (cacheprobe.c: .02.dylddata page1 off 0x22d0): a DA-key auth slot
     // with a blended modifier. target_va = value_add + runtime_offset (slide 0) = 0x1ec2f15c8;
     // modifier = blend(slot_slid_va, diversity) = blend(0x1ec06c2d0, 0x6ae1).
+    // Historic worked example from an older cache build (the host cache has since drifted — see
+    // cache_pager.rs's provenance comment for the live one). This test signs then authenticates
+    // the SAME (target, modifier) pair, a literal round-trip independent of any real cache, so
+    // these constants are cache-independent and do not need re-deriving.
     let target = 0x1_ec2f_15c8u64;
     let slot_slid_va = 0x1_ec06_c2d0u64;
     let modifier = blend(slot_slid_va, 0x6ae1); // == 0x6ae1_0001_ec06_c2d0

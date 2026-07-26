@@ -417,10 +417,10 @@ impl std::fmt::Debug for ReplaySession {
 }
 
 /// The outcome of one `advance`: exactly one trace event was consumed (`Event`); the guest reached
-/// `exit` and the final-memory landmark verified clean (`Exited`, run done); or a hardware
-/// breakpoint fired mid-window (`Break`, M3 debugger only — carries nothing: the caller reads
-/// `landmark()`/`pc()`). `Break` is unreachable under the plain `replay()` oracle, which never
-/// arms breakpoints.
+/// a terminal outcome — a normal `exit` OR a crash — carrying the `ReplayReport` whose `outcome`
+/// field discriminates which (`Exited`, run done); or a hardware breakpoint fired mid-window
+/// (`Break`, M3 debugger only — carries nothing: the caller reads `landmark()`/`pc()`). `Break` is
+/// unreachable under the plain `replay()` oracle, which never arms breakpoints.
 pub enum Advance { Event, Exited(ReplayReport), Break, Watch, WatchSyscall { watched: u64 } }
 
 impl ReplaySession {
@@ -455,11 +455,13 @@ impl ReplaySession {
         Ok(Advance::Event)
     }
 
-    /// Consume exactly ONE trace event (returning `Advance::Event`), or drive the guest to `exit`
-    /// (returning `Advance::Exited`). Non-event stops — a cache-window page-in or a reservation
-    /// commit — are handled internally and the guest re-run, so `advance` returns only on event
-    /// consumption or exit. Once it has returned `Advance::Exited` the run is complete; calling
-    /// `advance` again is unspecified (the guest is past its final landmark) — callers must not.
+    /// Consume exactly ONE trace event (returning `Advance::Event`), or drive the guest to a
+    /// terminal outcome — `exit` OR a crash — (returning `Advance::Exited`, carrying the
+    /// `ReplayReport` whose `outcome` field discriminates which). Non-event stops — a cache-window
+    /// page-in or a reservation commit — are handled internally and the guest re-run, so `advance`
+    /// returns only on event consumption or a terminal outcome. Once it has returned
+    /// `Advance::Exited` the run is complete; calling `advance` again is unspecified (the guest is
+    /// past its final landmark) — callers must not.
     pub fn advance(&mut self) -> Result<Advance, Divergence> {
         loop {
             match self.b.run() {

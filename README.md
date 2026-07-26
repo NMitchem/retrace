@@ -1076,9 +1076,12 @@ that were M5's entire test surface, and silently wrong on any MMU-on guest. `Box
 (`retrace-box/src/lib.rs`) is a read-only 3-level walk of the guest's *own* stage-1 tables (MMU off → identity;
 unmapped at any level → `None`), and the watch intersection now translates the armed VA at check time before
 comparing IPAs. **This changes no currently-passing or currently-failing case** — every guest mapping in this
-repo today is identity (VA == IPA), verified by a mutation check (`crates/retrace-box/tests/vaipa.rs`: shifting
-the walker's L2 index by four bits breaks both tests, proving they constrain the walk rather than passing
-vacuously against a pass-through stub). What's genuinely new is that the fix is no longer *incidentally* right:
+repo today is identity (VA == IPA). `crates/retrace-box/tests/vaipa.rs` pins the L1 index shift with a
+dedicated assertion (VA `1<<36` selects the empty L1[1], rather than falling through to L1[0]'s table,
+so it must miss) — the index that makes `GARBAGE_VA` unmapped in the first place, and so the one an
+unconstrained test suite could get wrong without any test noticing. A development-time-only mutation
+check (not committed) separately confirmed the L2 index discriminates the same way: shifting it four
+bits broke both tests. What's genuinely new is that the fix is no longer *incidentally* right:
 `crates/retrace/tests/watch_dyn.rs` proves a syscall-write watch fires correctly on a real MMU-on dynamic guest
 (`crashy`'s `fstat(1, &g.st)`, a kernel write into a watchable global) — the deferred M5 proof, now real.
 

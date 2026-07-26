@@ -20,6 +20,12 @@ fn walker_is_identity_on_mapped_vas_and_none_on_unmapped() {
     assert_eq!(b.va_to_ipa(text), Some(text), "guest text, identity");
     // Bit-46 VA: L1 index 0x400 is invalid -> None (the crash fixture's GARBAGE_VA).
     assert_eq!(b.va_to_ipa(GARBAGE_VA), None);
+    // Pins the L1 index shift itself — no other assertion here constrains it, since every mapped
+    // VA above is < 2^36 and so lands in L1[0] under a correct >>36 OR a buggy >>37 shift alike.
+    // VA 1<<36 selects L1[1], which is empty (only L1[0] is a table, via build_tables) -> None.
+    // A buggy >>37 would instead select L1[0] -> L2[0] (promoted by the trampoline) -> L3[0]
+    // (identity page 0, valid) -> Some(0), failing this assertion.
+    assert_eq!(b.va_to_ipa(1u64 << 36), None);
     // Beyond the 47-bit space -> None.
     assert_eq!(b.va_to_ipa(1u64 << 47), None);
 }
