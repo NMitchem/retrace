@@ -1026,9 +1026,13 @@ silently skipped (new golden-transcript test `pre_step_boundary_cross_reports_a_
 
 **The idea — a crash is a recorded, replayed, seekable stop, not a retrace error.** Through M5, a guest
 synchronous fault (wild pointer, NULL deref, jump to garbage) was indistinguishable from a retrace bug: it
-surfaced as the generic `Stop::Other` diagnosis bucket, the dispatch tried to page it in, failed, and aborted
-the run with an "unexpected stop" error. Nothing about the crash entered the trace, and there was no position
-"at the crash" to seek to. M6 gives guest faults a real, deterministic identity: **stage-1 EL0 data/instruction
+surfaced as the generic `Stop::Other` diagnosis bucket; the dispatch tried the below-the-trace demand paths
+(`page_in_cache`, then `commit_reserved_page`), and when both refused, record returned an `Err` carrying
+`describe_stop`'s rendering — a class string (`"non-syscall exit: data abort …"` or `"instruction abort"`), the
+FAR and whether it's mapped, and `ELR_EL1` — the same bring-up-failure shape a genuine retrace bug takes today.
+Nothing about the crash entered the trace, and there was no position "at the crash" to seek to.
+
+M6 gives guest faults a real, deterministic identity: **stage-1 EL0 data/instruction
 aborts become `Stop::Fault { pc, esr, far }`** (`retrace-box/src/lib.rs`), recorded as a terminal
 `Event::Crash { pc, esr, far }` (`retrace-trace/src/lib.rs`, `TRACE_MAGIC` bumped `0x03 → 0x04`) and
 byte-verified on replay — exactly like `Exit`, just a different terminal shape. `RecordSummary` and
@@ -1100,13 +1104,18 @@ The debugger finds the corrupting write starting **only** from the crash, with n
 the bug is — that's the reverse-debugging story this whole milestone exists to prove.
 
 **The headline gate — `crash_demo_end_to_end`, `crates/retrace/tests/crashy_e2e.rs`.** One test, the whole
-story: `record-dyn` of `CRASHY` reports the crash outcome and exit 139; `replay` verifies the trace bit-for-bit
-**twice** (a genuine double pass, run as two separate `cargo test -- --ignored` invocations before the
-`#[ignore]` was removed, per house honest-gate discipline); the scripted demo above runs against the fresh
-trace. The proof is deliberately **semantic, not a string match**: it asserts exactly two `x`-dump lines exist
-(closing a vacuous-filter hole), that the *first* does **not** contain `GARBAGE_VA`'s little-endian bytes and
-the *second* **does** — a value-flip that only the aliasing store can produce, with every address and byte
-discovered from the trace and the fixture's own source constant, never a coordinate copied out of a hand run.
+story: `record-dyn` of `CRASHY` reports the crash outcome and exit 139; `replay` of that one trace verifies it
+bit-for-bit **twice in a loop inside the test itself** (`crashy_e2e.rs:45-49`). Separately, the *test* was
+proven **twice** as well, in the honest-gate sense: it stayed born `#[ignore]`d and was run as two independent
+`cargo test -- --ignored` invocations before the `#[ignore]` line was removed — a different "twice" from the
+in-test double replay, not a restatement of it. The scripted demo then runs against the fresh trace, and its
+proof is deliberately **semantic, not a string match**: it asserts exactly two `x`-dump lines exist (closing a
+vacuous-filter hole), that the *first* does **not** contain `GARBAGE_VA`'s little-endian bytes and the *second*
+**does** — a value-flip that only the aliasing store can produce, with every address and byte discovered from
+the trace and the fixture's own source constant, never a coordinate copied out of a hand run. The script also
+runs `where` at the crash, but the headline gate asserts nothing about its output — the parked `(C, K_f)`
+coordinate is exercised, not proved, here; that coverage lives in `crashy_cli.rs`'s
+`continue_parks_at_the_crash_and_where_names_it`.
 
 **The final tally.** `just gate` (full workspace `cargo test` + `cargo clippy --workspace --all-targets -- -D
 warnings`, run fresh for this task): **136 passed, 0 failed, 0 ignored**, clippy clean. New this milestone: the
