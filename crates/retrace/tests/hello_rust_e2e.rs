@@ -8,7 +8,8 @@ mod util;
 
 #[test]
 #[ignore = "M7 rung 1 is parked at a PAC-garbled branch in dyld: a rustc-built hello_rust dies \
-            after 240 traps without reaching main. EC 0x20 (instruction abort, lower EL), IFSC \
+            after ~245 traps (the count drifts 245-247 run-to-run; the crash site does not) \
+            without reaching main. EC 0x20 (instruction abort, lower EL), IFSC \
             level-0 translation fault, branch target 0x67c0001800fc388 = live PAC signature bits \
             over the valid shared-cache address 0x1800fc388 — the guest branched through a signed \
             pointer as if it were raw. Un-ignore only on a genuine double pass. See \
