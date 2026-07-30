@@ -109,6 +109,7 @@ pub const SPINLOOP: &str = concat!(env!("OUT_DIR"), "/spinloop");
 pub const WATCHLOOP: &str = concat!(env!("OUT_DIR"), "/watchloop");
 pub const CRASH: &str = concat!(env!("OUT_DIR"), "/crash");
 pub const CRASHJMP: &str = concat!(env!("OUT_DIR"), "/crashjmp");
+pub const HELLO_RUST: &str = concat!(env!("OUT_DIR"), "/hello_rust");
 
 #[cfg(test)]
 mod tests {
@@ -143,5 +144,15 @@ mod tests {
     fn watchloop_guest_parses() {
         let l = parse_macho(&std::fs::read(WATCHLOOP).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn hello_rust_guest_parses() {
+        let l = parse_macho(&std::fs::read(HELLO_RUST).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64),
+                "entry 0x{:x} not inside any segment", l.entry);
+        // Rung 1's whole premise is a real dynamic binary through the real dynamic linker.
+        assert_eq!(l.dylinker.as_deref(), Some("/usr/lib/dyld"),
+                   "hello_rust must be dynamically linked through real dyld");
     }
 }

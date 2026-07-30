@@ -252,4 +252,18 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang crashjmp");
     assert!(status.success(), "crashjmp guest build failed");
+
+    // hello_rust: M7 rung 1 — a real Rust binary from the real toolchain, full std. rustc on a
+    // single file takes no cargo lock, so there is no build recursion; RUSTC is the toolchain cargo
+    // is already using (pinned 1.95.0), so the guest can't drift to a different compiler than the
+    // workspace. Plain --target aarch64-apple-darwin (NOT arm64e, per the ladder's premise that
+    // self-built binaries are arm64); links libSystem via /usr/lib/dyld like hello_dyn.
+    let src = format!("{}/rs/hello_rust.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/hello_rust");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc hello_rust");
+    assert!(status.success(), "hello_rust guest build failed");
 }
