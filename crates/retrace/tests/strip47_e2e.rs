@@ -3,6 +3,12 @@
 // pointer recovers the original. The guest signs a fixed canonical pointer P, strips it with the
 // 47-bit mask, and writes the 8-byte result; we assert it equals P. RED under the old 36-bit VA
 // (PAC bits [46:36] survive the strip); GREEN under 47-bit. Also replays byte-identically.
+//
+// Falsifiable only for the VA-width property, NOT for PAC posture: this guest boots with PAC on
+// (see M7's per-process posture derivation), so `pacda` genuinely signs P. If arm64e ever booted
+// with PAC off, `pacda` would be a NOP and this test would pass vacuously (P == P with no signing
+// having occurred at all) without any assertion here catching it. That hole is covered elsewhere —
+// `bfamstrip_e2e` and `pacposture.rs` — not by this test.
 mod util;
 #[test]
 fn strip47_lossless_under_wide_va() {
