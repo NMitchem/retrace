@@ -102,3 +102,31 @@ pub fn assert_rung_records_and_replays(guest: &str, expect_stdout: &[u8]) -> Run
     }
     RungOut { trace, stdout: rec.stdout }
 }
+
+/// Record `guest` TWICE and assert the two traces are byte-identical.
+///
+/// The second oracle. The replay divergence oracle compares a replay against ONE recording, so it is
+/// structurally blind to a nondeterministic value entering the trace: the recording captures it once
+/// and replay faithfully reproduces it forever. This one compares two RECORDINGS.
+///
+/// **Only valid for freestanding (`-nostdlib -static`) guests** — no clock, no entropy, no libmalloc,
+/// no mach ports. Recordings of dyld/libSystem guests are NOT reproducible run-to-run, because
+/// `gettimeofday` and `getentropy` are forwarded to the host and a libSystem polling loop takes a
+/// different number of iterations per run (measured: `hello_dyn` traces differ structurally, by a
+/// varying number of events, every time). That is accepted per-trace nondeterminism (M2-cpuid) and
+/// does not threaten replay determinism, which the divergence oracle enforces per trace — but it does
+/// put dyld guests out of this oracle's reach until both syscalls are synthesized.
+pub fn assert_trace_reproducible(guest: &str) {
+    let (r1, t1) = record(guest);
+    assert_eq!(r1.code, 0, "first recording of {guest} failed: {}", r1.stderr);
+    let (r2, t2) = record(guest);
+    assert_eq!(r2.code, 0, "second recording of {guest} failed: {}", r2.stderr);
+    assert_eq!(r1.stdout, r2.stdout, "stdout differed between two recordings of {guest}");
+    let (b1, b2) = (std::fs::read(&t1).expect("read trace 1"), std::fs::read(&t2).expect("read trace 2"));
+    if b1 != b2 {
+        let at = b1.iter().zip(b2.iter()).position(|(x, y)| x != y);
+        panic!("two recordings of {guest} produced different traces (lengths {} vs {}, first byte \
+                difference at {:?}) — a nondeterministic value is entering the trace",
+               b1.len(), b2.len(), at);
+    }
+}
