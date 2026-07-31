@@ -299,4 +299,16 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang fixedinner");
     assert!(status.success(), "fixedinner guest build failed");
+
+    // wildfixed: the M8-stack fast-follow fixture. mmaps MAP_FIXED at an address outside the
+    // guest's 36-bit IPA space (the one libstd's install_main_guard actually computes) and
+    // publishes the carry + errno, proving the guest gets EINVAL back instead of the recorder
+    // aborting inside hv_vm_map.
+    let src = format!("{}/asm/wildfixed.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/wildfixed");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang wildfixed");
+    assert!(status.success(), "wildfixed guest build failed");
 }

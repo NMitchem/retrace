@@ -1323,6 +1323,14 @@ impl Box_ {
     /// unreachable when `exec` is set**, so a caller's `set_region_exec` can never be silently
     /// skipped by the early return.
     fn place_fixed(&mut self, host: *mut u8, rlen: usize, addr: u64, exec: bool) -> Option<u64> {
+        // Every FIXED path funnels through here, so validate the address HERE: a caller that forgets
+        // cannot silently hand `hv_vm_map` an address it rejects. The BSD path checks `fixed_fits`
+        // itself first and answers the guest EINVAL, so it never trips this; the Mach path has no
+        // errno channel plumbed to its four call sites and no guest exercises it, so it fails loud
+        // with a diagnosis instead of an opaque `HvError(0xfae94003)` recorder abort.
+        assert!(Self::fixed_fits(addr, rlen),
+            "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's 36-bit \
+             IPA space", addr.saturating_add(rlen as u64));
         let end = addr + rlen as u64;
         assert!(!exec || !self.overlaps_backing(addr, rlen as u64),
             "FIXED exec map at {addr:#x}..{end:#x} overlaps a live backing: exec promotion of an \
@@ -1352,6 +1360,24 @@ impl Box_ {
         panic!("FIXED map at {addr:#x}..{end:#x} partially straddles a live backing: splitting a \
                 backing is unimplemented (no guest exercises it) and dropping it wholesale would \
                 destroy guest memory the kernel keeps");
+    }
+
+    /// Can the guest's address space hold a FIXED request for `[addr, addr+rlen)`? The guest IPA
+    /// space is 36-bit and the stage-1 tables are 16 KiB-granule, so a request that is misaligned,
+    /// overflows, or ends above the ceiling is one the real kernel refuses with `EINVAL` — and one
+    /// `hv_vm_map` refuses with `HV_BAD_ARGUMENT`, which retrace `expect`s on, converting a guest
+    /// error into a recorder abort.
+    ///
+    /// Not academic: libstd's `install_main_guard` mmaps `MAP_FIXED` at
+    /// `pthread_get_stackaddr_np() - pthread_get_stacksize_np()`, and macOS 26's libpthread reports
+    /// a constant 8 MiB-minus-a-page size for the main thread regardless of `RLIMIT_STACK`, so
+    /// against the box's smaller stack that subtraction underflows to a wild address.
+    ///
+    /// A pure function of `(addr, rlen)` and the fixed IPA geometry — record and replay classify
+    /// identically, so the rejection needs no mirror (symmetry is structural).
+    fn fixed_fits(addr: u64, rlen: usize) -> bool {
+        addr & (GRANULE as u64 - 1) == 0
+            && addr.checked_add(rlen as u64).is_some_and(|end| end <= 1u64 << 36)
     }
 
     /// Free every tracked backing that overlaps `[ipa, ipa+len)` (stage-2 unmap + release the anon
@@ -1415,7 +1441,7 @@ impl Box_ {
     /// guard-page install checks `result != stackptr` and panics with errno untouched
     /// ("os error 0"). Placement is delegated to `map_mmap_region`, which the file-backed path
     /// already uses, so both paths now share one FIXED implementation.
-    pub fn guest_mmap(&mut self, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
+    pub fn guest_mmap(&mut self, addr: u64, len: u64, prot: u64, flags: u64) -> Result<u64, u64> {
         let (host, rlen) = alloc_pages(len as usize);
         self.map_mmap_region(host, rlen, addr, prot, flags)
     }
@@ -1451,22 +1477,35 @@ impl Box_ {
     ///    apiece and equally destroyable.
     /// 3. **True partial straddle** (overlaps, neither contained nor covering) → `assert!` fail-loud.
     ///    No guest exercises it; fail-loud beats guessing at split semantics (this project's posture).
-    fn map_mmap_region(&mut self, host: *mut u8, rlen: usize, addr: u64, prot: u64, flags: u64) -> u64 {
+    fn map_mmap_region(&mut self, host: *mut u8, rlen: usize, addr: u64, prot: u64, flags: u64)
+        -> Result<u64, u64> {
         if flags & Self::MAP_FIXED == 0 && prot & Self::PROT_EXEC != 0 {
             self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1);
         }
         let ipa = if flags & Self::MAP_FIXED != 0 {
+            // An address the guest's own space cannot hold is the GUEST's error, not retrace's:
+            // answer EINVAL like the kernel would, rather than carrying it down to hv_vm_map and
+            // aborting the recorder. Checked BEFORE `place_fixed`, whose overlap arithmetic assumes
+            // a representable range. Nothing has been mapped yet, so releasing `host` (which this
+            // function owns) is the whole of the cleanup: a rejected request is a no-op, leaving
+            // `backings` and the `mmap_next` cursor untouched so later placements are unaffected.
+            if !Self::fixed_fits(addr, rlen) {
+                // SAFETY: `host` is this function's freshly-allocated `rlen`-byte mapping, never
+                // published to `backings` or the guest, and unreachable after this return.
+                unsafe { libc::munmap(host as *mut _, rlen); }
+                return Err(retrace_arch::EINVAL);
+            }
             // Classify the overlap (shared with guest_vm_map's FIXED branch). A contained request
             // reuses the existing backing and is already complete.
             if let Some(a) = self.place_fixed(host, rlen, addr, prot & Self::PROT_EXEC != 0) {
-                return a;
+                return Ok(a);
             }
             addr
         } else { self.mmap_next };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
         self.backings.push(Backing { host, ipa, len: rlen });
         if flags & Self::MAP_FIXED == 0 { self.mmap_next += rlen as u64; }
-        ipa
+        Ok(ipa)
     }
     /// RECORD: anon-alloc, stage the fd's bytes into it (SPTM: never map the file page itself), map,
     /// return (ipa, staged bytes to record so replay needs no file). Primary path is `pread`; if that
@@ -1475,7 +1514,7 @@ impl Box_ {
     /// copying the bytes out (a deterministic snapshot, captured in the trace). Either way the guest
     /// gets an anon page, never a file/shm page.
     pub fn guest_mmap_file(&mut self, addr: u64, len: u64, prot: u64, flags: u64, fd: i32, off: u64)
-        -> (u64, Vec<Region>) {
+        -> Result<(u64, Vec<Region>), u64> {
         let (host, rlen) = alloc_pages(len as usize);
         let n = unsafe { libc::pread(fd, host as *mut _, rlen, off as libc::off_t) };
         if n < 0 {
@@ -1488,18 +1527,22 @@ impl Box_ {
             assert!(src != libc::MAP_FAILED, "guest_mmap_file: neither pread nor mmap works on fd {fd}");
             unsafe { std::ptr::copy_nonoverlapping(src as *const u8, host, copy_len); libc::munmap(src, copy_len); }
         }
-        let ipa = self.map_mmap_region(host, rlen, addr, prot, flags);
+        // `?`: a rejected FIXED address frees `host` inside map_mmap_region, so there is nothing to
+        // clean up here — the staged bytes simply never reach the guest, exactly as with a real
+        // kernel that refuses the mapping.
+        let ipa = self.map_mmap_region(host, rlen, addr, prot, flags)?;
         // Read the staged bytes back out of the GUEST, not out of `host`: map_mmap_region owns
         // `host` and frees it on the containment path (where the bytes were copied into the existing
         // backing instead), so touching `host` here would be a use-after-free. read_guest is correct
         // for every case and is what actually lands in the trace.
         let bytes = self.read_guest(ipa, rlen);
-        (ipa, vec![Region { ipa, bytes }])
+        Ok((ipa, vec![Region { ipa, bytes }]))
     }
     /// REPLAY: anon-alloc (zeroed), address identically (no file access); caller applies the
     /// recorded writes to fill it. Returns the chosen IPA (must equal the recorded `ret`). `prot`
     /// must match record so the exec block-alignment in `map_mmap_region` chooses the same IPA.
-    pub fn guest_mmap_replay(&mut self, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
+    pub fn guest_mmap_replay(&mut self, addr: u64, len: u64, prot: u64, flags: u64)
+        -> Result<u64, u64> {
         let (host, rlen) = alloc_pages(len as usize);
         self.map_mmap_region(host, rlen, addr, prot, flags)
     }

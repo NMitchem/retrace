@@ -25,7 +25,7 @@ fn boxed() -> Box_ {
 fn partial_straddle_map_fixed_fails_loud() {
     let mut b = boxed();
     // A 4-page anon region at the bump allocator's next slot.
-    let base = b.guest_mmap(0, 0x10000, 3, 0x1002);
+    let base = b.guest_mmap(0, 0x10000, 3, 0x1002).unwrap();
     // FIXED over its last page AND one page past its end: overlaps, but is neither contained in the
     // region nor covering it.
     let _ = b.guest_mmap(base + 0xC000, 0x8000, 3, 0x1012);
