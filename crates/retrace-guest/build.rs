@@ -168,22 +168,32 @@ fn main() {
 
     // strip47: signs a pointer with pacda then strips it with objc's 47-bit ISA_MASK; the result
     // equals the original ONLY if the PAC signature lands above bit 46 — i.e. only under a 47-bit
-    // guest VA. The M2-va47 property test.
+    // guest VA. The M2-va47 property test. -arch arm64e (Task 7, M7): with PAC posture now DERIVED
+    // from the main executable's arch (Task 6), a plain-arm64 guest boots PAC-off and this
+    // assertion goes vacuously true (pacda a no-op). This is the repo's first arm64e guest — it
+    // never executes on the real host, only inside the VM, so the host's arm64e-runtime gating
+    // does not apply; only the build needed to work (confirmed: `otool -hv` reports `ARM64 E`).
+    // Making it genuinely arm64e is what exercises the PAC-ON branch of `pac_posture` end to end,
+    // which would otherwise be dead code in every test the gate runs.
     let src = format!("{}/asm/strip47.s", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/strip47");
     println!("cargo:rerun-if-changed={src}");
     let status = Command::new("clang")
-        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .args(["-arch","arm64e","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang strip47");
     assert!(status.success(), "strip47 guest build failed");
 
     // bfamstrip: pacdb-sign + corrupt + autdb -> FEAT_FPAC fault the box emulates by stripping.
-    // The M2-bfam strip-on-FPAC property test.
+    // The M2-bfam strip-on-FPAC property test. -arch arm64e (Task 7, M7): same reasoning as
+    // strip47 above — with PAC posture derived from the main executable's arch, a plain-arm64
+    // guest never FPAC-faults, so the strip-on-FPAC path never fires. This guest never executes
+    // on the real host (VM-only), so arm64e-runtime gating doesn't apply; only the build needed
+    // to work (confirmed: `otool -hv` reports `ARM64 E`).
     let src = format!("{}/asm/bfamstrip.s", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/bfamstrip");
     println!("cargo:rerun-if-changed={src}");
     let status = Command::new("clang")
-        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .args(["-arch","arm64e","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang bfamstrip");
     assert!(status.success(), "bfamstrip guest build failed");
 
@@ -252,4 +262,18 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang crashjmp");
     assert!(status.success(), "crashjmp guest build failed");
+
+    // hello_rust: M7 rung 1 — a real Rust binary from the real toolchain, full std. rustc on a
+    // single file takes no cargo lock, so there is no build recursion; RUSTC is the toolchain cargo
+    // is already using (pinned 1.95.0), so the guest can't drift to a different compiler than the
+    // workspace. Plain --target aarch64-apple-darwin (NOT arm64e, per the ladder's premise that
+    // self-built binaries are arm64); links libSystem via /usr/lib/dyld like hello_dyn.
+    let src = format!("{}/rs/hello_rust.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/hello_rust");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc hello_rust");
+    assert!(status.success(), "hello_rust guest build failed");
 }

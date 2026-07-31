@@ -91,6 +91,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     }
                 }
             }
+            if let Stop::Fault { pc, esr, far } = &stop {
+                // The terminal trap. CLAUDE.md advertises this flag as logging every dispatched
+                // trap, and a crash is the one an M7-style bring-up most needs to see.
+                eprintln!("[fault] pc={:#x} esr={:#x} far={:#x} ec={:#x}",
+                    *pc, *esr, *far, (*esr >> 26) & 0x3f);
+            }
         }
         match stop {
             Stop::Syscall { num, args } if num == SYS_EXIT => {
