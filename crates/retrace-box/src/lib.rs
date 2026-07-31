@@ -1901,6 +1901,19 @@ impl Box_ {
         out
     }
 
+    /// Answer `getrlimit(RLIMIT_STACK)` from the guest's own stack size. `struct rlimit` is two
+    /// u64s: `{ rlim_cur, rlim_max }`. Both report the real mapped size — retrace does not grow the
+    /// guest stack on demand, so a larger `rlim_max` would be a lie the guest could act on (libstd
+    /// subtracts this from `kern.usrstack64` to locate its guard page, so the two must describe the
+    /// SAME stack). Pure builder: the caller applies via `apply_and_return`, like `usrstack64_reply`.
+    pub fn rlimit_stack_reply(&self, args: [u64; 8]) -> Vec<Region> {
+        let rlp = args[1];
+        if rlp == 0 { return Vec::new(); }
+        let mut bytes = self.stack_size.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&self.stack_size.to_le_bytes());
+        vec![Region { ipa: rlp, bytes }]
+    }
+
     /// Read-only stage-1 walk of the guest's OWN page tables: VA -> IPA. MMU off => identity.
     /// None if unmapped at any level or beyond the 47-bit VA space — an unmapped VA cannot be
     /// the destination of an applied syscall write, so the watch check treats None as no-match.
