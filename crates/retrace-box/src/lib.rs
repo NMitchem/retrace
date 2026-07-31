@@ -1195,9 +1195,13 @@ impl Box_ {
             }
         } else {
             // FIXED (dyld/libmalloc often pass VM_FLAGS_OVERWRITE): the guest may be replacing a
-            // region it previously bump-allocated. Free any tracked backing overlapping the target
-            // range so the fresh stage-2 map doesn't collide (hv_vm_map rejects an overlap).
-            self.unmap_overlapping(addr, rlen as u64);
+            // region it previously bump-allocated, so classify the overlap exactly as the BSD mmap
+            // path does — `place_fixed` is shared with `map_mmap_region`. A request CONTAINED in a
+            // live backing reuses it in place and is already complete (returning early is safe:
+            // `place_fixed` panics on exec-over-live-backing, so the `set_region_exec` below can
+            // never be skipped when it was needed). Anything else leaves the range clear for the
+            // fresh stage-2 map, which hv_vm_map would otherwise reject for overlapping.
+            if let Some(a) = self.place_fixed(host, rlen, addr, exec) { return a; }
             addr
         };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_vm_map)");
@@ -1288,17 +1292,77 @@ impl Box_ {
         self.backings.iter().any(|b| ipa < b.ipa + b.len as u64 && b.ipa < end)
     }
 
+    /// Place a FIXED request (`MAP_FIXED` on the BSD path, `VM_FLAGS_OVERWRITE` on the Mach one) at
+    /// `addr`, classifying it against the live backings. **Shared by `map_mmap_region` and
+    /// `guest_vm_map`** — the two FIXED paths must not drift apart, which a second copy of this
+    /// logic is exactly how they would.
+    ///
+    /// Returns `Some(addr)` when the request was satisfied by REUSING an existing backing: the
+    /// caller must return that address immediately, having mapped nothing (`host` is already freed).
+    /// Returns `None` when the caller should go on to stage-2 map `host` at `addr` as usual.
+    ///
+    /// Three cases:
+    /// 1. **Fully covers** every backing it touches (including touching none) → drop them and let
+    ///    the caller install `host`. The original behaviour, and the only case `unmap_overlapping`'s
+    ///    wholesale drop is sound for.
+    /// 2. **Fully contained** in ONE backing → reuse it in place: copy `host`'s pages over
+    ///    `[addr, addr+rlen)` and keep the rest of the backing intact. `alloc_pages` maps with
+    ///    `MAP_ANON`, which `mmap(2)` guarantees zero-filled, so an anonymous FIXED request gets
+    ///    exactly the fresh zero pages the kernel would give it; on the file-backed path the same
+    ///    copy carries the staged bytes. This is the case that matters: libstd's
+    ///    `install_main_guard` mmaps at `usrstack64 - RLIMIT_STACK`, wholly inside the 256 KiB
+    ///    dynamic-stack backing, and dyld/libmalloc pass `VM_FLAGS_OVERWRITE` on the Mach path.
+    ///    Loaded image segments, the L1/L2 page tables and the PAC sign stub/table are one backing
+    ///    apiece and equally destroyable.
+    /// 3. **True partial straddle** → fail loud. Nothing exercises it; guessing at split semantics
+    ///    is worse than refusing.
+    ///
+    /// `exec` is the W^X guard: `set_region_exec` promotes a whole 32 MiB block without the guest
+    /// TLBI the VMM cannot issue, so it is sound only on a block the guest never translated. An exec
+    /// request overlapping ANY live backing therefore panics — which also means **case 2 is
+    /// unreachable when `exec` is set**, so a caller's `set_region_exec` can never be silently
+    /// skipped by the early return.
+    fn place_fixed(&mut self, host: *mut u8, rlen: usize, addr: u64, exec: bool) -> Option<u64> {
+        let end = addr + rlen as u64;
+        assert!(!exec || !self.overlaps_backing(addr, rlen as u64),
+            "FIXED exec map at {addr:#x}..{end:#x} overlaps a live backing: exec promotion of an \
+             already-translated block would need a guest TLBI the VMM cannot issue");
+        let covers_all = self.backings.iter()
+            .filter(|b| addr < b.ipa + b.len as u64 && b.ipa < end)   // the overlapping ones
+            .all(|b| addr <= b.ipa && b.ipa + b.len as u64 <= end);   // ...each wholly inside
+        if covers_all {
+            self.unmap_overlapping(addr, rlen as u64);                // case 1
+            return None;
+        }
+        if let Some((bhost, bipa)) = self.backings.iter()
+            .find(|b| addr >= b.ipa && end <= b.ipa + b.len as u64)
+            .map(|b| (b.host, b.ipa))
+        {
+            // Case 2. SAFETY: `[addr, end)` lies wholly inside the backing, so the destination is
+            // in-bounds; `host` is a distinct live allocation of `rlen` bytes (no overlap), and it is
+            // dead after the copy, so release it here — otherwise every guard-page install and every
+            // OVERWRITE commit would leak an allocation.
+            unsafe {
+                std::ptr::copy_nonoverlapping(host, bhost.add((addr - bipa) as usize), rlen);
+                libc::munmap(host as *mut _, rlen);
+            }
+            return Some(addr);
+        }
+        // Case 3: overlaps something but is neither contained nor covering.
+        panic!("FIXED map at {addr:#x}..{end:#x} partially straddles a live backing: splitting a \
+                backing is unimplemented (no guest exercises it) and dropping it wholesale would \
+                destroy guest memory the kernel keeps");
+    }
+
     /// Free every tracked backing that overlaps `[ipa, ipa+len)` (stage-2 unmap + release the anon
     /// host allocation), for a FIXED/OVERWRITE remap. A backing is removed WHOLESALE, so this is
     /// only correct when every overlapping backing lies entirely inside `[ipa, ipa+len)`.
     ///
-    /// `map_mmap_region` guarantees that: it classifies a FIXED request first and only reaches here
-    /// in the fully-covering case — a request CONTAINED in a backing reuses it in place, and a true
-    /// partial straddle is rejected fail-loud. Dropping a straddled backing would destroy guest
-    /// memory the real kernel keeps, and "it's deterministic" is no defence: determinism only makes
-    /// replay match the recording, so retrace would faithfully record a WRONG execution with no
-    /// divergence and nothing flagged. (`guest_vm_map`'s FIXED path also calls this; its straddles
-    /// remain unclassified — see the M8-stack report's fast-follow list.)
+    /// [`place_fixed`](Self::place_fixed) guarantees that for both FIXED paths: it only reaches here
+    /// in the fully-covering case. Dropping a straddled backing would destroy guest memory the real
+    /// kernel keeps, and "it's deterministic" is no defence: determinism only makes replay match the
+    /// recording, so retrace would faithfully record a WRONG execution with no divergence and
+    /// nothing flagged.
     fn unmap_overlapping(&mut self, ipa: u64, len: u64) {
         let end = ipa + len;
         let mut i = 0;
@@ -1392,40 +1456,10 @@ impl Box_ {
             self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1);
         }
         let ipa = if flags & Self::MAP_FIXED != 0 {
-            // W^X fail-loud. Before M8-stack a FIXED mmap over a live backing died at the `hv_vm_map`
-            // expect below; now that the overlap is handled, that accidental guard is gone, so state
-            // the real constraint. The caller promotes a PROT_EXEC mmap with `set_region_exec`, which
-            // rewrites a 32 MiB block's stage-1 entry WITHOUT a guest TLBI (the VMM cannot issue one)
-            // — sound only on a block the guest has never translated. An already-backed range may
-            // well have been translated, so refuse rather than promote it silently.
-            assert!(prot & Self::PROT_EXEC == 0 || !self.overlaps_backing(addr, rlen as u64),
-                "MAP_FIXED PROT_EXEC mmap at {addr:#x}..{:#x} overlaps a live backing: exec promotion \
-                 of an already-translated block would need a guest TLBI the VMM cannot issue",
-                addr + rlen as u64);
-            let end = addr + rlen as u64;
-            let covers_all = self.backings.iter()
-                .filter(|b| addr < b.ipa + b.len as u64 && b.ipa < end)   // the overlapping ones
-                .all(|b| addr <= b.ipa && b.ipa + b.len as u64 <= end);   // ...each wholly inside
-            if covers_all {
-                self.unmap_overlapping(addr, rlen as u64);                // case 1
-            } else if let Some((bhost, bipa)) = self.backings.iter()
-                .find(|b| addr >= b.ipa && end <= b.ipa + b.len as u64)
-                .map(|b| (b.host, b.ipa))
-            {
-                // Case 2: reuse in place. SAFETY: `[addr, end)` lies wholly inside the backing, so
-                // the destination is in-bounds; `host` is a distinct live allocation of `rlen` bytes
-                // (no overlap), and it is dead after the copy, so release it here — otherwise every
-                // guard-page install would leak an allocation.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(host, bhost.add((addr - bipa) as usize), rlen);
-                    libc::munmap(host as *mut _, rlen);
-                }
-                return addr;
-            } else {
-                // Case 3: overlaps something but is neither contained nor covering.
-                panic!("MAP_FIXED mmap at {addr:#x}..{end:#x} partially straddles a live backing: \
-                        splitting a backing is unimplemented (no guest exercises it) and dropping it \
-                        wholesale would destroy guest memory the kernel keeps");
+            // Classify the overlap (shared with guest_vm_map's FIXED branch). A contained request
+            // reuses the existing backing and is already complete.
+            if let Some(a) = self.place_fixed(host, rlen, addr, prot & Self::PROT_EXEC != 0) {
+                return a;
             }
             addr
         } else { self.mmap_next };
