@@ -115,6 +115,7 @@ pub const CRASH: &str = concat!(env!("OUT_DIR"), "/crash");
 pub const CRASHJMP: &str = concat!(env!("OUT_DIR"), "/crashjmp");
 pub const HELLO_RUST: &str = concat!(env!("OUT_DIR"), "/hello_rust");
 pub const USRSTACK: &str = concat!(env!("OUT_DIR"), "/usrstack");
+pub const FIXEDINNER: &str = concat!(env!("OUT_DIR"), "/fixedinner");
 
 #[cfg(test)]
 mod tests {

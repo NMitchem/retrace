@@ -287,4 +287,16 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang usrstack");
     assert!(status.success(), "usrstack guest build failed");
+
+    // fixedinner: the M8-stack straddle-cover fixture. mmaps two 4-page anon regions, fills them,
+    // then punches a MAP_FIXED page into the middle of one and at the base of the other, and
+    // publishes the returned addresses plus the surrounding bytes -- proving a partial FIXED
+    // overwrite trims the backing instead of dropping it wholesale.
+    let src = format!("{}/asm/fixedinner.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/fixedinner");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang fixedinner");
+    assert!(status.success(), "fixedinner guest build failed");
 }
