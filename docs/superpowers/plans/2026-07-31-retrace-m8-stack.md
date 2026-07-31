@@ -4,7 +4,7 @@
 
 **Goal:** Make the guest's stack identity truthful — synthesize `kern.usrstack64` and `RLIMIT_STACK` from the box's own stack geometry, honor `addr`/`MAP_FIXED` in the anonymous `mmap` path — and add an address-space determinism oracle that catches host addresses masquerading as guest addresses.
 
-**Architecture:** Three synthesis/placement changes in the record dispatch (`retrace-core`) and the box (`retrace-box`), each with a mirrored replay arm so the existing byte-compare *is* the divergence check. Plus a test-side oracle that records the same guest twice and compares only address-shaped fields.
+**Architecture:** Three synthesis/placement changes in the record dispatch (`retrace-core`) and the box (`retrace-box`), each with a mirrored replay arm so the existing byte-compare *is* the divergence check. Plus a test-side oracle that records the same freestanding guest twice and asserts the two traces are byte-identical.
 
 **Tech Stack:** Rust 1.95.0 (pinned), `aarch64-apple-darwin`, Hypervisor.framework, freestanding arm64 asm guest fixtures built by `clang` in `retrace-guest/build.rs`.
 
@@ -523,7 +523,15 @@ And on `Box_` in `crates/retrace-box/src/lib.rs`:
     }
 ```
 
-> **`write_guest` does not exist and must be added.** Verified: `retrace-box/src/lib.rs` has
+> ⚠️ **SUPERSEDED — this step was implemented differently, and the deviation was accepted.** Task 3
+> did not add `write_guest`. It made `usrstack64_reply(&self, args) -> Vec<Region>` a *pure builder*
+> and applied the regions via the existing `Box_::apply_and_return`, because `apply_and_return`
+> carries the M5 watchpoint intersection check that a raw `write_guest` would silently bypass, and
+> because it lets replay byte-compare before mutating guest memory. The paragraph below is retained
+> for the record only; `write_guest` does **not** exist in the tree. See commit `763ad99` and
+> `.superpowers/sdd/2026-07-31-retrace-m8-stack/task-3-report.md` (Deviation 2).
+>
+> **[HISTORICAL] `write_guest` does not exist and must be added.** Verified: `retrace-box/src/lib.rs` has
 > `read_guest(&self, ipa, len) -> Vec<u8>` at `:1818` and `read_guest_checked` at `:1832`, but no
 > writer. Add one immediately after `read_guest`, reusing that function's backing-lookup loop
 > verbatim and keeping its fail-loud behaviour on an unbacked address:
@@ -609,7 +617,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `Box_::stack_size()` from Task 3.
-- Produces: `Box_::write_rlimit_stack_reply(args) -> Vec<Region>`.
+- Produces: `Box_::rlimit_stack_reply(&self, args) -> Vec<Region>` (pure builder; caller applies via `apply_and_return`).
 
 - [ ] **Step 1: Add the constants**
 
@@ -629,55 +637,69 @@ Extend the constant test:
         assert_eq!((RLIMIT_STACK, RLIMIT_POSIX_FLAG), (3, 0x1000));
 ```
 
+> **Revised after Task 3 (commit `763ad99`).** Task 3 deliberately did **not** add `Box_::write_guest`.
+> It made the reply helper a *pure builder* returning `Vec<Region>` and routed application through the
+> existing `Box_::apply_and_return`, because `apply_and_return` carries the M5 watchpoint intersection
+> check that a raw `write_guest` would silently bypass, and because it lets replay byte-compare
+> *before* mutating guest memory. Task 4 follows that same shape, copied from the `usrstack64` pair
+> that landed. **`write_guest` does not exist — do not add it.**
+
 - [ ] **Step 2: Add the box helper**
 
-In `crates/retrace-box/src/lib.rs`:
+In `crates/retrace-box/src/lib.rs`, immediately after `usrstack64_reply` (`:1896`), matching its shape:
 
 ```rust
     /// Answer `getrlimit(RLIMIT_STACK)` from the guest's own stack size. `struct rlimit` is two
-    /// u64s: `{ rlim_cur, rlim_max }`. Both report the real mapped size — retrace does not grow
-    /// the guest stack on demand, so a larger `rlim_max` would be a lie the guest could act on.
-    pub fn write_rlimit_stack_reply(&mut self, args: [u64; 8]) -> Vec<Region> {
+    /// u64s: `{ rlim_cur, rlim_max }`. Both report the real mapped size — retrace does not grow the
+    /// guest stack on demand, so a larger `rlim_max` would be a lie the guest could act on (libstd
+    /// subtracts this from `kern.usrstack64` to locate its guard page, so the two must describe the
+    /// SAME stack). Pure builder: the caller applies via `apply_and_return`, like `usrstack64_reply`.
+    pub fn rlimit_stack_reply(&self, args: [u64; 8]) -> Vec<Region> {
         let rlp = args[1];
         if rlp == 0 { return Vec::new(); }
         let mut bytes = self.stack_size.to_le_bytes().to_vec();
         bytes.extend_from_slice(&self.stack_size.to_le_bytes());
-        self.write_guest(rlp, &bytes);
         vec![Region { ipa: rlp, bytes }]
     }
 ```
 
 - [ ] **Step 3: Add the record arm**
 
-In `crates/retrace-core/src/lib.rs`, beside the Task 3 arm:
+In `crates/retrace-core/src/lib.rs`, immediately after the `usrstack64` record arm (`:186-192`):
 
 ```rust
             // getrlimit(RLIMIT_STACK): answer from the guest's own stack size. Forwarding returns
-            // the HOST's limit (8176 KiB), which libstd subtracts from usrstack64 to locate its
-            // guard page — the two must describe the SAME stack or the result is a wild address.
-            // The guest passes RLIMIT_STACK | _RLIMIT_POSIX_FLAG (0x1003), so mask before compare.
+            // the HOST's limits (measured: 8176 KiB soft / 65520 KiB hard), and libstd subtracts
+            // this from usrstack64 to locate its guard page — the two must describe the SAME stack
+            // or the result is a wild address. The guest passes RLIMIT_STACK | _RLIMIT_POSIX_FLAG
+            // (0x1003), so mask before comparing. Deterministic => STANDARD symmetric posture,
+            // exactly like the usrstack64 arm above.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_GETRLIMIT
                 && (args[0] & !retrace_arch::RLIMIT_POSIX_FLAG) == retrace_arch::RLIMIT_STACK => {
-                let writes = b.write_rlimit_stack_reply(args);
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes })
+                let writes = b.rlimit_stack_reply(args);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
                     .map_err(|e| format!("append getrlimit stack: {e}"))?; count += 1;
-                b.set_x0_err_and_return(0, false);
+                b.apply_and_return(0, false, &writes);
             }
 ```
 
 - [ ] **Step 4: Add the mirrored replay arm**
 
+In `crates/retrace-core/src/lib.rs`, immediately after the `usrstack64` replay mirror (`:708-717`):
+
 ```rust
-                            // getrlimit(RLIMIT_STACK) mirror — see the usrstack64 mirror above.
+                            // getrlimit(RLIMIT_STACK) mirror — same posture as the usrstack64 mirror
+                            // above: recompute from the box's own geometry, byte-compare against the
+                            // recording (that comparison IS the divergence check), then apply.
                             if num == retrace_arch::SYS_GETRLIMIT
                                 && (args[0] & !retrace_arch::RLIMIT_POSIX_FLAG) == retrace_arch::RLIMIT_STACK {
-                                let recomputed = self.b.write_rlimit_stack_reply(*args);
-                                if &recomputed != writes {
+                                let recomputed = self.b.rlimit_stack_reply(args);
+                                if recomputed != *writes {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(
                                             "getrlimit stack reply mismatch: replay {recomputed:?} != recorded {writes:?}") });
                                 }
-                                self.b.set_x0_err_and_return(*ret, *err);
+                                self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
 ```
@@ -884,7 +906,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Placeholder scan:** No TBD/TODO. Every code step carries real code. Three steps are deliberately conditional rather than placeholder — Task 1 Step 3 (calibration has two defined outcomes with defined follow-ups), Task 6 Steps 2A/2B (the gate outcome is genuinely unknown until measured, which is the point of honest-gate discipline), and three "if the surrounding code differs, match it" notes where I could not verify an exact control-flow shape without reading code the implementer will have open.
 
-**Type consistency:** `stack_top`/`stack_size` are `u64` at every site — `Box_` fields, `BoxState` fields, accessors, and both helpers. `write_usrstack64_reply` and `write_rlimit_stack_reply` both take `[u64; 8]` and return `Vec<Region>`, matching `Event::Syscall.writes`. `guest_mmap(addr, len, prot, flags) -> u64` is used identically at both call sites. `assert_trace_reproducible(&str)` takes the guest path (not trace paths — it does its own recording) and is called from Tasks 1 and 2. `is_usrstack64_mib` takes `(&Box_, [u64; 8])` in the record arm and `(&self.b, *args)` in the replay arm — same types.
+**Type consistency:** `stack_top`/`stack_size` are `u64` at every site — `Box_` fields, `BoxState` fields, accessors, and both helpers. `usrstack64_reply` and `rlimit_stack_reply` are both `&self` pure builders taking `[u64; 8]` and returning `Vec<Region>`, matching `Event::Syscall.writes`; both are applied by the caller via `apply_and_return`. `guest_mmap(addr, len, prot, flags) -> u64` is used identically at both call sites. `assert_trace_reproducible(&str)` takes the guest path (not trace paths — it does its own recording) and is called from Tasks 1 and 2. `is_usrstack64_mib` takes `(&Box_, [u64; 8])` in the record arm and `(&self.b, *args)` in the replay arm — same types.
 
 **Soft spots, checked and resolved.** All three were verified against the source after the first draft; two of the original sketches were wrong and are now corrected in place:
 - **Replay-arm control flow — was wrong, fixed.** The sketches used `continue` and a one-field `Divergence`. Verified against the anon-mmap mirror at `retrace-core/src/lib.rs:589-597`: these arms `return self.finish_event();`, and `Divergence` is `{ landmark: usize, pc: u64, detail: String }` (`:393`). Tasks 3 and 4 now carry the correct shape.
