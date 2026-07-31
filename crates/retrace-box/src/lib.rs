@@ -2105,3 +2105,28 @@ impl Box_ {
         live
     }
 }
+
+#[cfg(test)]
+mod pac_posture_tests {
+    use super::*;
+
+    // `pac_posture_from_memory` is PRIVATE (restore()'s only route to re-derive PAC posture from a
+    // bare snapshot). It must FAIL LOUD — never default — when EXE_BASE doesn't hold MH_MAGIC_64,
+    // because a silent PAC-off fallback is indistinguishable from correct for every guest this repo
+    // can build today (all plain arm64); it would hide a broken derivation at exactly the moment an
+    // arm64e guest arrives. No VM needed — this exercises the pure byte-parsing path directly.
+    #[test]
+    #[should_panic(expected = "no MH_MAGIC_64 at EXE_BASE")]
+    fn pac_posture_from_memory_fails_loud_on_corrupted_magic() {
+        // A region covering EXE_BASE..EXE_BASE+12, but with a corrupted (non-Mach-O) magic in the
+        // first 4 bytes — never a silent default.
+        let mut bytes = vec![0u8; 16];
+        bytes[0..4].copy_from_slice(&0xdead_beef_u32.to_le_bytes()); // NOT 0xfeedfacf
+        let regions = vec![Region { ipa: EXE_BASE, bytes }];
+
+        // Confirm the panic is actually reachable, not just declared: this call is the only thing
+        // this test does, so if `pac_posture_from_memory` ever stopped panicking here (e.g. someone
+        // "fixed" it into a silent default), `#[should_panic]` would fail the test for real.
+        let _ = pac_posture_from_memory(&regions);
+    }
+}
