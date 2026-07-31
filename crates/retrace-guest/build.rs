@@ -276,4 +276,15 @@ fn main() {
         .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
         .status().expect("rustc hello_rust");
     assert!(status.success(), "hello_rust guest build failed");
+
+    // usrstack: the M8-stack fixture. Issues sysctl(KERN_USRSTACK64), getrlimit(RLIMIT_STACK), and
+    // an anonymous MAP_FIXED mmap, then publishes all four results as u64s on stdout. Plain
+    // -arch arm64 freestanding, like the other micro-guests.
+    let src = format!("{}/asm/usrstack.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/usrstack");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang usrstack");
+    assert!(status.success(), "usrstack guest build failed");
 }
