@@ -1329,15 +1329,17 @@ impl Box_ {
         name
     }
 
-    /// Special case for mmap: allocate host pages, map 1:1 at a deterministic fresh IPA,
+    /// Special case for anonymous mmap: allocate host pages, map them at a deterministic guest IPA,
     /// track as a backing, return the guest IPA. Same call sequence => same IPAs on replay.
-    pub fn guest_mmap(&mut self, len: u64) -> u64 {
+    ///
+    /// M8-stack: `addr`/`flags` now reach this function. Previously it took only a length and always
+    /// bump-allocated, so an anonymous MAP_FIXED request silently landed at `mmap_next` — libstd's
+    /// guard-page install checks `result != stackptr` and panics with errno untouched
+    /// ("os error 0"). Placement is delegated to `map_mmap_region`, which the file-backed path
+    /// already uses, so both paths now share one FIXED implementation.
+    pub fn guest_mmap(&mut self, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
         let (host, rlen) = alloc_pages(len as usize);
-        let ipa = self.mmap_next;
-        self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_mmap)");
-        self.backings.push(Backing { host, ipa, len: rlen });
-        self.mmap_next += rlen as u64;
-        ipa
+        self.map_mmap_region(host, rlen, addr, prot, flags)
     }
 
     const MAP_FIXED: u64 = 0x10;
@@ -1356,7 +1358,12 @@ impl Box_ {
         if flags & Self::MAP_FIXED == 0 && prot & Self::PROT_EXEC != 0 {
             self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1);
         }
-        let ipa = if flags & Self::MAP_FIXED != 0 { addr } else { self.mmap_next };
+        let ipa = if flags & Self::MAP_FIXED != 0 {
+            // FIXED may land on already-mapped guest memory; the kernel replaces it silently and
+            // hv_vm_map refuses to overlap, so drop the overlapping backing(s) first.
+            self.unmap_overlapping(addr, rlen as u64);
+            addr
+        } else { self.mmap_next };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
         self.backings.push(Backing { host, ipa, len: rlen });
         if flags & Self::MAP_FIXED == 0 { self.mmap_next += rlen as u64; }

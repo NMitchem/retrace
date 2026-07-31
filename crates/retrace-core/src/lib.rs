@@ -149,7 +149,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 if args[2] & 0x4 != 0 {
                     eprintln!("[retrace warn] anon PROT_EXEC mmap (len {:#x}) not promoted to exec (JIT out of M2 scope)", args[1]);
                 }
-                let ipa = b.guest_mmap(args[1]);       // args[1] = length
+                let ipa = b.guest_mmap(args[0], args[1], args[2], args[3]);
                 w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ipa, false);
             }
@@ -626,7 +626,7 @@ impl ReplaySession {
                             // mmap: recreate the mapping deterministically (the guest reproduces its own
                             // stores by re-execution). The IPA must match the recording exactly.
                             if num == retrace_arch::SYS_MMAP && args[3] & MAP_ANON != 0 {
-                                let ipa = self.b.guest_mmap(args[1]);
+                                let ipa = self.b.guest_mmap(args[0], args[1], args[2], args[3]);
                                 if ipa != *ret {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("mmap ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });

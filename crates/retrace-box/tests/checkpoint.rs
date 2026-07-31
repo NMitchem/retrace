@@ -14,7 +14,9 @@ fn checkpoint_round_trip_is_lossless_mid_run() {
     // Exercise non-default internal state via Box_'s own public bump-allocator/cache/port methods
     // (no real syscall forwarding needed — these are exactly what record/replay's dispatch calls).
     let _reserved = b.guest_vm_reserve(0x9999_0000, 0x4000, true);
-    let _mapped = b.guest_mmap(0x4000);
+    // (addr=0, PROT_READ|WRITE, MAP_ANON|MAP_PRIVATE): an ordinary non-FIXED anon mmap, so this
+    // still exercises the mmap_next bump allocator.
+    let _mapped = b.guest_mmap(0, 0x4000, 3, 0x1002);
     b.install_cache_pager();
     let _port = b.mint_bootstrap_port();
     // Single-step a few instructions (crosses steppy's timebase-emulated MRS, advancing
