@@ -190,6 +190,19 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     .map_err(|e| format!("append sysctl usrstack64: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
+            // getrlimit(RLIMIT_STACK): answer from the guest's own stack size. Forwarding returns
+            // the HOST's limits (measured: 8176 KiB soft / 65520 KiB hard), and libstd subtracts
+            // this from usrstack64 to locate its guard page — the two must describe the SAME stack
+            // or the result is a wild address. The guest passes RLIMIT_STACK | _RLIMIT_POSIX_FLAG
+            // (0x1003), so mask before comparing. Deterministic => STANDARD symmetric posture,
+            // exactly like the usrstack64 arm above.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_GETRLIMIT
+                && (args[0] & !retrace_arch::RLIMIT_POSIX_FLAG) == retrace_arch::RLIMIT_STACK => {
+                let writes = b.rlimit_stack_reply(args);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                    .map_err(|e| format!("append getrlimit stack: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
+            }
             // shared_region_check_np (#294): pin the cache slide to 0 by reporting the UNSLID base
             // (0x180000000) as the shared region's start — dyld then computes slide 0 and lays the
             // cache at exactly the VAs page_in_cache maps. Writes the base into the guest out-pointer
@@ -711,6 +724,20 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(
                                             "sysctl usrstack64 reply mismatch: replay {recomputed:?} != recorded {writes:?}") });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
+                                return self.finish_event();
+                            }
+                            // getrlimit(RLIMIT_STACK) mirror — same posture as the usrstack64 mirror
+                            // above: recompute from the box's own geometry, byte-compare against the
+                            // recording (that comparison IS the divergence check), then apply.
+                            if num == retrace_arch::SYS_GETRLIMIT
+                                && (args[0] & !retrace_arch::RLIMIT_POSIX_FLAG) == retrace_arch::RLIMIT_STACK {
+                                let recomputed = self.b.rlimit_stack_reply(args);
+                                if recomputed != *writes {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!(
+                                            "getrlimit stack reply mismatch: replay {recomputed:?} != recorded {writes:?}") });
                                 }
                                 self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();

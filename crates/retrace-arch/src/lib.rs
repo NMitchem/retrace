@@ -25,6 +25,12 @@ pub const CTL_KERN: u32 = 1;
 /// process's ASLR'd stack address; retrace must answer it from the guest's own geometry.
 pub const KERN_USRSTACK64: u32 = 59;
 
+/// `sys/resource.h:446`.
+pub const RLIMIT_STACK: u64 = 3;
+/// `sys/resource.h:458` — libc ORs this in for strict-POSIX `getrlimit`; the guest is observed
+/// passing `0x1003`, so the resource must be masked before comparison.
+pub const RLIMIT_POSIX_FLAG: u64 = 0x1000;
+
 pub const LC_LOAD_DYLINKER: u32 = 0xe;
 pub const FAT_MAGIC: u32 = 0xcafe_babe;      // big-endian on disk; read with from_be
 pub const FAT_MAGIC_64: u32 = 0xcafe_babf;
@@ -82,6 +88,7 @@ mod tests {
         assert_eq!((SYS_SHARED_REGION_CHECK_NP, SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP), (294, 536));
         assert_eq!((SYS_SYSCTL, SYS_GETRLIMIT), (202, 194));
         assert_eq!((CTL_KERN, KERN_USRSTACK64), (1, 59));
+        assert_eq!((RLIMIT_STACK, RLIMIT_POSIX_FLAG), (3, 0x1000));
     }
 
     #[test]
