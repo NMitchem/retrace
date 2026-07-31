@@ -7,12 +7,18 @@
 mod util;
 
 #[test]
-#[ignore = "M7 rung 1 is parked at a PAC-garbled branch in dyld: a rustc-built hello_rust dies \
-            after ~245 traps (the count drifts 245-247 run-to-run; the crash site does not) \
-            without reaching main. EC 0x20 (instruction abort, lower EL), IFSC \
-            level-0 translation fault, branch target 0x67c0001800fc388 = live PAC signature bits \
-            over the valid shared-cache address 0x1800fc388 — the guest branched through a signed \
-            pointer as if it were raw. Un-ignore only on a genuine double pass. See \
+#[ignore = "M7 rung 1 is re-parked, past the PAC wall Task 6 fixed, at a new and different-class \
+            wall: no HVF fault at all (no pc/esr/far — the PAC-garbled-branch signature is gone). \
+            The guest's own Rust runtime panics during std init while installing the main thread's \
+            stack-overflow guard page: 'failed to allocate a guard page: Undefined error: 0 (os \
+            error 0)' at library/std/src/sys/pal/unix/stack_overflow.rs:526, immediately preceded \
+            by an mmap trap (num=197, args addr=0x16f4ec000 len=0x4000 prot=0x3(RW) \
+            flags=0x41012(PRIVATE|ANON|FIXED|...) fd=-1 off=0) whose result the guest's libstd \
+            treats as failure. The panic drives Rust's abort path, which raises a real SIGABRT that \
+            reaches the host record-dyn process itself (exit 134 / Command::status().code()==None) \
+            — this is a syscall-surface gap (mmap/guard-page semantics), not a pointer-signing \
+            defect, and it lands in the Rust panic/abort -> SIGABRT signal-delivery path that has \
+            been out of scope since M6. Un-ignore only on a genuine double pass. See \
             docs/superpowers/specs/2026-07-26-retrace-m7-rust-design.md."]
 fn hello_rust_records_and_replays_reaching_main() {
     util::assert_rung_records_and_replays(retrace_guest::HELLO_RUST, b"hi from rust\n");
