@@ -31,6 +31,9 @@ pub const RLIMIT_STACK: u64 = 3;
 /// passing `0x1003`, so the resource must be masked before comparison.
 pub const RLIMIT_POSIX_FLAG: u64 = 0x1000;
 
+/// BSD errno: an argument the kernel rejects (a MAP_FIXED address outside the address space).
+pub const EINVAL: u64 = 22;
+
 pub const LC_LOAD_DYLINKER: u32 = 0xe;
 pub const FAT_MAGIC: u32 = 0xcafe_babe;      // big-endian on disk; read with from_be
 pub const FAT_MAGIC_64: u32 = 0xcafe_babf;

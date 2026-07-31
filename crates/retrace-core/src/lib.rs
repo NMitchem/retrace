@@ -149,18 +149,33 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 if args[2] & 0x4 != 0 {
                     eprintln!("[retrace warn] anon PROT_EXEC mmap (len {:#x}) not promoted to exec (JIT out of M2 scope)", args[1]);
                 }
-                let ipa = b.guest_mmap(args[0], args[1], args[2], args[3]);
-                w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
-                b.set_x0_err_and_return(ipa, false);
+                // A MAP_FIXED address the guest's own space cannot hold is refused with an errno —
+                // the kernel's answer — and recorded as an ordinary failed syscall. Replay
+                // recomputes the same verdict from the same pure geometry check and byte-compares
+                // (ret, err) against the recording, so the symmetry is structural.
+                let (ret, err) = match b.guest_mmap(args[0], args[1], args[2], args[3]) {
+                    Ok(ipa) => (ipa, false),
+                    Err(errno) => (errno, true),
+                };
+                w.append(&Event::Syscall { num, args, ret, err, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
             }
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
-                let (ipa, writes) = b.guest_mmap_file(args[0], args[1], args[2], args[3], args[4] as i32, args[5]);
-                // PROT_EXEC (0x4): promote the freshly-mapped region to RO+exec (ATTR_CODE) stage-1
-                // pages so the guest can execute from it under W^X (e.g. dyld mapping the shared
-                // cache's __TEXT). Done BEFORE resuming the guest, on record AND replay.
-                if args[2] & 0x4 != 0 { b.set_region_exec(ipa, args[1]); }
-                w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes }).map_err(|e| format!("append mmap_file: {e}"))?; count += 1;
-                b.set_x0_err_and_return(ipa, false);
+                // Same FIXED-address refusal as the anonymous path above; nothing was mapped, so
+                // there is no region to promote and no staged bytes to record.
+                let (ret, err, writes) = match b.guest_mmap_file(args[0], args[1], args[2], args[3], args[4] as i32, args[5]) {
+                    Ok((ipa, writes)) => {
+                        // PROT_EXEC (0x4): promote the freshly-mapped region to RO+exec (ATTR_CODE)
+                        // stage-1 pages so the guest can execute from it under W^X (e.g. dyld
+                        // mapping the shared cache's __TEXT). Done BEFORE resuming the guest, on
+                        // record AND replay.
+                        if args[2] & 0x4 != 0 { b.set_region_exec(ipa, args[1]); }
+                        (ipa, false, writes)
+                    }
+                    Err(errno) => (errno, true, vec![]),
+                };
+                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append mmap_file: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
             }
             // munmap/mprotect (debt #2): honor them for real — drop + hv_vm_unmap the backing on
             // munmap so a later mmap can reuse the address; best-effort hv_vm_protect on
@@ -626,27 +641,38 @@ impl ReplaySession {
                             // mmap: recreate the mapping deterministically (the guest reproduces its own
                             // stores by re-execution). The IPA must match the recording exactly.
                             if num == retrace_arch::SYS_MMAP && args[3] & MAP_ANON != 0 {
-                                let ipa = self.b.guest_mmap(args[0], args[1], args[2], args[3]);
-                                if ipa != *ret {
+                                // A rejected MAP_FIXED address is recomputed here, not replayed
+                                // blindly: `fixed_fits` is a pure function of the request and the
+                                // fixed IPA geometry, so replay must reach the SAME verdict. The
+                                // (ret, err) comparison below is that divergence check.
+                                let (ipa, failed) = match self.b.guest_mmap(args[0], args[1], args[2], args[3]) {
+                                    Ok(ipa) => (ipa, false),
+                                    Err(errno) => (errno, true),
+                                };
+                                if (ipa, failed) != (*ret, *err) {
                                     return Err(Divergence { landmark: self.idx, pc,
-                                        detail: format!("mmap ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
+                                        detail: format!("mmap mismatch: replay (ret {ipa:#x}, err {failed}) != recorded (ret {ret:#x}, err {err})") });
                                 }
-                                self.b.set_x0_err_and_return(*ret, false);
+                                self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
                             // file-backed mmap (Task 8): anon-alloc + address identically (no file
                             // access), verify the recreated IPA equals the recorded ret (this is what
                             // makes MAP_FIXED correct on replay), then stage the recorded bytes.
                             if num == retrace_arch::SYS_MMAP {
-                                let ipa = self.b.guest_mmap_replay(args[0], args[1], args[2], args[3]);
-                                if ipa != *ret {
+                                let (ipa, failed) = match self.b.guest_mmap_replay(args[0], args[1], args[2], args[3]) {
+                                    Ok(ipa) => (ipa, false),
+                                    Err(errno) => (errno, true),
+                                };
+                                if (ipa, failed) != (*ret, *err) {
                                     return Err(Divergence { landmark: self.idx, pc,
-                                        detail: format!("mmap_file ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
+                                        detail: format!("mmap_file mismatch: replay (ret {ipa:#x}, err {failed}) != recorded (ret {ret:#x}, err {err})") });
                                 }
                                 // Same exec promotion as record: the guest executes the mmap'd code on
                                 // replay too (replay runs the guest, only faking syscall results), so the
                                 // exec pages must exist here as well — before the recorded bytes are staged.
-                                if args[2] & 0x4 != 0 { self.b.set_region_exec(ipa, args[1]); }
+                                // Nothing was mapped on the rejected path, so nothing to promote.
+                                if !failed && args[2] & 0x4 != 0 { self.b.set_region_exec(ipa, args[1]); }
                                 self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
