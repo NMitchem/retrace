@@ -12,7 +12,26 @@ pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
 // Dynamic-path constants (M1 static path is untouched). dyld is a PIE MH_DYLINKER at vmaddr 0,
 // so it must be slid to a free base: 5 GiB is above the exe (~4 GiB) and below guest_mmap (8 GiB).
 pub const DYLD_BASE: u64 = 0x1_4000_0000;      // 5 GiB slide for dyld
-const DYN_STACK_TOP:  u64 = 0x0020_0000;       // 2 MiB (block 0, RW+non-exec by default, below PT_L3_BASE)
+// The dynamic guest's stack. The TOP is load-bearing in a way the size is not: libstd's
+// `install_main_guard` mmaps its stack-overflow guard page MAP_FIXED at
+// `pthread_get_stackaddr_np() - pthread_get_stacksize_np()`, and macOS 26's libpthread reports the
+// main thread's size as a CONSTANT 0x7fc000 (8 MiB minus one granule) — it calls
+// `getrlimit(RLIMIT_STACK)` and then ignores the reply (measured: answering 0x10000000 instead of
+// 0x40000 left the computed address bit-identical). Retrace cannot influence that subtrahend, so the
+// top must leave room above it: at the old 2 MiB the subtraction UNDERFLOWED to 0xffffffffffa04000
+// and the guard-page mmap was refused, which is what parked rung 1 (`hello_rust`) through M7 and M8.
+//
+// 40 MiB puts the computed guard page at 0x2004000 — just above PT_L3_CEIL (32 MiB), so it cannot
+// collide with the L3 translation tables, and comfortably below the stack backing it guards. Only
+// the top moved: the guard page lands in FREE address space and is mapped fresh on demand, so the
+// stack itself stays 256 KiB and no per-syscall memory diff got any more expensive. (Backing a full
+// 8 MiB instead was measured at ~1.7x on `hello_rust` and far worse across the dyld suite — the
+// diff scales with total mapped memory.) `stack_geometry_tests` pins the arithmetic.
+//
+// Fidelity gap, unchanged and tracked as spec risk R3: the guest BELIEVES it has an 8 MiB stack
+// while 256 KiB is backed, so a deep enough recursion faults on unmapped IPA instead of striking
+// the guard page. That was equally true when the stack sat at 2 MiB.
+const DYN_STACK_TOP:  u64 = 0x0280_0000;       // 40 MiB — above PT_L3_CEIL by libpthread's 0x7fc000
 const DYN_STACK_SIZE: u64 = 0x0004_0000;       // 256 KiB
 pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 // Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 36-bit (64 GiB)
@@ -208,8 +227,8 @@ const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
 
 // --- Guest signing oracle (M2-cache Task 4) ---
 // Two anon scratch pages, lazy-init'd on the first sign_slots/authenticate, at fixed reserved IPAs
-// in block 0's free area [TSD_end 0x34000, DYN_STACK 0x1C0000) — clear of trampoline (0x4000),
-// PT_L2 (0x8000), stack (0x1C000), TSD (0x30000), dyn stack, PT_L3 (0x800000+), segments (>=4GiB),
+// in block 0's free area [TSD_end 0x34000, PT_L3_BASE 0x800000) — clear of trampoline (0x4000),
+// PT_L2 (0x8000), stack (0x1C000), TSD (0x30000), dyn stack (40 MiB), PT_L3 (0x800000+), segments (>=4GiB),
 // mmap (>=16GiB), and the cache (>=6GiB). W^X: the STUB page is code (RO+exec, ATTR_CODE) — a fresh
 // IPA promoted via set_region_exec; the TABLE page is data (RW+non-exec, block 0's default
 // ATTR_DATA). Executing a writable page would HANG hv_vcpu_run (Apple-Silicon W^X). Both anon
@@ -2405,5 +2424,36 @@ mod stack_geometry_tests {
     #[should_panic(expected = "refusing to guess a stack geometry")]
     fn fails_loud_when_no_stack_is_identifiable() {
         let _ = stack_geometry_from_memory(&[region(EXE_BASE, GRANULE as u64)]);
+    }
+
+    // The dynamic stack must sit high enough that the main-thread GUARD PAGE libstd computes is a
+    // real guest address. libstd's `install_main_guard` mmaps MAP_FIXED at
+    // `pthread_get_stackaddr_np() - pthread_get_stacksize_np()`, and macOS 26's libpthread reports
+    // `MAIN_STACK_SIZE` for the main thread as a CONSTANT — it calls `getrlimit(RLIMIT_STACK)` and
+    // then ignores the reply (measured: answering 0x10000000 instead of 0x40000 left the computed
+    // address bit-identical). So retrace cannot influence the subtrahend; it can only make sure the
+    // minuend leaves room. With the stack top at 2 MiB that subtraction UNDERFLOWED to
+    // 0xffffffffffa04000, which is what parked rung 1.
+    //
+    // This is a pure constant check on purpose: it is instant, it runs on every gate, and it fails
+    // the moment someone edits the layout back into a collision — which is the failure mode that
+    // cost this milestone two walls. The end-to-end proof is `hello_rust_e2e`.
+    #[test]
+    fn the_guard_page_libstd_computes_is_a_mappable_guest_address() {
+        // macOS 26 libpthread's main-thread stack size: 8 MiB minus one 16 KiB page.
+        const LIBPTHREAD_MAIN_STACK_SIZE: u64 = 0x7fc000;
+        let guard = DYN_STACK_TOP.checked_sub(LIBPTHREAD_MAIN_STACK_SIZE).unwrap_or_else(|| panic!(
+            "DYN_STACK_TOP {DYN_STACK_TOP:#x} is below libpthread's constant main-thread stack size \
+             {LIBPTHREAD_MAIN_STACK_SIZE:#x}: libstd's guard-page subtraction underflows to a wild \
+             address and the mmap is refused"));
+
+        assert_eq!(guard % GRANULE as u64, 0, "guard page {guard:#x} must be granule-aligned");
+        assert!(guard >= PT_L3_CEIL,
+            "guard page {guard:#x} lands in the L3 page-table window [{PT_L3_BASE:#x}, \
+             {PT_L3_CEIL:#x}) — mapping it would overwrite live translation tables");
+        assert!(guard + GRANULE as u64 <= DYN_STACK_TOP - DYN_STACK_SIZE,
+            "guard page {guard:#x} overlaps the stack backing [{:#x}, {DYN_STACK_TOP:#x}) — it must \
+             sit BELOW the stack it guards", DYN_STACK_TOP - DYN_STACK_SIZE);
+        const { assert!(DYN_STACK_TOP <= 1 << 36, "the stack must fit in the 36-bit guest IPA space") };
     }
 }

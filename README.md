@@ -1379,3 +1379,60 @@ discipline (a stale reason is worse than none). Clippy is clean
   `hello_rust`'s init path plus its own.
 
 See `docs/superpowers/specs/2026-07-31-retrace-m8-stack-design.md`.
+
+## Status: M8-stack close — 🎉 rung 1 is GREEN, and the fix was to stop fighting a constant
+
+**`hello_rust_e2e` is un-`#[ignore]`d and passes.** A real Rust binary — built by the real toolchain, full
+`std`, dynamically linked — records and replays **bit-for-bit** through real `/usr/lib/dyld` and reaches
+`main`, printing `hi from rust`. The gate is the strict one: `util::assert_rung_records_and_replays` demands
+exit 0, exact stdout, a byte-identical replay, and a double replay, so it cannot pass on a guest that died
+inside dyld. **`just gate`: 173 passed / 0 failed / 0 ignored**, clippy clean — nothing is ignored for the
+first time since M2-taskinfo.
+
+**The close was a two-constant change, and the reasoning is the interesting part.** The section above ended
+with two things believed necessary to clear rung 1: characterize libpthread's main-thread stack-size
+bookkeeping, and implement guest-raised signal delivery. **Neither was needed.** The measurement that mattered
+was already in hand and pointed somewhere cheaper.
+
+libstd's `install_main_guard` mmaps `MAP_FIXED` at `pthread_get_stackaddr_np() -
+pthread_get_stacksize_np()`, and the probes proved the subtrahend is a **constant retrace cannot influence**
+(macOS 26's libpthread reports `0x7fc000` and discards the `getrlimit` reply). Every attempt to make retrace
+*answer* that question differently was therefore doomed. But retrace fully controls the **minuend**: with the
+dynamic stack top at 2 MiB, `0x200000 - 0x7fc000` underflowed; with it at **40 MiB**, the guard page lands at
+`0x2004000` — just above the L3 page-table window at 32 MiB, in free, mappable address space. The guest gets
+its guard page and init completes.
+
+**Only the top moved; the stack is still 256 KiB.** Backing a real 8 MiB stack also works and is arguably more
+faithful — it was tried first, and it makes the guard page land *inside* the stack backing, which is exactly
+the containment case Task 5 implemented. It was rejected on **measured cost**: per-syscall memory diffing
+scales with total mapped guest memory, so `hello_rust` went from 8.4 s to 13.9 s and the dyld suite blew past
+a 10-minute gate timeout. The guard page does not need to be *inside* the stack to be installed — it only
+needs a mappable address — so the cheap placement gets the same behaviour for no cost.
+
+`stack_geometry_tests::the_guard_page_libstd_computes_is_a_mappable_guest_address` pins the arithmetic as a
+pure constant check that runs instantly on every gate: it fails the moment the layout is edited back into an
+underflow or a collision with the L3 window. That is the regression this milestone most needed, because the
+failure it guards against cost two separate walls.
+
+**What this does and does not prove.** Rung 1 is a *breadth* result: it says retrace's syscall and memory
+surface is now complete enough for a real language runtime's init path — libstd, libpthread, libmalloc, libxpc,
+libsystem_trace, objc — end to end, deterministically, twice. It does **not** say retrace handles threads,
+signals, or a program that does substantial work. `hello_rust` still only writes one line and exits.
+
+**The next boundary, unchanged in substance:**
+
+- **Guest-raised signal delivery** — still the top item, and still deferred rather than solved. It is no longer
+  in rung 1's path only because nothing aborts any more: `__pthread_kill`/`SIGABRT` is forwarded to the host
+  and would kill the recorder, so *any* guest that aborts still cannot be recorded. M6's crash machinery
+  covers HVF faults; this is the sibling case.
+- **`prot` is still ignored except for `PROT_EXEC`.** libstd `mprotect`s its guard page `PROT_NONE` (visible in
+  the trace as trap 74 right after the guard mmap) and retrace accepts it while stage-2 stays RWX — so the
+  guard page is real memory, and a stack overflow would silently scribble instead of faulting. The guard is
+  *installed*, not *enforced*.
+- **Stack size / spec risk R3** — the guest believes it has 8 MiB while 256 KiB is backed. A deep recursion
+  faults on unmapped IPA rather than striking the guard. Unchanged by this fix, and now the more visible gap.
+- **`guest_munmap`'s wholesale-drop defect**, the `guest_mmap_replay` rename, threads, and arm64e dynamic
+  guests — all unchanged from the list above.
+- **Rung 2 (`brew jq`)** is now genuinely next, and no longer gated behind rung 1.
+
+See `docs/superpowers/specs/2026-07-31-retrace-m8-stack-design.md`.

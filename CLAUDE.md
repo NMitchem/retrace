@@ -27,8 +27,8 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   must run serially. `just gate` sets it; a bare `cargo test` will flake with `HV_BUSY`.
 - Single test: `cargo test -p <crate> <name> -- --test-threads=1`
   (e.g. `cargo test -p retrace-box --test pac -- --test-threads=1`).
-- The headline e2e gate is deliberately `#[ignore]`d at the current wall (see "Honest gate" below).
-  Run it with `cargo test -p retrace --test hello_rust_e2e -- --ignored --test-threads=1`.
+- Nothing in the gate is `#[ignore]`d as of M8-stack (see "Honest-gate discipline" below). The
+  headline e2e gates run with the rest: `cargo test -p retrace --test hello_rust_e2e -- --test-threads=1`.
 - CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
   exe through real `/usr/lib/dyld`), `... replay t.bin`.
 - `RETRACE_TRACE=1` on a `record`/`record-dyn` run logs every dispatched trap (and decodes
@@ -138,8 +138,13 @@ Development is milestone-driven: **M0** (box + trace spine), **M1** (general mem
 B-family PAC). Each milestone has a design spec in `docs/superpowers/specs/` and a task plan in
 `docs/superpowers/plans/`; per-task reports and code-review diffs land in `.superpowers/sdd/`.
 
-**Honest-gate discipline.** The headline end-to-end gate `hello_dyn_e2e` (a dynamically-linked C
-program that must record and replay byte-for-byte) stays `#[ignore]`d, parked at the current wall,
-rather than being faked green. Each milestone advances it and re-documents the next boundary — both
-in the test's `#[ignore]` reason and in the README Status section. When you clear a wall, move the
-gate forward and rewrite that documentation honestly; do not delete the ignored test.
+**Honest-gate discipline.** A headline end-to-end gate is parked `#[ignore]`d at the current wall,
+with the wall documented honestly, rather than being faked green or deleted. When you clear a wall,
+move the gate forward and rewrite that documentation — both the test's `#[ignore]` reason and the
+README Status section. If nothing is left to park it at, un-`#[ignore]` it and say so.
+
+As of M8-stack **both historical headline gates are GREEN and un-ignored**: `hello_dyn_e2e` (a
+dynamically-linked C program, green since M2-taskinfo) and `hello_rust_e2e` (rung 1 — a real
+full-`std` Rust binary reaching `main`, green since M8-stack). The gate is currently **173 passed /
+0 failed / 0 ignored**. Keep it that way: a new wall gets a NEW parked gate for the capability it
+blocks, not a regression of these.
