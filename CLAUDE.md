@@ -28,11 +28,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
 - Single test: `cargo test -p <crate> <name> -- --test-threads=1`
   (e.g. `cargo test -p retrace-box --test pac -- --test-threads=1`).
 - The headline e2e gate is deliberately `#[ignore]`d at the current wall (see "Honest gate" below).
-  Run it with `cargo test -p retrace --test hello_dyn_e2e -- --ignored --test-threads=1`.
+  Run it with `cargo test -p retrace --test hello_rust_e2e -- --ignored --test-threads=1`.
 - CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
   exe through real `/usr/lib/dyld`), `... replay t.bin`.
 - `RETRACE_TRACE=1` on a `record`/`record-dyn` run logs every dispatched trap (and decodes
-  `mach_msg2` sends) — the first tool to reach for on a bring-up failure.
+  `mach_msg2` sends) — the first tool to reach for on a bring-up failure. **Record-only:** `ReplaySession`
+  carries no trace instrumentation, so no `[trap]`/`[mach_msg2]`/`[fault]` line is ever printed on replay.
 
 The toolchain is pinned (`rust-toolchain.toml`: 1.95.0, target `aarch64-apple-darwin`). `clippy.toml`
 bans `Instant::now`/`SystemTime::now`/`std::thread` — see Determinism below; those denials are load-bearing, not style.

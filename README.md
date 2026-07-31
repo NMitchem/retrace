@@ -1149,3 +1149,79 @@ during M6 and fixed by re-deriving the three constants independently from the cu
   framing: M6 proves the crash story on one hand-planted arm64 C bug; the next milestones widen the guest
   surface (a self-built Rust binary, then a real Homebrew-packaged tool) rather than adding debugger
   capability, to find out what breaks when the guest is no longer a fixture written for this project.
+
+## Status: M7 — the breadth ladder, rung 1 (a real `rustc`-built Rust binary)
+
+**What rung 1 proved.** A `rustc`-built `hello_rust` — full `std`, produced by the real toolchain, not a
+hand-written fixture — loads through real `/usr/lib/dyld` and runs `libSystem` init (a Rust binary pulls in
+no `objc`), reaching further along paths `hello_dyn` never traversed at all — TLV setup and the Rust
+runtime's own pre-`main` init — though **not** as far as `hello_dyn` gets: `hello_dyn` reaches `main` and
+exits 0, while `hello_rust` still dies before `main`, inside libstd's pre-`main` init. M7 diagnosed and fixed
+a real class of bug along the way (below), and the milestone closes with rung 1 **re-parked** at a new,
+later, differently-shaped wall rather than green — a legitimate M7 outcome per the design spec's risk R1
+("walls come in chains"), not a failure and not grounds to loosen the gate.
+
+**The wall M7 found and fixed: PAC posture was global, not per-process.** retrace enabled PAC for every guest
+unconditionally; real macOS enables it **per process**, only for `arm64e` main executables — a plain-`arm64`
+process runs with PAC hardware-disabled. dyld's TLV-setup loop contains an unconditional `paciza x16`: on real
+macOS running a plain-`arm64` process this is architecturally a NOP (PAC off), but inside retrace's
+always-on posture it was a **real signature**, and the guest's later plain `blr` through that pointer branched
+through live PAC signature bits as if they were a raw code address — `pc=…`, `esr=0x82000004` (EC `0x20`,
+instruction abort lower EL), `far`/branch target `0x67c0001800fc388` (signature bits over the otherwise-valid
+shared-cache address `0x1800fc388`). The defect was a *class*, not one pointer (spec risk R4), and
+bidirectional: arm64e cache code signs a pointer that plain-arm64 client code then consumes raw, and
+plain-arm64 code can hand a raw pointer to arm64e cache code that `AUT*`s it. The fix (`78d884a`, Task 6)
+derives the guest's PAC posture from the **main executable's `cpusubtype`** in one helper, fed to all four
+SCTLR install sites, with a mandatory fail-loud rule — the posture is never silently defaulted. Task 7 kept the
+existing PAC tests falsifiable under the now-derived posture and, as a side effect, produced the repo's first
+arm64e guests (`bfamstrip`, `strip47`).
+
+**Why `hello_dyn` never hit this in four milestones of M2.** `hello_dyn` is also plain `arm64`, but it has
+**zero `__thread_vars`** — no TLV setup, so no arm64e→arm64 pointer handoff ever occurred on its path. It
+survived M2's entire wall-chain by luck of shape, not because its PAC posture was correct; M7 is the first
+guest whose shape exercises the defect at all.
+
+**The gate-credibility fix (Task 1).** The rung helper (`util::assert_rung_records_and_replays`) asserts exit
+**0** and exact stdout, not mere record/replay agreement — a recorded crash exits 139, and M6 records a crash
+as a *successful* recording that replays bit-for-bit, so an agreement-only gate would pass on a guest that died
+in dyld without ever reaching `main`. That assertion is exactly what caught the wall below: rung 1 fails loud,
+not green-by-accident.
+
+**The wall rung 1 is parked at now — a different mechanism, not the same class.** With PAC no longer
+corrupting the run, `hello_rust` gets substantially further (dyld completes, the Rust runtime's own pre-`main`
+init begins) and then the guest's `libstd` panics installing the **main thread's stack-overflow guard page**:
+`failed to allocate a guard page: Undefined error: 0 (os error 0)` at
+`library/std/src/sys/pal/unix/stack_overflow.rs:526`, immediately preceded by an `mmap` trap (syscall 197,
+`addr=0x16f4ec000 len=0x4000 prot=RW flags=PRIVATE|ANON|FIXED|…`) whose outcome the guest's `libstd` treats as
+failure. There is **no HVF fault at all** here — no `pc`/`esr`/`far` triple, unlike the PAC wall — so this is
+provably a **different mechanism** (spec risk R1's "normal ladder outcome"): a syscall-surface gap around
+guard-page `mmap`/`mprotect` semantics, not a pointer-signing disagreement. The panic drives Rust's abort path,
+which raises a real `SIGABRT` that reaches the host `record-dyn` process itself (exit 134). Because this lands
+directly in the Rust `panic!` → `abort()` → `SIGABRT` signal-delivery path — explicitly out of scope since M6 —
+M7 does not chase it; `hello_rust_records_and_replays_reaching_main` (`crates/retrace/tests/hello_rust_e2e.rs`)
+stays `#[ignore]`d, its reason rewritten to this signature (the old PAC-garbled-branch text is now obsolete and
+was deleted, per honest-gate discipline: a stale reason is worse than none).
+
+**The final tally.** `just gate`: **146 passed / 0 failed / 1 ignored** — the 1 is `hello_rust_e2e`
+(`hello_rust_records_and_replays_reaching_main`), deliberately parked at the guard-page wall described above,
+not swept under the rug. Clippy is clean (`cargo clippy --workspace --all-targets -- -D warnings`, no
+warnings), across 63 test binaries.
+
+**Deferred / the next boundary:**
+
+- **The guard-page `mmap` gap itself**, this milestone's parked wall — the immediate next thing a future rung-1
+  attempt must characterize and either fix or further re-park.
+- **Signal delivery** (unchanged from M6): `panic!`/`abort()` → `SIGABRT` is exactly the deferred fatal-signal
+  path M6 already named; M7 confirms a *real* Rust binary reaches it almost immediately.
+- **Threads** (`Sched` stays unused): not implicated by this wall — the trace shows no thread-spawn syscall
+  before the panic, only main-thread guard-page setup — but remain out of scope per spec risk R2 if a later
+  wall does spawn one.
+- **arm64e main executables as full dynamic programs** — rung 1 itself has only ever run plain-`arm64`, and
+  no real dynamically-linked arm64e program has recorded/replayed yet. But Task 7's `bfamstrip`/`strip47` are
+  themselves arm64e main executables (freestanding `-nostdlib -static` asm fixtures, not dynamically-linked
+  programs) that record and replay through the CLI, so `restore()`'s PAC-ON posture re-derivation *is*
+  exercised end-to-end — the branch's strongest posture evidence to date, short of a full arm64e dynamic guest.
+- **Rung 2 (`brew jq`, M8)** and beyond carry all of the above forward unchanged, plus whatever a real
+  Homebrew-packaged tool's own init path turns out to need that `hello_rust` didn't.
+
+See `docs/superpowers/specs/2026-07-26-retrace-m7-rust-design.md`.

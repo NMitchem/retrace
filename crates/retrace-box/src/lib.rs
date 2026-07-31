@@ -91,9 +91,50 @@ const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 // validateAlreadyRealizedClass fatal. See docs/.../2026-07-14-retrace-m2-tbi-design.md.
 const TCR_EL1_V:  u64 = 0x8_0021_0080_B511;    // +TBI0+TBID0. T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
-// base 0x30d00800 + M(1) + C(4) + I(0x1000), plus PAC enable bits:
+// base 0x30d00800 + M(1) + C(4) + I(0x1000). PAC is NOT in the base: it is per-guest (see below).
+const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000;
 // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
-const SCTLR_MMU_ON: u64 = (0x30d0_0800 | 1 | 4 | 0x1000) | 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
+const SCTLR_PAC_EN: u64 = 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
+
+/// The main executable's load address. Every guest this repo builds links `__TEXT` at
+/// `0x1_0000_0000`, and replay has NO independent way to learn it — a snapshot is a flat set of IPA
+/// regions with no Mach-O in sight. Naming it makes the one assumption `pac_posture_from_memory`
+/// rests on explicit and checkable instead of buried.
+pub const EXE_BASE: u64 = 0x1_0000_0000;
+
+/// **The one derivation.** All four SCTLR install sites go through this (directly, or through the
+/// two wrappers below). macOS enables pointer authentication per process, only for `arm64e` main
+/// executables — a plain-`arm64` process sees `PAC*`/`AUT*` as NOPs and `BRAA`/`BLRAA` as
+/// `BR`/`BLR`. retrace must match, or arm64e cache code and plain-arm64 client code disagree about
+/// whether a pointer carries a signature (M7's wall).
+pub fn pac_posture(cpusubtype: u32) -> bool {
+    (cpusubtype & 0x00ff_ffff) == retrace_arch::CPU_SUBTYPE_ARM64E
+}
+
+/// SCTLR_EL1 for a guest with the given posture. Never build this value ad hoc.
+fn sctlr_mmu_on(pac_enabled: bool) -> u64 {
+    SCTLR_MMU_ON_BASE | if pac_enabled { SCTLR_PAC_EN } else { 0 }
+}
+
+/// Re-derive the posture from a snapshot's own memory — `restore()`'s only route, since its inputs
+/// are `(regions, regs)` and `Regs` is `{x[31], pc, sp_el0, cpsr}`. Pure: `parse_macho` maps
+/// `__TEXT` from `fileoff == 0`, so the mach header is genuinely in guest memory and therefore in
+/// the snapshot, and record and replay cannot disagree about bytes the trace must contain anyway.
+///
+/// FAILS LOUD and NEVER defaults. A silent PAC-off fallback is indistinguishable from correct for
+/// every guest this repo can build today (all plain arm64), so it would hide a broken derivation at
+/// exactly the moment an arm64e guest arrives.
+fn pac_posture_from_memory(regions: &[Region]) -> bool {
+    let hdr = regions.iter()
+        .find(|r| r.ipa <= EXE_BASE && EXE_BASE + 12 <= r.ipa + r.bytes.len() as u64)
+        .unwrap_or_else(|| panic!(
+            "no snapshot region covers EXE_BASE {EXE_BASE:#x}; refusing to guess a PAC posture"));
+    let o = (EXE_BASE - hdr.ipa) as usize;
+    let magic = u32::from_le_bytes(hdr.bytes[o..o+4].try_into().unwrap());
+    assert_eq!(magic, 0xfeed_facf,
+        "no MH_MAGIC_64 at EXE_BASE {EXE_BASE:#x} (found {magic:#x}) — refusing to guess a PAC posture");
+    pac_posture(u32::from_le_bytes(hdr.bytes[o+8..o+12].try_into().unwrap()))
+}
 // CPACR_EL1.FPEN = 0b11 (bits [21:20]): EL0 and EL1 may use FP/SIMD without trapping. dyld's
 // early code uses NEON (memcpy, hashing); without this an FP access traps EC=0x07.
 const CPACR_FP_ON: u64 = 0x3 << 20;
@@ -266,6 +307,10 @@ pub struct Box_ {
     wps_armed: bool,
     watch_ranges: Vec<(u64, u64)>, // (va, len) armed write-watch ranges, for the software (syscall) check
     syscall_watch_hit: Option<(u64, u64)>, // (watched_va, write_ipa): first overlap this event
+    // M7 t6: this guest's derived (or explicitly overridden) PAC posture. Plain bool (no Drop),
+    // appended last so the load-bearing vcpu-before-vm drop order is unaffected. Cross-checked
+    // against the live SCTLR_EL1 bits by dbg_pac_enabled().
+    pac_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -295,6 +340,10 @@ pub struct BoxState {
     pub synthetic_tsc: u64,
     pub cache_refault_ipa: u64,
     pub cache_refault_count: u64,
+    // M7 t6: captured because from_checkpoint()'s snapshot is mid-run — its header is NOT pristine
+    // by construction, unlike restore()'s landmark-0 snapshot — so the posture cannot be re-derived
+    // and must be carried instead.
+    pub pac_enabled: bool,
 }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
@@ -548,7 +597,17 @@ impl Box_ {
         true
     }
 
-    pub fn load(loaded: &Loaded) -> Box_ {
+    /// Load a static guest with the posture the real OS would give it (derived from the main
+    /// executable's `cpusubtype`).
+    pub fn load(loaded: &Loaded) -> Box_ { Self::load_with_pac(loaded, pac_posture(loaded.cpusubtype)) }
+
+    /// `load` with an EXPLICIT PAC posture. **Test-only override.** Every guest this repo can build
+    /// is plain arm64, so the PAC tests (`pac`, `sign_oracle`, `cache_pager`) would otherwise have
+    /// no PAC-on box to assert against. NEVER use the override on a path whose trace is later
+    /// replayed: replay re-derives the posture from the header, and an overridden record run against
+    /// a derived replay run is a posture mismatch — which fails LATE (a divergence at the final
+    /// memory compare), not loudly.
+    pub fn load_with_pac(loaded: &Loaded, pac_enabled: bool) -> Box_ {
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         let mut backings = Vec::new();
@@ -583,13 +642,14 @@ impl Box_ {
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, ttbr0).unwrap();
         Self::set_pac_keys(&vcpu);
-        vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();   // was 0x30d00800 (MMU off)
+        let pac = pac_enabled;
+        vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(pac)).unwrap();   // was 0x30d00800 (MMU off)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -601,6 +661,11 @@ impl Box_ {
     /// cache. Does NOT disturb the caller's guest state: the stub runs on a dedicated scratch region
     /// and the full architectural state is saved and restored around it (see `run_pac_batch`).
     pub fn sign_slots(&mut self, slots: &[AuthSlot]) -> Vec<u64> {
+        // PAC-off guest: the real OS gives a non-arm64e process a REBASE-ONLY cache — its `braa`s
+        // are plain `br`s over raw pointers. `pacia`/`pacda` on the stub would NOP to the same
+        // result, but making this an INTENDED mode rather than an accident is the point (and it
+        // saves a vCPU round-trip per cache data page).
+        if !self.pac_enabled { return slots.iter().map(|s| s.target_va).collect(); }
         let entries: Vec<(u64, u64, u64)> = slots
             .iter()
             .map(|s| (s.target_va, s.modifier, if s.key_is_data { OP_PACDA } else { OP_PACIA }))
@@ -997,11 +1062,14 @@ impl Box_ {
         // must be 0 -- TSD_IPA (0x30000) would read as cluster 48 and blow libmalloc xzone's
         // per-cluster segment-group index out of bounds (M2-cpuid).
         vcpu.set_sys(sysreg::TPIDR_EL0,   0).unwrap();
-        vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();
+        // Derived from the MAIN executable's cpusubtype, not dyld's — dyld is itself arm64e, and
+        // deriving from it would recreate the bug this task fixes (M7's wall).
+        let pac = pac_posture(exe.cpusubtype);
+        vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(pac)).unwrap();
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -1579,7 +1647,8 @@ impl Box_ {
         vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();   // match load: thread pointer (harmless for M1)
         vcpu.set_sys(sysreg::TPIDR_EL0,   0).unwrap();         // match load: cpu 0 / cluster 0 (M2-cpuid)
         Self::set_pac_keys(&vcpu);
-        vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap(); // MMU on (tables from snapshot)
+        let pac = pac_posture_from_memory(regions);
+        vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(pac)).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
         // Restore captured architectural state.
@@ -1607,7 +1676,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -1928,6 +1997,7 @@ impl Box_ {
             synthetic_tsc: self.synthetic_tsc,
             cache_refault_ipa: self.cache_refault_ipa,
             cache_refault_count: self.cache_refault_count,
+            pac_enabled: self.pac_enabled,
         }
     }
 
@@ -1955,7 +2025,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();
         vcpu.set_sys(sysreg::TPIDR_EL0, state.tpidr_el0).unwrap(); // captured, NOT forced to 0
         Self::set_pac_keys(&vcpu);
-        vcpu.set_sys(sysreg::SCTLR_EL1, SCTLR_MMU_ON).unwrap();
+        vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(state.pac_enabled)).unwrap();
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_trap_debug_exceptions(true).unwrap(); // must not be omitted or step() stops trapping
         for i in 0..31 { vcpu.set_reg(reg::x(i as u32), state.regs.x[i]).unwrap(); }
@@ -1991,6 +2061,7 @@ impl Box_ {
             wps_armed: false,
             watch_ranges: Vec::new(),
             syscall_watch_hit: None,
+            pac_enabled: state.pac_enabled,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
@@ -2014,8 +2085,48 @@ impl Box_ {
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
-            self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count)
+            self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
+            self.pac_enabled)
+    }
+
+    /// Test-only: the guest's live PAC posture, read back from SCTLR_EL1 and cross-checked against
+    /// the field the constructor derived. PANICS if they disagree — i.e. if some install site set
+    /// SCTLR without going through `sctlr_mmu_on(pac_enabled)`. A posture mismatch between the four
+    /// sites otherwise fails LATE (a replay divergence, or a silently mis-seeked session); this
+    /// makes it fail in a unit test instead.
+    #[doc(hidden)]
+    pub fn dbg_pac_enabled(&self) -> bool {
+        let live = self.vcpu.get_sys(sysreg::SCTLR_EL1).unwrap() & SCTLR_PAC_EN != 0;
+        assert_eq!(live, self.pac_enabled,
+            "SCTLR_EL1 PAC bits ({live}) disagree with Box_::pac_enabled ({}) — an install site \
+             bypassed sctlr_mmu_on()", self.pac_enabled);
+        live
+    }
+}
+
+#[cfg(test)]
+mod pac_posture_tests {
+    use super::*;
+
+    // `pac_posture_from_memory` is PRIVATE (restore()'s only route to re-derive PAC posture from a
+    // bare snapshot). It must FAIL LOUD — never default — when EXE_BASE doesn't hold MH_MAGIC_64,
+    // because a silent PAC-off fallback is indistinguishable from correct for every guest this repo
+    // can build today (all plain arm64); it would hide a broken derivation at exactly the moment an
+    // arm64e guest arrives. No VM needed — this exercises the pure byte-parsing path directly.
+    #[test]
+    #[should_panic(expected = "no MH_MAGIC_64 at EXE_BASE")]
+    fn pac_posture_from_memory_fails_loud_on_corrupted_magic() {
+        // A region covering EXE_BASE..EXE_BASE+12, but with a corrupted (non-Mach-O) magic in the
+        // first 4 bytes — never a silent default.
+        let mut bytes = vec![0u8; 16];
+        bytes[0..4].copy_from_slice(&0xdead_beef_u32.to_le_bytes()); // NOT 0xfeedfacf
+        let regions = vec![Region { ipa: EXE_BASE, bytes }];
+
+        // Confirm the panic is actually reachable, not just declared: this call is the only thing
+        // this test does, so if `pac_posture_from_memory` ever stopped panicking here (e.g. someone
+        // "fixed" it into a silent default), `#[should_panic]` would fail the test for real.
+        let _ = pac_posture_from_memory(&regions);
     }
 }

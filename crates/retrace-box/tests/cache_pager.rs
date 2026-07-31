@@ -44,10 +44,13 @@ const DATA_DIVERSITY: u16 = 0x6ae1;
 const TEXT_IPA: u64 = 0x1_80cc_b568;
 
 // Load a static guest to get a live vCPU with the MMU on and the fixed PAC keys set (exactly the
-// state the pager signs from), without needing to run it first.
+// state the pager signs from), without needing to run it first. HELLO is plain arm64, so `load`'s
+// derived posture leaves PAC off; the pager's re-signing is exactly what this test exercises, so
+// it must ask for PAC explicitly via `load_with_pac(.., true)`. This box is never recorded/
+// replayed, so the posture override cannot create a record/replay mismatch.
 fn fresh_box() -> Box_ {
     let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
-    Box_::load(&loaded)
+    Box_::load_with_pac(&loaded, true)
 }
 
 #[test]

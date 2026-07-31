@@ -31,9 +31,12 @@ fn regs(b: &Box_) -> Regs {
 fn sign_slots_signs_roundtrips_and_preserves_state() {
     // Load a static guest and run to its first syscall (write): the vCPU is now stopped mid-syscall
     // with real ELR_EL1/SPSR_EL1/PC/SP/GPRs — exactly the state the cache pager calls sign_slots
-    // from. `load` already set the fixed PAC keys and SCTLR_EL1.EnIA/EnDA, so signing is live.
+    // from. HELLO is plain arm64, so `load`'s derived posture leaves PAC off (matching macOS's
+    // real per-process gating); this test is specifically about the PAC-ON signing oracle, so
+    // it must ask for PAC explicitly via `load_with_pac(.., true)`. This box is never recorded/
+    // replayed, so the posture override cannot create a record/replay mismatch.
     let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
-    let mut b = Box_::load(&loaded);
+    let mut b = Box_::load_with_pac(&loaded, true);
     match b.run() {
         Stop::Syscall { num, .. } => assert_eq!(num, SYS_WRITE, "expected write() first"),
         Stop::Other { esr } => panic!("guest faulted before first syscall: esr={esr:#x}"),

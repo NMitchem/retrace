@@ -1,13 +1,17 @@
 #[derive(Debug, Clone)]
 pub struct Segment { pub vaddr: u64, pub data: Vec<u8>, pub memsz: usize, pub exec: bool }
 #[derive(Debug, Clone)]
-pub struct Loaded { pub segments: Vec<Segment>, pub entry: u64, pub dylinker: Option<String> }
+pub struct Loaded { pub segments: Vec<Segment>, pub entry: u64, pub dylinker: Option<String>, pub cpusubtype: u32 }
 
 fn u32le(b: &[u8], o: usize) -> u32 { u32::from_le_bytes(b[o..o+4].try_into().unwrap()) }
 fn u64le(b: &[u8], o: usize) -> u64 { u64::from_le_bytes(b[o..o+8].try_into().unwrap()) }
 
 pub fn parse_macho(b: &[u8]) -> Loaded {
     assert_eq!(u32le(b, 0), 0xfeed_facf, "not a 64-bit Mach-O (MH_MAGIC_64)");
+    // mach_header_64: magic(0) cputype(4) cpusubtype(8). The low 24 bits are the subtype proper;
+    // the top 8 are capability bits (arm64e carries a ptrauth ABI version there). The box derives
+    // the guest's PAC posture from this — macOS enables PAC per process, only for arm64e mains.
+    let cpusubtype = u32le(b, 8);
     let ncmds = u32le(b, 16);
     let mut off = 32usize; // mach_header_64 is 32 bytes
     let mut segments = Vec::new();
@@ -52,7 +56,7 @@ pub fn parse_macho(b: &[u8]) -> Loaded {
         }
         off += cmdsize;
     }
-    Loaded { segments, entry: entry.expect("no LC_MAIN/LC_UNIXTHREAD entry point"), dylinker }
+    Loaded { segments, entry: entry.expect("no LC_MAIN/LC_UNIXTHREAD entry point"), dylinker, cpusubtype }
 }
 
 pub fn slice_arm64e(fat: &[u8]) -> &[u8] {
@@ -109,6 +113,7 @@ pub const SPINLOOP: &str = concat!(env!("OUT_DIR"), "/spinloop");
 pub const WATCHLOOP: &str = concat!(env!("OUT_DIR"), "/watchloop");
 pub const CRASH: &str = concat!(env!("OUT_DIR"), "/crash");
 pub const CRASHJMP: &str = concat!(env!("OUT_DIR"), "/crashjmp");
+pub const HELLO_RUST: &str = concat!(env!("OUT_DIR"), "/hello_rust");
 
 #[cfg(test)]
 mod tests {
@@ -143,5 +148,26 @@ mod tests {
     fn watchloop_guest_parses() {
         let l = parse_macho(&std::fs::read(WATCHLOOP).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn parse_macho_surfaces_cpusubtype() {
+        // The guest's PAC posture is derived from this field (M7 t6): macOS enables PAC per process
+        // only for arm64e main executables. Every guest this repo builds is plain arm64.
+        let l = parse_macho(&std::fs::read(HELLO_RUST).unwrap());
+        assert_eq!(l.cpusubtype & 0x00ff_ffff, 0,
+                   "hello_rust must be CPU_SUBTYPE_ARM64_ALL, got {:#x}", l.cpusubtype);
+        assert_ne!(l.cpusubtype & 0x00ff_ffff, retrace_arch::CPU_SUBTYPE_ARM64E,
+                   "hello_rust is not arm64e — the ladder's premise is self-built arm64 binaries");
+    }
+
+    #[test]
+    fn hello_rust_guest_parses() {
+        let l = parse_macho(&std::fs::read(HELLO_RUST).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64),
+                "entry 0x{:x} not inside any segment", l.entry);
+        // Rung 1's whole premise is a real dynamic binary through the real dynamic linker.
+        assert_eq!(l.dylinker.as_deref(), Some("/usr/lib/dyld"),
+                   "hello_rust must be dynamically linked through real dyld");
     }
 }
