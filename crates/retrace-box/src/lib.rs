@@ -135,6 +135,32 @@ fn pac_posture_from_memory(regions: &[Region]) -> bool {
         "no MH_MAGIC_64 at EXE_BASE {EXE_BASE:#x} (found {magic:#x}) — refusing to guess a PAC posture");
     pac_posture(u32::from_le_bytes(hdr.bytes[o+8..o+12].try_into().unwrap()))
 }
+
+/// Re-derive the guest's stack geometry `(top, size)` from a snapshot's own memory — the twin of
+/// `pac_posture_from_memory`, and for the same reason: `restore()` gets only `(regions, regs)`.
+///
+/// `restore()` rebuilds BOTH load paths (a static `record` trace AND a dynamic `record-dyn` one),
+/// and their stacks differ — one granule below `STACK_TOP_IPA` vs `DYN_STACK_SIZE` below
+/// `DYN_STACK_TOP`. Hardcoding either here would make the other path lie on replay, which under
+/// M8-stack is not a cosmetic wrong answer: the `kern.usrstack64` replay mirror recomputes its reply
+/// from this geometry and byte-compares it against the recording, so a wrong path would surface as a
+/// divergence. The two stack backings sit at disjoint IPAs, so the region list names the path
+/// unambiguously.
+///
+/// FAILS LOUD and NEVER defaults, exactly like `pac_posture_from_memory`: guessing a stack top is
+/// how the guest ends up believing a lie about its own address space in the first place.
+fn stack_geometry_from_memory(regions: &[Region]) -> (u64, u64) {
+    let covers = |base: u64, size: u64| regions.iter()
+        .any(|r| r.ipa == base && r.bytes.len() as u64 >= size);
+    let dynamic = covers(DYN_STACK_TOP - DYN_STACK_SIZE, DYN_STACK_SIZE);
+    let static_ = covers(STACK_TOP_IPA - GRANULE as u64, GRANULE as u64);
+    match (dynamic, static_) {
+        (true, false) => (DYN_STACK_TOP, DYN_STACK_SIZE),
+        (false, true) => (STACK_TOP_IPA, GRANULE as u64),
+        _ => panic!("cannot identify the guest's stack in the snapshot \
+                     (dynamic={dynamic}, static={static_}); refusing to guess a stack geometry"),
+    }
+}
 // CPACR_EL1.FPEN = 0b11 (bits [21:20]): EL0 and EL1 may use FP/SIMD without trapping. dyld's
 // early code uses NEON (memcpy, hashing); without this an FP access traps EC=0x07.
 const CPACR_FP_ON: u64 = 0x3 << 20;
@@ -311,6 +337,14 @@ pub struct Box_ {
     // appended last so the load-bearing vcpu-before-vm drop order is unaffected. Cross-checked
     // against the live SCTLR_EL1 bits by dbg_pac_enabled().
     pac_enabled: bool,
+    // M8-stack: the guest's OWN stack geometry, set at load. `kern.usrstack64` (and, from t4,
+    // RLIMIT_STACK) are answered from these rather than forwarded, so the guest is never told its
+    // stack lives at a HOST address. Path-aware by construction: the static path maps one granule
+    // below STACK_TOP_IPA, the dynamic path maps DYN_STACK_SIZE below DYN_STACK_TOP — hardcoding
+    // either constant at the answer site would make the other path lie. Plain u64s (no Drop),
+    // appended last so the load-bearing vcpu-before-vm drop order is unaffected.
+    stack_top: u64,
+    stack_size: u64,
 }
 
 #[derive(Debug)]
@@ -344,6 +378,10 @@ pub struct BoxState {
     // by construction, unlike restore()'s landmark-0 snapshot — so the posture cannot be re-derived
     // and must be carried instead.
     pub pac_enabled: bool,
+    // M8-stack: carried for the same reason as `pac_enabled` — a mid-run capture must reproduce the
+    // geometry exactly, and a seeked session must answer `kern.usrstack64` the way the record run did.
+    pub stack_top: u64,
+    pub stack_size: u64,
 }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
@@ -649,10 +687,15 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64 }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
+
+    /// Top of the guest's stack (exclusive) — what `kern.usrstack64` must report (M8-stack).
+    pub fn stack_top(&self) -> u64 { self.stack_top }
+    /// Size of the guest's stack in bytes — what `RLIMIT_STACK` must report (M8-stack).
+    pub fn stack_size(&self) -> u64 { self.stack_size }
 
     /// Re-sign a batch of shared-cache auth slots with the GUEST's fixed PAC keys, returning the
     /// signed pointers (in slot order). Each slot is signed in-guest with `pacia` (IA,
@@ -1069,7 +1112,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -1648,6 +1691,9 @@ impl Box_ {
         vcpu.set_sys(sysreg::TPIDR_EL0,   0).unwrap();         // match load: cpu 0 / cluster 0 (M2-cpuid)
         Self::set_pac_keys(&vcpu);
         let pac = pac_posture_from_memory(regions);
+        // M8-stack: DERIVED, not hardcoded — restore() rebuilds the static and the dynamic path
+        // alike, and the replay mirror byte-compares the reply it recomputes from this geometry.
+        let (stack_top, stack_size) = stack_geometry_from_memory(regions);
         vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(pac)).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
@@ -1676,7 +1722,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -1839,6 +1885,22 @@ impl Box_ {
         None
     }
 
+    /// The kernel writes `sysctl({CTL_KERN, KERN_USRSTACK64})` would perform, computed from the
+    /// guest's OWN stack top instead of retrace's (M8-stack). PURE — it only builds the regions;
+    /// the caller applies them with `apply_and_return`, exactly like the `shared_region_check_np`
+    /// reply. That is what lets replay recompute and byte-compare BEFORE touching guest memory.
+    ///
+    /// `args` is the raw syscall frame: `sysctl(name, namelen, oldp, oldlenp, newp, newlen)`.
+    /// `oldp == 0` is a size probe — only `*oldlenp` is reported. A `NULL` `oldlenp` (the guest
+    /// wants nothing back) yields no regions at all.
+    pub fn usrstack64_reply(&self, args: [u64; 8]) -> Vec<Region> {
+        let (oldp, oldlenp) = (args[2], args[3]);
+        let mut out = Vec::new();
+        if oldp != 0 { out.push(Region { ipa: oldp, bytes: self.stack_top.to_le_bytes().to_vec() }); }
+        if oldlenp != 0 { out.push(Region { ipa: oldlenp, bytes: 8u64.to_le_bytes().to_vec() }); }
+        out
+    }
+
     /// Read-only stage-1 walk of the guest's OWN page tables: VA -> IPA. MMU off => identity.
     /// None if unmapped at any level or beyond the 47-bit VA space — an unmapped VA cannot be
     /// the destination of an applied syscall write, so the watch check treats None as no-match.
@@ -1998,6 +2060,8 @@ impl Box_ {
             cache_refault_ipa: self.cache_refault_ipa,
             cache_refault_count: self.cache_refault_count,
             pac_enabled: self.pac_enabled,
+            stack_top: self.stack_top,
+            stack_size: self.stack_size,
         }
     }
 
@@ -2062,6 +2126,8 @@ impl Box_ {
             watch_ranges: Vec::new(),
             syscall_watch_hit: None,
             pac_enabled: state.pac_enabled,
+            stack_top: state.stack_top,
+            stack_size: state.stack_size,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
@@ -2128,5 +2194,50 @@ mod pac_posture_tests {
         // this test does, so if `pac_posture_from_memory` ever stopped panicking here (e.g. someone
         // "fixed" it into a silent default), `#[should_panic]` would fail the test for real.
         let _ = pac_posture_from_memory(&regions);
+    }
+}
+
+// M8-stack. `Box_` must know its OWN stack, per load path — the static path's stack is one granule
+// below STACK_TOP_IPA, the dynamic path's is DYN_STACK_SIZE below DYN_STACK_TOP. `restore()` rebuilds
+// both from a bare snapshot, so it re-derives the geometry rather than hardcoding either constant;
+// these tests pin the derivation (pure, no VM) and the static loader's own bookkeeping.
+#[cfg(test)]
+mod stack_geometry_tests {
+    use super::*;
+
+    // A minimal snapshot region list: the stack backing under test, plus whatever else the caller
+    // wants. `bytes` is sized, never filled — only ipa/len are consulted.
+    fn region(ipa: u64, len: u64) -> Region { Region { ipa, bytes: vec![0u8; len as usize] } }
+
+    #[test]
+    fn static_load_records_its_own_stack_geometry() {
+        let bytes = std::fs::read(retrace_guest::HELLO).unwrap();
+        let loaded = retrace_guest::parse_macho(&bytes);
+        let b = Box_::load(&loaded);
+        assert_eq!(b.stack_top(), STACK_TOP_IPA, "static stack top");
+        assert_eq!(b.stack_size(), GRANULE as u64, "static stack is exactly one granule");
+        assert_eq!(b.stack_top() - b.stack_size(), STACK_TOP_IPA - GRANULE as u64,
+                   "the computed stack bottom must equal the IPA load() actually maps");
+    }
+
+    #[test]
+    fn derives_the_static_geometry_from_a_static_snapshot() {
+        let regions = vec![region(STACK_TOP_IPA - GRANULE as u64, GRANULE as u64)];
+        assert_eq!(stack_geometry_from_memory(&regions), (STACK_TOP_IPA, GRANULE as u64));
+    }
+
+    #[test]
+    fn derives_the_dynamic_geometry_from_a_dynamic_snapshot() {
+        let regions = vec![region(DYN_STACK_TOP - DYN_STACK_SIZE, DYN_STACK_SIZE)];
+        assert_eq!(stack_geometry_from_memory(&regions), (DYN_STACK_TOP, DYN_STACK_SIZE));
+    }
+
+    // Fail loud, never default: a snapshot naming no stack we recognize must not silently answer
+    // with one path's constants, because that is precisely the "the guest is told a lie about its
+    // own address space" bug M8-stack exists to remove.
+    #[test]
+    #[should_panic(expected = "refusing to guess a stack geometry")]
+    fn fails_loud_when_no_stack_is_identifiable() {
+        let _ = stack_geometry_from_memory(&[region(EXE_BASE, GRANULE as u64)]);
     }
 }

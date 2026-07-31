@@ -36,6 +36,18 @@ fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64) {
     else                  { (args[1], args[2], args[3], 0x3 /*RW*/) } // allocate: always RW anon
 }
 
+/// True if this `sysctl` is `{CTL_KERN, KERN_USRSTACK64}` — a 2-element mib read out of guest
+/// memory. Shared by record and replay so both classify the trap identically (symmetry rule 1);
+/// the read is `read_guest_checked` so an unreadable/partial mib is simply "not our mib" (it
+/// forwards like every other sysctl) rather than a panic.
+fn is_usrstack64_mib(b: &retrace_box::Box_, args: [u64; 8]) -> bool {
+    if args[1] != 2 { return false; }
+    let Some(raw) = b.read_guest_checked(args[0], 8) else { return false };
+    let name0 = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+    let name1 = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+    name0 == retrace_arch::CTL_KERN && name1 == retrace_arch::KERN_USRSTACK64
+}
+
 /// How a recorded (or replayed) run ended: a clean exit, or a guest synchronous fault (M6). The
 /// triple is deterministic — identical guest state faults identically — so replay byte-compares it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +175,20 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.guest_mprotect(args[0], args[1], args[2]);
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mprotect: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
+            }
+            // sysctl({CTL_KERN, KERN_USRSTACK64}): answer from the guest's OWN stack top (M8-stack).
+            // Forwarding this returns RETRACE's host-process stack address — ASLR'd, different every
+            // run — which the guest then uses as a guest address (libstd derives its guard page from
+            // it). That is semantically wrong independent of determinism, exactly like M2-cpuid's
+            // TPIDR_EL0. Every other mib keeps forwarding, unchanged. The answer is deterministic, so
+            // this takes the STANDARD symmetric posture: replay recomputes these same bytes and
+            // byte-compares them against the recording (symmetry rule 1).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL
+                && is_usrstack64_mib(&b, args) => {
+                let writes = b.usrstack64_reply(args);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                    .map_err(|e| format!("append sysctl usrstack64: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
             }
             // shared_region_check_np (#294): pin the cache slide to 0 by reporting the UNSLID base
             // (0x180000000) as the shared region's start — dyld then computes slide 0 and lays the
@@ -672,6 +698,21 @@ impl ReplaySession {
                             if num == retrace_arch::SYS_MPROTECT {
                                 self.b.guest_mprotect(args[0], args[1], args[2]);
                                 self.b.set_x0_err_and_return(0, false);
+                                return self.finish_event();
+                            }
+                            // sysctl(KERN_USRSTACK64) mirror: recompute the SAME reply from the box's
+                            // own stack geometry and byte-compare it against the recording — that
+                            // comparison IS the divergence check (symmetry rule 1). The geometry is
+                            // re-derived by restore() from the snapshot, so a static trace recomputes
+                            // the static answer and a dynamic one the dynamic answer.
+                            if num == retrace_arch::SYS_SYSCTL && is_usrstack64_mib(&self.b, args) {
+                                let recomputed = self.b.usrstack64_reply(args);
+                                if recomputed != *writes {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!(
+                                            "sysctl usrstack64 reply mismatch: replay {recomputed:?} != recorded {writes:?}") });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
                             // Apply recorded kernel writes + feed ret; NO real syscall executes.
