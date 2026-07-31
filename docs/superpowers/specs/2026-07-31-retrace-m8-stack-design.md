@@ -141,21 +141,47 @@ comparison *is* the divergence check (symmetry rule 1). This is M2-setport's pos
 Each record-side special case therefore requires a mirrored replay arm. An asymmetry surfaces as a
 divergence, not as silent corruption.
 
-## The address-space determinism oracle
+## The trace-reproducibility oracle
 
 The existing divergence oracle compares replay against a recording; it never compares one recording
 against another, so it is structurally blind to a host address entering the trace. That blind spot is
 why this defect survived seven milestones and 146 passing tests.
 
-**The oracle:** record the same guest twice, then assert that every *address-shaped* field matches —
-`mmap`/`mach_vm` return addresses, address-carrying syscall arguments, and every `Region.ipa`. Opaque
-payload bytes are **not** compared.
+**The oracle:** record the same guest twice and assert the two traces are **byte-identical**. Scoped
+to **freestanding guests** — the `-nostdlib -static` asm fixtures, which have no clock, no entropy, no
+libmalloc, and no mach ports.
 
-The address-shaped restriction is load-bearing, not a convenience. A byte-identical oracle would fire
-on values the project has deliberately and correctly accepted as per-trace nondeterministic:
-M2-xpcport's minted bootstrap port name, M2-taskinfo's audit token, and M2-cpuid's `getentropy` /
-`proc_info`. Comparing only addresses detects host-addresses-masquerading-as-guest-addresses — the
-actual invariant — while leaving that settled ground untouched, and needs no allowlist to maintain.
+### Why not an address-shaped projection over dyld guests (measured, 2026-07-31)
+
+The first design for this oracle compared only *address-shaped* fields (`mmap` returns, address-
+carrying args, `Region.ipa`) so that values the project has correctly accepted as per-trace
+nondeterministic — M2-cpuid's `getentropy`/`proc_info`, M2-xpcport's minted port name, M2-taskinfo's
+audit token — would not trip it. **That design does not work, and the calibration run disproved it.**
+
+Two recordings of `hello_dyn` disagree on address-shaped fields every time, with *differing field
+counts* (883, 885, 886, 887 across four runs) — structural divergence, not a substituted value. The
+carrier is `gettimeofday` (BSD 116), which retrace forwards to the host: a polling loop in libSystem
+runs 4 iterations in one recording and 3 in the next. Every divergent address observed sat just above
+`MMAP_BASE = 0xA_0000_0000` (`0xa00070000`, `0xa002e8000`, `0xa0005c000`) — box-generated bump
+allocations, not host addresses.
+
+The reasoning error was assuming accepted nondeterminism stays in payload bytes. It does not: time and
+entropy change **control flow**, and control flow determines **addresses**. No cross-recording address
+comparison can distinguish "a host address leaked" from "the guest legitimately took a different path"
+on a guest whose path depends on the clock.
+
+On a freestanding fixture none of those inputs exist, so the far simpler and strictly stronger
+whole-trace equality applies instead. It catches this milestone's Defect 1 directly: `usrstack.s`'s
+recorded `sysctl` reply differs between recordings today and is identical after the fix.
+
+### The limitation this exposes, stated honestly
+
+**Recordings of dyld/libSystem guests are not reproducible run-to-run**, because `gettimeofday` and
+`getentropy` are forwarded. This does not threaten replay determinism — each trace replays bit-for-bit,
+which the divergence oracle enforces per trace, exactly as M2-cpuid ruled. But it does mean no
+cross-recording oracle can cover them. Making them reproducible means synthesizing both syscalls, which
+changes every dyld guest's trace and carries its own wall-chain risk: that is a milestone of its own
+(the natural M9 candidate), not a fix inside M8.
 
 ## Correctness invariant
 
@@ -194,14 +220,14 @@ A new freestanding asm guest — `crates/retrace-guest/asm/usrstack.s`, followin
 `machmsg.s` / `fileio.s` pattern — issues `sysctl(KERN_USRSTACK64)`, `getrlimit(RLIMIT_STACK)`, and an
 anonymous `MAP_FIXED` mmap at a computed address, then stores the results where the test can read them.
 
-- **Record-twice on `usrstack`: address-shaped fields identical.** Fails on HEAD (differs by host
-  ASLR); passes after the fix.
+- **Record-twice on `usrstack`: the two traces are byte-identical.** Fails on HEAD (the recorded
+  `sysctl` reply carries the host's ASLR'd stack address); passes after the fix.
 - **Anonymous `MAP_FIXED` returns exactly the requested address.**
-- **Synthesized values equal `DYN_STACK_TOP` / `DYN_STACK_SIZE`.**
+- **Synthesized values equal the box's own stack top / size.**
 - **The recording replays bit-for-bit** (symmetry rule 1 holds for all three new arms).
-- **The oracle passes on `hello_dyn`.** This must be *verified, not assumed*. If it fails, that is a
-  second real host-address leak and gets its own finding rather than an oracle weakened to accommodate
-  it.
+- **The oracle passes on `hello`**, the simplest freestanding fixture (`write` + `exit`), which must be
+  reproducible today and after the fix. This calibrates the oracle against a guest that should pass;
+  if it fails, the oracle is wrong, not the guest.
 
 ## Risk register
 
@@ -215,9 +241,11 @@ anonymous `MAP_FIXED` mmap at a computed address, then stores the results where 
   That is a new, honest wall, and R3 is the note that it was chosen knowingly.
 - **R4 — `mprotect(PROT_NONE)` is best-effort.** A guest that touches the guard page expecting SIGSEGV
   lands in M6 crash-recording territory; out of scope here.
-- **R5 — the oracle may be too strict or too loose.** Too strict fails on legitimate per-trace
-  nondeterminism (mitigated by comparing addresses only); too loose misses payload-carried host
-  addresses. The `hello_dyn` check calibrates it against a known-good run.
+- **R5 — the oracle's scope is narrow, by measurement.** Whole-trace equality is exact where it
+  applies, but it applies only to freestanding fixtures; dyld guests are out of reach until
+  `gettimeofday`/`getentropy` are synthesized (see "The limitation this exposes"). The `hello`
+  calibration guards against the oracle itself being wrong. A future freestanding fixture that
+  acquires a nondeterministic input would fail this oracle loudly — which is the intent, not a defect.
 
 ## Components
 
@@ -234,10 +262,12 @@ anonymous `MAP_FIXED` mmap at a computed address, then stores the results where 
 
 ## Open questions for implementation planning
 
-1. Does `hello_dyn` itself call `KERN_USRSTACK64`? If so its recorded trace changes, and any golden
-   fixture keyed to the old value needs updating. Determine empirically in task 1.
-2. Where does the oracle's address-shaped projection live — a helper in `retrace-trace` (reusable, but
-   widens that crate's surface) or in the test harness (contained)? Prefer the test harness unless a
-   second consumer appears.
+1. Does `hello_dyn` itself call `KERN_USRSTACK64`? It issues 8 `sysctl`s per recording (measured); the
+   mibs were not decoded. If one is `[1,59]` its recorded trace bytes change under this milestone —
+   benign, since its behaviour does not depend on the value (no `0x16…` host address appears in its
+   address fields), but any golden fixture keyed to the old bytes would need updating. `hello_dyn`'s
+   e2e test is the guard: it must stay green.
+2. **Resolved.** The oracle lives in the test harness (`crates/retrace/tests/util/mod.rs`) as
+   whole-trace equality; no `retrace-trace` surface change is needed.
 3. Does `guest_mmap`'s widened signature have non-test callers beyond the two dispatch sites? Confirm
    before changing it.

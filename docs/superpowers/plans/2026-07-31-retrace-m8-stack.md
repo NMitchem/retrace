@@ -34,66 +34,50 @@
 
 ---
 
-### Task 1: Address-space determinism oracle + calibrate it on `hello_dyn`
+### Task 1: Trace-reproducibility oracle + calibrate it on `hello`
 
-Builds the oracle harness and answers spec open question 1 empirically: *does `hello_dyn` itself leak a host address?* The answer determines nothing about the rest of the plan's shape — but it must be recorded, because if `hello_dyn` fails the oracle on HEAD that is a **second real leak**, and it gets its own finding rather than an oracle weakened to accommodate it.
+Builds the oracle harness and calibrates it against the simplest freestanding guest, which must be reproducible today.
+
+> **Revised 2026-07-31, after a measured calibration failure.** The first design compared only *address-shaped* fields and calibrated on `hello_dyn`. That was disproved: two `hello_dyn` recordings disagree every time with *differing field counts* (883/885/886/887), because `gettimeofday` (BSD 116) is forwarded and a libSystem polling loop runs a different number of iterations per recording. Time and entropy change **control flow**, and control flow determines **addresses** — so no cross-recording address comparison can work on a dyld guest. Every divergent address observed was a box-generated bump allocation just above `MMAP_BASE`, not a host address: there was no second leak. Whole-trace equality on a *freestanding* fixture is simpler, strictly stronger where it applies, and honest about where it does not. See the spec's "Why not an address-shaped projection over dyld guests".
 
 **Files:**
-- Modify: `crates/retrace/tests/util/mod.rs` (append two helpers)
+- Modify: `crates/retrace/tests/util/mod.rs` (append one helper)
 - Create: `crates/retrace/tests/determinism.rs`
 
 **Interfaces:**
-- Consumes: `util::record`, `util::record_dynamic` (existing).
-- Produces: `util::address_projection(&Path) -> Vec<(usize, &'static str, u64)>` and `util::assert_address_determinism(&Path, &Path)`, used by Tasks 2 and 6.
+- Consumes: `util::record` (existing).
+- Produces: `util::assert_trace_reproducible(guest: &str)`, used by Task 2.
 
-- [ ] **Step 1: Add the oracle helpers to `crates/retrace/tests/util/mod.rs`**
+- [ ] **Step 1: Add the oracle helper to `crates/retrace/tests/util/mod.rs`**
 
 Append at the end of the file:
 
 ```rust
-/// The ADDRESS-SHAPED projection of a trace: every field that names a guest address, in order.
+/// Record `guest` TWICE and assert the two traces are byte-identical.
 ///
-/// Deliberately excludes opaque payload bytes, so values this project has explicitly and correctly
-/// accepted as per-trace nondeterministic do NOT trip it: `getentropy`/`proc_info` (M2-cpuid design
-/// spec, "Record legitimately differs run-to-run"), M2-xpcport's minted bootstrap port name, and
-/// M2-taskinfo's audit token. What it DOES catch is a host address masquerading as a guest address
-/// — the M8-stack defect class, which the replay divergence oracle is structurally blind to because
-/// it only ever compares replay against one recording, never two recordings against each other.
-pub fn address_projection(trace: &std::path::Path) -> Vec<(usize, &'static str, u64)> {
-    use retrace_trace::Event;
-    let events = retrace_trace::Reader::open(trace).expect("open trace");
-    let mut out = Vec::new();
-    for (i, e) in events.iter().enumerate() {
-        match e {
-            Event::Snapshot { mem, .. } => {
-                for r in mem { out.push((i, "snapshot.ipa", r.ipa)); }
-            }
-            Event::Syscall { num, args, ret, writes, .. } => {
-                match *num {
-                    // mmap: arg0 is the requested address, ret is the placement.
-                    197 => { out.push((i, "mmap.addr", args[0])); out.push((i, "mmap.ret", *ret)); }
-                    // munmap / mprotect: arg0 is the target address.
-                    73 | 74 => out.push((i, "munmap_or_mprotect.addr", args[0])),
-                    _ => {}
-                }
-                for w in writes { out.push((i, "write.ipa", w.ipa)); }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// Assert two recordings of the SAME guest agree on every address-shaped field.
-pub fn assert_address_determinism(a: &std::path::Path, b: &std::path::Path) {
-    let (pa, pb) = (address_projection(a), address_projection(b));
-    assert_eq!(pa.len(), pb.len(),
-        "two recordings of the same guest produced different address-field counts ({} vs {}) — \
-         the runs took structurally different paths", pa.len(), pb.len());
-    for (x, y) in pa.iter().zip(pb.iter()) {
-        assert_eq!(x, y,
-            "address-shaped divergence between two recordings of the same guest: {x:?} vs {y:?} \
-             — a host address is reaching the guest as a guest address");
+/// The second oracle. The replay divergence oracle compares a replay against ONE recording, so it is
+/// structurally blind to a nondeterministic value entering the trace: the recording captures it once
+/// and replay faithfully reproduces it forever. This one compares two RECORDINGS.
+///
+/// **Only valid for freestanding (`-nostdlib -static`) guests** — no clock, no entropy, no libmalloc,
+/// no mach ports. Recordings of dyld/libSystem guests are NOT reproducible run-to-run, because
+/// `gettimeofday` and `getentropy` are forwarded to the host and a libSystem polling loop takes a
+/// different number of iterations per run (measured: `hello_dyn` traces differ structurally, by a
+/// varying number of events, every time). That is accepted per-trace nondeterminism (M2-cpuid) and
+/// does not threaten replay determinism, which the divergence oracle enforces per trace — but it does
+/// put dyld guests out of this oracle's reach until both syscalls are synthesized.
+pub fn assert_trace_reproducible(guest: &str) {
+    let (r1, t1) = record(guest);
+    assert_eq!(r1.code, 0, "first recording of {guest} failed: {}", r1.stderr);
+    let (r2, t2) = record(guest);
+    assert_eq!(r2.code, 0, "second recording of {guest} failed: {}", r2.stderr);
+    assert_eq!(r1.stdout, r2.stdout, "stdout differed between two recordings of {guest}");
+    let (b1, b2) = (std::fs::read(&t1).expect("read trace 1"), std::fs::read(&t2).expect("read trace 2"));
+    if b1 != b2 {
+        let at = b1.iter().zip(b2.iter()).position(|(x, y)| x != y);
+        panic!("two recordings of {guest} produced different traces (lengths {} vs {}, first byte \
+                difference at {:?}) — a nondeterministic value is entering the trace",
+               b1.len(), b2.len(), at);
     }
 }
 ```
@@ -103,33 +87,24 @@ pub fn assert_address_determinism(a: &std::path::Path, b: &std::path::Path) {
 Create `crates/retrace/tests/determinism.rs`:
 
 ```rust
-// M8-stack Task 1. The address-space determinism oracle, calibrated against a guest that is
-// already green. `hello_dyn` records and replays bit-for-bit today, so if IT trips the oracle the
-// oracle is either wrong or has found a second real host-address leak — either way that is a
-// finding to investigate, never a reason to loosen the assertion.
+// M8-stack Task 1. The trace-reproducibility oracle, calibrated against the simplest freestanding
+// guest there is: `hello` does write(1, "hello\n") then exit(0) under -nostdlib -static. It has no
+// clock, no entropy, no allocator and no ports, so two recordings of it MUST be byte-identical.
+// If this test fails, the oracle is wrong — not the guest.
 mod util;
 
 #[test]
-fn hello_dyn_records_deterministic_addresses() {
-    let (r1, t1) = util::record_dynamic(retrace_guest::HELLO_DYN);
-    assert_eq!(r1.code, 0, "first hello_dyn recording failed: {}", r1.stderr);
-    let (r2, t2) = util::record_dynamic(retrace_guest::HELLO_DYN);
-    assert_eq!(r2.code, 0, "second hello_dyn recording failed: {}", r2.stderr);
-    assert_eq!(r1.stdout, r2.stdout, "hello_dyn stdout differed between two recordings");
-    util::assert_address_determinism(&t1, &t2);
+fn hello_records_reproducibly() {
+    util::assert_trace_reproducible(retrace_guest::HELLO);
 }
 ```
 
-- [ ] **Step 3: Run it and record the answer**
+- [ ] **Step 3: Run the calibration**
 
 Run: `cargo test -p retrace --test determinism -- --test-threads=1 --nocapture`
+Expected: PASS.
 
-This is a **reconnaissance step with two legitimate outcomes.** Record which one you got in the commit message:
-
-- **PASS** — `hello_dyn` does not use a host address as a guest address. The oracle is calibrated against a known-good run. Proceed to Step 4.
-- **FAIL** — `hello_dyn` leaks too. **Stop and report** before writing any production code. Capture the failing `(index, field, value)` pair and diagnose with
-  `RETRACE_TRACE=1 cargo run -q -p retrace -- record-dyn <hello_dyn path> 2>&1 | grep -n '<the leaked value in hex>'`
-  to find the carrier, exactly as the spec's "Verified facts" section did. That is a second finding and needs its own decision from the user; do not widen this task to fix it.
+If it FAILS, **stop and report** — do not weaken the assertion and do not widen the task. A freestanding `write`+`exit` guest failing whole-trace equality means either the oracle is wrong or something unexpected is entering even the simplest trace; both need a decision. Include the reported lengths and first-differing byte offset.
 
 - [ ] **Step 4: Run the full gate**
 
@@ -140,19 +115,23 @@ Expected: 147 passed / 0 failed / 1 ignored, clippy clean. (One new test over th
 
 ```bash
 git add crates/retrace/tests/util/mod.rs crates/retrace/tests/determinism.rs
-git commit -m "M8-stack t1: address-space determinism oracle, calibrated on hello_dyn
+git commit -m "M8-stack t1: trace-reproducibility oracle, calibrated on hello
 
 The replay divergence oracle compares replay against ONE recording and is
-therefore structurally blind to a host address entering the trace -- which is
-why the M8-stack defect survived seven milestones and 146 passing tests.
+therefore structurally blind to a nondeterministic value entering the trace:
+the recording captures it once and replay reproduces it faithfully forever.
+That is why the M8-stack defect survived seven milestones and 146 tests.
 
-This adds the missing second oracle: record the same guest twice, compare only
-ADDRESS-SHAPED fields. Address-shaped rather than byte-identical so it does not
-disturb the per-trace nondeterminism the project has explicitly blessed
-(getentropy/proc_info per M2-cpuid, M2-xpcport's minted port name,
-M2-taskinfo's audit token) and needs no allowlist to maintain.
+This adds the missing second oracle: record twice, compare the traces byte for
+byte. Scoped to freestanding guests -- no clock, no entropy, no libmalloc, no
+ports. Calibrated on hello, which must be reproducible today.
 
-hello_dyn calibration result: <PASS: hello_dyn does not leak | FAIL: see report>
+Dyld guests are deliberately out of scope: gettimeofday and getentropy are
+forwarded, so a libSystem polling loop runs a different number of iterations
+per recording and the traces diverge structurally (measured on hello_dyn:
+883/885/886/887 address fields across four runs). That is accepted per-trace
+nondeterminism per M2-cpuid and does not threaten replay determinism; making
+dyld guests reproducible is a milestone of its own.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -281,14 +260,10 @@ Append to `crates/retrace/tests/determinism.rs`:
 ```rust
 #[test]
 fn usrstack_records_deterministically() {
-    let (r1, t1) = util::record(retrace_guest::USRSTACK);
-    assert_eq!(r1.code, 0, "first usrstack recording failed: {}", r1.stderr);
-    let (r2, t2) = util::record(retrace_guest::USRSTACK);
-    assert_eq!(r2.code, 0, "second usrstack recording failed: {}", r2.stderr);
-    assert_eq!(r1.stdout, r2.stdout,
-        "two recordings of the same guest disagree on kern.usrstack64 / RLIMIT_STACK / the \
-         MAP_FIXED placement — a host-derived value is reaching the guest");
-    util::assert_address_determinism(&t1, &t2);
+    // `usrstack` is freestanding, so it is in the reproducibility oracle's scope: two recordings
+    // must be byte-identical. Today they are not — the recorded sysctl reply carries the host's
+    // ASLR'd stack address, which differs every run.
+    util::assert_trace_reproducible(retrace_guest::USRSTACK);
 }
 ```
 
@@ -909,7 +884,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Placeholder scan:** No TBD/TODO. Every code step carries real code. Three steps are deliberately conditional rather than placeholder — Task 1 Step 3 (calibration has two defined outcomes with defined follow-ups), Task 6 Steps 2A/2B (the gate outcome is genuinely unknown until measured, which is the point of honest-gate discipline), and three "if the surrounding code differs, match it" notes where I could not verify an exact control-flow shape without reading code the implementer will have open.
 
-**Type consistency:** `stack_top`/`stack_size` are `u64` at every site — `Box_` fields, `BoxState` fields, accessors, and both helpers. `write_usrstack64_reply` and `write_rlimit_stack_reply` both take `[u64; 8]` and return `Vec<Region>`, matching `Event::Syscall.writes`. `guest_mmap(addr, len, prot, flags) -> u64` is used identically at both call sites. `address_projection` returns `Vec<(usize, &'static str, u64)>` and is consumed only by `assert_address_determinism`. `is_usrstack64_mib` takes `(&Box_, [u64; 8])` in the record arm and `(&self.b, *args)` in the replay arm — same types.
+**Type consistency:** `stack_top`/`stack_size` are `u64` at every site — `Box_` fields, `BoxState` fields, accessors, and both helpers. `write_usrstack64_reply` and `write_rlimit_stack_reply` both take `[u64; 8]` and return `Vec<Region>`, matching `Event::Syscall.writes`. `guest_mmap(addr, len, prot, flags) -> u64` is used identically at both call sites. `assert_trace_reproducible(&str)` takes the guest path (not trace paths — it does its own recording) and is called from Tasks 1 and 2. `is_usrstack64_mib` takes `(&Box_, [u64; 8])` in the record arm and `(&self.b, *args)` in the replay arm — same types.
 
 **Soft spots, checked and resolved.** All three were verified against the source after the first draft; two of the original sketches were wrong and are now corrected in place:
 - **Replay-arm control flow — was wrong, fixed.** The sketches used `continue` and a one-field `Divergence`. Verified against the anon-mmap mirror at `retrace-core/src/lib.rs:589-597`: these arms `return self.finish_event();`, and `Divergence` is `{ landmark: usize, pc: u64, detail: String }` (`:393`). Tasks 3 and 4 now carry the correct shape.
