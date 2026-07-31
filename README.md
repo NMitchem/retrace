@@ -1225,3 +1225,157 @@ warnings), across 63 test binaries.
   Homebrew-packaged tool's own init path turns out to need that `hello_rust` didn't.
 
 See `docs/superpowers/specs/2026-07-26-retrace-m7-rust-design.md`.
+
+## Status: M8-stack — guest stack identity (three real defects fixed, rung 1 advanced but still parked)
+
+**What M8-stack set out to do.** M7 parked rung 1 (`hello_rust`) at libstd's stack-overflow guard page. M8
+diagnosed that wall as two independent defects in retrace's **stack identity** — the guest was being told the
+truth about neither *where* its stack is nor *how big* it is — and fixed both; honoring `MAP_FIXED` then
+exposed a third, a recorder abort on an address the guest's space cannot hold, which is fixed here too. All
+three fixes are real, tested, and land; the wall itself moved twice but did not fall, and the milestone's own
+closing arithmetic turned out to rest on a premise that measurement refutes (below). Per spec risk R1 ("walls
+come in chains"), re-parking is a legitimate outcome — but this one comes with a caveat sharp enough to name in
+the same breath as the fixes.
+
+**Defect 1: `sysctl({CTL_KERN, KERN_USRSTACK64})` was forwarded.** The guest asked where its stack was and
+retrace handed it **retrace's own host-process stack address** — ASLR'd, different every run, and not a guest
+address at all. `Box_` now carries its own `stack_top`/`stack_size`, set at load and **path-aware by
+construction** (the static path maps one granule below `STACK_TOP_IPA`; the dynamic path maps `DYN_STACK_SIZE`
+below `DYN_STACK_TOP`) — hardcoding either constant at the answer site would make the other path lie.
+`usrstack64_reply` is a pure builder applied via `apply_and_return`, so replay recomputes the same bytes and
+byte-compares them: the standard symmetric posture of symmetry rule 1, not M2-xpcport's deliberate asymmetry.
+
+**Defect 2: anonymous `MAP_FIXED` was ignored outright.** `guest_mmap` took only a length and always
+bump-allocated, so a `MAP_FIXED` request silently landed at `mmap_next`. It now honors `addr`/`flags` through
+the same `map_mmap_region` the file-backed path already used, and — the part that matters — classifies a FIXED
+request against the live backings into three cases rather than unmapping wholesale: **fully covers** (drop and
+install), **fully contained in one backing** (copy into it in place, leaving the rest of that backing intact),
+and **true partial straddle** (`assert!` fail-loud; no guest exercises it, and fail-loud beats guessing at
+split semantics). The containment case is not a nicety — a guard page carved out of the stack lands *inside*
+the 256 KiB dynamic-stack backing, and the naive wholesale drop would have unmapped the stack the guest is
+running on; loaded image segments, the L1/L2 page tables and the PAC sign stub are each one backing apiece and
+equally destroyable. It is exercised by `crates/retrace/tests/fixedinner_e2e.rs`, which asserts the surrounding
+region keeps its contents. (It is *not*, as it turns out, what `hello_rust` ends up needing — see below.)
+
+**These were semantically wrong, not merely nondeterministic — which is exactly why M2-cpuid's rule does not
+excuse them.** M2-cpuid's position is that forwarded-syscall *variance* which is frozen identically into both
+runs is harmless: it never threatens replay determinism, so retrace tolerates it. That rule does not apply
+here, and M2-cpuid itself is the precedent for why. Its real defect was never nondeterminism — it was retrace
+telling the guest something **false about the guest itself** (`TPIDR_EL0 = TSD_IPA`, from which macOS derived
+cluster #48 and indexed out of bounds, deterministically, every single run). `KERN_USRSTACK64` has precisely
+that shape: a stable, reproducible, *wrong* answer about the guest's own address space. It would have been a
+bug even if retrace's host stack were pinned at a fixed address.
+
+**Two new oracles, because the replay divergence oracle is structurally blind to this whole class.** The
+divergence oracle compares replay against **one** recording, so a nondeterministic or simply wrong value that
+enters the trace is captured once and reproduced faithfully forever. That is how this defect survived seven
+milestones and 146 tests — and `usrstack_replays_bit_for_bit` **passed on the day it was written**, before any
+fix, which is the cleanest possible demonstration of the blind spot.
+
+- **Trace reproducibility** (`util::assert_trace_reproducible`): record the same guest twice and compare the
+  two traces **byte for byte**, plus exit code and stdout. **Read its scope honestly: it covers *freestanding*
+  guests only** (`hello`, `usrstack`). Dyld guests are *not* byte-reproducible run to run, and that was
+  **measured, not assumed** — four recordings of `hello_dyn` produced 883 / 885 / 886 / 887 address fields,
+  because `gettimeofday` and `getentropy` are forwarded and a libSystem polling loop runs a different number of
+  iterations each time. That is accepted per-trace nondeterminism under M2-cpuid and does not threaten replay
+  determinism, but it means this oracle must never be cited as "retrace is reproducible" — only as
+  "freestanding retrace is reproducible". Making dyld guests reproducible is a milestone of its own.
+- **Address-space shape** (`crates/retrace/tests/usrstack_e2e.rs` + the `asm/usrstack.s` fixture): a
+  freestanding guest issues `sysctl(KERN_USRSTACK64)`, `getrlimit(RLIMIT_STACK)` and an anonymous `MAP_FIXED`
+  mmap and publishes four `u64`s on stdout; the tests compare those against the geometry the box **actually
+  built** (`STACK_TOP_IPA = 0x20000`, size one granule `0x4000`, FIXED target `0xB_0000_0000`). It is
+  deliberately **address-shaped rather than byte-identical**: the claim under test is "the guest's view of its
+  own address space matches the address space retrace constructed", which no whole-trace byte comparison can
+  express — two recordings can agree byte-for-byte on an address that is wrong in both.
+
+**Where rung 1 actually landed — advanced, re-parked, and the milestone's closing arithmetic refuted.** The
+intended close was: libstd computes `stackptr = kern.usrstack64 - RLIMIT_STACK`, so with both fixes that
+becomes `0x200000 - 0x40000 = 0x1C0000`, wholly inside the 256 KiB dynamic-stack backing, and the containment
+case preserves the rest of the stack. **Measurement refutes the premise.** Disassembling the guest's own
+statically-linked libstd shows `install_main_guard` (inlined into `std::rt::lang_start_internal`) computing
+`align_up(pthread_get_stackaddr_np(self) - pthread_get_stacksize_np(self), pagesize)` — it asks **libpthread**,
+not the kernel. Two probes settle which operand is which:
+
+- Answering `kern.usrstack64` with `0x1f0000` instead of `0x200000` moved the mmap by exactly `-0x10000`.
+  **Defect 1's fix is confirmed working end-to-end on the real dyld guest** — `pthread_get_stackaddr_np` really
+  does return the guest's own stack top now.
+- Answering `getrlimit(RLIMIT_STACK)` with `0x10000000` instead of `0x40000` left the mmap address
+  **bit-identical**. macOS 26's `pthread_get_stacksize_np` calls `getrlimit` and then **ignores the reply**,
+  reporting a constant `0x7fc000` (8 MiB minus one 16 KiB page) for the main thread. Synthesizing
+  `RLIMIT_STACK` is therefore *correct* — and is asserted by the `usrstack` fixture — but **inert for this
+  guest**: it is not the lever that moves the guard page.
+
+So the guest computes `0x200000 - 0x7fc000`, which **underflows** to `0xffffffffffa04000`. And because Defect
+2's fix now *honors* `MAP_FIXED`, that wild address is no longer quietly bump-allocated somewhere harmless — it
+reaches the stage-2 mapper. That exposed a third defect, which this milestone also fixes.
+
+**Defect 3: a wild `MAP_FIXED` address aborted the recorder.** `map_mmap_region` `expect`ed on `hv_vm_map`,
+which rejects an IPA outside the 36-bit guest space with `HvError(4209590275)` = `HV_BAD_ARGUMENT` — so
+**retrace itself panicked, exit 101**, with no HVF fault (no `pc`/`esr`/`far`) and no guest error text at all.
+That is a strictly worse failure mode than M7's: the guest never got an answer to react to. A guest asking for
+the impossible must get an **error back**; only retrace's *own* invariants may fail loud. Both FIXED paths now
+validate the request first (`fixed_fits`: 16 KiB-aligned, no overflow, inside the 36-bit ceiling — a pure
+function of the request and the fixed IPA geometry, so record and replay classify identically and the symmetry
+is structural). The BSD `mmap` path answers the guest **`EINVAL`**, recorded and replayed as an ordinary failed
+syscall — a rejected request is a strict no-op, leaving the backings and the `mmap_next` cursor untouched so
+later placements are unaffected. The Mach path (`guest_vm_map`) has no errno channel plumbed to its four call
+sites and no guest exercises it, so it fails loud with a diagnosis — the same posture as the partial-straddle
+case beside it — rather than handing `hv_vm_map` an address it will reject. Covered by
+`crates/retrace-box/tests/fixedwild.rs` (both paths, plus the no-op and no-over-rejection properties) and
+`crates/retrace/tests/wildfixed_e2e.rs`, whose `asm/wildfixed.s` fixture mmaps `MAP_FIXED` at the exact
+address `hello_rust` asks for and publishes the carry and errno it gets back.
+
+**Where that leaves rung 1: back at a GUEST-side wall, with a truthful errno, and one boundary further on.**
+With the recorder robust, `hello_rust` now fails the way the real kernel would make it fail: libstd panics
+`failed to allocate a guard page: Invalid argument (os error 22)` (M7's signature was the same call site with
+the nonsense `Undefined error: 0 (os error 0)`), then `fatal runtime error: initialization or cleanup bug,
+aborting`. Two distinct things must land to clear it, and the second was previously hidden behind the first:
+
+1. **The real lever for the guard-page address** — libpthread's own main-thread stack-size bookkeeping, which
+   the probes above prove is *not* `getrlimit`.
+2. **Guest-raised signal delivery** (deferred since M6, now the terminal failure). The guest's `abort()`
+   forwards `__pthread_kill(sig=6)` — trap `num=328 args=[0x103,0x6]` — to the **host**, killing the
+   `record-dyn` process itself (exit 134). The trace therefore ends with no terminal event, and replay
+   diverges at the last landmark with `expected recorded syscall, got None (truncated=false)`. M6's crash
+   recording covers HVF **faults**; a signal the guest raises on itself is a different path, and it is the same
+   class of defect as Defect 3 — a guest-side event escaping into retrace's own process instead of being
+   serviced against the guest.
+
+**The final tally.** `just gate`: **171 passed / 0 failed / 1 ignored** — the 1 ignored is
+`hello_rust_e2e::hello_rust_records_and_replays_reaching_main`, re-parked at the boundary above with its
+`#[ignore]` reason rewritten to the new signature and the M7 guard-page text deleted, per honest-gate
+discipline (a stale reason is worse than none). Clippy is clean
+(`cargo clippy --workspace --all-targets -- -D warnings`).
+
+**Deferred / the next boundary:**
+
+- **Guest-raised signal delivery** (deferred since M6; now the terminal failure on rung 1 and the
+  highest-priority item): `__pthread_kill`/`SIGABRT` is forwarded to the host and kills the recorder, so a
+  guest that aborts cannot be recorded at all. Servicing it against the guest — the way M6 records a fault —
+  is what turns rung 1's remaining failure into a *recordable, replayable* crash rather than a dead trace.
+- **The real lever for the guard page** (new): `pthread_get_stacksize_np` is proven to ignore `RLIMIT_STACK`,
+  so the guest's main-thread stack size comes from libpthread's own bookkeeping (`stackaddr - stackbottom`,
+  seeded during `__pthread_init`, plausibly from the `main_stack=` entry of the `apple[]` array retrace builds,
+  or from libpthread's built-in 8 MiB default). Characterizing *that* is what a future rung-1 attempt must do;
+  a third synthesis mechanism aimed at `getrlimit` will not help.
+- **Stack *size*** (spec risk R3): the dynamic guest's stack is 256 KiB, leaving ~240 KiB usable once a 16 KiB
+  guard page is carved out of it. Real macOS gives the main thread 8 MiB. Nothing has needed the depth yet, but
+  a deeper guest will, and the two facts interact — growing the stack is also one way the underflow above stops
+  being an underflow.
+- **`guest_munmap` has the identical wholesale-drop defect** that Defect 2's fix removed from the mmap path: it
+  still drops the *entire* backing containing `ipa` and ignores `len` (`let _ = len;`). The three-case overlap
+  classification should be shared with it.
+- **`prot` is still ignored except for `PROT_EXEC`.** Stage-2 stays RWX by design (the VMM is the security
+  boundary), so a `PROT_NONE` guard page is reused as RW — the guest gets no fault when it overflows into it.
+  Correct guard-page *semantics* need this even once the address is right.
+- **`guest_mmap_replay` naming** (carried from t5 review): it serves only the *file-backed* replay arm (the
+  anon replay arm calls `guest_mmap` directly), so the more specific `guest_mmap_file_replay` was the better
+  name; the generic one now reads as if it covers both.
+- **Threads** (`Sched` stays unused): still not implicated — no thread-spawn syscall appears before the wall.
+- **arm64e main executables as full dynamic programs**: unchanged from M7. The arm64e fixtures
+  (`bfamstrip`, `strip47`) are freestanding, so no real dynamically-linked arm64e program has recorded and
+  replayed yet.
+- **Rung 2 (`brew jq`)**: unchanged, and now clearly gated behind rung 1 — a Homebrew-packaged tool has all of
+  `hello_rust`'s init path plus its own.
+
+See `docs/superpowers/specs/2026-07-31-retrace-m8-stack-design.md`.

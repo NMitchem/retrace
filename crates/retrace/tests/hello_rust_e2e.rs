@@ -7,19 +7,32 @@
 mod util;
 
 #[test]
-#[ignore = "M7 rung 1 is re-parked, past the PAC wall Task 6 fixed, at a new and different-class \
-            wall: no HVF fault at all (no pc/esr/far — the PAC-garbled-branch signature is gone). \
-            The guest's own Rust runtime panics during std init while installing the main thread's \
-            stack-overflow guard page: 'failed to allocate a guard page: Undefined error: 0 (os \
-            error 0)' at library/std/src/sys/pal/unix/stack_overflow.rs:526, immediately preceded \
-            by an mmap trap (num=197, args addr=0x16f4ec000 len=0x4000 prot=0x3(RW) \
-            flags=0x41012(PRIVATE|ANON|FIXED|...) fd=-1 off=0) whose result the guest's libstd \
-            treats as failure. The panic drives Rust's abort path, which raises a real SIGABRT that \
-            reaches the host record-dyn process itself (exit 134 / Command::status().code()==None) \
-            — this is a syscall-surface gap (mmap/guard-page semantics), not a pointer-signing \
-            defect, and it lands in the Rust panic/abort -> SIGABRT signal-delivery path that has \
-            been out of scope since M6. Un-ignore only on a genuine double pass. See \
-            docs/superpowers/specs/2026-07-26-retrace-m7-rust-design.md."]
+#[ignore = "M8-stack ADVANCED rung 1's guard-page wall but did not clear it. libstd's \
+            install_main_guard (inlined into std::rt::lang_start_internal) computes align_up(\
+            pthread_get_stackaddr_np(self) - pthread_get_stacksize_np(self), pagesize) and mmaps \
+            it MAP_FIXED. M8 fixed the FIRST operand: pthread_get_stackaddr_np now returns the \
+            GUEST's stack top (0x200000) instead of retrace's host ASLR address — proven by probe, \
+            answering kern.usrstack64 with 0x1f0000 moved the mmap by exactly -0x10000. The SECOND \
+            operand is NOT RLIMIT_STACK: macOS 26's libpthread reports a constant 0x7fc000 (8 MiB \
+            minus one 16 KiB page) as the main thread's size and IGNORES the getrlimit(RLIMIT_STACK) \
+            reply — proven by probe, answering 0x10000000 instead of 0x40000 left the mmap address \
+            BIT-IDENTICAL. So 0x200000 - 0x7fc000 underflows to 0xffffffffffa04000. Failing trap: \
+            mmap (num=197) pc=0x1804aea18 args=[addr=0xffffffffffa04000 len=0x4000 prot=0x3(RW) \
+            flags=0x41012(PRIVATE|FIXED|ANON|UNIX03) fd=-1 off=0]. That wild MAP_FIXED request is \
+            REFUSED with EINVAL exactly as the real kernel refuses it (it briefly took the RECORDER \
+            down instead — an HV_BAD_ARGUMENT panic at the 'hv_vm_map (mmap region)' expect, exit \
+            101 — which is what wildfixed_e2e.rs and tests/fixedwild.rs now pin), so the failure is \
+            back inside the GUEST, and with a truthful errno: libstd panics 'failed to allocate a \
+            guard page: Invalid argument (os error 22)' -> 'fatal runtime error: initialization or \
+            cleanup bug, aborting' -> abort. TWO things must land to clear this. (1) The real lever \
+            for the guard-page ADDRESS: libpthread's own main-thread stack-size bookkeeping, which \
+            the probes prove is not getrlimit. (2) Guest-raised SIGNAL DELIVERY, deferred since M6: \
+            the guest's abort forwards __pthread_kill(sig=6) (trap num=328 args=[0x103,0x6]) to the \
+            HOST, which kills the record-dyn process itself (exit 134), so the trace ends with no \
+            terminal event and replay diverges at the last landmark with 'expected recorded \
+            syscall, got None (truncated=false)'. M6's crash recording covers HVF FAULTS, not a \
+            signal the guest raises on itself. Un-ignore only on a genuine double pass. See \
+            docs/superpowers/specs/2026-07-31-retrace-m8-stack-design.md."]
 fn hello_rust_records_and_replays_reaching_main() {
     util::assert_rung_records_and_replays(retrace_guest::HELLO_RUST, b"hi from rust\n");
 }
