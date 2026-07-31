@@ -15,7 +15,15 @@
 ## Global Constraints
 
 - **`--test-threads=1` is mandatory.** HVF allows one VM per process. Use `just gate`, or `cargo test -p <crate> <name> -- --test-threads=1` for a single test. A bare `cargo test` flakes with `HV_BUSY`.
-- **The exit gate is `just gate`** = `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`. Both must be clean before any task is considered done.
+- **The exit gate is `just gate`** = `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`.
+- **Red-gate ruling (decided before execution).** This plan is staged TDD, so Tasks 2–4 deliberately end with M8 tests failing; the clean-gate requirement binds from **Task 5 onward**. The exact expected-red set is stated per task and is the *only* permitted failure — **no other test may regress at any point**, and clippy must be clean at every task. A failure outside the named set is a real regression, not staging.
+
+  | After task | Expected RED | Expected GREEN |
+  |---|---|---|
+  | 2 | `usrstack64_reports_the_guests_own_stack_top`, `rlimit_stack_reports_the_guests_own_stack_size`, `anonymous_map_fixed_lands_at_the_requested_address`, `usrstack_records_deterministically` | `usrstack_replays_bit_for_bit`, all pre-existing tests |
+  | 3 | `rlimit_stack_…`, `anonymous_map_fixed_…`, `usrstack_records_deterministically` | `usrstack64_…`, `usrstack_replays_bit_for_bit`, all pre-existing |
+  | 4 | `anonymous_map_fixed_…`, `usrstack_records_deterministically` | `usrstack64_…`, `rlimit_stack_…`, `usrstack_replays_bit_for_bit`, all pre-existing |
+  | 5 | *(none)* | everything — full `just gate` clean |
 - **Symmetry rule 1:** every special case added to record's `match stop` needs a mirror in replay's dispatch, and both must recompute *identical* addresses/bytes. Replay byte-compares its recomputed reply against the recording — that comparison is the divergence check.
 - **Symmetry rule 2:** deterministic instruction emulation belongs below the trace, inside `Box_::run()`. Not applicable to this milestone's changes (these are syscall-dispatch level), but do not move them below the trace.
 - **Never reimplement Apple's PAC.** Not touched by this milestone.
