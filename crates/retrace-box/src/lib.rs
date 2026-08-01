@@ -267,9 +267,29 @@ const SIGN_STUB: [u32; 19] = [
     0xd100_054a, 0x17ff_ffef, 0xd400_0001,
 ];
 
-// The full architectural state sign_slots saves before running its stub and restores after, so a
-// mid-run caller (the cache pager) sees no disturbance. The stub's `svc` overwrites ELR/SPSR/ESR/
-// FAR_EL1; ELR_EL1 & SPSR_EL1 are load-bearing (set_x0_and_return resumes EL0 from them).
+// --- Guest TLBI oracle (M9 t2) ---
+// The TLBI stub page. W^X: RO + EL1-exec (ATTR_TRAMP) — `tlbi` is an EL1 instruction, so this
+// CANNOT share the sign stub's ATTR_CODE page (ATTR_CODE sets PXN: EL0-exec, EL1 no-exec).
+const TLBI_STUB_IPA: u64 = 0x0004_8000; // 288 KiB: a fresh IPA the guest never translates
+// Safety net for the stub's own run loop: a correct stub reaches its terminating `hvc` in ONE
+// hv_vcpu_run, so any higher count means a bug.
+const TLBI_STUB_BOUND: u32 = 4;
+// The TLBI stub, hand-assembled. Encodings verified with `clang -arch arm64 -c` + `otool -t`
+// (Task 1's spike, spikes/tlbi.c):
+//   tlbi vmalle1 ; dsb ish ; isb ; hvc #0
+// Runs at EL1 (ATTR_TRAMP is EL1-exec) and ends with `hvc #0`, which from EL1 traps DIRECTLY to
+// EL2 — no trampoline indirection, unlike the sign stub's EL0 `svc`.
+// VMALLE1 (not VMALLE1IS): single-vCPU, so there is no other PE whose TLB needs invalidating.
+const TLBI_STUB: [u32; 4] = [0xd508_871f, 0xd503_3b9f, 0xd503_3fdf, 0xd400_0002];
+// EL1h with DAIF masked — the exception level `tlbi` requires.
+const TLBI_STUB_CPSR: u64 = 0x3C5;
+
+// The full architectural state save_state/restore_state capture around an in-guest stub run, so a
+// mid-run caller sees no disturbance — shared by both guest oracles: sign_slots's EL0 `svc` (the
+// cache pager's caller) and flush_guest_tlb's EL1 `hvc` (M9 t2). The sign stub's `svc` overwrites
+// ELR/SPSR/ESR/FAR_EL1; ELR_EL1 & SPSR_EL1 are load-bearing there (set_x0_and_return resumes EL0
+// from them). The TLBI stub's `hvc` traps EL1->EL2 directly and does NOT touch these EL1 sysregs at
+// all, but they are saved/restored anyway for one shared list and future-proofing.
 struct SavedState {
     x: [u64; 31],
     pc: u64,
@@ -364,6 +384,11 @@ pub struct Box_ {
     // appended last so the load-bearing vcpu-before-vm drop order is unaffected.
     stack_top: u64,
     stack_size: u64,
+    // M9 t2: has ensure_tlbi_stub already mapped + promoted the TLBI stub page? Plain bool (no
+    // Drop), appended last so the load-bearing vcpu-before-vm drop order is unaffected. Unlike the
+    // sign stub's lazy-init check (a stage-2-backing lookup at a fixed IPA), this is a plain flag —
+    // either works, but a flag makes ensure_tlbi_stub's early-return trivial to read.
+    tlbi_stub_ready: bool,
 }
 
 #[derive(Debug)]
@@ -538,28 +563,40 @@ impl Box_ {
     }
 
     /// Runtime exec-mmap promotion: install RO+exec (`ATTR_CODE`) stage-1 pages for [ipa, ipa+len)
-    /// by editing the LIVE page tables, so a `PROT_EXEC` mmap becomes executable under W^X. Any
-    /// newly-needed L3 tables are anon-allocated (SPTM: never file-backed), stage-2-mapped
-    /// immediately (the walker must reach them) AND tracked as backings. No TLB invalidation:
-    /// mmap regions are freshly-mapped IPAs the guest has never translated before, so the first
-    /// access does a fresh walk and sees ATTR_CODE.
+    /// by editing the LIVE page tables, so a `PROT_EXEC` mmap becomes executable under W^X. No TLB
+    /// invalidation: mmap regions are freshly-mapped IPAs the guest has never translated before, so
+    /// the first access does a fresh walk and sees ATTR_CODE. See
+    /// [`set_region_exec_attr`](Self::set_region_exec_attr) for the parameterised form (M9 t2) that
+    /// this now calls — `ATTR_CODE` (EL0-exec) is the right attribute for a guest code page, but the
+    /// TLBI stub needs `ATTR_TRAMP` (EL1-exec) instead.
     pub fn set_region_exec(&mut self, ipa: u64, len: u64) {
+        self.set_region_exec_attr(ipa, len, ATTR_CODE);
+    }
+
+    /// The single promotion implementation shared by `set_region_exec` (`ATTR_CODE`, guest code /
+    /// cache text) and `ensure_tlbi_stub` (`ATTR_TRAMP`, the M9 TLBI stub — an EL1-exec page). Edits
+    /// the LIVE page tables to install `attr` for [ipa, ipa+len): any newly-needed L3 tables are
+    /// anon-allocated (SPTM: never file-backed), stage-2-mapped immediately (the walker must reach
+    /// them) AND tracked as backings. No TLB invalidation here — callers on a block the guest MAY
+    /// already have translated (M9 t3's live-backing case) are responsible for their own
+    /// [`flush_guest_tlb`](Self::flush_guest_tlb) after promoting.
+    pub fn set_region_exec_attr(&mut self, ipa: u64, len: u64, attr: u64) {
         let l2_host = self.l2_host;
-        assert!(!l2_host.is_null(), "set_region_exec: no live L2 table (restore had no PT_L2 region)");
+        assert!(!l2_host.is_null(), "set_region_exec_attr: no live L2 table (restore had no PT_L2 region)");
         let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
         let mut next_l3 = self.next_l3;
         let created = {
             let mut alloc_l3 = || {
-                assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "set_region_exec: too many exec blocks; L3 window exhausted");
+                assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "set_region_exec_attr: too many exec blocks; L3 window exhausted");
                 let (h, _) = alloc_pages(GRANULE);
                 let a = next_l3; next_l3 += GRANULE as u64; (a, h)
             };
-            Self::promote_and_set(l2, &self.backings, ipa, len, ATTR_CODE, &mut alloc_l3)
+            Self::promote_and_set(l2, &self.backings, ipa, len, attr, &mut alloc_l3)
         };
         self.next_l3 = next_l3;
         // Register each new L3: stage-2-map it (freshly, so the walker reaches it) then track it.
         for bk in created {
-            self.vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (set_region_exec l3)");
+            self.vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (set_region_exec_attr l3)");
             self.backings.push(bk);
         }
     }
@@ -706,7 +743,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64 }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1018,6 +1055,66 @@ impl Box_ {
         panic!("sign stub did not reach its terminating svc within {SIGN_STUB_BOUND} runs (W^X hang / bad stub)");
     }
 
+    /// Invalidate the guest's stage-1 TLB by running `tlbi vmalle1` **on the guest vCPU itself** —
+    /// the VMM cannot issue a guest TLBI, and this project never emulates an instruction the guest
+    /// can run (the same rule that makes the PAC oracle run real `pac*`/`aut*`).
+    ///
+    /// Required whenever a stage-1 attribute changes on a range the guest may already have
+    /// translated. `set_region_exec`/`set_region_exec_attr` alone are sound only on a pristine
+    /// block; this is what makes a promotion sound anywhere else.
+    ///
+    /// Does NOT disturb the caller's guest state: the stub runs on a dedicated scratch page and the
+    /// full architectural state is saved and restored around it (`save_state`/`restore_state`, the
+    /// same pair `sign_slots` uses), so a mid-run caller sees nothing.
+    ///
+    /// Below the trace: called from paths shared by record and replay, so it fires identically on
+    /// both sides (symmetry rule 2) and never surfaces to the record/replay loop.
+    pub fn flush_guest_tlb(&mut self) {
+        self.ensure_tlbi_stub();
+        let saved = self.save_state();
+        self.vcpu.set_reg(reg::PC, TLBI_STUB_IPA).expect("set PC (tlbi stub)");
+        self.vcpu.set_reg(reg::CPSR, TLBI_STUB_CPSR).expect("set CPSR (tlbi stub)");
+        self.run_tlbi_stub();
+        self.restore_state(&saved);
+    }
+
+    /// Lazy-init the TLBI scratch on first use: one stub CODE page at a fixed reserved IPA, RO +
+    /// EL1-exec (`ATTR_TRAMP` — `tlbi` is an EL1 instruction, so this cannot share the sign stub's
+    /// `ATTR_CODE` page, which sets PXN: EL0-exec, EL1 no-exec). W^X — it is written once, before it
+    /// is ever promoted, and never written again.
+    fn ensure_tlbi_stub(&mut self) {
+        if self.tlbi_stub_ready { return; }
+        let (host, rlen) = alloc_pages(GRANULE);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                TLBI_STUB.as_ptr() as *const u8, host, std::mem::size_of_val(&TLBI_STUB));
+        }
+        self.vm.map(host, TLBI_STUB_IPA, rlen, MemFlags::RWX).expect("hv_vm_map (tlbi stub)");
+        self.backings.push(Backing { host, ipa: TLBI_STUB_IPA, len: rlen });
+        // No TLBI needed for this promotion itself: TLBI_STUB_IPA is a fresh IPA the guest has
+        // never translated (same soundness argument as the sign stub and the cache pager).
+        self.set_region_exec_attr(TLBI_STUB_IPA, GRANULE as u64, ATTR_TRAMP);
+        self.tlbi_stub_ready = true;
+    }
+
+    /// Run the TLBI stub to its terminating `hvc`. From EL1 an `hvc` traps straight to EL2, so the
+    /// terminating exit is a plain `Ec::Hvc` — no ESR_EL1 indirection (contrast `run_sign_stub`,
+    /// whose EL0 `svc` arrives via the guest's EL1 trampoline).
+    fn run_tlbi_stub(&mut self) {
+        for _ in 0..TLBI_STUB_BOUND {
+            let e = self.vcpu.run().expect("hv_vcpu_run (tlbi stub)");
+            if e.reason != EXIT_EXCEPTION { continue; }
+            match ec_of(e.syndrome) {
+                Ec::Hvc => return, // the stub's terminating hvc: the flush is done
+                other => panic!(
+                    "tlbi stub faulted at EL1: EC={other:?} (syndrome={:#x} far={:#x}) — bad \
+                     encoding, a non-EL1-exec stub page (ATTR_TRAMP required), or CPSR not EL1h",
+                    e.syndrome, e.virtual_address),
+            }
+        }
+        panic!("tlbi stub did not reach its terminating hvc within {TLBI_STUB_BOUND} runs");
+    }
+
     fn save_state(&self) -> SavedState {
         let mut x = [0u64; 31];
         for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
@@ -1131,7 +1228,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -1894,7 +1991,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -2125,6 +2222,19 @@ impl Box_ {
         Some(u64::from_le_bytes(bytes.try_into().unwrap()))
     }
 
+    /// Read-only capture of the architectural GPR/PC/SP_EL0/CPSR state — the same register set
+    /// `snapshot()` and `checkpoint()` embed. Test/diagnostic accessor (M9 t2): e.g.
+    /// `flush_guest_tlb`'s test proves this is byte-identical across a stub run.
+    pub fn regs_snapshot(&self) -> Regs {
+        let mut x = [0u64; 31];
+        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+        Regs {
+            x, pc: self.vcpu.get_reg(reg::PC).unwrap(),
+            sp_el0: self.vcpu.get_sys(sysreg::SP_EL0).unwrap(),
+            cpsr: self.vcpu.get_reg(reg::CPSR).unwrap(),
+        }
+    }
+
     /// Capture all backings + architectural registers as an Event::Snapshot.
     pub fn snapshot(&self) -> retrace_trace::Event {
         let mut mem = Vec::new();
@@ -2132,14 +2242,7 @@ impl Box_ {
             let bytes = unsafe { std::slice::from_raw_parts(bk.host, bk.len) }.to_vec();
             mem.push(Region { ipa: bk.ipa, bytes });
         }
-        let mut x = [0u64;31];
-        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
-        let regs = Regs {
-            x, pc: self.vcpu.get_reg(reg::PC).unwrap(),
-            sp_el0: self.vcpu.get_sys(sysreg::SP_EL0).unwrap(),
-            cpsr: self.vcpu.get_reg(reg::CPSR).unwrap(),
-        };
-        retrace_trace::Event::Snapshot { regs, mem }
+        retrace_trace::Event::Snapshot { regs: self.regs_snapshot(), mem }
     }
     /// The post-`svc` return address (ELR_EL1) — the execution position at a syscall trap.
     pub fn position(&self) -> u64 { self.vcpu.get_sys(sysreg::ELR_EL1).unwrap() }
@@ -2219,17 +2322,10 @@ impl Box_ {
             let bytes = unsafe { std::slice::from_raw_parts(bk.host, bk.len) }.to_vec();
             mem.push(Region { ipa: bk.ipa, bytes });
         }
-        let mut x = [0u64; 31];
-        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
-        let regs = Regs {
-            x, pc: self.vcpu.get_reg(reg::PC).unwrap(),
-            sp_el0: self.vcpu.get_sys(sysreg::SP_EL0).unwrap(),
-            cpsr: self.vcpu.get_reg(reg::CPSR).unwrap(),
-        };
         let mut fp = [0u128; 32];
         for (i, fi) in fp.iter_mut().enumerate() { *fi = self.vcpu.get_simd(simd::q(i as u32)).unwrap(); }
         BoxState {
-            regs, fp,
+            regs: self.regs_snapshot(), fp,
             fpcr: self.vcpu.get_reg(reg::FPCR).unwrap(),
             fpsr: self.vcpu.get_reg(reg::FPSR).unwrap(),
             tpidr_el0: self.vcpu.get_sys(sysreg::TPIDR_EL0).unwrap(),
@@ -2313,6 +2409,7 @@ impl Box_ {
             pac_enabled: state.pac_enabled,
             stack_top: state.stack_top,
             stack_size: state.stack_size,
+            tlbi_stub_ready: false,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
