@@ -36,6 +36,18 @@ fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64) {
     else                  { (args[1], args[2], args[3], 0x3 /*RW*/) } // allocate: always RW anon
 }
 
+/// True if this `sysctl` is `{CTL_KERN, KERN_USRSTACK64}` — a 2-element mib read out of guest
+/// memory. Shared by record and replay so both classify the trap identically (symmetry rule 1);
+/// the read is `read_guest_checked` so an unreadable/partial mib is simply "not our mib" (it
+/// forwards like every other sysctl) rather than a panic.
+fn is_usrstack64_mib(b: &retrace_box::Box_, args: [u64; 8]) -> bool {
+    if args[1] != 2 { return false; }
+    let Some(raw) = b.read_guest_checked(args[0], 8) else { return false };
+    let name0 = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+    let name1 = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+    name0 == retrace_arch::CTL_KERN && name1 == retrace_arch::KERN_USRSTACK64
+}
+
 /// How a recorded (or replayed) run ended: a clean exit, or a guest synchronous fault (M6). The
 /// triple is deterministic — identical guest state faults identically — so replay byte-compares it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,18 +149,33 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 if args[2] & 0x4 != 0 {
                     eprintln!("[retrace warn] anon PROT_EXEC mmap (len {:#x}) not promoted to exec (JIT out of M2 scope)", args[1]);
                 }
-                let ipa = b.guest_mmap(args[1]);       // args[1] = length
-                w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
-                b.set_x0_err_and_return(ipa, false);
+                // A MAP_FIXED address the guest's own space cannot hold is refused with an errno —
+                // the kernel's answer — and recorded as an ordinary failed syscall. Replay
+                // recomputes the same verdict from the same pure geometry check and byte-compares
+                // (ret, err) against the recording, so the symmetry is structural.
+                let (ret, err) = match b.guest_mmap(args[0], args[1], args[2], args[3]) {
+                    Ok(ipa) => (ipa, false),
+                    Err(errno) => (errno, true),
+                };
+                w.append(&Event::Syscall { num, args, ret, err, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
             }
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
-                let (ipa, writes) = b.guest_mmap_file(args[0], args[1], args[2], args[3], args[4] as i32, args[5]);
-                // PROT_EXEC (0x4): promote the freshly-mapped region to RO+exec (ATTR_CODE) stage-1
-                // pages so the guest can execute from it under W^X (e.g. dyld mapping the shared
-                // cache's __TEXT). Done BEFORE resuming the guest, on record AND replay.
-                if args[2] & 0x4 != 0 { b.set_region_exec(ipa, args[1]); }
-                w.append(&Event::Syscall { num, args, ret: ipa, err: false, writes }).map_err(|e| format!("append mmap_file: {e}"))?; count += 1;
-                b.set_x0_err_and_return(ipa, false);
+                // Same FIXED-address refusal as the anonymous path above; nothing was mapped, so
+                // there is no region to promote and no staged bytes to record.
+                let (ret, err, writes) = match b.guest_mmap_file(args[0], args[1], args[2], args[3], args[4] as i32, args[5]) {
+                    Ok((ipa, writes)) => {
+                        // PROT_EXEC (0x4): promote the freshly-mapped region to RO+exec (ATTR_CODE)
+                        // stage-1 pages so the guest can execute from it under W^X (e.g. dyld
+                        // mapping the shared cache's __TEXT). Done BEFORE resuming the guest, on
+                        // record AND replay.
+                        if args[2] & 0x4 != 0 { b.set_region_exec(ipa, args[1]); }
+                        (ipa, false, writes)
+                    }
+                    Err(errno) => (errno, true, vec![]),
+                };
+                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append mmap_file: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
             }
             // munmap/mprotect (debt #2): honor them for real — drop + hv_vm_unmap the backing on
             // munmap so a later mmap can reuse the address; best-effort hv_vm_protect on
@@ -163,6 +190,33 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.guest_mprotect(args[0], args[1], args[2]);
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mprotect: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
+            }
+            // sysctl({CTL_KERN, KERN_USRSTACK64}): answer from the guest's OWN stack top (M8-stack).
+            // Forwarding this returns RETRACE's host-process stack address — ASLR'd, different every
+            // run — which the guest then uses as a guest address (libstd derives its guard page from
+            // it). That is semantically wrong independent of determinism, exactly like M2-cpuid's
+            // TPIDR_EL0. Every other mib keeps forwarding, unchanged. The answer is deterministic, so
+            // this takes the STANDARD symmetric posture: replay recomputes these same bytes and
+            // byte-compares them against the recording (symmetry rule 1).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL
+                && is_usrstack64_mib(&b, args) => {
+                let writes = b.usrstack64_reply(args);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                    .map_err(|e| format!("append sysctl usrstack64: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
+            }
+            // getrlimit(RLIMIT_STACK): answer from the guest's own stack size. Forwarding returns
+            // the HOST's limits (measured: 8176 KiB soft / 65520 KiB hard), and libstd subtracts
+            // this from usrstack64 to locate its guard page — the two must describe the SAME stack
+            // or the result is a wild address. The guest passes RLIMIT_STACK | _RLIMIT_POSIX_FLAG
+            // (0x1003), so mask before comparing. Deterministic => STANDARD symmetric posture,
+            // exactly like the usrstack64 arm above.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_GETRLIMIT
+                && (args[0] & !retrace_arch::RLIMIT_POSIX_FLAG) == retrace_arch::RLIMIT_STACK => {
+                let writes = b.rlimit_stack_reply(args);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                    .map_err(|e| format!("append getrlimit stack: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
             }
             // shared_region_check_np (#294): pin the cache slide to 0 by reporting the UNSLID base
             // (0x180000000) as the shared region's start — dyld then computes slide 0 and lays the
@@ -587,27 +641,38 @@ impl ReplaySession {
                             // mmap: recreate the mapping deterministically (the guest reproduces its own
                             // stores by re-execution). The IPA must match the recording exactly.
                             if num == retrace_arch::SYS_MMAP && args[3] & MAP_ANON != 0 {
-                                let ipa = self.b.guest_mmap(args[1]);
-                                if ipa != *ret {
+                                // A rejected MAP_FIXED address is recomputed here, not replayed
+                                // blindly: `fixed_fits` is a pure function of the request and the
+                                // fixed IPA geometry, so replay must reach the SAME verdict. The
+                                // (ret, err) comparison below is that divergence check.
+                                let (ipa, failed) = match self.b.guest_mmap(args[0], args[1], args[2], args[3]) {
+                                    Ok(ipa) => (ipa, false),
+                                    Err(errno) => (errno, true),
+                                };
+                                if (ipa, failed) != (*ret, *err) {
                                     return Err(Divergence { landmark: self.idx, pc,
-                                        detail: format!("mmap ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
+                                        detail: format!("mmap mismatch: replay (ret {ipa:#x}, err {failed}) != recorded (ret {ret:#x}, err {err})") });
                                 }
-                                self.b.set_x0_err_and_return(*ret, false);
+                                self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
                             // file-backed mmap (Task 8): anon-alloc + address identically (no file
                             // access), verify the recreated IPA equals the recorded ret (this is what
                             // makes MAP_FIXED correct on replay), then stage the recorded bytes.
                             if num == retrace_arch::SYS_MMAP {
-                                let ipa = self.b.guest_mmap_replay(args[0], args[1], args[2], args[3]);
-                                if ipa != *ret {
+                                let (ipa, failed) = match self.b.guest_mmap_replay(args[0], args[1], args[2], args[3]) {
+                                    Ok(ipa) => (ipa, false),
+                                    Err(errno) => (errno, true),
+                                };
+                                if (ipa, failed) != (*ret, *err) {
                                     return Err(Divergence { landmark: self.idx, pc,
-                                        detail: format!("mmap_file ipa mismatch: replay {ipa:#x} != recorded {ret:#x}") });
+                                        detail: format!("mmap_file mismatch: replay (ret {ipa:#x}, err {failed}) != recorded (ret {ret:#x}, err {err})") });
                                 }
                                 // Same exec promotion as record: the guest executes the mmap'd code on
                                 // replay too (replay runs the guest, only faking syscall results), so the
                                 // exec pages must exist here as well — before the recorded bytes are staged.
-                                if args[2] & 0x4 != 0 { self.b.set_region_exec(ipa, args[1]); }
+                                // Nothing was mapped on the rejected path, so nothing to promote.
+                                if !failed && args[2] & 0x4 != 0 { self.b.set_region_exec(ipa, args[1]); }
                                 self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
@@ -672,6 +737,35 @@ impl ReplaySession {
                             if num == retrace_arch::SYS_MPROTECT {
                                 self.b.guest_mprotect(args[0], args[1], args[2]);
                                 self.b.set_x0_err_and_return(0, false);
+                                return self.finish_event();
+                            }
+                            // sysctl(KERN_USRSTACK64) mirror: recompute the SAME reply from the box's
+                            // own stack geometry and byte-compare it against the recording — that
+                            // comparison IS the divergence check (symmetry rule 1). The geometry is
+                            // re-derived by restore() from the snapshot, so a static trace recomputes
+                            // the static answer and a dynamic one the dynamic answer.
+                            if num == retrace_arch::SYS_SYSCTL && is_usrstack64_mib(&self.b, args) {
+                                let recomputed = self.b.usrstack64_reply(args);
+                                if recomputed != *writes {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!(
+                                            "sysctl usrstack64 reply mismatch: replay {recomputed:?} != recorded {writes:?}") });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
+                                return self.finish_event();
+                            }
+                            // getrlimit(RLIMIT_STACK) mirror — same posture as the usrstack64 mirror
+                            // above: recompute from the box's own geometry, byte-compare against the
+                            // recording (that comparison IS the divergence check), then apply.
+                            if num == retrace_arch::SYS_GETRLIMIT
+                                && (args[0] & !retrace_arch::RLIMIT_POSIX_FLAG) == retrace_arch::RLIMIT_STACK {
+                                let recomputed = self.b.rlimit_stack_reply(args);
+                                if recomputed != *writes {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!(
+                                            "getrlimit stack reply mismatch: replay {recomputed:?} != recorded {writes:?}") });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
                             // Apply recorded kernel writes + feed ret; NO real syscall executes.

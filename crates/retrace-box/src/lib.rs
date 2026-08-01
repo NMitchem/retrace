@@ -12,7 +12,26 @@ pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
 // Dynamic-path constants (M1 static path is untouched). dyld is a PIE MH_DYLINKER at vmaddr 0,
 // so it must be slid to a free base: 5 GiB is above the exe (~4 GiB) and below guest_mmap (8 GiB).
 pub const DYLD_BASE: u64 = 0x1_4000_0000;      // 5 GiB slide for dyld
-const DYN_STACK_TOP:  u64 = 0x0020_0000;       // 2 MiB (block 0, RW+non-exec by default, below PT_L3_BASE)
+// The dynamic guest's stack. The TOP is load-bearing in a way the size is not: libstd's
+// `install_main_guard` mmaps its stack-overflow guard page MAP_FIXED at
+// `pthread_get_stackaddr_np() - pthread_get_stacksize_np()`, and macOS 26's libpthread reports the
+// main thread's size as a CONSTANT 0x7fc000 (8 MiB minus one granule) — it calls
+// `getrlimit(RLIMIT_STACK)` and then ignores the reply (measured: answering 0x10000000 instead of
+// 0x40000 left the computed address bit-identical). Retrace cannot influence that subtrahend, so the
+// top must leave room above it: at the old 2 MiB the subtraction UNDERFLOWED to 0xffffffffffa04000
+// and the guard-page mmap was refused, which is what parked rung 1 (`hello_rust`) through M7 and M8.
+//
+// 40 MiB puts the computed guard page at 0x2004000 — just above PT_L3_CEIL (32 MiB), so it cannot
+// collide with the L3 translation tables, and comfortably below the stack backing it guards. Only
+// the top moved: the guard page lands in FREE address space and is mapped fresh on demand, so the
+// stack itself stays 256 KiB and no per-syscall memory diff got any more expensive. (Backing a full
+// 8 MiB instead was measured at ~1.7x on `hello_rust` and far worse across the dyld suite — the
+// diff scales with total mapped memory.) `stack_geometry_tests` pins the arithmetic.
+//
+// Fidelity gap, unchanged and tracked as spec risk R3: the guest BELIEVES it has an 8 MiB stack
+// while 256 KiB is backed, so a deep enough recursion faults on unmapped IPA instead of striking
+// the guard page. That was equally true when the stack sat at 2 MiB.
+const DYN_STACK_TOP:  u64 = 0x0280_0000;       // 40 MiB — above PT_L3_CEIL by libpthread's 0x7fc000
 const DYN_STACK_SIZE: u64 = 0x0004_0000;       // 256 KiB
 pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 // Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 36-bit (64 GiB)
@@ -135,6 +154,32 @@ fn pac_posture_from_memory(regions: &[Region]) -> bool {
         "no MH_MAGIC_64 at EXE_BASE {EXE_BASE:#x} (found {magic:#x}) — refusing to guess a PAC posture");
     pac_posture(u32::from_le_bytes(hdr.bytes[o+8..o+12].try_into().unwrap()))
 }
+
+/// Re-derive the guest's stack geometry `(top, size)` from a snapshot's own memory — the twin of
+/// `pac_posture_from_memory`, and for the same reason: `restore()` gets only `(regions, regs)`.
+///
+/// `restore()` rebuilds BOTH load paths (a static `record` trace AND a dynamic `record-dyn` one),
+/// and their stacks differ — one granule below `STACK_TOP_IPA` vs `DYN_STACK_SIZE` below
+/// `DYN_STACK_TOP`. Hardcoding either here would make the other path lie on replay, which under
+/// M8-stack is not a cosmetic wrong answer: the `kern.usrstack64` replay mirror recomputes its reply
+/// from this geometry and byte-compares it against the recording, so a wrong path would surface as a
+/// divergence. The two stack backings sit at disjoint IPAs, so the region list names the path
+/// unambiguously.
+///
+/// FAILS LOUD and NEVER defaults, exactly like `pac_posture_from_memory`: guessing a stack top is
+/// how the guest ends up believing a lie about its own address space in the first place.
+fn stack_geometry_from_memory(regions: &[Region]) -> (u64, u64) {
+    let covers = |base: u64, size: u64| regions.iter()
+        .any(|r| r.ipa == base && r.bytes.len() as u64 >= size);
+    let dynamic = covers(DYN_STACK_TOP - DYN_STACK_SIZE, DYN_STACK_SIZE);
+    let static_ = covers(STACK_TOP_IPA - GRANULE as u64, GRANULE as u64);
+    match (dynamic, static_) {
+        (true, false) => (DYN_STACK_TOP, DYN_STACK_SIZE),
+        (false, true) => (STACK_TOP_IPA, GRANULE as u64),
+        _ => panic!("cannot identify the guest's stack in the snapshot \
+                     (dynamic={dynamic}, static={static_}); refusing to guess a stack geometry"),
+    }
+}
 // CPACR_EL1.FPEN = 0b11 (bits [21:20]): EL0 and EL1 may use FP/SIMD without trapping. dyld's
 // early code uses NEON (memcpy, hashing); without this an FP access traps EC=0x07.
 const CPACR_FP_ON: u64 = 0x3 << 20;
@@ -182,8 +227,8 @@ const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
 
 // --- Guest signing oracle (M2-cache Task 4) ---
 // Two anon scratch pages, lazy-init'd on the first sign_slots/authenticate, at fixed reserved IPAs
-// in block 0's free area [TSD_end 0x34000, DYN_STACK 0x1C0000) — clear of trampoline (0x4000),
-// PT_L2 (0x8000), stack (0x1C000), TSD (0x30000), dyn stack, PT_L3 (0x800000+), segments (>=4GiB),
+// in block 0's free area [TSD_end 0x34000, PT_L3_BASE 0x800000) — clear of trampoline (0x4000),
+// PT_L2 (0x8000), stack (0x1C000), TSD (0x30000), dyn stack (40 MiB), PT_L3 (0x800000+), segments (>=4GiB),
 // mmap (>=16GiB), and the cache (>=6GiB). W^X: the STUB page is code (RO+exec, ATTR_CODE) — a fresh
 // IPA promoted via set_region_exec; the TABLE page is data (RW+non-exec, block 0's default
 // ATTR_DATA). Executing a writable page would HANG hv_vcpu_run (Apple-Silicon W^X). Both anon
@@ -311,6 +356,14 @@ pub struct Box_ {
     // appended last so the load-bearing vcpu-before-vm drop order is unaffected. Cross-checked
     // against the live SCTLR_EL1 bits by dbg_pac_enabled().
     pac_enabled: bool,
+    // M8-stack: the guest's OWN stack geometry, set at load. `kern.usrstack64` (and, from t4,
+    // RLIMIT_STACK) are answered from these rather than forwarded, so the guest is never told its
+    // stack lives at a HOST address. Path-aware by construction: the static path maps one granule
+    // below STACK_TOP_IPA, the dynamic path maps DYN_STACK_SIZE below DYN_STACK_TOP — hardcoding
+    // either constant at the answer site would make the other path lie. Plain u64s (no Drop),
+    // appended last so the load-bearing vcpu-before-vm drop order is unaffected.
+    stack_top: u64,
+    stack_size: u64,
 }
 
 #[derive(Debug)]
@@ -344,6 +397,10 @@ pub struct BoxState {
     // by construction, unlike restore()'s landmark-0 snapshot — so the posture cannot be re-derived
     // and must be carried instead.
     pub pac_enabled: bool,
+    // M8-stack: carried for the same reason as `pac_enabled` — a mid-run capture must reproduce the
+    // geometry exactly, and a seeked session must answer `kern.usrstack64` the way the record run did.
+    pub stack_top: u64,
+    pub stack_size: u64,
 }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
@@ -649,10 +706,15 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64 }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
+
+    /// Top of the guest's stack (exclusive) — what `kern.usrstack64` must report (M8-stack).
+    pub fn stack_top(&self) -> u64 { self.stack_top }
+    /// Size of the guest's stack in bytes — what `RLIMIT_STACK` must report (M8-stack).
+    pub fn stack_size(&self) -> u64 { self.stack_size }
 
     /// Re-sign a batch of shared-cache auth slots with the GUEST's fixed PAC keys, returning the
     /// signed pointers (in slot order). Each slot is signed in-guest with `pacia` (IA,
@@ -1069,7 +1131,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -1152,9 +1214,13 @@ impl Box_ {
             }
         } else {
             // FIXED (dyld/libmalloc often pass VM_FLAGS_OVERWRITE): the guest may be replacing a
-            // region it previously bump-allocated. Free any tracked backing overlapping the target
-            // range so the fresh stage-2 map doesn't collide (hv_vm_map rejects an overlap).
-            self.unmap_overlapping(addr, rlen as u64);
+            // region it previously bump-allocated, so classify the overlap exactly as the BSD mmap
+            // path does — `place_fixed` is shared with `map_mmap_region`. A request CONTAINED in a
+            // live backing reuses it in place and is already complete (returning early is safe:
+            // `place_fixed` panics on exec-over-live-backing, so the `set_region_exec` below can
+            // never be skipped when it was needed). Anything else leaves the range clear for the
+            // fresh stage-2 map, which hv_vm_map would otherwise reject for overlapping.
+            if let Some(a) = self.place_fixed(host, rlen, addr, exec) { return a; }
             addr
         };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_vm_map)");
@@ -1238,10 +1304,110 @@ impl Box_ {
         cands.into_iter().find(|&a| self.range_is_free(a, len))
     }
 
+    /// Does `[ipa, ipa+len)` intersect any tracked backing? (Distinct from `range_is_free`, which
+    /// also excludes reservations and forbidden windows — this asks only "is any of it live memory".)
+    fn overlaps_backing(&self, ipa: u64, len: u64) -> bool {
+        let end = ipa.saturating_add(len);
+        self.backings.iter().any(|b| ipa < b.ipa + b.len as u64 && b.ipa < end)
+    }
+
+    /// Place a FIXED request (`MAP_FIXED` on the BSD path, `VM_FLAGS_OVERWRITE` on the Mach one) at
+    /// `addr`, classifying it against the live backings. **Shared by `map_mmap_region` and
+    /// `guest_vm_map`** — the two FIXED paths must not drift apart, which a second copy of this
+    /// logic is exactly how they would.
+    ///
+    /// Returns `Some(addr)` when the request was satisfied by REUSING an existing backing: the
+    /// caller must return that address immediately, having mapped nothing (`host` is already freed).
+    /// Returns `None` when the caller should go on to stage-2 map `host` at `addr` as usual.
+    ///
+    /// Three cases:
+    /// 1. **Fully covers** every backing it touches (including touching none) → drop them and let
+    ///    the caller install `host`. The original behaviour, and the only case `unmap_overlapping`'s
+    ///    wholesale drop is sound for.
+    /// 2. **Fully contained** in ONE backing → reuse it in place: copy `host`'s pages over
+    ///    `[addr, addr+rlen)` and keep the rest of the backing intact. `alloc_pages` maps with
+    ///    `MAP_ANON`, which `mmap(2)` guarantees zero-filled, so an anonymous FIXED request gets
+    ///    exactly the fresh zero pages the kernel would give it; on the file-backed path the same
+    ///    copy carries the staged bytes. This is the case that matters: libstd's
+    ///    `install_main_guard` mmaps at `usrstack64 - RLIMIT_STACK`, wholly inside the 256 KiB
+    ///    dynamic-stack backing, and dyld/libmalloc pass `VM_FLAGS_OVERWRITE` on the Mach path.
+    ///    Loaded image segments, the L1/L2 page tables and the PAC sign stub/table are one backing
+    ///    apiece and equally destroyable.
+    /// 3. **True partial straddle** → fail loud. Nothing exercises it; guessing at split semantics
+    ///    is worse than refusing.
+    ///
+    /// `exec` is the W^X guard: `set_region_exec` promotes a whole 32 MiB block without the guest
+    /// TLBI the VMM cannot issue, so it is sound only on a block the guest never translated. An exec
+    /// request overlapping ANY live backing therefore panics — which also means **case 2 is
+    /// unreachable when `exec` is set**, so a caller's `set_region_exec` can never be silently
+    /// skipped by the early return.
+    fn place_fixed(&mut self, host: *mut u8, rlen: usize, addr: u64, exec: bool) -> Option<u64> {
+        // Every FIXED path funnels through here, so validate the address HERE: a caller that forgets
+        // cannot silently hand `hv_vm_map` an address it rejects. The BSD path checks `fixed_fits`
+        // itself first and answers the guest EINVAL, so it never trips this; the Mach path has no
+        // errno channel plumbed to its four call sites and no guest exercises it, so it fails loud
+        // with a diagnosis instead of an opaque `HvError(0xfae94003)` recorder abort.
+        assert!(Self::fixed_fits(addr, rlen),
+            "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's 36-bit \
+             IPA space", addr.saturating_add(rlen as u64));
+        let end = addr + rlen as u64;
+        assert!(!exec || !self.overlaps_backing(addr, rlen as u64),
+            "FIXED exec map at {addr:#x}..{end:#x} overlaps a live backing: exec promotion of an \
+             already-translated block would need a guest TLBI the VMM cannot issue");
+        let covers_all = self.backings.iter()
+            .filter(|b| addr < b.ipa + b.len as u64 && b.ipa < end)   // the overlapping ones
+            .all(|b| addr <= b.ipa && b.ipa + b.len as u64 <= end);   // ...each wholly inside
+        if covers_all {
+            self.unmap_overlapping(addr, rlen as u64);                // case 1
+            return None;
+        }
+        if let Some((bhost, bipa)) = self.backings.iter()
+            .find(|b| addr >= b.ipa && end <= b.ipa + b.len as u64)
+            .map(|b| (b.host, b.ipa))
+        {
+            // Case 2. SAFETY: `[addr, end)` lies wholly inside the backing, so the destination is
+            // in-bounds; `host` is a distinct live allocation of `rlen` bytes (no overlap), and it is
+            // dead after the copy, so release it here — otherwise every guard-page install and every
+            // OVERWRITE commit would leak an allocation.
+            unsafe {
+                std::ptr::copy_nonoverlapping(host, bhost.add((addr - bipa) as usize), rlen);
+                libc::munmap(host as *mut _, rlen);
+            }
+            return Some(addr);
+        }
+        // Case 3: overlaps something but is neither contained nor covering.
+        panic!("FIXED map at {addr:#x}..{end:#x} partially straddles a live backing: splitting a \
+                backing is unimplemented (no guest exercises it) and dropping it wholesale would \
+                destroy guest memory the kernel keeps");
+    }
+
+    /// Can the guest's address space hold a FIXED request for `[addr, addr+rlen)`? The guest IPA
+    /// space is 36-bit and the stage-1 tables are 16 KiB-granule, so a request that is misaligned,
+    /// overflows, or ends above the ceiling is one the real kernel refuses with `EINVAL` — and one
+    /// `hv_vm_map` refuses with `HV_BAD_ARGUMENT`, which retrace `expect`s on, converting a guest
+    /// error into a recorder abort.
+    ///
+    /// Not academic: libstd's `install_main_guard` mmaps `MAP_FIXED` at
+    /// `pthread_get_stackaddr_np() - pthread_get_stacksize_np()`, and macOS 26's libpthread reports
+    /// a constant 8 MiB-minus-a-page size for the main thread regardless of `RLIMIT_STACK`, so
+    /// against the box's smaller stack that subtraction underflows to a wild address.
+    ///
+    /// A pure function of `(addr, rlen)` and the fixed IPA geometry — record and replay classify
+    /// identically, so the rejection needs no mirror (symmetry is structural).
+    fn fixed_fits(addr: u64, rlen: usize) -> bool {
+        addr & (GRANULE as u64 - 1) == 0
+            && addr.checked_add(rlen as u64).is_some_and(|end| end <= 1u64 << 36)
+    }
+
     /// Free every tracked backing that overlaps `[ipa, ipa+len)` (stage-2 unmap + release the anon
-    /// host allocation), for a FIXED/OVERWRITE remap. A backing that straddles the range boundary is
-    /// removed wholesale (the guest is deliberately overwriting the range); such straddles are not
-    /// expected for the page-granular, self-allocated regions the guest remaps.
+    /// host allocation), for a FIXED/OVERWRITE remap. A backing is removed WHOLESALE, so this is
+    /// only correct when every overlapping backing lies entirely inside `[ipa, ipa+len)`.
+    ///
+    /// [`place_fixed`](Self::place_fixed) guarantees that for both FIXED paths: it only reaches here
+    /// in the fully-covering case. Dropping a straddled backing would destroy guest memory the real
+    /// kernel keeps, and "it's deterministic" is no defence: determinism only makes replay match the
+    /// recording, so retrace would faithfully record a WRONG execution with no divergence and
+    /// nothing flagged.
     fn unmap_overlapping(&mut self, ipa: u64, len: u64) {
         let end = ipa + len;
         let mut i = 0;
@@ -1286,21 +1452,27 @@ impl Box_ {
         name
     }
 
-    /// Special case for mmap: allocate host pages, map 1:1 at a deterministic fresh IPA,
+    /// Special case for anonymous mmap: allocate host pages, map them at a deterministic guest IPA,
     /// track as a backing, return the guest IPA. Same call sequence => same IPAs on replay.
-    pub fn guest_mmap(&mut self, len: u64) -> u64 {
+    ///
+    /// M8-stack: `addr`/`flags` now reach this function. Previously it took only a length and always
+    /// bump-allocated, so an anonymous MAP_FIXED request silently landed at `mmap_next` — libstd's
+    /// guard-page install checks `result != stackptr` and panics with errno untouched
+    /// ("os error 0"). Placement is delegated to `map_mmap_region`, which the file-backed path
+    /// already uses, so both paths now share one FIXED implementation.
+    pub fn guest_mmap(&mut self, addr: u64, len: u64, prot: u64, flags: u64) -> Result<u64, u64> {
         let (host, rlen) = alloc_pages(len as usize);
-        let ipa = self.mmap_next;
-        self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_mmap)");
-        self.backings.push(Backing { host, ipa, len: rlen });
-        self.mmap_next += rlen as u64;
-        ipa
+        self.map_mmap_region(host, rlen, addr, prot, flags)
     }
 
     const MAP_FIXED: u64 = 0x10;
     const PROT_EXEC: u64 = 0x4;
     /// Address + stage-2-map an anon backing for an mmap. FIXED → `addr`; else bump `mmap_next`.
     /// Identical on record and replay. Returns the chosen guest IPA.
+    ///
+    /// **Takes ownership of `host`**: it is either installed as a new backing, or — on the
+    /// containment path below — copied into the existing backing and then `munmap`ed. Callers must
+    /// not read `host` afterwards (read the guest through `read_guest` instead).
     ///
     /// Step 3c (TLB-gap fix): a non-FIXED `PROT_EXEC` mmap is placed in a FRESH, block-exclusive
     /// 32 MiB block — round `mmap_next` up to the next `BLK` boundary before choosing the IPA.
@@ -1309,15 +1481,50 @@ impl Box_ {
     /// pack normally and never promote; keeping exec regions block-exclusive guarantees promotion
     /// always hits a pristine block. (A MAP_FIXED exec mmap onto a touched block would need a TLBI;
     /// dyld in private mode is not expected to do that — if a run shows it, add a guest-side TLBI.)
-    fn map_mmap_region(&mut self, host: *mut u8, rlen: usize, addr: u64, prot: u64, flags: u64) -> u64 {
+    ///
+    /// M8-stack — a FIXED request is classified against the live backings into three cases:
+    /// 1. **Fully covers** every backing it touches → drop them and install `host` (the original
+    ///    behaviour, and the only one `unmap_overlapping` is safe for).
+    /// 2. **Fully contained** in ONE backing → reuse that backing in place: copy `host`'s pages over
+    ///    `[addr, addr+rlen)` inside it and return `addr`, leaving `backings` untouched. For an anon
+    ///    mmap `host` is fresh zeroed pages, so this zeroes exactly the requested range — which is
+    ///    what the kernel does — while the REST of the backing keeps its contents. This is the case
+    ///    that matters: libstd's `install_main_guard` mmaps `MAP_FIXED` at
+    ///    `usrstack64 - RLIMIT_STACK`, wholly inside the 256 KiB dynamic-stack backing, so the old
+    ///    wholesale drop would have unmapped the stack the guest is running on. Loaded image
+    ///    segments, the L1/L2 page tables and the PAC sign stub/table are all likewise one backing
+    ///    apiece and equally destroyable.
+    /// 3. **True partial straddle** (overlaps, neither contained nor covering) → `assert!` fail-loud.
+    ///    No guest exercises it; fail-loud beats guessing at split semantics (this project's posture).
+    fn map_mmap_region(&mut self, host: *mut u8, rlen: usize, addr: u64, prot: u64, flags: u64)
+        -> Result<u64, u64> {
         if flags & Self::MAP_FIXED == 0 && prot & Self::PROT_EXEC != 0 {
             self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1);
         }
-        let ipa = if flags & Self::MAP_FIXED != 0 { addr } else { self.mmap_next };
+        let ipa = if flags & Self::MAP_FIXED != 0 {
+            // An address the guest's own space cannot hold is the GUEST's error, not retrace's:
+            // answer EINVAL like the kernel would, rather than carrying it down to hv_vm_map and
+            // aborting the recorder. Checked BEFORE `place_fixed`, whose overlap arithmetic assumes
+            // a representable range. Nothing has been mapped yet, so releasing `host` (which this
+            // function owns) is the whole of the cleanup: a rejected request is a no-op, leaving
+            // `backings` and the `mmap_next` cursor untouched so later placements are unaffected.
+            if !Self::fixed_fits(addr, rlen) {
+                // SAFETY: `host` is this function's freshly-allocated `rlen`-byte mapping, never
+                // published to `backings` or the guest, and unreachable after this return.
+                unsafe { libc::munmap(host as *mut _, rlen); }
+                return Err(retrace_arch::EINVAL);
+            }
+            // Classify the overlap (shared with guest_vm_map's FIXED branch). A contained request
+            // reuses the existing backing and is already complete.
+            if let Some(a) = self.place_fixed(host, rlen, addr, prot & Self::PROT_EXEC != 0) {
+                return Ok(a);
+            }
+            addr
+        } else { self.mmap_next };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
         self.backings.push(Backing { host, ipa, len: rlen });
         if flags & Self::MAP_FIXED == 0 { self.mmap_next += rlen as u64; }
-        ipa
+        Ok(ipa)
     }
     /// RECORD: anon-alloc, stage the fd's bytes into it (SPTM: never map the file page itself), map,
     /// return (ipa, staged bytes to record so replay needs no file). Primary path is `pread`; if that
@@ -1326,7 +1533,7 @@ impl Box_ {
     /// copying the bytes out (a deterministic snapshot, captured in the trace). Either way the guest
     /// gets an anon page, never a file/shm page.
     pub fn guest_mmap_file(&mut self, addr: u64, len: u64, prot: u64, flags: u64, fd: i32, off: u64)
-        -> (u64, Vec<Region>) {
+        -> Result<(u64, Vec<Region>), u64> {
         let (host, rlen) = alloc_pages(len as usize);
         let n = unsafe { libc::pread(fd, host as *mut _, rlen, off as libc::off_t) };
         if n < 0 {
@@ -1339,14 +1546,22 @@ impl Box_ {
             assert!(src != libc::MAP_FAILED, "guest_mmap_file: neither pread nor mmap works on fd {fd}");
             unsafe { std::ptr::copy_nonoverlapping(src as *const u8, host, copy_len); libc::munmap(src, copy_len); }
         }
-        let ipa = self.map_mmap_region(host, rlen, addr, prot, flags);
-        let bytes = unsafe { std::slice::from_raw_parts(host, rlen) }.to_vec();
-        (ipa, vec![Region { ipa, bytes }])
+        // `?`: a rejected FIXED address frees `host` inside map_mmap_region, so there is nothing to
+        // clean up here — the staged bytes simply never reach the guest, exactly as with a real
+        // kernel that refuses the mapping.
+        let ipa = self.map_mmap_region(host, rlen, addr, prot, flags)?;
+        // Read the staged bytes back out of the GUEST, not out of `host`: map_mmap_region owns
+        // `host` and frees it on the containment path (where the bytes were copied into the existing
+        // backing instead), so touching `host` here would be a use-after-free. read_guest is correct
+        // for every case and is what actually lands in the trace.
+        let bytes = self.read_guest(ipa, rlen);
+        Ok((ipa, vec![Region { ipa, bytes }]))
     }
     /// REPLAY: anon-alloc (zeroed), address identically (no file access); caller applies the
     /// recorded writes to fill it. Returns the chosen IPA (must equal the recorded `ret`). `prot`
     /// must match record so the exec block-alignment in `map_mmap_region` chooses the same IPA.
-    pub fn guest_mmap_replay(&mut self, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
+    pub fn guest_mmap_replay(&mut self, addr: u64, len: u64, prot: u64, flags: u64)
+        -> Result<u64, u64> {
         let (host, rlen) = alloc_pages(len as usize);
         self.map_mmap_region(host, rlen, addr, prot, flags)
     }
@@ -1648,6 +1863,9 @@ impl Box_ {
         vcpu.set_sys(sysreg::TPIDR_EL0,   0).unwrap();         // match load: cpu 0 / cluster 0 (M2-cpuid)
         Self::set_pac_keys(&vcpu);
         let pac = pac_posture_from_memory(regions);
+        // M8-stack: DERIVED, not hardcoded — restore() rebuilds the static and the dynamic path
+        // alike, and the replay mirror byte-compares the reply it recomputes from this geometry.
+        let (stack_top, stack_size) = stack_geometry_from_memory(regions);
         vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(pac)).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
@@ -1676,7 +1894,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -1839,6 +2057,35 @@ impl Box_ {
         None
     }
 
+    /// The kernel writes `sysctl({CTL_KERN, KERN_USRSTACK64})` would perform, computed from the
+    /// guest's OWN stack top instead of retrace's (M8-stack). PURE — it only builds the regions;
+    /// the caller applies them with `apply_and_return`, exactly like the `shared_region_check_np`
+    /// reply. That is what lets replay recompute and byte-compare BEFORE touching guest memory.
+    ///
+    /// `args` is the raw syscall frame: `sysctl(name, namelen, oldp, oldlenp, newp, newlen)`.
+    /// `oldp == 0` is a size probe — only `*oldlenp` is reported. A `NULL` `oldlenp` (the guest
+    /// wants nothing back) yields no regions at all.
+    pub fn usrstack64_reply(&self, args: [u64; 8]) -> Vec<Region> {
+        let (oldp, oldlenp) = (args[2], args[3]);
+        let mut out = Vec::new();
+        if oldp != 0 { out.push(Region { ipa: oldp, bytes: self.stack_top.to_le_bytes().to_vec() }); }
+        if oldlenp != 0 { out.push(Region { ipa: oldlenp, bytes: 8u64.to_le_bytes().to_vec() }); }
+        out
+    }
+
+    /// Answer `getrlimit(RLIMIT_STACK)` from the guest's own stack size. `struct rlimit` is two
+    /// u64s: `{ rlim_cur, rlim_max }`. Both report the real mapped size — retrace does not grow the
+    /// guest stack on demand, so a larger `rlim_max` would be a lie the guest could act on (libstd
+    /// subtracts this from `kern.usrstack64` to locate its guard page, so the two must describe the
+    /// SAME stack). Pure builder: the caller applies via `apply_and_return`, like `usrstack64_reply`.
+    pub fn rlimit_stack_reply(&self, args: [u64; 8]) -> Vec<Region> {
+        let rlp = args[1];
+        if rlp == 0 { return Vec::new(); }
+        let mut bytes = self.stack_size.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&self.stack_size.to_le_bytes());
+        vec![Region { ipa: rlp, bytes }]
+    }
+
     /// Read-only stage-1 walk of the guest's OWN page tables: VA -> IPA. MMU off => identity.
     /// None if unmapped at any level or beyond the 47-bit VA space — an unmapped VA cannot be
     /// the destination of an applied syscall write, so the watch check treats None as no-match.
@@ -1998,6 +2245,8 @@ impl Box_ {
             cache_refault_ipa: self.cache_refault_ipa,
             cache_refault_count: self.cache_refault_count,
             pac_enabled: self.pac_enabled,
+            stack_top: self.stack_top,
+            stack_size: self.stack_size,
         }
     }
 
@@ -2062,6 +2311,8 @@ impl Box_ {
             watch_ranges: Vec::new(),
             syscall_watch_hit: None,
             pac_enabled: state.pac_enabled,
+            stack_top: state.stack_top,
+            stack_size: state.stack_size,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
@@ -2128,5 +2379,81 @@ mod pac_posture_tests {
         // this test does, so if `pac_posture_from_memory` ever stopped panicking here (e.g. someone
         // "fixed" it into a silent default), `#[should_panic]` would fail the test for real.
         let _ = pac_posture_from_memory(&regions);
+    }
+}
+
+// M8-stack. `Box_` must know its OWN stack, per load path — the static path's stack is one granule
+// below STACK_TOP_IPA, the dynamic path's is DYN_STACK_SIZE below DYN_STACK_TOP. `restore()` rebuilds
+// both from a bare snapshot, so it re-derives the geometry rather than hardcoding either constant;
+// these tests pin the derivation (pure, no VM) and the static loader's own bookkeeping.
+#[cfg(test)]
+mod stack_geometry_tests {
+    use super::*;
+
+    // A minimal snapshot region list: the stack backing under test, plus whatever else the caller
+    // wants. `bytes` is sized, never filled — only ipa/len are consulted.
+    fn region(ipa: u64, len: u64) -> Region { Region { ipa, bytes: vec![0u8; len as usize] } }
+
+    #[test]
+    fn static_load_records_its_own_stack_geometry() {
+        let bytes = std::fs::read(retrace_guest::HELLO).unwrap();
+        let loaded = retrace_guest::parse_macho(&bytes);
+        let b = Box_::load(&loaded);
+        assert_eq!(b.stack_top(), STACK_TOP_IPA, "static stack top");
+        assert_eq!(b.stack_size(), GRANULE as u64, "static stack is exactly one granule");
+        assert_eq!(b.stack_top() - b.stack_size(), STACK_TOP_IPA - GRANULE as u64,
+                   "the computed stack bottom must equal the IPA load() actually maps");
+    }
+
+    #[test]
+    fn derives_the_static_geometry_from_a_static_snapshot() {
+        let regions = vec![region(STACK_TOP_IPA - GRANULE as u64, GRANULE as u64)];
+        assert_eq!(stack_geometry_from_memory(&regions), (STACK_TOP_IPA, GRANULE as u64));
+    }
+
+    #[test]
+    fn derives_the_dynamic_geometry_from_a_dynamic_snapshot() {
+        let regions = vec![region(DYN_STACK_TOP - DYN_STACK_SIZE, DYN_STACK_SIZE)];
+        assert_eq!(stack_geometry_from_memory(&regions), (DYN_STACK_TOP, DYN_STACK_SIZE));
+    }
+
+    // Fail loud, never default: a snapshot naming no stack we recognize must not silently answer
+    // with one path's constants, because that is precisely the "the guest is told a lie about its
+    // own address space" bug M8-stack exists to remove.
+    #[test]
+    #[should_panic(expected = "refusing to guess a stack geometry")]
+    fn fails_loud_when_no_stack_is_identifiable() {
+        let _ = stack_geometry_from_memory(&[region(EXE_BASE, GRANULE as u64)]);
+    }
+
+    // The dynamic stack must sit high enough that the main-thread GUARD PAGE libstd computes is a
+    // real guest address. libstd's `install_main_guard` mmaps MAP_FIXED at
+    // `pthread_get_stackaddr_np() - pthread_get_stacksize_np()`, and macOS 26's libpthread reports
+    // `MAIN_STACK_SIZE` for the main thread as a CONSTANT — it calls `getrlimit(RLIMIT_STACK)` and
+    // then ignores the reply (measured: answering 0x10000000 instead of 0x40000 left the computed
+    // address bit-identical). So retrace cannot influence the subtrahend; it can only make sure the
+    // minuend leaves room. With the stack top at 2 MiB that subtraction UNDERFLOWED to
+    // 0xffffffffffa04000, which is what parked rung 1.
+    //
+    // This is a pure constant check on purpose: it is instant, it runs on every gate, and it fails
+    // the moment someone edits the layout back into a collision — which is the failure mode that
+    // cost this milestone two walls. The end-to-end proof is `hello_rust_e2e`.
+    #[test]
+    fn the_guard_page_libstd_computes_is_a_mappable_guest_address() {
+        // macOS 26 libpthread's main-thread stack size: 8 MiB minus one 16 KiB page.
+        const LIBPTHREAD_MAIN_STACK_SIZE: u64 = 0x7fc000;
+        let guard = DYN_STACK_TOP.checked_sub(LIBPTHREAD_MAIN_STACK_SIZE).unwrap_or_else(|| panic!(
+            "DYN_STACK_TOP {DYN_STACK_TOP:#x} is below libpthread's constant main-thread stack size \
+             {LIBPTHREAD_MAIN_STACK_SIZE:#x}: libstd's guard-page subtraction underflows to a wild \
+             address and the mmap is refused"));
+
+        assert_eq!(guard % GRANULE as u64, 0, "guard page {guard:#x} must be granule-aligned");
+        assert!(guard >= PT_L3_CEIL,
+            "guard page {guard:#x} lands in the L3 page-table window [{PT_L3_BASE:#x}, \
+             {PT_L3_CEIL:#x}) — mapping it would overwrite live translation tables");
+        assert!(guard + GRANULE as u64 <= DYN_STACK_TOP - DYN_STACK_SIZE,
+            "guard page {guard:#x} overlaps the stack backing [{:#x}, {DYN_STACK_TOP:#x}) — it must \
+             sit BELOW the stack it guards", DYN_STACK_TOP - DYN_STACK_SIZE);
+        const { assert!(DYN_STACK_TOP <= 1 << 36, "the stack must fit in the 36-bit guest IPA space") };
     }
 }
