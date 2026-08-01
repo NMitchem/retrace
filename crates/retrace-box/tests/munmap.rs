@@ -13,7 +13,7 @@ fn munmap_removes_the_backing() {
     loop {
         match b.run() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
-                mmapped_ipa = b.guest_mmap(args[1]);
+                mmapped_ipa = b.guest_mmap(args[0], args[1], args[2], args[3]).unwrap();
                 assert!(b.mapped_len() > before, "mmap must grow the map set");
                 b.set_x0_err_and_return(mmapped_ipa, false);
             }

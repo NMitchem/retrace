@@ -276,4 +276,39 @@ fn main() {
         .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
         .status().expect("rustc hello_rust");
     assert!(status.success(), "hello_rust guest build failed");
+
+    // usrstack: the M8-stack fixture. Issues sysctl(KERN_USRSTACK64), getrlimit(RLIMIT_STACK), and
+    // an anonymous MAP_FIXED mmap, then publishes all four results as u64s on stdout. Plain
+    // -arch arm64 freestanding, like the other micro-guests.
+    let src = format!("{}/asm/usrstack.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/usrstack");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang usrstack");
+    assert!(status.success(), "usrstack guest build failed");
+
+    // fixedinner: the M8-stack straddle-cover fixture. mmaps two 4-page anon regions, fills them,
+    // then punches a MAP_FIXED page into the middle of one and at the base of the other, and
+    // publishes the returned addresses plus the surrounding bytes -- proving a partial FIXED
+    // overwrite trims the backing instead of dropping it wholesale.
+    let src = format!("{}/asm/fixedinner.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/fixedinner");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang fixedinner");
+    assert!(status.success(), "fixedinner guest build failed");
+
+    // wildfixed: the M8-stack fast-follow fixture. mmaps MAP_FIXED at an address outside the
+    // guest's 36-bit IPA space (the one libstd's install_main_guard actually computes) and
+    // publishes the carry + errno, proving the guest gets EINVAL back instead of the recorder
+    // aborting inside hv_vm_map.
+    let src = format!("{}/asm/wildfixed.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/wildfixed");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang wildfixed");
+    assert!(status.success(), "wildfixed guest build failed");
 }
