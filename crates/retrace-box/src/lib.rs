@@ -1401,13 +1401,6 @@ impl Box_ {
         cands.into_iter().find(|&a| self.range_is_free(a, len))
     }
 
-    /// Does `[ipa, ipa+len)` intersect any tracked backing? (Distinct from `range_is_free`, which
-    /// also excludes reservations and forbidden windows — this asks only "is any of it live memory".)
-    fn overlaps_backing(&self, ipa: u64, len: u64) -> bool {
-        let end = ipa.saturating_add(len);
-        self.backings.iter().any(|b| ipa < b.ipa + b.len as u64 && b.ipa < end)
-    }
-
     /// Place a FIXED request (`MAP_FIXED` on the BSD path, `VM_FLAGS_OVERWRITE` on the Mach one) at
     /// `addr`, classifying it against the live backings. **Shared by `map_mmap_region` and
     /// `guest_vm_map`** — the two FIXED paths must not drift apart, which a second copy of this
@@ -1433,11 +1426,12 @@ impl Box_ {
     /// 3. **True partial straddle** → fail loud. Nothing exercises it; guessing at split semantics
     ///    is worse than refusing.
     ///
-    /// `exec` is the W^X guard: `set_region_exec` promotes a whole 32 MiB block without the guest
-    /// TLBI the VMM cannot issue, so it is sound only on a block the guest never translated. An exec
-    /// request overlapping ANY live backing therefore panics — which also means **case 2 is
-    /// unreachable when `exec` is set**, so a caller's `set_region_exec` can never be silently
-    /// skipped by the early return.
+    /// `exec` on the containment path (case 2, below) is honored by promoting the reused backing to
+    /// RO+exec (`set_region_exec`) and then invalidating the guest's stale TLB entry for it with the
+    /// guest-side TLBI oracle (`flush_guest_tlb`) — a block the guest has already translated can carry
+    /// a stale RW/UXN entry, so promotion alone would leave the guest running on it. This is dyld's
+    /// non-cache-dylib strategy: reserve the image's span, touch it, then `MAP_FIXED` each segment
+    /// in with its own protections (M9).
     fn place_fixed(&mut self, host: *mut u8, rlen: usize, addr: u64, exec: bool) -> Option<u64> {
         // Every FIXED path funnels through here, so validate the address HERE: a caller that forgets
         // cannot silently hand `hv_vm_map` an address it rejects. The BSD path checks `fixed_fits`
@@ -1448,9 +1442,6 @@ impl Box_ {
             "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's 36-bit \
              IPA space", addr.saturating_add(rlen as u64));
         let end = addr + rlen as u64;
-        assert!(!exec || !self.overlaps_backing(addr, rlen as u64),
-            "FIXED exec map at {addr:#x}..{end:#x} overlaps a live backing: exec promotion of an \
-             already-translated block would need a guest TLBI the VMM cannot issue");
         let covers_all = self.backings.iter()
             .filter(|b| addr < b.ipa + b.len as u64 && b.ipa < end)   // the overlapping ones
             .all(|b| addr <= b.ipa && b.ipa + b.len as u64 <= end);   // ...each wholly inside
@@ -1469,6 +1460,19 @@ impl Box_ {
             unsafe {
                 std::ptr::copy_nonoverlapping(host, bhost.add((addr - bipa) as usize), rlen);
                 libc::munmap(host as *mut _, rlen);
+            }
+
+            // M9: an exec FIXED map contained in a LIVE backing is dyld's non-cache-dylib strategy
+            // (reserve the image's span, then MAP_FIXED each segment with its own protections).
+            // The block may already be translated, so promotion alone would leave the guest running
+            // on a stale RW/UXN entry — promote, then invalidate on the guest itself.
+            //
+            // Idempotent with the caller's own set_region_exec (retrace-core's mmap dispatch calls
+            // it on both record and replay): a range that is already ATTR_CODE is found and left
+            // unchanged. Doing it here keeps the flush adjacent to the reason for it.
+            if exec {
+                self.set_region_exec(addr, rlen as u64);
+                self.flush_guest_tlb();
             }
             return Some(addr);
         }
@@ -1576,8 +1580,10 @@ impl Box_ {
     /// `set_region_exec` promotes an entire 32 MiB block from a data BLOCK to an L3 TABLE without
     /// TLB invalidation, which is only sound if that block was never translated before. Data mmaps
     /// pack normally and never promote; keeping exec regions block-exclusive guarantees promotion
-    /// always hits a pristine block. (A MAP_FIXED exec mmap onto a touched block would need a TLBI;
-    /// dyld in private mode is not expected to do that — if a run shows it, add a guest-side TLBI.)
+    /// always hits a pristine block. (A MAP_FIXED exec mmap onto a touched block DOES need a TLBI —
+    /// M9 added the guest-side oracle, `flush_guest_tlb`, and `place_fixed` now promotes-then-flushes
+    /// on that path. Block-exclusive placement for non-FIXED exec mmaps is therefore no longer a
+    /// correctness requirement, just an optimisation: it is a flush avoided, not a hazard avoided.)
     ///
     /// M8-stack — a FIXED request is classified against the live backings into three cases:
     /// 1. **Fully covers** every backing it touches → drop them and install `host` (the original

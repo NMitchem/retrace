@@ -133,6 +133,22 @@ fn main() {
         .status().expect("clang execmap");
     assert!(status.success(), "execmap guest build failed");
 
+    // tlbiexec: the M9 capability fixture. mmaps an anon RW region, TOUCHES it (so the block is
+    // translated), then MAP_FIXED-exec-maps a file of code over it and blr's in. Proves the guest-side
+    // TLBI oracle: without it, place_fixed refused the exec-over-live-backing map and the recorder
+    // aborted. Same code fixture as execmap: `movz x0, #42 ; ret`.
+    let fixture = format!("{out}/tlbiexec_fixture.bin");
+    std::fs::write(&fixture, [0x40u8, 0x05, 0x80, 0xD2, 0xC0, 0x03, 0x5F, 0xD6]).unwrap();
+    let gen = format!("{out}/tlbiexec_gen.s");
+    std::fs::write(&gen, format!(".section __DATA,__data\n.p2align 3\n.global path\npath: .asciz \"{fixture}\"\n")).unwrap();
+    let src = format!("{}/asm/tlbiexec.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/tlbiexec");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
+        .status().expect("clang tlbiexec");
+    assert!(status.success(), "tlbiexec guest build failed");
+
     // machmsg: hand-builds a wire-format _kernelrpc_mach_vm_map (4811) MIG request and issues
     // mach_msg2 (svc -47); the box must service it on guest IPAs. Proves the M2-mach codec +
     // dispatch without dyld/libSystem in the loop.
