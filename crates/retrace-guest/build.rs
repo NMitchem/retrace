@@ -192,6 +192,25 @@ fn main() {
         .status().expect("clang argv_echo");
     assert!(status.success(), "argv_echo guest build failed");
 
+    // stdio_dyn: printf, whose flush reaches the kernel as write_nocancel (397). The M9 console
+    // fixture — same recipe as hello_dyn (real toolchain, links libSystem, plain -arch arm64).
+    let src = format!("{}/c/stdio_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/stdio_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang stdio_dyn");
+    assert!(status.success(), "stdio_dyn guest build failed");
+
+    // closefd_dyn: prints, then closes its own stdout — jq's exit shape. Same recipe as hello_dyn.
+    let src = format!("{}/c/closefd_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/closefd_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang closefd_dyn");
+    assert!(status.success(), "closefd_dyn guest build failed");
+
     // strip47: signs a pointer with pacda then strips it with objc's 47-bit ISA_MASK; the result
     // equals the original ONLY if the PAC signature lands above bit 46 — i.e. only under a 47-bit
     // guest VA. The M2-va47 property test. -arch arm64e (Task 7, M7): with PAC posture now DERIVED
