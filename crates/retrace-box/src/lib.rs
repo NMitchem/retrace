@@ -1144,7 +1144,11 @@ impl Box_ {
     /// Dynamic loader: map a dynamically-linked exe at its own vmaddrs + `/usr/lib/dyld` slid to
     /// `DYLD_BASE`, build the XNU process-start stack, and set PC = dyld's slid entry. Constructs
     /// the initial box state only — running dyld is Task 9. The M1 static `load` path is untouched.
-    pub fn load_dynamic(exe: &Loaded, dyld: &Loaded, argv0: &str) -> Box_ {
+    ///
+    /// `argv` is the guest's full argument vector, `argv[0]` first (the exe path — what the kernel
+    /// passes and what dyld's `executable_path=` is derived from). M9 widened this from a lone
+    /// `argv0`; an empty slice yields `argc=0`, which no caller does but the layout handles.
+    pub fn load_dynamic(exe: &Loaded, dyld: &Loaded, argv: &[String]) -> Box_ {
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         let mut backings = Vec::new();
@@ -1184,7 +1188,7 @@ impl Box_ {
             .map(|s| s.vaddr)
             .expect("load_dynamic: no exe segment carries the Mach-O header (MH_MAGIC_64)");
         // Build the XNU start stack in the (already-mapped, zeroed) stack backing; get guest SP.
-        let sp = Self::build_start_stack(&backings[stack_idx], argv0, main_hdr);
+        let sp = Self::build_start_stack(&backings[stack_idx], argv, main_hdr);
 
         // W^X exec ranges: trampoline + exe exec segs (unslid) + dyld exec segs (slid) + the shared
         // cache's executable regions. The cache text stage-1 MUST be ATTR_CODE BEFORE the guest ever
@@ -1247,18 +1251,20 @@ impl Box_ {
     // non-zero values (identical on record & replay — deterministic; these are opaque cookies the
     // guest only XORs/stores, never checks against anything external). `executable_path=` gives dyld
     // the main exe's path.
-    fn build_start_stack(stack: &Backing, argv0: &str, main_hdr: u64) -> u64 {
+    fn build_start_stack(stack: &Backing, argv: &[String], main_hdr: u64) -> u64 {
         let base_ipa = stack.ipa;
         let top = stack.ipa + stack.len as u64;
-        // strings[0] = argv[0]; strings[1..] = apple[] entries (order irrelevant — parsed by key).
+        let argv0 = argv.first().map(String::as_str).unwrap_or("");
+        // strings[0..argc] = argv; the rest are apple[] entries (order irrelevant — parsed by key).
         let mut strings: Vec<Vec<u8>> = Vec::new();
         let push = |s: String, out: &mut Vec<Vec<u8>>| { let mut v = s.into_bytes(); v.push(0); out.push(v); };
-        push(argv0.to_string(), &mut strings);                                   // argv[0]
+        for a in argv { push(a.clone(), &mut strings); }                         // argv[0..argc]
         push(format!("executable_path={argv0}"), &mut strings);                  // apple[0]
         push("ptr_munge=0x1a2b3c4d5e6f7a8b".to_string(), &mut strings);          // libpthread cookie (nonzero)
         push("stack_guard=0x000a0b0c0d0e0f00".to_string(), &mut strings);        // __stack_chk_guard (low byte 0)
         push("malloc_entropy=0x00112233445566778899aabbccddeeff".to_string(), &mut strings); // libmalloc 2x64 entropy
-        let n_apple = strings.len() - 1;
+        let argc = argv.len();
+        let n_apple = strings.len() - argc;
 
         // Lay the strings down from the top of the stack; record each one's guest address.
         let mut p = top;
@@ -1268,9 +1274,12 @@ impl Box_ {
             addr[i] = p;
             unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), stack.host.add((p - base_ipa) as usize), s.len()); }
         }
-        // KernelArgs words: mainExecutable, argc, argv[0], NULL, NULL(envp), apple[0..], NULL.
-        let mut words = vec![main_hdr, 1u64, addr[0], 0, 0];
-        words.extend((0..n_apple).map(|i| addr[1 + i]));
+        // KernelArgs words: mainExecutable, argc, argv[0..argc], NULL, NULL(envp), apple[0..], NULL.
+        let mut words = vec![main_hdr, argc as u64];
+        words.extend((0..argc).map(|i| addr[i]));
+        words.push(0);                                          // argv terminator
+        words.push(0);                                          // envp terminator (empty)
+        words.extend((0..n_apple).map(|i| addr[argc + i]));
         words.push(0); // apple[] terminator
         let sp = (p - words.len() as u64 * 8) & !15u64;             // 16-byte aligned
         for (i, w) in words.iter().enumerate() {

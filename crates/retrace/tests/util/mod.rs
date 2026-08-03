@@ -54,6 +54,17 @@ pub fn record_dynamic(guest: &str) -> (RunOut, std::path::PathBuf) {
     (out, trace)
 }
 
+// Record a dynamically-linked guest through real dyld, passing `args` as the guest's argv[1..].
+// argv[0] is supplied by the CLI (the guest path), so `args` is exactly what the guest sees past it.
+pub fn record_dynamic_args(guest: &str, args: &[&str]) -> (RunOut, std::path::PathBuf) {
+    static NEXT: AtomicU64 = AtomicU64::new(2_000_000);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let trace = std::env::temp_dir().join(format!("retrace-argv-{}-{n}.bin", std::process::id()));
+    let mut argv = vec!["record-dyn", guest, "-o", trace.to_str().unwrap()];
+    if !args.is_empty() { argv.push("--"); argv.extend_from_slice(args); }
+    (run(&argv), trace)
+}
+
 /// (&g.st, &g.ptr) of the crashy.c fixture, discovered from the recorded marker convention —
 /// see c/crashy.c's header comment. Shared by crashy_e2e / watch_dyn / crashy_cli.
 pub fn discover_crashy_addrs(trace: &std::path::Path) -> (u64, u64) {
@@ -75,7 +86,8 @@ pub fn discover_crashy_addrs(trace: &std::path::Path) -> (u64, u64) {
 /// What a breadth-ladder rung guest yielded once it PROVED IT RAN.
 pub struct RungOut { pub trace: std::path::PathBuf, pub stdout: Vec<u8> }
 
-/// The breadth-ladder rung assertion: record `guest` through real dyld, then replay it twice.
+/// The breadth-ladder rung assertion: record `guest` through real dyld with `argv` as its
+/// arguments (`&[]` for none), then replay it twice.
 ///
 /// Demands a **clean exit 0 with exactly `expect_stdout`** — not merely that record and replay
 /// agree. M6's convention makes a recorded crash a successful recording and a verified crash replay
@@ -86,8 +98,8 @@ pub struct RungOut { pub trace: std::path::PathBuf, pub stdout: Vec<u8> }
 ///
 /// Panics with a diagnostic on any failure — it is an assertion helper, and `tests/rung.rs` pins
 /// both polarities.
-pub fn assert_rung_records_and_replays(guest: &str, expect_stdout: &[u8]) -> RungOut {
-    let (rec, trace) = record_dynamic(guest);
+pub fn assert_rung_records_and_replays(guest: &str, argv: &[&str], expect_stdout: &[u8]) -> RungOut {
+    let (rec, trace) = record_dynamic_args(guest, argv);
     assert_eq!(rec.code, 0,
         "rung guest must reach a clean exit(0); 139 means it CRASHED (M6 records that as a \
          successful recording, which is exactly what this assertion exists to reject). stderr:\n{}",

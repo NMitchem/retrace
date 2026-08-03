@@ -17,7 +17,7 @@ const KERN_INVALID_NAME: i32 = 0xf; // 15
 fn minted_bootstrap_port_accepts_a_send_mod_refs_and_is_idempotent() {
     let exe = parse_macho(&std::fs::read(HELLO_DYN).unwrap());
     let dyld = parse_macho(slice_arm64e(&std::fs::read(DYLD_PATH).unwrap()));
-    let mut b = Box_::load_dynamic(&exe, &dyld, "hello_dyn");
+    let mut b = Box_::load_dynamic(&exe, &dyld, &["hello_dyn".to_string()]);
 
     let name = b.mint_bootstrap_port();
     assert_ne!(name, 0, "minted name must be nonzero");

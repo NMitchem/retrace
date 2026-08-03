@@ -11,7 +11,7 @@ mod util;
 #[test]
 fn the_rung_assertion_accepts_a_guest_that_ran() {
     // hello_dyn reaches main and prints "hi\n" through real dyld — the positive control.
-    let r = util::assert_rung_records_and_replays(retrace_guest::HELLO_DYN, b"hi\n");
+    let r = util::assert_rung_records_and_replays(retrace_guest::HELLO_DYN, &[], b"hi\n");
     assert_eq!(r.stdout, b"hi\n");
     assert!(r.trace.exists(), "the rung helper must hand back the trace it recorded");
 }
@@ -24,7 +24,7 @@ fn the_rung_assertion_rejects_a_recorded_crash() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let outcome = std::panic::catch_unwind(|| {
-        util::assert_rung_records_and_replays(retrace_guest::CRASHY, b"unreachable\n");
+        util::assert_rung_records_and_replays(retrace_guest::CRASHY, &[], b"unreachable\n");
     });
     std::panic::set_hook(prev);
     let payload = match outcome {
