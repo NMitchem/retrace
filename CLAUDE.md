@@ -27,10 +27,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   must run serially. `just gate` sets it; a bare `cargo test` will flake with `HV_BUSY`.
 - Single test: `cargo test -p <crate> <name> -- --test-threads=1`
   (e.g. `cargo test -p retrace-box --test pac -- --test-threads=1`).
-- Nothing in the gate is `#[ignore]`d as of M8-stack (see "Honest-gate discipline" below). The
-  headline e2e gates run with the rest: `cargo test -p retrace --test hello_rust_e2e -- --test-threads=1`.
+- Nothing in the gate is `#[ignore]`d as of M9-jq (see "Honest-gate discipline" below). The
+  headline e2e gates run with the rest: `cargo test -p retrace --test hello_rust_e2e -- --test-threads=1`
+  (rung 1) and `--test jq_e2e` (rung 2; skips loudly without `/opt/homebrew/bin/jq`).
 - CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
-  exe through real `/usr/lib/dyld`), `... replay t.bin`.
+  exe through real `/usr/lib/dyld`; append `-- <guest args…>` to pass the guest an argv),
+  `... replay t.bin`.
 - `RETRACE_TRACE=1` on a `record`/`record-dyn` run logs every dispatched trap (and decodes
   `mach_msg2` sends) — the first tool to reach for on a bring-up failure. **Record-only:** `ReplaySession`
   carries no trace instrumentation, so no `[trap]`/`[mach_msg2]`/`[fault]` line is ever printed on replay.
@@ -106,8 +108,13 @@ and threads.
 
 - **W^X.** Executing a *writable* guest page hangs the vCPU on Apple Silicon. Code pages are RO+exec
   (`ATTR_CODE`), data is RW+non-exec (`ATTR_DATA`). Runtime data→exec promotion (`set_region_exec`)
-  is only sound on a block the guest has never translated (the VMM cannot issue a guest TLBI), so
-  exec mmaps are placed in fresh 32 MiB-exclusive blocks.
+  is sound with no further work only on a block the guest has never translated; on a block it *has*
+  translated the stale RW/UXN entry must be invalidated first. The VMM cannot issue a guest TLBI, so
+  **M9 has the guest issue it**: `flush_guest_tlb` runs `tlbi vmalle1` on the guest vCPU at EL1 from
+  a scratch page (`ATTR_TRAMP` — `ATTR_CODE` sets PXN and `tlbi` is EL1-only), using the PAC signing
+  oracle's save/restore discipline. `place_fixed` promotes-then-flushes on the FIXED-exec-over-live-
+  backing path (dyld's non-cache-dylib strategy). Non-FIXED exec mmaps are still placed in fresh
+  32 MiB-exclusive blocks — now an optimisation (a flush avoided), no longer a correctness rule.
 - **SPTM / anon-only memory.** A *file-backed* `hv_vm_map` hard-panics macOS 26
   (`VIOLATION_ILLEGAL_MAPPING_TYPE`). All guest memory is anonymous; file bytes (the shared cache,
   file-backed mmap) are staged via `pread` into anon pages and, on record, captured as writes.
@@ -135,7 +142,10 @@ at the top of `crates/retrace-box/src/lib.rs`.
 Development is milestone-driven: **M0** (box + trace spine), **M1** (general memory-diff recorder),
 **M2** (the loader: MMU-on, dyld, PAC) and its sub-milestones **M2-cache** (shared-cache re-signing),
 **M2-mach** (`mach_msg2` kernel-RPC servicing), **M2-va47** (47-bit guest VA), **M2-bfam** (objc
-B-family PAC). Each milestone has a design spec in `docs/superpowers/specs/` and a task plan in
+B-family PAC); then **M3** (reverse execution), **M4** (checkpoints), **M5** (watchpoints),
+**M6** (crash recording), **M7** (rung 1, a Rust guest), **M8-stack** (guest stack identity), and
+**M9-jq** (the guest-side TLBI oracle, argc/argv, and rung 2 — `brew jq`). Each milestone has a
+design spec in `docs/superpowers/specs/` and a task plan in
 `docs/superpowers/plans/`; per-task reports and code-review diffs land in `.superpowers/sdd/`.
 
 **Honest-gate discipline.** A headline end-to-end gate is parked `#[ignore]`d at the current wall,
@@ -143,8 +153,13 @@ with the wall documented honestly, rather than being faked green or deleted. Whe
 move the gate forward and rewrite that documentation — both the test's `#[ignore]` reason and the
 README Status section. If nothing is left to park it at, un-`#[ignore]` it and say so.
 
-As of M8-stack **both historical headline gates are GREEN and un-ignored**: `hello_dyn_e2e` (a
-dynamically-linked C program, green since M2-taskinfo) and `hello_rust_e2e` (rung 1 — a real
-full-`std` Rust binary reaching `main`, green since M8-stack). The gate is currently **173 passed /
-0 failed / 0 ignored**. Keep it that way: a new wall gets a NEW parked gate for the capability it
-blocks, not a regression of these.
+As of M9-jq **all three headline gates are GREEN and un-ignored**: `hello_dyn_e2e` (a
+dynamically-linked C program, green since M2-taskinfo), `hello_rust_e2e` (rung 1 — a real
+full-`std` Rust binary reaching `main`, green since M8-stack), and `jq_e2e` (rung 2 — `brew jq`,
+the first guest loading dylibs outside the shared cache, green since M9-jq). The gate is currently
+**185 passed / 0 failed / 0 ignored**. Keep it that way: a new wall gets a NEW parked gate for the
+capability it blocks, not a regression of these.
+
+`jq_e2e` depends on `/opt/homebrew/bin/jq`, which is not a repo artifact: it skips with a loud
+`eprintln!` when jq is absent rather than passing quietly. That announcement is not optional — a
+silent skip reads as a green it did not earn.
