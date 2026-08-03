@@ -1313,10 +1313,11 @@ impl Box_ {
             // FIXED (dyld/libmalloc often pass VM_FLAGS_OVERWRITE): the guest may be replacing a
             // region it previously bump-allocated, so classify the overlap exactly as the BSD mmap
             // path does — `place_fixed` is shared with `map_mmap_region`. A request CONTAINED in a
-            // live backing reuses it in place and is already complete (returning early is safe:
-            // `place_fixed` panics on exec-over-live-backing, so the `set_region_exec` below can
-            // never be skipped when it was needed). Anything else leaves the range clear for the
-            // fresh stage-2 map, which hv_vm_map would otherwise reject for overlapping.
+            // live backing reuses it in place and is already complete (returning early is safe: on
+            // that path `place_fixed` itself promotes-and-flushes when `exec` is set — M9 — so the
+            // `set_region_exec` below, which never runs on this path, is already done). Anything
+            // else leaves the range clear for the fresh stage-2 map, which hv_vm_map would otherwise
+            // reject for overlapping.
             if let Some(a) = self.place_fixed(host, rlen, addr, exec) { return a; }
             addr
         };
@@ -2397,6 +2398,13 @@ impl Box_ {
         let next_l3 = backings.iter()
             .filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL)
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
+        // M9 fix: if a flush ever ran before this checkpoint was captured, the TLBI stub is one of
+        // `backings` (checkpoint() captures every backing) and was just re-mapped above — so it must
+        // NOT be re-mapped again by a later `ensure_tlbi_stub()`, which would double-map its IPA and
+        // panic (`hv_vm_map` rejects an overlapping range). The page table entry (ATTR_TRAMP) is
+        // already restored as part of `state.mem`, so deriving readiness from the restored backings
+        // is enough; nothing else needs redoing.
+        let tlbi_stub_ready = backings.iter().any(|b| b.ipa == TLBI_STUB_IPA);
         let mut b = Box_ {
             vm, vcpu, backings,
             reservations: state.reservations.clone(),
@@ -2415,7 +2423,7 @@ impl Box_ {
             pac_enabled: state.pac_enabled,
             stack_top: state.stack_top,
             stack_size: state.stack_size,
-            tlbi_stub_ready: false,
+            tlbi_stub_ready,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
