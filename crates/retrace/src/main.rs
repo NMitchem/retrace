@@ -28,16 +28,21 @@ fn main() {
             }
         }
         Some("record-dyn") => {
-            // retrace record-dyn <exe> -o <trace>: load the dynamically-linked exe + its dylinker
-            // (/usr/lib/dyld, arm64e slice) and record it running through REAL dyld.
+            // retrace record-dyn <exe> -o <trace> [-- <guest args…>]: load the dynamically-linked
+            // exe + its dylinker (/usr/lib/dyld, arm64e slice) and record it running through REAL
+            // dyld.
             let guest = &a[2];
             let out = a.iter().position(|s| s == "-o").map(|i| a[i+1].clone()).expect("-o <trace>");
+            // Guest argv: argv[0] is the exe path (what the kernel passes and what dyld's
+            // `executable_path=` is derived from); everything after `--` is the guest's own.
+            let mut argv = vec![guest.clone()];
+            if let Some(i) = a.iter().position(|s| s == "--") { argv.extend_from_slice(&a[i+1..]); }
             let exe_bytes = std::fs::read(guest).expect("read guest");
             let exe = retrace_guest::parse_macho(&exe_bytes);
             let dyld_path = exe.dylinker.clone().unwrap_or_else(|| retrace_guest::DYLD_PATH.to_string());
             let dyld_bytes = std::fs::read(&dyld_path).unwrap_or_else(|e| panic!("read dyld {dyld_path}: {e}"));
             let dyld = retrace_guest::parse_macho(retrace_guest::slice_arm64e(&dyld_bytes));
-            match retrace_core::record_dynamic(&exe, &dyld, guest, Path::new(&out)) {
+            match retrace_core::record_dynamic(&exe, &dyld, &argv, Path::new(&out)) {
                 Ok(s) => {
                     use std::io::Write;
                     std::io::stdout().write_all(&s.stdout).unwrap();
@@ -88,6 +93,6 @@ fn main() {
                 _ => { eprintln!("usage: retrace debug <trace> --script '<cmds>'"); exit(2); }
             }
         }
-        _ => { eprintln!("usage: retrace <record <guest> -o <trace> | replay <trace> | debug <trace> --script '…'>"); exit(2); }
+        _ => { eprintln!("usage: retrace <record <guest> -o <trace> | record-dyn <exe> -o <trace> [-- <guest args…>] | replay <trace> | debug <trace> --script '…'>"); exit(2); }
     }
 }

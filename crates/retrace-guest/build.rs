@@ -182,6 +182,16 @@ fn main() {
         .status().expect("clang crashy");
     assert!(status.success(), "crashy guest build failed");
 
+    // argv_echo: prints argv[1]. The M9 argv fixture — a real dynamic guest, same recipe as
+    // hello_dyn (real toolchain, links libSystem, plain -arch arm64).
+    let src = format!("{}/c/argv_echo.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/argv_echo");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang argv_echo");
+    assert!(status.success(), "argv_echo guest build failed");
+
     // strip47: signs a pointer with pacda then strips it with objc's 47-bit ISA_MASK; the result
     // equals the original ONLY if the PAC signature lands above bit 46 — i.e. only under a 47-bit
     // guest VA. The M2-va47 property test. -arch arm64e (Task 7, M7): with PAC posture now DERIVED

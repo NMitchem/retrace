@@ -61,9 +61,9 @@ pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<Recor
 
 /// Dynamic record: run the exe through real dyld (mapped via `load_dynamic`) and record. Same
 /// record loop as the static path — dyld's syscalls/mach-traps flow through the shared engine.
-pub fn record_dynamic(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded, argv0: &str,
+pub fn record_dynamic(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded, argv: &[String],
                       trace_path: &Path) -> Result<RecordSummary, String> {
-    record_box(Box_::load_dynamic(exe, dyld, argv0), trace_path)
+    record_box(Box_::load_dynamic(exe, dyld, argv), trace_path)
 }
 
 fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
