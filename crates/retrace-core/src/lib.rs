@@ -4,7 +4,7 @@ use std::path::Path;
 use std::rc::Rc;
 use retrace_box::{Box_, Stop};
 use retrace_trace::{Writer, Event, Region};
-use retrace_arch::{SYS_WRITE, SYS_EXIT};
+use retrace_arch::SYS_EXIT;
 
 // mmap flag bit: set => anonymous (M1's guest_mmap path); clear => file-backed (Task 8's
 // anon-staged path — dyld maps the shared cache + dylibs this way).
@@ -87,7 +87,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 eprintln!("[trap] num={} (0x{:x}) pc={:#x} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
                     *num as i64, num, b.position(), args[0], args[1], args[2], args[3], args[4], args[5]);
                 // Echo dyld's fd-1/2 diagnostics so a fatal error message is visible.
-                if *num == SYS_WRITE && (args[0] == 1 || args[0] == 2) {
+                if retrace_arch::is_console_write(*num, args[0]) {
                     let bytes = b.read_guest(args[1], args[2] as usize);
                     eprintln!("[fd{}] {}", args[0], String::from_utf8_lossy(&bytes));
                 }
@@ -130,11 +130,30 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             }
             // Console writes are mirrored + faked (NOT forwarded) so record doesn't emit to the
             // record process's real stdout AND double the mirror; replay reproduces from the mirror.
-            Stop::Syscall { num, args } if num == SYS_WRITE && (args[0] == 1 || args[0] == 2) => {
+            // `is_console_write` covers write AND write_nocancel — the shared predicate is what
+            // keeps this arm and replay's mirror from drifting (M9; see its doc comment).
+            Stop::Syscall { num, args } if retrace_arch::is_console_write(num, args[0]) => {
                 stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
                 let ret = args[2];
                 w.append(&Event::Syscall { num, args, ret, err: false, writes: vec![] }).map_err(|e| format!("append write: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, false);
+            }
+            // A guest close of fd 0/1/2 is FAKED, never forwarded: those descriptors are retrace's
+            // own (see `is_console_close`), so forwarding lets the guest close retrace's stdout out
+            // from under it — after which the CLI prints the mirrored recording into a closed fd and
+            // the run reports success having emitted nothing. Measured with jq, whose exit path does
+            // exactly this. Reports success, which is what a real close(1) would do.
+            //
+            // No replay mirror arm is needed (contrast the console write): this appends an ordinary
+            // recorded syscall whose (ret=0, err=false, no writes) replay reproduces through the
+            // generic `apply_and_return`, and whose (num, args) the divergence oracle still checks.
+            //
+            // Deferred: retrace does not model the fd as CLOSED afterwards, so a guest that wrote to
+            // fd 1 after closing it would see the write succeed instead of EBADF. No guest in the
+            // gate does; modeling it means giving the box a real fd table.
+            Stop::Syscall { num, args } if retrace_arch::is_console_close(num, args[0]) => {
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append close: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
             // stores (no syscall), so it cannot go through forward_and_diff. guest_mmap maps a
@@ -561,7 +580,8 @@ impl ReplaySession {
                             // Learn the guest's task-port name (mirror of record) from the recorded −28 result.
                             if num == MACH_TASK_SELF && !*err { self.guest_task_port = Some(*ret); }
                             // Mirror fd-1/2 write output (the buffer is already filled by prior applied reads).
-                            if num == SYS_WRITE && (args[0] == 1 || args[0] == 2) {
+                            // Same predicate as record's arm — see `is_console_write`.
+                            if retrace_arch::is_console_write(num, args[0]) {
                                 self.stdout.extend_from_slice(&self.b.read_guest(args[1], args[2] as usize));
                             }
                             // mach_msg2: re-service (the mapping must exist on replay too), verify
