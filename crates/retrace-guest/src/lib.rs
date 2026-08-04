@@ -117,6 +117,11 @@ pub const HELLO_RUST: &str = concat!(env!("OUT_DIR"), "/hello_rust");
 pub const USRSTACK: &str = concat!(env!("OUT_DIR"), "/usrstack");
 pub const FIXEDINNER: &str = concat!(env!("OUT_DIR"), "/fixedinner");
 pub const WILDFIXED: &str = concat!(env!("OUT_DIR"), "/wildfixed");
+pub const ARGV_ECHO: &str = concat!(env!("OUT_DIR"), "/argv_echo");
+pub const STDIO_DYN: &str = concat!(env!("OUT_DIR"), "/stdio_dyn");
+pub const CLOSEFD_DYN: &str = concat!(env!("OUT_DIR"), "/closefd_dyn");
+pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
+pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
 
 #[cfg(test)]
 mod tests {

@@ -1436,3 +1436,103 @@ signals, or a program that does substantial work. `hello_rust` still only writes
 - **Rung 2 (`brew jq`)** is now genuinely next, and no longer gated behind rung 1.
 
 See `docs/superpowers/specs/2026-07-31-retrace-m8-stack-design.md`.
+
+## Status: M9-jq — 🎉 rung 2 is GREEN, and the wall was not where the milestone aimed
+
+**`jq_e2e` passes: `brew jq -n '1+1'` records and replays bit-for-bit through real `/usr/lib/dyld`,
+printing `2`.** It is the first guest that loads dylibs which are **not in the dyld shared cache** —
+`libjq.1.dylib` and `libonig.5.dylib`, real files under `/opt/homebrew`, the latter reached through the
+`/opt/homebrew/opt/oniguruma` symlink. Same strict gate as rung 1 (`assert_rung_records_and_replays`:
+exit 0, exact stdout, byte-identical replay, replayed twice). **`just gate`: 185 passed / 0 failed /
+0 ignored**, clippy clean.
+
+`jq` comes from Homebrew, not from this repo, so `jq_e2e` announces a loud skip on a machine without it
+rather than passing quietly — a silent skip reads as a green it did not earn.
+
+**The milestone built a guest-side TLBI oracle. `jq` never needed it.** That is the honest headline, and
+it is worth stating plainly rather than burying: the mechanism this milestone was designed around carried
+`jq` without a single new fault, and the thing that actually blocked rung 2 was somewhere else entirely.
+Both results are real; only one was predicted.
+
+**The oracle (Tasks 1–3).** The long-standing rule was that `set_region_exec` is sound only on a block the
+guest has never translated, *because the VMM cannot issue a guest TLBI* — so exec mmaps were placed in
+fresh 32 MiB-exclusive blocks. The codebase had already predicted the fix in a comment: retrace can't issue
+a TLBI, but **the guest can**, and retrace already knew how to make the guest run an instruction it did not
+write — that is exactly what the PAC signing oracle does. Both halves existed. `flush_guest_tlb` runs
+`tlbi vmalle1; dsb ish; isb; hvc #0` on the guest vCPU at EL1 from a dedicated scratch page, wrapped in the
+sign stub's own save/restore discipline so a mid-run caller sees nothing, and the page uses `ATTR_TRAMP`
+(EL1-exec) rather than `ATTR_CODE` — `tlbi` is an EL1 instruction and `ATTR_CODE` sets PXN.
+
+**The spike's measured answers**, because the control is the interesting one:
+
+- **F1 — does `tlbi vmalle1` execute untrapped at guest EL1?** Yes. It ran clean and reached its `hvc`.
+- **F2 (control) — does a hand-flipped data→code leaf really stale-fault without a flush?** **Yes: the
+  guard's premise held.** `ESR_EL1 EC=0x20` (instruction-abort, permission fault), with the payload's
+  sentinel proving it never ran. This mattered: the spike's *first* run reported "EXECUTED ANYWAY", which
+  would have said the invariant was over-conservative all along. That was a **measurement artifact** — every
+  EL0 trap funnels through one unconditional-`hvc` vector, so the EL2 exception class cannot discriminate
+  fault from success. Discriminating on `ESR_EL1` plus an `x0` sentinel reversed the answer. A spike that
+  cannot distinguish its two outcomes is worse than no spike.
+- **F3 — does the same page execute after the flush?** Yes, `x0=0x5a`: the payload genuinely ran.
+
+**Task 3** then relaxed `place_fixed`: a `MAP_FIXED PROT_EXEC` request contained in a live backing is
+promoted and *then* flushed, instead of asserting. That is dyld's real strategy for a non-cache dylib —
+reserve the image's span, touch it, then `MAP_FIXED` each segment in with its own protections. A code-review
+follow-up caught a genuine second-order defect before it could bite: `from_checkpoint` reset
+`tlbi_stub_ready` to false while the restored backings already contained the stub's IPA, so a flush after a
+checkpoint restore re-mapped an already-mapped IPA and panicked — latent since Task 2, first reachable at
+Task 3, now pinned by `flush_guest_tlb_survives_checkpoint_restore`.
+
+**Task 4** widened dyld's process-start stack from a hardcoded `argc=1` to a real `argv[0..argc]`, and gave
+the CLI a `--` separator (`retrace record-dyn <exe> -o <trace> -- <guest args…>`). `jq` with no filter does
+nothing, so rung 2 needed this regardless of the TLBI work. The old layout hid the argv and envp terminators
+in two trailing zeros of a five-word vector; they are separate pushes now, which is what makes it correct for
+any `argc`. `hello_dyn_e2e` and `hello_rust_e2e` passing with `&[]` is the proof the `argc=1` layout dyld
+already accepts was left alone.
+
+**The real wall: retrace was treating the guest's fd 0/1/2 as its own.** Two defects, one root cause, both
+found by driving `jq`:
+
+1. **Console writes were recognized only as `write` (4).** libc's **stdio** flush uses `write_nocancel`
+   (397), so `printf` output fell through to the generic forward path and the **host** kernel performed the
+   write — to retrace's own stdout. This is the nastiest shape a bug can take here: on a terminal the
+   recording looked *perfect*, because the text appeared. The trace held no console bytes at all, and replay,
+   which executes no syscall, printed nothing. Nothing in the gate had ever used stdio; `hello_dyn.c` calls
+   `write(2)` directly.
+2. **`close` of fd 0/1/2 was forwarded too**, so a guest closing its stdout closed **retrace's**. `jq` does
+   this on the way out. Afterwards the CLI wrote the mirrored recording into a closed descriptor and the run
+   reported success having emitted nothing — exit 0, empty stdout, no error anywhere.
+
+Both now route through shared predicates in `retrace-arch`, `is_console_write` and `is_console_close`, rather
+than each call site spelling out the condition. That is deliberate: record's arm and replay's mirror must
+agree (symmetry rule 1), and when they don't the failure is **silent** — a forwarded console write still
+prints, so nothing looks wrong until replay comes up empty. The close is faked, never forwarded, and needs no
+replay arm: its `(ret=0, err=false, no writes)` flows through the generic `apply_and_return` with the
+`(num, args)` divergence check intact. `stdio_dyn` and `closefd_dyn` pin each mechanism separately, asserting
+the trace really records syscall 397 and a faked close of fd 1 — not merely that `jq` got further.
+
+**What this does and does not prove.** Rung 2 is a breadth result about *loading*: dyld can bind and run a
+program whose dylibs live outside the shared cache, and retrace's console surface is now faithful enough that
+a stdio program's output belongs to the recording rather than to the recorder. `jq -n '1+1'` is still a
+small program that computes one value and exits. Threads, signals, and real input are all still untouched.
+
+**The next boundary:**
+
+- **Guest-raised signal delivery** — unchanged, and still the top item. `__pthread_kill`/`SIGABRT` is
+  forwarded to the host and would kill the recorder, so any guest that aborts still cannot be recorded.
+- **No fd table.** Retrace still does not model an fd as *closed*: a guest that wrote to fd 1 after closing it
+  would see the write succeed instead of `EBADF`. Faking the close fixed the leak, not the fidelity gap, and
+  closing it properly means giving the box a real fd table. Nothing in the gate does this.
+- **Block-exclusive exec placement is now retirable, but was not retired.** A non-FIXED `PROT_EXEC` mmap
+  still rounds `mmap_next` up to a fresh 32 MiB block. With the oracle in hand that is no longer a
+  *correctness* requirement — it is a flush avoided, not a hazard avoided — and the doc comment says so.
+- **The anon `PROT_EXEC` / JIT gap is likewise unblocked but still open**: `guest_mmap` installs plain
+  RW+non-exec pages for an anonymous exec mmap and warns. The oracle removes the reason it couldn't be fixed;
+  no guest in the gate needs it yet.
+- **`prot` is still ignored except for `PROT_EXEC`**, spec risk **R3** (the guest believes 8 MiB of stack
+  while 256 KiB is backed), **`guest_munmap`'s wholesale-drop defect**, the `guest_mmap_replay` rename,
+  threads, and arm64e dynamic guests — all unchanged.
+- **Rung 3** — a guest that reads real input, or does substantial work — is next, and `jq` with a file
+  argument is the natural first step now that `--` exists.
+
+See `docs/superpowers/specs/2026-08-01-retrace-m9-jq-design.md`.

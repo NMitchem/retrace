@@ -133,6 +133,22 @@ fn main() {
         .status().expect("clang execmap");
     assert!(status.success(), "execmap guest build failed");
 
+    // tlbiexec: the M9 capability fixture. mmaps an anon RW region, TOUCHES it (so the block is
+    // translated), then MAP_FIXED-exec-maps a file of code over it and blr's in. Proves the guest-side
+    // TLBI oracle: without it, place_fixed refused the exec-over-live-backing map and the recorder
+    // aborted. Same code fixture as execmap: `movz x0, #42 ; ret`.
+    let fixture = format!("{out}/tlbiexec_fixture.bin");
+    std::fs::write(&fixture, [0x40u8, 0x05, 0x80, 0xD2, 0xC0, 0x03, 0x5F, 0xD6]).unwrap();
+    let gen = format!("{out}/tlbiexec_gen.s");
+    std::fs::write(&gen, format!(".section __DATA,__data\n.p2align 3\n.global path\npath: .asciz \"{fixture}\"\n")).unwrap();
+    let src = format!("{}/asm/tlbiexec.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/tlbiexec");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
+        .status().expect("clang tlbiexec");
+    assert!(status.success(), "tlbiexec guest build failed");
+
     // machmsg: hand-builds a wire-format _kernelrpc_mach_vm_map (4811) MIG request and issues
     // mach_msg2 (svc -47); the box must service it on guest IPAs. Proves the M2-mach codec +
     // dispatch without dyld/libSystem in the loop.
@@ -165,6 +181,35 @@ fn main() {
         .args(["-arch","arm64","-o",&bin,&src])
         .status().expect("clang crashy");
     assert!(status.success(), "crashy guest build failed");
+
+    // argv_echo: prints argv[1]. The M9 argv fixture — a real dynamic guest, same recipe as
+    // hello_dyn (real toolchain, links libSystem, plain -arch arm64).
+    let src = format!("{}/c/argv_echo.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/argv_echo");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang argv_echo");
+    assert!(status.success(), "argv_echo guest build failed");
+
+    // stdio_dyn: printf, whose flush reaches the kernel as write_nocancel (397). The M9 console
+    // fixture — same recipe as hello_dyn (real toolchain, links libSystem, plain -arch arm64).
+    let src = format!("{}/c/stdio_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/stdio_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang stdio_dyn");
+    assert!(status.success(), "stdio_dyn guest build failed");
+
+    // closefd_dyn: prints, then closes its own stdout — jq's exit shape. Same recipe as hello_dyn.
+    let src = format!("{}/c/closefd_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/closefd_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang closefd_dyn");
+    assert!(status.success(), "closefd_dyn guest build failed");
 
     // strip47: signs a pointer with pacda then strips it with objc's 47-bit ISA_MASK; the result
     // equals the original ONLY if the PAC signature lands above bit 46 — i.e. only under a 47-bit

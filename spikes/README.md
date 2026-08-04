@@ -244,6 +244,75 @@ All four sub-findings confirm the pre-retire hypothesis the M5 design assumed, e
 M5 design's pre-retire watchpoint hypothesis holds on this OS/silicon exactly as assumed; no spec
 fallback needed.
 
+## `tlbi.c` — guest-side stage-1 TLB invalidation (M9 go/no-go)
+
+`retrace` hand-edits live stage-1 page tables (`set_region_exec`) but the VMM cannot issue a
+guest TLBI, so today a data→code flip is only sound on a block the guest has never translated.
+jq's dyld breaks that assumption (`MAP_FIXED`-exec-maps `__TEXT` into an already-touched
+reservation), so M9 needs to know: can the **guest itself** invalidate its own stage-1 TLB
+entries via `tlbi vmalle1` at EL1, and does that actually make a hand-edited leaf visible?
+
+**Deviation from the M9 task-1 brief:** the brief's `TCR_EL1` literal
+(`0x8000210080B511`, "T0SZ=17, TG0=16K") configures a 47-bit-VA **three-level** walk, but the
+brief's own table-build code constructs only a **two-level** table (start-level `L2 -> L3`) —
+contradictory, and would fault on the very first guest access. The TLBI question is independent
+of VA size, so this spike keeps the brief's IPA layout, attributes, stub encodings and phase
+structure verbatim but borrows the known-working two-level MMU config straight from
+`m2spike.c`: `TCR_EL1=0x10080B51C` (T0SZ=28, 36-bit VA, TG0=16K, start level 2).
+
+**A measurement pitfall found and fixed while getting this to run correctly:** all 16 EL1 vector
+slots are an unconditional `hvc #0`, so *every* EL0 trap — the deliberate `hvc` trigger
+instruction (itself UNDEFINED at EL0) **and** a genuine instruction-abort on a stale/faulting
+fetch — funnels through the same vector and re-emerges as the identical `ESR_EL2 EC2=0x16` exit
+at the identical `pc`. A first pass that discriminated F2 on `EC2` alone reported "EXECUTED
+ANYWAY" — a false positive purely from that ambiguity, not a real finding. Reading `ESR_EL1` (the
+real local EL0→EL1 trap cause, latched *before* the vector's own `hvc` fires) resolves it
+unambiguously: `EC1=0x00` (Unknown reason — the undefined `hvc`) means the code truly reached the
+trigger; `EC1=0x20` (Instruction Abort from a lower EL) means it never got there. `x0` (only the
+flipped page's payload sets it to `0x5a`, seeded to a sentinel `0xdead` beforehand) is the second,
+independent confirmation. Every subsequent run below uses that corrected instrumentation.
+
+```sh
+cd spikes
+clang -O2 -o tlbi tlbi.c -framework Hypervisor
+codesign -s - -f --entitlements ent.plist tlbi
+perl -e '$p=fork;if(!$p){setpgrp;exec@ARGV or exit 127}$SIG{ALRM}=sub{kill"-KILL",$p;exit 124};alarm 15;wait;exit($?>>8)' ./tlbi
+```
+
+```
+[phase1-read] reason=1 EC2=0x16 pc=0x4404 far=0x0 | ESR_EL1 EC1=0x00 esr1=0x2000000
+phase1: read OK (entry now cached as DATA)
+[F2-control] reason=1 EC2=0x16 pc=0x4404 far=0x0 | ESR_EL1 EC1=0x20 esr1=0x8200000f
+F2: without TLBI -> ESR_EL1 EC1=0x20, x0=0xdead (sentinel 0xdead, payload sets 0x5a) -> FAULTED (stale entry is REAL; the guard's premise holds)
+[F1-tlbi] reason=1 EC2=0x16 pc=0x14010 far=0x0 | ESR_EL1 EC1=0x20 esr1=0x8200000f
+F1: tlbi vmalle1 at EL1 -> EXECUTED, reached its hvc
+[F3-exec] reason=1 EC2=0x16 pc=0x4404 far=0x0 | ESR_EL1 EC1=0x00 esr1=0x2000000
+F3: after TLBI, execute flipped page -> SUCCEEDED (x0=0x5a, want 0x5a)
+
+VERDICT: GO — guest-side TLBI works; M9 Tasks 2-3 proceed as designed.
+```
+
+- **(F1) `tlbi vmalle1` executes cleanly at guest EL1, no trap to EL2.** Running the stub
+  (`tlbi vmalle1; dsb ish; isb; hvc #0`) directly at EL1 lands `pc` exactly on the stub's own
+  `hvc` (`STUB_IPA+0xc+4 = 0x14010`), **not** routed through the EL1 vector table — proof that
+  none of `tlbi`/`dsb`/`isb` trapped. (`ESR_EL1 EC1=0x20` on this line is stale, carried over
+  from the prior F2 run — the stub takes no local EL1 exception of its own, mirroring the
+  documented staleness note on `sstep.c`'s F3 line.)
+- **(F2, the control) a stale TLB entry is REAL.** Without a TLBI, flipping the leaf DATA→CODE
+  and executing from it faults: `ESR_EL1 EC1=0x20` (Instruction Abort from a lower EL) with
+  `esr1=0x8200000f` — IFSC `0x0F` = **Permission fault, level 3**, the textbook signature of a
+  TLB entry still carrying the old leaf's `UXN=1` after the underlying table entry changed.
+  `x0` stays at its `0xdead` sentinel (the payload never ran) confirming it independently. The
+  M9 design's guard is **not** over-conservative — the hazard it guards against is real on this
+  OS/silicon.
+- **(F3) after the TLBI, execution succeeds.** Same flipped leaf, same code path, but preceded
+  by the EL1 stub: `ESR_EL1 EC1=0x00` (the deliberate trigger, not a fault) and `x0=0x5a` —
+  the payload genuinely ran. The flush made the hand-edited leaf visible.
+
+=> **VERDICT: GO.** Guest-side `tlbi vmalle1` at EL1 is available, untrapped, and sufficient to
+invalidate a stale stage-1 entry after a hand-edited data→code leaf flip. M9 Tasks 2–3
+(`flush_guest_tlb`) proceed as designed; spec risk R1 (pre-promote reservations) is not needed.
+
 ## Proven for M2; still open for later milestones
 
 - MMU-on paging, PAC, and DSC reachability — **proven** (`m2spike.c`); `private` cache

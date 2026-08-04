@@ -13,7 +13,7 @@ use retrace_trace::Event;
 fn dynamic_load_and_restore_set_cpu_identity_zero_and_preserve_tsd_base() {
     let exe = parse_macho(&std::fs::read(HELLO_DYN).unwrap());
     let dyld = parse_macho(slice_arm64e(&std::fs::read(DYLD_PATH).unwrap()));
-    let b = Box_::load_dynamic(&exe, &dyld, "hello_dyn");
+    let b = Box_::load_dynamic(&exe, &dyld, &["hello_dyn".to_string()]);
     assert_eq!(b.tpidr_el0(), 0, "load_dynamic: TPIDR_EL0 must be 0 (cpu 0 / cluster 0)");
     assert_eq!(b.tpidrro_el0(), TSD_IPA, "load_dynamic: TPIDRRO_EL0 must remain the TSD base");
 
