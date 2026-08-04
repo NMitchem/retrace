@@ -389,6 +389,12 @@ pub struct Box_ {
     // sign stub's lazy-init check (a stage-2-backing lookup at a fixed IPA), this is a plain flag —
     // either works, but a flag makes ensure_tlbi_stub's early-return trivial to read.
     tlbi_stub_ready: bool,
+    // M10: the guest's file-descriptor table. Before this existed the guest's fds WERE retrace's —
+    // forward_and_diff issues a raw svc in retrace's own process, so a guest open returned a host fd
+    // and a guest close(n) closed retrace's n. Carried in BoxState (see its field comment): a mid-run
+    // capture cannot re-derive it. Has Drop (Vecs), but is declared after vcpu/vm, so the
+    // load-bearing vcpu-before-vm drop order is unaffected.
+    fds: FdTable,
 }
 
 #[derive(Debug)]
@@ -427,10 +433,17 @@ pub struct FdTable {
 }
 
 impl FdTable {
-    /// Fresh table with 0/1/2 open as the console. They carry no host mapping: M9 mirrors console
-    /// writes into the trace and fakes the close rather than forwarding either.
+    /// Fresh table with 0/1/2 open as the console, mapped **identically onto retrace's own 0/1/2**.
+    ///
+    /// The identity mapping is load-bearing and was not obvious. M9 intercepts console *writes*
+    /// (mirrored into the trace) and console *closes* (faked) before forwarding is ever considered —
+    /// but that is all it intercepts. Everything else libc does to fd 0/1/2 still forwards, and
+    /// stdio does a lot of it: `fstat(1)` to pick a buffering mode, `ioctl(1)`/`fcntl(1)` to ask
+    /// whether stdout is a tty. Leaving these unmapped answered EBADF for every one of them, which
+    /// crashed `watch_dyn`'s guest — the identity mapping restores exactly the pre-M10 behaviour for
+    /// the operations M9 does not intercept, while the dangerous two stay intercepted upstream.
     pub fn new() -> FdTable {
-        FdTable { slots: vec![FdSlot::Open; 3], host: vec![None; 3] }
+        FdTable { slots: vec![FdSlot::Open; 3], host: vec![Some(0), Some(1), Some(2)] }
     }
 
     fn grow_to(&mut self, gfd: usize) {
@@ -834,7 +847,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new() }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1323,7 +1336,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new() }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -1738,6 +1751,10 @@ impl Box_ {
     /// gets an anon page, never a file/shm page.
     pub fn guest_mmap_file(&mut self, addr: u64, len: u64, prot: u64, flags: u64, fd: i32, off: u64)
         -> Result<(u64, Vec<Region>), u64> {
+        // M10: `fd` arrives as a GUEST descriptor. This is the second consumer of a guest fd (the
+        // other is forward_and_diff): the mmap arm is special-cased in retrace-core and preads here
+        // directly, so it never passes through forwarding and must translate for itself.
+        let fd = if fd < 0 { fd } else { self.fds.host(fd as u64).ok_or(EBADF)? };
         let (host, rlen) = alloc_pages(len as usize);
         let n = unsafe { libc::pread(fd, host as *mut _, rlen, off as libc::off_t) };
         if n < 0 {
@@ -2098,7 +2115,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new() }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -2142,7 +2159,90 @@ impl Box_ {
     /// window (capped) and translate it to a host address; forward the real syscall via the
     /// raw-svc shim; diff. Returns the full 64-bit x0, the BSD carry flag (`err`), and any
     /// kernel writes. On error (`err`) no writes are captured — a failed syscall wrote nothing.
-    pub fn forward_and_diff(&self, num: u64, args: [u64;8]) -> (u64, bool, Vec<Region>) {
+    /// Rewrite every guest fd operand of `num` in `args` to its host fd, in place.
+    ///
+    /// Called from the TWO places that consume a guest fd — here in `forward_and_diff` and in
+    /// `guest_mmap_file`. It is deliberately not "a single choke point inside forward_and_diff":
+    /// file-backed mmap is special-cased upstream in retrace-core and preads from its fd without
+    /// ever reaching forward_and_diff, so a one-site design would leak exactly that one.
+    ///
+    /// `Err(EBADF)` means the guest named an fd it does not have open. The caller forwards NOTHING —
+    /// the whole point is that the number may be a live descriptor of retrace's own.
+    pub fn translate_fds(&self, num: u64, args: &mut [u64; 8]) -> Result<(), u64> {
+        for &i in retrace_arch::fd_operands(num) {
+            let v = args[i];
+            // AT_FDCWD (-2) and friends are sentinels, not descriptors.
+            if (v as i64) < 0 { continue; }
+            match self.fds.host(v) {
+                Some(h) => args[i] = h as u64,
+                // Console fds (0/1/2) have no host mapping and never reach here: retrace-core
+                // mirrors their writes and fakes their close before forwarding is considered.
+                None => return Err(EBADF),
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind an `allocates_fd` syscall's host return value to a fresh guest slot, returning the
+    /// GUEST fd — the number that goes into the trace and back to the guest.
+    pub fn bind_returned_fd(&mut self, num: u64, host_ret: u64) -> u64 {
+        debug_assert!(retrace_arch::allocates_fd(num), "syscall {num} does not return an fd");
+        let gfd = self.fds.alloc();
+        self.fds.bind(gfd, host_ret as i32);
+        gfd
+    }
+
+    pub fn fds(&self) -> &FdTable { &self.fds }
+    pub fn fds_mut(&mut self) -> &mut FdTable { &mut self.fds }
+
+    /// `map_with_linking_np`'s fd lives INSIDE guest memory, not in a register: x0 points at a
+    /// `struct mwl_region[]` (x1 = count) whose first field is `mwlr_fd`. No operand index can name
+    /// it, so `fd_operands` returns nothing for 550 and this handles it instead.
+    ///
+    /// The array is `const` — the kernel reads it and never writes it — so translation copies the
+    /// regions into a HOST-side buffer and points the forwarded x0 at that copy. Guest memory is
+    /// never mutated, which is what keeps a host fd from leaking into the trace as recorded data.
+    /// Returns the buffer (kept alive across the syscall by the caller) or `Err(EBADF)`.
+    fn translate_mwl_regions(&self, args: &[u64; 8]) -> Result<Vec<u8>, u64> {
+        let count = args[1].min(retrace_arch::MWL_MAX_REGION_COUNT);
+        let stride = retrace_arch::MWL_REGION_STRIDE;
+        let mut buf = self.read_guest(args[0], count as usize * stride);
+        for r in 0..count as usize {
+            let off = r * stride;
+            let gfd = i32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+            if gfd < 0 { continue; }
+            let h = self.fds.host(gfd as u64).ok_or(EBADF)?;
+            buf[off..off + 4].copy_from_slice(&h.to_le_bytes());
+        }
+        Ok(buf)
+    }
+
+    /// Forward one guest syscall to the host kernel and capture what it wrote into guest memory.
+    ///
+    /// **M10 makes this the whole fd contract, deliberately.** It takes GUEST descriptors, and the
+    /// `(u64, bool, Vec<Region>)` it returns already carries a GUEST descriptor when the syscall
+    /// produced one. Translation-in and binding-out used to live on opposite sides of a crate
+    /// boundary (translation here, binding in retrace-core's dispatch), which meant every other
+    /// caller had to remember the second half — and `memdiff`'s mini record loop did not, so its
+    /// guest's `open` returned an unbound host fd and its `read` came back EBADF. One function owns
+    /// both halves now; a caller cannot hold it wrong.
+    pub fn forward_and_diff(&mut self, num: u64, args: [u64;8]) -> (u64, bool, Vec<Region>) {
+        // The guest's own view of the operands, kept for the fd bookkeeping below: `args` is about
+        // to be rewritten to host descriptors, and `close` must retire the GUEST slot.
+        let gargs = args;
+        // M10: translate guest fds to host fds BEFORE anything else. A guest fd that reaches the
+        // host kernel untranslated acts on RETRACE's descriptor of that number.
+        let mut args = args;
+        if let Err(e) = self.translate_fds(num, &mut args) {
+            return (e, true, Vec::new());
+        }
+        // map_with_linking_np: fd inside a guest struct; forward a translated host-side copy.
+        let mwl = if num == retrace_arch::SYS_MAP_WITH_LINKING_NP {
+            match self.translate_mwl_regions(&args) {
+                Ok(b) => Some(b),
+                Err(e) => return (e, true, Vec::new()),
+            }
+        } else { None };
         let mut windows: Vec<(u64, usize, Vec<u8>)> = Vec::new(); // (guest_ipa, len, pre-image)
         let mut hargs = [0i64; 8];
         for i in 0..8 {
@@ -2162,13 +2262,21 @@ impl Box_ {
         // pointer if the count value happened to equal a mapped low IPA — e.g. dyld's pread count
         // 0x4000 collides with the trampoline IPA). This both fixes that mis-forward and keeps the
         // host kernel from writing past the destination backing.
-        if num == retrace_arch::SYS_READ || num == retrace_arch::SYS_PREAD {
+        //
+        // M10: `read_nocancel` (396) belongs here too and was missing — the same plain-vs-_nocancel
+        // trap as M9's console bug, in the clamp rather than in a predicate. `jq` reads through 396
+        // and never through 3, so before M10 its reads were forwarded UNCLAMPED.
+        if num == retrace_arch::SYS_READ || num == retrace_arch::SYS_PREAD
+            || num == retrace_arch::SYS_READ_NOCANCEL {
             let count = args[2] as usize;
             hargs[2] = match self.host_span(args[1]) {
                 Some((_, avail)) => Self::clamp_count(avail, count) as i64,
                 None => count as i64,
             };
         }
+        // M10: forward the TRANSLATED copy of map_with_linking_np's region array, not the guest's
+        // (whose mwlr_fd fields still hold guest fds, and must keep holding them).
+        if let Some(b) = mwl.as_ref() { hargs[0] = b.as_ptr() as i64; }
         // Forward via a raw `svc #0x80` shim (not `libc::syscall`, which narrows the return
         // toward 32 bits and hides the BSD carry flag). `hargs` is [i64;8] (x0..x7); no more x7
         // padding.
@@ -2186,6 +2294,21 @@ impl Box_ {
                     writes.push(Region { ipa, bytes: post.to_vec() });
                 }
             }
+        }
+        // M10 fd bookkeeping — the other half of the contract, deliberately here rather than in the
+        // caller (see this function's doc comment).
+        //
+        // An fd-producing syscall returned a HOST descriptor: bind it to a guest slot and hand back
+        // the GUEST number, so what reaches both the guest and the trace is a function of the
+        // guest's own open/close sequence rather than of how many files retrace holds open.
+        let ret = if !err && retrace_arch::allocates_fd(num) {
+            self.bind_returned_fd(num, ret)
+        } else { ret };
+        // A successful close retires the guest's slot, so a later use of that number is EBADF
+        // instead of reaching whatever retrace has open there. fd 0/1/2 never arrive here —
+        // is_console_close fakes them upstream in retrace-core.
+        if !err && (num == retrace_arch::SYS_CLOSE || num == retrace_arch::SYS_CLOSE_NOCANCEL) {
+            self.fds.close(gargs[0]);
         }
         (ret, err, writes)
     }
@@ -2524,6 +2647,11 @@ impl Box_ {
             stack_top: state.stack_top,
             stack_size: state.stack_size,
             tlbi_stub_ready,
+            // M10 t3 places a fresh table here only because BoxState cannot carry one yet; t4 adds
+            // `fd_slots` and replaces this with `FdTable::from_slots(&state.fd_slots)`. Until then a
+            // seeked session believes every fd is Free — the exact M9 t3 defect shape, and the reason
+            // t4 exists. Do not ship t3 without t4.
+            fds: FdTable::new(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
