@@ -113,9 +113,13 @@ pub fn fd_operands(num: u64) -> &'static [usize] {
 /// Does `num`'s RETURN value need binding to a fresh guest fd slot?
 ///
 /// `socket` and `shm_open` are here for the same reason `open` is: guest fds are not files-only.
+///
+/// **`dup2` is deliberately absent.** It names its own target descriptor instead of taking the
+/// lowest free one, so binding its return like the others would put the new mapping in the wrong
+/// slot. No guest in the gate calls it (measured: zero in the `jq` run), so retrace-core asserts on
+/// it rather than modelling it wrong — a silently mis-modelled `dup2` aliases the wrong file.
 pub fn allocates_fd(num: u64) -> bool {
-    matches!(num, SYS_OPEN | SYS_OPEN_NOCANCEL | SYS_OPENAT | SYS_DUP | SYS_DUP2
-                  | SYS_SOCKET | SYS_SHM_OPEN)
+    matches!(num, SYS_OPEN | SYS_OPEN_NOCANCEL | SYS_OPENAT | SYS_DUP | SYS_SOCKET | SYS_SHM_OPEN)
 }
 
 pub const SYS_SYSCTL: u64 = 202;
@@ -218,13 +222,15 @@ mod tests {
 
     #[test]
     fn allocates_fd_covers_every_fd_producing_call() {
-        for num in [SYS_OPEN, SYS_OPEN_NOCANCEL, SYS_OPENAT, SYS_DUP, SYS_DUP2,
-                    SYS_SOCKET, SYS_SHM_OPEN] {
+        for num in [SYS_OPEN, SYS_OPEN_NOCANCEL, SYS_OPENAT, SYS_DUP, SYS_SOCKET, SYS_SHM_OPEN] {
             assert!(allocates_fd(num), "syscall {num} returns a NEW fd");
         }
         for num in [SYS_CLOSE, SYS_READ, SYS_PREAD, SYS_MMAP, SYS_FCNTL, SYS_EXIT, SYS_IOCTL] {
             assert!(!allocates_fd(num), "syscall {num} does not return a new fd");
         }
+        // dup2 names its own target slot, so it is NOT bound like the others — retrace-core
+        // asserts on it instead of modelling it wrong. See allocates_fd's doc comment.
+        assert!(!allocates_fd(SYS_DUP2), "dup2 is deliberately unmodelled, not silently bound");
     }
 
     /// The M9 defect generalized. `jq` reaches the kernel through 396/397/398/399/406 and never

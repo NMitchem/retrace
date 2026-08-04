@@ -61,13 +61,25 @@ fn dup_aliases_two_guest_fds_onto_one_host_fd() {
 }
 
 #[test]
-fn console_fds_have_no_host_mapping() {
-    // 0/1/2 are open but unmapped: M9 mirrors their writes into the trace and fakes their close
-    // rather than forwarding either, so they must never resolve to a host descriptor.
+fn console_fds_map_identically_onto_retraces_own() {
+    // M9 intercepts console WRITES and CLOSES upstream, but nothing else: stdio still fstat()s and
+    // ioctl()s fd 1 to choose a buffering mode. Those forward, so 0/1/2 must resolve to retrace's
+    // own 0/1/2 — leaving them unmapped answers EBADF and crashed watch_dyn's guest.
     let t = FdTable::new();
     for gfd in 0..=2 {
-        assert_eq!(t.host(gfd), None, "console fd {gfd} must not map to a host descriptor");
+        assert_eq!(t.host(gfd), Some(gfd as i32),
+            "console fd {gfd} must map identically onto retrace's own descriptor");
     }
+}
+
+#[test]
+fn a_closed_console_fd_loses_its_identity_mapping() {
+    // The guest closing fd 1 is faked upstream and never reaches here, but if it ever did, the
+    // mapping must not survive — that is the M9 bug (a guest closing RETRACE's stdout) in table form.
+    let mut t = FdTable::new();
+    assert!(t.close(1));
+    assert_eq!(t.host(1), None);
+    assert!(!t.is_open(1));
 }
 
 #[test]

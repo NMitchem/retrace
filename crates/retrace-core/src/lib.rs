@@ -439,6 +439,16 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             }
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
+                // M10: dup2 names its own target descriptor rather than taking the lowest free one,
+                // so the table would have to honour an arbitrary slot. No guest in the gate calls it
+                // (measured: zero in the jq run), so fail loudly rather than model it wrong — a
+                // silently mis-modelled dup2 aliases the wrong file.
+                assert!(num != retrace_arch::SYS_DUP2,
+                    "dup2 is not modelled by the M10 fd table (unexercised by any gate guest); \
+                     implement target-slot allocation before a guest uses it");
+                // M10: `ret` is already a GUEST descriptor when this syscall produced one, and a
+                // successful close has already retired its slot — forward_and_diff owns both halves
+                // of the fd contract so no caller has to remember the second one.
                 let (ret, err, writes) = b.forward_and_diff(num, args);
                 w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
