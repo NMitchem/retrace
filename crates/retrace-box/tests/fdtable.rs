@@ -99,6 +99,33 @@ fn slots_round_trip_through_from_slots() {
         "Closed must stay distinguishable from Free across the round trip");
 }
 
+// M10 t4, in the shape of M9 t3's regression test. State a mid-run capture cannot re-derive must be
+// CARRIED — this is the third field in BoxState to exist for that reason (after pac_enabled and
+// stack_top). If from_checkpoint installed a fresh table, a seeked session would believe every fd is
+// Free, so a post-seek guest pread returns EBADF and reverse execution diverges from the forward run.
+#[test]
+fn fd_table_survives_checkpoint_restore() {
+    let mut t = FdTable::new();
+    let a = t.alloc(); // 3, stays open
+    let b = t.alloc(); // 4, gets closed
+    t.bind(a, 17);
+    t.close(b);
+
+    let restored = FdTable::from_slots(&t.slots());
+    assert!(restored.is_open(a), "an open fd must survive the restore");
+    assert!(!restored.is_open(b), "a CLOSED fd must stay closed — else a seek resurrects it");
+    assert_eq!(restored.slots()[b as usize], FdSlot::Closed,
+        "Closed must stay distinguishable from Free across the restore");
+    for gfd in 0..=2 {
+        assert!(restored.is_open(gfd), "console fd {gfd} must survive the restore open");
+        assert_eq!(restored.host(gfd), Some(gfd as i32),
+            "the console identity mapping is a CONSTANT and must be rederived on restore — \
+             without it a seeked session answers EBADF to fstat(1)");
+    }
+    // A guest-opened fd's host mapping is record-only and must NOT come back.
+    assert_eq!(restored.host(a), None, "a guest fd's host mapping is record-only");
+}
+
 #[test]
 fn from_slots_carries_no_host_mapping() {
     // The host half is record-only by construction: replay opens no host fd, so a restored table
