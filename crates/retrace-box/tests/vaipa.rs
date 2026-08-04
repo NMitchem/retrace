@@ -37,7 +37,7 @@ fn walker_is_identity_across_the_dynamic_layout() {
     let main_hdr = exe.segments.iter()
         .find(|s| s.data.len() >= 4 && s.data[0..4] == [0xcf, 0xfa, 0xed, 0xfe])
         .map(|s| s.vaddr).expect("crashy carries a mach header");
-    let b = Box_::load_dynamic(&exe, &dyld, "crashy");
+    let b = Box_::load_dynamic(&exe, &dyld, &["crashy".to_string()]);
     // TSD_IPA and the exe's mach header sit in blocks promoted to L3 tables (the trampoline resp.
     // the exe's own text) — the L3 path; COMMPAGE_IPA is in block 2047, which nothing promotes —
     // the L2 BLOCK path. Both must translate identity.

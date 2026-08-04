@@ -2,8 +2,41 @@
 pub enum Ec { Svc, Hvc, SysReg, SoftStep, Breakpoint, Watchpoint, DataAbort, InstrAbort, Other(u8) }
 
 pub const SYS_WRITE: u64 = 4;
+/// `SYS_write_nocancel` (`sys/syscall.h:437`). Identical `(fd, buf, nbyte)` ABI to `write`; the
+/// `_nocancel` variants only skip the pthread cancellation point. libc's **stdio** flush takes this
+/// path, so any guest that uses `printf`/`fwrite` — `jq` among them — reaches the console through
+/// 397 and never through 4. See `is_console_write`.
+pub const SYS_WRITE_NOCANCEL: u64 = 397;
 pub const SYS_EXIT: u64 = 1;
 pub const SVC_IMM: u64 = 0x80;
+
+/// Is this syscall the guest writing to the console (fd 1/2)?
+///
+/// Console writes are mirrored into the trace and faked — never forwarded — so the guest's output
+/// belongs to the recording rather than to retrace's own stdout, and replay can reproduce it
+/// without executing anything. Record and replay MUST agree on what counts (symmetry rule 1), so
+/// they share this one predicate instead of each spelling out the condition: an arm that forgets a
+/// variant does not diverge loudly, it silently forwards the write to the HOST — which still prints,
+/// so a recording looks correct on a terminal while the trace holds no console bytes at all and
+/// replay prints nothing. That is exactly how 397 stayed invisible until `jq` (M9).
+pub fn is_console_write(num: u64, fd: u64) -> bool {
+    (num == SYS_WRITE || num == SYS_WRITE_NOCANCEL) && (fd == 1 || fd == 2)
+}
+
+/// `SYS_close_nocancel` (`sys/syscall.h:439`).
+pub const SYS_CLOSE_NOCANCEL: u64 = 399;
+
+/// Is this the guest closing one of the three standard fds?
+///
+/// The guest's fd 0/1/2 ARE retrace's own — retrace never virtualized them, it just mirrors writes
+/// to them. So forwarding this close hands the guest a live handle on RETRACE's descriptors and it
+/// closes them for real: measured with `jq`, which closes fd 1 as it exits, after which every byte
+/// retrace itself tried to print — including the mirrored recording — went nowhere, silently and
+/// with a 0 exit status. Faked instead (see the record arm). fd > 2 is an ordinary file and still
+/// forwards.
+pub fn is_console_close(num: u64, fd: u64) -> bool {
+    (num == SYS_CLOSE || num == SYS_CLOSE_NOCANCEL) && fd <= 2
+}
 
 pub const SYS_READ: u64 = 3;
 pub const SYS_PREAD: u64 = 153;
@@ -92,6 +125,31 @@ mod tests {
         assert_eq!((SYS_SYSCTL, SYS_GETRLIMIT), (202, 194));
         assert_eq!((CTL_KERN, KERN_USRSTACK64), (1, 59));
         assert_eq!((RLIMIT_STACK, RLIMIT_POSIX_FLAG), (3, 0x1000));
+        assert_eq!((SYS_WRITE_NOCANCEL, SYS_CLOSE_NOCANCEL), (397, 399));
+    }
+
+    #[test]
+    fn console_close_covers_both_close_variants_on_the_standard_fds() {
+        for num in [SYS_CLOSE, SYS_CLOSE_NOCANCEL] {
+            for fd in 0..=2 {
+                assert!(is_console_close(num, fd), "fd {fd} is retrace's own descriptor");
+            }
+            assert!(!is_console_close(num, 3), "an ordinary file fd is forwarded, not faked");
+        }
+        assert!(!is_console_close(SYS_WRITE, 1), "only close is faked; write is mirrored");
+    }
+
+    #[test]
+    fn console_write_covers_both_write_variants_on_fd_1_and_2() {
+        for num in [SYS_WRITE, SYS_WRITE_NOCANCEL] {
+            assert!(is_console_write(num, 1), "fd 1 is the console");
+            assert!(is_console_write(num, 2), "fd 2 is the console");
+            assert!(!is_console_write(num, 0), "fd 0 is stdin, not a console write");
+            assert!(!is_console_write(num, 3), "an ordinary file fd is forwarded, not mirrored");
+        }
+        // Anything else is a normal syscall even on fd 1 — only the write family is mirrored.
+        assert!(!is_console_write(SYS_READ, 1));
+        assert!(!is_console_write(SYS_CLOSE, 1));
     }
 
     #[test]

@@ -21,5 +21,5 @@ mod util;
 
 #[test]
 fn hello_rust_records_and_replays_reaching_main() {
-    util::assert_rung_records_and_replays(retrace_guest::HELLO_RUST, b"hi from rust\n");
+    util::assert_rung_records_and_replays(retrace_guest::HELLO_RUST, &[], b"hi from rust\n");
 }
