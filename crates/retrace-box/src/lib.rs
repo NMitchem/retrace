@@ -494,10 +494,20 @@ impl FdTable {
 
     pub fn slots(&self) -> Vec<FdSlot> { self.slots.clone() }
 
-    /// Rebuild guest-visible state only — used by `from_checkpoint` and by replay. Deliberately
-    /// carries NO host mapping.
+    /// Rebuild guest-visible state — used by `from_checkpoint` and by replay.
+    ///
+    /// Deliberately carries no host mapping for guest-opened fds: those are record-only, and a
+    /// restored box has none (replay executes no syscall). The console identity mapping IS rebuilt
+    /// for whichever of 0/1/2 are still open, because it is a **constant**, not captured state —
+    /// the M9 t3 lesson in the other direction: carry what cannot be derived, derive what can.
+    /// Without this a restored box answers EBADF to `fstat(1)`, the same defect that crashed
+    /// `watch_dyn` before the identity mapping existed.
     pub fn from_slots(slots: &[FdSlot]) -> FdTable {
-        FdTable { slots: slots.to_vec(), host: vec![None; slots.len()] }
+        let mut host = vec![None; slots.len()];
+        for (gfd, h) in host.iter_mut().enumerate().take(3) {
+            if slots[gfd] == FdSlot::Open { *h = Some(gfd as i32); }
+        }
+        FdTable { slots: slots.to_vec(), host }
     }
 }
 
@@ -530,6 +540,15 @@ pub struct BoxState {
     // geometry exactly, and a seeked session must answer `kern.usrstack64` the way the record run did.
     pub stack_top: u64,
     pub stack_size: u64,
+    // M10: carried for the same reason as `pac_enabled` and `stack_top` — a mid-run capture cannot
+    // re-derive it. GUEST-VISIBLE slots only; the host map is record-only and a restored box has no
+    // host fds to map (from_checkpoint is a replay-side operation, and replay executes no syscall).
+    //
+    // Defaulting this to a fresh table would make a seeked session believe every fd is Free, so a
+    // post-seek guest pread returns EBADF and reverse execution silently diverges from the forward
+    // run. That is the M9 t3 failure shape — from_checkpoint resetting a flag the restored state
+    // contradicts — and this is the third field in this struct to exist for that reason.
+    pub fd_slots: Vec<FdSlot>,
 }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
@@ -2573,6 +2592,7 @@ impl Box_ {
             pac_enabled: self.pac_enabled,
             stack_top: self.stack_top,
             stack_size: self.stack_size,
+            fd_slots: self.fds.slots(),
         }
     }
 
@@ -2647,11 +2667,9 @@ impl Box_ {
             stack_top: state.stack_top,
             stack_size: state.stack_size,
             tlbi_stub_ready,
-            // M10 t3 places a fresh table here only because BoxState cannot carry one yet; t4 adds
-            // `fd_slots` and replaces this with `FdTable::from_slots(&state.fd_slots)`. Until then a
-            // seeked session believes every fd is Free — the exact M9 t3 defect shape, and the reason
-            // t4 exists. Do not ship t3 without t4.
-            fds: FdTable::new(),
+            // M10: DERIVED from the captured slots, never reset — see the BoxState field comment.
+            // A fresh table here would tell a seeked session every fd is Free.
+            fds: FdTable::from_slots(&state.fd_slots),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
