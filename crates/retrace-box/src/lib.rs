@@ -397,6 +397,97 @@ pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, 
 /// A complete, in-memory-only capture of `Box_`'s internal state at an ARBITRARY position — unlike
 /// `Event::Snapshot` (the trace format), which is only correct to restore from at landmark 0.
 /// Never persisted, never enters a trace file. See the M4 design spec for why each field is here.
+/// `EBADF` — answered for a guest fd that is `Free` or `Closed`, with nothing forwarded.
+pub const EBADF: u64 = 9;
+
+/// One entry in the guest's descriptor space.
+///
+/// `Closed` is deliberately distinct from `Free`: both answer `EBADF`, but only `Free` is reusable
+/// by `alloc`, and a checkpoint restore must be able to tell them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdSlot { Free, Open, Closed }
+
+/// The guest's file-descriptor table.
+///
+/// **Split by design.** `slots` is guest-visible state: a pure function of the guest's own
+/// open/dup/close sequence, identical on record and replay, and the sole authority on `EBADF`.
+/// `host` is the record-only `guest_fd -> host_fd` map — replay executes no syscall and opens no host
+/// fd, so it has nothing to map, and host fd numbers therefore never enter the trace. That matters:
+/// a host fd is a function of how many files RETRACE happens to hold open, so recording one would
+/// make the trace depend on the recorder rather than on the guest.
+///
+/// Before M10 the guest's fds simply WERE retrace's. `forward_and_diff` issues a raw `svc` in
+/// retrace's own process, so a guest `open` returned a host fd — measured: `jq` saw 17-22, because
+/// retrace holds 0-16 open — and a guest `close(n)` closed retrace's `n`. M9 fixed that for fd 0/1/2
+/// by special case; this table fixes it for the rest.
+#[derive(Debug, Clone, Default)]
+pub struct FdTable {
+    slots: Vec<FdSlot>,
+    host: Vec<Option<i32>>,
+}
+
+impl FdTable {
+    /// Fresh table with 0/1/2 open as the console. They carry no host mapping: M9 mirrors console
+    /// writes into the trace and fakes the close rather than forwarding either.
+    pub fn new() -> FdTable {
+        FdTable { slots: vec![FdSlot::Open; 3], host: vec![None; 3] }
+    }
+
+    fn grow_to(&mut self, gfd: usize) {
+        if self.slots.len() <= gfd {
+            self.slots.resize(gfd + 1, FdSlot::Free);
+            self.host.resize(gfd + 1, None);
+        }
+    }
+
+    /// Lowest descriptor >= 3 that is not currently open, POSIX-style. Deterministic, which is the
+    /// whole point: it makes a recorded guest fd a function of the guest rather than of retrace's
+    /// own open files.
+    ///
+    /// `Closed` slots are reusable — POSIX returns the lowest fd *not currently open*, so a number
+    /// the guest just closed is handed straight back on the next `open`. `Closed` is still distinct
+    /// from `Free` (a checkpoint restore must tell "the guest closed this" from "never used"), but
+    /// the distinction does not gate reuse.
+    pub fn alloc(&mut self) -> u64 {
+        let gfd = (3..self.slots.len())
+            .find(|&i| self.slots[i] != FdSlot::Open)
+            .unwrap_or_else(|| self.slots.len().max(3));
+        self.grow_to(gfd);
+        self.slots[gfd] = FdSlot::Open;
+        gfd as u64
+    }
+
+    pub fn bind(&mut self, gfd: u64, host_fd: i32) {
+        self.grow_to(gfd as usize);
+        self.host[gfd as usize] = Some(host_fd);
+    }
+
+    pub fn host(&self, gfd: u64) -> Option<i32> {
+        self.host.get(gfd as usize).copied().flatten()
+    }
+
+    pub fn is_open(&self, gfd: u64) -> bool {
+        self.slots.get(gfd as usize) == Some(&FdSlot::Open)
+    }
+
+    /// Mark closed and drop the host mapping. `false` means the guest closed something it did not
+    /// have open — the caller answers `EBADF` and forwards nothing.
+    pub fn close(&mut self, gfd: u64) -> bool {
+        if !self.is_open(gfd) { return false; }
+        self.slots[gfd as usize] = FdSlot::Closed;
+        self.host[gfd as usize] = None;
+        true
+    }
+
+    pub fn slots(&self) -> Vec<FdSlot> { self.slots.clone() }
+
+    /// Rebuild guest-visible state only — used by `from_checkpoint` and by replay. Deliberately
+    /// carries NO host mapping.
+    pub fn from_slots(slots: &[FdSlot]) -> FdTable {
+        FdTable { slots: slots.to_vec(), host: vec![None; slots.len()] }
+    }
+}
+
 #[derive(Clone)]
 pub struct BoxState {
     pub regs: Regs,
