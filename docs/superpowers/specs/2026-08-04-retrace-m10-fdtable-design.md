@@ -223,9 +223,11 @@ are handled only if the gate exercises them; otherwise they are missing rows tha
 
 ## Open questions for implementation planning
 
-1. **Does `fcntl` need per-command handling?** `F_DUPFD`/`F_DUPFD_CLOEXEC` allocate a new fd and would
-   need allocation-on-return, unlike other `fcntl` commands. 17 `fcntl` calls appear in the run; their
-   commands were not decoded. Decode them in task 1 before assuming x0-translation suffices.
+1. ~~**Does `fcntl` need per-command handling?**~~ **RESOLVED 2026-08-04, before planning.** The 17
+   `fcntl` calls decode as `F_GETPATH`(50)×10, `F_ADDFILESIGS_RETURN`(97)×4, `F_CHECK_LV`(98)×2 and
+   `F_SETFD`(2)×1. **No `F_DUPFD`(0) and no `F_DUPFD_CLOEXEC`(67)** — so `fcntl` needs plain x0
+   translation with no allocation-on-return, and the dup-family commands get a fail-loud arm rather
+   than speculative support.
 2. **Does anything in the gate rely on the guest seeing a specific fd number today?** Expected no, but
    the assertion in `fdtable_dyn.c` inverts a property no test currently states.
 3. **Where exactly does allocation-on-return live** — in the box (so `forward_and_diff` returns an
