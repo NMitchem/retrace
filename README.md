@@ -1536,3 +1536,107 @@ small program that computes one value and exits. Threads, signals, and real inpu
   argument is the natural first step now that `--` exists.
 
 See `docs/superpowers/specs/2026-08-01-retrace-m9-jq-design.md`.
+
+## Status: M10-fdtable — the guest's descriptors are its own, and rung 3 was already free
+
+**The guest no longer borrows retrace's file descriptors.** Before M10, `forward_and_diff` issued the
+guest's syscall via a raw `svc` in retrace's own process with no translation at all, so a guest fd
+literally *was* a host fd: `jq '.name' t.json` observed `0x11`–`0x16` (17–22), and it started at 17
+only because retrace itself holds 0–16 open. It now observes 3,4,5,6,7,8 — a function of the guest's
+own `open`/`dup`/`close` sequence and nothing else. **`just gate`: 212 passed / 0 failed / 0 ignored**
+(79 test binaries), clippy clean.
+
+**That was a correctness defect, not merely a determinism one.** The guest's 17 raw `close()` calls
+were forwarded straight into retrace's own descriptor table while `cache.rs` held a live fd on the
+shared cache. A guest closing the wrong number would have closed a descriptor the *recorder* owns,
+which is the M9 console bug generalised: the failure is silent, and the recording is wrong in a way
+that looks fine.
+
+**Rung 3 already passed before the milestone began, and the README says so rather than claiming it.**
+`jq '.name' <fixture>` recorded and replayed bit-for-bit at HEAD `84983dc` with no fd table in
+existence — the forward-and-record path already captured the file's bytes as recorded kernel writes,
+and replay already executed no syscall. `jq_file_e2e` **pins** that capability; it did not earn it.
+The test with teeth is the second one: it records from a scratch copy, rewrites that file to
+`{"name":"TAMPERED"}`, and requires replay to still print `retrace` — the trace is self-contained, not
+a script that re-reads the input.
+
+**The mechanism: a split table.** Guest-visible slots (`Free|Open|Closed`, lowest-not-currently-open
+from 3) are a pure function of the guest's own syscall sequence and are identical on record and
+replay. A separate `guest_fd → host_fd` map is **record-only**, because replay executes no syscall and
+opens no host fd. Host descriptor numbers therefore never enter the trace, and the milestone keeps the
+**standard symmetric posture** (symmetry rule 1): replay recomputes what the allocator would have
+produced and byte-compares — deliberately *not* M2-xpcport's verbatim-apply exception, which exists
+only because a minted Mach port name cannot be regenerated. A guest fd can.
+
+The oracle is proven non-vacuous rather than merely present: a passing replay would look identical if
+the recompute were never reached, so `a_recorded_host_shaped_fd_is_caught_as_divergence` rewrites a
+recorded `open()` return to 17 — exactly what a pre-M10 recording held — and requires replay to reject
+it.
+
+**What driving it actually found**, in the order it hurt:
+
+- **`forward_and_diff` owns the whole fd contract, not half of it.** Translation-in lived in the box
+  while binding-out lived in `retrace-core`'s dispatch, so any *other* driver of `forward_and_diff` had
+  to remember the second half — and `memdiff`'s mini record loop did not, so its guest's `open()`
+  returned an unbound host fd and its `read()` came back `EBADF`. Moving the binding into
+  `forward_and_diff` made that test pass **untouched**, which is the evidence that the split was the
+  bug rather than the test.
+- **Console fds must map identically onto retrace's own.** M9 intercepts console *writes* and *closes*
+  — but only those. stdio still `fstat()`s and `ioctl()`s fd 1 to choose a buffering mode, and leaving
+  those unmapped answered `EBADF` to every one, crashing `watch_dyn`'s guest. A unit test asserting
+  "console fds have no host mapping" **passed while being wrong**; only a real guest caught it.
+- **`map_with_linking_np` (550) carries its fd inside a struct in guest memory**, so no operand index
+  can name it. The array is const, so translation forwards a host-side *copy* with `mwlr_fd` rewritten;
+  guest memory is never mutated and no host fd reaches the trace as data.
+- **The plain-vs-`_nocancel` trap fired a third time, on a pre-existing latent defect.** The read-buffer
+  clamp covered `read`(3) and `pread`(153) but not `read_nocancel`(396) — the variant `jq` actually uses
+  — so those reads were forwarded unclamped and the host kernel could write past the destination
+  backing. That bug predates M10; building the fd table is what surfaced it.
+- **POSIX reuses closed slots, not merely free ones.** The RED run caught `alloc()` returning 5 after a
+  `close(3)`. The `Free`/`Closed` distinction survives for checkpoint fidelity but does not gate reuse.
+- **The guest's first `open` is 4 under retrace, not 3** — and that is environmental, not a table
+  defect. libSystem opens a socket before `main` under retrace (there is no real notifyd/bootstrap to
+  reach) and does not natively. So `fdtable_dyn` asserts **invariants** rather than absolute numbers —
+  `low` (the descriptor is the guest's own small number, `>= 3` and `< 16`), `dupnext`, `ebadf`,
+  `dupread`, `reuse` — all five of which hold *both* natively and under retrace. The spec's exit
+  criterion said "fd 3"; the measurement corrected it, and pinning 3 would have tested libSystem's
+  pre-main behaviour instead of the fd table. The companion test reads the recorded trace and rejects
+  any recorded fd `>= 16`.
+
+**Risk R1 fired during spec authoring, before a line of code existed.** A first pass over a `head -25`
+syscall histogram tabled `read`(3) — which `jq` never calls — and missed `read_nocancel`(396),
+`open_nocancel`(398), `socket`(97), `connect`(98) and `sendto`(133). Re-deriving from the **full**
+untruncated histogram in Task 1 then found five more rows the spec had also missed: `fcntl_nocancel`(406),
+`fstatat64`(470), `fgetattrlist`(228), `shm_open`(266), and `map_with_linking_np`(550). The transferable
+rule for the next syscall table anyone writes here: **table the `_nocancel` variant beside its plain
+form as a pair, never one number at a time** — macOS libc routinely takes only the `_nocancel` path, so
+a plain-only predicate fails silently — and **never derive a syscall surface from a truncated
+histogram**, because the tail is where the count-1 and count-2 syscalls live, which are exactly the ones
+no existing test covers. Resolve numbers to names from
+`$(xcrun --show-sdk-path)/usr/include/sys/syscall.h`, not from memory.
+
+**The new boundary.** M10 closed the fd-fidelity gap M9 named and touched nothing else, so most of M9's
+list carries forward verbatim:
+
+- **Guest-raised signal delivery** — unchanged, and still the top item. `__pthread_kill`/`SIGABRT` is
+  forwarded to the host and would kill the recorder, so any guest that aborts still cannot be recorded.
+- **`dup2` is fail-loud, not modelled.** It names its own target slot rather than taking the lowest free
+  one, and no gate guest calls it (measured: zero in the `jq` run), so `retrace-core` asserts on it. A
+  silently mis-modelled `dup2` aliases the wrong file.
+- **`fcntl(F_DUPFD)` is the weaker case: unmodelled and *not* fail-loud.** `fcntl` gets plain x0
+  translation and no allocation-on-return, so an `F_DUPFD` would hand the guest an unbound descriptor
+  rather than an assert. It is measured absent from `jq`'s 17 `fcntl` calls (`F_GETPATH`×10,
+  `F_ADDFILESIGS_RETURN`×4, `F_CHECK_LV`×2, `F_SETFD`×1), but it is a missing row, not a guarded one —
+  the honest next fix in this area.
+- **Guest stdin is still retrace's.** fd 0 maps identically onto the host's; no gate guest reads it.
+- **`RLIMIT_NOFILE` is unenforced** — the table just grows, and a guest calling `getrlimit` still gets
+  the host's answer.
+- **Block-exclusive exec placement is still retirable and still not retired**; the anon `PROT_EXEC`/JIT
+  gap is likewise unblocked by M9's TLBI oracle but still open; **`prot` is still ignored except for
+  `PROT_EXEC`** (spec risk R3 — the guest believes 8 MiB of stack while 256 KiB is backed);
+  **`guest_munmap`'s wholesale-drop defect**, the `guest_mmap_replay` rename, threads, and arm64e
+  dynamic guests — all unchanged.
+- **Rung 4** — a guest that does substantial work, or one that threads — is next. Rung 3 asked `jq` to
+  read a file; it did not ask it to do anything hard.
+
+See `docs/superpowers/specs/2026-08-04-retrace-m10-fdtable-design.md`.

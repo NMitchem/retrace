@@ -16,4 +16,7 @@ retrace-guest = { path = "../retrace-guest" }
 retrace-guest = { path = "../retrace-guest" }
 retrace-trace = { path = "../retrace-trace" }
 retrace-sim = { path = "../retrace-sim" }
+# M10: fdtable_e2e reads recorded events and asks `allocates_fd` which of them produced a
+# descriptor, so the assertion tracks the shared table rather than restating syscall numbers.
+retrace-arch = { path = "../retrace-arch" }
 bincode = "1"

@@ -439,6 +439,16 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             }
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
+                // M10: dup2 names its own target descriptor rather than taking the lowest free one,
+                // so the table would have to honour an arbitrary slot. No guest in the gate calls it
+                // (measured: zero in the jq run), so fail loudly rather than model it wrong — a
+                // silently mis-modelled dup2 aliases the wrong file.
+                assert!(num != retrace_arch::SYS_DUP2,
+                    "dup2 is not modelled by the M10 fd table (unexercised by any gate guest); \
+                     implement target-slot allocation before a guest uses it");
+                // M10: `ret` is already a GUEST descriptor when this syscall produced one, and a
+                // successful close has already retired its slot — forward_and_diff owns both halves
+                // of the fd contract so no caller has to remember the second one.
                 let (ret, err, writes) = b.forward_and_diff(num, args);
                 w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
@@ -787,6 +797,33 @@ impl ReplaySession {
                                 }
                                 self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
+                            }
+                            // M10 fd mirror. Guest fd numbers are a pure function of the guest's own
+                            // open/dup/close sequence, so replay can recompute what the allocator
+                            // WOULD have produced and byte-compare it against the recording — that
+                            // comparison IS the divergence check (symmetry rule 1, the standard
+                            // posture). This is deliberately NOT the ServiceGetSpecialPort
+                            // verbatim-apply exception: that one applies blindly because a minted
+                            // port name is nondeterministic and cannot be regenerated. An fd can.
+                            //
+                            // Replay keeps the guest-visible half of the table only; it opens no
+                            // host fd, so there is nothing to bind.
+                            if !*err && retrace_arch::allocates_fd(num) {
+                                let expect = self.b.fds_mut().alloc();
+                                if expect != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "fd divergence: recording says syscall {num} returned fd {ret}, \
+                                         but the guest's own open/close sequence yields {expect}. A \
+                                         recorded HOST fd (typically >= 16) means the trace predates \
+                                         M10's fd table.") });
+                                }
+                            }
+                            if !*err && (num == retrace_arch::SYS_CLOSE
+                                      || num == retrace_arch::SYS_CLOSE_NOCANCEL) {
+                                // Mirror record's slot retirement so the two tables stay in step —
+                                // otherwise the next alloc diverges. fd 0/1/2 never reach here
+                                // (is_console_close handles them in the arm above).
+                                self.b.fds_mut().close(args[0]);
                             }
                             // Apply recorded kernel writes + feed ret; NO real syscall executes.
                             self.b.apply_and_return(*ret, *err, writes);
