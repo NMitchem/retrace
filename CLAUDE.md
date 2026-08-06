@@ -29,7 +29,8 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   (e.g. `cargo test -p retrace-box --test pac -- --test-threads=1`).
 - Nothing in the gate is `#[ignore]`d as of M9-jq (see "Honest-gate discipline" below). The
   headline e2e gates run with the rest: `cargo test -p retrace --test hello_rust_e2e -- --test-threads=1`
-  (rung 1) and `--test jq_e2e` (rung 2; skips loudly without `/opt/homebrew/bin/jq`).
+  (rung 1), `--test jq_e2e` (rung 2; skips loudly without `/opt/homebrew/bin/jq`), and
+  `--test panic_e2e` (M11 — a Rust guest that aborts).
 - CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
   exe through real `/usr/lib/dyld`; append `-- <guest args…>` to pass the guest an argv),
   `... replay t.bin`.
@@ -144,8 +145,9 @@ Development is milestone-driven: **M0** (box + trace spine), **M1** (general mem
 **M2-mach** (`mach_msg2` kernel-RPC servicing), **M2-va47** (47-bit guest VA), **M2-bfam** (objc
 B-family PAC); then **M3** (reverse execution), **M4** (checkpoints), **M5** (watchpoints),
 **M6** (crash recording), **M7** (rung 1, a Rust guest), **M8-stack** (guest stack identity),
-**M9-jq** (the guest-side TLBI oracle, argc/argv, and rung 2 — `brew jq`), and **M10-fdtable** (a real
-guest-visible fd table, and rung 3 — `jq` over a file). Each milestone has a
+**M9-jq** (the guest-side TLBI oracle, argc/argv, and rung 2 — `brew jq`), **M10-fdtable** (a real
+guest-visible fd table, and rung 3 — `jq` over a file), and **M11-signals** (the guest's own signal
+dispositions, and a recordable abort). Each milestone has a
 design spec in `docs/superpowers/specs/` and a task plan in
 `docs/superpowers/plans/`; per-task reports and code-review diffs land in `.superpowers/sdd/`.
 
@@ -154,12 +156,14 @@ with the wall documented honestly, rather than being faked green or deleted. Whe
 move the gate forward and rewrite that documentation — both the test's `#[ignore]` reason and the
 README Status section. If nothing is left to park it at, un-`#[ignore]` it and say so.
 
-As of M10-fdtable **all four headline gates are GREEN and un-ignored**: `hello_dyn_e2e` (a
+As of M11-signals **all five headline gates are GREEN and un-ignored**: `hello_dyn_e2e` (a
 dynamically-linked C program, green since M2-taskinfo), `hello_rust_e2e` (rung 1 — a real
 full-`std` Rust binary reaching `main`, green since M8-stack), `jq_e2e` (rung 2 — `brew jq`,
-the first guest loading dylibs outside the shared cache, green since M9-jq), and `jq_file_e2e`
-(rung 3 — `jq` over a file argument; it already passed before M10 and is *pinned*, not newly earned).
-The gate is currently **212 passed / 0 failed / 0 ignored** (79 test binaries). Keep it that way: a
+the first guest loading dylibs outside the shared cache, green since M9-jq), `jq_file_e2e`
+(rung 3 — `jq` over a file argument; it already passed before M10 and is *pinned*, not newly earned),
+and `panic_e2e` (a full-`std` Rust guest that `panic!()`s into `abort()`/SIGABRT and records+replays
+its own death, green since M11-signals — no gate was parked that milestone).
+The gate is currently **240 passed / 0 failed / 0 ignored** (85 test binaries). Keep it that way: a
 new wall gets a NEW parked gate for the capability it blocks, not a regression of these.
 
 `jq_e2e` and `jq_file_e2e` depend on `/opt/homebrew/bin/jq`, which is not a repo artifact: they skip

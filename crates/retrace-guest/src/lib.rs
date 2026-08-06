@@ -123,6 +123,8 @@ pub const CLOSEFD_DYN: &str = concat!(env!("OUT_DIR"), "/closefd_dyn");
 /// M10: opens, dups, closes and re-opens, printing each descriptor it is given — so the e2e can
 /// assert the guest sees ITS OWN fd numbers (3, 4, …) rather than retrace's host ones (17+).
 pub const FDTABLE_DYN: &str = concat!(env!("OUT_DIR"), "/fdtable_dyn");
+/// M11 headline: a full-std Rust binary that `panic!()`s into `abort()`/SIGABRT (`-C panic=abort`).
+pub const PANICKY: &str = concat!(env!("OUT_DIR"), "/panicky");
 /// M11: `kill(getpid(), SIGABRT)` — the terminal raise mechanism.
 pub const RAISE: &str = concat!(env!("OUT_DIR"), "/raise");
 /// M11: `SIG_IGN` then raise then `write("ok\n")` — the non-terminal branch.
