@@ -7,6 +7,9 @@ mod cache;
 pub use cache::AuthSlot;
 use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
+mod sig;
+pub use sig::{decode_act, encode_oldact, Disposition, SigAction, SigTable};
+
 pub const TRAMPOLINE_IPA: u64 = 0x0000_4000; // 16 KiB-aligned (hv_vm_map rejects 4 KiB alignment under the default granule)
 pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
 // Dynamic-path constants (M1 static path is untouched). dyld is a PIE MH_DYLINKER at vmaddr 0,
