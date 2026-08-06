@@ -75,8 +75,32 @@ fn the_sigign_guest_replays_bit_for_bit() {
     std::fs::remove_file(&trace).ok();
 }
 
-// The second oracle: two RECORDINGS byte-compared. Valid because these are freestanding guests —
-// no clock, no entropy, no libmalloc, no mach ports. See util::assert_trace_reproducible's doc.
+// The second oracle: two RECORDINGS byte-compared. Freestanding guests — no clock, no entropy, no
+// libmalloc, no mach ports — so the usual preconditions hold (see util::assert_trace_reproducible).
+//
+// These live here, IN-PROCESS, rather than as CLI-level e2e tests, and that is load-bearing rather
+// than incidental. Both signal guests call getpid(20), which M11 deliberately does NOT intercept
+// (the raise arm's self-pid check depends on it forwarding), so the recorder's own pid is recorded
+// as that syscall's return value. Two recordings made by two SEPARATE processes therefore cannot be
+// byte-identical by construction — measured: the traces differ in exactly one record, the CRC and
+// body of the num=20 event. Recording twice in ONE process holds the pid constant and asks the
+// question the oracle is actually for: did anything ELSE nondeterministic enter the trace?
+#[test]
+fn two_recordings_of_the_sigign_guest_are_byte_identical() {
+    let dir = std::env::temp_dir().join(format!("retrace-m11-idet-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bytes = std::fs::read(retrace_guest::SIGIGN).unwrap();
+    let loaded = retrace_guest::parse_macho(&bytes);
+    let (t1, t2) = (dir.join("i1.bin"), dir.join("i2.bin"));
+    retrace_core::record(&loaded, &t1).expect("record 1");
+    retrace_core::record(&loaded, &t2).expect("record 2");
+    assert_eq!(std::fs::read(&t1).unwrap(), std::fs::read(&t2).unwrap(),
+               "a nondeterministic value entered the trace (sigaction servicing is the new code \
+                path here — it must not introduce one)");
+    std::fs::remove_file(&t1).ok();
+    std::fs::remove_file(&t2).ok();
+}
+
 #[test]
 fn two_recordings_of_the_raise_guest_are_byte_identical() {
     let dir = std::env::temp_dir().join(format!("retrace-m11-det-{}", std::process::id()));
