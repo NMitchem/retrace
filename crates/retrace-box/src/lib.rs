@@ -558,6 +558,12 @@ pub struct BoxState {
     // run. That is the M9 t3 failure shape — from_checkpoint resetting a flag the restored state
     // contradicts — and this is the third field in this struct to exist for that reason.
     pub fd_slots: Vec<FdSlot>,
+    // M11: carried for the same reason as `pac_enabled`, `stack_top`, and the fd slots — a mid-run
+    // capture cannot re-derive it. Without this, a seek into a run that installed a disposition
+    // restores a box that has forgotten it, and the next raise takes the wrong branch: an IGNORED
+    // signal would terminate the guest. That divergence would read as a signal bug and actually be
+    // a checkpoint bug. The fourth field in this struct to exist for exactly this reason.
+    pub sigtable: SigTable,
 }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
@@ -2604,6 +2610,7 @@ impl Box_ {
             stack_top: self.stack_top,
             stack_size: self.stack_size,
             fd_slots: self.fds.slots(),
+            sigtable: self.sigtable.clone(),
         }
     }
 
@@ -2681,10 +2688,9 @@ impl Box_ {
             // M10: DERIVED from the captured slots, never reset — see the BoxState field comment.
             // A fresh table here would tell a seeked session every fd is Free.
             fds: FdTable::from_slots(&state.fd_slots),
-            // M11 Task 4 places a fresh table here; Task 6 replaces it with the carried one. Until
-            // then a seeked session forgets the guest's dispositions — which is exactly the bug
-            // Task 6's test pins.
-            sigtable: SigTable::default(),
+            // M11: RESTORED from the capture, never reset — see the BoxState field comment. A fresh
+            // table here would tell a seeked session every signal is at its default disposition.
+            sigtable: state.sigtable.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
