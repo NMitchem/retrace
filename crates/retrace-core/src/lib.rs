@@ -752,11 +752,107 @@ impl ReplaySession {
                                 detail: format!("expected recorded Exit, got {other:?}") }),
                         }
                     }
+                    // M11 mirror of record's terminal raise. Structure copied from the Exit verify
+                    // above: compare the event, then the final-memory landmark. A signal arrives as
+                    // a Stop::Syscall, not a Stop::Fault, so this must sit BEFORE the generic
+                    // recorded-Event::Syscall lookup — mirroring how record's raise arm precedes its
+                    // generic arm. Placing it after yields "expected recorded syscall, got Signal",
+                    // a confusing divergence that looks like a recording bug and is a dispatch bug.
+                    //
+                    // The disposition is recomputed from the REPLAY-side table, which the serviced
+                    // mirrors below keep in step. That is what makes the sigign guest replay
+                    // correctly: without the sigaction mirror this table would still read Dfl for
+                    // SIGABRT and would wrongly terminate a guest that had ignored it.
+                    if num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL {
+                        let sig = args[1];
+                        let act = self.b.sigtable().action(sig);
+                        let terminal = matches!(act.disp, retrace_box::Disposition::Dfl)
+                            && retrace_arch::default_action(sig) == retrace_arch::DefaultAction::Terminate;
+                        if terminal {
+                            match self.events.get(self.idx) {
+                                Some(Event::Signal { sig: rsig, pc: rpc }) => {
+                                    if sig != *rsig || pc != *rpc {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "signal mismatch: live (sig={sig}, pc={pc:#x}) != \
+                                             recorded (sig={rsig}, pc={rpc:#x})") });
+                                    }
+                                    match self.events.get(self.idx + 1) {
+                                        Some(Event::Snapshot { mem: final_mem, .. }) => {
+                                            if let Some(d) = self.b.diff_memory(final_mem) {
+                                                return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
+                                            }
+                                            return Ok(Advance::Exited(ReplayReport {
+                                                stdout: std::mem::take(&mut self.stdout),
+                                                outcome: Outcome::Signal { sig: *rsig } }));
+                                        }
+                                        other => return Err(Divergence { landmark: self.idx + 1, pc,
+                                            detail: format!("expected final memory Snapshot after Signal, got {other:?}") }),
+                                    }
+                                }
+                                other => return Err(Divergence { landmark: self.idx, pc,
+                                    detail: format!("expected recorded Signal, got {other:?} (live raise: sig={sig})") }),
+                            }
+                        }
+                    }
                     match self.events.get(self.idx) {
                         Some(Event::Syscall { num: rn, args: ra, ret, err, writes }) => {
                             if num != *rn || args != *ra {
                                 return Err(Divergence { landmark: self.idx, pc,
                                     detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
+                            }
+                            // M11 mirror of record's serviced-signal arms. Recompute the SAME table
+                            // transition and the SAME writeback bytes, then byte-compare against
+                            // the recording — that comparison IS the divergence check (symmetry
+                            // rule 1), so an asymmetry surfaces as a Divergence rather than as
+                            // silent corruption. The recorded writes are then applied by the
+                            // existing apply_and_return path, exactly as for any other syscall: the
+                            // mirror's job is to keep the TABLE in step and prove the bytes match,
+                            // not to re-perform the write.
+                            if num == retrace_arch::SYS_SIGACTION {
+                                let new = if args[1] != 0 {
+                                    Some(retrace_box::decode_act(&self.b.read_guest(args[1], 24)))
+                                } else { None };
+                                let old = match new {
+                                    Some(a) => self.b.sigtable_mut().set_action(args[0], a),
+                                    None => self.b.sigtable().action(args[0]),
+                                };
+                                if args[2] != 0 {
+                                    let mine = retrace_box::encode_oldact(old).to_vec();
+                                    let recorded = writes.iter().find(|r| r.ipa == args[2])
+                                        .map(|r| r.bytes.clone()).unwrap_or_default();
+                                    if mine != recorded {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "sigaction oldact mismatch at {:#x}: recomputed {mine:02x?} \
+                                             != recorded {recorded:02x?}", args[2]) });
+                                    }
+                                }
+                            }
+                            if num == retrace_arch::SYS_SIGPROCMASK
+                                || num == retrace_arch::SYS_PTHREAD_SIGMASK {
+                                let old = if args[1] != 0 {
+                                    let set = u32::from_le_bytes(
+                                        self.b.read_guest(args[1], 4).try_into().unwrap());
+                                    self.b.sigtable_mut().set_mask(args[0], set)
+                                } else {
+                                    self.b.sigtable().mask()
+                                };
+                                if args[2] != 0 {
+                                    let mine = old.to_le_bytes().to_vec();
+                                    let recorded = writes.iter().find(|r| r.ipa == args[2])
+                                        .map(|r| r.bytes.clone()).unwrap_or_default();
+                                    if mine != recorded {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "sigprocmask oldset mismatch at {:#x}: recomputed \
+                                             {mine:02x?} != recorded {recorded:02x?}", args[2]) });
+                                    }
+                                }
+                            }
+                            if num == retrace_arch::SYS_SIGALTSTACK && args[0] != 0 {
+                                let raw = self.b.read_guest(args[0], 24);
+                                let ss = (u64::from_le_bytes(raw[0..8].try_into().unwrap()),
+                                          u64::from_le_bytes(raw[8..16].try_into().unwrap()),
+                                          u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64);
+                                self.b.sigtable_mut().set_altstack(Some(ss));
                             }
                             // Learn the guest's task-port name (mirror of record) from the recorded −28 result.
                             if num == MACH_TASK_SELF && !*err { self.guest_task_port = Some(*ret); }

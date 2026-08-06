@@ -41,6 +41,58 @@ fn an_ignored_signal_does_not_terminate_the_guest() {
 }
 
 #[test]
+fn a_recorded_signal_replays_identically_twice() {
+    let dir = std::env::temp_dir().join(format!("retrace-m11-rep-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let trace = dir.join("raise-replay.bin");
+    let bytes = std::fs::read(retrace_guest::RAISE).unwrap();
+    let loaded = retrace_guest::parse_macho(&bytes);
+    let rec = retrace_core::record(&loaded, &trace).expect("record");
+    for i in 0..2 {
+        let rep = retrace_core::replay(&trace)
+            .unwrap_or_else(|d| panic!("replay {i} diverged at landmark {}: {}", d.landmark, d.detail));
+        match rep.outcome {
+            Outcome::Signal { sig } => assert_eq!(sig, 6),
+            other => panic!("replay {i}: expected Outcome::Signal, got {other:?}"),
+        }
+        assert_eq!(rep.stdout, rec.stdout, "replay {i} stdout diverged");
+    }
+    std::fs::remove_file(&trace).ok();
+}
+
+#[test]
+fn the_sigign_guest_replays_bit_for_bit() {
+    let dir = std::env::temp_dir().join(format!("retrace-m11-ignrep-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let trace = dir.join("sigign-replay.bin");
+    let bytes = std::fs::read(retrace_guest::SIGIGN).unwrap();
+    let loaded = retrace_guest::parse_macho(&bytes);
+    let rec = retrace_core::record(&loaded, &trace).expect("record");
+    let rep = retrace_core::replay(&trace)
+        .unwrap_or_else(|d| panic!("diverged at landmark {}: {}", d.landmark, d.detail));
+    assert_eq!(rep.stdout, rec.stdout);
+    assert_eq!(rep.stdout, b"ok\n");
+    std::fs::remove_file(&trace).ok();
+}
+
+// The second oracle: two RECORDINGS byte-compared. Valid because these are freestanding guests —
+// no clock, no entropy, no libmalloc, no mach ports. See util::assert_trace_reproducible's doc.
+#[test]
+fn two_recordings_of_the_raise_guest_are_byte_identical() {
+    let dir = std::env::temp_dir().join(format!("retrace-m11-det-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bytes = std::fs::read(retrace_guest::RAISE).unwrap();
+    let loaded = retrace_guest::parse_macho(&bytes);
+    let (t1, t2) = (dir.join("d1.bin"), dir.join("d2.bin"));
+    retrace_core::record(&loaded, &t1).expect("record 1");
+    retrace_core::record(&loaded, &t2).expect("record 2");
+    assert_eq!(std::fs::read(&t1).unwrap(), std::fs::read(&t2).unwrap(),
+               "a nondeterministic value entered the trace");
+    std::fs::remove_file(&t1).ok();
+    std::fs::remove_file(&t2).ok();
+}
+
+#[test]
 #[should_panic(expected = "kill to a pid other than the guest's own")]
 fn killing_another_process_fails_loud_instead_of_signalling_the_host() {
     let dir = std::env::temp_dir().join(format!("retrace-m11-ko-{}", std::process::id()));
