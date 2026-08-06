@@ -307,11 +307,23 @@ pub fn signal_of_esr(esr: u64) -> (u64, u64) {
             0x0c..=0x0f => (SIGSEGV, SEGV_ACCERR), // permission fault
             0x10..=0x13 => (SIGBUS, BUS_OBJERR),   // synchronous external abort
             0x21 => (SIGBUS, BUS_ADRALN),          // alignment fault
+            // Deliberately NOT a panic, unlike the outer EC match below — and that asymmetry is
+            // the point, not an inconsistency. EC alone already told us this is an abort, so the
+            // SIGNAL is settled (SIGSEGV); an unenumerated DFSC only leaves `si_code` uncertain,
+            // and `si_code` is a field nothing in the gate set reads (libstd's SIGSEGV handling
+            // keys on `si_addr`, never `si_code`). Once a later task wires this into every stage-1
+            // guest fault — including ones that would otherwise record as an uncaught
+            // `Event::Crash` — panicking here would crash the RECORDER over an exotic-but-still-
+            // recordable guest fault, to buy precision in a field nothing consumes. So: SIGSEGV
+            // with the closest access-error code, not a fail-loud abort.
             _ => (SIGSEGV, SEGV_ACCERR),
         },
         0x26 => (SIGBUS, BUS_ADRALN),  // SP alignment fault
         0x00 | 0x0e => (SIGILL, ILL_ILLOPC), // unknown reason / illegal execution state
         0x3c => (SIGTRAP, TRAP_BRKPT), // BRK instruction
+        // Unlike the DFSC fallback above, THIS one stays fail-loud: an unmodelled EC means retrace
+        // cannot even name which signal this is, not merely which si_code — there is nothing
+        // "closest" to default to without risking a plausible lie about the signal itself.
         _ => panic!(
             "signal_of_esr: EC {ec:#x} (esr={esr:#x}) has no modelled signal mapping. It reached \
              the fault path, so it is a real guest fault retrace cannot name — add the class here \
@@ -513,6 +525,26 @@ mod tests {
     fn signal_of_esr_classifies_the_measured_probe_esr() {
         assert_eq!(signal_of_esr(0x9200_0046), (SIGSEGV, SEGV_MAPERR),
             "0x92000046 is what the host kernel put in the probe's mcontext: EC 0x24, WnR set, DFSC 0x06");
+    }
+
+    /// Covers the outer match's fail-loud fallback. EC 0x01 (trapped WFI/WFE) is a real AArch64
+    /// exception class but one `signal_of_esr` deliberately does not model — an unmodelled EC means
+    /// retrace cannot name even the SIGNAL, so it panics rather than guess.
+    #[test]
+    #[should_panic(expected = "EC 0x1")]
+    fn signal_of_esr_panics_on_an_unmodelled_ec() {
+        signal_of_esr(0x0400_0000); // EC 0x01 << 26
+    }
+
+    /// Covers the inner match's silent fallback: an abort EC (so the SIGNAL is settled) paired
+    /// with a DFSC outside every enumerated range. `0x00` ("address size fault, level 0" in the
+    /// real DFSC table) is not translation/access-flag/permission/external-abort/alignment, so it
+    /// falls to the default arm. Unlike the EC fallback above, this one must NOT panic — see the
+    /// comment on that arm for why the two fallbacks deliberately differ.
+    #[test]
+    fn signal_of_esr_defaults_an_unenumerated_dfsc_on_a_known_abort() {
+        assert_eq!(signal_of_esr(0x9200_0000), (SIGSEGV, SEGV_ACCERR),
+            "EC 0x24 (data abort) with DFSC 0x00: signal is settled, si_code defaults");
     }
 
     #[test]
