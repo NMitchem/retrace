@@ -176,7 +176,7 @@ fn signal_of_esr_maps_instruction_aborts_the_same_way() {
 
 #[test]
 fn signal_of_esr_maps_the_non_abort_classes() {
-    assert_eq!(signal_of_esr(0x9600_0000), (SIGBUS, BUS_ADRALN), "EC 0x26: SP alignment");
+    assert_eq!(signal_of_esr(0x9800_0000), (SIGBUS, BUS_ADRALN), "EC 0x26: SP alignment");
     assert_eq!(signal_of_esr(0x0000_0000), (SIGILL, ILL_ILLOPC), "EC 0x00: unknown/undefined");
     assert_eq!(signal_of_esr(0x3800_0000), (SIGILL, ILL_ILLOPC), "EC 0x0e: illegal execution state");
     assert_eq!(signal_of_esr(0xf000_0000), (SIGTRAP, TRAP_BRKPT), "EC 0x3c: BRK");
@@ -622,11 +622,14 @@ pub fn build_frame(inp: &FrameInput) -> (Vec<u8>, EntryRegs) {
             "build_frame called for disposition {other:?} — only Handler has anything to deliver \
              to. The caller's disposition check is wrong."),
     };
-    // infostyle: measured 0x1e (UC_FLAVOR) for an SA_SIGINFO handler. Task 1 Step 0 measures the
-    // non-SA_SIGINFO value; until then a non-SA_SIGINFO handler is not modelled.
+    // infostyle: measured 0x1e (UC_FLAVOR) for an SA_SIGINFO handler and 0x1 for one without
+    // (Task 1 Step 0, spikes/sigtramp.c). Only the SA_SIGINFO shape is MODELLED — the frame layout
+    // is identical either way, but no guest in the gate set installs a non-SA_SIGINFO handler, so
+    // delivering to one would ship an untested path. Assert rather than guess.
     assert!(inp.act.flags & SA_SIGINFO != 0,
-        "a non-SA_SIGINFO handler's infostyle is unmeasured (spec R3). Measure it with \
-         spikes/sigtramp.c before delivering to one, rather than guessing UC_FLAVOR.");
+        "a non-SA_SIGINFO handler is not modelled. Its infostyle is 0x1 (measured, vs 0x1e for \
+         SA_SIGINFO) and the frame layout is identical, so supporting it is small — but no gate \
+         guest exercises it, so it is asserted rather than shipped untested.");
     let regs = EntryRegs {
         x: [catcher, UC_FLAVOR, inp.sig, base, uc, sigreturn_token(uc)],
         sp: base,
