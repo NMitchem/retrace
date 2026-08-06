@@ -187,22 +187,22 @@ rewrites that field could otherwise ask for arbitrary `SPSR_EL1`, mode bits incl
 masks to user-settable flags and never touches mode. This is the only place in M12 where
 guest-controlled bytes reach a system register, and it gets its own fail-loud test.
 
-### M12-neon — vector state, and a latent M4 hole it exposes
+### M12-neon — vector state
 
-`hv-sys` exposes `get_simd`/`set_simd` for Q0–Q31, but the trace's `Regs` is `{x[31], pc, sp_el0,
-cpsr}` — **snapshots carry no vector state.** That matters twice here:
+The mcontext's 528-byte NEON block is not decoration. A handler is ordinary compiled code and will
+execute NEON; if `sigreturn` does not restore the vector registers, a handler that *returns* silently
+corrupts the guest. The headline gate cannot catch that — its guest re-faults and dies immediately —
+so it needs a gate of its own.
 
-- A handler is ordinary compiled code and will execute NEON. If `sigreturn` does not restore vector
-  registers, a handler that *returns* silently corrupts the guest. The headline gate would not catch
-  it (the guest re-faults and dies immediately), so this needs its own gate.
-- `deliver_signal` reads live vCPU state. After an M4 **checkpoint restore**, it would read vector
-  state `BoxState` never saved, and byte-compare the recomputed frame against recorded bytes that had
-  it — a spurious divergence on seek.
+So `deliver_signal` fills the block from the vCPU via `get_simd(simd::q(0..32))` plus `FPCR`/`FPSR`,
+and `sigreturn_restore` writes it back through `set_simd`.
 
-So M12 fills the NEON block from the vCPU, restores it on `sigreturn`, and adds SIMD plus FPSR/FPCR
-to `BoxState`. The second bullet is a latent M4 defect that predates this milestone — a checkpointed
-seek restores no vector state today — and the Status section should record it as found-here,
-not-caused-here.
+**No checkpoint work is required, contrary to an earlier draft of this spec.** `BoxState` already
+carries `fp: [u128; 32]`, `fpcr`, and `fpsr` (`crates/retrace-box/src/lib.rs:526`), captured at
+`:2592` and restored at `:2650`. A recompute after an M4 seek therefore reads the same vector state
+the recording had, and the byte-compare holds. The trace's `Event::Snapshot` `Regs` still carries no
+vector state, but that is harmless: both runs start from a fresh vCPU at landmark 0, so their initial
+FP state is identically zero.
 
 ### M12-route — three dispatch sites, three mirrors
 
@@ -267,14 +267,13 @@ exception; nothing nondeterministic is in play.
 **In:** `signal_of_esr`; `SigAction.tramp`; the pure `build_frame`; `Box_::deliver_signal` and
 `sigreturn_restore`, including NEON and PSTATE sanitizing; `Event::SignalDelivery` and the magic bump;
 the three dispatch sites and their replay mirrors; `SA_ONSTACK`/`sigaltstack` honouring with
-`uc_onstack` and its restore; `SA_NODEFER`, `SA_RESETHAND`, and `sig | sa_mask` blocking; SIMD and
-FPSR/FPCR in `BoxState`; fault-derived `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGTRAP`.
+`uc_onstack` and its restore; `SA_NODEFER`, `SA_RESETHAND`, and `sig | sa_mask` blocking;
+fault-derived `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGTRAP`.
 
 **Out, and named as such:** `PROT_NONE` enforcement and real guard pages — **the new top deferred
 item** (see below); a pending-signal set; nested delivery; threads; asynchronous signals from outside
 the guest, which are nondeterministic by nature and need an explicit injection model; `SA_RESTART`;
-arm64e guests, whose frame thread-state is PAC-signed; the M4 vector-state hole beyond what M12 needs
-for its own correctness.
+arm64e guests, whose frame thread-state is PAC-signed.
 
 ### Why `PROT_NONE` is out, and why it becomes the top deferred item
 
@@ -355,7 +354,7 @@ trace; the Rust guest will call it.
 | R2 | `_sigtramp` reads more of the frame than the probe revealed | Spike: disassemble it from the shared cache |
 | R3 | infostyle without `SA_SIGINFO` is wrong | Spike measures it; do not guess |
 | R4 | `si_addr` wrong → libstd misreads the fault as stack overflow | The gate discriminates: 134 instead of 139, loudly |
-| R5 | The M4 checkpoint/vector interaction produces spurious seek divergences | SIMD in `BoxState`, plus a seek-across-delivery test |
+| R5 | A returning handler clobbers guest vector state | `sigreturn_restore` writes Q0–Q31 back; the vector-survival gate proves it |
 | R6 | The 128-byte gap matters and is reproduced wrongly | Spike; reproduce rather than explain |
 | R7 | The headline gate passes on an exit-code coincidence — an uncaught fault also exits 139 | The four trace assertions in the exit criterion, not the exit code |
 
@@ -365,7 +364,7 @@ trace; the Rust guest will call it.
 |---|---|
 | `retrace-arch` | `signal_of_esr`; `UC_FLAVOR`, `SA_*`, `SS_*`, `si_code` and struct-size constants |
 | `retrace-box` (`sig.rs`) | `SigAction.tramp`; the pure `build_frame` and its layout tests |
-| `retrace-box` (`lib.rs`) | `deliver_signal`, `sigreturn_restore`, SIMD in `BoxState` |
+| `retrace-box` (`lib.rs`) | `deliver_signal`, `sigreturn_restore` |
 | `retrace-trace` | `Event::SignalDelivery`; `TRACE_MAGIC` → `0x0006` |
 | `retrace-core` | The three dispatch sites and their three replay mirrors |
 | `retrace-guest` | `sigframe.s`, `segvcatch.s`, `altstack.s`, a vector-survival guest, a dyn C recover guest, a Rust wild-pointer guest |
@@ -381,5 +380,5 @@ trace; the Rust guest will call it.
    faithful `SEGV_MAPERR`? Nothing in the gate set depends on the answer, which is precisely why the
    choice must be made deliberately and documented.
 4. Does any currently-green gate install a handler for a signal it then takes? (R1.)
-5. Is `BoxState`'s SIMD addition enough for M4, or does `Event::Snapshot`'s `Regs` need vector state
-   too — and if so, is that M12's problem or a separate fast-follow?
+5. `BoxState` already carries vector state, so a seek across a delivery should recompute the frame
+   correctly. Is there a test that proves it, or does M12 owe one?
