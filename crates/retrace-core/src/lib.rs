@@ -51,7 +51,13 @@ fn is_usrstack64_mib(b: &retrace_box::Box_, args: [u64; 8]) -> bool {
 /// How a recorded (or replayed) run ended: a clean exit, or a guest synchronous fault (M6). The
 /// triple is deterministic — identical guest state faults identically — so replay byte-compares it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome { Exit { code: u64 }, Crash { pc: u64, esr: u64, far: u64 } }
+pub enum Outcome {
+    Exit { code: u64 },
+    Crash { pc: u64, esr: u64, far: u64 },
+    /// M11: terminated by a signal the guest raised on itself, whose disposition resolved to the
+    /// default fatal action. Terminal in the same shape M6 gave a fault.
+    Signal { sig: u64 },
+}
 
 pub struct RecordSummary { pub stdout: Vec<u8>, pub outcome: Outcome, pub events: usize }
 
