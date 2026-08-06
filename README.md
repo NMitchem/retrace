@@ -1640,3 +1640,113 @@ list carries forward verbatim:
   read a file; it did not ask it to do anything hard.
 
 See `docs/superpowers/specs/2026-08-04-retrace-m10-fdtable-design.md`.
+
+## Status: M11-signals — 🎉 a guest can abort, and the recorder lives to record it
+
+**The README's top deferred item since M6 is closed.** A signal the guest raises on itself is now a
+recorded, replayable terminal event instead of a host signal that kills the recorder. A real
+full-`std` Rust binary that `panic!()`s records and replays bit-for-bit, exiting 134 (= 128 +
+SIGABRT) on both sides. **`just gate`: 240 passed / 0 failed / 0 ignored** (85 test binaries),
+clippy clean, nothing `#[ignore]`d. `panic_e2e` joins the headline set green and un-ignored — no
+gate was parked this milestone.
+
+**The bug, demonstrated rather than argued.** `forward_and_diff` issues the guest's syscall through
+a raw `svc` in *retrace's own process*, and no signal syscall was special-cased anywhere. Revert
+M11's dispatch arms and `cargo test -p retrace-core --test signals` does not merely fail — the test
+harness itself dies: `process didn't exit successfully: (signal: 6, SIGABRT: process abort signal)`.
+That is the whole milestone in one line of output.
+
+**Two defects nobody had written down, both now fixed.** M6 recorded the *delivery* half honestly
+("the guest's `sigaction` handlers never run"), but not these:
+
+- **`sigaction` was reading and writing RETRACE's signal table.** Measured live: `hello_rust`'s
+  startup query of `SIGSEGV` returned handler `0x104e6d7ec` with flags `0x41`
+  (`SA_SIGINFO|SA_ONSTACK`) — *retrace's own libstd stack-overflow handler*. libstd installs only
+  when the query returns `SIG_DFL`, so the guest silently skipped installing its own. With the
+  guest's table in place the query returns `SIG_DFL` and libstd proceeds: `hello_rust`'s signal
+  surface went from 3 calls to 6 (a `sigaltstack`, plus real handler installs for `SIGSEGV` and
+  `SIGBUS`). The guest now has signal state of its own instead of borrowing the recorder's.
+- **`kill(pid, sig)` reached any host pid, untranslated and unchecked.** The only defect in this
+  area that escaped the sandbox. `killother_e2e` fires `kill(1, SIGKILL)` from a guest, requires the
+  recorder to abort naming the boundary, and then asserts pid 1 is *still alive* — distinguishing
+  `EPERM` (exists, not ours to signal) from `ESRCH` (gone), because both return `-1` and only the
+  second is the catastrophe.
+
+**Disposition, not delivery.** `SigTable` (`crates/retrace-box/src/sig.rs`) holds per-signal
+disposition, the blocked mask, and the alt stack. It is a pure function of the guest's own calls, so
+both runs compute it identically and **nothing about it enters the trace** — `FdTable::slots`'
+posture, and the **standard symmetric** one (replay recomputes and byte-compares), deliberately not
+M2-xpcport's verbatim-apply exception. A raise consults it: `Ign` continues, `Dfl`+fatal appends
+`Event::Signal{sig,pc}` plus the final snapshot, and `Handler` **asserts** — running a handler needs
+signal frames, the `__sigtramp` ABI and `sigreturn`, which is M12 and is the larger half.
+
+`Event::Signal` is a new variant rather than `Event::Crash` with a synthetic ESR (`TRACE_MAGIC`
+`0x0004`→`0x0005`; no fixture is checked in, so nothing was invalidated). A signal is not a fault,
+and a `SIGABRT` printing as one bearing an ESR the hardware never produced is a lie the debug output
+would carry forever.
+
+**The measurement, which decided the milestone's shape** (`RETRACE_TRACE=1`, full untruncated
+histograms over `hello_dyn`/`hello_rust`/`jq`, per M10's rule):
+
+- Of `37/46/48/52/53/111/184/328/329/330/520/521`, **only `sigaction`(46) appeared at all** — 3×, in
+  `hello_rust` alone. The other eleven were zero across all three guests. That zero-count is the
+  evidence each `assert!` rests on.
+- **`getpid`(20) returns retrace's own pid** — confirmed at runtime by recording in-process and
+  comparing the recorded return against `std::process::id()`, not inferred. The `kill` self-check
+  depends on it, so it was measured rather than assumed.
+- **No guest installs a real handler.** The single non-query install is `SIGPIPE → SIG_IGN`. Spec
+  risk R3 (an existing green test walled by the handler assert) did not fire.
+- **The abort path is `__pthread_kill`(328), not `abort_with_payload`(521)** — settled by the
+  headline guest: `args=[0x103, 0x6]`, the thread port matching M7's observation exactly, with
+  `sigprocmask(SIG_SETMASK)` immediately before it (that is `abort()` unblocking `SIGABRT`, which is
+  why the blocked-raise assert is unreachable on the realistic path). Risk R2 did not fire either.
+
+**What driving it actually found:**
+
+- **A default Rust `panic!()` never raises a signal at all.** With `panic=unwind` it unwinds to
+  `lang_start`, prints, and exits **101**. The headline guest needs `-C panic=abort` to exit 134 and
+  exercise anything this milestone added. Measured natively before the fixture was wired in — a
+  plan that had assumed otherwise would have produced a gate that passed for the wrong reason or
+  failed for a reason having nothing to do with signals.
+- **The replay-side `sigaction` mirror is load-bearing, and that is proven rather than asserted.**
+  Disable it and `sigign` diverges with `expected recorded Signal, got Some(Syscall { num: 37, … })`:
+  replay's table still reads `Dfl` for `SIGABRT`, so it terminates a guest that had ignored it.
+  Without `sigign_e2e`, a bug making *every* raise terminal would pass the entire suite.
+- **The second oracle does not apply to these guests across processes, and was not weakened to
+  pretend otherwise.** `assert_trace_reproducible` compares two recordings from two *separate*
+  recorder processes; both signal guests call `getpid`, which M11 deliberately leaves forwarding, so
+  the recorder's pid lands in the trace. Measured: the two traces differ in exactly one record — the
+  CRC and body of the `num=20` event — and nowhere else. The coverage moved to in-process recordings
+  (constant pid), which ask the question the oracle is actually for. Relaxing the helper to tolerate
+  a varying pid would have blunted an oracle the whole project leans on, to buy nothing.
+- **`sigaction`'s in-param and out-param are different C structs** — `struct __sigaction` is 24
+  bytes (it carries `sa_tramp`), `struct sigaction` is 16. Synthesizing the `oldact` writeback at the
+  input width would corrupt the guest 8 bytes past the struct and surface days later as something
+  unrelated. `encode_oldact` returns a fixed `[u8; 16]`, so emitting the wrong width is impossible
+  rather than merely tested.
+
+**The new boundary.** M11 closed the signal-disposition gap and touched nothing else, so M10's list
+carries forward almost verbatim:
+
+- **Handler *delivery* is the top item now, in place of the one this milestone retired.** Signal
+  frames, the `__sigtramp` ABI, `ucontext`/`mcontext` layout, and `sigreturn`(184) — M12, and the
+  larger half of the problem. `hello_rust` now genuinely installs `SIGSEGV`/`SIGBUS` handlers, so the
+  first guest that actually faults will hit the `Handler` assert rather than a plausible lie.
+- **`__pthread_kill`'s thread-port operand is wired but ungated.** 328 fires in no *freestanding*
+  gate guest, so there was no observed port to validate against; its coverage rides entirely on
+  `panic_e2e`. The guest has one thread on one vCPU, so any port it can name is that thread — ungated
+  rather than wrongly gated. Learn it from `mach_thread_self` when a guest needs the check.
+- **A pending signal set is unmodelled**, so raising a *blocked* signal asserts. That is what makes
+  `sigpending` returning empty true by construction rather than a convenient lie — the two decisions
+  stand or fall together, and whoever adds a pending mask must revisit both.
+- **`sigsuspend`(111), `__sigwait`(330), `sigreturn`(184), `terminate_with_payload`(520) and
+  `abort_with_payload`(521) are fail-loud asserts**, not models. 520/521 were live
+  recorder-killing hazards before M11; asserting converts a silent host death into a loud stop.
+- **`sigaltstack` is stored but not honoured** — no handler runs, so there is nothing to run on an
+  alternate stack.
+- Everything else from M10 is unchanged: **`dup2` fail-loud**, **`fcntl(F_DUPFD)` unmodelled and
+  *not* fail-loud** (still the honest next fix in that area), **guest stdin is still retrace's**,
+  **`RLIMIT_NOFILE` unenforced**, block-exclusive exec placement, **`prot` ignored except
+  `PROT_EXEC`**, `guest_munmap`'s wholesale-drop defect, threads, and arm64e dynamic guests.
+
+See `docs/superpowers/specs/2026-08-05-retrace-m11-signals-design.md`.

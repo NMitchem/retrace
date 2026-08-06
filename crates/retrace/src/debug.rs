@@ -342,6 +342,15 @@ impl<'a> Exec<'a> {
                 let kf = self.probe_window_len(c)?; // drops the live session (one VM per process)
                 self.reseek(c, kf)
             }
+            // M11: terminal like a crash, and it inherits the same seek machinery — but it is NOT
+            // presented as one. Calling a SIGABRT a fault is the same lie that got Event::Crash
+            // reuse rejected in the spec, and the debug output would carry it forever.
+            Outcome::Signal { sig } => {
+                line(out, format_args!("guest terminated by signal {sig}"))?;
+                let c = self.sess().landmark();
+                let kf = self.probe_window_len(c)?; // drops the live session (one VM per process)
+                self.reseek(c, kf)
+            }
         }
     }
 

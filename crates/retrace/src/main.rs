@@ -22,6 +22,12 @@ fn main() {
                             eprintln!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}");
                             exit(139);
                         }
+                        retrace_core::Outcome::Signal { sig } => {
+                            eprintln!("guest terminated by signal {sig}");
+                            // 128 + sig: the convention M6 already uses for a crash
+                            // (139 == 128 + SIGSEGV). SIGABRT therefore exits 134.
+                            exit(128 + sig as i32);
+                        }
                     }
                 }
                 Err(e) => { eprintln!("RECORD ERROR: {e}"); exit(4); }
@@ -52,6 +58,12 @@ fn main() {
                             eprintln!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}");
                             exit(139);
                         }
+                        retrace_core::Outcome::Signal { sig } => {
+                            eprintln!("guest terminated by signal {sig}");
+                            // 128 + sig: the convention M6 already uses for a crash
+                            // (139 == 128 + SIGSEGV). SIGABRT therefore exits 134.
+                            exit(128 + sig as i32);
+                        }
                     }
                 }
                 Err(e) => { eprintln!("RECORD ERROR: {e}"); exit(4); }
@@ -68,6 +80,12 @@ fn main() {
                         retrace_core::Outcome::Crash { pc, esr, far } => {
                             eprintln!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}");
                             exit(139);
+                        }
+                        retrace_core::Outcome::Signal { sig } => {
+                            eprintln!("guest terminated by signal {sig}");
+                            // 128 + sig: the convention M6 already uses for a crash
+                            // (139 == 128 + SIGSEGV). SIGABRT therefore exits 134.
+                            exit(128 + sig as i32);
                         }
                     }
                 }

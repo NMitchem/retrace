@@ -17,9 +17,16 @@ pub enum Event {
     Sched { thread: u32, until: u64 },
     Exit { code: u64 },
     Crash { pc: u64, esr: u64, far: u64 },
+    /// M11: the guest raised a signal on itself whose disposition is the default fatal action.
+    /// Terminal, exactly like `Crash` — followed by the final full-memory `Snapshot`.
+    ///
+    /// Deliberately NOT folded into `Crash` with a synthetic ESR: a signal is not a fault, and a
+    /// SIGABRT printing as a fault bearing an ESR the hardware never produced is a lie the debug
+    /// output would carry forever. `pc` names the raise site, which is what makes it useful.
+    Signal { sig: u64, pc: u64 },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x04"; // "RT" + format version 0x0004 (M6-crash: Event::Crash terminal)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x05"; // "RT" + format version 0x0005 (M11-signals: Event::Signal)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -190,6 +197,45 @@ mod tests {
         assert!(truncated);
         assert_eq!(got, crash_sample()[..2].to_vec()); // torn final Snapshot dropped, Crash kept
     }
+    #[test]
+    fn signal_event_round_trips() {
+        let p = named_tempfile("sigev");
+        let mut w = Writer::create(&p).unwrap();
+        w.append(&Event::Signal { sig: 6, pc: 0x1_0000 }).unwrap();
+        drop(w);
+        let (events, torn) = Reader::open_checked(&p).unwrap();
+        assert!(!torn);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Signal { sig, pc } => {
+                assert_eq!(*sig, 6);
+                assert_eq!(*pc, 0x1_0000);
+            }
+            other => panic!("expected Signal, got {other:?}"),
+        }
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn the_magic_is_version_5_and_rejects_version_4() {
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x05", "M11 added Event::Signal — a format break");
+        let p = named_tempfile("oldmagic");
+        std::fs::write(&p, b"RT\x00\x04junkjunk").unwrap();
+        let (events, torn) = Reader::open_checked(&p).unwrap();
+        assert!(torn, "a v4 trace must be rejected, not misparsed");
+        assert!(events.is_empty());
+        std::fs::remove_file(&p).ok();
+    }
+
+    fn named_tempfile(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        // Deterministic per-test name; no clock/RNG (deny-list). The tag keeps these from
+        // colliding with `tempfile()`, which reuses one path per process.
+        p.push(format!("retrace-trace-test-{tag}-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
     fn tempfile() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
         // Deterministic per-test name; no clock/RNG (deny-list).
