@@ -322,3 +322,33 @@ invalidate a stale stage-1 entry after a hand-edited data→code leaf flip. M9 T
   bring-up itself is not a spike. **Signals, threads** — still M3+.
 - **Memory-diff fidelity across the real syscall surface** — the long tail; M2 pays the
   four carried-forward recorder debts (clamp, `munmap`/`mprotect`, error ABI, raw `svc`).
+
+## `sigabi.c` / `sigtramp.c` — the signal-frame ABI (M12 delivery spike)
+
+Neither needs the hypervisor entitlement or codesigning — they are plain user programs:
+
+```sh
+clang -arch arm64 -o sigabi sigabi.c && ./sigabi
+clang -arch arm64 -O0 -o sigtramp sigtramp.c && ./sigtramp
+```
+
+`sigabi.c` reports `sizeof`/`offsetof` for every struct in a signal frame, straight from the live
+SDK. The load-bearing result: **`sizeof(ucontext_t) == 56` because `uc_mcontext` is a POINTER** —
+the 816-byte mcontext lives elsewhere in the frame, so a design assuming one flat struct is wrong
+by 816 bytes.
+
+`sigtramp.c` installs its **own** trampoline via the raw `__sigaction` syscall (libc's
+`sigaction()` overwrites `sa_tramp` with `_sigtramp`, so it cannot answer this) and faults, to
+measure the kernel's entry contract:
+
+```
+x0=catcher  x1=0x1e infostyle(UC_FLAVOR, for SA_SIGINFO)  x2=sig  x3=siginfo*  x4=ucontext*
+x5=sigreturn token (process-randomized)      sp == x3  => THE FRAME BASE IS sp
+```
+
+Frame layout, derived from those pointers — siginfo at `sp+0` (104 B), ucontext at `sp+104`
+(56 B), mcontext at `sp+160` (816 B), total 976, with 128 bytes of slack between the frame top
+and the pre-signal `sp`. The mcontext carries the real hardware ESR and FAR.
+
+Findings and their consequences are written up in
+`docs/superpowers/specs/2026-08-06-retrace-m12-signal-delivery-design.md`.
