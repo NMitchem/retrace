@@ -1191,7 +1191,182 @@ where guest-controlled bytes reach a system register."
 
 ---
 
-## Task 6: The record-side integration (atomic)
+## Task 6: The guest fixtures
+
+**Files:**
+- Create: `crates/retrace-guest/asm/sigframe.s`, `segvcatch.s`, `altstack.s`, `vecsurvive.s`, `blockedfault.s`
+- Modify: `crates/retrace-guest/build.rs`, `crates/retrace-guest/src/lib.rs`
+- Test: `crates/retrace-guest/tests/m12_guests.rs` (create)
+
+**Interfaces:**
+- Consumes: nothing from Tasks 1–5 — these are freestanding guests plus build glue, and they
+  compile with no dependency on the delivery code.
+- Produces: `retrace_guest::{SIGFRAME, SEGVCATCH, ALTSTACK, VECSURVIVE, BLOCKEDFAULT}` path constants.
+
+**Background the implementer needs.** These guests come BEFORE the dispatch work on purpose: Tasks 7
+and 8's tests reference them, and building them first is what lets every task end on a green gate
+rather than three consecutive tasks carrying known-red tests.
+
+They are freestanding (`-nostdlib -static`) and supply their **own** trampoline, so they test
+retrace's contract without libc in the way. Follow `asm/raise.s` and `asm/sigign.s` (M11) for the
+syscall convention: number in `x16`, args in `x0..`, `svc #0x80`. Copy the `raise.s` stanza in
+`build.rs` for each.
+
+A guest trampoline is entered with the measured registers and must (a) check them, (b) call the
+handler if it wants, and (c) `svc` `sigreturn`(184) with `x0 = ucontext*`, `x1 = infostyle`,
+`x2 = token` — the values it received in `x4`, `x1`, `x5`.
+
+**W^X applies.** The trampoline is guest code in the text segment, so it is already RO+exec. Do not
+put it on the stack.
+
+`segvcatch.s` is the important one: its handler adds 4 to `__ss.__pc` in the ucontext (load the
+pointer at `uc+48`, then index `+16+256`) so the guest resumes **past** the faulting store. That is
+what proves `sigreturn` restores mutated state.
+
+The other four, each one job: `sigframe.s` checks the entry registers and exits with a distinct code
+per failed check; `altstack.s` installs `sigaltstack` + `SA_ONSTACK` and its handler checks its own
+`sp` is inside the alt stack; `vecsurvive.s` puts a known value in `v8`, faults, and checks it after
+`sigreturn`; `blockedfault.s` blocks `SIGSEGV` with `sigprocmask` and then faults, which must make
+the RECORDER abort (it is the fail-loud fixture, so the guest itself never exits cleanly).
+
+**These guests cannot pass yet, and must not be made to.** Nothing delivers a signal until Task 7.
+This task's test asserts only that all five build, export, and parse — the behaviour gates are
+Task 9's job.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `crates/retrace-guest/tests/m12_guests.rs`:
+
+```rust
+// M12: the five delivery fixtures build, export, and parse. Behaviour is Task 9's gate set — this
+// only proves the build.rs wiring and the path constants, which is what Tasks 7 and 8 need in order
+// to reference them.
+#[test]
+fn every_m12_guest_is_built_and_parses_as_a_macho() {
+    for (name, path) in [
+        ("sigframe", retrace_guest::SIGFRAME),
+        ("segvcatch", retrace_guest::SEGVCATCH),
+        ("altstack", retrace_guest::ALTSTACK),
+        ("vecsurvive", retrace_guest::VECSURVIVE),
+        ("blockedfault", retrace_guest::BLOCKEDFAULT),
+    ] {
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|e| panic!("{name} not built at {path}: {e}"));
+        let loaded = retrace_guest::parse_macho(&bytes);
+        assert!(loaded.entry != 0, "{name} has no entry point");
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cargo test -p retrace-guest --test m12_guests -- --test-threads=1`
+Expected: FAIL — `retrace_guest::SIGFRAME` unresolved.
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create the five guests. `segvcatch.s`, as the model — the others follow its shape:
+
+```asm
+// M12: install a SIGSEGV handler with our own trampoline, fault, repair, and continue.
+// The handler advances the saved pc past the faulting store, so sigreturn resuming MUTATED state
+// is what makes this guest exit 0 instead of looping on the same fault forever.
+.text
+.global _start
+.align 2
+_start:
+    // sigaction(SIGSEGV=11, &act, NULL) — struct __sigaction is 24 bytes:
+    //   +0 sa_handler  +8 sa_tramp  +16 sa_mask  +20 sa_flags
+    adrp    x1, act@PAGE
+    add     x1, x1, act@PAGEOFF
+    adrp    x2, handler@PAGE
+    add     x2, x2, handler@PAGEOFF
+    str     x2, [x1, #0]
+    adrp    x2, tramp@PAGE
+    add     x2, x2, tramp@PAGEOFF
+    str     x2, [x1, #8]
+    mov     w2, #0x40                   // SA_SIGINFO
+    str     w2, [x1, #20]
+    mov     x0, #11
+    mov     x2, #0
+    mov     x16, #46
+    svc     #0x80
+
+    // Fault: store through an unmapped address. The handler advances past THIS instruction.
+    movz    x9, #0xdead, lsl #16
+    str     xzr, [x9]                   // <-- the faulting store
+
+    // write(1, "resumed\n", 8); exit(0)
+    mov     x0, #1
+    adrp    x1, resumed@PAGE
+    add     x1, x1, resumed@PAGEOFF
+    mov     x2, #8
+    mov     x16, #4
+    svc     #0x80
+    mov     x0, #0
+    mov     x16, #1
+    svc     #0x80
+
+// Entered by retrace with x0=catcher x1=infostyle x2=sig x3=siginfo* x4=ucontext* x5=token.
+tramp:
+    stp     x4, x5, [sp, #-16]!         // keep ucontext* and token across the handler call
+    str     x1, [sp, #-16]!
+    blr     x0                          // call the handler (x0..x2 are already its args)
+    ldr     x1, [sp], #16
+    ldp     x0, x2, [sp], #16           // x0 = ucontext*, x2 = token
+    mov     x16, #184                   // sigreturn(uctx, infostyle, token)
+    svc     #0x80
+    brk     #0                          // sigreturn must not return
+
+// void handler(int sig, siginfo_t *si, ucontext_t *uc) — advance uc->uc_mcontext->__ss.__pc by 4.
+handler:
+    mov     x0, #1
+    adrp    x1, caught@PAGE
+    add     x1, x1, caught@PAGEOFF
+    mov     x2, #7
+    mov     x16, #4
+    svc     #0x80
+    // x2 was clobbered by the write; reload the ucontext from the frame the trampoline saved.
+    ldr     x9, [sp, #16]               // ucontext*
+    ldr     x10, [x9, #48]              // uc_mcontext (a POINTER — measured at ucontext+48)
+    ldr     x11, [x10, #(16 + 256)]     // __ss.__pc: thread_state at mcontext+16, __pc at +256
+    add     x11, x11, #4
+    str     x11, [x10, #(16 + 256)]
+    ret
+
+.data
+.align 4
+act:      .space 24
+caught:   .ascii "caught\n"
+resumed:  .ascii "resumed\n"
+```
+
+Then wire all five into `build.rs` (copy the `raise.s` stanza) and export the path constants from
+`src/lib.rs`.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cargo test -p retrace-guest --test m12_guests -- --test-threads=1`, then `just gate`
+Expected: PASS, and the gate still green with zero ignored — nothing else changed behaviour.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/retrace-guest
+git commit -m "M12 t6: the five delivery fixtures
+
+Freestanding guests with their own trampolines, so they test retrace's entry
+contract without libc in the way. Built BEFORE the dispatch work so tasks 7-9
+each end on a green gate instead of carrying known-red tests forward.
+
+segvcatch is the one that matters most: its handler advances __ss.__pc past
+the faulting store, so the guest continues instead of re-faulting forever —
+which is what will prove sigreturn restores MUTATED state."
+```
+
+---
+
+## Task 7: The record-side integration (atomic)
 
 **Files:**
 - Modify: `crates/retrace-core/src/lib.rs` (the `Stop::Fault` arm at line 130; the raise arm's
@@ -1288,9 +1463,10 @@ fn a_blocked_synchronous_fault_asserts_rather_than_guessing() {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p retrace-core --test signals -- --test-threads=1`
-Expected: FAIL — `SEGVCATCH` / `WILDSTORE` / `BLOCKEDFAULT` unresolved (Task 8 creates the guests).
-**Write the arms now anyway**; this task's tests go green in Task 8. To keep this task
-independently verifiable, assert the arms compile and the existing suite still passes.
+Expected: FAIL — `a_fault_with_a_handler_installed_delivers_instead_of_crashing` fails because
+`Stop::Fault` still appends `Event::Crash` and never consults `sigtable`. Read that failure before
+fixing it: it *is* the milestone's premise — the guest installed a handler and the recorder ignored
+it. The guests themselves already exist (Task 6), so nothing here waits on a later task.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1379,7 +1555,7 @@ If that goes red, Task 1 Step 0's R1 measurement was wrong. Stop and amend the s
 
 ```bash
 git add crates/retrace-core/src/lib.rs crates/retrace-arch/src/lib.rs crates/retrace-core/tests/signals.rs
-git commit -m "M12 t6: the three record dispatch sites
+git commit -m "M12 t7: the three record dispatch sites
 
 Fault-with-handler delivers instead of crashing (the live wrong answer: this
 arm never consulted sigtable). Self-raise-with-handler appends its ordinary
@@ -1389,12 +1565,13 @@ delivers. sigreturn is serviced, replacing M11's panic.
 Only Stop::Fault is touched. Demand paging arrives as Stop::Other, a stage-2
 abort, so this cannot steal a demand-paging case — the same argument M6 made.
 
-Tests referencing the new guests stay red until t8 creates them."
+The guests landed in t6, so this task's tests go green here rather than
+three tasks later."
 ```
 
 ---
 
-## Task 7: The replay mirror
+## Task 8: The replay mirror
 
 **Files:**
 - Modify: `crates/retrace-core/src/lib.rs` (replay's `advance()`, near the M11 mirror at line 755)
@@ -1513,14 +1690,14 @@ plus the raise mirror's `Handler` branch, which recomputes and compares the same
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p retrace-core -- --test-threads=1`
-Expected: PASS once Task 8's guests exist; until then, `cargo build --workspace` clean and no
-pre-existing test regressed.
+Expected: PASS, and `just gate` green with zero ignored — the guests exist (Task 6) and the record
+side landed (Task 7), so this task stands on its own.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/retrace-core/src/lib.rs crates/retrace-core/tests/replay.rs
-git commit -m "M12 t7: the replay mirror, and the byte-compare that IS the oracle
+git commit -m "M12 t8: the replay mirror, and the byte-compare that IS the oracle
 
 Replay recomputes the frame through the same deliver_signal and compares it
 against the recording before advancing — an asymmetry surfaces as a loud
@@ -1534,16 +1711,14 @@ bug. M11 line 757 learned this once already."
 
 ---
 
-## Task 8: The guest fixtures and the four mechanism gates
+## Task 9: The four mechanism gates
 
 **Files:**
-- Create: `crates/retrace-guest/asm/sigframe.s`, `segvcatch.s`, `altstack.s`, `vecsurvive.s`, `blockedfault.s`
-- Modify: `crates/retrace-guest/build.rs`, `crates/retrace-guest/src/lib.rs`
 - Create: `crates/retrace/tests/sigdeliver_e2e.rs`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–7.
-- Produces: `retrace_guest::{SIGFRAME, SEGVCATCH, ALTSTACK, VECSURVIVE, BLOCKEDFAULT}` path constants.
+- Consumes: the guests from Task 6; the delivery/mirror behaviour from Tasks 7–8.
+- Produces: nothing — this task is the CLI-level gate set.
 
 **Background the implementer needs.** These guests are freestanding (`-nostdlib -static`) and supply
 their **own** trampoline, so they test retrace's contract without libc in the way. Follow
@@ -1635,98 +1810,27 @@ fn a_blocked_synchronous_fault_fails_loud() {
 Run: `cargo test -p retrace --test sigdeliver_e2e -- --test-threads=1`
 Expected: FAIL — `retrace_guest::SIGFRAME` unresolved.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Fix whatever the gates expose**
 
-Create the five guests. `segvcatch.s`, as the model — the others follow its shape:
+The guests already exist (Task 6) and the delivery path already works (Tasks 7–8), so this step is
+**not** new feature code: it is whatever the five gates prove is still wrong. Expect the failures to
+be in the frame or the mirror, not in the guests. If a gate demands a behaviour no earlier task
+built, stop — that is a plan defect, not something to patch in here.
 
-```asm
-// M12: install a SIGSEGV handler with our own trampoline, fault, repair, and continue.
-// The handler advances the saved pc past the faulting store, so sigreturn resuming MUTATED state
-// is what makes this guest exit 0 instead of looping on the same fault forever.
-.text
-.global _start
-.align 2
-_start:
-    // sigaction(SIGSEGV=11, &act, NULL) — struct __sigaction is 24 bytes:
-    //   +0 sa_handler  +8 sa_tramp  +16 sa_mask  +20 sa_flags
-    adrp    x1, act@PAGE
-    add     x1, x1, act@PAGEOFF
-    adrp    x2, handler@PAGE
-    add     x2, x2, handler@PAGEOFF
-    str     x2, [x1, #0]
-    adrp    x2, tramp@PAGE
-    add     x2, x2, tramp@PAGEOFF
-    str     x2, [x1, #8]
-    mov     w2, #0x40                   // SA_SIGINFO
-    str     w2, [x1, #20]
-    mov     x0, #11
-    mov     x2, #0
-    mov     x16, #46
-    svc     #0x80
-
-    // Fault: store through an unmapped address. The handler advances past THIS instruction.
-    movz    x9, #0xdead, lsl #16
-    str     xzr, [x9]                   // <-- the faulting store
-
-    // write(1, "resumed\n", 8); exit(0)
-    mov     x0, #1
-    adrp    x1, resumed@PAGE
-    add     x1, x1, resumed@PAGEOFF
-    mov     x2, #8
-    mov     x16, #4
-    svc     #0x80
-    mov     x0, #0
-    mov     x16, #1
-    svc     #0x80
-
-// Entered by retrace with x0=catcher x1=infostyle x2=sig x3=siginfo* x4=ucontext* x5=token.
-tramp:
-    stp     x4, x5, [sp, #-16]!         // keep ucontext* and token across the handler call
-    str     x1, [sp, #-16]!
-    blr     x0                          // call the handler (x0..x2 are already its args)
-    ldr     x1, [sp], #16
-    ldp     x0, x2, [sp], #16           // x0 = ucontext*, x2 = token
-    mov     x16, #184                   // sigreturn(uctx, infostyle, token)
-    svc     #0x80
-    brk     #0                          // sigreturn must not return
-
-// void handler(int sig, siginfo_t *si, ucontext_t *uc) — advance uc->uc_mcontext->__ss.__pc by 4.
-handler:
-    mov     x0, #1
-    adrp    x1, caught@PAGE
-    add     x1, x1, caught@PAGEOFF
-    mov     x2, #7
-    mov     x16, #4
-    svc     #0x80
-    // x2 was clobbered by the write; reload the ucontext from the frame the trampoline saved.
-    ldr     x9, [sp, #16]               // ucontext*
-    ldr     x10, [x9, #48]              // uc_mcontext (a POINTER — measured at ucontext+48)
-    ldr     x11, [x10, #(16 + 256)]     // __ss.__pc: thread_state at mcontext+16, __pc at +256
-    add     x11, x11, #4
-    str     x11, [x10, #(16 + 256)]
-    ret
-
-.data
-.align 4
-act:      .space 24
-caught:   .ascii "caught\n"
-resumed:  .ascii "resumed\n"
-```
-
-Then wire all five into `build.rs` (copy the `raise.s` stanza) and export the path constants from
-`src/lib.rs`.
+The guests these gates lean on live in `crates/retrace-guest/asm/` from Task 6; read
+`segvcatch.s` there if a gate's expectations are unclear.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p retrace --test sigdeliver_e2e -- --test-threads=1` and
-`cargo test -p retrace-core -- --test-threads=1`
-Expected: PASS — including Tasks 6 and 7's tests, which were waiting on these guests.
+Run: `cargo test -p retrace --test sigdeliver_e2e -- --test-threads=1`, then the whole gate:
+`just gate 2>&1 | tail -20`
+Expected: PASS, and the gate green with zero ignored.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/retrace-guest crates/retrace/tests/sigdeliver_e2e.rs
-git commit -m "M12 t8: five guests, and the mechanism gates go green
+git add crates/retrace/tests/sigdeliver_e2e.rs
+git commit -m "M12 t9: the mechanism gates go green
 
 segvcatch proves the thing the headline cannot: sigreturn restores MUTATED
 state (the handler advances __ss.__pc past the faulting store, so the guest
@@ -1739,7 +1843,7 @@ re-faults and dies before clobbered vector state could show."
 
 ---
 
-## Task 9: Apple's real `_sigtramp`
+## Task 10: Apple's real `_sigtramp`
 
 **Files:**
 - Create: `crates/retrace-guest/c/sigcatch_dyn.c`
@@ -1747,7 +1851,7 @@ re-faults and dies before clobbered vector state could show."
 - Create: `crates/retrace/tests/sigcatch_dyn_e2e.rs`
 
 **Interfaces:**
-- Consumes: Tasks 1–8.
+- Consumes: Tasks 1–9.
 - Produces: `retrace_guest::SIGCATCH_DYN`.
 
 **Background the implementer needs.** Every guest so far supplies its own trampoline, so none of them
@@ -1831,7 +1935,7 @@ is reading something the frame does not provide.
 
 ```bash
 git add crates/retrace-guest crates/retrace/tests/sigcatch_dyn_e2e.rs
-git commit -m "M12 t9: Apple's real _sigtramp, exercised
+git commit -m "M12 t10: Apple's real _sigtramp, exercised
 
 Every guest so far supplied its own trampoline. libc's sigaction() installs
 Apple's, which is what real programs run through, so this is the only gate
@@ -1840,7 +1944,7 @@ that proves the frame satisfies the trampoline that actually ships."
 
 ---
 
-## Task 10: The headline gate, the seek, and the honest close
+## Task 11: The headline gate, the seek, and the honest close
 
 **Files:**
 - Create: `crates/retrace-guest/rs/segvy.rs`
@@ -2004,7 +2108,7 @@ guard page that does not guard, and what a stack-overflow milestone would need).
 
 ```bash
 git add -A
-git commit -m "M12 t10: the headline gate is GREEN, and the honest close
+git commit -m "M12 t11: the headline gate is GREEN, and the honest close
 
 A stock full-std Rust binary faults on a wild pointer, libstd's own SIGSEGV
 handler runs and returns, the store re-executes, and the guest dies of the
@@ -2029,9 +2133,9 @@ demand-commits any reserved page, so libstd's guard page does not guard."
 
 **Spec coverage.** Every spec section maps to a task: M12-esr → T1; M12-frame → T2; M12-format → T3;
 M12-deliver → T4; M12-sigreturn + PSTATE → T5; M12-neon → T4 (fill) + T5 (restore) + T8 (the gate);
-M12-route → T6/T7; the fail-loud boundaries → T5 (token, PSTATE) and T6/T8 (blocked fault); the
-five unmeasured facts → T1 Step 0; the gate set → T8/T9/T10; the exit criterion and honest-gate
-discipline → T10 Steps 4–6.
+M12-route → T7/T8; the fail-loud boundaries → T5 (token, PSTATE) and T7/T9 (blocked fault); the
+five unmeasured facts → T1 Step 0; the guest fixtures → T6; the gate set → T9/T10/T11; the exit
+criterion and honest-gate discipline → T11 Steps 4–6.
 
 Two spec items are deliberately **not** separate tasks and are called out here so their absence is a
 decision rather than an omission:
