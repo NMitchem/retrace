@@ -366,4 +366,18 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang wildfixed");
     assert!(status.success(), "wildfixed guest build failed");
+
+    // M11 signal guests. raise: kill(getpid(), SIGABRT) — the terminal mechanism, and it exercises
+    // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
+    // proving the guest keeps running (the branch the terminal gate cannot reach). killother:
+    // kill(1, SIGKILL) — the safety boundary; the recorder must abort rather than signal launchd.
+    for name in ["raise", "sigign", "killother"] {
+        let src = format!("{}/asm/{name}.s", env!("CARGO_MANIFEST_DIR"));
+        let bin = format!("{out}/{name}");
+        println!("cargo:rerun-if-changed={src}");
+        let status = Command::new("clang")
+            .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+            .status().expect("clang signal guest");
+        assert!(status.success(), "{name} guest build failed");
+    }
 }

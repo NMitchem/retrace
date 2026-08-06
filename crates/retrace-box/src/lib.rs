@@ -398,6 +398,12 @@ pub struct Box_ {
     // capture cannot re-derive it. Has Drop (Vecs), but is declared after vcpu/vm, so the
     // load-bearing vcpu-before-vm drop order is unaffected.
     fds: FdTable,
+    // M11: the guest's signal dispositions. Pure guest state — a function of the guest's own
+    // sigaction/sigprocmask/sigaltstack calls, identical on record and replay, so it never enters
+    // the trace (see `sig.rs`). Carried in BoxState for the same reason the fd slots are: a mid-run
+    // capture cannot re-derive it. Has Drop (an array of Copy + an Option), declared after vcpu/vm,
+    // so the load-bearing vcpu-before-vm drop order is unaffected.
+    sigtable: SigTable,
 }
 
 #[derive(Debug)]
@@ -869,7 +875,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1358,7 +1364,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -2137,7 +2143,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -2216,6 +2222,8 @@ impl Box_ {
 
     pub fn fds(&self) -> &FdTable { &self.fds }
     pub fn fds_mut(&mut self) -> &mut FdTable { &mut self.fds }
+    pub fn sigtable(&self) -> &SigTable { &self.sigtable }
+    pub fn sigtable_mut(&mut self) -> &mut SigTable { &mut self.sigtable }
 
     /// `map_with_linking_np`'s fd lives INSIDE guest memory, not in a register: x0 points at a
     /// `struct mwl_region[]` (x1 = count) whose first field is `mwlr_fd`. No operand index can name
@@ -2673,6 +2681,10 @@ impl Box_ {
             // M10: DERIVED from the captured slots, never reset — see the BoxState field comment.
             // A fresh table here would tell a seeked session every fd is Free.
             fds: FdTable::from_slots(&state.fd_slots),
+            // M11 Task 4 places a fresh table here; Task 6 replaces it with the carried one. Until
+            // then a seeked session forgets the guest's dispositions — which is exactly the bug
+            // Task 6's test pins.
+            sigtable: SigTable::default(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
