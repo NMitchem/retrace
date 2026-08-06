@@ -367,6 +367,19 @@ fn main() {
         .status().expect("clang wildfixed");
     assert!(status.success(), "wildfixed guest build failed");
 
+    // panicky: M11's headline — a real full-std Rust binary whose panic reaches abort()/SIGABRT.
+    // Same recipe as hello_rust (same RUSTC, same target) plus -C panic=abort, which is REQUIRED
+    // and was measured: with the default panic=unwind this program exits 101 without ever raising a
+    // signal, exercising nothing M11 added. With panic=abort it exits 134 (128 + SIGABRT).
+    let src = format!("{}/rs/panicky.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/panicky");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-C", "panic=abort", "-o", &bin, &src])
+        .status().expect("rustc panicky");
+    assert!(status.success(), "panicky guest build failed");
+
     // M11 signal guests. raise: kill(getpid(), SIGABRT) — the terminal mechanism, and it exercises
     // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
     // proving the guest keeps running (the branch the terminal gate cannot reach). killother:
