@@ -51,7 +51,13 @@ fn is_usrstack64_mib(b: &retrace_box::Box_, args: [u64; 8]) -> bool {
 /// How a recorded (or replayed) run ended: a clean exit, or a guest synchronous fault (M6). The
 /// triple is deterministic — identical guest state faults identically — so replay byte-compares it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome { Exit { code: u64 }, Crash { pc: u64, esr: u64, far: u64 } }
+pub enum Outcome {
+    Exit { code: u64 },
+    Crash { pc: u64, esr: u64, far: u64 },
+    /// M11: terminated by a signal the guest raised on itself, whose disposition resolved to the
+    /// default fatal action. Terminal in the same shape M6 gave a fault.
+    Signal { sig: u64 },
+}
 
 pub struct RecordSummary { pub stdout: Vec<u8>, pub outcome: Outcome, pub events: usize }
 
@@ -437,8 +443,173 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append mach-trap: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
+            // ---- M11-signals ---------------------------------------------------------------
+            // Placed ABOVE the generic forward arm on purpose: that ordering is what keeps
+            // forward_and_diff — which issues a raw svc in RETRACE's process — from ever seeing a
+            // signal syscall. Before M11, `__pthread_kill(self, SIGABRT)` killed the recorder,
+            // `sigaction` installed a guest VA as the RECORDER's handler (measured: hello_rust's
+            // SIGSEGV query read back retrace's own libstd handler), and `kill` reached any host
+            // pid. All three are gone by construction here, not by guard.
+            //
+            // Serviced state calls. Never forwarded; each synthesizes its own writeback and appends
+            // an ordinary Event::Syscall, so the divergence oracle still checks (num, args) and
+            // RETRACE_TRACE=1 still shows the sequence. Replay mirrors these.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGACTION => {
+                let sig = args[0];
+                let new = if args[1] != 0 {
+                    Some(retrace_box::decode_act(&b.read_guest(args[1], 24)))
+                } else { None };
+                let old = match new {
+                    Some(a) => b.sigtable_mut().set_action(sig, a),
+                    None => b.sigtable().action(sig),
+                };
+                // oldact is `struct sigaction` — 16 bytes, NOT the 24-byte input struct.
+                let writes = if args[2] != 0 {
+                    vec![Region { ipa: args[2], bytes: retrace_box::encode_oldact(old).to_vec() }]
+                } else { vec![] };
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                    .map_err(|e| format!("append sigaction: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
+            }
+            Stop::Syscall { num, args }
+                if num == retrace_arch::SYS_SIGPROCMASK || num == retrace_arch::SYS_PTHREAD_SIGMASK => {
+                // (how, set*, oldset*). A NULL `set` is a pure query — read the mask, change nothing.
+                let old = if args[1] != 0 {
+                    let set = u32::from_le_bytes(b.read_guest(args[1], 4).try_into().unwrap());
+                    b.sigtable_mut().set_mask(args[0], set)
+                } else {
+                    b.sigtable().mask()
+                };
+                let writes = if args[2] != 0 {
+                    vec![Region { ipa: args[2], bytes: old.to_le_bytes().to_vec() }]
+                } else { vec![] };
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                    .map_err(|e| format!("append sigprocmask: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
+            }
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGPENDING => {
+                // Always empty, and TRUE by construction: raising a blocked signal asserts below,
+                // so no signal can ever be pending. These two decisions stand or fall together.
+                let writes = if args[0] != 0 {
+                    vec![Region { ipa: args[0], bytes: 0u32.to_le_bytes().to_vec() }]
+                } else { vec![] };
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                    .map_err(|e| format!("append sigpending: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
+            }
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGALTSTACK => {
+                // stack_t { void *ss_sp; size_t ss_size; int ss_flags; } — 24 bytes with padding.
+                let new = if args[0] != 0 {
+                    let raw = b.read_guest(args[0], 24);
+                    Some((u64::from_le_bytes(raw[0..8].try_into().unwrap()),
+                          u64::from_le_bytes(raw[8..16].try_into().unwrap()),
+                          u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64))
+                } else { None };
+                let old = match new {
+                    Some(ss) => b.sigtable_mut().set_altstack(Some(ss)),
+                    None => b.sigtable().altstack(),
+                };
+                let writes = if args[1] != 0 {
+                    let (sp, size, flags) = old.unwrap_or((0, 0, 0));
+                    let mut bytes = vec![0u8; 24];
+                    bytes[0..8].copy_from_slice(&sp.to_le_bytes());
+                    bytes[8..16].copy_from_slice(&size.to_le_bytes());
+                    bytes[16..20].copy_from_slice(&(flags as u32).to_le_bytes());
+                    vec![Region { ipa: args[1], bytes }]
+                } else { vec![] };
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                    .map_err(|e| format!("append sigaltstack: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &writes);
+            }
+
+            // The raise path. `kill(pid, sig)` and `__pthread_kill(port, sig)` differ only in how
+            // the target is validated; the disposition decision below is shared.
+            Stop::Syscall { num, args }
+                if num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL => {
+                if num == retrace_arch::SYS_KILL {
+                    // A SAFETY boundary, not a fidelity one: forwarding this would signal a REAL
+                    // host process. getpid is not intercepted, so the guest's pid IS retrace's --
+                    // measured, not assumed (M11 Task 1 Step 0 answer 2).
+                    let self_pid = std::process::id() as u64;
+                    assert_eq!(args[0], self_pid,
+                        "kill to a pid other than the guest's own ({} != {self_pid}) is not \
+                         modelled: the guest has no children and no other process it may signal, \
+                         and forwarding would signal a REAL host process. Implement a guest pid \
+                         namespace before a guest needs this.", args[0]);
+                }
+                // __pthread_kill's thread-port operand is NOT validated: 328 fires in no gate guest
+                // (measured: zero across hello_dyn/hello_rust/jq), so there is no observed port to
+                // compare against, and the guest has exactly one thread on one vCPU — any port it
+                // could name is that thread. Ungated rather than wrongly gated; see the Status
+                // section. Learn the port from mach_thread_self if a guest ever needs the check.
+                let sig = args[1];
+                let act = b.sigtable().action(sig);
+                assert!(!b.sigtable().is_blocked(sig),
+                    "raising blocked signal {sig} is not modelled: it must go PENDING until \
+                     unblocked, and M11 models no pending set (measured: no gate guest does this; \
+                     abort() unblocks SIGABRT before raising). Implement a pending mask before a \
+                     guest needs this — and note that sigpending's always-empty answer stops being \
+                     true the moment you do.");
+                match act.disp {
+                    retrace_box::Disposition::Handler(va) => panic!(
+                        "signal {sig} has a handler installed at {va:#x}, and M11 models \
+                         DISPOSITION but not DELIVERY — running it needs a signal frame, the \
+                         __sigtramp ABI, and sigreturn(184). Implement those (M12) before a guest \
+                         raises a caught signal."),
+                    retrace_box::Disposition::Ign => {
+                        w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                            .map_err(|e| format!("append ignored raise: {e}"))?; count += 1;
+                        b.set_x0_err_and_return(0, false);
+                    }
+                    retrace_box::Disposition::Dfl => match retrace_arch::default_action(sig) {
+                        retrace_arch::DefaultAction::Ignore => {
+                            w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                                .map_err(|e| format!("append default-ignored raise: {e}"))?; count += 1;
+                            b.set_x0_err_and_return(0, false);
+                        }
+                        // TERMINAL. Same shape as the Exit and Crash arms above: the event, then
+                        // the final full-memory snapshot, then break.
+                        retrace_arch::DefaultAction::Terminate => {
+                            let pc = b.position();
+                            let final_snap = b.snapshot();
+                            w.append(&Event::Signal { sig, pc })
+                                .map_err(|e| format!("append signal: {e}"))?; count += 1;
+                            w.append(&final_snap)
+                                .map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
+                            outcome = Outcome::Signal { sig };
+                            break;
+                        }
+                    },
+                }
+            }
+
+            // Unmodelled, and loud about it. Each of these would otherwise reach forward_and_diff
+            // and execute against RETRACE's process — 520/521 are live recorder-killing hazards
+            // today, which is why they are asserted even though modelling them is out of scope.
+            Stop::Syscall { num, .. } if num == retrace_arch::SYS_SIGRETURN => panic!(
+                "sigreturn(184) is unreachable by construction: it can only be called from inside a \
+                 signal handler, and M11 never delivers one. Reaching it means the disposition \
+                 model itself is wrong — do not add a handler for it, find the bug."),
+            Stop::Syscall { num, .. }
+                if num == retrace_arch::SYS_SIGSUSPEND || num == retrace_arch::SYS_SIGWAIT => panic!(
+                "syscall {num} (sigsuspend/__sigwait) blocks until a signal arrives, and the guest \
+                 has ONE thread on ONE vCPU with nothing to wake it — servicing it would deadlock. \
+                 Implement threads before a guest needs this."),
+            Stop::Syscall { num, .. }
+                if num == retrace_arch::SYS_TERMINATE_WITH_PAYLOAD
+                || num == retrace_arch::SYS_ABORT_WITH_PAYLOAD => panic!(
+                "syscall {num} (terminate/abort_with_payload) is a terminal path that bypasses \
+                 signal disposition entirely and is not modelled (measured: unexercised by any gate \
+                 guest). It is asserted rather than forwarded because forwarding it kills the \
+                 RECORDER. Model it as a second terminal event shape if a guest needs it."),
+
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
+                // M11 correctness invariant: no signal syscall may reach forward_and_diff, which
+                // issues a raw svc in retrace's own process. If one does, an arm above is missing.
+                assert!(!retrace_arch::is_signal_syscall(num),
+                    "signal syscall {num} reached the generic forward arm — it must be serviced or \
+                     asserted above (M11 correctness invariant)");
                 // M10: dup2 names its own target descriptor rather than taking the lowest free one,
                 // so the table would have to honour an arbitrary slot. No guest in the gate calls it
                 // (measured: zero in the jq run), so fail loudly rather than model it wrong — a
@@ -581,11 +752,107 @@ impl ReplaySession {
                                 detail: format!("expected recorded Exit, got {other:?}") }),
                         }
                     }
+                    // M11 mirror of record's terminal raise. Structure copied from the Exit verify
+                    // above: compare the event, then the final-memory landmark. A signal arrives as
+                    // a Stop::Syscall, not a Stop::Fault, so this must sit BEFORE the generic
+                    // recorded-Event::Syscall lookup — mirroring how record's raise arm precedes its
+                    // generic arm. Placing it after yields "expected recorded syscall, got Signal",
+                    // a confusing divergence that looks like a recording bug and is a dispatch bug.
+                    //
+                    // The disposition is recomputed from the REPLAY-side table, which the serviced
+                    // mirrors below keep in step. That is what makes the sigign guest replay
+                    // correctly: without the sigaction mirror this table would still read Dfl for
+                    // SIGABRT and would wrongly terminate a guest that had ignored it.
+                    if num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL {
+                        let sig = args[1];
+                        let act = self.b.sigtable().action(sig);
+                        let terminal = matches!(act.disp, retrace_box::Disposition::Dfl)
+                            && retrace_arch::default_action(sig) == retrace_arch::DefaultAction::Terminate;
+                        if terminal {
+                            match self.events.get(self.idx) {
+                                Some(Event::Signal { sig: rsig, pc: rpc }) => {
+                                    if sig != *rsig || pc != *rpc {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "signal mismatch: live (sig={sig}, pc={pc:#x}) != \
+                                             recorded (sig={rsig}, pc={rpc:#x})") });
+                                    }
+                                    match self.events.get(self.idx + 1) {
+                                        Some(Event::Snapshot { mem: final_mem, .. }) => {
+                                            if let Some(d) = self.b.diff_memory(final_mem) {
+                                                return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
+                                            }
+                                            return Ok(Advance::Exited(ReplayReport {
+                                                stdout: std::mem::take(&mut self.stdout),
+                                                outcome: Outcome::Signal { sig: *rsig } }));
+                                        }
+                                        other => return Err(Divergence { landmark: self.idx + 1, pc,
+                                            detail: format!("expected final memory Snapshot after Signal, got {other:?}") }),
+                                    }
+                                }
+                                other => return Err(Divergence { landmark: self.idx, pc,
+                                    detail: format!("expected recorded Signal, got {other:?} (live raise: sig={sig})") }),
+                            }
+                        }
+                    }
                     match self.events.get(self.idx) {
                         Some(Event::Syscall { num: rn, args: ra, ret, err, writes }) => {
                             if num != *rn || args != *ra {
                                 return Err(Divergence { landmark: self.idx, pc,
                                     detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
+                            }
+                            // M11 mirror of record's serviced-signal arms. Recompute the SAME table
+                            // transition and the SAME writeback bytes, then byte-compare against
+                            // the recording — that comparison IS the divergence check (symmetry
+                            // rule 1), so an asymmetry surfaces as a Divergence rather than as
+                            // silent corruption. The recorded writes are then applied by the
+                            // existing apply_and_return path, exactly as for any other syscall: the
+                            // mirror's job is to keep the TABLE in step and prove the bytes match,
+                            // not to re-perform the write.
+                            if num == retrace_arch::SYS_SIGACTION {
+                                let new = if args[1] != 0 {
+                                    Some(retrace_box::decode_act(&self.b.read_guest(args[1], 24)))
+                                } else { None };
+                                let old = match new {
+                                    Some(a) => self.b.sigtable_mut().set_action(args[0], a),
+                                    None => self.b.sigtable().action(args[0]),
+                                };
+                                if args[2] != 0 {
+                                    let mine = retrace_box::encode_oldact(old).to_vec();
+                                    let recorded = writes.iter().find(|r| r.ipa == args[2])
+                                        .map(|r| r.bytes.clone()).unwrap_or_default();
+                                    if mine != recorded {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "sigaction oldact mismatch at {:#x}: recomputed {mine:02x?} \
+                                             != recorded {recorded:02x?}", args[2]) });
+                                    }
+                                }
+                            }
+                            if num == retrace_arch::SYS_SIGPROCMASK
+                                || num == retrace_arch::SYS_PTHREAD_SIGMASK {
+                                let old = if args[1] != 0 {
+                                    let set = u32::from_le_bytes(
+                                        self.b.read_guest(args[1], 4).try_into().unwrap());
+                                    self.b.sigtable_mut().set_mask(args[0], set)
+                                } else {
+                                    self.b.sigtable().mask()
+                                };
+                                if args[2] != 0 {
+                                    let mine = old.to_le_bytes().to_vec();
+                                    let recorded = writes.iter().find(|r| r.ipa == args[2])
+                                        .map(|r| r.bytes.clone()).unwrap_or_default();
+                                    if mine != recorded {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "sigprocmask oldset mismatch at {:#x}: recomputed \
+                                             {mine:02x?} != recorded {recorded:02x?}", args[2]) });
+                                    }
+                                }
+                            }
+                            if num == retrace_arch::SYS_SIGALTSTACK && args[0] != 0 {
+                                let raw = self.b.read_guest(args[0], 24);
+                                let ss = (u64::from_le_bytes(raw[0..8].try_into().unwrap()),
+                                          u64::from_le_bytes(raw[8..16].try_into().unwrap()),
+                                          u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64);
+                                self.b.sigtable_mut().set_altstack(Some(ss));
                             }
                             // Learn the guest's task-port name (mirror of record) from the recorded −28 result.
                             if num == MACH_TASK_SELF && !*err { self.guest_task_port = Some(*ret); }

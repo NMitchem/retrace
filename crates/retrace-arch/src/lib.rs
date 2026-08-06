@@ -176,6 +176,80 @@ pub fn decode_aut_rd(insn: u32) -> Option<u32> {
     }
 }
 
+// ---- M11-signals ---------------------------------------------------------------------------
+// Numbers resolved from $(xcrun --show-sdk-path)/usr/include/sys/syscall.h, never from memory.
+// The `_nocancel` pairing rule (M10) was checked and yields nothing here: the only `_nocancel`
+// signal syscalls are sigsuspend_nocancel(410) and __sigwait_nocancel(422), and both pair with
+// calls M11 asserts on anyway — so no SERVICED call has a silent-fallthrough twin.
+//
+// Measured surface (Task 1 Step 0, RETRACE_TRACE=1 full histograms over hello_dyn/hello_rust/jq):
+// of all twelve numbers below, ONLY sigaction(46) is exercised, 3x and by hello_rust alone. That
+// zero-count is the evidence each assert in record's dispatch rests on.
+pub const SYS_GETPID: u64 = 20;
+pub const SYS_KILL: u64 = 37;
+pub const SYS_SIGACTION: u64 = 46;
+pub const SYS_SIGPROCMASK: u64 = 48;
+pub const SYS_SIGPENDING: u64 = 52;
+pub const SYS_SIGALTSTACK: u64 = 53;
+pub const SYS_SIGSUSPEND: u64 = 111;
+pub const SYS_SIGRETURN: u64 = 184;
+pub const SYS_PTHREAD_KILL: u64 = 328;
+pub const SYS_PTHREAD_SIGMASK: u64 = 329;
+pub const SYS_SIGWAIT: u64 = 330;
+pub const SYS_TERMINATE_WITH_PAYLOAD: u64 = 520;
+pub const SYS_ABORT_WITH_PAYLOAD: u64 = 521;
+
+/// `NSIG` from `sys/signal.h:76` — "counting 0; could be 33 (mask is 1-32)". Signal numbers run
+/// 1..=31 in the table; index 0 is unused so indexing mirrors signal numbering.
+pub const NSIG: usize = 32;
+pub const SIGABRT: u64 = 6;
+pub const SIG_DFL: u64 = 0;
+pub const SIG_IGN: u64 = 1;
+pub const SIG_BLOCK: u64 = 1;
+pub const SIG_UNBLOCK: u64 = 2;
+pub const SIG_SETMASK: u64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultAction {
+    Terminate,
+    Ignore,
+}
+
+/// The kernel's default disposition for `sig` when the guest has installed nothing.
+///
+/// An arch fact, not policy — which is why it lives here beside `ec_of` rather than in the box.
+/// Record's raise arm and replay's mirror both consult THIS function, and that shared call is what
+/// keeps them from drifting (symmetry rule 1).
+pub fn default_action(sig: u64) -> DefaultAction {
+    match sig {
+        16 | 20 | 28 => DefaultAction::Ignore, // SIGURG, SIGCHLD, SIGWINCH
+        _ => DefaultAction::Terminate,
+    }
+}
+
+/// Every syscall M11 intercepts — serviced against the guest's `SigTable` or asserted, but in no
+/// case forwarded. This is the single place the correctness invariant ("no signal syscall is ever
+/// issued in retrace's process") is expressed, so the record loop can assert it rather than restate
+/// it. `getpid`(20) is deliberately absent: it keeps forwarding, and the raise arm's self-pid check
+/// depends on that.
+pub fn is_signal_syscall(num: u64) -> bool {
+    matches!(
+        num,
+        SYS_KILL
+            | SYS_SIGACTION
+            | SYS_SIGPROCMASK
+            | SYS_SIGPENDING
+            | SYS_SIGALTSTACK
+            | SYS_SIGSUSPEND
+            | SYS_SIGRETURN
+            | SYS_PTHREAD_KILL
+            | SYS_PTHREAD_SIGMASK
+            | SYS_SIGWAIT
+            | SYS_TERMINATE_WITH_PAYLOAD
+            | SYS_ABORT_WITH_PAYLOAD
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +272,41 @@ mod tests {
         assert_eq!((CTL_KERN, KERN_USRSTACK64), (1, 59));
         assert_eq!((RLIMIT_STACK, RLIMIT_POSIX_FLAG), (3, 0x1000));
         assert_eq!((SYS_WRITE_NOCANCEL, SYS_CLOSE_NOCANCEL), (397, 399));
+    }
+
+    #[test]
+    fn signal_syscall_numbers_match_the_sdk() {
+        // Resolved from $(xcrun --show-sdk-path)/usr/include/sys/syscall.h on 2026-08-06.
+        assert_eq!((SYS_GETPID, SYS_KILL, SYS_SIGACTION, SYS_SIGPROCMASK), (20, 37, 46, 48));
+        assert_eq!((SYS_SIGPENDING, SYS_SIGALTSTACK, SYS_SIGSUSPEND, SYS_SIGRETURN), (52, 53, 111, 184));
+        assert_eq!((SYS_PTHREAD_KILL, SYS_PTHREAD_SIGMASK, SYS_SIGWAIT), (328, 329, 330));
+        assert_eq!((SYS_TERMINATE_WITH_PAYLOAD, SYS_ABORT_WITH_PAYLOAD), (520, 521));
+        // sys/signal.h: NSIG == __DARWIN_NSIG == 32; sigset_t is __uint32_t (sys/_types.h:85).
+        assert_eq!((NSIG, SIGABRT, SIG_DFL, SIG_IGN), (32, 6, 0, 1));
+        assert_eq!((SIG_BLOCK, SIG_UNBLOCK, SIG_SETMASK), (1, 2, 3));
+    }
+
+    #[test]
+    fn default_action_classifies_the_three_ignored_signals() {
+        // SIGCHLD=20, SIGURG=16, SIGWINCH=28 default to ignore; everything else terminates.
+        assert_eq!(default_action(20), DefaultAction::Ignore);
+        assert_eq!(default_action(16), DefaultAction::Ignore);
+        assert_eq!(default_action(28), DefaultAction::Ignore);
+        assert_eq!(default_action(SIGABRT), DefaultAction::Terminate);
+        assert_eq!(default_action(9), DefaultAction::Terminate);   // SIGKILL
+        assert_eq!(default_action(11), DefaultAction::Terminate);  // SIGSEGV
+    }
+
+    #[test]
+    fn is_signal_syscall_covers_every_intercepted_number_and_nothing_else() {
+        for n in [37u64, 46, 48, 52, 53, 111, 184, 328, 329, 330, 520, 521] {
+            assert!(is_signal_syscall(n), "{n} must be intercepted");
+        }
+        // getpid is NOT intercepted — it keeps forwarding, and the raise arm's self-check relies on
+        // that: measured, the guest's getpid returns RETRACE's own pid (Task 1 Step 0, answer 2).
+        for n in [20u64, 1, 3, 4, 5, 6, 197, 333] {
+            assert!(!is_signal_syscall(n), "{n} must keep forwarding");
+        }
     }
 
     #[test]
