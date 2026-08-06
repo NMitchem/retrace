@@ -123,12 +123,19 @@ and `SigTable` is pure, self-contained, and testable without a VM, so it does no
 ```rust
 pub enum Disposition { Dfl, Ign, Handler(u64) }   // u64 = guest VA
 
+pub struct SigAction { pub disp: Disposition, pub mask: u32, pub flags: u32 }
+
 pub struct SigTable {
-    disp: [Disposition; NSIG],          // index 1..=31; [0] unused, mirrors signal numbering
-    blocked: u64,                       // bit (sig - 1)
+    disp: [SigAction; NSIG],            // index 1..=31; [0] unused, mirrors signal numbering
+    blocked: u32,                       // bit (sig - 1); u32 because sigset_t is __uint32_t
     altstack: Option<(u64, u64, u64)>,  // (sp, size, flags) — stored, not honoured
 }
 ```
+
+The per-signal entry is a `SigAction`, not a bare `Disposition`, because the `oldact` writeback must
+reproduce the mask and flags the guest previously installed — not just the handler. `blocked` is
+`u32` for the same reason the structs are 24 and 16 bytes: `sigset_t` is `__uint32_t`
+(`sys/_types.h:85`).
 
 `Default` is all-`Dfl`, empty mask, no altstack, which is genuinely correct for a fresh process — so
 there is no seeding step to get wrong. The module owns both struct layouts and the 24-in/16-out
