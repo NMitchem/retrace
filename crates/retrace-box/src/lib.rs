@@ -14,6 +14,19 @@ pub use sig::{
     FRAME_MCONTEXT_OFF, FRAME_SIGINFO_OFF, FRAME_SLACK, FRAME_UCONTEXT_OFF,
 };
 
+/// PSTATE bits a guest may set through its own signal frame: NZCV only.
+///
+/// The frame sits on the GUEST's stack, so `__ss.__cpsr` is guest-writable before `sigreturn`.
+/// Restoring it verbatim into the resume PSTATE would let a guest select its own exception level.
+/// This is the only place in M12 where guest-controlled bytes reach a system register.
+///
+/// Masking to the user bits and forcing EL0t coincide here, which is worth stating rather than
+/// leaving as a coincidence: this guest runs at **EL0t**, whose mode bits are zero (`CPSR = 0` at
+/// load — see `load_static`/`load_dynamic`). So zeroing everything outside NZCV lands exactly on
+/// the guest's own legitimate execution state. A design that ran the guest at any other EL would
+/// need to OR the trusted mode bits back in rather than rely on that.
+pub const PSTATE_USER_MASK: u64 = 0xf000_0000;
+
 pub const TRAMPOLINE_IPA: u64 = 0x0000_4000; // 16 KiB-aligned (hv_vm_map rejects 4 KiB alignment under the default granule)
 pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
 // Dynamic-path constants (M1 static path is untouched). dyld is a PIE MH_DYLINKER at vmaddr 0,
@@ -2402,6 +2415,57 @@ impl Box_ {
 
     /// The saved PSTATE at the current trap (SPSR_EL1) — the sibling of `position()`'s ELR_EL1.
     pub fn spsr(&self) -> u64 { self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap() }
+
+    /// Test/diagnostic accessors for vector and general registers. Present so the M12 delivery
+    /// tests can clobber and observe state without a running guest.
+    pub fn vcpu_set_x(&mut self, n: u32, v: u64) { self.vcpu.set_reg(reg::x(n), v).unwrap(); }
+    pub fn vcpu_set_q(&mut self, n: u32, v: u128) { self.vcpu.set_simd(simd::q(n), v).unwrap(); }
+    pub fn vcpu_get_q(&self, n: u32) -> u128 { self.vcpu.get_simd(simd::q(n)).unwrap() }
+    /// Write raw bytes into guest memory (tests only — the production path is `write_guest`).
+    pub fn poke_guest(&mut self, ipa: u64, bytes: &[u8]) { self.write_guest(ipa, bytes) }
+
+    /// The inverse of [`deliver_signal`](Self::deliver_signal): read the mcontext back out of guest
+    /// memory and resume the interrupted context. Called by BOTH record and replay.
+    ///
+    /// Resumes via `reg::PC`/`reg::CPSR`, exactly as `deliver_signal` enters — the vCPU is parked at
+    /// the `sigreturn` trap and resumes from those registers. A caller must therefore NOT follow
+    /// this with `set_x0_err_and_return`: `sigreturn` does not return a value, and doing so would
+    /// overwrite the `x0` just restored from the frame.
+    pub fn sigreturn_restore(&mut self, uctx_ipa: u64, token: u64) {
+        let expected = sigreturn_token(uctx_ipa);
+        assert_eq!(token, expected,
+            "sigreturn token mismatch: got {token:#x}, expected {expected:#x} for uctx {uctx_ipa:#x}. \
+             The token is a pure function of the ucontext address, so a mismatch means a corrupted \
+             frame or a sigreturn the guest reached without a delivery.");
+
+        let uc = self.read_guest(uctx_ipa, 56);
+        let mask = u32::from_le_bytes(uc[4..8].try_into().unwrap());
+        let mc_ipa = u64::from_le_bytes(uc[48..56].try_into().unwrap());
+        let mc = self.read_guest(mc_ipa, 816);
+        let ts = &mc[16..];
+
+        for i in 0..29u32 {
+            let o = i as usize * 8;
+            self.vcpu.set_reg(reg::x(i), u64::from_le_bytes(ts[o..o + 8].try_into().unwrap())).unwrap();
+        }
+        self.vcpu.set_reg(reg::FP, u64::from_le_bytes(ts[232..240].try_into().unwrap())).unwrap();
+        self.vcpu.set_reg(reg::LR, u64::from_le_bytes(ts[240..248].try_into().unwrap())).unwrap();
+        self.vcpu.set_sys(sysreg::SP_EL0, u64::from_le_bytes(ts[248..256].try_into().unwrap())).unwrap();
+        let pc = u64::from_le_bytes(ts[256..264].try_into().unwrap());
+        let cpsr = u32::from_le_bytes(ts[264..268].try_into().unwrap()) as u64;
+
+        let ns = &mc[288..];
+        for i in 0..32u32 {
+            let o = i as usize * 16;
+            self.vcpu.set_simd(simd::q(i), u128::from_le_bytes(ns[o..o + 16].try_into().unwrap())).unwrap();
+        }
+        self.vcpu.set_reg(reg::FPSR, u32::from_le_bytes(ns[512..516].try_into().unwrap()) as u64).unwrap();
+        self.vcpu.set_reg(reg::FPCR, u32::from_le_bytes(ns[516..520].try_into().unwrap()) as u64).unwrap();
+
+        self.vcpu.set_reg(reg::PC, pc).unwrap();
+        self.vcpu.set_reg(reg::CPSR, cpsr & PSTATE_USER_MASK).unwrap();
+        self.sigtable.set_mask(retrace_arch::SIG_SETMASK, mask);
+    }
 
     /// Enter the guest's handler for `sig`: build the frame, write it, set the entry registers.
     ///

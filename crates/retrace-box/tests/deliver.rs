@@ -10,7 +10,10 @@
 //      `resume_pc` would come back 0 rather than the trapping instruction.
 // So this uses the pattern every other box test uses — load the real static guest and run it to its
 // first syscall — which gives genuine ELR_EL1/SP_EL0/SPSR_EL1 state instead of a hand-set fiction.
-use retrace_box::{Box_, Disposition, SigAction, FRAME_LEN, FRAME_UCONTEXT_OFF, sigreturn_token};
+use retrace_box::{
+    Box_, Disposition, SigAction, FRAME_LEN, FRAME_MCONTEXT_OFF, FRAME_UCONTEXT_OFF,
+    PSTATE_USER_MASK, sigreturn_token,
+};
 use retrace_guest::{parse_macho, HELLO};
 
 const TRAMP: u64 = 0x1_0100; // opaque here: nothing ERETs in this test, so it need not be mapped
@@ -141,4 +144,69 @@ fn on_altstack_is_false_when_the_guest_is_on_its_normal_stack() {
     assert!(!b.on_altstack(), "no alt stack installed at all");
     b.sigtable_mut().set_altstack(Some((0x1_c000, 0x100, 0)));
     assert!(!b.on_altstack(), "installed, but sp is not inside it");
+}
+
+// ---- M12 t5: sigreturn ------------------------------------------------------------------------
+
+#[test]
+fn sigreturn_restores_the_pre_signal_state_including_vectors() {
+    let mut b = boxed();
+    b.vcpu_set_x(7, 0xcafe_f00d);
+    b.vcpu_set_q(8, 0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00);
+    b.sigtable_mut().set_mask(retrace_arch::SIG_SETMASK, 0b0110);
+    b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO, 0));
+    let sp_before = b.regs_snapshot().sp_el0;
+    let pc_before = b.position();
+    let (writes, _) = b.deliver_signal(11, 1, 0, 0, 0);
+    let uctx = writes[0].ipa + FRAME_UCONTEXT_OFF as u64;
+
+    // The handler runs and clobbers everything it is allowed to.
+    b.vcpu_set_x(7, 0xdead_beef);
+    b.vcpu_set_q(8, 0);
+    assert!(b.sigtable().is_blocked(11));
+
+    b.sigreturn_restore(uctx, sigreturn_token(uctx));
+
+    let r = b.regs_snapshot();
+    assert_eq!(r.x[7], 0xcafe_f00d, "x7 restored");
+    assert_eq!(r.sp_el0, sp_before, "sp restored");
+    assert_eq!(r.pc, pc_before, "pc restored to the pre-signal instruction");
+    assert_eq!(b.vcpu_get_q(8), 0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00,
+        "VECTOR state restored — a handler is ordinary compiled code and will use NEON; without \
+         this a handler that RETURNS silently corrupts the guest");
+    assert_eq!(b.sigtable().mask(), 0b0110, "the pre-signal mask is restored from uc_sigmask");
+}
+
+#[test]
+#[should_panic(expected = "sigreturn token mismatch")]
+fn sigreturn_rejects_a_bad_token() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO, 0));
+    let (writes, _) = b.deliver_signal(11, 1, 0, 0, 0);
+    let uctx = writes[0].ipa + FRAME_UCONTEXT_OFF as u64;
+    b.sigreturn_restore(uctx, 0);
+}
+
+// The security-shaped one: the frame is on the GUEST's stack, so the guest can rewrite __cpsr.
+#[test]
+fn sigreturn_sanitizes_pstate_and_cannot_be_asked_for_el1() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO, 0));
+    let (writes, _) = b.deliver_signal(11, 1, 0, 0, 0);
+    let base = writes[0].ipa;
+    let uctx = base + FRAME_UCONTEXT_OFF as u64;
+
+    // Rewrite __ss.__cpsr in guest memory the way a hostile guest would: ask for EL1h with
+    // interrupts masked, plus a legitimate NZCV.
+    let cpsr_ipa = base + FRAME_MCONTEXT_OFF as u64 + 16 + 264;
+    b.poke_guest(cpsr_ipa, &0x8000_03c5u32.to_le_bytes());
+
+    b.sigreturn_restore(uctx, sigreturn_token(uctx));
+    let cpsr = b.regs_snapshot().cpsr;
+    assert_eq!(cpsr & !PSTATE_USER_MASK, 0,
+        "only user-settable bits may survive: the guest must not be able to select an exception \
+         level by writing its own signal frame");
+    assert_eq!(cpsr & 0x8000_0000, 0x8000_0000, "the legitimate N flag still round-trips");
+    // Concretely: mode bits back to EL0t, which is where this guest actually runs (lib.rs:886).
+    assert_eq!(cpsr & 0xf, 0, "EL0t — the guest asked for EL1h (0x5) and did not get it");
 }
