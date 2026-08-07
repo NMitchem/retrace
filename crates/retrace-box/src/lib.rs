@@ -2369,13 +2369,106 @@ impl Box_ {
                     self.syscall_watch_hit = Some((va, w.ipa));
                 }
             }
-            let (hp, avail) = self.host_span(w.ipa)
-                .unwrap_or_else(|| panic!("apply_and_return: write ipa {:#x} outside any mapped region", w.ipa));
-            assert!(w.bytes.len() <= avail,
-                "apply_and_return: write at {:#x} ({} bytes) overruns backing ({} avail)", w.ipa, w.bytes.len(), avail);
-            unsafe { std::ptr::copy_nonoverlapping(w.bytes.as_ptr(), hp, w.bytes.len()); }
+            self.write_guest(w.ipa, &w.bytes);
         }
         self.set_x0_err_and_return(ret, err);
+    }
+
+    /// Copy `bytes` into guest memory at `ipa`. The write path `apply_and_return` uses, minus the
+    /// syscall return — a delivered signal is not a syscall and must not set `x0`.
+    ///
+    /// Deliberately does NOT do the M5 watched-range check: `syscall_watch_hit` names the
+    /// syscall-write path specifically, and a signal frame is not a guest store. Delivery landing on
+    /// a watched range is a separate question from "which syscall wrote here", and conflating them
+    /// would make a watchpoint fire with a syscall's provenance for a write no syscall made.
+    fn write_guest(&mut self, ipa: u64, bytes: &[u8]) {
+        let (hp, avail) = self.host_span(ipa)
+            .unwrap_or_else(|| panic!("write_guest: ipa {ipa:#x} outside any mapped region"));
+        assert!(bytes.len() <= avail,
+            "write_guest at {ipa:#x} ({} bytes) overruns backing ({avail} avail)", bytes.len());
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), hp, bytes.len()); }
+    }
+
+    /// Is the guest currently executing on its alternate signal stack?
+    pub fn on_altstack(&self) -> bool {
+        match self.sigtable.altstack() {
+            Some((sp, size, _)) => {
+                let cur = self.vcpu.get_sys(sysreg::SP_EL0).unwrap();
+                cur >= sp && cur < sp + size
+            }
+            None => false,
+        }
+    }
+
+    /// The saved PSTATE at the current trap (SPSR_EL1) — the sibling of `position()`'s ELR_EL1.
+    pub fn spsr(&self) -> u64 { self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap() }
+
+    /// Enter the guest's handler for `sig`: build the frame, write it, set the entry registers.
+    ///
+    /// Returns `(frame writes, resume_pc)`. Called by BOTH record and replay — that is what makes
+    /// "both sides recompute the same frame" true by construction rather than by discipline.
+    ///
+    /// `esr`/`far` are the guest's own fault syndrome for a fault-derived signal, and 0 for a
+    /// self-raise (no hardware fault happened, and inventing one would be the same lie M11 refused
+    /// when it kept `Event::Signal` out of `Event::Crash`).
+    pub fn deliver_signal(
+        &mut self, sig: u64, si_code: u64, si_addr: u64, esr: u64, far: u64,
+    ) -> (Vec<Region>, u64) {
+        let act = self.sigtable.action(sig);
+        let mut x = [0u64; 29];
+        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+        let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+        let ts = ThreadState {
+            x,
+            fp: self.vcpu.get_reg(reg::FP).unwrap(),
+            lr: self.vcpu.get_reg(reg::LR).unwrap(),
+            // The guest runs at EL0: its stack pointer is SP_EL0, and its pc is ELR_EL1 (the vCPU's
+            // live PC is parked in the trampoline) — the same sources `position()` uses.
+            sp: self.vcpu.get_sys(sysreg::SP_EL0).unwrap(),
+            pc: self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(),
+            cpsr: spsr,
+        };
+        let mut v = [0u128; 32];
+        for (i, vi) in v.iter_mut().enumerate() { *vi = self.vcpu.get_simd(simd::q(i as u32)).unwrap(); }
+        let ns = NeonState {
+            v,
+            fpsr: self.vcpu.get_reg(reg::FPSR).unwrap() as u32,
+            fpcr: self.vcpu.get_reg(reg::FPCR).unwrap() as u32,
+        };
+
+        let (frame_base, on_alt) =
+            choose_frame_base(ts.sp, act, self.sigtable.altstack(), self.on_altstack());
+        let inp = FrameInput {
+            sig, si_code, si_addr, esr, far, ts, ns,
+            mask: self.sigtable.mask(),   // the PRE-signal mask: what sigreturn restores
+            act, frame_base,
+            // Fed back from choose_frame_base rather than recomputed, so the frame's uc_onstack
+            // cannot disagree with the stack the frame was actually placed on.
+            on_alt,
+        };
+        let (bytes, entry) = build_frame(&inp);
+        self.write_guest(frame_base, &bytes);
+
+        // Block the signal for the handler's duration, unless SA_NODEFER.
+        let mut newmask = self.sigtable.mask() | act.mask;
+        if act.flags & retrace_arch::SA_NODEFER == 0 { newmask |= 1 << (sig - 1); }
+        self.sigtable.set_mask(retrace_arch::SIG_SETMASK, newmask);
+        if act.flags & retrace_arch::SA_RESETHAND != 0 {
+            self.sigtable.set_action(sig, SigAction { disp: Disposition::Dfl, ..act });
+        }
+
+        for (i, xi) in entry.x.iter().enumerate() {
+            self.vcpu.set_reg(reg::x(i as u32), *xi).unwrap();
+        }
+        self.vcpu.set_sys(sysreg::SP_EL0, entry.sp).unwrap();
+        // The mirror of `set_x0_err_and_return`: the vCPU resumes at reg::PC, so the trampoline
+        // address goes THERE, and CPSR comes from SPSR_EL1 so the handler runs at EL0. Writing
+        // ELR_EL1 instead would be inert — nothing ERETs — and the guest would resume at the
+        // trampoline it trapped into, never reaching the handler.
+        self.vcpu.set_reg(reg::PC, entry.pc).unwrap();
+        self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
+
+        (vec![Region { ipa: frame_base, bytes }], ts.pc)
     }
 
     /// Take (and clear) the syscall-write watch hit recorded by `apply_and_return` this event.
