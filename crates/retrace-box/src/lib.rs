@@ -8,7 +8,11 @@ pub use cache::AuthSlot;
 use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
-pub use sig::{decode_act, encode_oldact, Disposition, SigAction, SigTable};
+pub use sig::{
+    build_frame, choose_frame_base, decode_act, encode_oldact, sigreturn_token, Disposition,
+    EntryRegs, FrameInput, NeonState, SigAction, SigTable, ThreadState, FRAME_LEN,
+    FRAME_MCONTEXT_OFF, FRAME_SIGINFO_OFF, FRAME_SLACK, FRAME_UCONTEXT_OFF,
+};
 
 pub const TRAMPOLINE_IPA: u64 = 0x0000_4000; // 16 KiB-aligned (hv_vm_map rejects 4 KiB alignment under the default granule)
 pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
