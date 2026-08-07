@@ -384,7 +384,15 @@ fn main() {
     // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
     // proving the guest keeps running (the branch the terminal gate cannot reach). killother:
     // kill(1, SIGKILL) — the safety boundary; the recorder must abort rather than signal launchd.
-    for name in ["raise", "sigign", "killother"] {
+    // M12 delivery fixtures. Freestanding with their OWN trampolines, so they test retrace's entry
+    // contract without libc's _sigtramp in the way. sigframe: validates every entry register, one
+    // exit code per failed check. segvcatch: faults, and its handler advances __ss.__pc past the
+    // store so sigreturn resuming MUTATED state is what lets it finish. altstack: SA_ONSTACK, and
+    // the handler checks its own sp is inside the alt stack. vecsurvive: the handler clobbers v8,
+    // so only a real vector restore exits 0. blockedfault: faults with SIGSEGV blocked — the
+    // fail-loud fixture, which never exits cleanly by design.
+    for name in ["raise", "sigign", "killother",
+                 "sigframe", "segvcatch", "altstack", "vecsurvive", "blockedfault"] {
         let src = format!("{}/asm/{name}.s", env!("CARGO_MANIFEST_DIR"));
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");
