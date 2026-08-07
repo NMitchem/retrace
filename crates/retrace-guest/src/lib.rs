@@ -131,6 +131,20 @@ pub const RAISE: &str = concat!(env!("OUT_DIR"), "/raise");
 pub const SIGIGN: &str = concat!(env!("OUT_DIR"), "/sigign");
 /// M11: `kill(1, SIGKILL)` — the safety boundary the recorder must refuse.
 pub const KILLOTHER: &str = concat!(env!("OUT_DIR"), "/killother");
+
+// M12 delivery fixtures. Each supplies its OWN trampoline, so they exercise retrace's entry
+// contract directly rather than through libc's `_sigtramp`.
+/// M12: validates every entry register retrace promises; a distinct exit code per failed check.
+pub const SIGFRAME: &str = concat!(env!("OUT_DIR"), "/sigframe");
+/// M12: faults, and the handler advances `__ss.__pc` past the store — so continuing at all proves
+/// `sigreturn` restored MUTATED state rather than the state captured at delivery.
+pub const SEGVCATCH: &str = concat!(env!("OUT_DIR"), "/segvcatch");
+/// M12: `SA_ONSTACK` + `sigaltstack`; the handler checks its own `sp` is inside the alt stack.
+pub const ALTSTACK: &str = concat!(env!("OUT_DIR"), "/altstack");
+/// M12: the handler clobbers `v8`, so only a real vector restore lets this exit 0.
+pub const VECSURVIVE: &str = concat!(env!("OUT_DIR"), "/vecsurvive");
+/// M12: faults with `SIGSEGV` blocked — the fail-loud fixture; it never exits cleanly by design.
+pub const BLOCKEDFAULT: &str = concat!(env!("OUT_DIR"), "/blockedfault");
 pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
 pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
 
