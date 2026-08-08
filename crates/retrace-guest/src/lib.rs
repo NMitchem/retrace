@@ -103,6 +103,9 @@ pub const EXECMAP_FIXTURE: &str = concat!(env!("OUT_DIR"), "/execmap_fixture.bin
 pub const MACHMSG: &str = concat!(env!("OUT_DIR"), "/machmsg");
 pub const HELLO_DYN: &str = concat!(env!("OUT_DIR"), "/hello_dyn");
 pub const CRASHY: &str = concat!(env!("OUT_DIR"), "/crashy");
+/// M12: catches SIGSEGV through Apple's real `_sigtramp` (libc's `sigaction()` installs its own
+/// `sa_tramp`) — the only guest that exercises the trampoline that actually ships.
+pub const SIGCATCH_DYN: &str = concat!(env!("OUT_DIR"), "/sigcatch_dyn");
 pub const DYLD_PATH: &str = "/usr/lib/dyld";
 pub const STRIP47: &str = concat!(env!("OUT_DIR"), "/strip47");
 pub const BFAMSTRIP: &str = concat!(env!("OUT_DIR"), "/bfamstrip");
@@ -125,12 +128,29 @@ pub const CLOSEFD_DYN: &str = concat!(env!("OUT_DIR"), "/closefd_dyn");
 pub const FDTABLE_DYN: &str = concat!(env!("OUT_DIR"), "/fdtable_dyn");
 /// M11 headline: a full-std Rust binary that `panic!()`s into `abort()`/SIGABRT (`-C panic=abort`).
 pub const PANICKY: &str = concat!(env!("OUT_DIR"), "/panicky");
+/// M12 headline: a stock full-`std` Rust binary that faults on a wild pointer, so libstd's own
+/// SIGSEGV handler runs, resets to `SIG_DFL` and returns, and the re-executed store kills it.
+pub const SEGVY: &str = concat!(env!("OUT_DIR"), "/segvy");
 /// M11: `kill(getpid(), SIGABRT)` — the terminal raise mechanism.
 pub const RAISE: &str = concat!(env!("OUT_DIR"), "/raise");
 /// M11: `SIG_IGN` then raise then `write("ok\n")` — the non-terminal branch.
 pub const SIGIGN: &str = concat!(env!("OUT_DIR"), "/sigign");
 /// M11: `kill(1, SIGKILL)` — the safety boundary the recorder must refuse.
 pub const KILLOTHER: &str = concat!(env!("OUT_DIR"), "/killother");
+
+// M12 delivery fixtures. Each supplies its OWN trampoline, so they exercise retrace's entry
+// contract directly rather than through libc's `_sigtramp`.
+/// M12: validates every entry register retrace promises; a distinct exit code per failed check.
+pub const SIGFRAME: &str = concat!(env!("OUT_DIR"), "/sigframe");
+/// M12: faults, and the handler advances `__ss.__pc` past the store — so continuing at all proves
+/// `sigreturn` restored MUTATED state rather than the state captured at delivery.
+pub const SEGVCATCH: &str = concat!(env!("OUT_DIR"), "/segvcatch");
+/// M12: `SA_ONSTACK` + `sigaltstack`; the handler checks its own `sp` is inside the alt stack.
+pub const ALTSTACK: &str = concat!(env!("OUT_DIR"), "/altstack");
+/// M12: the handler clobbers `v8`, so only a real vector restore lets this exit 0.
+pub const VECSURVIVE: &str = concat!(env!("OUT_DIR"), "/vecsurvive");
+/// M12: faults with `SIGSEGV` blocked — the fail-loud fixture; it never exits cleanly by design.
+pub const BLOCKEDFAULT: &str = concat!(env!("OUT_DIR"), "/blockedfault");
 pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
 pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
 

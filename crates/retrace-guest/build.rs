@@ -182,6 +182,18 @@ fn main() {
         .status().expect("clang crashy");
     assert!(status.success(), "crashy guest build failed");
 
+    // sigcatch_dyn: the M12 guest that catches SIGSEGV through APPLE's _sigtramp (libc's
+    // sigaction() installs its own sa_tramp). Same recipe as crashy — real toolchain, links
+    // libSystem, no -O so the volatile faulting store survives — and it faults at the same
+    // 0x4000_DEAD_0000, a stage-1 fault that reaches Stop::Fault.
+    let src = format!("{}/c/sigcatch_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sigcatch_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang sigcatch_dyn");
+    assert!(status.success(), "sigcatch_dyn guest build failed");
+
     // argv_echo: prints argv[1]. The M9 argv fixture — a real dynamic guest, same recipe as
     // hello_dyn (real toolchain, links libSystem, plain -arch arm64).
     let src = format!("{}/c/argv_echo.c", env!("CARGO_MANIFEST_DIR"));
@@ -380,11 +392,32 @@ fn main() {
         .status().expect("rustc panicky");
     assert!(status.success(), "panicky guest build failed");
 
+    // segvy: M12's headline — a stock full-std Rust binary that faults on a wild pointer, so
+    // libstd's OWN SIGSEGV handler runs, resets to SIG_DFL and returns, and the re-executed store
+    // kills it. Same recipe as panicky MINUS -C panic=abort: a hardware fault is not a panic, so
+    // no flag is needed to reach a signal here.
+    let src = format!("{}/rs/segvy.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/segvy");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc segvy");
+    assert!(status.success(), "segvy guest build failed");
+
     // M11 signal guests. raise: kill(getpid(), SIGABRT) — the terminal mechanism, and it exercises
     // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
     // proving the guest keeps running (the branch the terminal gate cannot reach). killother:
     // kill(1, SIGKILL) — the safety boundary; the recorder must abort rather than signal launchd.
-    for name in ["raise", "sigign", "killother"] {
+    // M12 delivery fixtures. Freestanding with their OWN trampolines, so they test retrace's entry
+    // contract without libc's _sigtramp in the way. sigframe: validates every entry register, one
+    // exit code per failed check. segvcatch: faults, and its handler advances __ss.__pc past the
+    // store so sigreturn resuming MUTATED state is what lets it finish. altstack: SA_ONSTACK, and
+    // the handler checks its own sp is inside the alt stack. vecsurvive: the handler clobbers v8,
+    // so only a real vector restore exits 0. blockedfault: faults with SIGSEGV blocked — the
+    // fail-loud fixture, which never exits cleanly by design.
+    for name in ["raise", "sigign", "killother",
+                 "sigframe", "segvcatch", "altstack", "vecsurvive", "blockedfault"] {
         let src = format!("{}/asm/{name}.s", env!("CARGO_MANIFEST_DIR"));
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");

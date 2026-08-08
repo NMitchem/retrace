@@ -1732,6 +1732,13 @@ carries forward almost verbatim:
   frames, the `__sigtramp` ABI, `ucontext`/`mcontext` layout, and `sigreturn`(184) — M12, and the
   larger half of the problem. `hello_rust` now genuinely installs `SIGSEGV`/`SIGBUS` handlers, so the
   first guest that actually faults will hit the `Handler` assert rather than a plausible lie.
+
+  > **Corrected by M12 (left in place rather than overwritten, because it was this milestone's
+  > premise).** That last sentence was false when written. The `Handler` assert existed only on the
+  > *self-raise* arm; `Stop::Fault` appended `Event::Crash` and broke without ever consulting the
+  > `SigTable`. A guest that installed a `SIGSEGV` handler and then faulted was recorded as a
+  > terminal crash with its handler silently skipped — the plausible lie, not the assert. See the
+  > M12-signal-delivery section below.
 - **`__pthread_kill`'s thread-port operand is wired but ungated.** 328 fires in no *freestanding*
   gate guest, so there was no observed port to validate against; its coverage rides entirely on
   `panic_e2e`. The guest has one thread on one vCPU, so any port it can name is that thread — ungated
@@ -1750,3 +1757,196 @@ carries forward almost verbatim:
   `PROT_EXEC`**, `guest_munmap`'s wholesale-drop defect, threads, and arm64e dynamic guests.
 
 See `docs/superpowers/specs/2026-08-05-retrace-m11-signals-design.md`.
+
+## Status: M12-signal-delivery — 🎉 the guest's handlers actually run
+
+**M11's named boundary is closed.** A signal with a handler installed no longer asserts: retrace
+builds the signal frame, enters the guest's handler through the real `sa_tramp` contract, and
+services `sigreturn`(184) to put the guest back. Both causes route through the same disposition
+decision — a signal the guest **raises on itself**, and a **hardware fault** its own instruction
+produced. **`just gate`: 296 passed / 0 failed / 0 ignored** (90 test binaries), clippy
+clean, nothing `#[ignore]`d. `segv_rust_e2e` joins the headline set green and un-ignored; no gate was
+parked this milestone.
+
+**The headline.** A stock full-`std` Rust binary (`rs/segvy.rs`) stores through a wild pointer.
+libstd's **own** `SIGSEGV` handler runs, compares `si_addr` against the guard range it installed,
+concludes this is not a stack overflow, resets the disposition to `SIG_DFL` and **returns**; the
+store re-executes, faults again, and the default action terminates the guest at 139. Recorded and
+replayed bit-for-bit, twice. One run exercises delivery, Apple's trampoline, `siginfo`, `sigreturn`,
+a mid-handler `sigaction`, a second fault, and M11's terminal path.
+
+**Exit 139 is necessary and nowhere near sufficient, and the gate says so.** An *uncaught* fault
+exits 139 too — that is exactly what M6's `crashy_e2e` asserts — so a gate resting on the exit code
+would have passed unchanged with M12's routing entirely broken. The gate asserts on the trace
+instead: exactly one `SignalDelivery` with `sig == 11` whose `handler` is the VA libstd actually
+installed, a `sigreturn` *after* it (the handler returned rather than aborting), a terminal
+`Event::Crash` after that, and `resume_pc == ` the crash `pc` (the store was re-executed, not
+skipped). The installed VA is **learned, not hardcoded**, and learning it is itself a test: the
+handler is not a datum in the trace — `sigaction`'s event carries a *pointer* to the guest's
+`struct __sigaction` — so the gate seeks a `ReplaySession` to that landmark and reads `sa_handler`
+out of reconstructed guest memory.
+
+**A correction to the M11 Status section, because this milestone's premise rested on it.** M11 wrote
+that "the first guest that actually faults will hit the `Handler` assert rather than a plausible
+lie." That was not what the code did. The assert existed only on the *self-raise* arm; `Stop::Fault`
+appended `Event::Crash` and broke without ever consulting the `SigTable`. So a guest that installed a
+`SIGSEGV` handler and then faulted was recorded as a terminal crash with its handler silently
+skipped, and nothing said so. M11 itself measured that `hello_rust` installs real `SIGSEGV`/`SIGBUS`
+handlers at startup, so the wrong answer was live rather than hypothetical.
+
+**The measured facts that shaped it** (`spikes/sigabi.c`, `spikes/sigtramp.c`, `spikes/sigraisex0.c`
+— compiled and run natively, not recalled):
+
+- **The frame is 976 bytes at the new `sp`**: `siginfo_t`(104) ‖ `ucontext_t`(56) ‖ `mcontext64`(816),
+  where `uc_mcontext` is a **pointer** to `+160`. `sp == x3 ==` the frame base, `siginfo` at offset 0.
+  A design assuming one flat struct would have been wrong by 816 bytes.
+- **The entry contract**: `x0`=the catcher, `x1`=infostyle, `x2`=the signal, `x3`=`siginfo_t*`,
+  `x4`=`ucontext_t*`, `x5`=the `sigreturn` token. The host's token is process-randomized; retrace
+  synthesizes the whole frame and so owns it, using a **constant** folded with the ucontext address —
+  the fixed-PAC-keys posture. Nondeterminism never gets an opening, and validation is a free
+  fail-loud on a corrupted frame.
+- **`_sigtramp` was disassemblable out of the shared cache** (spec risk R2, resolved rather than
+  worked around). It forwards `x3`/`x4` verbatim, reads **no** frame field, saves and restores the
+  kernel's `x5` across the handler call, and **hardcodes infostyle `0x1e` into `sigreturn`'s second
+  argument** regardless of what the kernel passed. retrace's `sigreturn` arm ignoring `args[1]` is
+  therefore validated, not merely convenient.
+- **infostyle without `SA_SIGINFO` is `0x1`** (R3) — measured, not guessed; the layout is otherwise
+  identical. The `build_frame` assert cites it as measured, because shipping "unmeasured" in an
+  assert message after measuring it would ship a lie.
+- **R1 cleared before the arm was written**: `crashy` installs no `SIGSEGV`/`SIGBUS` handler before
+  faulting (none in source; zero `num=46` in a live trace), so M6's `crashy_e2e` was never at risk of
+  flipping from `Crash` to delivery. M11's R3 treatment, applied again.
+
+**What driving it actually found — five defects that would have shipped broken behaviour.**
+Twenty-three plan defects surfaced across eleven tasks; **not one was found by reading the plan** —
+every single one came from executing it. The five that mattered:
+
+1. **Delivery would never have entered the handler.** The plan said to set `ELR_EL1` to the
+   trampoline, "the mirror of `set_x0_err_and_return`". Backwards: that function *reads* `ELR_EL1`
+   and *writes* `reg::PC`/`reg::CPSR`. Nothing `ERET`s — the VMM parks at the trap and resumes via
+   `reg::PC` — so writing `ELR_EL1` is inert, and the plan omitted `CPSR` entirely. Falsified by
+   implementing the plan's version and running it rather than by arguing: the guest entered `0x4404`,
+   **inside the exception vector table**, with the stale parked `CPSR` `0x3C5` (EL1h) instead of the
+   guest's genuine EL0t. The plan contradicted its own test, and the test — written against observed
+   behaviour — was the better evidence.
+2. **`uc_onstack` would have lied on the alt-stack path**, telling a handler it was *not* on its
+   alternate stack while it was. Invisible until a real guest read it back with
+   `sigaltstack(NULL,&old)` from inside a handler.
+3. **A caught self-raise reported itself to the guest as failed.** `deliver_signal` reads the frame's
+   registers live, so it captured `x0` = the pid passed to `kill()` rather than the syscall's return
+   value. Measured with a new probe: the kernel snapshots the context *after* completing the syscall
+   return (`kill()` returned 0, frame `x0` = 0, and `PSTATE.C` did not survive while `Z` did). Every
+   freestanding fixture overwrites `x0` before observing it, so no gate guest could have caught this
+   — it would have first bitten under real libc as an invented error path, the quiet shape rather
+   than the loud one.
+4. **The replay-side `sigreturn` mirror as planned would have clobbered the registers it had just
+   restored**, by running `apply_and_return` after the hook.
+5. **A static guest could not execute a single NEON instruction — and that asymmetry predates M12 by
+   eleven milestones.** `load_with_pac`, the static *record* path, never set `CPACR_EL1.FPEN`, while
+   `restore()` — which every *replay* goes through — always has, as do `load_dynamic` and
+   `from_checkpoint`. So a static guest using a vector register would **fail to record while
+   replaying fine**: exactly the class symmetry rule 1 exists to prevent. Latent since M0 because no
+   static fixture used a vector register until `vecsurvive` needed one. One line, matching the three
+   existing sites.
+
+The headline gate itself then failed twice before it passed, and both were the plan's test rather
+than the mechanism:
+
+- **It read the `sigaction` struct one landmark too early.** A coordinate `(N, 0)` is the state after
+  `N` events have been *consumed*, so event `N` is still to come and the guest sits at the **start**
+  of the window leading to it — before the stores that fill `struct __sigaction` have run. The
+  alarming reading was that replay's memory reconstruction disagreed with record's at the same
+  address, which would have been a real seek defect; record reads that identical `args[1]`. Falsified
+  by printing both coordinates: at `(li, 0)` the struct reads `handler=0x4000, mask=0x27ff7a8` — a
+  *stack address* sitting in the mask field, which is what uninitialized memory looks like — and at
+  `(li + 1, 0)` it reads `handler=0x10001fa48, flags=0x441`, matching the delivery exactly. retrace
+  was right at every step.
+- **It expected the wrong terminal event.** The plan asserted `Event::Signal`; a fault-derived death
+  whose disposition is no longer a handler goes down M6's `Event::Crash` path byte-for-byte
+  unchanged, because it really is a fault and the hardware really did produce the ESR. Recording it
+  as a `Signal` would be the exact mirror of the lie M11 refused when it declined to fold
+  `Event::Signal` into `Crash`.
+
+And one that is not a defect but a new shape: **the first mid-run two-event landmark pair.** A caught
+raise writes `Syscall` *then* `SignalDelivery` at a single stop, so the coordinate between them names
+a position the guest never occupies — the syscall is completed and the frame written as one
+indivisible transition. `advance_to_landmark`'s `while self.idx < n` would have overshot and returned
+`Ok`: a debugger seek silently at the wrong position. Now a named `Divergence`, with a test that also
+pins that the landmark *after* the pair still seeks, so the guard refuses exactly one coordinate
+rather than breaking seeks past deliveries.
+
+**The gate set.** The mechanism is proven by freestanding asm guests that supply their **own**
+trampoline, deliberately, so they test retrace's entry contract with libc out of the way: `sigframe`
+(the `x0..x5` and `sp` contract, six named fields with six distinct exit codes), `segvcatch` (the
+handler advances `__ss.__pc` and returns — the only gate proving `sigreturn` restores *mutated*
+state), `altstack` (`SA_ONSTACK` honoured, the handler asserting its own `sp` lies inside the
+alternate stack), `vecsurvive` (a known value in a vector register survives the round trip), and
+`blockedfault` (fail-loud). `altstack` is mandatory precisely *because* the headline does not prove
+alt-stack handling — a wild-pointer fault runs perfectly well on the main stack, so `SA_ONSTACK`
+could be ignored entirely and the headline would still pass. That is honest-gate discipline applied
+to a gate that passes. `sigcatch_dyn_e2e` is then the only gate that runs through **Apple's real
+`_sigtramp`**, since libc's `sigaction()` overwrites `sa_tramp` with its own no matter what the
+caller puts there. `crashy_e2e` is unchanged: an *uncaught* fault is still an `Event::Crash`.
+
+**The determinism posture is standard symmetric** — record puts the frame bytes in `writes`, replay
+recomputes them through the *same* `deliver_signal` and byte-compares before applying. Both sides
+call one implementation, so "record and replay recompute identically" is true by construction rather
+than by discipline. That mirror is load-bearing and it is proven so: drop replay's
+`complete_syscall_before_delivery` and it fails with `first differing byte at frame+176: recomputed
+0xa1 != recorded 0x00` — `__ss.__x[0]`, the low byte of the pid. The diagnostic names the field
+because reporting only lengths and IPAs would be useless when both frames are 976 bytes at the same
+address, which is the only mismatch that can occur.
+
+**Delivery is a first-class trace event, not below-the-trace emulation.** Symmetry rule 2 would
+otherwise suggest hiding it inside `Box_::run()`, but rule 2's precedents (the timebase MRS, the
+Apple-IMPDEF undef-MRS, the B-family FPAC strip) are *instruction* emulations — micro, high-frequency,
+semantically invisible. Entering a handler is a *control transfer*: macro, rare, and the loudest
+thing that happens in a run. "Rewind to where the signal was delivered" is a query a reverse debugger
+should answer, so `the_delivery_is_a_seekable_landmark` tests the payoff rather than claiming it.
+`TRACE_MAGIC` `0x0005`→`0x0006`; no fixture is checked in, so nothing was invalidated.
+
+**The new boundary: `PROT_NONE` enforcement, and it is now the top deferred item.**
+`commit_reserved_page` silently demand-commits any page inside a tracked reservation, and `prot` is
+ignored except `PROT_EXEC`. libstd's `install_main_guard` maps its stack-overflow guard page
+`PROT_NONE MAP_FIXED` — so **in the guest that page does not guard**, and a Rust stack overflow grows
+straight through it instead of faulting. That is why the headline guest uses a wild pointer rather
+than the stack overflow that would otherwise have been the obvious choice. Making it fault needs real
+page-table permissions plus a fault path that separates "reserved and committable" from "reserved
+`PROT_NONE`, must fault" — a milestone's worth of work, and the obvious M13.
+
+Also unmodelled and fail-loud rather than guessed, each named at the point it asserts: **a blocked
+synchronous fault** (POSIX leaves it undefined and Darwin force-delivers; M11 models no pending set,
+so guessing would be a plausible lie), **a fault taken inside a handler** (nested delivery), and
+**`sigreturn` with a bad token or one asking for PSTATE mode bits**. `PSTATE` is sanitized on
+restore: `cpsr` comes back from a frame in guest-*writable* memory, so the restore masks to
+user-settable flags and never touches mode — the only place in M12 where guest-controlled bytes reach
+a system register. **`SA_RESTART` is unreachable by construction** (M12 delivers only synchronously,
+at a fault or a self-raise, and never interrupts a blocking syscall) and is documented rather than
+implemented.
+
+Everything else from M11 carries forward unchanged: a **pending signal set** is still unmodelled (so
+`sigpending` returning empty stays true by construction), `sigsuspend`(111)/`__sigwait`(330)/
+`terminate_with_payload`(520)/`abort_with_payload`(521) remain asserts, `__pthread_kill`'s thread-port
+operand is wired but ungated, **`dup2` fail-loud**, **`fcntl(F_DUPFD)` unmodelled and *not*
+fail-loud**, guest stdin is still retrace's, `RLIMIT_NOFILE` unenforced, `guest_munmap`'s
+wholesale-drop defect, **threads**, **asynchronous signals from outside the guest** (nondeterministic
+by nature — they need an explicit injection model), and **arm64e guests**, whose frame thread-state
+is PAC-signed.
+
+**One measured property that is not M12's, recorded so it is not rediscovered painfully.** The
+**event count of a recording is not reproducible across runs**: `segvy` produced 258/262/263/268
+events over five recordings of the same guest — same exit, same stdout, same structure, shifted
+wholesale. A control run attributes it rather than assuming: **`hello_rust`, a headline gate green
+since M8 and untouched by this milestone, varies too** (257/257/258). So this is pre-existing, and
+presumably libmalloc's entropy-derived placement (cf. M2-carveout). It costs nothing today — no gate
+asserts event counts, replay is always against one specific trace, and `segv_rust_e2e` asserts
+structure only, verified stable over three consecutive runs — but it bounds what any
+recording-against-recording oracle can ever check for a dynamic guest, which is a sharper limit than
+M11's "these guests call `getpid`" already implied.
+
+A follow-up noted rather than done: `vecsurvive` is now the only coverage for static-guest FP/SIMD,
+and its *name* says it is about signals. If `CPACR` regresses, a signal test fails. The failure text
+names `EC=0x07`, so it is diagnosable, but a dedicated one-instruction static fixture would separate
+the two mechanisms the way `sigign`/`sigraise` separate theirs.
+
+See `docs/superpowers/specs/2026-08-06-retrace-m12-signal-delivery-design.md`.

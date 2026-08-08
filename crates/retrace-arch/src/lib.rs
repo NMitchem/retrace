@@ -250,6 +250,87 @@ pub fn is_signal_syscall(num: u64) -> bool {
     )
 }
 
+// ---- M12-signal-delivery ---------------------------------------------------------------------
+// Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here
+// was read out of the live SDK by spikes/sigabi.c, not from memory.
+pub const SIGILL: u64 = 4;
+pub const SIGTRAP: u64 = 5;
+pub const SIGFPE: u64 = 8;
+pub const SIGBUS: u64 = 10;
+pub const SIGSEGV: u64 = 11;
+
+pub const SEGV_MAPERR: u64 = 1;
+pub const SEGV_ACCERR: u64 = 2;
+pub const BUS_ADRALN: u64 = 1;
+pub const BUS_ADRERR: u64 = 2;
+pub const BUS_OBJERR: u64 = 3;
+pub const ILL_ILLOPC: u64 = 1;
+pub const TRAP_BRKPT: u64 = 1;
+/// `si_code` a kernel-synthesized signal never has: it marks one raised by `kill`/`pthread_kill`
+/// instead of a hardware trap. Not yet consumed by `signal_of_esr` (that function only ever sees a
+/// fault ESR), but belongs beside its `SEGV_`/`BUS_`/`ILL_`/`TRAP_` siblings rather than being added
+/// piecemeal later.
+pub const SI_USER: u64 = 0x10001;
+
+pub const SA_ONSTACK: u32 = 0x1;
+pub const SA_RESTART: u32 = 0x2;
+pub const SA_RESETHAND: u32 = 0x4;
+pub const SA_NODEFER: u32 = 0x10;
+pub const SA_SIGINFO: u32 = 0x40;
+
+pub const SS_ONSTACK: u64 = 0x1;
+pub const SS_DISABLE: u64 = 0x4;
+
+/// The `infostyle` the kernel passes in `x1` on `sa_tramp` entry for an `SA_SIGINFO` handler.
+/// Measured as `0x1e` by `spikes/sigtramp.c`; `UC_FLAVOR` is xnu's name for it.
+pub const UC_FLAVOR: u64 = 30;
+
+/// Classify a guest fault into the `(signal, si_code)` a real kernel would deliver.
+///
+/// Pure: a function of the ESR alone. The DFSC (`ISS[5:0]`) distinguishes "nothing is mapped there"
+/// (translation fault → `SEGV_MAPERR`) from "mapped, but not for that" (permission / access-flag
+/// fault → `SEGV_ACCERR`).
+///
+/// **A deliberate divergence from one host observation.** `spikes/sigtramp.c` recorded the host
+/// delivering `SEGV_ACCERR` for a store to a wholly unmapped address, where the DFSC says
+/// `MAPERR`. The host's answer reflects its own VM regime (a Mach protection failure on a submap
+/// retrace does not reproduce); the guest's fault is described completely by its ESR, so the ESR is
+/// what retrace derives from. Nothing in the gate set depends on the choice — libstd keys on
+/// `si_addr` — which is exactly why it is made deliberately here rather than by accident.
+pub fn signal_of_esr(esr: u64) -> (u64, u64) {
+    let ec = (esr >> 26) & 0x3f;
+    match ec {
+        // Instruction / data abort from a lower EL: the guest touched something it could not.
+        0x20 | 0x24 => match esr & 0x3f {
+            0x04..=0x07 => (SIGSEGV, SEGV_MAPERR), // translation fault, levels 0..3
+            0x08..=0x0b => (SIGSEGV, SEGV_ACCERR), // access-flag fault
+            0x0c..=0x0f => (SIGSEGV, SEGV_ACCERR), // permission fault
+            0x10..=0x13 => (SIGBUS, BUS_OBJERR),   // synchronous external abort
+            0x21 => (SIGBUS, BUS_ADRALN),          // alignment fault
+            // Deliberately NOT a panic, unlike the outer EC match below — and that asymmetry is
+            // the point, not an inconsistency. EC alone already told us this is an abort, so the
+            // SIGNAL is settled (SIGSEGV); an unenumerated DFSC only leaves `si_code` uncertain,
+            // and `si_code` is a field nothing in the gate set reads (libstd's SIGSEGV handling
+            // keys on `si_addr`, never `si_code`). Once a later task wires this into every stage-1
+            // guest fault — including ones that would otherwise record as an uncaught
+            // `Event::Crash` — panicking here would crash the RECORDER over an exotic-but-still-
+            // recordable guest fault, to buy precision in a field nothing consumes. So: SIGSEGV
+            // with the closest access-error code, not a fail-loud abort.
+            _ => (SIGSEGV, SEGV_ACCERR),
+        },
+        0x26 => (SIGBUS, BUS_ADRALN),  // SP alignment fault
+        0x00 | 0x0e => (SIGILL, ILL_ILLOPC), // unknown reason / illegal execution state
+        0x3c => (SIGTRAP, TRAP_BRKPT), // BRK instruction
+        // Unlike the DFSC fallback above, THIS one stays fail-loud: an unmodelled EC means retrace
+        // cannot even name which signal this is, not merely which si_code — there is nothing
+        // "closest" to default to without risking a plausible lie about the signal itself.
+        _ => panic!(
+            "signal_of_esr: EC {ec:#x} (esr={esr:#x}) has no modelled signal mapping. It reached \
+             the fault path, so it is a real guest fault retrace cannot name — add the class here \
+             deliberately rather than defaulting it to SIGSEGV, which would be a plausible lie."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +487,75 @@ mod tests {
         assert_eq!(ec_of(0x20u64 << 26), Ec::InstrAbort);
         assert_eq!(ec_of(0x21u64 << 26), Ec::InstrAbort);
         assert_eq!(ec_of(0x24u64 << 26), Ec::DataAbort);
+    }
+
+    #[test]
+    fn signal_of_esr_maps_the_fault_classes_by_dfsc() {
+        // EC 0x24 = data abort from a lower EL. DFSC lives in ISS[5:0].
+        // 0b0001LL (0x04..0x07) = translation fault  -> SEGV_MAPERR (nothing is mapped there)
+        assert_eq!(signal_of_esr(0x9200_0006), (SIGSEGV, SEGV_MAPERR), "translation fault, level 2");
+        assert_eq!(signal_of_esr(0x9200_0005), (SIGSEGV, SEGV_MAPERR), "translation fault, level 1");
+        // 0b0011LL (0x0C..0x0F) = permission fault -> SEGV_ACCERR (mapped, but not like that)
+        assert_eq!(signal_of_esr(0x9200_000f), (SIGSEGV, SEGV_ACCERR), "permission fault, level 3");
+        // 0b0010LL (0x08..0x0B) = access-flag fault -> also an access error
+        assert_eq!(signal_of_esr(0x9200_0009), (SIGSEGV, SEGV_ACCERR), "access flag fault");
+        // 0x21 = alignment fault -> SIGBUS
+        assert_eq!(signal_of_esr(0x9200_0021), (SIGBUS, BUS_ADRALN), "alignment fault");
+        // 0x10..0x13 = synchronous external abort -> SIGBUS/BUS_OBJERR
+        assert_eq!(signal_of_esr(0x9200_0010), (SIGBUS, BUS_OBJERR), "external abort");
+    }
+
+    #[test]
+    fn signal_of_esr_maps_instruction_aborts_the_same_way() {
+        // EC 0x20 = instruction abort from a lower EL; same DFSC encoding.
+        assert_eq!(signal_of_esr(0x8200_0006), (SIGSEGV, SEGV_MAPERR));
+        assert_eq!(signal_of_esr(0x8200_000f), (SIGSEGV, SEGV_ACCERR));
+    }
+
+    #[test]
+    fn signal_of_esr_maps_the_non_abort_classes() {
+        assert_eq!(signal_of_esr(0x9800_0000), (SIGBUS, BUS_ADRALN), "EC 0x26: SP alignment");
+        assert_eq!(signal_of_esr(0x0000_0000), (SIGILL, ILL_ILLOPC), "EC 0x00: unknown/undefined");
+        assert_eq!(signal_of_esr(0x3800_0000), (SIGILL, ILL_ILLOPC), "EC 0x0e: illegal execution state");
+        assert_eq!(signal_of_esr(0xf000_0000), (SIGTRAP, TRAP_BRKPT), "EC 0x3c: BRK");
+    }
+
+    // The measured ESR from spikes/sigtramp.c, end to end. A store to an unmapped page.
+    #[test]
+    fn signal_of_esr_classifies_the_measured_probe_esr() {
+        assert_eq!(signal_of_esr(0x9200_0046), (SIGSEGV, SEGV_MAPERR),
+            "0x92000046 is what the host kernel put in the probe's mcontext: EC 0x24, WnR set, DFSC 0x06");
+    }
+
+    /// Covers the outer match's fail-loud fallback. EC 0x01 (trapped WFI/WFE) is a real AArch64
+    /// exception class but one `signal_of_esr` deliberately does not model — an unmodelled EC means
+    /// retrace cannot name even the SIGNAL, so it panics rather than guess.
+    #[test]
+    #[should_panic(expected = "EC 0x1")]
+    fn signal_of_esr_panics_on_an_unmodelled_ec() {
+        signal_of_esr(0x0400_0000); // EC 0x01 << 26
+    }
+
+    /// Covers the inner match's silent fallback: an abort EC (so the SIGNAL is settled) paired
+    /// with a DFSC outside every enumerated range. `0x00` ("address size fault, level 0" in the
+    /// real DFSC table) is not translation/access-flag/permission/external-abort/alignment, so it
+    /// falls to the default arm. Unlike the EC fallback above, this one must NOT panic — see the
+    /// comment on that arm for why the two fallbacks deliberately differ.
+    #[test]
+    fn signal_of_esr_defaults_an_unenumerated_dfsc_on_a_known_abort() {
+        assert_eq!(signal_of_esr(0x9200_0000), (SIGSEGV, SEGV_ACCERR),
+            "EC 0x24 (data abort) with DFSC 0x00: signal is settled, si_code defaults");
+    }
+
+    #[test]
+    fn signal_constants_match_the_sdk() {
+        assert_eq!((SIGILL, SIGTRAP, SIGFPE, SIGBUS, SIGSEGV), (4, 5, 8, 10, 11));
+        assert_eq!((SEGV_MAPERR, SEGV_ACCERR), (1, 2));
+        assert_eq!((BUS_ADRALN, BUS_ADRERR, BUS_OBJERR), (1, 2, 3));
+        assert_eq!((SA_ONSTACK, SA_RESTART, SA_RESETHAND, SA_NODEFER, SA_SIGINFO),
+                   (0x1, 0x2, 0x4, 0x10, 0x40));
+        assert_eq!((SS_ONSTACK, SS_DISABLE), (0x1, 0x4));
+        assert_eq!(UC_FLAVOR, 30, "measured in spikes/sigtramp.c as x1 on trampoline entry");
+        assert_eq!(SI_USER, 0x10001, "measured by spikes/sigabi.c");
     }
 }

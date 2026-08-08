@@ -127,7 +127,29 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // M6: a stage-1 guest fault ends the recording as a CRASH — a successful recording
             // (mirror: replay's crash verify in advance()). Same terminal shape as exit:
             // Event::Crash, then the final full-memory snapshot.
+            //
+            // M12: unless the guest installed a handler for the signal that fault maps to, in which
+            // case it is DELIVERED instead. The disposition check comes FIRST. Before M12 this arm
+            // never consulted sigtable at all, so a guest that installed a SIGSEGV handler and then
+            // faulted was recorded as a terminal crash with its handler silently skipped.
+            //
+            // Only Stop::Fault is touched. Demand paging (page_in_cache, commit_reserved_page)
+            // arrives as Stop::Other — a stage-2 abort — so this cannot steal a demand-paging case,
+            // for exactly the reason M6's arm couldn't.
             Stop::Fault { pc, esr, far } => {
+                let (sig, si_code) = retrace_arch::signal_of_esr(esr);
+                if let retrace_box::Disposition::Handler(handler) = b.sigtable().action(sig).disp {
+                    assert!(!b.sigtable().is_blocked(sig),
+                        "raising blocked signal {sig} synchronously is not modelled: a fault cannot \
+                         be deferred, POSIX leaves it undefined, and Darwin force-delivers. M11 \
+                         models no pending set, so implement one — and revisit sigpending's \
+                         always-empty answer — before a guest needs this.");
+                    let (writes, resume_pc) = b.deliver_signal(sig, si_code, far, esr, far);
+                    w.append(&Event::SignalDelivery { sig, si_code, si_addr: far, handler,
+                                                      resume_pc, writes })
+                        .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
+                    continue;
+                }
                 let final_snap = b.snapshot();
                 w.append(&Event::Crash { pc, esr, far }).map_err(|e| format!("append crash: {e}"))?; count += 1;
                 w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
@@ -551,11 +573,28 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                      guest needs this — and note that sigpending's always-empty answer stops being \
                      true the moment you do.");
                 match act.disp {
-                    retrace_box::Disposition::Handler(va) => panic!(
-                        "signal {sig} has a handler installed at {va:#x}, and M11 models \
-                         DISPOSITION but not DELIVERY — running it needs a signal frame, the \
-                         __sigtramp ABI, and sigreturn(184). Implement those (M12) before a guest \
-                         raises a caught signal."),
+                    // M12: the self-raise counterpart of the fault path. The ordinary Syscall event
+                    // is appended FIRST, so the divergence oracle still checks (num, args) and the
+                    // kill safety boundary above still runs; the delivery is a second landmark.
+                    // esr/far are 0: no hardware fault happened, and inventing a syndrome would be
+                    // the lie M11 refused when it kept Event::Signal out of Event::Crash.
+                    retrace_box::Disposition::Handler(handler) => {
+                        w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                            .map_err(|e| format!("append caught raise: {e}"))?; count += 1;
+                        // The raise SUCCEEDS, and the frame must say so. Unlike the fault path,
+                        // this delivery happens at a syscall boundary, so the context the kernel
+                        // snapshots is the POST-return one: x0 = 0 and PSTATE.C clear, not the
+                        // pid the guest passed and whatever flags it happened to carry. Measured
+                        // in spikes/sigraisex0.c; see complete_syscall_before_delivery, which
+                        // exists because the frame's PSTATE comes from SPSR_EL1 rather than from
+                        // the reg::CPSR that set_x0_err_and_return writes.
+                        b.complete_syscall_before_delivery(0, false);
+                        let (writes, resume_pc) =
+                            b.deliver_signal(sig, retrace_arch::SI_USER, 0, 0, 0);
+                        w.append(&Event::SignalDelivery { sig, si_code: retrace_arch::SI_USER,
+                                                          si_addr: 0, handler, resume_pc, writes })
+                            .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
+                    }
                     retrace_box::Disposition::Ign => {
                         w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
                             .map_err(|e| format!("append ignored raise: {e}"))?; count += 1;
@@ -586,10 +625,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // Unmodelled, and loud about it. Each of these would otherwise reach forward_and_diff
             // and execute against RETRACE's process — 520/521 are live recorder-killing hazards
             // today, which is why they are asserted even though modelling them is out of scope.
-            Stop::Syscall { num, .. } if num == retrace_arch::SYS_SIGRETURN => panic!(
-                "sigreturn(184) is unreachable by construction: it can only be called from inside a \
-                 signal handler, and M11 never delivers one. Reaching it means the disposition \
-                 model itself is wrong — do not add a handler for it, find the bug."),
+            // M12: sigreturn(184) — the handler returning. Serviced, never forwarded. Its register
+            // restore is recomputed identically on both sides by Box_::sigreturn_restore, so the
+            // event carries no writes; (num, args) is still oracle-checked.
+            //
+            // Deliberately NOT followed by set_x0_err_and_return: sigreturn returns no value, and
+            // that call would overwrite the x0 and pc just restored from the frame.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGRETURN => {
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                    .map_err(|e| format!("append sigreturn: {e}"))?; count += 1;
+                b.sigreturn_restore(args[0], args[2]);
+            }
             Stop::Syscall { num, .. }
                 if num == retrace_arch::SYS_SIGSUSPEND || num == retrace_arch::SYS_SIGWAIT => panic!(
                 "syscall {num} (sigsuspend/__sigwait) blocks until a signal arrives, and the guest \
@@ -704,6 +750,39 @@ impl ReplaySession {
         Ok(ReplaySession { b, events, idx: 1, stdout: Vec::new(), guest_task_port: None, truncated })
     }
 
+    /// M12: recompute a signal delivery and byte-compare the frame against the recorded landmark.
+    /// That comparison **is** the divergence check (symmetry rule 1) — an asymmetry between
+    /// record's delivery arms and these mirrors surfaces here as a named divergence instead of as
+    /// silent corruption of the guest's stack.
+    ///
+    /// Comparing after `deliver_signal` has written is too late to prevent the write but not too
+    /// late to detect it: the session has not advanced, so a mismatch aborts replay at the right
+    /// landmark with both byte strings in hand.
+    fn mirror_delivery(&mut self, sig: u64, si_code: u64, si_addr: u64, esr: u64, far: u64, pc: u64)
+        -> Result<Advance, Divergence> {
+        let (rsig, rwrites) = match self.events.get(self.idx) {
+            Some(Event::SignalDelivery { sig: rsig, writes, .. }) => (*rsig, writes.clone()),
+            other => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                "expected recorded SignalDelivery, got {other:?} (live: sig={sig} far={far:#x})") }),
+        };
+        let (mine, _resume_pc) = self.b.deliver_signal(sig, si_code, si_addr, esr, far);
+        if sig != rsig || mine != rwrites {
+            // Name the first differing byte: a frame mismatch is usually one field, and the
+            // offset identifies which one far faster than two 976-byte dumps do.
+            let where_ = mine.first().zip(rwrites.first()).and_then(|(m, r)| {
+                m.bytes.iter().zip(r.bytes.iter()).position(|(a, b)| a != b)
+                    .map(|i| format!("; first differing byte at frame+{i}: recomputed {:#04x} != \
+                                      recorded {:#04x}", m.bytes[i], r.bytes[i]))
+            }).unwrap_or_default();
+            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                "signal frame mismatch: live sig={sig} recorded sig={rsig}; recomputed {} bytes at \
+                 {:#x}, recorded {} bytes at {:#x}{where_}",
+                mine.first().map_or(0, |r| r.bytes.len()), mine.first().map_or(0, |r| r.ipa),
+                rwrites.first().map_or(0, |r| r.bytes.len()), rwrites.first().map_or(0, |r| r.ipa)) });
+        }
+        self.finish_event()
+    }
+
     /// Finish consuming one trace event: bump idx and report it — as `WatchSyscall` if this event's
     /// applied writes overlapped an armed watch range (the event is consumed identically either
     /// way; only the report differs), else as plain `Event`.
@@ -793,6 +872,43 @@ impl ReplaySession {
                                     detail: format!("expected recorded Signal, got {other:?} (live raise: sig={sig})") }),
                             }
                         }
+                        // M12: the CAUGHT counterpart of the terminal arm above. Record appended
+                        // TWO events at this one stop — the ordinary Syscall, then the delivery —
+                        // so both are consumed here. Letting the generic arm below take the first
+                        // would apply_and_return past the svc, and the delivery landmark would then
+                        // be met by the next unrelated stop ("expected recorded Exit, got
+                        // SignalDelivery", which is what this looked like before the mirror existed).
+                        if matches!(act.disp, retrace_box::Disposition::Handler(_)) {
+                            match self.events.get(self.idx) {
+                                Some(Event::Syscall { num: rn, args: ra, .. })
+                                    if *rn == num && *ra == args => {}
+                                other => return Err(Divergence { landmark: self.idx, pc, detail:
+                                    format!("expected the recorded caught raise, got {other:?} \
+                                             (live: num={num}, args={args:?})") }),
+                            }
+                            self.idx += 1;
+                            // Record completes the syscall BEFORE building the frame, so the frame
+                            // carries the raise's success (x0 = 0, PSTATE.C clear) rather than the
+                            // pid argument and a stale carry — measured in spikes/sigraisex0.c.
+                            // Omit this and every caught self-raise diverges on those two fields.
+                            self.b.complete_syscall_before_delivery(0, false);
+                            return self.mirror_delivery(sig, retrace_arch::SI_USER, 0, 0, 0, pc);
+                        }
+                    }
+                    // M12 mirror of record's sigreturn arm. Its OWN arm rather than a hook inside
+                    // the serviced block below, mirroring record: sigreturn returns no value, so it
+                    // must not go through apply_and_return, which would overwrite the x0 and pc
+                    // just restored from the frame (Task 5's carry-forward, on this side too).
+                    if num == retrace_arch::SYS_SIGRETURN {
+                        match self.events.get(self.idx) {
+                            Some(Event::Syscall { num: rn, args: ra, .. })
+                                if *rn == num && *ra == args => {}
+                            other => return Err(Divergence { landmark: self.idx, pc, detail:
+                                format!("expected recorded sigreturn, got {other:?} \
+                                         (live args={args:?})") }),
+                        }
+                        self.b.sigreturn_restore(args[0], args[2]);
+                        return self.finish_event();
                     }
                     match self.events.get(self.idx) {
                         Some(Event::Syscall { num: rn, args: ra, ret, err, writes }) => {
@@ -1101,6 +1217,20 @@ impl ReplaySession {
                     }
                 }
                 Stop::Fault { pc, esr, far } => {
+                    // M12 mirror of record's fault-delivery arm, and it must come FIRST: the
+                    // disposition decides whether this fault is a crash or a delivery, exactly as
+                    // it does on the record side. Placing it after the recorded-Crash verify would
+                    // report "expected recorded Crash, got SignalDelivery" — a confusing divergence
+                    // that reads as a recording bug and is a dispatch bug (M11 line 757's lesson).
+                    //
+                    // The recomputed disposition comes from the REPLAY-side table, which the
+                    // serviced sigaction mirror keeps in step; that is what makes a guest which
+                    // installed a handler take this branch on both sides.
+                    let (sig, si_code) = retrace_arch::signal_of_esr(esr);
+                    if matches!(self.b.sigtable().action(sig).disp,
+                                retrace_box::Disposition::Handler(_)) {
+                        return self.mirror_delivery(sig, si_code, far, esr, far, pc);
+                    }
                     // M6 mirror of record's crash arm. The triple compare IS the divergence check
                     // (symmetry rule 1); then the final-memory landmark, exactly like Exit.
                     match self.events.get(self.idx) {
@@ -1162,6 +1292,18 @@ impl ReplaySession {
                 return Err(Divergence { landmark: self.idx, pc: self.position(),
                     detail: format!("run exited before landmark {n}") });
             }
+        }
+        // M12: a caught raise writes TWO landmarks at ONE stop (the syscall, then the delivery),
+        // so the coordinate between them names a position the guest never occupies — the syscall
+        // is completed and the frame written as one indivisible transition. Overshooting it is the
+        // honest outcome; overshooting it SILENTLY is not, and every caller here is a debugger
+        // seek whose whole contract is landing where it was asked to. The terminal Exit/Signal
+        // pairs cannot reach this: they report through the `Exited` arm above.
+        if self.idx != n {
+            return Err(Divergence { landmark: self.idx, pc: self.position(), detail: format!(
+                "landmark {n} is not a resumable position: it falls inside a two-event landmark \
+                 pair (a caught raise's syscall and its delivery are written at one stop); the \
+                 session is now at {}", self.idx) });
         }
         Ok(())
     }

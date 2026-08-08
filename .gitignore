@@ -10,3 +10,6 @@
 /spikes/sstep
 /spikes/dbgw
 /spikes/tlbi
+/spikes/sigabi
+/spikes/sigtramp
+/spikes/sigraisex0
