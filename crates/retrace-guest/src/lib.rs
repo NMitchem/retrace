@@ -128,6 +128,9 @@ pub const CLOSEFD_DYN: &str = concat!(env!("OUT_DIR"), "/closefd_dyn");
 pub const FDTABLE_DYN: &str = concat!(env!("OUT_DIR"), "/fdtable_dyn");
 /// M11 headline: a full-std Rust binary that `panic!()`s into `abort()`/SIGABRT (`-C panic=abort`).
 pub const PANICKY: &str = concat!(env!("OUT_DIR"), "/panicky");
+/// M12 headline: a stock full-`std` Rust binary that faults on a wild pointer, so libstd's own
+/// SIGSEGV handler runs, resets to `SIG_DFL` and returns, and the re-executed store kills it.
+pub const SEGVY: &str = concat!(env!("OUT_DIR"), "/segvy");
 /// M11: `kill(getpid(), SIGABRT)` — the terminal raise mechanism.
 pub const RAISE: &str = concat!(env!("OUT_DIR"), "/raise");
 /// M11: `SIG_IGN` then raise then `write("ok\n")` — the non-terminal branch.
