@@ -2190,6 +2190,28 @@ impl Box_ {
         self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
     }
 
+    /// Complete a serviced syscall AND bring the saved trap state (SPSR_EL1) along, for the one
+    /// caller that needs it: a signal delivered before the guest resumes from that syscall.
+    ///
+    /// `deliver_signal` reads the frame's GPRs live but its PSTATE from **SPSR_EL1**, which
+    /// `set_x0_err_and_return` never touches — it writes `reg::CPSR`, the register the vCPU
+    /// actually resumes from. On every other path that gap is invisible: nothing reads SPSR_EL1
+    /// before the next trap overwrites it. On the caught-raise path it is the difference between
+    /// a frame that says the syscall succeeded and one that says it failed.
+    ///
+    /// Measured against the real kernel (`spikes/sigraisex0.c`), not inferred: a process that
+    /// raises a signal on itself enters its handler with x0 = the syscall's RETURN value (0), not
+    /// the pid it passed, and with PSTATE.C **clear**. The probe set C=1 and Z=1 immediately
+    /// before `kill()`; the frame came back `0x40000000` — Z survived, C did not. The kernel
+    /// snapshots the context *after* completing the return, so retrace must too, or the guest
+    /// resumes from its own successful raise reading it as a failure.
+    pub fn complete_syscall_before_delivery(&mut self, ret: u64, err: bool) {
+        self.set_x0_err_and_return(ret, err);
+        let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+        let spsr = (spsr & !retrace_arch::PSTATE_C) | if err { retrace_arch::PSTATE_C } else { 0 };
+        self.vcpu.set_sys(sysreg::SPSR_EL1, spsr).unwrap();
+    }
+
     // Translate a guest IPA to (host pointer, bytes available to the end of its backing).
     fn host_span(&self, ipa: u64) -> Option<(*mut u8, usize)> {
         for bk in &self.backings {
