@@ -24,9 +24,26 @@ pub enum Event {
     /// SIGABRT printing as a fault bearing an ESR the hardware never produced is a lie the debug
     /// output would carry forever. `pc` names the raise site, which is what makes it useful.
     Signal { sig: u64, pc: u64 },
+    /// M12: control transferred to one of the guest's own signal handlers.
+    ///
+    /// NOT terminal — the guest keeps running inside the handler, and a later `sigreturn`(184)
+    /// syscall event brings it back. One shape for BOTH causes (a fault, and a self-raise via
+    /// kill/__pthread_kill) so there is one seek target, one debug line, and one replay mirror.
+    ///
+    /// Deliberately a trace event rather than emulation hidden inside `Box_::run()`: symmetry rule
+    /// 2's precedents (the timebase MRS, the undef-MRS, the FPAC strip) are INSTRUCTION emulations —
+    /// micro, high-frequency, semantically invisible. Entering a handler is a control transfer, and
+    /// "rewind to where the signal was delivered" is a query a reverse debugger's users have.
+    ///
+    /// `writes` carries the frame bytes; replay recomputes them and byte-compares before applying,
+    /// the same posture as M11's `sigaction` oldact writeback. `resume_pc` is where the guest
+    /// resumes on `sigreturn` — for a fault, the faulting instruction itself, which re-executes.
+    SignalDelivery {
+        sig: u64, si_code: u64, si_addr: u64, handler: u64, resume_pc: u64, writes: Vec<Region>,
+    },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x05"; // "RT" + format version 0x0005 (M11-signals: Event::Signal)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x06"; // "RT" + format version 0x0006 (M12: Event::SignalDelivery)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -216,14 +233,55 @@ mod tests {
         std::fs::remove_file(&p).ok();
     }
 
+    // M11's magic assertion moved to `magic_bumped_for_the_signal_delivery_variant` when M12 bumped
+    // to v6. What is left here is the half that does not go stale: a v4 trace stays rejected.
     #[test]
-    fn the_magic_is_version_5_and_rejects_version_4() {
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x05", "M11 added Event::Signal — a format break");
+    fn rejects_v4_traces() {
         let p = named_tempfile("oldmagic");
         std::fs::write(&p, b"RT\x00\x04junkjunk").unwrap();
         let (events, torn) = Reader::open_checked(&p).unwrap();
         assert!(torn, "a v4 trace must be rejected, not misparsed");
         assert!(events.is_empty());
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn signal_delivery_round_trips_through_the_writer_and_reader() {
+        let p = named_tempfile("sigdeliv");
+        let ev = Event::SignalDelivery {
+            sig: 11,
+            si_code: 1,
+            si_addr: 0xdead_0000,
+            handler: 0x1_0000,
+            resume_pc: 0x2_0000,
+            writes: vec![Region { ipa: 0x7000_0000, bytes: vec![1, 2, 3, 4] }],
+        };
+        {
+            let mut w = Writer::create(&p).unwrap();
+            w.append(&ev).unwrap();
+        }
+        let (evs, torn) = Reader::open_checked(&p).unwrap();
+        assert!(!torn);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0], ev);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn magic_bumped_for_the_signal_delivery_variant() {
+        assert_eq!(
+            TRACE_MAGIC,
+            *b"RT\x00\x06",
+            "adding an Event variant is a format break: the version must bump with it"
+        );
+    }
+
+    #[test]
+    fn a_trace_written_with_the_old_magic_is_rejected_whole() {
+        let p = named_tempfile("v5magic");
+        std::fs::write(&p, b"RT\x00\x05rest-of-a-v5-trace").unwrap();
+        let (evs, rejected) = Reader::open_checked(&p).unwrap();
+        assert!(evs.is_empty() && rejected, "a v5 trace must be rejected, not half-read");
         std::fs::remove_file(&p).ok();
     }
 

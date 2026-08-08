@@ -14,7 +14,7 @@ fn from_checkpoint_carries_the_signal_table() {
     let mut b = Box_::load_with_pac(&loaded, false);
     let _ = b.run(); // reach the first syscall so the checkpoint is genuinely mid-run
 
-    b.sigtable_mut().set_action(6, SigAction { disp: Disposition::Ign, mask: 0xf, flags: 0x2 });
+    b.sigtable_mut().set_action(6, SigAction { disp: Disposition::Ign, tramp: 0, mask: 0xf, flags: 0x2 });
     b.sigtable_mut().set_mask(retrace_arch::SIG_SETMASK, 0b1010);
     b.sigtable_mut().set_altstack(Some((0x9000, 0x4000, 0)));
 
@@ -23,7 +23,7 @@ fn from_checkpoint_carries_the_signal_table() {
     let r = Box_::from_checkpoint(&st);
 
     assert_eq!(r.sigtable().action(6),
-               SigAction { disp: Disposition::Ign, mask: 0xf, flags: 0x2 },
+               SigAction { disp: Disposition::Ign, tramp: 0, mask: 0xf, flags: 0x2 },
                "a seek must not resurrect a default disposition");
     assert_eq!(r.sigtable().mask(), 0b1010, "the blocked mask must survive the restore");
     assert_eq!(r.sigtable().altstack(), Some((0x9000, 0x4000, 0)));

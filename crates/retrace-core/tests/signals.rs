@@ -126,3 +126,103 @@ fn killing_another_process_fails_loud_instead_of_signalling_the_host() {
     let loaded = retrace_guest::parse_macho(&bytes);
     let _ = retrace_core::record(&loaded, &trace);
 }
+
+// ---- M12: delivery. The dispositions above decide WHETHER a handler runs; these decide that it
+// actually does, and that it can return.
+
+/// Record a freestanding asm guest IN-PROCESS (the pattern every test in this file uses — there is
+/// no shared helper; `crates/retrace/tests/util` is for the CLI-level gates).
+fn record_asm(guest: &str) -> (retrace_core::Outcome, std::path::PathBuf) {
+    let bytes = std::fs::read(guest).expect("read guest");
+    let loaded = retrace_guest::parse_macho(&bytes);
+    let name = guest.rsplit('/').next().unwrap();
+    let p = std::env::temp_dir().join(format!("retrace-m12-{}-{name}.bin", std::process::id()));
+    let s = retrace_core::record(&loaded, &p).expect("record must SUCCEED");
+    (s.outcome, p)
+}
+
+// A fault with a handler installed must DELIVER, not crash. This is the live wrong answer M12
+// exists to fix: Stop::Fault never consulted sigtable, so the handler was silently skipped.
+#[test]
+fn a_fault_with_a_handler_installed_delivers_instead_of_crashing() {
+    let (outcome, trace) = record_asm(retrace_guest::SEGVCATCH);
+    let (events, torn) = retrace_trace::Reader::open_checked(&trace).unwrap();
+    assert!(!torn, "the recording must be complete");
+    let deliveries: Vec<_> = events.iter()
+        .filter(|e| matches!(e, retrace_trace::Event::SignalDelivery { .. })).collect();
+    assert_eq!(deliveries.len(), 1, "exactly one delivery; events:\n{events:#?}");
+    let retrace_trace::Event::SignalDelivery { sig, si_code, handler, .. } = deliveries[0] else {
+        unreachable!()
+    };
+    assert_eq!(*sig, 11, "a store to an unmapped address is SIGSEGV");
+    assert_eq!(*si_code, retrace_arch::SEGV_MAPERR, "nothing is mapped there: a translation fault");
+    assert_ne!(*handler, 0);
+    assert!(!events.iter().any(|e| matches!(e, retrace_trace::Event::Crash { .. })),
+        "the handler ran, so this is NOT a crash");
+    assert_eq!(outcome, retrace_core::Outcome::Exit { code: 0 },
+        "segvcatch repairs the fault and exits 0 — a Crash outcome here means the handler was skipped");
+    std::fs::remove_file(&trace).ok();
+}
+
+#[test]
+fn an_uncaught_fault_is_still_a_crash() {
+    // The M6 regression. No handler installed => the Event::Crash path is untouched.
+    //
+    // CRASH, not WILDSTORE. Both store to a bad address, but only CRASH's has bit 46 set, so only
+    // CRASH takes the STAGE-1 fault that reaches Stop::Fault. WILDSTORE is M2's stage-2 negative:
+    // it is fatal by design, record() returns Err for it, and reservecommit.rs asserts it must
+    // never become a Stop::Fault at all. Using it here would have tested the wrong classification.
+    let (outcome, trace) = record_asm(retrace_guest::CRASH);
+    assert!(matches!(outcome, retrace_core::Outcome::Crash { .. }), "got {outcome:?}");
+    let (events, _) = retrace_trace::Reader::open_checked(&trace).unwrap();
+    assert!(events.iter().any(|e| matches!(e, retrace_trace::Event::Crash { .. })),
+        "an uncaught fault must still record as Crash, not a delivery");
+    assert!(!events.iter().any(|e| matches!(e, retrace_trace::Event::SignalDelivery { .. })));
+    std::fs::remove_file(&trace).ok();
+}
+
+#[test]
+fn sigreturn_is_recorded_as_an_ordinary_syscall_between_delivery_and_resumption() {
+    let (_, trace) = record_asm(retrace_guest::SEGVCATCH);
+    let (events, _) = retrace_trace::Reader::open_checked(&trace).unwrap();
+    let di = events.iter().position(|e| matches!(e, retrace_trace::Event::SignalDelivery { .. }))
+        .expect("a delivery");
+    let si = events.iter().position(|e| matches!(e,
+        retrace_trace::Event::Syscall { num, .. } if *num == retrace_arch::SYS_SIGRETURN))
+        .expect("a sigreturn — the handler must have RETURNED, not aborted");
+    assert!(si > di, "sigreturn comes after the delivery it returns from");
+    std::fs::remove_file(&trace).ok();
+}
+
+// The end-to-end counterpart of deliver.rs's frame assertions. A guest that raises a signal on
+// ITSELF must resume from its own SUCCESSFUL kill(), not from a failure retrace invented: the
+// kernel delivers such a signal with the syscall's return already applied (measured — see
+// spikes/sigraisex0.c). Decoded from the RECORDED frame rather than from the fixture's own checks,
+// so it keeps holding if those checks change.
+#[test]
+fn a_caught_self_raise_records_the_syscalls_success_in_the_frame() {
+    let (_, trace) = record_asm(retrace_guest::SIGFRAME);
+    let (events, _) = retrace_trace::Reader::open_checked(&trace).unwrap();
+    let d = events.iter().find(|e| matches!(e, retrace_trace::Event::SignalDelivery { .. }))
+        .expect("a delivery");
+    let retrace_trace::Event::SignalDelivery { writes, .. } = d else { unreachable!() };
+    let o = retrace_box::FRAME_MCONTEXT_OFF + 16; // __ss within mcontext64; __x[0] at its offset 0
+    let f = &writes[0].bytes;
+    let x0 = u64::from_le_bytes(f[o..o + 8].try_into().unwrap());
+    let cpsr = u32::from_le_bytes(f[o + 264..o + 268].try_into().unwrap()) as u64;
+    assert_eq!(x0, 0, "kill() returned 0: the frame carries the RETURN, not the pid argument");
+    assert_eq!(cpsr & retrace_arch::PSTATE_C, 0,
+        "a successful raise clears PSTATE.C; a stale carry reads as a failed kill() to the guest");
+    std::fs::remove_file(&trace).ok();
+}
+
+// The expected substring says "synchronously", which appears ONLY in the fault arm's message. The
+// raise arm has carried its own "raising blocked signal" assert since M11, so matching the shorter
+// prefix would green this test even if the fault arm never gained a blocked check at all.
+#[test]
+#[should_panic(expected = "raising blocked signal 11 synchronously")]
+fn a_blocked_synchronous_fault_asserts_rather_than_guessing() {
+    // POSIX leaves this undefined and Darwin force-delivers. M11 models no pending set, so
+    // guessing here would be a plausible lie.
+    record_asm(retrace_guest::BLOCKEDFAULT);
+}
