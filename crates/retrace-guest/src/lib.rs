@@ -103,6 +103,9 @@ pub const EXECMAP_FIXTURE: &str = concat!(env!("OUT_DIR"), "/execmap_fixture.bin
 pub const MACHMSG: &str = concat!(env!("OUT_DIR"), "/machmsg");
 pub const HELLO_DYN: &str = concat!(env!("OUT_DIR"), "/hello_dyn");
 pub const CRASHY: &str = concat!(env!("OUT_DIR"), "/crashy");
+/// M12: catches SIGSEGV through Apple's real `_sigtramp` (libc's `sigaction()` installs its own
+/// `sa_tramp`) — the only guest that exercises the trampoline that actually ships.
+pub const SIGCATCH_DYN: &str = concat!(env!("OUT_DIR"), "/sigcatch_dyn");
 pub const DYLD_PATH: &str = "/usr/lib/dyld";
 pub const STRIP47: &str = concat!(env!("OUT_DIR"), "/strip47");
 pub const BFAMSTRIP: &str = concat!(env!("OUT_DIR"), "/bfamstrip");

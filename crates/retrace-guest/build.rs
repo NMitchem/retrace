@@ -182,6 +182,18 @@ fn main() {
         .status().expect("clang crashy");
     assert!(status.success(), "crashy guest build failed");
 
+    // sigcatch_dyn: the M12 guest that catches SIGSEGV through APPLE's _sigtramp (libc's
+    // sigaction() installs its own sa_tramp). Same recipe as crashy — real toolchain, links
+    // libSystem, no -O so the volatile faulting store survives — and it faults at the same
+    // 0x4000_DEAD_0000, a stage-1 fault that reaches Stop::Fault.
+    let src = format!("{}/c/sigcatch_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sigcatch_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang sigcatch_dyn");
+    assert!(status.success(), "sigcatch_dyn guest build failed");
+
     // argv_echo: prints argv[1]. The M9 argv fixture — a real dynamic guest, same recipe as
     // hello_dyn (real toolchain, links libSystem, plain -arch arm64).
     let src = format!("{}/c/argv_echo.c", env!("CARGO_MANIFEST_DIR"));
