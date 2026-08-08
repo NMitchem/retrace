@@ -82,3 +82,84 @@ fn tampered_read_write_is_caught_by_final_memory() {
     assert!(err.detail.contains("memory divergence") || err.detail.contains("syscall"),
         "expected a named divergence, got: {}", err.detail);
 }
+
+// ---- M12 t8: the replay mirror for signal delivery.
+//
+// Symmetry rule 1 in its sharpest form: replay recomputes the frame through the SAME
+// deliver_signal and byte-compares it against the recording before advancing, so an asymmetry
+// between the two sides surfaces as a loud divergence rather than as silent corruption.
+
+fn record_guest(path: &str, tag: &str) -> PathBuf {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(path).unwrap());
+    let p = std::env::temp_dir().join(format!("retrace-m12-rep-{tag}-{}.bin", std::process::id()));
+    retrace_core::record(&loaded, &p).expect("record");
+    p
+}
+
+// The FAULT path: a guest that catches SIGSEGV, repairs its own pc, and runs on.
+#[test]
+fn a_caught_fault_replays_bit_for_bit() {
+    let trace = record_guest(retrace_guest::SEGVCATCH, "segvcatch");
+    let r = retrace_core::replay(&trace).expect("replay must not diverge");
+    assert_eq!(r.outcome, retrace_core::Outcome::Exit { code: 0 },
+        "the handler ran on replay too — a Crash here means the mirror skipped it");
+    assert_eq!(r.stdout, b"caught\nresumed\n",
+        "both the handler's write and the resumed guest's write must reappear");
+    std::fs::remove_file(&trace).ok();
+}
+
+// The RAISE path, which the fault path cannot stand in for: delivery happens at a syscall
+// boundary, so the mirror must complete the syscall exactly as record did before rebuilding the
+// frame. Omit that and the recomputed frame differs from the recording in x0 and PSTATE.C.
+#[test]
+fn a_caught_self_raise_replays_bit_for_bit() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::SIGFRAME).unwrap());
+    let p = std::env::temp_dir().join(format!("retrace-m12-rep-raise-{}.bin", std::process::id()));
+    let rec = retrace_core::record(&loaded, &p).expect("record");
+    let rep = retrace_core::replay(&p).expect("replay must not diverge");
+    // Compared against the RECORDING rather than against a literal, so this keeps asking the
+    // right question if the fixture's own checks change.
+    assert_eq!(rep.outcome, rec.outcome, "replay must reach the same outcome it recorded");
+    assert_eq!(rep.stdout, rec.stdout);
+    std::fs::remove_file(&p).ok();
+}
+
+// The mirror is load-bearing, and this proves it rather than asserting it: corrupt one byte of the
+// recorded frame and replay's recomputation must refuse to match it.
+#[test]
+fn a_tampered_signal_frame_is_caught_as_divergence() {
+    let trace = record_guest(retrace_guest::SEGVCATCH, "tamper");
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let d = events.iter_mut()
+        .find(|e| matches!(e, retrace_trace::Event::SignalDelivery { .. }))
+        .expect("a recorded delivery");
+    if let retrace_trace::Event::SignalDelivery { writes, .. } = d { writes[0].bytes[0] ^= 0xff; }
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let err = retrace_core::replay(&trace).unwrap_err();
+    assert!(err.detail.contains("signal frame mismatch"), "detail: {}", err.detail);
+    std::fs::remove_file(&trace).ok();
+}
+
+// A caught raise is TWO landmarks written at ONE stop, so the coordinate between them names a
+// position the guest never occupies. A seek there must SAY so rather than silently landing past
+// it: the terminal Exit/Signal pairs report through their own path, and this is the first mid-run
+// pair the trace format can contain.
+#[test]
+fn seeking_between_a_caught_raise_and_its_delivery_is_a_named_error() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::SIGFRAME).unwrap());
+    let p = std::env::temp_dir().join(format!("retrace-m12-pair-{}.bin", std::process::id()));
+    retrace_core::record(&loaded, &p).expect("record");
+    let events = retrace_trace::Reader::open(&p).unwrap();
+    let d = events.iter().position(|e| matches!(e, retrace_trace::Event::SignalDelivery { .. }))
+        .expect("a delivery");
+
+    let err = retrace_core::seek(&p, d, 0).unwrap_err();
+    assert!(err.contains("not a resumable position"), "got: {err}");
+    // And the landmark after the pair still seeks, so the guard refuses one coordinate rather
+    // than breaking seeking past a delivery altogether.
+    retrace_core::seek(&p, d + 1, 0).expect("the landmark after the pair must remain reachable");
+    std::fs::remove_file(&p).ok();
+}
