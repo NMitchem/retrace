@@ -894,6 +894,13 @@ impl Box_ {
         let pac = pac_enabled;
         vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(pac)).unwrap();   // was 0x30d00800 (MMU off)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
+        // FPEN=0b11, matching load_dynamic/restore/from_checkpoint. Without it a STATIC guest
+        // cannot execute FP/SIMD at all: the first NEON instruction takes EC=0x07 and the
+        // recording dies with "non-syscall exit". This was an asymmetry, not merely a gap —
+        // `restore` (which every REPLAY goes through) has always set it, so a static guest using
+        // vector registers would fail to RECORD while replaying fine. No static fixture used a
+        // vector register until M12's vecsurvive, which is why nothing caught it before.
+        vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap();
         vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
