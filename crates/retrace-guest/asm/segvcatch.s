@@ -27,7 +27,14 @@ _start:
     svc  #0x80
 
     // Fault: store through an unmapped address. The handler advances past THIS instruction.
-    movz x9, #0xdead, lsl #16
+    //
+    // The VA must have bit 46 set, exactly as asm/crash.s does. Only L1[0] is ever valid (the
+    // identity map covers just the 36-bit IPA space), so this takes a STAGE-1 translation fault
+    // and reaches run()'s INNER match => Stop::Fault, which is the stop M12 delivers from. A VA
+    // below 2^36 (0xdead_0000, what this guest first used) is stage-1-mapped but stage-2-unbacked
+    // => an OUTER abort => Stop::Other, which is fatal and never reaches the delivery arm.
+    movz x9, #0x4000, lsl #32   // 0x4000_0000_0000
+    movk x9, #0xdead, lsl #16   // | 0xdead_0000
     str  xzr, [x9]              // <-- the faulting store
 
     mov  x0, #1

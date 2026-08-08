@@ -34,7 +34,12 @@ _start:
     mov  x16, #48               // SYS_sigprocmask
     svc  #0x80
 
-    movz x9, #0xdead, lsl #16
+    // Bit 46 set, as asm/crash.s and asm/segvcatch.s: only a STAGE-1 translation fault reaches
+    // Stop::Fault, the arm that consults the disposition. A VA below 2^36 takes a stage-2 abort
+    // instead and dies fatally before any blocked check runs — passing this fixture for the
+    // wrong reason.
+    movz x9, #0x4000, lsl #32   // 0x4000_0000_0000
+    movk x9, #0xdead, lsl #16   // | 0xdead_0000
     str  xzr, [x9]              // faults while SIGSEGV is blocked -> recorder must abort
 
     mov  x0, #0                 // UNREACHABLE

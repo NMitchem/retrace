@@ -352,3 +352,31 @@ and the pre-signal `sp`. The mcontext carries the real hardware ESR and FAR.
 
 Findings and their consequences are written up in
 `docs/superpowers/specs/2026-08-06-retrace-m12-signal-delivery-design.md`.
+
+## `sigraisex0.c` — what a frame delivered at a SYSCALL boundary carries (M12 t7)
+
+`sigtramp.c` above measures a frame built from a **fault**. This one measures the other case: a
+signal the process **raises on itself**, where the delivery happens at a syscall boundary and the
+frame therefore has a syscall result to account for.
+
+```sh
+clang -O0 -o sigraisex0 sigraisex0.c && ./sigraisex0
+```
+
+It forces `PSTATE.C = 1` (and `Z = 1`) immediately before `kill(getpid(), SIGUSR1)`, then reports
+what the handler's `ucontext` actually holds:
+
+```
+kill() returned   = 0
+frame saved x0    = 0            <- the syscall's RETURN, not the pid argument that was in x0
+frame saved cpsr  = 0x40000000   <- Z survived, C did NOT: the success flags, not the pre-call ones
+```
+
+**The kernel snapshots the context *after* completing the syscall return.** So a frame built from
+the raw trap state is a frame whose guest, on `sigreturn`, reads its own successful `kill()` as a
+failure — `x0` holds the pid and `PSTATE.C` says "error". That is why the caught-raise arm calls
+`Box_::complete_syscall_before_delivery` rather than plain `set_x0_err_and_return`: the frame's
+PSTATE comes from `SPSR_EL1`, which the latter never writes.
+
+The fault path is deliberately untouched by this — a fault has no syscall result, and its `x0` and
+PSTATE *are* the guest's genuine trap state.

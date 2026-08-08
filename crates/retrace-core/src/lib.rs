@@ -127,7 +127,29 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // M6: a stage-1 guest fault ends the recording as a CRASH — a successful recording
             // (mirror: replay's crash verify in advance()). Same terminal shape as exit:
             // Event::Crash, then the final full-memory snapshot.
+            //
+            // M12: unless the guest installed a handler for the signal that fault maps to, in which
+            // case it is DELIVERED instead. The disposition check comes FIRST. Before M12 this arm
+            // never consulted sigtable at all, so a guest that installed a SIGSEGV handler and then
+            // faulted was recorded as a terminal crash with its handler silently skipped.
+            //
+            // Only Stop::Fault is touched. Demand paging (page_in_cache, commit_reserved_page)
+            // arrives as Stop::Other — a stage-2 abort — so this cannot steal a demand-paging case,
+            // for exactly the reason M6's arm couldn't.
             Stop::Fault { pc, esr, far } => {
+                let (sig, si_code) = retrace_arch::signal_of_esr(esr);
+                if let retrace_box::Disposition::Handler(handler) = b.sigtable().action(sig).disp {
+                    assert!(!b.sigtable().is_blocked(sig),
+                        "raising blocked signal {sig} synchronously is not modelled: a fault cannot \
+                         be deferred, POSIX leaves it undefined, and Darwin force-delivers. M11 \
+                         models no pending set, so implement one — and revisit sigpending's \
+                         always-empty answer — before a guest needs this.");
+                    let (writes, resume_pc) = b.deliver_signal(sig, si_code, far, esr, far);
+                    w.append(&Event::SignalDelivery { sig, si_code, si_addr: far, handler,
+                                                      resume_pc, writes })
+                        .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
+                    continue;
+                }
                 let final_snap = b.snapshot();
                 w.append(&Event::Crash { pc, esr, far }).map_err(|e| format!("append crash: {e}"))?; count += 1;
                 w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
@@ -551,11 +573,28 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                      guest needs this — and note that sigpending's always-empty answer stops being \
                      true the moment you do.");
                 match act.disp {
-                    retrace_box::Disposition::Handler(va) => panic!(
-                        "signal {sig} has a handler installed at {va:#x}, and M11 models \
-                         DISPOSITION but not DELIVERY — running it needs a signal frame, the \
-                         __sigtramp ABI, and sigreturn(184). Implement those (M12) before a guest \
-                         raises a caught signal."),
+                    // M12: the self-raise counterpart of the fault path. The ordinary Syscall event
+                    // is appended FIRST, so the divergence oracle still checks (num, args) and the
+                    // kill safety boundary above still runs; the delivery is a second landmark.
+                    // esr/far are 0: no hardware fault happened, and inventing a syndrome would be
+                    // the lie M11 refused when it kept Event::Signal out of Event::Crash.
+                    retrace_box::Disposition::Handler(handler) => {
+                        w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                            .map_err(|e| format!("append caught raise: {e}"))?; count += 1;
+                        // The raise SUCCEEDS, and the frame must say so. Unlike the fault path,
+                        // this delivery happens at a syscall boundary, so the context the kernel
+                        // snapshots is the POST-return one: x0 = 0 and PSTATE.C clear, not the
+                        // pid the guest passed and whatever flags it happened to carry. Measured
+                        // in spikes/sigraisex0.c; see complete_syscall_before_delivery, which
+                        // exists because the frame's PSTATE comes from SPSR_EL1 rather than from
+                        // the reg::CPSR that set_x0_err_and_return writes.
+                        b.complete_syscall_before_delivery(0, false);
+                        let (writes, resume_pc) =
+                            b.deliver_signal(sig, retrace_arch::SI_USER, 0, 0, 0);
+                        w.append(&Event::SignalDelivery { sig, si_code: retrace_arch::SI_USER,
+                                                          si_addr: 0, handler, resume_pc, writes })
+                            .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
+                    }
                     retrace_box::Disposition::Ign => {
                         w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
                             .map_err(|e| format!("append ignored raise: {e}"))?; count += 1;
@@ -586,10 +625,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // Unmodelled, and loud about it. Each of these would otherwise reach forward_and_diff
             // and execute against RETRACE's process — 520/521 are live recorder-killing hazards
             // today, which is why they are asserted even though modelling them is out of scope.
-            Stop::Syscall { num, .. } if num == retrace_arch::SYS_SIGRETURN => panic!(
-                "sigreturn(184) is unreachable by construction: it can only be called from inside a \
-                 signal handler, and M11 never delivers one. Reaching it means the disposition \
-                 model itself is wrong — do not add a handler for it, find the bug."),
+            // M12: sigreturn(184) — the handler returning. Serviced, never forwarded. Its register
+            // restore is recomputed identically on both sides by Box_::sigreturn_restore, so the
+            // event carries no writes; (num, args) is still oracle-checked.
+            //
+            // Deliberately NOT followed by set_x0_err_and_return: sigreturn returns no value, and
+            // that call would overwrite the x0 and pc just restored from the frame.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGRETURN => {
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                    .map_err(|e| format!("append sigreturn: {e}"))?; count += 1;
+                b.sigreturn_restore(args[0], args[2]);
+            }
             Stop::Syscall { num, .. }
                 if num == retrace_arch::SYS_SIGSUSPEND || num == retrace_arch::SYS_SIGWAIT => panic!(
                 "syscall {num} (sigsuspend/__sigwait) blocks until a signal arrives, and the guest \

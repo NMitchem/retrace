@@ -210,3 +210,54 @@ fn sigreturn_sanitizes_pstate_and_cannot_be_asked_for_el1() {
     // Concretely: mode bits back to EL0t, which is where this guest actually runs (lib.rs:886).
     assert_eq!(cpsr & 0xf, 0, "EL0t — the guest asked for EL1h (0x5) and did not get it");
 }
+
+// ---- The frame delivered at a SYSCALL boundary carries that syscall's RESULT.
+//
+// Measured against the real kernel, not reasoned about (spikes/sigraisex0.c): a process that
+// raises a signal on itself with kill() enters its handler with a frame holding x0 = 0 (the
+// syscall's RETURN value, not the pid it passed) and PSTATE.C CLEAR. The probe deliberately set
+// C=1 and Z=1 immediately before kill(); the frame came back 0x40000000 — Z survived, C did not.
+// So the kernel snapshots the context AFTER completing the syscall return, and a frame built from
+// the raw trap state is a frame the guest's libc will read as "kill() failed".
+//
+// set_x0_err_and_return alone cannot fix this: it writes reg::CPSR, and the frame's PSTATE comes
+// from SPSR_EL1. Both directions are pinned below so neither assertion can pass vacuously.
+
+fn frame_x0(bytes: &[u8]) -> u64 {
+    let o = FRAME_MCONTEXT_OFF + 16; // __ss within mcontext64, then __x[0] at its offset 0
+    u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap())
+}
+fn frame_cpsr(bytes: &[u8]) -> u32 {
+    let o = FRAME_MCONTEXT_OFF + 16 + 264; // __ss.__cpsr, a u32 (the same offset sigreturn pokes)
+    u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap())
+}
+
+#[test]
+fn a_syscall_completed_before_delivery_puts_its_success_result_in_the_frame() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO, 0));
+    // Leave an ERROR in the trap state first, so a frame that merely copied the raw SPSR_EL1
+    // would show C set — this assertion cannot pass by accident on a guest whose C was already 0.
+    b.complete_syscall_before_delivery(38, true);
+    b.complete_syscall_before_delivery(0, false); // the successful kill() that raised the signal
+    let (writes, _) = b.deliver_signal(11, retrace_arch::SI_USER, 0, 0, 0);
+
+    assert_eq!(frame_x0(&writes[0].bytes), 0,
+        "the frame carries the syscall's RETURN value, not the argument that was in x0");
+    assert_eq!(frame_cpsr(&writes[0].bytes) as u64 & retrace_arch::PSTATE_C, 0,
+        "a successful syscall clears PSTATE.C, and the frame must carry the cleared flag or the \
+         guest resumes reading its own successful raise as a failure");
+}
+
+#[test]
+fn a_failed_syscall_completed_before_delivery_carries_its_error_flag_into_the_frame() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO, 0));
+    b.complete_syscall_before_delivery(0, false); // clear C first, for the same anti-vacuity reason
+    b.complete_syscall_before_delivery(38, true);
+    let (writes, _) = b.deliver_signal(11, retrace_arch::SI_USER, 0, 0, 0);
+
+    assert_eq!(frame_x0(&writes[0].bytes), 38, "the errno the syscall returned");
+    assert_eq!(frame_cpsr(&writes[0].bytes) as u64 & retrace_arch::PSTATE_C, retrace_arch::PSTATE_C,
+        "an error sets PSTATE.C, and the frame must carry it");
+}
