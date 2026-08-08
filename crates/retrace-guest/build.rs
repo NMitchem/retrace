@@ -392,6 +392,19 @@ fn main() {
         .status().expect("rustc panicky");
     assert!(status.success(), "panicky guest build failed");
 
+    // segvy: M12's headline — a stock full-std Rust binary that faults on a wild pointer, so
+    // libstd's OWN SIGSEGV handler runs, resets to SIG_DFL and returns, and the re-executed store
+    // kills it. Same recipe as panicky MINUS -C panic=abort: a hardware fault is not a panic, so
+    // no flag is needed to reach a signal here.
+    let src = format!("{}/rs/segvy.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/segvy");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc segvy");
+    assert!(status.success(), "segvy guest build failed");
+
     // M11 signal guests. raise: kill(getpid(), SIGABRT) — the terminal mechanism, and it exercises
     // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
     // proving the guest keeps running (the branch the terminal gate cannot reach). killother:
