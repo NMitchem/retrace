@@ -701,17 +701,17 @@ Insert after `commit_reserved_page` (`:1100`):
     }
 ```
 
-- [ ] **Step 4b: Run the test to verify it passes**
+- [ ] **Step 6: Run the test to verify it passes**
 
 Run: `cargo test -p retrace-box --test protnone -- --test-threads=1`
 Expected: PASS, both new tests.
 
-- [ ] **Step 5b: Run the full gate**
+- [ ] **Step 7: Run the full gate**
 
 Run: `just gate`
 Expected: 299 passed / 0 failed / 0 ignored, clippy clean.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add crates/retrace-box/src/lib.rs crates/retrace-box/tests/protnone.rs
