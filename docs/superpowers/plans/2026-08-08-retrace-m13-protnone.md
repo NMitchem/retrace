@@ -1916,4 +1916,19 @@ git push origin main
 
 **`<SIG>`/`<CODE>` are not placeholders** — they are Task 1's measured output, and Task 3 is explicitly gated on substituting them. Every task that uses them (3, 7, 9, 11) names Task 1 as the source. No task may guess them.
 
-**Projected test counts** (297, 299, 300, 302, 304, 305, 306, 308) assume the current 296 baseline and that each task adds exactly the tests it lists. Treat them as a checksum, not a contract: if a count is off by one, find out why before proceeding — a silently-absent test is how a gate stops meaning anything.
+**Projected test counts — CORRECTED DURING EXECUTION; the original chain was off by one throughout.**
+Task 3's Step 5 predicted an *unchanged* `296 passed`, but Task 3 adds a whole new `#[test] fn`
+(`a_permission_fault_takes_the_darwin_signal`), so it is **297** — and 297 is what the first full gate
+actually measured. Every later projection inherited that error. The corrected chain, from the 296
+baseline, is:
+
+| after task | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|
+| adds | +1 | +1 | +2 | +1 | +2 | +2 | +1 | +1 | +2 passed, +1 ignored |
+| **total passed** | **297** | **298** | **300** | **301** | **303** | **305** | **306** | **307** | **309** (+1 ignored) |
+
+Cross-checked against measurement: `protnone.rs` grew 1 → 3 → 4 across Tasks 4/5/6, matching +1/+2/+1
+exactly. Treat these as a checksum, not a contract: if a count is off, find out why before proceeding —
+a silently-absent test is how a gate stops meaning anything. Under the amended (batched) cadence a full
+gate validates every task since the previous full gate at once, so Task 7's gate reading **303** is the
+joint checksum for Tasks 4, 5, 6 and 7.
