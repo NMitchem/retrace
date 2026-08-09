@@ -71,6 +71,28 @@ fn protect_none_stamps_the_leaf_and_tracks_the_range() {
     assert!(b.noaccess().is_empty(), "the extent must be dropped from the map");
 }
 
+// A seeked or checkpointed session must agree with the run it came from about what is protected.
+// The page-table STAMP rides along for free (the tables are backings, captured in `mem`); the MAP
+// does not, and without it `unprotect` and the fail-loud asserts would disagree with the hardware.
+#[test]
+fn a_checkpoint_carries_both_the_stamp_and_the_map() {
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    let base = b.guest_vm_reserve(0, 0x10000, true);
+    assert!(b.commit_reserved_page(base));
+    b.protect_none(base, 0x4000);
+
+    let st = b.checkpoint();
+    assert_eq!(st.noaccess, vec![(base, 0x4000)], "the map must be captured");
+    drop(b); // one VM per process: the original must go before the restored one is built
+
+    let b2 = Box_::from_checkpoint(&st);
+    assert!(b2.ipa_is_noaccess(base),
+        "the stage-1 stamp rides in `mem` with the page tables and must survive the restore");
+    assert_eq!(b2.noaccess(), &[(base, 0x4000)],
+        "the map must survive too, or unprotect and the hardware disagree");
+}
+
 // The M13-split invariant: no-access implies backed. Protecting a page with no backing would leave
 // its fault at stage 2, where commit_reserved_page would silently materialize it — the exact
 // silent-wrong-answer this milestone exists to remove. It must fail loud instead.

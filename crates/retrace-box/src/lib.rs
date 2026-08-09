@@ -563,6 +563,11 @@ pub struct BoxState {
     pub spsr: u64,
     pub mem: Vec<Region>,
     pub reservations: Vec<(u64, u64)>,
+    // M13: carried for the same reason as `reservations` — a mid-run capture cannot re-derive it.
+    // The page-table STAMPS ride along inside `mem` (the L2/L3 tables are backings, exactly as M9's
+    // ATTR_TRAMP note at from_checkpoint explains), but the MAP that `unprotect` and the fail-loud
+    // asserts consult is box state, and a restore without it would leave the two disagreeing.
+    pub noaccess: Vec<(u64, u64)>,
     pub mmap_next: u64,
     pub bootstrap_port: Option<u32>,
     pub cache_installed: bool,
@@ -2902,6 +2907,7 @@ impl Box_ {
             spsr: self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap(),
             mem,
             reservations: self.reservations.clone(),
+            noaccess: self.noaccess.clone(),
             mmap_next: self.mmap_next,
             bootstrap_port: self.bootstrap_port,
             cache_installed: self.cache.is_some(),
@@ -2972,11 +2978,7 @@ impl Box_ {
         let mut b = Box_ {
             vm, vcpu, backings,
             reservations: state.reservations.clone(),
-            // M13 t5: BoxState has no `noaccess` field yet (that's M13 t6's job — carrying the
-            // protection map through checkpoint/restore, the same way `reservations` already is
-            // above). Until then a checkpoint/restore round-trip forgets any active protection,
-            // which is safe today because nothing calls `protect_none` yet.
-            noaccess: Vec::new(),
+            noaccess: state.noaccess.clone(),
             mmap_next: state.mmap_next,
             bootstrap_port: state.bootstrap_port,
             l2_host, next_l3,
