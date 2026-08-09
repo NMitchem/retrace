@@ -13,6 +13,21 @@
 - **macOS 26.x on Apple Silicon.** Every binary touching `hv_*` needs `com.apple.security.hypervisor` (ad-hoc signable).
 - **`--test-threads=1` is mandatory** — one HVF VM per process. `just gate` sets it; a bare `cargo test` flakes with `HV_BUSY`.
 - **`just gate` is THE exit gate:** `cargo test --workspace` + `clippy -D warnings`. Baseline entering this milestone: **296 passed / 0 failed / 0 ignored** (90 test binaries).
+- **GATE CADENCE, amended during execution (user decision).** Measured: a full gate is ~8.6 min of test
+  execution plus compile, ~11 min wall-clock, and 9 remaining tasks would spend ~100 min in it. Each
+  task's `just gate` step is therefore run **in full only where a live call site can actually move a
+  dynamic gate**: Tasks **7, 8, 9** (the `mprotect` / `mmap` / `mach_vm_protect` wirings), **11** (the
+  headline) and **12** (the close needs true numbers). Tasks **5, 6, 10** add code that *nothing calls
+  yet* — new methods, a new `BoxState` field, a new guest fixture — so they run **targeted crate tests
+  plus clippy** instead (`cargo test -p retrace-box --test protnone --test carveout --test checkpoint
+  -- --test-threads=1`). The plan's per-task count checksums (299, 300, 302, …) are **not abandoned,
+  only batched**: the next full gate must equal the cumulative projection for every task since the last
+  one, and a mismatch is investigated then. A batched checksum is not a skipped one.
+- **Who runs the gate: the CONTROLLER, never an implementer.** Measured across four attempts on this
+  machine: both controller-run gates completed (exit 0; 297/0/0), while both subagent-run gates were
+  reaped mid-run once the agent went idle (killed at 44/90; SIGTERM at 19/90 — `recipe 'gate' was
+  terminated on line 5 by signal 15`). Raising the subagent's Bash timeout keeps the *agent* alive but
+  does not protect its orphaned child process. Implementers run fast crate-level tests and clippy only.
 - **All six headline gates stay green and un-ignored:** `hello_dyn_e2e`, `hello_rust_e2e`, `jq_e2e`, `jq_file_e2e`, `panic_e2e`, `segv_rust_e2e`. A new wall gets a NEW parked gate, never a regression of these.
 - **M13 deliberately ends with `1 ignored`** — `stackoverflow_rust_e2e`, parked at M8 spec risk R3 (Task 11). That is the first non-zero ignored count since M2-taskinfo and it is honest-gate discipline, not a regression. Task 12 must say so explicitly.
 - **MEASURED (Task 1):** a `PROT_NONE` access on Darwin raises **`SIGBUS`/`BUS_ADRALN`**, not `SIGSEGV`/`SEGV_ACCERR`. Wherever this plan writes `<SIG>`/`<CODE>`, substitute those. An unmapped address still raises `SIGSEGV`, so `crashy_e2e`/`segv_rust_e2e` are unaffected.
