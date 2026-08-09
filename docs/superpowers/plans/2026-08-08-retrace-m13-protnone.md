@@ -624,7 +624,10 @@ In `crates/retrace-box/src/lib.rs`, after `ATTR_TRAMP` (`:331`):
 // to `Stop::Fault` and M12's disposition check. Marking the descriptor INVALID instead would give a
 // translation fault, making a protected page indistinguishable from an unmapped one; that
 // distinction is what lets `commit_reserved_page` keep its stage-2 cases (see the M13 spec).
-const ATTR_NONE: u64 = A_COMMON | 0x00 /*AP EL1-RW, EL0 none*/ | UXN | PXN;
+// NOTE: no `| 0x00` for the AP field — AP 0b00 means there are literally no bits to OR in, and
+// clippy's `identity_op` rejects the no-op under `-D warnings`. The AP note lives in the trailing
+// comment instead.
+const ATTR_NONE: u64 = A_COMMON | UXN | PXN; // AP 0b00 (no bits to OR in): EL1-RW, EL0 none
 ```
 
 - [ ] **Step 4: Add the `noaccess` field**
@@ -639,7 +642,9 @@ In the `Box_` struct, immediately after the `reservations` field (`:349-354` are
     noaccess: Vec<(u64, u64)>,
 ```
 
-Add `noaccess: Vec::new(),` to each of the three landmark-0 constructors (`:908`, `:1397`, `:2176`) beside their existing `reservations: Vec::new(),`.
+Add `noaccess: Vec::new(),` beside the existing `reservations` initializer in **FOUR** `Box_ { … }` constructors, not three. Searching for `reservations: Vec::new()` finds only three of them — the fourth, **`from_checkpoint`** (M4's mid-run restore), initializes it as `state.reservations.clone()` instead, so that search structurally cannot see it. Omitting it is a hard compile error (E0063, missing field). Find all four with `rg -n 'Box_ \{ vm|noaccess:' ` or by compiling.
+
+At `from_checkpoint` specifically, set `noaccess: Vec::new()` and say why in a comment: `BoxState` has no `noaccess` field until Task 6, so a checkpoint/restore round-trip forgets any active protection — which is safe **only** because nothing calls `protect_none` yet. Task 6 closes that gap. Do not reach into `BoxState`/`checkpoint()` here; that is Task 6's job.
 
 - [ ] **Step 5: Add the four methods**
 
