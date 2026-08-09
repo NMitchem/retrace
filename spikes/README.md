@@ -363,6 +363,24 @@ frame therefore has a syscall result to account for.
 clang -O0 -o sigraisex0 sigraisex0.c && ./sigraisex0
 ```
 
+It forces `PSTATE.C = 1` (and `Z = 1`) immediately before `kill(getpid(), SIGUSR1)`, then reports
+what the handler's `ucontext` actually holds:
+
+```
+kill() returned   = 0
+frame saved x0    = 0            <- the syscall's RETURN, not the pid argument that was in x0
+frame saved cpsr  = 0x40000000   <- Z survived, C did NOT: the success flags, not the pre-call ones
+```
+
+**The kernel snapshots the context *after* completing the syscall return.** So a frame built from
+the raw trap state is a frame whose guest, on `sigreturn`, reads its own successful `kill()` as a
+failure — `x0` holds the pid and `PSTATE.C` says "error". That is why the caught-raise arm calls
+`Box_::complete_syscall_before_delivery` rather than plain `set_x0_err_and_return`: the frame's
+PSTATE comes from `SPSR_EL1`, which the latter never writes.
+
+The fault path is deliberately untouched by this — a fault has no syscall result, and its `x0` and
+PSTATE *are* the guest's genuine trap state.
+
 ## `protnone.c` — Darwin's `PROT_NONE` signal, measured (M13 R1)
 
 `crates/retrace-arch/src/lib.rs:307` maps an AArch64 permission fault (DFSC `0x0c..=0x0f`) to
@@ -403,21 +421,3 @@ Verified, both directions:
   "no permission at all" from "wrong permission for this access" in `si_code`; both surface as the
   alignment-named constant despite neither access being misaligned. Not consumed by M13, recorded
   for completeness.
-
-It forces `PSTATE.C = 1` (and `Z = 1`) immediately before `kill(getpid(), SIGUSR1)`, then reports
-what the handler's `ucontext` actually holds:
-
-```
-kill() returned   = 0
-frame saved x0    = 0            <- the syscall's RETURN, not the pid argument that was in x0
-frame saved cpsr  = 0x40000000   <- Z survived, C did NOT: the success flags, not the pre-call ones
-```
-
-**The kernel snapshots the context *after* completing the syscall return.** So a frame built from
-the raw trap state is a frame whose guest, on `sigreturn`, reads its own successful `kill()` as a
-failure — `x0` holds the pid and `PSTATE.C` says "error". That is why the caught-raise arm calls
-`Box_::complete_syscall_before_delivery` rather than plain `set_x0_err_and_return`: the frame's
-PSTATE comes from `SPSR_EL1`, which the latter never writes.
-
-The fault path is deliberately untouched by this — a fault has no syscall result, and its `x0` and
-PSTATE *are* the guest's genuine trap state.
