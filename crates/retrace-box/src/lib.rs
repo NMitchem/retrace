@@ -329,6 +329,13 @@ const PXN: u64 = 1 << 53;                     // privileged (EL1) execute-never
 const ATTR_DATA:  u64 = A_COMMON | 0x40 /*AP EL0RW*/ | UXN | PXN;   // RW, never executable
 const ATTR_CODE:  u64 = A_COMMON | 0xC0 /*AP RO both ELs*/ | PXN;   // RO, EL0-exec (UXN clear), EL1 no-exec
 const ATTR_TRAMP: u64 = A_COMMON | 0x80 /*AP EL1-RO, EL0 none*/ | UXN; // RO, EL1-exec (PXN clear)
+// M13: EL0 gets nothing (AP 0b00 leaves EL1 RW and EL0 with no access at all), and the page is
+// non-executable at both ELs. `A_COMMON` sets AF, so an EL0 access takes a clean PERMISSION fault
+// (DFSC 0x0f) rather than an access-flag fault — which is what routes it through the EL1 trampoline
+// to `Stop::Fault` and M12's disposition check. Marking the descriptor INVALID instead would give a
+// translation fault, making a protected page indistinguishable from an unmapped one; that
+// distinction is what lets `commit_reserved_page` keep its stage-2 cases (see the M13 spec).
+const ATTR_NONE: u64 = A_COMMON | UXN | PXN; // AP 0b00 (no bits to OR in): EL1-RW, EL0 none
 const DESC_BLOCK: u64 = 0x1;                  // L2 block descriptor
 const DESC_TABLE: u64 = 0x3;                  // L2 -> L3 table descriptor
 const DESC_PAGE:  u64 = 0x3;                  // L3 page descriptor
@@ -352,6 +359,11 @@ pub struct Box_ {
     // space matches record. Plain Vec (its Drop only frees its own buffer), declared after
     // `backings` so the load-bearing vcpu-before-vm drop order is unaffected.
     reservations: Vec<(u64, u64)>,
+    // M13: page-granular extents the guest has protected PROT_NONE, recorded by `protect_none` and
+    // subtracted by `unprotect`/`guest_munmap`. Same shape and same treatment as `reservations`
+    // above — a pure function of the guest's own mmap/mprotect sequence, so identical on record and
+    // replay. INVARIANT: every page named here is backed (see `protect_none`).
+    noaccess: Vec<(u64, u64)>,
     // Next fresh IPA for guest_mmap. Plain u64 (no Drop), declared after `backings` so the
     // load-bearing vcpu-before-vm drop order is unaffected.
     mmap_next: u64,
@@ -940,7 +952,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1166,6 +1178,79 @@ impl Box_ {
     pub fn ipa_is_exec(&self, ipa: u64) -> bool {
         let Some(leaf) = self.leaf_desc(ipa) else { return false };
         leaf & 0x3 != 0 && leaf & UXN == 0
+    }
+
+    /// Make `[ipa, ipa+len)` inaccessible to EL0 — the guest asked for `PROT_NONE`, so the page
+    /// tables say so and the hardware enforces it. Page-granular: the range is rounded out to whole
+    /// pages, since a stage-1 leaf is the finest thing that can carry an attribute.
+    ///
+    /// **Requires every page in the range to be backed, and asserts otherwise.** That is M13's
+    /// central invariant, and it is what makes the fault unambiguous: a protected page is backed, so
+    /// an EL0 access takes a stage-1 PERMISSION fault via the EL1 trampoline and arrives as
+    /// `Stop::Fault` for M12's disposition check; a reserved-but-uncommitted page is unbacked, so its
+    /// access takes a stage-2 TRANSLATION fault direct to EL2 and arrives as `Stop::Other` for
+    /// `commit_reserved_page`. Two exception routes, two `Stop` variants — the hardware separates
+    /// "reserved and committable" from "protected, must fault", and no software gate has to.
+    ///
+    /// **The TLBI is a correctness requirement here, not a precaution.** Every other caller of
+    /// `set_region_attr` stamps a fresh IPA the guest has never translated — the sign stub, the TLBI
+    /// stub, a cache page, a fresh exec mmap — and each documents that as its soundness argument.
+    /// This one stamps a page the guest is actively using (libstd's guard page lives inside the stack
+    /// it is running on). A missing flush leaves a stale PERMISSIVE entry, so the guard silently
+    /// fails to guard: the precise class of quiet wrong answer this milestone exists to remove.
+    ///
+    /// Deterministic and trace-free: a pure function of the guest's own protection calls, which are
+    /// already recorded syscalls that replay re-dispatches through this same method.
+    pub fn protect_none(&mut self, ipa: u64, len: u64) {
+        let g = GRANULE as u64;
+        let start = ipa & !(g - 1);
+        let end = (ipa.saturating_add(len) + g - 1) & !(g - 1);
+        if end <= start { return; }
+        let mut p = start;
+        while p < end {
+            assert!(self.host_span(p).is_some(),
+                "protect_none: no backing for {p:#x} (in [{start:#x},{end:#x})). M13 models \
+                 no-access only on BACKED pages: an unbacked protected page would fault at stage 2, \
+                 where commit_reserved_page would silently materialize it instead of faulting. \
+                 Model the reservation-protect case deliberately before a guest needs it.");
+            p += g;
+        }
+        self.set_region_attr(start, end - start, ATTR_NONE);
+        self.noaccess.push((start, end - start));
+        // The guest may already hold a translation for these pages — unlike every other stamp site.
+        self.flush_guest_tlb();
+    }
+
+    /// Restore ordinary EL0 read/write access to `[ipa, ipa+len)` and drop it from the protection
+    /// map. The mirror of [`protect_none`](Self::protect_none), and it needs the same flush for the
+    /// same reason in the opposite direction: a stale RESTRICTIVE entry would keep faulting on a page
+    /// the guest has legitimately unprotected.
+    ///
+    /// Restores `ATTR_DATA` unconditionally rather than whatever the page held before it was
+    /// protected. Today those are the same thing — only `ATTR_DATA` pages are ever protected, since
+    /// code pages are read-only and no guest protects them — and the choice is documented rather than
+    /// incidental: a general protection map would have to remember the prior attribute instead.
+    pub fn unprotect(&mut self, ipa: u64, len: u64) {
+        let g = GRANULE as u64;
+        let start = ipa & !(g - 1);
+        let end = (ipa.saturating_add(len) + g - 1) & !(g - 1);
+        if end <= start { return; }
+        self.set_region_attr(start, end - start, ATTR_DATA);
+        subtract_range(&mut self.noaccess, start, end - start);
+        self.flush_guest_tlb();
+    }
+
+    /// The tracked no-access extents as `(start, len)` (test/diagnostic observability, the twin of
+    /// [`reservations`](Self::reservations)).
+    pub fn noaccess(&self) -> &[(u64, u64)] { &self.noaccess }
+
+    /// Test/diagnostic observable: does the stage-1 leaf for `ipa` deny EL0 all access (`ATTR_NONE`:
+    /// AP bits `0b00`)? The AP field uniquely identifies the four attributes this box installs —
+    /// `ATTR_NONE` `0x00`, `ATTR_DATA` `0x40`, `ATTR_TRAMP` `0x80`, `ATTR_CODE` `0xC0` — so testing
+    /// it is exact rather than heuristic.
+    pub fn ipa_is_noaccess(&self, ipa: u64) -> bool {
+        let Some(leaf) = self.leaf_desc(ipa) else { return false };
+        leaf & 0x3 != 0 && leaf & 0xC0 == 0x00
     }
 
     /// Lazy-init the signing scratch on first use: a stub CODE page (RO+exec, ATTR_CODE) and an I/O
@@ -1437,7 +1522,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -2201,7 +2286,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -2887,6 +2972,11 @@ impl Box_ {
         let mut b = Box_ {
             vm, vcpu, backings,
             reservations: state.reservations.clone(),
+            // M13 t5: BoxState has no `noaccess` field yet (that's M13 t6's job — carrying the
+            // protection map through checkpoint/restore, the same way `reservations` already is
+            // above). Until then a checkpoint/restore round-trip forgets any active protection,
+            // which is safe today because nothing calls `protect_none` yet.
+            noaccess: Vec::new(),
             mmap_next: state.mmap_next,
             bootstrap_port: state.bootstrap_port,
             l2_host, next_l3,

@@ -40,3 +40,45 @@ fn subtract_range_trims_splits_and_removes() {
     assert_eq!(t, vec![(0x1000_0000, 0x4000), (0x1000_8000, 0x8000)],
         "a sub-page cut is rounded out to whole pages");
 }
+
+use retrace_box::Box_;
+use retrace_guest::{parse_macho, HELLO};
+
+// The stamp round-trips: a backed page goes no-access and comes back, and both the live page-table
+// leaf and the tracked map agree at every step. This is the mechanism with no guest and no fault
+// in the way.
+#[test]
+fn protect_none_stamps_the_leaf_and_tracks_the_range() {
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+
+    // A page that is genuinely backed: reserve, then commit one page (the M2-mmapcommit path).
+    let base = b.guest_vm_reserve(0, 0x10000, true);
+    assert!(b.commit_reserved_page(base), "the page under test must be backed");
+
+    assert!(!b.ipa_is_noaccess(base), "a freshly committed page is ordinary RW data");
+    assert!(b.noaccess().is_empty(), "nothing is protected yet");
+
+    b.protect_none(base, 0x4000);
+    assert!(b.ipa_is_noaccess(base), "the leaf must deny EL0 after protect_none");
+    assert_eq!(b.noaccess(), &[(base, 0x4000)], "the extent must be tracked");
+
+    // Its neighbour inside the same reservation is untouched: the stamp is per-page.
+    assert!(!b.ipa_is_noaccess(base + 0x4000), "protection must not leak to the next page");
+
+    b.unprotect(base, 0x4000);
+    assert!(!b.ipa_is_noaccess(base), "unprotect must restore EL0 access");
+    assert!(b.noaccess().is_empty(), "the extent must be dropped from the map");
+}
+
+// The M13-split invariant: no-access implies backed. Protecting a page with no backing would leave
+// its fault at stage 2, where commit_reserved_page would silently materialize it — the exact
+// silent-wrong-answer this milestone exists to remove. It must fail loud instead.
+#[test]
+#[should_panic(expected = "protect_none: no backing")]
+fn protect_none_refuses_an_unbacked_page() {
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    let base = b.guest_vm_reserve(0, 0x10000, true);  // reserved, deliberately NOT committed
+    b.protect_none(base, 0x4000);
+}
