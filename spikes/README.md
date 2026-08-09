@@ -363,6 +363,47 @@ frame therefore has a syscall result to account for.
 clang -O0 -o sigraisex0 sigraisex0.c && ./sigraisex0
 ```
 
+## `protnone.c` — Darwin's `PROT_NONE` signal, measured (M13 R1)
+
+`crates/retrace-arch/src/lib.rs:307` maps an AArch64 permission fault (DFSC `0x0c..=0x0f`) to
+`(SIGSEGV, SEGV_ACCERR)` — the Linux answer, and a row **no guest has ever exercised** (M6/M11/M12
+only ever recorded translation faults). Darwin's `ux_exception` maps `EXC_BAD_ACCESS` by *code*:
+`KERN_INVALID_ADDRESS` → SIGSEGV, everything else (including `KERN_PROTECTION_FAILURE`) → SIGBUS;
+libstd's `install_main_guard` comment claims *"This ensures SIGBUS will be raised on stack
+overflow."* Needs no entitlement or codesigning — plain user memory, no `hv_*` API:
+
+```sh
+clang -o protnone protnone.c
+./protnone
+```
+
+```
+page size = 16384
+SEGV_MAPERR=1 SEGV_ACCERR=2 BUS_ADRALN=1 BUS_ADRERR=2 BUS_OBJERR=3
+PROT_NONE page at 0x104bd0000
+PROT_NONE load         SIGBUS   si_code=1 si_addr=0x104bd0000
+PROT_NONE store        SIGBUS   si_code=1 si_addr=0x104bd0000
+unmapped load          SIGSEGV  si_code=2 si_addr=0x4000dead0000
+unmapped store         SIGSEGV  si_code=2 si_addr=0x4000dead0000
+PROT_READ store        SIGBUS   si_code=1 si_addr=0x104bd4000
+```
+
+Verified, both directions:
+
+- **A `PROT_NONE` access — load and store alike — raises `SIGBUS` with `si_code=BUS_ADRALN` (1),
+  not `SIGSEGV`/`SEGV_ACCERR`.** libstd's comment is right and retrace-arch's table (the Linux
+  answer) is wrong for this row: Darwin's `KERN_PROTECTION_FAILURE` → SIGBUS holds for both
+  directions, not just the store libstd's guard page cares about.
+- **The unmapped control still raises `SIGSEGV`**, both directions — `crashy_e2e`'s M6
+  classification is unaffected. Its `si_code=SEGV_ACCERR` (2), not `SEGV_MAPERR`, matching the
+  divergence `sigtramp.c` already recorded for a store to a wholly unmapped address (see the doc
+  comment above `signal_of_esr`) — this run reconfirms it and extends it to a load.
+- **`PROT_READ` store (informational only — M13 honors `prot == 0` exclusively)** also raises
+  `SIGBUS`/`BUS_ADRALN` — the same code Darwin uses for `PROT_NONE`. XNU does not distinguish
+  "no permission at all" from "wrong permission for this access" in `si_code`; both surface as the
+  alignment-named constant despite neither access being misaligned. Not consumed by M13, recorded
+  for completeness.
+
 It forces `PSTATE.C = 1` (and `Z = 1`) immediately before `kill(getpid(), SIGUSR1)`, then reports
 what the handler's `ucontext` actually holds:
 
