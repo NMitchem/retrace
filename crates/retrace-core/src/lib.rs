@@ -676,7 +676,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // real bring-up failure — decode the ESR class + faulting IPA so it names itself.
             Stop::Other { esr } => {
                 if b.page_in_cache(b.fault_ipa()) { continue; }
-                if b.commit_reserved_page(b.fault_ipa()) { continue; }
+                if b.commit_reserved_page(b.fault_ipa()) {
+                    // M13 t2: the retained PROT_NONE-reservation deviation is quantified rather
+                    // than hand-waved (see the M13 spec). Record-only, like every other
+                    // RETRACE_TRACE line.
+                    if trace_log { eprintln!("[commit] ipa={:#x}", b.fault_ipa()); }
+                    continue;
+                }
                 if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
                 return Err(b.describe_stop(esr));
             }
