@@ -1,9 +1,13 @@
 # retrace M13-protnone — the guard page actually guards
 
-M12 closed its boundary and named the next one in the same breath: `PROT_NONE` is not enforced, so
-libstd's stack-overflow guard page does not guard, and a Rust stack overflow grows straight through
-it. That is why M12's headline guest used a wild pointer rather than the stack overflow that would
-otherwise have been the obvious choice. M13 makes the guard fault.
+M12 closed its boundary and named the next one in the same breath: `PROT_NONE` is not enforced, so a
+page the guest protects stays readable and writable. M13 makes it fault.
+
+> **Read the "Measured corrections" section below before the rest of this spec.** Two of the claims
+> M12 handed forward — that libstd mmaps its guard `PROT_NONE`, and that a Rust stack overflow
+> "grows straight through" that guard — were inherited rather than measured, and executing this
+> plan's measurement-first tasks falsified both. The mechanism this spec designs is unchanged and
+> correct; its *headline* moved, and two call sites swapped billing.
 
 The milestone is smaller than M12's Status section feared, and the reason is worth stating up front:
 **three of the four mechanisms it needs already exist and are already tested.** The fault route
@@ -15,24 +19,67 @@ is a fourth thing: an attribute that denies EL0 access, and the four call sites 
 
 ## The problem, precisely
 
-`crates/retrace-box/src/lib.rs:1774` — `map_mmap_region` — accepts `prot` and consults exactly one
-bit of it (`PROT_EXEC`, and only to decide block-exclusive placement). Its own doc comment names the
-guest that this breaks:
+**`Box_::guest_mprotect` (`lib.rs:1894`) is the live wrong answer, and it states its own debt.** It
+discards `_prot`, re-`hv_vm_protect`s the stage-2 range to `RWX`, and documents: *"A finer prot map
+lands if a guest ever needs a fault from this."* A guest does — measured: `hello_rust` issues three
+`mprotect(addr, 0x4000, PROT_NONE)` calls, one of which is libstd's stack-overflow guard at
+`0x2004000`. All three silently do nothing today.
 
-> libstd's `install_main_guard` mmaps `MAP_FIXED` at `usrstack64 - RLIMIT_STACK`, wholly inside the
-> 256 KiB dynamic-stack backing
+`map_mmap_region` (`lib.rs:1774`) accepts `prot` and consults exactly one bit (`PROT_EXEC`, only to
+decide block-exclusive placement), so a `PROT_NONE` mmap is equally unenforced. Its doc comment cites
+`install_main_guard` as the motivating case, and that citation is **half wrong**: libstd does mmap
+`MAP_FIXED` at the guard address, but with `PROT_READ|PROT_WRITE` — the `PROT_NONE` arrives from the
+following `mprotect`. So this path is real but is *not* what makes libstd's guard a guard.
 
-That is the "fully contained" case (case 2 of three). It copies fresh zeroed pages over the requested
-range inside the existing backing and returns the address. Correct for everything except the one
-thing the guest asked for: the range stays RW. The guard page is ordinary stack memory that happens
-to be zeroed.
-
-`Box_::guest_mprotect` (`lib.rs:1894`) is the same story stated openly — it discards `_prot`,
-re-`hv_vm_protect`s the stage-2 range to `RWX`, and documents the debt: *"A finer prot map lands if a
-guest ever needs a fault from this."* A guest now does.
+`mach_vm_protect` is a third path and the weakest: its record arm (`retrace-core/src/lib.rs:348`) and
+replay arm (`:1123`) return `KERN_SUCCESS` without calling into the box at all. Measured, no dynamic
+gate ever passes it `prot == 0`, so wiring it is dormant today and exists to keep the three paths
+from disagreeing.
 
 `mach_vm_protect` is a third path and the weakest: its record arm (`retrace-core/src/lib.rs:348`) and
 replay arm (`:1123`) return `KERN_SUCCESS` without calling into the box at all.
+
+## Measured corrections to this spec (Tasks 1-2, 2026-08-08)
+
+Three claims below were written from inherited documentation rather than measurement. Executing the
+plan's measurement-first tasks falsified them. They are corrected here rather than quietly edited
+away, because what the spec believed is part of the record.
+
+1. **Darwin raises `SIGBUS`/`BUS_ADRALN` for a `PROT_NONE` access, not `SIGSEGV`/`SEGV_ACCERR`**
+   (`spikes/protnone.c`, reproduced independently at two optimization levels). `signal_of_esr`'s
+   permission row was the Linux answer and had never been reached by a running guest in six
+   milestones. An unmapped address still raises `SIGSEGV`, so M6's classification is untouched.
+
+2. **libstd does NOT mmap its guard page `PROT_NONE`.** It issues
+   `mmap(guard, page, PROT_READ|PROT_WRITE, MAP_FIXED|MAP_ANON)` and *then*
+   `mprotect(guard, page, PROT_NONE)`. `hello_rust` records **zero** `PROT_NONE` mmaps.
+   So **M13-sites' case 2 (`guest_mprotect`) is the path that makes libstd's guard fault**, and
+   case 1 (`map_mmap_region`) is not on libstd's path at all — the reverse of what this spec said.
+   Both remain in scope; only their billing was wrong. M12's Status section and
+   `crates/retrace-box/src/lib.rs:35-37` carry the same error and are corrected by this milestone.
+
+3. **The stack-overflow headline is unachievable in M13, and the reason is pre-existing measured
+   debt.** libstd puts its guard at `pthread_get_stackaddr_np() - pthread_get_stacksize_np()` =
+   `DYN_STACK_TOP - 0x7fc000` = `0x2004000`, which is **7.73 MiB below** the real 256 KiB stack
+   bottom. `crates/retrace-box/src/lib.rs:35-53` already documents this as **M8-stack spec risk R3**,
+   and already measured both candidate fixes and rejected them: backing a full 8 MiB cost **~1.7x on
+   `hello_rust` and far worse across the dyld suite**, and `getrlimit` cannot move the subtrahend
+   because libpthread ignores the reply (answering `0x10000000` instead of `0x40000` left the address
+   bit-identical). Worse than "the guard does not guard": an overflow today runs into unbacked IPA,
+   takes a stage-2 fault, and reaches the fatal `describe_stop` path — a retrace hard error rather
+   than a guest-visible signal.
+
+   **Ruling:** M13's headline becomes a full-`std` Rust guest that `mprotect`s a page `PROT_NONE` and
+   faults on it. The stack-overflow gate is written and **parked `#[ignore]`d at the R3 wall**, with
+   the wall named in the test and the README — honest-gate discipline, and a precisely diagnosed
+   target for the milestone that fixes R3.
+
+Two risks retired by measurement rather than by argument: **`mach_vm_protect` never carries
+`prot == 0`** (47 calls across `hello_rust`, only `0x1`/`0x3`/`0x13`), so M13-sites case 3 is a
+dormant change; and **`commit_reserved_page` fires zero times** in `hello_rust`, `hello_dyn`, and
+`jq` across three runs each — with the diagnostic proven live against the static `reservecommit`
+fixture, so the zero is a measurement and not a broken probe. The deviation this spec retains has
+**no observed cost in any dynamic gate**.
 
 ## Verified facts (this host, HEAD `45b0821`, 2026-08-08)
 
@@ -258,28 +305,30 @@ quantified deviation is honest; an unquantified one is the thing this project re
 ## Exit criterion
 
 `just gate` green with no existing assertion loosened, all six current headline gates still green and
-un-ignored, and `stackoverflow_rust_e2e` — a stock full-`std` Rust guest that recurses until it hits
-libstd's guard page — recording and replaying bit-for-bit, replayed twice.
+un-ignored, and `protnone_rust_e2e` — a stock full-`std` Rust guest that `mprotect`s a page
+`PROT_NONE` and then touches it — recording and replaying bit-for-bit, replayed twice.
 
-**The printed message is necessary and nowhere near sufficient, and the gate must say so.** libstd
-installs the *same* handler for `SIGSEGV` and `SIGBUS`, and that handler prints `thread 'main' has
-overflowed its stack` whenever `si_addr` falls inside the guard range — regardless of which signal
-actually arrived. A gate asserting on that string would pass with the wrong signal in the trace. This
-is M12's "exit 139 is necessary and nowhere near sufficient" lesson recurring one milestone later, so
-the gate asserts on the trace:
+**The exit code is necessary and nowhere near sufficient, and the gate must say so.** A guest that
+dies of any uncaught fault exits the same way — that is exactly what `crashy_e2e` already asserts — so
+a gate resting on the exit code would pass unchanged with M13's enforcement entirely absent, because
+the *unprotected* store to a wild address would kill it just as dead. This is M12's "exit 139 is
+necessary and nowhere near sufficient" lesson recurring one milestone later, so the gate asserts on
+the trace:
 
-- **exactly one** `Event::SignalDelivery` whose `sig` is the **measured** signal (R1's answer, not the
-  current table's assumption);
-- `si_addr` inside the guard page — proving the fault is the *guard*, not an unrelated access;
-- `handler` equal to the VA libstd installed, **learned from the recorded `sigaction` rather than
-  hardcoded**, by seeking a `ReplaySession` to that landmark (M12's technique, and itself a test of
-  seek);
-- a terminal event consistent with `abort()`;
+- a fault whose ESR carries **DFSC `0x0f`** — a *permission* fault, which is the thing M13 creates and
+  which no guest could produce before this milestone; a translation fault here would mean the page was
+  unmapped rather than protected, and would pass a weaker gate;
+- mapping to the **measured** signal (`SIGBUS`, Task 1's answer — not the table's prior assumption);
+- `far` equal to the page the guest protected, learned from the recorded `mprotect` event rather than
+  hardcoded;
 - replay byte-identical, twice.
 
-Per honest-gate discipline: if it does not clear, it parks `#[ignore]`d with the exact wall named in
-both the test and the README, and a NEW gate is parked for the capability that wall blocks — never a
-regression of the existing six.
+**Parked at the wall, per honest-gate discipline:** `stackoverflow_rust_e2e` is written and committed
+`#[ignore]`d, naming M8 spec risk R3 — the guest believes it has an 8 MiB stack while 256 KiB is
+backed, so libstd's guard sits 7.73 MiB below the real stack bottom and an overflow never reaches it.
+The `#[ignore]` reason and the README Status section must both state that wall and both measured
+non-fixes (8 MiB backing ≈ 1.7x on `hello_rust`; `getrlimit` ignored by libpthread). That is a NEW
+parked gate for the capability the wall blocks — never a regression of the existing six.
 
 ## Testing
 
@@ -304,27 +353,35 @@ libstd's use of it:
 
 **End-to-end.**
 
-- `stackoverflow_rust_e2e` — the headline, as specified in the exit criterion.
+- `protnone_rust_e2e` — the headline, as specified in the exit criterion. Note that libstd installs
+  `SIGSEGV`/`SIGBUS` handlers at startup (M11 measured flags `0x41`), so this guest also exercises
+  M12's delivery: the fault is delivered to libstd's handler, which compares `si_addr` against its
+  guard range, finds no match, resets to `SIG_DFL` and returns, and the re-executed store kills the
+  guest — the `segvy` shape, now reached through a *permission* fault instead of a translation fault.
+- `stackoverflow_rust_e2e` — **committed `#[ignore]`d**, naming the M8 R3 wall and both measured
+  non-fixes. It is the gate that comes green when R3 is fixed.
 - `crashy_e2e`, `segv_rust_e2e`, and the four dynamic gates unchanged — the regression that M13
-  changed no existing fault's classification.
-- A reverse-debug seek to the guard-page `SignalDelivery` landmark. M12 made delivery seekable; "rewind
-  to just before the stack overflow" is the payoff, so it is tested rather than claimed.
+  changed no existing fault's classification. `segv_rust_e2e` matters most here: it asserts
+  `sig == 11`, and a wrong edit to `signal_of_esr` would flip it to `SIGBUS` and be caught.
+- A reverse-debug seek to the delivery landmark, showing "rewind to the moment the protected page was
+  touched" works — M12 made delivery seekable, so this tests the payoff rather than claiming it.
 
 **Why the headline alone is insufficient**, stated so the mechanism gates are not treated as optional:
-it never exercises the **restore** direction, because libstd never unprotects its guard; it never
-reaches `mprotect` or `mach_vm_protect`, only the `mmap` path; and without the `si_addr` assertion it
-would pass on a guard fault produced for an accidental reason.
+it never exercises the **restore** direction, because nothing in it unprotects; it reaches
+`mprotect` but never `mach_vm_protect` or the `mmap` `prot == 0` path; and without the DFSC assertion
+it would pass on a translation fault produced for an accidental reason.
 
 ## Risk register
 
 | # | Risk | Mitigation |
 |---|---|---|
-| R1 | `signal_of_esr`'s permission row is the Linux answer; Darwin raises `SIGBUS` for a protection failure, and libstd's own comment says so | Spike `spikes/protnone.c`: handlers for **both** signals, load and store separately, plus an **unmapped** control that must still yield `SIGSEGV` or `crashy_e2e` breaks. Measure `si_code` while there. Fix the row and its golden test if the spike says so |
-| R2 | libstd's guard page lands outside the guest stack backing → `protect_none`'s assert fires at task 1 | One `RETRACE_TRACE=1` run comparing the guard address against the stack backing extent, before any mechanism is built |
+| R1 | ~~`signal_of_esr`'s permission row is the Linux answer~~ | **RETIRED by measurement.** `spikes/protnone.c` measured `(SIGBUS, BUS_ADRALN)`, reproduced independently. Unmapped control still `SIGSEGV`, so `crashy_e2e` is safe. Task 3 fixes the row |
+| R2 | ~~libstd's guard page lands outside the guest stack backing → `protect_none`'s assert fires~~ | **RETIRED by measurement.** Every PROT_NONE'd page is backed in both `hello_rust` and `hello_dyn` (libstd mmaps the page RW before mprotecting it), so the assert cannot fire on the dynamic gates |
+| R8 | The guard sits 7.73 MiB below the real stack, so the stack-overflow headline cannot work (M8 R3) | **ACCEPTED, not mitigated.** Both fixes were already measured and rejected by M8 (8 MiB backing ≈ 1.7x; `getrlimit` ignored by libpthread). Headline swapped to `protnone_rust_e2e`; `stackoverflow_rust_e2e` parked `#[ignore]`d at this wall |
 | R3 | A missing or ineffective TLBI leaves a stale permissive entry, so the guard silently fails to guard | `protrestore.s`, ordered protect-then-restore, which cannot pass vacuously |
-| R4 | dyld `mach_vm_protect`s something to `PROT_NONE`, so routing that arm into the box is a live behavior change | Measure `mach_vm_protect` call sites and `prot` values across the four dynamic gates before wiring the arm |
+| R4 | ~~dyld `mach_vm_protect`s something to `PROT_NONE`~~ | **RETIRED by measurement.** 47 calls in `hello_rust`, `prot` only `0x1`/`0x3`/`0x13`, never `0`. Task 9 is a dormant change |
 | R5 | The headline passes on the printed message while the trace carries the wrong signal | Assert the signal number and `si_addr` in the trace, not the string |
-| R6 | The recursion guest is optimized into a loop and never overflows | `black_box` on the recursive call; assert the guest actually faults rather than exiting |
+| R6 | The headline guest's protected store is optimized away | `write_volatile` through the protected pointer; assert the guest actually faults rather than exiting 0 |
 | R7 | Growing the stack-adjacent protected region slows the per-syscall memory diff (M8's measured lesson) | The guard is one page; watch the gate's wall-clock and say so if it moves |
 
 ## Components
