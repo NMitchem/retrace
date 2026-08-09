@@ -521,8 +521,8 @@ mod tests {
     #[test]
     fn a_permission_fault_takes_the_darwin_signal() {
         // DFSC 0x0f = permission fault, level 3. Bit 6 of the ISS is WnR: 0 = load, 1 = store.
-        assert_eq!(signal_of_esr(0x9200_000f), (SIGBUS, BUS_ADRALN), "permission fault, store");
-        assert_eq!(signal_of_esr(0x9200_004f), (SIGBUS, BUS_ADRALN), "permission fault, load");
+        assert_eq!(signal_of_esr(0x9200_000f), (SIGBUS, BUS_ADRALN), "permission fault, load");
+        assert_eq!(signal_of_esr(0x9200_004f), (SIGBUS, BUS_ADRALN), "permission fault, store");
         // The control that must NOT move: an unmapped address is a TRANSLATION fault and stays
         // SIGSEGV/SEGV_MAPERR, which is what crashy_e2e and segv_rust_e2e rest on.
         assert_eq!(signal_of_esr(0x9200_0006), (SIGSEGV, SEGV_MAPERR), "translation fault, level 2");
