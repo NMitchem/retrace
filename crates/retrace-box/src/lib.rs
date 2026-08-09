@@ -631,6 +631,39 @@ extern "C" {
     fn mach_port_construct(task: u32, options: *const MachPortOptions, context: u64, name: *mut u32) -> i32;
 }
 
+/// Subtract `[addr, addr+len)` from every overlapping extent in a page-granular `(start, len)`
+/// table, rounding the cut OUT to whole pages the way the kernel does (start down, end up). A full
+/// cover removes the entry; a head/tail overlap trims it; a strictly-interior punch SPLITS it into
+/// two. Pure: identical input produces identical output on record and replay.
+///
+/// Shared by `reservations` (M2-carveout's hole punch) and `noaccess` (M13's protection map) so the
+/// second table cannot drift from the arithmetic `carveout.rs` already pins for the first.
+pub(crate) fn subtract_range(table: &mut Vec<(u64, u64)>, addr: u64, len: u64) {
+    let g = GRANULE as u64;
+    let s = addr & !(g - 1);                                 // trunc_page(addr)
+    let e = (addr.saturating_add(len) + g - 1) & !(g - 1);   // round_page(addr + len)
+    if e <= s { return; }
+    let mut out = Vec::with_capacity(table.len() + 1);
+    for &(start, rlen) in table.iter() {
+        let end = start + rlen;
+        if e <= start || s >= end {
+            out.push((start, rlen));                         // disjoint: keep whole
+            continue;
+        }
+        if s > start { out.push((start, s - start)); }       // head remnant below the cut
+        if e < end   { out.push((e, end - e)); }             // tail remnant above the cut
+        // [s, e) fully covers [start, end): push nothing (entry removed)
+    }
+    *table = out;
+}
+
+/// Test-only re-export of [`subtract_range`], so the integration test can exercise the shared
+/// arithmetic directly without making it part of the crate's public surface.
+#[doc(hidden)]
+pub fn subtract_range_for_test(table: &mut Vec<(u64, u64)>, addr: u64, len: u64) {
+    subtract_range(table, addr, len)
+}
+
 impl Box_ {
     // Promote every 32 MiB L2 block covering [ipa, ipa+len) from a data BLOCK to an L3 TABLE
     // (identity-filled with ATTR_DATA), then set the pages this range covers to `attr`. A block
@@ -721,28 +754,30 @@ impl Box_ {
     /// by editing the LIVE page tables, so a `PROT_EXEC` mmap becomes executable under W^X. No TLB
     /// invalidation: mmap regions are freshly-mapped IPAs the guest has never translated before, so
     /// the first access does a fresh walk and sees ATTR_CODE. See
-    /// [`set_region_exec_attr`](Self::set_region_exec_attr) for the parameterised form (M9 t2) that
+    /// [`set_region_attr`](Self::set_region_attr) for the parameterised form (M9 t2) that
     /// this now calls — `ATTR_CODE` (EL0-exec) is the right attribute for a guest code page, but the
     /// TLBI stub needs `ATTR_TRAMP` (EL1-exec) instead.
     pub fn set_region_exec(&mut self, ipa: u64, len: u64) {
-        self.set_region_exec_attr(ipa, len, ATTR_CODE);
+        self.set_region_attr(ipa, len, ATTR_CODE);
     }
 
-    /// The single promotion implementation shared by `set_region_exec` (`ATTR_CODE`, guest code /
-    /// cache text) and `ensure_tlbi_stub` (`ATTR_TRAMP`, the M9 TLBI stub — an EL1-exec page). Edits
-    /// the LIVE page tables to install `attr` for [ipa, ipa+len): any newly-needed L3 tables are
+    /// The single stamp implementation shared by `set_region_exec` (`ATTR_CODE`, guest code / cache
+    /// text), `ensure_tlbi_stub` (`ATTR_TRAMP`, the M9 TLBI stub — an EL1-exec page), and
+    /// `protect_none`/`unprotect` (M13, `ATTR_NONE`/`ATTR_DATA` — NOT exec attributes, which is why
+    /// this is no longer named for exec). Edits the LIVE page tables to install `attr` for
+    /// [ipa, ipa+len): any newly-needed L3 tables are
     /// anon-allocated (SPTM: never file-backed), stage-2-mapped immediately (the walker must reach
     /// them) AND tracked as backings. No TLB invalidation here — callers on a block the guest MAY
     /// already have translated (M9 t3's live-backing case) are responsible for their own
     /// [`flush_guest_tlb`](Self::flush_guest_tlb) after promoting.
-    pub fn set_region_exec_attr(&mut self, ipa: u64, len: u64, attr: u64) {
+    pub fn set_region_attr(&mut self, ipa: u64, len: u64, attr: u64) {
         let l2_host = self.l2_host;
-        assert!(!l2_host.is_null(), "set_region_exec_attr: no live L2 table (restore had no PT_L2 region)");
+        assert!(!l2_host.is_null(), "set_region_attr: no live L2 table (restore had no PT_L2 region)");
         let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
         let mut next_l3 = self.next_l3;
         let created = {
             let mut alloc_l3 = || {
-                assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "set_region_exec_attr: too many exec blocks; L3 window exhausted");
+                assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "set_region_attr: too many exec blocks; L3 window exhausted");
                 let (h, _) = alloc_pages(GRANULE);
                 let a = next_l3; next_l3 += GRANULE as u64; (a, h)
             };
@@ -751,7 +786,7 @@ impl Box_ {
         self.next_l3 = next_l3;
         // Register each new L3: stage-2-map it (freshly, so the walker reaches it) then track it.
         for bk in created {
-            self.vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (set_region_exec_attr l3)");
+            self.vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (set_region_attr l3)");
             self.backings.push(bk);
         }
     }
@@ -1104,24 +1139,32 @@ impl Box_ {
     /// to service cache-window stage-2 faults.
     pub fn fault_ipa(&self) -> u64 { self.last_far }
 
+    /// The live stage-1 leaf descriptor for `ipa`, walking the L2/L3 the box maintains: an L3 page
+    /// descriptor where the block has been promoted, otherwise the L2 block descriptor itself.
+    /// `None` when there is no live L2, the IPA is outside the 36-bit space, or the promoted L3 is
+    /// not among the tracked backings. Shared by the attribute observables below.
+    fn leaf_desc(&self, ipa: u64) -> Option<u64> {
+        if self.l2_host.is_null() { return None; }
+        let bi = (ipa / BLK) as usize;
+        if bi >= 2048 { return None; }
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        if l2[bi] & 0x3 == DESC_TABLE {
+            let l3_ipa = l2[bi] & !(GRANULE as u64 - 1);
+            let host = self.backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host)?;
+            let l3 = unsafe { std::slice::from_raw_parts(host as *const u64, 2048) };
+            let idx = ((ipa - bi as u64 * BLK) / GRANULE as u64) as usize;
+            Some(l3[idx])
+        } else {
+            Some(l2[bi]) // block descriptor: identity data block, never executable
+        }
+    }
+
     /// Test/diagnostic observable: is the stage-1 leaf mapping for `ipa` executable at EL0
     /// (`ATTR_CODE`: UXN clear)? A default data block (or a promoted `ATTR_DATA` page) is
     /// non-exec; only a `set_region_exec` page (guest code, the sign stub, or a paged-in cache
-    /// TEXT page) is. Walks the live L2/L3 the box maintains.
+    /// TEXT page) is.
     pub fn ipa_is_exec(&self, ipa: u64) -> bool {
-        if self.l2_host.is_null() { return false; }
-        let bi = (ipa / BLK) as usize;
-        if bi >= 2048 { return false; }
-        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
-        let leaf = if l2[bi] & 0x3 == DESC_TABLE {
-            let l3_ipa = l2[bi] & !(GRANULE as u64 - 1);
-            let Some(host) = self.backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host) else { return false };
-            let l3 = unsafe { std::slice::from_raw_parts(host as *const u64, 2048) };
-            let idx = ((ipa - bi as u64 * BLK) / GRANULE as u64) as usize;
-            l3[idx]
-        } else {
-            l2[bi] // block descriptor: identity data block, never executable
-        };
+        let Some(leaf) = self.leaf_desc(ipa) else { return false };
         leaf & 0x3 != 0 && leaf & UXN == 0
     }
 
@@ -1222,7 +1265,7 @@ impl Box_ {
     /// can run (the same rule that makes the PAC oracle run real `pac*`/`aut*`).
     ///
     /// Required whenever a stage-1 attribute changes on a range the guest may already have
-    /// translated. `set_region_exec`/`set_region_exec_attr` alone are sound only on a pristine
+    /// translated. `set_region_exec`/`set_region_attr` alone are sound only on a pristine
     /// block; this is what makes a promotion sound anywhere else.
     ///
     /// Does NOT disturb the caller's guest state: the stub runs on a dedicated scratch page and the
@@ -1255,7 +1298,7 @@ impl Box_ {
         self.backings.push(Backing { host, ipa: TLBI_STUB_IPA, len: rlen });
         // No TLBI needed for this promotion itself: TLBI_STUB_IPA is a fresh IPA the guest has
         // never translated (same soundness argument as the sign stub and the cache pager).
-        self.set_region_exec_attr(TLBI_STUB_IPA, GRANULE as u64, ATTR_TRAMP);
+        self.set_region_attr(TLBI_STUB_IPA, GRANULE as u64, ATTR_TRAMP);
         self.tlbi_stub_ready = true;
     }
 
@@ -1854,22 +1897,7 @@ impl Box_ {
     /// stops treating them as occupied. Deterministic: an identical `(addr, len)` sequence rebuilds the
     /// identical table on record & replay.
     fn subtract_reservations(&mut self, addr: u64, len: u64) {
-        let g = GRANULE as u64;
-        let s = addr & !(g - 1);                                 // trunc_page(addr)
-        let e = (addr.saturating_add(len) + g - 1) & !(g - 1);   // round_page(addr + len)
-        if e <= s { return; }
-        let mut out = Vec::with_capacity(self.reservations.len() + 1);
-        for &(start, rlen) in &self.reservations {
-            let end = start + rlen;
-            if e <= start || s >= end {
-                out.push((start, rlen));                         // disjoint: keep whole
-                continue;
-            }
-            if s > start { out.push((start, s - start)); }       // head remnant below the cut
-            if e < end   { out.push((e, end - e)); }             // tail remnant above the cut
-            // [s, e) fully covers [start, end): push nothing (entry removed)
-        }
-        self.reservations = out;
+        subtract_range(&mut self.reservations, addr, len);
     }
 
     /// Honor munmap (debt #2): punch the deallocated range out of any overlapping reservation
