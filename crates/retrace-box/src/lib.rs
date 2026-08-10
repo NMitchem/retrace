@@ -1943,7 +1943,14 @@ impl Box_ {
             }
             // Classify the overlap (shared with guest_vm_map's FIXED branch). A contained request
             // reuses the existing backing and is already complete.
+            //
+            // M13: a PROT_NONE MAP_FIXED mmap landing wholly inside an existing backing returns
+            // through HERE, not through the tail, so the protection hook must be at both exits or a
+            // contained request is silently left accessible. (Measured in Task 2: libstd's guard is
+            // NOT installed this way — it mmaps RW MAP_FIXED and then mprotects — so this path is
+            // covered for completeness, not because a live gate takes it.)
             if let Some(a) = self.place_fixed(host, rlen, addr, prot & Self::PROT_EXEC != 0) {
+                if prot == 0 { self.protect_none(a, rlen as u64); }
                 return Ok(a);
             }
             addr
@@ -1951,6 +1958,9 @@ impl Box_ {
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
         self.backings.push(Backing { host, ipa, len: rlen });
         if flags & Self::MAP_FIXED == 0 { self.mmap_next += rlen as u64; }
+        // M13: a PROT_NONE mmap is protected once its backing exists — which is why the invariant
+        // "no-access => backed" costs nothing on this path.
+        if prot == 0 { self.protect_none(ipa, rlen as u64); }
         Ok(ipa)
     }
     /// RECORD: anon-alloc, stage the fd's bytes into it (SPTM: never map the file page itself), map,
@@ -2015,6 +2025,9 @@ impl Box_ {
     /// runs even when nothing is backed (the carveout case: a PROT_NONE reservation has no backing).
     pub fn guest_munmap(&mut self, ipa: u64, len: u64) {
         self.subtract_reservations(ipa, len);
+        // M13: the pages are gone, so the protection goes with them — otherwise the next mapping at
+        // this address inherits a no-access extent its guest never asked for.
+        subtract_range(&mut self.noaccess, ipa, len);
         if let Some(pos) = self.backings.iter().position(|b| ipa >= b.ipa && ipa < b.ipa + b.len as u64) {
             let bk = self.backings.remove(pos);
             let _ = self.vm.unmap(bk.ipa, bk.len);       // stage-1 identity block stays; stage-2 removed
