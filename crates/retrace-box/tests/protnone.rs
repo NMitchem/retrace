@@ -188,3 +188,43 @@ fn an_unprotected_page_is_usable_again() {
         }
     }
 }
+
+// libstd's install_main_guard in miniature: a PROT_NONE MAP_FIXED mmap landing WHOLLY INSIDE an
+// existing backing. That is map_mmap_region's "fully contained" case, which returns early through
+// place_fixed — so a hook placed only at the normal exit would miss the one path that matters.
+#[test]
+fn a_fixed_prot_none_mmap_inside_a_backing_protects_it() {
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+
+    // A backing to sit inside: 4 pages, mapped RW at a fresh address.
+    let region = b.guest_mmap(0, 0x10000, 3, 0x1002).expect("anon mmap");
+    assert!(!b.ipa_is_noaccess(region + 0x4000), "the backing starts fully accessible");
+
+    // The guard: one page, FIXED, PROT_NONE, strictly inside it.
+    let guard = region + 0x4000;
+    let got = b.guest_mmap(guard, 0x4000, 0, 0x1012).expect("fixed PROT_NONE mmap");
+    assert_eq!(got, guard, "a FIXED mmap is honored at the requested address");
+    assert!(b.ipa_is_noaccess(guard), "the guard page must deny EL0 — this is the contained path");
+    assert_eq!(b.noaccess(), &[(guard, 0x4000)], "and be tracked");
+
+    // Its neighbours inside the same backing are untouched.
+    assert!(!b.ipa_is_noaccess(region), "the page below the guard stays accessible");
+    assert!(!b.ipa_is_noaccess(region + 0x8000), "the page above it stays accessible");
+}
+
+// Unmapping a protected range must drop it from the map, or the next thing mapped at that address
+// inherits a protection its guest never asked for.
+#[test]
+fn munmap_drops_the_protection_with_the_pages() {
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    let region = b.guest_mmap(0, 0x10000, 3, 0x1002).expect("anon mmap");
+    let guard = region + 0x4000;
+    b.guest_mmap(guard, 0x4000, 0, 0x1012).expect("fixed PROT_NONE mmap");
+    assert_eq!(b.noaccess(), &[(guard, 0x4000)]);
+
+    b.guest_munmap(guard, 0x4000);
+    assert!(b.noaccess().is_empty(),
+        "an unmapped range must leave the protection map, or the next mapping there inherits it");
+}
