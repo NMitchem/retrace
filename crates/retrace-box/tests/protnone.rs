@@ -276,3 +276,51 @@ fn mach_vm_protect_denies_access_too() {
         }
     }
 }
+
+use retrace_guest::PROTRESERVE;
+
+// The M13-split invariant survives the DISPATCH path, not just a direct call.
+// `protect_none_refuses_an_unbacked_page` above proves the assert by calling `protect_none` itself;
+// this proves a guest can reach that assert through a real `mprotect` trap and still get the loud
+// failure — rather than silently having its page committed by `commit_reserved_page` at the next
+// touch, which is the exact silent wrong answer M13 exists to remove.
+#[test]
+#[should_panic(expected = "protect_none: no backing")]
+fn a_guest_cannot_protect_a_page_it_never_committed() {
+    // _kernelrpc_mach_vm_map_trap. A const so it can sit IN the pattern: a `if num == ...` guard is
+    // what tripped clippy::redundant_guards in Task 7 (plan defect #10).
+    const MACH_VM_MAP: u64 = (-15i64) as u64;
+    let loaded = parse_macho(&std::fs::read(PROTRESERVE).unwrap());
+    let mut b = Box_::load(&loaded);
+    loop {
+        match b.run() {
+            // The trap is (target, &addr, size, mask, flags, cur_protection), so cur_protection is
+            // args[5] — the same index retrace-core's `vm_map_args` reads. Zero means a RESERVATION:
+            // bookkeeping only, no backing, and so nothing legal to protect.
+            Stop::Syscall { num: MACH_VM_MAP, args } => {
+                assert_eq!(args[5], 0, "this guest reserves; cur_protection must be 0");
+                let base = b.guest_vm_reserve(0, args[2], true);
+                let writes = vec![retrace_trace::Region {
+                    ipa: args[1],
+                    bytes: base.to_le_bytes().to_vec(),
+                }];
+                b.apply_and_return(0, false, &writes);
+            }
+            Stop::Syscall { num: 74, args } => {
+                b.guest_mprotect(args[0], args[1], args[2]); // <-- must panic
+                b.set_x0_err_and_return(0, false);
+            }
+            Stop::Syscall { num: 1, args } => panic!(
+                "the guest exited {} — protecting a page it never committed was ALLOWED; that page \
+                 would fault at stage 2, where commit_reserved_page silently materializes it",
+                args[0]),
+            // Guarded/const arms don't make the match exhaustive over Stop::Syscall (plan defect #9).
+            Stop::Syscall { num, .. } => panic!("unexpected syscall {num}"),
+            Stop::Fault { esr, far, .. } => panic!(
+                "no fault expected — the box must assert before the guest runs again \
+                 (esr={esr:#x} far={far:#x})"),
+            Stop::Other { esr } => panic!("unexpected stage-2 abort esr={esr:#x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}
