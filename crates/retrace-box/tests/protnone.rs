@@ -104,3 +104,87 @@ fn protect_none_refuses_an_unbacked_page() {
     let base = b.guest_vm_reserve(0, 0x10000, true);  // reserved, deliberately NOT committed
     b.protect_none(base, 0x4000);
 }
+
+use retrace_box::Stop;
+use retrace_guest::{PROTNONE, PROTRESTORE};
+
+// A real guest, a real mprotect, a real fault. The fault must arrive as Stop::Fault — the stage-1
+// route through the EL1 trampoline that M12's disposition check consults — and NOT as Stop::Other,
+// which is the stage-2 route commit_reserved_page owns. That classification is the whole of M13's
+// "the hardware separates them" claim, so it is asserted rather than assumed.
+#[test]
+fn a_protected_page_faults_on_the_stage_one_route() {
+    let loaded = parse_macho(&std::fs::read(PROTNONE).unwrap());
+    let mut b = Box_::load(&loaded);
+    let mut protected = 0u64;
+    loop {
+        match b.run() {
+            // The guest's mmap and mprotect are ordinary syscalls; drive them through the box the
+            // way the record loop does, so this test needs no recorder.
+            Stop::Syscall { num: 197, args } => {
+                let ipa = b.guest_mmap(args[0], args[1], args[2], args[3]).expect("anon mmap");
+                b.set_x0_err_and_return(ipa, false);
+            }
+            Stop::Syscall { num: 74, args } => {
+                protected = args[0];
+                b.guest_mprotect(args[0], args[1], args[2]);
+                b.set_x0_err_and_return(0, false);
+            }
+            Stop::Syscall { num: 1, args } => {
+                panic!("the guest exited {} — the protected store was NOT denied, which is what a \
+                        missing TLBI looks like", args[0]);
+            }
+            // Guarded arms don't make the match exhaustive over Stop::Syscall; this guest only
+            // ever issues 197/74/1, so anything else is a bug in the guest or the dispatch.
+            Stop::Syscall { num, .. } => panic!("unexpected syscall {num}"),
+            Stop::Fault { esr, far, .. } => {
+                assert_eq!(far & !0x3fff, protected,
+                    "the fault must be at the protected page {protected:#x}, got {far:#x}");
+                assert_eq!(esr & 0x3f, 0x0f,
+                    "DFSC must be 0x0f (permission fault, level 3), got {:#x} — a translation \
+                     fault here would mean the descriptor was invalidated rather than AP-denied",
+                    esr & 0x3f);
+                assert_eq!(retrace_arch::signal_of_esr(esr).0, retrace_arch::SIGBUS,
+                    "the protected fault must map to the signal Darwin raises (spikes/protnone.c)");
+                return;
+            }
+            Stop::Other { esr } => panic!(
+                "a protected page must fault at STAGE 1 (Stop::Fault), not stage 2 (Stop::Other, \
+                 esr={esr:#x}) — stage 2 is commit_reserved_page's route and would silently \
+                 materialize the page"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}
+
+// The restore direction, and the other half of the TLBI proof: after unprotect, the guest's store
+// must succeed and the value must read back. A stale restrictive entry faults here instead.
+#[test]
+fn an_unprotected_page_is_usable_again() {
+    let loaded = parse_macho(&std::fs::read(PROTRESTORE).unwrap());
+    let mut b = Box_::load(&loaded);
+    loop {
+        match b.run() {
+            Stop::Syscall { num: 197, args } => {
+                let ipa = b.guest_mmap(args[0], args[1], args[2], args[3]).expect("anon mmap");
+                b.set_x0_err_and_return(ipa, false);
+            }
+            Stop::Syscall { num: 74, args } => {
+                b.guest_mprotect(args[0], args[1], args[2]);
+                b.set_x0_err_and_return(0, false);
+            }
+            Stop::Syscall { num: 1, args } => {
+                assert_eq!(args[0], 0,
+                    "exit {} — 9 means the value did not survive the protect/unprotect round trip",
+                    args[0]);
+                return;
+            }
+            Stop::Syscall { num, .. } => panic!("unexpected syscall {num}"),
+            Stop::Fault { esr, far, .. } => panic!(
+                "the post-restore store must NOT fault (esr={esr:#x} far={far:#x}) — a stale \
+                 restrictive TLB entry is what this looks like"),
+            Stop::Other { esr } => panic!("unexpected stage-2 abort esr={esr:#x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}

@@ -405,6 +405,27 @@ fn main() {
         .status().expect("rustc segvy");
     assert!(status.success(), "segvy guest build failed");
 
+    // protnone: touches an mmap'd RW page (populating the TLB), mprotects it PROT_NONE, then stores
+    // again — which must take a stage-1 PERMISSION fault. The M13 t7 mechanism guest; the pre-touch
+    // is what makes protect_none's TLBI load-bearing rather than decorative.
+    let src = format!("{}/asm/protnone.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protnone");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang protnone");
+    assert!(status.success(), "protnone guest build failed");
+
+    // protrestore: the same page protected PROT_NONE and then returned to RW, proving unprotect's
+    // flush too — a stale restrictive entry would fault the post-restore store. Exits 0 on success.
+    let src = format!("{}/asm/protrestore.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protrestore");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang protrestore");
+    assert!(status.success(), "protrestore guest build failed");
+
     // M11 signal guests. raise: kill(getpid(), SIGABRT) — the terminal mechanism, and it exercises
     // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
     // proving the guest keeps running (the branch the terminal gate cannot reach). killother:

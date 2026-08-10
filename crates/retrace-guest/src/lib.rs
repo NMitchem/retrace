@@ -151,6 +151,12 @@ pub const ALTSTACK: &str = concat!(env!("OUT_DIR"), "/altstack");
 pub const VECSURVIVE: &str = concat!(env!("OUT_DIR"), "/vecsurvive");
 /// M12: faults with `SIGSEGV` blocked — the fail-loud fixture; it never exits cleanly by design.
 pub const BLOCKEDFAULT: &str = concat!(env!("OUT_DIR"), "/blockedfault");
+
+/// M13 t7: mmaps RW, touches it (populates the TLB), `mprotect`s PROT_NONE, then stores again —
+/// which must take a stage-1 permission fault. Exits 7 if the store wrongly succeeds.
+pub const PROTNONE: &str = concat!(env!("OUT_DIR"), "/protnone");
+/// M13 t7: the restore direction — PROT_NONE then back to RW, proving `unprotect`'s flush too.
+pub const PROTRESTORE: &str = concat!(env!("OUT_DIR"), "/protrestore");
 pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
 pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
 
