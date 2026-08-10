@@ -157,6 +157,9 @@ pub const BLOCKEDFAULT: &str = concat!(env!("OUT_DIR"), "/blockedfault");
 pub const PROTNONE: &str = concat!(env!("OUT_DIR"), "/protnone");
 /// M13 t7: the restore direction — PROT_NONE then back to RW, proving `unprotect`'s flush too.
 pub const PROTRESTORE: &str = concat!(env!("OUT_DIR"), "/protrestore");
+/// M13 t9: the `protnone` twin that protects through `mach_vm_protect` (svc −14) instead of
+/// `mprotect` (74) — the dispatch arm that returned KERN_SUCCESS without touching the box.
+pub const PROTNONE_MACH: &str = concat!(env!("OUT_DIR"), "/protnone_mach");
 pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
 pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
 

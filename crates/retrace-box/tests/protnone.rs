@@ -228,3 +228,51 @@ fn munmap_drops_the_protection_with_the_pages() {
     assert!(b.noaccess().is_empty(),
         "an unmapped range must leave the protection map, or the next mapping there inherits it");
 }
+
+use retrace_guest::PROTNONE_MACH;
+
+// mach_vm_protect is a SEPARATE dispatch arm from mprotect and had no box call at all before M13.
+// One implementation now serves both, so this proves the arm is wired rather than that the
+// mechanism works twice.
+//
+// NOTE ON WHAT THIS DOES AND DOES NOT PROVE: this test drives the arm ITSELF, so it passes with or
+// without Task 9's change to retrace-core — it pins the ARG LAYOUT (addr=args[1], size=args[2],
+// prot=args[4]) and nothing more. The dispatch wiring is proved one crate up, by
+// retrace-core/tests/protnone_mach.rs, which records the same guest through the real record loop.
+#[test]
+fn mach_vm_protect_denies_access_too() {
+    // _kernelrpc_mach_vm_protect_trap. A const so it can sit IN the pattern: a `if num == ...`
+    // guard is what tripped clippy::redundant_guards in Task 7 (plan defect #10).
+    const MACH_VM_PROTECT: u64 = (-14i64) as u64;
+    let loaded = parse_macho(&std::fs::read(PROTNONE_MACH).unwrap());
+    let mut b = Box_::load(&loaded);
+    let mut protected = 0u64;
+    loop {
+        match b.run() {
+            Stop::Syscall { num: 197, args } => {
+                let ipa = b.guest_mmap(args[0], args[1], args[2], args[3]).expect("anon mmap");
+                b.set_x0_err_and_return(ipa, false);
+            }
+            // addr=args[1], size=args[2], prot=args[4]. set_maximum (args[3]) is ignored — M13
+            // models current protection only.
+            Stop::Syscall { num: MACH_VM_PROTECT, args } => {
+                protected = args[1];
+                b.guest_mprotect(args[1], args[2], args[4]);
+                b.set_x0_err_and_return(0, false);
+            }
+            Stop::Syscall { num: 1, args } =>
+                panic!("the guest exited {} — mach_vm_protect did not deny access", args[0]),
+            // Guarded/const arms don't make the match exhaustive over Stop::Syscall (plan defect #9).
+            Stop::Syscall { num, .. } => panic!("unexpected syscall {num}"),
+            Stop::Fault { esr, far, .. } => {
+                assert_eq!(far & !0x3fff, protected,
+                    "the fault must be at the protected page {protected:#x}, got {far:#x}");
+                assert_eq!(esr & 0x3f, 0x0f, "DFSC must be 0x0f (permission fault, level 3)");
+                assert_eq!(retrace_arch::signal_of_esr(esr).0, retrace_arch::SIGBUS);
+                return;
+            }
+            Stop::Other { esr } => panic!("expected a stage-1 fault, got stage-2 esr={esr:#x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}
