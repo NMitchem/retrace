@@ -2,8 +2,12 @@
 //
 // The pre-protect store puts a writable entry in the TLB, and the protect replaces it. If unprotect
 // stamps ATTR_DATA without flushing, the post-restore store hits the stale RESTRICTIVE entry and
-// faults, and this guest dies instead of exiting 0. So both directions of the flush are covered by
-// the pair, and neither can pass vacuously.
+// faults, and this guest dies instead of exiting 0.
+//
+// The pair covers both directions of the flush, but their non-vacuity is ASYMMETRIC and this
+// comment must not pretend otherwise: if guest_mprotect no-ops entirely, nothing is ever protected
+// and this round trip succeeds trivially. protnone.s is what proves the forward direction; this
+// guest guards the reverse regression — a missing unprotect flush — on top of it.
 .section __TEXT,__text
 .global _start
 .p2align 2

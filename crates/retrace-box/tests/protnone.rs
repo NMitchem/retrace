@@ -227,6 +227,35 @@ fn munmap_drops_the_protection_with_the_pages() {
     b.guest_munmap(guard, 0x4000);
     assert!(b.noaccess().is_empty(),
         "an unmapped range must leave the protection map, or the next mapping there inherits it");
+    // The BOOKKEEPING half is not the whole invariant. Stage-1 leaves live in the box's own tables
+    // and are untouched by a stage-2 unmap ("the stage-1 identity block stays" — guest_munmap), so
+    // dropping only the map would leave the hardware still denying EL0 at this IPA.
+    assert!(!b.ipa_is_noaccess(guard),
+        "munmap must reset the stage-1 leaf too, or the next mapping at this IPA faults on a \
+         protection its guest never asked for");
+}
+
+// The teardown invariant end to end: a protected page that is unmapped and then RE-MAPPED for an
+// ordinary purpose must be usable. This is the failure the bookkeeping-only drop actually produces —
+// a fresh, entirely valid mapping that faults because it inherited a stale ATTR_NONE leaf.
+#[test]
+fn a_remapped_address_does_not_inherit_the_old_protection() {
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    let region = b.guest_mmap(0, 0x10000, 3, 0x1002).expect("anon mmap");
+    let guard = region + 0x4000;
+    b.guest_mmap(guard, 0x4000, 0, 0x1012).expect("fixed PROT_NONE mmap");
+    assert!(b.ipa_is_noaccess(guard), "precondition: the guard really is protected");
+
+    b.guest_munmap(region, 0x10000);
+
+    // Same IPA, ordinary RW, nothing to do with the old guard.
+    let again = b.guest_mmap(region, 0x10000, 3, 0x1012).expect("fixed RW remap");
+    assert_eq!(again, region, "a FIXED remap is honored at the requested address");
+    assert!(!b.ipa_is_noaccess(guard),
+        "the remapped page must be ordinary RW data — inheriting the old guard's ATTR_NONE is a \
+         silent denial the guest can neither see nor undo");
+    assert!(b.noaccess().is_empty(), "and nothing may remain tracked");
 }
 
 use retrace_guest::PROTNONE_MACH;
@@ -310,10 +339,17 @@ fn a_guest_cannot_protect_a_page_it_never_committed() {
                 b.guest_mprotect(args[0], args[1], args[2]); // <-- must panic
                 b.set_x0_err_and_return(0, false);
             }
-            Stop::Syscall { num: 1, args } => panic!(
-                "the guest exited {} — protecting a page it never committed was ALLOWED; that page \
-                 would fault at stage 2, where commit_reserved_page silently materializes it",
-                args[0]),
+            // The guest's two exit codes name two DIFFERENT bugs, so they get two different
+            // messages: 1 means the reservation itself failed and the page under test was never
+            // reserved at all, which would make a green run meaningless.
+            Stop::Syscall { num: 1, args } => match args[0] {
+                7 => panic!("the guest exited 7 — protecting a page it never committed was \
+                             ALLOWED; that page would fault at stage 2, where \
+                             commit_reserved_page silently materializes it"),
+                1 => panic!("the guest exited 1 — the RESERVATION failed, so this run never \
+                             reached the case under test"),
+                n => panic!("the guest exited {n} — unexpected; protreserve.s only exits 1 or 7"),
+            },
             // Guarded/const arms don't make the match exhaustive over Stop::Syscall (plan defect #9).
             Stop::Syscall { num, .. } => panic!("unexpected syscall {num}"),
             Stop::Fault { esr, far, .. } => panic!(
