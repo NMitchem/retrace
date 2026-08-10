@@ -1261,6 +1261,24 @@ impl Box_ {
         self.flush_guest_tlb();
     }
 
+    /// Drop any no-access protection covering `[ipa, ipa+len)` as part of tearing that range down.
+    ///
+    /// Both teardown paths need this, and neither may use a bare `subtract_range`: stage-1 leaves
+    /// live in the box's OWN page tables and survive a stage-2 unmap ("the stage-1 identity block
+    /// stays" — [`guest_munmap`](Self::guest_munmap)), so dropping only the MAP would leave the
+    /// hardware still denying EL0 at an IPA the guest has legitimately released. The next mapping
+    /// there would then fault on a protection its guest never asked for and cannot see or undo —
+    /// the same silent wrong answer, one layer down, that M13 exists to remove.
+    ///
+    /// [`unprotect`](Self::unprotect) resets the leaf, subtracts the range and flushes; the overlap
+    /// test keeps the common never-protected teardown free of a needless guest TLBI.
+    fn drop_protection(&mut self, ipa: u64, len: u64) {
+        let end = ipa.saturating_add(len);
+        if self.noaccess.iter().any(|&(s, l)| ipa < s + l && s < end) {
+            self.unprotect(ipa, len);
+        }
+    }
+
     /// The tracked no-access extents as `(start, len)` (test/diagnostic observability, the twin of
     /// [`reservations`](Self::reservations)).
     pub fn noaccess(&self) -> &[(u64, u64)] { &self.noaccess }
@@ -1834,6 +1852,10 @@ impl Box_ {
     /// recording, so retrace would faithfully record a WRONG execution with no divergence and
     /// nothing flagged.
     fn unmap_overlapping(&mut self, ipa: u64, len: u64) {
+        // A FIXED/OVERWRITE remap over a protected range must not leave the old protection behind,
+        // for the same reason munmap must not. `place_fixed` only reaches here in the fully-covering
+        // case, so `[ipa, ipa+len)` spans every backing about to be dropped.
+        self.drop_protection(ipa, len);
         let end = ipa + len;
         let mut i = 0;
         while i < self.backings.len() {
@@ -2026,8 +2048,9 @@ impl Box_ {
     pub fn guest_munmap(&mut self, ipa: u64, len: u64) {
         self.subtract_reservations(ipa, len);
         // M13: the pages are gone, so the protection goes with them — otherwise the next mapping at
-        // this address inherits a no-access extent its guest never asked for.
-        subtract_range(&mut self.noaccess, ipa, len);
+        // this address inherits a no-access extent its guest never asked for. Runs BEFORE the
+        // stage-2 unmap below so the pages are still backed while their leaves are reset.
+        self.drop_protection(ipa, len);
         if let Some(pos) = self.backings.iter().position(|b| ipa >= b.ipa && ipa < b.ipa + b.len as u64) {
             let bk = self.backings.remove(pos);
             let _ = self.vm.unmap(bk.ipa, bk.len);       // stage-1 identity block stays; stage-2 removed
