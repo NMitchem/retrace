@@ -426,6 +426,16 @@ fn main() {
         .status().expect("clang protrestore");
     assert!(status.success(), "protrestore guest build failed");
 
+    // protnone_mach: the M13 t9 twin of protnone.s, protecting through mach_vm_protect (svc -14)
+    // rather than mprotect (74). Before M13 that arm returned KERN_SUCCESS without calling the box.
+    let src = format!("{}/asm/protnone_mach.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protnone_mach");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang protnone_mach");
+    assert!(status.success(), "protnone_mach guest build failed");
+
     // M11 signal guests. raise: kill(getpid(), SIGABRT) — the terminal mechanism, and it exercises
     // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
     // proving the guest keeps running (the branch the terminal gate cannot reach). killother:
