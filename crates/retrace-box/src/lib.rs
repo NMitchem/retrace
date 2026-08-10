@@ -291,6 +291,22 @@ const SIGN_STUB: [u32; 19] = [
 // The TLBI stub page. W^X: RO + EL1-exec (ATTR_TRAMP) — `tlbi` is an EL1 instruction, so this
 // CANNOT share the sign stub's ATTR_CODE page (ATTR_CODE sets PXN: EL0-exec, EL1 no-exec).
 const TLBI_STUB_IPA: u64 = 0x0004_8000; // 288 KiB: a fresh IPA the guest never translates
+
+// --- The VMM scratch window (M13 t7) ---
+// The three scratch IPAs above (sign stub, sign table, TLBI stub) are contiguous, and every one of
+// them is mapped LAZILY — on the first sign/authenticate or the first flush. Until then they are
+// absent from `backings`, so `range_is_free` saw them as free and an ANYWHERE placement could be
+// handed an extent straddling them; the later lazy `hv_vm_map` then failed with HV_ERROR because the
+// guest already owned the IPA. That is not hypothetical: libsystem's thread-stack
+// `mach_vm_allocate(ANYWHERE, 0x408000)` lands at 0x38000 on the dynamic path and covers all three.
+// It stayed latent only because nothing forced the TLBI stub to be created AFTER such an allocation
+// until M13 made `mprotect(PROT_NONE)` flush for real.
+//
+// Reserving the window as a forbidden range keeps the stubs lazy while making their addresses truly
+// theirs, and it is a pure function of constants — identical on record and replay, so first-fit's
+// determinism argument is unchanged.
+const SCRATCH_RESERVED_START: u64 = SIGN_STUB_IPA;
+const SCRATCH_RESERVED_END:   u64 = TLBI_STUB_IPA + GRANULE as u64; // 0x4C000, exclusive
 // Safety net for the stub's own run loop: a correct stub reaches its terminating `hvc` in ONE
 // hv_vcpu_run, so any higher count means a bug.
 const TLBI_STUB_BOUND: u32 = 4;
@@ -1673,6 +1689,8 @@ impl Box_ {
         let end = ipa.saturating_add(len);
         if end > (1u64 << 36) { return false; }                            // out of 36-bit IPA space
         if ipa < SHARED_REGION_END && SHARED_REGION_START < end { return false; } // shared-cache window
+        // The VMM's lazily-mapped scratch pages: forbidden even while still absent from `backings`.
+        if ipa < SCRATCH_RESERVED_END && SCRATCH_RESERVED_START < end { return false; }
         if self.backings.iter().any(|b| ipa < b.ipa + b.len as u64 && b.ipa < end) { return false; }
         if self.reservations.iter().any(|&(s, l)| ipa < s + l && s < end) { return false; }
         true
@@ -1701,6 +1719,7 @@ impl Box_ {
             if end > base { cands.push(end); }
         }
         if SHARED_REGION_END > base { cands.push(SHARED_REGION_END); }
+        if SCRATCH_RESERVED_END > base { cands.push(SCRATCH_RESERVED_END); }
         cands.sort_unstable();
         cands.dedup();
         cands.into_iter().find(|&a| self.range_is_free(a, len))
@@ -2005,11 +2024,27 @@ impl Box_ {
         }
     }
 
-    /// Honor mprotect (debt #2), best-effort: re-`hv_vm_protect`s the stage-2 range. Fidelity
-    /// only — our security boundary is the VMM, so stage-2 stays RWX (the permissive term of
-    /// the AND with stage-1 W^X), but accepting the call keeps record/replay from diverging.
-    /// A finer prot map lands if a guest ever needs a fault from this.
-    pub fn guest_mprotect(&mut self, ipa: u64, len: u64, _prot: u64) {
+    /// Honor `mprotect`. **Only `prot == 0` is modelled**, and that is a decision rather than an
+    /// omission: dyld issues `mach_vm_protect` RW→RO during fixups and then writes through the
+    /// result, so honoring the read-only bit would break the loader. No-access is what a guard page
+    /// needs and is the only protection change with no blast radius on the dynamic gates. Every
+    /// other `prot` keeps the pre-M13 behavior — a best-effort stage-2 re-protect to `RWX`, since
+    /// our security boundary is the VMM and stage-1 W^X is already correct.
+    ///
+    /// A non-zero `prot` over a range that is currently no-access RESTORES it (`unprotect`), which
+    /// is how a guest takes its guard page back. Shared by the `mprotect`(74) and
+    /// `mach_vm_protect`(−14) dispatch arms on both record and replay, so there is one
+    /// implementation and no mirror to keep in step.
+    pub fn guest_mprotect(&mut self, ipa: u64, len: u64, prot: u64) {
+        if prot == 0 {
+            self.protect_none(ipa, len);
+            return;
+        }
+        let end = ipa.saturating_add(len);
+        if self.noaccess.iter().any(|&(s, l)| ipa < s + l && s < end) {
+            self.unprotect(ipa, len);
+            return;
+        }
         let _ = self.vm.protect(ipa, len as usize, MemFlags::RWX);
     }
 
