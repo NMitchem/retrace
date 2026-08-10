@@ -160,6 +160,9 @@ pub const PROTRESTORE: &str = concat!(env!("OUT_DIR"), "/protrestore");
 /// M13 t9: the `protnone` twin that protects through `mach_vm_protect` (svc −14) instead of
 /// `mprotect` (74) — the dispatch arm that returned KERN_SUCCESS without touching the box.
 pub const PROTNONE_MACH: &str = concat!(env!("OUT_DIR"), "/protnone_mach");
+/// M13 t10: reserves PROT_NONE address space and `mprotect`s a page inside it that was never
+/// committed — the fail-loud negative. The box must assert (no-access implies backed), not succeed.
+pub const PROTRESERVE: &str = concat!(env!("OUT_DIR"), "/protreserve");
 pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
 pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
 

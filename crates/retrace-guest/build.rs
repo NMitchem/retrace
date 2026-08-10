@@ -436,6 +436,17 @@ fn main() {
         .status().expect("clang protnone_mach");
     assert!(status.success(), "protnone_mach guest build failed");
 
+    // protreserve: the M13 t10 fail-loud negative — mprotect(PROT_NONE) over a page inside an
+    // UNCOMMITTED reservation. protect_none must assert rather than let commit_reserved_page
+    // silently materialize the page at the next touch.
+    let src = format!("{}/asm/protreserve.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protreserve");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang protreserve");
+    assert!(status.success(), "protreserve guest build failed");
+
     // M11 signal guests. raise: kill(getpid(), SIGABRT) — the terminal mechanism, and it exercises
     // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
     // proving the guest keeps running (the branch the terminal gate cannot reach). killother:
