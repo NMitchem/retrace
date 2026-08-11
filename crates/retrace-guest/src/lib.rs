@@ -163,6 +163,12 @@ pub const PROTNONE_MACH: &str = concat!(env!("OUT_DIR"), "/protnone_mach");
 /// M13 t10: reserves PROT_NONE address space and `mprotect`s a page inside it that was never
 /// committed — the fail-loud negative. The box must assert (no-access implies backed), not succeed.
 pub const PROTRESERVE: &str = concat!(env!("OUT_DIR"), "/protreserve");
+/// M13 t11 headline: a full-`std` Rust binary that `mprotect`s one of its own pages PROT_NONE and
+/// stores through it — enforcement proved through real libc, real dyld and libstd's own handlers.
+pub const PROTRUST: &str = concat!(env!("OUT_DIR"), "/protrust");
+/// M13 t11: the recursion behind the PARKED `stackoverflow_rust_e2e` gate. Cannot strike libstd's
+/// guard today — that guard sits 7.73 MiB below retrace's real stack bottom (M8 spec risk R3).
+pub const OVERFLOW: &str = concat!(env!("OUT_DIR"), "/overflow");
 pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
 pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
 
