@@ -447,6 +447,29 @@ fn main() {
         .status().expect("clang protreserve");
     assert!(status.success(), "protreserve guest build failed");
 
+    // protrust: M13's headline — a stock full-std Rust binary that mprotects one of its own pages
+    // PROT_NONE and stores through it. Same rustc recipe as segvy (no -C panic=abort: a protection
+    // fault is not a panic).
+    let src = format!("{}/rs/protrust.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protrust");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc protrust");
+    assert!(status.success(), "protrust guest build failed");
+
+    // overflow: the guest for the PARKED stackoverflow_rust_e2e gate (M8 spec risk R3). Built so the
+    // parked test is real code that compiles and can be un-ignored the day R3 is fixed.
+    let src = format!("{}/rs/overflow.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/overflow");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc overflow");
+    assert!(status.success(), "overflow guest build failed");
+
     // M11 signal guests. raise: kill(getpid(), SIGABRT) — the terminal mechanism, and it exercises
     // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
     // proving the guest keeps running (the branch the terminal gate cannot reach). killother:
