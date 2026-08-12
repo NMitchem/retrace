@@ -8,6 +8,7 @@ pub use cache::AuthSlot;
 use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
+pub mod thread;
 pub use sig::{
     build_frame, choose_frame_base, decode_act, encode_oldact, sigreturn_token, Disposition,
     EntryRegs, FrameInput, NeonState, SigAction, SigTable, ThreadState, FRAME_LEN,
