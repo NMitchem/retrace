@@ -151,6 +151,24 @@ pub const ALTSTACK: &str = concat!(env!("OUT_DIR"), "/altstack");
 pub const VECSURVIVE: &str = concat!(env!("OUT_DIR"), "/vecsurvive");
 /// M12: faults with `SIGSEGV` blocked — the fail-loud fixture; it never exits cleanly by design.
 pub const BLOCKEDFAULT: &str = concat!(env!("OUT_DIR"), "/blockedfault");
+
+/// M13 t7: mmaps RW, touches it (populates the TLB), `mprotect`s PROT_NONE, then stores again —
+/// which must take a stage-1 permission fault. Exits 7 if the store wrongly succeeds.
+pub const PROTNONE: &str = concat!(env!("OUT_DIR"), "/protnone");
+/// M13 t7: the restore direction — PROT_NONE then back to RW, proving `unprotect`'s flush too.
+pub const PROTRESTORE: &str = concat!(env!("OUT_DIR"), "/protrestore");
+/// M13 t9: the `protnone` twin that protects through `mach_vm_protect` (svc −14) instead of
+/// `mprotect` (74) — the dispatch arm that returned KERN_SUCCESS without touching the box.
+pub const PROTNONE_MACH: &str = concat!(env!("OUT_DIR"), "/protnone_mach");
+/// M13 t10: reserves PROT_NONE address space and `mprotect`s a page inside it that was never
+/// committed — the fail-loud negative. The box must assert (no-access implies backed), not succeed.
+pub const PROTRESERVE: &str = concat!(env!("OUT_DIR"), "/protreserve");
+/// M13 t11 headline: a full-`std` Rust binary that `mprotect`s one of its own pages PROT_NONE and
+/// stores through it — enforcement proved through real libc, real dyld and libstd's own handlers.
+pub const PROTRUST: &str = concat!(env!("OUT_DIR"), "/protrust");
+/// M13 t11: the recursion behind the PARKED `stackoverflow_rust_e2e` gate. Cannot strike libstd's
+/// guard today — that guard sits 7.73 MiB below retrace's real stack bottom (M8 spec risk R3).
+pub const OVERFLOW: &str = concat!(env!("OUT_DIR"), "/overflow");
 pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
 pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
 

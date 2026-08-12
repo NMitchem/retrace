@@ -291,6 +291,22 @@ const SIGN_STUB: [u32; 19] = [
 // The TLBI stub page. W^X: RO + EL1-exec (ATTR_TRAMP) — `tlbi` is an EL1 instruction, so this
 // CANNOT share the sign stub's ATTR_CODE page (ATTR_CODE sets PXN: EL0-exec, EL1 no-exec).
 const TLBI_STUB_IPA: u64 = 0x0004_8000; // 288 KiB: a fresh IPA the guest never translates
+
+// --- The VMM scratch window (M13 t7) ---
+// The three scratch IPAs above (sign stub, sign table, TLBI stub) are contiguous, and every one of
+// them is mapped LAZILY — on the first sign/authenticate or the first flush. Until then they are
+// absent from `backings`, so `range_is_free` saw them as free and an ANYWHERE placement could be
+// handed an extent straddling them; the later lazy `hv_vm_map` then failed with HV_ERROR because the
+// guest already owned the IPA. That is not hypothetical: libsystem's thread-stack
+// `mach_vm_allocate(ANYWHERE, 0x408000)` lands at 0x38000 on the dynamic path and covers all three.
+// It stayed latent only because nothing forced the TLBI stub to be created AFTER such an allocation
+// until M13 made `mprotect(PROT_NONE)` flush for real.
+//
+// Reserving the window as a forbidden range keeps the stubs lazy while making their addresses truly
+// theirs, and it is a pure function of constants — identical on record and replay, so first-fit's
+// determinism argument is unchanged.
+const SCRATCH_RESERVED_START: u64 = SIGN_STUB_IPA;
+const SCRATCH_RESERVED_END:   u64 = TLBI_STUB_IPA + GRANULE as u64; // 0x4C000, exclusive
 // Safety net for the stub's own run loop: a correct stub reaches its terminating `hvc` in ONE
 // hv_vcpu_run, so any higher count means a bug.
 const TLBI_STUB_BOUND: u32 = 4;
@@ -329,6 +345,13 @@ const PXN: u64 = 1 << 53;                     // privileged (EL1) execute-never
 const ATTR_DATA:  u64 = A_COMMON | 0x40 /*AP EL0RW*/ | UXN | PXN;   // RW, never executable
 const ATTR_CODE:  u64 = A_COMMON | 0xC0 /*AP RO both ELs*/ | PXN;   // RO, EL0-exec (UXN clear), EL1 no-exec
 const ATTR_TRAMP: u64 = A_COMMON | 0x80 /*AP EL1-RO, EL0 none*/ | UXN; // RO, EL1-exec (PXN clear)
+// M13: EL0 gets nothing (AP 0b00 leaves EL1 RW and EL0 with no access at all), and the page is
+// non-executable at both ELs. `A_COMMON` sets AF, so an EL0 access takes a clean PERMISSION fault
+// (DFSC 0x0f) rather than an access-flag fault — which is what routes it through the EL1 trampoline
+// to `Stop::Fault` and M12's disposition check. Marking the descriptor INVALID instead would give a
+// translation fault, making a protected page indistinguishable from an unmapped one; that
+// distinction is what lets `commit_reserved_page` keep its stage-2 cases (see the M13 spec).
+const ATTR_NONE: u64 = A_COMMON | UXN | PXN; // AP 0b00 (no bits to OR in): EL1-RW, EL0 none
 const DESC_BLOCK: u64 = 0x1;                  // L2 block descriptor
 const DESC_TABLE: u64 = 0x3;                  // L2 -> L3 table descriptor
 const DESC_PAGE:  u64 = 0x3;                  // L3 page descriptor
@@ -352,6 +375,11 @@ pub struct Box_ {
     // space matches record. Plain Vec (its Drop only frees its own buffer), declared after
     // `backings` so the load-bearing vcpu-before-vm drop order is unaffected.
     reservations: Vec<(u64, u64)>,
+    // M13: page-granular extents the guest has protected PROT_NONE, recorded by `protect_none` and
+    // subtracted by `unprotect`/`guest_munmap`. Same shape and same treatment as `reservations`
+    // above — a pure function of the guest's own mmap/mprotect sequence, so identical on record and
+    // replay. INVARIANT: every page named here is backed (see `protect_none`).
+    noaccess: Vec<(u64, u64)>,
     // Next fresh IPA for guest_mmap. Plain u64 (no Drop), declared after `backings` so the
     // load-bearing vcpu-before-vm drop order is unaffected.
     mmap_next: u64,
@@ -551,6 +579,11 @@ pub struct BoxState {
     pub spsr: u64,
     pub mem: Vec<Region>,
     pub reservations: Vec<(u64, u64)>,
+    // M13: carried for the same reason as `reservations` — a mid-run capture cannot re-derive it.
+    // The page-table STAMPS ride along inside `mem` (the L2/L3 tables are backings, exactly as M9's
+    // ATTR_TRAMP note at from_checkpoint explains), but the MAP that `unprotect` and the fail-loud
+    // asserts consult is box state, and a restore without it would leave the two disagreeing.
+    pub noaccess: Vec<(u64, u64)>,
     pub mmap_next: u64,
     pub bootstrap_port: Option<u32>,
     pub cache_installed: bool,
@@ -629,6 +662,39 @@ extern "C" {
     static mach_task_self_: u32; // mach_task_self() is a C macro for this global
     // kern_return_t mach_port_construct(ipc_space_t, mach_port_options_t*, mach_port_context_t, mach_port_name_t*)
     fn mach_port_construct(task: u32, options: *const MachPortOptions, context: u64, name: *mut u32) -> i32;
+}
+
+/// Subtract `[addr, addr+len)` from every overlapping extent in a page-granular `(start, len)`
+/// table, rounding the cut OUT to whole pages the way the kernel does (start down, end up). A full
+/// cover removes the entry; a head/tail overlap trims it; a strictly-interior punch SPLITS it into
+/// two. Pure: identical input produces identical output on record and replay.
+///
+/// Shared by `reservations` (M2-carveout's hole punch) and `noaccess` (M13's protection map) so the
+/// second table cannot drift from the arithmetic `carveout.rs` already pins for the first.
+pub(crate) fn subtract_range(table: &mut Vec<(u64, u64)>, addr: u64, len: u64) {
+    let g = GRANULE as u64;
+    let s = addr & !(g - 1);                                 // trunc_page(addr)
+    let e = (addr.saturating_add(len) + g - 1) & !(g - 1);   // round_page(addr + len)
+    if e <= s { return; }
+    let mut out = Vec::with_capacity(table.len() + 1);
+    for &(start, rlen) in table.iter() {
+        let end = start + rlen;
+        if e <= start || s >= end {
+            out.push((start, rlen));                         // disjoint: keep whole
+            continue;
+        }
+        if s > start { out.push((start, s - start)); }       // head remnant below the cut
+        if e < end   { out.push((e, end - e)); }             // tail remnant above the cut
+        // [s, e) fully covers [start, end): push nothing (entry removed)
+    }
+    *table = out;
+}
+
+/// Test-only re-export of [`subtract_range`], so the integration test can exercise the shared
+/// arithmetic directly without making it part of the crate's public surface.
+#[doc(hidden)]
+pub fn subtract_range_for_test(table: &mut Vec<(u64, u64)>, addr: u64, len: u64) {
+    subtract_range(table, addr, len)
 }
 
 impl Box_ {
@@ -721,28 +787,30 @@ impl Box_ {
     /// by editing the LIVE page tables, so a `PROT_EXEC` mmap becomes executable under W^X. No TLB
     /// invalidation: mmap regions are freshly-mapped IPAs the guest has never translated before, so
     /// the first access does a fresh walk and sees ATTR_CODE. See
-    /// [`set_region_exec_attr`](Self::set_region_exec_attr) for the parameterised form (M9 t2) that
+    /// [`set_region_attr`](Self::set_region_attr) for the parameterised form (M9 t2) that
     /// this now calls — `ATTR_CODE` (EL0-exec) is the right attribute for a guest code page, but the
     /// TLBI stub needs `ATTR_TRAMP` (EL1-exec) instead.
     pub fn set_region_exec(&mut self, ipa: u64, len: u64) {
-        self.set_region_exec_attr(ipa, len, ATTR_CODE);
+        self.set_region_attr(ipa, len, ATTR_CODE);
     }
 
-    /// The single promotion implementation shared by `set_region_exec` (`ATTR_CODE`, guest code /
-    /// cache text) and `ensure_tlbi_stub` (`ATTR_TRAMP`, the M9 TLBI stub — an EL1-exec page). Edits
-    /// the LIVE page tables to install `attr` for [ipa, ipa+len): any newly-needed L3 tables are
+    /// The single stamp implementation shared by `set_region_exec` (`ATTR_CODE`, guest code / cache
+    /// text), `ensure_tlbi_stub` (`ATTR_TRAMP`, the M9 TLBI stub — an EL1-exec page), and
+    /// `protect_none`/`unprotect` (M13, `ATTR_NONE`/`ATTR_DATA` — NOT exec attributes, which is why
+    /// this is no longer named for exec). Edits the LIVE page tables to install `attr` for
+    /// [ipa, ipa+len): any newly-needed L3 tables are
     /// anon-allocated (SPTM: never file-backed), stage-2-mapped immediately (the walker must reach
     /// them) AND tracked as backings. No TLB invalidation here — callers on a block the guest MAY
     /// already have translated (M9 t3's live-backing case) are responsible for their own
     /// [`flush_guest_tlb`](Self::flush_guest_tlb) after promoting.
-    pub fn set_region_exec_attr(&mut self, ipa: u64, len: u64, attr: u64) {
+    pub fn set_region_attr(&mut self, ipa: u64, len: u64, attr: u64) {
         let l2_host = self.l2_host;
-        assert!(!l2_host.is_null(), "set_region_exec_attr: no live L2 table (restore had no PT_L2 region)");
+        assert!(!l2_host.is_null(), "set_region_attr: no live L2 table (restore had no PT_L2 region)");
         let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
         let mut next_l3 = self.next_l3;
         let created = {
             let mut alloc_l3 = || {
-                assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "set_region_exec_attr: too many exec blocks; L3 window exhausted");
+                assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "set_region_attr: too many exec blocks; L3 window exhausted");
                 let (h, _) = alloc_pages(GRANULE);
                 let a = next_l3; next_l3 += GRANULE as u64; (a, h)
             };
@@ -751,7 +819,7 @@ impl Box_ {
         self.next_l3 = next_l3;
         // Register each new L3: stage-2-map it (freshly, so the walker reaches it) then track it.
         for bk in created {
-            self.vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (set_region_exec_attr l3)");
+            self.vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (set_region_attr l3)");
             self.backings.push(bk);
         }
     }
@@ -905,7 +973,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1104,25 +1172,124 @@ impl Box_ {
     /// to service cache-window stage-2 faults.
     pub fn fault_ipa(&self) -> u64 { self.last_far }
 
+    /// The live stage-1 leaf descriptor for `ipa`, walking the L2/L3 the box maintains: an L3 page
+    /// descriptor where the block has been promoted, otherwise the L2 block descriptor itself.
+    /// `None` when there is no live L2, the IPA is outside the 36-bit space, or the promoted L3 is
+    /// not among the tracked backings. Shared by the attribute observables below.
+    fn leaf_desc(&self, ipa: u64) -> Option<u64> {
+        if self.l2_host.is_null() { return None; }
+        let bi = (ipa / BLK) as usize;
+        if bi >= 2048 { return None; }
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        if l2[bi] & 0x3 == DESC_TABLE {
+            let l3_ipa = l2[bi] & !(GRANULE as u64 - 1);
+            let host = self.backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host)?;
+            let l3 = unsafe { std::slice::from_raw_parts(host as *const u64, 2048) };
+            let idx = ((ipa - bi as u64 * BLK) / GRANULE as u64) as usize;
+            Some(l3[idx])
+        } else {
+            Some(l2[bi]) // block descriptor: identity data block, never executable
+        }
+    }
+
     /// Test/diagnostic observable: is the stage-1 leaf mapping for `ipa` executable at EL0
     /// (`ATTR_CODE`: UXN clear)? A default data block (or a promoted `ATTR_DATA` page) is
     /// non-exec; only a `set_region_exec` page (guest code, the sign stub, or a paged-in cache
-    /// TEXT page) is. Walks the live L2/L3 the box maintains.
+    /// TEXT page) is.
     pub fn ipa_is_exec(&self, ipa: u64) -> bool {
-        if self.l2_host.is_null() { return false; }
-        let bi = (ipa / BLK) as usize;
-        if bi >= 2048 { return false; }
-        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
-        let leaf = if l2[bi] & 0x3 == DESC_TABLE {
-            let l3_ipa = l2[bi] & !(GRANULE as u64 - 1);
-            let Some(host) = self.backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host) else { return false };
-            let l3 = unsafe { std::slice::from_raw_parts(host as *const u64, 2048) };
-            let idx = ((ipa - bi as u64 * BLK) / GRANULE as u64) as usize;
-            l3[idx]
-        } else {
-            l2[bi] // block descriptor: identity data block, never executable
-        };
+        let Some(leaf) = self.leaf_desc(ipa) else { return false };
         leaf & 0x3 != 0 && leaf & UXN == 0
+    }
+
+    /// Make `[ipa, ipa+len)` inaccessible to EL0 — the guest asked for `PROT_NONE`, so the page
+    /// tables say so and the hardware enforces it. Page-granular: the range is rounded out to whole
+    /// pages, since a stage-1 leaf is the finest thing that can carry an attribute.
+    ///
+    /// **Requires every page in the range to be backed, and asserts otherwise.** That is M13's
+    /// central invariant, and it is what makes the fault unambiguous: a protected page is backed, so
+    /// an EL0 access takes a stage-1 PERMISSION fault via the EL1 trampoline and arrives as
+    /// `Stop::Fault` for M12's disposition check; a reserved-but-uncommitted page is unbacked, so its
+    /// access takes a stage-2 TRANSLATION fault direct to EL2 and arrives as `Stop::Other` for
+    /// `commit_reserved_page`. Two exception routes, two `Stop` variants — the hardware separates
+    /// "reserved and committable" from "protected, must fault", and no software gate has to.
+    ///
+    /// **The TLBI is a correctness requirement here, not a precaution.** Every other caller of
+    /// `set_region_attr` stamps a fresh IPA the guest has never translated — the sign stub, the TLBI
+    /// stub, a cache page, a fresh exec mmap — and each documents that as its soundness argument.
+    /// This one stamps a page the guest is actively using (libstd's guard page lives inside the stack
+    /// it is running on). A missing flush leaves a stale PERMISSIVE entry, so the guard silently
+    /// fails to guard: the precise class of quiet wrong answer this milestone exists to remove.
+    ///
+    /// Deterministic and trace-free: a pure function of the guest's own protection calls, which are
+    /// already recorded syscalls that replay re-dispatches through this same method.
+    pub fn protect_none(&mut self, ipa: u64, len: u64) {
+        let g = GRANULE as u64;
+        let start = ipa & !(g - 1);
+        let end = (ipa.saturating_add(len) + g - 1) & !(g - 1);
+        if end <= start { return; }
+        let mut p = start;
+        while p < end {
+            assert!(self.host_span(p).is_some(),
+                "protect_none: no backing for {p:#x} (in [{start:#x},{end:#x})). M13 models \
+                 no-access only on BACKED pages: an unbacked protected page would fault at stage 2, \
+                 where commit_reserved_page would silently materialize it instead of faulting. \
+                 Model the reservation-protect case deliberately before a guest needs it.");
+            p += g;
+        }
+        self.set_region_attr(start, end - start, ATTR_NONE);
+        self.noaccess.push((start, end - start));
+        // The guest may already hold a translation for these pages — unlike every other stamp site.
+        self.flush_guest_tlb();
+    }
+
+    /// Restore ordinary EL0 read/write access to `[ipa, ipa+len)` and drop it from the protection
+    /// map. The mirror of [`protect_none`](Self::protect_none), and it needs the same flush for the
+    /// same reason in the opposite direction: a stale RESTRICTIVE entry would keep faulting on a page
+    /// the guest has legitimately unprotected.
+    ///
+    /// Restores `ATTR_DATA` unconditionally rather than whatever the page held before it was
+    /// protected. Today those are the same thing — only `ATTR_DATA` pages are ever protected, since
+    /// code pages are read-only and no guest protects them — and the choice is documented rather than
+    /// incidental: a general protection map would have to remember the prior attribute instead.
+    pub fn unprotect(&mut self, ipa: u64, len: u64) {
+        let g = GRANULE as u64;
+        let start = ipa & !(g - 1);
+        let end = (ipa.saturating_add(len) + g - 1) & !(g - 1);
+        if end <= start { return; }
+        self.set_region_attr(start, end - start, ATTR_DATA);
+        subtract_range(&mut self.noaccess, start, end - start);
+        self.flush_guest_tlb();
+    }
+
+    /// Drop any no-access protection covering `[ipa, ipa+len)` as part of tearing that range down.
+    ///
+    /// Both teardown paths need this, and neither may use a bare `subtract_range`: stage-1 leaves
+    /// live in the box's OWN page tables and survive a stage-2 unmap ("the stage-1 identity block
+    /// stays" — [`guest_munmap`](Self::guest_munmap)), so dropping only the MAP would leave the
+    /// hardware still denying EL0 at an IPA the guest has legitimately released. The next mapping
+    /// there would then fault on a protection its guest never asked for and cannot see or undo —
+    /// the same silent wrong answer, one layer down, that M13 exists to remove.
+    ///
+    /// [`unprotect`](Self::unprotect) resets the leaf, subtracts the range and flushes; the overlap
+    /// test keeps the common never-protected teardown free of a needless guest TLBI.
+    fn drop_protection(&mut self, ipa: u64, len: u64) {
+        let end = ipa.saturating_add(len);
+        if self.noaccess.iter().any(|&(s, l)| ipa < s + l && s < end) {
+            self.unprotect(ipa, len);
+        }
+    }
+
+    /// The tracked no-access extents as `(start, len)` (test/diagnostic observability, the twin of
+    /// [`reservations`](Self::reservations)).
+    pub fn noaccess(&self) -> &[(u64, u64)] { &self.noaccess }
+
+    /// Test/diagnostic observable: does the stage-1 leaf for `ipa` deny EL0 all access (`ATTR_NONE`:
+    /// AP bits `0b00`)? The AP field uniquely identifies the four attributes this box installs —
+    /// `ATTR_NONE` `0x00`, `ATTR_DATA` `0x40`, `ATTR_TRAMP` `0x80`, `ATTR_CODE` `0xC0` — so testing
+    /// it is exact rather than heuristic.
+    pub fn ipa_is_noaccess(&self, ipa: u64) -> bool {
+        let Some(leaf) = self.leaf_desc(ipa) else { return false };
+        leaf & 0x3 != 0 && leaf & 0xC0 == 0x00
     }
 
     /// Lazy-init the signing scratch on first use: a stub CODE page (RO+exec, ATTR_CODE) and an I/O
@@ -1222,7 +1389,7 @@ impl Box_ {
     /// can run (the same rule that makes the PAC oracle run real `pac*`/`aut*`).
     ///
     /// Required whenever a stage-1 attribute changes on a range the guest may already have
-    /// translated. `set_region_exec`/`set_region_exec_attr` alone are sound only on a pristine
+    /// translated. `set_region_exec`/`set_region_attr` alone are sound only on a pristine
     /// block; this is what makes a promotion sound anywhere else.
     ///
     /// Does NOT disturb the caller's guest state: the stub runs on a dedicated scratch page and the
@@ -1255,7 +1422,7 @@ impl Box_ {
         self.backings.push(Backing { host, ipa: TLBI_STUB_IPA, len: rlen });
         // No TLBI needed for this promotion itself: TLBI_STUB_IPA is a fresh IPA the guest has
         // never translated (same soundness argument as the sign stub and the cache pager).
-        self.set_region_exec_attr(TLBI_STUB_IPA, GRANULE as u64, ATTR_TRAMP);
+        self.set_region_attr(TLBI_STUB_IPA, GRANULE as u64, ATTR_TRAMP);
         self.tlbi_stub_ready = true;
     }
 
@@ -1394,7 +1561,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -1540,6 +1707,8 @@ impl Box_ {
         let end = ipa.saturating_add(len);
         if end > (1u64 << 36) { return false; }                            // out of 36-bit IPA space
         if ipa < SHARED_REGION_END && SHARED_REGION_START < end { return false; } // shared-cache window
+        // The VMM's lazily-mapped scratch pages: forbidden even while still absent from `backings`.
+        if ipa < SCRATCH_RESERVED_END && SCRATCH_RESERVED_START < end { return false; }
         if self.backings.iter().any(|b| ipa < b.ipa + b.len as u64 && b.ipa < end) { return false; }
         if self.reservations.iter().any(|&(s, l)| ipa < s + l && s < end) { return false; }
         true
@@ -1568,6 +1737,7 @@ impl Box_ {
             if end > base { cands.push(end); }
         }
         if SHARED_REGION_END > base { cands.push(SHARED_REGION_END); }
+        if SCRATCH_RESERVED_END > base { cands.push(SCRATCH_RESERVED_END); }
         cands.sort_unstable();
         cands.dedup();
         cands.into_iter().find(|&a| self.range_is_free(a, len))
@@ -1682,6 +1852,10 @@ impl Box_ {
     /// recording, so retrace would faithfully record a WRONG execution with no divergence and
     /// nothing flagged.
     fn unmap_overlapping(&mut self, ipa: u64, len: u64) {
+        // A FIXED/OVERWRITE remap over a protected range must not leave the old protection behind,
+        // for the same reason munmap must not. `place_fixed` only reaches here in the fully-covering
+        // case, so `[ipa, ipa+len)` spans every backing about to be dropped.
+        self.drop_protection(ipa, len);
         let end = ipa + len;
         let mut i = 0;
         while i < self.backings.len() {
@@ -1791,7 +1965,14 @@ impl Box_ {
             }
             // Classify the overlap (shared with guest_vm_map's FIXED branch). A contained request
             // reuses the existing backing and is already complete.
+            //
+            // M13: a PROT_NONE MAP_FIXED mmap landing wholly inside an existing backing returns
+            // through HERE, not through the tail, so the protection hook must be at both exits or a
+            // contained request is silently left accessible. (Measured in Task 2: libstd's guard is
+            // NOT installed this way — it mmaps RW MAP_FIXED and then mprotects — so this path is
+            // covered for completeness, not because a live gate takes it.)
             if let Some(a) = self.place_fixed(host, rlen, addr, prot & Self::PROT_EXEC != 0) {
+                if prot == 0 { self.protect_none(a, rlen as u64); }
                 return Ok(a);
             }
             addr
@@ -1799,6 +1980,9 @@ impl Box_ {
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
         self.backings.push(Backing { host, ipa, len: rlen });
         if flags & Self::MAP_FIXED == 0 { self.mmap_next += rlen as u64; }
+        // M13: a PROT_NONE mmap is protected once its backing exists — which is why the invariant
+        // "no-access => backed" costs nothing on this path.
+        if prot == 0 { self.protect_none(ipa, rlen as u64); }
         Ok(ipa)
     }
     /// RECORD: anon-alloc, stage the fd's bytes into it (SPTM: never map the file page itself), map,
@@ -1854,22 +2038,7 @@ impl Box_ {
     /// stops treating them as occupied. Deterministic: an identical `(addr, len)` sequence rebuilds the
     /// identical table on record & replay.
     fn subtract_reservations(&mut self, addr: u64, len: u64) {
-        let g = GRANULE as u64;
-        let s = addr & !(g - 1);                                 // trunc_page(addr)
-        let e = (addr.saturating_add(len) + g - 1) & !(g - 1);   // round_page(addr + len)
-        if e <= s { return; }
-        let mut out = Vec::with_capacity(self.reservations.len() + 1);
-        for &(start, rlen) in &self.reservations {
-            let end = start + rlen;
-            if e <= start || s >= end {
-                out.push((start, rlen));                         // disjoint: keep whole
-                continue;
-            }
-            if s > start { out.push((start, s - start)); }       // head remnant below the cut
-            if e < end   { out.push((e, end - e)); }             // tail remnant above the cut
-            // [s, e) fully covers [start, end): push nothing (entry removed)
-        }
-        self.reservations = out;
+        subtract_range(&mut self.reservations, addr, len);
     }
 
     /// Honor munmap (debt #2): punch the deallocated range out of any overlapping reservation
@@ -1878,6 +2047,10 @@ impl Box_ {
     /// runs even when nothing is backed (the carveout case: a PROT_NONE reservation has no backing).
     pub fn guest_munmap(&mut self, ipa: u64, len: u64) {
         self.subtract_reservations(ipa, len);
+        // M13: the pages are gone, so the protection goes with them — otherwise the next mapping at
+        // this address inherits a no-access extent its guest never asked for. Runs BEFORE the
+        // stage-2 unmap below so the pages are still backed while their leaves are reset.
+        self.drop_protection(ipa, len);
         if let Some(pos) = self.backings.iter().position(|b| ipa >= b.ipa && ipa < b.ipa + b.len as u64) {
             let bk = self.backings.remove(pos);
             let _ = self.vm.unmap(bk.ipa, bk.len);       // stage-1 identity block stays; stage-2 removed
@@ -1887,11 +2060,27 @@ impl Box_ {
         }
     }
 
-    /// Honor mprotect (debt #2), best-effort: re-`hv_vm_protect`s the stage-2 range. Fidelity
-    /// only — our security boundary is the VMM, so stage-2 stays RWX (the permissive term of
-    /// the AND with stage-1 W^X), but accepting the call keeps record/replay from diverging.
-    /// A finer prot map lands if a guest ever needs a fault from this.
-    pub fn guest_mprotect(&mut self, ipa: u64, len: u64, _prot: u64) {
+    /// Honor `mprotect`. **Only `prot == 0` is modelled**, and that is a decision rather than an
+    /// omission: dyld issues `mach_vm_protect` RW→RO during fixups and then writes through the
+    /// result, so honoring the read-only bit would break the loader. No-access is what a guard page
+    /// needs and is the only protection change with no blast radius on the dynamic gates. Every
+    /// other `prot` keeps the pre-M13 behavior — a best-effort stage-2 re-protect to `RWX`, since
+    /// our security boundary is the VMM and stage-1 W^X is already correct.
+    ///
+    /// A non-zero `prot` over a range that is currently no-access RESTORES it (`unprotect`), which
+    /// is how a guest takes its guard page back. Shared by the `mprotect`(74) and
+    /// `mach_vm_protect`(−14) dispatch arms on both record and replay, so there is one
+    /// implementation and no mirror to keep in step.
+    pub fn guest_mprotect(&mut self, ipa: u64, len: u64, prot: u64) {
+        if prot == 0 {
+            self.protect_none(ipa, len);
+            return;
+        }
+        let end = ipa.saturating_add(len);
+        if self.noaccess.iter().any(|&(s, l)| ipa < s + l && s < end) {
+            self.unprotect(ipa, len);
+            return;
+        }
         let _ = self.vm.protect(ipa, len as usize, MemFlags::RWX);
     }
 
@@ -2173,7 +2362,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -2789,6 +2978,7 @@ impl Box_ {
             spsr: self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap(),
             mem,
             reservations: self.reservations.clone(),
+            noaccess: self.noaccess.clone(),
             mmap_next: self.mmap_next,
             bootstrap_port: self.bootstrap_port,
             cache_installed: self.cache.is_some(),
@@ -2859,6 +3049,7 @@ impl Box_ {
         let mut b = Box_ {
             vm, vcpu, backings,
             reservations: state.reservations.clone(),
+            noaccess: state.noaccess.clone(),
             mmap_next: state.mmap_next,
             bootstrap_port: state.bootstrap_port,
             l2_host, next_l3,
