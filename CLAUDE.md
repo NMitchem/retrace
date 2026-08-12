@@ -27,11 +27,13 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   must run serially. `just gate` sets it; a bare `cargo test` will flake with `HV_BUSY`.
 - Single test: `cargo test -p <crate> <name> -- --test-threads=1`
   (e.g. `cargo test -p retrace-box --test pac -- --test-threads=1`).
-- Nothing in the gate is `#[ignore]`d as of M9-jq (see "Honest-gate discipline" below). The
-  headline e2e gates run with the rest: `cargo test -p retrace --test hello_rust_e2e -- --test-threads=1`
+- Exactly one test in the gate is `#[ignore]`d as of M13-protnone — `stackoverflow_rust_e2e`, parked
+  at M8 spec risk R3 (see "Honest-gate discipline" below). The headline e2e gates run with the rest:
+  `cargo test -p retrace --test hello_rust_e2e -- --test-threads=1`
   (rung 1), `--test jq_e2e` (rung 2; skips loudly without `/opt/homebrew/bin/jq`), and
-  `--test panic_e2e` (M11 — a Rust guest that aborts), and `--test segv_rust_e2e` (M12 — a Rust
-  guest that faults and runs its own handler).
+  `--test panic_e2e` (M11 — a Rust guest that aborts), `--test segv_rust_e2e` (M12 — a Rust
+  guest that faults and runs its own handler), and `--test protnone_rust_e2e` (M13 — a Rust guest
+  that protects one of its own pages and faults on it).
 - CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
   exe through real `/usr/lib/dyld`; append `-- <guest args…>` to pass the guest an argv),
   `... replay t.bin`.
@@ -148,28 +150,36 @@ B-family PAC); then **M3** (reverse execution), **M4** (checkpoints), **M5** (wa
 **M6** (crash recording), **M7** (rung 1, a Rust guest), **M8-stack** (guest stack identity),
 **M9-jq** (the guest-side TLBI oracle, argc/argv, and rung 2 — `brew jq`), **M10-fdtable** (a real
 guest-visible fd table, and rung 3 — `jq` over a file), **M11-signals** (the guest's own signal
-dispositions, and a recordable abort), and **M12-signal-delivery** (the guest's handlers actually
-run: signal frames, the `sa_tramp` contract, `sigreturn`, and fault-derived delivery). Each
-milestone has a
-design spec in `docs/superpowers/specs/` and a task plan in
-`docs/superpowers/plans/`; per-task reports and code-review diffs land in `.superpowers/sdd/`.
+dispositions, and a recordable abort), **M12-signal-delivery** (the guest's handlers actually
+run: signal frames, the `sa_tramp` contract, `sigreturn`, and fault-derived delivery), and
+**M13-protnone** (`PROT_NONE` enforcement: the guest's own protection calls reach the stage-1 page
+tables, so its guard pages actually guard). Each milestone has a design spec in
+`docs/superpowers/specs/` and a task plan in `docs/superpowers/plans/`; per-task reports and
+code-review diffs land in `.superpowers/sdd/`.
 
 **Honest-gate discipline.** A headline end-to-end gate is parked `#[ignore]`d at the current wall,
 with the wall documented honestly, rather than being faked green or deleted. When you clear a wall,
 move the gate forward and rewrite that documentation — both the test's `#[ignore]` reason and the
 README Status section. If nothing is left to park it at, un-`#[ignore]` it and say so.
 
-As of M12-signal-delivery **all six headline gates are GREEN and un-ignored**: `hello_dyn_e2e` (a
+As of M13-protnone **all seven headline gates are GREEN**: `hello_dyn_e2e` (a
 dynamically-linked C program, green since M2-taskinfo), `hello_rust_e2e` (rung 1 — a real
 full-`std` Rust binary reaching `main`, green since M8-stack), `jq_e2e` (rung 2 — `brew jq`,
 the first guest loading dylibs outside the shared cache, green since M9-jq), `jq_file_e2e`
 (rung 3 — `jq` over a file argument; it already passed before M10 and is *pinned*, not newly earned),
 `panic_e2e` (a full-`std` Rust guest that `panic!()`s into `abort()`/SIGABRT and records+replays
-its own death, green since M11-signals), and `segv_rust_e2e` (a full-`std` Rust guest that faults on
+its own death, green since M11-signals), `segv_rust_e2e` (a full-`std` Rust guest that faults on
 a wild pointer, runs libstd's **own** `SIGSEGV` handler, and dies of the re-executed store, green
-since M12-signal-delivery — no gate was parked either milestone).
-The gate is currently **296 passed / 0 failed / 0 ignored** (90 test binaries). Keep it that way: a
-new wall gets a NEW parked gate for the capability it blocks, not a regression of these.
+since M12-signal-delivery), and `protnone_rust_e2e` (a full-`std` Rust guest that `mprotect`s one of
+its own pages `PROT_NONE` and takes a stage-1 **permission** fault storing through it, green since
+M13-protnone).
+The gate is currently **311 passed / 0 failed / 1 ignored** (94 test binaries). The one ignored is
+`stackoverflow_rust_e2e`, parked at **M8 spec risk R3** — libpthread's constant `0x7fc000` puts
+libstd's computed guard 7.73 MiB below retrace's real stack backing, so the recursion takes a
+*stage-2* fault instead of striking the guard; both fixes are already measured and rejected at
+`crates/retrace-box/src/lib.rs:35-53`. That is honest-gate discipline, not a regression: M13 parked a
+NEW gate for the capability it does not have, and regressed none of the seven above. Keep it that
+way.
 
 **`segv_rust_e2e` does not rest on its exit code, and neither should its successors.** An *uncaught*
 fault also exits 139 (`crashy_e2e` asserts exactly that), so the gate asserts on the trace: one
@@ -177,6 +187,14 @@ fault also exits 139 (`crashy_e2e` asserts exactly that), so the gate asserts on
 `Event::Crash` after that, and `resume_pc == ` the crash `pc`. Note the terminal variant: a signal
 the guest **raises** is `Event::Signal` (M11), while one derived from a **hardware fault** whose
 disposition is not a handler stays on M6's `Event::Crash` path.
+
+`protnone_rust_e2e` follows that rule and sharpens it. An *unprotected* store to a wild address kills
+its guest just as dead with M13's enforcement entirely absent, so the gate asserts **DFSC `0x0f`**
+(permission, level 3) rather than `0x04..=0x07` (translation) — exactly the difference M13 creates —
+plus the FAR masked to the protected page and `(SIGBUS, BUS_ADRALN)` from `signal_of_esr`. It learns
+the protected page from the guest's **own recorded `mprotect`**, taking the *last* `PROT_NONE` call
+rather than the first: three of the run's four are libSystem's own startup work, so `.rev()` is
+load-bearing — take the first and you assert against libpthread's guard at `0x38000`.
 
 `jq_e2e` and `jq_file_e2e` depend on `/opt/homebrew/bin/jq`, which is not a repo artifact: they skip
 with a loud `eprintln!` when jq is absent rather than passing quietly. That announcement is not
