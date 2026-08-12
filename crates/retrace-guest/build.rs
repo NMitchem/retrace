@@ -405,6 +405,71 @@ fn main() {
         .status().expect("rustc segvy");
     assert!(status.success(), "segvy guest build failed");
 
+    // protnone: touches an mmap'd RW page (populating the TLB), mprotects it PROT_NONE, then stores
+    // again — which must take a stage-1 PERMISSION fault. The M13 t7 mechanism guest; the pre-touch
+    // is what makes protect_none's TLBI load-bearing rather than decorative.
+    let src = format!("{}/asm/protnone.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protnone");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang protnone");
+    assert!(status.success(), "protnone guest build failed");
+
+    // protrestore: the same page protected PROT_NONE and then returned to RW, proving unprotect's
+    // flush too — a stale restrictive entry would fault the post-restore store. Exits 0 on success.
+    let src = format!("{}/asm/protrestore.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protrestore");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang protrestore");
+    assert!(status.success(), "protrestore guest build failed");
+
+    // protnone_mach: the M13 t9 twin of protnone.s, protecting through mach_vm_protect (svc -14)
+    // rather than mprotect (74). Before M13 that arm returned KERN_SUCCESS without calling the box.
+    let src = format!("{}/asm/protnone_mach.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protnone_mach");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang protnone_mach");
+    assert!(status.success(), "protnone_mach guest build failed");
+
+    // protreserve: the M13 t10 fail-loud negative — mprotect(PROT_NONE) over a page inside an
+    // UNCOMMITTED reservation. protect_none must assert rather than let commit_reserved_page
+    // silently materialize the page at the next touch.
+    let src = format!("{}/asm/protreserve.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protreserve");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang protreserve");
+    assert!(status.success(), "protreserve guest build failed");
+
+    // protrust: M13's headline — a stock full-std Rust binary that mprotects one of its own pages
+    // PROT_NONE and stores through it. Same rustc recipe as segvy (no -C panic=abort: a protection
+    // fault is not a panic).
+    let src = format!("{}/rs/protrust.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/protrust");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc protrust");
+    assert!(status.success(), "protrust guest build failed");
+
+    // overflow: the guest for the PARKED stackoverflow_rust_e2e gate (M8 spec risk R3). Built so the
+    // parked test is real code that compiles and can be un-ignored the day R3 is fixed.
+    let src = format!("{}/rs/overflow.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/overflow");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc overflow");
+    assert!(status.success(), "overflow guest build failed");
+
     // M11 signal guests. raise: kill(getpid(), SIGABRT) — the terminal mechanism, and it exercises
     // the self-pid check as a side effect. sigign: the same raise with SIGABRT set to SIG_IGN first,
     // proving the guest keeps running (the branch the terminal gate cannot reach). killother:

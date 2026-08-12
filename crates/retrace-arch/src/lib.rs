@@ -288,8 +288,10 @@ pub const UC_FLAVOR: u64 = 30;
 /// Classify a guest fault into the `(signal, si_code)` a real kernel would deliver.
 ///
 /// Pure: a function of the ESR alone. The DFSC (`ISS[5:0]`) distinguishes "nothing is mapped there"
-/// (translation fault → `SEGV_MAPERR`) from "mapped, but not for that" (permission / access-flag
-/// fault → `SEGV_ACCERR`).
+/// (translation fault → `SEGV_MAPERR`) from "mapped, but not for that" — and that second case splits
+/// again on Darwin: an access-flag fault still reads as `SEGV_ACCERR`, but a permission fault
+/// (M13, measured by `spikes/protnone.c`) is `SIGBUS`/`BUS_ADRALN` — Darwin's `ux_exception` maps
+/// `KERN_PROTECTION_FAILURE` to `SIGBUS`, not `SIGSEGV`.
 ///
 /// **A deliberate divergence from one host observation.** `spikes/sigtramp.c` recorded the host
 /// delivering `SEGV_ACCERR` for a store to a wholly unmapped address, where the DFSC says
@@ -304,7 +306,13 @@ pub fn signal_of_esr(esr: u64) -> (u64, u64) {
         0x20 | 0x24 => match esr & 0x3f {
             0x04..=0x07 => (SIGSEGV, SEGV_MAPERR), // translation fault, levels 0..3
             0x08..=0x0b => (SIGSEGV, SEGV_ACCERR), // access-flag fault
-            0x0c..=0x0f => (SIGSEGV, SEGV_ACCERR), // permission fault
+            // M13, MEASURED (spikes/protnone.c): Darwin's ux_exception translates EXC_BAD_ACCESS by
+            // code — KERN_INVALID_ADDRESS to SIGSEGV, and everything else, including
+            // KERN_PROTECTION_FAILURE, to SIGBUS. libstd's install_main_guard comment says the same
+            // of its own guard page. The previous SIGSEGV here was the Linux answer and had never
+            // been reached by a running guest: every fault M6/M11/M12 recorded was a TRANSLATION
+            // fault (0x04..0x07), whose row is unchanged and still SIGSEGV.
+            0x0c..=0x0f => (SIGBUS, BUS_ADRALN),   // permission fault
             0x10..=0x13 => (SIGBUS, BUS_OBJERR),   // synchronous external abort
             0x21 => (SIGBUS, BUS_ADRALN),          // alignment fault
             // Deliberately NOT a panic, unlike the outer EC match below — and that asymmetry is
@@ -495,8 +503,9 @@ mod tests {
         // 0b0001LL (0x04..0x07) = translation fault  -> SEGV_MAPERR (nothing is mapped there)
         assert_eq!(signal_of_esr(0x9200_0006), (SIGSEGV, SEGV_MAPERR), "translation fault, level 2");
         assert_eq!(signal_of_esr(0x9200_0005), (SIGSEGV, SEGV_MAPERR), "translation fault, level 1");
-        // 0b0011LL (0x0C..0x0F) = permission fault -> SEGV_ACCERR (mapped, but not like that)
-        assert_eq!(signal_of_esr(0x9200_000f), (SIGSEGV, SEGV_ACCERR), "permission fault, level 3");
+        // 0b0011LL (0x0C..0x0F) = permission fault -> SIGBUS/BUS_ADRALN on Darwin (M13, measured by
+        // spikes/protnone.c) rather than the Linux-shaped SEGV_ACCERR this row used to assert.
+        assert_eq!(signal_of_esr(0x9200_000f), (SIGBUS, BUS_ADRALN), "permission fault, level 3");
         // 0b0010LL (0x08..0x0B) = access-flag fault -> also an access error
         assert_eq!(signal_of_esr(0x9200_0009), (SIGSEGV, SEGV_ACCERR), "access flag fault");
         // 0x21 = alignment fault -> SIGBUS
@@ -505,11 +514,25 @@ mod tests {
         assert_eq!(signal_of_esr(0x9200_0010), (SIGBUS, BUS_OBJERR), "external abort");
     }
 
+    // M13: the permission-fault row, MEASURED (spikes/protnone.c) rather than assumed. Every fault
+    // M6/M11/M12 ever recorded was a TRANSLATION fault, so this row shipped unexercised for six
+    // milestones. Darwin's ux_exception maps KERN_PROTECTION_FAILURE to SIGBUS, not to what the
+    // Linux-shaped table said.
+    #[test]
+    fn a_permission_fault_takes_the_darwin_signal() {
+        // DFSC 0x0f = permission fault, level 3. Bit 6 of the ISS is WnR: 0 = load, 1 = store.
+        assert_eq!(signal_of_esr(0x9200_000f), (SIGBUS, BUS_ADRALN), "permission fault, load");
+        assert_eq!(signal_of_esr(0x9200_004f), (SIGBUS, BUS_ADRALN), "permission fault, store");
+        // The control that must NOT move: an unmapped address is a TRANSLATION fault and stays
+        // SIGSEGV/SEGV_MAPERR, which is what crashy_e2e and segv_rust_e2e rest on.
+        assert_eq!(signal_of_esr(0x9200_0006), (SIGSEGV, SEGV_MAPERR), "translation fault, level 2");
+    }
+
     #[test]
     fn signal_of_esr_maps_instruction_aborts_the_same_way() {
         // EC 0x20 = instruction abort from a lower EL; same DFSC encoding.
         assert_eq!(signal_of_esr(0x8200_0006), (SIGSEGV, SEGV_MAPERR));
-        assert_eq!(signal_of_esr(0x8200_000f), (SIGSEGV, SEGV_ACCERR));
+        assert_eq!(signal_of_esr(0x8200_000f), (SIGBUS, BUS_ADRALN));
     }
 
     #[test]

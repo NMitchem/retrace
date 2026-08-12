@@ -343,9 +343,14 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mach_vm_dealloc: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
-            // mach_vm_protect: no-op success. Stage-2 stays RWX; stage-1 W^X is already correct, so
-            // a guest protect changes nothing we model — returning KERN_SUCCESS keeps dyld happy.
+            // mach_vm_protect: M13 routes it into the box like mprotect(74), through the SAME
+            // `guest_mprotect` so record and replay cannot drift. Only `prot == 0` changes anything
+            // (see guest_mprotect); every other value keeps the pre-M13 no-op-success behavior, so
+            // dyld's RW→RO fixup protects are unaffected — Task 2 measured hello_rust's 47 calls as
+            // 0x1/0x3/0x13 and never 0. `set_maximum` (args[3]) is ignored: M13 models current
+            // protection only. Writes nothing itself, so it records like mprotect.
             Stop::Syscall { num, args } if num == MACH_VM_PROTECT => {
+                b.guest_mprotect(args[1], args[2], args[4]);
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mach_vm_protect: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
@@ -676,7 +681,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // real bring-up failure — decode the ESR class + faulting IPA so it names itself.
             Stop::Other { esr } => {
                 if b.page_in_cache(b.fault_ipa()) { continue; }
-                if b.commit_reserved_page(b.fault_ipa()) { continue; }
+                if b.commit_reserved_page(b.fault_ipa()) {
+                    // M13 t2: the retained PROT_NONE-reservation deviation is quantified rather
+                    // than hand-waved (see the M13 spec). Record-only, like every other
+                    // RETRACE_TRACE line.
+                    if trace_log { eprintln!("[commit] ipa={:#x}", b.fault_ipa()); }
+                    continue;
+                }
                 if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
                 return Err(b.describe_stop(esr));
             }
@@ -1120,7 +1131,12 @@ impl ReplaySession {
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
+                            // M13: the record arm's mirror. Same call, same args, so the protection
+                            // state the replay guest runs against is recomputed rather than
+                            // recorded (symmetry rule 1) — without this the replay guest survives
+                            // the store the recording died on.
                             if num == MACH_VM_PROTECT {
+                                self.b.guest_mprotect(args[1], args[2], args[4]);
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }

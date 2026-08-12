@@ -1950,3 +1950,164 @@ names `EC=0x07`, so it is diagnosable, but a dedicated one-instruction static fi
 the two mechanisms the way `sigign`/`sigraise` separate theirs.
 
 See `docs/superpowers/specs/2026-08-06-retrace-m12-signal-delivery-design.md`.
+
+## Status: M13-protnone — 🎉 the guard page actually guards
+
+**A `PROT_NONE` page now denies EL0 in hardware.** Before this milestone the guest's own protection
+calls were a polite lie: `guest_mprotect` discarded `prot` and re-opened the range, `map_mmap_region`
+ignored every bit but `PROT_EXEC`, and `mach_vm_protect` returned `KERN_SUCCESS` without touching a
+page table. A new stage-1 attribute (`ATTR_NONE`, AP `0b00`), a tracked no-access map, and
+`protect_none`/`unprotect` wired through **all three** protection call sites make the guest's request
+real. **`just gate`: 311 passed / 0 failed / 1 ignored** (94 test binaries), clippy clean.
+
+**M13 deliberately ends with `1 ignored` — the first non-zero ignored count since M2-taskinfo.** That
+is `stackoverflow_rust_e2e`, parked at M8 spec risk R3, and it is honest-gate discipline rather than a
+regression. It is billed below, not buried.
+
+**The headline.** `rs/protrust.rs`, a stock full-`std` Rust binary, `mmap`s a page RW, touches it,
+`mprotect`s it `PROT_NONE`, and stores through it. The store takes a **stage-1 permission fault** —
+something no guest could produce in twelve prior milestones — which routes through M12's delivery into
+libstd's *own* `SIGBUS` handler, and the guest dies of the re-executed store. Recorded and replayed
+bit-for-bit, twice. The pre-protect touch is load-bearing rather than decorative: it puts a
+**writable translation in the TLB**, so `protect_none`'s flush has to actually take. Delete the flush
+and the guest prints `survived` and exits 0.
+
+**Exit 139 is necessary and nowhere near sufficient, and the gate says so.** This is the same trap
+`segv_rust_e2e` documented, one milestone on: an *unprotected* store to a wild address kills this
+guest just as dead with M13's enforcement entirely absent, and M6's flat crash convention
+(`Outcome::Crash` → `exit(139)`, whatever signal it maps to) means the code carries no information
+about *which* fault occurred. So the gate asserts on the trace instead: **DFSC `0x0f`** (permission,
+level 3) rather than `0x04..=0x07` (translation) — exactly the difference M13 creates — the FAR
+masked to the protected page, `(SIGBUS, BUS_ADRALN)` from `signal_of_esr`, exactly one
+`SignalDelivery` whose `si_addr` names that page, a `sigreturn` after it, and `resume_pc ==` the
+terminal crash `pc`. The protected page is **learned from the guest's own recorded `mprotect`, not
+hardcoded** — and learning it is itself a measurement: the run contains **four** `mprotect(…,
+PROT_NONE)` calls and three are libSystem's own startup work, so the gate takes the **last**, which is
+the guest's. Take the first and you assert against libpthread's guard at `0x38000`.
+
+**The signal was measured, and the measurement contradicted the shipped table.** `spikes/protnone.c`,
+compiled and run natively: a `PROT_NONE` access — **load and store alike** — raises
+**`SIGBUS`/`BUS_ADRALN`**, not `SIGSEGV`/`SEGV_ACCERR`. `signal_of_esr`'s permission row said
+`SIGSEGV`, the Linux-shaped guess, and it had **never been reached in six milestones** — every fault
+any guest had ever recorded was a *translation* fault (`0x04..=0x07`). So the row was wrong and
+nothing could have noticed, which is precisely what an unexercised branch is for. The spike carries
+its own control: an access to a wholly unmapped address still raises `SIGSEGV`, so M6's `crashy_e2e`
+classification is unaffected. (Informational, not consumed: a store to a `PROT_READ` page also
+returns `BUS_ADRALN` — XNU does not distinguish "no permission" from "wrong permission" in `si_code`,
+despite neither access being misaligned.)
+
+**The hardware separates "committable" from "must fault" — no software gate does.** A protected page
+is **backed**, so an EL0 access takes a stage-1 permission fault via the EL1 trampoline and arrives as
+`Stop::Fault`, where M12's disposition check runs. A reserved-but-uncommitted page is **unbacked**, so
+its access takes a stage-2 translation fault direct to EL2 and arrives as `Stop::Other`, where
+`commit_reserved_page` demand-commits it. Two exception routes, two `Stop` variants, and the split is
+free. It rests on one invariant, which `protect_none` **asserts** rather than assumes: every page it
+protects must already be backed. Protecting an uncommitted reservation would fault at stage 2, where
+`commit_reserved_page` would silently materialize the page instead of denying it — so that case fails
+loud, and `protreserve.s` is the gate that proves it does.
+
+**The guest-side TLBI finally has a caller that needs it.** M9 built `flush_guest_tlb` for exec
+promotion and then found jq never used it; every other `set_region_attr` caller stamps an IPA the
+guest has never translated, and each documents that as its soundness argument. `protect_none` is the
+first that stamps a page the guest is **actively using** — libstd's guard lives inside the stack it is
+running on. Its non-vacuity is measured, not argued: reverting the flush makes `protnone.s` report
+"the protected store was NOT denied," verbatim. The pairing is asymmetric and the README says so
+where the plan did not: `protrestore.s` (the `unprotect` direction) **wants** its store to succeed, so
+it passes vacuously when nothing is protected at all. Only `protnone.s` proves the forward direction.
+
+**The stack-overflow capability is PARKED, not delivered.** M12's Status section named a Rust stack
+overflow as the obvious M13 headline. Measurement killed it. libstd computes its guard at
+`pthread_get_stackaddr_np() - pthread_get_stacksize_np()`, and macOS 26's libpthread reports a
+**constant `0x7fc000`**, so the guard lands at `0x2004000` — **7.73 MiB below** retrace's real 256 KiB
+stack backing `[0x27C0000, 0x2800000)`. A deep recursion therefore runs off the stack into unbacked
+IPA and takes a **stage-2** fault — a fatal `describe_stop`, not even a guest-visible signal — instead
+of striking the guard. That is **M8 spec risk R3**, already documented at
+`crates/retrace-box/src/lib.rs:35-53` with both fixes already measured and rejected there: backing a
+full 8 MiB costs ~1.7x on `hello_rust` and worse across the dyld suite, and `getrlimit` cannot move
+the subtrahend (M8 measured that answering `0x10000000` left the computed address bit-identical). So
+`stackoverflow_rust_e2e` ships as **real, compiling code with a real guest behind it**, `#[ignore]`d at
+that wall — because a gate that cannot be run cannot be un-parked by deleting an attribute. Forced
+with `--ignored` it dies exactly where R3 says: a stage-2 translation fault 160 bytes below the stack
+bottom, nowhere near the guard. **The enforcement mechanism is not what is missing** — the headline
+gate observes that very guard page being installed at `0x2004000` and protects a different page to
+prove enforcement works.
+
+**A correction to M12's Status section, because this milestone's premise rested on it.** M12 wrote
+that libstd's `install_main_guard` maps its guard page `PROT_NONE MAP_FIXED`. Measured, it does not:
+the `mmap` **is** `MAP_FIXED` at the guard address but carries `PROT_READ|PROT_WRITE`, and the
+`PROT_NONE` arrives from a *subsequent* `mprotect`. The consequence inverted two tasks' stated
+significance — `guest_mprotect` is what makes libstd's guard fault, and `map_mmap_region`'s `prot == 0`
+hook is **not** on libstd's path at all. Both remain necessary; the reason each is necessary changed.
+The same measurement also identified which page is libstd's: `0x38000` and `0x43c000` appear in
+`hello_dyn` too and are libpthread's own guards, while `0x2004000` appears only under libstd.
+
+**What driving it actually found — fourteen plan defects, and the one that mattered was found by a
+review that was nearly skipped.** Tasks 7–10 landed controller-implemented without independent review,
+for defensible reasons (dispatched subagents kept stalling). The back-fill review of all four found
+three clean and **one Important defect in Task 8**: `guest_munmap` dropped a range from the no-access
+map with a bare `subtract_range` and never reset the stage-1 leaf. Stage-1 leaves live in the box's own
+tables and **survive a stage-2 unmap** — `guest_munmap`'s own comment says so — so munmap-then-remap
+left a valid new mapping holding a stale `ATTR_NONE`: a silent denial the guest can neither see nor
+undo, in the exact milestone whose purpose is removing silent denials. `unmap_overlapping` had the same
+gap and touched neither the map nor the leaf. Fixed with one `drop_protection` helper serving both
+teardown paths. **Why the existing test missed it is the transferable lesson:**
+`munmap_drops_the_protection_with_the_pages` asserted only `noaccess().is_empty()` — the *bookkeeping*
+side — while every other test in that file also checks `ipa_is_noaccess`, the *hardware* side. **A test
+that checks only the software mirror of a hardware fact will pass while the hardware disagrees.**
+
+Three more worth keeping:
+
+1. **Task 7 detonated a latent VMM bug that predates M13.** Its targeted 17/17 was green while the
+   full gate was **red** at the first dynamic guest it reached. The three VMM scratch IPAs (sign stub
+   `0x40000`, sign table `0x44000`, TLBI stub `0x48000`) are contiguous and **lazy**, so until first
+   use they are absent from `backings`, `range_is_free` counted them free, and first-fit handed
+   libsystem a 4 MiB thread-stack extent at `0x38000` straddling all three. M13 did not create that —
+   it forced the first TLBI-stub creation to happen *after* guest allocation on the dynamic path, which
+   nothing had ever done. Fixed with a forbidden `[0x40000, 0x4C000)` window, a pure function of
+   constants and so identical on both runs. The sibling hazard it exposed is worse than the one that
+   fired: `ensure_sign_stub` early-returns when its IPA is backed, so a guest extent covering `0x40000`
+   would have made it **skip creating the stub and sign against guest memory** — a silent wrong answer
+   rather than a loud `HV_ERROR`.
+2. **Task 9's only planned test could not fail for the reason Task 9 existed.** It drove the dispatch
+   itself from its own match arm, so it passed identically before and after the change — it pins the
+   arg layout, which is worth pinning, but as the task's sole gate it would have let a completely
+   unwired `mach_vm_protect` go green. A real record-and-replay gate was added, and **both** halves of
+   symmetry rule 1 were measured by deletion: drop the record arm and the guest reports
+   "protection not enforced"; drop the replay arm and replay reports `Divergence { landmark: 3 }`.
+3. **Task 10's planned guest wrote `cur_protection` to the wrong register**, zeroing x5/x6/x7 alike so
+   that its `args[7] == 0` assertion would have passed **vacuously** while documenting the wrong ABI.
+   The trap passes `cur_protection` in x5, as `vm_map_args` has always read it.
+
+**The determinism posture is standard symmetric, with no new mirror.** `mach_vm_protect` is routed
+into the same `guest_mprotect` both sides call, so "record and replay recompute identically" is true by
+construction. No `TRACE_MAGIC` change: M13 adds no event shape.
+
+**The retained deviation, measured rather than assumed.** `commit_reserved_page` still silently
+demand-commits any page inside a tracked reservation, and M13 keeps that deliberately. Its cost is
+**zero, three runs each**: `hello_rust` 0/0/0, `hello_dyn` 0/0/0, `jq --version` 0/0/0. A zero from a
+broken probe is indistinguishable from a real zero, so the instrument was proved against the static
+`reservecommit` fixture whose whole purpose is that path — it reports two commits. The path is live
+but no dynamic gate depends on it.
+
+**`mach_vm_protect`'s routing is dormant, and that was checked before it was written.** `hello_rust`
+issues 47 `mach_vm_protect` calls with `new_protection` in `{0x1, 0x3, 0x13}` and **never** `0`, so
+routing it into the box alters no live behavior in any dynamic gate. It is wired for the guest that
+eventually needs it, not for one that does today.
+
+**Still unmodelled, and fail-loud rather than guessed:** every protection bit other than **no-access**
+— `PROT_READ`-only, `PROT_WRITE`-only, and executable transitions are not modelled, and `unprotect`
+restores `ATTR_DATA` unconditionally rather than the prior attribute (sound only because nothing but
+data pages are ever protected today, and documented as a choice); and **protecting an uncommitted
+reservation**, which asserts. Everything M12 carries forward is unchanged: a **pending signal set**,
+**nested delivery**, a **blocked synchronous fault**, `dup2` (fail-loud), `fcntl(F_DUPFD)` (unmodelled
+and *not* fail-loud), guest stdin still being retrace's, `RLIMIT_NOFILE`, **threads**, **asynchronous
+signals**, and **arm64e guests**.
+
+**Three fast-follows carried out, none blocking, all pre-existing or dormant:** `place_fixed` /
+`unmap_overlapping` still never consult the forbidden scratch window before claiming an IPA (out of
+reach today — no guest FIXED-maps below 4 GiB, since dyld's segments are ≥ 4 GiB); `protect_none` does
+not dedupe overlapping protect calls, so protecting the same range twice tracks two entries (harmless
+— the stamp is idempotent and `subtract_range` scans the whole table); and `guest_munmap` removes a
+backing wholesale but drops protection only over `[ipa, len)`.
+
+See `docs/superpowers/specs/2026-08-08-retrace-m13-protnone-design.md`.
