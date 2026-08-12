@@ -450,6 +450,9 @@ pub struct Box_ {
     // capture cannot re-derive it. Has Drop (an array of Copy + an Option), declared after vcpu/vm,
     // so the load-bearing vcpu-before-vm drop order is unaffected.
     sigtable: SigTable,
+    // M14: the guest's threads. A single-threaded guest has one entry and takes the pre-M14 path.
+    // Declared after vcpu/vm, so the load-bearing vcpu-before-vm drop order is unaffected.
+    threads: thread::ThreadTable,
 }
 
 #[derive(Debug)]
@@ -974,7 +977,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()) }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1562,7 +1565,13 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()) };
+        // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
+        // it with the real startup state just written to the vCPU so it reflects reality from the
+        // first `switch_to_thread` rather than an all-zero placeholder.
+        let ctx0 = b.save_ctx();
+        *b.threads.ctx_mut(0) = ctx0;
+        b
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -2363,7 +2372,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()) }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -2638,8 +2647,14 @@ impl Box_ {
     /// Test/diagnostic accessors for vector and general registers. Present so the M12 delivery
     /// tests can clobber and observe state without a running guest.
     pub fn vcpu_set_x(&mut self, n: u32, v: u64) { self.vcpu.set_reg(reg::x(n), v).unwrap(); }
+    pub fn vcpu_get_x(&self, n: u32) -> u64 { self.vcpu.get_reg(reg::x(n)).unwrap() }
     pub fn vcpu_set_q(&mut self, n: u32, v: u128) { self.vcpu.set_simd(simd::q(n), v).unwrap(); }
     pub fn vcpu_get_q(&self, n: u32) -> u128 { self.vcpu.get_simd(simd::q(n)).unwrap() }
+    /// M14 t5: setters for the sysregs a context switch must move, paired with the existing
+    /// getters `position()` (ELR_EL1), `spsr()` (SPSR_EL1), and `tpidrro_el0()` below.
+    pub fn set_elr(&mut self, v: u64) { self.vcpu.set_sys(sysreg::ELR_EL1, v).unwrap(); }
+    pub fn set_spsr(&mut self, v: u64) { self.vcpu.set_sys(sysreg::SPSR_EL1, v).unwrap(); }
+    pub fn set_tpidrro_el0(&mut self, v: u64) { self.vcpu.set_sys(sysreg::TPIDRRO_EL0, v).unwrap(); }
     /// Write raw bytes into guest memory (tests only — the production path is `write_guest`).
     pub fn poke_guest(&mut self, ipa: u64, bytes: &[u8]) { self.write_guest(ipa, bytes) }
 
@@ -2881,6 +2896,60 @@ impl Box_ {
         }
     }
 
+    /// Capture the running thread's context off the vCPU.
+    ///
+    /// Same save/restore discipline `flush_guest_tlb` (M9) and the PAC signing oracle already use;
+    /// a context switch is that operation with the restore aimed at a DIFFERENT thread.
+    pub fn save_ctx(&self) -> thread::ThreadCtx {
+        let mut fp = [0u128; 32];
+        for (i, f) in fp.iter_mut().enumerate() { *f = self.vcpu.get_simd(simd::q(i as u32)).unwrap(); }
+        thread::ThreadCtx {
+            regs: self.regs_snapshot(),
+            fp,
+            fpcr: self.vcpu.get_reg(reg::FPCR).unwrap(),   // Reg, not SysReg
+            fpsr: self.vcpu.get_reg(reg::FPSR).unwrap(),   // Reg, not SysReg
+            tpidrro_el0: self.vcpu.get_sys(sysreg::TPIDRRO_EL0).unwrap(),
+            elr: self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(),
+            spsr: self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap(),
+        }
+    }
+
+    /// The inverse of `regs_snapshot`. The only new low-level helper M14 needs.
+    fn write_regs(&mut self, r: &Regs) {
+        for (i, xi) in r.x.iter().enumerate() { self.vcpu.set_reg(reg::x(i as u32), *xi).unwrap(); }
+        self.vcpu.set_reg(reg::PC, r.pc).unwrap();
+        self.vcpu.set_sys(sysreg::SP_EL0, r.sp_el0).unwrap();
+        self.vcpu.set_reg(reg::CPSR, r.cpsr).unwrap();
+    }
+
+    /// Install a thread's context onto the vCPU.
+    ///
+    /// `TPIDR_EL0` is deliberately NOT touched: macOS 26 reads the guest's CPU number from its low
+    /// bits and the cluster from the rest, so it must stay 0 for every thread. Writing a per-thread
+    /// value there is how M2-cpuid's OOB seg-group index bug comes back.
+    pub fn load_ctx(&mut self, ctx: &thread::ThreadCtx) {
+        self.write_regs(&ctx.regs);
+        for (i, f) in ctx.fp.iter().enumerate() { self.vcpu.set_simd(simd::q(i as u32), *f).unwrap(); }
+        self.vcpu.set_reg(reg::FPCR, ctx.fpcr).unwrap();   // Reg, not SysReg
+        self.vcpu.set_reg(reg::FPSR, ctx.fpsr).unwrap();   // Reg, not SysReg
+        self.vcpu.set_sys(sysreg::TPIDRRO_EL0, ctx.tpidrro_el0).unwrap();
+        self.vcpu.set_sys(sysreg::ELR_EL1, ctx.elr).unwrap();
+        self.vcpu.set_sys(sysreg::SPSR_EL1, ctx.spsr).unwrap();
+    }
+
+    /// Switch the vCPU from the running thread to `tid`.
+    pub fn switch_to_thread(&mut self, tid: usize) {
+        let cur = self.threads.current();
+        if cur == tid {
+            return;
+        }
+        let saved = self.save_ctx();
+        *self.threads.ctx_mut(cur) = saved;
+        self.threads.switch_to(tid);
+        let next = self.threads.ctx_of(tid).clone();
+        self.load_ctx(&next);
+    }
+
     /// Capture all backings + architectural registers as an Event::Snapshot.
     pub fn snapshot(&self) -> retrace_trace::Event {
         let mut mem = Vec::new();
@@ -3073,6 +3142,9 @@ impl Box_ {
             // M11: RESTORED from the capture, never reset — see the BoxState field comment. A fresh
             // table here would tell a seeked session every signal is at its default disposition.
             sigtable: state.sigtable.clone(),
+            // M14 t5: BoxState does not carry the thread table yet (that is Task 6) — a checkpoint
+            // restore takes the pre-M14 single-thread path for now.
+            threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b

@@ -85,3 +85,48 @@ fn every_thread_blocked_is_a_deadlock_and_pick_next_says_so() {
     // Nobody can run. pick_next reports it rather than hanging or picking a blocked thread.
     assert_eq!(t.pick_next(), None, "a deadlock must be visible, not a hang");
 }
+
+/// A `Box_` for the VM-backed tests in this file.
+///
+/// There is no `Box_::for_test()`; the constructor is `Box_::load(&loaded)`, and every existing
+/// retrace-box test builds one this way — see `tests/checkpoint.rs:11-12`, whose exact two-line
+/// form this copies. `parse_macho` takes BYTES and returns `Loaded` directly: it is not fallible,
+/// and the `SPINLOOP` constant is a PATH, so read it first. M14 needs no special guest for these
+/// register-level tests, only a live vCPU. **`--test-threads=1` is mandatory: one HVF VM per
+/// process.**
+fn tb() -> retrace_box::Box_ {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::SPINLOOP).unwrap());
+    retrace_box::Box_::load(&loaded)
+}
+
+// This one needs a VM.
+#[test]
+fn a_switch_round_trips_every_register_in_the_context() {
+    let mut b = tb();
+    // Distinctive values in every field the context claims to carry, so a dropped field shows up
+    // as a mismatch rather than a coincidental zero-equals-zero pass.
+    b.vcpu_set_x(3, 0xdead_beef_0000_0003);
+    b.vcpu_set_x(29, 0xdead_beef_0000_001d);
+    b.set_elr(0x1234_5000);
+    b.set_spsr(0x3c4);
+    b.set_tpidrro_el0(0x0003_8000);
+
+    let saved = b.save_ctx();
+
+    // Clobber the hardware, then restore.
+    b.vcpu_set_x(3, 0);
+    b.vcpu_set_x(29, 0);
+    b.set_elr(0);
+    b.set_spsr(0);
+    b.set_tpidrro_el0(0);
+    b.load_ctx(&saved);
+
+    // Assert against the HARDWARE, not against `saved`. M13's Task 8 defect was a test that checked
+    // only the software mirror and passed while the stage-1 leaf disagreed.
+    assert_eq!(b.vcpu_get_x(3), 0xdead_beef_0000_0003);
+    assert_eq!(b.vcpu_get_x(29), 0xdead_beef_0000_001d);
+    assert_eq!(b.position(), 0x1234_5000);
+    assert_eq!(b.spsr(), 0x3c4);
+    assert_eq!(b.tpidrro_el0(), 0x0003_8000, "tpidrro_el0 is THE per-thread register");
+    assert_eq!(b.tpidr_el0(), 0, "tpidr_el0 must stay 0 — macOS reads the CPU number from it");
+}
