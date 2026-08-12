@@ -196,6 +196,16 @@ pub const SYS_SIGRETURN: u64 = 184;
 pub const SYS_PTHREAD_KILL: u64 = 328;
 pub const SYS_PTHREAD_SIGMASK: u64 = 329;
 pub const SYS_SIGWAIT: u64 = 330;
+/// `bsdthread_create(func, func_arg, stack, pthread, flags)`. **Never forwarded** — the host would
+/// create a real thread inside retrace's own process, starting at a GUEST address. M14 emulates it.
+pub const SYS_BSDTHREAD_CREATE: u64 = 360;
+/// `bsdthread_terminate(stackaddr, freesize, port, sem)` — a guest thread's exit.
+pub const SYS_BSDTHREAD_TERMINATE: u64 = 361;
+/// `bsdthread_register(threadstart, wqthread, pthsize, …)`. Already fires on EVERY dynamic guest
+/// since M7, unremarked; `threadstart` is the address a new thread must be entered at.
+pub const SYS_BSDTHREAD_REGISTER: u64 = 366;
+/// `thread_selfid()` — already fires and already survives.
+pub const SYS_THREAD_SELFID: u64 = 372;
 pub const SYS_TERMINATE_WITH_PAYLOAD: u64 = 520;
 pub const SYS_ABORT_WITH_PAYLOAD: u64 = 521;
 
@@ -580,5 +590,14 @@ mod tests {
         assert_eq!((SS_ONSTACK, SS_DISABLE), (0x1, 0x4));
         assert_eq!(UC_FLAVOR, 30, "measured in spikes/sigtramp.c as x1 on trampoline entry");
         assert_eq!(SI_USER, 0x10001, "measured by spikes/sigabi.c");
+    }
+
+    #[test]
+    fn thread_syscall_numbers_are_the_darwin_ones() {
+        // Measured on macOS 26 (M14 Task 2): a NON-threading Rust guest already issues 366 and 372.
+        assert_eq!(
+            (SYS_BSDTHREAD_CREATE, SYS_BSDTHREAD_TERMINATE, SYS_BSDTHREAD_REGISTER, SYS_THREAD_SELFID),
+            (360, 361, 366, 372)
+        );
     }
 }
