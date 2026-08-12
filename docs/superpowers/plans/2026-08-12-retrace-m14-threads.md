@@ -33,7 +33,7 @@ Every signature below was read out of the tree while writing this plan. Use thes
 - **`--test-threads=1` is mandatory** — one HVF VM per process. `just gate` sets it; a bare `cargo test` flakes with `HV_BUSY`.
 - **`just gate` is THE exit gate:** `cargo test --workspace` + `clippy -D warnings`. **Baseline entering this milestone: 311 passed / 0 failed / 1 ignored (94 test binaries), clippy clean**, at `main` = `c685695`. The 1 ignored is `stackoverflow_rust_e2e` (M8 spec risk R3) and it stays ignored — do not "fix" it in this milestone.
 - **`cargo test -p retrace --lib` IS INVALID.** `retrace` is a binary-only crate; `--lib` makes cargo fail the *entire* invocation with exit 101 and `error: no library targets found in package 'retrace'`, running nothing — including a `--bins` half passed in the same command. Use `cargo test -p retrace --bins`. This cost real time in M13 Task 12; the failure is indistinguishable from a test failure at the exit-code level.
-- **GATE CADENCE.** A full gate is ~11 min wall-clock. Run it **in full** only where a live call site can actually move a dynamic gate: Tasks **7, 8, 9, 10, 11, 12**. Tasks **3, 4, 5, 6** add code nothing calls yet, so they run **targeted crate tests plus clippy**: `cargo test -p retrace-box --test threads --test checkpoint_seek -- --test-threads=1` and `cargo clippy --workspace --all-targets -- -D warnings`. Per-task count checksums are **batched, not abandoned** — the next full gate must equal the cumulative projection since the last one, and a mismatch is investigated *then*, not waved through.
+- **GATE CADENCE.** A full gate is ~11 min wall-clock. Run it **in full** only where a live call site can actually move a dynamic gate: Tasks **7, 8, 9, 11, 12**. (Task 10 is excluded deliberately — it breaks `pick_next`, observes the failure, and reverts, so it ends on already-gated code and its own steps run targeted tests only.) Tasks **3, 4, 5, 6** add code nothing calls yet, so they run **targeted crate tests plus clippy**: `cargo test -p retrace-box --test threads --test checkpoint_seek -- --test-threads=1` and `cargo clippy --workspace --all-targets -- -D warnings`. Per-task count checksums are **batched, not abandoned** — the next full gate must equal the cumulative projection since the last one, and a mismatch is investigated *then*, not waved through.
 - **Who runs the gate: the CONTROLLER, never an implementer.** Measured across four attempts in M13: both controller-run gates completed; both subagent-run gates were reaped mid-run once the agent went idle (killed at 44/90; SIGTERM at 19/90). Raising the subagent's Bash timeout keeps the *agent* alive but does not protect its orphaned child process. Implementers run fast crate-level tests and clippy only.
 - **Do not run `sudo killall syspolicyd` during a gate.** It is a real remedy for accumulated Gatekeeper load but it **strands any process already mid-code-signature-validation** — that process then blocks forever on a dead daemon with zero accumulated CPU. Kill it *between* runs, never during one.
 - **Symmetry rule 1:** a special case in record's `match stop` needs a mirror in replay's dispatch, both recomputing identical bytes. **Symmetry rule 2:** deterministic emulation belongs *below* the trace, inside `Box_::run()`, where it fires identically on both sides. M14's scheduler is a rule-2 citizen; keep it there.
@@ -458,7 +458,9 @@ Expected: FAIL to compile — `unresolved import retrace_box::thread`.
 //! thread. Given the guest's own syscall sequence the choice is forced, so record and replay
 //! schedule identically with nothing recorded and no trace-format change. That is symmetry rule 2:
 //! deterministic behaviour belongs below the trace, where it fires identically on both sides.
-use crate::Regs;
+// `retrace-box` imports Regs PRIVATELY at lib.rs:4 (`use retrace_trace::{Regs, Region};`), so
+// `crate::Regs` does NOT resolve from a submodule. Import it from its own crate.
+use retrace_trace::Regs;
 
 /// One thread's register context.
 ///
@@ -482,7 +484,9 @@ pub struct ThreadCtx {
 impl ThreadCtx {
     pub fn zeroed() -> Self {
         Self {
-            regs: Regs::default(),
+            // `Regs` derives Debug/Clone/PartialEq/Eq/Serialize/Deserialize but NOT Default —
+            // construct it field-by-field rather than adding a derive to the trace crate.
+            regs: Regs { x: [0u64; 31], pc: 0, sp_el0: 0, cpsr: 0 },
             fp: [0u128; 32],
             fpcr: 0,
             fpsr: 0,
