@@ -27,6 +27,19 @@ Every signature below was read out of the tree while writing this plan. Use thes
 
 **There is no `write_regs` yet.** Task 5 adds one as the inverse of `regs_snapshot`; it is the only new low-level helper this milestone needs.
 
+### Where syscall dispatch actually lives — corrected during Task 3
+
+This plan originally said the per-syscall dispatch is in `crates/retrace-box/src/lib.rs`. **It is not.** `retrace-box` owns `forward_and_diff`, the generic forward primitive, and the `Box_` methods that implement guest semantics — but the `match stop { Stop::Syscall { num, args } … }` dispatch is in **`crates/retrace-core/src/lib.rs`**, in two places that must stay mirrored:
+
+| side | location | M13's `mach_vm_protect` example |
+|---|---|---|
+| record | `record_box`'s `match stop` | `lib.rs:352` → `b.guest_mprotect(args[1], args[2], args[4])` |
+| replay | `ReplaySession::advance` | `lib.rs:1148-1149` → `self.b.guest_mprotect(args[1], args[2], args[4])` |
+
+**Copy that pattern.** A new arm goes in *both*, calling the *same* `Box_` method with the *same* arguments — that identity is what makes symmetry rule 1 hold by construction rather than by inspection. Task 3's `panic!` scaffold is an exception only because it records no event and kills the recorder, so there is nothing for replay to mirror.
+
+Note the arm must sit **before** the generic forward arm. Forwarding syscall 360 to the host is reproducibly fatal (Task 1).
+
 ## Global Constraints
 
 - **macOS 26.x on Apple Silicon.** Every binary touching `hv_*` needs `com.apple.security.hypervisor` (ad-hoc signable via `tools/codesign-run.sh`).
@@ -866,8 +879,11 @@ git commit -m "M14 t6: a checkpoint that forgets a thread breaks quietly, so it 
 ### Task 7: Emulated `bsdthread_create`
 
 **Files:**
-- Modify: `crates/retrace-box/src/lib.rs` (replace Task 3's panic scaffold)
+- Modify: `crates/retrace-core/src/lib.rs` — replace Task 3's panic scaffold in `record_box`'s `match stop`, **and add the matching replay arm in `ReplaySession::advance`**. See "Where syscall dispatch actually lives" above; copy M13's `mach_vm_protect` pair at `:352` / `:1148`.
+- Modify: `crates/retrace-box/src/lib.rs` — the `guest_bsdthread_create` method itself and the `thread_start_pc` field.
 - Test: `crates/retrace-box/tests/threads.rs`
+
+**Symmetry rule 1 applies here and it is not optional.** Record and replay must both call `b.guest_bsdthread_create(args)` with identical arguments, so both build an identical thread table. Omit the replay arm and replay runs a one-thread table against a two-thread recording — which surfaces as a divergence at the child's first syscall, not as a clean error. Task 9's plan text says to measure this by deletion; do that here too if it is cheap.
 
 **Interfaces:**
 - Consumes: Task 2's measured ABI and `threadstart` address; `ThreadTable::spawn`; `ThreadCtx`.
@@ -1019,12 +1035,15 @@ git commit -m "M14 t7: bsdthread_create builds a thread instead of dying"
 ### Task 8: Thread exit, and waking the joiner
 
 **Files:**
-- Modify: `crates/retrace-box/src/lib.rs`
+- Modify: `crates/retrace-core/src/lib.rs` — the `bsdthread_terminate` and blocking-primitive arms, **in both `record_box` and `ReplaySession::advance`**.
+- Modify: `crates/retrace-box/src/lib.rs` — the `guest_bsdthread_terminate` method.
 - Test: `crates/retrace-box/tests/threads.rs`
 
 **Interfaces:**
-- Consumes: Task 1's measured join primitive; `ThreadTable::exit_current`/`unblock_joiners_of`.
+- Consumes: Task 1's measured join primitive — **`__ulock_wait`, syscall 515** (measured, and independently cross-checked against the SDK's `sys/syscall.h`); `ThreadTable::exit_current`/`unblock_joiners_of`.
 - Produces: `Box_::guest_bsdthread_terminate(&mut self, args: [u64; 8]) -> u64`.
+
+**A design decision this task must make explicitly, not by accident.** The blocking arm can live either above the trace (in `retrace-core`'s dispatch, needing a replay mirror) or below it (inside `Box_::run()`, firing identically on both sides for free). The spec argues for below — symmetry rule 2 — because that is what makes the schedule a pure function with no recorded state. But `__ulock_wait` is a real syscall with a real return value, so whichever side handles it must decide what the guest sees when it wakes. **State the choice and its reasoning in the report**; do not leave it implied by where the code happened to land.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1075,27 +1094,22 @@ impl Box_ {
 
 - [ ] **Step 4: Wire the blocking primitive Task 1 measured**
 
-Add an arm for whichever syscall Task 1 identified. Write the one that matches; delete the others.
+Task 1 SETTLED this: `__ulock_wait`, syscall **515**, pinned by disassembly (`mov x16, #0x203; svc #0x80` in `___ulock_wait`) and cross-checked against the SDK header. The other two candidates are ruled out — `psynch_cvwait` and `semaphore_wait` do not appear anywhere in `__pthread_join`. (`___semwait_signal_nocancel` DOES appear, but downstream of the `__ulock_wait` retry loop, gated on a semaphore slot the join path does not populate — do not mistake it for an alternate wait.) Add `SYS_ULOCK_WAIT: u64 = 515` to `retrace-arch` alongside Task 3's constants, then:
 
-*If `__ulock_wait` (515):*
 ```rust
 retrace_arch::SYS_ULOCK_WAIT => {
-    // args[1] is the address being waited on. If the value no longer matches, the wait is already
-    // satisfied and the thread stays runnable — blocking it would deadlock a race the guest won.
+    // args[1] is the address being waited on. If the value there no longer matches what the guest
+    // expects, the wait is ALREADY SATISFIED and the thread must stay runnable — blocking it would
+    // deadlock a race the guest already won. That check is the difference between a scheduler and
+    // a hang, so write it explicitly rather than assuming the guest only waits when it must.
     self.threads.block(thread::BlockReason::Wait { addr: args[1] });
     return Stop::Syscall { num, args };
 }
 ```
 
-*If `psynch_cvwait`:*
-```rust
-retrace_arch::SYS_PSYNCH_CVWAIT => {
-    self.threads.block(thread::BlockReason::Wait { addr: args[0] });
-    return Stop::Syscall { num, args };
-}
-```
-
-*If a Mach `semaphore_wait`:* handle it in `machmsg.rs`'s router alongside `semaphore_create`, blocking on the semaphore's name rather than an address, and say so in the report.
+**Two things to settle while writing this, and to state in the report:**
+1. **What the woken thread sees in x0.** `__ulock_wait` returns a value the guest inspects. Decide it, justify it, and make record and replay agree — if they disagree the divergence oracle catches it, which is the good outcome, but only after a confusing failure.
+2. **Whether the arm is above or below the trace** (see this task's Files note). Below is the spec's preference; if you put it above, it needs a replay mirror like every other `record_box` arm.
 
 - [ ] **Step 5: Run the tests**
 
