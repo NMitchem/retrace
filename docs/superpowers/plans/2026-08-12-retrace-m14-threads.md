@@ -614,7 +614,7 @@ pub mod thread;
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 6 tests. If `Regs` does not derive `Default`/`PartialEq`/`Clone`, add the derives it needs — do **not** hand-roll a second register struct.
+Expected: PASS, 6 tests. If `Regs` does not derive `Default`/`PartialEq`/`Clone`, add the derives it needs — do **not** hand-roll a second register struct. *(Shipped 7: the fix round added `pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one`. Every count below is measured against that 7.)*
 
 - [ ] **Step 6: Targeted tests and clippy**
 
@@ -778,7 +778,7 @@ and initialise it in each constructor with `thread::ThreadTable::new(thread::Thr
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 7 tests.
+Expected: PASS, 8 tests.
 
 - [ ] **Step 5: Prove the existing gates did not move**
 
@@ -787,7 +787,7 @@ Adding a field to `Box_` touches every constructor. Run the crate:
 ```bash
 cargo test -p retrace-box -- --test-threads=1
 ```
-Expected: **123 + 7 = 130 passed / 0 failed / 0 ignored.**
+Expected: **123 + 8 = 131 passed / 0 failed / 0 ignored.**
 
 - [ ] **Step 6: Clippy, then commit**
 
@@ -802,6 +802,8 @@ git commit -m "M14 t5: a context switch, built on the save/restore discipline M9
 ### Task 6: `BoxState` carries the thread table (R4)
 
 Risk R4 is that a checkpoint silently loses every non-current thread — it still restores, still runs, and breaks quietly. That is the M13 Task 8 signature, so the gate must assert the restored **table**, not merely that the seek succeeded.
+
+**As shipped, this task needed two tests beyond the one specified below, and the reason is worth keeping.** The planned test asserts on the `BoxState` that `checkpoint()` produced and never restores it, so a `from_checkpoint` that carries the table into `BoxState` and then drops it on the floor — R4 itself — satisfies every assertion in it. Measured by mutation: reverting the restore to a fresh table leaves the planned test green. `a_restored_checkpoint_still_has_every_thread` closes that. Separately, R4 has a hardware half: `from_checkpoint` forced `TPIDRRO_EL0` to the constant `TSD_IPA`, which was right while the thread pointer WAS constant and hands a restored child main's TSD the moment it is not — it is precisely the register `BoxState`'s flat fields never carried. `a_restored_checkpoint_puts_the_running_threads_pointer_back_on_the_vcpu` covers that, and the restore now reads the value from the captured table.
 
 **Files:**
 - Modify: `crates/retrace-box/src/lib.rs` (`BoxState`, `capture`, `from_checkpoint`)
@@ -862,7 +864,7 @@ Populate it in `capture` (after `save_ctx` has folded the live context back into
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 8 tests.
+Expected: PASS, 11 tests — the one below, plus the two the task actually needs (see the note at the head of this task).
 
 - [ ] **Step 5: Prove M4's seeks still work**
 
@@ -870,7 +872,7 @@ Expected: PASS, 8 tests.
 cargo test -p retrace-box -- --test-threads=1
 cargo test -p retrace --test checkpoint_seek --test seek --test reverse_debug_e2e -- --test-threads=1
 ```
-Expected: `retrace-box` **131 passed**; the three seek targets unchanged from baseline.
+Expected: `retrace-box` **134 passed**; the three seek targets unchanged from baseline (**10 passed**).
 
 - [ ] **Step 6: Clippy, then commit**
 
@@ -1018,7 +1020,7 @@ impl Box_ {
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 10 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 6: FULL GATE — a live call site now exists**
 
@@ -1027,7 +1029,7 @@ Expected: PASS, 10 tests.
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **321 passed / 0 failed / 1 ignored** (311 baseline + 10 new). Investigate any mismatch before continuing.
+Expected: **325 passed / 0 failed / 1 ignored** (323 after Task 6, + 2 new). Investigate any mismatch before continuing.
 
 - [ ] **Step 7: Commit**
 
@@ -1122,14 +1124,14 @@ retrace_arch::SYS_ULOCK_WAIT => {
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 11 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 6: FULL GATE (controller)**
 
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **322 passed / 0 failed / 1 ignored.**
+Expected: **326 passed / 0 failed / 1 ignored.**
 
 - [ ] **Step 7: Commit**
 
@@ -1227,7 +1229,7 @@ if !matches!(self.threads.state_of(self.threads.current()), thread::ThreadState:
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 13 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 5: FULL GATE (controller)**
 
@@ -1236,7 +1238,7 @@ Expected: PASS, 13 tests.
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **324 passed / 0 failed / 1 ignored.** A regression here means the single-threaded path stopped being the one-entry-table path — check that a lone `Runnable` thread 0 never triggers a switch.
+Expected: **328 passed / 0 failed / 1 ignored.** A regression here means the single-threaded path stopped being the one-entry-table path — check that a lone `Runnable` thread 0 never triggers a switch.
 
 - [ ] **Step 6: Commit**
 
@@ -1401,7 +1403,7 @@ Honest-gate discipline. Do **not** loosen this test, and do **not** regress any 
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **325 passed / 0 failed / 1 ignored** (or 1 passed fewer and 2 ignored if Step 5 fired).
+Expected: **329 passed / 0 failed / 1 ignored** (or 1 passed fewer and 2 ignored if Step 5 fired).
 
 - [ ] **Step 7: Commit**
 
