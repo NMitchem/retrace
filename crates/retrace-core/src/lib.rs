@@ -654,6 +654,16 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                  guest). It is asserted rather than forwarded because forwarding it kills the \
                  RECORDER. Model it as a second terminal event shape if a guest needs it."),
 
+            // M14 Task 3 scaffolding, REPLACED by Task 7's real handler. Never forward this: the
+            // host would create a real thread in retrace's own process at a guest address.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_CREATE => {
+                panic!(
+                    "M14: guest called bsdthread_create(func={:#x}, arg={:#x}, stack={:#x}, pthread={:#x}, \
+                     flags={:#x}) — threads are not implemented yet. This is the M14 wall, reached honestly.",
+                    args[0], args[1], args[2], args[3], args[4]
+                );
+            }
+
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
                 // M11 correctness invariant: no signal syscall may reach forward_and_diff, which
