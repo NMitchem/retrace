@@ -903,7 +903,13 @@ fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     assert_eq!(b.threads().current(), 0, "create does not switch — the caller keeps running");
     let c = b.threads().ctx_of(1);
     assert_eq!(c.elr, 0x1804b_2000, "the child enters at the REGISTERED trampoline, not at func");
-    assert_eq!(c.regs.x[1], 0x1_0002_4e00, "libpthread's contract passes func to the trampoline");
+    // MEASURED contract (Task 2, re-disassembled in review): __pthread_start reads x0 and w5 only.
+    // func/arg arrive through the pthread struct at +0x90/+0x98, which the GUEST populated before
+    // trapping — so they must NOT appear in registers here.
+    assert_eq!(c.regs.x[0], 0x3020_7000, "x0 is the pthread-struct pointer");
+    assert_eq!(c.regs.x[5], 0x90008ff, "w5 carries the flags __pthread_start tbnz/tbz-tests");
+    assert_eq!(c.regs.x[1], 0, "x1 is NOT part of the contract — seeding it would be cargo cult");
+    assert_eq!(c.tpidrro_el0, 0x3020_7000, "each thread gets its own thread pointer…");
     assert_ne!(c.regs.sp_el0, 0, "the child runs on the guest-allocated stack");
 }
 
@@ -918,7 +924,9 @@ fn bsdthread_create_without_a_registered_trampoline_fails_loud() {
 }
 ```
 
-**The exact register contract in the first test — which registers the trampoline expects `func`, `arg`, `stack` and `pthread` in — MUST come from Task 2's measurement.** If Task 2 measured a different layout, use the measured one and update this test; do not preserve the plan's guess. M13's Task 10 shipped a planned guest that wrote `cur_protection` to the wrong register and would have asserted vacuously.
+**This test was REWRITTEN after Task 2 measured the real contract, which is not what this plan originally guessed.** The plan had the classic five-register `_pthread_start(self, kport, fun, funarg, stacksize, pflags)` shape; the disassembly says `__pthread_start` reads only `x0` and `w5`, and takes `func`/`arg` from the pthread struct at `+0x90`/`+0x98`. Both Task 2 and its reviewer disassembled this independently and agree. **Use the measured contract above. Do not restore the five-register form.** M13's Task 10 shipped a planned guest that wrote to the wrong register and would have asserted vacuously — this is that same failure, caught before it shipped.
+
+The `stack` (x2) and `pthread` (x3) arguments are numerically **identical** in every capture taken so far (both this plan's Rust probe and Task 2's C spike). That is a real property of Apple's combined stack+struct allocation, not a misread — but do not write code that relies on them being the same value.
 
 - [ ] **Step 3: Run and watch it fail**
 
@@ -951,14 +959,31 @@ impl Box_ {
         ctx.elr = start;
         ctx.spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
         ctx.regs.sp_el0 = stack;
-        // libpthread's thread_start contract, per Task 2's measurement.
+
+        // THE THREAD-START CONTRACT, MEASURED (Task 2) AND INDEPENDENTLY RE-DISASSEMBLED IN REVIEW.
+        // NOT the classic _pthread_start(self, kport, fun, funarg, stacksize, pflags) shape — this
+        // plan originally guessed that and was WRONG. `__pthread_start` reads only:
+        //   x0 — the pthread-struct pointer
+        //   w5 — flags (tested via tbnz/tbz at its entry, 0x6be0/0x6be4)
+        // and it loads func/arg FROM THE STRUCT, not from registers:
+        //   `ldp x8, x0, [x19, #0x90]` at 0x6c50 → x8 = [pthread+0x90] (func),
+        //                                          x0 = [pthread+0x98] (arg), then `blraaz x8`.
+        // x1-x4 are never read on the entry-to-dispatch path. (One callee,
+        // `__pthread_markcancel_if_canceled`, does `mov x0, x1` at 0x3788, but only on an
+        // already-canceled branch this path does not take — internal bookkeeping, not dispatch.)
+        //
+        // So the box seeds x0 and w5 and nothing else. It does NOT populate the struct: the guest's
+        // own `_pthread_create` stored func/arg at +0x90/+0x98 BEFORE issuing this trap, which is
+        // why the fields are there to be read. Writing them here would be retrace inventing guest
+        // state it does not own.
         ctx.regs.x[0] = pthread;
-        ctx.regs.x[1] = func;
-        ctx.regs.x[2] = arg;
-        ctx.regs.x[3] = stack;
-        ctx.regs.x[4] = flags;
+        ctx.regs.x[5] = flags;
         // Each thread gets its own thread pointer. TPIDR_EL0 stays 0 for ALL threads (M2-cpuid).
         ctx.tpidrro_el0 = pthread;
+
+        // `func` and `arg` are deliberately unused: they reach the child through the struct, not
+        // through us. Named in the destructuring above so the ABI stays documented at the call site.
+        let _ = (func, arg);
 
         self.threads.spawn(ctx, (stack, 0));
         0
