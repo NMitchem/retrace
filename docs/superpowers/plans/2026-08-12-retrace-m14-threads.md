@@ -376,18 +376,9 @@ fn ctx(pc: u64) -> ThreadCtx {
     c
 }
 
-/// A `Box_` for the VM-backed tests further down this file.
-///
-/// There is no `Box_::for_test()`; the constructor is `Box_::load(&loaded)` and every existing
-/// retrace-box test builds one this way (see `tests/checkpoint.rs:12`). Copy whichever static guest
-/// fixture that neighbouring test uses — M14 needs no special guest for the register-level tests,
-/// only a live vCPU. **`--test-threads=1` is mandatory: one HVF VM per process.**
-fn tb() -> retrace_box::Box_ {
-    // `parse_macho` takes BYTES and returns `Loaded` directly — it is not fallible and the constant
-    // is a PATH. This is exactly the two-line form `tests/checkpoint.rs:11-12` uses.
-    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::SPINLOOP).unwrap());
-    retrace_box::Box_::load(&loaded)
-}
+// NOTE: do NOT add a `tb()` helper in this task. None of Task 4's six tests are VM-backed — they
+// exercise `ThreadTable`/`ThreadCtx` only — so an unused helper would be dead code and fail clippy
+// under `-D warnings`. **Task 5 adds `tb()` alongside the first test that needs it.**
 
 #[test]
 fn a_fresh_table_has_one_runnable_main_thread() {
@@ -655,11 +646,26 @@ git commit -m "M14 t4: a thread table and a scheduler that is a pure function"
 
 Append to `crates/retrace-box/tests/threads.rs`:
 
+This task adds the **first VM-backed test in the file**, so it must also add the `tb()` helper (Task 4 deliberately left it out — an unused helper is dead code under `-D warnings`). Add both:
+
 ```rust
+/// A `Box_` for the VM-backed tests in this file.
+///
+/// There is no `Box_::for_test()`; the constructor is `Box_::load(&loaded)`, and every existing
+/// retrace-box test builds one this way — see `tests/checkpoint.rs:11-12`, whose exact two-line
+/// form this copies. `parse_macho` takes BYTES and returns `Loaded` directly: it is not fallible,
+/// and the `SPINLOOP` constant is a PATH, so read it first. M14 needs no special guest for these
+/// register-level tests, only a live vCPU. **`--test-threads=1` is mandatory: one HVF VM per
+/// process.**
+fn tb() -> retrace_box::Box_ {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::SPINLOOP).unwrap());
+    retrace_box::Box_::load(&loaded)
+}
+
 // This one needs a VM.
 #[test]
 fn a_switch_round_trips_every_register_in_the_context() {
-    let mut b = tb();   // see `fn tb()` at the top of this file
+    let mut b = tb();
     // Distinctive values in every field the context claims to carry, so a dropped field shows up
     // as a mismatch rather than a coincidental zero-equals-zero pass.
     b.set_x(3, 0xdead_beef_0000_0003);
