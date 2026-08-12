@@ -62,6 +62,20 @@ fn an_exited_thread_is_never_picked_and_unblocks_its_joiner() {
 }
 
 #[test]
+fn pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one() {
+    // The realistic shape: main calls pthread_exit while a spawned child keeps running. Unlike
+    // `an_exited_thread_is_never_picked_and_unblocks_its_joiner` above — where the exited thread
+    // (index 1) was never going to beat the still-runnable index 0 regardless of whether
+    // `pick_next` actually excludes `Exited` — this puts the exited thread at the LOWER index. A
+    // `pick_next` that also matched `Exited` (e.g. `Runnable | Exited(_)`) would return `Some(0)`
+    // here instead of `Some(1)`, so this is the case that actually pins the exclusion.
+    let mut t = ThreadTable::new(ctx(0x1000));
+    t.spawn(ctx(0x2000), (0x30200000, 0x8000));
+    t.exit_current(0); // main (index 0) exits; the child (index 1) is still Runnable.
+    assert_eq!(t.pick_next(), Some(1), "an exited thread must be skipped even when it is lowest-indexed");
+}
+
+#[test]
 fn every_thread_blocked_is_a_deadlock_and_pick_next_says_so() {
     let mut t = ThreadTable::new(ctx(0x1000));
     t.spawn(ctx(0x2000), (0x30200000, 0x8000));
