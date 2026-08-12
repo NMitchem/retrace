@@ -144,3 +144,66 @@ fn a_switch_round_trips_every_register_in_the_context() {
         assert_eq!(b.tpidr_el0(), 0, "tpidr_el0 must stay 0 — macOS reads the CPU number from it");
     }
 }
+
+#[test]
+fn a_checkpoint_carries_every_thread_not_just_the_running_one() {
+    let mut b = tb();
+    let child = b.threads_mut().spawn(ctx(0x4242_0000), (0x3020_0000, 0x8000));
+    b.threads_mut().block(BlockReason::Join { target: child });
+
+    let st = b.checkpoint();
+
+    // The failure this guards is QUIET: a checkpoint that drops non-current threads still restores
+    // and still runs. Assert the table, not that the restore returned Ok.
+    assert_eq!(st.threads.len(), 2, "the checkpoint must carry the child thread");
+    assert_eq!(st.threads.ctx_of(child).elr, 0x4242_0000, "…and its register context");
+    assert!(
+        matches!(st.threads.state_of(0), ThreadState::Blocked(_)),
+        "…and main's blocked state, or the restored run picks the wrong thread"
+    );
+}
+
+/// The capture is only half of R4. A `from_checkpoint` that ignores `state.threads` passes the test
+/// above untouched — the table would be carried into `BoxState` and then dropped on the floor at the
+/// one moment it matters. Assert the RESTORED box, which is what a seeked session actually runs.
+#[test]
+fn a_restored_checkpoint_still_has_every_thread() {
+    let st = {
+        let mut b = tb();
+        let child = b.threads_mut().spawn(ctx(0x4242_0000), (0x3020_0000, 0x8000));
+        b.threads_mut().block(BlockReason::Join { target: child });
+        b.checkpoint()
+        // `b` drops here: one HVF VM per process, so it must be gone before `from_checkpoint`
+        // builds a second one (`tests/checkpoint.rs:40` does the same with an explicit `drop`).
+    };
+    let r = retrace_box::Box_::from_checkpoint(&st);
+
+    assert_eq!(r.threads().len(), 2, "the RESTORE must rebuild the child, not merely the capture");
+    assert_eq!(r.threads().ctx_of(1).elr, 0x4242_0000, "…with its register context intact");
+    assert_eq!(r.threads().current(), 0, "…and the same thread still running");
+    assert!(
+        matches!(r.threads().state_of(0), ThreadState::Blocked(BlockReason::Join { target: 1 })),
+        "…and main still blocked on the child, or the restored run picks the wrong thread"
+    );
+}
+
+/// R4 has a hardware half. Carrying the table faithfully and then forcing the vCPU's thread pointer
+/// back to the single-threaded constant hands a restored child MAIN's TSD — the same quiet break one
+/// layer down. `tpidrro_el0` is precisely the register `BoxState`'s flat fields never carried,
+/// because it was constant until threads existed.
+#[test]
+fn a_restored_checkpoint_puts_the_running_threads_pointer_back_on_the_vcpu() {
+    let st = {
+        let mut b = tb();
+        let child = b.threads_mut().spawn(ctx(0x4242_0000), (0x3020_0000, 0x8000));
+        b.switch_to_thread(child);
+        b.set_tpidrro_el0(0x5150_0000); // the CHILD's own TSD, deliberately not TSD_IPA
+        b.checkpoint()
+    };
+    let r = retrace_box::Box_::from_checkpoint(&st);
+
+    assert_eq!(r.threads().current(), 1, "the child was the running thread at capture");
+    assert_eq!(r.tpidrro_el0(), 0x5150_0000,
+        "a restore that forces TSD_IPA hands the child main's thread pointer");
+    assert_eq!(r.tpidr_el0(), 0, "tpidr_el0 must still be 0 — macOS reads the CPU number from it");
+}

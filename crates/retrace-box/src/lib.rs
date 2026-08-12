@@ -588,6 +588,11 @@ pub struct BoxState {
     // ATTR_TRAMP note at from_checkpoint explains), but the MAP that `unprotect` and the fail-loud
     // asserts consult is box state, and a restore without it would leave the two disagreeing.
     pub noaccess: Vec<(u64, u64)>,
+    // M14: carried for the same reason as `reservations` and `noaccess` — a mid-run capture cannot
+    // re-derive it. Note this SUPERSEDES the struct's flat register fields as the authority for
+    // non-current threads: `regs`/`elr`/`spsr` still describe the RUNNING thread (so every M0–M13
+    // consumer is unchanged), while `threads` carries all of them including that one.
+    pub threads: thread::ThreadTable,
     pub mmap_next: u64,
     pub bootstrap_port: Option<u32>,
     pub cache_installed: bool,
@@ -2937,6 +2942,15 @@ impl Box_ {
         self.vcpu.set_sys(sysreg::SPSR_EL1, ctx.spsr).unwrap();
     }
 
+    /// The guest's thread table. Read-only: the RUNNING thread's context here is stale between
+    /// switches (the vCPU is the authority for that one), so consult `save_ctx` for live registers.
+    pub fn threads(&self) -> &thread::ThreadTable { &self.threads }
+
+    /// Mutable access, for the dispatch arms that spawn/block/exit a thread (Tasks 7–9) and for the
+    /// tests. Does not touch the vCPU: changing `current` here without a `load_ctx` would leave the
+    /// table and the hardware disagreeing — use `switch_to_thread` to move the vCPU.
+    pub fn threads_mut(&mut self) -> &mut thread::ThreadTable { &mut self.threads }
+
     /// Switch the vCPU from the running thread to `tid`.
     pub fn switch_to_thread(&mut self, tid: usize) {
         let cur = self.threads.current();
@@ -3049,6 +3063,16 @@ impl Box_ {
             mem,
             reservations: self.reservations.clone(),
             noaccess: self.noaccess.clone(),
+            // M14: the RUNNING thread's context lives on the vCPU, not in the table — the table's
+            // copy is only refreshed by `switch_to_thread`, so it is stale for whoever is running.
+            // Fold the live registers back in before carrying it, or a checkpoint taken between two
+            // switches restores the current thread to wherever it was at the LAST switch.
+            threads: {
+                let mut t = self.threads.clone();
+                let cur = t.current();
+                *t.ctx_mut(cur) = self.save_ctx();
+                t
+            },
             mmap_next: self.mmap_next,
             bootstrap_port: self.bootstrap_port,
             cache_installed: self.cache.is_some(),
@@ -3085,7 +3109,15 @@ impl Box_ {
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, PT_L1_IPA).unwrap();
         vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap();
-        vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();
+        // M14 t6: the thread pointer is PER-THREAD now, so a constant here is wrong the moment a
+        // checkpoint is taken while a child runs — it would hand that thread MAIN's TSD. The
+        // captured table is the authority (`checkpoint` folds the live vCPU into `ctx_mut(current)`
+        // before carrying it), and for a single-threaded guest that captured value IS `TSD_IPA`, so
+        // every M0–M13 restore is identical to what this line did before. That makes it the fourth
+        // field here to stop being re-derived for the reason the `BoxState` comments give (M9 t3,
+        // M10, M11): a restore that contradicts the state it just restored breaks quietly.
+        let cur_tid = state.threads.current();
+        vcpu.set_sys(sysreg::TPIDRRO_EL0, state.threads.ctx_of(cur_tid).tpidrro_el0).unwrap();
         vcpu.set_sys(sysreg::TPIDR_EL0, state.tpidr_el0).unwrap(); // captured, NOT forced to 0
         Self::set_pac_keys(&vcpu);
         vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(state.pac_enabled)).unwrap();
@@ -3142,9 +3174,12 @@ impl Box_ {
             // M11: RESTORED from the capture, never reset — see the BoxState field comment. A fresh
             // table here would tell a seeked session every signal is at its default disposition.
             sigtable: state.sigtable.clone(),
-            // M14 t5: BoxState does not carry the thread table yet (that is Task 6) — a checkpoint
-            // restore takes the pre-M14 single-thread path for now.
-            threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()),
+            // M14 t6: RESTORED from the capture, never reset — see the BoxState field comment. A
+            // fresh table here would tell a seeked session the guest has exactly one thread, so the
+            // scheduler would never pick the child and a join on it would deadlock. The RUNNING
+            // thread's registers are additionally loaded onto the vCPU above, from the flat fields
+            // that describe it; the table agrees with them, having been folded at capture.
+            threads: state.threads.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
