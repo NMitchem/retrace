@@ -1,8 +1,8 @@
 // M14: the thread table and the cooperative scheduler. These are PURE — no VM, no vCPU, no HVF —
 // which is the entire reason `thread.rs` is a separate module. They run in milliseconds.
 //
-// No `tb()` helper here yet: Task 4's six tests only exercise `ThreadTable`/`ThreadCtx` and need no
-// `Box_` at all. Task 5 introduces the first VM-backed test and its `tb()` helper alongside it.
+// Task 4's tests are pure and need no `Box_` at all. The VM-backed tests below them do, and share
+// the `tb()` helper that arrived with Task 5's context-switch round-trip.
 use retrace_box::thread::{BlockReason, ThreadCtx, ThreadState, ThreadTable};
 
 fn ctx(pc: u64) -> ThreadCtx {
@@ -99,34 +99,48 @@ fn tb() -> retrace_box::Box_ {
     retrace_box::Box_::load(&loaded)
 }
 
-// This one needs a VM.
+/// The first VM-backed test in this file; everything above it is pure.
+///
+/// The round-trip, for **every** field of `ThreadCtx` — which the first version of this test only
+/// claimed. Review found it vacuous: it set x3, x29, ELR, SPSR and TPIDRRO and nothing else, and
+/// `tb()`'s box already holds real values in the fields it never disturbed, so a `load_ctx` missing
+/// `write_regs` outright, or a `save_ctx` missing the whole FP capture, would still have passed.
+///
+/// Shaped as load-then-save rather than set-clobber-load because `Box_` has no setter for PC,
+/// SP_EL0, CPSR, FPCR or FPSR: `load_ctx` is the only writer for those, and it is the code under
+/// test. Two DIFFERENT patterns run back to back, so a field `load_ctx` never writes cannot pass by
+/// already holding the expected value — after pattern B the hardware would still read pattern A.
+///
+/// The values stay architecturally legal on purpose. A reserved or RAZ/WI bit that refused to
+/// round-trip would be a fact about the CPU, not a defect in M14, so CPSR/SPSR keep mode EL0t and
+/// vary only NZCV, FPCR varies only FZ, and FPSR varies only the exception flags.
 #[test]
 fn a_switch_round_trips_every_register_in_the_context() {
     let mut b = tb();
-    // Distinctive values in every field the context claims to carry, so a dropped field shows up
-    // as a mismatch rather than a coincidental zero-equals-zero pass.
-    b.vcpu_set_x(3, 0xdead_beef_0000_0003);
-    b.vcpu_set_x(29, 0xdead_beef_0000_001d);
-    b.set_elr(0x1234_5000);
-    b.set_spsr(0x3c4);
-    b.set_tpidrro_el0(0x0003_8000);
+    for (round, seed) in [(0u64, 0x1111_0000_0000_0000u64), (1, 0x2222_0000_0000_0000)] {
+        let mut want = ThreadCtx::zeroed();
+        for (i, x) in want.regs.x.iter_mut().enumerate() { *x = seed | (i as u64 + 1); }
+        want.regs.pc     = 0x1_0000_4000 + round * 0x40;
+        want.regs.sp_el0 = 0x3020_8000 + round * 0x100;
+        want.regs.cpsr   = if round == 0 { 0xA000_0000 } else { 0x6000_0000 }; // NZCV; mode EL0t
+        for (i, f) in want.fp.iter_mut().enumerate() { *f = ((seed as u128) << 64) | (i as u128 + 1); }
+        want.fpcr        = if round == 0 { 0 } else { 0x0100_0000 };           // FZ
+        want.fpsr        = if round == 0 { 0x10 } else { 0x01 };               // IXC / IOC
+        want.tpidrro_el0 = 0x0003_8000 + round * 0x4000;
+        want.elr         = 0x1234_5000 + round * 0x1000;
+        want.spsr        = if round == 0 { 0x3c4 } else { 0x8000_03c4 };       // EL0t + NZCV
 
-    let saved = b.save_ctx();
+        b.load_ctx(&want);
 
-    // Clobber the hardware, then restore.
-    b.vcpu_set_x(3, 0);
-    b.vcpu_set_x(29, 0);
-    b.set_elr(0);
-    b.set_spsr(0);
-    b.set_tpidrro_el0(0);
-    b.load_ctx(&saved);
+        // `save_ctx` reads the HARDWARE back, so this is a real round-trip and not a struct copy.
+        assert_eq!(b.save_ctx(), want, "round {round}: the context did not survive load -> save");
 
-    // Assert against the HARDWARE, not against `saved`. M13's Task 8 defect was a test that checked
-    // only the software mirror and passed while the stage-1 leaf disagreed.
-    assert_eq!(b.vcpu_get_x(3), 0xdead_beef_0000_0003);
-    assert_eq!(b.vcpu_get_x(29), 0xdead_beef_0000_001d);
-    assert_eq!(b.position(), 0x1234_5000);
-    assert_eq!(b.spsr(), 0x3c4);
-    assert_eq!(b.tpidrro_el0(), 0x0003_8000, "tpidrro_el0 is THE per-thread register");
-    assert_eq!(b.tpidr_el0(), 0, "tpidr_el0 must stay 0 — macOS reads the CPU number from it");
+        // Cross-check the sysregs through INDEPENDENT getters. `save_ctx`/`load_ctx` agreeing on the
+        // WRONG register id would round-trip cleanly and still be wrong; these do not share it.
+        assert_eq!(b.position(), want.elr, "round {round}: ELR_EL1");
+        assert_eq!(b.spsr(), want.spsr, "round {round}: SPSR_EL1");
+        assert_eq!(b.tpidrro_el0(), want.tpidrro_el0,
+            "round {round}: tpidrro_el0 is THE per-thread register");
+        assert_eq!(b.tpidr_el0(), 0, "tpidr_el0 must stay 0 — macOS reads the CPU number from it");
+    }
 }
