@@ -134,7 +134,7 @@ RETRACE_TRACE=1 cargo run -q -p retrace -- record-dyn ./spikes/threadjoin -o /tm
 otool -tV /usr/lib/system/libsystem_pthread.dylib 2>/dev/null | sed -n '/_pthread_join:/,/^_/p' | head -80
 ```
 
-Record which of `psynch_cvwait` (`SYS_PSYNCH_CVWAIT`), `__ulock_wait` (515) / `__ulock_wait2` (516), or a Mach `semaphore_wait` appears. **Report the syscall number, not just the name.**
+Record which of `psynch_cvwait` (`SYS_PSYNCH_CVWAIT`), `__ulock_wait` (515) / `__ulock_wake` (516), or a Mach `semaphore_wait` appears. **Report the syscall number, not just the name.**
 
 - [ ] **Step 4: Answer the second question — does `bsdthread_create` reach the host?**
 
