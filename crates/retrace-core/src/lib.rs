@@ -1180,7 +1180,17 @@ impl ReplaySession {
                             // one-thread table against a two-thread recording, surfacing as a
                             // divergence at the child's first syscall rather than as a clean error.
                             if num == retrace_arch::SYS_BSDTHREAD_CREATE {
-                                self.b.guest_bsdthread_create(args);
+                                let rc = self.b.guest_bsdthread_create(args);
+                                // Same divergence-check shape as the mach_vm_map arm above: bind the
+                                // recomputed return and byte-compare it against the recording rather
+                                // than discarding it. Vacuous today (guest_bsdthread_create always
+                                // returns 0), but silently wrong the moment the emulator's return
+                                // becomes conditional — that comparison, not the constant, IS the
+                                // oracle (symmetry rule 1).
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("bsdthread_create rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }

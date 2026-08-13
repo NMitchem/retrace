@@ -455,10 +455,10 @@ pub struct Box_ {
     threads: thread::ThreadTable,
     // M14 t7: the address the kernel enters a NEW thread at, learned from the guest's own
     // `bsdthread_register` call (x0) — every dynamic guest issues one at startup (measured, Task 2),
-    // so `guest_bsdthread_create` never has to guess it. `None` until that call is observed; NOT
-    // carried by checkpoint/restore (out of this task's scope — see the M14 ledger). Plain
-    // `Option<u64>` (no Drop), declared after vcpu/vm, so the load-bearing vcpu-before-vm drop
-    // order is unaffected.
+    // so `guest_bsdthread_create` never has to guess it. `None` until that call is observed.
+    // Carried in BoxState (see its field comment): a mid-run capture cannot re-derive it, since the
+    // registering syscall sits behind the checkpoint. Plain `Option<u64>` (no Drop), declared after
+    // vcpu/vm, so the load-bearing vcpu-before-vm drop order is unaffected.
     thread_start_pc: Option<u64>,
 }
 
@@ -2991,7 +2991,15 @@ impl Box_ {
         );
 
         let mut ctx = thread::ThreadCtx::zeroed();
+        // The entry point is written to BOTH `elr` and `regs.pc`, not just one. `switch_to_thread`'s
+        // `load_ctx` -> `write_regs` sets `reg::PC` from `regs.pc` for a live vCPU resume, while the
+        // syscall-return path (`set_x0_err_and_return`) resumes off ELR_EL1 and would clobber x0 —
+        // the one register this child must receive intact. WHICH convention actually drives a
+        // scheduled thread's first resume is Task 9's to settle, not this task's; writing both here
+        // makes the context resumable either way rather than leaving that choice to be rediscovered
+        // as a bug when Task 9 wires the scheduler in.
         ctx.elr = start;
+        ctx.regs.pc = start;
         ctx.spsr = self.spsr();
         ctx.regs.sp_el0 = stack;
 
@@ -3012,7 +3020,9 @@ impl Box_ {
         // why the fields are there to be read. Writing them here would be retrace inventing guest
         // state it does not own.
         ctx.regs.x[0] = pthread;
-        ctx.regs.x[5] = flags;
+        // The measured contract reads `w5` (32-bit), not `x5` — model the zero-extension a real
+        // 32-bit register read performs rather than carrying the full 64-bit syscall argument.
+        ctx.regs.x[5] = flags as u32 as u64;
         // Each thread gets its own thread pointer. TPIDR_EL0 stays 0 for ALL threads (M2-cpuid).
         ctx.tpidrro_el0 = pthread;
 
@@ -3020,6 +3030,10 @@ impl Box_ {
         // through us. Named in the destructuring above so the ABI stays documented at the call site.
         let _ = (func, arg);
 
+        // `(stack, 0)`: the SECOND element is a placeholder length, not a measured size — the
+        // syscall carries no stack-size argument, and `stack` (x2) is the guest-computed stack TOP
+        // libpthread already mapped, not a base. `Thread::stack` is documented as `(base, len)` for
+        // TEARDOWN (Task 8's named consumer); nothing reads it before then.
         self.threads.spawn(ctx, (stack, 0));
         0
     }

@@ -213,14 +213,21 @@ fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     let mut b = tb();   // see `fn tb()` at the top of this file
     b.set_thread_start_pc(0x0001_804b_2000);
 
-    // The ABI measured in Task 2: (func, arg, stack, pthread, flags).
-    let rc = b.guest_bsdthread_create([0x1_0002_4e00, 0x62180, 0x3020_7000, 0x3020_7000, 0x90008ff, 0, 0, 0]);
+    // The ABI measured in Task 2: (func, arg, stack, pthread, flags). `stack` and `pthread`
+    // deliberately DIFFER here (fix round 2) — Task 2 measured them equal in every capture taken so
+    // far, but that is a real property of Apple's combined stack+struct allocation, not a contract
+    // this box may rely on; using distinct values means a swap between x[0]/sp_el0 in the
+    // implementation actually fails the assertions below instead of passing unchanged.
+    let rc = b.guest_bsdthread_create([0x1_0002_4e00, 0x62180, 0x3020_6000, 0x3020_7000, 0x90008ff, 0, 0, 0]);
 
     assert_eq!(rc, 0, "create must succeed");
     assert_eq!(b.threads().len(), 2);
     assert_eq!(b.threads().current(), 0, "create does not switch — the caller keeps running");
     let c = b.threads().ctx_of(1);
     assert_eq!(c.elr, 0x0001_804b_2000, "the child enters at the REGISTERED trampoline, not at func");
+    // Fix round 2: the resume convention (ELR-based vs PC-based) is Task 9's to settle — see
+    // guest_bsdthread_create's comment — so both must carry the entry point today.
+    assert_eq!(c.regs.pc, 0x0001_804b_2000, "the child's PC must also carry the trampoline");
     // MEASURED contract (Task 2, re-disassembled in review): __pthread_start reads x0 and w5 only.
     // func/arg arrive through the pthread struct at +0x90/+0x98, which the GUEST populated before
     // trapping — so they must NOT appear in registers here.
@@ -228,7 +235,7 @@ fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     assert_eq!(c.regs.x[5], 0x90008ff, "w5 carries the flags __pthread_start tbnz/tbz-tests");
     assert_eq!(c.regs.x[1], 0, "x1 is NOT part of the contract — seeding it would be cargo cult");
     assert_eq!(c.tpidrro_el0, 0x3020_7000, "each thread gets its own thread pointer…");
-    assert_ne!(c.regs.sp_el0, 0, "the child runs on the guest-allocated stack");
+    assert_eq!(c.regs.sp_el0, 0x3020_6000, "the child runs on the guest-allocated stack");
 }
 
 /// Task 7 fix round 1: `thread_start_pc` is learned from the guest's OWN `bsdthread_register` call,
