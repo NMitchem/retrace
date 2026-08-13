@@ -207,3 +207,36 @@ fn a_restored_checkpoint_puts_the_running_threads_pointer_back_on_the_vcpu() {
         "a restore that forces TSD_IPA hands the child main's thread pointer");
     assert_eq!(r.tpidr_el0(), 0, "tpidr_el0 must still be 0 — macOS reads the CPU number from it");
 }
+
+#[test]
+fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    b.set_thread_start_pc(0x0001_804b_2000);
+
+    // The ABI measured in Task 2: (func, arg, stack, pthread, flags).
+    let rc = b.guest_bsdthread_create([0x1_0002_4e00, 0x62180, 0x3020_7000, 0x3020_7000, 0x90008ff, 0, 0, 0]);
+
+    assert_eq!(rc, 0, "create must succeed");
+    assert_eq!(b.threads().len(), 2);
+    assert_eq!(b.threads().current(), 0, "create does not switch — the caller keeps running");
+    let c = b.threads().ctx_of(1);
+    assert_eq!(c.elr, 0x0001_804b_2000, "the child enters at the REGISTERED trampoline, not at func");
+    // MEASURED contract (Task 2, re-disassembled in review): __pthread_start reads x0 and w5 only.
+    // func/arg arrive through the pthread struct at +0x90/+0x98, which the GUEST populated before
+    // trapping — so they must NOT appear in registers here.
+    assert_eq!(c.regs.x[0], 0x3020_7000, "x0 is the pthread-struct pointer");
+    assert_eq!(c.regs.x[5], 0x90008ff, "w5 carries the flags __pthread_start tbnz/tbz-tests");
+    assert_eq!(c.regs.x[1], 0, "x1 is NOT part of the contract — seeding it would be cargo cult");
+    assert_eq!(c.tpidrro_el0, 0x3020_7000, "each thread gets its own thread pointer…");
+    assert_ne!(c.regs.sp_el0, 0, "the child runs on the guest-allocated stack");
+}
+
+#[test]
+fn bsdthread_create_without_a_registered_trampoline_fails_loud() {
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    // No bsdthread_register seen. Guessing a trampoline address would be a silent wrong answer.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        b.guest_bsdthread_create([1, 2, 0x3020_7000, 4, 5, 0, 0, 0])
+    }));
+    assert!(r.is_err(), "must assert rather than invent an entry point");
+}
