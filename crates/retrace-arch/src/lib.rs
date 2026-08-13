@@ -206,6 +206,12 @@ pub const SYS_BSDTHREAD_TERMINATE: u64 = 361;
 pub const SYS_BSDTHREAD_REGISTER: u64 = 366;
 /// `thread_selfid()` — already fires and already survives.
 pub const SYS_THREAD_SELFID: u64 = 372;
+/// `__ulock_wait(operation, addr, value, timeout_us)` — the primitive `__pthread_join`'s retry
+/// loop blocks on (M14 Task 1, pinned by disassembly of `___ulock_wait`'s `mov x16, #0x203; svc
+/// #0x80` and cross-checked against the SDK's `sys/syscall.h`). `psynch_cvwait` and Mach
+/// `semaphore_wait` do not appear anywhere in `__pthread_join`; `___semwait_signal_nocancel` does,
+/// but strictly downstream of this call's retry loop, gated on state a plain join never sets.
+pub const SYS_ULOCK_WAIT: u64 = 515;
 pub const SYS_TERMINATE_WITH_PAYLOAD: u64 = 520;
 pub const SYS_ABORT_WITH_PAYLOAD: u64 = 521;
 
@@ -596,8 +602,9 @@ mod tests {
     fn thread_syscall_numbers_are_the_darwin_ones() {
         // Measured on macOS 26 (M14 Task 2): a NON-threading Rust guest already issues 366 and 372.
         assert_eq!(
-            (SYS_BSDTHREAD_CREATE, SYS_BSDTHREAD_TERMINATE, SYS_BSDTHREAD_REGISTER, SYS_THREAD_SELFID),
-            (360, 361, 366, 372)
+            (SYS_BSDTHREAD_CREATE, SYS_BSDTHREAD_TERMINATE, SYS_BSDTHREAD_REGISTER, SYS_THREAD_SELFID,
+             SYS_ULOCK_WAIT),
+            (360, 361, 366, 372, 515)
         );
     }
 }

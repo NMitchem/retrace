@@ -86,6 +86,27 @@ fn every_thread_blocked_is_a_deadlock_and_pick_next_says_so() {
     assert_eq!(t.pick_next(), None, "a deadlock must be visible, not a hang");
 }
 
+/// M14 Task 8, carrying forward Task 4's review finding: `block(Join { target })` is a bare
+/// primitive that does not check whether `target` already exited, so `block_on_join` must guard
+/// it — a target that exited BEFORE the join call already ran `unblock_joiners_of` and will never
+/// run it again, so an unconditional block would wait forever on a wake that already happened.
+///
+/// Mutation check (see the Task 8 report): replacing `block_on_join`'s body with an unconditional
+/// `self.block(BlockReason::Join { target })` turns this into a deadlock — `pick_next()` returns
+/// `None` instead of `Some(0)` — so this test cannot pass for the wrong reason.
+#[test]
+fn block_on_join_does_not_wait_forever_on_an_already_exited_target() {
+    let mut t = ThreadTable::new(ctx(0x1000));
+    t.spawn(ctx(0x2000), (0x30200000, 0x8000));
+    t.switch_to(1);
+    t.exit_current(42); // the child exits BEFORE anyone joins it — unblock_joiners_of(1) fires now
+    t.switch_to(0);
+    t.block_on_join(1); // main tries to join the ALREADY-exited child
+    assert_eq!(t.pick_next(), Some(0),
+        "the child already exited — main must stay runnable, not wait for a wake that already happened");
+    assert!(!matches!(t.state_of(0), ThreadState::Blocked(_)), "the guard must keep main out of Blocked");
+}
+
 /// A `Box_` for the VM-backed tests in this file.
 ///
 /// There is no `Box_::for_test()`; the constructor is `Box_::load(&loaded)`, and every existing
@@ -261,6 +282,53 @@ fn a_restored_checkpoint_still_knows_the_registered_trampoline() {
     // fails_loud` below, except here the guest did nothing wrong.
     let rc = r.guest_bsdthread_create([1, 2, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
     assert_eq!(rc, 0, "a restored session must be able to create a thread without re-registering");
+}
+
+#[test]
+fn a_terminating_thread_exits_and_wakes_whoever_joined_it() {
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    b.set_thread_start_pc(0x0001_804b_2000);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
+
+    // Main joins the child, so main blocks and the child is the only runnable thread.
+    b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
+    b.switch_to_thread(1);
+
+    b.guest_bsdthread_terminate([0x3020_7000, 0x8000, 0, 0, 0, 0, 0, 0]);
+
+    assert!(matches!(b.threads().state_of(1), retrace_box::thread::ThreadState::Exited(_)));
+    assert_eq!(b.threads().pick_next(), Some(0), "main's join is satisfied");
+}
+
+/// The other half of the M14 Task 8 report's ruling 1 answer: the STATE the real flow actually
+/// produces is `Wait { addr }` (never `Join { target }` — see the report), so the primitive that
+/// must be proven against something other than a hand-installed `block(Join { .. })` is
+/// `guest_ulock_wait`'s own already-satisfied guard (Step 4). Both branches, against REAL guest
+/// memory (not a struct copy) via `poke_guest`/`read_guest`.
+#[test]
+fn ulock_wait_blocks_only_when_the_guests_condition_still_holds() {
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    // A real, mapped guest address: the static stack backing (a full granule below stack_top()),
+    // so `read_guest`'s "is this mapped" check has a real answer either way.
+    let addr = b.stack_top() - 0x40;
+
+    // Case 1: the live value no longer matches what the guest expects (args[2]) — someone else
+    // already changed it, so the wait is ALREADY SATISFIED and the thread must stay Runnable.
+    b.poke_guest(addr, &99u32.to_le_bytes());
+    let rc = b.guest_ulock_wait([0, addr, 42, 0, 0, 0, 0, 0]);
+    assert_eq!(rc, 0, "x0 is 0 in every case this box produces (see guest_ulock_wait's doc)");
+    assert_eq!(b.threads().state_of(0), retrace_box::thread::ThreadState::Runnable,
+        "the value already changed — blocking now would deadlock a race the guest already won");
+
+    // Case 2: the live value STILL matches — the wait is genuine, so the thread must block on it.
+    b.poke_guest(addr, &42u32.to_le_bytes());
+    let rc = b.guest_ulock_wait([0, addr, 42, 0, 0, 0, 0, 0]);
+    assert_eq!(rc, 0);
+    assert!(
+        matches!(b.threads().state_of(0),
+            retrace_box::thread::ThreadState::Blocked(retrace_box::thread::BlockReason::Wait { addr: a }) if a == addr),
+        "the value still matches — the thread must block on exactly this address"
+    );
 }
 
 #[test]
