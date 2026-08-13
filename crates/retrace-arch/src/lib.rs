@@ -212,6 +212,20 @@ pub const SYS_THREAD_SELFID: u64 = 372;
 /// `semaphore_wait` do not appear anywhere in `__pthread_join`; `___semwait_signal_nocancel` does,
 /// but strictly downstream of this call's retry loop, gated on state a plain join never sets.
 pub const SYS_ULOCK_WAIT: u64 = 515;
+/// `__ulock_wake(operation, addr, wake_value)` — the other half of the pair `SYS_ULOCK_WAIT`
+/// services, pinned the same way (disassembly of `___ulock_wake`'s `mov x16, #0x204; svc #0x80`
+/// — M14 Task 8 fix round 1, I-1). While re-pinning it, the same method also caught a stale claim
+/// in this constant's neighbour's doc and in Task 1's report: their "candidate list" labels 516 as
+/// `__ulock_wait2` — but `___ulock_wait2` actually disassembles to `mov x16, #0x220` (544), not
+/// 516. 516 is `__ulock_wake`, confirmed directly, not inferred.
+///
+/// UNMEASURED beyond the number: Task 1 measured only the WAIT side of `__pthread_join`; nothing
+/// in this milestone has measured what address the EXITING thread wakes on, or even confirmed it
+/// calls this at all. Deliberately unmodelled — asserted in `retrace-core`'s record dispatch
+/// rather than forwarded, which would issue a real `__ulock_wake` from retrace's own process
+/// against a guest address, the exact hazard `SYS_ULOCK_WAIT`'s own doc cites, applied to its
+/// pair. Assigned to M14 Task 9 (measure the exit-side wake address first).
+pub const SYS_ULOCK_WAKE: u64 = 516;
 pub const SYS_TERMINATE_WITH_PAYLOAD: u64 = 520;
 pub const SYS_ABORT_WITH_PAYLOAD: u64 = 521;
 
