@@ -453,6 +453,13 @@ pub struct Box_ {
     // M14: the guest's threads. A single-threaded guest has one entry and takes the pre-M14 path.
     // Declared after vcpu/vm, so the load-bearing vcpu-before-vm drop order is unaffected.
     threads: thread::ThreadTable,
+    // M14 t7: the address the kernel enters a NEW thread at, learned from the guest's own
+    // `bsdthread_register` call (x0) — every dynamic guest issues one at startup (measured, Task 2),
+    // so `guest_bsdthread_create` never has to guess it. `None` until that call is observed; NOT
+    // carried by checkpoint/restore (out of this task's scope — see the M14 ledger). Plain
+    // `Option<u64>` (no Drop), declared after vcpu/vm, so the load-bearing vcpu-before-vm drop
+    // order is unaffected.
+    thread_start_pc: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -982,7 +989,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()) }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1570,7 +1577,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()) };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None };
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
         // first `switch_to_thread` rather than an all-zero placeholder.
@@ -2377,7 +2384,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()) }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -2951,6 +2958,65 @@ impl Box_ {
     /// table and the hardware disagreeing — use `switch_to_thread` to move the vCPU.
     pub fn threads_mut(&mut self) -> &mut thread::ThreadTable { &mut self.threads }
 
+    /// The address the kernel enters a NEW thread at, learned from the guest's own
+    /// `bsdthread_register` call — `None` until that call is observed.
+    pub fn thread_start_pc(&self) -> Option<u64> { self.thread_start_pc }
+
+    /// Record the trampoline address the guest registered with `bsdthread_register`. Called by
+    /// retrace-core's dispatch (record AND replay — see the M14 Task 7 symmetry note on
+    /// `guest_bsdthread_create`), which is why this is `pub`: retrace-box cannot call itself here.
+    pub fn set_thread_start_pc(&mut self, pc: u64) { self.thread_start_pc = Some(pc); }
+
+    /// `bsdthread_create(func, arg, stack, pthread, flags)`, emulated.
+    ///
+    /// **Never forwarded.** The host would create a real thread inside retrace's own process
+    /// starting at a guest address — the same class of hazard as M13's `mach_vm_protect`, but worse,
+    /// because it would execute.
+    ///
+    /// The stack is the guest's own: libpthread `mach_vm_map`s it and `mach_vm_protect`s its guard
+    /// page PROT_NONE (M13's first real caller) two traps before this one. M14 places no IPAs.
+    pub fn guest_bsdthread_create(&mut self, args: [u64; 8]) -> u64 {
+        let (func, arg, stack, pthread, flags) = (args[0], args[1], args[2], args[3], args[4]);
+        let start = self.thread_start_pc.expect(
+            "M14: bsdthread_create before bsdthread_register — refusing to invent a thread entry \
+             point. Every dynamic guest registers one at startup (measured, M14 Task 2), so this \
+             means the guest took a path no measurement covers.",
+        );
+
+        let mut ctx = thread::ThreadCtx::zeroed();
+        ctx.elr = start;
+        ctx.spsr = self.spsr();
+        ctx.regs.sp_el0 = stack;
+
+        // THE THREAD-START CONTRACT, MEASURED (Task 2) AND INDEPENDENTLY RE-DISASSEMBLED IN REVIEW.
+        // NOT the classic _pthread_start(self, kport, fun, funarg, stacksize, pflags) shape — this
+        // plan originally guessed that and was WRONG. `__pthread_start` reads only:
+        //   x0 — the pthread-struct pointer
+        //   w5 — flags (tested via tbnz/tbz at its entry, 0x6be0/0x6be4)
+        // and it loads func/arg FROM THE STRUCT, not from registers:
+        //   `ldp x8, x0, [x19, #0x90]` at 0x6c50 → x8 = [pthread+0x90] (func),
+        //                                          x0 = [pthread+0x98] (arg), then `blraaz x8`.
+        // x1-x4 are never read on the entry-to-dispatch path. (One callee,
+        // `__pthread_markcancel_if_canceled`, does `mov x0, x1` at 0x3788, but only on an
+        // already-canceled branch this path does not take — internal bookkeeping, not dispatch.)
+        //
+        // So the box seeds x0 and w5 and nothing else. It does NOT populate the struct: the guest's
+        // own `_pthread_create` stored func/arg at +0x90/+0x98 BEFORE issuing this trap, which is
+        // why the fields are there to be read. Writing them here would be retrace inventing guest
+        // state it does not own.
+        ctx.regs.x[0] = pthread;
+        ctx.regs.x[5] = flags;
+        // Each thread gets its own thread pointer. TPIDR_EL0 stays 0 for ALL threads (M2-cpuid).
+        ctx.tpidrro_el0 = pthread;
+
+        // `func` and `arg` are deliberately unused: they reach the child through the struct, not
+        // through us. Named in the destructuring above so the ABI stays documented at the call site.
+        let _ = (func, arg);
+
+        self.threads.spawn(ctx, (stack, 0));
+        0
+    }
+
     /// Switch the vCPU from the running thread to `tid`.
     pub fn switch_to_thread(&mut self, tid: usize) {
         let cur = self.threads.current();
@@ -3180,6 +3246,11 @@ impl Box_ {
             // thread's registers are additionally loaded onto the vCPU above, from the flat fields
             // that describe it; the table agrees with them, having been folded at capture.
             threads: state.threads.clone(),
+            // M14 t7: NOT carried by `BoxState` (out of this task's scope — see the M14 ledger).
+            // A mid-run checkpoint taken after the guest's own `bsdthread_register` loses the
+            // learned trampoline on restore; a future `bsdthread_create` on that restored session
+            // would hit the same fail-loud `.expect()` a guest that never registered does.
+            thread_start_pc: None,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b

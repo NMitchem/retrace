@@ -654,14 +654,27 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                  guest). It is asserted rather than forwarded because forwarding it kills the \
                  RECORDER. Model it as a second terminal event shape if a guest needs it."),
 
-            // M14 Task 3 scaffolding, REPLACED by Task 7's real handler. Never forward this: the
-            // host would create a real thread in retrace's own process at a guest address.
+            // M14 Task 7: capture the trampoline address the guest registers with the kernel. x0 is
+            // the address `__pthread_start`'s caller loads `threadstart` from (measured, Task 2, on
+            // every dynamic guest since M7 — which is why M14 never has to synthesize one). The call
+            // already works today and must keep working exactly as before; this arm only observes
+            // x0 and then does what the generic forward arm below does (duplicated here because a
+            // guard arm cannot fall through to it — Rust match has no fallthrough).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_REGISTER => {
+                b.set_thread_start_pc(args[0]);
+                let (ret, err, writes) = b.forward_and_diff(num, args);
+                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append bsdthread_register: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
+            }
+            // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
+            // real thread inside retrace's own process at a guest address (see
+            // Box_::guest_bsdthread_create). Writes nothing to guest memory itself, so the event
+            // carries no writes.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_CREATE => {
-                panic!(
-                    "M14: guest called bsdthread_create(func={:#x}, arg={:#x}, stack={:#x}, pthread={:#x}, \
-                     flags={:#x}) — threads are not implemented yet. This is the M14 wall, reached honestly.",
-                    args[0], args[1], args[2], args[3], args[4]
-                );
+                let rc = b.guest_bsdthread_create(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                    .map_err(|e| format!("append bsdthread_create: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
             }
 
             // Every other syscall goes through the general memory-diff engine (forwarded once).
@@ -1147,6 +1160,27 @@ impl ReplaySession {
                             // the store the recording died on.
                             if num == MACH_VM_PROTECT {
                                 self.b.guest_mprotect(args[1], args[2], args[4]);
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M14 Task 7: capture the registered trampoline on replay too (the
+                            // record arm's mirror), then apply exactly as the generic path does —
+                            // this call already worked pre-M14 and is unchanged here. Without this
+                            // capture, a later bsdthread_create on THIS side hits the same
+                            // fail-loud `.expect()` an unregistered guest does, reappearing as a
+                            // replay-only wall (see the M14 Task 7 dispatch note).
+                            if num == retrace_arch::SYS_BSDTHREAD_REGISTER {
+                                self.b.set_thread_start_pc(args[0]);
+                                self.b.apply_and_return(*ret, *err, writes);
+                                return self.finish_event();
+                            }
+                            // M14 Task 7: the record arm's mirror (symmetry rule 1). Record and
+                            // replay must call `guest_bsdthread_create` with IDENTICAL args so both
+                            // build an identical thread table — omit this and replay runs a
+                            // one-thread table against a two-thread recording, surfacing as a
+                            // divergence at the child's first syscall rather than as a clean error.
+                            if num == retrace_arch::SYS_BSDTHREAD_CREATE {
+                                self.b.guest_bsdthread_create(args);
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
