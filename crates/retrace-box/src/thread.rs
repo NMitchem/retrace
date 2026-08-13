@@ -112,23 +112,24 @@ impl ThreadTable {
         self.threads.len() - 1
     }
 
-    pub fn block(&mut self, reason: BlockReason) {
-        self.threads[self.current].state = ThreadState::Blocked(reason);
-    }
-
-    /// Block the current thread on `target`'s exit — the `pthread_join` shape — UNLESS `target`
-    /// has ALREADY exited.
+    /// Block the current thread on `reason`.
     ///
-    /// `block(Join { target })` is a bare primitive and does not check this (by design — checking
-    /// is the caller's job). But if `target` already exited, `unblock_joiners_of(target)` already
-    /// ran and will not run again, so a caller that blocks unconditionally waits forever on a wake
-    /// that already happened (M14 Task 4's review; carried forward and made mandatory at Task 8).
-    /// This is the guarded caller that closes that race.
-    pub fn block_on_join(&mut self, target: usize) {
-        if matches!(self.state_of(target), ThreadState::Exited(_)) {
-            return;
+    /// For `Join { target }`: guarded against a target that has ALREADY exited (fix round 1,
+    /// M-1). `unblock_joiners_of(target)` fires exactly once, at `target`'s exit — if that has
+    /// already happened, it will not fire again, so blocking anyway waits forever on a wake that
+    /// already happened (M14 Task 4's review; carried forward and made mandatory at Task 8). This
+    /// used to live in a separate wrapper (`block_on_join`) that callers had to opt into; folded
+    /// into `block` itself so every caller of the ONE public entry point — including this
+    /// module's own tests — gets the guard, not just callers who remembered the wrapper existed.
+    /// `Wait { .. }` is unaffected: it has no analogous "already satisfied" state to check here
+    /// (that check is `guest_ulock_wait`'s, against live guest memory, not this table's).
+    pub fn block(&mut self, reason: BlockReason) {
+        if let BlockReason::Join { target } = reason {
+            if matches!(self.state_of(target), ThreadState::Exited(_)) {
+                return;
+            }
         }
-        self.block(BlockReason::Join { target });
+        self.threads[self.current].state = ThreadState::Blocked(reason);
     }
 
     pub fn switch_to(&mut self, tid: usize) {

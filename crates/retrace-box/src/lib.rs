@@ -3042,11 +3042,13 @@ impl Box_ {
     ///
     /// **Does not return.** The calling thread is gone; the trap loop must switch rather than
     /// resume it — M14 Task 9's job (wiring the scheduler into `Box_::run()`), not this one's.
-    /// `_args` is unused here for the same reason M14 Task 7's `bsdthread_create` leaves
-    /// `func`/`arg` untouched: `stackaddr`/`freesize` name the guest's own stack for the KERNEL
-    /// to reclaim, which this box does not yet do (no test in this task depends on the guest's
-    /// stack backing actually being freed) — teardown of the memory itself is left for whichever
-    /// task needs it, rather than guessed at here.
+    /// (Fix round 1, M-4: retrace-core's two arms now panic instead of silently resuming this
+    /// thread's vCPU state, which is the enforcement half of that "does not return" — this method
+    /// only does the bookkeeping half.) `_args` is unused here for the same reason M14 Task 7's
+    /// `bsdthread_create` leaves `func`/`arg` untouched: `stackaddr`/`freesize` name the guest's
+    /// own stack for the KERNEL to reclaim, which this box does not yet do (no test in this task
+    /// depends on the guest's stack backing actually being freed) — teardown of the memory itself
+    /// is left for whichever task needs it, rather than guessed at here.
     pub fn guest_bsdthread_terminate(&mut self, _args: [u64; 8]) -> u64 {
         let me = self.threads.current();
         // Open question 1 in the spec: whether the return value rides here or in the pthread
@@ -3070,20 +3072,49 @@ impl Box_ {
     /// would deadlock a race the guest already won (this is Step 4's guard, written explicitly
     /// rather than assumed).
     ///
-    /// x0: real `__ulock_wait` returns 0 on a normal wake and a negative errno on timeout/
-    /// failure. Nothing in this milestone can time out (no clock-driven wake exists yet), so 0
-    /// is the correct return in EVERY case this box can produce today — whether the wait was
-    /// skipped because already-satisfied, or genuinely entered. Fixed and data-independent, so
-    /// record and replay agree on it trivially (the divergence oracle still checks it — see the
-    /// retrace-core mirror — it just never has anything to disagree about yet).
-    pub fn guest_ulock_wait(&mut self, args: [u64; 8]) -> u64 {
+    /// x0: real `__ulock_wait` returns 0 on a normal wake, some non-zero value when the wait was
+    /// skipped because already-satisfied (the exact value is unmeasured), and a negative errno on
+    /// timeout/failure. This box always returns `Ok(0)` on the non-EFAULT paths — including the
+    /// already-satisfied one — which is a SIMPLIFICATION, not a measured fact (fix round 1, M-5
+    /// corrects the earlier doc's overstated claim). **The block/no-block decision made here is
+    /// NOT independently visible to the replay divergence oracle**: `rc`/`err` are the SAME on
+    /// both branches (only the EFAULT path differs), and neither branch writes guest memory, so
+    /// nothing in the recorded `Event::Syscall` distinguishes "blocked" from "stayed runnable"
+    /// (fix round 1, I-3 corrects the earlier doc's false claim that the mirror already checks
+    /// this). If replay's memory at `addr` ever differed from record's — an upstream bug, not a
+    /// normal-operation risk — replay could silently leave a different thread `Runnable` here and
+    /// nothing would say so at this call. Closing that gap directly needs either a trace-format
+    /// change (a new field on `Event::Syscall`, which is a format break per `TRACE_MAGIC` — too
+    /// heavy for this fix round and not this task's call) or is closed *indirectly*, the same way
+    /// cache-page/PAC regeneration already is (CLAUDE.md's M0 principle: pure functions of
+    /// already-verified inputs, checked downstream rather than at the point of computation): once
+    /// M14 Task 9 wires `pick_next`/`switch_to_thread` into `Box_::run()`, a wrongly-scheduled
+    /// thread issues a DIFFERENT next syscall than the recording, which the standard `(num, args)`
+    /// divergence check every other syscall already relies on then catches automatically.
+    pub fn guest_ulock_wait(&mut self, args: [u64; 8]) -> Result<u64, u64> {
+        // Fix round 1, M-2: freshly re-disassembled `__pthread_join`'s retry loop (see the report)
+        // — the ONLY operation words it is measured to pass are these two 32-bit
+        // compare-and-wait shapes (differing only in a flag bit gated on a register this box
+        // doesn't otherwise need). Anything else — in particular a 64-bit compare-and-wait op —
+        // would silently degrade to this arm's 32-bit read below, making equality MORE likely and
+        // therefore blocking where the real kernel would not: a manufactured deadlock. Fail loud
+        // on an unmeasured operation instead of guessing its width.
+        assert!(matches!(args[0] as u32, 0x1000002 | 0x1020002),
+            "guest_ulock_wait: unmeasured operation word {:#x} — only __pthread_join's plain \
+             32-bit compare-and-wait is modelled; a 64-bit compare would silently degrade to a \
+             32-bit read here and could deadlock", args[0]);
         let addr = args[1];
         let expect = args[2] as u32;
-        let current = u32::from_le_bytes(self.read_guest(addr, 4).try_into().unwrap());
+        // Fix round 1, M-3: `addr` is guest-controlled and a bad pointer is LEGAL guest behaviour
+        // (real `__ulock_wait` answers EFAULT), not a retrace invariant violation — use the
+        // checked read rather than `read_guest`, which would panic the box on it.
+        const EFAULT: u64 = 14;
+        let Some(bytes) = self.read_guest_checked(addr, 4) else { return Err(EFAULT); };
+        let current = u32::from_le_bytes(bytes.try_into().unwrap());
         if current == expect {
             self.threads.block(thread::BlockReason::Wait { addr });
         }
-        0
+        Ok(0)
     }
 
     /// Switch the vCPU from the running thread to `tid`.
