@@ -600,6 +600,13 @@ pub struct BoxState {
     // non-current threads: `regs`/`elr`/`spsr` still describe the RUNNING thread (so every M0–M13
     // consumer is unchanged), while `threads` carries all of them including that one.
     pub threads: thread::ThreadTable,
+    // M14 t7 fix round 1: carried for the same reason as `threads` above — a mid-run capture cannot
+    // re-derive it. The guest's OWN `bsdthread_register` call — the only place this is learned —
+    // sits BEHIND the checkpoint the moment one is taken after it, so a restored session replaying
+    // FORWARD can never see that call again; without this field, a `bsdthread_create` on the
+    // restored session hits the same fail-loud `.expect()` an unregistered guest hits, even though
+    // this guest already registered before the capture.
+    pub thread_start_pc: Option<u64>,
     pub mmap_next: u64,
     pub bootstrap_port: Option<u32>,
     pub cache_installed: bool,
@@ -3139,6 +3146,8 @@ impl Box_ {
                 *t.ctx_mut(cur) = self.save_ctx();
                 t
             },
+            // M14 t7 fix round 1: carried, not re-derived — see the field comment on `BoxState`.
+            thread_start_pc: self.thread_start_pc,
             mmap_next: self.mmap_next,
             bootstrap_port: self.bootstrap_port,
             cache_installed: self.cache.is_some(),
@@ -3246,11 +3255,11 @@ impl Box_ {
             // thread's registers are additionally loaded onto the vCPU above, from the flat fields
             // that describe it; the table agrees with them, having been folded at capture.
             threads: state.threads.clone(),
-            // M14 t7: NOT carried by `BoxState` (out of this task's scope — see the M14 ledger).
-            // A mid-run checkpoint taken after the guest's own `bsdthread_register` loses the
-            // learned trampoline on restore; a future `bsdthread_create` on that restored session
-            // would hit the same fail-loud `.expect()` a guest that never registered does.
-            thread_start_pc: None,
+            // M14 t7 fix round 1: RESTORED from the capture, never reset — see the `BoxState` field
+            // comment. A `None` here would tell a restored session it never saw the guest's own
+            // `bsdthread_register`, even when it did — the fail-loud `.expect()` this field exists
+            // to prevent.
+            thread_start_pc: state.thread_start_pc,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b

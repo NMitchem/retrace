@@ -231,6 +231,31 @@ fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     assert_ne!(c.regs.sp_el0, 0, "the child runs on the guest-allocated stack");
 }
 
+/// Task 7 fix round 1: `thread_start_pc` is learned from the guest's OWN `bsdthread_register` call,
+/// which sits BEHIND any checkpoint taken after it — a restored session can never re-derive it by
+/// replaying forward. Mirrors Task 6's `threads`-carrying precedent exactly: state a mid-run capture
+/// cannot re-derive must be carried, or the checkpoint forgets it and breaks quietly. Here that
+/// means a `bsdthread_create` on the restored session would hit the same fail-loud `.expect()` an
+/// UNregistered guest hits, even though THIS guest registered before the checkpoint was taken.
+#[test]
+fn a_restored_checkpoint_still_knows_the_registered_trampoline() {
+    let st = {
+        let mut b = tb();
+        b.set_thread_start_pc(0x0001_804b_2000);
+        b.checkpoint()
+    };
+    let mut r = retrace_box::Box_::from_checkpoint(&st);
+
+    assert_eq!(r.thread_start_pc(), Some(0x0001_804b_2000),
+        "the checkpoint must carry the registered trampoline, or a restored session can never \
+         re-derive it — bsdthread_register sits BEHIND the checkpoint");
+    // The real failure mode, exercised end-to-end: without the carry, THIS call panics on a guest
+    // that already registered — exactly like `bsdthread_create_without_a_registered_trampoline_
+    // fails_loud` below, except here the guest did nothing wrong.
+    let rc = r.guest_bsdthread_create([1, 2, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
+    assert_eq!(rc, 0, "a restored session must be able to create a thread without re-registering");
+}
+
 #[test]
 fn bsdthread_create_without_a_registered_trampoline_fails_loud() {
     let mut b = tb();   // see `fn tb()` at the top of this file
