@@ -152,6 +152,45 @@ impl ThreadTable {
         }
     }
 
+    /// Wake every thread waiting on exactly `addr`. Returns how many were woken.
+    ///
+    /// **This is the wake seam, and it matches by ADDRESS EQUALITY — measured, not fabricated.**
+    /// Task 8's review established that nothing woke a `Blocked(Wait { addr })` thread in any form,
+    /// and correctly declined to invent an address→thread-index correlation. It does not need one:
+    /// M14 Task 9 disassembled both halves of the pair (`.superpowers/…/task-9-measurements.md`) and
+    /// they name the *same word*, `pthread + 0x34` —
+    ///   * `__pthread_join` at `0x9028`:        `add x21, x19, #0x34` … `bl ___ulock_wait`
+    ///   * `__pthread_joiner_wake` at `0x66f0`: `add x1,  x19, #0x34` … `bl ___ulock_wake`
+    ///
+    /// so equality on the address the guest itself supplies is the whole correlation.
+    ///
+    /// Returning a count rather than `()` is what lets the caller's test tell "woke the right one"
+    /// apart from "woke everything"; nothing in the box branches on it. Zero is legal and not an
+    /// error: the real kernel answers `ENOENT` when no one is waiting and `__pthread_joiner_wake`
+    /// treats that as success (its `cmn w0, #0x2` / `b.eq` return path).
+    pub fn unblock_waiters_on(&mut self, addr: u64) -> usize {
+        let mut woken = 0;
+        for t in &mut self.threads {
+            if let ThreadState::Blocked(BlockReason::Wait { addr: a }) = t.state {
+                if a == addr {
+                    t.state = ThreadState::Runnable;
+                    woken += 1;
+                }
+            }
+        }
+        woken
+    }
+
+    /// Does the vCPU need to be moved to a different thread before it can run again?
+    ///
+    /// The predicate `Box_::run()` consults on every entry, named so it can be unit-tested here
+    /// rather than living as an inline condition inside the trap loop. **This is the compatibility
+    /// argument for every M0–M13 gate:** a single-threaded guest has a one-entry table whose only
+    /// thread is `Runnable`, so this is always false and `run()` takes precisely the pre-M14 path.
+    pub fn needs_reschedule(&self) -> bool {
+        !matches!(self.state_of(self.current), ThreadState::Runnable)
+    }
+
     /// The scheduler. Lowest-indexed runnable thread, or `None` if nobody can run.
     ///
     /// `None` is a deadlock, and the caller must fail loud rather than spin — see `Box_`'s

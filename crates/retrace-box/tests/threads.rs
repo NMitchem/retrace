@@ -397,3 +397,157 @@ fn bsdthread_create_without_a_registered_trampoline_fails_loud() {
     }));
     assert!(r.is_err(), "must assert rather than invent an entry point");
 }
+
+// ---------------------------------------------------------------------------------------------
+// M14 Task 9: the scheduler runs, and the wake seam that Task 8's review found had no owner.
+// ---------------------------------------------------------------------------------------------
+
+/// Pure. The wake seam's selectivity, at the table level.
+///
+/// Shaped like Task 8's M-6 fix: a SECOND waiter on a DIFFERENT address is what distinguishes
+/// "wakes exactly this address's waiters" from "wakes every blocked thread". Without it,
+/// `pick_next()` answers `Some(0)` either way and the test proves nothing.
+#[test]
+fn unblock_waiters_on_wakes_only_the_matching_address() {
+    let mut t = ThreadTable::new(ctx(0x1000));
+    t.spawn(ctx(0x2000), (0, 0));   // 1
+    t.spawn(ctx(0x3000), (0, 0));   // 2
+
+    t.switch_to(0);
+    t.block(BlockReason::Wait { addr: 0xAAA0 });
+    t.switch_to(2);
+    t.block(BlockReason::Wait { addr: 0xBBB0 });
+    t.switch_to(1);
+
+    assert_eq!(t.unblock_waiters_on(0xAAA0), 1, "exactly one waiter is on that address");
+
+    assert_eq!(t.state_of(0), ThreadState::Runnable, "the matching waiter must wake");
+    assert!(matches!(t.state_of(2), ThreadState::Blocked(BlockReason::Wait { addr: 0xBBB0 })),
+        "a waiter on a DIFFERENT address must not be woken — this is the whole selectivity claim");
+
+    // A wake nobody is waiting on is legal and must not panic: the real kernel answers ENOENT and
+    // `__pthread_joiner_wake` treats that as success (measured, task-9-measurements.md §2).
+    assert_eq!(t.unblock_waiters_on(0xC0DE), 0, "a wake with no waiter is a no-op, not a fault");
+}
+
+/// Pure. The exact predicate `Box_::run()` consults on every entry.
+///
+/// This is the compatibility argument for every M0–M13 gate, expressed as a testable function
+/// instead of an inline condition: a single-threaded guest has a one-entry table whose only thread
+/// is `Runnable`, so `run()` never schedules and takes precisely the pre-M14 path.
+#[test]
+fn a_lone_runnable_thread_never_needs_rescheduling() {
+    let mut t = ThreadTable::new(ctx(0x1000));
+    assert!(!t.needs_reschedule(), "a single-threaded guest must never trigger a switch");
+
+    t.block(BlockReason::Wait { addr: 0x10 });
+    assert!(t.needs_reschedule(), "a blocked current thread must");
+
+    t.switch_to(0);
+    t.exit_current(0);
+    assert!(t.needs_reschedule(), "…and so must an exited one");
+}
+
+/// The plan's Task 9 Step 1 test. `get_elr()` in the plan snippet is `position()` in the tree.
+///
+/// Asserts the live **PC** as well as ELR. `load_ctx` writes both, but only `reg::PC`/`reg::CPSR`
+/// actually drive the next `hv_vcpu_run` — asserting ELR alone would pass on a `load_ctx` that
+/// never moved the vCPU's execution point at all.
+#[test]
+fn run_switches_to_the_child_when_main_blocks() {
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    b.set_thread_start_pc(0x0001_804b_2000);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
+
+    b.schedule_after_block();
+
+    assert_eq!(b.threads().current(), 1, "the box must switch to the only runnable thread");
+    assert_eq!(b.position(), 0x0001_804b_2000, "…and the vCPU must actually be running its context");
+    assert_eq!(b.pc(), 0x0001_804b_2000, "…at the PC the next hv_vcpu_run resumes from");
+}
+
+/// Task 7 deferred this to Task 9 by name ("WHICH convention actually drives a scheduled thread's
+/// first resume is Task 9's to settle"). It is `regs.pc`/`regs.cpsr`: `load_ctx` -> `write_regs`
+/// writes those, and HVF resumes the vCPU from them.
+///
+/// So a fresh thread's `regs.cpsr` must be the creator's EL0 PSTATE, not `ThreadCtx::zeroed()`'s 0.
+/// The failure this guards is quiet and awful: CPSR 0 is EL0t with DAIF clear, which *looks* like it
+/// works right up until the mask bits matter.
+#[test]
+fn a_created_thread_resumes_with_the_creating_threads_el0_pstate() {
+    let mut b = tb();
+    b.set_thread_start_pc(0x0001_804b_2000);
+    let creator_spsr = b.spsr();
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
+
+    assert_eq!(b.threads().ctx_of(1).regs.cpsr, creator_spsr,
+        "a child must resume at EL0 with the PSTATE its creator was running under, not 0");
+    assert_eq!(b.threads().ctx_of(1).spsr, creator_spsr, "…and its saved SPSR must agree");
+
+    // And the switch must actually install it, or the field above is bookkeeping nobody reads.
+    b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
+    b.schedule_after_block();
+    assert_eq!(b.regs_snapshot().cpsr, creator_spsr, "the vCPU must be running with that PSTATE");
+}
+
+/// THE WAKE SEAM, end to end through the two box entry points the guest actually calls — the thing
+/// Task 8's review established does not exist in any form, and that Task 11 cannot pass without.
+///
+/// Both addresses are real mapped guest memory, so `guest_ulock_wait`'s condition check has a real
+/// answer. Thread 2 waits on a DIFFERENT address for the M-6 reason above.
+#[test]
+fn ulock_wake_wakes_exactly_the_thread_waiting_on_that_address() {
+    let mut b = tb();
+    b.set_thread_start_pc(0x0001_804b_2000);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]); // 1
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_9000, 0x3020_9000, 0, 0, 0, 0]); // 2
+
+    // `pthread + 0x34` in the real flow (task-9-measurements.md); any two distinct mapped words do
+    // here. Both hold the value their waiter compares against, so both waits are genuine.
+    let joined = b.stack_top() - 0x40;
+    let other = b.stack_top() - 0x80;
+    const WAIT_OP: u64 = 0x1000002;
+    const WAKE_OP: u64 = 0x1000002;
+    b.poke_guest(joined, &42u32.to_le_bytes());
+    b.poke_guest(other, &42u32.to_le_bytes());
+
+    b.guest_ulock_wait([WAIT_OP, joined, 42, 0, 0, 0, 0, 0]).unwrap();   // main blocks
+    b.switch_to_thread(2);
+    b.guest_ulock_wait([WAIT_OP, other, 42, 0, 0, 0, 0, 0]).unwrap();    // 2 blocks elsewhere
+    b.switch_to_thread(1);
+
+    assert_eq!(b.guest_ulock_wake([WAKE_OP, joined, 0, 0, 0, 0, 0, 0]), 0,
+        "0 is the success value __pthread_joiner_wake accepts (measured, §2)");
+
+    assert_eq!(b.threads().state_of(0), retrace_box::thread::ThreadState::Runnable,
+        "the joiner waiting on this exact address must wake");
+    assert!(matches!(b.threads().state_of(2), retrace_box::thread::ThreadState::Blocked(_)),
+        "a thread waiting on a different address must NOT be woken");
+    assert_eq!(b.threads().pick_next(), Some(0), "…and the woken joiner is now schedulable");
+}
+
+/// `ULF_WAKE_THREAD` (0x200) names a specific thread PORT in x2 rather than waking by address.
+/// Treating it as an address-wake would wake the wrong thread — silently. Measured wake shapes
+/// only; everything else fails loud, the same posture `guest_ulock_wait` already takes.
+#[test]
+#[should_panic(expected = "unmeasured operation word")]
+fn ulock_wake_rejects_an_unmeasured_operation_word() {
+    let mut b = tb();
+    let addr = b.stack_top() - 0x40;
+    b.guest_ulock_wake([0x1000202, addr, 0, 0, 0, 0, 0, 0]); // ULF_WAKE_THREAD — unmeasured
+}
+
+/// A deadlock must be a loud panic, never a spin. The plan's Task 9 Step 1 test.
+#[test]
+fn a_deadlock_fails_loud_instead_of_hanging() {
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    b.set_thread_start_pc(0x0001_804b_2000);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
+    b.switch_to_thread(1);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 0 });
+
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.schedule_after_block()));
+    assert!(r.is_err(), "every thread blocked must panic, never spin");
+}
