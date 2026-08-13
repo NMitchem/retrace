@@ -3038,6 +3038,54 @@ impl Box_ {
         0
     }
 
+    /// `bsdthread_terminate(stackaddr, freesize, port, sem)` — a guest thread's exit.
+    ///
+    /// **Does not return.** The calling thread is gone; the trap loop must switch rather than
+    /// resume it — M14 Task 9's job (wiring the scheduler into `Box_::run()`), not this one's.
+    /// `_args` is unused here for the same reason M14 Task 7's `bsdthread_create` leaves
+    /// `func`/`arg` untouched: `stackaddr`/`freesize` name the guest's own stack for the KERNEL
+    /// to reclaim, which this box does not yet do (no test in this task depends on the guest's
+    /// stack backing actually being freed) — teardown of the memory itself is left for whichever
+    /// task needs it, rather than guessed at here.
+    pub fn guest_bsdthread_terminate(&mut self, _args: [u64; 8]) -> u64 {
+        let me = self.threads.current();
+        // Open question 1 in the spec: whether the return value rides here or in the pthread
+        // struct. Task 1/2 measured it; if it is in the struct, libpthread reads it back itself
+        // and the box records 0 here rather than pretending to know.
+        self.threads.exit_current(0);
+        self.threads.unblock_joiners_of(me);
+        0
+    }
+
+    /// `__ulock_wait(operation, addr, value, timeout_us)` — the join primitive M14 Task 1
+    /// measured (syscall 515, `SYS_ULOCK_WAIT`). **Never forwarded**: the host has no guest
+    /// thread to actually block on this address, and forwarding would block retrace's OWN
+    /// process on a guest address — the same class of hazard Task 1 measured as
+    /// whole-process-fatal for `bsdthread_create`.
+    ///
+    /// Blocks the CURRENT thread on `addr` only if the guest's own wait condition still holds:
+    /// real `__ulock_wait` blocks iff the live memory at `addr` still equals the `value` the
+    /// caller compared it against (`args[2]`) — if some other thread already changed it, the
+    /// wait is ALREADY SATISFIED and this thread must stay Runnable. Blocking unconditionally
+    /// would deadlock a race the guest already won (this is Step 4's guard, written explicitly
+    /// rather than assumed).
+    ///
+    /// x0: real `__ulock_wait` returns 0 on a normal wake and a negative errno on timeout/
+    /// failure. Nothing in this milestone can time out (no clock-driven wake exists yet), so 0
+    /// is the correct return in EVERY case this box can produce today — whether the wait was
+    /// skipped because already-satisfied, or genuinely entered. Fixed and data-independent, so
+    /// record and replay agree on it trivially (the divergence oracle still checks it — see the
+    /// retrace-core mirror — it just never has anything to disagree about yet).
+    pub fn guest_ulock_wait(&mut self, args: [u64; 8]) -> u64 {
+        let addr = args[1];
+        let expect = args[2] as u32;
+        let current = u32::from_le_bytes(self.read_guest(addr, 4).try_into().unwrap());
+        if current == expect {
+            self.threads.block(thread::BlockReason::Wait { addr });
+        }
+        0
+    }
+
     /// Switch the vCPU from the running thread to `tid`.
     pub fn switch_to_thread(&mut self, tid: usize) {
         let cur = self.threads.current();

@@ -116,6 +116,21 @@ impl ThreadTable {
         self.threads[self.current].state = ThreadState::Blocked(reason);
     }
 
+    /// Block the current thread on `target`'s exit — the `pthread_join` shape — UNLESS `target`
+    /// has ALREADY exited.
+    ///
+    /// `block(Join { target })` is a bare primitive and does not check this (by design — checking
+    /// is the caller's job). But if `target` already exited, `unblock_joiners_of(target)` already
+    /// ran and will not run again, so a caller that blocks unconditionally waits forever on a wake
+    /// that already happened (M14 Task 4's review; carried forward and made mandatory at Task 8).
+    /// This is the guarded caller that closes that race.
+    pub fn block_on_join(&mut self, target: usize) {
+        if matches!(self.state_of(target), ThreadState::Exited(_)) {
+            return;
+        }
+        self.block(BlockReason::Join { target });
+    }
+
     pub fn switch_to(&mut self, tid: usize) {
         assert!(tid < self.threads.len(), "switch to nonexistent thread {tid}");
         self.current = tid;

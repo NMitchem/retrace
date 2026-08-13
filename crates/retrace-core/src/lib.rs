@@ -676,6 +676,29 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     .map_err(|e| format!("append bsdthread_create: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
+            // M14 Task 8: a guest thread's exit (see Box_::guest_bsdthread_terminate). Never
+            // forwarded — same reasoning as bsdthread_create above. `guest_bsdthread_terminate`
+            // "does not return" to the thread that called it, but nothing schedules a DIFFERENT
+            // thread onto the vCPU yet (M14 Task 9's job), so this resumes the now-Exited
+            // thread's own vCPU state with a fixed x0=0 as an interim placeholder — Task 9
+            // replaces this arm's tail with an actual switch to the next runnable thread.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_TERMINATE => {
+                b.guest_bsdthread_terminate(args);
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                    .map_err(|e| format!("append bsdthread_terminate: {e}"))?; count += 1;
+                b.set_x0_err_and_return(0, false);
+            }
+            // M14 Task 8: the join blocking primitive (see Box_::guest_ulock_wait). Never
+            // forwarded: syscall 515 is a real futex-shaped wait, and forwarding it would block
+            // retrace's OWN process on a guest address — the same hazard class Task 1 measured
+            // as fatal for bsdthread_create. Writes nothing to guest memory itself (the box only
+            // READS the compared word), so the event carries no writes.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAIT => {
+                let rc = b.guest_ulock_wait(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                    .map_err(|e| format!("append ulock_wait: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
 
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
@@ -1190,6 +1213,31 @@ impl ReplaySession {
                                 if rc != *ret {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("bsdthread_create rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M14 Task 8: the record arm's mirror (symmetry rule 1). Same interim
+                            // posture as record: nothing schedules a different thread onto the
+                            // vCPU yet (Task 9), so this resumes with the recorded (always 0)
+                            // return rather than switching away.
+                            if num == retrace_arch::SYS_BSDTHREAD_TERMINATE {
+                                self.b.guest_bsdthread_terminate(args);
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M14 Task 8: the record arm's mirror (symmetry rule 1). Record and
+                            // replay must call `guest_ulock_wait` with IDENTICAL args so both
+                            // land the SAME thread in the SAME state (Runnable vs Blocked) —
+                            // omit this and a replay guest schedules differently from the
+                            // recording the moment Task 9 wires the scheduler in. The rc
+                            // byte-compare is vacuous today (guest_ulock_wait always returns 0)
+                            // but is the divergence oracle itself the moment that changes.
+                            if num == retrace_arch::SYS_ULOCK_WAIT {
+                                let rc = self.b.guest_ulock_wait(args);
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("ulock_wait rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
