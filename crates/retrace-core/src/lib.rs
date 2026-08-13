@@ -699,18 +699,23 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // forwarded: syscall 515 is a real futex-shaped wait, and forwarding it would block
             // retrace's OWN process on a guest address — the same hazard class Task 1 measured
             // as fatal for bsdthread_create. Writes nothing to guest memory itself (the box only
-            // READS the compared word), so the event carries no writes. `guest_ulock_wait` returns
-            // `Result<u64, u64>` (fix round 1, M-3) so an unmapped guest address answers EFAULT —
-            // a legal guest behaviour — instead of panicking the box; same shape as `guest_mmap`'s
-            // callers just below.
+            // READS the compared word), so the event carries no writes. An unmapped guest address
+            // answers EFAULT — a legal guest behaviour — instead of panicking the box (fix round 1,
+            // M-3).
+            //
+            // `err` is hardcoded `false`, and that is the FIX for round 1's I-2, not an oversight.
+            // Both operation words `guest_ulock_wait` admits carry `ULF_NO_ERRNO` (bit 24), under
+            // which the kernel reports failure as `-errno` in x0 with `PSTATE.C` CLEAR — measured
+            // on this host, see that function's doc. The earlier `Result<u64, u64>` shape mapped
+            // `Err(14)` to `set_x0_err_and_return(14, true)`, which set carry and sent the guest
+            // into libsyscall's `cerror`; `__pthread_join`'s own `cmn w0, #0x4` then missed and it
+            // re-waited forever. `guest_ulock_wait` now returns the raw signed x0 word, so there is
+            // no `Err` variant left for this arm to turn into `err: true`.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAIT => {
-                let (rc, err) = match b.guest_ulock_wait(args) {
-                    Ok(v) => (v, false),
-                    Err(errno) => (errno, true),
-                };
-                w.append(&Event::Syscall { num, args, ret: rc, err, writes: vec![] })
+                let rc = b.guest_ulock_wait(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
                     .map_err(|e| format!("append ulock_wait: {e}"))?; count += 1;
-                b.set_x0_err_and_return(rc, err);
+                b.set_x0_err_and_return(rc, false);
             }
             // M14 Task 9: the wake half of the pair 515 services (see Box_::guest_ulock_wake).
             // Task 8 left a fail-loud placeholder here because the exit-side wake address was
@@ -1265,15 +1270,18 @@ impl ReplaySession {
                             // replay must call `guest_ulock_wait` with IDENTICAL args so both
                             // land the SAME thread in the SAME state (Runnable vs Blocked) —
                             // omit this and a replay guest schedules differently from the
-                            // recording the moment Task 9 wires the scheduler in. The (rc, err)
-                            // byte-compare is vacuous today (guest_ulock_wait's only non-Ok(0)
-                            // path is an EFAULT no gate guest hits) but is the divergence oracle
-                            // itself the moment either changes.
+                            // recording the moment Task 9 wires the scheduler in.
+                            //
+                            // Fix round 1, I-2: `rc` is now the raw signed x0 word (`ULF_NO_ERRNO`
+                            // returns `-errno` with carry clear — see `Box_::guest_ulock_wait`),
+                            // so replay's recomputed `err` is the CONSTANT `false` record's arm
+                            // writes. It is still bound and compared rather than skipped: a
+                            // recorded `err: true` on this syscall could only come from a trace
+                            // some other build wrote, and that is a divergence, not something to
+                            // pass silently into `set_x0_err_and_return`. The `rc` half is the
+                            // live oracle — it distinguishes the EFAULT return from the normal one.
                             if num == retrace_arch::SYS_ULOCK_WAIT {
-                                let (rc, rerr) = match self.b.guest_ulock_wait(args) {
-                                    Ok(v) => (v, false),
-                                    Err(errno) => (errno, true),
-                                };
+                                let (rc, rerr) = (self.b.guest_ulock_wait(args), false);
                                 if rc != *ret || rerr != *err {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(
@@ -1290,11 +1298,22 @@ impl ReplaySession {
                             // (guest_ulock_wake always returns 0, which is what the guest's own
                             // `__pthread_joiner_wake` accepts) but IS the oracle the moment that
                             // becomes conditional.
+                            //
+                            // Fix round 1, M-1: `err` is compared too, not just `rc` — the same
+                            // shape as the 515 mirror above, and for the same reason. Record's arm
+                            // hardcodes `err: false` (`guest_ulock_wake` has no failure path; if it
+                            // grows one it must answer `-errno` with carry clear, since its
+                            // measured operation word also carries `ULF_NO_ERRNO`), so replay
+                            // recomputes that constant and checks it. The neighbouring comment
+                            // argues the byte-compare "IS the oracle the moment that becomes
+                            // conditional" — leaving `err` out would have made that false for half
+                            // the pair.
                             if num == retrace_arch::SYS_ULOCK_WAKE {
-                                let rc = self.b.guest_ulock_wake(args);
-                                if rc != *ret {
+                                let (rc, rerr) = (self.b.guest_ulock_wake(args), false);
+                                if rc != *ret || rerr != *err {
                                     return Err(Divergence { landmark: self.idx, pc,
-                                        detail: format!("ulock_wake rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                        detail: format!(
+                                            "ulock_wake mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
