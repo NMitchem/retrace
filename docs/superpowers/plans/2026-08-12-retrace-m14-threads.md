@@ -917,7 +917,7 @@ retrace_arch::SYS_BSDTHREAD_REGISTER => {
 #[test]
 fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     let mut b = tb();   // see `fn tb()` at the top of this file
-    b.set_thread_start_pc_for_test(0x1804b_2000);
+    b.set_thread_start_pc(0x0001_804b_2000);
 
     // The ABI measured in Task 2: (func, arg, stack, pthread, flags).
     let rc = b.guest_bsdthread_create([0x1_0002_4e00, 0x62180, 0x3020_7000, 0x3020_7000, 0x90008ff, 0, 0, 0]);
@@ -926,7 +926,7 @@ fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     assert_eq!(b.threads().len(), 2);
     assert_eq!(b.threads().current(), 0, "create does not switch — the caller keeps running");
     let c = b.threads().ctx_of(1);
-    assert_eq!(c.elr, 0x1804b_2000, "the child enters at the REGISTERED trampoline, not at func");
+    assert_eq!(c.elr, 0x0001_804b_2000, "the child enters at the REGISTERED trampoline, not at func");
     // MEASURED contract (Task 2, re-disassembled in review): __pthread_start reads x0 and w5 only.
     // func/arg arrive through the pthread struct at +0x90/+0x98, which the GUEST populated before
     // trapping — so they must NOT appear in registers here.
@@ -1020,16 +1020,33 @@ impl Box_ {
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 13 tests.
+Expected: PASS, 14 tests. (13 from this task's two new tests; the 14th is the checkpoint round-trip
+test added in fix round 1, when the controller ruled `thread_start_pc` must be carried by `BoxState`.)
 
 - [ ] **Step 6: FULL GATE — a live call site now exists**
 
 **The controller runs this, not the implementer.**
 
+Run it DETACHED, not inside a tool call with a timeout — a full gate is ~11 min and two M14 attempts
+were killed at a 10-minute cap. Redirect to a file that outlives the call and poll the file:
+
 ```bash
-just gate 2>&1 | tail -20
+nohup just gate > /tmp/gate.log 2>&1 & disown
 ```
-Expected: **325 passed / 0 failed / 1 ignored** (323 after Task 6, + 2 new). Investigate any mismatch before continuing.
+Gate ONCE, LAST: not until the task's review has landed AND its fix rounds are in. Two M14 runs were
+wasted gating a commit a pending review was about to supersede.
+
+The log carries ANSI colour codes that break `awk`/`grep` with a multibyte conversion failure. Strip
+them before tallying:
+
+```bash
+LC_ALL=C sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' /tmp/gate.log | LC_ALL=C tr -cd '\11\12\15\40-\176' > /tmp/gate-clean.txt
+LC_ALL=C awk '/^test result:/ {p+=$4; f+=$6; i+=$8} END {print p, f, i}' /tmp/gate-clean.txt
+```
+
+Expected: **326 passed / 0 failed / 1 ignored** (323 after Task 6, + 3 new — two from this task plus
+fix round 1's). MEASURED at `6e6355d`: 326/0/1 over 95 binaries, clippy clean. Investigate any
+mismatch before continuing.
 
 - [ ] **Step 7: Commit**
 
@@ -1059,7 +1076,7 @@ git commit -m "M14 t7: bsdthread_create builds a thread instead of dying"
 #[test]
 fn a_terminating_thread_exits_and_wakes_whoever_joined_it() {
     let mut b = tb();   // see `fn tb()` at the top of this file
-    b.set_thread_start_pc_for_test(0x1804b_2000);
+    b.set_thread_start_pc(0x0001_804b_2000);
     b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
 
     // Main joins the child, so main blocks and the child is the only runnable thread.
@@ -1131,7 +1148,8 @@ Expected: PASS, 14 tests.
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **326 passed / 0 failed / 1 ignored.**
+Expected: **327 passed / 0 failed / 1 ignored.** (Was 326 before Task 7's fix round 1 added a test;
+every count from here on is +1 over the plan's original projection.)
 
 - [ ] **Step 7: Commit**
 
@@ -1160,20 +1178,20 @@ This is the task that makes the previous five do something. It belongs **below t
 #[test]
 fn run_switches_to_the_child_when_main_blocks() {
     let mut b = tb();   // see `fn tb()` at the top of this file
-    b.set_thread_start_pc_for_test(0x1804b_2000);
+    b.set_thread_start_pc(0x0001_804b_2000);
     b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
 
     b.schedule_after_block();
 
     assert_eq!(b.threads().current(), 1, "the box must switch to the only runnable thread");
-    assert_eq!(b.get_elr(), 0x1804b_2000, "…and the vCPU must actually be running its context");
+    assert_eq!(b.get_elr(), 0x0001_804b_2000, "…and the vCPU must actually be running its context");
 }
 
 #[test]
 fn a_deadlock_fails_loud_instead_of_hanging() {
     let mut b = tb();   // see `fn tb()` at the top of this file
-    b.set_thread_start_pc_for_test(0x1804b_2000);
+    b.set_thread_start_pc(0x0001_804b_2000);
     b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
     b.switch_to_thread(1);
@@ -1238,7 +1256,7 @@ Expected: PASS, 16 tests.
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **328 passed / 0 failed / 1 ignored.** A regression here means the single-threaded path stopped being the one-entry-table path — check that a lone `Runnable` thread 0 never triggers a switch.
+Expected: **329 passed / 0 failed / 1 ignored.** A regression here means the single-threaded path stopped being the one-entry-table path — check that a lone `Runnable` thread 0 never triggers a switch.
 
 - [ ] **Step 6: Commit**
 
@@ -1403,7 +1421,7 @@ Honest-gate discipline. Do **not** loosen this test, and do **not** regress any 
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **329 passed / 0 failed / 1 ignored** (or 1 passed fewer and 2 ignored if Step 5 fired).
+Expected: **330 passed / 0 failed / 1 ignored** (or 1 passed fewer and 2 ignored if Step 5 fired).
 
 - [ ] **Step 7: Commit**
 
