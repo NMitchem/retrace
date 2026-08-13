@@ -2122,6 +2122,24 @@ impl Box_ {
     pub fn reservations(&self) -> &[(u64, u64)] { &self.reservations }
 
     pub fn run(&mut self) -> Stop {
+        // M14 Task 9: switch threads only at a CLEAN STOP BOUNDARY — here, on entry, where the
+        // previous stop has been fully handled by the dispatch loop and the guest is about to be
+        // resumed. Switching mid-`mach_msg2` or mid-demand-page would leave in-flight box state
+        // describing a thread that is no longer running (risk R3); neither of those re-enters
+        // `run()` with the current thread blocked, so neither can reach this.
+        //
+        // Entry, not exit, because the blocking happens AFTER `run()` returns: the dispatch arm for
+        // 515/361 is what marks the thread `Blocked`/`Exited`, and (for 515) `set_x0_err_and_return`
+        // then leaves the vCPU holding that thread's resume-ready EL0 state — exactly what
+        // `switch_to_thread` must save before loading the next thread's.
+        //
+        // Below the trace on purpose (symmetry rule 2): `run()` is shared by record and replay, so
+        // the schedule fires identically on both sides and nothing about it is recorded. A
+        // single-threaded guest has a one-entry table whose only thread is `Runnable`, so
+        // `needs_reschedule()` is false and every M0–M13 path is untouched.
+        if self.threads.needs_reschedule() {
+            self.schedule_after_block();
+        }
         loop {
             let e = self.vcpu.run().expect("hv_vcpu_run");
             if e.reason != EXIT_EXCEPTION { continue; }         // vtimer/canceled: control-plane only
@@ -3001,6 +3019,18 @@ impl Box_ {
         ctx.elr = start;
         ctx.regs.pc = start;
         ctx.spsr = self.spsr();
+        // M14 Task 9 SETTLES the convention Task 7 deferred by name ("WHICH convention actually
+        // drives a scheduled thread's first resume is Task 9's to settle"). It is `regs.pc` /
+        // `regs.cpsr`: `switch_to_thread` -> `load_ctx` -> `write_regs` writes `reg::PC` and
+        // `reg::CPSR`, and those are what HVF resumes the vCPU from — the same two registers
+        // `set_x0_err_and_return` writes to send a thread back to EL0 after a syscall. ELR_EL1 /
+        // SPSR_EL1 are carried too, but only matter to a later ERET-shaped path.
+        //
+        // So `regs.cpsr` must be the creating thread's EL0 PSTATE, NOT `ThreadCtx::zeroed()`'s 0.
+        // SPSR_EL1 at this trap IS that PSTATE (the guest trapped from EL0 through the trampoline).
+        // Leaving it 0 is quietly wrong rather than loudly broken: 0 is EL0t with DAIF clear, which
+        // looks like it works right up until the mask bits matter.
+        ctx.regs.cpsr = ctx.spsr;
         ctx.regs.sp_el0 = stack;
 
         // THE THREAD-START CONTRACT, MEASURED (Task 2) AND INDEPENDENTLY RE-DISASSEMBLED IN REVIEW.
@@ -3115,6 +3145,58 @@ impl Box_ {
             self.threads.block(thread::BlockReason::Wait { addr });
         }
         Ok(0)
+    }
+
+    /// `__ulock_wake(operation, addr, wake_value)` — the wake half of the pair `guest_ulock_wait`
+    /// blocks on (syscall 516, `SYS_ULOCK_WAKE`). **Never forwarded**: forwarding would issue a real
+    /// `__ulock_wake` from retrace's OWN process against a guest address, the identical hazard class
+    /// `guest_ulock_wait`'s doc cites for 515. Task 8 fail-loud-blocked it; this is the real handler.
+    ///
+    /// **Wakes by address equality, which is measured rather than fabricated.** See
+    /// `ThreadTable::unblock_waiters_on` for the disassembly: `__pthread_join` waits on
+    /// `pthread + 0x34` and `__pthread_joiner_wake` wakes on `pthread + 0x34`, so the address the
+    /// guest hands both calls IS the correlation. Full walk in
+    /// `.superpowers/sdd/2026-08-12-retrace-m14-threads/task-9-measurements.md`.
+    ///
+    /// Returns 0 unconditionally. Read off `__pthread_joiner_wake`'s own branches rather than
+    /// assumed: it accepts 0 and -2 (`ENOENT`, nobody was waiting) as success, retries on -4
+    /// (`EINTR`), and aborts the guest ("BUG IN LIBPTHREAD") on anything else. 0 is therefore
+    /// always accepted, whether or not a waiter was present — so a wake nobody is waiting on is a
+    /// legal no-op here, not a fault.
+    ///
+    /// Reads and writes no guest memory, so the recorded event carries no writes and replay's
+    /// mirror recomputes this identically from the same `(num, args)`.
+    pub fn guest_ulock_wake(&mut self, args: [u64; 8]) -> u64 {
+        // The measured wake operation is exactly one word (`mov w0,#2` + `movk w0,#0x100,lsl#16` at
+        // `__pthread_joiner_wake` 0x66f4). Fail loud on anything else, the same posture
+        // `guest_ulock_wait` takes — and for a sharper reason than width: `ULF_WAKE_THREAD`
+        // (0x200) names a specific thread PORT in x2 instead of waking by address, so silently
+        // treating it as an address-wake would wake the WRONG thread. The wait side's
+        // `0x1020002` is deliberately NOT accepted here: `ULF_WAIT_CANCEL_POINT` (0x20000) is a
+        // wait-only flag and has no meaning on a wake.
+        assert!(args[0] as u32 == 0x1000002,
+            "guest_ulock_wake: unmeasured operation word {:#x} — only __pthread_joiner_wake's plain \
+             address wake is modelled; ULF_WAKE_THREAD names a thread port in x2 and would wake the \
+             wrong thread if treated as an address wake", args[0]);
+        self.threads.unblock_waiters_on(args[1]);
+        0
+    }
+
+    /// Pick and switch after the running thread blocked or exited.
+    ///
+    /// The pick is `ThreadTable::pick_next` — lowest-indexed runnable — which is a pure function of
+    /// the guest's own syscall sequence. That is what lets record and replay schedule identically
+    /// with NOTHING recorded and no trace-format change (symmetry rule 2).
+    pub fn schedule_after_block(&mut self) {
+        match self.threads.pick_next() {
+            Some(tid) => self.switch_to_thread(tid),
+            None => panic!(
+                "M14: DEADLOCK — no runnable thread. {} live of {} total. States: {:?}",
+                self.threads.live(),
+                self.threads.len(),
+                (0..self.threads.len()).map(|i| self.threads.state_of(i)).collect::<Vec<_>>()
+            ),
+        }
     }
 
     /// Switch the vCPU from the running thread to `tid`.

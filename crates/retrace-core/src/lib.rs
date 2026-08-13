@@ -683,22 +683,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // divergence oracle, and a hardcoded `ret: 0` would leave it permanently vacuous.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_TERMINATE => {
                 let rc = b.guest_bsdthread_terminate(args);
-                // `count` is deliberately NOT incremented here: this arm always panics below (see
-                // M-4), so the final count returned in `RecordSummary` is never reached — an
-                // increment right before an unconditional panic is dead, and clippy is right to
-                // flag it (`unused_assignments`).
                 w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
-                    .map_err(|e| format!("append bsdthread_terminate: {e}"))?;
-                // Fix round 1, M-4: `guest_bsdthread_terminate`'s own doc is explicit — "Does not
-                // return" — so calling `set_x0_err_and_return` here would resume THIS (now-Exited)
-                // thread's vCPU state, contradicting it: the real kernel never returns to a thread
-                // that just terminated. No scheduler exists yet to switch the vCPU to a DIFFERENT
-                // thread (M14 Task 9's job), and no gate guest issues 361 today (Task 11 adds the
-                // first one), so failing loud here costs nothing now and stops Task 9 from
-                // inheriting a silently-wrong resume disguised as a working arm.
-                panic!("bsdthread_terminate: thread exited, but no scheduler exists yet to switch \
-                        the vCPU away from it (M14 Task 9) — refusing to resume a thread that just \
-                        exited");
+                    .map_err(|e| format!("append bsdthread_terminate: {e}"))?; count += 1;
+                // Task 8 fix round 1, M-4 panicked here because "no scheduler exists yet to switch
+                // the vCPU away from it". M14 TASK 9 IS THAT SCHEDULER, so the panic is now
+                // replaced by its intended behaviour — but note what is still ABSENT:
+                // `set_x0_err_and_return` is deliberately NOT called. `guest_bsdthread_terminate`'s
+                // doc is explicit ("Does not return"), and the real kernel never returns to a
+                // thread that just terminated. The thread is now `Exited`, so the next entry to
+                // `Box_::run()` sees `needs_reschedule()` and switches to a runnable thread instead
+                // of resuming this one. The vCPU state left parked here is the exiting thread's and
+                // is never resumed — `pick_next` skips `Exited` threads.
             }
             // M14 Task 8: the join blocking primitive (see Box_::guest_ulock_wait). Never
             // forwarded: syscall 515 is a real futex-shaped wait, and forwarding it would block
@@ -717,21 +712,18 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     .map_err(|e| format!("append ulock_wait: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, err);
             }
-            // M14 Task 8 fix round 1, I-1: `__ulock_wake` is the OTHER half of the pair 515
-            // services — see `SYS_ULOCK_WAKE`'s doc for the fresh re-pin (mov x16, #0x204) and the
-            // stale "516 = __ulock_wait2" claim it corrects. UNMEASURED beyond the syscall number:
-            // nothing in this milestone has measured what address the exiting thread wakes on, or
-            // confirmed it calls this at all (M14 Task 9 owns measuring and wiring that). Forwarding
-            // it would issue a REAL `__ulock_wake` from retrace's own process against a guest
-            // address — the identical hazard class `SYS_ULOCK_WAIT`'s own arm above cites for why
-            // 515 must never reach `forward_and_diff` — so this fails loud instead, same idiom as
-            // the sigsuspend/sigwait arm above.
-            Stop::Syscall { num, .. }
-                if num == retrace_arch::SYS_ULOCK_WAKE => panic!(
-                "syscall {num} (__ulock_wake) is the wake half of the join primitive 515 services \
-                 and is UNMEASURED and UNMODELLED. Forwarding it would issue a real __ulock_wake \
-                 from retrace's own process against a GUEST address — the same hazard 515's own \
-                 arm avoids. M14 Task 9 owns measuring the exit-side wake address and wiring it."),
+            // M14 Task 9: the wake half of the pair 515 services (see Box_::guest_ulock_wake).
+            // Task 8 left a fail-loud placeholder here because the exit-side wake address was
+            // unmeasured; Task 9 measured it (task-9-measurements.md) and this is the real handler.
+            // Still never forwarded, for Task 8's reason unchanged: forwarding would issue a real
+            // __ulock_wake from retrace's OWN process against a guest address. Writes nothing to
+            // guest memory (it only moves thread-table state), so the event carries no writes.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAKE => {
+                let rc = b.guest_ulock_wake(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                    .map_err(|e| format!("append ulock_wake: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
 
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
@@ -1261,12 +1253,13 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("bsdthread_terminate rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
                                 }
-                                // Fix round 1, M-4: same posture as record's mirror — no
-                                // scheduler exists yet, so there is nothing correct to resume
-                                // into. Fail loud rather than resume the thread that just exited.
-                                panic!("bsdthread_terminate: thread exited, but no scheduler \
-                                        exists yet to switch the vCPU away from it (M14 Task 9) — \
-                                        refusing to resume a thread that just exited");
+                                // M14 Task 9: same posture as record's mirror, and the same
+                                // deliberate ABSENCE — no `set_x0_err_and_return`. The thread is
+                                // `Exited`, so the next `Box_::run()` reschedules instead of
+                                // resuming it. Task 8's fail-loud panic stood here only until a
+                                // scheduler existed to switch away; it now does, below the trace,
+                                // where record and replay reach it identically.
+                                return self.finish_event();
                             }
                             // M14 Task 8: the record arm's mirror (symmetry rule 1). Record and
                             // replay must call `guest_ulock_wait` with IDENTICAL args so both
@@ -1285,6 +1278,23 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(
                                             "ulock_wait mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M14 Task 9: the record arm's mirror (symmetry rule 1). Record and
+                            // replay must call `guest_ulock_wake` with IDENTICAL args so both wake
+                            // the SAME set of threads — omit this and replay leaves the joiner
+                            // blocked, `pick_next()` returns None, and a run that recorded cleanly
+                            // deadlocks on replay. The rc byte-compare is vacuous today
+                            // (guest_ulock_wake always returns 0, which is what the guest's own
+                            // `__pthread_joiner_wake` accepts) but IS the oracle the moment that
+                            // becomes conditional.
+                            if num == retrace_arch::SYS_ULOCK_WAKE {
+                                let rc = self.b.guest_ulock_wake(args);
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("ulock_wake rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
