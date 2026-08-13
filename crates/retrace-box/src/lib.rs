@@ -2211,6 +2211,27 @@ impl Box_ {
     /// retries the same step). Arms both step bits, runs one classification, then disarms both so
     /// `run()`/forward paths never step.
     pub fn step(&mut self) -> Stop {
+        // M14 Task 9 fix round 1, I-3: `step()` is the SECOND entry into the guest, and it needs
+        // the same reschedule `run()` does. `ReplaySession`'s instruction machinery (`step_insns`,
+        // `window_len_here`) drives the guest exclusively through here, so a session parked on a
+        // thread that just blocked would otherwise single-step that BLOCKED thread — measuring a
+        // window on the wrong thread and letting `checkpointed_seek` memoize the wrong length.
+        // Silently: this is below the trace, so no `Divergence` could ever fire on it. Latent until
+        // a threaded trace reaches the debug CLI, but M3/M4/M5 are shipped features and threaded
+        // traces now exist, so it is fixed rather than parked.
+        //
+        // **THE PLACEMENT IS LOAD-BEARING: this must stay ABOVE the SS arming below.** A reschedule
+        // pushed down into `run_one_for_step` would run `load_ctx` -> `write_regs` ->
+        // `set_reg(reg::CPSR, ctx.regs.cpsr)`, wiping the `PSTATE_SS` bit just armed. MDSCR_EL1.SS
+        // would still be set, leaving the step state machine active-PENDING rather than
+        // active-not-pending, so the exception fires BEFORE the next instruction instead of after
+        // it: `step()` returns `Stop::Step` having retired nothing, and `step_insns` reports a
+        // window that ends after 0 instructions. It looks like it works.
+        // `step_reschedules_off_a_blocked_thread_before_arming_the_step_bit` asserts the retired PC
+        // precisely so that variant fails.
+        if self.threads.needs_reschedule() {
+            self.schedule_after_block();
+        }
         let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_SS).unwrap();
         let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
@@ -3104,7 +3125,7 @@ impl Box_ {
     ///
     /// x0: real `__ulock_wait` returns 0 on a normal wake, some non-zero value when the wait was
     /// skipped because already-satisfied (the exact value is unmeasured), and a negative errno on
-    /// timeout/failure. This box always returns `Ok(0)` on the non-EFAULT paths — including the
+    /// timeout/failure. This box always returns 0 on the non-EFAULT paths — including the
     /// already-satisfied one — which is a SIMPLIFICATION, not a measured fact (fix round 1, M-5
     /// corrects the earlier doc's overstated claim). **The block/no-block decision made here is
     /// NOT independently visible to the replay divergence oracle**: `rc`/`err` are the SAME on
@@ -3121,7 +3142,35 @@ impl Box_ {
     /// M14 Task 9 wires `pick_next`/`switch_to_thread` into `Box_::run()`, a wrongly-scheduled
     /// thread issues a DIFFERENT next syscall than the recording, which the standard `(num, args)`
     /// divergence check every other syscall already relies on then catches automatically.
-    pub fn guest_ulock_wait(&mut self, args: [u64; 8]) -> Result<u64, u64> {
+    ///
+    /// **Returns the raw `x0` word, not a `Result`, because under `ULF_NO_ERRNO` this syscall has
+    /// no error flag to return** (fix round 1, I-2). Both whitelisted operation words set bit 24 =
+    /// `ULF_NO_ERRNO` (`0x0100_0002`, `0x0102_0002`), under which the kernel reports failure as a
+    /// *negative errno in x0 with `PSTATE.C` CLEAR* rather than `+errno` with carry set. Measured
+    /// on this host with a raw `svc #0x80` — libsyscall's stub branches to `cerror` on carry and
+    /// would have destroyed both facts — passing an unmapped address to syscall 515. Probe source,
+    /// output and build line in
+    /// `.superpowers/sdd/2026-08-12-retrace-m14-threads/task-9-measurements.md` §6:
+    ///
+    /// ```text
+    /// op=0x01000002  x0=0xfffffffffffffff2  w0=-14  C=0     <- ULF_NO_ERRNO
+    /// op=0x01020002  x0=0xfffffffffffffff2  w0=-14  C=0     <- the second whitelisted word
+    /// op=0x00000002  x0=0x000000000000000e  w0=+14  C=1     <- the control, without the flag
+    /// ```
+    ///
+    /// The guest reads this back exactly that way: `__pthread_join` @ `0x911c` tests its result
+    /// with `cmn w0, #0x4` (i.e. `w0 == -4`) and `__pthread_mutex_ulock_unlock_slow` @ `0xa154`
+    /// with a bare sign-bit test `tbz w0, #0x1f`. Returning `+14` with carry set — which the
+    /// earlier `Result<u64, u64>` shape made the dispatch arms do — sent the guest into `cerror`,
+    /// missing every one of those tests: `__pthread_join` would then re-read the word and re-wait,
+    /// livelocking on recorded 515 events. Collapsing the `Result` is what makes that
+    /// unrepresentable rather than merely fixed: with no `Err` variant there is no `err: true` for
+    /// a dispatch arm to record.
+    ///
+    /// Note the full 64-bit sign extension above (`0xffff_ffff_ffff_fff2`, not `0xffff_fff2`) —
+    /// that is what the measurement shows, so that is what this returns, even though every
+    /// measured consumer only ever looks at `w0`.
+    pub fn guest_ulock_wait(&mut self, args: [u64; 8]) -> u64 {
         // Fix round 1, M-2: freshly re-disassembled `__pthread_join`'s retry loop (see the report)
         // — the ONLY operation words it is measured to pass are these two 32-bit
         // compare-and-wait shapes (differing only in a flag bit gated on a register this box
@@ -3138,13 +3187,21 @@ impl Box_ {
         // Fix round 1, M-3: `addr` is guest-controlled and a bad pointer is LEGAL guest behaviour
         // (real `__ulock_wait` answers EFAULT), not a retrace invariant violation — use the
         // checked read rather than `read_guest`, which would panic the box on it.
-        const EFAULT: u64 = 14;
-        let Some(bytes) = self.read_guest_checked(addr, 4) else { return Err(EFAULT); };
+        //
+        // Fix round 1, I-2: NEGATED here, in the one place that reads the operation word. The
+        // `-errno`-with-carry-clear convention is a property of `ULF_NO_ERRNO` in `args[0]`, and
+        // the retrace-core dispatch arms never decode `args[0]` — putting the negation there would
+        // put operation-word semantics in a layer that cannot see the operation word, and would
+        // silently answer wrongly on the day a non-`ULF_NO_ERRNO` word is measured and whitelisted.
+        // The assert above is what makes this sound: it admits only the two words that carry the
+        // flag, so every path out of this function is a `ULF_NO_ERRNO` path.
+        const EFAULT: i64 = 14;
+        let Some(bytes) = self.read_guest_checked(addr, 4) else { return (-EFAULT) as u64; };
         let current = u32::from_le_bytes(bytes.try_into().unwrap());
         if current == expect {
             self.threads.block(thread::BlockReason::Wait { addr });
         }
-        Ok(0)
+        0
     }
 
     /// `__ulock_wake(operation, addr, wake_value)` — the wake half of the pair `guest_ulock_wait`
@@ -3163,6 +3220,11 @@ impl Box_ {
     /// (`EINTR`), and aborts the guest ("BUG IN LIBPTHREAD") on anything else. 0 is therefore
     /// always accepted, whether or not a waiter was present — so a wake nobody is waiting on is a
     /// legal no-op here, not a fault.
+    ///
+    /// The sole measured wake word `0x0100_0002` also carries bit 24 = `ULF_NO_ERRNO`, so if this
+    /// ever grows a failure path it must answer `-errno` with `PSTATE.C` CLEAR, exactly like
+    /// `guest_ulock_wait` (fix round 1, I-2 — see that function's doc for the kernel measurement).
+    /// Today it cannot fail, which is why its dispatch arms hardcode `err: false`.
     ///
     /// Reads and writes no guest memory, so the recorded event carries no writes and replay's
     /// mirror recomputes this identically from the same `(num, args)`.

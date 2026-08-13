@@ -345,14 +345,14 @@ fn ulock_wait_blocks_only_when_the_guests_condition_still_holds() {
     // Case 1: the live value no longer matches what the guest expects (args[2]) — someone else
     // already changed it, so the wait is ALREADY SATISFIED and the thread must stay Runnable.
     b.poke_guest(addr, &99u32.to_le_bytes());
-    let rc = b.guest_ulock_wait([OP, addr, 42, 0, 0, 0, 0, 0]).unwrap();
+    let rc = b.guest_ulock_wait([OP, addr, 42, 0, 0, 0, 0, 0]);
     assert_eq!(rc, 0);
     assert_eq!(b.threads().state_of(0), retrace_box::thread::ThreadState::Runnable,
         "the value already changed — blocking now would deadlock a race the guest already won");
 
     // Case 2: the live value STILL matches — the wait is genuine, so the thread must block on it.
     b.poke_guest(addr, &42u32.to_le_bytes());
-    let rc = b.guest_ulock_wait([OP, addr, 42, 0, 0, 0, 0, 0]).unwrap();
+    let rc = b.guest_ulock_wait([OP, addr, 42, 0, 0, 0, 0, 0]);
     assert_eq!(rc, 0);
     assert!(
         matches!(b.threads().state_of(0),
@@ -377,15 +377,37 @@ fn ulock_wait_rejects_an_unmeasured_operation_word() {
 
 /// Fix round 1, M-3: a bad guest address is legal guest behaviour (real `__ulock_wait` answers
 /// `EFAULT`), not a retrace invariant violation — must not panic the box. Mutation check (see the
-/// report): reverting to `read_guest` (the panicking form) turns this into a panic instead of
-/// `Err(14)`.
+/// report): reverting to `read_guest` (the panicking form) turns this into a panic instead of a
+/// return value.
+///
+/// Fix round 1, I-2: and the value is **`-EFAULT`, not `+EFAULT`**. Both operation words this
+/// syscall admits carry `ULF_NO_ERRNO` (bit 24), under which the kernel returns a negative errno in
+/// x0 with `PSTATE.C` clear — measured on this host with a raw `svc #0x80` against syscall 515
+/// (probe and output in the fix-round-1 report):
+///
+/// ```text
+/// op=0x01000002  x0=0xfffffffffffffff2  w0=-14  C=0
+/// op=0x01020002  x0=0xfffffffffffffff2  w0=-14  C=0
+/// op=0x00000002  x0=0x000000000000000e  w0=+14  C=1     <- the convention this used to use
+/// ```
+///
+/// The old `Err(14)` reached `set_x0_err_and_return(14, true)`, which set carry and sent the guest
+/// into libsyscall's `cerror`; `__pthread_join` @ `0x911c` tests its result with `cmn w0, #0x4`
+/// (`w0 == -4`), so it would have missed, re-read the word and re-waited — a livelock of recorded
+/// 515 events. The `w0` assertion below is the one that actually matters to the guest: `cmn` and
+/// `__pthread_mutex_ulock_unlock_slow`'s `tbz w0, #0x1f` both read the 32-bit view.
 #[test]
-fn ulock_wait_answers_efault_on_an_unmapped_address_instead_of_panicking() {
+fn ulock_wait_answers_negative_efault_on_an_unmapped_address_instead_of_panicking() {
     let mut b = tb();
     const OP: u64 = 0x1000002;
     let unmapped = 0xdead_beef_0000u64; // not inside any tracked guest backing
-    assert_eq!(b.guest_ulock_wait([OP, unmapped, 42, 0, 0, 0, 0, 0]), Err(14),
-        "an unmapped wait address must answer EFAULT, not panic the box");
+    let rc = b.guest_ulock_wait([OP, unmapped, 42, 0, 0, 0, 0, 0]);
+
+    assert_eq!(rc, (-14i64) as u64,
+        "an unmapped wait address must answer -EFAULT sign-extended, exactly as the kernel does");
+    assert_eq!(rc as u32 as i32, -14,
+        "…and w0 — the view every measured libpthread consumer actually tests — must be negative");
+    assert_ne!(rc, 14, "+EFAULT is the errno convention this operation word does NOT use");
 }
 
 #[test]
@@ -474,11 +496,29 @@ fn run_switches_to_the_child_when_main_blocks() {
 /// So a fresh thread's `regs.cpsr` must be the creator's EL0 PSTATE, not `ThreadCtx::zeroed()`'s 0.
 /// The failure this guards is quiet and awful: CPSR 0 is EL0t with DAIF clear, which *looks* like it
 /// works right up until the mask bits matter.
+///
+/// Fix round 1, I-1: **the creator's PSTATE is PINNED before the create, and that is what makes
+/// this test able to fail.** `Box_::load` writes `reg::CPSR = 0` and never writes `SPSR_EL1` at
+/// all, so without the pin `creator_spsr` is HVF's *reset* SPSR_EL1 — an unmeasured value. If that
+/// value happens to be 0 (the likely case for a zero-initialised vCPU) then with the fix reverted
+/// assertion (1) reads `0 == 0` and assertion (3) reads `0 == 0`: the test passes identically
+/// whether `ctx.regs.cpsr = ctx.spsr` exists or not, and nothing in the suite covers it. Pinning
+/// `0x8000_03c4` (EL0t + N — the same architecturally-legal value
+/// `a_switch_round_trips_every_register_in_the_context` already proves round-trips on this
+/// hardware) makes both assertions compare against a value that is distinct from every zero in
+/// sight. Mutation-tested: deleting `ctx.regs.cpsr = ctx.spsr` makes this test fail, and the
+/// transcript is in the Task 9 fix-round-1 report.
 #[test]
 fn a_created_thread_resumes_with_the_creating_threads_el0_pstate() {
     let mut b = tb();
     b.set_thread_start_pc(0x0001_804b_2000);
+    b.set_spsr(0x8000_03c4);
     let creator_spsr = b.spsr();
+    // The pin is the whole non-vacuity argument, so assert it took. A hardware that refused this
+    // value would quietly return the test to comparing zeroes with itself.
+    assert_eq!(creator_spsr, 0x8000_03c4, "the pinned creator PSTATE must survive the write");
+    assert_ne!(creator_spsr, b.regs_snapshot().cpsr,
+        "…and must differ from the live CPSR, or assertion (3) below cannot discriminate");
     b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
 
     assert_eq!(b.threads().ctx_of(1).regs.cpsr, creator_spsr,
@@ -512,9 +552,9 @@ fn ulock_wake_wakes_exactly_the_thread_waiting_on_that_address() {
     b.poke_guest(joined, &42u32.to_le_bytes());
     b.poke_guest(other, &42u32.to_le_bytes());
 
-    b.guest_ulock_wait([WAIT_OP, joined, 42, 0, 0, 0, 0, 0]).unwrap();   // main blocks
+    assert_eq!(b.guest_ulock_wait([WAIT_OP, joined, 42, 0, 0, 0, 0, 0]), 0); // main blocks
     b.switch_to_thread(2);
-    b.guest_ulock_wait([WAIT_OP, other, 42, 0, 0, 0, 0, 0]).unwrap();    // 2 blocks elsewhere
+    assert_eq!(b.guest_ulock_wait([WAIT_OP, other, 42, 0, 0, 0, 0, 0]), 0);  // 2 blocks elsewhere
     b.switch_to_thread(1);
 
     assert_eq!(b.guest_ulock_wake([WAKE_OP, joined, 0, 0, 0, 0, 0, 0]), 0,
@@ -536,6 +576,49 @@ fn ulock_wake_rejects_an_unmeasured_operation_word() {
     let mut b = tb();
     let addr = b.stack_top() - 0x40;
     b.guest_ulock_wake([0x1000202, addr, 0, 0, 0, 0, 0, 0]); // ULF_WAKE_THREAD — unmeasured
+}
+
+/// Fix round 1, I-3: `Box_::step()` is the SECOND way into the guest, and it must reschedule off a
+/// blocked thread exactly like `Box_::run()` does. `ReplaySession`'s `step_insns` /
+/// `window_len_here` drive the guest only through `step()`, so a session parked on a thread that
+/// just blocked would otherwise measure an instruction window on the WRONG thread and let
+/// `checkpointed_seek` memoize it — silently, since this is below the trace and no `Divergence` can
+/// see it.
+///
+/// **The PC assertion is the point of this test, not decoration.** The obvious wrong fix — putting
+/// the reschedule inside `run_one_for_step` instead of at the top of `step()` — still switches
+/// threads, so `current() == 1` passes either way. But it runs `load_ctx` -> `write_regs` ->
+/// `set_reg(reg::CPSR, …)` AFTER `step()` armed `PSTATE_SS`, wiping that bit while MDSCR_EL1.SS
+/// stays set. That leaves the step state machine active-*pending*, so the exception fires before
+/// the next instruction rather than after it: `Stop::Step` comes back having retired NOTHING, and
+/// `pc` is still `entry + 4`. Asserting the retired PC is what separates the two.
+///
+/// The child runs REAL mapped guest code — the spinloop's own `loop1: subs x0, x0, #1` one
+/// instruction past the entry — because a step needs something executable to retire. Its context is
+/// built by hand rather than through `guest_bsdthread_create` so the PSTATE is pinned to the EL0t 0
+/// that `Box_::load` gives the main thread, instead of HVF's unmeasured reset SPSR_EL1 (see I-1
+/// above): a child resuming at EL1 would land in `run_one_for_step`'s trap arm and prove nothing.
+#[test]
+fn step_reschedules_off_a_blocked_thread_before_arming_the_step_bit() {
+    let mut b = tb();
+    let entry = b.pc();
+
+    let mut child = ThreadCtx::zeroed();
+    child.regs.pc = entry + 4;
+    child.elr = entry + 4;
+    child.regs.cpsr = 0;                    // EL0t, DAIF clear — what Box_::load runs main under
+    child.regs.sp_el0 = b.stack_top() - 0x1000;
+    b.threads_mut().spawn(child, (0, 0));
+    b.threads_mut().block(BlockReason::Wait { addr: 0x10 });
+
+    let stop = b.step();
+
+    assert_eq!(b.threads().current(), 1,
+        "step() must switch off the blocked thread, not single-step it");
+    assert!(matches!(stop, retrace_box::Stop::Step), "one instruction, cleanly stepped: {stop:?}");
+    assert_eq!(b.pc(), entry + 8,
+        "exactly ONE instruction must have retired — entry+4 here means PSTATE_SS was wiped by a \
+         reschedule placed after the arming");
 }
 
 /// A deadlock must be a loud panic, never a spin. The plan's Task 9 Step 1 test.
