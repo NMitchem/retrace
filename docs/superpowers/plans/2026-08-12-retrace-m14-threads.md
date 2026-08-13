@@ -1166,11 +1166,47 @@ This is the task that makes the previous five do something. It belongs **below t
 
 **Files:**
 - Modify: `crates/retrace-box/src/lib.rs` (`run()`)
+- Modify: `crates/retrace-arch/src/lib.rs` — `SYS_ULOCK_WAKE` (see "THE WAKE SEAM" below)
+- Modify: `crates/retrace-core/src/lib.rs` — the `__ulock_wake` arms, **both** record and replay
 - Test: `crates/retrace-box/tests/threads.rs`
 
 **Interfaces:**
 - Consumes: everything from Tasks 4–8.
-- Produces: no new public API — `run()` transparently multiplexes threads.
+- Produces: no new public API for the switch itself — `run()` transparently multiplexes threads —
+  plus `Box_::guest_ulock_wake` for the seam below.
+
+> **THE WAKE SEAM — ASSIGNED HERE BY THE CONTROLLER AFTER TASK 8's REVIEW. Task 11 cannot pass
+> without it, and before this note it had no owner.**
+>
+> Task 8 blocks a joining thread as `BlockReason::Wait { addr }`. Task 8's review then established
+> three things by reading `thread.rs` and `retrace-arch`:
+>
+> 1. `ThreadTable`'s only wake path is `unblock_joiners_of`, which matches **only**
+>    `BlockReason::Join`. **Nothing wakes a `Blocked(Wait { addr })` thread.** That wake does not
+>    exist in any form — it is not merely unconnected.
+> 2. Task 8 declined to translate a wait address into a thread index, correctly: Task 1 measured the
+>    syscall number, never the address's relationship to a thread, and fabricating an offset is the
+>    M13 `signal_of_esr` mistake. **But address→index is not the only option, and the report never
+>    considered the one that needs no measurement:** the exiting side calls `__ulock_wake` on the
+>    *same address*, so matching `Wait { addr }` by **address equality** requires nothing Task 1
+>    failed to measure.
+> 3. `__ulock_wake` (**516**) appears nowhere in `retrace-arch` or `retrace-core` — the constant
+>    block jumps 515 → 520. So a guest's wake call falls through to the generic arm and reaches
+>    `forward_and_diff`, issuing a real `__ulock_wake` from **retrace's own process** against a guest
+>    address. That is the same hazard class Task 8's own comments cite as the reason 515 must never
+>    be forwarded, applied to 515's other half. Task 8 adds a fail-loud arm for 516 so it cannot
+>    reach `forward_and_diff`; **this task replaces that assert with the real handler.**
+>
+> **The predicted Task 11 failure if this is skipped**, recorded so it is not rediscovered as a
+> mystery: a real threaded guest that joins blocks main as `Wait { addr }`; the child's
+> `__ulock_wake` is forwarded to the host and lost; nothing wakes main; `pick_next()` returns `None`;
+> deadlock.
+>
+> **Measure before wiring, exactly as Task 1 and Task 2 did.** Confirm from disassembly that the exit
+> path's wake address is the same word the join path waits on. If it is, wake by address equality and
+> say so. If it is not, report what it actually is — do not invent the correlation, and do not paper
+> over it. `unblock_joiners_of`/`Join { target }` stay dead code until something real produces a
+> `Join` block; that is honest, not a defect.
 
 - [ ] **Step 1: Write the failing test**
 
