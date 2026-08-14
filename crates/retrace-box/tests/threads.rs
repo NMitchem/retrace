@@ -634,3 +634,59 @@ fn a_deadlock_fails_loud_instead_of_hanging() {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.schedule_after_block()));
     assert!(r.is_err(), "every thread blocked must panic, never spin");
 }
+
+/// **M14 Task 10, F-1: the switch's WIRING into `run()`, not just its logic.**
+///
+/// Task 10 mutation-tested the scheduler and found the logic well covered — breaking `pick_next`
+/// fails 8 tests. It also found that *deleting the call site in `run()` outright fails nothing*:
+/// all of `retrace-box`, 150/150, stayed green with `lib.rs:2140-2142` removed. Two structural
+/// reasons: no test in this file called `run()` at all (every other one drives the box through
+/// `schedule_after_block`, `switch_to_thread`, or `step`), and for a single-threaded guest
+/// `needs_reschedule()` is false by construction, so the branch was already a no-op on every
+/// M0–M13 path. `step()`'s call site was covered — by the test Task 9's fix round added for I-3 —
+/// and `run()`'s, written in the same task, was not. This is that test, one entry point over.
+///
+/// **The discriminator is the syscall NUMBER, and it is why this test can actually fail.**
+/// `SPINLOOP`'s two `svc`s are different calls (verified with `otool -tv`, `_start` at
+/// `0x1_0000_0380`):
+///   * `_start+0x20`: `mov x16,#4` … `svc` — SYS_write, which is where MAIN is headed from `+0`
+///   * `_start+0x30`: `mov x0,#0` ; `mov x16,#1` ; `svc` — SYS_exit, where the CHILD is parked
+///
+/// So the returned `Stop` names which thread the vCPU actually ran, with no reliance on the thread
+/// table's own bookkeeping to report it. **Both assertions are mutation-proven, and they catch
+/// DIFFERENT defects — neither is redundant:**
+///   * Delete the reschedule from `run()` (`lib.rs:2140-2142`) — blocked main resumes at `+0`,
+///     `current()` reads 0, and the FIRST assertion fires. That is the F-1 mutation, which before
+///     this test failed nothing anywhere in the crate.
+///   * Keep the reschedule but drop `load_ctx` from `switch_to_thread` — the table reads 1 while
+///     the vCPU still holds main's registers, so `current() == 1` PASSES and only the syscall
+///     number notices: `num` reads 4 and the SECOND assertion fires.
+///
+/// The second case is why the `Stop` is asserted at all. `current()` is the table describing
+/// itself; `num` is the hardware saying which code it really ran.
+#[test]
+fn run_switches_to_the_child_when_main_blocks_going_through_run() {
+    let mut b = tb();
+    let entry = b.pc();
+
+    let mut child = ThreadCtx::zeroed();
+    child.regs.pc = entry + 0x30;           // mov x0,#0 ; mov x16,#1 ; svc #0x80  -> SYS_exit
+    child.elr = entry + 0x30;
+    child.regs.cpsr = 0;                    // EL0t, DAIF clear — what Box_::load runs main under
+    child.regs.sp_el0 = b.stack_top() - 0x1000;
+    b.threads_mut().spawn(child, (0, 0));
+    b.threads_mut().block(BlockReason::Wait { addr: 0x10 });
+
+    let stop = b.run();
+
+    assert_eq!(b.threads().current(), 1, "run() must switch off the blocked thread");
+    match stop {
+        retrace_box::Stop::Syscall { num, .. } => assert_eq!(
+            num, 1,
+            "the CHILD's SYS_exit must be what trapped — num=4 (SYS_write) means the vCPU ran \
+             MAIN. Two distinct causes, and this assertion is mutation-proven against BOTH: the \
+             reschedule in run() never fired, or switch_to_thread moved the table without \
+             load_ctx moving the hardware"),
+        other => panic!("expected the child's exit syscall, got {other:?}"),
+    }
+}
