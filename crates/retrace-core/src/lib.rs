@@ -654,6 +654,90 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                  guest). It is asserted rather than forwarded because forwarding it kills the \
                  RECORDER. Model it as a second terminal event shape if a guest needs it."),
 
+            // M14 Task 7: capture the trampoline address the guest registers with the kernel. x0 is
+            // the address `__pthread_start`'s caller loads `threadstart` from (measured, Task 2, on
+            // every dynamic guest since M7 — which is why M14 never has to synthesize one). The call
+            // already works today and must keep working exactly as before; this arm only observes
+            // x0 and then does what the generic forward arm below does (duplicated here because a
+            // guard arm cannot fall through to it — Rust match has no fallthrough).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_REGISTER => {
+                b.set_thread_start_pc(args[0]);
+                let (ret, err, writes) = b.forward_and_diff(num, args);
+                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append bsdthread_register: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
+            }
+            // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
+            // real thread inside retrace's own process at a guest address (see
+            // Box_::guest_bsdthread_create).
+            //
+            // M14 t11: it DOES now write guest memory — the child's kport into the guest's pthread
+            // struct at +0xf8, the write `pthread_join` is unusable without — and the event STILL
+            // carries no writes. That is deliberate, not an oversight. The value is
+            // `GUEST_THREAD_PORT_BASE | tid`, a pure function of the guest's own syscall sequence,
+            // and the replay arm below calls the same `guest_bsdthread_create` with identical args:
+            // both sides therefore recompute the identical byte at the identical address (symmetry
+            // rule 1), so recording it would be recording a constant. The exit-time full-memory
+            // comparison still covers it, which is what keeps this honest rather than merely quiet.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_CREATE => {
+                let rc = b.guest_bsdthread_create(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                    .map_err(|e| format!("append bsdthread_create: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
+            // M14 Task 8: a guest thread's exit (see Box_::guest_bsdthread_terminate). Never
+            // forwarded — same reasoning as bsdthread_create above. `rc` is bound and recorded as
+            // `ret` (fix round 1, I-2) even though it is always 0 today, exactly like
+            // `bsdthread_create`'s neighbour arm below — the byte-compare on replay IS the
+            // divergence oracle, and a hardcoded `ret: 0` would leave it permanently vacuous.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_TERMINATE => {
+                let rc = b.guest_bsdthread_terminate(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                    .map_err(|e| format!("append bsdthread_terminate: {e}"))?; count += 1;
+                // Task 8 fix round 1, M-4 panicked here because "no scheduler exists yet to switch
+                // the vCPU away from it". M14 TASK 9 IS THAT SCHEDULER, so the panic is now
+                // replaced by its intended behaviour — but note what is still ABSENT:
+                // `set_x0_err_and_return` is deliberately NOT called. `guest_bsdthread_terminate`'s
+                // doc is explicit ("Does not return"), and the real kernel never returns to a
+                // thread that just terminated. The thread is now `Exited`, so the next entry to
+                // `Box_::run()` sees `needs_reschedule()` and switches to a runnable thread instead
+                // of resuming this one. The vCPU state left parked here is the exiting thread's and
+                // is never resumed — `pick_next` skips `Exited` threads.
+            }
+            // M14 Task 8: the join blocking primitive (see Box_::guest_ulock_wait). Never
+            // forwarded: syscall 515 is a real futex-shaped wait, and forwarding it would block
+            // retrace's OWN process on a guest address — the same hazard class Task 1 measured
+            // as fatal for bsdthread_create. Writes nothing to guest memory itself (the box only
+            // READS the compared word), so the event carries no writes. An unmapped guest address
+            // answers EFAULT — a legal guest behaviour — instead of panicking the box (fix round 1,
+            // M-3).
+            //
+            // `err` is hardcoded `false`, and that is the FIX for round 1's I-2, not an oversight.
+            // Both operation words `guest_ulock_wait` admits carry `ULF_NO_ERRNO` (bit 24), under
+            // which the kernel reports failure as `-errno` in x0 with `PSTATE.C` CLEAR — measured
+            // on this host, see that function's doc. The earlier `Result<u64, u64>` shape mapped
+            // `Err(14)` to `set_x0_err_and_return(14, true)`, which set carry and sent the guest
+            // into libsyscall's `cerror`; `__pthread_join`'s own `cmn w0, #0x4` then missed and it
+            // re-waited forever. `guest_ulock_wait` now returns the raw signed x0 word, so there is
+            // no `Err` variant left for this arm to turn into `err: true`.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAIT => {
+                let rc = b.guest_ulock_wait(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                    .map_err(|e| format!("append ulock_wait: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
+            // M14 Task 9: the wake half of the pair 515 services (see Box_::guest_ulock_wake).
+            // Task 8 left a fail-loud placeholder here because the exit-side wake address was
+            // unmeasured; Task 9 measured it (task-9-measurements.md) and this is the real handler.
+            // Still never forwarded, for Task 8's reason unchanged: forwarding would issue a real
+            // __ulock_wake from retrace's OWN process against a guest address. Writes nothing to
+            // guest memory (it only moves thread-table state), so the event carries no writes.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAKE => {
+                let rc = b.guest_ulock_wake(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                    .map_err(|e| format!("append ulock_wake: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
+
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
                 // M11 correctness invariant: no signal syscall may reach forward_and_diff, which
@@ -1137,6 +1221,108 @@ impl ReplaySession {
                             // the store the recording died on.
                             if num == MACH_VM_PROTECT {
                                 self.b.guest_mprotect(args[1], args[2], args[4]);
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M14 Task 7: capture the registered trampoline on replay too (the
+                            // record arm's mirror), then apply exactly as the generic path does —
+                            // this call already worked pre-M14 and is unchanged here. Without this
+                            // capture, a later bsdthread_create on THIS side hits the same
+                            // fail-loud `.expect()` an unregistered guest does, reappearing as a
+                            // replay-only wall (see the M14 Task 7 dispatch note).
+                            if num == retrace_arch::SYS_BSDTHREAD_REGISTER {
+                                self.b.set_thread_start_pc(args[0]);
+                                self.b.apply_and_return(*ret, *err, writes);
+                                return self.finish_event();
+                            }
+                            // M14 Task 7: the record arm's mirror (symmetry rule 1). Record and
+                            // replay must call `guest_bsdthread_create` with IDENTICAL args so both
+                            // build an identical thread table — omit this and replay runs a
+                            // one-thread table against a two-thread recording, surfacing as a
+                            // divergence at the child's first syscall rather than as a clean error.
+                            if num == retrace_arch::SYS_BSDTHREAD_CREATE {
+                                let rc = self.b.guest_bsdthread_create(args);
+                                // Same divergence-check shape as the mach_vm_map arm above: bind the
+                                // recomputed return and byte-compare it against the recording rather
+                                // than discarding it. Vacuous today (guest_bsdthread_create always
+                                // returns 0), but silently wrong the moment the emulator's return
+                                // becomes conditional — that comparison, not the constant, IS the
+                                // oracle (symmetry rule 1).
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("bsdthread_create rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M14 Task 8: the record arm's mirror (symmetry rule 1). `rc` is bound
+                            // and compared against the recorded `ret` (fix round 1, I-2) — the
+                            // same divergence-check shape as `bsdthread_create`'s mirror above;
+                            // vacuous today (guest_bsdthread_terminate always returns 0) but is
+                            // the oracle itself the moment that changes.
+                            if num == retrace_arch::SYS_BSDTHREAD_TERMINATE {
+                                let rc = self.b.guest_bsdthread_terminate(args);
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("bsdthread_terminate rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                // M14 Task 9: same posture as record's mirror, and the same
+                                // deliberate ABSENCE — no `set_x0_err_and_return`. The thread is
+                                // `Exited`, so the next `Box_::run()` reschedules instead of
+                                // resuming it. Task 8's fail-loud panic stood here only until a
+                                // scheduler existed to switch away; it now does, below the trace,
+                                // where record and replay reach it identically.
+                                return self.finish_event();
+                            }
+                            // M14 Task 8: the record arm's mirror (symmetry rule 1). Record and
+                            // replay must call `guest_ulock_wait` with IDENTICAL args so both
+                            // land the SAME thread in the SAME state (Runnable vs Blocked) —
+                            // omit this and a replay guest schedules differently from the
+                            // recording the moment Task 9 wires the scheduler in.
+                            //
+                            // Fix round 1, I-2: `rc` is now the raw signed x0 word (`ULF_NO_ERRNO`
+                            // returns `-errno` with carry clear — see `Box_::guest_ulock_wait`),
+                            // so replay's recomputed `err` is the CONSTANT `false` record's arm
+                            // writes. It is still bound and compared rather than skipped: a
+                            // recorded `err: true` on this syscall could only come from a trace
+                            // some other build wrote, and that is a divergence, not something to
+                            // pass silently into `set_x0_err_and_return`. The `rc` half is the
+                            // live oracle — it distinguishes the EFAULT return from the normal one.
+                            if num == retrace_arch::SYS_ULOCK_WAIT {
+                                let (rc, rerr) = (self.b.guest_ulock_wait(args), false);
+                                if rc != *ret || rerr != *err {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!(
+                                            "ulock_wait mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M14 Task 9: the record arm's mirror (symmetry rule 1). Record and
+                            // replay must call `guest_ulock_wake` with IDENTICAL args so both wake
+                            // the SAME set of threads — omit this and replay leaves the joiner
+                            // blocked, `pick_next()` returns None, and a run that recorded cleanly
+                            // deadlocks on replay. The rc byte-compare is vacuous today
+                            // (guest_ulock_wake always returns 0, which is what the guest's own
+                            // `__pthread_joiner_wake` accepts) but IS the oracle the moment that
+                            // becomes conditional.
+                            //
+                            // Fix round 1, M-1: `err` is compared too, not just `rc` — the same
+                            // shape as the 515 mirror above, and for the same reason. Record's arm
+                            // hardcodes `err: false` (`guest_ulock_wake` has no failure path; if it
+                            // grows one it must answer `-errno` with carry clear, since its
+                            // measured operation word also carries `ULF_NO_ERRNO`), so replay
+                            // recomputes that constant and checks it. The neighbouring comment
+                            // argues the byte-compare "IS the oracle the moment that becomes
+                            // conditional" — leaving `err` out would have made that false for half
+                            // the pair.
+                            if num == retrace_arch::SYS_ULOCK_WAKE {
+                                let (rc, rerr) = (self.b.guest_ulock_wake(args), false);
+                                if rc != *ret || rerr != *err {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!(
+                                            "ulock_wake mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
+                                }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }

@@ -8,6 +8,7 @@ pub use cache::AuthSlot;
 use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
+pub mod thread;
 pub use sig::{
     build_frame, choose_frame_base, decode_act, encode_oldact, sigreturn_token, Disposition,
     EntryRegs, FrameInput, NeonState, SigAction, SigTable, ThreadState, FRAME_LEN,
@@ -449,7 +450,47 @@ pub struct Box_ {
     // capture cannot re-derive it. Has Drop (an array of Copy + an Option), declared after vcpu/vm,
     // so the load-bearing vcpu-before-vm drop order is unaffected.
     sigtable: SigTable,
+    // M14: the guest's threads. A single-threaded guest has one entry and takes the pre-M14 path.
+    // Declared after vcpu/vm, so the load-bearing vcpu-before-vm drop order is unaffected.
+    threads: thread::ThreadTable,
+    // M14 t7: the address the kernel enters a NEW thread at, learned from the guest's own
+    // `bsdthread_register` call (x0) — every dynamic guest issues one at startup (measured, Task 2),
+    // so `guest_bsdthread_create` never has to guess it. `None` until that call is observed.
+    // Carried in BoxState (see its field comment): a mid-run capture cannot re-derive it, since the
+    // registering syscall sits behind the checkpoint. Plain `Option<u64>` (no Drop), declared after
+    // vcpu/vm, so the load-bearing vcpu-before-vm drop order is unaffected.
+    thread_start_pc: Option<u64>,
 }
+
+/// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
+/// on macOS 26. **The kernel writes this during `bsdthread_create`, and `pthread_join` is unusable
+/// without it** — see `Box_::guest_bsdthread_create` for the disassembly and the host probe.
+const PTHREAD_KPORT_OFF: u64 = 0xf8;
+
+/// Byte offset of the thread-specific-data base inside libpthread's `pthread` struct. The kernel
+/// sets `TPIDRRO_EL0 = pthread + 0xe0` when it starts a thread; libpthread reads it back the other
+/// way (`__pthread_join`: `mrs x23, TPIDRRO_EL0` / `sub x21, x23, #0xe0`). MEASURED on the live
+/// host, 4/4 for main and child alike — see `Box_::guest_bsdthread_create`.
+const PTHREAD_TSD_OFF: u64 = 0xe0;
+
+/// `PTHREAD_START_TSD_BASE_SET` — the bit the kernel ORs into the flags word a new thread receives
+/// in `w5`, asserting that it set that thread's TSD base. `__pthread_start`'s second instruction is
+/// `tbz w5, #0x1c, ...` straight into `brk #0xb001` with the message "BUG IN LIBPTHREAD:
+/// thread_set_tsd_base() wasn't called by the kernel", so a thread started without it dies
+/// immediately. ORed onto the guest's own flags, never substituted for them.
+const PTHREAD_START_TSD_BASE_SET: u64 = 0x1000_0000;
+
+/// Base for the synthetic mach port names retrace hands guest threads, in the same obviously-fake
+/// `0x0BAD….` shape as `SYNTHETIC_BOOTSTRAP_PORT`. The name is `BASE | tid`, so it is a pure
+/// function of the guest's own syscall sequence: non-zero (what `join` actually tests), distinct per
+/// thread, and identical on record and replay with nothing recorded.
+///
+/// A real kport would be a host-allocated name and therefore nondeterministic — the same reason
+/// M2-xpcport had to take a deliberate record/replay asymmetry for its minted bootstrap port. This
+/// needs no such exception: nothing outside the guest ever dereferences this name. libpthread uses
+/// it only as the `__ulock_wait` comparison value at `pthread+0x34` and passes it back verbatim in
+/// `bsdthread_terminate`'s `port` argument, both of which stay inside the box.
+const GUEST_THREAD_PORT_BASE: u32 = 0x0BAD_7000;
 
 #[derive(Debug)]
 pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, far: u64 }, Other { esr: u64 }, Step }
@@ -584,6 +625,18 @@ pub struct BoxState {
     // ATTR_TRAMP note at from_checkpoint explains), but the MAP that `unprotect` and the fail-loud
     // asserts consult is box state, and a restore without it would leave the two disagreeing.
     pub noaccess: Vec<(u64, u64)>,
+    // M14: carried for the same reason as `reservations` and `noaccess` — a mid-run capture cannot
+    // re-derive it. Note this SUPERSEDES the struct's flat register fields as the authority for
+    // non-current threads: `regs`/`elr`/`spsr` still describe the RUNNING thread (so every M0–M13
+    // consumer is unchanged), while `threads` carries all of them including that one.
+    pub threads: thread::ThreadTable,
+    // M14 t7 fix round 1: carried for the same reason as `threads` above — a mid-run capture cannot
+    // re-derive it. The guest's OWN `bsdthread_register` call — the only place this is learned —
+    // sits BEHIND the checkpoint the moment one is taken after it, so a restored session replaying
+    // FORWARD can never see that call again; without this field, a `bsdthread_create` on the
+    // restored session hits the same fail-loud `.expect()` an unregistered guest hits, even though
+    // this guest already registered before the capture.
+    pub thread_start_pc: Option<u64>,
     pub mmap_next: u64,
     pub bootstrap_port: Option<u32>,
     pub cache_installed: bool,
@@ -973,7 +1026,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1561,7 +1614,13 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None };
+        // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
+        // it with the real startup state just written to the vCPU so it reflects reality from the
+        // first `switch_to_thread` rather than an all-zero placeholder.
+        let ctx0 = b.save_ctx();
+        *b.threads.ctx_mut(0) = ctx0;
+        b
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -2093,6 +2152,24 @@ impl Box_ {
     pub fn reservations(&self) -> &[(u64, u64)] { &self.reservations }
 
     pub fn run(&mut self) -> Stop {
+        // M14 Task 9: switch threads only at a CLEAN STOP BOUNDARY — here, on entry, where the
+        // previous stop has been fully handled by the dispatch loop and the guest is about to be
+        // resumed. Switching mid-`mach_msg2` or mid-demand-page would leave in-flight box state
+        // describing a thread that is no longer running (risk R3); neither of those re-enters
+        // `run()` with the current thread blocked, so neither can reach this.
+        //
+        // Entry, not exit, because the blocking happens AFTER `run()` returns: the dispatch arm for
+        // 515/361 is what marks the thread `Blocked`/`Exited`, and (for 515) `set_x0_err_and_return`
+        // then leaves the vCPU holding that thread's resume-ready EL0 state — exactly what
+        // `switch_to_thread` must save before loading the next thread's.
+        //
+        // Below the trace on purpose (symmetry rule 2): `run()` is shared by record and replay, so
+        // the schedule fires identically on both sides and nothing about it is recorded. A
+        // single-threaded guest has a one-entry table whose only thread is `Runnable`, so
+        // `needs_reschedule()` is false and every M0–M13 path is untouched.
+        if self.threads.needs_reschedule() {
+            self.schedule_after_block();
+        }
         loop {
             let e = self.vcpu.run().expect("hv_vcpu_run");
             if e.reason != EXIT_EXCEPTION { continue; }         // vtimer/canceled: control-plane only
@@ -2164,6 +2241,27 @@ impl Box_ {
     /// retries the same step). Arms both step bits, runs one classification, then disarms both so
     /// `run()`/forward paths never step.
     pub fn step(&mut self) -> Stop {
+        // M14 Task 9 fix round 1, I-3: `step()` is the SECOND entry into the guest, and it needs
+        // the same reschedule `run()` does. `ReplaySession`'s instruction machinery (`step_insns`,
+        // `window_len_here`) drives the guest exclusively through here, so a session parked on a
+        // thread that just blocked would otherwise single-step that BLOCKED thread — measuring a
+        // window on the wrong thread and letting `checkpointed_seek` memoize the wrong length.
+        // Silently: this is below the trace, so no `Divergence` could ever fire on it. Latent until
+        // a threaded trace reaches the debug CLI, but M3/M4/M5 are shipped features and threaded
+        // traces now exist, so it is fixed rather than parked.
+        //
+        // **THE PLACEMENT IS LOAD-BEARING: this must stay ABOVE the SS arming below.** A reschedule
+        // pushed down into `run_one_for_step` would run `load_ctx` -> `write_regs` ->
+        // `set_reg(reg::CPSR, ctx.regs.cpsr)`, wiping the `PSTATE_SS` bit just armed. MDSCR_EL1.SS
+        // would still be set, leaving the step state machine active-PENDING rather than
+        // active-not-pending, so the exception fires BEFORE the next instruction instead of after
+        // it: `step()` returns `Stop::Step` having retired nothing, and `step_insns` reports a
+        // window that ends after 0 instructions. It looks like it works.
+        // `step_reschedules_off_a_blocked_thread_before_arming_the_step_bit` asserts the retired PC
+        // precisely so that variant fails.
+        if self.threads.needs_reschedule() {
+            self.schedule_after_block();
+        }
         let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_SS).unwrap();
         let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
@@ -2362,7 +2460,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -2637,8 +2735,14 @@ impl Box_ {
     /// Test/diagnostic accessors for vector and general registers. Present so the M12 delivery
     /// tests can clobber and observe state without a running guest.
     pub fn vcpu_set_x(&mut self, n: u32, v: u64) { self.vcpu.set_reg(reg::x(n), v).unwrap(); }
+    pub fn vcpu_get_x(&self, n: u32) -> u64 { self.vcpu.get_reg(reg::x(n)).unwrap() }
     pub fn vcpu_set_q(&mut self, n: u32, v: u128) { self.vcpu.set_simd(simd::q(n), v).unwrap(); }
     pub fn vcpu_get_q(&self, n: u32) -> u128 { self.vcpu.get_simd(simd::q(n)).unwrap() }
+    /// M14 t5: setters for the sysregs a context switch must move, paired with the existing
+    /// getters `position()` (ELR_EL1), `spsr()` (SPSR_EL1), and `tpidrro_el0()` below.
+    pub fn set_elr(&mut self, v: u64) { self.vcpu.set_sys(sysreg::ELR_EL1, v).unwrap(); }
+    pub fn set_spsr(&mut self, v: u64) { self.vcpu.set_sys(sysreg::SPSR_EL1, v).unwrap(); }
+    pub fn set_tpidrro_el0(&mut self, v: u64) { self.vcpu.set_sys(sysreg::TPIDRRO_EL0, v).unwrap(); }
     /// Write raw bytes into guest memory (tests only — the production path is `write_guest`).
     pub fn poke_guest(&mut self, ipa: u64, bytes: &[u8]) { self.write_guest(ipa, bytes) }
 
@@ -2880,6 +2984,380 @@ impl Box_ {
         }
     }
 
+    /// Capture the running thread's context off the vCPU.
+    ///
+    /// Same save/restore discipline `flush_guest_tlb` (M9) and the PAC signing oracle already use;
+    /// a context switch is that operation with the restore aimed at a DIFFERENT thread.
+    pub fn save_ctx(&self) -> thread::ThreadCtx {
+        let mut fp = [0u128; 32];
+        for (i, f) in fp.iter_mut().enumerate() { *f = self.vcpu.get_simd(simd::q(i as u32)).unwrap(); }
+        thread::ThreadCtx {
+            regs: self.regs_snapshot(),
+            fp,
+            fpcr: self.vcpu.get_reg(reg::FPCR).unwrap(),   // Reg, not SysReg
+            fpsr: self.vcpu.get_reg(reg::FPSR).unwrap(),   // Reg, not SysReg
+            tpidrro_el0: self.vcpu.get_sys(sysreg::TPIDRRO_EL0).unwrap(),
+            elr: self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(),
+            spsr: self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap(),
+        }
+    }
+
+    /// The inverse of `regs_snapshot`. The only new low-level helper M14 needs.
+    fn write_regs(&mut self, r: &Regs) {
+        for (i, xi) in r.x.iter().enumerate() { self.vcpu.set_reg(reg::x(i as u32), *xi).unwrap(); }
+        self.vcpu.set_reg(reg::PC, r.pc).unwrap();
+        self.vcpu.set_sys(sysreg::SP_EL0, r.sp_el0).unwrap();
+        self.vcpu.set_reg(reg::CPSR, r.cpsr).unwrap();
+    }
+
+    /// Install a thread's context onto the vCPU.
+    ///
+    /// `TPIDR_EL0` is deliberately NOT touched: macOS 26 reads the guest's CPU number from its low
+    /// bits and the cluster from the rest, so it must stay 0 for every thread. Writing a per-thread
+    /// value there is how M2-cpuid's OOB seg-group index bug comes back.
+    pub fn load_ctx(&mut self, ctx: &thread::ThreadCtx) {
+        self.write_regs(&ctx.regs);
+        for (i, f) in ctx.fp.iter().enumerate() { self.vcpu.set_simd(simd::q(i as u32), *f).unwrap(); }
+        self.vcpu.set_reg(reg::FPCR, ctx.fpcr).unwrap();   // Reg, not SysReg
+        self.vcpu.set_reg(reg::FPSR, ctx.fpsr).unwrap();   // Reg, not SysReg
+        self.vcpu.set_sys(sysreg::TPIDRRO_EL0, ctx.tpidrro_el0).unwrap();
+        self.vcpu.set_sys(sysreg::ELR_EL1, ctx.elr).unwrap();
+        self.vcpu.set_sys(sysreg::SPSR_EL1, ctx.spsr).unwrap();
+    }
+
+    /// The guest's thread table. Read-only: the RUNNING thread's context here is stale between
+    /// switches (the vCPU is the authority for that one), so consult `save_ctx` for live registers.
+    pub fn threads(&self) -> &thread::ThreadTable { &self.threads }
+
+    /// Mutable access, for the dispatch arms that spawn/block/exit a thread (Tasks 7–9) and for the
+    /// tests. Does not touch the vCPU: changing `current` here without a `load_ctx` would leave the
+    /// table and the hardware disagreeing — use `switch_to_thread` to move the vCPU.
+    pub fn threads_mut(&mut self) -> &mut thread::ThreadTable { &mut self.threads }
+
+    /// The address the kernel enters a NEW thread at, learned from the guest's own
+    /// `bsdthread_register` call — `None` until that call is observed.
+    pub fn thread_start_pc(&self) -> Option<u64> { self.thread_start_pc }
+
+    /// Record the trampoline address the guest registered with `bsdthread_register`. Called by
+    /// retrace-core's dispatch (record AND replay — see the M14 Task 7 symmetry note on
+    /// `guest_bsdthread_create`), which is why this is `pub`: retrace-box cannot call itself here.
+    pub fn set_thread_start_pc(&mut self, pc: u64) { self.thread_start_pc = Some(pc); }
+
+    /// `bsdthread_create(func, arg, stack, pthread, flags)`, emulated.
+    ///
+    /// **Never forwarded.** The host would create a real thread inside retrace's own process
+    /// starting at a guest address — the same class of hazard as M13's `mach_vm_protect`, but worse,
+    /// because it would execute.
+    ///
+    /// The stack is the guest's own: libpthread `mach_vm_map`s it and `mach_vm_protect`s its guard
+    /// page PROT_NONE (M13's first real caller) two traps before this one. M14 places no IPAs.
+    pub fn guest_bsdthread_create(&mut self, args: [u64; 8]) -> u64 {
+        let (func, arg, stack, pthread, flags) = (args[0], args[1], args[2], args[3], args[4]);
+        let start = self.thread_start_pc.expect(
+            "M14: bsdthread_create before bsdthread_register — refusing to invent a thread entry \
+             point. Every dynamic guest registers one at startup (measured, M14 Task 2), so this \
+             means the guest took a path no measurement covers.",
+        );
+
+        let mut ctx = thread::ThreadCtx::zeroed();
+        // The entry point is written to BOTH `elr` and `regs.pc`, not just one. `switch_to_thread`'s
+        // `load_ctx` -> `write_regs` sets `reg::PC` from `regs.pc` for a live vCPU resume, while the
+        // syscall-return path (`set_x0_err_and_return`) resumes off ELR_EL1 and would clobber x0 —
+        // the one register this child must receive intact. WHICH convention actually drives a
+        // scheduled thread's first resume is Task 9's to settle, not this task's; writing both here
+        // makes the context resumable either way rather than leaving that choice to be rediscovered
+        // as a bug when Task 9 wires the scheduler in.
+        ctx.elr = start;
+        ctx.regs.pc = start;
+        ctx.spsr = self.spsr();
+        // M14 Task 9 SETTLES the convention Task 7 deferred by name ("WHICH convention actually
+        // drives a scheduled thread's first resume is Task 9's to settle"). It is `regs.pc` /
+        // `regs.cpsr`: `switch_to_thread` -> `load_ctx` -> `write_regs` writes `reg::PC` and
+        // `reg::CPSR`, and those are what HVF resumes the vCPU from — the same two registers
+        // `set_x0_err_and_return` writes to send a thread back to EL0 after a syscall. ELR_EL1 /
+        // SPSR_EL1 are carried too, but only matter to a later ERET-shaped path.
+        //
+        // So `regs.cpsr` must be the creating thread's EL0 PSTATE, NOT `ThreadCtx::zeroed()`'s 0.
+        // SPSR_EL1 at this trap IS that PSTATE (the guest trapped from EL0 through the trampoline).
+        // Leaving it 0 is quietly wrong rather than loudly broken: 0 is EL0t with DAIF clear, which
+        // looks like it works right up until the mask bits matter.
+        ctx.regs.cpsr = ctx.spsr;
+        ctx.regs.sp_el0 = stack;
+
+        // THE THREAD-START CONTRACT, MEASURED (Task 2) AND INDEPENDENTLY RE-DISASSEMBLED IN REVIEW.
+        // NOT the classic _pthread_start(self, kport, fun, funarg, stacksize, pflags) shape — this
+        // plan originally guessed that and was WRONG. `__pthread_start` reads only:
+        //   x0 — the pthread-struct pointer
+        //   w5 — flags (tested via tbnz/tbz at its entry, 0x6be0/0x6be4)
+        // and it loads func/arg FROM THE STRUCT, not from registers:
+        //   `ldp x8, x0, [x19, #0x90]` at 0x6c50 → x8 = [pthread+0x90] (func),
+        //                                          x0 = [pthread+0x98] (arg), then `blraaz x8`.
+        // x1-x4 are never read on the entry-to-dispatch path. (One callee,
+        // `__pthread_markcancel_if_canceled`, does `mov x0, x1` at 0x3788, but only on an
+        // already-canceled branch this path does not take — internal bookkeeping, not dispatch.)
+        //
+        // So the box seeds x0 and w5 and nothing else. It does NOT populate the struct: the guest's
+        // own `_pthread_create` stored func/arg at +0x90/+0x98 BEFORE issuing this trap, which is
+        // why the fields are there to be read. Writing them here would be retrace inventing guest
+        // state it does not own.
+        ctx.regs.x[0] = pthread;
+        // The measured contract reads `w5` (32-bit), not `x5` — model the zero-extension a real
+        // 32-bit register read performs rather than carrying the full 64-bit syscall argument.
+        //
+        // M14 t11: OR in the kernel's own `PTHREAD_START_TSD_BASE_SET`. `__pthread_start`'s SECOND
+        // instruction is `tbz w5, #0x1c, 0x6c8c`, and 0x6c8c loads "BUG IN LIBPTHREAD:
+        // thread_set_tsd_base() wasn't called by the kernel" and falls into `brk #0xb001`. Passing
+        // the guest's flags through verbatim therefore kills the child on its second instruction —
+        // measured, not theorised: that brk is exactly where M14's headline guest died once the
+        // kport write above let a child run at all. ORed, not substituted: bits 0-27 are the
+        // guest's own (QOS class, CUSTOM, …) and `__pthread_start` reads several of them.
+        ctx.regs.x[5] = (flags as u32 as u64) | PTHREAD_START_TSD_BASE_SET;
+        // Each thread gets its own thread pointer. TPIDR_EL0 stays 0 for ALL threads (M2-cpuid).
+        //
+        // M14 t11: the TSD is at `pthread + 0xe0`, NOT the struct pointer — this used to seed the
+        // struct pointer itself. libpthread reads the register back the other way
+        // (`__pthread_join`: `mrs x23, TPIDRRO_EL0` / `sub x21, x23, #0xe0`), so the old value made
+        // every thread compute a pthread struct 0xe0 bytes below its real one. A host probe pinned
+        // the convention directly, 4/4 for main and child: `TPIDRRO_EL0 - pthread_self() == 0xe0`.
+        // This is the substance behind the flag bit above — setting that bit while leaving the base
+        // wrong would be the box asserting something it had not done.
+        ctx.tpidrro_el0 = pthread + PTHREAD_TSD_OFF;
+
+        // `func` and `arg` are deliberately unused: they reach the child through the struct, not
+        // through us. Named in the destructuring above so the ABI stays documented at the call site.
+        let _ = (func, arg);
+
+        // `(stack, 0)`: the SECOND element is a placeholder length, not a measured size — the
+        // syscall carries no stack-size argument, and `stack` (x2) is the guest-computed stack TOP
+        // libpthread already mapped, not a base. `Thread::stack` is documented as `(base, len)` for
+        // TEARDOWN (Task 8's named consumer); nothing reads it before then.
+        let tid = self.threads.spawn(ctx, (stack, 0));
+
+        // THE KERNEL'S OTHER HALF OF bsdthread_create: the child's mach port, written into the
+        // guest's own pthread struct. Without it `pthread_join` does not merely mis-wait — it does
+        // not wait AT ALL, and reports success. From libsystem_pthread on this host:
+        //
+        //   __pthread_join:
+        //     0x90b8  ldr  w9, [x19, #0x34]   ; the join futex word
+        //     0x90bc  cmn  w9, #0x1           ; already -1 => the thread exited, take that path
+        //     0x90c0  b.eq 0x9208
+        //     0x90c4  ldr  w9, [x19, #0xf8]   ; <-- otherwise the KPORT becomes the wait value
+        //     0x90c8  str  w9, [sp, #0x10]
+        //     0x90cc  str  w9, [x19, #0x34]
+        //     ...
+        //     0x9024  cbz  w8, 0x9198         ; kport == 0  =>  skip __ulock_wait entirely
+        //     0x9198  bl   __pthread_deallocate
+        //     0x91a4  mov  w21, #0x0          ;              =>  and return SUCCESS
+        //
+        // So a zero here makes the guest free a thread that never ran and call it a successful
+        // join. That is not a hypothetical: it is exactly how M14's headline guest failed before
+        // this write existed — libstd's `Arc::get_mut(..).expect("threads should not terminate
+        // unexpectedly")` panicked because the child never dropped its packet clone.
+        //
+        // THE KERNEL IS THE WRITER — measured twice, not inferred. (1) The only two userspace
+        // writers of `+0xf8` in libsystem_pthread are `__pthread_main_thread_init` and
+        // `__pthread_wqthread_setup`; neither is on the `pthread_create` path, and the parent's
+        // call site at 0x83a0 only tests the return for -1 (`cmn x0, #0x1`) and stores nothing.
+        // (2) A host probe read the field with the child provably not yet run, 5/5 runs: `[+0xf8]`
+        // already equalled `pthread_mach_thread_np(t)` while `[+0x34]` was still 0.
+        //
+        // Fail loud on an untranslatable struct: the guest just wrote func/arg into this same page
+        // (`+0x90`/`+0x98`, the contract above), so an unmapped pthread here means the box's view of
+        // guest memory disagrees with the guest's — worth a panic, not a silent skip that would
+        // resurface as the very "join returns without waiting" bug this write exists to prevent.
+        let port = GUEST_THREAD_PORT_BASE | tid as u32;
+        let ipa = self.va_to_ipa(pthread + PTHREAD_KPORT_OFF).unwrap_or_else(|| {
+            panic!("M14: bsdthread_create pthread struct {pthread:#x} has no mapping for +0xf8")
+        });
+        self.write_guest(ipa, &port.to_le_bytes());
+        0
+    }
+
+    /// `bsdthread_terminate(stackaddr, freesize, port, sem)` — a guest thread's exit.
+    ///
+    /// **Does not return.** The calling thread is gone; the trap loop must switch rather than
+    /// resume it — M14 Task 9's job (wiring the scheduler into `Box_::run()`), not this one's.
+    /// (Fix round 1, M-4: retrace-core's two arms now panic instead of silently resuming this
+    /// thread's vCPU state, which is the enforcement half of that "does not return" — this method
+    /// only does the bookkeeping half.) `_args` is unused here for the same reason M14 Task 7's
+    /// `bsdthread_create` leaves `func`/`arg` untouched: `stackaddr`/`freesize` name the guest's
+    /// own stack for the KERNEL to reclaim, which this box does not yet do (no test in this task
+    /// depends on the guest's stack backing actually being freed) — teardown of the memory itself
+    /// is left for whichever task needs it, rather than guessed at here.
+    pub fn guest_bsdthread_terminate(&mut self, _args: [u64; 8]) -> u64 {
+        let me = self.threads.current();
+        // Open question 1 in the spec: whether the return value rides here or in the pthread
+        // struct. Task 1/2 measured it; if it is in the struct, libpthread reads it back itself
+        // and the box records 0 here rather than pretending to know.
+        self.threads.exit_current(0);
+        self.threads.unblock_joiners_of(me);
+        0
+    }
+
+    /// `__ulock_wait(operation, addr, value, timeout_us)` — the join primitive M14 Task 1
+    /// measured (syscall 515, `SYS_ULOCK_WAIT`). **Never forwarded**: the host has no guest
+    /// thread to actually block on this address, and forwarding would block retrace's OWN
+    /// process on a guest address — the same class of hazard Task 1 measured as
+    /// whole-process-fatal for `bsdthread_create`.
+    ///
+    /// Blocks the CURRENT thread on `addr` only if the guest's own wait condition still holds:
+    /// real `__ulock_wait` blocks iff the live memory at `addr` still equals the `value` the
+    /// caller compared it against (`args[2]`) — if some other thread already changed it, the
+    /// wait is ALREADY SATISFIED and this thread must stay Runnable. Blocking unconditionally
+    /// would deadlock a race the guest already won (this is Step 4's guard, written explicitly
+    /// rather than assumed).
+    ///
+    /// x0: real `__ulock_wait` returns 0 on a normal wake, some non-zero value when the wait was
+    /// skipped because already-satisfied (the exact value is unmeasured), and a negative errno on
+    /// timeout/failure. This box always returns 0 on the non-EFAULT paths — including the
+    /// already-satisfied one — which is a SIMPLIFICATION, not a measured fact (fix round 1, M-5
+    /// corrects the earlier doc's overstated claim). **The block/no-block decision made here is
+    /// NOT independently visible to the replay divergence oracle**: `rc`/`err` are the SAME on
+    /// both branches (only the EFAULT path differs), and neither branch writes guest memory, so
+    /// nothing in the recorded `Event::Syscall` distinguishes "blocked" from "stayed runnable"
+    /// (fix round 1, I-3 corrects the earlier doc's false claim that the mirror already checks
+    /// this). If replay's memory at `addr` ever differed from record's — an upstream bug, not a
+    /// normal-operation risk — replay could silently leave a different thread `Runnable` here and
+    /// nothing would say so at this call. Closing that gap directly needs either a trace-format
+    /// change (a new field on `Event::Syscall`, which is a format break per `TRACE_MAGIC` — too
+    /// heavy for this fix round and not this task's call) or is closed *indirectly*, the same way
+    /// cache-page/PAC regeneration already is (CLAUDE.md's M0 principle: pure functions of
+    /// already-verified inputs, checked downstream rather than at the point of computation): once
+    /// M14 Task 9 wires `pick_next`/`switch_to_thread` into `Box_::run()`, a wrongly-scheduled
+    /// thread issues a DIFFERENT next syscall than the recording, which the standard `(num, args)`
+    /// divergence check every other syscall already relies on then catches automatically.
+    ///
+    /// **Returns the raw `x0` word, not a `Result`, because under `ULF_NO_ERRNO` this syscall has
+    /// no error flag to return** (fix round 1, I-2). Both whitelisted operation words set bit 24 =
+    /// `ULF_NO_ERRNO` (`0x0100_0002`, `0x0102_0002`), under which the kernel reports failure as a
+    /// *negative errno in x0 with `PSTATE.C` CLEAR* rather than `+errno` with carry set. Measured
+    /// on this host with a raw `svc #0x80` — libsyscall's stub branches to `cerror` on carry and
+    /// would have destroyed both facts — passing an unmapped address to syscall 515. Probe source,
+    /// output and build line in
+    /// `.superpowers/sdd/2026-08-12-retrace-m14-threads/task-9-measurements.md` §6:
+    ///
+    /// ```text
+    /// op=0x01000002  x0=0xfffffffffffffff2  w0=-14  C=0     <- ULF_NO_ERRNO
+    /// op=0x01020002  x0=0xfffffffffffffff2  w0=-14  C=0     <- the second whitelisted word
+    /// op=0x00000002  x0=0x000000000000000e  w0=+14  C=1     <- the control, without the flag
+    /// ```
+    ///
+    /// The guest reads this back exactly that way: `__pthread_join` @ `0x911c` tests its result
+    /// with `cmn w0, #0x4` (i.e. `w0 == -4`) and `__pthread_mutex_ulock_unlock_slow` @ `0xa154`
+    /// with a bare sign-bit test `tbz w0, #0x1f`. Returning `+14` with carry set — which the
+    /// earlier `Result<u64, u64>` shape made the dispatch arms do — sent the guest into `cerror`,
+    /// missing every one of those tests: `__pthread_join` would then re-read the word and re-wait,
+    /// livelocking on recorded 515 events. Collapsing the `Result` is what makes that
+    /// unrepresentable rather than merely fixed: with no `Err` variant there is no `err: true` for
+    /// a dispatch arm to record.
+    ///
+    /// Note the full 64-bit sign extension above (`0xffff_ffff_ffff_fff2`, not `0xffff_fff2`) —
+    /// that is what the measurement shows, so that is what this returns, even though every
+    /// measured consumer only ever looks at `w0`.
+    pub fn guest_ulock_wait(&mut self, args: [u64; 8]) -> u64 {
+        // Fix round 1, M-2: freshly re-disassembled `__pthread_join`'s retry loop (see the report)
+        // — the ONLY operation words it is measured to pass are these two 32-bit
+        // compare-and-wait shapes (differing only in a flag bit gated on a register this box
+        // doesn't otherwise need). Anything else — in particular a 64-bit compare-and-wait op —
+        // would silently degrade to this arm's 32-bit read below, making equality MORE likely and
+        // therefore blocking where the real kernel would not: a manufactured deadlock. Fail loud
+        // on an unmeasured operation instead of guessing its width.
+        assert!(matches!(args[0] as u32, 0x1000002 | 0x1020002),
+            "guest_ulock_wait: unmeasured operation word {:#x} — only __pthread_join's plain \
+             32-bit compare-and-wait is modelled; a 64-bit compare would silently degrade to a \
+             32-bit read here and could deadlock", args[0]);
+        let addr = args[1];
+        let expect = args[2] as u32;
+        // Fix round 1, M-3: `addr` is guest-controlled and a bad pointer is LEGAL guest behaviour
+        // (real `__ulock_wait` answers EFAULT), not a retrace invariant violation — use the
+        // checked read rather than `read_guest`, which would panic the box on it.
+        //
+        // Fix round 1, I-2: NEGATED here, in the one place that reads the operation word. The
+        // `-errno`-with-carry-clear convention is a property of `ULF_NO_ERRNO` in `args[0]`, and
+        // the retrace-core dispatch arms never decode `args[0]` — putting the negation there would
+        // put operation-word semantics in a layer that cannot see the operation word, and would
+        // silently answer wrongly on the day a non-`ULF_NO_ERRNO` word is measured and whitelisted.
+        // The assert above is what makes this sound: it admits only the two words that carry the
+        // flag, so every path out of this function is a `ULF_NO_ERRNO` path.
+        const EFAULT: i64 = 14;
+        let Some(bytes) = self.read_guest_checked(addr, 4) else { return (-EFAULT) as u64; };
+        let current = u32::from_le_bytes(bytes.try_into().unwrap());
+        if current == expect {
+            self.threads.block(thread::BlockReason::Wait { addr });
+        }
+        0
+    }
+
+    /// `__ulock_wake(operation, addr, wake_value)` — the wake half of the pair `guest_ulock_wait`
+    /// blocks on (syscall 516, `SYS_ULOCK_WAKE`). **Never forwarded**: forwarding would issue a real
+    /// `__ulock_wake` from retrace's OWN process against a guest address, the identical hazard class
+    /// `guest_ulock_wait`'s doc cites for 515. Task 8 fail-loud-blocked it; this is the real handler.
+    ///
+    /// **Wakes by address equality, which is measured rather than fabricated.** See
+    /// `ThreadTable::unblock_waiters_on` for the disassembly: `__pthread_join` waits on
+    /// `pthread + 0x34` and `__pthread_joiner_wake` wakes on `pthread + 0x34`, so the address the
+    /// guest hands both calls IS the correlation. Full walk in
+    /// `.superpowers/sdd/2026-08-12-retrace-m14-threads/task-9-measurements.md`.
+    ///
+    /// Returns 0 unconditionally. Read off `__pthread_joiner_wake`'s own branches rather than
+    /// assumed: it accepts 0 and -2 (`ENOENT`, nobody was waiting) as success, retries on -4
+    /// (`EINTR`), and aborts the guest ("BUG IN LIBPTHREAD") on anything else. 0 is therefore
+    /// always accepted, whether or not a waiter was present — so a wake nobody is waiting on is a
+    /// legal no-op here, not a fault.
+    ///
+    /// The sole measured wake word `0x0100_0002` also carries bit 24 = `ULF_NO_ERRNO`, so if this
+    /// ever grows a failure path it must answer `-errno` with `PSTATE.C` CLEAR, exactly like
+    /// `guest_ulock_wait` (fix round 1, I-2 — see that function's doc for the kernel measurement).
+    /// Today it cannot fail, which is why its dispatch arms hardcode `err: false`.
+    ///
+    /// Reads and writes no guest memory, so the recorded event carries no writes and replay's
+    /// mirror recomputes this identically from the same `(num, args)`.
+    pub fn guest_ulock_wake(&mut self, args: [u64; 8]) -> u64 {
+        // The measured wake operation is exactly one word (`mov w0,#2` + `movk w0,#0x100,lsl#16` at
+        // `__pthread_joiner_wake` 0x66f4). Fail loud on anything else, the same posture
+        // `guest_ulock_wait` takes — and for a sharper reason than width: `ULF_WAKE_THREAD`
+        // (0x200) names a specific thread PORT in x2 instead of waking by address, so silently
+        // treating it as an address-wake would wake the WRONG thread. The wait side's
+        // `0x1020002` is deliberately NOT accepted here: `ULF_WAIT_CANCEL_POINT` (0x20000) is a
+        // wait-only flag and has no meaning on a wake.
+        assert!(args[0] as u32 == 0x1000002,
+            "guest_ulock_wake: unmeasured operation word {:#x} — only __pthread_joiner_wake's plain \
+             address wake is modelled; ULF_WAKE_THREAD names a thread port in x2 and would wake the \
+             wrong thread if treated as an address wake", args[0]);
+        self.threads.unblock_waiters_on(args[1]);
+        0
+    }
+
+    /// Pick and switch after the running thread blocked or exited.
+    ///
+    /// The pick is `ThreadTable::pick_next` — lowest-indexed runnable — which is a pure function of
+    /// the guest's own syscall sequence. That is what lets record and replay schedule identically
+    /// with NOTHING recorded and no trace-format change (symmetry rule 2).
+    pub fn schedule_after_block(&mut self) {
+        match self.threads.pick_next() {
+            Some(tid) => self.switch_to_thread(tid),
+            None => panic!(
+                "M14: DEADLOCK — no runnable thread. {} live of {} total. States: {:?}",
+                self.threads.live(),
+                self.threads.len(),
+                (0..self.threads.len()).map(|i| self.threads.state_of(i)).collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    /// Switch the vCPU from the running thread to `tid`.
+    pub fn switch_to_thread(&mut self, tid: usize) {
+        let cur = self.threads.current();
+        if cur == tid {
+            return;
+        }
+        let saved = self.save_ctx();
+        *self.threads.ctx_mut(cur) = saved;
+        self.threads.switch_to(tid);
+        let next = self.threads.ctx_of(tid).clone();
+        self.load_ctx(&next);
+    }
+
     /// Capture all backings + architectural registers as an Event::Snapshot.
     pub fn snapshot(&self) -> retrace_trace::Event {
         let mut mem = Vec::new();
@@ -2979,6 +3457,18 @@ impl Box_ {
             mem,
             reservations: self.reservations.clone(),
             noaccess: self.noaccess.clone(),
+            // M14: the RUNNING thread's context lives on the vCPU, not in the table — the table's
+            // copy is only refreshed by `switch_to_thread`, so it is stale for whoever is running.
+            // Fold the live registers back in before carrying it, or a checkpoint taken between two
+            // switches restores the current thread to wherever it was at the LAST switch.
+            threads: {
+                let mut t = self.threads.clone();
+                let cur = t.current();
+                *t.ctx_mut(cur) = self.save_ctx();
+                t
+            },
+            // M14 t7 fix round 1: carried, not re-derived — see the field comment on `BoxState`.
+            thread_start_pc: self.thread_start_pc,
             mmap_next: self.mmap_next,
             bootstrap_port: self.bootstrap_port,
             cache_installed: self.cache.is_some(),
@@ -3015,7 +3505,15 @@ impl Box_ {
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, PT_L1_IPA).unwrap();
         vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap();
-        vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();
+        // M14 t6: the thread pointer is PER-THREAD now, so a constant here is wrong the moment a
+        // checkpoint is taken while a child runs — it would hand that thread MAIN's TSD. The
+        // captured table is the authority (`checkpoint` folds the live vCPU into `ctx_mut(current)`
+        // before carrying it), and for a single-threaded guest that captured value IS `TSD_IPA`, so
+        // every M0–M13 restore is identical to what this line did before. That makes it the fourth
+        // field here to stop being re-derived for the reason the `BoxState` comments give (M9 t3,
+        // M10, M11): a restore that contradicts the state it just restored breaks quietly.
+        let cur_tid = state.threads.current();
+        vcpu.set_sys(sysreg::TPIDRRO_EL0, state.threads.ctx_of(cur_tid).tpidrro_el0).unwrap();
         vcpu.set_sys(sysreg::TPIDR_EL0, state.tpidr_el0).unwrap(); // captured, NOT forced to 0
         Self::set_pac_keys(&vcpu);
         vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(state.pac_enabled)).unwrap();
@@ -3072,6 +3570,17 @@ impl Box_ {
             // M11: RESTORED from the capture, never reset — see the BoxState field comment. A fresh
             // table here would tell a seeked session every signal is at its default disposition.
             sigtable: state.sigtable.clone(),
+            // M14 t6: RESTORED from the capture, never reset — see the BoxState field comment. A
+            // fresh table here would tell a seeked session the guest has exactly one thread, so the
+            // scheduler would never pick the child and a join on it would deadlock. The RUNNING
+            // thread's registers are additionally loaded onto the vCPU above, from the flat fields
+            // that describe it; the table agrees with them, having been folded at capture.
+            threads: state.threads.clone(),
+            // M14 t7 fix round 1: RESTORED from the capture, never reset — see the `BoxState` field
+            // comment. A `None` here would tell a restored session it never saw the guest's own
+            // `bsdthread_register`, even when it did — the fail-loud `.expect()` this field exists
+            // to prevent.
+            thread_start_pc: state.thread_start_pc,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
