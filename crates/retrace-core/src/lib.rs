@@ -93,6 +93,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
     let mut guest_task_port: Option<u64> = None;
     loop {
         let stop = b.run();
+        // M15: the thread that produced this stop, captured ONCE and used by every append arm
+        // below. Read here rather than at each append because this is the only point guaranteed to
+        // be the trapping thread: `run()` reschedules at ENTRY, and no handler between here and the
+        // append moves `current` (block/exit_current change state only). One source of the value,
+        // ~35 uses — a stale or defaulted tag is the failure mode this ordering removes.
+        let thread = b.threads().current() as u32;
         if trace_log {
             if let Stop::Syscall { num, args } = &stop {
                 eprintln!("[trap] num={} (0x{:x}) pc={:#x} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
@@ -168,7 +174,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             Stop::Syscall { num, args } if retrace_arch::is_console_write(num, args[0]) => {
                 stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
                 let ret = args[2];
-                w.append(&Event::Syscall { num, args, ret, err: false, writes: vec![] }).map_err(|e| format!("append write: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret, err: false, writes: vec![], thread }).map_err(|e| format!("append write: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, false);
             }
             // A guest close of fd 0/1/2 is FAKED, never forwarded: those descriptors are retrace's
@@ -185,7 +191,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // fd 1 after closing it would see the write succeed instead of EBADF. No guest in the
             // gate does; modeling it means giving the box a real fd table.
             Stop::Syscall { num, args } if retrace_arch::is_console_close(num, args[0]) => {
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append close: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append close: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
@@ -209,7 +215,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     Ok(ipa) => (ipa, false),
                     Err(errno) => (errno, true),
                 };
-                w.append(&Event::Syscall { num, args, ret, err, writes: vec![] }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret, err, writes: vec![], thread }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MMAP => {
@@ -226,7 +232,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     }
                     Err(errno) => (errno, true, vec![]),
                 };
-                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append mmap_file: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret, err, writes, thread }).map_err(|e| format!("append mmap_file: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
             // munmap/mprotect (debt #2): honor them for real — drop + hv_vm_unmap the backing on
@@ -235,12 +241,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // do), so they're recorded like mmap: ret=0, no writes, reproduced by re-execution.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MUNMAP => {
                 b.guest_munmap(args[0], args[1]);
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append munmap: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append munmap: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MPROTECT => {
                 b.guest_mprotect(args[0], args[1], args[2]);
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mprotect: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append mprotect: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
             // sysctl({CTL_KERN, KERN_USRSTACK64}): answer from the guest's OWN stack top (M8-stack).
@@ -253,7 +259,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL
                 && is_usrstack64_mib(&b, args) => {
                 let writes = b.usrstack64_reply(args);
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append sysctl usrstack64: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
@@ -266,7 +272,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_GETRLIMIT
                 && (args[0] & !retrace_arch::RLIMIT_POSIX_FLAG) == retrace_arch::RLIMIT_STACK => {
                 let writes = b.rlimit_stack_reply(args);
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append getrlimit stack: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
@@ -283,14 +289,14 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.install_cache_pager();
                 if b.is_mapped(args[0]) {
                     let writes = vec![Region { ipa: args[0], bytes: retrace_box::SHARED_REGION_START.to_le_bytes().to_vec() }];
-                    w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append shared_region_check: {e}"))?; count += 1;
+                    w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append shared_region_check: {e}"))?; count += 1;
                     b.apply_and_return(0, false, &writes);
                 } else {
                     // dyld's deliberate error path (e.g. `shared_region_check_np((void*)-1)` to
                     // return a failure code): the kernel's copyout to the bad pointer yields EFAULT.
                     // Reproduce it deterministically — carry set, x0 = EFAULT, no writes.
                     const EFAULT: u64 = 14;
-                    w.append(&Event::Syscall { num, args, ret: EFAULT, err: true, writes: vec![] }).map_err(|e| format!("append shared_region_check(bad ptr): {e}"))?; count += 1;
+                    w.append(&Event::Syscall { num, args, ret: EFAULT, err: true, writes: vec![], thread }).map_err(|e| format!("append shared_region_check(bad ptr): {e}"))?; count += 1;
                     b.set_x0_err_and_return(EFAULT, true);
                 }
             }
@@ -300,7 +306,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // identical bytes; no cache bytes are ever written to the trace.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SHARED_REGION_MAP_AND_SLIDE_2_NP => {
                 b.install_cache_pager();
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append shared_region_map: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append shared_region_map: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
             // dyld's inline __mac_syscall sandbox check (x16 = MAC_SYSCALL_MAGIC): cannot be
@@ -316,7 +322,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 let writes = if args[2] != 0 && b.is_mapped(args[2]) {
                     vec![Region { ipa: args[2], bytes: vec![0u8; 8] }]
                 } else { vec![] };
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append mac_syscall: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append mac_syscall: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
             // mach_vm_allocate / mach_vm_map: allocate anonymous GUEST memory (never forward). The
@@ -339,13 +345,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     b.guest_vm_map(req, size, anywhere, exec)
                 };
                 let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
             // mach_vm_deallocate: free guest memory (drop the backing + stage-2 unmap).
             Stop::Syscall { num, args } if num == MACH_VM_DEALLOCATE => {
                 b.guest_munmap(args[1], args[2]);
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mach_vm_dealloc: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append mach_vm_dealloc: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
             // mach_vm_protect: M13 routes it into the box like mprotect(74), through the SAME
@@ -356,7 +362,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // protection only. Writes nothing itself, so it records like mprotect.
             Stop::Syscall { num, args } if num == MACH_VM_PROTECT => {
                 b.guest_mprotect(args[1], args[2], args[4]);
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] }).map_err(|e| format!("append mach_vm_protect: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append mach_vm_protect: {e}"))?; count += 1;
                 b.set_x0_err_and_return(0, false);
             }
             // mach_msg2 (−47): MIG kernel RPCs. Address-space ops are serviced against GUEST
@@ -385,7 +391,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_vm_map_reply(m.reply_port, ipa) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
-                            err: false, writes: writes.clone() })
+                            err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 vm_map: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
@@ -404,7 +410,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_get_special_port_reply(m.reply_port, name) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
-                            err: false, writes: writes.clone() })
+                            err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 get_special_port: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
@@ -422,7 +428,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
-                            err: false, writes: writes.clone() })
+                            err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 set_special_port: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
@@ -434,7 +440,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, retcode) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS,
-                            err: false, writes: writes.clone() })
+                            err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 stub: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
@@ -451,7 +457,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                                 }
                             }
                         }
-                        w.append(&Event::Syscall { num, args, ret, err, writes })
+                        w.append(&Event::Syscall { num, args, ret, err, writes, thread })
                             .map_err(|e| format!("append mach_msg2 fwd: {e}"))?; count += 1;
                         b.set_x0_err_and_return(ret, err);
                     }
@@ -472,7 +478,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // Learn the guest's task-port name from task_self_trap (−28) so machmsg routing can
                 // recognize task-destined kernel RPCs. Mirrored on replay from the recorded result.
                 if num == MACH_TASK_SELF && !err { guest_task_port = Some(ret); }
-                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append mach-trap: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret, err, writes, thread }).map_err(|e| format!("append mach-trap: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
             // ---- M11-signals ---------------------------------------------------------------
@@ -499,7 +505,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 let writes = if args[2] != 0 {
                     vec![Region { ipa: args[2], bytes: retrace_box::encode_oldact(old).to_vec() }]
                 } else { vec![] };
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append sigaction: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
@@ -515,7 +521,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 let writes = if args[2] != 0 {
                     vec![Region { ipa: args[2], bytes: old.to_le_bytes().to_vec() }]
                 } else { vec![] };
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append sigprocmask: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
@@ -525,7 +531,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 let writes = if args[0] != 0 {
                     vec![Region { ipa: args[0], bytes: 0u32.to_le_bytes().to_vec() }]
                 } else { vec![] };
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append sigpending: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
@@ -549,7 +555,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     bytes[16..20].copy_from_slice(&(flags as u32).to_le_bytes());
                     vec![Region { ipa: args[1], bytes }]
                 } else { vec![] };
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone() })
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append sigaltstack: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
             }
@@ -589,7 +595,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     // esr/far are 0: no hardware fault happened, and inventing a syndrome would be
                     // the lie M11 refused when it kept Event::Signal out of Event::Crash.
                     retrace_box::Disposition::Handler(handler) => {
-                        w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                        w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
                             .map_err(|e| format!("append caught raise: {e}"))?; count += 1;
                         // The raise SUCCEEDS, and the frame must say so. Unlike the fault path,
                         // this delivery happens at a syscall boundary, so the context the kernel
@@ -606,13 +612,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
                     }
                     retrace_box::Disposition::Ign => {
-                        w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                        w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
                             .map_err(|e| format!("append ignored raise: {e}"))?; count += 1;
                         b.set_x0_err_and_return(0, false);
                     }
                     retrace_box::Disposition::Dfl => match retrace_arch::default_action(sig) {
                         retrace_arch::DefaultAction::Ignore => {
-                            w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                            w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
                                 .map_err(|e| format!("append default-ignored raise: {e}"))?; count += 1;
                             b.set_x0_err_and_return(0, false);
                         }
@@ -642,7 +648,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // Deliberately NOT followed by set_x0_err_and_return: sigreturn returns no value, and
             // that call would overwrite the x0 and pc just restored from the frame.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGRETURN => {
-                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![] })
+                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append sigreturn: {e}"))?; count += 1;
                 b.sigreturn_restore(args[0], args[2]);
             }
@@ -668,7 +674,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_REGISTER => {
                 b.set_thread_start_pc(args[0]);
                 let (ret, err, writes) = b.forward_and_diff(num, args);
-                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append bsdthread_register: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret, err, writes, thread }).map_err(|e| format!("append bsdthread_register: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
             // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
@@ -685,7 +691,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // comparison still covers it, which is what keeps this honest rather than merely quiet.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_CREATE => {
                 let rc = b.guest_bsdthread_create(args);
-                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append bsdthread_create: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
@@ -696,7 +702,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // divergence oracle, and a hardcoded `ret: 0` would leave it permanently vacuous.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_TERMINATE => {
                 let rc = b.guest_bsdthread_terminate(args);
-                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append bsdthread_terminate: {e}"))?; count += 1;
                 // Task 8 fix round 1, M-4 panicked here because "no scheduler exists yet to switch
                 // the vCPU away from it". M14 TASK 9 IS THAT SCHEDULER, so the panic is now
@@ -726,7 +732,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // no `Err` variant left for this arm to turn into `err: true`.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAIT => {
                 let rc = b.guest_ulock_wait(args);
-                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append ulock_wait: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
@@ -738,7 +744,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // guest memory (it only moves thread-table state), so the event carries no writes.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAKE => {
                 let rc = b.guest_ulock_wake(args);
-                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append ulock_wake: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
@@ -761,7 +767,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // successful close has already retired its slot — forward_and_diff owns both halves
                 // of the fd contract so no caller has to remember the second one.
                 let (ret, err, writes) = b.forward_and_diff(num, args);
-                w.append(&Event::Syscall { num, args, ret, err, writes }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
+                w.append(&Event::Syscall { num, args, ret, err, writes, thread }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
             // A cache-window stage-2 fault: stage/fixup/re-sign/map the page (page_in_cache) and
@@ -1011,7 +1017,9 @@ impl ReplaySession {
                         return self.finish_event();
                     }
                     match self.events.get(self.idx) {
-                        Some(Event::Syscall { num: rn, args: ra, ret, err, writes }) => {
+                        // `thread` deliberately unused here — Task 4 owns wiring it into the
+                        // divergence check; this task only records it.
+                        Some(Event::Syscall { num: rn, args: ra, ret, err, writes, thread: _ }) => {
                             if num != *rn || args != *ra {
                                 return Err(Divergence { landmark: self.idx, pc,
                                     detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
