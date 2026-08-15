@@ -772,3 +772,21 @@ fn bsdthread_create_writes_the_childs_thread_port_into_the_pthread_struct() {
         "pthread+0xf8 must be a non-zero thread port — join reads THIS word and skips \
          __ulock_wait entirely when it is 0, so a zero here is a child that never runs");
 }
+
+/// M15 Task 1: pins the invariant `ReplaySession::current_thread()` will expose — that
+/// `ThreadTable::current()` tracks the scheduler's own switch, both before (creation must not
+/// switch) and after (a block must) — using the same round-trip `run_switches_to_the_child_when_main_blocks`
+/// above already exercises via `schedule_after_block()` directly rather than through `run()`.
+#[test]
+fn current_thread_follows_the_scheduler_across_a_switch() {
+    let mut b = tb();
+    b.set_thread_start_pc(0x0001_804b_2000);
+    let p = pth(&b, 1);
+    b.guest_bsdthread_create([0x1000, 0, p, p, 0x90008ff, 0, 0, 0]);
+    assert_eq!(b.threads().current(), 0, "creation must not switch — the real kernel does not either");
+
+    // Block thread 0 so the scheduler has somewhere to go, then take the switch.
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.schedule_after_block();
+    assert_eq!(b.threads().current(), 1, "the scheduler must have switched to the child");
+}
