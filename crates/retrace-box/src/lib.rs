@@ -3224,20 +3224,25 @@ impl Box_ {
     /// timeout/failure. This box always returns 0 on the non-EFAULT paths — including the
     /// already-satisfied one — which is a SIMPLIFICATION, not a measured fact (fix round 1, M-5
     /// corrects the earlier doc's overstated claim). **The block/no-block decision made here is
-    /// NOT independently visible to the replay divergence oracle**: `rc`/`err` are the SAME on
-    /// both branches (only the EFAULT path differs), and neither branch writes guest memory, so
-    /// nothing in the recorded `Event::Syscall` distinguishes "blocked" from "stayed runnable"
-    /// (fix round 1, I-3 corrects the earlier doc's false claim that the mirror already checks
-    /// this). If replay's memory at `addr` ever differed from record's — an upstream bug, not a
-    /// normal-operation risk — replay could silently leave a different thread `Runnable` here and
-    /// nothing would say so at this call. Closing that gap directly needs either a trace-format
-    /// change (a new field on `Event::Syscall`, which is a format break per `TRACE_MAGIC` — too
-    /// heavy for this fix round and not this task's call) or is closed *indirectly*, the same way
-    /// cache-page/PAC regeneration already is (CLAUDE.md's M0 principle: pure functions of
-    /// already-verified inputs, checked downstream rather than at the point of computation): once
-    /// M14 Task 9 wires `pick_next`/`switch_to_thread` into `Box_::run()`, a wrongly-scheduled
-    /// thread issues a DIFFERENT next syscall than the recording, which the standard `(num, args)`
-    /// divergence check every other syscall already relies on then catches automatically.
+    /// still not independently visible in `rc`/`err` or in any guest memory write**: both
+    /// branches return the same `rc`/`err` (only the EFAULT path differs), and neither writes
+    /// guest memory, so nothing in those fields of the recorded `Event::Syscall` distinguishes
+    /// "blocked" from "stayed runnable" (fix round 1, I-3 corrects the earlier doc's false claim
+    /// that the mirror already checks this).
+    ///
+    /// That gap is CLOSED now, though — directly, not indirectly. M15 Task 3 added a `thread: u32`
+    /// field to `Event::Syscall` recording which thread issued each syscall (`TRACE_MAGIC` bumped
+    /// to `RT\x00\x07`), and M15 Task 4 made `ReplaySession::advance` compare it against
+    /// `self.current_thread()` on every syscall, right after the `(num, args)` check. If replay's
+    /// memory at `addr` ever differed from record's — an upstream bug, not a normal-operation risk
+    /// — and this call left a different thread `Runnable` here than record did, that wrongly
+    /// scheduled thread is the one that issues the NEXT recorded syscall event, and the thread
+    /// check catches the mismatch there directly. An earlier version of this doc argued the
+    /// existing `(num, args)` check would catch that "automatically" once a scheduler existed —
+    /// that claim was already known false during M14's own review, before this doc was written:
+    /// two threads running the SAME code issue byte-identical `(num, args)`, so a wrong-thread
+    /// replay of identical code passed that check in silence. The `thread` field and the M15
+    /// Task 4 comparison are what actually closes the gap; nothing here catches it "automatically".
     ///
     /// **Returns the raw `x0` word, not a `Result`, because under `ULF_NO_ERRNO` this syscall has
     /// no error flag to return** (fix round 1, I-2). Both whitelisted operation words set bit 24 =
