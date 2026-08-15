@@ -1512,6 +1512,13 @@ impl ReplaySession {
 
     /// The current landmark index (how many trace events have been consumed).
     pub fn landmark(&self) -> usize { self.idx }
+    /// M15: which guest thread is running at this position. The thread is a DERIVED property of
+    /// `(N, K)` — a switch happens only at a clean stop boundary between windows — so this is a
+    /// query about the current position, not a coordinate the caller supplies.
+    ///
+    /// Reads what the box already computes. The schedule is a pure function of the guest's own
+    /// syscall sequence (M14), recomputed identically on replay, so this needs nothing recorded.
+    pub fn current_thread(&self) -> u32 { self.b.threads().current() as u32 }
     /// Peek the NEXT trace event to be consumed: its `(num, args)` when it is a `Syscall`, else
     /// `None` (a `Snapshot`/`Exit`, or past the last event). Read-only — does NOT advance the guest.
     /// Lets a discovery session recognize a target syscall landmark (e.g. `write(1, …)`) before

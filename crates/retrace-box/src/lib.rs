@@ -2170,6 +2170,12 @@ impl Box_ {
         if self.threads.needs_reschedule() {
             self.schedule_after_block();
         }
+        // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
+        // already happened before the first instruction of this window retires. Pin it: after this
+        // point, no path may change `current` until the next run()/step() entry.
+        debug_assert!(!self.threads.needs_reschedule(),
+            "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
+             would make position->thread ambiguous");
         loop {
             let e = self.vcpu.run().expect("hv_vcpu_run");
             if e.reason != EXIT_EXCEPTION { continue; }         // vtimer/canceled: control-plane only
@@ -2262,6 +2268,12 @@ impl Box_ {
         if self.threads.needs_reschedule() {
             self.schedule_after_block();
         }
+        // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
+        // already happened before the first instruction of this window retires. Pin it: after this
+        // point, no path may change `current` until the next run()/step() entry.
+        debug_assert!(!self.threads.needs_reschedule(),
+            "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
+             would make position->thread ambiguous");
         let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_SS).unwrap();
         let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
