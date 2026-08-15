@@ -27,13 +27,26 @@ Every signature below was read out of the tree while writing this plan. Use thes
 
 **There is no `write_regs` yet.** Task 5 adds one as the inverse of `regs_snapshot`; it is the only new low-level helper this milestone needs.
 
+### Where syscall dispatch actually lives — corrected during Task 3
+
+This plan originally said the per-syscall dispatch is in `crates/retrace-box/src/lib.rs`. **It is not.** `retrace-box` owns `forward_and_diff`, the generic forward primitive, and the `Box_` methods that implement guest semantics — but the `match stop { Stop::Syscall { num, args } … }` dispatch is in **`crates/retrace-core/src/lib.rs`**, in two places that must stay mirrored:
+
+| side | location | M13's `mach_vm_protect` example |
+|---|---|---|
+| record | `record_box`'s `match stop` | `lib.rs:352` → `b.guest_mprotect(args[1], args[2], args[4])` |
+| replay | `ReplaySession::advance` | `lib.rs:1148-1149` → `self.b.guest_mprotect(args[1], args[2], args[4])` |
+
+**Copy that pattern.** A new arm goes in *both*, calling the *same* `Box_` method with the *same* arguments — that identity is what makes symmetry rule 1 hold by construction rather than by inspection. Task 3's `panic!` scaffold is an exception only because it records no event and kills the recorder, so there is nothing for replay to mirror.
+
+Note the arm must sit **before** the generic forward arm. Forwarding syscall 360 to the host is reproducibly fatal (Task 1).
+
 ## Global Constraints
 
 - **macOS 26.x on Apple Silicon.** Every binary touching `hv_*` needs `com.apple.security.hypervisor` (ad-hoc signable via `tools/codesign-run.sh`).
 - **`--test-threads=1` is mandatory** — one HVF VM per process. `just gate` sets it; a bare `cargo test` flakes with `HV_BUSY`.
 - **`just gate` is THE exit gate:** `cargo test --workspace` + `clippy -D warnings`. **Baseline entering this milestone: 311 passed / 0 failed / 1 ignored (94 test binaries), clippy clean**, at `main` = `c685695`. The 1 ignored is `stackoverflow_rust_e2e` (M8 spec risk R3) and it stays ignored — do not "fix" it in this milestone.
 - **`cargo test -p retrace --lib` IS INVALID.** `retrace` is a binary-only crate; `--lib` makes cargo fail the *entire* invocation with exit 101 and `error: no library targets found in package 'retrace'`, running nothing — including a `--bins` half passed in the same command. Use `cargo test -p retrace --bins`. This cost real time in M13 Task 12; the failure is indistinguishable from a test failure at the exit-code level.
-- **GATE CADENCE.** A full gate is ~11 min wall-clock. Run it **in full** only where a live call site can actually move a dynamic gate: Tasks **7, 8, 9, 10, 11, 12**. Tasks **3, 4, 5, 6** add code nothing calls yet, so they run **targeted crate tests plus clippy**: `cargo test -p retrace-box --test threads --test checkpoint_seek -- --test-threads=1` and `cargo clippy --workspace --all-targets -- -D warnings`. Per-task count checksums are **batched, not abandoned** — the next full gate must equal the cumulative projection since the last one, and a mismatch is investigated *then*, not waved through.
+- **GATE CADENCE.** A full gate is ~11 min wall-clock. Run it **in full** only where a live call site can actually move a dynamic gate: Tasks **7, 8, 9, 11, 12**. (Task 10 is excluded deliberately — it breaks `pick_next`, observes the failure, and reverts, so it ends on already-gated code and its own steps run targeted tests only.) Tasks **3, 4, 5, 6** add code nothing calls yet, so they run **targeted crate tests plus clippy**: `cargo test -p retrace-box --test threads --test checkpoint_seek -- --test-threads=1` and `cargo clippy --workspace --all-targets -- -D warnings`. Per-task count checksums are **batched, not abandoned** — the next full gate must equal the cumulative projection since the last one, and a mismatch is investigated *then*, not waved through.
 - **Who runs the gate: the CONTROLLER, never an implementer.** Measured across four attempts in M13: both controller-run gates completed; both subagent-run gates were reaped mid-run once the agent went idle (killed at 44/90; SIGTERM at 19/90). Raising the subagent's Bash timeout keeps the *agent* alive but does not protect its orphaned child process. Implementers run fast crate-level tests and clippy only.
 - **Do not run `sudo killall syspolicyd` during a gate.** It is a real remedy for accumulated Gatekeeper load but it **strands any process already mid-code-signature-validation** — that process then blocks forever on a dead daemon with zero accumulated CPU. Kill it *between* runs, never during one.
 - **Symmetry rule 1:** a special case in record's `match stop` needs a mirror in replay's dispatch, both recomputing identical bytes. **Symmetry rule 2:** deterministic emulation belongs *below* the trace, inside `Box_::run()`, where it fires identically on both sides. M14's scheduler is a rule-2 citizen; keep it there.
@@ -121,7 +134,7 @@ RETRACE_TRACE=1 cargo run -q -p retrace -- record-dyn ./spikes/threadjoin -o /tm
 otool -tV /usr/lib/system/libsystem_pthread.dylib 2>/dev/null | sed -n '/_pthread_join:/,/^_/p' | head -80
 ```
 
-Record which of `psynch_cvwait` (`SYS_PSYNCH_CVWAIT`), `__ulock_wait` (515) / `__ulock_wait2` (516), or a Mach `semaphore_wait` appears. **Report the syscall number, not just the name.**
+Record which of `psynch_cvwait` (`SYS_PSYNCH_CVWAIT`), `__ulock_wait` (515) / `__ulock_wake` (516), or a Mach `semaphore_wait` appears. **Report the syscall number, not just the name.**
 
 - [ ] **Step 4: Answer the second question — does `bsdthread_create` reach the host?**
 
@@ -363,18 +376,9 @@ fn ctx(pc: u64) -> ThreadCtx {
     c
 }
 
-/// A `Box_` for the VM-backed tests further down this file.
-///
-/// There is no `Box_::for_test()`; the constructor is `Box_::load(&loaded)` and every existing
-/// retrace-box test builds one this way (see `tests/checkpoint.rs:12`). Copy whichever static guest
-/// fixture that neighbouring test uses — M14 needs no special guest for the register-level tests,
-/// only a live vCPU. **`--test-threads=1` is mandatory: one HVF VM per process.**
-fn tb() -> retrace_box::Box_ {
-    // `parse_macho` takes BYTES and returns `Loaded` directly — it is not fallible and the constant
-    // is a PATH. This is exactly the two-line form `tests/checkpoint.rs:11-12` uses.
-    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::SPINLOOP).unwrap());
-    retrace_box::Box_::load(&loaded)
-}
+// NOTE: do NOT add a `tb()` helper in this task. None of Task 4's six tests are VM-backed — they
+// exercise `ThreadTable`/`ThreadCtx` only — so an unused helper would be dead code and fail clippy
+// under `-D warnings`. **Task 5 adds `tb()` alongside the first test that needs it.**
 
 #[test]
 fn a_fresh_table_has_one_runnable_main_thread() {
@@ -458,7 +462,9 @@ Expected: FAIL to compile — `unresolved import retrace_box::thread`.
 //! thread. Given the guest's own syscall sequence the choice is forced, so record and replay
 //! schedule identically with nothing recorded and no trace-format change. That is symmetry rule 2:
 //! deterministic behaviour belongs below the trace, where it fires identically on both sides.
-use crate::Regs;
+// `retrace-box` imports Regs PRIVATELY at lib.rs:4 (`use retrace_trace::{Regs, Region};`), so
+// `crate::Regs` does NOT resolve from a submodule. Import it from its own crate.
+use retrace_trace::Regs;
 
 /// One thread's register context.
 ///
@@ -482,7 +488,9 @@ pub struct ThreadCtx {
 impl ThreadCtx {
     pub fn zeroed() -> Self {
         Self {
-            regs: Regs::default(),
+            // `Regs` derives Debug/Clone/PartialEq/Eq/Serialize/Deserialize but NOT Default —
+            // construct it field-by-field rather than adding a derive to the trace crate.
+            regs: Regs { x: [0u64; 31], pc: 0, sp_el0: 0, cpsr: 0 },
             fp: [0u128; 32],
             fpcr: 0,
             fpsr: 0,
@@ -606,7 +614,7 @@ pub mod thread;
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 6 tests. If `Regs` does not derive `Default`/`PartialEq`/`Clone`, add the derives it needs — do **not** hand-roll a second register struct.
+Expected: PASS, 6 tests. If `Regs` does not derive `Default`/`PartialEq`/`Clone`, add the derives it needs — do **not** hand-roll a second register struct. *(Shipped 7: the fix round added `pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one`. Every count below is measured against that 7.)*
 
 - [ ] **Step 6: Targeted tests and clippy**
 
@@ -638,11 +646,26 @@ git commit -m "M14 t4: a thread table and a scheduler that is a pure function"
 
 Append to `crates/retrace-box/tests/threads.rs`:
 
+This task adds the **first VM-backed test in the file**, so it must also add the `tb()` helper (Task 4 deliberately left it out — an unused helper is dead code under `-D warnings`). Add both:
+
 ```rust
+/// A `Box_` for the VM-backed tests in this file.
+///
+/// There is no `Box_::for_test()`; the constructor is `Box_::load(&loaded)`, and every existing
+/// retrace-box test builds one this way — see `tests/checkpoint.rs:11-12`, whose exact two-line
+/// form this copies. `parse_macho` takes BYTES and returns `Loaded` directly: it is not fallible,
+/// and the `SPINLOOP` constant is a PATH, so read it first. M14 needs no special guest for these
+/// register-level tests, only a live vCPU. **`--test-threads=1` is mandatory: one HVF VM per
+/// process.**
+fn tb() -> retrace_box::Box_ {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::SPINLOOP).unwrap());
+    retrace_box::Box_::load(&loaded)
+}
+
 // This one needs a VM.
 #[test]
 fn a_switch_round_trips_every_register_in_the_context() {
-    let mut b = tb();   // see `fn tb()` at the top of this file
+    let mut b = tb();
     // Distinctive values in every field the context claims to carry, so a dropped field shows up
     // as a mismatch rather than a coincidental zero-equals-zero pass.
     b.set_x(3, 0xdead_beef_0000_0003);
@@ -755,7 +778,7 @@ and initialise it in each constructor with `thread::ThreadTable::new(thread::Thr
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 7 tests.
+Expected: PASS, 8 tests.
 
 - [ ] **Step 5: Prove the existing gates did not move**
 
@@ -764,7 +787,7 @@ Adding a field to `Box_` touches every constructor. Run the crate:
 ```bash
 cargo test -p retrace-box -- --test-threads=1
 ```
-Expected: **123 + 7 = 130 passed / 0 failed / 0 ignored.**
+Expected: **123 + 8 = 131 passed / 0 failed / 0 ignored.**
 
 - [ ] **Step 6: Clippy, then commit**
 
@@ -779,6 +802,8 @@ git commit -m "M14 t5: a context switch, built on the save/restore discipline M9
 ### Task 6: `BoxState` carries the thread table (R4)
 
 Risk R4 is that a checkpoint silently loses every non-current thread — it still restores, still runs, and breaks quietly. That is the M13 Task 8 signature, so the gate must assert the restored **table**, not merely that the seek succeeded.
+
+**As shipped, this task needed two tests beyond the one specified below, and the reason is worth keeping.** The planned test asserts on the `BoxState` that `checkpoint()` produced and never restores it, so a `from_checkpoint` that carries the table into `BoxState` and then drops it on the floor — R4 itself — satisfies every assertion in it. Measured by mutation: reverting the restore to a fresh table leaves the planned test green. `a_restored_checkpoint_still_has_every_thread` closes that. Separately, R4 has a hardware half: `from_checkpoint` forced `TPIDRRO_EL0` to the constant `TSD_IPA`, which was right while the thread pointer WAS constant and hands a restored child main's TSD the moment it is not — it is precisely the register `BoxState`'s flat fields never carried. `a_restored_checkpoint_puts_the_running_threads_pointer_back_on_the_vcpu` covers that, and the restore now reads the value from the captured table.
 
 **Files:**
 - Modify: `crates/retrace-box/src/lib.rs` (`BoxState`, `capture`, `from_checkpoint`)
@@ -839,7 +864,7 @@ Populate it in `capture` (after `save_ctx` has folded the live context back into
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 8 tests.
+Expected: PASS, 11 tests — the one below, plus the two the task actually needs (see the note at the head of this task).
 
 - [ ] **Step 5: Prove M4's seeks still work**
 
@@ -847,7 +872,7 @@ Expected: PASS, 8 tests.
 cargo test -p retrace-box -- --test-threads=1
 cargo test -p retrace --test checkpoint_seek --test seek --test reverse_debug_e2e -- --test-threads=1
 ```
-Expected: `retrace-box` **131 passed**; the three seek targets unchanged from baseline.
+Expected: `retrace-box` **134 passed**; the three seek targets unchanged from baseline (**10 passed**).
 
 - [ ] **Step 6: Clippy, then commit**
 
@@ -862,8 +887,11 @@ git commit -m "M14 t6: a checkpoint that forgets a thread breaks quietly, so it 
 ### Task 7: Emulated `bsdthread_create`
 
 **Files:**
-- Modify: `crates/retrace-box/src/lib.rs` (replace Task 3's panic scaffold)
+- Modify: `crates/retrace-core/src/lib.rs` — replace Task 3's panic scaffold in `record_box`'s `match stop`, **and add the matching replay arm in `ReplaySession::advance`**. See "Where syscall dispatch actually lives" above; copy M13's `mach_vm_protect` pair at `:352` / `:1148`.
+- Modify: `crates/retrace-box/src/lib.rs` — the `guest_bsdthread_create` method itself and the `thread_start_pc` field.
 - Test: `crates/retrace-box/tests/threads.rs`
+
+**Symmetry rule 1 applies here and it is not optional.** Record and replay must both call `b.guest_bsdthread_create(args)` with identical arguments, so both build an identical thread table. Omit the replay arm and replay runs a one-thread table against a two-thread recording — which surfaces as a divergence at the child's first syscall, not as a clean error. Task 9's plan text says to measure this by deletion; do that here too if it is cheap.
 
 **Interfaces:**
 - Consumes: Task 2's measured ABI and `threadstart` address; `ThreadTable::spawn`; `ThreadCtx`.
@@ -889,7 +917,7 @@ retrace_arch::SYS_BSDTHREAD_REGISTER => {
 #[test]
 fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     let mut b = tb();   // see `fn tb()` at the top of this file
-    b.set_thread_start_pc_for_test(0x1804b_2000);
+    b.set_thread_start_pc(0x0001_804b_2000);
 
     // The ABI measured in Task 2: (func, arg, stack, pthread, flags).
     let rc = b.guest_bsdthread_create([0x1_0002_4e00, 0x62180, 0x3020_7000, 0x3020_7000, 0x90008ff, 0, 0, 0]);
@@ -898,8 +926,14 @@ fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     assert_eq!(b.threads().len(), 2);
     assert_eq!(b.threads().current(), 0, "create does not switch — the caller keeps running");
     let c = b.threads().ctx_of(1);
-    assert_eq!(c.elr, 0x1804b_2000, "the child enters at the REGISTERED trampoline, not at func");
-    assert_eq!(c.regs.x[1], 0x1_0002_4e00, "libpthread's contract passes func to the trampoline");
+    assert_eq!(c.elr, 0x0001_804b_2000, "the child enters at the REGISTERED trampoline, not at func");
+    // MEASURED contract (Task 2, re-disassembled in review): __pthread_start reads x0 and w5 only.
+    // func/arg arrive through the pthread struct at +0x90/+0x98, which the GUEST populated before
+    // trapping — so they must NOT appear in registers here.
+    assert_eq!(c.regs.x[0], 0x3020_7000, "x0 is the pthread-struct pointer");
+    assert_eq!(c.regs.x[5], 0x90008ff, "w5 carries the flags __pthread_start tbnz/tbz-tests");
+    assert_eq!(c.regs.x[1], 0, "x1 is NOT part of the contract — seeding it would be cargo cult");
+    assert_eq!(c.tpidrro_el0, 0x3020_7000, "each thread gets its own thread pointer…");
     assert_ne!(c.regs.sp_el0, 0, "the child runs on the guest-allocated stack");
 }
 
@@ -914,7 +948,9 @@ fn bsdthread_create_without_a_registered_trampoline_fails_loud() {
 }
 ```
 
-**The exact register contract in the first test — which registers the trampoline expects `func`, `arg`, `stack` and `pthread` in — MUST come from Task 2's measurement.** If Task 2 measured a different layout, use the measured one and update this test; do not preserve the plan's guess. M13's Task 10 shipped a planned guest that wrote `cur_protection` to the wrong register and would have asserted vacuously.
+**This test was REWRITTEN after Task 2 measured the real contract, which is not what this plan originally guessed.** The plan had the classic five-register `_pthread_start(self, kport, fun, funarg, stacksize, pflags)` shape; the disassembly says `__pthread_start` reads only `x0` and `w5`, and takes `func`/`arg` from the pthread struct at `+0x90`/`+0x98`. Both Task 2 and its reviewer disassembled this independently and agree. **Use the measured contract above. Do not restore the five-register form.** M13's Task 10 shipped a planned guest that wrote to the wrong register and would have asserted vacuously — this is that same failure, caught before it shipped.
+
+The `stack` (x2) and `pthread` (x3) arguments are numerically **identical** in every capture taken so far (both this plan's Rust probe and Task 2's C spike). That is a real property of Apple's combined stack+struct allocation, not a misread — but do not write code that relies on them being the same value.
 
 - [ ] **Step 3: Run and watch it fail**
 
@@ -947,14 +983,31 @@ impl Box_ {
         ctx.elr = start;
         ctx.spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
         ctx.regs.sp_el0 = stack;
-        // libpthread's thread_start contract, per Task 2's measurement.
+
+        // THE THREAD-START CONTRACT, MEASURED (Task 2) AND INDEPENDENTLY RE-DISASSEMBLED IN REVIEW.
+        // NOT the classic _pthread_start(self, kport, fun, funarg, stacksize, pflags) shape — this
+        // plan originally guessed that and was WRONG. `__pthread_start` reads only:
+        //   x0 — the pthread-struct pointer
+        //   w5 — flags (tested via tbnz/tbz at its entry, 0x6be0/0x6be4)
+        // and it loads func/arg FROM THE STRUCT, not from registers:
+        //   `ldp x8, x0, [x19, #0x90]` at 0x6c50 → x8 = [pthread+0x90] (func),
+        //                                          x0 = [pthread+0x98] (arg), then `blraaz x8`.
+        // x1-x4 are never read on the entry-to-dispatch path. (One callee,
+        // `__pthread_markcancel_if_canceled`, does `mov x0, x1` at 0x3788, but only on an
+        // already-canceled branch this path does not take — internal bookkeeping, not dispatch.)
+        //
+        // So the box seeds x0 and w5 and nothing else. It does NOT populate the struct: the guest's
+        // own `_pthread_create` stored func/arg at +0x90/+0x98 BEFORE issuing this trap, which is
+        // why the fields are there to be read. Writing them here would be retrace inventing guest
+        // state it does not own.
         ctx.regs.x[0] = pthread;
-        ctx.regs.x[1] = func;
-        ctx.regs.x[2] = arg;
-        ctx.regs.x[3] = stack;
-        ctx.regs.x[4] = flags;
+        ctx.regs.x[5] = flags;
         // Each thread gets its own thread pointer. TPIDR_EL0 stays 0 for ALL threads (M2-cpuid).
         ctx.tpidrro_el0 = pthread;
+
+        // `func` and `arg` are deliberately unused: they reach the child through the struct, not
+        // through us. Named in the destructuring above so the ABI stays documented at the call site.
+        let _ = (func, arg);
 
         self.threads.spawn(ctx, (stack, 0));
         0
@@ -967,16 +1020,33 @@ impl Box_ {
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 10 tests.
+Expected: PASS, 14 tests. (13 from this task's two new tests; the 14th is the checkpoint round-trip
+test added in fix round 1, when the controller ruled `thread_start_pc` must be carried by `BoxState`.)
 
 - [ ] **Step 6: FULL GATE — a live call site now exists**
 
 **The controller runs this, not the implementer.**
 
+Run it DETACHED, not inside a tool call with a timeout — a full gate is ~11 min and two M14 attempts
+were killed at a 10-minute cap. Redirect to a file that outlives the call and poll the file:
+
 ```bash
-just gate 2>&1 | tail -20
+nohup just gate > /tmp/gate.log 2>&1 & disown
 ```
-Expected: **321 passed / 0 failed / 1 ignored** (311 baseline + 10 new). Investigate any mismatch before continuing.
+Gate ONCE, LAST: not until the task's review has landed AND its fix rounds are in. Two M14 runs were
+wasted gating a commit a pending review was about to supersede.
+
+The log carries ANSI colour codes that break `awk`/`grep` with a multibyte conversion failure. Strip
+them before tallying:
+
+```bash
+LC_ALL=C sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' /tmp/gate.log | LC_ALL=C tr -cd '\11\12\15\40-\176' > /tmp/gate-clean.txt
+LC_ALL=C awk '/^test result:/ {p+=$4; f+=$6; i+=$8} END {print p, f, i}' /tmp/gate-clean.txt
+```
+
+Expected: **326 passed / 0 failed / 1 ignored** (323 after Task 6, + 3 new — two from this task plus
+fix round 1's). MEASURED at `6e6355d`: 326/0/1 over 95 binaries, clippy clean. Investigate any
+mismatch before continuing.
 
 - [ ] **Step 7: Commit**
 
@@ -990,12 +1060,15 @@ git commit -m "M14 t7: bsdthread_create builds a thread instead of dying"
 ### Task 8: Thread exit, and waking the joiner
 
 **Files:**
-- Modify: `crates/retrace-box/src/lib.rs`
+- Modify: `crates/retrace-core/src/lib.rs` — the `bsdthread_terminate` and blocking-primitive arms, **in both `record_box` and `ReplaySession::advance`**.
+- Modify: `crates/retrace-box/src/lib.rs` — the `guest_bsdthread_terminate` method.
 - Test: `crates/retrace-box/tests/threads.rs`
 
 **Interfaces:**
-- Consumes: Task 1's measured join primitive; `ThreadTable::exit_current`/`unblock_joiners_of`.
+- Consumes: Task 1's measured join primitive — **`__ulock_wait`, syscall 515** (measured, and independently cross-checked against the SDK's `sys/syscall.h`); `ThreadTable::exit_current`/`unblock_joiners_of`.
 - Produces: `Box_::guest_bsdthread_terminate(&mut self, args: [u64; 8]) -> u64`.
+
+**A design decision this task must make explicitly, not by accident.** The blocking arm can live either above the trace (in `retrace-core`'s dispatch, needing a replay mirror) or below it (inside `Box_::run()`, firing identically on both sides for free). The spec argues for below — symmetry rule 2 — because that is what makes the schedule a pure function with no recorded state. But `__ulock_wait` is a real syscall with a real return value, so whichever side handles it must decide what the guest sees when it wakes. **State the choice and its reasoning in the report**; do not leave it implied by where the code happened to land.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1003,7 +1076,7 @@ git commit -m "M14 t7: bsdthread_create builds a thread instead of dying"
 #[test]
 fn a_terminating_thread_exits_and_wakes_whoever_joined_it() {
     let mut b = tb();   // see `fn tb()` at the top of this file
-    b.set_thread_start_pc_for_test(0x1804b_2000);
+    b.set_thread_start_pc(0x0001_804b_2000);
     b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
 
     // Main joins the child, so main blocks and the child is the only runnable thread.
@@ -1046,41 +1119,37 @@ impl Box_ {
 
 - [ ] **Step 4: Wire the blocking primitive Task 1 measured**
 
-Add an arm for whichever syscall Task 1 identified. Write the one that matches; delete the others.
+Task 1 SETTLED this: `__ulock_wait`, syscall **515**, pinned by disassembly (`mov x16, #0x203; svc #0x80` in `___ulock_wait`) and cross-checked against the SDK header. The other two candidates are ruled out — `psynch_cvwait` and `semaphore_wait` do not appear anywhere in `__pthread_join`. (`___semwait_signal_nocancel` DOES appear, but downstream of the `__ulock_wait` retry loop, gated on a semaphore slot the join path does not populate — do not mistake it for an alternate wait.) Add `SYS_ULOCK_WAIT: u64 = 515` to `retrace-arch` alongside Task 3's constants, then:
 
-*If `__ulock_wait` (515):*
 ```rust
 retrace_arch::SYS_ULOCK_WAIT => {
-    // args[1] is the address being waited on. If the value no longer matches, the wait is already
-    // satisfied and the thread stays runnable — blocking it would deadlock a race the guest won.
+    // args[1] is the address being waited on. If the value there no longer matches what the guest
+    // expects, the wait is ALREADY SATISFIED and the thread must stay runnable — blocking it would
+    // deadlock a race the guest already won. That check is the difference between a scheduler and
+    // a hang, so write it explicitly rather than assuming the guest only waits when it must.
     self.threads.block(thread::BlockReason::Wait { addr: args[1] });
     return Stop::Syscall { num, args };
 }
 ```
 
-*If `psynch_cvwait`:*
-```rust
-retrace_arch::SYS_PSYNCH_CVWAIT => {
-    self.threads.block(thread::BlockReason::Wait { addr: args[0] });
-    return Stop::Syscall { num, args };
-}
-```
-
-*If a Mach `semaphore_wait`:* handle it in `machmsg.rs`'s router alongside `semaphore_create`, blocking on the semaphore's name rather than an address, and say so in the report.
+**Two things to settle while writing this, and to state in the report:**
+1. **What the woken thread sees in x0.** `__ulock_wait` returns a value the guest inspects. Decide it, justify it, and make record and replay agree — if they disagree the divergence oracle catches it, which is the good outcome, but only after a confusing failure.
+2. **Whether the arm is above or below the trace** (see this task's Files note). Below is the spec's preference; if you put it above, it needs a replay mirror like every other `record_box` arm.
 
 - [ ] **Step 5: Run the tests**
 
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 11 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 6: FULL GATE (controller)**
 
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **322 passed / 0 failed / 1 ignored.**
+Expected: **327 passed / 0 failed / 1 ignored.** (Was 326 before Task 7's fix round 1 added a test;
+every count from here on is +1 over the plan's original projection.)
 
 - [ ] **Step 7: Commit**
 
@@ -1097,11 +1166,47 @@ This is the task that makes the previous five do something. It belongs **below t
 
 **Files:**
 - Modify: `crates/retrace-box/src/lib.rs` (`run()`)
+- Modify: `crates/retrace-arch/src/lib.rs` — `SYS_ULOCK_WAKE` (see "THE WAKE SEAM" below)
+- Modify: `crates/retrace-core/src/lib.rs` — the `__ulock_wake` arms, **both** record and replay
 - Test: `crates/retrace-box/tests/threads.rs`
 
 **Interfaces:**
 - Consumes: everything from Tasks 4–8.
-- Produces: no new public API — `run()` transparently multiplexes threads.
+- Produces: no new public API for the switch itself — `run()` transparently multiplexes threads —
+  plus `Box_::guest_ulock_wake` for the seam below.
+
+> **THE WAKE SEAM — ASSIGNED HERE BY THE CONTROLLER AFTER TASK 8's REVIEW. Task 11 cannot pass
+> without it, and before this note it had no owner.**
+>
+> Task 8 blocks a joining thread as `BlockReason::Wait { addr }`. Task 8's review then established
+> three things by reading `thread.rs` and `retrace-arch`:
+>
+> 1. `ThreadTable`'s only wake path is `unblock_joiners_of`, which matches **only**
+>    `BlockReason::Join`. **Nothing wakes a `Blocked(Wait { addr })` thread.** That wake does not
+>    exist in any form — it is not merely unconnected.
+> 2. Task 8 declined to translate a wait address into a thread index, correctly: Task 1 measured the
+>    syscall number, never the address's relationship to a thread, and fabricating an offset is the
+>    M13 `signal_of_esr` mistake. **But address→index is not the only option, and the report never
+>    considered the one that needs no measurement:** the exiting side calls `__ulock_wake` on the
+>    *same address*, so matching `Wait { addr }` by **address equality** requires nothing Task 1
+>    failed to measure.
+> 3. `__ulock_wake` (**516**) appears nowhere in `retrace-arch` or `retrace-core` — the constant
+>    block jumps 515 → 520. So a guest's wake call falls through to the generic arm and reaches
+>    `forward_and_diff`, issuing a real `__ulock_wake` from **retrace's own process** against a guest
+>    address. That is the same hazard class Task 8's own comments cite as the reason 515 must never
+>    be forwarded, applied to 515's other half. Task 8 adds a fail-loud arm for 516 so it cannot
+>    reach `forward_and_diff`; **this task replaces that assert with the real handler.**
+>
+> **The predicted Task 11 failure if this is skipped**, recorded so it is not rediscovered as a
+> mystery: a real threaded guest that joins blocks main as `Wait { addr }`; the child's
+> `__ulock_wake` is forwarded to the host and lost; nothing wakes main; `pick_next()` returns `None`;
+> deadlock.
+>
+> **Measure before wiring, exactly as Task 1 and Task 2 did.** Confirm from disassembly that the exit
+> path's wake address is the same word the join path waits on. If it is, wake by address equality and
+> say so. If it is not, report what it actually is — do not invent the correlation, and do not paper
+> over it. `unblock_joiners_of`/`Join { target }` stay dead code until something real produces a
+> `Join` block; that is honest, not a defect.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1109,20 +1214,20 @@ This is the task that makes the previous five do something. It belongs **below t
 #[test]
 fn run_switches_to_the_child_when_main_blocks() {
     let mut b = tb();   // see `fn tb()` at the top of this file
-    b.set_thread_start_pc_for_test(0x1804b_2000);
+    b.set_thread_start_pc(0x0001_804b_2000);
     b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
 
     b.schedule_after_block();
 
     assert_eq!(b.threads().current(), 1, "the box must switch to the only runnable thread");
-    assert_eq!(b.get_elr(), 0x1804b_2000, "…and the vCPU must actually be running its context");
+    assert_eq!(b.get_elr(), 0x0001_804b_2000, "…and the vCPU must actually be running its context");
 }
 
 #[test]
 fn a_deadlock_fails_loud_instead_of_hanging() {
     let mut b = tb();   // see `fn tb()` at the top of this file
-    b.set_thread_start_pc_for_test(0x1804b_2000);
+    b.set_thread_start_pc(0x0001_804b_2000);
     b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
     b.switch_to_thread(1);
@@ -1178,7 +1283,7 @@ if !matches!(self.threads.state_of(self.threads.current()), thread::ThreadState:
 ```bash
 cargo test -p retrace-box --test threads -- --test-threads=1
 ```
-Expected: PASS, 13 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 5: FULL GATE (controller)**
 
@@ -1187,7 +1292,7 @@ Expected: PASS, 13 tests.
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **324 passed / 0 failed / 1 ignored.** A regression here means the single-threaded path stopped being the one-entry-table path — check that a lone `Runnable` thread 0 never triggers a switch.
+Expected: **329 passed / 0 failed / 1 ignored.** A regression here means the single-threaded path stopped being the one-entry-table path — check that a lone `Runnable` thread 0 never triggers a switch.
 
 - [ ] **Step 6: Commit**
 
@@ -1352,7 +1457,7 @@ Honest-gate discipline. Do **not** loosen this test, and do **not** regress any 
 ```bash
 just gate 2>&1 | tail -20
 ```
-Expected: **325 passed / 0 failed / 1 ignored** (or 1 passed fewer and 2 ignored if Step 5 fired).
+Expected: **330 passed / 0 failed / 1 ignored** (or 1 passed fewer and 2 ignored if Step 5 fired).
 
 - [ ] **Step 7: Commit**
 

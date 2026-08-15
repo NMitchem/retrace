@@ -196,6 +196,36 @@ pub const SYS_SIGRETURN: u64 = 184;
 pub const SYS_PTHREAD_KILL: u64 = 328;
 pub const SYS_PTHREAD_SIGMASK: u64 = 329;
 pub const SYS_SIGWAIT: u64 = 330;
+/// `bsdthread_create(func, func_arg, stack, pthread, flags)`. **Never forwarded** — the host would
+/// create a real thread inside retrace's own process, starting at a GUEST address. M14 emulates it.
+pub const SYS_BSDTHREAD_CREATE: u64 = 360;
+/// `bsdthread_terminate(stackaddr, freesize, port, sem)` — a guest thread's exit.
+pub const SYS_BSDTHREAD_TERMINATE: u64 = 361;
+/// `bsdthread_register(threadstart, wqthread, pthsize, …)`. Already fires on EVERY dynamic guest
+/// since M7, unremarked; `threadstart` is the address a new thread must be entered at.
+pub const SYS_BSDTHREAD_REGISTER: u64 = 366;
+/// `thread_selfid()` — already fires and already survives.
+pub const SYS_THREAD_SELFID: u64 = 372;
+/// `__ulock_wait(operation, addr, value, timeout_us)` — the primitive `__pthread_join`'s retry
+/// loop blocks on (M14 Task 1, pinned by disassembly of `___ulock_wait`'s `mov x16, #0x203; svc
+/// #0x80` and cross-checked against the SDK's `sys/syscall.h`). `psynch_cvwait` and Mach
+/// `semaphore_wait` do not appear anywhere in `__pthread_join`; `___semwait_signal_nocancel` does,
+/// but strictly downstream of this call's retry loop, gated on state a plain join never sets.
+pub const SYS_ULOCK_WAIT: u64 = 515;
+/// `__ulock_wake(operation, addr, wake_value)` — the other half of the pair `SYS_ULOCK_WAIT`
+/// services, pinned the same way (disassembly of `___ulock_wake`'s `mov x16, #0x204; svc #0x80`
+/// — M14 Task 8 fix round 1, I-1). While re-pinning it, the same method also caught a stale claim
+/// in this constant's neighbour's doc and in Task 1's report: their "candidate list" labels 516 as
+/// `__ulock_wait2` — but `___ulock_wait2` actually disassembles to `mov x16, #0x220` (544), not
+/// 516. 516 is `__ulock_wake`, confirmed directly, not inferred.
+///
+/// UNMEASURED beyond the number: Task 1 measured only the WAIT side of `__pthread_join`; nothing
+/// in this milestone has measured what address the EXITING thread wakes on, or even confirmed it
+/// calls this at all. Deliberately unmodelled — asserted in `retrace-core`'s record dispatch
+/// rather than forwarded, which would issue a real `__ulock_wake` from retrace's own process
+/// against a guest address, the exact hazard `SYS_ULOCK_WAIT`'s own doc cites, applied to its
+/// pair. Assigned to M14 Task 9 (measure the exit-side wake address first).
+pub const SYS_ULOCK_WAKE: u64 = 516;
 pub const SYS_TERMINATE_WITH_PAYLOAD: u64 = 520;
 pub const SYS_ABORT_WITH_PAYLOAD: u64 = 521;
 
@@ -580,5 +610,21 @@ mod tests {
         assert_eq!((SS_ONSTACK, SS_DISABLE), (0x1, 0x4));
         assert_eq!(UC_FLAVOR, 30, "measured in spikes/sigtramp.c as x1 on trampoline entry");
         assert_eq!(SI_USER, 0x10001, "measured by spikes/sigabi.c");
+    }
+
+    #[test]
+    fn thread_syscall_numbers_are_the_darwin_ones() {
+        // Measured on macOS 26 (M14 Task 2): a NON-threading Rust guest already issues 366 and 372.
+        //
+        // SYS_ULOCK_WAKE is here because M14's plan MISLABELED 516 as `__ulock_wait2` (it is
+        // `__ulock_wake`; `__ulock_wait2` is 544), and a wrong syscall number sitting unexercised is
+        // exactly what this cross-check exists to catch — the same shape as M13's `signal_of_esr`
+        // row. All six are the SDK's own values, `MacOSX.sdk/usr/include/sys/syscall.h` lines
+        // 555/556 for the pair.
+        assert_eq!(
+            (SYS_BSDTHREAD_CREATE, SYS_BSDTHREAD_TERMINATE, SYS_BSDTHREAD_REGISTER, SYS_THREAD_SELFID,
+             SYS_ULOCK_WAIT, SYS_ULOCK_WAKE),
+            (360, 361, 366, 372, 515, 516)
+        );
     }
 }

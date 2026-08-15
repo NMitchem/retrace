@@ -459,6 +459,17 @@ fn main() {
         .status().expect("rustc protrust");
     assert!(status.success(), "protrust guest build failed");
 
+    // threadrust: M14's headline — a stock full-std Rust binary that spawns a thread and joins it.
+    // Same rustc recipe as protrust: no -C panic=abort, since nothing here is expected to panic.
+    let src = format!("{}/rs/threadrust.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/threadrust");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc threadrust");
+    assert!(status.success(), "threadrust guest build failed");
+
     // overflow: the guest for the PARKED stackoverflow_rust_e2e gate (M8 spec risk R3). Built so the
     // parked test is real code that compiles and can be un-ignored the day R3 is fixed.
     let src = format!("{}/rs/overflow.rs", env!("CARGO_MANIFEST_DIR"));
