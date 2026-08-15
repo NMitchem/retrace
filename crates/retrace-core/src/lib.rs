@@ -889,6 +889,28 @@ impl ReplaySession {
         self.finish_event()
     }
 
+    /// M15 Task 4, fix round 1: the thread comparison shared by every point in `advance` that
+    /// consumes a recorded `Event::Syscall` landmark. There are THREE such points, not one: the
+    /// generic dispatch below, plus two signal-delivery mirrors that sit ABOVE it and return before
+    /// ever reaching it — the caught-raise mirror (`Disposition::Handler` under `SYS_KILL` /
+    /// `SYS_PTHREAD_KILL`) and the `SYS_SIGRETURN` mirror. A threaded guest that also takes a
+    /// caught signal is the only guest shape that ever reaches either of those two, so a hole in
+    /// just those two paths is invisible to every gate that doesn't combine both — which is exactly
+    /// how the first cut of this check missed them. Each of the three call sites invokes this
+    /// AFTER its own local (num, args) verification, for the same reason the check is ordered that
+    /// way inline: a genuine syscall divergence should be reported as one, not masked by the thread
+    /// mismatch it caused.
+    fn verify_thread(&self, rthread: u32, pc: u64) -> Result<(), Divergence> {
+        if self.current_thread() != rthread {
+            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                "thread {} on replay, {} recorded — the schedule diverged. Two \
+                 threads running the same code issue identical (num, args), which \
+                 is exactly the case this check exists to catch",
+                self.current_thread(), rthread) });
+        }
+        Ok(())
+    }
+
     /// Finish consuming one trace event: bump idx and report it — as `WatchSyscall` if this event's
     /// applied writes overlapped an armed watch range (the event is consumed identically either
     /// way; only the report differs), else as plain `Event`.
@@ -986,8 +1008,14 @@ impl ReplaySession {
                         // SignalDelivery", which is what this looked like before the mirror existed).
                         if matches!(act.disp, retrace_box::Disposition::Handler(_)) {
                             match self.events.get(self.idx) {
-                                Some(Event::Syscall { num: rn, args: ra, .. })
-                                    if *rn == num && *ra == args => {}
+                                Some(Event::Syscall { num: rn, args: ra, thread: rthread, .. })
+                                    if *rn == num && *ra == args => {
+                                    // M15 Task 4, fix round 1: this arm consumes a recorded
+                                    // Event::Syscall landmark and RETURNS before ever reaching the
+                                    // generic dispatch below, so it needs its own call to the thread
+                                    // oracle — see `verify_thread`'s doc.
+                                    self.verify_thread(*rthread, pc)?;
+                                }
                                 other => return Err(Divergence { landmark: self.idx, pc, detail:
                                     format!("expected the recorded caught raise, got {other:?} \
                                              (live: num={num}, args={args:?})") }),
@@ -1007,8 +1035,14 @@ impl ReplaySession {
                     // just restored from the frame (Task 5's carry-forward, on this side too).
                     if num == retrace_arch::SYS_SIGRETURN {
                         match self.events.get(self.idx) {
-                            Some(Event::Syscall { num: rn, args: ra, .. })
-                                if *rn == num && *ra == args => {}
+                            Some(Event::Syscall { num: rn, args: ra, thread: rthread, .. })
+                                if *rn == num && *ra == args => {
+                                // M15 Task 4, fix round 1: this arm consumes a recorded
+                                // Event::Syscall landmark and RETURNS before ever reaching the
+                                // generic dispatch below, so it needs its own call to the thread
+                                // oracle — see `verify_thread`'s doc.
+                                self.verify_thread(*rthread, pc)?;
+                            }
                             other => return Err(Divergence { landmark: self.idx, pc, detail:
                                 format!("expected recorded sigreturn, got {other:?} \
                                          (live args={args:?})") }),
@@ -1022,22 +1056,16 @@ impl ReplaySession {
                                 return Err(Divergence { landmark: self.idx, pc,
                                     detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
                             }
-                            // M15 Task 4: the thread oracle. Placed AFTER the (num, args) check
-                            // above, not before — a genuine syscall divergence usually also
-                            // produces a thread mismatch (the wrong thread issuing the wrong
-                            // call), and it must be reported as the syscall divergence it is
-                            // rather than masked by a thread error it caused. This is the check
-                            // M14's Status section named as the oracle's sharpest limit: two
-                            // threads running the SAME code issue byte-identical (num, args), so
-                            // without this, a replay that schedules the wrong thread onto
-                            // identical code continues in silence.
-                            if self.current_thread() != *rthread {
-                                return Err(Divergence { landmark: self.idx, pc, detail: format!(
-                                    "thread {} on replay, {} recorded — the schedule diverged. Two \
-                                     threads running the same code issue identical (num, args), which \
-                                     is exactly the case this check exists to catch",
-                                    self.current_thread(), rthread) });
-                            }
+                            // M15 Task 4: the thread oracle (see `verify_thread`'s doc for why this
+                            // is one of three call sites). Placed AFTER the (num, args) check above,
+                            // not before — a genuine syscall divergence usually also produces a
+                            // thread mismatch (the wrong thread issuing the wrong call), and it must
+                            // be reported as the syscall divergence it is rather than masked by a
+                            // thread error it caused. This is the check M14's Status section named
+                            // as the oracle's sharpest limit: two threads running the SAME code
+                            // issue byte-identical (num, args), so without this, a replay that
+                            // schedules the wrong thread onto identical code continues in silence.
+                            self.verify_thread(*rthread, pc)?;
                             // M11 mirror of record's serviced-signal arms. Recompute the SAME table
                             // transition and the SAME writeback bytes, then byte-compare against
                             // the recording — that comparison IS the divergence check (symmetry
