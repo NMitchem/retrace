@@ -5,6 +5,11 @@ use std::rc::Rc;
 use retrace_box::{Box_, Stop};
 use retrace_trace::{Writer, Event, Region};
 use retrace_arch::SYS_EXIT;
+pub use retrace_box::thread::{BlockReason, ThreadState};
+
+/// M15: one row of the debugger's thread listing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadSummary { pub tid: u32, pub state: ThreadState, pub is_current: bool }
 
 // mmap flag bit: set => anonymous (M1's guest_mmap path); clear => file-backed (Task 8's
 // anon-staged path — dyld maps the shared cache + dylibs this way).
@@ -1519,6 +1524,18 @@ impl ReplaySession {
     /// Reads what the box already computes. The schedule is a pure function of the guest's own
     /// syscall sequence (M14), recomputed identically on replay, so this needs nothing recorded.
     pub fn current_thread(&self) -> u32 { self.b.threads().current() as u32 }
+    /// M15: every thread the guest has created, in stable index order. Exited threads STAY in the
+    /// table (a `join` may arrive after the exit), so they appear here too — that is information the
+    /// debugger's user wants, not noise.
+    pub fn thread_summaries(&self) -> Vec<ThreadSummary> {
+        let t = self.b.threads();
+        (0..t.len()).map(|i| ThreadSummary {
+            tid: i as u32, state: t.state_of(i), is_current: i == t.current(),
+        }).collect()
+    }
+    /// M15: a specific thread's registers, including a BLOCKED one — impossible before this
+    /// milestone. `None` for an out-of-range id, which the CLI turns into a usage error.
+    pub fn dbg_regs_of(&self, tid: u32) -> Option<String> { self.b.dbg_regs_of(tid as usize) }
     /// Peek the NEXT trace event to be consumed: its `(num, args)` when it is a `Syscall`, else
     /// `None` (a `Snapshot`/`Exit`, or past the last event). Read-only — does NOT advance the guest.
     /// Lets a discovery session recognize a target syscall landmark (e.g. `write(1, …)`) before

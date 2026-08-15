@@ -790,3 +790,49 @@ fn current_thread_follows_the_scheduler_across_a_switch() {
     b.schedule_after_block();
     assert_eq!(b.threads().current(), 1, "the scheduler must have switched to the child");
 }
+
+/// M15 Task 2: the trap this task exists to avoid. `ThreadTable::ctx_of(current)` is stale while
+/// that thread is running — only `switch_to_thread` writes a thread's context back into the table
+/// (see its call in `checkpoint()`, which folds the live vCPU in before cloning the table for
+/// exactly this reason). A `dbg_regs_of` that read the table unconditionally would print STALE
+/// registers for the CURRENT thread, confidently — no panic, no error, just a quiet lie.
+#[test]
+fn dbg_regs_of_reads_the_live_vcpu_for_the_current_thread_not_the_stale_table_slot() {
+    let mut b = tb();
+    // Put a distinctive value in a register of the CURRENT thread, WITHOUT switching. The table's
+    // slot for thread 0 still holds whatever it had at construction, so a table read misses this.
+    b.vcpu_set_x(3, 0xfeed_face_dead_beef);
+
+    let dump = b.dbg_regs_of(0).expect("thread 0 exists");
+    assert!(dump.contains("feedfacedeadbeef"),
+        "dbg_regs_of(current) must read the LIVE vCPU: the table's slot is stale between \
+         switches, and printing it would be a confident lie. Got:\n{dump}");
+}
+
+/// The other half of the trap: a NON-current thread has no live vCPU state at all — the table IS
+/// the authority for it, and this must work even while that thread is BLOCKED (impossible before
+/// this milestone: there was no way to inspect a thread that wasn't running).
+#[test]
+fn dbg_regs_of_reads_the_table_for_a_blocked_non_current_thread() {
+    let mut b = tb();
+    b.set_thread_start_pc(0x0001_804b_2000);
+    let p = pth(&b, 1);
+    b.guest_bsdthread_create([0x0001_0002_4e00, 0, p, p, 0, 0, 0, 0]);
+    // Give the child a distinctive ELR directly in the table (it has never run, so this is exactly
+    // what a real spawn's initial context looks like) and block it, so it is provably not current.
+    b.threads_mut().ctx_mut(1).elr = 0xcafe_babe_0000_0000;
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    assert_ne!(b.threads().current(), 1, "thread 1 must NOT be current for this to test the table path");
+
+    let dump = b.dbg_regs_of(1).expect("thread 1 exists");
+    assert!(dump.contains("cafebabe00000000"),
+        "dbg_regs_of(non-current) must read the TABLE, since that thread has no live vCPU state. \
+         Got:\n{dump}");
+}
+
+/// An out-of-range thread id is a `None`, not a panic — the CLI turns this into a usage error.
+#[test]
+fn dbg_regs_of_is_none_for_an_out_of_range_thread_id() {
+    let b = tb();
+    assert_eq!(b.dbg_regs_of(1), None, "a single-threaded box has no thread 1");
+}
