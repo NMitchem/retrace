@@ -13,8 +13,7 @@ pub struct Region { pub ipa: u64, pub bytes: Vec<u8> }
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     Snapshot { regs: Regs, mem: Vec<Region> },
-    Syscall { num: u64, args: [u64;8], ret: u64, err: bool, writes: Vec<Region> },
-    Sched { thread: u32, until: u64 },
+    Syscall { num: u64, args: [u64;8], ret: u64, err: bool, writes: Vec<Region>, thread: u32 },
     Exit { code: u64 },
     Crash { pc: u64, esr: u64, far: u64 },
     /// M11: the guest raised a signal on itself whose disposition is the default fatal action.
@@ -43,7 +42,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x06"; // "RT" + format version 0x0006 (M12: Event::SignalDelivery)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x07"; // "RT" + format version 0x0007 (M15: Syscall.thread)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -113,7 +112,8 @@ mod tests {
             Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000000, sp_el0:0x2000_0000, cpsr:0 },
                               mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,4] }] },
             Event::Syscall { num:3, args:[5,0x100000100,6,0,0,0,0,0], ret:6, err:false,
-                             writes: vec![Region{ ipa:0x100000100, bytes: vec![9,9,9,9,9,9] }] },
+                             writes: vec![Region{ ipa:0x100000100, bytes: vec![9,9,9,9,9,9] }],
+                             thread: 0 },
             Event::Exit { code:0 },
         ]
     }
@@ -233,8 +233,8 @@ mod tests {
         std::fs::remove_file(&p).ok();
     }
 
-    // M11's magic assertion moved to `magic_bumped_for_the_signal_delivery_variant` when M12 bumped
-    // to v6. What is left here is the half that does not go stale: a v4 trace stays rejected.
+    // M11's magic assertion moved to `magic_bumped_for_the_syscall_thread_tag` when M15 bumped to
+    // v7. What is left here is the half that does not go stale: a v4 trace stays rejected.
     #[test]
     fn rejects_v4_traces() {
         let p = named_tempfile("oldmagic");
@@ -268,20 +268,18 @@ mod tests {
     }
 
     #[test]
-    fn magic_bumped_for_the_signal_delivery_variant() {
-        assert_eq!(
-            TRACE_MAGIC,
-            *b"RT\x00\x06",
-            "adding an Event variant is a format break: the version must bump with it"
-        );
+    fn magic_bumped_for_the_syscall_thread_tag() {
+        // M15 adds `thread` to Event::Syscall — a shape change, so old traces MUST be rejected
+        // whole rather than misparsed.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x07");
     }
 
     #[test]
     fn a_trace_written_with_the_old_magic_is_rejected_whole() {
-        let p = named_tempfile("v5magic");
-        std::fs::write(&p, b"RT\x00\x05rest-of-a-v5-trace").unwrap();
+        let p = named_tempfile("v6magic");
+        std::fs::write(&p, b"RT\x00\x06rest-of-a-v6-trace").unwrap();
         let (evs, rejected) = Reader::open_checked(&p).unwrap();
-        assert!(evs.is_empty() && rejected, "a v5 trace must be rejected, not half-read");
+        assert!(evs.is_empty() && rejected, "a v6 trace must be rejected, not half-read");
         std::fs::remove_file(&p).ok();
     }
 
