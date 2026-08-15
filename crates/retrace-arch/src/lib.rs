@@ -615,10 +615,16 @@ mod tests {
     #[test]
     fn thread_syscall_numbers_are_the_darwin_ones() {
         // Measured on macOS 26 (M14 Task 2): a NON-threading Rust guest already issues 366 and 372.
+        //
+        // SYS_ULOCK_WAKE is here because M14's plan MISLABELED 516 as `__ulock_wait2` (it is
+        // `__ulock_wake`; `__ulock_wait2` is 544), and a wrong syscall number sitting unexercised is
+        // exactly what this cross-check exists to catch — the same shape as M13's `signal_of_esr`
+        // row. All six are the SDK's own values, `MacOSX.sdk/usr/include/sys/syscall.h` lines
+        // 555/556 for the pair.
         assert_eq!(
             (SYS_BSDTHREAD_CREATE, SYS_BSDTHREAD_TERMINATE, SYS_BSDTHREAD_REGISTER, SYS_THREAD_SELFID,
-             SYS_ULOCK_WAIT),
-            (360, 361, 366, 372, 515)
+             SYS_ULOCK_WAIT, SYS_ULOCK_WAKE),
+            (360, 361, 366, 372, 515, 516)
         );
     }
 }

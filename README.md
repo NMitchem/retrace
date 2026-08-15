@@ -2111,3 +2111,227 @@ not dedupe overlapping protect calls, so protecting the same range twice tracks 
 backing wholesale but drops protection only over `[ipa, len)`.
 
 See `docs/superpowers/specs/2026-08-08-retrace-m13-protnone-design.md`.
+
+## Status: M14-threads — 🎉 a guest with two threads of control
+
+**A stock `std::thread::spawn` + `join` Rust guest now records and replays bit-for-bit.**
+`rs/threadrust.rs` prints `main before spawn`, spawns a child that prints `child ran` and returns
+`42u32`, joins it, and prints `joined 42` — recorded, then replayed byte-identically, twice.
+`Box_` gained a thread table, an emulated `bsdthread_create`/`bsdthread_terminate`, a `__ulock_wait`/
+`__ulock_wake` pair, and a cooperative block-driven scheduler. **The gate: 342 passed / 0 failed /
+1 ignored** (96 test binaries), clippy clean over `--workspace --all-targets` with `-D warnings`.
+
+That total was **measured in chunks, not by one `just gate` run**, and the distinction is recorded
+rather than smoothed over: a single `cargo test --workspace` has been killed on this machine twice
+this milestone (once at the 10-minute tool timeout, once mid-run), so the number comes from
+`--workspace --exclude retrace-box --exclude retrace` (93), `-p retrace-box` (152), and the 43
+`-p retrace` test targets plus `--bins` run one invocation at a time (97). It **reconciles** against
+the milestone's own checkpoints rather than being taken on faith: Task 7's measured 326, plus 5 from
+Task 8, 8 from Task 9, 1 from Task 10's F-1 follow-up, and 2 from Task 11 — and 95 binaries plus
+`thread_rust_e2e` is 96. Every gate-count *projection* the plan carried was retired as it drifted;
+this is the measured figure.
+
+**`joined 42` is the whole assertion, and the gate says why.** Exit 0 proves nothing — a guest that
+never spawned also exits 0, the trap `segv_rust_e2e` documented and `protnone_rust_e2e` sharpened.
+That one line can be printed only if the child genuinely **ran** on retrace's single vCPU *and* its
+return value **crossed back** through `join`. The gate also asserts the `bsdthread_create` event is in
+the trace (libstd did not optimize the spawn away) and that two replays are byte-identical — which is
+where a nondeterministic schedule would surface, since a different interleaving reorders the guest's
+own writes.
+
+**The single vCPU is a gift to a replay engine, not an obstacle.** Real threads on real cores are the
+classic source of replay nondeterminism. N guest threads multiplexed onto one vCPU by a scheduler that
+is a pure function of the guest's own syscall sequence are deterministic *by construction*. So the
+schedule is **regenerated, never recorded** — it joins cache pages, the timebase and PAC keys as
+things M0's principle says to recompute rather than store. **Nothing was added to the trace and
+`TRACE_MAGIC` did not move.** The scheduler lives inside `Box_::run()` and `Box_::step()`, below the
+trace, per symmetry rule 2, which is *why* determinism is automatic here rather than argued for.
+
+**M13's `mach_vm_protect` routing, billed in its own Status section as dormant, was this milestone's
+prerequisite.** M13 measured that `hello_rust` issues 47 such calls and never with
+`new_protection == 0`, and wired the routing "for the guest that eventually needs it, not for one that
+does today." That guest is this one, and it needs it **one trap before the wall**: libpthread maps the
+new thread's stack, `mach_vm_protect`s its guard page `PROT_NONE`, *then* asks for the thread. Two
+milestones were coupled without either knowing it.
+
+**The registration half of threading had been working, unremarked, since M7.** Measured on
+`hello_rust` — a guest with **no** threads — `bsdthread_register` (366) fires once and `thread_selfid`
+(372) twice, both surviving silently on **every dynamic guest retrace has ever run**. libpthread hands
+the kernel its thread-start trampoline at startup regardless, so the address the kernel is supposed to
+enter a new thread at had already been handed over eight milestones ago. M14 was therefore narrower
+than "implement threading" — and correspondingly, the box now *captures* that trampoline rather than
+letting it pass.
+
+**Forwarding `bsdthread_create` is not a hazard to weigh — it is a 100%-reproducible, whole-process
+crash, and the spike said so before a line of box code was written.** The design spec called it a
+*maybe* ("the host **may** be creating a real thread… starting at a guest address"). Measured over 40+
+runs, both halves of that were wrong. The host does create a genuine OS thread inside retrace's own
+process, entering **retrace's own** `_pthread_start` with `x0` pointing into guest backing memory — and
+it never reaches guest code at all. It dies three instructions in, at libpthread's `brk #0xc473`, on a
+PAC self-check of the pthread-struct pointer whose bytes were signed under the *guest's* key domain.
+`SIGTRAP` with default disposition kills the whole process, which is why retrace's own main thread died
+mid-serialize with nothing printed. That is a much stronger argument for emulate-never-forward than the
+spec had, and it is now an assert.
+
+**The measured ABI overturned the plan's, and the plan had pre-authorized being overturned.** The
+classic `_pthread_start(self, kport, fun, funarg, stacksize, pflags)` shape — which the plan's own
+Task 7 code encoded, seeding `x0`–`x4` — is **not** what macOS 26 does. `__pthread_start` reads only
+**`x0`** (the pthread struct) and **`w5`** (flags) before dispatch; `x1`–`x4` are never touched, and
+`func`/`arg` are loaded *from the struct* at `+0x90`/`+0x98` (`ldp x8, x0, [x19, #0x90]` immediately
+before `blraaz x8`). The guest's own `_pthread_create` already stored them there before trapping, so
+the box seeds two registers and populates nothing. The Task 7 test now asserts `x1 == 0` explicitly, so
+a future implementer cannot quietly restore the guess. This is M13's Task-10 failure mode — a planned
+guest writing the wrong register, whose assertion would have passed vacuously — **caught before it
+shipped rather than after**.
+
+**The headline's wall: emulating a syscall's *entry contract* is not the same as emulating the
+syscall.** With Tasks 4–9 complete, the guest still failed — and not subtly. `pthread_join` returned
+**success without the child ever running**, and libstd panicked `threads should not terminate
+unexpectedly` because `Arc::get_mut` needs `strong_count == 1`. `RETRACE_TRACE=1` showed `360` firing
+once and then nothing thread-shaped at all: no `515`, no `516`, no `361`. Task 7 had gotten every
+register right; three of the kernel's **side effects** had no owner:
+
+1. **The child's mach port at `pthread + 0xf8`.** `__pthread_join` does not unconditionally wait —
+   `ldr w9, [x19, #0xf8]` makes the kport the wait value, and `cbz w8` **skips `__ulock_wait`
+   entirely** when it is zero, deallocates, and returns success. The only two userspace writers of
+   `+0xf8` in libsystem_pthread are off the `pthread_create` path, and a host probe read the field with
+   the child provably not yet run, 5/5: `[+0xf8]` already equalled `pthread_mach_thread_np(t)` while
+   `[+0x34]` was still 0. The kernel writes it; now so does the box.
+2. **`TPIDRRO_EL0` is `pthread + 0xe0`, not `pthread`.** With the kport written the child ran for the
+   first time and died two instructions in at `brk #0xb001` — *"BUG IN LIBPTHREAD:
+   thread_set_tsd_base() wasn't called by the kernel"*. libpthread reads the register back the other
+   way (`mrs x23, TPIDRRO_EL0` / `sub x21, x23, #0xe0`). Measured 4/4, main and child alike.
+3. **`w5 |= PTHREAD_START_TSD_BASE_SET`** (bit 28) — the kernel's own assertion that it set the TSD
+   base, and the `tbz` that produced that brk. ORed onto the guest's flags, never substituted.
+
+(2) and (3) are one kernel behaviour and were fixed together deliberately: setting the flag while
+leaving the base wrong would be the box asserting something it had not done. The transferable shape:
+**when a spike measures behaviour on the host, list what the KERNEL contributed to that measurement,
+because that list is exactly what the emulation must reproduce.** Task 1's spike correctly concluded
+that `join` blocks on `__ulock_wait`, and that conclusion silently carried the precondition
+`kport != 0`.
+
+**The synthetic port needs no determinism exception, unlike M2-xpcport's.** It is
+`GUEST_THREAD_PORT_BASE | tid` = `0x0BAD_7000 | tid`, a pure function of the guest's syscall sequence,
+so record and replay compute the identical byte at the identical address and **nothing is recorded**.
+A *real* kport would be host-allocated and therefore nondeterministic — exactly why M2-xpcport had to
+take a deliberate record/replay asymmetry for its minted bootstrap port. This needs none, because
+nothing outside the guest ever dereferences the name: libpthread uses it only as the `__ulock_wait`
+comparison value at `pthread+0x34` and hands it back verbatim in `bsdthread_terminate`'s `port`
+argument, both inside the box.
+
+**The wait/wake correlation is address equality, and it was measured rather than fabricated.**
+`__pthread_join` computes `add x21, x19, #0x34` before `___ulock_wait`; `__pthread_joiner_wake`
+computes `add x1, x19, #0x34` before `___ulock_wake`. **Same word, `pthread + 0x34`** — so matching a
+blocked `Wait{addr}` to a wake needs no address→thread-index correlation, which is what Task 8 had
+believed was missing and unmeasurable. Also load-bearing and measured: `__pthread_terminate` calls
+`joiner_wake` *before* `___bsdthread_terminate`, so the joiner is `Runnable` before the child is
+`Exited` and no deferred-wake queue is needed.
+
+**A wrong syscall number, sitting unexercised in the plan, found the way this project keeps finding
+them.** The plan called 516 `__ulock_wait2`. Fresh disassembly says **516 is `__ulock_wake`** (`mov
+x16, #0x204`) and `__ulock_wait2` is **544**; the SDK's `sys/syscall.h` confirms all three. Worse, 516
+appeared nowhere in `retrace-arch` or `retrace-core` at all, so the guest's own wake call was falling
+through to the generic arm and reaching `forward_and_diff` — **issuing a real `__ulock_wake` from
+retrace's own process against a guest address**, the precise hazard class that makes 515 unforwardable,
+applied to 515's other half.
+
+**And then the guard against that very class of bug was itself dropped, which is worth recording
+rather than quietly fixing.** The new `SYS_ULOCK_WAKE` was immediately noticed to be the one thread
+syscall number *not* pinned by `thread_syscall_numbers_are_the_darwin_ones` — this project's whole
+discipline for syscall numbers is that SDK cross-check — and it was routed to "the next fix round."
+That round ran and addressed five other findings; **this one fell out of it and shipped unpinned
+through Tasks 9, 10 and 11.** The milestone's close caught it: 516 is now in the tuple, cross-checked
+against `MacOSX.sdk/usr/include/sys/syscall.h` lines 555/556, and **mutation-verified** rather than
+assumed — set the constant to 544 (the `__ulock_wait2` number the plan had confused it with) and the
+test fails `544` against `516`. The transferable part is not the one-line fix but the shape: a finding
+parked on a *later* task's fix round has no owner, and nothing in the process notices when that round
+closes without it.
+
+**`ULF_NO_ERRNO` — "the library compares against `-4`" and "the kernel returns `-4`" are different
+claims.** Both operation words `__pthread_join` can pass set bit 24 (`ULF_NO_ERRNO`), under which XNU
+returns **`-errno` in `x0` with carry CLEAR**, not `+errno` with carry set. retrace was doing the
+latter, sending the guest into libsyscall's `cerror` so that `join`'s own `cmn w0, #0x4` missed and it
+re-waited forever. The review argued this from libpthread's comparisons — sound, but that is evidence
+about what libpthread *expects*. The fix round measured **XNU directly** with a raw-`svc` probe
+(libsyscall's stub branches on carry and would have destroyed both facts), **including a control with
+the flag cleared**:
+
+```
+op=0x01000002  x0=0xfffffffffffffff2  w0=-14  C=0
+op=0x01020002  x0=0xfffffffffffffff2  w0=-14  C=0
+op=0x00000002  x0=0x000000000000000e  w0=+14  C=1   <- control: flag cleared, what retrace was doing
+```
+
+The control is what proves the flag is the distinguishing bit. `guest_ulock_wait`'s signature collapsed
+from `Result<u64,u64>` to a bare `u64` as a result — with no `Err` variant, no dispatch arm can record
+`err: true`, which makes the bug **unrepresentable** rather than merely fixed.
+
+**Break the call site, not just the callee.** Task 10's job was proving the scheduler non-vacuous.
+Corrupting `pick_next` to `Some(0)` failed 8 tests, so the scheduler's *logic* was well covered. Its
+*wiring* was not: **deleting the call site in `run()` outright passed the entire crate, 150/150.** No
+test in `threads.rs` called `run()` at all, and for a single-threaded guest `needs_reschedule()` is
+false by construction, so the branch was already a no-op on every M0–M13 path — the compatibility
+argument's exact cost. A `run()`-level test now closes it, with **both** its assertions mutation-proven
+against **different** defects (delete the reschedule → `current()` reads 0; keep it but drop `load_ctx`
+→ `current()` passes and only the returned `Stop`'s syscall number notices). Mutation-testing only the
+first would have left the second assertion vacuous in the same sense.
+
+**This milestone's signature defect was the test that cannot fail for the property it names — six
+times.** `pick_next`'s exited-thread test (a mutant matching `Runnable | Exited(_)` passed all six
+tests); the context-switch round-trip that left `pc`, `sp_el0`, `cpsr`, all 32 FP registers, `FPCR` and
+`FPSR` unasserted; the checkpoint test that never called `from_checkpoint` at all, so a restore
+dropping the whole thread table satisfied it (risk R4 exactly); Task 7's fixture whose `stack` and
+`pthread` literals were *equal*, so three assertions could not detect a swap; Task 8's test that
+hand-installed a `Join{target}` state the production path never produces; and Task 9's PSTATE test that
+read `0 == 0` because HVF's reset `SPSR_EL1` happens to be 0 on this host. Each was caught by mutation
+rather than by reading, and the last one is the sharpest lesson: **Task 10's milestone-level
+non-vacuity probe could never have caught it**, because breaking `pick_next` does not touch
+`regs.cpsr`. A per-fix mutation test catches what one milestone-wide probe cannot.
+
+**The plan was wrong about where syscall dispatch lives, and that is worth recording.** It placed the
+per-syscall `match` in `retrace-box`. It is in `retrace-core`, in **two mirrored places** — `record_box`
+and `ReplaySession::advance` — which is symmetry rule 1's whole shape. Four further compile-level
+errors were found in the plan before any dispatch (`Regs` lives in `retrace-trace` with `sp_el0`;
+FPCR/FPSR are `Reg` not `SysReg`; `checkpoint()`/`load()` not `capture()`/`for_test()`; `Regs` derives
+no `Default`), and every gate-count projection in the plan drifted and was retired in favour of
+measurement.
+
+**Two things `BoxState` had to start carrying, both of which break quietly rather than loudly.** The
+**thread table** (risk R4: a checkpoint that drops the non-current threads still restores and still
+runs), and **`thread_start_pc`** — the registered trampoline, which a mid-run capture cannot re-derive
+because the registering syscall sits *behind* the checkpoint. `from_checkpoint` also now sources
+`TPIDRRO_EL0` from the restored table rather than the `TSD_IPA` constant, which was wrong the instant a
+checkpoint is taken while a non-main thread is running. M4's three seek gates are unchanged.
+
+**Honest limits, and the sharpest one is in the oracle.** **The determinism oracle has no thread
+identity.** It compares `(num, args)`, so two threads running the *same code* — the normal case for a
+thread pool — can issue byte-identical syscalls and replay would continue on the wrong thread in
+silence. Today's schedule is deterministic by construction, so this is a missing *belt* rather than a
+live defect, but the honest wording is that divergence is caught **whenever the two threads' next
+syscalls differ** — probabilistic, not structural. The format-compatible place to fix it already
+exists: `Event::Sched { thread, until }` is in `retrace-trace` with **zero producers and zero
+consumers**, so a schedule oracle costs a landmark-index change and a replay arm, not a `TRACE_MAGIC`
+break. Also carried: `guest_bsdthread_create` returns **0** where the real syscall returns the child's
+`pthread_t` (accepted as an open risk at Task 7 and never bitten, since libpthread's caller only tests
+for `-1`); and `run()` and `step()` each carry the reschedule check independently, with no shared choke
+point — fine at two entry points, worth revisiting at a third.
+
+**Still unmodelled, and named rather than discovered later:** `workq`/GCD thread pools (`workq_open`/
+`workq_kernreturn` have never fired); real **preemption** — scheduling is cooperative and switches only
+at a block or an exit, so **a guest that spin-waits without ever trapping runs forever**; **per-thread
+seek and stepping**; **thread-aware watchpoints** (M5's reverse-continue-to-last-writer stays
+thread-agnostic); the **per-thread signal mask** (spec open question 2 — M11 modelled *dispositions* as
+process-wide, which stays correct per POSIX, but the mask is per-thread and `spawn`+`join` never touches
+one); thread priority and per-thread signal targeting, which assert rather than answering plausibly;
+and any claim about more than a handful of threads. Everything M13 carries forward is unchanged: every
+protection bit other than no-access, a **pending signal set**, **nested delivery**, a **blocked
+synchronous fault**, `dup2` (fail-loud), `fcntl(F_DUPFD)` (unmodelled and *not* fail-loud), guest stdin
+still being retrace's, `RLIMIT_NOFILE`, **asynchronous signals**, and **arm64e guests**.
+
+**No new gate is parked, because Task 11's wall was cleared rather than hit.** The plan reserved a
+parked gate for a capability M14 could not reach; the headline went green instead, and no guest today
+demands the spin-wait case that would need preemption. The gate count therefore still carries exactly
+**one** `#[ignore]` — `stackoverflow_rust_e2e`, at M8 spec risk R3, unchanged and not newly parked.
+
+See `docs/superpowers/specs/2026-08-12-retrace-m14-threads-design.md`.
