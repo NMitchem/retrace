@@ -1017,12 +1017,26 @@ impl ReplaySession {
                         return self.finish_event();
                     }
                     match self.events.get(self.idx) {
-                        // `thread` deliberately unused here — Task 4 owns wiring it into the
-                        // divergence check; this task only records it.
-                        Some(Event::Syscall { num: rn, args: ra, ret, err, writes, thread: _ }) => {
+                        Some(Event::Syscall { num: rn, args: ra, ret, err, writes, thread: rthread }) => {
                             if num != *rn || args != *ra {
                                 return Err(Divergence { landmark: self.idx, pc,
                                     detail: format!("syscall mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
+                            }
+                            // M15 Task 4: the thread oracle. Placed AFTER the (num, args) check
+                            // above, not before — a genuine syscall divergence usually also
+                            // produces a thread mismatch (the wrong thread issuing the wrong
+                            // call), and it must be reported as the syscall divergence it is
+                            // rather than masked by a thread error it caused. This is the check
+                            // M14's Status section named as the oracle's sharpest limit: two
+                            // threads running the SAME code issue byte-identical (num, args), so
+                            // without this, a replay that schedules the wrong thread onto
+                            // identical code continues in silence.
+                            if self.current_thread() != *rthread {
+                                return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    "thread {} on replay, {} recorded — the schedule diverged. Two \
+                                     threads running the same code issue identical (num, args), which \
+                                     is exactly the case this check exists to catch",
+                                    self.current_thread(), rthread) });
                             }
                             // M11 mirror of record's serviced-signal arms. Recompute the SAME table
                             // transition and the SAME writeback bytes, then byte-compare against
