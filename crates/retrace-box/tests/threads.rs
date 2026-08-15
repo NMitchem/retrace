@@ -812,17 +812,33 @@ fn dbg_regs_of_reads_the_live_vcpu_for_the_current_thread_not_the_stale_table_sl
 /// The other half of the trap: a NON-current thread has no live vCPU state at all — the table IS
 /// the authority for it, and this must work even while that thread is BLOCKED (impossible before
 /// this milestone: there was no way to inspect a thread that wasn't running).
+///
+/// **Fix round 1:** the first version of this test called `block()` right after `spawn()` without
+/// switching first. `ThreadTable::block` takes no tid — it unconditionally blocks
+/// `self.threads[self.current]` (`thread.rs:126`) — and `spawn` never switches (M14's own contract:
+/// "the real kernel does not switch on create, and neither do we"), so `current` was still 0 and
+/// that call blocked thread 0, leaving thread 1 `Runnable` for the whole test. The test still
+/// passed and still proved a real property (non-current reads the table), but not the BLOCKED case
+/// its name claimed. Fixed by actually switching to the child so `block()` lands on it, then using
+/// `schedule_after_block()` — the real scheduler path, not a table-only shortcut — to switch back to
+/// main, which is what folds the child's live registers into its table slot on the way out
+/// (`switch_to_thread` -> `save_ctx` -> `ctx_mut`, the same fold the current-thread test's doc
+/// comment describes for `checkpoint()`).
 #[test]
 fn dbg_regs_of_reads_the_table_for_a_blocked_non_current_thread() {
     let mut b = tb();
     b.set_thread_start_pc(0x0001_804b_2000);
     let p = pth(&b, 1);
     b.guest_bsdthread_create([0x0001_0002_4e00, 0, p, p, 0, 0, 0, 0]);
-    // Give the child a distinctive ELR directly in the table (it has never run, so this is exactly
-    // what a real spawn's initial context looks like) and block it, so it is provably not current.
-    b.threads_mut().ctx_mut(1).elr = 0xcafe_babe_0000_0000;
-    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
-    assert_ne!(b.threads().current(), 1, "thread 1 must NOT be current for this to test the table path");
+
+    b.switch_to_thread(1);
+    b.set_elr(0xcafe_babe_0000_0000); // a distinctive LIVE value; only a real switch-away folds it into the table
+    b.threads_mut().block(BlockReason::Wait { addr: 0xdead_0000 }); // blocks the CURRENT thread, i.e. 1
+    b.schedule_after_block(); // picks the lowest-indexed runnable thread — main (0) — switching away from 1
+
+    assert_eq!(b.threads().current(), 0, "main must be the thread picked back up");
+    assert!(matches!(b.threads().state_of(1), ThreadState::Blocked(_)),
+        "thread 1 must actually be Blocked, or this does not test the blocked-non-current case");
 
     let dump = b.dbg_regs_of(1).expect("thread 1 exists");
     assert!(dump.contains("cafebabe00000000"),
