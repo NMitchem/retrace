@@ -27,13 +27,16 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   must run serially. `just gate` sets it; a bare `cargo test` will flake with `HV_BUSY`.
 - Single test: `cargo test -p <crate> <name> -- --test-threads=1`
   (e.g. `cargo test -p retrace-box --test pac -- --test-threads=1`).
-- Exactly one test in the gate is `#[ignore]`d as of M13-protnone — `stackoverflow_rust_e2e`, parked
-  at M8 spec risk R3 (see "Honest-gate discipline" below). The headline e2e gates run with the rest:
-  `cargo test -p retrace --test hello_rust_e2e -- --test-threads=1`
-  (rung 1), `--test jq_e2e` (rung 2; skips loudly without `/opt/homebrew/bin/jq`), and
-  `--test panic_e2e` (M11 — a Rust guest that aborts), `--test segv_rust_e2e` (M12 — a Rust
-  guest that faults and runs its own handler), and `--test protnone_rust_e2e` (M13 — a Rust guest
-  that protects one of its own pages and faults on it).
+- The headline end-to-end gates live in `crates/retrace/tests/` and run with the rest of the
+  workspace; each records and replays a real guest program: `hello_dyn_e2e` (a dynamically-linked C
+  program), `hello_rust_e2e` (rung 1 — full-`std` Rust), `jq_e2e` / `jq_file_e2e` (rungs 2–3 —
+  `brew jq`, without and with a file argument), `panic_e2e` (a guest that aborts), `segv_rust_e2e`
+  (a guest that faults and runs its own handler), `protnone_rust_e2e` (a guest that `PROT_NONE`s
+  its own page and faults on it), `thread_rust_e2e` (rung 4 — a guest that spawns a thread and
+  joins it). Run one with
+  `cargo test -p retrace --test <name> -- --test-threads=1`.
+- Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
+  the rule, and the README's latest Status section for which ones and why.
 - CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
   exe through real `/usr/lib/dyld`; append `-- <guest args…>` to pass the guest an argv),
   `... replay t.bin`.
@@ -41,8 +44,11 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   `mach_msg2` sends) — the first tool to reach for on a bring-up failure. **Record-only:** `ReplaySession`
   carries no trace instrumentation, so no `[trap]`/`[mach_msg2]`/`[fault]` line is ever printed on replay.
 
-The toolchain is pinned (`rust-toolchain.toml`: 1.95.0, target `aarch64-apple-darwin`). `clippy.toml`
-bans `Instant::now`/`SystemTime::now`/`std::thread` — see Determinism below; those denials are load-bearing, not style.
+The toolchain is pinned (`rust-toolchain.toml`: 1.95.0, target `aarch64-apple-darwin`). The
+`clippy.toml` denials are load-bearing, not style, and are **two separate rules**:
+`Instant::now`/`SystemTime::now` for determinism (see below); `std::thread::Thread` because
+retrace's core is single-threaded by design. The latter governs the *recorder's* threads, not the
+*guest's* — a guest may be multi-threaded (see "Guest threads").
 
 ### Codesigning
 
@@ -99,10 +105,14 @@ and threads.
 
 **Two symmetry rules govern adding any new trap handler:**
 
-1. A special case added to record's `match stop` (in `record_box`) needs a **mirror** in replay's
-   dispatch, and both must recompute *identical* addresses/bytes. Replay byte-compares its recomputed
-   reply against the recording — that comparison *is* the divergence check, so an asymmetry surfaces
-   as a divergence, not silent corruption.
+1. A special case added to record's `match stop` needs a **mirror** in replay's dispatch, and both
+   must recompute *identical* addresses/bytes. Both arms live in `crates/retrace-core/src/lib.rs` —
+   record in `record_box`, replay in `ReplaySession::advance` — **not** in `retrace-box`, which owns
+   only the `Box_` methods those arms call. A new arm goes in *both*, calling the *same* `Box_`
+   method with the *same* arguments (that identity is what makes the rule hold by construction), and
+   must sit *before* the generic forward arm. Replay byte-compares its recomputed reply against the
+   recording — that comparison *is* the divergence check, so an asymmetry surfaces as a divergence,
+   not silent corruption.
 2. Deterministic instruction emulation is better done **below the trace**, inside `Box_::run()`
    (as with the timebase MRS, the Apple-IMPDEF undef-MRS, and the B-family FPAC strip): `run()` is
    shared by record and replay, so such an arm fires identically on both sides and never surfaces to
@@ -141,61 +151,66 @@ A-family (IA/DA) keys; B-family cache auths that FPAC-fault are handled by strip
 sign scratch, nano band, mmap base, shared-region window) is defined and explained in the constants
 at the top of `crates/retrace-box/src/lib.rs`.
 
-### Milestone / SDD workflow
+### Guest threads
 
-Development is milestone-driven: **M0** (box + trace spine), **M1** (general memory-diff recorder),
-**M2** (the loader: MMU-on, dyld, PAC) and its sub-milestones **M2-cache** (shared-cache re-signing),
-**M2-mach** (`mach_msg2` kernel-RPC servicing), **M2-va47** (47-bit guest VA), **M2-bfam** (objc
-B-family PAC); then **M3** (reverse execution), **M4** (checkpoints), **M5** (watchpoints),
-**M6** (crash recording), **M7** (rung 1, a Rust guest), **M8-stack** (guest stack identity),
-**M9-jq** (the guest-side TLBI oracle, argc/argv, and rung 2 — `brew jq`), **M10-fdtable** (a real
-guest-visible fd table, and rung 3 — `jq` over a file), **M11-signals** (the guest's own signal
-dispositions, and a recordable abort), **M12-signal-delivery** (the guest's handlers actually
-run: signal frames, the `sa_tramp` contract, `sigreturn`, and fault-derived delivery), and
-**M13-protnone** (`PROT_NONE` enforcement: the guest's own protection calls reach the stage-1 page
-tables, so its guard pages actually guard). Each milestone has a design spec in
-`docs/superpowers/specs/` and a task plan in `docs/superpowers/plans/`; per-task reports and
-code-review diffs land in `.superpowers/sdd/`.
+A guest may be multi-threaded even though retrace's core is not. `bsdthread_create` is **emulated in
+the box, never forwarded**: `Box_` holds a thread table of register contexts, and a cooperative,
+block-driven scheduler switches only when a thread blocks or exits. That choice is a pure function of
+the guest's own syscall sequence, so record and replay produce identical schedules with **nothing
+recorded** and no trace-format change — symmetry rule 2 doing its job. The switch reuses the
+save/restore discipline the PAC signing oracle and `flush_guest_tlb` already established. Blocking is
+`__ulock_wait` (515) and waking is `__ulock_wake` (516), correlated by **address equality** on
+`pthread + 0x34` — measured in both `__pthread_join` and `__pthread_joiner_wake`, so no
+address→thread-index mapping is needed. Forwarding `bsdthread_create` is not merely wrong but
+whole-process fatal (the host starts a real thread on retrace's own `_pthread_start`, which
+PAC-fails on the guest's pthread struct), so it asserts.
 
-**Honest-gate discipline.** A headline end-to-end gate is parked `#[ignore]`d at the current wall,
-with the wall documented honestly, rather than being faked green or deleted. When you clear a wall,
-move the gate forward and rewrite that documentation — both the test's `#[ignore]` reason and the
-README Status section. If nothing is left to park it at, un-`#[ignore]` it and say so.
+**Emulating a syscall's entry contract is not the same as emulating the syscall.** Besides the new
+thread's registers, `guest_bsdthread_create` must reproduce what the *kernel* writes on the way
+through, or `pthread_join` returns success without ever waiting: the child's mach port at
+`pthread + 0xf8`, `TPIDRRO_EL0 = pthread + 0xe0` (the TSD sits *inside* the struct), and
+`PTHREAD_START_TSD_BASE_SET` in `w5`, which `__pthread_start` `tbz`-tests and `brk`s on. Each is
+documented with its measurement at the call site.
 
-As of M13-protnone **all seven headline gates are GREEN**: `hello_dyn_e2e` (a
-dynamically-linked C program, green since M2-taskinfo), `hello_rust_e2e` (rung 1 — a real
-full-`std` Rust binary reaching `main`, green since M8-stack), `jq_e2e` (rung 2 — `brew jq`,
-the first guest loading dylibs outside the shared cache, green since M9-jq), `jq_file_e2e`
-(rung 3 — `jq` over a file argument; it already passed before M10 and is *pinned*, not newly earned),
-`panic_e2e` (a full-`std` Rust guest that `panic!()`s into `abort()`/SIGABRT and records+replays
-its own death, green since M11-signals), `segv_rust_e2e` (a full-`std` Rust guest that faults on
-a wild pointer, runs libstd's **own** `SIGSEGV` handler, and dies of the re-executed store, green
-since M12-signal-delivery), and `protnone_rust_e2e` (a full-`std` Rust guest that `mprotect`s one of
-its own pages `PROT_NONE` and takes a stage-1 **permission** fault storing through it, green since
-M13-protnone).
-The gate is currently **311 passed / 0 failed / 1 ignored** (94 test binaries). The one ignored is
-`stackoverflow_rust_e2e`, parked at **M8 spec risk R3** — libpthread's constant `0x7fc000` puts
-libstd's computed guard 7.73 MiB below retrace's real stack backing, so the recursion takes a
-*stage-2* fault instead of striking the guard; both fixes are already measured and rejected at
-`crates/retrace-box/src/lib.rs:35-53`. That is honest-gate discipline, not a regression: M13 parked a
-NEW gate for the capability it does not have, and regressed none of the seven above. Keep it that
-way.
+One limit worth knowing before relying on it: **the divergence oracle has no thread identity.** It
+compares `(num, args)`, so two threads running the same code can issue byte-identical syscalls. The
+schedule is deterministic by construction, so this is a missing belt rather than a live defect, and
+`Event::Sched` already exists in the trace format (no producers or consumers) if one is ever wanted.
+(M14-threads; see its spec and the README's Status section.)
 
-**`segv_rust_e2e` does not rest on its exit code, and neither should its successors.** An *uncaught*
-fault also exits 139 (`crashy_e2e` asserts exactly that), so the gate asserts on the trace: one
-`SignalDelivery` to the handler libstd actually installed, a `sigreturn` after it, a terminal
-`Event::Crash` after that, and `resume_pc == ` the crash `pc`. Note the terminal variant: a signal
-the guest **raises** is `Event::Signal` (M11), while one derived from a **hardware fault** whose
-disposition is not a handler stays on M6's `Event::Crash` path.
+## Milestone / SDD workflow
 
-`protnone_rust_e2e` follows that rule and sharpens it. An *unprotected* store to a wild address kills
-its guest just as dead with M13's enforcement entirely absent, so the gate asserts **DFSC `0x0f`**
-(permission, level 3) rather than `0x04..=0x07` (translation) — exactly the difference M13 creates —
-plus the FAR masked to the protected page and `(SIGBUS, BUS_ADRALN)` from `signal_of_esr`. It learns
-the protected page from the guest's **own recorded `mprotect`**, taking the *last* `PROT_NONE` call
-rather than the first: three of the run's four are libSystem's own startup work, so `.rev()` is
-load-bearing — take the first and you assert against libpthread's guard at `0x38000`.
+Development is milestone-driven, M0 onward. Each milestone has a design spec in
+`docs/superpowers/specs/` and a task plan in `docs/superpowers/plans/` — both date-prefixed and named
+for the milestone, so `ls` them for the current list rather than trusting a list written here.
+Per-task reports and code-review diffs land in `.superpowers/sdd/`.
 
-`jq_e2e` and `jq_file_e2e` depend on `/opt/homebrew/bin/jq`, which is not a repo artifact: they skip
-with a loud `eprintln!` when jq is absent rather than passing quietly. That announcement is not
-optional — a silent skip reads as a green it did not earn.
+**The README's latest "Status" section is the single authoritative record** of what runs today, which
+gates are green, and where the next wall is. Read it before starting work. Do not restate that status
+in this file — a second copy is a copy that goes stale.
+
+## Honest-gate discipline
+
+A headline end-to-end gate is parked `#[ignore]`d at the current wall, with the wall documented
+honestly, rather than being faked green or deleted. When you clear a wall, move the gate forward and
+rewrite that documentation — both the test's `#[ignore]` reason and the README Status section. If
+nothing is left to park it at, un-`#[ignore]` it and say so. A milestone that parks a *new* gate for
+a capability it does not yet have has regressed nothing; that is the discipline working, not a
+backslide.
+
+Two rules these gates taught, which bind their successors:
+
+- **Never assert on an exit code a weaker failure would also produce.** An *uncaught* fault exits 139
+  exactly like a caught-then-fatal one (`crashy_e2e` asserts precisely that), so `segv_rust_e2e`
+  asserts on the *trace* instead — the `SignalDelivery` to the handler libstd actually installed, the
+  `sigreturn`, the terminal `Event::Crash`, the `resume_pc`. `protnone_rust_e2e` sharpens it: it
+  asserts DFSC `0x0f` (permission) rather than `0x04..=0x07` (translation), because only the
+  permission fault is the thing its milestone created. **Assert on the difference your work makes.**
+  Per-test specifics belong in comments in the test file, next to the assertion they explain.
+- **A skipped test must announce itself.** `jq_e2e` / `jq_file_e2e` depend on
+  `/opt/homebrew/bin/jq`, which is not a repo artifact; they skip with a loud `eprintln!` rather than
+  passing quietly. A silent skip reads as a green it did not earn.
+
+One distinction that is easy to get backwards when writing such a test: a signal the guest **raises**
+is `Event::Signal`, while one derived from a **hardware fault** whose disposition is not a handler
+stays on the `Event::Crash` path.
