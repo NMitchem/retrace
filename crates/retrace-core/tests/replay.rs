@@ -143,6 +143,64 @@ fn a_tampered_signal_frame_is_caught_as_divergence() {
     std::fs::remove_file(&trace).ok();
 }
 
+// ---- M15 t4 fix round 1: the thread oracle's two call sites OUTSIDE the generic Event::Syscall
+// match at ReplaySession::advance's bottom — the caught-raise mirror and the sigreturn mirror both
+// consume a recorded Event::Syscall landmark and RETURN before ever reaching that generic match, so
+// each needed its own call to `verify_thread` (see its doc comment). SIGFRAME reaches BOTH in one
+// recording: the self-raise takes the caught-raise arm, and the handler's return takes the
+// sigreturn arm.
+//
+// No guest that is both threaded AND signals itself exists yet (a follow-up, not this fix round —
+// M15's headline guest takes no signals, and the signal guests are single-threaded), so there is no
+// second LIVE thread id here to retag to the way `thread_oracle.rs`'s THREADRUST-based test does
+// for the generic arm. These use the SAME idiom as `tampered_syscall_arg_is_caught_as_divergence`
+// above instead — an arbitrary different value (`+= 1`), not one drawn from a second real schedule.
+// That proves the comparison FIRES at these two call sites; it does not prove it distinguishes
+// between two genuinely live schedules there, which is a narrower claim than the main M15 t4 test
+// makes for the generic arm.
+#[test]
+fn a_tampered_thread_on_the_caught_raise_landmark_is_a_divergence() {
+    let trace = record_guest(retrace_guest::SIGFRAME, "raise-thread-tamper");
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let di = events.iter().position(|e| matches!(e, retrace_trace::Event::SignalDelivery { .. }))
+        .expect("a delivery");
+    // Record appends the ordinary (caught-raise) Syscall, THEN the delivery, at ONE stop (see the
+    // record-side Disposition::Handler raise arm) — di - 1 is unambiguously that Syscall.
+    match &mut events[di - 1] {
+        retrace_trace::Event::Syscall { thread, .. } => *thread += 1,
+        other => panic!("expected the caught-raise Syscall landmark just before the delivery, got {other:?}"),
+    }
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let err = retrace_core::replay(&trace).unwrap_err();
+    assert!(err.detail.contains("schedule diverged"),
+        "expected the thread oracle at the caught-raise arm to fire: {}", err.detail);
+    std::fs::remove_file(&trace).ok();
+}
+
+#[test]
+fn a_tampered_thread_on_the_sigreturn_landmark_is_a_divergence() {
+    let trace = record_guest(retrace_guest::SIGFRAME, "sigreturn-thread-tamper");
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let si = events.iter().position(|e| matches!(e,
+        retrace_trace::Event::Syscall { num, .. } if *num == retrace_arch::SYS_SIGRETURN))
+        .expect("a sigreturn — the handler must have RETURNED, not aborted");
+    match &mut events[si] {
+        retrace_trace::Event::Syscall { thread, .. } => *thread += 1,
+        other => panic!("expected the sigreturn Syscall landmark, got {other:?}"),
+    }
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let err = retrace_core::replay(&trace).unwrap_err();
+    assert!(err.detail.contains("schedule diverged"),
+        "expected the thread oracle at the sigreturn arm to fire: {}", err.detail);
+    std::fs::remove_file(&trace).ok();
+}
+
 // A caught raise is TWO landmarks written at ONE stop, so the coordinate between them names a
 // position the guest never occupies. A seek there must SAY so rather than silently landing past
 // it: the terminal Exit/Signal pairs report through their own path, and this is the first mid-run
