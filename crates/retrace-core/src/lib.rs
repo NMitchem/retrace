@@ -668,8 +668,16 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             }
             // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
             // real thread inside retrace's own process at a guest address (see
-            // Box_::guest_bsdthread_create). Writes nothing to guest memory itself, so the event
-            // carries no writes.
+            // Box_::guest_bsdthread_create).
+            //
+            // M14 t11: it DOES now write guest memory — the child's kport into the guest's pthread
+            // struct at +0xf8, the write `pthread_join` is unusable without — and the event STILL
+            // carries no writes. That is deliberate, not an oversight. The value is
+            // `GUEST_THREAD_PORT_BASE | tid`, a pure function of the guest's own syscall sequence,
+            // and the replay arm below calls the same `guest_bsdthread_create` with identical args:
+            // both sides therefore recompute the identical byte at the identical address (symmetry
+            // rule 1), so recording it would be recording a constant. The exit-time full-memory
+            // comparison still covers it, which is what keeps this honest rather than merely quiet.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_CREATE => {
                 let rc = b.guest_bsdthread_create(args);
                 w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![] })

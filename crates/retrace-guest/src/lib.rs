@@ -166,6 +166,10 @@ pub const PROTRESERVE: &str = concat!(env!("OUT_DIR"), "/protreserve");
 /// M13 t11 headline: a full-`std` Rust binary that `mprotect`s one of its own pages PROT_NONE and
 /// stores through it — enforcement proved through real libc, real dyld and libstd's own handlers.
 pub const PROTRUST: &str = concat!(env!("OUT_DIR"), "/protrust");
+/// M14 t11 headline: a full-`std` Rust binary that `std::thread::spawn`s a child and `join`s it.
+/// `joined 42` is the load-bearing output — it requires the child to have RUN on retrace's single
+/// vCPU under the cooperative scheduler AND its return value to have crossed back through join.
+pub const THREADRUST: &str = concat!(env!("OUT_DIR"), "/threadrust");
 /// M13 t11: the recursion behind the PARKED `stackoverflow_rust_e2e` gate. Cannot strike libstd's
 /// guard today — that guard sits 7.73 MiB below retrace's real stack bottom (M8 spec risk R3).
 pub const OVERFLOW: &str = concat!(env!("OUT_DIR"), "/overflow");

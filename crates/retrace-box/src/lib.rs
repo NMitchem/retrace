@@ -462,6 +462,36 @@ pub struct Box_ {
     thread_start_pc: Option<u64>,
 }
 
+/// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
+/// on macOS 26. **The kernel writes this during `bsdthread_create`, and `pthread_join` is unusable
+/// without it** — see `Box_::guest_bsdthread_create` for the disassembly and the host probe.
+const PTHREAD_KPORT_OFF: u64 = 0xf8;
+
+/// Byte offset of the thread-specific-data base inside libpthread's `pthread` struct. The kernel
+/// sets `TPIDRRO_EL0 = pthread + 0xe0` when it starts a thread; libpthread reads it back the other
+/// way (`__pthread_join`: `mrs x23, TPIDRRO_EL0` / `sub x21, x23, #0xe0`). MEASURED on the live
+/// host, 4/4 for main and child alike — see `Box_::guest_bsdthread_create`.
+const PTHREAD_TSD_OFF: u64 = 0xe0;
+
+/// `PTHREAD_START_TSD_BASE_SET` — the bit the kernel ORs into the flags word a new thread receives
+/// in `w5`, asserting that it set that thread's TSD base. `__pthread_start`'s second instruction is
+/// `tbz w5, #0x1c, ...` straight into `brk #0xb001` with the message "BUG IN LIBPTHREAD:
+/// thread_set_tsd_base() wasn't called by the kernel", so a thread started without it dies
+/// immediately. ORed onto the guest's own flags, never substituted for them.
+const PTHREAD_START_TSD_BASE_SET: u64 = 0x1000_0000;
+
+/// Base for the synthetic mach port names retrace hands guest threads, in the same obviously-fake
+/// `0x0BAD….` shape as `SYNTHETIC_BOOTSTRAP_PORT`. The name is `BASE | tid`, so it is a pure
+/// function of the guest's own syscall sequence: non-zero (what `join` actually tests), distinct per
+/// thread, and identical on record and replay with nothing recorded.
+///
+/// A real kport would be a host-allocated name and therefore nondeterministic — the same reason
+/// M2-xpcport had to take a deliberate record/replay asymmetry for its minted bootstrap port. This
+/// needs no such exception: nothing outside the guest ever dereferences this name. libpthread uses
+/// it only as the `__ulock_wait` comparison value at `pthread+0x34` and passes it back verbatim in
+/// `bsdthread_terminate`'s `port` argument, both of which stay inside the box.
+const GUEST_THREAD_PORT_BASE: u32 = 0x0BAD_7000;
+
 #[derive(Debug)]
 pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, far: u64 }, Other { esr: u64 }, Step }
 
@@ -3073,9 +3103,25 @@ impl Box_ {
         ctx.regs.x[0] = pthread;
         // The measured contract reads `w5` (32-bit), not `x5` — model the zero-extension a real
         // 32-bit register read performs rather than carrying the full 64-bit syscall argument.
-        ctx.regs.x[5] = flags as u32 as u64;
+        //
+        // M14 t11: OR in the kernel's own `PTHREAD_START_TSD_BASE_SET`. `__pthread_start`'s SECOND
+        // instruction is `tbz w5, #0x1c, 0x6c8c`, and 0x6c8c loads "BUG IN LIBPTHREAD:
+        // thread_set_tsd_base() wasn't called by the kernel" and falls into `brk #0xb001`. Passing
+        // the guest's flags through verbatim therefore kills the child on its second instruction —
+        // measured, not theorised: that brk is exactly where M14's headline guest died once the
+        // kport write above let a child run at all. ORed, not substituted: bits 0-27 are the
+        // guest's own (QOS class, CUSTOM, …) and `__pthread_start` reads several of them.
+        ctx.regs.x[5] = (flags as u32 as u64) | PTHREAD_START_TSD_BASE_SET;
         // Each thread gets its own thread pointer. TPIDR_EL0 stays 0 for ALL threads (M2-cpuid).
-        ctx.tpidrro_el0 = pthread;
+        //
+        // M14 t11: the TSD is at `pthread + 0xe0`, NOT the struct pointer — this used to seed the
+        // struct pointer itself. libpthread reads the register back the other way
+        // (`__pthread_join`: `mrs x23, TPIDRRO_EL0` / `sub x21, x23, #0xe0`), so the old value made
+        // every thread compute a pthread struct 0xe0 bytes below its real one. A host probe pinned
+        // the convention directly, 4/4 for main and child: `TPIDRRO_EL0 - pthread_self() == 0xe0`.
+        // This is the substance behind the flag bit above — setting that bit while leaving the base
+        // wrong would be the box asserting something it had not done.
+        ctx.tpidrro_el0 = pthread + PTHREAD_TSD_OFF;
 
         // `func` and `arg` are deliberately unused: they reach the child through the struct, not
         // through us. Named in the destructuring above so the ABI stays documented at the call site.
@@ -3085,7 +3131,45 @@ impl Box_ {
         // syscall carries no stack-size argument, and `stack` (x2) is the guest-computed stack TOP
         // libpthread already mapped, not a base. `Thread::stack` is documented as `(base, len)` for
         // TEARDOWN (Task 8's named consumer); nothing reads it before then.
-        self.threads.spawn(ctx, (stack, 0));
+        let tid = self.threads.spawn(ctx, (stack, 0));
+
+        // THE KERNEL'S OTHER HALF OF bsdthread_create: the child's mach port, written into the
+        // guest's own pthread struct. Without it `pthread_join` does not merely mis-wait — it does
+        // not wait AT ALL, and reports success. From libsystem_pthread on this host:
+        //
+        //   __pthread_join:
+        //     0x90b8  ldr  w9, [x19, #0x34]   ; the join futex word
+        //     0x90bc  cmn  w9, #0x1           ; already -1 => the thread exited, take that path
+        //     0x90c0  b.eq 0x9208
+        //     0x90c4  ldr  w9, [x19, #0xf8]   ; <-- otherwise the KPORT becomes the wait value
+        //     0x90c8  str  w9, [sp, #0x10]
+        //     0x90cc  str  w9, [x19, #0x34]
+        //     ...
+        //     0x9024  cbz  w8, 0x9198         ; kport == 0  =>  skip __ulock_wait entirely
+        //     0x9198  bl   __pthread_deallocate
+        //     0x91a4  mov  w21, #0x0          ;              =>  and return SUCCESS
+        //
+        // So a zero here makes the guest free a thread that never ran and call it a successful
+        // join. That is not a hypothetical: it is exactly how M14's headline guest failed before
+        // this write existed — libstd's `Arc::get_mut(..).expect("threads should not terminate
+        // unexpectedly")` panicked because the child never dropped its packet clone.
+        //
+        // THE KERNEL IS THE WRITER — measured twice, not inferred. (1) The only two userspace
+        // writers of `+0xf8` in libsystem_pthread are `__pthread_main_thread_init` and
+        // `__pthread_wqthread_setup`; neither is on the `pthread_create` path, and the parent's
+        // call site at 0x83a0 only tests the return for -1 (`cmn x0, #0x1`) and stores nothing.
+        // (2) A host probe read the field with the child provably not yet run, 5/5 runs: `[+0xf8]`
+        // already equalled `pthread_mach_thread_np(t)` while `[+0x34]` was still 0.
+        //
+        // Fail loud on an untranslatable struct: the guest just wrote func/arg into this same page
+        // (`+0x90`/`+0x98`, the contract above), so an unmapped pthread here means the box's view of
+        // guest memory disagrees with the guest's — worth a panic, not a silent skip that would
+        // resurface as the very "join returns without waiting" bug this write exists to prevent.
+        let port = GUEST_THREAD_PORT_BASE | tid as u32;
+        let ipa = self.va_to_ipa(pthread + PTHREAD_KPORT_OFF).unwrap_or_else(|| {
+            panic!("M14: bsdthread_create pthread struct {pthread:#x} has no mapping for +0xf8")
+        });
+        self.write_guest(ipa, &port.to_le_bytes());
         0
     }
 

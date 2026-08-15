@@ -126,6 +126,20 @@ fn tb() -> retrace_box::Box_ {
     retrace_box::Box_::load(&loaded)
 }
 
+/// A pthread-struct address inside THIS box's own mapped stack page.
+///
+/// **M14 t11 changed what a pthread pointer has to be.** `guest_bsdthread_create` now writes the
+/// child's kport into the guest's pthread struct at `+0xf8` — the write `pthread_join` is unusable
+/// without (see `bsdthread_create_writes_the_childs_thread_port_into_the_pthread_struct`) — so the
+/// address these tests pass must be REAL, backed memory. The literal `0x3020_7000` they used before
+/// is a genuine *dynamic*-guest address that the static `tb()` box does not back, and it now panics
+/// in `write_guest`. That panic is correct behaviour, not collateral damage: an unmapped pthread
+/// struct means the box's view of guest memory disagrees with the guest's.
+///
+/// `Box_::load` gives the static guest one GRANULE (0x4000) of stack, so `n` in `0..=1` stays inside
+/// it with room for `+0xf8`.
+fn pth(b: &retrace_box::Box_, n: u64) -> u64 { b.stack_top() - 0x4000 + n * 0x1000 }
+
 /// The first VM-backed test in this file; everything above it is pure.
 ///
 /// The round-trip, for **every** field of `ThreadCtx` — which the first version of this test only
@@ -245,7 +259,8 @@ fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     // far, but that is a real property of Apple's combined stack+struct allocation, not a contract
     // this box may rely on; using distinct values means a swap between x[0]/sp_el0 in the
     // implementation actually fails the assertions below instead of passing unchanged.
-    let rc = b.guest_bsdthread_create([0x1_0002_4e00, 0x62180, 0x3020_6000, 0x3020_7000, 0x90008ff, 0, 0, 0]);
+    let (stack, pthread) = (pth(&b, 0), pth(&b, 1));
+    let rc = b.guest_bsdthread_create([0x1_0002_4e00, 0x62180, stack, pthread, 0x90008ff, 0, 0, 0]);
 
     assert_eq!(rc, 0, "create must succeed");
     assert_eq!(b.threads().len(), 2);
@@ -258,11 +273,29 @@ fn bsdthread_create_builds_a_thread_at_the_registered_trampoline() {
     // MEASURED contract (Task 2, re-disassembled in review): __pthread_start reads x0 and w5 only.
     // func/arg arrive through the pthread struct at +0x90/+0x98, which the GUEST populated before
     // trapping — so they must NOT appear in registers here.
-    assert_eq!(c.regs.x[0], 0x3020_7000, "x0 is the pthread-struct pointer");
-    assert_eq!(c.regs.x[5], 0x90008ff, "w5 carries the flags __pthread_start tbnz/tbz-tests");
+    assert_eq!(c.regs.x[0], pthread, "x0 is the pthread-struct pointer");
     assert_eq!(c.regs.x[1], 0, "x1 is NOT part of the contract — seeding it would be cargo cult");
-    assert_eq!(c.tpidrro_el0, 0x3020_7000, "each thread gets its own thread pointer…");
-    assert_eq!(c.regs.sp_el0, 0x3020_6000, "the child runs on the guest-allocated stack");
+    assert_eq!(c.regs.sp_el0, stack, "the child runs on the guest-allocated stack");
+
+    // M14 t11. Both of these used to assert the guest's raw values, and both were WRONG in the
+    // same way: they described what the guest asked for rather than what the KERNEL delivers, so
+    // the child brk'd on libpthread's own consistency check the first time one really ran.
+    //
+    // `__pthread_start`'s first two instructions are the check:
+    //     0x6be0  tbnz w5, #0x1d, ...  ; PTHREAD_START_SUSPENDED  -> "kernel without ... support"
+    //     0x6be4  tbz  w5, #0x1c, ...  ; TSD_BASE_SET *clear*     -> brk #0xb001, message
+    //             "BUG IN LIBPTHREAD: thread_set_tsd_base() wasn't called by the kernel"
+    // so bit 28 is the kernel's assertion that it set the TSD base, and it must be ORed in on top
+    // of the guest's own flag bits rather than replacing them.
+    assert_eq!(c.regs.x[5], 0x90008ff | 0x1000_0000,
+        "w5 must carry the guest's flags PLUS the kernel's TSD_BASE_SET bit");
+
+    // And the base it claims to have set: TPIDRRO_EL0 is the TSD, which sits at +0xe0 INSIDE the
+    // pthread struct — not the struct pointer. `__pthread_join` reads it back the other way
+    // (`mrs x23, TPIDRRO_EL0` / `sub x21, x23, #0xe0`), and a host probe measured +0xe0 exactly,
+    // 4/4, for main and child alike. Setting the flag without this offset would be the box lying.
+    assert_eq!(c.tpidrro_el0, pthread + 0xe0,
+        "TPIDRRO_EL0 is the TSD at pthread+0xe0, which is what TSD_BASE_SET above promises");
 }
 
 /// Task 7 fix round 1: `thread_start_pc` is learned from the guest's OWN `bsdthread_register` call,
@@ -286,7 +319,8 @@ fn a_restored_checkpoint_still_knows_the_registered_trampoline() {
     // The real failure mode, exercised end-to-end: without the carry, THIS call panics on a guest
     // that already registered — exactly like `bsdthread_create_without_a_registered_trampoline_
     // fails_loud` below, except here the guest did nothing wrong.
-    let rc = r.guest_bsdthread_create([1, 2, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
+    let p = pth(&r, 0);
+    let rc = r.guest_bsdthread_create([1, 2, p, p, 0, 0, 0, 0]);
     assert_eq!(rc, 0, "a restored session must be able to create a thread without re-registering");
 }
 
@@ -307,8 +341,9 @@ fn a_restored_checkpoint_still_knows_the_registered_trampoline() {
 fn a_terminating_thread_exits_and_wakes_whoever_joined_it() {
     let mut b = tb();   // see `fn tb()` at the top of this file
     b.set_thread_start_pc(0x0001_804b_2000);
-    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]); // thread 1
-    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_9000, 0x3020_9000, 0, 0, 0, 0]); // thread 2
+    let (p1, p2) = (pth(&b, 0), pth(&b, 1));
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, p1, p1, 0, 0, 0, 0]); // thread 1
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, p2, p2, 0, 0, 0, 0]); // thread 2
 
     // Main (0) joins the child (1) that's about to exit. Thread 2 joins an UNRELATED target (0,
     // which never exits in this test) — see the M-6 note above for why.
@@ -479,7 +514,7 @@ fn a_lone_runnable_thread_never_needs_rescheduling() {
 fn run_switches_to_the_child_when_main_blocks() {
     let mut b = tb();   // see `fn tb()` at the top of this file
     b.set_thread_start_pc(0x0001_804b_2000);
-    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, pth(&b, 0), pth(&b, 0), 0, 0, 0, 0]);
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
 
     b.schedule_after_block();
@@ -519,7 +554,7 @@ fn a_created_thread_resumes_with_the_creating_threads_el0_pstate() {
     assert_eq!(creator_spsr, 0x8000_03c4, "the pinned creator PSTATE must survive the write");
     assert_ne!(creator_spsr, b.regs_snapshot().cpsr,
         "…and must differ from the live CPSR, or assertion (3) below cannot discriminate");
-    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, pth(&b, 0), pth(&b, 0), 0, 0, 0, 0]);
 
     assert_eq!(b.threads().ctx_of(1).regs.cpsr, creator_spsr,
         "a child must resume at EL0 with the PSTATE its creator was running under, not 0");
@@ -540,8 +575,9 @@ fn a_created_thread_resumes_with_the_creating_threads_el0_pstate() {
 fn ulock_wake_wakes_exactly_the_thread_waiting_on_that_address() {
     let mut b = tb();
     b.set_thread_start_pc(0x0001_804b_2000);
-    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]); // 1
-    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_9000, 0x3020_9000, 0, 0, 0, 0]); // 2
+    let (p1, p2) = (pth(&b, 0), pth(&b, 1));
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, p1, p1, 0, 0, 0, 0]); // 1
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, p2, p2, 0, 0, 0, 0]); // 2
 
     // `pthread + 0x34` in the real flow (task-9-measurements.md); any two distinct mapped words do
     // here. Both hold the value their waiter compares against, so both waits are genuine.
@@ -626,7 +662,7 @@ fn step_reschedules_off_a_blocked_thread_before_arming_the_step_bit() {
 fn a_deadlock_fails_loud_instead_of_hanging() {
     let mut b = tb();   // see `fn tb()` at the top of this file
     b.set_thread_start_pc(0x0001_804b_2000);
-    b.guest_bsdthread_create([0x1_0002_4e00, 0, 0x3020_7000, 0x3020_7000, 0, 0, 0, 0]);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, pth(&b, 0), pth(&b, 0), 0, 0, 0, 0]);
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
     b.switch_to_thread(1);
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 0 });
@@ -689,4 +725,50 @@ fn run_switches_to_the_child_when_main_blocks_going_through_run() {
              load_ctx moving the hardware"),
         other => panic!("expected the child's exit syscall, got {other:?}"),
     }
+}
+
+/// **M14 t11 root cause: the kernel writes the child's mach port into the guest's pthread struct.**
+///
+/// `__pthread_join` does NOT unconditionally wait. Disassembly of libsystem_pthread on this host:
+/// ```text
+/// 0x90b8  ldr  w9, [x19, #0x34]   ; the join futex word
+/// 0x90bc  cmn  w9, #0x1           ; already -1 => thread exited
+/// 0x90c0  b.eq 0x9208
+/// 0x90c4  ldr  w9, [x19, #0xf8]   ; <-- else the KPORT becomes the wait value
+/// 0x90c8  str  w9, [sp, #0x10]
+/// 0x90cc  str  w9, [x19, #0x34]
+/// ...
+/// 0x9024  cbz  w8, 0x9198         ; kport == 0  =>  SKIP the wait entirely
+/// 0x9198  bl   __pthread_deallocate
+/// 0x91a4  mov  w21, #0x0          ;              =>  and return SUCCESS
+/// ```
+/// So a zero at `+0xf8` makes `join` free the thread and return 0 without ever blocking — the child
+/// never runs, and the caller sees a thread that "joined" without having executed. That is exactly
+/// how M14's headline guest failed: libstd's `Arc::get_mut(...).expect("threads should not
+/// terminate unexpectedly")` panicked because the child never dropped its packet clone.
+///
+/// **The kernel is the writer, measured not inferred.** The only two userspace writers of `+0xf8`
+/// in libsystem_pthread are `__pthread_main_thread_init` and `__pthread_wqthread_setup` — neither on
+/// the `pthread_create` path. A host probe confirmed it directly, 5/5 runs: with the child provably
+/// not yet run, `[+0xf8]` already equals `pthread_mach_thread_np(t)` and `[+0x34]` is still 0.
+///
+/// The port retrace writes is synthetic and derived from the thread id, so it is a pure function of
+/// the guest's own syscall sequence — identical on record and replay, which is what lets this write
+/// stay out of the trace entirely (both dispatch arms call `guest_bsdthread_create`).
+#[test]
+fn bsdthread_create_writes_the_childs_thread_port_into_the_pthread_struct() {
+    let mut b = tb();
+    b.set_thread_start_pc(0x0001_804b_2000);
+
+    // A pthread struct inside the guest's own mapped stack backing. The literal 0x3020_7000 the
+    // other tests use is a real dynamic-guest address that is NOT backed in this static box.
+    let pthread = b.stack_top() - 0x4000;
+    b.poke_guest(pthread + 0xf8, &0u32.to_le_bytes());   // as the host measures it pre-create
+
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, pthread + 0x1000, pthread, 0, 0, 0, 0]);
+
+    let got = u32::from_le_bytes(b.read_guest(pthread + 0xf8, 4).try_into().unwrap());
+    assert_ne!(got, 0,
+        "pthread+0xf8 must be a non-zero thread port — join reads THIS word and skips \
+         __ulock_wait entirely when it is 0, so a zero here is a child that never runs");
 }
