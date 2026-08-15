@@ -3391,17 +3391,47 @@ impl Box_ {
     /// Test-facing accessor (M2-cpuid).
     pub fn tpidrro_el0(&self) -> u64 { self.vcpu.get_sys(sysreg::TPIDRRO_EL0).unwrap() }
 
-    /// Bring-up diagnostic: dump x0..x30, SP_EL0, PC, ELR/SPSR/FAR as a multi-line string.
-    pub fn dbg_regs(&self) -> String {
+    /// Shared x0..x30 block, four per line — the part of `dbg_regs`'s layout that a saved
+    /// `ThreadCtx` can also supply, factored out so `dbg_regs_of` renders a NON-current thread in
+    /// the exact same shape without duplicating the format string.
+    fn format_gprs(x: &[u64; 31]) -> String {
         let mut s = String::new();
-        for i in 0..31 {
-            s += &format!("x{i:<2}={:#018x}  ", self.vcpu.get_reg(reg::x(i as u32)).unwrap());
+        for (i, xi) in x.iter().enumerate() {
+            s += &format!("x{i:<2}={xi:#018x}  ");
             if i % 4 == 3 { s.push('\n'); }
         }
+        s
+    }
+
+    /// Bring-up diagnostic: dump x0..x30, SP_EL0, PC, ELR/SPSR/FAR as a multi-line string.
+    pub fn dbg_regs(&self) -> String {
+        let mut x = [0u64; 31];
+        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+        let mut s = Self::format_gprs(&x);
         s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x}",
             self.vcpu.get_sys(sysreg::SP_EL0).unwrap(), self.pc(),
             self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(), self.last_far);
         s
+    }
+
+    /// M15: render a specific thread's registers. For the CURRENT thread this reads the live vCPU,
+    /// because the table's slot is stale between switches (only `switch_to_thread` writes it back)
+    /// — the same reason `checkpoint()` folds the vCPU in before cloning the table. For any other
+    /// thread the table IS the authority: that thread is not on the vCPU.
+    ///
+    /// `far` has no per-thread meaning (`last_far` is the box's last fault address, not a saved
+    /// register) — 0 for a non-current thread, the honest "not applicable" value, rather than
+    /// reusing the box's possibly-unrelated last fault.
+    pub fn dbg_regs_of(&self, tid: usize) -> Option<String> {
+        if tid >= self.threads.len() { return None; }
+        if tid == self.threads.current() {
+            return Some(self.dbg_regs());
+        }
+        let ctx = self.threads.ctx_of(tid);
+        let mut s = Self::format_gprs(&ctx.regs.x);
+        s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x}",
+            ctx.regs.sp_el0, ctx.regs.pc, ctx.elr, 0);
+        Some(s)
     }
 
     /// Bring-up diagnostic: walk the guest AArch64 frame-pointer chain from x29, returning up to
