@@ -1,4 +1,7 @@
-//! M14: the guest's thread table and its cooperative scheduler.
+//! M14: the guest's thread table and its cooperative scheduler. M16 additionally makes this module
+//! the owner of per-thread signal state — the blocked mask, the pending set and the alternate stack
+//! (see `Thread`'s `mask`/`pending`/`altstack` fields below), moved here from `SigTable` because
+//! POSIX makes those three per-thread while dispositions stay process-wide and remain in `sig.rs`.
 //!
 //! **This module is deliberately VM-free.** Nothing here touches HVF, the vCPU, or guest memory —
 //! it is bookkeeping plus one pick function, which is why it can be unit-tested exhaustively in
@@ -117,6 +120,25 @@ impl ThreadTable {
 
     // ---- M16: per-thread mask, pending set, and alternate stack ----------------------------
 
+    /// `1u32 << (sig - 1)`, guarded — the moved counterpart of `SigTable::idx`, which used to sit
+    /// between every mask access and the shift. Range-checked against the SAME bound `SigTable`
+    /// uses (`NSIG` == 32, i.e. signals 1..=31), deliberately, not 1..=32: `take_deliverable`'s
+    /// result is looked up in `SigTable::action`, so a signal this guard admitted but `idx` rejected
+    /// would panic far from the mistake instead of here, at the point it was made. Fix round 2
+    /// (review finding 1): the review found `is_blocked_for`/`pend`/`take_deliverable` computed this
+    /// shift unguarded — `sig == 0` underflows `sig - 1` (a shift-overflow panic in debug, a masked
+    /// shift onto bit 31 in release), and `sig == 32` is representable in the `u32` mask but not in
+    /// `SigTable`'s 1..=31.
+    fn sig_bit(sig: u64) -> u32 {
+        assert!(
+            sig >= 1 && (sig as usize) < retrace_arch::NSIG,
+            "signal {sig} out of range 1..{} — the caller passed a signal number no thread's mask \
+             can represent; widen the mask or reject it at the syscall arm",
+            retrace_arch::NSIG
+        );
+        1u32 << (sig - 1)
+    }
+
     pub fn mask_of(&self, tid: usize) -> u32 { self.threads[tid].mask }
 
     /// `SigTable::set_mask`'s arithmetic, moved verbatim, including its fail-loud `how` panic.
@@ -135,11 +157,11 @@ impl ThreadTable {
     }
 
     pub fn is_blocked_for(&self, tid: usize, sig: u64) -> bool {
-        self.threads[tid].mask & (1u32 << (sig - 1)) != 0
+        self.threads[tid].mask & Self::sig_bit(sig) != 0
     }
 
     pub fn pend(&mut self, tid: usize, sig: u64) {
-        self.threads[tid].pending |= 1u32 << (sig - 1);
+        self.threads[tid].pending |= Self::sig_bit(sig);
     }
 
     pub fn pending_of(&self, tid: usize) -> u32 { self.threads[tid].pending }
@@ -153,7 +175,7 @@ impl ThreadTable {
             return None;
         }
         let sig = ready.trailing_zeros() as u64 + 1;
-        t.pending &= !(1u32 << (sig - 1));
+        t.pending &= !Self::sig_bit(sig);
         Some(sig)
     }
 
@@ -320,6 +342,39 @@ mod tests {
         assert!(t.is_blocked_for(0, 30));
         assert!(!t.is_blocked_for(child, 30),
             "this is the whole per-thread claim: main blocking a signal must not block it for the child");
+    }
+
+    // Restored from sig.rs's SigTable::is_blocked_indexes_by_sig_minus_one (M16 fix round 2, review
+    // finding 4): the same-thread NEIGHBOUR negatives. masks_are_independent_between_threads (above)
+    // pins the shift amount and polarity via a different thread's mask, which is a real but distinct
+    // property — this restores the direct, same-thread, both-neighbours check the earlier test
+    // dropped.
+    #[test]
+    fn is_blocked_for_indexes_by_sig_minus_one() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        t.set_mask_of(0, retrace_arch::SIG_SETMASK, 1 << 5); // bit 5 == signal 6
+        assert!(t.is_blocked_for(0, 6), "bit (sig-1) is the encoding");
+        assert!(!t.is_blocked_for(0, 5));
+        assert!(!t.is_blocked_for(0, 7));
+    }
+
+    // M16 fix round 2 (review finding 1): the guard `sig_bit` adds. sig=0 is the underflow case
+    // (shift-overflow panic in debug, masked shift onto bit 31 in release, pre-fix); sig=32 is the
+    // aliasing case (representable in the u32 mask, NOT in SigTable's 1..=31, pre-fix silently
+    // accepted by pend and deferred to a far-away panic in SigTable::idx when take_deliverable later
+    // handed 32 back).
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn is_blocked_for_rejects_signal_zero() {
+        let t = ThreadTable::new(ThreadCtx::zeroed());
+        let _ = t.is_blocked_for(0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn pend_rejects_signal_32_which_the_mask_could_alias_but_sigtable_cannot_represent() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        t.pend(0, 32);
     }
 
     #[test]

@@ -1,9 +1,12 @@
 //! The guest's signal dispositions (M11-signals).
 //!
-//! **Pure guest state.** Every field is a function of the guest's own `sigaction`/`sigprocmask`/
-//! `sigaltstack` calls, so record and replay compute an identical table from an identical syscall
-//! sequence and nothing here ever enters the trace. That is `FdTable::slots`' posture, and it is why
-//! this module has no `Box_` and no VM in it — the whole thing is unit-testable at full speed.
+//! **Pure guest state.** `SigTable`'s one field is a function of the guest's own `sigaction` calls,
+//! so record and replay compute an identical table from an identical syscall sequence and nothing
+//! here ever enters the trace. That is `FdTable::slots`' posture, and it is why this module has no
+//! `Box_` and no VM in it — the whole thing is unit-testable at full speed. The blocked mask, the
+//! pending set and the alternate stack used to live here too, driven by `sigprocmask`/`sigaltstack`;
+//! M16 moved them to `Thread` (`thread.rs`), since POSIX makes those three per-thread while
+//! dispositions stay process-wide.
 //!
 //! **Disposition, then delivery.** M11 modelled what the guest ASKED for and never ran a handler.
 //! M12 adds the other half — `build_frame`/`choose_frame_base`, the pure layout of the frame a real
