@@ -470,6 +470,17 @@ fn main() {
         .status().expect("rustc threadrust");
     assert!(status.success(), "threadrust guest build failed");
 
+    // watchthread: M15's headline — a stock full-std Rust binary with two threads that write
+    // DIFFERENT addresses. Same rustc recipe as threadrust.
+    let src = format!("{}/rs/watchthread.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/watchthread");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc watchthread");
+    assert!(status.success(), "watchthread guest build failed");
+
     // overflow: the guest for the PARKED stackoverflow_rust_e2e gate (M8 spec risk R3). Built so the
     // parked test is real code that compiles and can be un-ignored the day R3 is fixed.
     let src = format!("{}/rs/overflow.rs", env!("CARGO_MANIFEST_DIR"));
