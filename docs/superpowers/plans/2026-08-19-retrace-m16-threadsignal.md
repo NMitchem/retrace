@@ -1750,6 +1750,18 @@ not a placeholder) is correct; replace only the parenthetical reason with the re
 field comparison, never hoisted above it, so a genuine `(code)`/`(pc, esr, far)`/`(sig, pc)`
 divergence is still reported as itself instead of being masked by the thread mismatch it caused.
 
+**ONE OF YOUR THREE CALLS ALREADY LANDED — verify before you add anything.** Task 8 (`449cf90`) had
+to restructure the terminal-raise arm to mirror record's ordering, and while it was in there it added
+the `verify_thread` call at the terminal **`Event::Signal`** site, with a comment arguing that
+`Event::Signal`'s `thread` is the RAISING thread (per its trace-format doc) and so is compared
+against the caller rather than against the resolved `pthread_kill` target. That landing was reviewed
+and accepted. So **your remaining work is `Exit` and `Crash`, not all three.**
+
+Grep for `verify_thread(` before writing: adding a second call at the `Signal` site would double-check
+one landmark and leave the tag comparison's failure message ambiguous. If the Step 1 test below
+passes in part before you have written any product code, that is why — do not treat it as the test
+being broken, and do not weaken it.
+
 - [ ] **Step 1: Write the failing test**
 
 ```rust
