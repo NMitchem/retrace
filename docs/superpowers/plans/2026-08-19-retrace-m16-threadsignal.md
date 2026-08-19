@@ -2113,3 +2113,12 @@ M11's account of what M11 built, and say plainly that M16 later moved the mask a
 stack to the thread table, pointing at the M16 Status section. Grep the README for other
 `SigTable`-holds-the-mask claims before you edit; this is the one the reviewer found, not
 necessarily the only one.
+
+**Also carried in from the Task 6 review (finding 5).** The spec's fail-loud boundary list
+(`docs/superpowers/specs/2026-08-19-retrace-m16-threadsignal-design.md`, the "Fail-loud boundaries"
+section) names "a port matching no live thread" but says nothing about **a live thread that is
+Blocked or Exited**. Task 6's fix round added exactly that guard to `deliver_signal_to` — two
+distinct panics, one for `Blocked(reason)` (redirecting it would overwrite the saved context its
+blocking syscall must resume through) and one for `Exited(code)` (no context left to resume). Add
+both to the spec's list so the design record matches the code, and cross-reference Task 13's parked
+`sigblocked_e2e` gate, which is precisely the guest that trips the Blocked arm.
