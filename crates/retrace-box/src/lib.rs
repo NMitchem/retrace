@@ -2732,7 +2732,7 @@ impl Box_ {
 
     /// Is the guest currently executing on its alternate signal stack?
     pub fn on_altstack(&self) -> bool {
-        match self.sigtable.altstack() {
+        match self.threads.altstack_of(self.threads.current()) {
             Some((sp, size, _)) => {
                 let cur = self.vcpu.get_sys(sysreg::SP_EL0).unwrap();
                 cur >= sp && cur < sp + size
@@ -2798,7 +2798,10 @@ impl Box_ {
 
         self.vcpu.set_reg(reg::PC, pc).unwrap();
         self.vcpu.set_reg(reg::CPSR, cpsr & PSTATE_USER_MASK).unwrap();
-        self.sigtable.set_mask(retrace_arch::SIG_SETMASK, mask);
+        // M16: the RETURNING (current) thread's mask — sigreturn always resumes the thread it was
+        // called on.
+        let cur = self.threads.current();
+        self.threads.set_mask_of(cur, retrace_arch::SIG_SETMASK, mask);
     }
 
     /// Enter the guest's handler for `sig`: build the frame, write it, set the entry registers.
@@ -2834,11 +2837,13 @@ impl Box_ {
             fpcr: self.vcpu.get_reg(reg::FPCR).unwrap() as u32,
         };
 
+        // M16: the current thread — Task 6 parameterises deliver_signal over its target thread.
+        let cur = self.threads.current();
         let (frame_base, on_alt) =
-            choose_frame_base(ts.sp, act, self.sigtable.altstack(), self.on_altstack());
+            choose_frame_base(ts.sp, act, self.threads.altstack_of(cur), self.on_altstack());
         let inp = FrameInput {
             sig, si_code, si_addr, esr, far, ts, ns,
-            mask: self.sigtable.mask(),   // the PRE-signal mask: what sigreturn restores
+            mask: self.threads.mask_of(cur),   // the PRE-signal mask: what sigreturn restores
             act, frame_base,
             // Fed back from choose_frame_base rather than recomputed, so the frame's uc_onstack
             // cannot disagree with the stack the frame was actually placed on.
@@ -2848,9 +2853,9 @@ impl Box_ {
         self.write_guest(frame_base, &bytes);
 
         // Block the signal for the handler's duration, unless SA_NODEFER.
-        let mut newmask = self.sigtable.mask() | act.mask;
+        let mut newmask = self.threads.mask_of(cur) | act.mask;
         if act.flags & retrace_arch::SA_NODEFER == 0 { newmask |= 1 << (sig - 1); }
-        self.sigtable.set_mask(retrace_arch::SIG_SETMASK, newmask);
+        self.threads.set_mask_of(cur, retrace_arch::SIG_SETMASK, newmask);
         if act.flags & retrace_arch::SA_RESETHAND != 0 {
             self.sigtable.set_action(sig, SigAction { disp: Disposition::Dfl, ..act });
         }

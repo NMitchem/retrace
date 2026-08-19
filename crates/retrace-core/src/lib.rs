@@ -150,7 +150,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             Stop::Fault { pc, esr, far } => {
                 let (sig, si_code) = retrace_arch::signal_of_esr(esr);
                 if let retrace_box::Disposition::Handler(handler) = b.sigtable().action(sig).disp {
-                    assert!(!b.sigtable().is_blocked(sig),
+                    assert!(!b.threads().is_blocked_for(thread as usize, sig),
                         "raising blocked signal {sig} synchronously is not modelled: a fault cannot \
                          be deferred, POSIX leaves it undefined, and Darwin force-delivers. M11 \
                          models no pending set, so implement one — and revisit sigpending's \
@@ -516,11 +516,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             Stop::Syscall { num, args }
                 if num == retrace_arch::SYS_SIGPROCMASK || num == retrace_arch::SYS_PTHREAD_SIGMASK => {
                 // (how, set*, oldset*). A NULL `set` is a pure query — read the mask, change nothing.
+                // M16: the mask belongs to the CALLING thread, which is `thread` here.
                 let old = if args[1] != 0 {
                     let set = u32::from_le_bytes(b.read_guest(args[1], 4).try_into().unwrap());
-                    b.sigtable_mut().set_mask(args[0], set)
+                    b.threads_mut().set_mask_of(thread as usize, args[0], set)
                 } else {
-                    b.sigtable().mask()
+                    b.threads().mask_of(thread as usize)
                 };
                 let writes = if args[2] != 0 {
                     vec![Region { ipa: args[2], bytes: old.to_le_bytes().to_vec() }]
@@ -547,9 +548,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                           u64::from_le_bytes(raw[8..16].try_into().unwrap()),
                           u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64))
                 } else { None };
+                // M16: the alternate stack belongs to the CALLING thread.
                 let old = match new {
-                    Some(ss) => b.sigtable_mut().set_altstack(Some(ss)),
-                    None => b.sigtable().altstack(),
+                    Some(ss) => b.threads_mut().set_altstack_of(thread as usize, Some(ss)),
+                    None => b.threads().altstack_of(thread as usize),
                 };
                 let writes = if args[1] != 0 {
                     let (sp, size, flags) = old.unwrap_or((0, 0, 0));
@@ -586,7 +588,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // section. Learn the port from mach_thread_self if a guest ever needs the check.
                 let sig = args[1];
                 let act = b.sigtable().action(sig);
-                assert!(!b.sigtable().is_blocked(sig),
+                assert!(!b.threads().is_blocked_for(thread as usize, sig),
                     "raising blocked signal {sig} is not modelled: it must go PENDING until \
                      unblocked, and M11 models no pending set (measured: no gate guest does this; \
                      abort() unblocks SIGABRT before raising). Implement a pending mask before a \
@@ -1116,12 +1118,14 @@ impl ReplaySession {
                             }
                             if num == retrace_arch::SYS_SIGPROCMASK
                                 || num == retrace_arch::SYS_PTHREAD_SIGMASK {
+                                // M16: the mask belongs to the CALLING (current) thread.
+                                let cur = self.current_thread() as usize;
                                 let old = if args[1] != 0 {
                                     let set = u32::from_le_bytes(
                                         self.b.read_guest(args[1], 4).try_into().unwrap());
-                                    self.b.sigtable_mut().set_mask(args[0], set)
+                                    self.b.threads_mut().set_mask_of(cur, args[0], set)
                                 } else {
-                                    self.b.sigtable().mask()
+                                    self.b.threads().mask_of(cur)
                                 };
                                 if args[2] != 0 {
                                     let mine = old.to_le_bytes().to_vec();
@@ -1139,7 +1143,9 @@ impl ReplaySession {
                                 let ss = (u64::from_le_bytes(raw[0..8].try_into().unwrap()),
                                           u64::from_le_bytes(raw[8..16].try_into().unwrap()),
                                           u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64);
-                                self.b.sigtable_mut().set_altstack(Some(ss));
+                                // M16: the alternate stack belongs to the CALLING (current) thread.
+                                let cur = self.current_thread() as usize;
+                                self.b.threads_mut().set_altstack_of(cur, Some(ss));
                             }
                             // Learn the guest's task-port name (mirror of record) from the recorded −28 result.
                             if num == MACH_TASK_SELF && !*err { self.guest_task_port = Some(*ret); }

@@ -80,8 +80,8 @@ fn deliver_signal_blocks_the_signal_and_its_sa_mask_for_the_handler() {
     let mut b = boxed();
     b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO, 1 << 5 /* SIGABRT */));
     b.deliver_signal(11, 1, 0, 0, 0);
-    assert!(b.sigtable().is_blocked(11), "the delivered signal blocks itself");
-    assert!(b.sigtable().is_blocked(6), "and everything in sa_mask");
+    assert!(b.threads().is_blocked_for(0, 11), "the delivered signal blocks itself");
+    assert!(b.threads().is_blocked_for(0, 6), "and everything in sa_mask");
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn deliver_signal_honours_sa_nodefer() {
     b.sigtable_mut()
         .set_action(11, handler(retrace_arch::SA_SIGINFO | retrace_arch::SA_NODEFER, 0));
     b.deliver_signal(11, 1, 0, 0, 0);
-    assert!(!b.sigtable().is_blocked(11), "SA_NODEFER means do not block the signal itself");
+    assert!(!b.threads().is_blocked_for(0, 11), "SA_NODEFER means do not block the signal itself");
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn deliver_signal_honours_sa_resethand() {
 #[test]
 fn the_frame_records_the_pre_signal_mask_not_the_handler_mask() {
     let mut b = boxed();
-    b.sigtable_mut().set_mask(retrace_arch::SIG_SETMASK, 0b1010);
+    b.threads_mut().set_mask_of(0, retrace_arch::SIG_SETMASK, 0b1010);
     b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO, 0));
     let (writes, _) = b.deliver_signal(11, 1, 0, 0, 0);
     let uc = &writes[0].bytes[FRAME_UCONTEXT_OFF..];
@@ -123,7 +123,7 @@ fn deliver_signal_runs_on_the_alternate_stack_and_says_so_in_the_frame() {
     let mut b = boxed();
     // A sub-range of the guest's own mapped stack, so the frame lands in real backing.
     let (ss_sp, ss_size) = (0x1_c000u64, 0x2000u64);
-    b.sigtable_mut().set_altstack(Some((ss_sp, ss_size, 0)));
+    b.threads_mut().set_altstack_of(0, Some((ss_sp, ss_size, 0)));
     b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO | retrace_arch::SA_ONSTACK, 0));
 
     let (writes, _) = b.deliver_signal(11, 1, 0, 0, 0);
@@ -142,7 +142,7 @@ fn deliver_signal_runs_on_the_alternate_stack_and_says_so_in_the_frame() {
 fn on_altstack_is_false_when_the_guest_is_on_its_normal_stack() {
     let mut b = boxed();
     assert!(!b.on_altstack(), "no alt stack installed at all");
-    b.sigtable_mut().set_altstack(Some((0x1_c000, 0x100, 0)));
+    b.threads_mut().set_altstack_of(0, Some((0x1_c000, 0x100, 0)));
     assert!(!b.on_altstack(), "installed, but sp is not inside it");
 }
 
@@ -153,7 +153,7 @@ fn sigreturn_restores_the_pre_signal_state_including_vectors() {
     let mut b = boxed();
     b.vcpu_set_x(7, 0xcafe_f00d);
     b.vcpu_set_q(8, 0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00);
-    b.sigtable_mut().set_mask(retrace_arch::SIG_SETMASK, 0b0110);
+    b.threads_mut().set_mask_of(0, retrace_arch::SIG_SETMASK, 0b0110);
     b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO, 0));
     let sp_before = b.regs_snapshot().sp_el0;
     let pc_before = b.position();
@@ -163,7 +163,7 @@ fn sigreturn_restores_the_pre_signal_state_including_vectors() {
     // The handler runs and clobbers everything it is allowed to.
     b.vcpu_set_x(7, 0xdead_beef);
     b.vcpu_set_q(8, 0);
-    assert!(b.sigtable().is_blocked(11));
+    assert!(b.threads().is_blocked_for(0, 11));
 
     b.sigreturn_restore(uctx, sigreturn_token(uctx));
 
@@ -174,7 +174,7 @@ fn sigreturn_restores_the_pre_signal_state_including_vectors() {
     assert_eq!(b.vcpu_get_q(8), 0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00,
         "VECTOR state restored — a handler is ordinary compiled code and will use NEON; without \
          this a handler that RETURNS silently corrupts the guest");
-    assert_eq!(b.sigtable().mask(), 0b0110, "the pre-signal mask is restored from uc_sigmask");
+    assert_eq!(b.threads().mask_of(0), 0b0110, "the pre-signal mask is restored from uc_sigmask");
 }
 
 #[test]
