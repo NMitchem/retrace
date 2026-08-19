@@ -2730,16 +2730,25 @@ impl Box_ {
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), hp, bytes.len()); }
     }
 
-    /// Is the guest currently executing on its alternate signal stack?
-    pub fn on_altstack(&self) -> bool {
-        match self.threads.altstack_of(self.threads.current()) {
-            Some((sp, size, _)) => {
-                let cur = self.vcpu.get_sys(sysreg::SP_EL0).unwrap();
-                cur >= sp && cur < sp + size
-            }
-            None => false,
-        }
+    /// Is thread `tid` currently executing on ITS OWN alternate signal stack?
+    ///
+    /// Same current/non-current discipline as `pthread_of` and `dbg_regs_of`: the running thread's
+    /// stack pointer is live in `SP_EL0` and its table entry is stale between switches, so only a
+    /// NON-current thread is read from the table. That distinction is load-bearing rather than
+    /// stylistic — inside `deliver_signal_to` the current thread's ctx has just been saved, so the
+    /// table would be right there, but `on_altstack()` called from anywhere else has had no such save
+    /// and reading the table unconditionally would answer from stale state.
+    pub fn on_altstack_of(&self, tid: usize) -> bool {
+        let sp = if tid == self.threads.current() {
+            self.vcpu.get_sys(sysreg::SP_EL0).unwrap()
+        } else {
+            self.threads.ctx_of(tid).regs.sp_el0
+        };
+        matches!(self.threads.altstack_of(tid), Some((base, size, _)) if sp >= base && sp < base + size)
     }
+
+    /// The running thread's alternate-stack membership. Unchanged for every existing caller.
+    pub fn on_altstack(&self) -> bool { self.on_altstack_of(self.threads.current()) }
 
     /// The saved PSTATE at the current trap (SPSR_EL1) — the sibling of `position()`'s ELR_EL1.
     pub fn spsr(&self) -> u64 { self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap() }
@@ -2748,6 +2757,11 @@ impl Box_ {
     /// tests can clobber and observe state without a running guest.
     pub fn vcpu_set_x(&mut self, n: u32, v: u64) { self.vcpu.set_reg(reg::x(n), v).unwrap(); }
     pub fn vcpu_get_x(&self, n: u32) -> u64 { self.vcpu.get_reg(reg::x(n)).unwrap() }
+    /// Test-only: `reg::FP`/`reg::LR` straight off the vCPU, so a test can pin that they alias X29/X30.
+    #[doc(hidden)]
+    pub fn dbg_fp_lr(&self) -> (u64, u64) {
+        (self.vcpu.get_reg(reg::FP).unwrap(), self.vcpu.get_reg(reg::LR).unwrap())
+    }
     pub fn vcpu_set_q(&mut self, n: u32, v: u128) { self.vcpu.set_simd(simd::q(n), v).unwrap(); }
     pub fn vcpu_get_q(&self, n: u32) -> u128 { self.vcpu.get_simd(simd::q(n)).unwrap() }
     /// M14 t5: setters for the sysregs a context switch must move, paired with the existing
@@ -2804,7 +2818,7 @@ impl Box_ {
         self.threads.set_mask_of(cur, retrace_arch::SIG_SETMASK, mask);
     }
 
-    /// Enter the guest's handler for `sig`: build the frame, write it, set the entry registers.
+    /// Deliver `sig` to thread `tid`, which need NOT be the running one.
     ///
     /// Returns `(frame writes, resume_pc)`. Called by BOTH record and replay — that is what makes
     /// "both sides recompute the same frame" true by construction rather than by discipline.
@@ -2812,66 +2826,88 @@ impl Box_ {
     /// `esr`/`far` are the guest's own fault syndrome for a fault-derived signal, and 0 for a
     /// self-raise (no hardware fault happened, and inventing one would be the same lie M11 refused
     /// when it kept `Event::Signal` out of `Event::Crash`).
-    pub fn deliver_signal(
-        &mut self, sig: u64, si_code: u64, si_addr: u64, esr: u64, far: u64,
+    ///
+    /// The table is the authority for EVERY thread, including the running one whose entry is stale
+    /// between switches — so the current context is saved into it first and reloaded at the end. That
+    /// is what lets one code path serve a self-signal and a cross-thread signal identically, instead
+    /// of two paths that drift (M13 Task 8 shipped a test that checked only one of a mirrored pair).
+    pub fn deliver_signal_to(
+        &mut self, tid: usize, sig: u64, si_code: u64, si_addr: u64, esr: u64, far: u64,
     ) -> (Vec<Region>, u64) {
         let act = self.sigtable.action(sig);
+        let cur = self.threads.current();
+        *self.threads.ctx_mut(cur) = self.save_ctx();
+
+        // M16: a second signal to a thread already redirected into an un-run handler would stack a
+        // frame the kernel's queueing semantics would order — unmodelled, so fail loud rather than
+        // guess. A self-signal (tid == cur) runs its handler immediately, so there is no un-run
+        // frame to stack on and this does not apply.
+        if tid != cur {
+            assert!(!self.threads.is_redirected(tid),
+                "thread {tid} was already redirected into a handler and has not run since; a \
+                 second signal here would stack frames without the kernel's queueing semantics. \
+                 Nested delivery is unmodelled — implement queueing before a guest needs this.");
+        }
+
+        let ctx = self.threads.ctx_of(tid).clone();
         let mut x = [0u64; 29];
-        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
-        let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+        x.copy_from_slice(&ctx.regs.x[..29]);
         let ts = ThreadState {
             x,
-            fp: self.vcpu.get_reg(reg::FP).unwrap(),
-            lr: self.vcpu.get_reg(reg::LR).unwrap(),
-            // The guest runs at EL0: its stack pointer is SP_EL0, and its pc is ELR_EL1 (the vCPU's
-            // live PC is parked in the trampoline) — the same sources `position()` uses.
-            sp: self.vcpu.get_sys(sysreg::SP_EL0).unwrap(),
-            pc: self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(),
-            cpsr: spsr,
+            fp: ctx.regs.x[29],
+            lr: ctx.regs.x[30],
+            // ELR, not regs.pc: regs.pc is where the vCPU RESUMES (the trampoline, at a trap), while
+            // ELR_EL1 is the guest's own next instruction — `position()`'s source, and what sigreturn
+            // must come back to. Likewise spsr, not regs.cpsr.
+            sp: ctx.regs.sp_el0,
+            pc: ctx.elr,
+            cpsr: ctx.spsr,
         };
-        let mut v = [0u128; 32];
-        for (i, vi) in v.iter_mut().enumerate() { *vi = self.vcpu.get_simd(simd::q(i as u32)).unwrap(); }
-        let ns = NeonState {
-            v,
-            fpsr: self.vcpu.get_reg(reg::FPSR).unwrap() as u32,
-            fpcr: self.vcpu.get_reg(reg::FPCR).unwrap() as u32,
-        };
+        let ns = NeonState { v: ctx.fp, fpsr: ctx.fpsr as u32, fpcr: ctx.fpcr as u32 };
 
-        // M16: the current thread — Task 6 parameterises deliver_signal over its target thread.
-        let cur = self.threads.current();
-        let (frame_base, on_alt) =
-            choose_frame_base(ts.sp, act, self.threads.altstack_of(cur), self.on_altstack());
+        // The TARGET's alt stack, and whether the TARGET is already on it — not the running thread's.
+        let alt = self.threads.altstack_of(tid);
+        let (frame_base, on_alt) = choose_frame_base(ts.sp, act, alt, self.on_altstack_of(tid));
+
         let inp = FrameInput {
             sig, si_code, si_addr, esr, far, ts, ns,
-            mask: self.threads.mask_of(cur),   // the PRE-signal mask: what sigreturn restores
-            act, frame_base,
-            // Fed back from choose_frame_base rather than recomputed, so the frame's uc_onstack
-            // cannot disagree with the stack the frame was actually placed on.
-            on_alt,
+            mask: self.threads.mask_of(tid),   // the PRE-signal mask: what sigreturn restores
+            act, frame_base, on_alt,
         };
         let (bytes, entry) = build_frame(&inp);
         self.write_guest(frame_base, &bytes);
 
-        // Block the signal for the handler's duration, unless SA_NODEFER.
-        let mut newmask = self.threads.mask_of(cur) | act.mask;
+        // Block for the handler's duration, unless SA_NODEFER — on the RECEIVING thread.
+        let mut newmask = self.threads.mask_of(tid) | act.mask;
         if act.flags & retrace_arch::SA_NODEFER == 0 { newmask |= 1 << (sig - 1); }
-        self.threads.set_mask_of(cur, retrace_arch::SIG_SETMASK, newmask);
+        self.threads.set_mask_of(tid, retrace_arch::SIG_SETMASK, newmask);
+        // SA_RESETHAND changes a DISPOSITION, which stays process-global.
         if act.flags & retrace_arch::SA_RESETHAND != 0 {
             self.sigtable.set_action(sig, SigAction { disp: Disposition::Dfl, ..act });
         }
 
-        for (i, xi) in entry.x.iter().enumerate() {
-            self.vcpu.set_reg(reg::x(i as u32), *xi).unwrap();
+        {
+            let c = self.threads.ctx_mut(tid);
+            for (i, xi) in entry.x.iter().enumerate() { c.regs.x[i] = *xi; }
+            c.regs.sp_el0 = entry.sp;
+            // The vCPU resumes at reg::PC, which load_ctx writes from regs.pc — so the trampoline
+            // address goes THERE, exactly as the pre-M16 code wrote reg::PC and not ELR_EL1.
+            c.regs.pc = entry.pc;
+            c.regs.cpsr = ctx.spsr;
         }
-        self.vcpu.set_sys(sysreg::SP_EL0, entry.sp).unwrap();
-        // The mirror of `set_x0_err_and_return`: the vCPU resumes at reg::PC, so the trampoline
-        // address goes THERE, and CPSR comes from SPSR_EL1 so the handler runs at EL0. Writing
-        // ELR_EL1 instead would be inert — nothing ERETs — and the guest would resume at the
-        // trampoline it trapped into, never reaching the handler.
-        self.vcpu.set_reg(reg::PC, entry.pc).unwrap();
-        self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
+        self.threads.set_redirected(tid, tid != cur);
+
+        let back = self.threads.ctx_of(cur).clone();
+        self.load_ctx(&back);
 
         (vec![Region { ipa: frame_base, bytes }], ts.pc)
+    }
+
+    /// M11/M12's entry point, unchanged for every existing caller: deliver to the running thread.
+    pub fn deliver_signal(
+        &mut self, sig: u64, si_code: u64, si_addr: u64, esr: u64, far: u64,
+    ) -> (Vec<Region>, u64) {
+        self.deliver_signal_to(self.threads.current(), sig, si_code, si_addr, esr, far)
     }
 
     /// Take (and clear) the syscall-write watch hit recorded by `apply_and_return` this event.
