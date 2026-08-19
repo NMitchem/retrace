@@ -19,7 +19,7 @@ const CHECKPOINT_BYTE_BUDGET: usize = 256 * 1024 * 1024;
 const CHECKPOINT_COST_GATE_STEPS: u64 = 64;
 
 /// One parsed debugger command. `Break`/`Delete` carry a guest VA; `Examine` carries (VA, len);
-/// `Stepi`/`ReverseStepi` carry a repeat count (default 1).
+/// `Stepi`/`ReverseStepi` carry a repeat count (default 1); `RegsOf` carries a thread id (M15).
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
     Break(u64),
@@ -33,6 +33,8 @@ pub enum Cmd {
     Where,
     Watch(u64, u64),
     Unwatch(u64),
+    Threads,
+    RegsOf(u32),
 }
 
 /// The non-empty, trimmed command segments of a script, in order. `break;;continue;` → the two
@@ -104,7 +106,15 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
         "reverse-continue"=> expect_none(Cmd::ReverseContinue, &ops),
         "stepi"           => { at_most_one(verb, &ops)?; Ok(Cmd::Stepi(parse_count(ops.first().copied())?)) }
         "reverse-stepi"   => { at_most_one(verb, &ops)?; Ok(Cmd::ReverseStepi(parse_count(ops.first().copied())?)) }
-        "regs"            => expect_none(Cmd::Regs, &ops),
+        "threads"         => expect_none(Cmd::Threads, &ops),
+        "regs"            => {
+            at_most_one(verb, &ops)?;
+            match ops.first() {
+                None => Ok(Cmd::Regs),
+                Some(t) => Ok(Cmd::RegsOf(t.parse::<u32>()
+                    .map_err(|_| format!("bad thread id: {t}"))?)),
+            }
+        }
         "where"           => expect_none(Cmd::Where, &ops),
         "x"               => {
             if ops.len() != 2 { return Err(format!("`x` takes <addr> <len>; got {} operand(s)", ops.len())); }
@@ -221,6 +231,8 @@ impl<'a> Exec<'a> {
             Cmd::Where            => self.cmd_where(out),
             Cmd::Watch(a, l)      => self.cmd_watch(*a, *l, out),
             Cmd::Unwatch(a)       => self.cmd_unwatch(*a, out),
+            Cmd::Threads          => self.cmd_threads(out),
+            Cmd::RegsOf(tid)      => self.cmd_regs_of(*tid, out),
         }
     }
 
@@ -263,9 +275,32 @@ impl<'a> Exec<'a> {
         line(out, format_args!("{dump}"))
     }
 
+    /// M15: one line per `ThreadSummary`, `*` marking the thread currently on the vCPU. Exited
+    /// threads stay in the table (see `thread_summaries`'s doc) and are listed too — the debugger's
+    /// user wants to see them, not have them silently drop off.
+    fn cmd_threads<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
+        for t in self.sess().thread_summaries() {
+            let marker = if t.is_current { "*" } else { " " };
+            line(out, format_args!("{marker} thread {}: {:?}", t.tid, t.state))?;
+        }
+        Ok(())
+    }
+
+    /// M15: a specific thread's register dump, including a BLOCKED (non-current) one. `dbg_regs_of`
+    /// returns `None` for an out-of-range id — that is a bad script input, not an internal bug, so it
+    /// becomes an `Err` here (a usage error the CLI reports and exits 5 on, same as `break`'s 6-slot
+    /// limit), never a panic on an unwrap.
+    fn cmd_regs_of<W: Write>(&mut self, tid: u32, out: &mut W) -> Result<(), String> {
+        match self.sess().dbg_regs_of(tid) {
+            Some(dump) => line(out, format_args!("{dump}")),
+            None => Err(format!("no such thread: {tid}")),
+        }
+    }
+
     fn cmd_where<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
         let pc = self.sess().pc();
-        line(out, format_args!("at ({}, {}) pc={pc:#x}", self.n, self.k))
+        line(out, format_args!("at ({}, {}) pc={pc:#x} thread={}",
+            self.n, self.k, self.sess().current_thread()))
     }
 
     fn cmd_examine<W: Write>(&mut self, addr: u64, len: usize, out: &mut W) -> Result<(), String> {
@@ -589,5 +624,13 @@ mod tests {
         assert!(parse_script("watch 0x1001 8").unwrap_err().contains("8-byte aligned"));
         assert!(parse_script("watch").is_err());
         assert!(parse_script("watch 0x1000 8 extra").is_err());
+    }
+    #[test] fn parses_threads_and_regs_of() {
+        assert_eq!(parse_script("threads").unwrap(), vec![Cmd::Threads]);
+        assert_eq!(parse_script("regs").unwrap(), vec![Cmd::Regs]);
+        assert_eq!(parse_script("regs 3").unwrap(), vec![Cmd::RegsOf(3)]);
+        assert!(parse_script("regs 1 2").is_err(), "`regs` takes at most one operand");
+        assert!(parse_script("regs abc").is_err(), "a thread id must parse as u32");
+        assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");
     }
 }
