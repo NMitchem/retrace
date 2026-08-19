@@ -3085,18 +3085,23 @@ impl Box_ {
     /// on MAIN's stack, silently. A port retrace cannot place is a modelling gap that must surface
     /// as a panic.
     pub fn thread_of_port(&self, port: u32) -> usize {
-        // `Option<u32>`, not a 0 sentinel: an unreadable pthread and a thread whose kport genuinely
-        // reads 0 are different diagnoses, and this panic's whole job is to tell them apart.
-        let mut seen: Vec<(usize, Option<u32>)> = Vec::new();
+        // Exited threads are included in the diagnostic dump too (fix round 1, review finding 2),
+        // tagged, so a port that belonged to a thread that has SINCE exited reads differently in
+        // the panic from a port retrace never issued at all — two different bugs to go looking
+        // for. They are still excluded from MATCHING (`!exited &&` below): only a live thread can
+        // claim a port. That acceptance behaviour is unchanged; only the diagnostic widened, per
+        // the brief's own "measure before widening this" caution, which stays about what this
+        // function accepts.
+        let mut seen = Vec::new();
         for tid in 0..self.threads.len() {
-            if matches!(self.threads.state_of(tid), thread::ThreadState::Exited(_)) { continue; }
+            let exited = matches!(self.threads.state_of(tid), thread::ThreadState::Exited(_));
             let p = self.kport_of(tid);
-            if p == Some(port) { return tid; }
-            seen.push((tid, p));
+            if !exited && p == Some(port) { return tid; }
+            seen.push(format_seen_entry(tid, p, exited));
         }
         panic!("__pthread_kill names mach port {port:#x}, which belongs to no live guest thread \
-                (searched {seen:x?} as (tid, kport)). Either the guest holds a port retrace never \
-                issued, or its pthread struct moved — measure before widening this.");
+                (searched [{}]). Either the guest holds a port retrace never issued, or its \
+                pthread struct moved — measure before widening this.", seen.join(", "));
     }
 
     /// The address the kernel enters a NEW thread at, learned from the guest's own
@@ -3738,6 +3743,50 @@ impl Box_ {
             self.vcpu.get_sys(sysreg::DBGWCR0_EL1).unwrap(),
             self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap(),
         )
+    }
+}
+
+/// One entry of `thread_of_port`'s panic diagnostic: `(tid=…, kport=…[, exited])`.
+///
+/// Pure and VM-free — factored out of `thread_of_port` (fix round 1, review finding 1) so the
+/// format can be pinned by a plain unit test instead of only ever being read inside a panic
+/// message from a real VM run. `kport` stays hex-with-prefix (matches the `{port:#x}` the target
+/// port itself is printed with); "unreadable" instead of a 0 sentinel distinguishes an unreadable
+/// pthread from a thread whose kport genuinely reads 0. `tid` stays plain decimal — the earlier
+/// `{seen:x?}` swept it into hex along with the kport, ambiguous the moment a guest has >= 10
+/// threads (`a` misreadable as decimal 10).
+fn format_seen_entry(tid: usize, kport: Option<u32>, exited: bool) -> String {
+    let kport = match kport {
+        Some(k) => format!("{k:#x}"),
+        None => "unreadable".to_string(),
+    };
+    format!("(tid={tid}, kport={kport}{})", if exited { ", exited" } else { "" })
+}
+
+#[cfg(test)]
+mod thread_of_port_diagnostic_tests {
+    use super::*;
+
+    // No VM: `format_seen_entry` is the pure formatting slice of `thread_of_port`'s panic message.
+    // Asserts on substrings, not the whole string, so it pins the two things review finding 1 and
+    // 2 were actually about (tid stays decimal, kport stays hex, exited is tagged) without pinning
+    // wording that isn't the point.
+    #[test]
+    fn tid_stays_decimal_and_kport_stays_hex_with_prefix() {
+        let entry = format_seen_entry(10, Some(0xff), false);
+        assert!(entry.contains("tid=10"), "tid must stay decimal, not fold into hex: {entry}");
+        assert!(!entry.contains("tid=a"), "tid must NOT get swept into hex formatting: {entry}");
+        assert!(entry.contains("kport=0xff"), "kport must stay hex-with-prefix: {entry}");
+        assert!(!entry.contains("exited"), "a live (non-exited) thread must not be tagged: {entry}");
+    }
+
+    #[test]
+    fn exited_and_unreadable_are_distinguishable_in_the_dump() {
+        let exited = format_seen_entry(3, None, true);
+        assert!(exited.contains("exited"), "an already-exited thread must be tagged: {exited}");
+        assert!(exited.contains("kport=unreadable"),
+            "a None kport must read as unreadable, not a bare '0' that could be confused with a \
+             thread whose kport genuinely reads 0: {exited}");
     }
 }
 
