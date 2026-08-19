@@ -402,3 +402,44 @@ fn a_second_signal_to_an_unrun_redirected_thread_fails_loud() {
     })).is_err();
     assert!(panicked, "stacking a frame on a context that never ran the first must not be silent");
 }
+
+/// M16 Task 6 fix round 1 (review finding 5): `deliver_signal_to` must refuse a target that is not
+/// `Runnable`. Redirecting a Blocked thread would overwrite the very saved context its blocking
+/// syscall is waiting to resume through. Not reachable through any product caller at this commit
+/// (nothing yet passes `tid != cur`), but the guard must exist before the next task makes it
+/// reachable — without it the failure mode is silent corruption, not a panic.
+#[test]
+#[should_panic(expected = "is Blocked(")]
+fn delivering_to_a_blocked_thread_fails_loud() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(30, handler(retrace_arch::SA_SIGINFO, 0));
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+
+    // Block thread `tid` itself (`block` always blocks the CURRENT thread), then switch back to 0
+    // so the target is blocked while some OTHER thread is running — the shape the guard exists for.
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.threads_mut().switch_to(0);
+
+    b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
+}
+
+/// M16 Task 6 fix round 1 (review finding 5), the other half: redirecting an Exited thread would
+/// mutate a dead table entry that has no saved context left to resume into a handler.
+#[test]
+#[should_panic(expected = "has Exited(")]
+fn delivering_to_an_exited_thread_fails_loud() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(30, handler(retrace_arch::SA_SIGINFO, 0));
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().exit_current(0);
+    b.threads_mut().switch_to(0);
+
+    b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
+}
