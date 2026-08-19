@@ -927,10 +927,7 @@ impl ReplaySession {
     /// way; only the report differs), else as plain `Event`.
     fn finish_event(&mut self) -> Result<Advance, Divergence> {
         self.idx += 1;
-        // Bound before the `if let` so the &mut borrow for `take_` ends before `current_thread`'s
-        // shared borrow starts (the scrutinee temporary otherwise outlives the body).
-        let hit = self.b.take_syscall_watch_hit();
-        if let Some((watched, _ipa)) = hit {
+        if let Some((watched, _ipa)) = self.b.take_syscall_watch_hit() {
             return Ok(Advance::WatchSyscall { watched, thread: self.current_thread() });
         }
         Ok(Advance::Event)
