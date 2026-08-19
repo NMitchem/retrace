@@ -77,6 +77,44 @@ pub fn record_dynamic(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded,
     record_box(Box_::load_dynamic(exe, dyld, argv), trace_path)
 }
 
+/// M16 Task 9: the decision an unmasking `sigprocmask`/`pthread_sigmask` makes about the calling
+/// thread's pending set — written ONCE and called by record's mask arm and replay's mirror with the
+/// SAME `(b, tid)`. That identity is what makes "both sides materialise the same signal" true by
+/// construction instead of by two matches that could drift while both stayed green (symmetry rule 1).
+///
+/// `Some((sig, handler))` is the only shape that produces a second landmark. `None` covers BOTH
+/// "nothing was pending" and "the signal was discarded", which are indistinguishable to the trace
+/// precisely because neither writes an event — and discarding is the kernel's own behaviour for a
+/// signal whose disposition is ignore: it never runs anything, and the pending bit is gone.
+///
+/// `ThreadTable::take_deliverable` CLEARS the bit it returns, so this must be called exactly ONCE
+/// per unmask on each side, and a signal can never be materialised twice.
+fn take_pending_delivery(b: &mut Box_, tid: usize) -> Option<(u64, u64)> {
+    let sig = b.threads_mut().take_deliverable(tid)?;
+    match b.sigtable().action(sig).disp {
+        retrace_box::Disposition::Handler(handler) => Some((sig, handler)),
+        retrace_box::Disposition::Ign => None,
+        retrace_box::Disposition::Dfl => match retrace_arch::default_action(sig) {
+            retrace_arch::DefaultAction::Ignore => None,
+            // UNMODELLED, and loud about it rather than silently dropped. A signal whose default
+            // action is Terminate, pended while masked and then unblocked, must KILL the process
+            // here — which means appending `Event::Signal` plus the final full-memory snapshot and
+            // breaking the record loop, and the matching terminal mirror on the replay side, i.e.
+            // the shape record's terminal raise arm already has. That is a real piece of work, not
+            // a line, and no guest reaches it (nothing in dyld/libSystem startup raises a signal;
+            // `abort()` unblocks SIGABRT before raising it). Dropping it silently would turn a
+            // process death into a clean exit — the worst possible failure for a determinism
+            // oracle, because the recording and the replay would agree with each other and both be
+            // wrong. Both sides reach this panic at the same landmark.
+            retrace_arch::DefaultAction::Terminate => panic!(
+                "signal {sig} became deliverable at an unmask and its default action is Terminate: \
+                 the process must die here, and the terminal path (Event::Signal + final snapshot + \
+                 break, plus its replay mirror) is not modelled at the mask landmark. Implement it \
+                 before a guest needs this; do not drop the signal."),
+        },
+    }
+}
+
 fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
@@ -529,12 +567,57 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append sigprocmask: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
+                // M16 Task 9: THE ANCHOR, and the design's load-bearing choice. A signal raised
+                // while this thread's mask blocked it is materialised HERE, at the unmask landmark
+                // — never at the scheduler's switch point, which lives inside `Box_::run()`, below
+                // the trace, where a `SignalDelivery` could not be emitted at all. That is exactly
+                // the argument M15 used to DELETE `Event::Sched` rather than reserve it, and it is
+                // why the arm appends TWO landmarks (this Syscall, then the delivery) instead of
+                // teaching the scheduler to write events.
+                //
+                // The limit this accepts: a signal left pending on a thread that never touches its
+                // mask again is delivered NEVER, where a real kernel would deliver it at the next
+                // opportunity.
+                //
+                // The target is the CALLING thread — the one holding the vCPU — so
+                // `deliver_signal_to`'s Runnable guard is satisfied by construction. Worth stating
+                // because the OTHER materialisation shape someone will reach for (delivering a
+                // PEER's pending signal when its mask is changed for it) has no such invariant and
+                // would hit that guard's panic.
+                if let Some((psig, handler)) = take_pending_delivery(&mut b, thread as usize) {
+                    // The frame must record that this sigprocmask SUCCEEDED, and `apply_and_return`
+                    // alone cannot say so: the frame's PSTATE comes from SPSR_EL1, which
+                    // `set_x0_err_and_return` never writes (it writes reg::CPSR). Same call, same
+                    // reason, as the caught-raise arm below — omit it and the handler returns
+                    // through `sigreturn` into a stale carry, where libc's syscall stub reads the
+                    // unmask as having failed.
+                    b.complete_syscall_before_delivery(0, false);
+                    let (dwrites, resume_pc) =
+                        b.deliver_signal_to(thread as usize, psig, retrace_arch::SI_USER, 0, 0, 0);
+                    // `thread` is both caller and receiver here, so the tag is unambiguous — but it
+                    // is the RECEIVER that `Event::SignalDelivery.thread` promises, which is what
+                    // `mirror_delivery` compares its recomputed target against.
+                    w.append(&Event::SignalDelivery { sig: psig, si_code: retrace_arch::SI_USER,
+                                                      si_addr: 0, handler, resume_pc,
+                                                      writes: dwrites, thread })
+                        .map_err(|e| format!("append pending delivery: {e}"))?; count += 1;
+                }
             }
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGPENDING => {
-                // Always empty, and TRUE by construction: raising a blocked signal asserts below,
-                // so no signal can ever be pending. These two decisions stand or fall together.
+                // M16 Task 9: the real pending set. This used to write a constant zero, justified
+                // as "Always empty, and TRUE by construction: raising a blocked signal asserts
+                // below, so no signal can ever be pending. These two decisions stand or fall
+                // together." Task 7 removed that assert and gave the box a per-thread pending set,
+                // so the second decision fell — and the comment, having named its own expiry
+                // condition, is the reason this one did not quietly outlive it.
+                //
+                // The CALLING thread's set, like the mask. POSIX's sigpending is the union of the
+                // thread's pending signals and the PROCESS's; retrace models no process-wide
+                // pending set (nothing pends one — `kill` targets the caller), so the union is the
+                // per-thread set and this is exact, not an approximation.
                 let writes = if args[0] != 0 {
-                    vec![Region { ipa: args[0], bytes: 0u32.to_le_bytes().to_vec() }]
+                    let pending = b.threads().pending_of(thread as usize);
+                    vec![Region { ipa: args[0], bytes: pending.to_le_bytes().to_vec() }]
                 } else { vec![] };
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append sigpending: {e}"))?; count += 1;
