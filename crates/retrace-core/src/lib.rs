@@ -581,72 +581,98 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                          and forwarding would signal a REAL host process. Implement a guest pid \
                          namespace before a guest needs this.", args[0]);
                 }
-                // __pthread_kill's thread-port operand is NOT validated: 328 fires in no gate guest
-                // (measured: zero across hello_dyn/hello_rust/jq), so there is no observed port to
-                // compare against, and the guest has exactly one thread on one vCPU — any port it
-                // could name is that thread. Ungated rather than wrongly gated; see the Status
-                // section. Learn the port from mach_thread_self if a guest ever needs the check.
+                // M16: __pthread_kill's thread-port operand IS validated now, by `thread_of_port`,
+                // which reads each live thread's own kport out of its own pthread struct — main
+                // included, with no special case. It is fail-loud (panics rather than defaulting
+                // to the current thread) because defaulting to the current thread is the exact
+                // latent bug M16 exists to close: it would silently run the target's handler on
+                // whoever happened to call __pthread_kill. Before this task the operand went
+                // unchecked because 328 fired in no gate guest (measured: zero across
+                // hello_dyn/hello_rust/jq) and the guest had exactly one thread on one vCPU, so any
+                // port it could name was that thread; SIGTHREAD (Task 5) is the first guest that
+                // exercises this.
+                //
+                // M16: __pthread_kill names a TARGET THREAD; kill names the process. A
+                // process-directed signal may go to any thread with it unblocked, and retrace picks
+                // the caller — which is what every pre-M16 gate already assumes.
+                let target = if num == retrace_arch::SYS_PTHREAD_KILL {
+                    b.thread_of_port(args[0] as u32)
+                } else {
+                    b.threads().current()
+                };
                 let sig = args[1];
                 let act = b.sigtable().action(sig);
-                assert!(!b.threads().is_blocked_for(thread as usize, sig),
-                    "raising blocked signal {sig} is not modelled: it must go PENDING until \
-                     unblocked, and M11 models no pending set (measured: no gate guest does this; \
-                     abort() unblocks SIGABRT before raising). Implement a pending mask before a \
-                     guest needs this — and note that sigpending's always-empty answer stops being \
-                     true the moment you do.");
-                match act.disp {
-                    // M12: the self-raise counterpart of the fault path. The ordinary Syscall event
-                    // is appended FIRST, so the divergence oracle still checks (num, args) and the
-                    // kill safety boundary above still runs; the delivery is a second landmark.
-                    // esr/far are 0: no hardware fault happened, and inventing a syndrome would be
-                    // the lie M11 refused when it kept Event::Signal out of Event::Crash.
-                    retrace_box::Disposition::Handler(handler) => {
-                        w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
-                            .map_err(|e| format!("append caught raise: {e}"))?; count += 1;
-                        // The raise SUCCEEDS, and the frame must say so. Unlike the fault path,
-                        // this delivery happens at a syscall boundary, so the context the kernel
-                        // snapshots is the POST-return one: x0 = 0 and PSTATE.C clear, not the
-                        // pid the guest passed and whatever flags it happened to carry. Measured
-                        // in spikes/sigraisex0.c; see complete_syscall_before_delivery, which
-                        // exists because the frame's PSTATE comes from SPSR_EL1 rather than from
-                        // the reg::CPSR that set_x0_err_and_return writes.
-                        b.complete_syscall_before_delivery(0, false);
-                        let (writes, resume_pc) =
-                            b.deliver_signal(sig, retrace_arch::SI_USER, 0, 0, 0);
-                        // PLACEHOLDER (M16): `thread` is the CURRENT (raising) thread, which is
-                        // factually right at this commit because __pthread_kill's target port is
-                        // not yet resolved to a thread — delivery still runs on whoever raised it.
-                        // Task 7 resolves that target, and delivery must then follow it there,
-                        // which may not be `thread`. Fix at Task 7, not here.
-                        w.append(&Event::SignalDelivery { sig, si_code: retrace_arch::SI_USER,
-                                                          si_addr: 0, handler, resume_pc, writes,
-                                                          thread })
-                            .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
-                    }
-                    retrace_box::Disposition::Ign => {
-                        w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
-                            .map_err(|e| format!("append ignored raise: {e}"))?; count += 1;
-                        b.set_x0_err_and_return(0, false);
-                    }
-                    retrace_box::Disposition::Dfl => match retrace_arch::default_action(sig) {
-                        retrace_arch::DefaultAction::Ignore => {
+
+                if b.threads().is_blocked_for(target, sig) {
+                    // M16 replaces M11's assert: M11 modelled no pending set (measured: no gate
+                    // guest raised a blocked signal; abort() unblocks SIGABRT before raising), so
+                    // it could only refuse this case, not handle it. The signal goes PENDING on the
+                    // TARGET thread and is materialised at the next unmask — a syscall landmark,
+                    // which is what keeps delivery visible to both dispatch loops. Note
+                    // sigpending's always-empty answer stops being true now that a pending set
+                    // exists.
+                    w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
+                        .map_err(|e| format!("append pended raise: {e}"))?; count += 1;
+                    b.threads_mut().pend(target, sig);
+                    b.set_x0_err_and_return(0, false);
+                } else {
+                    match act.disp {
+                        // M12: the self-raise counterpart of the fault path. The ordinary Syscall
+                        // event is appended FIRST, so the divergence oracle still checks (num, args)
+                        // and the kill safety boundary above still runs; the delivery is a second
+                        // landmark. esr/far are 0: no hardware fault happened, and inventing a
+                        // syndrome would be the lie M11 refused when it kept Event::Signal out of
+                        // Event::Crash.
+                        retrace_box::Disposition::Handler(handler) => {
                             w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
-                                .map_err(|e| format!("append default-ignored raise: {e}"))?; count += 1;
+                                .map_err(|e| format!("append caught raise: {e}"))?; count += 1;
+                            // The raise SUCCEEDS, and the CALLER's frame must say so — regardless of
+                            // whether the caller is also the receiver. This delivery happens at a
+                            // syscall boundary, so the context the kernel snapshots on the CALLER is
+                            // the POST-return one: x0 = 0 and PSTATE.C clear, not the pid the guest
+                            // passed and whatever flags it happened to carry. Measured in
+                            // spikes/sigraisex0.c; see complete_syscall_before_delivery, which exists
+                            // because the frame's PSTATE comes from SPSR_EL1 rather than from the
+                            // reg::CPSR that set_x0_err_and_return writes. It always operates on the
+                            // live vCPU (the caller), never on `target`'s saved context, so it needs
+                            // no split for a cross-thread delivery.
+                            b.complete_syscall_before_delivery(0, false);
+                            let (writes, resume_pc) =
+                                b.deliver_signal_to(target, sig, retrace_arch::SI_USER, 0, 0, 0);
+                            // M16: `thread` here is the TARGET, not the caller — the receiving
+                            // thread the trace-format doc comment on Event::SignalDelivery promises.
+                            w.append(&Event::SignalDelivery { sig, si_code: retrace_arch::SI_USER,
+                                                              si_addr: 0, handler, resume_pc, writes,
+                                                              thread: target as u32 })
+                                .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
+                        }
+                        retrace_box::Disposition::Ign => {
+                            w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
+                                .map_err(|e| format!("append ignored raise: {e}"))?; count += 1;
                             b.set_x0_err_and_return(0, false);
                         }
-                        // TERMINAL. Same shape as the Exit and Crash arms above: the event, then
-                        // the final full-memory snapshot, then break.
-                        retrace_arch::DefaultAction::Terminate => {
-                            let pc = b.position();
-                            let final_snap = b.snapshot();
-                            w.append(&Event::Signal { sig, pc, thread })
-                                .map_err(|e| format!("append signal: {e}"))?; count += 1;
-                            w.append(&final_snap)
-                                .map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
-                            outcome = Outcome::Signal { sig };
-                            break;
-                        }
-                    },
+                        retrace_box::Disposition::Dfl => match retrace_arch::default_action(sig) {
+                            retrace_arch::DefaultAction::Ignore => {
+                                w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread })
+                                    .map_err(|e| format!("append default-ignored raise: {e}"))?; count += 1;
+                                b.set_x0_err_and_return(0, false);
+                            }
+                            // TERMINAL. Same shape as the Exit and Crash arms above: the event, then
+                            // the final full-memory snapshot, then break. `thread` is the CALLER
+                            // here (unchanged from pre-M16): a process-directed default-terminate
+                            // has no per-thread target to resolve.
+                            retrace_arch::DefaultAction::Terminate => {
+                                let pc = b.position();
+                                let final_snap = b.snapshot();
+                                w.append(&Event::Signal { sig, pc, thread })
+                                    .map_err(|e| format!("append signal: {e}"))?; count += 1;
+                                w.append(&final_snap)
+                                    .map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
+                                outcome = Outcome::Signal { sig };
+                                break;
+                            }
+                        },
+                    }
                 }
             }
 
