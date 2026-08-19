@@ -265,17 +265,33 @@ fn a_failed_syscall_completed_before_delivery_carries_its_error_flag_into_the_fr
 // ---- M16 t6: delivery targets a thread, not the vCPU ------------------------------------------
 
 /// M16 Task 6. `deliver_signal_to` sources FP/LR from `ThreadCtx.regs.x[29]`/`[30]`, because a
-/// saved context has no separate FP/LR field. That is only correct if HVF aliases the registers.
+/// saved context has no separate FP/LR field. This test pins two DIFFERENT things (fix round 1,
+/// review finding 3 — the original comment described only the second and read as though the
+/// aliasing were an open question):
+///
+/// The FIRST assertion (`r.x[29], r.x[30]`) is the genuine one: it pins that `regs_snapshot()` —
+/// hence `save_ctx()` — actually carries FP/LR at `x[29]`/`x[30]`. That is the property
+/// `deliver_signal_to`'s `ts.fp`/`ts.lr` sourcing depends on; a `ThreadCtx.regs.x` that only
+/// filled `x[..29]` would fail it.
+///
+/// The SECOND assertion (`dbg_fp_lr()`) is a constant-identity guard, not a live measurement. In
+/// the generated bindings `HV_REG_FP == HV_REG_X29 == 29` and `HV_REG_LR == HV_REG_X30 == 30`, and
+/// `reg::x(n) = Reg(HV_REG_X0 + n)` — so `vcpu_set_x(29, …)` and `dbg_fp_lr()`'s `get_reg(reg::FP)`
+/// address the SAME HVF register id by construction, and this comparison cannot fail on this SDK.
+/// It stays as a guard against a future SDK renumbering those constants, nothing more.
 #[test]
 fn x29_and_x30_are_the_frame_pointer_and_link_register() {
     let mut b = boxed();
     b.vcpu_set_x(29, 0xF00D_0000_0000_0001);
     b.vcpu_set_x(30, 0xF00D_0000_0000_0002);
     let r = b.regs_snapshot();
-    assert_eq!((r.x[29], r.x[30]), (0xF00D_0000_0000_0001, 0xF00D_0000_0000_0002));
+    assert_eq!((r.x[29], r.x[30]), (0xF00D_0000_0000_0001, 0xF00D_0000_0000_0002),
+        "regs_snapshot() (hence save_ctx) must carry FP/LR at x[29]/x[30] — the property \
+         deliver_signal_to's ts.fp/ts.lr sourcing actually depends on");
     assert_eq!(b.dbg_fp_lr(), (0xF00D_0000_0000_0001, 0xF00D_0000_0000_0002),
-        "HV_REG_FP/HV_REG_LR must alias X29/X30. If they do not, deliver_signal_to must carry them \
-         as their own ThreadCtx fields instead of reading regs.x — measure, do not paper over it.");
+        "constant-identity guard, not a live measurement: HV_REG_FP/HV_REG_LR alias X29/X30 by \
+         construction in today's SDK bindings, so this cannot fail here — it exists only to catch \
+         a future SDK renumbering those constants.");
 }
 
 /// M16 Task 6, the headline unit property: a signal delivered to a thread that is NOT running
