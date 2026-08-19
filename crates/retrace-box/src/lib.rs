@@ -3670,6 +3670,22 @@ impl Box_ {
              bypassed sctlr_mmu_on()", self.pac_enabled);
         live
     }
+
+    /// Read back the hardware watchpoint slot-0 registers and MDSCR_EL1 straight off the vCPU.
+    /// Test-only (M15 Task 6): debug registers are vCPU-global and deliberately absent from
+    /// `ThreadCtx`, so a watchpoint armed before a context switch must still be armed after one.
+    /// Nothing in production reads these back — `arm_hw_watchpoint`/`clear_hw_watchpoints` only
+    /// write them — so without this there is no way to assert the hardware leaf rather than the
+    /// `watch_ranges` software mirror, and a test of the mirror alone would pass even if
+    /// `load_ctx` wiped MDSCR_EL1. Returns `(DBGWVR0_EL1, DBGWCR0_EL1, MDSCR_EL1)`.
+    #[doc(hidden)]
+    pub fn dbg_watch0_hw(&self) -> (u64, u64, u64) {
+        (
+            self.vcpu.get_sys(sysreg::DBGWVR0_EL1).unwrap(),
+            self.vcpu.get_sys(sysreg::DBGWCR0_EL1).unwrap(),
+            self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap(),
+        )
+    }
 }
 
 #[cfg(test)]

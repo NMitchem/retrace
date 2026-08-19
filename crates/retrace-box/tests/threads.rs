@@ -852,3 +852,53 @@ fn dbg_regs_of_is_none_for_an_out_of_range_thread_id() {
     let b = tb();
     assert_eq!(b.dbg_regs_of(1), None, "a single-threaded box has no thread 1");
 }
+
+/// M15 Task 6: `DBGWVR/DBGWCR`/`MDSCR_EL1` are vCPU-global and deliberately absent from
+/// `ThreadCtx` (see its doc comment in `thread.rs`) — `switch_to_thread` moves only
+/// `save_ctx`/`load_ctx`'s fields, neither of which mentions them. So a watchpoint armed before a
+/// context switch must still be armed after one: one vCPU, one address space, so any thread's
+/// store should trip it. That is correct and desirable, but every M5 watchpoint test predates M14
+/// and runs a single-threaded guest, so this property was correct by accident and entirely
+/// unexercised until now.
+///
+/// Asserts the HARDWARE leaf via `dbg_watch0_hw` (a test-only accessor added for this task — no
+/// other route exists to read `DBGWVR0_EL1`/`DBGWCR0_EL1`/`MDSCR_EL1` back off the vCPU), not just
+/// the software `watch_ranges` mirror `apply_and_return` consults on the syscall path. M13 Task
+/// 8's defect was a test that checked only a software mirror and passed while the hardware leaf
+/// disagreed; checking `watch_ranges` alone here would pass even if `load_ctx` wiped `MDSCR_EL1`.
+/// See the Task 6 report for the mutation-check transcript proving this test would have failed
+/// exactly that mutation.
+#[test]
+fn an_armed_watchpoint_survives_a_context_switch() {
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    b.set_thread_start_pc(0x0001_804b_2000);
+    let p = pth(&b, 1);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, p, p, 0, 0, 0, 0]); // thread 1
+
+    // Real mapped guest memory (the static stack backing), word-aligned — same address shape the
+    // ulock_wait tests above already use.
+    let addr = b.stack_top() - 0x40;
+    b.arm_hw_watchpoint(0, addr, 4);
+
+    // MDSCR_EL1.MDE — lib.rs:217, gates the whole HW breakpoint/watchpoint machine.
+    const MDSCR_MDE_BIT: u64 = 1 << 15;
+    let (wvr0, wcr0, mdscr0) = b.dbg_watch0_hw();
+    // Nonvacuity: prove arming actually took, or the "survives a switch" assertions below would
+    // pass trivially on a watchpoint that was never armed in the first place.
+    assert_ne!(wcr0 & 0x1, 0, "arm_hw_watchpoint must set DBGWCR0_EL1's enable bit (E, bit0)");
+    assert_ne!(mdscr0 & MDSCR_MDE_BIT, 0, "…and MDSCR_EL1.MDE");
+
+    // Force a real switch — block main, then let the scheduler take it, the same idiom
+    // `run_switches_to_the_child_when_main_blocks` above uses, not a table-only shortcut.
+    b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
+    b.schedule_after_block();
+    assert_eq!(b.threads().current(), 1, "the switch must actually have happened");
+
+    let (wvr1, wcr1, mdscr1) = b.dbg_watch0_hw();
+    assert_eq!(wvr1, wvr0, "DBGWVR0_EL1 must still hold the armed address after the switch");
+    assert_ne!(wcr1 & 0x1, 0,
+        "DBGWCR0_EL1's enable bit (E, bit0 of DBGWCR_BASE) must still be set after the switch");
+    assert_ne!(mdscr1 & MDSCR_MDE_BIT, 0,
+        "MDSCR_EL1.MDE must still be set after the switch — the watch machine stays armed for \
+         EVERY thread, which is what lets it catch any thread's store");
+}
