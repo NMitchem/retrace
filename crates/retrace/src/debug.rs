@@ -386,7 +386,7 @@ impl<'a> Exec<'a> {
                         format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?
                     {
                         Advance::Exited(report) => return self.park_at_terminal(report, out),
-                        Advance::WatchSyscall { watched } => {
+                        Advance::WatchSyscall { watched, thread: _ } => {
                             let n = self.sess().landmark();
                             line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
                             // Only watches were armed here — clear them; the session is kept.
@@ -442,7 +442,11 @@ impl<'a> Exec<'a> {
                     // no boundary match; keep scanning (hardware breakpoints stay armed)
                 }
                 Advance::Exited(report) => return self.park_at_terminal(report, out),
-                Advance::Watch => {
+                // `thread: _` at all five watch arms below, not `..`: M15 Task 5 plumbs the
+                // writing thread through `Advance`, and Task 7 is what teaches these lines to
+                // print it. Naming the field keeps every site that drops it greppable; `..` is
+                // exactly how Task 4's oracle check went missing from two arms.
+                Advance::Watch { thread: _ } => {
                     let n = self.sess().landmark();
                     let p_hit = self.sess().pc();
                     let watched = watched_of(&ws, self.sess().far());
@@ -458,7 +462,7 @@ impl<'a> Exec<'a> {
                     self.last_watch_hit = Some((n, k));
                     return self.reseek(n, k);
                 }
-                Advance::WatchSyscall { watched } => {
+                Advance::WatchSyscall { watched, thread: _ } => {
                     let n = self.sess().landmark();
                     line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
                     self.sess_mut().clear_breakpoints();  // keep this session, hit-clean
@@ -494,11 +498,11 @@ impl<'a> Exec<'a> {
             let hit = loop {
                 match s.advance().map_err(|d| format!("reverse-continue diverged: {}", d.detail))? {
                     Advance::Break => break Some((s.landmark(), RHit::Bp(s.pc()))),
-                    Advance::Watch => {
+                    Advance::Watch { thread: _ } => {
                         let watched = watched_of(&ws, s.far());
                         break Some((s.landmark(), RHit::Watch { watched, pc: s.pc() }));
                     }
-                    Advance::WatchSyscall { watched } =>
+                    Advance::WatchSyscall { watched, thread: _ } =>
                         break Some((s.landmark(), RHit::WatchSys { watched })),
                     Advance::Event => continue,
                     // Exited covers BOTH terminals (exit and crash): either way the scan is over.

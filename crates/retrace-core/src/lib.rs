@@ -833,7 +833,18 @@ impl std::fmt::Debug for ReplaySession {
 /// field discriminates which (`Exited`, run done); or a hardware breakpoint fired mid-window
 /// (`Break`, M3 debugger only — carries nothing: the caller reads `landmark()`/`pc()`). `Break` is
 /// unreachable under the plain `replay()` oracle, which never arms breakpoints.
-pub enum Advance { Event, Exited(ReplayReport), Break, Watch, WatchSyscall { watched: u64 } }
+/// M15 Task 5: both watch variants name the thread whose store triggered them. `Watch` was a unit
+/// variant until now; a watch hit that cannot say WHO wrote is half an answer once a guest has more
+/// than one thread. The two are populated at two independent sites — `Watch` in the `Stop::Other`
+/// watchpoint arm, `WatchSyscall` in `finish_event` — both reading the live thread table, never a
+/// cached copy, so the id is the scheduler's own answer at the instant of the hit.
+pub enum Advance {
+    Event,
+    Exited(ReplayReport),
+    Break,
+    Watch { thread: u32 },
+    WatchSyscall { watched: u64, thread: u32 },
+}
 
 impl ReplaySession {
     pub fn open(trace_path: &Path) -> Result<Self, String> {
@@ -916,8 +927,11 @@ impl ReplaySession {
     /// way; only the report differs), else as plain `Event`.
     fn finish_event(&mut self) -> Result<Advance, Divergence> {
         self.idx += 1;
-        if let Some((watched, _ipa)) = self.b.take_syscall_watch_hit() {
-            return Ok(Advance::WatchSyscall { watched });
+        // Bound before the `if let` so the &mut borrow for `take_` ends before `current_thread`'s
+        // shared borrow starts (the scrutinee temporary otherwise outlives the body).
+        let hit = self.b.take_syscall_watch_hit();
+        if let Some((watched, _ipa)) = hit {
+            return Ok(Advance::WatchSyscall { watched, thread: self.current_thread() });
         }
         Ok(Advance::Event)
     }
@@ -1524,7 +1538,7 @@ impl ReplaySession {
                     // A hardware watchpoint (M5 debugger) delivers here identically; surface it
                     // BEFORE the fault fallbacks. Only the debugger arms watchpoints.
                     if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Watchpoint) {
-                        return Ok(Advance::Watch);
+                        return Ok(Advance::Watch { thread: self.current_thread() });
                     }
                     // Cache-window fault: page it in (regenerated identically to record) and re-run.
                     if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
