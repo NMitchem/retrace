@@ -11,10 +11,7 @@
 //! its inputs alone, which is both why record and replay produce identical bytes and why the whole
 //! layout is testable in microseconds.
 
-use retrace_arch::{
-    NSIG, SA_ONSTACK, SA_SIGINFO, SIG_BLOCK, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SS_ONSTACK,
-    UC_FLAVOR,
-};
+use retrace_arch::{NSIG, SA_ONSTACK, SA_SIGINFO, SIG_DFL, SIG_IGN, SS_ONSTACK, UC_FLAVOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
@@ -39,25 +36,20 @@ impl Default for SigAction {
     }
 }
 
-/// Per-signal disposition, the blocked mask, and the alternate stack.
-///
-/// `altstack` is STORED but never honoured: no handler runs this milestone, so there is nothing to
-/// run on an alternate stack. Keeping it makes `sigaltstack` a real syscall with a real writeback
-/// rather than a lie, and costs one field.
+/// Per-signal disposition — process-wide, per POSIX. The blocked mask, the pending set and the
+/// alternate stack used to live here too; M16 moved them to `Thread` (`thread.rs`), since POSIX
+/// makes those three per-thread while dispositions stay shared across the whole process.
 #[derive(Debug, Clone)]
 pub struct SigTable {
     /// Indexed by signal number; `[0]` is unused so indexing mirrors signal numbering (1..=31).
     disp: [SigAction; NSIG],
-    /// Bit `(sig - 1)`, matching `sigset_t`'s encoding for signals 1..=32.
-    blocked: u32,
-    altstack: Option<(u64, u64, u64)>,
 }
 
 impl Default for SigTable {
-    /// All-default, nothing blocked, no alt stack — which is genuinely correct for a fresh process,
-    /// so there is no seeding step that could be got wrong.
+    /// All-default — which is genuinely correct for a fresh process, so there is no seeding step
+    /// that could be got wrong.
     fn default() -> Self {
-        SigTable { disp: [SigAction::default(); NSIG], blocked: 0, altstack: None }
+        SigTable { disp: [SigAction::default(); NSIG] }
     }
 }
 
@@ -77,36 +69,6 @@ impl SigTable {
 
     pub fn set_action(&mut self, sig: u64, a: SigAction) -> SigAction {
         std::mem::replace(&mut self.disp[Self::idx(sig)], a)
-    }
-
-    pub fn is_blocked(&self, sig: u64) -> bool {
-        self.blocked & (1u32 << (Self::idx(sig) - 1)) != 0
-    }
-
-    pub fn mask(&self) -> u32 {
-        self.blocked
-    }
-
-    pub fn set_mask(&mut self, how: u64, set: u32) -> u32 {
-        let old = self.blocked;
-        self.blocked = match how {
-            SIG_BLOCK => old | set,
-            SIG_UNBLOCK => old & !set,
-            SIG_SETMASK => set,
-            _ => panic!(
-                "sigprocmask how={how} is not BLOCK(1)/UNBLOCK(2)/SETMASK(3) — an unmodelled \
-                 value, not a guest error to swallow"
-            ),
-        };
-        old
-    }
-
-    pub fn altstack(&self) -> Option<(u64, u64, u64)> {
-        self.altstack
-    }
-
-    pub fn set_altstack(&mut self, ss: Option<(u64, u64, u64)>) -> Option<(u64, u64, u64)> {
-        std::mem::replace(&mut self.altstack, ss)
     }
 }
 
@@ -314,17 +276,13 @@ pub fn build_frame(inp: &FrameInput) -> (Vec<u8>, EntryRegs) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use retrace_arch::{SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK};
 
     #[test]
-    fn fresh_table_is_all_default_unblocked_no_altstack() {
+    fn fresh_table_is_all_default() {
         let t = SigTable::default();
         for sig in 1..32u64 {
             assert_eq!(t.action(sig).disp, Disposition::Dfl, "sig {sig}");
-            assert!(!t.is_blocked(sig), "sig {sig}");
         }
-        assert_eq!(t.mask(), 0);
-        assert_eq!(t.altstack(), None);
     }
 
     #[test]
@@ -338,28 +296,6 @@ mod tests {
             t.action(6),
             SigAction { disp: Disposition::Handler(0x1_0000), tramp: 0, mask: 3, flags: 4 }
         );
-    }
-
-    #[test]
-    fn mask_honours_block_unblock_setmask() {
-        let mut t = SigTable::default();
-        assert_eq!(t.set_mask(SIG_BLOCK, 0b0110), 0, "returns the OLD mask");
-        assert_eq!(t.mask(), 0b0110);
-        assert_eq!(t.set_mask(SIG_BLOCK, 0b1000), 0b0110);
-        assert_eq!(t.mask(), 0b1110, "BLOCK is a union");
-        assert_eq!(t.set_mask(SIG_UNBLOCK, 0b0100), 0b1110);
-        assert_eq!(t.mask(), 0b1010, "UNBLOCK clears");
-        assert_eq!(t.set_mask(SIG_SETMASK, 0b0001), 0b1010);
-        assert_eq!(t.mask(), 0b0001, "SETMASK replaces");
-    }
-
-    #[test]
-    fn is_blocked_indexes_by_sig_minus_one() {
-        let mut t = SigTable::default();
-        t.set_mask(SIG_SETMASK, 1 << 5); // bit 5 == signal 6
-        assert!(t.is_blocked(6), "bit (sig-1) is the encoding");
-        assert!(!t.is_blocked(5));
-        assert!(!t.is_blocked(7));
     }
 
     // THE golden test. sigaction(2)'s in-param and out-param are different C structs:
@@ -413,14 +349,6 @@ mod tests {
         assert_eq!(u64::from_le_bytes(d[0..8].try_into().unwrap()), 0);
         let i = encode_oldact(SigAction { disp: Disposition::Ign, tramp: 0, mask: 0, flags: 0 });
         assert_eq!(u64::from_le_bytes(i[0..8].try_into().unwrap()), 1);
-    }
-
-    #[test]
-    fn altstack_is_stored_and_returns_the_previous_value() {
-        let mut t = SigTable::default();
-        assert_eq!(t.set_altstack(Some((0x9000, 0x4000, 0))), None);
-        assert_eq!(t.altstack(), Some((0x9000, 0x4000, 0)));
-        assert_eq!(t.set_altstack(None), Some((0x9000, 0x4000, 0)));
     }
 
     // ---- M12: the frame builder ---------------------------------------------------------------
