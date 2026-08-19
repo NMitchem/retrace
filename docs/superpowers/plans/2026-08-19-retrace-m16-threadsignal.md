@@ -2075,3 +2075,18 @@ It must cover, each in its own right:
 git add README.md CLAUDE.md
 git commit -m "M16-threadsignal: the honest close"
 ```
+
+**Carried in from the Task 3 review (finding 3), with the exact location:** `README.md:1675`, in the
+**M11** Status section, reads:
+
+> **Disposition, not delivery.** `SigTable` (`crates/retrace-box/src/sig.rs`) holds per-signal
+> disposition, the blocked mask, and the alt stack.
+
+Two of those three moved to `Thread` in `crates/retrace-box/src/thread.rs` in M16 Task 3. The
+sentence is present-tense and names a file, so a reader following it lands on code that does not
+match it. A Status section is a historical log and must not be rewritten to pretend M11 did
+something it did not — correct it the way this project already corrects superseded claims: leave
+M11's account of what M11 built, and say plainly that M16 later moved the mask and the alternate
+stack to the thread table, pointing at the M16 Status section. Grep the README for other
+`SigTable`-holds-the-mask claims before you edit; this is the one the reviewer found, not
+necessarily the only one.
