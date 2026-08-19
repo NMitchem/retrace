@@ -30,7 +30,8 @@
 // 20/20 on one host. That retrace's post-M16 order happens to equal native's is a fidelity result
 // worth reporting, not the thing being tested.
 //
-// Task 5 ships steps 1-4. Task 9 appends the mask/pending half.
+// Task 5 shipped steps 1-4; Task 9 appended the mask/pending half at the end of `main`, whose own
+// claim is stated at that code rather than repeated here.
 //
 // Same rustc recipe as watchthread: no -C panic=abort.
 
@@ -43,7 +44,17 @@ extern "C" {
     fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
     #[link_name = "write"]
     fn libc_write(fd: i32, buf: *const u8, n: usize) -> isize;
+    // The Task 9 half. `sigset_t` on macOS is 32 bits — VERIFIED against this host's SDK, not
+    // assumed: `sys/_types/_sigset_t.h` has `typedef __darwin_sigset_t sigset_t;` and
+    // `sys/_types.h:85` has `typedef __uint32_t __darwin_sigset_t;`. So `u32` is the exact
+    // width; a wider type would hand the kernel bytes past the end of the set.
+    fn pthread_sigmask(how: i32, set: *const u32, old: *mut u32) -> i32;
+    fn sigpending(set: *mut u32) -> i32;
+    fn pthread_self() -> u64;
 }
+
+const SIG_BLOCK: i32 = 1;
+const SIG_UNBLOCK: i32 = 2;
 
 // SA_SIGINFO, installed via `sigaction` — NOT `signal(3)`. MEASURED: a `signal()`-installed
 // handler is non-SA_SIGINFO, and `build_frame` (sig.rs:262) asserts fail-loud on exactly that:
@@ -92,4 +103,26 @@ fn main() {
 
     h.join().unwrap();
     println!("joined");
+
+    // The mask/pending half (Task 9). Main blocks SIGUSR1 for ITSELF, raises it on itself so it
+    // must pend, observes sigpending reporting it, then unblocks — which is the landmark the
+    // delivery is anchored to. Every step is main's own: the child has already been joined, so
+    // nothing here depends on a second live thread, and the pending set is exercised on the one
+    // thread whose Runnable-ness at its own sigprocmask is true by construction.
+    let set: u32 = 1u32 << (SIGUSR1 - 1);
+    let mut old: u32 = 0;
+    unsafe { pthread_sigmask(SIG_BLOCK, &set, &mut old) };
+    let rc2 = unsafe { pthread_kill(pthread_self(), SIGUSR1) };
+    println!("self kill rc {rc2}");
+
+    let mut pend: u32 = 0;
+    unsafe { sigpending(&mut pend) };
+    println!("pending {}", (pend >> (SIGUSR1 - 1)) & 1);
+
+    // The anchor. `handler` prints from INSIDE this call — the delivery is materialised at the
+    // unmask landmark, before it returns — so `handler` precedes `unblocked` in stdout, and that
+    // adjacency is what the e2e asserts on the trace side as SignalDelivery-immediately-after-
+    // the-mask-Syscall.
+    unsafe { pthread_sigmask(SIG_UNBLOCK, &set, &mut old) };
+    println!("unblocked");
 }
