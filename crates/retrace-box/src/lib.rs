@@ -3078,6 +3078,27 @@ impl Box_ {
         Some(u32::from_le_bytes(b.try_into().unwrap()))
     }
 
+    /// Which thread owns `port`.
+    ///
+    /// FAIL-LOUD, not `Option`: the alternative is defaulting to the current thread, which is the
+    /// exact latent defect M16 exists to close — `pthread_kill(child, sig)` running MAIN's handler
+    /// on MAIN's stack, silently. A port retrace cannot place is a modelling gap that must surface
+    /// as a panic.
+    pub fn thread_of_port(&self, port: u32) -> usize {
+        // `Option<u32>`, not a 0 sentinel: an unreadable pthread and a thread whose kport genuinely
+        // reads 0 are different diagnoses, and this panic's whole job is to tell them apart.
+        let mut seen: Vec<(usize, Option<u32>)> = Vec::new();
+        for tid in 0..self.threads.len() {
+            if matches!(self.threads.state_of(tid), thread::ThreadState::Exited(_)) { continue; }
+            let p = self.kport_of(tid);
+            if p == Some(port) { return tid; }
+            seen.push((tid, p));
+        }
+        panic!("__pthread_kill names mach port {port:#x}, which belongs to no live guest thread \
+                (searched {seen:x?} as (tid, kport)). Either the guest holds a port retrace never \
+                issued, or its pthread struct moved — measure before widening this.");
+    }
+
     /// The address the kernel enters a NEW thread at, learned from the guest's own
     /// `bsdthread_register` call — `None` until that call is observed.
     pub fn thread_start_pc(&self) -> Option<u64> { self.thread_start_pc }
