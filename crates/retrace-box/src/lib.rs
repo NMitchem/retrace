@@ -2888,6 +2888,9 @@ impl Box_ {
         let alt = self.threads.altstack_of(tid);
         let (frame_base, on_alt) = choose_frame_base(ts.sp, act, alt, self.on_altstack_of(tid));
 
+        // `on_alt` is FED BACK from `choose_frame_base` rather than recomputed here, so the frame's
+        // `uc_onstack` cannot disagree with the stack the frame was actually placed on — this is
+        // the whole reason `choose_frame_base` returns a second value at all.
         let inp = FrameInput {
             sig, si_code, si_addr, esr, far, ts, ns,
             mask: self.threads.mask_of(tid),   // the PRE-signal mask: what sigreturn restores
@@ -2912,6 +2915,11 @@ impl Box_ {
             // The vCPU resumes at reg::PC, which load_ctx writes from regs.pc — so the trampoline
             // address goes THERE, exactly as the pre-M16 code wrote reg::PC and not ELR_EL1.
             c.regs.pc = entry.pc;
+            // CPSR comes from ctx.spsr (SPSR_EL1), not ctx.regs.cpsr, so the handler runs at EL0.
+            // This is now MORE subtle than the pre-M16 line it replaced: for a non-current target,
+            // ctx.regs.cpsr is that thread's own EL1 TRAP pstate (the vCPU's live CPSR while the
+            // box was handling the trap that captured this context), not the guest's EL0 state —
+            // using that field here would resume the handler at EL1.
             c.regs.cpsr = ctx.spsr;
         }
         self.threads.set_redirected(tid, tid != cur);
