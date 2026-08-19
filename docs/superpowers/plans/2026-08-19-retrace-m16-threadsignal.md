@@ -214,12 +214,32 @@ field has to exist before them. Populating all four from `threads().current()` h
 `Exit`, `Crash` and `Signal` and is a placeholder only for `SignalDelivery`, which Task 7 changes to
 the resolved target.
 
-**Files:**
-- Modify: `crates/retrace-trace/src/lib.rs` (the `Event` enum, `TRACE_MAGIC` at `:45`, the `sample()`
-  fixture)
-- Modify: `crates/retrace-core/src/lib.rs` (every construction and match site)
-- Modify: `crates/retrace/src/debug.rs` (any match on the four variants)
-- Test: `crates/retrace-trace/src/lib.rs` unit tests (the magic pair)
+**Files:** the enum and the magic live in `crates/retrace-trace/src/lib.rs` (the `Event` enum,
+`TRACE_MAGIC` at `:45`, the `sample()` fixture, and the magic-pair unit tests). **Everything else is
+found by the property, not by a list**, and the list is deliberately not given: on M15, a controller
+handed a reviewer four affected assertion sites instead of the property that had changed, a fifth
+site survived review, and the enumeration had become the ceiling of the search.
+
+**The property: every site that constructs or exhaustively matches `Event::Exit`, `Event::Crash`,
+`Event::Signal`, or `Event::SignalDelivery`, in every crate, including test crates.** A construction
+missing the new field is an `E0063` and an exhaustive pattern missing it is an `E0027` — both are
+compile errors, so the compiler enumerates for you. Sites that match with `..` compile unchanged and
+correctly need no edit.
+
+**Checksum, measured at `b7860a6`** — use it to confirm your sweep was complete, not to bound it.
+15 files mention those four variants, across 5 crates:
+
+| Crate | Files |
+|---|---|
+| `retrace-trace` | `src/lib.rs` (5 mentions) |
+| `retrace-core` | `src/lib.rs` (11), `tests/{crash,protnone_mach,record,replay,signals}.rs` (20 total) |
+| `retrace-box` | `src/lib.rs` (1) |
+| `retrace` | `src/debug.rs` (1), `tests/{crashy_cli,panic_e2e,protnone_rust_e2e,segv_rust_e2e,sigraise_e2e}.rs` (19 total) |
+| `retrace-arch` | `src/lib.rs` (1) |
+
+Most are `matches!`/`..` patterns that will not break. **The number that matters is how many the
+compiler makes you touch, and whether any file in that table compiled untouched for a reason you can
+state** — if a file in this table needed no edit, know why before concluding it needed none.
 
 **Interfaces:**
 - Produces: `Event::Exit { code: u64, thread: u32 }`,
