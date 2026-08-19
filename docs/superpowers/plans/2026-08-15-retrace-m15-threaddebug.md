@@ -515,6 +515,20 @@ git commit -m "M15 t7: the debugger can name, list, and inspect threads"
 
 **Design constraint from the spec:** scoping is a **debugger-side filter**. The hardware slot stays global — one vCPU underlies every thread, and there is no per-thread `DBGW`. The debugger discards hits whose thread does not match. Do NOT attempt to scope in hardware.
 
+**ORDERING CORRECTION — run this task AFTER Task 9.** Step 1 needs a multi-threaded guest that
+writes a watched address. No such guest exists at Task 8's original position: THREADRUST
+(`crates/retrace-guest/rs/threadrust.rs`) performs no writes at all, and the only guest this plan
+creates is WATCHTHREAD, in **Task 9**. The File Structure table assigns no guest file to Task 8, so
+running it first would force its implementer to invent an unbudgeted guest in a crate this task's
+Files list does not name. Task 9 has no reciprocal dependency on Task 8 — its gate uses `watch`,
+`reverse-continue` and `regs`, from Tasks 5 and 7 — so the reorder is free.
+
+Extend `crates/retrace-guest/rs/watchthread.rs` with a **third static that BOTH threads write**, so
+the filter has two competing writers to discriminate; that is what Step 1's text actually asks for.
+If that perturbs Task 9's already-landed gate, fall back to filtering on the existing per-thread
+cells (scope-to-the-writer → hit, scope-to-the-other-thread → silence) — weaker, but still
+non-vacuous. **Re-run Task 9's gate either way**, and add the guest file to this task's `git add`.
+
 - [ ] **Step 1: Write the failing test** — a guest where two threads write the same watched address; `watch <addr> thread 1` reports only thread 1's write.
 
 - [ ] **Step 2: Run to verify it fails.**
@@ -607,10 +621,24 @@ M14's Task 10 learned the lesson this task applies: **a mutation aimed at a pure
 | `current_thread()` returns a constant `0` | Task 1 and Task 7 tests |
 | `dbg_regs_of` always reads the table | Task 2's stale-slot test |
 | The oracle's thread compare deleted | Task 4's test |
-| `Advance::Watch.thread` hardcoded to `0` | Task 5 and Task 9's gate |
+| `Advance::Watch.thread` hardcoded to `0` | Task 9's gate, and Task 8's scoping test. **NOT Task 5's tests** — see below. |
 | `MDSCR_EL1` added to `load_ctx` | Task 6's test |
 
 - [ ] **Step 2: If any mutation fails ZERO tests, that mechanism is untested.** Say so loudly and stop — do not paper over it. This is the F-1 situation from M14, and it is the whole reason this task exists.
+
+**One row is pre-adjudicated, and you must not "fix" it.** Task 5's two tests
+(`hw_watch_hit_names_the_writing_thread`, `syscall_watch_hit_names_the_writing_thread`) assert
+`thread == 0` against WATCHLOOP and FILEIO, both **single-threaded**. A hardcoded `thread: 0`
+therefore **passes them by construction** — they cannot catch that mutation and were never able to.
+This is the Task 5 half of the fidelity caveat Task 11 bills, not a discovery and not a defect for
+you to repair. Record it as a **known, documented gap**; do NOT strengthen Task 5's tests to make
+this table come out even. Task 9's gate (and Task 8's scoping test) are what catch this mutation,
+because they are the only tests with a live second thread to be wrong about. If *those* also fail
+to catch it, that IS the Step 2 situation — say so loudly and stop.
+
+Task 5's sites were already mutation-checked per-site at implementation time (`current_thread() + 7`
+at each site failed exactly that site's test and no other). Re-running that specific mutation is
+duplicate work; spend the budget on mechanisms that have not been swept.
 
 - [ ] **Step 3: Write the report** to `.superpowers/sdd/2026-08-15-retrace-m15-threaddebug/task-10-nonvacuity.md` and commit:
 
