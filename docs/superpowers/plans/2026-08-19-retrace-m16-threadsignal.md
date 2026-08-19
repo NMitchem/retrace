@@ -1903,6 +1903,54 @@ Expected: PASS. If either fails because the `position` lookup found nothing, the
 reach that mirror — report which one and what the trace actually contains, rather than weakening the
 test to whatever it does reach.
 
+- [ ] **Step 2b: The `SignalDelivery.thread` retag — the one check with no permanent test**
+
+Task 8's review proved this check is a real oracle but left it untested, and its own probe is the
+template. Unlike 12a/12b above, retag the **`SignalDelivery`** event's `thread`, leaving its `writes`
+BYTE-UNTOUCHED — that is the whole point. Replay's frame byte-compare then passes and only the
+thread check can fire, which is what makes this test about the tag rather than about the frame.
+
+```rust
+/// M16 Task 12c. `SignalDelivery.thread` is the one tag whose check the frame byte-compare does NOT
+/// subsume — and the only one with no test until now.
+///
+/// The retag leaves `writes` untouched on purpose. A wrong-thread DELIVERY lands the frame on a
+/// different stack, so `Region`'s derived PartialEq (over `ipa` as well as `bytes`) trips the frame
+/// compare first and this check never speaks. Corrupting only the TAG is the one input that isolates
+/// it. Task 8's review measured the failure this guards: changing record's `thread: target as u32`
+/// to `thread` — tagging the delivery with the caller instead of the resolved target, the exact
+/// "simplification" the comments there warn against — yields a perfectly valid trace that every
+/// other check accepts.
+#[test]
+fn a_wrong_thread_on_the_delivery_landmark_is_a_divergence() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::SIGTHREAD);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let i = events.iter().position(|e| matches!(e, Event::SignalDelivery { .. }))
+        .expect("SIGTHREAD must record a delivery");
+    let orig = match &events[i] { Event::SignalDelivery { thread, .. } => *thread, _ => unreachable!() };
+    assert_eq!(orig, 1, "the delivery must be tagged with the CHILD, or this fixture no longer \
+                         exercises a cross-thread delivery and the retag below proves nothing");
+    // Only the tag. Not one byte of `writes`.
+    if let Event::SignalDelivery { thread, .. } = &mut events[i] { *thread = 0; }
+
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+    assert!(rep.stderr.contains("signal delivery thread mismatch"),
+        "the divergence must be the DELIVERY thread check, not the frame compare — if the frame \
+         compare fired, the retag touched `writes` and the test is measuring the wrong thing:\n{}",
+        rep.stderr);
+}
+```
+
+The second assertion is the load-bearing one: it pins that the *delivery thread* check fired and not
+the frame compare. Without it this test would pass for the wrong reason.
+
 - [ ] **Step 3: Prove each mirror independently**
 
 M15's Task 4 lesson: mutating one call site cannot demonstrate that a bug in another would be caught.
@@ -2123,6 +2171,17 @@ It must cover, each in its own right:
   If this plan survived unamended, say so — but check first, because "unamended" is more often
   unexamined than perfect
 - the one new `#[ignore]`, and confirmation that `stackoverflow_rust_e2e` is unchanged
+- **Do not claim the pended-raise path is exercised end-to-end.** Task 8's review confirmed record's
+  `pend` (`:622`) and replay's (`:1095`) are consistent with each other and that the fall-through
+  equivalence holds in source — but no gate guest blocks a signal it then raises, so until Task 9's
+  guest does, both sides write a bit nobody reads. Say what is *proven* (the two arms agree, the
+  equivalence was read in source) separately from what is *exercised*.
+- **Follow-up to name, not fix: some replay-side divergences abort instead of diverging.**
+  `deliver_signal_to`'s `Runnable` assertion and `thread_of_port`'s no-such-port panic are correctly
+  fail-loud, and calling them from replay is what symmetry rule 1 demands — but on the replay side
+  they are the failure modes of a *schedule* divergence, and the `pthread_kill` landmark's own
+  `verify_thread` checks the CALLER, not the target, so it would not catch that first. M16 elsewhere
+  prefers a named `Divergence` at a landmark to a process abort. Record it as a known rough edge.
 - **`ThreadTable::take_deliverable` has a product caller.** Grep for it and confirm. Task 7 traded a
   fail-loud assert for a pending set, and between Task 7 and Task 9 that pending set had NO consumer:
   a guest raising a blocked signal got `pthread_kill` → 0 and the signal never materialised. That is
