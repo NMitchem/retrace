@@ -56,8 +56,8 @@ fn perturbed_crash_triple_is_a_loud_divergence() {
     let mut w = Writer::create(&tampered).unwrap();
     for e in &events {
         match e {
-            Event::Crash { pc, esr, far } =>
-                w.append(&Event::Crash { pc: *pc, esr: *esr, far: far + 8 }).unwrap(),
+            Event::Crash { pc, esr, far, thread } =>
+                w.append(&Event::Crash { pc: *pc, esr: *esr, far: far + 8, thread: *thread }).unwrap(),
             other => w.append(other).unwrap(),
         }
     }
