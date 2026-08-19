@@ -102,8 +102,18 @@ fn every_live_thread_has_a_distinct_readable_kport() {
     // "child ran" is in stdout the spawn is behind us; simplest reliable seek is to run to the end
     // of the trace minus nothing and inspect the table, so instead advance until the table grows.
     let mut s = ReplaySession::open(Path::new(&trace)).unwrap();
-    while s.b_thread_count() < 2 {
-        s.advance().expect("no divergence on an untampered trace");
+    // BOUNDED. `advance()`'s own doc says calling it after `Advance::Exited` is unspecified and
+    // callers must not — so an unbounded "wait for the child" loop runs off the end of the trace on
+    // any guest that never spawns. Stop on exit, and fail loud naming what we were waiting for.
+    loop {
+        if s.b_thread_count() >= 2 { break; }
+        match s.advance().expect("no divergence on an untampered trace") {
+            retrace_core::Advance::Exited(_) =>
+                panic!("the recording ended with only {} thread(s): THREADRUST must spawn one, so \
+                        either the guest changed or bsdthread_create was not emulated",
+                       s.b_thread_count()),
+            _ => continue,
+        }
     }
 
     let main_port = s.dbg_kport_of(0).expect("main's pthread must be mapped and readable");
@@ -950,7 +960,8 @@ only place that knows a delivery happened. Stacking a second frame on a thread t
 redirected but has not yet run would need the kernel's queueing semantics, which retrace does not
 model — and nested delivery is already on M11's unmodelled list.
 
-`Thread` gains one field:
+`Thread` gains one field — which breaks Task 3's `spawn` struct literal with an `E0063`. That is
+the safe, compiler-forced failure; add the field there too and move on.
 
 ```rust
     /// M16: this thread has been redirected into a handler and has not been scheduled since.
@@ -1661,23 +1672,59 @@ falls — `overflow.rs` and `stackoverflow_rust_e2e` are the precedent to copy.
 
 - [ ] **Step 1: Write the guest**
 
+**The obvious two-thread shape does not work, and the reason is worth understanding before you
+write this.** M14's scheduler switches **only** when a thread blocks or exits. So if main spawns `a`
+and immediately signals it, `a` is Runnable-and-never-run — not Blocked — and the gate would be
+parked against a state its own guest never enters. Generalised: for any thread to be Blocked, some
+other thread must have blocked first to let it run, so **main can never observe a blocked peer.**
+
+A third thread breaks the deadlock, because a blocked joiner leaves its own joinee running:
+
+```
+main(0) spawns a(1); main joins a          -> main Blocked
+  a runs, spawns b(2), joins b             -> a    Blocked(Join{2})
+    b runs, and b is CURRENT while a is genuinely Blocked
+    b signals a
+```
+
 ```rust
 // crates/retrace-guest/rs/sigblocked.rs
 //
-// The guest for the PARKED sigblocked_e2e gate. Main spawns A, A joins B, so A sits in
-// __ulock_wait; main then signals A by name — a target that is Blocked, not merely not-current.
+// The guest for the PARKED sigblocked_e2e gate: a signal whose target is BLOCKED in __ulock_wait,
+// not merely not-current.
+//
+// Three threads, not two, and that is forced rather than incidental. The cooperative scheduler
+// switches only on block or exit, so main can never be running while a peer is blocked — for the
+// peer to have blocked, main must have blocked first. A blocked JOINER, though, leaves its joinee
+// running: main joins a, a joins b, so b runs while a sits in __ulock_wait. b is the only thread
+// that can express this signal.
+//
 // Built so the parked test is real code that compiles and can be un-ignored the day the wall falls.
-unsafe extern "C" { fn pthread_kill(thread: u64, sig: i32) -> i32; fn signal(sig: i32, h: usize) -> usize; }
+use std::sync::atomic::{AtomicU64, Ordering};
+
+unsafe extern "C" {
+    fn pthread_kill(thread: u64, sig: i32) -> i32;
+    fn signal(sig: i32, h: usize) -> usize;
+    fn pthread_self() -> u64;
+}
 const SIGUSR1: i32 = 30;
+static A_PT: AtomicU64 = AtomicU64::new(0);
 extern "C" fn on_usr1(_sig: i32) {}
 
 fn main() {
     unsafe { signal(SIGUSR1, on_usr1 as usize) };
-    let b = std::thread::spawn(|| { println!("b"); });
-    let a = std::thread::spawn(move || { b.join().unwrap(); println!("a"); });
-    use std::os::unix::thread::JoinHandleExt;
-    let at = a.as_pthread_t() as u64;
-    unsafe { pthread_kill(at, SIGUSR1) };
+    let a = std::thread::spawn(|| {
+        // Publish a's own pthread_t BEFORE blocking, so b has something to name.
+        A_PT.store(unsafe { pthread_self() }, Ordering::SeqCst);
+        let b = std::thread::spawn(|| {
+            // a is Blocked(Join) right now: b was scheduled precisely because a blocked.
+            let at = A_PT.load(Ordering::SeqCst);
+            unsafe { pthread_kill(at, SIGUSR1) };
+            println!("b signalled a");
+        });
+        b.join().unwrap();
+        println!("a resumed");
+    });
     a.join().unwrap();
     println!("done");
 }
