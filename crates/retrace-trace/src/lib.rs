@@ -48,10 +48,14 @@ pub enum Event {
     /// resumes on `sigreturn` — for a fault, the faulting instruction itself, which re-executes.
     ///
     /// M16: `thread` is the **receiving** thread — the one that goes on to run the handler, which
-    /// may not be the thread that raised the signal. AT THIS COMMIT it is always populated as the
-    /// current thread, which is a PLACEHOLDER, not yet correct: Task 7 resolves `__pthread_kill`'s
-    /// target port to a (possibly different, possibly blocked) thread and delivery follows it
-    /// there. The raiser, when there is one, is already tagged on the `pthread_kill` `Syscall`
+    /// may not be the thread that raised the signal. There are two construction sites and they do
+    /// NOT share one story: both currently write `current`, but the RAISE-path construction (in
+    /// `record_box`'s `__pthread_kill`/`kill` arm) is a PLACEHOLDER that Task 7 resolves to
+    /// `__pthread_kill`'s named target, while the FAULT-path construction (`record_box`'s
+    /// `Stop::Fault` arm) is permanent, since a hardware fault is always attributed to the thread
+    /// whose vCPU trapped and has no target to resolve. See the comment at each construction site
+    /// for the full reasoning — this doc intentionally doesn't restate it, so the two can't drift
+    /// apart. The raiser, when there is one, is already tagged on the `pthread_kill` `Syscall`
     /// landmark immediately preceding this one; on the fault path there is no raiser.
     SignalDelivery {
         sig: u64, si_code: u64, si_addr: u64, handler: u64, resume_pc: u64, writes: Vec<Region>,
