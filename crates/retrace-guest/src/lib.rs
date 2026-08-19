@@ -173,6 +173,10 @@ pub const THREADRUST: &str = concat!(env!("OUT_DIR"), "/threadrust");
 /// M15 t9 headline: the `threadrust` twin whose two threads write DIFFERENT static cells, so a
 /// hardware watch on one and not the other makes thread attribution a claim that can be wrong.
 pub const WATCHTHREAD: &str = concat!(env!("OUT_DIR"), "/watchthread");
+/// M16 t5 headline: a full-`std` Rust binary whose MAIN thread `pthread_kill`s its CHILD by name
+/// while the child is Runnable-but-not-current. Today retrace ignores the target port and
+/// delivers to whoever is running (main); M16 fixes attribution so the child takes it instead.
+pub const SIGTHREAD: &str = concat!(env!("OUT_DIR"), "/sigthread");
 /// M13 t11: the recursion behind the PARKED `stackoverflow_rust_e2e` gate. Cannot strike libstd's
 /// guard today — that guard sits 7.73 MiB below retrace's real stack bottom (M8 spec risk R3).
 pub const OVERFLOW: &str = concat!(env!("OUT_DIR"), "/overflow");

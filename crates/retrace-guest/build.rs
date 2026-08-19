@@ -481,6 +481,17 @@ fn main() {
         .status().expect("rustc watchthread");
     assert!(status.success(), "watchthread guest build failed");
 
+    // sigthread: M16's headline — a full-std Rust binary whose MAIN signals its CHILD by name.
+    // Same rustc recipe as watchthread.
+    let src = format!("{}/rs/sigthread.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sigthread");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc sigthread");
+    assert!(status.success(), "sigthread guest build failed");
+
     // overflow: the guest for the PARKED stackoverflow_rust_e2e gate (M8 spec risk R3). Built so the
     // parked test is real code that compiles and can be un-ignored the day R3 is fixed.
     let src = format!("{}/rs/overflow.rs", env!("CARGO_MANIFEST_DIR"));
