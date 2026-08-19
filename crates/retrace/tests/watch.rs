@@ -24,12 +24,35 @@ fn hw_watchpoint_fires_on_store_pre_retire_with_far() {
     let mut s = ReplaySession::open(tp).unwrap();
     s.arm_watchpoints(&[(target, 8)]);
     match s.advance().unwrap() {
-        Advance::Watch => {
+        Advance::Watch { thread: _ } => {
             let far = s.far();
             assert!(far >= target && far < target + 8, "far {far:#x} outside watched [{target:#x}; +8)");
             // Pre-retire (spike F4c): the first store (value 1) has NOT landed yet.
             assert_eq!(s.read_mem(target, 8).unwrap(), vec![0u8; 8], "store must not have retired");
         }
+        _ => panic!("expected Advance::Watch"),
+    }
+}
+
+/// M15 Task 5: a hardware watch hit reports WHICH thread stored.
+///
+/// WATCHLOOP is single-threaded, so the only truthful answer here is thread 0. What this pins is
+/// the plumbing — the field exists, is populated from the live thread table at the hit site, and
+/// reaches the caller. It does NOT prove the report can tell two live threads apart, because this
+/// guest has no second thread to be wrong about; that is Task 9's headline gate, on THREADRUST.
+/// Stated here rather than left implied: an assertion whose guest cannot exhibit the failure it
+/// guards is worth exactly its plumbing check, and saying so is cheaper than re-deriving it later.
+#[test]
+fn hw_watch_hit_names_the_writing_thread() {
+    let (rec, trace) = util::record(retrace_guest::WATCHLOOP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let tp = Path::new(&trace);
+    let target = discover_target(tp);
+    let mut s = ReplaySession::open(tp).unwrap();
+    s.arm_watchpoints(&[(target, 8)]);
+    match s.advance().unwrap() {
+        Advance::Watch { thread } => assert_eq!(thread, 0,
+            "the store came from the guest's only thread; the hit must name it"),
         _ => panic!("expected Advance::Watch"),
     }
 }
@@ -63,7 +86,7 @@ fn mde_survives_clear_breakpoints_with_watches_armed() {
     s.arm_watchpoints(&[(target, 8)]);
     s.arm_breakpoints(&[0xdead_0000]); // never matched
     s.clear_breakpoints();             // must NOT disarm the watchpoint (shared MDSCR.MDE)
-    assert!(matches!(s.advance().unwrap(), Advance::Watch),
+    assert!(matches!(s.advance().unwrap(), Advance::Watch { thread: _ }),
         "watchpoint died when breakpoints were cleared (MDE sharing bug)");
 }
 
@@ -102,7 +125,7 @@ fn syscall_write_to_watched_buf_is_reported_and_replay_completes() {
     // open consumes as Event (no writes hit); fstat writes statbuf only; read MUST report.
     let hit_at = loop {
         match s.advance().unwrap() {
-            Advance::WatchSyscall { watched } => { assert_eq!(watched, buf); break s.landmark(); }
+            Advance::WatchSyscall { watched, thread: _ } => { assert_eq!(watched, buf); break s.landmark(); }
             Advance::Event => continue,
             _ => panic!("unexpected advance kind before the read"),
         }
@@ -132,9 +155,36 @@ fn fstat_statbuf_write_is_detected() {
     s.arm_watchpoints(&[(statbuf, 8)]);
     loop {
         match s.advance().unwrap() {
-            Advance::WatchSyscall { watched } => {
+            Advance::WatchSyscall { watched, thread: _ } => {
                 assert_eq!(watched, statbuf);
                 assert_eq!(s.landmark(), after_fstat);
+                break;
+            }
+            Advance::Event => continue,
+            _ => panic!("expected the fstat WatchSyscall first"),
+        }
+    }
+}
+
+/// M15 Task 5: the software (applied-writes) watch path reports the thread too.
+///
+/// A separate test from the hardware one because these are two independent construction sites in
+/// `advance`: the hardware hit is built in the `Stop::Other` watchpoint arm, the syscall hit in
+/// `finish_event`. Populating one and forgetting the other is the obvious way to half-do this, and
+/// a single test over either path would not notice. Same single-thread vacuity caveat as above.
+#[test]
+fn syscall_watch_hit_names_the_writing_thread() {
+    let (rec, trace) = util::record(retrace_guest::FILEIO);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let tp = Path::new(&trace);
+    let (_after_fstat, statbuf) = discover_fstat(tp);
+    let mut s = ReplaySession::open(tp).unwrap();
+    s.arm_watchpoints(&[(statbuf, 8)]);
+    loop {
+        match s.advance().unwrap() {
+            Advance::WatchSyscall { watched, thread } => {
+                assert_eq!(watched, statbuf);
+                assert_eq!(thread, 0, "the kernel wrote on behalf of the guest's only thread");
                 break;
             }
             Advance::Event => continue,

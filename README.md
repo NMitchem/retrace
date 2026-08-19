@@ -2335,3 +2335,241 @@ demands the spin-wait case that would need preemption. The gate count therefore 
 **one** `#[ignore]` — `stackoverflow_rust_e2e`, at M8 spec risk R3, unchanged and not newly parked.
 
 See `docs/superpowers/specs/2026-08-12-retrace-m14-threads-design.md`.
+
+## Status: M15-threaddebug — 🎉 the debugger can name the thread that wrote the byte
+
+**`reverse-continue` now walks backward to a store and says which thread made it.** A new guest,
+`rs/watchthread.rs`, spawns a child; the child writes `CHILD_CELL`, main writes `MAIN_CELL`, both
+write `SHARED_CELL`, and the guest prints all three addresses. Arm a watch on the child's cell
+*after* the run has already finished — so only a genuine backward scan can reach it — and
+`reverse-continue` finds the store while `where` answers `thread=1`, the child, on an address main
+never touches. The debugger also grew a thread vocabulary: `threads` lists every thread with its
+state and marks the current one, `regs <tid>` dumps a **blocked** thread's registers straight out of
+the thread table, `where` labels its coordinate with the owning thread, and
+`watch <addr> [len] [thread <n>]` scopes a watch to one thread. Underneath, `Event::Syscall` gained a
+`thread` field and the divergence oracle now compares it. **The gate: 360 passed / 0 failed /
+1 ignored** across 98 test binaries at `259a4db`, clippy clean over `--workspace --all-targets` with
+`-D warnings`.
+
+That total was **measured in chunks, not by one `just gate` run** — a bare `cargo test --workspace`
+still gets killed on this machine, as M14's close recorded — with every chunk run `--no-fail-fast`
+and all three returning `CARGO_EXIT=0`. The delta is the number that means something: M14 closed at
+**342 / 0 / 1 over 96 binaries**, so M15 adds **18 passing tests and 2 test binaries and does not
+move the ignored count.** Those 18 reconcile exactly against the per-task counts rather than being
+waved through — Task 1 ×1, Task 2 ×3, Task 4 ×3 (one `thread_oracle` gate plus two `replay.rs`
+signal-path tests), Task 5 ×2, Task 6 ×1, Task 7 ×4 (three `debug_cli` e2e plus one parser unit
+test), Task 8 ×3, Task 9 ×1 — and the two new binaries are exactly
+`crates/retrace/tests/thread_oracle.rs` and `crates/retrace/tests/thread_watch_e2e.rs`. Every
+headline gate ran and passed by name in the log: `hello_dyn`, `hello_rust`, **both** `jq` gates (not
+skipped — `/opt/homebrew/bin/jq` was present), `panic_e2e`, and M15's own
+`reverse_continue_names_the_thread_that_wrote_the_watched_cell`.
+
+**`TRACE_MAGIC` moved, so every recording made before this milestone is now unreadable.** `RT\x00\x06`
+→ `RT\x00\x07` (spec risk R2, billed here rather than discovered): `Event::Syscall` genuinely gained
+a field the new reader requires, so an old trace is not merely older, it is missing data. The
+rejection is loud and clean rather than a misparse — `open_checked` returns "keep nothing" on a magic
+mismatch — and both halves are pinned by tests, one asserting the *new* magic
+(`magic_bumped_for_the_syscall_thread_tag`, renamed from the M12 reason it used to carry) and one
+asserting a trace written with the *previous* magic is rejected whole. Between them, "forgot to bump"
+and "bumped to the wrong value" are both caught. **If you have a `.bin` from M14 or earlier that you
+were mid-investigation on, re-record it.**
+
+**`Event::Sched` was not merely left unused — it was deleted.** M14's Status section billed it as the
+cheap, format-compatible place a future schedule oracle could live ("zero producers and zero
+consumers, so a schedule oracle costs a landmark-index change and a replay arm, not a `TRACE_MAGIC`
+break"). **That line is superseded by this one.** Emitting it was considered and rejected on two
+measured grounds: it would **silently renumber every landmark** (`N` is a flat `Vec` index, so
+interleaving a `Sched` per switch shifts every subsequent landmark — and *without* a magic break,
+since the variant already parsed under the old magic, which makes it worse than a loud break given
+checkpoints are cached by landmark and `advance_to_landmark` is a public seek target); and **nothing
+in either dispatch loop can see a switch**, because `run()`'s reschedule check lives inside `Box_`,
+below the trace, so producing `Sched` would need either a new channel out of `run()` or the
+scheduling decision duplicated into both dispatch loops — the exact duplication symmetry rule 2
+exists to prevent. Since Task 3 was already editing that enum under a magic bump, a reserved-but-dead
+variant with an undocumented `until` field would only invite a future reader to assume it was live.
+The oracle got its thread identity from a field on `Syscall` instead, which is complete: the schedule
+can change only when a thread blocks or exits, and both are syscalls, so every other landmark's
+thread is "the thread of the most recent syscall landmark."
+
+**The determinism posture did not move.** The recorded `thread` is a *recording of the output* of a
+function replay recomputes anyway — the standard symmetric posture, where replay recomputes and
+byte-compares, never consumes. `verify_thread` compares and returns a `Divergence`; it never sets the
+current thread. The schedule is still regenerated, not replayed.
+
+**The oracle's thread check covers all three landmark-consuming arms, and the first attempt covered
+one.** `ReplaySession::advance` consumes a recorded `Event::Syscall` at three places, not one: the
+caught-raise mirror and the `sigreturn` mirror each sit as their own `if` block *above* the generic
+match and each `return` before ever reaching it. The original commit put the comparison inside the
+generic arm only, which was invisible to every gate — reaching either mirror needs a guest that is
+both threaded and signalling, and none exists. The fix is one `verify_thread` helper called from all
+three sites, each call placed *after* that site's own `(num, args)` check rather than hoisted above
+all three, so a genuine argument divergence still reports as itself instead of being masked by the
+thread mismatch it caused. Both new call sites were mutated *independently*, and each failed exactly
+its own test with the other staying green — proof the two are not piggybacking on one working check.
+
+**The attribution claim rests on three mechanisms, not one, and Task 10 measured which catches what.**
+It is tempting to write "a watch hit names the thread that wrote" as though the headline gate proved
+it end to end. It does not, and the split is the subtlest thing this milestone learned:
+
+1. **The divergence oracle is the first line of defence.** A broken `current_thread()` — the
+   scheduler-state bug that would make every attribution wrong — diverges at the very next syscall
+   landmark, before any CLI assertion runs. Task 10 confirmed this by mutation: hardcoding
+   `current_thread()` to `0` fails four gates, and all four fail through the oracle
+   (`thread 0 on replay, 1 recorded`), not through their own assertions.
+2. **The headline gate proves the display path.** `where` reports the box's real `current_thread()`
+   at a *resolved* coordinate rather than a constant. Substantive — hardcoding `cmd_where`'s printed
+   id to `0` fails it at exactly that line — but it is a check of what the user reads, not a
+   standalone catch of a scheduler defect.
+3. **`Advance::Watch { thread }` is consumed by the per-thread scoping filter, and only by it.** The
+   field is threaded through five `Advance` sites *and* through `RHit::Watch`/`RHit::WatchSys` into
+   `reverse-continue`'s backward scan, so the scan filters on state **captured at the hit** rather
+   than re-derived afterwards. Task 10 measured that hardcoding that field to `0` is **not** caught
+   by the headline gate — `cmd_where` re-derives the thread from the live scheduler and never reads
+   the field, and the gate's script never scopes a watch — and is not caught by Task 5's tests
+   either. Task 8's `watch_thread_scoping_filters_the_others_write` is the sole catcher.
+
+That third measurement is what forced the split. The plan had predicted the headline gate would catch
+it, and it was wrong.
+
+**Debug registers are vCPU-global, the cross-switch watch was correct by accident, and now it has a
+test saying so.** `ThreadCtx` carries `regs`, `fp`, `fpcr`, `fpsr`, `tpidrro_el0`, `elr`, `spsr` —
+and `save_ctx`/`load_ctx` touch exactly those, so `DBGWVR`/`DBGWCR`/`MDSCR_EL1` sit entirely outside
+the scheduler's save/restore discipline. That leak is the behaviour we want (one vCPU, one address
+space, so an armed watch keeps firing across switches and catches *any* thread's store), but every
+M5 test predates M14 and no test anywhere had ever armed a `DBGW` across a `switch_to_thread`. Task 6
+closes it at the **hardware** leaf, not the `watch_ranges` software mirror — M13's own Task-8 defect
+was a test that checked only the mirror — via a `#[doc(hidden)]` accessor reading the three registers
+straight back off the vCPU. All three assertions are independently mutation-proven: clobber
+`MDSCR_EL1` alone in `load_ctx` and only the MDE assertion fails; clobber `DBGWCR0_EL1` alone and
+only the enable-bit assertion fails; clobber `DBGWVR0_EL1` alone and only the address assertion
+fails. Mutating one register cannot demonstrate that a bug in another would be caught, and the
+brief's Step 3 had specified only one of the three.
+
+**The fidelity caveat: one half is discharged, the other still stands.** This is a limit on work that
+*passed*, which is exactly the kind that gets lost.
+
+- **Discharged — the watch hit's thread (Task 5).** Both construction sites (the hardware
+  `Stop::Other` arm and the software `finish_event`) have per-site mutation-tested guards, but on
+  `WATCHLOOP` and `FILEIO`, which are single-threaded and can only truthfully answer `thread == 0`;
+  a hardcoded `thread: 0` would satisfy both. Task 9's gate is what discharges it: it asserts
+  `ends_with("thread=1")` **and** `!contains("thread=0")` against ground truth that independently
+  establishes tid 1 is the child (the guest prints two distinct cell addresses; `thread_summaries()`
+  is read straight off `retrace_core::seek`), and it provably fails when attribution is wrong.
+- **Still standing — the oracle's two signal-path arms (Task 4).** They are exercised only by
+  `SIGFRAME`, which is **single-threaded**. Those tests prove the check *fires* and reports a
+  `Divergence` at each site; they do **not** prove it *distinguishes two live schedules* there, since
+  there is no second live thread id in the fixture to retag to. Only the generic arm gets that, via
+  `THREADRUST`. Closing it needs a guest that is both threaded and signalling, which does not exist.
+
+**A thread scope naming a thread that never exists is silently inert — and arm-time validation is
+the wrong fix.** `watch 0x… thread 99` parses, arms, and then suppresses every hit forever:
+`watch_thread_matches` compares the scope against the hit's thread, never matches, and `continue`
+runs to exit without ever reporting a hit — it still prints `exited (code N)`, so the silence is
+specifically the absence of hits, not an absence of output. That is the same class Task 8's fix
+round called intolerable — a scope announced but not applied — arriving through a different door.
+**It cannot be fixed by validating the id when the watch is armed**, and the reason is load-bearing
+rather than incidental: thread 1 legitimately does not exist yet when a user arms a watch *before*
+`bsdthread_create` runs, which is the main way this feature gets used, so rejecting unknown ids at
+parse time would break the ordinary case to catch the typo. The natural fast-follow is the other end — check at the end of the run
+rather than constraining the arm. Note what the *bare* form does not buy: warning on zero matching
+hits alone fires identically whether nothing wrote the address or nothing could ever have matched,
+which is exactly what those two cases have in common. Distinguishing them needs zero matching hits
+**and a nonzero count of scoped-out hits**, and that count is already available at both discard sites
+(the forward recursion and the `WatchSyscall` fall-through) — it costs a counter on `Exec`, which is
+where it has to live, since the forward path re-enters `cmd_continue` and a local would not survive
+the call.
+
+**Two coverage gaps are accepted and named rather than quietly dropped.**
+
+1. **The `WatchSyscall` thread filter has no scoped coverage.** `watch_thread_matches` has five call
+   sites; three of them are on the `WatchSyscall`/`RHit::WatchSys` path, and **none of the three is
+   exercised with a scope.** Task 10's sweep proved it on the sharpest of the three: it bypassed the
+   guard at the boundary-cross call site *only*, leaving the callee and the other four sites intact
+   — and **zero tests failed.** Task 8's reviewer independently flagged the same class. The root
+   cause is fixture shape, not logic: **no guest anywhere issues a *syscall* write to a watched cell
+   from a scoped thread.** `WATCHTHREAD`'s threads write the watched cells with plain stores, so
+   every thread-scoped script takes the hardware path, and the one test that does exercise the
+   boundary-cross arm
+   (`pre_step_boundary_cross_reports_a_watched_syscall_write`) never scopes its watch. Closing it
+   needs a new guest whose thread writes a watched buffer through a syscall out-param. **Named
+   fast-follow.**
+2. Task 7's `cmd_threads`/`cmd_regs_of` take `&mut self` without needing it, and its parser unit test
+   is parse-only, with all behavioural coverage resting on the e2e tests. Both cosmetic; neither
+   fixed.
+
+**What contradicted the plan, in detail — because a plan that survives contact unamended is more
+likely unexamined than perfect.** This one did not survive unamended:
+
+- **Task 8 required a guest no earlier task built.** `threadrust.rs` performs no writes at all, and
+  the only guest the plan creates is `WATCHTHREAD` — in Task 9, Task 8's *successor*. The two tasks
+  were **executed in reverse order** to fix it, and the plan was amended rather than the discrepancy
+  papered over.
+- **Task 10's mutation table was wrong twice about the same row, once *after* being amended.**
+  Measurement disproved both claims. `current_thread()` → `0` is **not** caught by Task 1's test,
+  which asserts on `Box_::threads().current()` against a bare `Box_` and never constructs a
+  `ReplaySession` at all; and `Advance::Watch.thread` → `0` is **not** caught by Task 9's gate, for
+  the structural reason in layer 3 above. Both corrections came from the sweep whose job was to
+  measure the claims rather than accept them.
+- **Task 9's brief demanded the watched address be learned from recorded behaviour, then specified a
+  guest that stores to a `static mut`** — whose address is never an argument to anything the kernel
+  sees, so M13's learn-it-from-a-recorded-`mprotect` trick had nothing to bite on. Resolved by having
+  the guest **print** both cell addresses: still its own recorded behaviour, just stdout rather than a
+  syscall argument, and printing *both* is what lets the gate assert they are distinct instead of
+  assuming it.
+- **Task 9's brief implied proving attribution and "regs of a non-current child" in one script.**
+  That is impossible: at the coordinate `reverse-continue` parks on, the child *is* current by
+  construction, because it is the thread that just executed the un-retired store, so `regs <child>`
+  there is indistinguishable from plain `regs`. The gate is two parts against two coordinates.
+- **Task 6's brief said "test-only, no product code" while also requiring the hardware leaf be
+  asserted** — mutually exclusive, since no accessor for those registers existed. Resolved with one
+  `#[doc(hidden)]` accessor, in the same family as `dbg_leak_ss`/`dbg_internal_state`/`dbg_pac_enabled`.
+- **Task 7's brief listed only `debug_cli.rs` as its test file.** Adding `thread=` to `where`'s output
+  broke `ends_with` assertions in `watch_cli.rs` and `crashy_cli.rs` too. None was weakened to
+  `contains`; all were updated to carry the new suffix.
+- **Task 3's brief undercounted the `Event::Syscall` construction sites** ("~34" against a measured
+  35 plus one non-`..` match pattern) and did not mention the 36th site outside `retrace-core` in the
+  trace crate's own `sample()` fixture. The compiler found all of them — a missed site is an `E0063`,
+  which is the safe failure — and a `grep` for `thread: 0` in `record_box` is the backstop against
+  the dangerous one, a site that compiles while writing a defaulted id.
+- **Task 5 shipped a code comment asserting a borrow-checker error that does not occur.** The claim
+  that matching `take_syscall_watch_hit()` inline makes the scrutinee temporary outlive the body was
+  disproved by building it: the method returns an owned `Option`, so NLL ends the `&mut` borrow at the
+  call. Both the pre-binding and its false rationale were removed.
+- **Task 7's `regs 99` shipped as exit 5, not the exit 2 its brief named.** Exit 2 / "usage" is
+  produced only by the CLI-argument branch that runs *before* `run_script`; every error *inside* a
+  script (bad hex, the six-breakpoint limit, the examine cap) already goes to `DEBUG ERROR: …` and
+  exit 5. An out-of-range thread id is a script-level error, so it belongs with its siblings.
+- **Task 8 found a lying echo it had just made worse.** `cmd_watch` only inserted on a *new* address,
+  so re-`watch`ing an armed address left the stored entry untouched while printing the
+  just-requested len and scope — the `len` half predates M15, but Task 8 is what turns it into "the
+  scoping feature reports a scope it did not apply." Re-arming without an intervening `unwatch` is
+  now an explicit usage error, matching how every other watch-arming failure in that file behaves.
+
+**Six times this milestone, a subagent corrected a controller claim by checking it instead of obeying
+it** — five implementers questioning their own instructions, and the non-vacuity sweep, whose entire
+job was to measure claims rather than accept them. One process failure is worth recording against
+that: the `crashy_cli` regression escaped Task 7's review because the controller handed the reviewer
+an *enumeration* of four affected sites instead of the *property* that had changed, and the list
+became the ceiling of the search. That is a dispatch failure, not a review failure.
+
+**Still unmodelled, and named rather than discovered later:** **thread identity on any landmark that
+is not a syscall** — only `Event::Syscall` carries the tag, so `Exit`, `Crash`, `Signal` and
+`SignalDelivery` leave a multi-threaded guest's terminal or handler-entry landmark unattributed, the
+same corner of the format the two untested signal-path oracle arms live in; **per-thread reverse
+execution as its own position space** — `P` stays `(N, K)`, and "rewind thread B" is a search over
+positions where B is current, not a coordinate change; **preemption** — scheduling is still
+cooperative, so a guest that spin-waits without ever trapping still runs forever; **`workq`/GCD**
+thread pools; **thread priority**; **per-thread signal masks**; and **scoping a watchpoint in
+hardware** (the `DBGW` slot
+stays global; filtering is the debugger's job). Everything M14 and M13 carry forward is unchanged:
+`guest_bsdthread_create` still returns `0` where the real syscall returns the child's `pthread_t`;
+`run()` and `step()` still carry the reschedule check independently; every protection bit other than
+no-access, a pending signal set, nested delivery, a blocked synchronous fault, `dup2` (fail-loud),
+`fcntl(F_DUPFD)` (unmodelled and *not* fail-loud), guest stdin still being retrace's, `RLIMIT_NOFILE`,
+asynchronous signals, and arm64e guests.
+
+**No new gate is parked.** The count still carries exactly **one** `#[ignore]` —
+`stackoverflow_rust_e2e::a_rust_stack_overflow_strikes_its_own_guard_page`, at the M8 spec-risk-R3
+wall, unchanged since M13. M15 parked nothing new and un-parked nothing.
+
+See `docs/superpowers/specs/2026-08-15-retrace-m15-threaddebug-design.md`.

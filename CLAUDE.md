@@ -33,7 +33,8 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   `brew jq`, without and with a file argument), `panic_e2e` (a guest that aborts), `segv_rust_e2e`
   (a guest that faults and runs its own handler), `protnone_rust_e2e` (a guest that `PROT_NONE`s
   its own page and faults on it), `thread_rust_e2e` (rung 4 — a guest that spawns a thread and
-  joins it). Run one with
+  joins it), `thread_watch_e2e` (a guest whose two threads write different cells, where
+  `reverse-continue` must name the thread that wrote the watched one). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule, and the README's latest Status section for which ones and why.
@@ -172,11 +173,17 @@ through, or `pthread_join` returns success without ever waiting: the child's mac
 `PTHREAD_START_TSD_BASE_SET` in `w5`, which `__pthread_start` `tbz`-tests and `brk`s on. Each is
 documented with its measurement at the call site.
 
-One limit worth knowing before relying on it: **the divergence oracle has no thread identity.** It
-compares `(num, args)`, so two threads running the same code can issue byte-identical syscalls. The
-schedule is deterministic by construction, so this is a missing belt rather than a live defect, and
-`Event::Sched` already exists in the trace format (no producers or consumers) if one is ever wanted.
-(M14-threads; see its spec and the README's Status section.)
+**The divergence oracle checks thread identity.** `Event::Syscall` carries a `thread` tag (M15;
+`TRACE_MAGIC` is now `RT\x00\x07`, so every pre-M15 recording is unreadable), and replay recomputes
+the current thread and compares it at every syscall landmark — at all three landmark-consuming arms,
+the generic dispatch plus the caught-raise and `sigreturn` mirrors. Without that check, two threads
+running the same code issue byte-identical `(num, args)` and a wrong-thread replay continues in
+silence. `Event::Sched` is **gone**, not reserved: emitting it would silently renumber every
+landmark, and nothing in either dispatch loop can see a switch. The caveat that survives: only the
+generic arm is exercised against a genuinely live second thread — the two signal-path arms are
+reached only by a single-threaded fixture, so their tests prove the check *fires*, not that it
+*distinguishes two live schedules*. (M14-threads, M15-threaddebug; see their specs and the README's
+Status sections.)
 
 ## Milestone / SDD workflow
 

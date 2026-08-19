@@ -60,7 +60,8 @@ fn watch_continue_hits_first_store_and_progress_rule_advances() {
     // Progress rule: the second continue pre-steps off the un-retired store and lands on the NEXT
     // execution of the same store pc — ks[1], not ks[0] again.
     assert!(out.contains(&format!("resolved (1, {})", ks[1])), "second hit advances:\n{out}");
-    assert!(out.trim_end().ends_with(&format!("at (1, {}) pc=0x{spc:x}", ks[1])), "final where:\n{out}");
+    // WATCHLOOP is single-threaded throughout, so thread=0 is the only truthful answer (M15).
+    assert!(out.trim_end().ends_with(&format!("at (1, {}) pc=0x{spc:x} thread=0", ks[1])), "final where:\n{out}");
 }
 
 #[test]
@@ -114,7 +115,8 @@ fn reverse_continue_finds_last_store() {
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains(&format!("hit watch 0x{t:x} (write at 0x{spc:x}) at (1, {k_last})")),
         "last-writer hit:\n{out}");
-    assert!(out.trim_end().ends_with(&format!("at (1, {k_last}) pc=0x{spc:x}")), "final where:\n{out}");
+    // WATCHLOOP is single-threaded throughout, so thread=0 is the only truthful answer (M15).
+    assert!(out.trim_end().ends_with(&format!("at (1, {k_last}) pc=0x{spc:x} thread=0")), "final where:\n{out}");
 }
 
 #[test]
@@ -160,6 +162,94 @@ fn syscall_writer_is_found_forward_and_backward() {
     assert!(out.contains(&format!("at ({after_read}, 0) pc=0x{bpc:x}")), "parked at boundary:\n{out}");
 }
 
+/// Parse `"<label> cell 0x…"` out of the guest's own stdout — same convention as
+/// `thread_watch_e2e.rs`'s `parse_cell`, retaken independently here so this file does not depend
+/// on that one.
+fn parse_cell(stdout: &str, label: &str) -> u64 {
+    let marker = format!("{label} cell ");
+    let start = stdout.find(&marker)
+        .unwrap_or_else(|| panic!("missing `{marker}` in stdout:\n{stdout}")) + marker.len();
+    let rest = &stdout[start..];
+    let hex = rest[..rest.find('\n').unwrap_or(rest.len())].trim();
+    u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+        .unwrap_or_else(|_| panic!("bad address {hex:?} in stdout:\n{stdout}"))
+}
+
+/// Task 8: `watch <addr> thread <n>` is a debugger-side filter, not a hardware one — the hardware
+/// slot fires for every thread's store to the watched range, and the debugger discards hits whose
+/// thread does not match (CLAUDE.md, "the hardware watchpoint slot stays global"). WATCHTHREAD's
+/// `SHARED_CELL` is written by BOTH threads (main first, then the child, once M15's own scheduler
+/// switches control at `h.join()`), so scoping is a claim that can be wrong in either direction —
+/// a filter that ignores its thread argument, or one that just suppresses everything, would each
+/// pass a single-direction check. This test asserts both directions in one run.
+#[test]
+fn watch_thread_scoping_filters_the_others_write() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::WATCHTHREAD);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let out = String::from_utf8_lossy(&rec.stdout).into_owned();
+    assert!(out.contains("child wrote"), "the child thread must actually run:\n{out}");
+    let shared = parse_cell(&out, "shared");
+    assert_eq!(shared % 8, 0, "shared cell {shared:#x} must be 8-byte aligned to watch");
+
+    let ts = trace.to_str().unwrap();
+
+    // Forward: main (thread 0) writes `shared` FIRST; scoping to thread 1 must SKIP that earlier,
+    // real hardware hit and keep running until the child's later write — the mid-scan case, not
+    // just "the first hit happens to already be the right one".
+    let (code1, out1, err1) = debug_run(ts, &format!("watch 0x{shared:x} thread 1; continue; where"));
+    assert_eq!(code1, 0, "stderr: {err1}");
+    assert!(out1.contains(&format!("hit watch 0x{shared:x}")), "child's write must be reported:\n{out1}");
+    let where1 = out1.lines().last().expect("a `where` line");
+    assert!(where1.contains("thread=1"), "scoped to thread 1, the reported hit must be the child's:\n{out1}");
+    assert!(!where1.contains("thread=0"), "must not report main's (thread 0's) earlier write:\n{out1}");
+
+    // Backward, scoped to the OTHER thread: run to completion, then ask who wrote `shared` scoped
+    // to thread 0. The unfiltered answer (and a filter that ignores its argument) is the child's
+    // LATER write; the correct, scoped answer is main's EARLIER one — this direction is what
+    // actually distinguishes real filtering from no filtering at all.
+    let (code2, out2, err2) = debug_run(ts,
+        &format!("continue; watch 0x{shared:x} thread 0; reverse-continue; where"));
+    assert_eq!(code2, 0, "stderr: {err2}");
+    assert!(out2.contains(&format!("hit watch 0x{shared:x}")), "main's write must be found:\n{out2}");
+    let where2 = out2.lines().last().expect("a `where` line");
+    assert!(where2.contains("thread=0"), "scoped to thread 0, the reported hit must be main's:\n{out2}");
+    assert!(!where2.contains("thread=1"), "must not report the child's later write instead:\n{out2}");
+}
+
+/// Task 8 fix round 1: re-`watch`ing an ALREADY-armed address used to be a silent no-op — the
+/// echo unconditionally printed the just-requested len/thread while the STORED entry (what
+/// `arm_watchpoints` and `watch_thread_matches` actually consult) stayed unchanged, so a watch
+/// could claim a new scope while the filter kept letting every thread through. Fixed by rejecting
+/// the re-arm outright. Two directions: the reject itself must fire loudly (not silently accept a
+/// lying echo), and `unwatch`-then-`watch` — the correct way to change a watch — must still make
+/// the new scope REAL, proving the fix didn't just start rejecting every re-arm attempt.
+#[test]
+fn rewatch_without_unwatch_is_rejected_and_unwatch_then_rewatch_applies_the_new_scope() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::WATCHTHREAD);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let out = String::from_utf8_lossy(&rec.stdout).into_owned();
+    let shared = parse_cell(&out, "shared");
+    let ts = trace.to_str().unwrap();
+
+    // Direction 1: re-arming `shared` a second time, without `unwatch`, must be a loud usage
+    // error — never a silent state change that leaves the echo lying about the armed scope.
+    let (code1, _out1, err1) = debug_run(ts, &format!("watch 0x{shared:x}; watch 0x{shared:x} thread 1"));
+    assert_eq!(code1, 5, "re-arming an already-watched address must be a usage error, not a no-op");
+    assert!(err1.contains("already watched"), "stderr must name the problem: {err1}");
+
+    // Direction 2: `unwatch` first, THEN re-`watch` with a scope, must make that scope REAL — not
+    // just accepted and echoed. Reuses the same discrimination as
+    // `watch_thread_scoping_filters_the_others_write`: main (thread 0) writes `shared` first, so
+    // a working thread-1 scope must skip that real, earlier hit and land on the child's later one.
+    let (code2, out2, err2) = debug_run(ts, &format!(
+        "watch 0x{shared:x}; unwatch 0x{shared:x}; watch 0x{shared:x} thread 1; continue; where"));
+    assert_eq!(code2, 0, "stderr: {err2}");
+    assert!(out2.contains(&format!("watch at 0x{shared:x} len 8 thread 1")), "re-armed echo:\n{out2}");
+    let where2 = out2.lines().last().expect("a `where` line");
+    assert!(where2.contains("thread=1"), "the re-armed scope must actually filter to thread 1:\n{out2}");
+    assert!(!where2.contains("thread=0"), "must not report main's write once re-scoped to thread 1:\n{out2}");
+}
+
 #[test]
 fn pre_step_boundary_cross_reports_a_watched_syscall_write() {
     // Final-review M-1: park ON the read-svc via a breakpoint (resolves to k = window len),
@@ -176,6 +266,7 @@ fn pre_step_boundary_cross_reports_a_watched_syscall_write() {
     assert_eq!(code, 0, "stderr: {err}");
     assert!(out.contains(&format!("hit watch 0x{buf:x} (syscall write) at ({after_read}, 0)")),
         "the crossed boundary event's write must be reported:\n{out}");
-    assert!(out.trim_end().ends_with(&format!("at ({after_read}, 0) pc=0x{bpc:x}")),
+    // FILEIO is single-threaded throughout, so thread=0 is the only truthful answer (M15).
+    assert!(out.trim_end().ends_with(&format!("at ({after_read}, 0) pc=0x{bpc:x} thread=0")),
         "parked at the post-event boundary:\n{out}");
 }
