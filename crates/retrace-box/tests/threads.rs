@@ -113,6 +113,21 @@ fn blocking_on_an_already_exited_join_target_does_not_wait_forever() {
     assert!(!matches!(t.state_of(0), ThreadState::Blocked(_)), "the guard must keep main out of Blocked");
 }
 
+/// M16 Task 6 fix round 1 (review finding 2): `switch_to` clears `redirected` for the thread being
+/// switched TO — that thread is now running the handler it was given, so the "un-run redirection"
+/// `deliver_signal_to`'s fail-loud assert guards against no longer holds. Pure (no VM needed): the
+/// flag lives entirely in `ThreadTable`. The reviewer's mutation (replacing the clear with a
+/// no-op) left lib+deliver+threads all green, so this closes that gap.
+#[test]
+fn switch_to_clears_redirected_for_the_thread_it_switches_to() {
+    let mut t = ThreadTable::new(ctx(0x1000));
+    t.spawn(ctx(0x2000), (0x30200000, 0x8000));
+    t.set_redirected(1, true);
+    assert!(t.is_redirected(1));
+    t.switch_to(1);
+    assert!(!t.is_redirected(1), "thread 1 is now running — the un-run redirection is over");
+}
+
 /// A `Box_` for the VM-backed tests in this file.
 ///
 /// There is no `Box_::for_test()`; the constructor is `Box_::load(&loaded)`, and every existing
