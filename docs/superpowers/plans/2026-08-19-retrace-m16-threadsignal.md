@@ -578,6 +578,7 @@ git commit -m "M16 t3: the mask, the pending set and the alt stack belong to a t
 
 **Files:**
 - Modify: `crates/retrace-box/src/lib.rs` (`thread_of_port`, beside Task 1's `kport_of`)
+- Modify: `crates/retrace-core/src/lib.rs` (the `dbg_thread_of_port` passthrough, beside `dbg_kport_of`)
 - Test: `crates/retrace/tests/kport.rs` (extend Task 1's file)
 
 **Interfaces:**
@@ -595,7 +596,7 @@ fn a_port_resolves_to_the_thread_that_owns_it() {
     let (rec, trace) = util::record_dynamic(retrace_guest::THREADRUST);
     assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
     let mut s = ReplaySession::open(Path::new(&trace)).unwrap();
-    while s.b_thread_count() < 2 { s.advance().unwrap(); }
+    seek_to_two_threads(&mut s);
 
     for tid in [0usize, 1] {
         let port = s.dbg_kport_of(tid).expect("readable");
@@ -604,6 +605,34 @@ fn a_port_resolves_to_the_thread_that_owns_it() {
     }
 }
 ```
+
+**Step 1a: first extract the seek Task 1 already got right.** Task 1's implementer replaced an
+unbounded `while s.b_thread_count() < 2 { s.advance().unwrap(); }` with a bounded loop, because
+`advance()`'s own doc says calling it after `Advance::Exited` is unspecified — so the unbounded form
+runs off the end of the trace on any guest that never spawns. Do not write that loop back into the
+same file, and do not copy the bounded one either (two copies drift, and verbatim duplication of a
+logic block is a review finding). Lift Task 1's loop out of
+`every_live_thread_has_a_distinct_readable_kport` into a file-local helper and have BOTH tests call
+it:
+
+```rust
+/// Advance until the child exists, or fail loud naming what we were waiting for. Shared by both
+/// tests in this file: the bound is the point (see the panic), and two copies of it would drift.
+fn seek_to_two_threads(s: &mut ReplaySession) {
+    loop {
+        if s.b_thread_count() >= 2 { return; }
+        match s.advance().expect("no divergence on an untampered trace") {
+            retrace_core::Advance::Exited(_) =>
+                panic!("the recording ended with only {} thread(s): THREADRUST must spawn one, so \
+                        either the guest changed or bsdthread_create was not emulated",
+                       s.b_thread_count()),
+            _ => continue,
+        }
+    }
+}
+```
+
+Task 1's test must still pass unchanged after the refactor.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -619,14 +648,14 @@ Expected: FAIL to compile — no `dbg_thread_of_port`.
 /// latent defect M16 exists to close — `pthread_kill(child, sig)` running MAIN's handler on MAIN's
 /// stack, silently. A port retrace cannot place is a modelling gap that must surface as a panic.
 pub fn thread_of_port(&self, port: u32) -> usize {
-    let mut seen = Vec::new();
+    // `Option<u32>`, not a 0 sentinel: an unreadable pthread and a thread whose kport genuinely
+    // reads 0 are different diagnoses, and this panic's whole job is to tell them apart.
+    let mut seen: Vec<(usize, Option<u32>)> = Vec::new();
     for tid in 0..self.threads.len() {
         if matches!(self.threads.state_of(tid), thread::ThreadState::Exited(_)) { continue; }
-        match self.kport_of(tid) {
-            Some(p) if p == port => return tid,
-            Some(p) => seen.push((tid, p)),
-            None => seen.push((tid, 0)),
-        }
+        let p = self.kport_of(tid);
+        if p == Some(port) { return tid; }
+        seen.push((tid, p));
     }
     panic!("__pthread_kill names mach port {port:#x}, which belongs to no live guest thread \
             (searched {seen:x?} as (tid, kport)). Either the guest holds a port retrace never \
@@ -689,17 +718,31 @@ depend on a feature three tasks away.
 //   * main signals the child while the child is Runnable-but-NOT-current — the cooperative
 //     scheduler switches only on block or exit, so main still holds the vCPU
 //   * the child therefore takes the signal in its NEVER-RUN entry context: the handler runs, then
-//     sigreturn lands on `thread_start_pc` and the body starts. Handler-before-body is retrace's
-//     modelling choice and differs from a native run (spec R3) — so this guest's stdout is asserted
-//     against retrace's own recorded behaviour, never against a native execution of the same source.
+//     sigreturn lands on `thread_start_pc` and the body starts.
+//
+// Handler-before-body is what a native run does too — MEASURED, 20/20 identical runs on this host:
+// `installed | child pthread 0x… | kill rc 0 | handler | child body | joined`, because pthread_kill
+// lands while the child is still in libpthread's `_pthread_start` preamble. So retrace's ordering
+// here is NOT a divergence from native, and no one should go hunting for one.
+//
+// This test still asserts against retrace's own recorded behaviour rather than against a native
+// execution, for the reason that actually holds: POSIX guarantees no such ordering, so a native run
+// is not a specification even when it is reproducible on one machine. Retrace's ordering, by
+// contrast, is a deterministic consequence of the cooperative scheduler.
 //
 // Task 5 ships steps 1-4. Task 9 appends the mask/pending half.
 //
 // Same rustc recipe as watchthread: no -C panic=abort.
 
-unsafe extern "C" {
+// PLAIN `extern "C"`, not `unsafe extern "C"`. build.rs invokes rustc with no `--edition`, so
+// every Rust guest compiles as edition 2015, where `unsafe extern` is a syntax error. The only
+// other Rust guest with an extern block, `protrust.rs:17`, uses this form. MEASURED: this file
+// compiles and runs with the exact build.rs recipe; the `unsafe extern` form does not.
+extern "C" {
     fn pthread_kill(thread: u64, sig: i32) -> i32;
     fn signal(sig: i32, handler: usize) -> usize;
+    #[link_name = "write"]
+    fn libc_write(fd: i32, buf: *const u8, n: usize) -> isize;
 }
 
 const SIGUSR1: i32 = 30;
@@ -712,13 +755,11 @@ extern "C" fn on_usr1(_sig: i32) {
     unsafe { libc_write(1, msg.as_ptr(), msg.len()) };
 }
 
-unsafe extern "C" {
-    #[link_name = "write"]
-    fn libc_write(fd: i32, buf: *const u8, n: usize) -> isize;
-}
-
 fn main() {
-    unsafe { signal(SIGUSR1, on_usr1 as usize) };
+    // `as *const () as usize`, not `as usize`: rustc 1.95 warns `direct cast of function item
+    // into an integer` (function_casts_as_integer, on by default) on the direct form, and a guest
+    // that warns on every build is not pristine output.
+    unsafe { signal(SIGUSR1, on_usr1 as *const () as usize) };
     println!("installed");
 
     let h = std::thread::spawn(|| {
@@ -1165,7 +1206,30 @@ this milestone exists to close; quote it verbatim in your report.**
 
 - [ ] **Step 3: Rewrite the raise arm**
 
-In `record_box`, replacing the body of the `SYS_KILL || SYS_PTHREAD_KILL` arm after the existing
+**First, retire the comment that sits directly above the assert you are replacing.** It currently
+reads:
+
+```
+    // __pthread_kill's thread-port operand is NOT validated: 328 fires in no gate guest
+    // (measured: zero across hello_dyn/hello_rust/jq), so there is no observed port to
+    // compare against, and the guest has exactly one thread on one vCPU -- any port it
+    // could name is that thread. Ungated rather than wrongly gated; see the Status
+    // section. Learn the port from mach_thread_self if a guest ever needs the check.
+```
+
+Every clause of it is falsified by this milestone: 328 now fires in a gate guest (SIGTHREAD, Task
+5); the guest no longer has exactly one thread, so "any port it could name is that thread" is
+false; the operand IS validated now, by Task 4's `thread_of_port`; and the suggested fix, a
+`mach_thread_self` handler, was measured unnecessary (spec R1 — main's kport reads `0x103` straight
+out of its own pthread struct, the child's `0xbad7001`). Leaving it would ship a comment
+recommending a road M16 deliberately did not take, sitting on top of the code that took the other
+one. Replace it with what is now true — the operand is validated by `thread_of_port`, which reads
+each live thread's own kport out of its pthread struct, covers main without a special case, and is
+fail-loud because defaulting to the current thread is the exact latent bug M16 exists to close —
+and keep the old measurement (zero 328s across hello_dyn/hello_rust/jq) as the history of *why* it
+was ungated before.
+
+Then, in `record_box`, replace the body of the `SYS_KILL || SYS_PTHREAD_KILL` arm after the existing
 `self_pid` safety check (which is unchanged):
 
 ```rust
