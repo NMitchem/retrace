@@ -21,6 +21,15 @@ Hypervisor.framework via `hv-sys`. Guests are built by bare `rustc` from `crates
 
 ## Global Constraints
 
+**Line numbers in this plan are approximate and drift as tasks land.** They were measured once and
+every task that edits a file moves the ones below it — after Task 3 alone, every anchor here had
+slipped between 1 and 5 lines. Each reference therefore also names the **symbol** or the exact
+`match` guard, and the symbol is the authoritative half: search for it rather than jumping to the
+number. A `~` prefix marks a number known to be approximate. Do not treat a line that does not
+contain what the plan says it contains as evidence the plan is wrong about the *work* — grep for the
+symbol first, and only then report a discrepancy.
+
+
 - **`--test-threads=1` is mandatory** for anything that builds a VM. HVF allows one VM per process.
 - **A bare `cargo test --workspace` gets killed on this machine.** Run the suite in chunks, every
   chunk with `--no-fail-fast`, and capture cargo's own exit code *before* piping to any filter —
@@ -547,10 +556,10 @@ Remove `blocked`, `altstack`, `is_blocked`, `mask`, `set_mask`, `altstack`, `set
 `crates/retrace-box/src/sig.rs`, and update its doc comment: it is now the disposition table alone.
 Retarget every call site to the relevant thread:
 
-- `Box_::on_altstack` (`lib.rs:2735`) — the **current** thread's altstack and the live `SP_EL0`
-- `deliver_signal` (`:2812`) — the current thread for now; Task 6 parameterises it
+- `Box_::on_altstack` (`lib.rs`, ~`:2734`) — the **current** thread's altstack and the live `SP_EL0`
+- `deliver_signal` (~`:2815`) — the current thread for now; Task 6 parameterises it
 - the `sigreturn` mask restore (`:2801`) — the **returning** (current) thread
-- `retrace-core`'s `sigprocmask`/`pthread_sigmask` arm (`:513`) and its replay mirror (`:1108`) —
+- `retrace-core`'s `sigprocmask`/`pthread_sigmask` arm (~`:518`) and its replay mirror (~`:1126`) —
   the **calling** thread
 - the `sigaltstack` arm — the **calling** thread
 - the raise arm's `is_blocked` assert (`:584`) — leave it targeting the current thread; Task 7
@@ -897,7 +906,7 @@ git commit -m "M16 t5: a guest whose main signals its child by name"
 ### Task 6: Delivery targets a thread, not the vCPU
 
 **Files:**
-- Modify: `crates/retrace-box/src/lib.rs` (`deliver_signal` at `:2812` → `deliver_signal_to`, plus a
+- Modify: `crates/retrace-box/src/lib.rs` (`deliver_signal`, ~`:2815` → `deliver_signal_to`, plus a
   `dbg_fp_lr` accessor beside `vcpu_get_x` at `:2749`)
 - Test: `crates/retrace-box/tests/deliver.rs`
 
@@ -1181,7 +1190,8 @@ git commit -m "M16 t6: a signal is delivered to a thread, not to whoever is runn
 ### Task 7: The recorder resolves `__pthread_kill`'s target
 
 **Files:**
-- Modify: `crates/retrace-core/src/lib.rs:566-660` (the raise arm in `record_box`)
+- Modify: `crates/retrace-core/src/lib.rs` — the raise arm in `record_box`, the `match` guard
+  `if num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL` (~`:572`)
 - Test: `crates/retrace/tests/sigthread_e2e.rs`
 
 **Interfaces:**
@@ -1365,7 +1375,7 @@ git commit -m "M16 t7: __pthread_kill delivers to the thread it names"
 **Interfaces:**
 - Consumes: everything Task 7 produced.
 
-**`ReplaySession::mirror_delivery` (`:888`) is a SHARED helper — parameterise it, do not duplicate
+**`ReplaySession::mirror_delivery` (~`:890`) is a SHARED helper — parameterise it, do not duplicate
 it.** It owns the `deliver_signal` call (`:895`) *and* the frame byte-compare that IS the divergence
 check, and it already has **two** callers: `:1050`, the caught-raise mirror (`SI_USER`), and `:1510`,
 the fault mirror. Task 9 adds a third. Writing a second raise-specific copy of it would reproduce
@@ -1460,8 +1470,9 @@ git commit -m "M16 t8: replay recomputes the target and byte-compares the frame"
 ### Task 9: A masked signal pends, and materialises when the mask lifts
 
 **Files:**
-- Modify: `crates/retrace-core/src/lib.rs:513-527` (the mask arm in `record_box`) and its replay
-  mirror at `:1108`; the `SYS_SIGPENDING` arm at `:528`
+- Modify: `crates/retrace-core/src/lib.rs` — the `SYS_SIGPROCMASK`/`SYS_PTHREAD_SIGMASK` arm in
+  `record_box` (~`:518`) and its replay mirror in `ReplaySession::advance` (~`:1126`); the
+  `SYS_SIGPENDING` arm (~`:533`)
 - Modify: `crates/retrace-guest/rs/sigthread.rs` (append the mask/pending half)
 - Test: `crates/retrace/tests/sigthread_e2e.rs`
 
@@ -1587,7 +1598,7 @@ write back the old mask, append the `Syscall` landmark, and *then*:
                 }
 ```
 
-`SYS_SIGPENDING` (`:528`) stops returning a constant and writes `threads().pending_of(current)`.
+`SYS_SIGPENDING` (~`:533`) stops returning a constant and writes `threads().pending_of(current)`.
 
 Mirror all of it in `ReplaySession::advance`'s mask arm, recomputing and byte-comparing — through
 `mirror_delivery`, which Task 8 gave a `tid` parameter. This is its **third** call site; pass the
