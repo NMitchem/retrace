@@ -33,7 +33,8 @@ fn continue_parks_at_the_crash_and_where_names_it() {
     assert!(out.contains(&format!("guest crashed: pc={crash_pc:#x} far=0x4000dead0000")),
             "crash line:\n{out}");
     // Parked AT the fault: where's pc is the crash pc (the faulting instruction, un-retired).
-    assert!(out.trim_end().ends_with(&format!("pc={crash_pc:#x}")), "where:\n{out}");
+    // CRASHY is single-threaded throughout, so thread=0 is the only truthful answer (M15).
+    assert!(out.trim_end().ends_with(&format!("pc={crash_pc:#x} thread=0")), "where:\n{out}");
 }
 
 #[test]
