@@ -20,6 +20,9 @@ const CHECKPOINT_COST_GATE_STEPS: u64 = 64;
 
 /// One parsed debugger command. `Break`/`Delete` carry a guest VA; `Examine` carries (VA, len);
 /// `Stepi`/`ReverseStepi` carry a repeat count (default 1); `RegsOf` carries a thread id (M15).
+/// `Watch` carries (VA, len, an optional thread scope — M15 Task 8): the hardware slot is global
+/// (one vCPU, no per-thread DBGW), so a thread scope is a debugger-side filter applied at the hit
+/// sites, never armed in hardware.
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
     Break(u64),
@@ -31,7 +34,7 @@ pub enum Cmd {
     Regs,
     Examine(u64, usize),
     Where,
-    Watch(u64, u64),
+    Watch(u64, u64, Option<u32>),
     Unwatch(u64),
     Threads,
     RegsOf(u32),
@@ -85,21 +88,44 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
         "break"           => { one_operand(verb, &ops)?; Ok(Cmd::Break(parse_addr(ops[0])?)) }
         "delete"          => { one_operand(verb, &ops)?; Ok(Cmd::Delete(parse_addr(ops[0])?)) }
         "watch"           => {
-            if ops.is_empty() || ops.len() > 2 {
-                return Err(format!("`watch` takes <addr> [len]; got {} operand(s)", ops.len()));
+            // Grammar: `watch <addr> [len] [thread <n>]` — `len` stays purely positional (as
+            // before Task 8); `thread <n>` is a trailing keyword clause so it composes with an
+            // omitted `len` without ambiguity (`ops[1]` is only ever read as a length when it is
+            // NOT the literal `thread`).
+            if ops.is_empty() || ops.len() > 4 {
+                return Err(format!(
+                    "`watch` takes <addr> [len] [thread <n>]; got {} operand(s)", ops.len()));
             }
             let addr = parse_addr(ops[0])?;
-            let len = match ops.get(1) {
-                None => 8u64,
-                Some(t) => t.parse::<u64>().map_err(|_| format!("bad watch len: {t}"))?,
+            let mut idx = 1;
+            let len = if idx < ops.len() && ops[idx] != "thread" {
+                let l = ops[idx].parse::<u64>().map_err(|_| format!("bad watch len: {}", ops[idx]))?;
+                idx += 1;
+                l
+            } else {
+                8u64
             };
+            let thread = if idx < ops.len() {
+                if ops[idx] != "thread" {
+                    return Err(format!("unexpected token after watch operands: {}", ops[idx]));
+                }
+                idx += 1;
+                let t = ops.get(idx).ok_or_else(|| "`thread` requires a thread id".to_string())?;
+                idx += 1;
+                Some(t.parse::<u32>().map_err(|_| format!("bad thread id: {t}"))?)
+            } else {
+                None
+            };
+            if idx != ops.len() {
+                return Err("`watch` has trailing garbage after the thread id".to_string());
+            }
             if !matches!(len, 1 | 2 | 4 | 8) {
                 return Err(format!("watch len must be 1, 2, 4, or 8; got {len}"));
             }
             if addr % len != 0 {
                 return Err(format!("watch address {addr:#x} must be {len}-byte aligned"));
             }
-            Ok(Cmd::Watch(addr, len))
+            Ok(Cmd::Watch(addr, len, thread))
         }
         "unwatch"         => { one_operand(verb, &ops)?; Ok(Cmd::Unwatch(parse_addr(ops[0])?)) }
         "continue"        => expect_none(Cmd::Continue, &ops),
@@ -177,10 +203,13 @@ struct Exec<'a> {
     n: usize,
     k: u64,
     breakpoints: Vec<u64>,
-    /// Armed watch ranges (addr, len), sorted by addr + deduped (≤ 4: one per DBGWVR slot).
-    watches: Vec<(u64, u64)>,
-    /// The (n, k) of the most recent watch hit reported to the user, if any — drives the
-    /// `cmd_continue` progress rule (a hardware watch parks pre-retire, at the un-retired store).
+    /// Armed watch ranges (addr, len, optional thread scope), sorted by addr + deduped (≤ 4: one
+    /// per DBGWVR slot). The thread scope (M15 Task 8) is a pure debugger-side filter — the
+    /// hardware slot itself stays global — checked at each hit site via `watch_thread_matches`.
+    watches: Vec<(u64, u64, Option<u32>)>,
+    /// The (n, k) at which the session is currently parked pre-retire on a hardware watch hit, be
+    /// it one reported to the user or one discarded by a thread scope — either way the store has
+    /// not retired, so `cmd_continue`'s progress rule must pre-step off it before resuming.
     last_watch_hit: Option<(usize, u64)>,
     cache: CheckpointCache,
 }
@@ -229,7 +258,7 @@ impl<'a> Exec<'a> {
             Cmd::Regs             => self.cmd_regs(out),
             Cmd::Examine(a, len)  => self.cmd_examine(*a, *len, out),
             Cmd::Where            => self.cmd_where(out),
-            Cmd::Watch(a, l)      => self.cmd_watch(*a, *l, out),
+            Cmd::Watch(a, l, t)   => self.cmd_watch(*a, *l, *t, out),
             Cmd::Unwatch(a)       => self.cmd_unwatch(*a, out),
             Cmd::Threads          => self.cmd_threads(out),
             Cmd::RegsOf(tid)      => self.cmd_regs_of(*tid, out),
@@ -253,21 +282,36 @@ impl<'a> Exec<'a> {
         line(out, format_args!("deleted {addr:#x}"))
     }
 
-    fn cmd_watch<W: Write>(&mut self, addr: u64, len: u64, out: &mut W) -> Result<(), String> {
-        if let Err(i) = self.watches.binary_search_by_key(&addr, |&(a, _)| a) {
+    fn cmd_watch<W: Write>(&mut self, addr: u64, len: u64, thread: Option<u32>, out: &mut W) -> Result<(), String> {
+        if let Err(i) = self.watches.binary_search_by_key(&addr, |&(a, _, _)| a) {
             if self.watches.len() >= 4 {
                 return Err("cannot arm more than 4 watchpoints (hardware limit: DBGWVR0-3)".into());
             }
-            self.watches.insert(i, (addr, len));
+            self.watches.insert(i, (addr, len, thread));
         }
-        line(out, format_args!("watch at {addr:#x} len {len}"))
+        match thread {
+            Some(t) => line(out, format_args!("watch at {addr:#x} len {len} thread {t}")),
+            None    => line(out, format_args!("watch at {addr:#x} len {len}")),
+        }
     }
 
     fn cmd_unwatch<W: Write>(&mut self, addr: u64, out: &mut W) -> Result<(), String> {
-        if let Ok(i) = self.watches.binary_search_by_key(&addr, |&(a, _)| a) {
+        if let Ok(i) = self.watches.binary_search_by_key(&addr, |&(a, _, _)| a) {
             self.watches.remove(i);
         }
         line(out, format_args!("unwatched {addr:#x}"))
+    }
+
+    /// Whether a hardware/syscall watch hit at `addr` by `thread` should be reported to the user:
+    /// true when that watch has no scope, or the scope equals `thread`. `addr` is always drawn
+    /// from `watched_of` (hardware) or the trace's own recorded write (syscall), both of which
+    /// only ever name an address present in `self.watches`, so the lookup always finds an entry —
+    /// the `_ => true` arm exists only as an honest fallback, never a silent default-allow.
+    fn watch_thread_matches(&self, addr: u64, thread: u32) -> bool {
+        match self.watches.iter().find(|&&(a, _, _)| a == addr) {
+            Some(&(_, _, Some(scope))) => scope == thread,
+            _ => true,
+        }
     }
 
     fn cmd_regs<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
@@ -415,13 +459,15 @@ impl<'a> Exec<'a> {
                     // (the pre-step must not re-report the parked position); no instruction
                     // retires during the crossing (the guest is parked ON the trap), so only
                     // Event, WatchSyscall, or Exited can come back — never Watch or Break.
-                    let ws = self.watches.clone();
+                    let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
                     self.sess_mut().arm_watchpoints(&ws);
                     match self.sess_mut().advance().map_err(|d|
                         format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?
                     {
                         Advance::Exited(report) => return self.park_at_terminal(report, out),
-                        Advance::WatchSyscall { watched, thread: _ } => {
+                        // Task 8: a scoped-out writer falls through to the `_` arm below — it is
+                        // treated exactly like a plain Event (boundary crossed, keep scanning).
+                        Advance::WatchSyscall { watched, thread } if self.watch_thread_matches(watched, thread) => {
                             let n = self.sess().landmark();
                             line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
                             // Only watches were armed here — clear them; the session is kept.
@@ -431,8 +477,9 @@ impl<'a> Exec<'a> {
                             return Ok(());
                         }
                         _ => {
-                            // Plain Event: disarm before the main scan re-arms (a second
-                            // arm_watchpoints without a clear would duplicate watch_ranges).
+                            // Plain Event, or a WatchSyscall scoped out by thread: disarm before
+                            // the main scan re-arms (a second arm_watchpoints without a clear
+                            // would duplicate watch_ranges).
                             self.sess_mut().clear_watchpoints();
                             self.n = self.sess().landmark();
                             self.k = 0;
@@ -445,7 +492,7 @@ impl<'a> Exec<'a> {
         let (start_n, start_k) = (self.n, self.k);
         let bps = self.breakpoints.clone();
         self.sess_mut().arm_breakpoints(&bps);
-        let ws = self.watches.clone();
+        let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
         self.sess_mut().arm_watchpoints(&ws);
         loop {
             let adv = self.sess_mut().advance()
@@ -477,34 +524,55 @@ impl<'a> Exec<'a> {
                     // no boundary match; keep scanning (hardware breakpoints stay armed)
                 }
                 Advance::Exited(report) => return self.park_at_terminal(report, out),
-                // `thread: _` at all five watch arms below, not `..`: M15 Task 5 plumbs the
-                // writing thread through `Advance`, and Task 7 is what teaches these lines to
-                // print it. Naming the field keeps every site that drops it greppable; `..` is
-                // exactly how Task 4's oracle check went missing from two arms.
-                Advance::Watch { thread: _ } => {
+                // Both watch arms below name their `thread` field (not `..`): M15 Task 5 plumbs
+                // the writing thread through `Advance`, Task 7 is what teaches these lines to
+                // print it, and Task 8 is what filters on it. Naming the field keeps every site
+                // that drops it greppable; `..` is exactly how Task 4's oracle check went missing
+                // from two arms.
+                Advance::Watch { thread } => {
                     let n = self.sess().landmark();
                     let p_hit = self.sess().pc();
                     let watched = watched_of(&ws, self.sess().far());
-                    line(out, format_args!("hit watch {watched:#x} (write at {p_hit:#x}) at ({n}, +?)"))?;
+                    let matched = self.watch_thread_matches(watched, thread);
+                    if matched {
+                        line(out, format_args!("hit watch {watched:#x} (write at {p_hit:#x}) at ({n}, +?)"))?;
+                    }
                     // Resolve from kctx, NOT kctx+1: unlike a breakpoint (whose parked-on case the
                     // pre-step already moved off), a watched store CAN legitimately fire at the
                     // exact parked coordinate (the user stepi'd up to it), and the store pc repeats
-                    // in loops — searching from kctx+1 would misresolve to the NEXT iteration.
+                    // in loops — searching from kctx+1 would misresolve to the NEXT iteration. This
+                    // resolution runs whether or not the hit is scoped out: the vCPU is physically
+                    // parked pre-retire at the store either way.
                     let kctx = if n == start_n { start_k } else { 0 };
                     self.session = None; // free the VM before the resolution seek
                     let k = resolve_hit_k(self.trace, &mut self.cache, n, p_hit, kctx)?;
-                    line(out, format_args!("resolved ({n}, {k})"))?;
+                    if matched {
+                        line(out, format_args!("resolved ({n}, {k})"))?;
+                    }
                     self.last_watch_hit = Some((n, k));
-                    return self.reseek(n, k);
+                    self.reseek(n, k)?;
+                    if matched {
+                        return Ok(());
+                    }
+                    // Task 8: scoped to a different thread — not a hit for this filter. Re-enter
+                    // this function rather than duplicating its own pre-step rule: `last_watch_hit
+                    // == (n, k)` now holds, so the top-of-function pre-step steps past the
+                    // un-retired store and the scan resumes from there.
+                    return self.cmd_continue(out);
                 }
-                Advance::WatchSyscall { watched, thread: _ } => {
-                    let n = self.sess().landmark();
-                    line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
-                    self.sess_mut().clear_breakpoints();  // keep this session, hit-clean
-                    self.sess_mut().clear_watchpoints();
-                    self.n = n;
-                    self.k = 0;
-                    return Ok(());
+                Advance::WatchSyscall { watched, thread } => {
+                    if self.watch_thread_matches(watched, thread) {
+                        let n = self.sess().landmark();
+                        line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
+                        self.sess_mut().clear_breakpoints();  // keep this session, hit-clean
+                        self.sess_mut().clear_watchpoints();
+                        self.n = n;
+                        self.k = 0;
+                        return Ok(());
+                    }
+                    // Task 8: scoped out. The writing event is already consumed (no pre-retire
+                    // issue for a syscall write), so just keep scanning — breakpoints/watches
+                    // stay armed and the loop's next `advance()` moves past it on its own.
                 }
             }
         }
@@ -519,10 +587,14 @@ impl<'a> Exec<'a> {
     /// already consumed by the (unarmed) seek, so it cannot re-fire, but a first-instruction store
     /// in window n can still be caught.
     fn cmd_reverse_continue<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
-        enum RHit { Bp(u64), Watch { watched: u64, pc: u64 }, WatchSys { watched: u64 } }
+        // Watch/WatchSys carry the writing `thread` too (M15 Task 8): the scan below must still
+        // walk THROUGH a scoped-out hit (it is a real, earlier event that may hide an earlier
+        // matching one behind it), so the thread rides along on every candidate and the FILTER is
+        // applied only once, where `last` gets decided — never at the point of discovery.
+        enum RHit { Bp(u64), Watch { watched: u64, pc: u64, thread: u32 }, WatchSys { watched: u64, thread: u32 } }
         let (pn, pk) = (self.n, self.k);
         let bps = self.breakpoints.clone();
-        let ws = self.watches.clone();
+        let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
         self.session = None; // the scan uses its own transient sessions
         let mut last: Option<(usize, u64, RHit)> = None; // (n, k, kind) of the latest hit < P
         let (mut cur_n, mut cur_k) = (1usize, 0u64);     // scan cursor
@@ -533,12 +605,12 @@ impl<'a> Exec<'a> {
             let hit = loop {
                 match s.advance().map_err(|d| format!("reverse-continue diverged: {}", d.detail))? {
                     Advance::Break => break Some((s.landmark(), RHit::Bp(s.pc()))),
-                    Advance::Watch { thread: _ } => {
+                    Advance::Watch { thread } => {
                         let watched = watched_of(&ws, s.far());
-                        break Some((s.landmark(), RHit::Watch { watched, pc: s.pc() }));
+                        break Some((s.landmark(), RHit::Watch { watched, pc: s.pc(), thread }));
                     }
-                    Advance::WatchSyscall { watched, thread: _ } =>
-                        break Some((s.landmark(), RHit::WatchSys { watched })),
+                    Advance::WatchSyscall { watched, thread } =>
+                        break Some((s.landmark(), RHit::WatchSys { watched, thread })),
                     Advance::Event => continue,
                     // Exited covers BOTH terminals (exit and crash): either way the scan is over.
                     Advance::Exited(_) => break None,
@@ -555,7 +627,17 @@ impl<'a> Exec<'a> {
                 RHit::WatchSys { .. } => (0u64, (n, 0u64)),
             };
             if (n, k) < (pn, pk) {
-                last = Some((n, k, rh));
+                // Task 8: a scoped-out watch hit is still a real event — the cursor advances past
+                // it exactly as if it counted, so scanning continues into whatever comes after —
+                // but it does NOT become a candidate for `last`. Breakpoints are never scoped.
+                let matches = match &rh {
+                    RHit::Bp(_) => true,
+                    RHit::Watch { watched, thread, .. } => self.watch_thread_matches(*watched, *thread),
+                    RHit::WatchSys { watched, thread } => self.watch_thread_matches(*watched, *thread),
+                };
+                if matches {
+                    last = Some((n, k, rh));
+                }
                 (cur_n, cur_k) = resume;
             } else {
                 break; // reached P; earlier hits are already recorded
@@ -566,12 +648,12 @@ impl<'a> Exec<'a> {
                 line(out, format_args!("hit {pc:#x} at ({n}, {k})"))?;
                 self.reseek(n, k)
             }
-            Some((n, k, RHit::Watch { watched, pc })) => {
+            Some((n, k, RHit::Watch { watched, pc, .. })) => {
                 line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k})"))?;
                 self.last_watch_hit = Some((n, k));
                 self.reseek(n, k)
             }
-            Some((n, _, RHit::WatchSys { watched })) => {
+            Some((n, _, RHit::WatchSys { watched, .. })) => {
                 line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
                 self.reseek(n, 0)
             }
@@ -615,15 +697,23 @@ mod tests {
         assert_eq!(parse_script("regs;; where ;").unwrap(), vec![Cmd::Regs, Cmd::Where]);
     }
     #[test] fn parses_watch_and_unwatch() {
-        assert_eq!(parse_script("watch 0x1000").unwrap(), vec![Cmd::Watch(0x1000, 8)]);
+        assert_eq!(parse_script("watch 0x1000").unwrap(), vec![Cmd::Watch(0x1000, 8, None)]);
         assert_eq!(parse_script("watch 0x1004 4; unwatch 0x1004").unwrap(),
-                   vec![Cmd::Watch(0x1004, 4), Cmd::Unwatch(0x1004)]);
+                   vec![Cmd::Watch(0x1004, 4, None), Cmd::Unwatch(0x1004)]);
     }
     #[test] fn rejects_bad_watch_len_and_alignment() {
         assert!(parse_script("watch 0x1000 3").unwrap_err().contains("must be 1, 2, 4, or 8"));
         assert!(parse_script("watch 0x1001 8").unwrap_err().contains("8-byte aligned"));
         assert!(parse_script("watch").is_err());
         assert!(parse_script("watch 0x1000 8 extra").is_err());
+    }
+    #[test] fn parses_watch_thread_scope() {
+        // `thread <n>` composes with an omitted OR present `len`.
+        assert_eq!(parse_script("watch 0x1000 thread 1").unwrap(), vec![Cmd::Watch(0x1000, 8, Some(1))]);
+        assert_eq!(parse_script("watch 0x1000 4 thread 2").unwrap(), vec![Cmd::Watch(0x1000, 4, Some(2))]);
+        assert!(parse_script("watch 0x1000 thread").unwrap_err().contains("requires a thread id"));
+        assert!(parse_script("watch 0x1000 thread abc").unwrap_err().contains("bad thread id"));
+        assert!(parse_script("watch 0x1000 thread 1 extra").is_err());
     }
     #[test] fn parses_threads_and_regs_of() {
         assert_eq!(parse_script("threads").unwrap(), vec![Cmd::Threads]);

@@ -162,6 +162,60 @@ fn syscall_writer_is_found_forward_and_backward() {
     assert!(out.contains(&format!("at ({after_read}, 0) pc=0x{bpc:x}")), "parked at boundary:\n{out}");
 }
 
+/// Parse `"<label> cell 0x…"` out of the guest's own stdout — same convention as
+/// `thread_watch_e2e.rs`'s `parse_cell`, retaken independently here so this file does not depend
+/// on that one.
+fn parse_cell(stdout: &str, label: &str) -> u64 {
+    let marker = format!("{label} cell ");
+    let start = stdout.find(&marker)
+        .unwrap_or_else(|| panic!("missing `{marker}` in stdout:\n{stdout}")) + marker.len();
+    let rest = &stdout[start..];
+    let hex = rest[..rest.find('\n').unwrap_or(rest.len())].trim();
+    u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+        .unwrap_or_else(|_| panic!("bad address {hex:?} in stdout:\n{stdout}"))
+}
+
+/// Task 8: `watch <addr> thread <n>` is a debugger-side filter, not a hardware one — the hardware
+/// slot fires for every thread's store to the watched range, and the debugger discards hits whose
+/// thread does not match (CLAUDE.md, "the hardware watchpoint slot stays global"). WATCHTHREAD's
+/// `SHARED_CELL` is written by BOTH threads (main first, then the child, once M15's own scheduler
+/// switches control at `h.join()`), so scoping is a claim that can be wrong in either direction —
+/// a filter that ignores its thread argument, or one that just suppresses everything, would each
+/// pass a single-direction check. This test asserts both directions in one run.
+#[test]
+fn watch_thread_scoping_filters_the_others_write() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::WATCHTHREAD);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let out = String::from_utf8_lossy(&rec.stdout).into_owned();
+    assert!(out.contains("child wrote"), "the child thread must actually run:\n{out}");
+    let shared = parse_cell(&out, "shared");
+    assert_eq!(shared % 8, 0, "shared cell {shared:#x} must be 8-byte aligned to watch");
+
+    let ts = trace.to_str().unwrap();
+
+    // Forward: main (thread 0) writes `shared` FIRST; scoping to thread 1 must SKIP that earlier,
+    // real hardware hit and keep running until the child's later write — the mid-scan case, not
+    // just "the first hit happens to already be the right one".
+    let (code1, out1, err1) = debug_run(ts, &format!("watch 0x{shared:x} thread 1; continue; where"));
+    assert_eq!(code1, 0, "stderr: {err1}");
+    assert!(out1.contains(&format!("hit watch 0x{shared:x}")), "child's write must be reported:\n{out1}");
+    let where1 = out1.lines().last().expect("a `where` line");
+    assert!(where1.contains("thread=1"), "scoped to thread 1, the reported hit must be the child's:\n{out1}");
+    assert!(!where1.contains("thread=0"), "must not report main's (thread 0's) earlier write:\n{out1}");
+
+    // Backward, scoped to the OTHER thread: run to completion, then ask who wrote `shared` scoped
+    // to thread 0. The unfiltered answer (and a filter that ignores its argument) is the child's
+    // LATER write; the correct, scoped answer is main's EARLIER one — this direction is what
+    // actually distinguishes real filtering from no filtering at all.
+    let (code2, out2, err2) = debug_run(ts,
+        &format!("continue; watch 0x{shared:x} thread 0; reverse-continue; where"));
+    assert_eq!(code2, 0, "stderr: {err2}");
+    assert!(out2.contains(&format!("hit watch 0x{shared:x}")), "main's write must be found:\n{out2}");
+    let where2 = out2.lines().last().expect("a `where` line");
+    assert!(where2.contains("thread=0"), "scoped to thread 0, the reported hit must be main's:\n{out2}");
+    assert!(!where2.contains("thread=1"), "must not report the child's later write instead:\n{out2}");
+}
+
 #[test]
 fn pre_step_boundary_cross_reports_a_watched_syscall_write() {
     // Final-review M-1: park ON the read-svc via a breakpoint (resolves to k = window len),
