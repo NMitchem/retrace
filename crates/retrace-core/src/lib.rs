@@ -156,10 +156,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                          models no pending set, so implement one — and revisit sigpending's \
                          always-empty answer — before a guest needs this.");
                     let (writes, resume_pc) = b.deliver_signal(sig, si_code, far, esr, far);
-                    // NOT a placeholder, unlike the __pthread_kill delivery below: a hardware fault
-                    // has no target port to resolve — it is always attributed to whichever thread's
-                    // vCPU context trapped — so `current` is permanently correct on this path, even
-                    // after Task 7 resolves `__pthread_kill`'s target thread on the raise path.
+                    // A hardware fault has no target port to resolve — it is always attributed to
+                    // whichever thread's vCPU context trapped — so `current` is permanently correct
+                    // on this path. Contrast the __pthread_kill delivery below, which resolves its
+                    // target thread from the port the guest named (M16).
                     w.append(&Event::SignalDelivery { sig, si_code, si_addr: far, handler,
                                                       resume_pc, writes, thread })
                         .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
@@ -590,7 +590,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // unchecked because 328 fired in no gate guest (measured: zero across
                 // hello_dyn/hello_rust/jq) and the guest had exactly one thread on one vCPU, so any
                 // port it could name was that thread; SIGTHREAD (Task 5) is the first guest that
-                // exercises this.
+                // exercises this. The path is not confined to that fixture, either: libc's abort()
+                // issues __pthread_kill(self_kport, SIGABRT), so thread_of_port now runs on the
+                // abort path of EVERY guest — measured with RETRACE_TRACE=1 on `panicky`:
+                // `[trap] num=328 (0x148) pc=0x1804b65e8 args=[0x103,0x6,0x0,0x0,0x0,0x1]`, where
+                // 0x103 is main's own kport. That is why panic_e2e now covers the target==caller
+                // resolution case on every run, and it means whoever next tunes thread_of_port's
+                // matching rules has a blast radius of "every aborting guest", not just SIGTHREAD.
                 //
                 // M16: __pthread_kill names a TARGET THREAD; kill names the process. A
                 // process-directed signal may go to any thread with it unblocked, and retrace picks
@@ -659,8 +665,9 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             }
                             // TERMINAL. Same shape as the Exit and Crash arms above: the event, then
                             // the final full-memory snapshot, then break. `thread` is the CALLER
-                            // here (unchanged from pre-M16): a process-directed default-terminate
-                            // has no per-thread target to resolve.
+                            // here, not `target` (in scope above, for __pthread_kill): Event::Signal's
+                            // format doc (retrace-trace) permanently defines `thread` as the RAISING
+                            // thread, so that it names the same event as `pc`, the raise site.
                             retrace_arch::DefaultAction::Terminate => {
                                 let pc = b.position();
                                 let final_snap = b.snapshot();
