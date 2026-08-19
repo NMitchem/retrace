@@ -2111,6 +2111,13 @@ It must cover, each in its own right:
   If this plan survived unamended, say so — but check first, because "unamended" is more often
   unexamined than perfect
 - the one new `#[ignore]`, and confirmation that `stackoverflow_rust_e2e` is unchanged
+- **`ThreadTable::take_deliverable` has a product caller.** Grep for it and confirm. Task 7 traded a
+  fail-loud assert for a pending set, and between Task 7 and Task 9 that pending set had NO consumer:
+  a guest raising a blocked signal got `pthread_kill` → 0 and the signal never materialised. That is
+  the one direction this codebase's fail-loud constraint dislikes — an assert replaced by silence —
+  and no gate reaches it either way, so nothing but this checklist line will catch it if Task 9's
+  materialisation slipped. If the grep finds only test callers, Task 9 is incomplete and the close is
+  not honest until it is fixed or the silence is documented as a named limit.
 
 - [ ] **Step 4: Update `CLAUDE.md`**
 
