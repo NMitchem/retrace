@@ -295,6 +295,23 @@ mod tests {
         assert_eq!(t.mask_of(0), 0);
     }
 
+    // Relocated from sig.rs's SigTable::set_mask test (M16 fix round 1): the BLOCK/UNBLOCK/SETMASK
+    // arithmetic table, including the OLD-mask return value at every step — nothing else in this
+    // module asserts on set_mask_of's return, and "UNBLOCK clears" is the trigger the pending-signal
+    // delivery path (a_pended_signal_is_taken_only_once_and_lowest_first, below) rests on.
+    #[test]
+    fn set_mask_of_honours_block_unblock_setmask_and_returns_the_old_mask() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        assert_eq!(t.set_mask_of(0, retrace_arch::SIG_BLOCK, 0b0110), 0, "returns the OLD mask");
+        assert_eq!(t.mask_of(0), 0b0110);
+        assert_eq!(t.set_mask_of(0, retrace_arch::SIG_BLOCK, 0b1000), 0b0110);
+        assert_eq!(t.mask_of(0), 0b1110, "BLOCK is a union");
+        assert_eq!(t.set_mask_of(0, retrace_arch::SIG_UNBLOCK, 0b0100), 0b1110);
+        assert_eq!(t.mask_of(0), 0b1010, "UNBLOCK clears");
+        assert_eq!(t.set_mask_of(0, retrace_arch::SIG_SETMASK, 0b0001), 0b1010);
+        assert_eq!(t.mask_of(0), 0b0001, "SETMASK replaces");
+    }
+
     #[test]
     fn masks_are_independent_between_threads() {
         let mut t = ThreadTable::new(ThreadCtx::zeroed());
@@ -328,5 +345,15 @@ mod tests {
         assert_eq!(t.altstack_of(0), Some((0x9000, 0x1000, 0)));
         assert_eq!(t.altstack_of(child), None,
             "sigaltstack is per-thread, and is NOT inherited across pthread_create");
+    }
+
+    // Relocated from sig.rs's SigTable::set_altstack test (M16 fix round 1): the previous-value
+    // return, which alternate_stacks_are_per_thread (above) never checks.
+    #[test]
+    fn set_altstack_of_returns_the_previous_value() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        assert_eq!(t.set_altstack_of(0, Some((0x9000, 0x4000, 0))), None);
+        assert_eq!(t.altstack_of(0), Some((0x9000, 0x4000, 0)));
+        assert_eq!(t.set_altstack_of(0, None), Some((0x9000, 0x4000, 0)));
     }
 }
