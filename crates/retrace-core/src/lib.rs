@@ -1627,6 +1627,10 @@ impl ReplaySession {
     /// M16 Task 1: `Box_::kport_of`, for the R1 measurement gate. Test-only, like `dbg_regs_of`.
     #[doc(hidden)]
     pub fn dbg_kport_of(&self, tid: usize) -> Option<u32> { self.b.kport_of(tid) }
+    /// M16 Task 4: `Box_::thread_of_port`, for the port->tid resolution gate. Test-only, like
+    /// `dbg_kport_of`.
+    #[doc(hidden)]
+    pub fn dbg_thread_of_port(&self, port: u32) -> usize { self.b.thread_of_port(port) }
     /// How many threads the guest has created so far. Test-only.
     #[doc(hidden)]
     pub fn b_thread_count(&self) -> usize { self.b.threads().len() }

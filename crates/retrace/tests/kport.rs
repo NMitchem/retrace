@@ -7,6 +7,21 @@ mod util;
 use retrace_core::ReplaySession;
 use std::path::Path;
 
+/// Advance until the child exists, or fail loud naming what we were waiting for. Shared by both
+/// tests in this file: the bound is the point (see the panic), and two copies of it would drift.
+fn seek_to_two_threads(s: &mut ReplaySession) {
+    loop {
+        if s.b_thread_count() >= 2 { return; }
+        match s.advance().expect("no divergence on an untampered trace") {
+            retrace_core::Advance::Exited(_) =>
+                panic!("the recording ended with only {} thread(s): THREADRUST must spawn one, so \
+                        either the guest changed or bsdthread_create was not emulated",
+                       s.b_thread_count()),
+            _ => continue,
+        }
+    }
+}
+
 #[test]
 fn every_live_thread_has_a_distinct_readable_kport() {
     let (rec, trace) = util::record_dynamic(retrace_guest::THREADRUST);
@@ -16,19 +31,7 @@ fn every_live_thread_has_a_distinct_readable_kport() {
     // "child ran" is in stdout the spawn is behind us; simplest reliable seek is to run to the end
     // of the trace minus nothing and inspect the table, so instead advance until the table grows.
     let mut s = ReplaySession::open(Path::new(&trace)).unwrap();
-    // BOUNDED. `advance()`'s own doc says calling it after `Advance::Exited` is unspecified and
-    // callers must not — so an unbounded "wait for the child" loop runs off the end of the trace on
-    // any guest that never spawns. Stop on exit, and fail loud naming what we were waiting for.
-    loop {
-        if s.b_thread_count() >= 2 { break; }
-        match s.advance().expect("no divergence on an untampered trace") {
-            retrace_core::Advance::Exited(_) =>
-                panic!("the recording ended with only {} thread(s): THREADRUST must spawn one, so \
-                        either the guest changed or bsdthread_create was not emulated",
-                       s.b_thread_count()),
-            _ => continue,
-        }
-    }
+    seek_to_two_threads(&mut s);
 
     let main_port = s.dbg_kport_of(0).expect("main's pthread must be mapped and readable");
     let child_port = s.dbg_kport_of(1).expect("the child's pthread must be mapped and readable");
@@ -43,4 +46,21 @@ fn every_live_thread_has_a_distinct_readable_kport() {
     assert_ne!(main_port, child_port,
         "two threads that share a kport would make port->tid resolution ambiguous");
     eprintln!("R1 MEASURED: main kport = {main_port:#x}, child kport = {child_port:#x}");
+}
+
+/// M16 Task 4. Resolution is a search over LIVE threads' own kport fields, so it covers main
+/// without a special case and cannot silently fall back to "whoever is running" — which is exactly
+/// today's latent bug.
+#[test]
+fn a_port_resolves_to_the_thread_that_owns_it() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::THREADRUST);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+    let mut s = ReplaySession::open(Path::new(&trace)).unwrap();
+    seek_to_two_threads(&mut s);
+
+    for tid in [0usize, 1] {
+        let port = s.dbg_kport_of(tid).expect("readable");
+        assert_eq!(s.dbg_thread_of_port(port), tid,
+            "each thread's own port must resolve back to it");
+    }
 }
