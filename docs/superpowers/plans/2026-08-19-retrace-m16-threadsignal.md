@@ -2069,6 +2069,26 @@ Record the totals. **M15 closed at 360 passed / 0 failed / 1 ignored over 98 bin
 against that is the number that means something, and it must reconcile against the per-task counts
 rather than being waved through.
 
+- [ ] **Step 1b: Distinguish a real red from the known codesign race**
+
+If any target fails with `codesign -f --entitlements failed … No such file or directory`, that is
+**not** a product failure. `crates/retrace/tests/util/mod.rs`'s `bin()` runs `codesign -f` on the one
+shared `target/aarch64-apple-darwin/debug/retrace`; `-f` replaces the file, so a second test process
+can observe it missing mid-replacement. `--test-threads=1` does not prevent this — it serialises
+threads inside one test binary, while cargo runs test *binaries* concurrently as separate processes.
+Measured during M16 by running 13 `--test` targets in one invocation: `kport` failed, then passed
+2/2 alone.
+
+Re-run the affected target ALONE to confirm, and record both transcripts. Do **not** fix `bin()` here
+— that is shared test infrastructure and a fast-follow, named as such in the close. Do **not** wave
+the red away without the isolated re-run either; the whole hazard is that a gate which can go
+spuriously red teaches the reader to dismiss red.
+
+The Status section must name this honestly: M16 adds e2e binaries (`sigthread_e2e`, and
+`sigblocked_e2e` in Task 13), and every added binary raises the collision odds on the project's own
+exit gate. Say what the fix is (sign a per-test-binary copy rather than the shared file) and that it
+was deliberately deferred.
+
 - [ ] **Step 2: Verify every headline gate ran by name**
 
 Run: `grep -a "hello_dyn\|hello_rust\|jq_\|panic_e2e\|thread_watch\|sigthread" /tmp/m16-gate-*.log`
