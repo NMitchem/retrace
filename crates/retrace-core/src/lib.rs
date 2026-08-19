@@ -917,17 +917,31 @@ impl ReplaySession {
     /// record's delivery arms and these mirrors surfaces here as a named divergence instead of as
     /// silent corruption of the guest's stack.
     ///
-    /// Comparing after `deliver_signal` has written is too late to prevent the write but not too
+    /// Comparing after `deliver_signal_to` has written is too late to prevent the write but not too
     /// late to detect it: the session has not advanced, so a mismatch aborts replay at the right
     /// landmark with both byte strings in hand.
-    fn mirror_delivery(&mut self, sig: u64, si_code: u64, si_addr: u64, esr: u64, far: u64, pc: u64)
+    ///
+    /// M16 Task 8: `tid` is the RECEIVING thread, and every call site recomputes its own — the
+    /// raise mirror through `thread_of_port`, the fault mirror as the current thread. One shared
+    /// helper rather than a per-arm copy precisely because it owns the byte-compare that IS the
+    /// divergence check: two copies could drift while both stayed green, which is the defect M13
+    /// Task 8 shipped. The recorded `thread` tag is compared against `tid` here, after the frame
+    /// compare, so a genuine frame divergence still reports as itself.
+    // The parameter list is `deliver_signal_to`'s, verbatim, plus the `pc` every Divergence needs
+    // to name its landmark. Symmetry rule 1 is "the same method with the same arguments", so
+    // bundling them into a struct here would put a translation step on exactly the path whose
+    // whole job is to have none.
+    #[allow(clippy::too_many_arguments)]
+    fn mirror_delivery(&mut self, tid: usize, sig: u64, si_code: u64, si_addr: u64, esr: u64,
+                       far: u64, pc: u64)
         -> Result<Advance, Divergence> {
-        let (rsig, rwrites) = match self.events.get(self.idx) {
-            Some(Event::SignalDelivery { sig: rsig, writes, .. }) => (*rsig, writes.clone()),
+        let (rsig, rwrites, rthread) = match self.events.get(self.idx) {
+            Some(Event::SignalDelivery { sig: rsig, writes, thread, .. }) =>
+                (*rsig, writes.clone(), *thread),
             other => return Err(Divergence { landmark: self.idx, pc, detail: format!(
                 "expected recorded SignalDelivery, got {other:?} (live: sig={sig} far={far:#x})") }),
         };
-        let (mine, _resume_pc) = self.b.deliver_signal(sig, si_code, si_addr, esr, far);
+        let (mine, _resume_pc) = self.b.deliver_signal_to(tid, sig, si_code, si_addr, esr, far);
         if sig != rsig || mine != rwrites {
             // Name the first differing byte: a frame mismatch is usually one field, and the
             // offset identifies which one far faster than two 976-byte dumps do.
@@ -941,6 +955,16 @@ impl ReplaySession {
                  {:#x}, recorded {} bytes at {:#x}{where_}",
                 mine.first().map_or(0, |r| r.bytes.len()), mine.first().map_or(0, |r| r.ipa),
                 rwrites.first().map_or(0, |r| r.bytes.len()), rwrites.first().map_or(0, |r| r.ipa)) });
+        }
+        // M16 Task 8: and the RECEIVER must match too. Ordered AFTER the frame compare on purpose:
+        // delivering to the wrong thread builds the frame on the wrong stack, so the frame compare
+        // is the more specific report of the same fault and must not be masked by this one. Note
+        // this tag is NOT the caller — for `pthread_kill(child, sig)` the recorded Syscall landmark
+        // names the caller and this one names the target, and they differ.
+        if rthread != tid as u32 {
+            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                "signal delivery thread mismatch: live {tid}, recorded {rthread} — the signal was \
+                 delivered to a different thread than the recording did") });
         }
         self.finish_event()
     }
@@ -956,6 +980,13 @@ impl ReplaySession {
     /// AFTER its own local (num, args) verification, for the same reason the check is ordered that
     /// way inline: a genuine syscall divergence should be reported as one, not masked by the thread
     /// mismatch it caused.
+    ///
+    /// M16 Task 8 adds a FOURTH call site whose landmark is not an `Event::Syscall` at all: the
+    /// terminal-raise mirror's `Event::Signal`, whose `thread` the trace format also defines as the
+    /// RAISING thread. Same comparison, same ordering rule. What this helper never checks is a
+    /// `SignalDelivery`'s tag — that one names the RECEIVER, which for `pthread_kill(child, sig)`
+    /// is a different thread from the caller, so it is compared against the recomputed target
+    /// inside `mirror_delivery` instead.
     fn verify_thread(&self, rthread: u32, pc: u64) -> Result<(), Divergence> {
         if self.current_thread() != rthread {
             return Err(Divergence { landmark: self.idx, pc, detail: format!(
@@ -1027,18 +1058,61 @@ impl ReplaySession {
                     // correctly: without the sigaction mirror this table would still read Dfl for
                     // SIGABRT and would wrongly terminate a guest that had ignored it.
                     if num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL {
+                        // M16 Task 8: resolve the TARGET by the same route record used — the same
+                        // `Box_` methods with the same arguments (symmetry rule 1), which is what
+                        // makes "both sides pick the same thread" true by construction. Recomputed,
+                        // never read out of the recording: consuming the recorded `thread` would
+                        // leave replay unable to disagree with record, i.e. would delete the
+                        // divergence check while leaving a gate that still passed. `thread_of_port`
+                        // is fail-loud on this side too, deliberately — a "fall back to the current
+                        // thread" path here would silently resurrect the exact bug M16 closes.
+                        let target = if num == retrace_arch::SYS_PTHREAD_KILL {
+                            self.b.thread_of_port(args[0] as u32)
+                        } else {
+                            // kill names the process, not a thread; a process-directed signal may
+                            // go to any thread with it unblocked and retrace picks the caller,
+                            // exactly as record does.
+                            self.b.threads().current()
+                        };
                         let sig = args[1];
                         let act = self.b.sigtable().action(sig);
-                        let terminal = matches!(act.disp, retrace_box::Disposition::Dfl)
-                            && retrace_arch::default_action(sig) == retrace_arch::DefaultAction::Terminate;
-                        if terminal {
+                        // M16 Task 8: record tests the TARGET's mask FIRST and only then consults
+                        // the disposition, so this side must too. Until this task replay had no
+                        // pended concept at all and decided terminal-vs-caught straight off the
+                        // disposition, so a guest raising a BLOCKED signal whose disposition is
+                        // Dfl+Terminate made record pend it and carry on while replay took the
+                        // terminal path and hunted an Event::Signal that was never recorded. That
+                        // surfaced as a divergence rather than as corruption — loud, which is why
+                        // it was not a Task 7 defect — but it was still the two dispatch loops
+                        // disagreeing about control flow, and the order below closes it.
+                        if self.b.threads().is_blocked_for(target, sig) {
+                            // A pended raise produces ONE landmark — the ordinary Syscall — and no
+                            // delivery, so it falls through to the generic dispatch below, which
+                            // already verifies (num, args), checks the thread tag, and applies the
+                            // recorded return (record's `set_x0_err_and_return(0, false)` is that
+                            // arm's `apply_and_return` with ret=0, err=false, writes=[]). Only the
+                            // mask side-effect belongs here.
+                            self.b.threads_mut().pend(target, sig);
+                        } else if matches!(act.disp, retrace_box::Disposition::Dfl)
+                            && retrace_arch::default_action(sig) == retrace_arch::DefaultAction::Terminate {
                             match self.events.get(self.idx) {
-                                Some(Event::Signal { sig: rsig, pc: rpc, .. }) => {
+                                Some(Event::Signal { sig: rsig, pc: rpc, thread: rthread }) => {
                                     if sig != *rsig || pc != *rpc {
                                         return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                             "signal mismatch: live (sig={sig}, pc={pc:#x}) != \
                                              recorded (sig={rsig}, pc={rpc:#x})") });
                                     }
+                                    // M16 Task 8: Event::Signal's `thread` is the RAISING thread —
+                                    // the trace format fixes it that way so it names the same event
+                                    // as `pc`, the raise site — so it is checked against the CALLER
+                                    // (`verify_thread`, i.e. the current thread), NOT against
+                                    // `target`. A terminal disposition kills the whole PROCESS, so
+                                    // which thread the raise named stops mattering; what the event
+                                    // pins down is where the process stopped. Do not "simplify"
+                                    // this to `target`. Placed after the sig/pc compare for the
+                                    // usual reason: report the specific divergence, not the thread
+                                    // mismatch it caused.
+                                    self.verify_thread(*rthread, pc)?;
                                     match self.events.get(self.idx + 1) {
                                         Some(Event::Snapshot { mem: final_mem, .. }) => {
                                             if let Some(d) = self.b.diff_memory(final_mem) {
@@ -1055,14 +1129,13 @@ impl ReplaySession {
                                 other => return Err(Divergence { landmark: self.idx, pc,
                                     detail: format!("expected recorded Signal, got {other:?} (live raise: sig={sig})") }),
                             }
-                        }
                         // M12: the CAUGHT counterpart of the terminal arm above. Record appended
                         // TWO events at this one stop — the ordinary Syscall, then the delivery —
                         // so both are consumed here. Letting the generic arm below take the first
                         // would apply_and_return past the svc, and the delivery landmark would then
                         // be met by the next unrelated stop ("expected recorded Exit, got
                         // SignalDelivery", which is what this looked like before the mirror existed).
-                        if matches!(act.disp, retrace_box::Disposition::Handler(_)) {
+                        } else if matches!(act.disp, retrace_box::Disposition::Handler(_)) {
                             match self.events.get(self.idx) {
                                 Some(Event::Syscall { num: rn, args: ra, thread: rthread, .. })
                                     if *rn == num && *ra == args => {
@@ -1082,7 +1155,7 @@ impl ReplaySession {
                             // pid argument and a stale carry — measured in spikes/sigraisex0.c.
                             // Omit this and every caught self-raise diverges on those two fields.
                             self.b.complete_syscall_before_delivery(0, false);
-                            return self.mirror_delivery(sig, retrace_arch::SI_USER, 0, 0, 0, pc);
+                            return self.mirror_delivery(target, sig, retrace_arch::SI_USER, 0, 0, 0, pc);
                         }
                     }
                     // M12 mirror of record's sigreturn arm. Its OWN arm rather than a hook inside
@@ -1546,7 +1619,12 @@ impl ReplaySession {
                     let (sig, si_code) = retrace_arch::signal_of_esr(esr);
                     if matches!(self.b.sigtable().action(sig).disp,
                                 retrace_box::Disposition::Handler(_)) {
-                        return self.mirror_delivery(sig, si_code, far, esr, far, pc);
+                        // M16 Task 8: a hardware fault has no target port to resolve — it is always
+                        // attributed to whichever thread's vCPU context trapped — so `current` is
+                        // permanently correct here, matching record's fault arm, which tags its
+                        // SignalDelivery with the live `thread`.
+                        let cur = self.b.threads().current();
+                        return self.mirror_delivery(cur, sig, si_code, far, esr, far, pc);
                     }
                     // M6 mirror of record's crash arm. The triple compare IS the divergence check
                     // (symmetry rule 1); then the final-memory landmark, exactly like Exit.
