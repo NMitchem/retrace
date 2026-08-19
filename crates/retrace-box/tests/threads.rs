@@ -772,3 +772,133 @@ fn bsdthread_create_writes_the_childs_thread_port_into_the_pthread_struct() {
         "pthread+0xf8 must be a non-zero thread port — join reads THIS word and skips \
          __ulock_wait entirely when it is 0, so a zero here is a child that never runs");
 }
+
+/// M15 Task 1: pins the invariant `ReplaySession::current_thread()` will expose — that
+/// `ThreadTable::current()` tracks the scheduler's own switch, both before (creation must not
+/// switch) and after (a block must) — using the same round-trip `run_switches_to_the_child_when_main_blocks`
+/// above already exercises via `schedule_after_block()` directly rather than through `run()`.
+#[test]
+fn current_thread_follows_the_scheduler_across_a_switch() {
+    let mut b = tb();
+    b.set_thread_start_pc(0x0001_804b_2000);
+    let p = pth(&b, 1);
+    b.guest_bsdthread_create([0x1000, 0, p, p, 0x90008ff, 0, 0, 0]);
+    assert_eq!(b.threads().current(), 0, "creation must not switch — the real kernel does not either");
+
+    // Block thread 0 so the scheduler has somewhere to go, then take the switch.
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.schedule_after_block();
+    assert_eq!(b.threads().current(), 1, "the scheduler must have switched to the child");
+}
+
+/// M15 Task 2: the trap this task exists to avoid. `ThreadTable::ctx_of(current)` is stale while
+/// that thread is running — only `switch_to_thread` writes a thread's context back into the table
+/// (see its call in `checkpoint()`, which folds the live vCPU in before cloning the table for
+/// exactly this reason). A `dbg_regs_of` that read the table unconditionally would print STALE
+/// registers for the CURRENT thread, confidently — no panic, no error, just a quiet lie.
+#[test]
+fn dbg_regs_of_reads_the_live_vcpu_for_the_current_thread_not_the_stale_table_slot() {
+    let mut b = tb();
+    // Put a distinctive value in a register of the CURRENT thread, WITHOUT switching. The table's
+    // slot for thread 0 still holds whatever it had at construction, so a table read misses this.
+    b.vcpu_set_x(3, 0xfeed_face_dead_beef);
+
+    let dump = b.dbg_regs_of(0).expect("thread 0 exists");
+    assert!(dump.contains("feedfacedeadbeef"),
+        "dbg_regs_of(current) must read the LIVE vCPU: the table's slot is stale between \
+         switches, and printing it would be a confident lie. Got:\n{dump}");
+}
+
+/// The other half of the trap: a NON-current thread has no live vCPU state at all — the table IS
+/// the authority for it, and this must work even while that thread is BLOCKED (impossible before
+/// this milestone: there was no way to inspect a thread that wasn't running).
+///
+/// **Fix round 1:** the first version of this test called `block()` right after `spawn()` without
+/// switching first. `ThreadTable::block` takes no tid — it unconditionally blocks
+/// `self.threads[self.current]` (`thread.rs:126`) — and `spawn` never switches (M14's own contract:
+/// "the real kernel does not switch on create, and neither do we"), so `current` was still 0 and
+/// that call blocked thread 0, leaving thread 1 `Runnable` for the whole test. The test still
+/// passed and still proved a real property (non-current reads the table), but not the BLOCKED case
+/// its name claimed. Fixed by actually switching to the child so `block()` lands on it, then using
+/// `schedule_after_block()` — the real scheduler path, not a table-only shortcut — to switch back to
+/// main, which is what folds the child's live registers into its table slot on the way out
+/// (`switch_to_thread` -> `save_ctx` -> `ctx_mut`, the same fold the current-thread test's doc
+/// comment describes for `checkpoint()`).
+#[test]
+fn dbg_regs_of_reads_the_table_for_a_blocked_non_current_thread() {
+    let mut b = tb();
+    b.set_thread_start_pc(0x0001_804b_2000);
+    let p = pth(&b, 1);
+    b.guest_bsdthread_create([0x0001_0002_4e00, 0, p, p, 0, 0, 0, 0]);
+
+    b.switch_to_thread(1);
+    b.set_elr(0xcafe_babe_0000_0000); // a distinctive LIVE value; only a real switch-away folds it into the table
+    b.threads_mut().block(BlockReason::Wait { addr: 0xdead_0000 }); // blocks the CURRENT thread, i.e. 1
+    b.schedule_after_block(); // picks the lowest-indexed runnable thread — main (0) — switching away from 1
+
+    assert_eq!(b.threads().current(), 0, "main must be the thread picked back up");
+    assert!(matches!(b.threads().state_of(1), ThreadState::Blocked(_)),
+        "thread 1 must actually be Blocked, or this does not test the blocked-non-current case");
+
+    let dump = b.dbg_regs_of(1).expect("thread 1 exists");
+    assert!(dump.contains("cafebabe00000000"),
+        "dbg_regs_of(non-current) must read the TABLE, since that thread has no live vCPU state. \
+         Got:\n{dump}");
+}
+
+/// An out-of-range thread id is a `None`, not a panic — the CLI turns this into a usage error.
+#[test]
+fn dbg_regs_of_is_none_for_an_out_of_range_thread_id() {
+    let b = tb();
+    assert_eq!(b.dbg_regs_of(1), None, "a single-threaded box has no thread 1");
+}
+
+/// M15 Task 6: `DBGWVR/DBGWCR`/`MDSCR_EL1` are vCPU-global and deliberately absent from
+/// `ThreadCtx` (see its doc comment in `thread.rs`) — `switch_to_thread` moves only
+/// `save_ctx`/`load_ctx`'s fields, neither of which mentions them. So a watchpoint armed before a
+/// context switch must still be armed after one: one vCPU, one address space, so any thread's
+/// store should trip it. That is correct and desirable, but every M5 watchpoint test predates M14
+/// and runs a single-threaded guest, so this property was correct by accident and entirely
+/// unexercised until now.
+///
+/// Asserts the HARDWARE leaf via `dbg_watch0_hw` (a test-only accessor added for this task — no
+/// other route exists to read `DBGWVR0_EL1`/`DBGWCR0_EL1`/`MDSCR_EL1` back off the vCPU), not just
+/// the software `watch_ranges` mirror `apply_and_return` consults on the syscall path. M13 Task
+/// 8's defect was a test that checked only a software mirror and passed while the hardware leaf
+/// disagreed; checking `watch_ranges` alone here would pass even if `load_ctx` wiped `MDSCR_EL1`.
+/// See the Task 6 report for the mutation-check transcript proving this test would have failed
+/// exactly that mutation.
+#[test]
+fn an_armed_watchpoint_survives_a_context_switch() {
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    b.set_thread_start_pc(0x0001_804b_2000);
+    let p = pth(&b, 1);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, p, p, 0, 0, 0, 0]); // thread 1
+
+    // Real mapped guest memory (the static stack backing), word-aligned — same address shape the
+    // ulock_wait tests above already use.
+    let addr = b.stack_top() - 0x40;
+    b.arm_hw_watchpoint(0, addr, 4);
+
+    // MDSCR_EL1.MDE — lib.rs:217, gates the whole HW breakpoint/watchpoint machine.
+    const MDSCR_MDE_BIT: u64 = 1 << 15;
+    let (wvr0, wcr0, mdscr0) = b.dbg_watch0_hw();
+    // Nonvacuity: prove arming actually took, or the "survives a switch" assertions below would
+    // pass trivially on a watchpoint that was never armed in the first place.
+    assert_ne!(wcr0 & 0x1, 0, "arm_hw_watchpoint must set DBGWCR0_EL1's enable bit (E, bit0)");
+    assert_ne!(mdscr0 & MDSCR_MDE_BIT, 0, "…and MDSCR_EL1.MDE");
+
+    // Force a real switch — block main, then let the scheduler take it, the same idiom
+    // `run_switches_to_the_child_when_main_blocks` above uses, not a table-only shortcut.
+    b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
+    b.schedule_after_block();
+    assert_eq!(b.threads().current(), 1, "the switch must actually have happened");
+
+    let (wvr1, wcr1, mdscr1) = b.dbg_watch0_hw();
+    assert_eq!(wvr1, wvr0, "DBGWVR0_EL1 must still hold the armed address after the switch");
+    assert_ne!(wcr1 & 0x1, 0,
+        "DBGWCR0_EL1's enable bit (E, bit0 of DBGWCR_BASE) must still be set after the switch");
+    assert_ne!(mdscr1 & MDSCR_MDE_BIT, 0,
+        "MDSCR_EL1.MDE must still be set after the switch — the watch machine stays armed for \
+         EVERY thread, which is what lets it catch any thread's store");
+}

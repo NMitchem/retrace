@@ -2170,6 +2170,12 @@ impl Box_ {
         if self.threads.needs_reschedule() {
             self.schedule_after_block();
         }
+        // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
+        // already happened before the first instruction of this window retires. Pin it: after this
+        // point, no path may change `current` until the next run()/step() entry.
+        debug_assert!(!self.threads.needs_reschedule(),
+            "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
+             would make position->thread ambiguous");
         loop {
             let e = self.vcpu.run().expect("hv_vcpu_run");
             if e.reason != EXIT_EXCEPTION { continue; }         // vtimer/canceled: control-plane only
@@ -2262,6 +2268,12 @@ impl Box_ {
         if self.threads.needs_reschedule() {
             self.schedule_after_block();
         }
+        // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
+        // already happened before the first instruction of this window retires. Pin it: after this
+        // point, no path may change `current` until the next run()/step() entry.
+        debug_assert!(!self.threads.needs_reschedule(),
+            "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
+             would make position->thread ambiguous");
         let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_SS).unwrap();
         let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
@@ -3212,20 +3224,25 @@ impl Box_ {
     /// timeout/failure. This box always returns 0 on the non-EFAULT paths — including the
     /// already-satisfied one — which is a SIMPLIFICATION, not a measured fact (fix round 1, M-5
     /// corrects the earlier doc's overstated claim). **The block/no-block decision made here is
-    /// NOT independently visible to the replay divergence oracle**: `rc`/`err` are the SAME on
-    /// both branches (only the EFAULT path differs), and neither branch writes guest memory, so
-    /// nothing in the recorded `Event::Syscall` distinguishes "blocked" from "stayed runnable"
-    /// (fix round 1, I-3 corrects the earlier doc's false claim that the mirror already checks
-    /// this). If replay's memory at `addr` ever differed from record's — an upstream bug, not a
-    /// normal-operation risk — replay could silently leave a different thread `Runnable` here and
-    /// nothing would say so at this call. Closing that gap directly needs either a trace-format
-    /// change (a new field on `Event::Syscall`, which is a format break per `TRACE_MAGIC` — too
-    /// heavy for this fix round and not this task's call) or is closed *indirectly*, the same way
-    /// cache-page/PAC regeneration already is (CLAUDE.md's M0 principle: pure functions of
-    /// already-verified inputs, checked downstream rather than at the point of computation): once
-    /// M14 Task 9 wires `pick_next`/`switch_to_thread` into `Box_::run()`, a wrongly-scheduled
-    /// thread issues a DIFFERENT next syscall than the recording, which the standard `(num, args)`
-    /// divergence check every other syscall already relies on then catches automatically.
+    /// still not independently visible in `rc`/`err` or in any guest memory write**: both
+    /// branches return the same `rc`/`err` (only the EFAULT path differs), and neither writes
+    /// guest memory, so nothing in those fields of the recorded `Event::Syscall` distinguishes
+    /// "blocked" from "stayed runnable" (fix round 1, I-3 corrects the earlier doc's false claim
+    /// that the mirror already checks this).
+    ///
+    /// That gap is CLOSED now, though — directly, not indirectly. M15 Task 3 added a `thread: u32`
+    /// field to `Event::Syscall` recording which thread issued each syscall (`TRACE_MAGIC` bumped
+    /// to `RT\x00\x07`), and M15 Task 4 made `ReplaySession::advance` compare it against
+    /// `self.current_thread()` on every syscall, right after the `(num, args)` check. If replay's
+    /// memory at `addr` ever differed from record's — an upstream bug, not a normal-operation risk
+    /// — and this call left a different thread `Runnable` here than record did, that wrongly
+    /// scheduled thread is the one that issues the NEXT recorded syscall event, and the thread
+    /// check catches the mismatch there directly. An earlier version of this doc argued the
+    /// existing `(num, args)` check would catch that "automatically" once a scheduler existed —
+    /// that claim was already known false during M14's own review, before this doc was written:
+    /// two threads running the SAME code issue byte-identical `(num, args)`, so a wrong-thread
+    /// replay of identical code passed that check in silence. The `thread` field and the M15
+    /// Task 4 comparison are what actually closes the gap; nothing here catches it "automatically".
     ///
     /// **Returns the raw `x0` word, not a `Result`, because under `ULF_NO_ERRNO` this syscall has
     /// no error flag to return** (fix round 1, I-2). Both whitelisted operation words set bit 24 =
@@ -3379,17 +3396,47 @@ impl Box_ {
     /// Test-facing accessor (M2-cpuid).
     pub fn tpidrro_el0(&self) -> u64 { self.vcpu.get_sys(sysreg::TPIDRRO_EL0).unwrap() }
 
-    /// Bring-up diagnostic: dump x0..x30, SP_EL0, PC, ELR/SPSR/FAR as a multi-line string.
-    pub fn dbg_regs(&self) -> String {
+    /// Shared x0..x30 block, four per line — the part of `dbg_regs`'s layout that a saved
+    /// `ThreadCtx` can also supply, factored out so `dbg_regs_of` renders a NON-current thread in
+    /// the exact same shape without duplicating the format string.
+    fn format_gprs(x: &[u64; 31]) -> String {
         let mut s = String::new();
-        for i in 0..31 {
-            s += &format!("x{i:<2}={:#018x}  ", self.vcpu.get_reg(reg::x(i as u32)).unwrap());
+        for (i, xi) in x.iter().enumerate() {
+            s += &format!("x{i:<2}={xi:#018x}  ");
             if i % 4 == 3 { s.push('\n'); }
         }
+        s
+    }
+
+    /// Bring-up diagnostic: dump x0..x30, SP_EL0, PC, ELR/SPSR/FAR as a multi-line string.
+    pub fn dbg_regs(&self) -> String {
+        let mut x = [0u64; 31];
+        for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
+        let mut s = Self::format_gprs(&x);
         s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x}",
             self.vcpu.get_sys(sysreg::SP_EL0).unwrap(), self.pc(),
             self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(), self.last_far);
         s
+    }
+
+    /// M15: render a specific thread's registers. For the CURRENT thread this reads the live vCPU,
+    /// because the table's slot is stale between switches (only `switch_to_thread` writes it back)
+    /// — the same reason `checkpoint()` folds the vCPU in before cloning the table. For any other
+    /// thread the table IS the authority: that thread is not on the vCPU.
+    ///
+    /// `far` has no per-thread meaning (`last_far` is the box's last fault address, not a saved
+    /// register) — 0 for a non-current thread, the honest "not applicable" value, rather than
+    /// reusing the box's possibly-unrelated last fault.
+    pub fn dbg_regs_of(&self, tid: usize) -> Option<String> {
+        if tid >= self.threads.len() { return None; }
+        if tid == self.threads.current() {
+            return Some(self.dbg_regs());
+        }
+        let ctx = self.threads.ctx_of(tid);
+        let mut s = Self::format_gprs(&ctx.regs.x);
+        s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x}",
+            ctx.regs.sp_el0, ctx.regs.pc, ctx.elr, 0);
+        Some(s)
     }
 
     /// Bring-up diagnostic: walk the guest AArch64 frame-pointer chain from x29, returning up to
@@ -3622,6 +3669,22 @@ impl Box_ {
             "SCTLR_EL1 PAC bits ({live}) disagree with Box_::pac_enabled ({}) — an install site \
              bypassed sctlr_mmu_on()", self.pac_enabled);
         live
+    }
+
+    /// Read back the hardware watchpoint slot-0 registers and MDSCR_EL1 straight off the vCPU.
+    /// Test-only (M15 Task 6): debug registers are vCPU-global and deliberately absent from
+    /// `ThreadCtx`, so a watchpoint armed before a context switch must still be armed after one.
+    /// Nothing in production reads these back — `arm_hw_watchpoint`/`clear_hw_watchpoints` only
+    /// write them — so without this there is no way to assert the hardware leaf rather than the
+    /// `watch_ranges` software mirror, and a test of the mirror alone would pass even if
+    /// `load_ctx` wiped MDSCR_EL1. Returns `(DBGWVR0_EL1, DBGWCR0_EL1, MDSCR_EL1)`.
+    #[doc(hidden)]
+    pub fn dbg_watch0_hw(&self) -> (u64, u64, u64) {
+        (
+            self.vcpu.get_sys(sysreg::DBGWVR0_EL1).unwrap(),
+            self.vcpu.get_sys(sysreg::DBGWCR0_EL1).unwrap(),
+            self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap(),
+        )
     }
 }
 

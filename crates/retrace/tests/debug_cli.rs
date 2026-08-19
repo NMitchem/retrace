@@ -64,7 +64,8 @@ fn continue_hits_mid_window_and_reverse_continue_returns() {
     assert!(out.contains(&format!("at ({w}, 5) pc=0x{p5:x}")), "where after stepi 2:\n{out}");
     // reverse-continue from (W,5): the (W,3) hit is strictly earlier -> returns to it.
     assert!(out.contains(&format!("hit 0x{p_mid:x} at ({w}, 3)")), "reverse-continue hit:\n{out}");
-    assert!(out.trim_end().ends_with(&format!("at ({w}, 3) pc=0x{p_mid:x}")), "final where:\n{out}");
+    // HELLO_DYN is single-threaded throughout, so thread=0 is the only truthful answer (M15).
+    assert!(out.trim_end().ends_with(&format!("at ({w}, 3) pc=0x{p_mid:x} thread=0")), "final where:\n{out}");
 }
 
 #[test]
@@ -170,6 +171,111 @@ fn continue_after_reverse_stepi_onto_boundary_bp() {
     let hits = out.matches(&format!("hit 0x{bpc:x} at ({w}, 0)")).count();
     assert_eq!(hits, 2, "exactly two clean boundary-form hits, no loop:\n{out}");
     assert!(!out.contains("+?"), "no mid-window form in this transcript:\n{out}");
+}
+
+/// The landmark right after `bsdthread_create` returns to the thread THAT CALLED IT. The scheduler
+/// switches only when a thread blocks or exits (CLAUDE.md, "Guest threads"), and the creator has not
+/// blocked yet at this point, so this window is still owned by thread 0 even though
+/// `thread_summaries()` already lists thread 1 — exactly the window where `regs 1` exercises
+/// `dbg_regs_of`'s non-current-thread path. Returns (N, boundary_pc).
+fn discover_after_create(trace: &Path) -> (usize, u64) {
+    let mut s = retrace_core::ReplaySession::open(trace).unwrap();
+    loop {
+        if let Some((num, _)) = s.peek_syscall() {
+            if num == retrace_arch::SYS_BSDTHREAD_CREATE {
+                s.advance().unwrap();
+                return (s.landmark(), s.position());
+            }
+        }
+        s.advance().unwrap();
+    }
+}
+
+/// The `which`-th (0-indexed) `write(1, …)` in the trace: `(N, boundary_pc, thread)`, where `N` is
+/// the landmark of the window right after the write returns and `thread` is that window's owning
+/// thread — read straight off the box's own scheduler (`current_thread`), the same accessor `where`
+/// and `threads` report from. THREADRUST prints three lines from two threads ("main before spawn"
+/// [0], "child ran" [1], "joined 42" [0]); `which=1` is the only one NOT issued by thread 0.
+fn discover_write_n(trace: &Path, which: usize) -> (usize, u64, u32) {
+    let mut s = retrace_core::ReplaySession::open(trace).unwrap();
+    let mut seen = 0;
+    loop {
+        if let Some((4, args)) = s.peek_syscall() {
+            if args[0] == 1 {
+                if seen == which {
+                    s.advance().unwrap();
+                    return (s.landmark(), s.position(), s.current_thread());
+                }
+                seen += 1;
+            }
+        }
+        s.advance().unwrap();
+    }
+}
+
+#[test]
+fn threads_lists_every_thread_and_regs_of_reaches_a_non_current_one() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::THREADRUST);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    assert!(String::from_utf8_lossy(&rec.stdout).contains("child ran"),
+        "the child thread must actually run for thread 1 to exist");
+    let tp = Path::new(&trace);
+    let ts = trace.to_str().unwrap();
+    let (n, bpc) = discover_after_create(tp);
+
+    // Ground truth taken directly off the SAME accessors the CLI wraps, at the SAME coordinate the
+    // script below parks at — independent of the CLI's own rendering, so a `cmd_regs_of` that ignores
+    // its argument (e.g. always dumping the current thread) fails this, not just a weaker "some
+    // output appeared" check.
+    let (summaries, expected_regs0, expected_regs1) = {
+        let g = retrace_core::seek(tp, n, 0).unwrap();
+        (g.thread_summaries(), g.dbg_regs_of(0).unwrap(), g.dbg_regs_of(1).unwrap())
+    };
+    assert_eq!(summaries.len(), 2, "bsdthread_create must have added exactly one thread: {summaries:?}");
+    assert!(summaries[0].tid == 0 && summaries[0].is_current,
+        "thread 0 is still current here: the creator has not blocked yet: {summaries:?}");
+    assert!(summaries[1].tid == 1 && !summaries[1].is_current,
+        "thread 1 exists but is not yet current here: {summaries:?}");
+    assert_ne!(expected_regs0, expected_regs1, "the two threads must have distinct register state");
+
+    let (code, out, err) = debug_run(ts, &format!("break 0x{bpc:x}; continue; threads; regs 1; regs"));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("* thread 0: Runnable"), "thread 0 marked current:\n{out}");
+    assert!(out.contains("  thread 1: Runnable"), "thread 1 listed, not marked current:\n{out}");
+    assert!(!out.contains("* thread 1"), "thread 1 must not be marked current here:\n{out}");
+    assert!(out.contains(&expected_regs1), "`regs 1` must print thread 1's OWN registers:\n{out}");
+    assert!(out.contains(&expected_regs0), "`regs` (no arg) must still dump the current thread:\n{out}");
+}
+
+#[test]
+fn where_and_threads_name_the_thread_after_a_switch() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::THREADRUST);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let tp = Path::new(&trace);
+    let ts = trace.to_str().unwrap();
+    let (n, bpc, tid) = discover_write_n(tp, 1); // "child ran": the child's own write
+    assert_eq!(tid, 1, "the child's write must be issued by thread 1, not the scheduler default 0");
+
+    // All three writes return through the SAME libSystem `__write` stub pc, so one `continue` lands
+    // on the FIRST occurrence ("main before spawn"); a second `continue` steps over it (the
+    // established back-to-back-continue behavior — see `continue_from_a_breakpoint_steps_over_it`)
+    // and re-arms the same breakpoint, landing on the SECOND occurrence, which is `which=1`'s write.
+    let (code, out, err) = debug_run(ts, &format!("break 0x{bpc:x}; continue; continue; where; threads"));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains(&format!("at ({n}, 0) pc=0x{bpc:x} thread=1")),
+        "`where` must name the SWITCHED-TO thread, not always 0:\n{out}");
+    assert!(out.contains("* thread 1: Runnable"), "thread 1 marked current after the switch:\n{out}");
+    assert!(!out.contains("* thread 0:"), "thread 0 must no longer be marked current:\n{out}");
+}
+
+#[test]
+fn regs_of_out_of_range_thread_is_a_usage_error_not_a_panic() {
+    let (rec, trace) = util::record(retrace_guest::WATCHLOOP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let (code, out, err) = debug_run(trace.to_str().unwrap(), "regs 99");
+    assert_eq!(code, 5, "an out-of-range thread id is a controlled error, not a crash; stderr: {err}");
+    assert!(err.contains("no such thread: 99"), "stderr names the bad id: {err}");
+    assert!(!out.contains("x0="), "no register dump on a rejected thread id:\n{out}");
 }
 
 #[test]

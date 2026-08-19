@@ -515,6 +515,20 @@ git commit -m "M15 t7: the debugger can name, list, and inspect threads"
 
 **Design constraint from the spec:** scoping is a **debugger-side filter**. The hardware slot stays global — one vCPU underlies every thread, and there is no per-thread `DBGW`. The debugger discards hits whose thread does not match. Do NOT attempt to scope in hardware.
 
+**ORDERING CORRECTION — run this task AFTER Task 9.** Step 1 needs a multi-threaded guest that
+writes a watched address. No such guest exists at Task 8's original position: THREADRUST
+(`crates/retrace-guest/rs/threadrust.rs`) performs no writes at all, and the only guest this plan
+creates is WATCHTHREAD, in **Task 9**. The File Structure table assigns no guest file to Task 8, so
+running it first would force its implementer to invent an unbudgeted guest in a crate this task's
+Files list does not name. Task 9 has no reciprocal dependency on Task 8 — its gate uses `watch`,
+`reverse-continue` and `regs`, from Tasks 5 and 7 — so the reorder is free.
+
+Extend `crates/retrace-guest/rs/watchthread.rs` with a **third static that BOTH threads write**, so
+the filter has two competing writers to discriminate; that is what Step 1's text actually asks for.
+If that perturbs Task 9's already-landed gate, fall back to filtering on the existing per-thread
+cells (scope-to-the-writer → hit, scope-to-the-other-thread → silence) — weaker, but still
+non-vacuous. **Re-run Task 9's gate either way**, and add the guest file to this task's `git add`.
+
 - [ ] **Step 1: Write the failing test** — a guest where two threads write the same watched address; `watch <addr> thread 1` reports only thread 1's write.
 
 - [ ] **Step 2: Run to verify it fails.**
@@ -604,13 +618,45 @@ M14's Task 10 learned the lesson this task applies: **a mutation aimed at a pure
 
 | Mutation | Must fail |
 |---|---|
-| `current_thread()` returns a constant `0` | Task 1 and Task 7 tests |
+| `current_thread()` returns a constant `0` | Task 4's oracle (FIRST), Task 7's CLI test. **NOT Task 1's test** — measured. |
 | `dbg_regs_of` always reads the table | Task 2's stale-slot test |
 | The oracle's thread compare deleted | Task 4's test |
-| `Advance::Watch.thread` hardcoded to `0` | Task 5 and Task 9's gate |
+| `Advance::Watch.thread` hardcoded to `0` | Task 8's scoping test ONLY. **NOT Task 5's tests, and NOT Task 9's gate** — both measured. |
 | `MDSCR_EL1` added to `load_ctx` | Task 6's test |
 
 - [ ] **Step 2: If any mutation fails ZERO tests, that mechanism is untested.** Say so loudly and stop — do not paper over it. This is the F-1 situation from M14, and it is the whole reason this task exists.
+
+**One row is pre-adjudicated, and you must not "fix" it.** Task 5's two tests
+(`hw_watch_hit_names_the_writing_thread`, `syscall_watch_hit_names_the_writing_thread`) assert
+`thread == 0` against WATCHLOOP and FILEIO, both **single-threaded**. A hardcoded `thread: 0`
+therefore **passes them by construction** — they cannot catch that mutation and were never able to.
+This is the Task 5 half of the fidelity caveat Task 11 bills, not a discovery and not a defect for
+you to repair. Record it as a **known, documented gap**; do NOT strengthen Task 5's tests to make
+this table come out even. Task 9's gate (and Task 8's scoping test) are what catch this mutation,
+because they are the only tests with a live second thread to be wrong about. If *those* also fail
+to catch it, that IS the Step 2 situation — say so loudly and stop.
+
+**Two rows above were corrected by measurement, after this table was first written and after it was
+once already amended. Recording both, because a table that was wrong twice is worth distrusting a
+third time:**
+
+- **`current_thread()` → 0 is NOT caught by Task 1's test.** That test
+  (`current_thread_follows_the_scheduler_across_a_switch`) asserts on `Box_::threads().current()`
+  directly and never calls `ReplaySession::current_thread()`, so mutating the session method cannot
+  fail it. It is caught by Task 4's oracle first (a constant thread diverges at the next syscall
+  landmark), then Task 7's CLI test, and incidentally by Task 8's scoping test.
+- **`Advance::Watch.thread` → 0 is NOT caught by Task 9's headline gate.** `cmd_where` prints
+  `current_thread()` freshly re-derived at the resolved coordinate — it never reads the
+  `Advance`-carried field — and Task 9's gate never scopes its watch by thread. The field's only
+  consumer is `watch_thread_matches`, so **Task 8's `watch_thread_scoping_filters_the_others_write`
+  is the sole test that catches this mutation.** An earlier amendment to this row claimed Task 9's
+  gate caught it; that claim conflated three distinct mutation points — `current_thread()` (the
+  source), `Advance::Watch{thread}` (the field), and `cmd_where`'s printed value (display). Task 9
+  mutated the third. They are not interchangeable.
+
+Task 5's sites were already mutation-checked per-site at implementation time (`current_thread() + 7`
+at each site failed exactly that site's test and no other). Re-running that specific mutation is
+duplicate work; spend the budget on mechanisms that have not been swept.
 
 - [ ] **Step 3: Write the report** to `.superpowers/sdd/2026-08-15-retrace-m15-threaddebug/task-10-nonvacuity.md` and commit:
 
@@ -631,6 +677,25 @@ git commit --allow-empty -m "M15 t10: every mechanism fails a test when broken"
   - That debug registers are vCPU-global and the cross-switch watch was correct-by-accident and untested until Task 6.
   - Everything still unmodelled: per-thread reverse execution as its own position space, preemption / spin-waiting guests, `workq`/GCD, thread priority, per-thread signal masks, plus everything M14 and M13 carry forward.
   - Whatever measurement contradicted this plan. A plan that survives contact unamended is more likely unexamined than perfect.
+  - **THE FIDELITY CAVEAT — carried from Tasks 4 and 5; bill BOTH halves.** This is the requirement
+    most likely to be lost, because it is a limit on work that PASSED. The milestone's guards are
+    mutation-tested, but not all are exercised against a genuinely LIVE second thread id:
+      * **Task 4 (the oracle's thread check).** All three landmark-consuming arms have per-arm
+        mutation-tested guards. Only the GENERIC arm is exercised with a real second thread
+        (THREADRUST). The two signal-path arms (caught-raise, `sigreturn`) are exercised by
+        SIGFRAME, a SINGLE-threaded fixture: those tests prove the check FIRES and reports a
+        `Divergence`; they do NOT prove it DISTINGUISHES two live schedules. No threaded-AND-
+        signalling guest exists.
+      * **Task 5 (the watch hit's thread).** Both construction sites — the hardware `Stop::Other`
+        arm and the software `finish_event` — have per-site mutation-tested guards, but on
+        WATCHLOOP and FILEIO, which are both single-threaded. Task 9's WATCHTHREAD gate is what
+        discharges this half: if Task 9 landed asserting the CHILD's id specifically, say so and
+        call it discharged; if it did not, this half stands and must be billed as an untested
+        distinction.
+    **Do NOT restate the superseded version of this caveat.** An earlier ruling said the two
+    signal-path arms would ship "argued by inspection, untestable without a threaded-and-signalling
+    guest." That ruling was wrong and was reversed — SIGFRAME reaches both arms. Billing the stale
+    version would claim LESS coverage than the milestone actually has.
 
 - [ ] **Step 3: Update CLAUDE.md** — the headline-gate list (eight → nine if Task 9 landed), and the "Guest threads" section, which currently states the oracle has no thread identity. **That claim becomes false in Task 4 and must be rewritten, not left standing.**
 

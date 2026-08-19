@@ -170,6 +170,9 @@ pub const PROTRUST: &str = concat!(env!("OUT_DIR"), "/protrust");
 /// `joined 42` is the load-bearing output — it requires the child to have RUN on retrace's single
 /// vCPU under the cooperative scheduler AND its return value to have crossed back through join.
 pub const THREADRUST: &str = concat!(env!("OUT_DIR"), "/threadrust");
+/// M15 t9 headline: the `threadrust` twin whose two threads write DIFFERENT static cells, so a
+/// hardware watch on one and not the other makes thread attribution a claim that can be wrong.
+pub const WATCHTHREAD: &str = concat!(env!("OUT_DIR"), "/watchthread");
 /// M13 t11: the recursion behind the PARKED `stackoverflow_rust_e2e` gate. Cannot strike libstd's
 /// guard today — that guard sits 7.73 MiB below retrace's real stack bottom (M8 spec risk R3).
 pub const OVERFLOW: &str = concat!(env!("OUT_DIR"), "/overflow");
