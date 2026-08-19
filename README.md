@@ -2464,14 +2464,20 @@ brief's Step 3 had specified only one of the three.
 **A thread scope naming a thread that never exists is silently inert — and arm-time validation is
 the wrong fix.** `watch 0x… thread 99` parses, arms, and then suppresses every hit forever:
 `watch_thread_matches` compares the scope against the hit's thread, never matches, and `continue`
-runs to exit printing nothing. That is the same class Task 8's fix round called intolerable — a scope
-announced but not applied — arriving through a different door. **It cannot be fixed by validating the
-id when the watch is armed**, and the reason is load-bearing rather than incidental: thread 1
-legitimately does not exist yet when a user arms a watch *before* `bsdthread_create` runs, which is
-the main way this feature gets used, so rejecting unknown ids at parse time would break the ordinary
-case to catch the typo. The natural fast-follow is the other end — warn when a **scoped run completes
-with zero matching hits**, which distinguishes "nothing wrote it" from "nobody could have matched"
-without constraining when the watch may be armed.
+runs to exit without ever reporting a hit — it still prints `exited (code N)`, so the silence is
+specifically the absence of hits, not an absence of output. That is the same class Task 8's fix
+round called intolerable — a scope announced but not applied — arriving through a different door.
+**It cannot be fixed by validating the id when the watch is armed**, and the reason is load-bearing
+rather than incidental: thread 1 legitimately does not exist yet when a user arms a watch *before*
+`bsdthread_create` runs, which is the main way this feature gets used, so rejecting unknown ids at
+parse time would break the ordinary case to catch the typo. The natural fast-follow is the other end — check at the end of the run
+rather than constraining the arm. Note what the *bare* form does not buy: warning on zero matching
+hits alone fires identically whether nothing wrote the address or nothing could ever have matched,
+which is exactly what those two cases have in common. Distinguishing them needs zero matching hits
+**and a nonzero count of scoped-out hits**, and that count is already available at both discard sites
+(the forward recursion and the `WatchSyscall` fall-through) — it costs a counter on `Exec`, which is
+where it has to live, since the forward path re-enters `cmd_continue` and a local would not survive
+the call.
 
 **Two coverage gaps are accepted and named rather than quietly dropped.**
 
