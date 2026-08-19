@@ -282,12 +282,26 @@ impl<'a> Exec<'a> {
         line(out, format_args!("deleted {addr:#x}"))
     }
 
+    /// Task 8 fix round 1: re-`watch`ing an address that is ALREADY armed is a fail-loud usage
+    /// error, not a silent no-op. Before this fix the echo unconditionally printed the
+    /// just-requested `len`/`thread` while the STORED entry (what `arm_watchpoints` and
+    /// `watch_thread_matches` actually consult) was left untouched on a duplicate — a scope
+    /// change is exactly what this task exists to make real, so a watch that CLAIMS to be scoped
+    /// while the filter keeps letting every thread through is the one failure mode this file
+    /// cannot tolerate silently. Consistent with this file's other watch-arming failures (the
+    /// 4-slot cap just below, the len/alignment checks in `parse_one`): explicit `Err`, not a
+    /// partial or implicit mutation of already-armed state. `unwatch` first to change a watch.
     fn cmd_watch<W: Write>(&mut self, addr: u64, len: u64, thread: Option<u32>, out: &mut W) -> Result<(), String> {
-        if let Err(i) = self.watches.binary_search_by_key(&addr, |&(a, _, _)| a) {
-            if self.watches.len() >= 4 {
-                return Err("cannot arm more than 4 watchpoints (hardware limit: DBGWVR0-3)".into());
+        match self.watches.binary_search_by_key(&addr, |&(a, _, _)| a) {
+            Err(i) => {
+                if self.watches.len() >= 4 {
+                    return Err("cannot arm more than 4 watchpoints (hardware limit: DBGWVR0-3)".into());
+                }
+                self.watches.insert(i, (addr, len, thread));
             }
-            self.watches.insert(i, (addr, len, thread));
+            Ok(_) => return Err(format!(
+                "{addr:#x} is already watched; `unwatch {addr:#x}` before re-arming it with a \
+                 different len or thread scope")),
         }
         match thread {
             Some(t) => line(out, format_args!("watch at {addr:#x} len {len} thread {t}")),
@@ -303,10 +317,13 @@ impl<'a> Exec<'a> {
     }
 
     /// Whether a hardware/syscall watch hit at `addr` by `thread` should be reported to the user:
-    /// true when that watch has no scope, or the scope equals `thread`. `addr` is always drawn
-    /// from `watched_of` (hardware) or the trace's own recorded write (syscall), both of which
-    /// only ever name an address present in `self.watches`, so the lookup always finds an entry —
-    /// the `_ => true` arm exists only as an honest fallback, never a silent default-allow.
+    /// true when that watch has no scope, or the scope equals `thread`. The `_ => true` arm is a
+    /// deliberate fail-OPEN, not merely a defensive default: `watched_of`'s own `far`-fallback
+    /// (`.unwrap_or(far)`, used when `far` lands outside every armed range's exact bytes AND its
+    /// aligned doubleword) CAN hand this function an address genuinely absent from `self.watches`
+    /// — a hit whose owning watch is unknown. Suppressing an unattributable hit would be a worse
+    /// failure than showing an unscoped one: this function chooses to report it rather than risk
+    /// silently hiding a real write.
     fn watch_thread_matches(&self, addr: u64, thread: u32) -> bool {
         match self.watches.iter().find(|&&(a, _, _)| a == addr) {
             Some(&(_, _, Some(scope))) => scope == thread,
@@ -557,7 +574,12 @@ impl<'a> Exec<'a> {
                     // Task 8: scoped to a different thread — not a hit for this filter. Re-enter
                     // this function rather than duplicating its own pre-step rule: `last_watch_hit
                     // == (n, k)` now holds, so the top-of-function pre-step steps past the
-                    // un-retired store and the scan resumes from there.
+                    // un-retired store and the scan resumes from there. Recursion depth is bounded
+                    // by the number of scoped-out hits within this one `continue` (not by
+                    // instruction count), so a guest with a hot write loop on the scoped-out
+                    // thread would grow the call stack one frame per discarded write — a real but
+                    // unexercised tradeoff (no current guest writes a watched address in a loop
+                    // from a thread that isn't the one being watched).
                     return self.cmd_continue(out);
                 }
                 Advance::WatchSyscall { watched, thread } => {

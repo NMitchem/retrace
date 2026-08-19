@@ -216,6 +216,40 @@ fn watch_thread_scoping_filters_the_others_write() {
     assert!(!where2.contains("thread=1"), "must not report the child's later write instead:\n{out2}");
 }
 
+/// Task 8 fix round 1: re-`watch`ing an ALREADY-armed address used to be a silent no-op — the
+/// echo unconditionally printed the just-requested len/thread while the STORED entry (what
+/// `arm_watchpoints` and `watch_thread_matches` actually consult) stayed unchanged, so a watch
+/// could claim a new scope while the filter kept letting every thread through. Fixed by rejecting
+/// the re-arm outright. Two directions: the reject itself must fire loudly (not silently accept a
+/// lying echo), and `unwatch`-then-`watch` — the correct way to change a watch — must still make
+/// the new scope REAL, proving the fix didn't just start rejecting every re-arm attempt.
+#[test]
+fn rewatch_without_unwatch_is_rejected_and_unwatch_then_rewatch_applies_the_new_scope() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::WATCHTHREAD);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let out = String::from_utf8_lossy(&rec.stdout).into_owned();
+    let shared = parse_cell(&out, "shared");
+    let ts = trace.to_str().unwrap();
+
+    // Direction 1: re-arming `shared` a second time, without `unwatch`, must be a loud usage
+    // error — never a silent state change that leaves the echo lying about the armed scope.
+    let (code1, _out1, err1) = debug_run(ts, &format!("watch 0x{shared:x}; watch 0x{shared:x} thread 1"));
+    assert_eq!(code1, 5, "re-arming an already-watched address must be a usage error, not a no-op");
+    assert!(err1.contains("already watched"), "stderr must name the problem: {err1}");
+
+    // Direction 2: `unwatch` first, THEN re-`watch` with a scope, must make that scope REAL — not
+    // just accepted and echoed. Reuses the same discrimination as
+    // `watch_thread_scoping_filters_the_others_write`: main (thread 0) writes `shared` first, so
+    // a working thread-1 scope must skip that real, earlier hit and land on the child's later one.
+    let (code2, out2, err2) = debug_run(ts, &format!(
+        "watch 0x{shared:x}; unwatch 0x{shared:x}; watch 0x{shared:x} thread 1; continue; where"));
+    assert_eq!(code2, 0, "stderr: {err2}");
+    assert!(out2.contains(&format!("watch at 0x{shared:x} len 8 thread 1")), "re-armed echo:\n{out2}");
+    let where2 = out2.lines().last().expect("a `where` line");
+    assert!(where2.contains("thread=1"), "the re-armed scope must actually filter to thread 1:\n{out2}");
+    assert!(!where2.contains("thread=0"), "must not report main's write once re-scoped to thread 1:\n{out2}");
+}
+
 #[test]
 fn pre_step_boundary_cross_reports_a_watched_syscall_write() {
     // Final-review M-1: park ON the read-svc via a breakpoint (resolves to k = window len),
