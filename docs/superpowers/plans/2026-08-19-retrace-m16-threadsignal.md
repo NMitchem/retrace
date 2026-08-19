@@ -1528,7 +1528,7 @@ Append to `sigthread.rs`'s `main`, after `h.join().unwrap()` and the `joined` li
 extending the `extern "C"` block:
 
 ```rust
-unsafe extern "C" {
+extern "C" {
     fn pthread_sigmask(how: i32, set: *const u32, old: *mut u32) -> i32;
     fn sigpending(set: *mut u32) -> i32;
     fn pthread_self() -> u64;
@@ -1955,17 +1955,26 @@ main(0) spawns a(1); main joins a          -> main Blocked
 // Built so the parked test is real code that compiles and can be un-ignored the day the wall falls.
 use std::sync::atomic::{AtomicU64, Ordering};
 
-unsafe extern "C" {
+extern "C" {
     fn pthread_kill(thread: u64, sig: i32) -> i32;
-    fn signal(sig: i32, h: usize) -> usize;
+    fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
     fn pthread_self() -> u64;
 }
+#[repr(C)]
+struct SigAction { handler: usize, mask: u32, flags: i32 }
 const SIGUSR1: i32 = 30;
+// SA_SIGINFO is MANDATORY, not stylistic. `signal(3)` installs a handler WITHOUT it, and
+// sig.rs's build_frame asserts fail-loud that a non-SA_SIGINFO handler is unmodelled. A guest
+// that trips that assert would park this gate at the wrong wall — documenting an SA_SIGINFO
+// limitation instead of the blocked-target one this gate exists to record. Same shape as
+// sigthread.rs, deliberately.
+const SA_SIGINFO: i32 = 0x0040;
 static A_PT: AtomicU64 = AtomicU64::new(0);
-extern "C" fn on_usr1(_sig: i32) {}
+extern "C" fn on_usr1(_sig: i32, _info: *mut u8, _uap: *mut u8) {}
 
 fn main() {
-    unsafe { signal(SIGUSR1, on_usr1 as usize) };
+    let act = SigAction { handler: on_usr1 as *const () as usize, mask: 0, flags: SA_SIGINFO };
+    assert_eq!(unsafe { sigaction(SIGUSR1, &act, core::ptr::null_mut()) }, 0);
     let a = std::thread::spawn(|| {
         // Publish a's own pthread_t BEFORE blocking, so b has something to name.
         A_PT.store(unsafe { pthread_self() }, Ordering::SeqCst);
