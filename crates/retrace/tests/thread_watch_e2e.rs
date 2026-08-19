@@ -106,8 +106,22 @@ fn reverse_continue_names_the_thread_that_wrote_the_watched_cell() {
     // thread` pins that this field's plumbing already existed). What's new is that the NAME is
     // right: main writes `main`, never `child` — a scheduler-default or hardcoded thread=0 would
     // misattribute this store, and that is exactly the bug this assertion catches.
+    //
+    // Scope, in three layers, so a later reader doesn't credit this one assertion with all of them:
+    // (1) Task 4's divergence oracle is the FIRST line of defence — it catches a broken
+    // `current_thread()` at the next syscall landmark, before this assertion ever runs (confirmed in
+    // the fix-round report: mutating `current_thread()` itself is caught there, not here).
+    // (2) THIS gate proves the display path end-to-end: `where` reports the box's real
+    // `current_thread()` at a *resolved* coordinate rather than a constant — the thing a user
+    // actually reads, and a substantive check, but only of display, not a standalone scheduler-bug
+    // catch. (3) `Advance::Watch { thread }` — the field the hardware hit itself carries — is
+    // exercised by Task 8's `watch_thread_scoping_filters_the_others_write` (`watch_cli.rs`), not
+    // here: this script never scopes a watch to a thread.
     let where_line = out2.lines().last().expect("a `where` line");
-    assert!(where_line.contains("thread=1"),
+    // `ends_with`, not `contains`: `cmd_where`'s format (`"…thread={}"`) puts nothing after the
+    // thread number, so "thread=1" can only ever be a suffix — `contains` would also pass a
+    // hypothetical "thread=10".
+    assert!(where_line.ends_with("thread=1"),
         "`where` after reverse-continue must name thread 1 — the CHILD actually wrote the watched \
          cell, main never touches it. got:\n{where_line}\nfull transcript:\n{out2}");
     assert!(!where_line.contains("thread=0"),
