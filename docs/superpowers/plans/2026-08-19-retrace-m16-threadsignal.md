@@ -358,12 +358,42 @@ git commit -m "M16 t2: Exit, Crash, Signal and SignalDelivery name a thread"
 
 ### Task 3: Mask, pending set and alternate stack become per-thread
 
-**Files:**
-- Modify: `crates/retrace-box/src/thread.rs` (`Thread`, `ThreadTable`)
-- Modify: `crates/retrace-box/src/sig.rs` (`SigTable` sheds `blocked` and `altstack`)
-- Modify: `crates/retrace-box/src/lib.rs` (every `sigtable().is_blocked/mask/set_mask/altstack` call)
-- Modify: `crates/retrace-core/src/lib.rs` (the `sigprocmask`/`sigaltstack`/raise arms)
-- Test: `crates/retrace-box/src/thread.rs` unit tests (VM-free, no `--test-threads=1` needed)
+**Files:** the split itself lands in `crates/retrace-box/src/thread.rs` (`Thread`, `ThreadTable`) and
+`crates/retrace-box/src/sig.rs` (`SigTable` sheds `blocked` and `altstack`), with the new unit tests
+in `thread.rs` (VM-free — no `--test-threads=1` needed).
+
+**Every call site is found by the property, not by a list:** every use of
+`SigTable::{is_blocked, mask, set_mask, altstack, set_altstack}` anywhere outside `sig.rs` itself.
+Each becomes a compile error when the method disappears, so the compiler enumerates for you.
+
+**Checksum, measured at `57acfd0`** — 30 sites across 4 files:
+
+| File | Sites |
+|---|---|
+| `crates/retrace-box/tests/deliver.rs` | 11 |
+| `crates/retrace-core/src/lib.rs` | 9 |
+| `crates/retrace-box/src/lib.rs` | 6 |
+| `crates/retrace-box/tests/sigcheckpoint.rs` | 4 |
+
+**`crates/retrace-box/tests/sigcheckpoint.rs` is the one to handle deliberately, and it is worth
+knowing what it guards before you touch it.** Its `from_checkpoint_carries_the_signal_table` (`:12`)
+sets a disposition, a mask and an altstack, checkpoints, restores, and asserts all three survived:
+
+```rust
+    assert_eq!(r.sigtable().mask(), 0b1010, "the blocked mask must survive the restore");
+    assert_eq!(r.sigtable().altstack(), Some((0x9000, 0x4000, 0)));
+```
+
+Those two lines are **the only proof anywhere that the checkpoint carries the mask and the alt
+stack** — which is exactly the invariant this task's split puts at risk. The spec's claim that
+"`BoxState` already carries both `threads` and `sigtable`, so checkpointing survives the split with
+no new field" is a claim *this test verifies*.
+
+So: **relocate these assertions, do not delete them.** After the split they read
+`r.threads().mask_of(0)` and `r.threads().altstack_of(0)`, and the disposition assertion stays on
+`sigtable()`. Deleting them because they stopped compiling would silently drop the proof, leaving a
+green suite that no longer checks the thing the split most plausibly breaks. The test's name should
+change too — it now covers a signal table *and* per-thread signal state.
 
 **Interfaces:**
 - Produces, on `ThreadTable`: `mask_of(tid) -> u32`, `set_mask_of(tid, how: u64, set: u32) -> u32`,
