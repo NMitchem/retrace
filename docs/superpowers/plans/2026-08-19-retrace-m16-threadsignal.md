@@ -1081,8 +1081,16 @@ git commit -m "M16 t6: a signal is delivered to a thread, not to whoever is runn
   single-threaded gate already assumes and what M11 measured — do not route it through
   `thread_of_port`, whose operand is a thread port, not a pid.
 - `__pthread_kill(port, sig)` is **thread-directed** and now resolves.
-- The blocked-signal `assert!` at `:584-590` **becomes the pending path**. M11 wrote "implement a
-  pending mask before a guest needs this"; this is that.
+- **There are TWO blocked-signal asserts, and only one of them moves. Do not grep for the assert
+  and convert both.**
+  - `:584-590`, in the RAISE arm, **becomes the pending path**. Its own text says M11 modelled no
+    pending set; this task is that pending set.
+  - `:152-155`, in the **fault** arm (`Stop::Fault`), **stays exactly as it is.** Its justification
+    is different in kind — *"a fault cannot be deferred, POSIX leaves it undefined, and Darwin
+    force-delivers"* — and it argues from the architecture rather than from a feature M11 skipped.
+    A synchronous fault genuinely cannot go pending: there is no later point at which re-delivering
+    it would mean anything. Converting it would turn a correct fail-loud boundary into quiet,
+    wrong deferral.
 - The caller's own syscall still completes first, in both branches, via
   `complete_syscall_before_delivery(0, false)`. **Read that function before using it here** — it
   exists because the frame's PSTATE comes from `SPSR_EL1` rather than the `reg::CPSR` that
@@ -1207,6 +1215,19 @@ git commit -m "M16 t7: __pthread_kill delivers to the thread it names"
 
 **Interfaces:**
 - Consumes: everything Task 7 produced.
+
+**`ReplaySession::mirror_delivery` (`:888`) is a SHARED helper — parameterise it, do not duplicate
+it.** It owns the `deliver_signal` call (`:895`) *and* the frame byte-compare that IS the divergence
+check, and it already has **two** callers: `:1050`, the caught-raise mirror (`SI_USER`), and `:1510`,
+the fault mirror. Task 9 adds a third. Writing a second raise-specific copy of it would reproduce
+the defect M13 Task 8 shipped — a mirrored pair where only one half is checked — and is exactly what
+Task 6's own design note prevents on the record side.
+
+Give it a `tid: usize` parameter. Each **call site** recomputes its own target: the raise mirror via
+`thread_of_port`, the fault mirror as the current thread, Task 9's as the calling thread. The one
+helper then does both the frame byte-compare and the recorded-`thread` comparison. Note its match
+arm is `Some(Event::SignalDelivery { sig: rsig, writes, .. })` — that `..` is why Task 2 never had
+to touch it, and it is where you bind `thread` to compare.
 
 **Symmetry rule 1 in its ordinary form:** the mirror calls the **same** `Box_` methods with the
 **same** arguments — `thread_of_port`, then `deliver_signal_to` — recomputes the frame bytes, and
@@ -1419,7 +1440,9 @@ write back the old mask, append the `Syscall` landmark, and *then*:
 
 `SYS_SIGPENDING` (`:528`) stops returning a constant and writes `threads().pending_of(current)`.
 
-Mirror all of it in `ReplaySession::advance`'s mask arm, recomputing and byte-comparing.
+Mirror all of it in `ReplaySession::advance`'s mask arm, recomputing and byte-comparing — through
+`mirror_delivery`, which Task 8 gave a `tid` parameter. This is its **third** call site; pass the
+calling thread. Do not open a fourth copy of the recompute-and-compare logic.
 
 - [ ] **Step 5: Run**
 
@@ -1542,6 +1565,14 @@ task adds the other three.
 **Interfaces:**
 - Consumes: `ReplaySession::verify_thread(rthread: u32, pc: u64) -> Result<(), Divergence>`, which
   M15 already provides.
+
+**Carried in from Task 2's review (a deferred Minor — fix it while you are here).** The `Event::Exit`
+doc in `crates/retrace-trace/src/lib.rs` justifies its `thread` tag's permanence with *"a threaded
+guest still has exactly one thread call exit"*. That reason is wrong: nothing stops two guest threads
+racing to call `exit`. The real invariant is in `record_box` at `crates/retrace-core/src/lib.rs:131-136`
+— the `SYS_EXIT` arm **`break`s** after appending the first `Event::Exit`, so at most one can ever
+exist in a trace and its tag is unambiguous because the RECORDING stops. The conclusion (permanent,
+not a placeholder) is correct; replace only the parenthetical reason with the real one.
 
 **Placement rule, inherited from M15 Task 4's fix round:** each call goes **after** that site's own
 field comparison, never hoisted above it, so a genuine `(code)`/`(pc, esr, far)`/`(sig, pc)`
