@@ -31,14 +31,60 @@ fn the_signal_is_delivered_to_the_named_child_thread() {
     // Every line, in order — same shape as the Task 5 test this replaces, and for the same reason:
     // a filtered allowlist would silently drop unexpected output, and the length check is what
     // catches it. The pthread line is matched by prefix so an unrelated memory-layout change cannot
-    // raise a false alarm here.
+    // raise a false alarm here. Task 9 appended four lines to the guest (`self kill rc 0` ..
+    // `unblocked`), and they are asserted here as well as in the pending test below: this test owns
+    // "every line, in order", which it cannot keep while stopping at line 6.
     let out = String::from_utf8_lossy(&rec.stdout);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 6, "unexpected extra or missing stdout line:\n{out}");
+    assert_eq!(lines.len(), 10, "unexpected extra or missing stdout line:\n{out}");
     assert_eq!(lines[0], "installed");
     assert!(lines[1].starts_with("child pthread 0x"), "line 2 was {:?}", lines[1]);
-    assert_eq!(&lines[2..], &["kill rc 0", "handler", "child body", "joined"],
+    assert_eq!(&lines[2..], &["kill rc 0", "handler", "child body", "joined",
+                              "self kill rc 0", "pending 1", "handler", "unblocked"],
         "post-M16 order: the CHILD takes the signal. Full stdout:\n{out}");
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 0, "replay must be clean; stderr:\n{}", rep.stderr);
+    assert_eq!(rep.stdout, rec.stdout, "replay must be byte-identical");
+}
+
+/// M16 Task 9: a masked signal pends and is delivered at the unmask, not before and not never.
+///
+/// Two deliveries in this trace, and the pair is the assertion: the child's at the pthread_kill
+/// landmark, main's at the pthread_sigmask landmark. One delivery means the pending half was
+/// dropped; three means it was delivered twice.
+#[test]
+fn a_masked_signal_pends_and_is_delivered_when_the_mask_lifts() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::SIGTHREAD);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+    let out = String::from_utf8_lossy(&rec.stdout);
+
+    assert!(out.contains("pending 1"),
+        "sigpending must report the signal main raised on itself while masked — an always-empty \
+         answer is the lie M11 flagged and M16 fixes. stdout:\n{out}");
+
+    let events = retrace_trace::Reader::open(&trace).unwrap();
+    let delivered: Vec<u32> = events.iter().filter_map(|e| match e {
+        Event::SignalDelivery { sig: 30, thread, .. } => Some(*thread),
+        _ => None,
+    }).collect();
+    assert_eq!(delivered, vec![1u32, 0u32],
+        "the child's delivery first, then main's pending one at the unmask landmark — and EXACTLY \
+         those two: a third would mean `take_deliverable` did not clear the bit and the guest's \
+         second mask call re-materialised the same signal");
+
+    // The pending delivery is anchored to the mask call, not to some later point: the landmark
+    // immediately before it is the pthread_sigmask that unblocked it. This is the assertion that
+    // separates M16's design from the one it rejected — materialising at the SCHEDULER's switch
+    // point would put a trace event below the trace, and the delivery would land next to some
+    // arbitrary other landmark instead of this one.
+    let di = events.iter().rposition(|e| matches!(e, Event::SignalDelivery { .. })).unwrap();
+    match &events[di - 1] {
+        Event::Syscall { num, .. } => assert!(
+            *num == retrace_arch::SYS_SIGPROCMASK || *num == retrace_arch::SYS_PTHREAD_SIGMASK,
+            "the pending delivery must sit immediately after the unmasking syscall, got num {num}"),
+        other => panic!("expected the unmasking Syscall landmark before the delivery, got {other:?}"),
+    }
 
     let rep = util::replay(&trace);
     assert_eq!(rep.code, 0, "replay must be clean; stderr:\n{}", rep.stderr);
