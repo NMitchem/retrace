@@ -631,6 +631,25 @@ git commit --allow-empty -m "M15 t10: every mechanism fails a test when broken"
   - That debug registers are vCPU-global and the cross-switch watch was correct-by-accident and untested until Task 6.
   - Everything still unmodelled: per-thread reverse execution as its own position space, preemption / spin-waiting guests, `workq`/GCD, thread priority, per-thread signal masks, plus everything M14 and M13 carry forward.
   - Whatever measurement contradicted this plan. A plan that survives contact unamended is more likely unexamined than perfect.
+  - **THE FIDELITY CAVEAT — carried from Tasks 4 and 5; bill BOTH halves.** This is the requirement
+    most likely to be lost, because it is a limit on work that PASSED. The milestone's guards are
+    mutation-tested, but not all are exercised against a genuinely LIVE second thread id:
+      * **Task 4 (the oracle's thread check).** All three landmark-consuming arms have per-arm
+        mutation-tested guards. Only the GENERIC arm is exercised with a real second thread
+        (THREADRUST). The two signal-path arms (caught-raise, `sigreturn`) are exercised by
+        SIGFRAME, a SINGLE-threaded fixture: those tests prove the check FIRES and reports a
+        `Divergence`; they do NOT prove it DISTINGUISHES two live schedules. No threaded-AND-
+        signalling guest exists.
+      * **Task 5 (the watch hit's thread).** Both construction sites — the hardware `Stop::Other`
+        arm and the software `finish_event` — have per-site mutation-tested guards, but on
+        WATCHLOOP and FILEIO, which are both single-threaded. Task 9's WATCHTHREAD gate is what
+        discharges this half: if Task 9 landed asserting the CHILD's id specifically, say so and
+        call it discharged; if it did not, this half stands and must be billed as an untested
+        distinction.
+    **Do NOT restate the superseded version of this caveat.** An earlier ruling said the two
+    signal-path arms would ship "argued by inspection, untestable without a threaded-and-signalling
+    guest." That ruling was wrong and was reversed — SIGFRAME reaches both arms. Billing the stale
+    version would claim LESS coverage than the milestone actually has.
 
 - [ ] **Step 3: Update CLAUDE.md** — the headline-gate list (eight → nine if Task 9 landed), and the "Guest threads" section, which currently states the oracle has no thread identity. **That claim becomes false in Task 4 and must be rewritten, not left standing.**
 
