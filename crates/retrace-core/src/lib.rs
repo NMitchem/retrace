@@ -1608,6 +1608,12 @@ impl ReplaySession {
     /// M15: a specific thread's registers, including a BLOCKED one — impossible before this
     /// milestone. `None` for an out-of-range id, which the CLI turns into a usage error.
     pub fn dbg_regs_of(&self, tid: u32) -> Option<String> { self.b.dbg_regs_of(tid as usize) }
+    /// M16 Task 1: `Box_::kport_of`, for the R1 measurement gate. Test-only, like `dbg_regs_of`.
+    #[doc(hidden)]
+    pub fn dbg_kport_of(&self, tid: usize) -> Option<u32> { self.b.kport_of(tid) }
+    /// How many threads the guest has created so far. Test-only.
+    #[doc(hidden)]
+    pub fn b_thread_count(&self) -> usize { self.b.threads().len() }
     /// Peek the NEXT trace event to be consumed: its `(num, args)` when it is a `Syscall`, else
     /// `None` (a `Snapshot`/`Exit`, or past the last event). Read-only — does NOT advance the guest.
     /// Lets a discovery session recognize a target syscall landmark (e.g. `write(1, …)`) before

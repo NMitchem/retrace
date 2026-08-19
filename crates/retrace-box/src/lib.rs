@@ -3046,6 +3046,36 @@ impl Box_ {
     /// table and the hardware disagreeing — use `switch_to_thread` to move the vCPU.
     pub fn threads_mut(&mut self) -> &mut thread::ThreadTable { &mut self.threads }
 
+    /// The guest VA of `tid`'s `pthread` struct, derived from its thread pointer.
+    ///
+    /// `TPIDRRO_EL0 = pthread + PTHREAD_TSD_OFF` is the kernel's convention, measured 4/4 for main and
+    /// child alike (see `guest_bsdthread_create`). The CURRENT thread's table entry is stale between
+    /// switches, so its thread pointer comes off the vCPU — the split `dbg_regs_of` established.
+    pub fn pthread_of(&self, tid: usize) -> Option<u64> {
+        if tid >= self.threads.len() { return None; }
+        let tp = if tid == self.threads.current() {
+            self.vcpu.get_sys(sysreg::TPIDRRO_EL0).unwrap()
+        } else {
+            self.threads.ctx_of(tid).tpidrro_el0
+        };
+        tp.checked_sub(PTHREAD_TSD_OFF)
+    }
+
+    /// `tid`'s mach-port name, read back out of its own `pthread` struct at `+0xf8`.
+    ///
+    /// READ, not reconstructed. For a thread retrace spawned this returns the
+    /// `GUEST_THREAD_PORT_BASE | tid` it wrote itself; for main it returns what libpthread's
+    /// `__pthread_main_thread_init` stored. Reading is what makes main need no special case.
+    pub fn kport_of(&self, tid: usize) -> Option<u32> {
+        let va = self.pthread_of(tid)?;
+        let ipa = self.va_to_ipa(va + PTHREAD_KPORT_OFF)?;
+        let (hp, avail) = self.host_span(ipa)?;
+        if avail < 4 { return None; }
+        let mut b = [0u8; 4];
+        unsafe { std::ptr::copy_nonoverlapping(hp, b.as_mut_ptr(), 4) };
+        Some(u32::from_le_bytes(b))
+    }
+
     /// The address the kernel enters a NEW thread at, learned from the guest's own
     /// `bsdthread_register` call — `None` until that call is observed.
     pub fn thread_start_pc(&self) -> Option<u64> { self.thread_start_pc }
