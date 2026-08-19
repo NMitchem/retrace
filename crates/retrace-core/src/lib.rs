@@ -1584,6 +1584,17 @@ impl ReplaySession {
     ///
     /// Reads what the box already computes. The schedule is a pure function of the guest's own
     /// syscall sequence (M14), recomputed identically on replay, so this needs nothing recorded.
+    ///
+    /// **At a landmark boundary `(N, 0)` this names the thread that ISSUED landmark `N`'s syscall,
+    /// which after a BLOCKING one (`__ulock_wait`, `bsdthread_terminate`) is the thread that just
+    /// blocked or exited — not the one that will retire the next instruction.** `Box_::run()` and
+    /// `step()` switch on ENTRY, after the dispatch arm has marked the thread `Blocked`/`Exited`,
+    /// which is exactly where M15's R1 invariant is pinned; so from `K >= 1` onward this names the
+    /// running thread, and only the `K == 0` boundary shows the outgoing one. That is a
+    /// definitional choice, not a lag: it keeps this in agreement with `Event::Syscall.thread` for
+    /// that same landmark, which is what the divergence oracle compares against. A caller
+    /// rendering it (`where`, `threads`) will therefore mark a `Blocked` thread as current at such
+    /// a boundary — correct, and surprising the first time you see it.
     pub fn current_thread(&self) -> u32 { self.b.threads().current() as u32 }
     /// M15: every thread the guest has created, in stable index order. Exited threads STAY in the
     /// table (a `join` may arrive after the exit), so they appear here too — that is information the

@@ -2461,6 +2461,18 @@ brief's Step 3 had specified only one of the three.
   there is no second live thread id in the fixture to retag to. Only the generic arm gets that, via
   `THREADRUST`. Closing it needs a guest that is both threaded and signalling, which does not exist.
 
+**A thread scope naming a thread that never exists is silently inert — and arm-time validation is
+the wrong fix.** `watch 0x… thread 99` parses, arms, and then suppresses every hit forever:
+`watch_thread_matches` compares the scope against the hit's thread, never matches, and `continue`
+runs to exit printing nothing. That is the same class Task 8's fix round called intolerable — a scope
+announced but not applied — arriving through a different door. **It cannot be fixed by validating the
+id when the watch is armed**, and the reason is load-bearing rather than incidental: thread 1
+legitimately does not exist yet when a user arms a watch *before* `bsdthread_create` runs, which is
+the main way this feature gets used, so rejecting unknown ids at parse time would break the ordinary
+case to catch the typo. The natural fast-follow is the other end — warn when a **scoped run completes
+with zero matching hits**, which distinguishes "nothing wrote it" from "nobody could have matched"
+without constraining when the watch may be armed.
+
 **Two coverage gaps are accepted and named rather than quietly dropped.**
 
 1. **The `WatchSyscall` thread filter has no scoped coverage.** `watch_thread_matches` has five call
@@ -2534,11 +2546,15 @@ that: the `crashy_cli` regression escaped Task 7's review because the controller
 an *enumeration* of four affected sites instead of the *property* that had changed, and the list
 became the ceiling of the search. That is a dispatch failure, not a review failure.
 
-**Still unmodelled, and named rather than discovered later:** **per-thread reverse execution as its
-own position space** — `P` stays `(N, K)`, and "rewind thread B" is a search over positions where B is
-current, not a coordinate change; **preemption** — scheduling is still cooperative, so a guest that
-spin-waits without ever trapping still runs forever; **`workq`/GCD** thread pools; **thread
-priority**; **per-thread signal masks**; and **scoping a watchpoint in hardware** (the `DBGW` slot
+**Still unmodelled, and named rather than discovered later:** **thread identity on any landmark that
+is not a syscall** — only `Event::Syscall` carries the tag, so `Exit`, `Crash`, `Signal` and
+`SignalDelivery` leave a multi-threaded guest's terminal or handler-entry landmark unattributed, the
+same corner of the format the two untested signal-path oracle arms live in; **per-thread reverse
+execution as its own position space** — `P` stays `(N, K)`, and "rewind thread B" is a search over
+positions where B is current, not a coordinate change; **preemption** — scheduling is still
+cooperative, so a guest that spin-waits without ever trapping still runs forever; **`workq`/GCD**
+thread pools; **thread priority**; **per-thread signal masks**; and **scoping a watchpoint in
+hardware** (the `DBGW` slot
 stays global; filtering is the debugger's job). Everything M14 and M13 carry forward is unchanged:
 `guest_bsdthread_create` still returns `0` where the real syscall returns the child's `pthread_t`;
 `run()` and `step()` still carry the reschedule check independently; every protection bit other than
