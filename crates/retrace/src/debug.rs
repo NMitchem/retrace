@@ -576,10 +576,14 @@ impl<'a> Exec<'a> {
                     // == (n, k)` now holds, so the top-of-function pre-step steps past the
                     // un-retired store and the scan resumes from there. Recursion depth is bounded
                     // by the number of scoped-out hits within this one `continue` (not by
-                    // instruction count), so a guest with a hot write loop on the scoped-out
-                    // thread would grow the call stack one frame per discarded write — a real but
-                    // unexercised tradeoff (no current guest writes a watched address in a loop
-                    // from a thread that isn't the one being watched).
+                    // instruction count), and the cost of each is NOT merely slowness: a discarded
+                    // hit pays a full `resolve_hit_k` seek AND one stack frame, so a guest with a
+                    // hot write loop on the scoped-out thread OVERFLOWS THE STACK and crashes the
+                    // debugger rather than degrading gracefully. Unexercised today (no guest writes
+                    // a watched address in a loop from a thread that isn't the watched one), and
+                    // the fix is mechanical when one does: everything a `loop` would need is
+                    // already on `self` — `self.n`, `self.k` and `last_watch_hit`, all set by the
+                    // `reseek` above.
                     return self.cmd_continue(out);
                 }
                 Advance::WatchSyscall { watched, thread } => {
