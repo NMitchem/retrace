@@ -618,10 +618,10 @@ M14's Task 10 learned the lesson this task applies: **a mutation aimed at a pure
 
 | Mutation | Must fail |
 |---|---|
-| `current_thread()` returns a constant `0` | Task 1 and Task 7 tests |
+| `current_thread()` returns a constant `0` | Task 4's oracle (FIRST), Task 7's CLI test. **NOT Task 1's test** — measured. |
 | `dbg_regs_of` always reads the table | Task 2's stale-slot test |
 | The oracle's thread compare deleted | Task 4's test |
-| `Advance::Watch.thread` hardcoded to `0` | Task 9's gate, and Task 8's scoping test. **NOT Task 5's tests** — see below. |
+| `Advance::Watch.thread` hardcoded to `0` | Task 8's scoping test ONLY. **NOT Task 5's tests, and NOT Task 9's gate** — both measured. |
 | `MDSCR_EL1` added to `load_ctx` | Task 6's test |
 
 - [ ] **Step 2: If any mutation fails ZERO tests, that mechanism is untested.** Say so loudly and stop — do not paper over it. This is the F-1 situation from M14, and it is the whole reason this task exists.
@@ -635,6 +635,24 @@ you to repair. Record it as a **known, documented gap**; do NOT strengthen Task 
 this table come out even. Task 9's gate (and Task 8's scoping test) are what catch this mutation,
 because they are the only tests with a live second thread to be wrong about. If *those* also fail
 to catch it, that IS the Step 2 situation — say so loudly and stop.
+
+**Two rows above were corrected by measurement, after this table was first written and after it was
+once already amended. Recording both, because a table that was wrong twice is worth distrusting a
+third time:**
+
+- **`current_thread()` → 0 is NOT caught by Task 1's test.** That test
+  (`current_thread_follows_the_scheduler_across_a_switch`) asserts on `Box_::threads().current()`
+  directly and never calls `ReplaySession::current_thread()`, so mutating the session method cannot
+  fail it. It is caught by Task 4's oracle first (a constant thread diverges at the next syscall
+  landmark), then Task 7's CLI test, and incidentally by Task 8's scoping test.
+- **`Advance::Watch.thread` → 0 is NOT caught by Task 9's headline gate.** `cmd_where` prints
+  `current_thread()` freshly re-derived at the resolved coordinate — it never reads the
+  `Advance`-carried field — and Task 9's gate never scopes its watch by thread. The field's only
+  consumer is `watch_thread_matches`, so **Task 8's `watch_thread_scoping_filters_the_others_write`
+  is the sole test that catches this mutation.** An earlier amendment to this row claimed Task 9's
+  gate caught it; that claim conflated three distinct mutation points — `current_thread()` (the
+  source), `Advance::Watch{thread}` (the field), and `cmd_where`'s printed value (display). Task 9
+  mutated the third. They are not interchangeable.
 
 Task 5's sites were already mutation-checked per-site at implementation time (`current_thread() + 7`
 at each site failed exactly that site's test and no other). Re-running that specific mutation is
