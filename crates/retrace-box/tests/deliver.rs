@@ -319,6 +319,73 @@ fn delivering_to_a_non_current_thread_leaves_the_running_one_alone() {
         "and not on the thread that merely raised it");
 }
 
+/// M16 Task 6 fix round 1 (review finding 1): the alt stack half of the fix is untested by the
+/// headline test above, which installs no alt stack on either thread. Reverting
+/// `self.threads.altstack_of(tid)` / `self.on_altstack_of(tid)` to `(cur)` — exactly the "use the
+/// running thread, not the target" defect this task exists to remove — left all 16 `deliver.rs`
+/// tests green. This closes that gap: the TARGET has an alt stack installed and SA_ONSTACK, the
+/// RUNNING thread has none, so only reading the target's altstack can land the frame correctly.
+#[test]
+fn delivering_to_a_non_current_thread_uses_that_threads_alt_stack() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(30, handler(retrace_arch::SA_SIGINFO | retrace_arch::SA_ONSTACK, 0));
+
+    // Thread 1: main's context, moved to a different (unused) stack region, exactly as the
+    // headline cross-thread test builds it.
+    let mut ctx = b.save_ctx();
+    let other_sp = ctx.regs.sp_el0 - 0x2000;
+    ctx.regs.sp_el0 = other_sp;
+    let tid = b.threads_mut().spawn(ctx, (other_sp, 0));
+    assert_eq!(tid, 1);
+
+    // The alt stack is installed on thread 1 ONLY. Thread 0 (the running thread) has none, so if
+    // delivery reads the running thread's altstack instead of the target's, `choose_frame_base`
+    // sees `None` and falls through to the "no alt stack" branch — a different, wrong base.
+    let (ss_sp, ss_size) = (0x1_c000u64, 0x2000u64);
+    b.threads_mut().set_altstack_of(tid, Some((ss_sp, ss_size, 0)));
+    assert_eq!(b.threads().altstack_of(0), None, "the running thread must have no altstack of its own");
+
+    let (writes, _) = b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
+    let base = writes[0].ipa;
+    assert!((ss_sp..ss_sp + ss_size).contains(&base),
+        "the frame must sit inside THREAD 1's alt stack [{ss_sp:#x}, {:#x}), got {base:#x} — landing \
+         anywhere else means the target's altstack was not consulted", ss_sp + ss_size);
+    assert_eq!(base, (ss_sp + ss_size - FRAME_LEN as u64) & !15);
+    assert_eq!(b.threads().ctx_of(tid).regs.sp_el0, base, "the TARGET's saved sp is the frame base");
+
+    let uc = &writes[0].bytes[FRAME_UCONTEXT_OFF..];
+    assert_eq!(u32::from_le_bytes(uc[0..4].try_into().unwrap()), 1,
+        "uc_onstack must report SS_ONSTACK for the TARGET thread's frame, not the running thread's \
+         (unset) altstack state");
+}
+
+/// M16 Task 6 fix round 1 (review finding 1, second half): the same "which thread's state?"
+/// question applies to `FrameInput.mask` — the frame's `uc_sigmask` must be the TARGET's
+/// pre-signal mask, not the running thread's, or a handler that inspects/restores its mask via
+/// `sigreturn` gets the wrong one back. The headline cross-thread test leaves both threads at
+/// mask 0, so `mask_of(cur)` would pass there unnoticed; this test gives the two threads different
+/// masks so only reading the target's is correct.
+#[test]
+fn delivering_to_a_non_current_thread_records_that_threads_pre_signal_mask_in_the_frame() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(30, handler(retrace_arch::SA_SIGINFO, 0));
+
+    let mut ctx = b.save_ctx();
+    let other_sp = ctx.regs.sp_el0 - 0x2000;
+    ctx.regs.sp_el0 = other_sp;
+    let tid = b.threads_mut().spawn(ctx, (other_sp, 0));
+    assert_eq!(tid, 1);
+
+    b.threads_mut().set_mask_of(0, retrace_arch::SIG_SETMASK, 0b0001);
+    b.threads_mut().set_mask_of(tid, retrace_arch::SIG_SETMASK, 0b1010);
+
+    let (writes, _) = b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
+    let uc = &writes[0].bytes[FRAME_UCONTEXT_OFF..];
+    assert_eq!(u32::from_le_bytes(uc[4..8].try_into().unwrap()), 0b1010,
+        "uc_sigmask is what sigreturn restores on the TARGET; it must be the TARGET's pre-signal \
+         mask (0b1010), not the running thread's (0b0001)");
+}
+
 /// M16 Task 6's fail-loud boundary: a second signal to a thread that has already been redirected
 /// into a handler and has not run since would stack a frame without the kernel's queueing
 /// semantics. Nested delivery is unmodelled — this must panic, not silently corrupt the frame.
