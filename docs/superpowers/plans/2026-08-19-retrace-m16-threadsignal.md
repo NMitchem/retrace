@@ -912,6 +912,34 @@ pub fn dbg_fp_lr(&self) -> (u64, u64) {
 }
 ```
 
+**`on_altstack` becomes per-thread rather than being inlined.** It has exactly one product caller
+(`deliver_signal`) plus two assertions in `deliver.rs`. Recomputing its predicate inline inside
+`deliver_signal_to` would duplicate its body — the same duplicate-logic defect this task's design
+note exists to prevent — and would leave `on_altstack()` product-dead, alive only for two tests,
+which is how a helper rots into something wrong that nobody notices. Instead:
+
+```rust
+/// Is thread `tid` currently executing on ITS OWN alternate signal stack?
+///
+/// Same current/non-current discipline as `pthread_of` and `dbg_regs_of`: the running thread's
+/// stack pointer is live in `SP_EL0` and its table entry is stale between switches, so only a
+/// NON-current thread is read from the table. That distinction is load-bearing rather than
+/// stylistic — inside `deliver_signal_to` the current thread's ctx has just been saved, so the
+/// table would be right there, but `on_altstack()` called from anywhere else has had no such save
+/// and reading the table unconditionally would answer from stale state.
+pub fn on_altstack_of(&self, tid: usize) -> bool {
+    let sp = if tid == self.threads.current() {
+        self.vcpu.get_sys(sysreg::SP_EL0).unwrap()
+    } else {
+        self.threads.ctx_of(tid).regs.sp_el0
+    };
+    matches!(self.threads.altstack_of(tid), Some((base, size, _)) if sp >= base && sp < base + size)
+}
+
+/// The running thread's alternate-stack membership. Unchanged for every existing caller.
+pub fn on_altstack(&self) -> bool { self.on_altstack_of(self.threads.current()) }
+```
+
 ```rust
 /// Deliver `sig` to thread `tid`, which need NOT be the running one.
 ///
@@ -944,8 +972,7 @@ pub fn deliver_signal_to(
 
     // The TARGET's alt stack, and whether the TARGET is already on it — not the running thread's.
     let alt = self.threads.altstack_of(tid);
-    let on_alt_now = matches!(alt, Some((sp, size, _)) if ts.sp >= sp && ts.sp < sp + size);
-    let (frame_base, on_alt) = choose_frame_base(ts.sp, act, alt, on_alt_now);
+    let (frame_base, on_alt) = choose_frame_base(ts.sp, act, alt, self.on_altstack_of(tid));
 
     let inp = FrameInput {
         sig, si_code, si_addr, esr, far, ts, ns,
