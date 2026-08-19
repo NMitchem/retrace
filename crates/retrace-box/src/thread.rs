@@ -75,6 +75,14 @@ pub struct Thread {
     /// `(base, len)` of the guest-allocated stack. The guest maps its own thread stacks, so M14
     /// never places one; this is recorded for teardown and for diagnostics only.
     pub stack: (u64, u64),
+    /// M16: bit `(sig - 1)`, the same `sigset_t` encoding `SigTable.blocked` used before the split.
+    /// Per-thread because POSIX makes it so; INHERITED by value at `spawn`.
+    pub mask: u32,
+    /// M16: signals raised for this thread while its mask blocked them. Materialised at the next
+    /// unmask, which is a syscall landmark — the anchor that keeps delivery above the trace.
+    pub pending: u32,
+    /// M16: per-thread, and deliberately NOT inherited — a new thread starts with no alt stack.
+    pub altstack: Option<(u64, u64, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -88,7 +96,14 @@ impl ThreadTable {
     /// takes precisely the pre-M14 path. That is the compatibility argument for every M0–M13 gate.
     pub fn new(main: ThreadCtx) -> Self {
         Self {
-            threads: vec![Thread { ctx: main, state: ThreadState::Runnable, stack: (0, 0) }],
+            threads: vec![Thread {
+                ctx: main,
+                state: ThreadState::Runnable,
+                stack: (0, 0),
+                mask: 0,
+                pending: 0,
+                altstack: None,
+            }],
             current: 0,
         }
     }
@@ -100,6 +115,58 @@ impl ThreadTable {
     pub fn ctx_of(&self, tid: usize) -> &ThreadCtx { &self.threads[tid].ctx }
     pub fn ctx_mut(&mut self, tid: usize) -> &mut ThreadCtx { &mut self.threads[tid].ctx }
 
+    // ---- M16: per-thread mask, pending set, and alternate stack ----------------------------
+
+    pub fn mask_of(&self, tid: usize) -> u32 { self.threads[tid].mask }
+
+    /// `SigTable::set_mask`'s arithmetic, moved verbatim, including its fail-loud `how` panic.
+    pub fn set_mask_of(&mut self, tid: usize, how: u64, set: u32) -> u32 {
+        let old = self.threads[tid].mask;
+        self.threads[tid].mask = match how {
+            retrace_arch::SIG_BLOCK => old | set,
+            retrace_arch::SIG_UNBLOCK => old & !set,
+            retrace_arch::SIG_SETMASK => set,
+            _ => panic!(
+                "sigprocmask how={how} is not BLOCK(1)/UNBLOCK(2)/SETMASK(3) — an unmodelled \
+                 value, not a guest error to swallow"
+            ),
+        };
+        old
+    }
+
+    pub fn is_blocked_for(&self, tid: usize, sig: u64) -> bool {
+        self.threads[tid].mask & (1u32 << (sig - 1)) != 0
+    }
+
+    pub fn pend(&mut self, tid: usize, sig: u64) {
+        self.threads[tid].pending |= 1u32 << (sig - 1);
+    }
+
+    pub fn pending_of(&self, tid: usize) -> u32 { self.threads[tid].pending }
+
+    /// The lowest-numbered pending signal this thread's mask no longer blocks, CLEARED as it is
+    /// taken.
+    pub fn take_deliverable(&mut self, tid: usize) -> Option<u64> {
+        let t = &mut self.threads[tid];
+        let ready = t.pending & !t.mask;
+        if ready == 0 {
+            return None;
+        }
+        let sig = ready.trailing_zeros() as u64 + 1;
+        t.pending &= !(1u32 << (sig - 1));
+        Some(sig)
+    }
+
+    pub fn altstack_of(&self, tid: usize) -> Option<(u64, u64, u64)> { self.threads[tid].altstack }
+
+    pub fn set_altstack_of(
+        &mut self,
+        tid: usize,
+        ss: Option<(u64, u64, u64)>,
+    ) -> Option<(u64, u64, u64)> {
+        std::mem::replace(&mut self.threads[tid].altstack, ss)
+    }
+
     /// Threads that have not exited.
     pub fn live(&self) -> usize {
         self.threads.iter().filter(|t| !matches!(t.state, ThreadState::Exited(_))).count()
@@ -107,8 +174,19 @@ impl ThreadTable {
 
     /// Append a runnable thread. Does **not** switch: the real kernel returns to the caller after
     /// `bsdthread_create`, and a switch here would reorder the guest's own output.
+    ///
+    /// POSIX inherits the creating thread's signal mask at `pthread_create`, BY VALUE. The
+    /// alternate stack is NOT inherited — a new thread starts with none.
     pub fn spawn(&mut self, ctx: ThreadCtx, stack: (u64, u64)) -> usize {
-        self.threads.push(Thread { ctx, state: ThreadState::Runnable, stack });
+        let mask = self.threads[self.current].mask;
+        self.threads.push(Thread {
+            ctx,
+            state: ThreadState::Runnable,
+            stack,
+            mask,
+            pending: 0,
+            altstack: None,
+        });
         self.threads.len() - 1
     }
 
@@ -198,5 +276,57 @@ impl ThreadTable {
     /// lets the table be unit-tested for the deadlock case without catching a panic.
     pub fn pick_next(&self) -> Option<usize> {
         self.threads.iter().position(|t| matches!(t.state, ThreadState::Runnable))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_spawned_thread_inherits_the_creators_mask_by_value() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        t.set_mask_of(0, retrace_arch::SIG_BLOCK, 1 << 29); // SIGUSR1 (30) => bit 29
+        let child = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        assert_eq!(t.mask_of(child), 1 << 29, "POSIX inherits the mask at creation");
+        // BY VALUE: changing the creator afterwards must not reach the child.
+        t.set_mask_of(0, retrace_arch::SIG_SETMASK, 0);
+        assert_eq!(t.mask_of(child), 1 << 29, "inheritance is a copy, not a reference");
+        assert_eq!(t.mask_of(0), 0);
+    }
+
+    #[test]
+    fn masks_are_independent_between_threads() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        let child = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        t.set_mask_of(0, retrace_arch::SIG_BLOCK, 1 << 29);
+        assert!(t.is_blocked_for(0, 30));
+        assert!(!t.is_blocked_for(child, 30),
+            "this is the whole per-thread claim: main blocking a signal must not block it for the child");
+    }
+
+    #[test]
+    fn a_pended_signal_is_taken_only_once_and_lowest_first() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        t.set_mask_of(0, retrace_arch::SIG_BLOCK, (1 << 29) | (1 << 30)); // 30 and 31
+        t.pend(0, 31);
+        t.pend(0, 30);
+        assert_eq!(t.take_deliverable(0), None, "both are still masked");
+        t.set_mask_of(0, retrace_arch::SIG_UNBLOCK, 1 << 29);
+        assert_eq!(t.take_deliverable(0), Some(30), "lowest deliverable first");
+        assert_eq!(t.take_deliverable(0), None, "taking clears the bit; 31 is still masked");
+        t.set_mask_of(0, retrace_arch::SIG_UNBLOCK, 1 << 30);
+        assert_eq!(t.take_deliverable(0), Some(31));
+        assert_eq!(t.take_deliverable(0), None);
+    }
+
+    #[test]
+    fn alternate_stacks_are_per_thread() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        let child = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        t.set_altstack_of(0, Some((0x9000, 0x1000, 0)));
+        assert_eq!(t.altstack_of(0), Some((0x9000, 0x1000, 0)));
+        assert_eq!(t.altstack_of(child), None,
+            "sigaltstack is per-thread, and is NOT inherited across pthread_create");
     }
 }
