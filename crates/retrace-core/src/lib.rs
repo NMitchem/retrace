@@ -130,7 +130,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
         match stop {
             Stop::Syscall { num, args } if num == SYS_EXIT => {
                 let final_snap = b.snapshot();          // final-memory landmark
-                w.append(&Event::Exit { code: args[0] }).map_err(|e| format!("append exit: {e}"))?; count += 1;
+                w.append(&Event::Exit { code: args[0], thread }).map_err(|e| format!("append exit: {e}"))?; count += 1;
                 w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
                 outcome = Outcome::Exit { code: args[0] };
                 break;
@@ -156,13 +156,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                          models no pending set, so implement one — and revisit sigpending's \
                          always-empty answer — before a guest needs this.");
                     let (writes, resume_pc) = b.deliver_signal(sig, si_code, far, esr, far);
+                    // NOT a placeholder, unlike the __pthread_kill delivery below: a hardware fault
+                    // has no target port to resolve — it is always attributed to whichever thread's
+                    // vCPU context trapped — so `current` is permanently correct on this path, even
+                    // after Task 7 resolves `__pthread_kill`'s target thread on the raise path.
                     w.append(&Event::SignalDelivery { sig, si_code, si_addr: far, handler,
-                                                      resume_pc, writes })
+                                                      resume_pc, writes, thread })
                         .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
                     continue;
                 }
                 let final_snap = b.snapshot();
-                w.append(&Event::Crash { pc, esr, far }).map_err(|e| format!("append crash: {e}"))?; count += 1;
+                w.append(&Event::Crash { pc, esr, far, thread }).map_err(|e| format!("append crash: {e}"))?; count += 1;
                 w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
                 outcome = Outcome::Crash { pc, esr, far };
                 break;
@@ -607,8 +611,14 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         b.complete_syscall_before_delivery(0, false);
                         let (writes, resume_pc) =
                             b.deliver_signal(sig, retrace_arch::SI_USER, 0, 0, 0);
+                        // PLACEHOLDER (M16): `thread` is the CURRENT (raising) thread, which is
+                        // factually right at this commit because __pthread_kill's target port is
+                        // not yet resolved to a thread — delivery still runs on whoever raised it.
+                        // Task 7 resolves that target, and delivery must then follow it there,
+                        // which may not be `thread`. Fix at Task 7, not here.
                         w.append(&Event::SignalDelivery { sig, si_code: retrace_arch::SI_USER,
-                                                          si_addr: 0, handler, resume_pc, writes })
+                                                          si_addr: 0, handler, resume_pc, writes,
+                                                          thread })
                             .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
                     }
                     retrace_box::Disposition::Ign => {
@@ -627,7 +637,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         retrace_arch::DefaultAction::Terminate => {
                             let pc = b.position();
                             let final_snap = b.snapshot();
-                            w.append(&Event::Signal { sig, pc })
+                            w.append(&Event::Signal { sig, pc, thread })
                                 .map_err(|e| format!("append signal: {e}"))?; count += 1;
                             w.append(&final_snap)
                                 .map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
@@ -948,7 +958,7 @@ impl ReplaySession {
                     if num == SYS_EXIT {
                         // Verify Exit, then the final-memory landmark.
                         match self.events.get(self.idx) {
-                            Some(Event::Exit { code }) => {
+                            Some(Event::Exit { code, .. }) => {
                                 if args[0] != *code {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("exit code mismatch: live {} != recorded {}", args[0], code) });
@@ -988,7 +998,7 @@ impl ReplaySession {
                             && retrace_arch::default_action(sig) == retrace_arch::DefaultAction::Terminate;
                         if terminal {
                             match self.events.get(self.idx) {
-                                Some(Event::Signal { sig: rsig, pc: rpc }) => {
+                                Some(Event::Signal { sig: rsig, pc: rpc, .. }) => {
                                     if sig != *rsig || pc != *rpc {
                                         return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                             "signal mismatch: live (sig={sig}, pc={pc:#x}) != \
@@ -1502,7 +1512,7 @@ impl ReplaySession {
                     // M6 mirror of record's crash arm. The triple compare IS the divergence check
                     // (symmetry rule 1); then the final-memory landmark, exactly like Exit.
                     match self.events.get(self.idx) {
-                        Some(Event::Crash { pc: rpc, esr: resr, far: rfar }) => {
+                        Some(Event::Crash { pc: rpc, esr: resr, far: rfar, .. }) => {
                             if pc != *rpc || esr != *resr || far != *rfar {
                                 return Err(Divergence { landmark: self.idx, pc,
                                     detail: format!("crash mismatch: live (pc={pc:#x}, esr={esr:#x}, far={far:#x}) != recorded (pc={rpc:#x}, esr={resr:#x}, far={rfar:#x})") });

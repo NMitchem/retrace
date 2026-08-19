@@ -14,15 +14,24 @@ pub struct Region { pub ipa: u64, pub bytes: Vec<u8> }
 pub enum Event {
     Snapshot { regs: Regs, mem: Vec<Region> },
     Syscall { num: u64, args: [u64;8], ret: u64, err: bool, writes: Vec<Region>, thread: u32 },
-    Exit { code: u64 },
-    Crash { pc: u64, esr: u64, far: u64 },
+    /// M16: `thread` is the thread that called `exit`/`exit_group` — always the current thread;
+    /// permanent, not a placeholder (a threaded guest still has exactly one thread call exit).
+    Exit { code: u64, thread: u32 },
+    /// M16: `thread` is the thread that faulted — always the current thread; permanent, not a
+    /// placeholder (the vCPU that trapped IS the thread that faulted).
+    Crash { pc: u64, esr: u64, far: u64, thread: u32 },
     /// M11: the guest raised a signal on itself whose disposition is the default fatal action.
     /// Terminal, exactly like `Crash` — followed by the final full-memory `Snapshot`.
     ///
     /// Deliberately NOT folded into `Crash` with a synthetic ESR: a signal is not a fault, and a
     /// SIGABRT printing as a fault bearing an ESR the hardware never produced is a lie the debug
     /// output would carry forever. `pc` names the raise site, which is what makes it useful.
-    Signal { sig: u64, pc: u64 },
+    ///
+    /// M16: `thread` is the **raising** thread, matching `pc`'s raise-site semantics — permanent,
+    /// not a placeholder. `Signal` is terminal, so the thread it names never executes again;
+    /// tagging the raiser (not a receiver, which does not exist here) keeps `pc` and `thread`
+    /// describing the same event.
+    Signal { sig: u64, pc: u64, thread: u32 },
     /// M12: control transferred to one of the guest's own signal handlers.
     ///
     /// NOT terminal — the guest keeps running inside the handler, and a later `sigreturn`(184)
@@ -37,12 +46,20 @@ pub enum Event {
     /// `writes` carries the frame bytes; replay recomputes them and byte-compares before applying,
     /// the same posture as M11's `sigaction` oldact writeback. `resume_pc` is where the guest
     /// resumes on `sigreturn` — for a fault, the faulting instruction itself, which re-executes.
+    ///
+    /// M16: `thread` is the **receiving** thread — the one that goes on to run the handler, which
+    /// may not be the thread that raised the signal. AT THIS COMMIT it is always populated as the
+    /// current thread, which is a PLACEHOLDER, not yet correct: Task 7 resolves `__pthread_kill`'s
+    /// target port to a (possibly different, possibly blocked) thread and delivery follows it
+    /// there. The raiser, when there is one, is already tagged on the `pthread_kill` `Syscall`
+    /// landmark immediately preceding this one; on the fault path there is no raiser.
     SignalDelivery {
         sig: u64, si_code: u64, si_addr: u64, handler: u64, resume_pc: u64, writes: Vec<Region>,
+        thread: u32,
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x07"; // "RT" + format version 0x0007 (M15: Syscall.thread)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x08"; // "RT" + format version 0x0008 (M16: landmark threads)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -114,7 +131,7 @@ mod tests {
             Event::Syscall { num:3, args:[5,0x100000100,6,0,0,0,0,0], ret:6, err:false,
                              writes: vec![Region{ ipa:0x100000100, bytes: vec![9,9,9,9,9,9] }],
                              thread: 0 },
-            Event::Exit { code:0 },
+            Event::Exit { code:0, thread: 0 },
         ]
     }
     #[test]
@@ -171,7 +188,7 @@ mod tests {
         vec![
             Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000000, sp_el0:0x2000_0000, cpsr:0 },
                               mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,4] }] },
-            Event::Crash { pc: 0x100000010, esr: 0x92000005, far: 0x4000DEAD0000 },
+            Event::Crash { pc: 0x100000010, esr: 0x92000005, far: 0x4000DEAD0000, thread: 0 },
             Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000010, sp_el0:0x2000_0000, cpsr:0 },
                               mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,9] }] },
         ]
@@ -218,23 +235,25 @@ mod tests {
     fn signal_event_round_trips() {
         let p = named_tempfile("sigev");
         let mut w = Writer::create(&p).unwrap();
-        w.append(&Event::Signal { sig: 6, pc: 0x1_0000 }).unwrap();
+        w.append(&Event::Signal { sig: 6, pc: 0x1_0000, thread: 0 }).unwrap();
         drop(w);
         let (events, torn) = Reader::open_checked(&p).unwrap();
         assert!(!torn);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Event::Signal { sig, pc } => {
+            Event::Signal { sig, pc, thread } => {
                 assert_eq!(*sig, 6);
                 assert_eq!(*pc, 0x1_0000);
+                assert_eq!(*thread, 0);
             }
             other => panic!("expected Signal, got {other:?}"),
         }
         std::fs::remove_file(&p).ok();
     }
 
-    // M11's magic assertion moved to `magic_bumped_for_the_syscall_thread_tag` when M15 bumped to
-    // v7. What is left here is the half that does not go stale: a v4 trace stays rejected.
+    // M11's magic assertion moved to `magic_bumped_for_the_landmark_thread_tags` (now asserting
+    // v8, M16's bump). What is left here is the half that does not go stale: a v4 trace stays
+    // rejected.
     #[test]
     fn rejects_v4_traces() {
         let p = named_tempfile("oldmagic");
@@ -255,6 +274,7 @@ mod tests {
             handler: 0x1_0000,
             resume_pc: 0x2_0000,
             writes: vec![Region { ipa: 0x7000_0000, bytes: vec![1, 2, 3, 4] }],
+            thread: 0,
         };
         {
             let mut w = Writer::create(&p).unwrap();
@@ -268,10 +288,11 @@ mod tests {
     }
 
     #[test]
-    fn magic_bumped_for_the_syscall_thread_tag() {
-        // M15 adds `thread` to Event::Syscall — a shape change, so old traces MUST be rejected
-        // whole rather than misparsed.
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x07");
+    fn magic_bumped_for_the_landmark_thread_tags() {
+        // M16: Exit/Crash/Signal/SignalDelivery each gained `thread`, so a pre-M16 trace is not
+        // merely older — it is missing data the reader requires. Two tests, because "forgot to
+        // bump" and "bumped to the wrong value" are different mistakes.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x08");
     }
 
     #[test]
@@ -280,6 +301,36 @@ mod tests {
         std::fs::write(&p, b"RT\x00\x06rest-of-a-v6-trace").unwrap();
         let (evs, rejected) = Reader::open_checked(&p).unwrap();
         assert!(evs.is_empty() && rejected, "a v6 trace must be rejected, not half-read");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_trace_written_with_the_previous_magic_is_rejected_whole() {
+        // The M16 bump: the immediately-prior (v7, M15) magic must be rejected wholesale, not
+        // misparsed as if the four landmark variants still had no `thread` field.
+        let p = named_tempfile("v7magic");
+        std::fs::write(&p, b"RT\x00\x07rest-of-a-trace-that-will-never-be-read").unwrap();
+        let (evs, rejected) = Reader::open_checked(&p).unwrap();
+        assert!(evs.is_empty() && rejected,
+            "a magic mismatch must keep NOTHING, not misparse the tail");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn the_four_new_thread_tags_round_trip() {
+        let evs = vec![
+            Event::Exit { code: 7, thread: 3 },
+            Event::Crash { pc: 0x1000, esr: 0x24, far: 0x2000, thread: 1 },
+            Event::Signal { sig: 6, pc: 0x3000, thread: 2 },
+            Event::SignalDelivery { sig: 30, si_code: 0x10001, si_addr: 0, handler: 0x4000,
+                                    resume_pc: 0x5000, writes: vec![], thread: 1 },
+        ];
+        let p = named_tempfile("landmark-threads-rt");
+        {
+            let mut w = Writer::create(&p).unwrap();
+            for e in &evs { w.append(e).unwrap(); }
+        }
+        assert_eq!(Reader::open(&p).unwrap(), evs);
         std::fs::remove_file(&p).ok();
     }
 
