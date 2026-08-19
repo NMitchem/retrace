@@ -3069,11 +3069,8 @@ impl Box_ {
     pub fn kport_of(&self, tid: usize) -> Option<u32> {
         let va = self.pthread_of(tid)?;
         let ipa = self.va_to_ipa(va + PTHREAD_KPORT_OFF)?;
-        let (hp, avail) = self.host_span(ipa)?;
-        if avail < 4 { return None; }
-        let mut b = [0u8; 4];
-        unsafe { std::ptr::copy_nonoverlapping(hp, b.as_mut_ptr(), 4) };
-        Some(u32::from_le_bytes(b))
+        let b = self.read_guest_checked(ipa, 4)?;
+        Some(u32::from_le_bytes(b.try_into().unwrap()))
     }
 
     /// The address the kernel enters a NEW thread at, learned from the guest's own
