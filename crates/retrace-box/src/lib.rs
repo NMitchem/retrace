@@ -2838,6 +2838,25 @@ impl Box_ {
         let cur = self.threads.current();
         *self.threads.ctx_mut(cur) = self.save_ctx();
 
+        // M16 fix round 1 (review finding 5): the target must be schedulable. A Blocked thread's
+        // ctx is the saved state its blocking syscall must resume through — redirecting it
+        // overwrites that resume point out from under the syscall that is waiting on it. An
+        // Exited thread's ctx is a dead entry with nothing left to resume. Neither is reachable
+        // today (no product caller passes tid != cur), but the next task makes both reachable and
+        // the failure mode would be silent corruption, not a panic — so check now, not then.
+        match self.threads.state_of(tid) {
+            thread::ThreadState::Runnable => {}
+            thread::ThreadState::Blocked(reason) => panic!(
+                "thread {tid} is Blocked({reason:?}), not Runnable; deliver_signal_to would \
+                 overwrite the saved context its blocking syscall must resume through. Wake or \
+                 skip it instead of redirecting a thread that cannot run yet."
+            ),
+            thread::ThreadState::Exited(code) => panic!(
+                "thread {tid} has Exited({code}), not Runnable; it has no saved context left to \
+                 resume into a handler. deliver_signal_to must not target a dead thread."
+            ),
+        }
+
         // M16: a second signal to a thread already redirected into an un-run handler would stack a
         // frame the kernel's queueing semantics would order — unmodelled, so fail loud rather than
         // guess. A self-signal (tid == cur) runs its handler immediately, so there is no un-run
