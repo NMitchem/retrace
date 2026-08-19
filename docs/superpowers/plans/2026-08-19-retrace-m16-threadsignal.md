@@ -720,15 +720,24 @@ depend on a feature three tasks away.
 //   * the child therefore takes the signal in its NEVER-RUN entry context: the handler runs, then
 //     sigreturn lands on `thread_start_pc` and the body starts.
 //
-// Handler-before-body is what a native run does too — MEASURED, 20/20 identical runs on this host:
-// `installed | child pthread 0x… | kill rc 0 | handler | child body | joined`, because pthread_kill
-// lands while the child is still in libpthread's `_pthread_start` preamble. So retrace's ordering
-// here is NOT a divergence from native, and no one should go hunting for one.
+// THE STDOUT LINE ORDER IS THIS GUEST'S REAL OBSERVABLE, and it is worth stating exactly, because
+// all of it is MEASURED (record-dyn'd through the CLI before Task 5 was written):
 //
-// This test still asserts against retrace's own recorded behaviour rather than against a native
-// execution, for the reason that actually holds: POSIX guarantees no such ordering, so a native run
-// is not a specification even when it is reproducible on one machine. Retrace's ordering, by
-// contrast, is a deterministic consequence of the cooperative scheduler.
+//   native, 20/20 identical runs:  installed | child pthread | kill rc 0 | handler | child body | joined
+//   retrace TODAY (pre-Task 7):    installed | child pthread | handler | kill rc 0 | child body | joined
+//
+// The inversion of `handler` and `kill rc 0` IS the defect M16 closes, made visible. Today retrace
+// ignores __pthread_kill's target port and delivers to whoever is running — main — synchronously
+// inside the pthread_kill syscall, so the handler prints BEFORE the syscall returns. Natively the
+// CHILD takes it, so main's pthread_kill returns first. After Task 7 the child takes it here too:
+// main prints "kill rc 0", blocks in join, and only then does the child run its handler and body —
+// i.e. retrace's order becomes native's order, exactly.
+//
+// So Task 5's test asserts the WRONG order on purpose, documenting the bug; Task 7 flips it. Both
+// assert against retrace's own recorded behaviour rather than against a native execution, because
+// POSIX guarantees no such ordering — a native run is not a specification even when it reproduces
+// 20/20 on one host. That retrace's post-M16 order happens to equal native's is a fidelity result
+// worth reporting, not the thing being tested.
 //
 // Task 5 ships steps 1-4. Task 9 appends the mask/pending half.
 //
@@ -740,14 +749,29 @@ depend on a feature three tasks away.
 // compiles and runs with the exact build.rs recipe; the `unsafe extern` form does not.
 extern "C" {
     fn pthread_kill(thread: u64, sig: i32) -> i32;
-    fn signal(sig: i32, handler: usize) -> usize;
+    fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
     #[link_name = "write"]
     fn libc_write(fd: i32, buf: *const u8, n: usize) -> isize;
 }
 
+// SA_SIGINFO, installed via `sigaction` — NOT `signal(3)`. MEASURED: a `signal()`-installed
+// handler is non-SA_SIGINFO, and `build_frame` (sig.rs:262) asserts fail-loud on exactly that:
+// "a non-SA_SIGINFO handler is not modelled. Its infostyle is 0x1 (measured, vs 0x1e for
+// SA_SIGINFO) and the frame layout is identical, so supporting it is small — but no gate guest
+// exercises it." That wall is real and is NOT M16's to clear: infostyle is unrelated to thread
+// attribution, and clearing it here would be scope creep into a different modelling gap. The
+// assert stays honest and untouched; this guest simply installs the shape the box models.
+//
+// macOS `struct sigaction`: 8-byte handler union, 4-byte sigset_t mask, 4-byte flags. libc's
+// wrapper fills in sa_tramp itself, so the guest never declares it.
+#[repr(C)]
+struct SigAction { handler: usize, mask: u32, flags: i32 }
+
+const SA_SIGINFO: i32 = 0x0040;
+
 const SIGUSR1: i32 = 30;
 
-extern "C" fn on_usr1(_sig: i32) {
+extern "C" fn on_usr1(_sig: i32, _info: *mut u8, _uap: *mut u8) {
     // A raw write(2) rather than println!: a handler must not take libstd's stdout lock, which the
     // interrupted thread may already hold. The child is the only thread that runs this in Task 5,
     // but the Task 9 half runs it on main too.
@@ -759,7 +783,8 @@ fn main() {
     // `as *const () as usize`, not `as usize`: rustc 1.95 warns `direct cast of function item
     // into an integer` (function_casts_as_integer, on by default) on the direct form, and a guest
     // that warns on every build is not pristine output.
-    unsafe { signal(SIGUSR1, on_usr1 as *const () as usize) };
+    let act = SigAction { handler: on_usr1 as *const () as usize, mask: 0, flags: SA_SIGINFO };
+    assert_eq!(unsafe { sigaction(SIGUSR1, &act, core::ptr::null_mut()) }, 0);
     println!("installed");
 
     let h = std::thread::spawn(|| {
@@ -814,15 +839,24 @@ pub const SIGTHREAD: &str = concat!(env!("OUT_DIR"), "/sigthread");
 mod util;
 
 #[test]
-fn the_sigthread_guest_records_and_replays() {
+fn the_sigthread_guest_records_and_replays_with_main_wrongly_taking_the_signal() {
     let (rec, trace) = util::record_dynamic(retrace_guest::SIGTHREAD);
     assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+
+    // The ORDER, not a bag of contains() — a set-membership check passes identically before and
+    // after Task 7 and would prove nothing. `handler` before `kill rc 0` means the handler ran
+    // synchronously inside main's pthread_kill: main took the signal it aimed at the child. That
+    // is today's defect, asserted rather than tolerated, so Task 7's flip is a visible change.
     let out = String::from_utf8_lossy(&rec.stdout);
-    for line in ["installed", "child body", "joined", "handler"] {
-        assert!(out.contains(line), "missing {line:?} in stdout:\n{out}");
-    }
+    let order: Vec<&str> = out.lines()
+        .filter(|l| ["installed", "handler", "kill rc 0", "child body", "joined"].contains(l))
+        .collect();
+    assert_eq!(order, vec!["installed", "handler", "kill rc 0", "child body", "joined"],
+        "pre-Task-7 order: main takes its own signal inside pthread_kill. Full stdout:\n{out}");
+
     let rep = util::replay(&trace);
     assert_eq!(rep.code, 0, "replay must be clean; stderr:\n{}", rep.stderr);
+    assert_eq!(rep.stdout, rec.stdout, "replay must be byte-identical");
 }
 ```
 
@@ -831,8 +865,19 @@ fn the_sigthread_guest_records_and_replays() {
 Run: `cargo test -p retrace --test sigthread_e2e -- --test-threads=1 --nocapture`
 Expected: PASS.
 
-**If it fails, the failure is information, and which failure matters.** Record the exact message in
-your report:
+**This guest is already PROVEN viable — it is not a leap of faith.** Before this task was
+finalised the controller compiled exactly this source with the build.rs recipe and ran it through
+the CLI directly (`record-dyn` then `replay`): both exited 0, stdout was byte-identical between
+record and replay, and the line order was the pre-Task-7 order this test asserts. So the frame
+machinery already works for a libc-installed SA_SIGINFO handler on a guest that is ALSO threaded —
+M16's single biggest unknown, answered before the task was dispatched. A failure here is therefore
+a regression from something in Tasks 1-4, not an expected wall.
+
+**If it fails anyway, the failure is information, and which failure matters.** Record the exact
+message in your report:
+- `a non-SA_SIGINFO handler is not modelled` (sig.rs:262) → the handler got installed with
+  `signal(3)` instead of `sigaction`+SA_SIGINFO. This is the wall the guest is written to avoid;
+  it is NOT M16's to clear. Fix the guest, not the box.
 - a `brk`/PAC fault inside the handler → the frame the box builds is wrong for a libc-installed
   handler; measure before changing anything
 - `__pthread_kill names mach port …, which belongs to no live guest thread` → Task 4 is working and
@@ -1193,8 +1238,21 @@ fn the_signal_is_delivered_to_the_named_child_thread() {
         "exactly one SIGUSR1 delivery, to thread 1 — the child. Thread 0 here means the target \
          port was ignored and main took its own signal, which is the defect M16 closes.");
 
+    // The user-visible half of the same claim, and the half Task 5 asserted inverted. `kill rc 0`
+    // must now come BEFORE `handler`: main's pthread_kill returns without running anything, and
+    // the child runs the handler only once main blocks in join. This is also, exactly, the order a
+    // native run produces (MEASURED 20/20) — so M16 does not merely relabel a trace field, it
+    // corrects observable behaviour.
+    let out = String::from_utf8_lossy(&rec.stdout);
+    let order: Vec<&str> = out.lines()
+        .filter(|l| ["installed", "handler", "kill rc 0", "child body", "joined"].contains(l))
+        .collect();
+    assert_eq!(order, vec!["installed", "kill rc 0", "handler", "child body", "joined"],
+        "post-M16 order: the CHILD takes the signal. Full stdout:\n{out}");
+
     let rep = util::replay(&trace);
     assert_eq!(rep.code, 0, "replay must be clean; stderr:\n{}", rep.stderr);
+    assert_eq!(rep.stdout, rec.stdout, "replay must be byte-identical");
 }
 ```
 
