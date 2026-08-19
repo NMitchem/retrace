@@ -261,3 +261,77 @@ fn a_failed_syscall_completed_before_delivery_carries_its_error_flag_into_the_fr
     assert_eq!(frame_cpsr(&writes[0].bytes) as u64 & retrace_arch::PSTATE_C, retrace_arch::PSTATE_C,
         "an error sets PSTATE.C, and the frame must carry it");
 }
+
+// ---- M16 t6: delivery targets a thread, not the vCPU ------------------------------------------
+
+/// M16 Task 6. `deliver_signal_to` sources FP/LR from `ThreadCtx.regs.x[29]`/`[30]`, because a
+/// saved context has no separate FP/LR field. That is only correct if HVF aliases the registers.
+#[test]
+fn x29_and_x30_are_the_frame_pointer_and_link_register() {
+    let mut b = boxed();
+    b.vcpu_set_x(29, 0xF00D_0000_0000_0001);
+    b.vcpu_set_x(30, 0xF00D_0000_0000_0002);
+    let r = b.regs_snapshot();
+    assert_eq!((r.x[29], r.x[30]), (0xF00D_0000_0000_0001, 0xF00D_0000_0000_0002));
+    assert_eq!(b.dbg_fp_lr(), (0xF00D_0000_0000_0001, 0xF00D_0000_0000_0002),
+        "HV_REG_FP/HV_REG_LR must alias X29/X30. If they do not, deliver_signal_to must carry them \
+         as their own ThreadCtx fields instead of reading regs.x — measure, do not paper over it.");
+}
+
+/// M16 Task 6, the headline unit property: a signal delivered to a thread that is NOT running
+/// lands on THAT thread's stack and redirects THAT thread, leaving the running one untouched.
+///
+/// This is the latent defect M16 closes, expressed at the smallest level that can express it.
+#[test]
+fn delivering_to_a_non_current_thread_leaves_the_running_one_alone() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(30, handler(retrace_arch::SA_SIGINFO, 0));
+
+    // A second thread whose context is main's but on a DIFFERENT stack, so the frame's address
+    // alone says which thread's stack it landed on.
+    let mut ctx = b.save_ctx();
+    let other_sp = ctx.regs.sp_el0 - 0x2000;
+    ctx.regs.sp_el0 = other_sp;
+    let elr_of_other = ctx.elr;
+    let tid = b.threads_mut().spawn(ctx, (other_sp, 0));
+    assert_eq!(tid, 1);
+
+    let before = b.regs_snapshot();
+    let (writes, resume_pc) = b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
+
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].ipa, other_sp - 128 - FRAME_LEN as u64,
+        "the frame must land on thread 1's stack; landing on the running thread's stack IS the bug");
+    assert_eq!(resume_pc, elr_of_other, "sigreturn returns to the TARGET's own next instruction");
+
+    let after = b.regs_snapshot();
+    assert_eq!((after.pc, after.sp_el0, after.x[0]), (before.pc, before.sp_el0, before.x[0]),
+        "delivering to another thread must not redirect the running one");
+
+    let t = b.threads().ctx_of(tid);
+    assert_eq!(t.regs.pc, TRAMP, "thread 1 enters the trampoline when it is next scheduled");
+    assert_eq!(t.regs.sp_el0, writes[0].ipa, "and resumes on the frame it was given");
+    assert_eq!(t.regs.x[0], 0xabc0, "x0 = the catcher, in the TARGET's context");
+
+    assert!(b.threads().is_blocked_for(tid, 30),
+        "the signal is blocked for the handler's duration on the RECEIVING thread");
+    assert!(!b.threads().is_blocked_for(0, 30),
+        "and not on the thread that merely raised it");
+}
+
+/// M16 Task 6's fail-loud boundary: a second signal to a thread that has already been redirected
+/// into a handler and has not run since would stack a frame without the kernel's queueing
+/// semantics. Nested delivery is unmodelled — this must panic, not silently corrupt the frame.
+#[test]
+fn a_second_signal_to_an_unrun_redirected_thread_fails_loud() {
+    let mut b = boxed();
+    b.sigtable_mut().set_action(30, handler(retrace_arch::SA_SIGINFO, 0));
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
+    })).is_err();
+    assert!(panicked, "stacking a frame on a context that never ran the first must not be silent");
+}

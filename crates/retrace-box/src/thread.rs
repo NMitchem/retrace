@@ -86,6 +86,10 @@ pub struct Thread {
     pub pending: u32,
     /// M16: per-thread, and deliberately NOT inherited — a new thread starts with no alt stack.
     pub altstack: Option<(u64, u64, u64)>,
+    /// M16: this thread has been redirected into a handler and has not been scheduled since.
+    /// A second signal arriving now would stack a frame on a context that never ran the first —
+    /// fail loud rather than guess at the kernel's queueing order.
+    pub redirected: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +110,7 @@ impl ThreadTable {
                 mask: 0,
                 pending: 0,
                 altstack: None,
+                redirected: false,
             }],
             current: 0,
         }
@@ -181,6 +186,16 @@ impl ThreadTable {
 
     pub fn altstack_of(&self, tid: usize) -> Option<(u64, u64, u64)> { self.threads[tid].altstack }
 
+    /// M16: has `tid` been redirected into a handler it has not yet run?
+    pub fn is_redirected(&self, tid: usize) -> bool { self.threads[tid].redirected }
+
+    /// M16: mark (or clear) `tid`'s redirected flag. `deliver_signal_to` sets it on the target it
+    /// just redirected; `switch_to` clears it for the thread being switched TO, because that thread
+    /// is now running the handler it was given.
+    pub fn set_redirected(&mut self, tid: usize, redirected: bool) {
+        self.threads[tid].redirected = redirected;
+    }
+
     pub fn set_altstack_of(
         &mut self,
         tid: usize,
@@ -208,6 +223,7 @@ impl ThreadTable {
             mask,
             pending: 0,
             altstack: None,
+            redirected: false,
         });
         self.threads.len() - 1
     }
@@ -235,6 +251,9 @@ impl ThreadTable {
     pub fn switch_to(&mut self, tid: usize) {
         assert!(tid < self.threads.len(), "switch to nonexistent thread {tid}");
         self.current = tid;
+        // M16: `tid` is now running — if it was redirected into a handler, it is about to run that
+        // handler, so the "un-run redirection" this flag guards against no longer holds.
+        self.threads[tid].redirected = false;
     }
 
     pub fn exit_current(&mut self, code: u64) {
