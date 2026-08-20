@@ -15,7 +15,9 @@ pub enum Event {
     Snapshot { regs: Regs, mem: Vec<Region> },
     Syscall { num: u64, args: [u64;8], ret: u64, err: bool, writes: Vec<Region>, thread: u32 },
     /// M16: `thread` is the thread that called `exit`/`exit_group` — always the current thread;
-    /// permanent, not a placeholder (a threaded guest still has exactly one thread call exit).
+    /// permanent, not a placeholder (`record_box`'s `SYS_EXIT` arm `break`s the record loop right
+    /// after appending this event, so at most one `Event::Exit` can ever exist in a trace and its
+    /// tag is unambiguous).
     Exit { code: u64, thread: u32 },
     /// M16: `thread` is the thread that faulted — always the current thread; permanent, not a
     /// placeholder (the vCPU that trapped IS the thread that faulted).

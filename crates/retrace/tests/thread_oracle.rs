@@ -65,3 +65,32 @@ fn a_wrong_thread_on_replay_is_a_divergence() {
         "the divergence detail should name what diverged (the schedule), not just that something \
          did; stderr:\n{}", rep.stderr);
 }
+
+/// M16 Task 11. The three terminal-ish landmarks gained a thread tag; retagging any of them to a
+/// genuinely live thread id must diverge. `Exit` is the one every guest reaches, so it is the one
+/// that can be tested against a real threaded recording without a bespoke fixture.
+#[test]
+fn a_wrong_thread_on_the_exit_landmark_is_a_divergence() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::THREADRUST);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let ids: Vec<u32> = { let mut v: Vec<u32> = events.iter().filter_map(|e| match e {
+        Event::Syscall { thread, .. } => Some(*thread), _ => None }).collect();
+        v.sort_unstable(); v.dedup(); v };
+    assert!(ids.len() >= 2, "need a genuinely threaded recording; got {ids:?}");
+
+    let i = events.iter().position(|e| matches!(e, Event::Exit { .. }))
+        .expect("a clean run ends in Exit");
+    let orig = match &events[i] { Event::Exit { thread, .. } => *thread, _ => unreachable!() };
+    let other = *ids.iter().find(|&&t| t != orig).expect("a second live id exists");
+    if let Event::Exit { thread, .. } = &mut events[i] { *thread = other; }
+
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+    assert!(rep.stderr.contains("thread"), "the divergence must name the thread mismatch:\n{}", rep.stderr);
+}
