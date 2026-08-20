@@ -649,12 +649,25 @@ Keep the entire existing comment block and the `rc`/`err` compare. Replace only 
                                 return match deliver_to.first() {
                                     Some(&wtid) => match take_pending_delivery(&mut self.b, wtid) {
                                         Some((psig, _handler)) => {
+                                            // The SAME Box_ calls record makes, in the SAME order,
+                                            // with the SAME arguments — that identity IS symmetry
+                                            // rule 1 holding by construction rather than by two
+                                            // matches happening to agree.
+                                            //
+                                            // `complete_saved_syscall_before_delivery` IS called
+                                            // and `complete_syscall_before_delivery` is NOT, for
+                                            // the reason record's arm spells out at length: the
+                                            // live vCPU here is the WAKER, so the live version
+                                            // would correct the wrong thread's PSTATE — while the
+                                            // receiver's own saved SPSR was measured (0x60000000,
+                                            // C set, `crates/retrace/tests/blockedctx.rs`) to
+                                            // disagree with the completed x0 beside it. Omit this
+                                            // call and replay's frame bytes differ from record's,
+                                            // which surfaces as a divergence in `mirror_delivery`'s
+                                            // byte-compare rather than as silent corruption.
+                                            self.b.complete_saved_syscall_before_delivery(wtid, false);
                                             // Consume the Syscall landmark by hand; mirror_delivery
-                                            // takes the SignalDelivery. No
-                                            // complete_syscall_before_delivery — the receiver is the
-                                            // WOKEN thread, not the caller, so there is no live-vCPU
-                                            // PSTATE to fix up. Record's arm omits it for the same
-                                            // reason; the pair must match.
+                                            // takes the SignalDelivery.
                                             self.idx += 1;
                                             self.mirror_delivery(wtid, psig, retrace_arch::SI_USER,
                                                                  0, 0, 0, pc)
