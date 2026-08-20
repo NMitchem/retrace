@@ -1747,9 +1747,20 @@ carries forward almost verbatim:
   gate guest, so there was no observed port to validate against; its coverage rides entirely on
   `panic_e2e`. The guest has one thread on one vCPU, so any port it can name is that thread — ungated
   rather than wrongly gated. Learn it from `mach_thread_self` when a guest needs the check.
+  *(Superseded by M16-threadsignal, and left standing as M11's own account of what M11 built: the
+  operand is now **decoded and gated** — `Box_::thread_of_port` resolves it by reading
+  `[pthread + 0xf8]` back out of guest memory, with no special case for main, and a port matching no
+  live thread is fail-loud. The `mach_thread_self` suggestion turned out to be **unnecessary**:
+  main's own kport reads back through the identical path (measured, `0x103`). See the
+  M16-threadsignal Status section.)*
 - **A pending signal set is unmodelled**, so raising a *blocked* signal asserts. That is what makes
   `sigpending` returning empty true by construction rather than a convenient lie — the two decisions
   stand or fall together, and whoever adds a pending mask must revisit both.
+  *(Superseded by M16-threadsignal, and left standing as M11's own account: the pending set is now
+  **per-thread state on `Thread`**, a blocked raise *pends* instead of asserting, and `sigpending`
+  reports it. The two decisions did fall together exactly as this sentence predicted — the same
+  milestone that added the pending mask is the one that stopped `sigpending` lying. See the
+  M16-threadsignal Status section.)*
 - **`sigsuspend`(111), `__sigwait`(330), `sigreturn`(184), `terminate_with_payload`(520) and
   `abort_with_payload`(521) are fail-loud asserts**, not models. 520/521 were live
   recorder-killing hazards before M11; asserting converts a silent host death into a loud stop.
@@ -1935,7 +1946,10 @@ operand is wired but ungated, **`dup2` fail-loud**, **`fcntl(F_DUPFD)` unmodelle
 fail-loud**, guest stdin is still retrace's, `RLIMIT_NOFILE` unenforced, `guest_munmap`'s
 wholesale-drop defect, **threads**, **asynchronous signals from outside the guest** (nondeterministic
 by nature — they need an explicit injection model), and **arm64e guests**, whose frame thread-state
-is PAC-signed.
+is PAC-signed. *(Superseded in part by M16-threadsignal, and left standing as M12's own account:
+both the pending signal set and `__pthread_kill`'s thread-port gate are implemented there, so
+`sigpending` no longer returns empty by construction. The rest of this list still stands. See the
+M16-threadsignal Status section.)*
 
 **One measured property that is not M12's, recorded so it is not rediscovered painfully.** The
 **event count of a recording is not reproducible across runs**: `segvy` produced 258/262/263/268
@@ -2105,7 +2119,9 @@ data pages are ever protected today, and documented as a choice); and **protecti
 reservation**, which asserts. Everything M12 carries forward is unchanged: a **pending signal set**,
 **nested delivery**, a **blocked synchronous fault**, `dup2` (fail-loud), `fcntl(F_DUPFD)` (unmodelled
 and *not* fail-loud), guest stdin still being retrace's, `RLIMIT_NOFILE`, **threads**, **asynchronous
-signals**, and **arm64e guests**.
+signals**, and **arm64e guests**. *(Superseded in part by M16-threadsignal, and left standing as
+M13's own account: the **pending signal set** is modelled there, per-thread. See the M16-threadsignal
+Status section.)*
 
 **Three fast-follows carried out, none blocking, all pre-existing or dormant:** `place_fixed` /
 `unmap_overlapping` still never consult the forbidden scratch window before claiming an IPA (out of
@@ -2332,6 +2348,12 @@ and any claim about more than a handful of threads. Everything M13 carries forwa
 protection bit other than no-access, a **pending signal set**, **nested delivery**, a **blocked
 synchronous fault**, `dup2` (fail-loud), `fcntl(F_DUPFD)` (unmodelled and *not* fail-loud), guest stdin
 still being retrace's, `RLIMIT_NOFILE`, **asynchronous signals**, and **arm64e guests**.
+*(Superseded in part by M16-threadsignal, and left standing as M14's own account: three items in this
+paragraph fell there — the **per-thread signal mask** this paragraph names as its spec's open
+question 2 (the mask, the pending set and the alternate stack all moved off `SigTable` onto `Thread`,
+and `spawn` inherits the mask), **per-thread signal targeting** (it resolves the port rather than
+asserting), and the **pending signal set**. Preemption, `workq`/GCD, thread priority and per-thread
+seek all still stand — see M16's own carry-forward list. See the M16-threadsignal Status section.)*
 
 **No new gate is parked, because Task 11's wall was cleared rather than hit.** The plan reserved a
 parked gate for a capability M14 could not reach; the headline went green instead, and no guest today
@@ -2574,6 +2596,12 @@ stays global; filtering is the debugger's job). Everything M14 and M13 carry for
 no-access, a pending signal set, nested delivery, a blocked synchronous fault, `dup2` (fail-loud),
 `fcntl(F_DUPFD)` (unmodelled and *not* fail-loud), guest stdin still being retrace's, `RLIMIT_NOFILE`,
 asynchronous signals, and arm64e guests.
+*(Superseded in part by M16-threadsignal, and left standing as M15's own account: three items here
+fell there — **thread identity on the non-syscall landmarks** (`Exit`, `Crash`, `Signal` and
+`SignalDelivery` each carry a `thread` now, at the cost of a second `TRACE_MAGIC` break), **per-thread
+signal masks**, and the **pending signal set**. Per-thread reverse execution, preemption, `workq`/GCD,
+thread priority and hardware watchpoint scoping all still stand. See the M16-threadsignal Status
+section.)*
 
 **No new gate is parked.** The count still carries exactly **one** `#[ignore]` —
 `stackoverflow_rust_e2e::a_rust_stack_overflow_strikes_its_own_guard_page`, at the M8 spec-risk-R3
