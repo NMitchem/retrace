@@ -111,14 +111,23 @@ fn a_wrong_thread_at_the_caught_raise_mirror_is_a_divergence() {
 /// the CHILD, so the recorded tag here is a nonzero id — a value this arm has never seen.
 #[test]
 fn a_wrong_thread_at_the_sigreturn_mirror_is_a_divergence() {
-    retag_and_expect_divergence(retrace_arch::SYS_SIGRETURN);
+    let orig = retag_and_expect_divergence(retrace_arch::SYS_SIGRETURN);
+    // The precondition that makes 12b STRONGER than 12a, asserted rather than asserted-in-prose: the
+    // thread current at this landmark must be the CHILD. If the fixture ever schedules sigreturn on
+    // main instead, this test silently degrades into a duplicate of 12a — still green, no longer
+    // covering the nonzero-tag case its doc comment claims.
+    assert_ne!(orig, 0,
+        "sigreturn must be tagged with a nonzero (child) thread id for this test to cover what 12a \
+         does not; got {orig} — the fixture's schedule changed");
 }
 
 /// Retag the first `Syscall` landmark for `num` to some OTHER live thread id from this same trace
 /// and assert replay refuses it. Shared by 12a and 12b; the reasoning for why the retag target must
 /// be a genuinely live id, not an out-of-range constant, is the same one
 /// `a_wrong_thread_on_replay_is_a_divergence` above already documents.
-fn retag_and_expect_divergence(num_wanted: u64) {
+/// Returns the tag it found BEFORE retagging, so a caller can assert on what the fixture actually
+/// scheduled rather than trusting the comment above it.
+fn retag_and_expect_divergence(num_wanted: u64) -> u32 {
     let (rec, trace) = util::record_dynamic(retrace_guest::SIGTHREAD);
     assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
 
@@ -144,6 +153,13 @@ fn retag_and_expect_divergence(num_wanted: u64) {
 
     let rep = util::replay(&trace);
     assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+    // Exit 3 alone is too weak: it is the convention for EVERY divergence, so a trace that diverged
+    // for some unrelated reason would pass this test while proving nothing about the thread oracle.
+    // Pin the message `verify_thread` actually emits.
+    assert!(rep.stderr.contains("the schedule diverged"),
+        "the divergence must be the THREAD oracle's, not merely some divergence; stderr:\n{}",
+        rep.stderr);
+    orig
 }
 
 /// M16 Task 12c. `SignalDelivery.thread` is the one tag whose check the frame byte-compare does NOT

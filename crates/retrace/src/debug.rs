@@ -352,7 +352,9 @@ impl<'a> Exec<'a> {
     /// becomes an `Err` here (a usage error the CLI reports and exits 5 on, same as `break`'s 6-slot
     /// limit), never a panic on an unwrap.
     fn cmd_regs_of<W: Write>(&mut self, tid: u32, out: &mut W) -> Result<(), String> {
-        match self.sess().dbg_regs_of(tid) {
+        // `tid` is u32 because that is what the CLI parses; the session's hooks take `usize`,
+        // matching `Box_`. One cast, at the boundary where the u32 actually comes from.
+        match self.sess().dbg_regs_of(tid as usize) {
             Some(dump) => line(out, format_args!("{dump}")),
             None => Err(format!("no such thread: {tid}")),
         }

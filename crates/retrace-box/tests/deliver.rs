@@ -413,10 +413,21 @@ fn a_second_signal_to_an_unrun_redirected_thread_fails_loud() {
     ctx.regs.sp_el0 -= 0x2000;
     let tid = b.threads_mut().spawn(ctx, (0, 0));
     b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
-    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    // `catch_unwind` rather than `#[should_panic]` because the panic must come from the SECOND
+    // call, not the first. But `.is_err()` alone would only prove that *something* unwound — and
+    // `deliver_signal_to` now has more than one way to panic (it also refuses a target that is not
+    // Runnable, via `check_deliverable`). So downcast the payload and pin the message: a test that
+    // passes on the wrong panic is a test that would keep passing after the guard it names is gone.
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
-    })).is_err();
-    assert!(panicked, "stacking a frame on a context that never ran the first must not be silent");
+    })).expect_err("stacking a frame on a context that never ran the first must not be silent");
+    let msg = payload.downcast_ref::<String>().map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or_else(|| panic!("panic payload was neither String nor &str, so the message \
+                                   cannot be checked and this test cannot tell which guard fired"));
+    assert!(msg.contains("already redirected into a handler"),
+        "the panic must be the NESTED-DELIVERY guard (Box_'s `is_redirected` assert), not some \
+         other assertion inside deliver_signal_to; got:\n{msg}");
 }
 
 /// M16 Task 6 fix round 1 (review finding 5): `deliver_signal_to` must refuse a target that is not

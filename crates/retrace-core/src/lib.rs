@@ -193,7 +193,14 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                          be deferred, POSIX leaves it undefined, and Darwin force-delivers. M11 \
                          models no pending set, so implement one — and revisit sigpending's \
                          always-empty answer — before a guest needs this.");
-                    let (writes, resume_pc) = b.deliver_signal(sig, si_code, far, esr, far);
+                    // C9: `deliver_signal_to(thread, …)`, not the `deliver_signal(…)` shorthand it
+                    // delegates to. Behaviourally identical — the shorthand IS
+                    // `deliver_signal_to(current)` — but replay's mirror spells the thread out, and
+                    // this branch works hard to keep the two sides grep-identical so a reader can
+                    // see symmetry rule 1 holding rather than having to chase a delegation to
+                    // confirm it.
+                    let (writes, resume_pc) =
+                        b.deliver_signal_to(thread as usize, sig, si_code, far, esr, far);
                     // A hardware fault has no target port to resolve — it is always attributed to
                     // whichever thread's vCPU context trapped — so `current` is permanently correct
                     // on this path. Contrast the __pthread_kill delivery below, which resolves its
@@ -2004,7 +2011,7 @@ impl ReplaySession {
     }
     /// M15: a specific thread's registers, including a BLOCKED one — impossible before this
     /// milestone. `None` for an out-of-range id, which the CLI turns into a usage error.
-    pub fn dbg_regs_of(&self, tid: u32) -> Option<String> { self.b.dbg_regs_of(tid as usize) }
+    pub fn dbg_regs_of(&self, tid: usize) -> Option<String> { self.b.dbg_regs_of(tid) }
     /// M16 Task 1: `Box_::kport_of`, for the R1 measurement gate. Test-only, like `dbg_regs_of`.
     #[doc(hidden)]
     pub fn dbg_kport_of(&self, tid: usize) -> Option<u32> { self.b.kport_of(tid) }
