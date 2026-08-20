@@ -1,3 +1,10 @@
+// PARKED at the M16 blocked-target wall. This is the gate that comes green when a signal can be
+// delivered to a thread that is blocked in `__ulock_wait` rather than merely not-current.
+//
+// It is committed as real, compiling code with a real guest behind it (`retrace-guest/rs/
+// sigblocked.rs`) rather than as a comment, because honest-gate discipline means the wall is
+// documented where someone hits it — and because a gate that cannot be run cannot be un-parked by
+// simply deleting an attribute.
 mod util;
 
 #[test]

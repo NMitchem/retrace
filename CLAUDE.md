@@ -34,7 +34,8 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   (a guest that faults and runs its own handler), `protnone_rust_e2e` (a guest that `PROT_NONE`s
   its own page and faults on it), `thread_rust_e2e` (rung 4 — a guest that spawns a thread and
   joins it), `thread_watch_e2e` (a guest whose two threads write different cells, where
-  `reverse-continue` must name the thread that wrote the watched one). Run one with
+  `reverse-continue` must name the thread that wrote the watched one), `sigthread_e2e` (a guest
+  whose main signals its child by name, so the *child* runs the handler). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule, and the README's latest Status section for which ones and why.
@@ -173,17 +174,33 @@ through, or `pthread_join` returns success without ever waiting: the child's mac
 `PTHREAD_START_TSD_BASE_SET` in `w5`, which `__pthread_start` `tbz`-tests and `brk`s on. Each is
 documented with its measurement at the call site.
 
-**The divergence oracle checks thread identity.** `Event::Syscall` carries a `thread` tag (M15;
-`TRACE_MAGIC` is now `RT\x00\x07`, so every pre-M15 recording is unreadable), and replay recomputes
-the current thread and compares it at every syscall landmark — at all three landmark-consuming arms,
-the generic dispatch plus the caught-raise and `sigreturn` mirrors. Without that check, two threads
-running the same code issue byte-identical `(num, args)` and a wrong-thread replay continues in
-silence. `Event::Sched` is **gone**, not reserved: emitting it would silently renumber every
-landmark, and nothing in either dispatch loop can see a switch. The caveat that survives: only the
-generic arm is exercised against a genuinely live second thread — the two signal-path arms are
-reached only by a single-threaded fixture, so their tests prove the check *fires*, not that it
-*distinguishes two live schedules*. (M14-threads, M15-threaddebug; see their specs and the README's
-Status sections.)
+**Signals are per-thread too (M16).** The signal path resolves `__pthread_kill`'s target port to a
+thread — `thread_of_port` reads `[pthread + PTHREAD_KPORT_OFF]` back out of guest memory, so main
+needs no special case — and `deliver_signal_to` builds the frame into *that thread's saved context*
+rather than off the live vCPU. Masks, pending sets and alternate stacks live on `Thread`
+(`crates/retrace-box/src/thread.rs`) because POSIX makes them per-thread; **dispositions stay
+process-global** on `SigTable`, because POSIX makes those per-process. A masked signal pends and is
+materialised at the *calling* thread's next unmasking `sigprocmask`/`pthread_sigmask` — a syscall
+landmark, so both dispatch loops can see it, which is the same argument that keeps delivery above
+the trace.
+
+**The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
+`Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (`TRACE_MAGIC` is now
+`RT\x00\x08`, so every pre-M16 recording is unreadable) — and replay recomputes the current thread
+and compares it. `verify_thread` has **seven** call sites, one per landmark-consuming arm, each
+placed *after* that arm's own field comparison so a genuine argument divergence still reports as
+itself. That count is the thing to check when adding an arm: each site exists because a mirror
+`return`s before reaching the generic dispatch, so **every new mirror silently creates a new hole
+until its oracle call is added** — nothing structural couples the two. Without the check, two
+threads running the same code issue byte-identical `(num, args)` and a wrong-thread replay continues
+in silence. `Event::Sched` is **gone**, not reserved: emitting it would silently renumber every
+landmark, and nothing in either dispatch loop can see a switch. M15 shipped the caught-raise and
+`sigreturn` mirrors proven only to *fire*, since their only fixture was single-threaded; **M16
+discharged that** — `sigthread` is both threaded and signalling, and independent mutation of each
+arm fails its own gate while the other stays green, so both are now proven to *distinguish two live
+schedules*. What is still unexercised is the `Crash` site: no threaded guest in the tree crashes, so
+its retag mutation has no live second thread to target. (M14-threads, M15-threaddebug,
+M16-threadsignal; see their specs and the README's Status sections.)
 
 ## Milestone / SDD workflow
 
