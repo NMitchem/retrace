@@ -129,7 +129,9 @@ These are real and current, not aspirational gaps.
   pended and materialised at the wake that makes the thread runnable; retrace does not interrupt the
   wait with `EINTR` as a real kernel would. A guest that strands a signal this way fails loud at a
   **clean** exit rather than exiting 0 and swallowing it; a guest that is already crashing is
-  diagnosed by its crash instead.
+  diagnosed by its crash instead. **At most one signal materialises per wake**, and a second
+  deliverable one aborts loudly rather than being dropped: queueing at a wake is unmodelled because
+  no guest in the tree measures it.
 - **One gate is parked `#[ignore]`d** at a documented, *measured* wall — the reason is on the test
   itself:
   - `stackoverflow_rust_e2e` — libstd computes its guard page from a constant macOS 26 libpthread

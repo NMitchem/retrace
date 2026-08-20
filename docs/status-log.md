@@ -3307,6 +3307,17 @@ the log a third time. M16's deferral text stays standing; this paragraph is its 
 - **Signal queueing and nested delivery remain unmodelled** (M16), `sigwait` (330) and `sigsuspend`
   (111) still panic (M11), and a pended signal whose default action is Terminate still panics at
   materialisation rather than killing the process.
+- **At most ONE signal materialises per wake**, and a second deliverable one on the woken thread now
+  asserts. Added in the final-review round, not during the tasks: the review observed that the
+  sibling case — one wake making several *threads* deliverable — got an explicit `deliver_to.len()
+  <= 1` bound with the reasoning "measure the guest before modelling it", while the multi-*signal*
+  case got nothing. It is the same argument, and the gap was invisible for a specific reason worth
+  recording: `take_pending_delivery` takes one bit, the woken thread is `Runnable` by then, and
+  `assert_no_stranded_signals` scans `Blocked(_)` threads only — so the residue would have been
+  swallowed with record and replay agreeing, the one failure a determinism oracle cannot see. The
+  assert sits *outside* the `Some`/`None` match on the take, because an `Ign` disposition returns
+  `None` **after** the bit was consumed, so that path swallows too. Byte-identical message on both
+  sides, verified by extracting and comparing the two literals rather than by reading them.
 
 **What is still unexercised, honestly.** Replay's `mirror_delivery` `check_deliverable` **Err** branch
 is genuinely called now — the function is on the live wake path — but the Err arm itself stays
