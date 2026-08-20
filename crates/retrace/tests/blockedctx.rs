@@ -8,7 +8,7 @@
 // wall is narrower than its own `#[ignore]` text describes. If it is false, materialisation must
 // first complete the syscall on the SAVED context, which is a different design.
 //
-// The reading this checks is `crates/retrace-core/src/lib.rs:865-870`: `guest_ulock_wait` marks the
+// The reading this checks is `crates/retrace-core/src/lib.rs:874-879`: `guest_ulock_wait` marks the
 // thread Blocked, and only THEN does `set_x0_err_and_return` write x0 and advance the pc on the
 // live vCPU; the switch that saves it happens on the next `run()`.
 mod util;
@@ -89,8 +89,8 @@ fn parse_spsr(dump: &str) -> u64 {
 
 // M17 Task 4b. Task 1 above measured R1 on ONE axis (x0). A review found a second axis nobody had
 // looked at: `deliver_signal_to` writes the frame's PSTATE from the receiver's SAVED SPSR
-// (`ts.cpsr = ctx.spsr`, `crates/retrace-box/src/lib.rs:2926`), and `ctx.spsr` is a raw
-// `SPSR_EL1` read (`save_ctx`, lib.rs:3124) that NOTHING on the wake path patches:
+// (`cpsr: ctx.spsr`, `crates/retrace-box/src/lib.rs:2973`), and `ctx.spsr` is a raw
+// `SPSR_EL1` read (`save_ctx`, lib.rs:3161) that NOTHING on the wake path patches:
 // `set_x0_err_and_return`/`apply_and_return` write only `reg::CPSR`, never `SPSR_EL1`, and the one
 // function that DOES touch `SPSR_EL1` — `complete_syscall_before_delivery` — is deliberately not
 // called on the wake arm, because the live vCPU there is the WAKER, not the receiver (see the
@@ -135,7 +135,7 @@ fn b_wait_blocked_threads_saved_spsr_is_an_unpatched_el0_pstate() {
 
     // The saved SPSR must still be a plausible EL0 PSTATE — mode EL0t — because that is what
     // `deliver_signal_to` needs in order to resume the handler at EL0 at all (the comment at
-    // lib.rs:2961-2965 depends on exactly this). If this ever fails, `ctx.spsr` is not what
+    // lib.rs:2970-2973 depends on exactly this). If this ever fails, `ctx.spsr` is not what
     // `save_ctx` claims it is, which would be a correctness bug well upstream of M17.
     assert_eq!(mode, 0,
         "spsr={spsr:#x} has a non-EL0t mode (M[3:0]={mode:#x}) — the saved context is not a \
