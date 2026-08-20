@@ -81,8 +81,9 @@ fn two_recordings_of_a_caught_fault_are_byte_identical() {
     util::assert_trace_reproducible(retrace_guest::SEGVCATCH);
 }
 
-/// Fast-follow: the `sigaltstack` replay mirror. `sigaction`'s oldact writeback (:1392 in
-/// retrace-core) is byte-compared on replay; `sigaltstack`'s oldstack writeback is not — see
+/// Fast-follow: the `sigaltstack` replay mirror. `sigaction`'s oldact writeback (the
+/// `encode_oldact` byte-compare in `ReplaySession::advance`, retrace-core `:1536`) is
+/// byte-compared on replay; `sigaltstack`'s oldstack writeback is not — see
 /// `.superpowers/sdd/fastfollow-sigaltstack-brief.md`. This is that gap's mutation test.
 ///
 /// ALTSTACK's fast-follow query (`sigaltstack(NULL, &oss)`, added to altstack.s beside the
@@ -108,7 +109,7 @@ fn two_recordings_of_a_caught_fault_are_byte_identical() {
 /// and at a LATER landmark than the sigaltstack call itself. That accidental, coarse, late catch
 /// is what "no sigaltstack-specific check" looked like in practice on this fixture.
 ///
-/// Now that the mirror (retrace-core's `SYS_SIGALTSTACK` arm at :1408) recomputes and
+/// Now that the mirror (retrace-core's replay-side `SYS_SIGALTSTACK` arm at `:1546`) recomputes and
 /// byte-compares the oldstack writeback, this corruption is caught immediately, AT the sigaltstack
 /// landmark, by a `Divergence` naming it — before the guest even resumes.
 #[test]
