@@ -99,21 +99,19 @@ fn two_recordings_of_a_caught_fault_are_byte_identical() {
 /// guest instruction ever reads — isolates exactly the gap this test exists to prove: with no
 /// sigaltstack-specific check, NOTHING notices at the landmark where the corruption actually is.
 ///
-/// Measured, not assumed (see the fast-follow report): this does NOT make replay report success.
-/// `apply_and_return` paints the corrupted byte into guest memory at the sigaltstack landmark,
-/// unnoticed there, but that byte then sits untouched until the run's PRE-EXISTING, unrelated
-/// final full-memory `Snapshot` diff (CLAUDE.md's "at exit does a full-memory comparison") trips
-/// over it — reported as a bare `memory divergence at ipa 0x.. replay=0xff recorded=0x00`, naming
-/// an address, not sigaltstack. That accidental, coarse, late catch is exactly what "no
-/// sigaltstack-specific check" looks like in practice on this fixture; it is not the deliverable.
+/// Measured, not assumed (see the fast-follow report): before the mirror landed, this did NOT
+/// make replay report success either — `apply_and_return` painted the corrupted byte into guest
+/// memory at the sigaltstack landmark unnoticed, but that byte sat untouched until the run's
+/// PRE-EXISTING, unrelated final full-memory `Snapshot` diff (CLAUDE.md's "at exit does a
+/// full-memory comparison") tripped over it — reported as a bare
+/// `memory divergence at ipa 0x.. replay=0xff recorded=0x00`, naming an address, not sigaltstack,
+/// and at a LATER landmark than the sigaltstack call itself. That accidental, coarse, late catch
+/// is what "no sigaltstack-specific check" looked like in practice on this fixture.
+///
+/// Now that the mirror (retrace-core's `SYS_SIGALTSTACK` arm at :1408) recomputes and
+/// byte-compares the oldstack writeback, this corruption is caught immediately, AT the sigaltstack
+/// landmark, by a `Divergence` naming it — before the guest even resumes.
 #[test]
-#[ignore = "parked until the sigaltstack replay mirror lands (fast-follow step 3, retrace-core's \
-            SYS_SIGALTSTACK arm at :1411): replay currently has NO byte-compare for the oldstack \
-            writeback, so this corruption goes unnoticed at the sigaltstack landmark and is only \
-            caught later, by chance, as an unrelated bare final-memory-diff — never as a divergence \
-            naming 'sigaltstack oldstack mismatch'. That is what fails below today. Un-ignore once \
-            the mirror lands: it should then report the divergence immediately, at the sigaltstack \
-            landmark, by that name, before the guest even resumes — exactly as this test asserts."]
 fn a_corrupted_sigaltstack_oldstack_region_is_a_divergence() {
     let (rec, trace) = util::record(retrace_guest::ALTSTACK);
     assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);

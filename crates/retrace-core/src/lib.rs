@@ -1405,14 +1405,38 @@ impl ReplaySession {
                                     }
                                 }
                             }
-                            if num == retrace_arch::SYS_SIGALTSTACK && args[0] != 0 {
-                                let raw = self.b.read_guest(args[0], 24);
-                                let ss = (u64::from_le_bytes(raw[0..8].try_into().unwrap()),
-                                          u64::from_le_bytes(raw[8..16].try_into().unwrap()),
-                                          u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64);
-                                // M16: the alternate stack belongs to the CALLING (current) thread.
-                                let cur = self.current_thread() as usize;
-                                self.b.threads_mut().set_altstack_of(cur, Some(ss));
+                            if num == retrace_arch::SYS_SIGALTSTACK {
+                                // Fast-follow: a real mirror of record's arm (`SYS_SIGALTSTACK` in
+                                // `record_box`, above), on the model of the `sigaction` mirror just
+                                // above this one. The table update stays guarded on `args[0]` —
+                                // installing a new stack is the only thing that changes it — but
+                                // the byte-compare belongs under its OWN guard, `args[1]`, so a pure
+                                // query `sigaltstack(NULL, &old)` now enters this compare too instead
+                                // of skipping it. `rthread` (not `current_thread()`) is the thread
+                                // index, for identity with record — `verify_thread` above already
+                                // proved the two agree, but taking the same value record took is
+                                // what makes the identity structural rather than incidental.
+                                let tid = *rthread as usize;
+                                let new = if args[0] != 0 {
+                                    Some(retrace_box::decode_stack(&self.b.read_guest(args[0], 24)))
+                                } else { None };
+                                // `old` comes from `set_altstack_of`'s RETURN value, exactly as
+                                // record takes it — by the time a read-back would run, the update
+                                // has already overwritten the table entry it would read.
+                                let old = match new {
+                                    Some(ss) => self.b.threads_mut().set_altstack_of(tid, Some(ss)),
+                                    None => self.b.threads().altstack_of(tid),
+                                };
+                                if args[1] != 0 {
+                                    let mine = retrace_box::encode_oldstack(old.unwrap_or((0, 0, 0))).to_vec();
+                                    let recorded = writes.iter().find(|r| r.ipa == args[1])
+                                        .map(|r| r.bytes.clone()).unwrap_or_default();
+                                    if mine != recorded {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "sigaltstack oldstack mismatch at {:#x}: recomputed {mine:02x?} \
+                                             != recorded {recorded:02x?}", args[1]) });
+                                    }
+                                }
                             }
                             // M16 Task 9, fix round 1: sigpending's mirror. Record's arm used to
                             // write a constant zero, so there was nothing to recompute and nothing
