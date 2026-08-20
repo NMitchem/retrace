@@ -73,35 +73,44 @@ context, and over interrupting the wait with `EINTR`. The alternatives and why t
 
 This is the part most likely to be got wrong, so it is specified rather than left to discovery.
 
-Replay handles `SYS_ULOCK_WAKE` today as a **hook** inside `advance`'s generic dispatch block
-(`crates/retrace-core/src/lib.rs:1777`). That block ends in `finish_event()`, which consumes exactly
-**ONE** landmark. A materialising wake appends **TWO** — the ordinary `Syscall`, then the
-`SignalDelivery`.
+A materialising wake appends **TWO** landmarks — the ordinary `Syscall`, then the `SignalDelivery` —
+where the ordinary path consumes ONE. Replay's wake handling must therefore consume two explicitly.
 
-Therefore replay's wake handling **must be hoisted into its own dispatch arm**, exactly as the
-unmasking `sigprocmask` arm already was, for the reason documented at `:1325`. Leaving it a hook
-would silently renumber every subsequent landmark.
+**Corrected during plan-writing. This replaces an earlier claim in this spec that the arm had to be
+hoisted into its own dispatch arm and that the oracle count went 7 -> 8. Both were wrong.** The
+earlier reading assumed the `ULOCK_WAKE` hook sat where the unmasking-`sigprocmask` hook sat before
+M16 Task 9 hoisted it. It does not:
 
-This mirrors the rule CLAUDE.md states for the *record* side and the sigpending comment states for
-the replay side: an arm that materialises nothing may stay a hook; an arm that materialises a
-landmark may not.
+- Replay's `SYS_ULOCK_WAKE` hook (`crates/retrace-core/src/lib.rs:1777`) lives **inside** the generic
+  `Some(Event::Syscall { .. })` arm beginning at `:1415`, and that arm calls
+  `self.verify_thread(*rthread, pc)?` at `:1429` — **before** control reaches the hook. The thread
+  oracle has already run.
+- The hook **`return`s explicitly** (`return self.finish_event();` at `:1785`) rather than falling
+  through to the block's tail. Falling through was precisely the mask hook's problem, which its
+  hoist comment at `:1322-1333` describes.
 
-## The oracle hole the hoist creates
+So the wake hook stays where it is and consumes two landmarks, using the exact tail the hoisted mask
+arm already uses at `:1390-1412`:
 
-M16's status entry is explicit, and it applies directly here:
+```rust
+match take_pending_delivery(&mut self.b, woken_tid) {
+    Some((psig, _handler)) => {
+        self.idx += 1;                     // consume the Syscall landmark by hand;
+        self.mirror_delivery(woken_tid, psig, retrace_arch::SI_USER, 0, 0, 0, pc)
+    }                                      // mirror_delivery consumes the SignalDelivery
+    None => self.finish_event(),           // ONE landmark, exactly as today
+}
+```
 
-> every one of those sites exists because a mirror was found that `return`s *before* reaching the
-> generic dispatch, so **each new mirror silently creates a new hole until someone remembers to add
-> its oracle call**. Nothing structural couples "add a mirror" to "add its `verify_thread`".
+**The `verify_thread` count stays at SEVEN**, and the number of places the oracle compares a thread
+stays at EIGHT. No task in this plan may change either. A task that finds it needs to has discovered
+that this correction is itself wrong, and must stop and say so rather than adjust a count quietly —
+that census has already drifted three times. CLAUDE.md's paragraph needs no edit.
 
-The hoisted wake arm `return`s before the generic dispatch. **It therefore needs its own
-`verify_thread` call**, placed *after* that arm's own field comparison so a genuine argument
-divergence still reports as itself.
-
-Count goes from **seven** `verify_thread` call sites to **eight**, and from eight to **nine** places
-the oracle compares a thread (the ninth remains `mirror_delivery`'s inline `rthread != tid` check,
-which is deliberately not a `verify_thread` call because its tag names the receiving thread). Any
-task that changes this count updates CLAUDE.md's paragraph, which has drifted three times before.
+**What does still need care:** `mirror_delivery`'s inline `rthread != tid` test is the only thing
+checking a delivery's RECEIVING thread — the eighth place. It is what makes a wrong woken thread a
+divergence instead of silent corruption, which is why materialisation goes through `mirror_delivery`
+rather than a hand-rolled compare.
 
 ## Determinism posture
 
@@ -154,9 +163,8 @@ is the semantic gap named under fail-loud boundaries, which is guarded rather th
 
 ## Scope
 
-**In:** the widened pend condition; materialisation at the wake; the hoist of replay's `ULOCK_WAKE`
-handling into its own arm; that arm's `verify_thread` call; the exit-time pending-signal guard;
-un-parking `sigblocked_e2e`.
+**In:** the widened pend condition; materialisation at the wake; replay's `ULOCK_WAKE` hook
+consuming two landmarks; the exit-time pending-signal guard; un-parking `sigblocked_e2e`.
 
 **Out:** `EINTR`/wait-interruption semantics. `BlockReason::Join`. Signals to `Exited` threads. The
 `Crash` landmark's still-unexercised `verify_thread` site — a real gap, unrelated to this one, which
@@ -175,10 +183,11 @@ asserting on the trace (`delivered == vec![1u32]`), which is why it was written 
 ## Testing
 
 - **`sigblocked_e2e`, un-parked.** The headline. Assertions unmodified.
-- **A mutation test for the new oracle site.** Retag the wake landmark's thread tag to another live
-  id and assert replay reports a divergence naming the schedule. Without it the hoisted arm's
-  `verify_thread` is an untested hole — the exact failure mode M16's own census kept re-creating.
-  Follow `thread_oracle.rs`'s existing shape, and pin the message, not just exit code 3.
+- **A mutation test for the materialised delivery's thread tag.** Retag the new `SignalDelivery`
+  landmark's thread to another live id and assert replay reports a divergence. This exercises
+  `mirror_delivery`'s inline receiving-thread check — the eighth oracle place — on a delivery that
+  reaches it by a route no existing test uses. Follow `thread_oracle.rs`'s existing shape, and pin
+  the message, not merely exit code 3.
 - **Unit tests** for the widened pend condition (a `Blocked` target pends rather than delivering)
   and for materialise-at-wake (a wake on a thread with a deliverable pending signal produces one).
 - **Mutation over argument.** Every claim that a test catches something is established by making the
@@ -188,12 +197,13 @@ asserting on the trace (`delivered == vec![1u32]`), which is why it was written 
 
 - **R1 — the load-bearing claim is false.** Mitigation: Task 1 measures it first and the design is
   re-shaped before anything is built on it. Impact: high, cost of detection: one task.
-- **R2 — the hoist renumbers landmarks.** A hook that appends two landmarks corrupts every
-  subsequent index. Mitigation: the hoist is specified above, not discovered; and the full e2e suite
-  is the detector, since every existing threaded gate would fail loudly.
-- **R3 — the new arm's oracle hole is forgotten.** Mitigation: named as its own deliverable with its
-  own mutation test, and the seven→eight count is stated so a reviewer can check it by grep.
-- **R4 — the guest deadlocks instead of delivering.** If the pend-until-wake ordering is wrong, `a`
+- **R2 — the landmark arithmetic is got wrong.** A hook that appends two landmarks but consumes one
+  meets the delivery landmark with the next unrelated stop, reporting "expected recorded syscall, got
+  SignalDelivery" far past the wake — the exact failure M16 Task 9 measured before its hoist
+  (landmark 280 of the sigthread trace, for an unmask at 271). Mitigation: the two-landmark tail is
+  specified above, copied from the arm that already does it; and every existing threaded gate is the
+  detector, since a renumbered trace fails them loudly.
+- **R3 — the guest deadlocks instead of delivering.** If the pend-until-wake ordering is wrong, `a`
   waits forever and the gate hangs rather than failing. Mitigation: the exit-time guard, plus
   `RETRACE_TRACE=1` on the record run as the first diagnostic.
 
@@ -203,8 +213,9 @@ asserting on the trace (`delivered == vec![1u32]`), which is why it was written 
   suffice. If a task finds it needs a new `Thread` field, that is a signal the design is wrong.
 - `crates/retrace-box/src/lib.rs` — the widened pend decision, the wake-site materialisation hook,
   the exit-time guard.
-- `crates/retrace-core/src/lib.rs` — record's wake arm materialises; replay's wake handling is
-  hoisted into its own arm with its own `verify_thread`.
+- `crates/retrace-core/src/lib.rs` — record's wake arm materialises; replay's wake hook consumes two
+  landmarks via `self.idx += 1` + `mirror_delivery`. No new `verify_thread` call: the generic
+  `Event::Syscall` arm's call at `:1429` already covers this hook.
 - `crates/retrace/tests/sigblocked_e2e.rs` — un-parked, assertions untouched.
 - `crates/retrace/tests/thread_oracle.rs` — the new site's mutation test.
 - `README.md` (edited in place: "Known limits", the gate line) and `docs/status-log.md` (a new
@@ -212,10 +223,10 @@ asserting on the trace (`delivered == vec![1u32]`), which is why it was written 
 
 ## Open questions for implementation planning
 
-1. Does the materialisation belong inside `guest_ulock_wake` (below the trace, so both loops get it
-   for free) or in the two dispatch arms (above the trace, explicit and symmetric)? The
-   `SignalDelivery` is a **landmark**, so it cannot live below the trace — but the *decision* of
-   which signal to materialise can. Task 1 should settle where the seam sits.
+1. SETTLED during plan-writing: the seam matches the existing mask arm. `guest_ulock_wake` reports
+   which threads it woke (below the trace, both loops identical); the shared `take_pending_delivery`
+   helper decides which signal materialises (below the trace, one definition); the dispatch arms
+   emit the landmark (above the trace, because a `SignalDelivery` IS a landmark).
 2. Should the exit-time guard fire on any `Blocked` thread with pending signals, or only when the
    guest exits 0? A guest already crashing should probably not have this guard fire on top.
 3. If a wake makes SEVERAL threads runnable and more than one has a deliverable signal, the wake
