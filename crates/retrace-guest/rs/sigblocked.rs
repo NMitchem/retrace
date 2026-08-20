@@ -36,7 +36,11 @@ fn main() {
         // Publish a's own pthread_t BEFORE blocking, so b has something to name.
         A_PT.store(unsafe { pthread_self() }, Ordering::SeqCst);
         let b = std::thread::spawn(|| {
-            // a is Blocked(Join) right now: b was scheduled precisely because a blocked.
+            // a is Blocked(Wait { addr }) right now: b was scheduled precisely because a
+            // blocked. MEASURED (Task 13, forced with --ignored): the record-side panic names
+            // `Blocked(Wait { addr: 809578548 })`, NOT `Blocked(Join)` — `pthread_join` blocks in
+            // `__ulock_wait`, and `guest_ulock_wait` is the only site in the box that ever calls
+            // `threads.block`, so `BlockReason::Join` is a variant nothing produces today.
             let at = A_PT.load(Ordering::SeqCst);
             unsafe { pthread_kill(at, SIGUSR1) };
             println!("b signalled a");

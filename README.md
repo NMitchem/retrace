@@ -1673,7 +1673,11 @@ That is the whole milestone in one line of output.
   second is the catastrophe.
 
 **Disposition, not delivery.** `SigTable` (`crates/retrace-box/src/sig.rs`) holds per-signal
-disposition, the blocked mask, and the alt stack. It is a pure function of the guest's own calls, so
+disposition, the blocked mask, and the alt stack. *(Superseded in part, and left standing as M11's
+own account of what M11 built: **M16-threadsignal moved the blocked mask and the alternate stack off
+`SigTable` onto `Thread`** in `crates/retrace-box/src/thread.rs`, because POSIX makes both
+per-thread. `SigTable` holds the dispositions, which are correctly process-global, and nothing else.
+See the M16-threadsignal Status section.)* It is a pure function of the guest's own calls, so
 both runs compute it identically and **nothing about it enters the trace** — `FdTable::slots`'
 posture, and the **standard symmetric** one (replay recomputes and byte-compares), deliberately not
 M2-xpcport's verbatim-apply exception. A raise consults it: `Ign` continues, `Dfl`+fatal appends
@@ -2573,3 +2577,296 @@ asynchronous signals, and arm64e guests.
 wall, unchanged since M13. M15 parked nothing new and un-parked nothing.
 
 See `docs/superpowers/specs/2026-08-15-retrace-m15-threaddebug-design.md`.
+
+## Status: M16-threadsignal — 🎉 a signal knows which thread it is for
+
+**`pthread_kill(child, SIGUSR1)` now runs the handler on the child.** A new guest,
+`rs/sigthread.rs`, installs a `SIGUSR1` handler, spawns a child, masks `SIGUSR1` *for main only*,
+signals the child by its `pthread_t`, joins it, then self-raises while still masked and unmasks —
+and every step of that is recorded and replayed bit-for-bit. Before M16 the target port of
+`__pthread_kill` was not decoded at all: the signal went to whoever held the vCPU, which was main,
+synchronously inside the syscall. The one-line check a reader can run is the guest's own stdout
+order: `kill rc 0` now precedes `handler`, where it used to follow it. Underneath, the blocked
+mask, the pending set and the alternate stack moved off the process-global `SigTable` onto
+`Thread`; `Box_::thread_of_port` resolves a mach port to a thread by reading `[pthread + 0xf8]`
+back out of guest memory; `deliver_signal_to` builds the frame into a *named* thread's saved
+context rather than off the live vCPU; a masked signal pends and materialises at the unmask
+landmark; `sigpending` stops lying; and `Exit`, `Crash`, `Signal` and `SignalDelivery` each carry
+the thread they belong to, with the oracle checking all four. **The gate: 387 passed / 0 failed /
+2 ignored** across 101 test binaries at `dc04e48`, clippy clean over `--workspace --all-targets`
+with `-D warnings` (`CLIPPY_EXIT=0`).
+
+That total was again **measured in chunks, not by one `just gate` run**, every chunk
+`--no-fail-fast` with cargo's exit code captured before any pipe, and every chunk returned
+`CARGO_EXIT=0`. M15 closed at **360 / 0 / 1 over 98 binaries**, so M16 adds **27 passing tests, one
+new `#[ignore]`, and 3 test binaries** — and the delta reconciles *exactly* rather than being waved
+through. It was checked by diffing `#[test]` counts file-by-file between M15's close (`ed819c2`)
+and this HEAD: `kport.rs` +2 (new), `sigthread_e2e.rs` +3 (new), `sigblocked_e2e.rs` +1 (new, and
+the one `#[ignore]`), `thread_oracle.rs` +4, `thread.rs` 0→9, `sig.rs` 23→20, `deliver.rs` +7,
+`threads.rs` +1, `retrace-box/src/lib.rs` +2, `retrace-trace/src/lib.rs` +2. That is **+28 raw new
+tests, one of them ignored = +27 passed + 1 ignored**, and the +3 binaries are exactly the three
+new files. **`sig.rs`'s −3 is a relocation, not a deletion** — the three mask/altstack unit tests
+moved to `thread.rs` when the state they test moved there, which is why `thread.rs`'s +9 contains
+them. `retrace-core`'s test count is byte-identical across the milestone. Every headline gate ran
+and passed **by name** in the logs: `hello_dyn_e2e`, `hello_rust_e2e`, **both** `jq` gates —
+`/opt/homebrew/bin/jq` was present and no skip `eprintln!` fired anywhere in any log, so that green
+is earned — `panic_e2e`, `thread_watch_e2e`, and M16's own `sigthread_e2e` at 3/0.
+
+**`TRACE_MAGIC` moved again, so every recording made before this milestone is unreadable.**
+`RT\x00\x07` → `RT\x00\x08`: `Exit`, `Crash`, `Signal` and `SignalDelivery` each gained a `thread`
+field the new reader requires, so an old trace is missing data rather than merely old. Rejection is
+loud and whole — `open_checked` keeps nothing on a magic mismatch — and both halves are pinned by
+tests, one asserting the *new* magic (`magic_bumped_for_the_landmark_thread_tags`) and one
+asserting a trace written with the *previous* magic is rejected entire. **This is the second format
+break in two milestones** (spec risk R4), and it was accepted on a specific ground rather than
+waved through: every trace on disk was *already* dead from M15's break, so the break costs nothing
+now and would cost real recordings later, once traces start being kept again. The spec named the
+seam to cut if the milestone grew too large — M16-tag, not M16-pending, precisely because dropping
+the tags drops the break with them — and it was not cut, so the break was paid deliberately. **If
+you have a `.bin` from M15 or earlier, re-record it.**
+
+**R1's measurement, first task of the milestone: main's kport reads back as `0x103`, and the
+fallback was never needed.** The design assumed `[main_pthread + 0xf8]` holds a usable mach-port
+name even though retrace never writes it — libpthread's `__pthread_main_thread_init` does, in
+userspace — and that assumption had never been checked. Measured on `THREADRUST`, three separate
+`record-dyn` + replay runs, identical every time: **`main kport = 0x103`, `child kport =
+0xbad7001`** (the child's being the `GUEST_THREAD_PORT_BASE | tid` retrace itself wrote). Nonzero,
+distinct, and readable through exactly the same `pthread_of`/`kport_of` path as a child's — so
+`thread_of_port` needs **no special case for main**, and the fallback the spec held in reserve
+(recognise `0x0BAD_7000 | tid` and fail loud on anything else) was never built. One caveat travels
+with that number: `0x103` is *stable*, not *architecturally guaranteed*. It is the kernel's write,
+not retrace's, so it is guest-observed data — like M2-xpcport's minted port — and nothing here
+claims retrace could recompute it.
+
+**What is proven and what is merely exercised are not the same list, and the pended-raise path is
+where the difference bites.** Both halves of the pend path — record's `pend` and replay's mirror —
+were verified consistent *in source* by Task 8's review, including the fall-through equivalence
+that lets replay's blocked branch drop into generic dispatch. Source agreement is not a test. What
+Task 9's guest actually exercises end to end is the **self-directed** case: main masks `SIGUSR1`,
+`pthread_kill`s *itself*, the signal pends, `sigpending` reports it, and the unmask materialises it
+into a real `SignalDelivery` — and that is genuinely proven rather than argued, because mutating
+replay's recomputed pending set to a constant `0` turns `sigthread_e2e` from 2 passed to 2 failed
+with a named divergence (`sigpending set mismatch … recomputed [00,00,00,00] != recorded
+[00,00,00,20]`, bit 29 = `SIGUSR1`). **What remains source-level agreement only** is the
+*cross-thread* pend — `pend(target, …)` where `target != current`, which no guest reaches, since
+`sigthread`'s masked raise is self-directed and its cross-thread raise is unmasked — and
+`take_pending_delivery`'s `Ign` / `Dfl`-ignore discard branches, which no guest reaches either.
+Those write and read a bit that both sides agree about because they call the same function with the
+same arguments, not because anything runs them.
+
+**The `Crash` thread check is installed and unexercised, and the reason is a missing fixture rather
+than an oversight.** Task 11 added `verify_thread` at both the `Exit` and `Crash` replay sites. The
+`Exit` site has a retag mutation test (`a_wrong_thread_on_the_exit_landmark_is_a_divergence`,
+against `THREADRUST`); the `Crash` site has none, and **no honest test for it is constructible from
+the guests in this tree**. Enumerated rather than assumed: `threadrust`, `watchthread` and
+`sigthread` are the only guests that spawn threads, and none of them reaches the `Crash` arm —
+`sigthread`'s signal is non-terminal. This project's own standard for a retag mutation is that it
+must target a *genuinely live second thread id in the same trace* (it is exactly why M15's
+bogus-constant mutations were judged too weak), and every crashing fixture is single-threaded, so
+the only mutation available is precisely the weak kind. A threaded-crashing guest was ruled out of
+scope. Two checks added, one mutation-proven, one not.
+
+**Tasks 7, 9 and 10 are not three independent guards on per-thread masks — they are three
+observables of one defect class.** Measured, not assumed: mutating `ThreadTable::is_blocked_for` to
+ignore its `tid` — a faithful re-creation of the process-global mask M16 replaced — fails **all
+three** `sigthread_e2e` tests *and* the `thread.rs` unit test
+`masks_are_independent_between_threads`. Worth stating because the close would otherwise read as
+three checks where there is one. What each *uniquely* contributes: Task 7 owns "delivery goes to the
+thread the port names"; Task 9 owns "a masked signal pends and materialises at the unmask"; and
+Task 10 owns the **stdout-ordering proof** (`masked` precedes `kill rc`) — the only one of the three
+that makes the per-thread mask an observable of the guest's own behaviour rather than an assertion
+about a struct. One deferred minor sits alongside: `sigthread_e2e.rs:188-192`, Task 10's trace-side
+check, is mechanically the same assertion as Task 7's `delivered[0] == 1u32`. It was specified
+verbatim by the task brief and self-disclosed; noted for whoever tightens test independence.
+
+**M15's standing fidelity caveat is discharged, and the evidence is specific rather than
+rhetorical.** M15 shipped the oracle's caught-raise and `sigreturn` mirrors proven to *fire* but not
+to *distinguish two live schedules*, because the only fixture reaching them (`SIGFRAME`) is
+single-threaded. `sigthread` is the guest that is both threaded and signalling, and Task 12 proved
+the distinction by independent mutation: disabling the caught-raise mirror's `verify_thread` fails
+`a_wrong_thread_at_the_caught_raise_mirror_is_a_divergence` while the `sigreturn` test stays green,
+and disabling the `sigreturn` mirror's does exactly the reverse. Both were restored and the call
+census returned to seven after each. The review strengthened the transcript into a proof by
+establishing that `self.verify_thread(*rthread, pc)?` is **the only statement in either arm capable
+of producing a divergence once `(num, args)` has already matched**, so the observed exit-code flip
+is mechanically attributable to the thread check and to nothing incidental; and the two arms are
+structurally non-overlapping branches, so neither mutation can contaminate the other's test. The
+`CLAUDE.md` and README sentences that carried that caveat have been rewritten, not left standing
+next to the work that discharged them.
+
+**`verify_thread` has seven call sites, not three, four or six — and the drift is the lesson.** The
+seven, with attribution: M15 Task 4's three (the generic dispatch, the caught-raise mirror, the
+`SYS_SIGRETURN` mirror); M16 Task 8's terminal `Signal`; M16 Task 9's hoisted mask mirror; M16 Task
+11's `Exit` and `Crash`. The census in its own doc drifted **three times inside this one milestone**
+and was corrected in Task 12. The pattern underneath is what matters: every one of those sites
+exists because a mirror was found that `return`s *before* reaching the generic dispatch, so **each
+new mirror silently creates a new hole until someone remembers to add its oracle call**. Nothing
+structural couples "add a mirror" to "add its `verify_thread`"; today the coupling is a habit and a
+grep.
+
+**The `sigaltstack` oldstack writeback is the one remaining serviced-syscall writeback with no
+divergence check — pre-existing, and deliberately not fixed here.** Replay's hook
+(`crates/retrace-core/src/lib.rs:1400-1407`) reads the *new* stack out of guest memory and calls
+`set_altstack_of` so the thread table stays in step, then applies the recorded bytes. It never
+recomputes or byte-compares the *old* `stack_t` that record writes back at `args[1]` — unlike the
+`sigaction` oldact compare six lines above it, the `sigprocmask` oldset compare in the hoisted mask
+arm, and (as of M16) `sigpending`. Symmetry rule 1's check is simply absent there. This predates
+M16, M16 did not create it, and M16 chose not to close it; it is named here so it is not later
+discovered. **A scope note for whoever does fix it, measured and easy to get backwards:** record's
+arm handles the query case `args[0] == 0` by reading `altstack_of` without changing state, so the
+mirror's guard belongs on **`args[1] != 0`** — the writeback pointer — **not** on `args[0] != 0`,
+which is how the current hook is guarded.
+
+**A rough edge worth naming: some replay-side divergences abort instead of diverging.**
+`deliver_signal_to`'s `Runnable` assertion and `thread_of_port`'s no-such-port panic are correctly
+fail-loud, and calling them from the replay side is exactly what symmetry rule 1 demands — the two
+loops must call the same `Box_` method with the same arguments. But on the replay side those are
+the failure modes of a *schedule* divergence, and the `pthread_kill` landmark's own `verify_thread`
+checks the **caller**, not the target, so it would not catch such a divergence first. M16 elsewhere
+prefers a named `Divergence` at a landmark to a process abort. Recorded as a known rough edge, not
+fixed.
+
+**The named limits, stated here rather than discovered later:**
+
+- **A signal pended on a thread that never touches its mask again is never delivered.** Delivery has
+  exactly two anchors, both syscalls: the `pthread_kill` landmark and the
+  `sigprocmask`/`pthread_sigmask` landmark that unblocks. `take_pending_delivery` operates on the
+  **calling** thread, so a signal pended on thread B materialises only when *B itself* unmasks. A
+  real kernel would deliver it at B's next opportunity. Anchoring to syscalls is deliberate — the
+  reschedule check lives inside `run()`, below the trace, and producing a `SignalDelivery` from
+  there needs either a new channel out of `run()` or the scheduling decision duplicated into both
+  dispatch loops, which is the exact argument M15 used to *delete* `Event::Sched`.
+- **Handler-before-body differs from a native run** (spec risk R3, accepted by design). A never-run
+  target's saved context is the synthetic entry context `guest_bsdthread_create` built, so the frame
+  lands on the child's stack, the child runs the handler first, `sigreturn`s, and *then* starts its
+  body. A real kernel starts the thread and takes the signal at its first opportunity. This is why
+  the gate asserts against **retrace's own recorded behaviour replayed identically**, not against
+  native output the way `hello_dyn_e2e` compares against `"hi\n"`.
+- **Signalling a thread that is Blocked is parked, with a gate to prove it** — see below.
+- **Signal queueing and nested delivery are unmodelled**, and a second signal raised for a thread
+  already redirected and not yet scheduled is fail-loud rather than stacked.
+- **`sigwait` (330) and `sigsuspend` (111) still panic**, unchanged from M11.
+- **A pended signal whose default action is Terminate panics at the unmask** rather than killing the
+  process. Both sides reach that panic at the same landmark, so it cannot desync; no guest reaches
+  it (`abort()` unblocks `SIGABRT` before raising it).
+
+**One new gate is parked, and `stackoverflow_rust_e2e` is untouched.** The ignored count goes 1 → 2.
+`sigblocked_e2e::a_signal_reaches_a_thread_blocked_in_ulock_wait` is the new one: a three-thread
+guest (three, not two, and forced rather than incidental — the cooperative scheduler switches only
+on block or exit, so for a peer to be blocked main must have blocked first; a blocked *joiner*
+leaves its joinee running, so `main → joins a → joins b`, and `b` is the only thread that can
+express this signal at all). `stackoverflow_rust_e2e`'s `#[ignore]` reason is **byte-identical** to
+before — M16 did not touch the M8 R3 wall — and those two are confirmed to be the **only** live
+`#[ignore]` attributes anywhere in the test surface; the other four files a `grep` matches carry the
+string inside prose comments narrating gate history, not as attributes.
+
+**What contradicted this plan — because a plan that survives contact unamended is more likely
+unexamined than perfect.** This one did not survive unamended:
+
+- **Task 13's wall was cleaner than the plan predicted, and the reason is that M16 had already
+  guarded it.** The brief predicted a messy failure — mismatched register state, EINTR/restart
+  semantics — and explicitly warned "do not assume it panics where you expect." Forced with
+  `--ignored`, what actually happens is a **clean fail-loud panic from M16's own Task 6 fix round**:
+  `crates/retrace-box/src/lib.rs:2849`, "thread 1 is `Blocked(Wait { addr: 809578548 })`, not
+  Runnable; `deliver_signal_to` would overwrite the saved context its blocking syscall must resume
+  through." That guard was added when no product caller could reach it, on the argument that the
+  failure mode would be silent corruption rather than a panic; Task 13's guest is the first caller
+  to reach it, and it fires exactly as designed. The general *shape* of the prediction held (a
+  blocked thread's saved ctx is a resume point that cannot simply be redirected); the *mechanism*
+  was an already-installed assert, not a live discovery. The `#[ignore]` reason was written from the
+  measurement rather than forced into the predicted shape.
+- **The `verify_thread` census drifted three times in one milestone.** Documented above; it is
+  listed here too because it is a *plan* failure, not only a code one — each task's brief carried a
+  count that was already stale by the time the task ran.
+- **Task 11's brief contradicted itself about how many call sites to add**, naming three where two
+  were correct: the terminal `Signal` site's call had already landed in Task 8 (`449cf90`). The
+  implementer resolved it by grepping rather than obeying, found the existing call with its
+  "RAISING thread, not `target`" comment intact, and added only `Exit` and `Crash`.
+- **Task 10's mutation measured three tests catching one defect class** where the plan implied
+  independent guards. Documented above.
+- **Task 9's non-vacuity prediction was wrong about which tests a mutation would fail.** The brief
+  predicted that making `take_deliverable` always return `None` would fail Task 9's test and leave
+  Task 7's green. It fails both — Task 7's on `lines.len(): left 9, right 10`, because the guest
+  prints from inside its handler and a dropped delivery is a missing stdout line. The line-count
+  assertion was **not** weakened to make the prediction come true.
+- **Task 9's fix round deliberately deviated from the brief's mutation recipe, and was right to.**
+  The brief proposed mutating record's raise arm alone, which answers a different question: replay
+  recomputes the target independently, so a record-only mutation kills the test through a *replay
+  divergence* and proves the oracle works rather than proving the test's delivery claim bites.
+  Mutating **both** resolutions is the faithful simulation of the defect M16 closes, and under it
+  the test fails on its own assertion, at `sigthread_e2e.rs:43`, with `left: 0, right: 1`.
+- **Task 8's review found that replay's `pend` was a write-only side effect** at the time it was
+  written — both sides maintained a pending bit nobody read. Task 9's materialisation is what gave
+  it a consumer, and this close verified that by grep rather than by assumption:
+  `ThreadTable::take_deliverable` has a **product** caller at `crates/retrace-core/src/lib.rs:93`,
+  not merely test callers. That check mattered: Task 7 traded a fail-loud assert for a pending set,
+  and an assert replaced by silence is the one direction this codebase's fail-loud constraint
+  dislikes.
+- **The spec's own open question 5 is answered, and the answer is yes.** It asked whether `Exit`'s
+  thread tag was worth its format break "if it proves to carry no assertion anywhere." It does
+  carry one — `a_wrong_thread_on_the_exit_landmark_is_a_divergence`, a retag mutation against a
+  genuinely threaded trace. Its type doc was also corrected in passing: the old reason for the tag
+  being unambiguous ("a threaded guest still has exactly one thread call exit") is false as stated,
+  since nothing stops two threads racing to call `exit`; what actually makes it unambiguous is that
+  `record_box`'s `SYS_EXIT` arm `break`s the record loop immediately after appending, so at most one
+  `Event::Exit` can exist in a trace.
+- **One commit subject overclaims, and is recorded rather than rewritten.** `af657a6` reads "M16
+  t11: the oracle checks Exit, Crash and Signal's thread too", but that commit added only `Exit` and
+  `Crash`; `Signal`'s landed in Task 8 (`449cf90`). True of the oracle's coverage, imprecise as a
+  description of the commit. Judged not worth unwinding history over, and named here so this account
+  does not repeat it.
+
+**Two hazards on the project's own exit gate, both deliberately deferred, both named so the next
+milestone does not rediscover them:**
+
+1. **A codesign race between concurrent test binaries.** `crates/retrace/tests/util/mod.rs::bin()`
+   runs `codesign -f` on the *one shared* `target/aarch64-apple-darwin/debug/retrace`; `-f` replaces
+   the file, so a second test **process** can observe it missing mid-replacement and fail with
+   `codesign -f --entitlements failed … No such file or directory`. **`--test-threads=1` does not
+   prevent this** — it serialises threads inside one binary, while cargo runs test *binaries*
+   concurrently as separate processes. Measured during M16 by running 13 `--test` targets in one
+   invocation: `kport` failed, then passed 2/2 alone. It did **not** fire during this milestone's
+   closing gate run (every chunk log was grepped for the failure string; zero hits), so the 387/0/2
+   above is not a re-run of a spurious red. The fix is to sign a per-test-binary copy rather than
+   the shared file. Deferred because `bin()` is shared test infrastructure and touching it at the
+   close would be unreviewed. **M16 adds two more e2e binaries, so it raises the collision odds it
+   is deferring** — a gate that can go spuriously red teaches the reader to dismiss red, which is
+   the real cost.
+2. **The plan's own gate recipe exceeds the 10-minute tool-call ceiling.** New this milestone. The
+   plan mandated a single `-p retrace-core -p retrace` chunk; it was killed mid-`rung.rs` at the
+   harness's 600s Bash ceiling — *not* a test failure, and no orphan process was left holding the VM
+   (`ps` was clean afterwards), so the one-VM-per-process invariant survived it. Every test that
+   completed before the kill had passed. Splitting into `-p retrace-core` alone plus three
+   `--test`-scoped sub-chunks finished it, and `rung.rs` was re-run to completion so no target was
+   counted twice or dropped. This is distinct from the older "a bare `cargo test --workspace` gets
+   killed on this machine" hazard, but confirms its shape: **this workspace's e2e suite no longer
+   fits in a single bounded invocation**, and the next close will hit the same ceiling with the same
+   recipe unless the recipe changes.
+
+**Deferred minors still open at the close**, none of them fixed: `dbg_kport_of(tid: usize)` takes a
+different tid width than its sibling `dbg_regs_of(tid: u32)`; the anti-drift claim in the
+trace-format type doc is oversold (Task 2, no action taken); Task 10's duplicate trace-side check
+(above); Tasks 12a/12b assert only `rep.code == 3` with no stderr message pin, unlike their siblings
+— Task 12's mutation proof substitutes for the pin, and both were verbatim brief content rather than
+implementer choices; and 12b's doc claims the `sigreturn` tag is a "nonzero id" without asserting
+it, where 12c pins its equivalent precondition with `assert_eq!(orig, 1, …)`.
+
+**Everything M15 and earlier carry forward is unchanged.** Per-thread reverse execution as its own
+position space, preemption (scheduling is still cooperative, so a guest that spin-waits without
+trapping runs forever), `workq`/GCD thread pools, thread priority, hardware-scoped watchpoints, the
+`WatchSyscall` thread filter's missing scoped coverage, M15's three named fast-follows,
+`guest_bsdthread_create` still returning `0` where the real syscall returns the child's `pthread_t`,
+`dup2` (fail-loud), `fcntl(F_DUPFD)` (unmodelled and *not* fail-loud), guest stdin still being
+retrace's, `RLIMIT_NOFILE`, asynchronous signals from outside the process, per-thread *dispositions*
+(correctly process-global — that is POSIX, not a gap), and arm64e guests.
+
+**Process reality, recorded because it shaped the milestone.** Seventeen subagent deaths across M16,
+six of them in the final session, and almost all infrastructural (`API Error: Connection lost
+mid-response`, `ENOTFOUND`) rather than capability failures. Three implementers died mid-task
+leaving uncommitted work; **every one was resumed from the tree rather than restarted, and nothing
+was lost.** Two mitigations were adopted mid-milestone and both are worth keeping: reviewers write
+their report to a file *before* returning it, which recovers a report lost in transit (though not
+one the agent never got far enough to write); and expensive verification steps run *after* the
+commit rather than before it, so a death costs the proof and not the task.
+
+See `docs/superpowers/specs/2026-08-19-retrace-m16-threadsignal-design.md`.

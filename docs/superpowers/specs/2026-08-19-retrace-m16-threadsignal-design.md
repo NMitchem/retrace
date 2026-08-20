@@ -236,6 +236,14 @@ No new record/replay asymmetry is introduced. M2-xpcport's minted-port exception
 ## Fail-loud boundaries
 
 - a `pthread_kill` port matching no live thread — panic naming the ports searched
+- **a target thread that is `Blocked(reason)`** — panic naming the reason. Redirecting it would
+  overwrite the saved context its blocking syscall must resume through: a blocked thread's ctx *is*
+  the resume point `__ulock_wait` owes a return value to. Added in Task 6's fix round, before any
+  product caller could reach it, because the failure mode is silent corruption rather than a panic.
+  **Task 13's parked `sigblocked_e2e` is precisely the guest that trips this arm** — measured, and
+  the exact panic text is quoted in that gate's `#[ignore]` reason.
+- **a target thread that is `Exited(code)`** — panic. There is no context left to resume through,
+  so a frame built into it would never run. Same fix round, same argument.
 - a second signal raised for a thread already redirected and not yet scheduled
 - `sigwait` (330) and `sigsuspend` (111) — unchanged, still panic
 - `kill` to a pid other than the guest's own — unchanged safety boundary
