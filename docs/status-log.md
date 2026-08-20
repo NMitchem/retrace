@@ -2776,6 +2776,33 @@ arm handles the query case `args[0] == 0` by reading `altstack_of` without chang
 mirror's guard belongs on **`args[1] != 0`** — the writeback pointer — **not** on `args[0] != 0`,
 which is how the current hook is guarded.
 
+**[Closed after M16 by the `sigaltstack` fast-follow, `f000c0d`.]** Left standing above rather than
+corrected, because this log is append-only. Replay's hook is now a real mirror of record's arm: both
+sides go through one shared `retrace_box::decode_stack` / `encode_oldstack` pair, so the 24-byte
+layout exists in exactly one place, and the compare is guarded on `args[1] != 0` — the writeback
+pointer — exactly as the scope note above predicted.
+
+One expectation recorded above needs correcting, and it is the kind that is easy to get backwards a
+second time. The missing check did **not** mean a corrupted oldstack was silently accepted: the
+pre-existing end-of-run full-memory `Snapshot` diff caught it anyway, seven landmarks late, as a bare
+`memory divergence at ipa 0x…` naming no syscall at all. Measured on the same mutation, before and
+after the fix:
+
+```
+before: DIVERGENCE at landmark 9: memory divergence at ipa 0x100004044: replay=0xff recorded=0x00
+after:  DIVERGENCE at landmark 2: sigaltstack oldstack mismatch at 0x100004030: … != recorded [.. ff ..]
+```
+
+So the CLI's exit code was already 3 either way, and a gate asserting on the exit code alone would
+have passed **before** the fix. `a_corrupted_sigaltstack_oldstack_region_is_a_divergence`
+(`sigdeliver_e2e.rs`) therefore asserts on the divergence *message*, and the landmark shift 9 -> 2 —
+not the green — is what proves the check fires at the sigaltstack landmark rather than by accident at
+the end of the run. Whoever re-checks this later should look at the landmark number.
+
+The fixture had to change too: `altstack.s` only ever called `sigaltstack(&ss, NULL)`, so `args[1]`
+was 0, record wrote no oldstack `Region`, and there was nothing in any trace to corrupt. It now also
+queries with `sigaltstack(NULL, &oss)` and checks the three returned fields (exit codes 32/33/34).
+
 **A rough edge worth naming: some replay-side divergences abort instead of diverging.**
 `deliver_signal_to`'s `Runnable` assertion and `thread_of_port`'s no-such-port panic are correctly
 fail-loud, and calling them from the replay side is exactly what symmetry rule 1 demands — the two
