@@ -99,10 +99,12 @@ Passed to `debug --script`, semicolon-separated:
   reverse-continue reaches the corrupting store.
 - **Signals** — dispositions, handlers that actually run, `sigreturn`, alternate stacks, masks and
   pending sets. Per-thread since M16: `pthread_kill(child, SIGUSR1)` runs the handler on the child.
+  Since M17 the child may be **blocked** in `__ulock_wait` when it is signalled: the signal pends and
+  is materialised at the wake that makes the thread runnable.
 - **Threads** — emulated `bsdthread_create`, a cooperative block-driven scheduler, and a divergence
   oracle that checks thread identity on every landmark.
 
-**Gate:** 395 passed / 0 failed / 2 ignored across 102 test binaries, **measured at `b73bdbb`**,
+**Gate:** 412 passed / 0 failed / 1 ignored across 103 test binaries, **measured at `3501c9a`**,
 clippy clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how
 that number is assembled.
 
@@ -123,13 +125,15 @@ These are real and current, not aspirational gaps.
   is a raw address.
 - **The trace format is not stable.** `TRACE_MAGIC` broke in both M15 and M16. Recordings are
   currently working artifacts, not things to keep across milestones.
-- **Two gates are parked `#[ignore]`d** at documented, *measured* walls — the reasons are on the
-  tests themselves:
+- **A signal to a thread that never wakes is never delivered.** Signals to a blocked thread are
+  pended and materialised at the wake that makes the thread runnable; retrace does not interrupt the
+  wait with `EINTR` as a real kernel would. A guest that strands a signal this way fails loud at
+  exit rather than exiting 0 and swallowing it.
+- **One gate is parked `#[ignore]`d** at a documented, *measured* wall — the reason is on the test
+  itself:
   - `stackoverflow_rust_e2e` — libstd computes its guard page from a constant macOS 26 libpthread
     reports and retrace cannot influence, so the recursion takes a stage-2 fault instead of striking
     the guard (M8 risk R3).
-  - `sigblocked_e2e` — signalling a thread **blocked** in `__ulock_wait` is unmodelled; a fail-loud
-    guard fires rather than corrupting the blocked thread's resume point (M16 wall).
 
 ## Testing
 
@@ -148,9 +152,19 @@ run every chunk `--no-fail-fast`, and capture cargo's exit code *before* any pip
 cargo test --workspace --exclude retrace-box --exclude retrace -- --test-threads=1
 cargo test -p retrace-box -- --test-threads=1
 cargo test -p retrace --test <name> -- --test-threads=1     # per-target for the e2e gates
+cargo test -p retrace --bins -- --test-threads=1            # don't omit: see below
 ```
 
-Note that `cargo test -p retrace --lib` is invalid and fails the whole invocation.
+**Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the 8
+unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
+other chunks. Leaving it out silently costs 8 tests and one binary — 404 / 0 / 1 over 102 instead of
+412 / 0 / 1 over 103 — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`, which
+is invalid for this crate (there is no lib target) and fails the whole invocation loudly.
+
+**Run each `crates/retrace` test target as its own cargo invocation.** `tests/util/mod.rs::bin()`
+codesigns one *shared* binary with `codesign -f`, so two test processes running concurrently can
+catch it mid-replacement and fail spuriously; `--test-threads=1` does not prevent this, because it
+serialises threads within a binary while cargo runs binaries concurrently.
 
 Some end-to-end gates depend on `/opt/homebrew/bin/jq`, which is not a repo artifact. They skip with
 a loud `eprintln!` rather than passing quietly — a silent skip would read as a green it did not earn.

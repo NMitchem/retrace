@@ -1,6 +1,6 @@
 # retrace — milestone status log
 
-The append-only engineering record, M0 through M16. Every section below was written at the close of
+The append-only engineering record, M0 through M17. Every section below was written at the close of
 the milestone it names and is preserved **verbatim**: nothing was rewritten, condensed, or deleted
 when this moved out of `README.md`.
 
@@ -2843,6 +2843,13 @@ retrace itself has a real schedule bug — precisely the case where a named land
 abort. The delivery arm additionally cannot even be *recorded* today: `sigblocked_e2e`, the guest
 that would produce it, is parked at record's own fail-loud guard. **Un-parking that gate is what
 would make the delivery arm live**, and is the natural next step for whoever wants it covered.
+*(Superseded in part by M17-blockedsignal, and left standing as M16's own account: the next step was
+taken — `sigblocked_e2e` is un-parked and green, so `mirror_delivery` is genuinely called on the
+wake-materialised delivery path. But the **`check_deliverable` Err branch inside it is still
+unreached**, for a new reason: `guest_ulock_wake`'s `unblock_waiters_on` makes the woken thread
+`Runnable` in the same call that produces the woken set, so every target reaching that point is
+already Runnable on both sides. It now needs a genuine live-versus-recorded schedule mismatch, not an
+un-parked gate. See the M17-blockedsignal Status section.)*
 
 **The spec's open question 4 is answered, and the answer is not the one the spec predicted.** It
 asked whether the debugger should surface the *receiving* thread at a `SignalDelivery` landmark, and
@@ -2884,6 +2891,12 @@ source.
   the gate asserts against **retrace's own recorded behaviour replayed identically**, not against
   native output the way `hello_dyn_e2e` compares against `"hi\n"`.
 - **Signalling a thread that is Blocked is parked, with a gate to prove it** — see below.
+  *(Superseded by M17-blockedsignal, and left standing as M16's own account: it is no longer parked.
+  A signal to a `Blocked` target now **pends** and is materialised at the `__ulock_wake` that makes
+  the thread runnable, and `sigblocked_e2e` is green with its assertions unmodified. What replaced
+  the wall is a narrower, named gap: a signal to a thread nothing ever wakes is never delivered — no
+  `EINTR` — and `assert_no_stranded_signals` fails loud at a clean exit rather than swallowing it.
+  See the M17-blockedsignal Status section.)*
 - **Signal queueing and nested delivery are unmodelled**, and a second signal raised for a thread
   already redirected and not yet scheduled is fail-loud rather than stacked.
 - **`sigwait` (330) and `sigsuspend` (111) still panic**, unchanged from M11.
@@ -2892,6 +2905,12 @@ source.
   it (`abort()` unblocks `SIGABRT` before raising it).
 
 **One new gate is parked, and `stackoverflow_rust_e2e` is untouched.** The ignored count goes 1 → 2.
+*(Superseded by M17-blockedsignal, and left standing as M16's own account of what M16 measured: the
+count goes back **2 → 1** there. `sigblocked_e2e` was un-parked — by deleting the `#[ignore]`
+attribute, with the test body byte-for-byte unchanged — leaving `stackoverflow_rust_e2e` at the M8
+R3 wall as the only live `#[ignore]`, still untouched. This paragraph is the discipline working
+exactly as it describes: a gate parked at a measured wall, un-parked one milestone later without one
+assertion being relaxed. See the M17-blockedsignal Status section.)*
 `sigblocked_e2e::a_signal_reaches_a_thread_blocked_in_ulock_wait` is the new one: a three-thread
 guest (three, not two, and forced rather than incidental — the cooperative scheduler switches only
 on block or exit, so for a peer to be blocked main must have blocked first; a blocked *joiner*
@@ -3038,3 +3057,235 @@ one the agent never got far enough to write); and expensive verification steps r
 commit rather than before it, so a death costs the proof and not the task.
 
 See `docs/superpowers/specs/2026-08-19-retrace-m16-threadsignal-design.md`.
+
+## Status: M17-blockedsignal — 🎉 a signal reaches a thread that is blocked
+
+**`pthread_kill(a, SIGUSR1)` now works when `a` is asleep in `__ulock_wait`.** M16 gave signals a
+thread identity and then stopped at one boundary, parking `sigblocked_e2e` at a fail-loud guard: a
+target that is `Blocked`, not merely not-current. `deliver_signal_to` builds the handler frame into
+the target's **saved context**, and for a blocked thread that context is the resume point its own
+blocking syscall owes a return value through — redirecting it would overwrite that resume point out
+from under the wait. M17 funds the boundary M16 declined to fund. The gate is un-parked and green,
+and the ignored count goes **2 → 1**.
+
+**The mechanism is pend-until-wake.** A raise aimed at a thread that cannot run yet is *pended* on
+that thread and *materialised* at the `__ulock_wake` that makes it runnable. That is a syscall
+landmark, so both dispatch loops can see it — the identical argument that already kept delivery above
+the trace for M16's unmasking `sigprocmask`/`pthread_sigmask`, reused rather than re-invented. There
+is now a second materialisation site where M16 had one, and the two reasons a signal pends (masked;
+blocked) are independent: `take_deliverable` already filters by mask, so a signal pended for both is
+released only when both have cleared. **No trace-format change** — `SignalDelivery` already existed
+and already carried a thread tag, so `TRACE_MAGIC` stays `RT\x00\x08` and an M16 recording is still
+readable — where M15 and M16 each broke it.
+
+The pieces: `should_pend_for` (`crates/retrace-box/src/lib.rs`) is the pend-vs-deliver predicate both
+dispatch loops consult, written once so they cannot drift on that decision while both stayed green;
+`guest_ulock_wake` now returns *which* threads it woke (`-> (u64, Vec<usize>)`) rather than only how
+many, because the wake site cannot materialise onto a thread it cannot name; record's
+`SYS_ULOCK_WAKE` arm materialises and appends a second landmark; replay's hook consumes both.
+
+**The gate: 412 passed / 0 failed / 1 ignored** across 103 test binaries at `3501c9a`, clippy clean
+over `--workspace --all-targets` with `-D warnings` (`CLIPPY_EXIT=0`). Measured in chunks again, and
+this time **every chunk returned `CARGO_EXIT=0` — no kill, nothing partial** — 55 logs in total, each
+one grepped for the codesign-race string and for `FAILED`/`panicked` with zero hits. The `jq` gates
+genuinely ran rather than skipping (`/opt/homebrew/bin/jq` present), so none of the 412 is a silent
+skip. The one `#[ignore]` is `stackoverflow_rust_e2e`, confirmed by grep to be the only live
+`#[ignore]` attribute in the tree.
+
+**The chunk recipe as the README documented it was short by 8 tests and one binary, and this close
+found it by arithmetic rather than by luck.** Running the three documented chunks —
+workspace-minus-two, `-p retrace-box`, and one `cargo test -p retrace --test <name>` per target —
+totals **404 / 0 / 1 over 102 binaries**, not 412 / 0 / 1 over 103. The gap is
+`crates/retrace/src/debug.rs`, which holds 8
+`#[test]`s inside the `retrace` **bin** target: `--test <name>` selects integration-test targets only
+and never builds the binary's own unittest harness. `just gate`'s unchunked `--workspace` run does
+include it, so the shortfall exists only in the chunked substitute the README recommends — which is
+the recipe every close since M14 has actually used. `cargo test -p retrace --bins` supplies exactly
+the missing 8, and the README's recipe now names it. Note the asymmetry that hid this: `--lib` is
+invalid for this crate (there is no lib target) and fails the whole invocation loudly, which is
+documented; `--bins` is valid, and omitting it fails **silently**, which was not.
+
+The reconciliation against the previous close was done from **commits, never the working tree**:
+`#[test]` counts at `e78019c` versus `3501c9a` give `thread.rs` +1, `deliver.rs` +11 (23 → 34),
+`threads.rs` +1, `thread_oracle.rs` +1, and `blockedctx.rs` +2 as a new binary — **+16**, with a
+tree-wide count of 397 → 413 agreeing independently. M16 closed at 395 / 0 / 2 over 102 binaries;
+395 + 16 = 411, plus `sigblocked_e2e` moving from ignored to passing = **412 passed, 1 ignored, 103
+binaries**, which is what the run measured.
+
+**The load-bearing claim was MEASURED before anything was built on it, and that is why the milestone
+did not ship a bug.** The design rested on one reading of record's `SYS_ULOCK_WAIT` arm: that a
+`Wait`-blocked thread's saved context is a *complete post-syscall state*, `x0` already holding
+`__ulock_wait`'s return value. The spec named this R1, refused to build on the reading, and made
+Task 1 a measurement task with its own gate, `crates/retrace/tests/blockedctx.rs`. It measured:
+
+```
+R1 MEASURED: thread 0 is Blocked(Wait) with a completed context, x0=0x0
+```
+
+`0x0` — the success return — and not either of the two pre-`svc` operation words (`0x1000002` /
+`0x1020002`) that would have meant the ordering was the other way round. R1 held as read. The gate
+was seen red (assertion flipped to `x0 == 1`) before being left green, so the measurement is a
+measurement and not a tautology.
+
+**Then the same saved context turned out to be wrong on a different axis — and that is this
+milestone's sharpest lesson.** Task 4b measured the *other* half of the same context, the saved
+`SPSR_EL1`, rather than inferring it from Task 1's result. It is `0x60000000`: mode `M[3:0] = 0`
+(EL0t, as expected), Z set, and **bit 29, C, SET**. C set means "the syscall failed" — sitting
+directly beside an `x0` of `0` that means "the syscall succeeded". The two halves of one context
+disagreed.
+
+The explanation is that nothing on the wake path had ever patched that SPSR. `set_x0_err_and_return`
+writes `reg::CPSR`, the register the vCPU resumes from; the saved `ctx.spsr` is raw
+exception-entry state, the guest's own incidental pre-`svc` NZCV. On every other path the gap is
+invisible, because nothing reads SPSR before the next trap overwrites it. On a delivery path it is
+the difference between a frame that says the wait succeeded and one that says it failed — and
+`sigreturn` would have restored the lie. What the real kernel does was measured too, by the
+`spikes/sigraisex0.c` probe M16 already had: a successful self-raise enters its handler with
+`0x40000000`, C **clear**, because the kernel snapshots PSTATE *after* completing the return. Task 4c
+closed it with `complete_saved_syscall_before_delivery`, the saved-context sibling of the live-vCPU
+`complete_syscall_before_delivery` — same correction, applied to `ctx.spsr` instead of `SPSR_EL1`,
+and deliberately with no `x0` write, because Task 1 had already measured that axis correct.
+
+**The lesson, stated plainly: measuring one axis of a state and inferring the rest is the trap.** R1
+was true. The natural next sentence — "so the saved context is fine, build on it" — was false. Two
+tasks that both looked like the same question ("is the blocked thread's saved context usable?")
+returned opposite answers on `x0` and on PSTATE, and only the second measurement found it. Worth
+noting how close the spec came: it wrote that if R1 were FALSE, "the materialisation site would first
+need the equivalent of `complete_syscall_before_delivery` applied to a *saved* context rather than to
+the live vCPU, and that becomes a task of its own." R1 was TRUE and that task was needed **anyway**,
+on an axis the risk register never separated out. The contingency was right about the shape of the
+work and wrong about the trigger that would reveal it. Tasks 4b and 4c did not exist when the plan
+was written; they exist because someone measured a thing the plan did not ask about.
+
+**The landmark-arithmetic correction was found during plan-writing, not during implementation, and
+the wrong reading is worth recording.** A materialising wake appends **TWO** landmarks — the ordinary
+`Syscall`, then the `SignalDelivery` — where the ordinary path appends one, so replay must consume
+two explicitly. The spec's *first* version said this required hoisting replay's `SYS_ULOCK_WAKE` hook
+into its own dispatch arm and that the oracle count therefore went **7 → 8**. Both halves were wrong,
+and the error was the same in both: it assumed the wake hook sat where the unmasking-`sigprocmask`
+hook sat *before* M16 Task 9 hoisted it. It does not. Replay's wake hook lives **inside** the generic
+`Some(Event::Syscall { .. })` arm, whose `verify_thread` call runs *before* control reaches the hook;
+and it already `return`s explicitly rather than falling through, which was precisely the mask hook's
+problem and the reason that one needed hoisting. So the hook stayed where it was, grew the
+two-landmark tail the hoisted mask arm already uses, and no oracle site was added. Commit `8e4666f`
+carries the correction. Had it been found during implementation instead, the symptom would have been
+R2's signature: "expected recorded syscall, got `SignalDelivery`" reported far past the wake, which is
+what M16 Task 9 actually measured (landmark 280 for an unmask at 271) before its hoist.
+
+**The oracle census is UNCHANGED at seven and eight.** Seven `verify_thread` call sites, and eight
+places the oracle compares a thread — the eighth still being `mirror_delivery`'s inline
+`rthread != tid` test, which checks a delivery's **receiving** thread rather than the current one.
+M17 added no site and removed none, and CLAUDE.md's census sentence is deliberately untouched. What
+M17 did add is *traffic* on the eighth place by a route no existing test used: Task 8's
+`a_wrong_thread_on_a_wake_materialised_delivery_is_a_divergence` (`thread_oracle.rs`) retags the
+wake-materialised `SignalDelivery` from thread 1 (`a`, the blocked target) to thread 2 (`b`, the
+waker — the specific wrong answer this route invites) and pins replay's `"signal delivery thread
+mismatch"`. Proved by mutation: commenting out `mirror_delivery`'s check turns that test **and**
+M16 Task 12c's delivery-landmark test red together, which is the correct coupling, since both depend
+on the one comparison. Materialisation goes through `mirror_delivery` rather than a hand-rolled
+compare precisely so that it lands on that check.
+
+**The accepted semantic gap, and its guard.** Pend-until-wake diverges from POSIX in one direction
+and the divergence is named rather than hidden: **a signal pended on a thread nothing ever wakes is
+never delivered.** A real kernel would interrupt the wait with `EINTR`; retrace does not. That was a
+deliberate choice over the alternative — `EINTR` changes a guest-visible syscall return value, so it
+needs `__pthread_join`'s retry loop measured by disassembly and `__ulock_wait`'s `ULF_NO_ERRNO`
+convention modelled, which the current arm hardcodes as `err: false`. That is a milestone of its own
+and nothing in the tree needs it yet.
+
+The guard is `Box_::assert_no_stranded_signals`, wired into record's `SYS_EXIT` arm immediately
+before the `Event::Exit` append. It scans every thread and panics, naming the thread and the signal,
+if a `Blocked` thread is exiting with a signal its mask does not block. **Clean-exit path only** — a
+guest already crashing must be diagnosed by its crash, not by a secondary guard firing on top of it.
+The reason it exists is that a swallowed signal makes record and replay agree with each other and
+**both be wrong**, which is the one failure shape a determinism oracle structurally cannot see. Five
+tests pin it, three of them mutation-killers: dropping the `Blocked` check, dropping the deliverable
+check, and using `pending` instead of `pending & !mask` each turn exactly the predicted test red and
+leave the other two green.
+
+**The guard scans `Blocked(_)` only, and that is correct precisely because `should_pend_for` pends
+for `Blocked(_)` only — the two are one decision, not two.** `should_pend_for` narrows to
+`Blocked(_)` rather than the looser "anything but `Runnable`" (commit `67855f5`, a plan-time
+correction). An unmasked signal to an `Exited` target must keep reaching `check_deliverable`'s
+panic, which is *earlier and more precise* than any exit-time guard: a signal to a dead thread is a
+modelling bug, not a schedule divergence, and there is no wake to materialise it at. Had
+`should_pend_for` pended for `Exited` too, the signal would have gone onto a dead thread's pending
+set and been swallowed in silence — the exit guard would never have seen it, because it does not
+scan `Exited`. Whoever widens either one must widen the other in the same commit.
+
+**The headline gate came green with its assertions untouched.** `sigblocked_e2e` was committed in
+M16 as real compiling code behind a real three-thread guest, parked at the panic, with assertions
+written **correct-by-construction from M16 Task 13's measurement before they could ever be run**.
+Task 7 deleted the `#[ignore]` attribute and rewrote the file's now-false narration; diffing the
+parked and un-parked versions with comments and the attribute stripped shows the test body
+**byte-for-byte identical**. That is the strongest thing that can be said for a parked gate: it was
+un-parked by someone who did not write it, without relaxing one assertion. The gate asserts on the
+**trace**, not the exit code, because the guest's handler is empty — an exit-code gate would have
+come green under the single most likely wrong fix, silently *skipping* the blocked target, which
+exits 0 on both sides and changes no stdout. `delivered == vec![1u32]` rejects that, and the
+"blocked BEFORE the delivery" tooth keeps the gate about the blocked case rather than the
+merely-not-current case `sigthread_e2e` already covers.
+
+One honest note on that gate's ordering: M17 delivers at the **wake**, not at the raise, so the
+delivery landmark sits after `b`'s `__ulock_wake` rather than at `b`'s `pthread_kill`. Both orderings
+satisfy the assertions as written, which is why the second tooth — that thread 1 entered
+`__ulock_wait` *before* the delivery index — is load-bearing rather than decorative.
+
+**M17 makes `sigblocked_e2e` the third gate reaching `util::bin()` on every gate run, exactly as M16
+predicted — and then adds a fourth M16 did not.** M16's own close named the hazard —
+`crates/retrace/tests/util/mod.rs::bin()` runs `codesign -f` on the *one shared* `retrace` binary, so
+a second test **process** can observe it missing mid-replacement, which `--test-threads=1` does not
+prevent because it serialises threads inside a binary while cargo runs binaries concurrently — and
+wrote that `kport` and `sigthread_e2e` were two, "with `sigblocked_e2e` a third the day it is
+un-parked — so it raises the collision odds it is deferring." **Today is that day, and M17 raised
+those odds by two, not one.** Counted at this close: **25** `crates/retrace` test binaries actually
+reached `bin()` on a gate run at `b73bdbb`, and **27** do now. `sigblocked_e2e` is the predicted
+third in M16's sequence — it was present in the tree but `#[ignore]`d, so it never invoked `bin()`
+until Task 7 un-parked it — and `blockedctx`, Task 1's new measurement gate, is a fourth in that same
+sequence, because it records `THREADRUST` through `util::record_dynamic` like the rest. (Those
+ordinals count what M16 and M17 *added*; the absolute totals are the 25 and 27 above.) A prediction
+about one gate under-counted
+the milestone that fulfilled it, which is the ordinary way this hazard grows: nobody adds a `bin()`
+caller on purpose, they add a gate. The mitigation actually used at this
+close was to run every `crates/retrace` test target as its **own** cargo invocation, one per target,
+so no two `bin()` callers are ever live at once; the failure string was grepped for across every
+chunk log and did not appear. `bin()` itself is **not fixed**, and M16's reason for deferring still
+holds: it is shared test infrastructure and touching it at a milestone close would be unreviewed. The
+real fix remains signing a per-test-binary copy rather than the shared file. Recorded here as a
+still-open item that one more milestone has now made likelier, not as one M17 discharged.
+
+**Fail-loud boundaries, unchanged or newly stated:**
+
+- **A signal to a thread nothing wakes is never delivered** — the accepted gap above, guarded by
+  `assert_no_stranded_signals` on the clean-exit path.
+- **`BlockReason::Join` gaining a producer** would add a second materialisation site this design does
+  not cover. It has no producer today (measured in M16 Task 13), so there is exactly one.
+- **A signal to an `Exited` thread still panics** in `check_deliverable`, deliberately and by the
+  argument above.
+- **`guest_ulock_wait` / `guest_ulock_wake`'s operation-word asserts are untouched.** M17 changes who
+  gets woken to what, never which operation words are modelled.
+- **Signal queueing and nested delivery remain unmodelled** (M16), `sigwait` (330) and `sigsuspend`
+  (111) still panic (M11), and a pended signal whose default action is Terminate still panics at
+  materialisation rather than killing the process.
+
+**What is still unexercised, honestly.** Replay's `mirror_delivery` `check_deliverable` **Err** branch
+is genuinely called now — the function is on the live wake path — but the Err arm itself stays
+unreached, and for a *different* reason than before M17: `guest_ulock_wake`'s own `unblock_waiters_on`
+transitions the woken thread to `Runnable` inside the **same call** that produces the woken set, so
+every `wtid` reaching that point is already `Runnable` on both sides. The arm needs a genuine
+live-versus-recorded schedule mismatch to fire. Task 7 rewrote that comment to say so rather than
+leave M16's "un-parking the gate would make this arm live" standing: un-parking made
+`mirror_delivery` live, which is what M16 was half right about, but it did not make the **Err**
+branch inside it reachable, which is what M16 meant. The `Crash` landmark's `verify_thread` site also
+remains the one unexercised oracle site, for
+the same reason as at M16's close: no threaded guest in the tree crashes. Unrelated to this
+milestone, and still open.
+
+**Everything M16 and earlier carry forward is unchanged**, none of it fixed here: per-thread reverse
+execution, preemption, `workq`/GCD, thread priority, hardware watchpoint scoping,
+`guest_bsdthread_create` still returning `0` where the real syscall returns the child's `pthread_t`,
+`dbg_kport_of(tid: usize)`'s type, `dup2` (fail-loud), `fcntl(F_DUPFD)` (unmodelled and *not*
+fail-loud), guest stdin still being retrace's, `RLIMIT_NOFILE`, asynchronous signals from outside the
+process, per-thread *dispositions* (correctly process-global — POSIX, not a gap), and arm64e guests.
+
+See `docs/superpowers/specs/2026-08-20-retrace-m17-blockedsignal-design.md`.
