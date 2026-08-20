@@ -161,10 +161,7 @@ fn b_wait_blocked_threads_saved_spsr_is_an_unpatched_el0_pstate() {
     // equivalent), a successful __ulock_wait would flip C to clear here, and this test would be
     // the thing that catches it.
     assert!(c_set,
-        "spsr={spsr:#x} has bit 29 (C) CLEAR, but this test measured it SET on the current guest/OS \
-         build. Something changed: either a real kernel/toolchain difference shifted the guest's \
-         own pre-svc flags (in which case this assertion is over-fit to one build and should be \
-         loosened to just logging), or something started patching SPSR_EL1 for this receiver \
-         (which the M17 design forbids on the wake arm — see the comment this test's header cites). \
-         Investigate which before changing this assertion. Dump:\n{dump}");
+        "spsr={spsr:#x} has bit 29 (C) CLEAR; this test measured it SET. Expected failure mode: a \
+         toolchain or OS bump moved the guest's own incidental pre-svc flags — that means the \
+         premise this fix rests on changed, not that the fix broke. Dump:\n{dump}");
 }

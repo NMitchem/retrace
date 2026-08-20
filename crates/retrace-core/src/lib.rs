@@ -1874,10 +1874,11 @@ impl ReplaySession {
                                 // M17: record's wake arm materialises a signal pended on a thread
                                 // it just woke, appending a SECOND landmark. This side must consume
                                 // both — `finish_event` takes one, `mirror_delivery` takes the
-                                // other — exactly as the mask arm at :1390 does. Getting this wrong
-                                // does not corrupt anything quietly: the delivery landmark would be
-                                // met by the next unrelated stop and reported as "expected recorded
-                                // syscall, got SignalDelivery" at some landmark past the wake.
+                                // other — exactly as the mask arm at :1478-1501 does. Getting this
+                                // wrong does not corrupt anything quietly: the delivery landmark
+                                // would be met by the next unrelated stop and reported as "expected
+                                // recorded syscall, got SignalDelivery" at some landmark past the
+                                // wake.
                                 //
                                 // The same `Box_` calls with the same arguments as record, in the
                                 // same order, so which signal materialises on which thread is
@@ -1885,6 +1886,14 @@ impl ReplaySession {
                                 let deliver_to: Vec<usize> = woken.iter().copied()
                                     .filter(|&t| self.b.threads().peek_deliverable(t).is_some())
                                     .collect();
+                                // M17 fix round 5: BOTH bounds here PANIC on replay rather than
+                                // returning a named `Divergence`, which is what the neighbouring
+                                // impossible-ish condition does (`check_deliverable`, in
+                                // `mirror_delivery`). The difference is deliberate: both of these
+                                // are recomputed entirely from live state that no recorded field
+                                // steers, and record asserts the same two bounds first, so no
+                                // recordable trace can reach either — firing one means retrace's own
+                                // model is wrong, not that this replay diverged from its recording.
                                 assert!(deliver_to.len() <= 1,
                                     "one wake made {} threads deliverable at once ({deliver_to:?}) \
                                      — record asserts the same bound; see its arm",
