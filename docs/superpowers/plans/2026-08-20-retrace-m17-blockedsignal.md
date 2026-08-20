@@ -386,6 +386,26 @@ fn should_pend_for_is_false_for_a_runnable_target_with_the_signal_unmasked() {
          every pre-M17 delivery, including sigthread's");
     assert!(!b.should_pend_for(0, 30), "and the current thread is Runnable by definition");
 }
+
+/// The other negative, and the one the spec is explicit about: an `Exited` target must NOT pend.
+/// Its signal has no wake to be materialised at, and `assert_no_stranded_signals` scans `Blocked`
+/// threads only — so pending here would swallow it in silence. Keeping `should_pend_for` false
+/// leaves the raise path reaching `check_deliverable`'s refusal, which is where the spec puts it:
+/// "the existing `deliver_signal_to` `Exited` arm stays a panic".
+#[test]
+fn should_pend_for_is_false_for_an_exited_target_so_it_still_fails_loud() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().exit_current(0);
+    b.threads_mut().switch_to(0);
+
+    assert!(!b.should_pend_for(tid, 30),
+        "an Exited target must not pend — `delivering_to_an_exited_thread_fails_loud` is the \
+         posture the spec keeps, and a pend would route around it into a silent swallow");
+}
 ```
 
 **Note on `set_mask_of`:** if `ThreadTable` exposes a different setter name, use whatever `sigprocmask`'s record arm calls (grep `set_mask_of\|set_mask` in `crates/retrace-box/src/thread.rs`) — do not add a new one.
@@ -403,9 +423,16 @@ In `crates/retrace-box/src/lib.rs`, immediately above `check_deliverable`:
     /// M17: should a raise targeting `tid` PEND rather than deliver?
     ///
     /// Two reasons, and they are independent. The mask reason is M16's and unchanged. The state
-    /// reason is M17's: a target that is not `Runnable` cannot be redirected into a handler yet —
-    /// its saved context is the resume point its blocking syscall owes a return through — so the
-    /// signal waits on its pending set and is materialised at the wake instead.
+    /// reason is M17's: a BLOCKED target cannot be redirected into a handler yet — its saved
+    /// context is the resume point its blocking syscall owes a return through — so the signal waits
+    /// on its pending set and is materialised at the wake instead.
+    ///
+    /// `Blocked(_)` specifically, NOT "anything but `Runnable`". An `Exited` target must keep
+    /// reaching `check_deliverable`'s refusal: the spec keeps that arm a panic because a signal to
+    /// a dead thread is a modelling bug rather than a schedule divergence, and there is no wake to
+    /// materialise it at. Pending on a dead thread would swallow the signal in silence instead —
+    /// `assert_no_stranded_signals` scans `Blocked` threads only — which is the one failure shape a
+    /// determinism oracle cannot see.
     ///
     /// This is the predicate BOTH dispatch loops consult, written once so they cannot drift on the
     /// pend-vs-deliver decision while both stayed green. `take_deliverable` already filters by
@@ -416,14 +443,14 @@ In `crates/retrace-box/src/lib.rs`, immediately above `check_deliverable`:
     /// raise path can no longer reach that guard's refusal for a merely-blocked target.
     pub fn should_pend_for(&self, tid: usize, sig: u64) -> bool {
         self.threads.is_blocked_for(tid, sig)
-            || !matches!(self.threads.state_of(tid), thread::ThreadState::Runnable)
+            || matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_))
     }
 ```
 
 - [ ] **Step 4: Run to verify they pass**
 
 Run: `cargo test -p retrace-box --test deliver -- --test-threads=1 should_pend_for`
-Expected: 3 PASS.
+Expected: 4 PASS.
 
 - [ ] **Step 5: Point both dispatch loops at it**
 
@@ -912,7 +939,7 @@ git commit -m "M17 t8: a wrong thread on a wake-materialised delivery is a diver
 
 - [ ] **Step 1: Run the full gate and get the real numbers**
 
-Run each chunk from Global Constraints, then `cargo clippy --workspace --all-targets -- -D warnings`. Reconcile the total against the previous close (**395 passed / 0 failed / 2 ignored across 102 test binaries at `b73bdbb`**) by counting the tests this milestone added: Task 1 adds 1 (and 1 new binary), Task 3 adds 3, Task 4 adds 1, Task 6 adds 2, Task 8 adds 1, and Task 7 moves 1 test from ignored to passing. **Expected: 404 passed / 0 failed / 1 ignored across 103 test binaries.** If the measured number differs, the measured number wins — find and explain the difference rather than adjusting the arithmetic.
+Run each chunk from Global Constraints, then `cargo clippy --workspace --all-targets -- -D warnings`. Reconcile the total against the previous close (**395 passed / 0 failed / 2 ignored across 102 test binaries at `b73bdbb`**) by counting the tests this milestone added: Task 1 adds 1 (and 1 new binary), Task 3 adds 4, Task 4 adds 1, Task 6 adds 2, Task 8 adds 1, and Task 7 moves 1 test from ignored to passing. **Expected: 405 passed / 0 failed / 1 ignored across 103 test binaries.** If the measured number differs, the measured number wins — find and explain the difference rather than adjusting the arithmetic.
 
 - [ ] **Step 2: Update the README in place**
 
