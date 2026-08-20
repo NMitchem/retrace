@@ -2747,7 +2747,10 @@ impl Box_ {
         matches!(self.threads.altstack_of(tid), Some((base, size, _)) if sp >= base && sp < base + size)
     }
 
-    /// The running thread's alternate-stack membership. Unchanged for every existing caller.
+    /// Is the RUNNING thread's stack pointer inside its own alternate stack? The `_of` form takes
+    /// any tid; this one is the common case. Callers use it to decide whether a further
+    /// `SA_ONSTACK` delivery would re-enter a stack the guest is already on, which POSIX says it
+    /// must not — see `choose_frame_base`, which is the only real consumer.
     pub fn on_altstack(&self) -> bool { self.on_altstack_of(self.threads.current()) }
 
     /// The saved PSTATE at the current trap (SPSR_EL1) — the sibling of `position()`'s ELR_EL1.
