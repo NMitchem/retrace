@@ -1,20 +1,7 @@
 use std::process::Command;
 use retrace_sim::{Rng, pick_fault, apply_fault};
 
-// CARGO_BIN_EXE_retrace is a separate binary that this test spawns itself — it never
-// passes through `.cargo/config.toml`'s codesign `runner`, so it lacks the hypervisor
-// entitlement and every hv_* call would get HV_DENIED. Sign it here the same way e2e.rs
-// does before exec'ing it (see tools/codesign-run.sh, retrace.entitlements).
-fn bin() -> &'static str {
-    let p = env!("CARGO_BIN_EXE_retrace");
-    let ent = concat!(env!("CARGO_MANIFEST_DIR"), "/../../retrace.entitlements");
-    let out = Command::new("codesign")
-        .args(["-s", "-", "-f", "--entitlements", ent, p])
-        .output()
-        .expect("codesign");
-    assert!(out.status.success(), "codesign -f --entitlements failed for {p}: {}", String::from_utf8_lossy(&out.stderr));
-    p
-}
+mod util;
 
 // The M1 exit gate: record a general-syscall guest, inject a seeded trace-IO fault, replay.
 // Every seed must end in a byte-identical replay of the guest's known output (exit 0) OR a
@@ -76,10 +63,10 @@ fn swarm_over(bin: &str, tag: &str, guest: &str, expected_stdout: &[u8]) {
 
 #[test]
 fn n_seeds_never_diverge_silently_fileio() {
-    swarm_over(bin(), "fileio", retrace_guest::FILEIO, b"retrace-m1-fixture\n");
+    swarm_over(util::bin(), "fileio", retrace_guest::FILEIO, b"retrace-m1-fixture\n");
 }
 
 #[test]
 fn n_seeds_never_diverge_silently_mmap() {
-    swarm_over(bin(), "mmap", retrace_guest::MMAPGUEST, &[0xAB, 0xCD]);
+    swarm_over(util::bin(), "mmap", retrace_guest::MMAPGUEST, &[0xAB, 0xCD]);
 }

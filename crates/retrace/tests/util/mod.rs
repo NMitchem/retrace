@@ -3,21 +3,43 @@
 #![allow(dead_code)]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 // `.cargo/config.toml`'s `runner` ad-hoc codesigns the binary cargo invokes
 // directly (the test harness) with the hypervisor entitlement, but CARGO_BIN_EXE_retrace
 // is a separate binary that this test spawns itself — it never passes through
 // that runner. Every executable that calls hv_* needs the entitlement (see
 // tools/codesign-run.sh), so sign it here the same way before exec'ing it.
+//
+// A19b: this used to `codesign -f` CARGO_BIN_EXE_retrace **in place**. `-f` replaces the
+// file, so while one test process was re-signing it, a concurrent test process (cargo runs
+// test *binaries* as separate processes — `--test-threads=1` only serialises threads within
+// one) could observe it briefly missing and fail with "No such file or directory". Instead,
+// copy it to a pid-unique path beside the original and sign the copy: two test processes can
+// never write the same path, so the race is eliminated by construction rather than narrowed.
+// The copy lives under `target/`, so `cargo clean` collects it and no caller's path
+// assumptions change. Signed once per process via OnceLock, since every caller in a process
+// wants the same signed copy.
 pub fn bin() -> &'static str {
-    let p = env!("CARGO_BIN_EXE_retrace");
-    let ent = concat!(env!("CARGO_MANIFEST_DIR"), "/../../retrace.entitlements");
-    let out = Command::new("codesign")
-        .args(["-s", "-", "-f", "--entitlements", ent, p])
-        .output()
-        .expect("codesign");
-    assert!(out.status.success(), "codesign -f --entitlements failed for {p}: {}", String::from_utf8_lossy(&out.stderr));
-    p
+    static SIGNED: OnceLock<String> = OnceLock::new();
+    SIGNED.get_or_init(|| {
+        let p = env!("CARGO_BIN_EXE_retrace");
+        let ent = concat!(env!("CARGO_MANIFEST_DIR"), "/../../retrace.entitlements");
+        let copy = format!("{p}-signed-{}", std::process::id());
+        std::fs::copy(p, &copy).unwrap_or_else(|e| panic!("copy {p} -> {copy}: {e}"));
+        let out = Command::new("codesign")
+            .args(["-s", "-", "-f", "--entitlements", ent, &copy])
+            .output()
+            .expect("codesign");
+        assert!(out.status.success(), "codesign -f --entitlements failed for {copy}: {}", String::from_utf8_lossy(&out.stderr));
+        // std::fs::copy preserves the source's permission bits on Unix, but verify rather than
+        // assume: an unsigned-and-inexecutable copy would fail far more confusingly downstream,
+        // as a spawn error deep inside whichever test happened to call bin() first.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&copy).expect("stat signed copy").permissions().mode();
+        assert!(mode & 0o111 != 0, "signed copy {copy} is not executable (mode {mode:o})");
+        copy
+    }).as_str()
 }
 
 pub struct RunOut { pub code: i32, pub stdout: Vec<u8>, pub stderr: String }
