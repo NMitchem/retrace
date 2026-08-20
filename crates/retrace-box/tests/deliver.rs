@@ -527,3 +527,67 @@ fn check_deliverable_accepts_a_runnable_target() {
         "a freshly spawned thread is Runnable and must be deliverable");
     assert_eq!(b.check_deliverable(0), Ok(()), "and so is the current thread");
 }
+
+// ---- M17: the widened pend condition ------------------------------------------------------------
+//
+// A signal pends for TWO reasons now, not one. `take_deliverable` already respects the mask, so a
+// signal pended for both is released only when both clear — no extra bookkeeping.
+
+/// The pre-M17 reason, unchanged: the target's own mask blocks this signal.
+#[test]
+fn should_pend_for_is_true_when_the_targets_mask_blocks_the_signal() {
+    let mut b = boxed();
+    // `set_mask_of(tid, how, set)` — three arguments, matching what sigprocmask's arm calls.
+    b.threads_mut().set_mask_of(0, retrace_arch::SIG_BLOCK, 1 << (30 - 1));
+    assert!(b.should_pend_for(0, 30), "a masked signal pends, as it did before M17");
+}
+
+/// The M17 reason: the target cannot run, so it cannot be redirected into a handler yet.
+#[test]
+fn should_pend_for_is_true_when_the_target_is_blocked() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.threads_mut().switch_to(0);
+
+    assert!(b.should_pend_for(tid, 30),
+        "a BLOCKED target pends even with the signal unmasked — this is the M17 change, and it is \
+         what stops the raise path reaching `deliver_signal_to`'s Runnable guard");
+}
+
+/// The negative case, without which a `should_pend_for` that always returned true would pass both
+/// tests above while pending every signal in the tree and delivering none.
+#[test]
+fn should_pend_for_is_false_for_a_runnable_target_with_the_signal_unmasked() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    assert!(!b.should_pend_for(tid, 30),
+        "a Runnable target with the signal unmasked must be delivered to, not pended — this is \
+         every pre-M17 delivery, including sigthread's");
+    assert!(!b.should_pend_for(0, 30), "and the current thread is Runnable by definition");
+}
+
+/// The other negative, and the one the spec is explicit about: an `Exited` target must NOT pend.
+/// Its signal has no wake to be materialised at, and `assert_no_stranded_signals` scans `Blocked`
+/// threads only — so pending here would swallow it in silence. Keeping `should_pend_for` false
+/// leaves the raise path reaching `check_deliverable`'s refusal, which is where the spec puts it:
+/// "the existing `deliver_signal_to` `Exited` arm stays a panic".
+#[test]
+fn should_pend_for_is_false_for_an_exited_target_so_it_still_fails_loud() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().exit_current(0);
+    b.threads_mut().switch_to(0);
+
+    assert!(!b.should_pend_for(tid, 30),
+        "an Exited target must not pend — `delivering_to_an_exited_thread_fails_loud` is the \
+         posture the spec keeps, and a pend would route around it into a silent swallow");
+}
