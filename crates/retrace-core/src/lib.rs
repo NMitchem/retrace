@@ -1825,14 +1825,61 @@ impl ReplaySession {
                             // conditional" — leaving `err` out would have made that false for half
                             // the pair.
                             if num == retrace_arch::SYS_ULOCK_WAKE {
-                                let ((rc, _woken), rerr) = (self.b.guest_ulock_wake(args), false);
+                                let ((rc, woken), rerr) = (self.b.guest_ulock_wake(args), false);
                                 if rc != *ret || rerr != *err {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(
                                             "ulock_wake mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
-                                return self.finish_event();
+                                // M17: record's wake arm materialises a signal pended on a thread
+                                // it just woke, appending a SECOND landmark. This side must consume
+                                // both — `finish_event` takes one, `mirror_delivery` takes the
+                                // other — exactly as the mask arm at :1390 does. Getting this wrong
+                                // does not corrupt anything quietly: the delivery landmark would be
+                                // met by the next unrelated stop and reported as "expected recorded
+                                // syscall, got SignalDelivery" at some landmark past the wake.
+                                //
+                                // The same `Box_` calls with the same arguments as record, in the
+                                // same order, so which signal materialises on which thread is
+                                // identical by construction rather than by two matches agreeing.
+                                let deliver_to: Vec<usize> = woken.iter().copied()
+                                    .filter(|&t| self.b.threads().take_deliverable_peek(t).is_some())
+                                    .collect();
+                                assert!(deliver_to.len() <= 1,
+                                    "one wake made {} threads deliverable at once ({deliver_to:?}) \
+                                     — record asserts the same bound; see its arm",
+                                    deliver_to.len());
+                                return match deliver_to.first() {
+                                    Some(&wtid) => match take_pending_delivery(&mut self.b, wtid) {
+                                        Some((psig, _handler)) => {
+                                            // The SAME Box_ calls record makes, in the SAME order,
+                                            // with the SAME arguments — that identity IS symmetry
+                                            // rule 1 holding by construction rather than by two
+                                            // matches happening to agree.
+                                            //
+                                            // `complete_saved_syscall_before_delivery` IS called
+                                            // and `complete_syscall_before_delivery` is NOT, for
+                                            // the reason record's arm spells out at length: the
+                                            // live vCPU here is the WAKER, so the live version
+                                            // would correct the wrong thread's PSTATE — while the
+                                            // receiver's own saved SPSR was measured (0x60000000,
+                                            // C set, `crates/retrace/tests/blockedctx.rs`) to
+                                            // disagree with the completed x0 beside it. Omit this
+                                            // call and replay's frame bytes differ from record's,
+                                            // which surfaces as a divergence in `mirror_delivery`'s
+                                            // byte-compare rather than as silent corruption.
+                                            self.b.complete_saved_syscall_before_delivery(wtid, false);
+                                            // Consume the Syscall landmark by hand; mirror_delivery
+                                            // takes the SignalDelivery.
+                                            self.idx += 1;
+                                            self.mirror_delivery(wtid, psig, retrace_arch::SI_USER,
+                                                                 0, 0, 0, pc)
+                                        }
+                                        None => self.finish_event(),
+                                    },
+                                    None => self.finish_event(),
+                                };
                             }
                             // shared_region_check_np (#294): install the demand-pager on replay too
                             // (record installed it here), so cache faults regenerate identical pages, then
