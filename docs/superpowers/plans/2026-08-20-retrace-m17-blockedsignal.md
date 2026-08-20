@@ -580,7 +580,10 @@ Append to `crates/retrace-box/src/thread.rs`'s test module:
     // consume the signal it was asking about.
     #[test]
     fn take_deliverable_peek_does_not_clear_the_bit() {
-        let mut t = ThreadTable::new(ctx(0x1000));
+        // `ThreadCtx::zeroed()`, not the `ctx(pc)` helper — that helper lives in
+        // `crates/retrace-box/tests/threads.rs`, a different file. Every test in THIS inline module
+        // builds its table the way the siblings above do.
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
         t.pend(0, 30);
         assert_eq!(t.take_deliverable_peek(0), Some(30));
         assert_eq!(t.take_deliverable_peek(0), Some(30), "peeking twice must answer twice");
