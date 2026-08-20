@@ -654,3 +654,83 @@ fn complete_saved_syscall_before_delivery_sets_c_when_err_is_true() {
          its false-branch counterpart above");
     assert_eq!(spsr & (1 << 30), 1 << 30, "Z must still survive untouched in this direction too");
 }
+
+// ---- M17 Task 6: the exit-time pending-signal guard ---------------------------------------------
+
+/// M17: a signal pended on a thread that never wakes is delivered NEVER — the accepted cost of
+/// pend-until-wake. Accepted, but not hidden: exiting 0 while silently swallowing a signal is the
+/// worst failure shape for a determinism oracle, because record and replay would agree and both be
+/// wrong.
+#[test]
+#[should_panic(expected = "still Blocked with pending signal")]
+fn a_signal_stranded_on_a_never_woken_thread_fails_loud_at_exit() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.threads_mut().switch_to(0);
+    b.threads_mut().pend(tid, 30);
+
+    b.assert_no_stranded_signals();
+}
+
+/// The negative case: the ordinary exit, where nothing is stranded, must not fire the guard.
+#[test]
+fn a_clean_exit_with_no_pending_signals_passes_the_guard() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    b.threads_mut().spawn(ctx, (0, 0));
+    b.assert_no_stranded_signals();
+}
+
+/// Mutation-killer 1: a Blocked thread with NO pending signal must pass. The brief's two tests above
+/// cannot distinguish a guard that checks `Blocked` state from one that fires on ANY blocked thread
+/// regardless of a pending signal — this isolates that the `take_deliverable_peek` check is load-
+/// bearing, not decorative.
+#[test]
+fn a_blocked_thread_with_no_pending_signal_passes_the_guard() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.threads_mut().switch_to(0);
+    b.assert_no_stranded_signals();
+}
+
+/// Mutation-killer 2: a Runnable thread with a pending signal must pass. Isolates that the
+/// `Blocked` state check is load-bearing — a guard that dropped it would fire on every thread with
+/// ANY pending bit set, including ones that are simply mid-flight toward ordinary delivery.
+#[test]
+fn a_runnable_thread_with_a_pending_signal_passes_the_guard() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.threads_mut().pend(tid, 30);
+    b.assert_no_stranded_signals();
+}
+
+/// Mutation-killer 3, and the POSIX-correct case in its own right: a Blocked thread whose pending
+/// signal is MASKED must pass. Isolates that the guard reads `pending & !mask` (via
+/// `take_deliverable_peek`), not `pending` alone — a masked pending signal at exit was never owed a
+/// delivery, so a guard that fired on it would be a false positive parking a future guest at a wall
+/// that does not exist.
+#[test]
+fn a_blocked_thread_whose_pending_signal_is_masked_passes_the_guard() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.threads_mut().switch_to(0);
+    b.threads_mut().pend(tid, 30);
+    // Signal 30's mask bit: sig_bit(sig) is `1 << (sig - 1)` (thread.rs:144).
+    b.threads_mut().set_mask_of(tid, retrace_arch::SIG_BLOCK, 1u32 << 29);
+    b.assert_no_stranded_signals();
+}

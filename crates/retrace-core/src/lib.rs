@@ -170,6 +170,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
         match stop {
             Stop::Syscall { num, args } if num == SYS_EXIT => {
                 let final_snap = b.snapshot();          // final-memory landmark
+                // M17: the clean-exit path only — see `assert_no_stranded_signals`. The crash path
+                // deliberately does not call this: a guest already dying must be diagnosed by its
+                // crash, not by a secondary guard firing on top of it.
+                b.assert_no_stranded_signals();
                 w.append(&Event::Exit { code: args[0], thread }).map_err(|e| format!("append exit: {e}"))?; count += 1;
                 w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
                 outcome = Outcome::Exit { code: args[0] };
@@ -916,7 +920,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     deliver_to.len());
                 if let Some(&wtid) = deliver_to.first() {
                     if let Some((psig, handler)) = take_pending_delivery(&mut b, wtid) {
-                        b.complete_saved_syscall_before_delivery(wtid, false);
+                        b.complete_saved_syscall_before_delivery(wtid, false); // always false: the receiver's own wait succeeded (its saved x0 is 0)
                         let (dwrites, resume_pc) =
                             b.deliver_signal_to(wtid, psig, retrace_arch::SI_USER, 0, 0, 0);
                         // The tag is the RECEIVER — the woken thread — not `thread`, which is the
