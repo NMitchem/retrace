@@ -5,6 +5,7 @@
 // main stack, so SA_ONSTACK could be ignored entirely and a headline pass would prove nothing; and
 // a guest that re-faults and dies immediately can never reveal clobbered vector state.
 mod util;
+use retrace_trace::Event;
 
 #[test]
 fn the_trampoline_is_entered_with_the_measured_registers() {
@@ -78,4 +79,76 @@ fn a_blocked_synchronous_fault_fails_loud() {
 #[test]
 fn two_recordings_of_a_caught_fault_are_byte_identical() {
     util::assert_trace_reproducible(retrace_guest::SEGVCATCH);
+}
+
+/// Fast-follow: the `sigaltstack` replay mirror. `sigaction`'s oldact writeback (:1392 in
+/// retrace-core) is byte-compared on replay; `sigaltstack`'s oldstack writeback is not — see
+/// `.superpowers/sdd/fastfollow-sigaltstack-brief.md`. This is that gap's mutation test.
+///
+/// ALTSTACK's fast-follow query (`sigaltstack(NULL, &oss)`, added to altstack.s beside the
+/// pre-existing install) is what puts a real oldstack `Region` in the trace at all — the install
+/// call alone passes `oss=NULL` and record writes nothing.
+///
+/// The corruption is confined to the encoded stack_t's zero-padding TAIL (byte 20, past
+/// `ss_flags` at 16..20) — deliberately NOT one of the three semantic fields (`ss_sp`/`ss_size`/
+/// `ss_flags`) altstack.s's own query check reads back. A field corruption would be caught by the
+/// GUEST's own check (it would call `exit` with a code other than the recorded 0, tripping the
+/// pre-existing generic exit-code divergence at the `Exit` landmark) and would prove something
+/// weaker: that SOME check exists somewhere, not that the SIGALTSTACK writeback itself is
+/// unchecked. Confining it to padding — which `encode_oldstack` always emits as zero and which no
+/// guest instruction ever reads — isolates exactly the gap this test exists to prove: with no
+/// sigaltstack-specific check, NOTHING notices at the landmark where the corruption actually is.
+///
+/// Measured, not assumed (see the fast-follow report): this does NOT make replay report success.
+/// `apply_and_return` paints the corrupted byte into guest memory at the sigaltstack landmark,
+/// unnoticed there, but that byte then sits untouched until the run's PRE-EXISTING, unrelated
+/// final full-memory `Snapshot` diff (CLAUDE.md's "at exit does a full-memory comparison") trips
+/// over it — reported as a bare `memory divergence at ipa 0x.. replay=0xff recorded=0x00`, naming
+/// an address, not sigaltstack. That accidental, coarse, late catch is exactly what "no
+/// sigaltstack-specific check" looks like in practice on this fixture; it is not the deliverable.
+#[test]
+#[ignore = "parked until the sigaltstack replay mirror lands (fast-follow step 3, retrace-core's \
+            SYS_SIGALTSTACK arm at :1411): replay currently has NO byte-compare for the oldstack \
+            writeback, so this corruption goes unnoticed at the sigaltstack landmark and is only \
+            caught later, by chance, as an unrelated bare final-memory-diff — never as a divergence \
+            naming 'sigaltstack oldstack mismatch'. That is what fails below today. Un-ignore once \
+            the mirror lands: it should then report the divergence immediately, at the sigaltstack \
+            landmark, by that name, before the guest even resumes — exactly as this test asserts."]
+fn a_corrupted_sigaltstack_oldstack_region_is_a_divergence() {
+    let (rec, trace) = util::record(retrace_guest::ALTSTACK);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+
+    // The QUERY call — sigaltstack(NULL, &oss) — has args[0] == 0 (no new stack) and args[1] != 0
+    // (a real oss pointer). That is the landmark whose recorded `writes` carries the oldstack
+    // Region this test corrupts; the earlier INSTALL call (args[0] != 0, args[1] == 0) has none.
+    let i = events.iter().position(|e| matches!(e, Event::Syscall { num, args, .. }
+            if *num == retrace_arch::SYS_SIGALTSTACK && args[0] == 0 && args[1] != 0))
+        .expect("ALTSTACK must issue sigaltstack(NULL, &oss) — see the fast-follow query in \
+                 altstack.s; without it record writes no oldstack Region and there is nothing \
+                 here to corrupt");
+    let oldstack_ipa = match &events[i] { Event::Syscall { args, .. } => args[1], _ => unreachable!() };
+
+    let region = match &mut events[i] {
+        Event::Syscall { writes, .. } => writes.iter_mut().find(|r| r.ipa == oldstack_ipa)
+            .expect("the sigaltstack query's recorded writes must include a Region at args[1]"),
+        _ => unreachable!(),
+    };
+    assert_eq!(region.bytes.len(), 24, "encode_oldstack always emits a 24-byte stack_t");
+    assert_eq!(region.bytes[20], 0, "byte 20 is documented zero padding (past ss_flags at \
+        16..20) — this test's whole point depends on corrupting a byte the guest never reads");
+    region.bytes[20] = 0xff;
+
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3,
+        "a corrupted oldstack Region must be reported as a DIVERGENCE (CLI exit 3), not silently \
+         accepted; got exit {} stderr:\n{}", rep.code, rep.stderr);
+    assert!(rep.stderr.contains("sigaltstack oldstack mismatch"),
+        "the divergence must NAME the sigaltstack oldstack mismatch, not just fail generically; \
+         stderr:\n{}", rep.stderr);
 }
