@@ -13,9 +13,11 @@ Requires **macOS 26.x on Apple Silicon**. Runs non-root; SIP may stay enabled. E
 touches `hv_*` needs the `com.apple.security.hypervisor` entitlement (ad-hoc signable — see
 Codesigning below).
 
-The full design and milestone history live in `docs/superpowers/specs/` and the README's "Status"
-sections — read the **latest Status section** before starting work; it is the authoritative, honest
-log of what runs today and what the next wall is.
+**The README is the current-state document** — what runs today, the known limits, and the gate. Read
+it before starting work. The milestone-by-milestone history lives in `docs/status-log.md` (M0–M16,
+verbatim, each entry true as of its own milestone) and the design specs in
+`docs/superpowers/specs/`. Reach for the log when you need to know *how* something came to be or
+what a past milestone measured; reach for the README when you need to know what is true now.
 
 ## Commands
 
@@ -23,6 +25,18 @@ log of what runs today and what the next wall is.
 just gate          # THE exit gate: cargo test --workspace + clippy -D warnings. `just m0`/`just m1` are aliases.
 ```
 
+- **`just gate` does not currently complete as one command — expect to chunk it.** The full
+  workspace run exceeds the 10-minute tool ceiling and gets killed; M14, M15 and M16 each closed on
+  a chunked run instead. Do not read a kill as a red. Split it, run every chunk `--no-fail-fast`,
+  and capture cargo's exit code **before any pipe** (a pipe swallows it):
+  ```sh
+  cargo test --workspace --exclude retrace-box --exclude retrace -- --test-threads=1
+  cargo test -p retrace-box -- --test-threads=1
+  cargo test -p retrace --test <name> -- --test-threads=1   # per-target for the e2e gates
+  ```
+  Then reconcile the total against the previous milestone's close by diffing `#[test]` counts
+  file-by-file, rather than trusting a sum. `cargo test -p retrace --lib` is invalid and fails the
+  whole invocation. Grep gate logs with `grep -a` — they carry ANSI and UTF-8 that trips plain grep.
 - **`--test-threads=1` is mandatory.** HVF allows only one VM per process, so in-process VM tests
   must run serially. `just gate` sets it; a bare `cargo test` will flake with `HV_BUSY`.
 - Single test: `cargo test -p <crate> <name> -- --test-threads=1`
@@ -38,7 +52,8 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   whose main signals its child by name, so the *child* runs the handler). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
-  the rule, and the README's latest Status section for which ones and why.
+  the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
+  record) and summarised under "Known limits" in the README.
 - CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
   exe through real `/usr/lib/dyld`; append `-- <guest args…>` to pass the guest an argv),
   `... replay t.bin`.
@@ -195,14 +210,11 @@ rather than the current one. That count is the thing to check when adding an arm
 because a mirror `return`s before reaching the generic dispatch, so **every new mirror silently
 creates a new hole until its oracle call is added** — nothing structural couples the two. Without
 the check, two threads running the same code issue byte-identical `(num, args)` and a wrong-thread
-replay continues in silence. `Event::Sched` is **gone**, not reserved: emitting it would silently renumber every
-landmark, and nothing in either dispatch loop can see a switch. M15 shipped the caught-raise and
-`sigreturn` mirrors proven only to *fire*, since their only fixture was single-threaded; **M16
-discharged that** — `sigthread` is both threaded and signalling, and independent mutation of each
-arm fails its own gate while the other stays green, so both are now proven to *distinguish two live
-schedules*. What is still unexercised is the `Crash` site: no threaded guest in the tree crashes, so
-its retag mutation has no live second thread to target. (M14-threads, M15-threaddebug,
-M16-threadsignal; see their specs and the README's Status sections.)
+replay continues in silence. `Event::Sched` is **gone**, not reserved: emitting it would silently
+renumber every landmark, and nothing in either dispatch loop can see a switch. One site is still
+unexercised — `Crash`, because no threaded guest in the tree crashes, so its retag mutation has no
+live second thread to target. (M14-threads, M15-threaddebug, M16-threadsignal; see their specs and
+`docs/status-log.md`.)
 
 ## Milestone / SDD workflow
 
@@ -211,15 +223,22 @@ Development is milestone-driven, M0 onward. Each milestone has a design spec in
 for the milestone, so `ls` them for the current list rather than trusting a list written here.
 Per-task reports and code-review diffs land in `.superpowers/sdd/`.
 
-**The README's latest "Status" section is the single authoritative record** of what runs today, which
-gates are green, and where the next wall is. Read it before starting work. Do not restate that status
-in this file — a second copy is a copy that goes stale.
+**Two documents, two jobs, and they must not be merged.** The **README** says what is true *now* —
+capability, limits, gate. It is **edited in place** as reality changes, so it never needs a
+"superseded" note. `docs/status-log.md` is the **append-only history**: a closing milestone adds a
+new section to it and never rewrites an old one, so an earlier claim that later proved wrong is
+left standing with a forward pointer rather than quietly corrected.
+
+At a milestone close you therefore touch **both**: append the new Status section to the log, and
+**edit** the README's "What works today" / "Known limits" so they describe the new reality. Do not
+restate either in this file — a third copy is a copy that goes stale.
 
 ## Honest-gate discipline
 
 A headline end-to-end gate is parked `#[ignore]`d at the current wall, with the wall documented
 honestly, rather than being faked green or deleted. When you clear a wall, move the gate forward and
-rewrite that documentation — both the test's `#[ignore]` reason and the README Status section. If
+rewrite that documentation — the test's `#[ignore]` reason, the README's "Known limits", and the new
+section you append to `docs/status-log.md`. If
 nothing is left to park it at, un-`#[ignore]` it and say so. A milestone that parks a *new* gate for
 a capability it does not yet have has regressed nothing; that is the discipline working, not a
 backslide.
