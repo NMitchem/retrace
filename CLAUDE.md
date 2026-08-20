@@ -187,9 +187,11 @@ the trace.
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (`TRACE_MAGIC` is now
 `RT\x00\x08`, so every pre-M16 recording is unreadable) — and replay recomputes the current thread
-and compares it. `verify_thread` has **seven** call sites, one per landmark-consuming arm, each
-placed *after* that arm's own field comparison so a genuine argument divergence still reports as
-itself. That count is the thing to check when adding an arm: each site exists because a mirror
+and compares it. `verify_thread` has **seven** call sites, one in each arm that consumes a landmark and
+`return`s, each placed *after* that arm's own field comparison so a genuine argument divergence
+still reports as itself; the `SignalDelivery` landmark is checked by an eighth, inline comparison in
+`mirror_delivery`, deliberately not `verify_thread`, because its tag is the **receiving** thread
+rather than the current one. That count is the thing to check when adding an arm: each site exists because a mirror
 `return`s before reaching the generic dispatch, so **every new mirror silently creates a new hole
 until its oracle call is added** — nothing structural couples the two. Without the check, two
 threads running the same code issue byte-identical `(num, args)` and a wrong-thread replay continues
