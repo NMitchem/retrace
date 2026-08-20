@@ -893,13 +893,19 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 //
                 // NO `complete_syscall_before_delivery` here, and that is the difference from the
                 // other two materialisation sites. That call fixes SPSR_EL1 on the LIVE vCPU, which
-                // is the CALLER — and here the caller is the WAKER, not the receiver. The receiver's
-                // frame is built from its own saved context: Task 1 measured x0 on it to already
-                // hold `__ulock_wait`'s completed return value, and Task 4b measured the saved
-                // PSTATE to be correspondingly UNPATCHED rather than "also completed" — its C flag
-                // is whatever the guest's own pre-`svc` state was, not a manufactured
-                // success/failure flag (`crates/retrace/tests/blockedctx.rs`, both axes). Calling
-                // `complete_syscall_before_delivery` here would corrupt the waker's PSTATE instead.
+                // is the CALLER — and here the caller is the WAKER, not the receiver. Calling it
+                // here would corrupt the waker's PSTATE instead of the receiver's.
+                //
+                // But the receiver's OWN PSTATE still needs the equivalent fix, applied to its
+                // SAVED context instead of the live vCPU: Task 1 measured its saved x0 as already 0
+                // (`__ulock_wait`'s completed return value), and Task 4b measured its saved SPSR as
+                // correspondingly UNPATCHED rather than "also completed" — C **set**
+                // (`0x60000000`, `crates/retrace/tests/blockedctx.rs`), disagreeing with the
+                // completed x0 sitting next to it. `complete_saved_syscall_before_delivery` is that
+                // fix, targeted at `wtid`'s saved context rather than the live vCPU. Both halves are
+                // load-bearing: the live version stays absent because the live vCPU is the waker;
+                // the saved version is called because the receiver's own PSTATE needs the same
+                // completed-syscall correction the kernel applies, just against different state.
                 let deliver_to: Vec<usize> = woken.iter().copied()
                     .filter(|&t| b.threads().take_deliverable_peek(t).is_some())
                     .collect();
@@ -910,6 +916,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     deliver_to.len());
                 if let Some(&wtid) = deliver_to.first() {
                     if let Some((psig, handler)) = take_pending_delivery(&mut b, wtid) {
+                        b.complete_saved_syscall_before_delivery(wtid, false);
                         let (dwrites, resume_pc) =
                             b.deliver_signal_to(wtid, psig, retrace_arch::SI_USER, 0, 0, 0);
                         // The tag is the RECEIVER — the woken thread — not `thread`, which is the
