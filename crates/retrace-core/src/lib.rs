@@ -1107,11 +1107,16 @@ impl ReplaySession {
                     if num == SYS_EXIT {
                         // Verify Exit, then the final-memory landmark.
                         match self.events.get(self.idx) {
-                            Some(Event::Exit { code, .. }) => {
+                            Some(Event::Exit { code, thread: rthread }) => {
                                 if args[0] != *code {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("exit code mismatch: live {} != recorded {}", args[0], code) });
                                 }
+                                // M16 Task 11: the thread oracle (see `verify_thread`'s doc). Placed
+                                // AFTER the exit-code compare above, not before, for the usual
+                                // reason: a genuine code mismatch should be reported as itself, not
+                                // masked by the thread mismatch it caused.
+                                self.verify_thread(*rthread, pc)?;
                                 match self.events.get(self.idx + 1) {
                                     Some(Event::Snapshot { mem: final_mem, .. }) => {
                                         if let Some(d) = self.b.diff_memory(final_mem) {
@@ -1818,11 +1823,16 @@ impl ReplaySession {
                     // M6 mirror of record's crash arm. The triple compare IS the divergence check
                     // (symmetry rule 1); then the final-memory landmark, exactly like Exit.
                     match self.events.get(self.idx) {
-                        Some(Event::Crash { pc: rpc, esr: resr, far: rfar, .. }) => {
+                        Some(Event::Crash { pc: rpc, esr: resr, far: rfar, thread: rthread }) => {
                             if pc != *rpc || esr != *resr || far != *rfar {
                                 return Err(Divergence { landmark: self.idx, pc,
                                     detail: format!("crash mismatch: live (pc={pc:#x}, esr={esr:#x}, far={far:#x}) != recorded (pc={rpc:#x}, esr={resr:#x}, far={rfar:#x})") });
                             }
+                            // M16 Task 11: the thread oracle (see `verify_thread`'s doc). Placed
+                            // AFTER the (pc, esr, far) compare above, not before, for the usual
+                            // reason: a genuine crash mismatch should be reported as itself, not
+                            // masked by the thread mismatch it caused.
+                            self.verify_thread(*rthread, pc)?;
                             match self.events.get(self.idx + 1) {
                                 Some(Event::Snapshot { mem: final_mem, .. }) => {
                                     if let Some(d) = self.b.diff_memory(final_mem) {
