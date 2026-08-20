@@ -2176,6 +2176,16 @@ It must cover, each in its own right:
   equivalence holds in source — but no gate guest blocks a signal it then raises, so until Task 9's
   guest does, both sides write a bit nobody reads. Say what is *proven* (the two arms agree, the
   equivalence was read in source) separately from what is *exercised*.
+- **The `sigaltstack` oldstack writeback has no replay byte-compare.** Measured at Task 9's fix round
+  and still open: replay's hook (`crates/retrace-core/src/lib.rs:1400-1407`) reads the NEW stack and
+  calls `set_altstack_of` to keep the table in step, but never recomputes or compares the OLD
+  `stack_t` record writes back at `args[1]` — unlike the `sigaction` oldact compare six lines above,
+  the `sigprocmask` oldset compare in the hoisted mask arm, and (as of M16) `sigpending`. It is
+  PRE-EXISTING, not M16's, and M16 deliberately did not fix it. Name it as the one remaining
+  serviced-syscall writeback with no divergence check. Scope note for whoever does fix it, measured
+  and easy to get wrong: record handles the query case `args[0] == 0` by reading `altstack_of`
+  without changing state, so the mirror's guard belongs on **`args[1] != 0`** — the writeback
+  pointer — not on `args[0] != 0` as the current hook is guarded.
 - **Follow-up to name, not fix: some replay-side divergences abort instead of diverging.**
   `deliver_signal_to`'s `Runnable` assertion and `thread_of_port`'s no-such-port panic are correctly
   fail-loud, and calling them from replay is what symmetry rule 1 demands — but on the replay side
