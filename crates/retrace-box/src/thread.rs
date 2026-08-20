@@ -261,17 +261,25 @@ impl ThreadTable {
     }
 
     /// Wake everyone joined on `tid`. Called on thread exit.
-    pub fn unblock_joiners_of(&mut self, tid: usize) {
-        for t in &mut self.threads {
+    ///
+    /// M17: returns the woken tids, for the same reason `unblock_waiters_on` does — except here the
+    /// caller uses them only as a TRIPWIRE. Nothing produces `BlockReason::Join` today, so this
+    /// wakes nobody; M17's "exactly one materialisation site" rests on that, and a silent change
+    /// would strand a signal rather than fail.
+    pub fn unblock_joiners_of(&mut self, tid: usize) -> Vec<usize> {
+        let mut woken = Vec::new();
+        for (i, t) in self.threads.iter_mut().enumerate() {
             if let ThreadState::Blocked(BlockReason::Join { target }) = t.state {
                 if target == tid {
                     t.state = ThreadState::Runnable;
+                    woken.push(i);
                 }
             }
         }
+        woken
     }
 
-    /// Wake every thread waiting on exactly `addr`. Returns how many were woken.
+    /// Wake every thread waiting on exactly `addr`. Returns which tids were woken.
     ///
     /// **This is the wake seam, and it matches by ADDRESS EQUALITY — measured, not fabricated.**
     /// Task 8's review established that nothing woke a `Blocked(Wait { addr })` thread in any form,
@@ -287,13 +295,18 @@ impl ThreadTable {
     /// apart from "woke everything"; nothing in the box branches on it. Zero is legal and not an
     /// error: the real kernel answers `ENOENT` when no one is waiting and `__pthread_joiner_wake`
     /// treats that as success (its `cmn w0, #0x2` / `b.eq` return path).
-    pub fn unblock_waiters_on(&mut self, addr: u64) -> usize {
-        let mut woken = 0;
-        for t in &mut self.threads {
+    ///
+    /// M17: returns the woken tids rather than a count. The count told a caller's test "woke the
+    /// right one" apart from "woke everything"; the IDENTITY is what lets the dispatch arms
+    /// materialise a pending signal on the thread that just became runnable. `Vec::len()` still
+    /// answers the old question, so no existing claim is lost.
+    pub fn unblock_waiters_on(&mut self, addr: u64) -> Vec<usize> {
+        let mut woken = Vec::new();
+        for (tid, t) in self.threads.iter_mut().enumerate() {
             if let ThreadState::Blocked(BlockReason::Wait { addr: a }) = t.state {
                 if a == addr {
                     t.state = ThreadState::Runnable;
-                    woken += 1;
+                    woken.push(tid);
                 }
             }
         }
