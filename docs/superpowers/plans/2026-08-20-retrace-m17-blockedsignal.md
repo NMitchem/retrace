@@ -274,7 +274,10 @@ Then at its product call site, `crates/retrace-box/src/lib.rs:3359`, replace
         // pended on such a thread would be swallowed silently. Fail instead.
         let joiners = self.threads.unblock_joiners_of(me);
         assert!(joiners.is_empty(),
-            "unblock_joiners_of woke {joiners:?}, but BlockReason::Join is supposed to have no              producer. M17 materialises pended signals only at __ulock_wake, so this is now a              second wake path — teach it to materialise, or a signal pended on one of these              threads is lost silently.");
+            "unblock_joiners_of woke {joiners:?}, but BlockReason::Join is supposed to have no \
+             producer. M17 materialises pended signals only at __ulock_wake, so this is now a \
+             second wake path — teach it to materialise, or a signal pended on one of these \
+             threads is lost silently.");
 ```
 
 The three existing `threads.rs` tests that call `unblock_joiners_of` (lines ~59, ~108, and the
