@@ -875,7 +875,8 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // __ulock_wake from retrace's OWN process against a guest address. Writes nothing to
             // guest memory (it only moves thread-table state), so the event carries no writes.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAKE => {
-                let rc = b.guest_ulock_wake(args);
+                // M17 Task 4 makes use of `_woken`; this task only threads it through.
+                let (rc, _woken) = b.guest_ulock_wake(args);
                 w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append ulock_wake: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
@@ -1775,7 +1776,7 @@ impl ReplaySession {
                             // conditional" — leaving `err` out would have made that false for half
                             // the pair.
                             if num == retrace_arch::SYS_ULOCK_WAKE {
-                                let (rc, rerr) = (self.b.guest_ulock_wake(args), false);
+                                let ((rc, _woken), rerr) = (self.b.guest_ulock_wake(args), false);
                                 if rc != *ret || rerr != *err {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(

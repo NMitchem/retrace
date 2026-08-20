@@ -377,6 +377,34 @@ fn a_terminating_thread_exits_and_wakes_whoever_joined_it() {
     assert_eq!(b.threads().pick_next(), Some(0), "main's join is satisfied");
 }
 
+/// M17: the Join tripwire fires on the HAZARD it exists for, not on a proxy for it.
+///
+/// `unblock_joiners_of` is a live wake path that today wakes nobody, because no production code
+/// constructs `BlockReason::Join` (measured — every construction site is in this file). M17's
+/// "exactly one materialisation site" rests on that. If a producer ever appears, a joiner woken
+/// while carrying a pending signal is a signal M17 materialises nowhere and therefore swallows in
+/// silence — the one failure a determinism oracle cannot see, because record and replay agree.
+///
+/// The negative case is `a_terminating_thread_exits_and_wakes_whoever_joined_it` directly above:
+/// the same wiring, the same wake, no pending signal — and it must stay green. That pair is why the
+/// tripwire asserts on the pending set rather than on "woke anybody at all", which would have made
+/// the legitimate wiring test impossible to write.
+#[test]
+#[should_panic(expected = "carrying pending signals")]
+fn a_woken_joiner_carrying_a_pending_signal_trips_the_m17_tripwire() {
+    let mut b = tb();
+    b.set_thread_start_pc(0x0001_804b_2000);
+    let p1 = pth(&b, 0);
+    b.guest_bsdthread_create([0x1_0002_4e00, 0, p1, p1, 0, 0, 0, 0]); // thread 1
+
+    // Main blocks joining the child AND is holding an undelivered SIGUSR1.
+    b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
+    b.threads_mut().pend(0, 30);
+    b.switch_to_thread(1);
+
+    b.guest_bsdthread_terminate([0x3020_7000, 0x8000, 0, 0, 0, 0, 0, 0]);
+}
+
 /// The other half of the M14 Task 8 report's ruling 1 answer: the STATE the real flow actually
 /// produces is `Wait { addr }` (never `Join { target }` — see the report), so the primitive that
 /// must be proven against something other than a hand-installed `block(Join { .. })` is
@@ -491,7 +519,9 @@ fn unblock_waiters_on_wakes_only_the_matching_address() {
     t.block(BlockReason::Wait { addr: 0xBBB0 });
     t.switch_to(1);
 
-    assert_eq!(t.unblock_waiters_on(0xAAA0), 1, "exactly one waiter is on that address");
+    assert_eq!(t.unblock_waiters_on(0xAAA0), vec![0],
+        "exactly one waiter is on that address, and it is thread 0 — M17 needs the IDENTITY, not \
+         just the count: materialising a pending signal at the wake requires knowing WHO woke");
 
     assert_eq!(t.state_of(0), ThreadState::Runnable, "the matching waiter must wake");
     assert!(matches!(t.state_of(2), ThreadState::Blocked(BlockReason::Wait { addr: 0xBBB0 })),
@@ -499,7 +529,8 @@ fn unblock_waiters_on_wakes_only_the_matching_address() {
 
     // A wake nobody is waiting on is legal and must not panic: the real kernel answers ENOENT and
     // `__pthread_joiner_wake` treats that as success (measured, task-9-measurements.md §2).
-    assert_eq!(t.unblock_waiters_on(0xC0DE), 0, "a wake with no waiter is a no-op, not a fault");
+    assert_eq!(t.unblock_waiters_on(0xC0DE), Vec::<usize>::new(),
+        "a wake with no waiter is a no-op, not a fault");
 }
 
 /// Pure. The exact predicate `Box_::run()` consults on every entry.
@@ -608,8 +639,12 @@ fn ulock_wake_wakes_exactly_the_thread_waiting_on_that_address() {
     assert_eq!(b.guest_ulock_wait([WAIT_OP, other, 42, 0, 0, 0, 0, 0]), 0);  // 2 blocks elsewhere
     b.switch_to_thread(1);
 
-    assert_eq!(b.guest_ulock_wake([WAKE_OP, joined, 0, 0, 0, 0, 0, 0]), 0,
-        "0 is the success value __pthread_joiner_wake accepts (measured, §2)");
+    assert_eq!(b.guest_ulock_wake([WAKE_OP, joined, 0, 0, 0, 0, 0, 0]), (0, vec![0]),
+        "0 is the success value __pthread_joiner_wake accepts (measured, §2), and M17 adds the \
+         IDENTITY alongside it: the wake reports that it woke the JOINER (0), not the thread \
+         waiting on a different address (2). The state assertions below check the same thing from \
+         the table's side; this checks what the wake itself reported, which is what the dispatch \
+         arms actually consume.");
 
     assert_eq!(b.threads().state_of(0), retrace_box::thread::ThreadState::Runnable,
         "the joiner waiting on this exact address must wake");

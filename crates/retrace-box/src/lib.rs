@@ -3356,7 +3356,30 @@ impl Box_ {
         // struct. Task 1/2 measured it; if it is in the struct, libpthread reads it back itself
         // and the box records 0 here rather than pretending to know.
         self.threads.exit_current(0);
-        self.threads.unblock_joiners_of(me);
+        // M17 tripwire. M17 materialises pended signals at exactly ONE site (`guest_ulock_wake`),
+        // which is sound only because no production path constructs `BlockReason::Join` today
+        // (measured: every construction site is in `retrace-box/tests/threads.rs`; the guest's own
+        // `sigblocked.rs` records the same fact). But `unblock_joiners_of` is still a live wake
+        // path, so if a producer ever appears it becomes a SECOND place a thread goes from Blocked
+        // to Runnable — and a signal pended on such a thread would be swallowed in silence.
+        //
+        // The assert fires on the HAZARD, not on a proxy for it: a woken joiner that is carrying a
+        // pending signal. Asserting `joiners.is_empty()` instead would be both too strong and too
+        // brittle — `a_terminating_thread_exits_and_wakes_whoever_joined_it` drives a Join state
+        // through this very path on purpose, to prove the exit/wake wiring, and it strands nothing.
+        // `pending_of` rather than the mask-filtered set is deliberate: a masked pending signal is
+        // not stranded (its unmask landmark still materialises it), but a tripwire should err
+        // toward firing early.
+        let joiners = self.threads.unblock_joiners_of(me);
+        let carrying: Vec<usize> = joiners.iter().copied()
+            .filter(|&t| self.threads.pending_of(t) != 0)
+            .collect();
+        assert!(carrying.is_empty(),
+            "unblock_joiners_of woke {carrying:?} while they were carrying pending signals. \
+             `BlockReason::Join` has gained a producer, so joiner-wake is now a second path from \
+             Blocked to Runnable — and M17 materialises pended signals only at __ulock_wake. Teach \
+             this site to materialise too, or the signals pended on those threads are lost \
+             silently.");
         0
     }
 
@@ -3483,7 +3506,13 @@ impl Box_ {
     ///
     /// Reads and writes no guest memory, so the recorded event carries no writes and replay's
     /// mirror recomputes this identically from the same `(num, args)`.
-    pub fn guest_ulock_wake(&mut self, args: [u64; 8]) -> u64 {
+    ///
+    /// M17: returns `(rc, woken_tids)`. `rc` is unchanged (always 0 — see above). The tids are what
+    /// the dispatch arms need in order to materialise a signal pended on a thread that was blocked:
+    /// after the wake those threads are merely `Runnable`, indistinguishable from threads that were
+    /// never blocked, so the wake must report them as it performs them. Both dispatch loops
+    /// destructure the same pair from the same call with the same args, so symmetry rule 1 holds.
+    pub fn guest_ulock_wake(&mut self, args: [u64; 8]) -> (u64, Vec<usize>) {
         // The measured wake operation is exactly one word (`mov w0,#2` + `movk w0,#0x100,lsl#16` at
         // `__pthread_joiner_wake` 0x66f4). Fail loud on anything else, the same posture
         // `guest_ulock_wait` takes — and for a sharper reason than width: `ULF_WAKE_THREAD`
@@ -3495,8 +3524,8 @@ impl Box_ {
             "guest_ulock_wake: unmeasured operation word {:#x} — only __pthread_joiner_wake's plain \
              address wake is modelled; ULF_WAKE_THREAD names a thread port in x2 and would wake the \
              wrong thread if treated as an address wake", args[0]);
-        self.threads.unblock_waiters_on(args[1]);
-        0
+        let woken = self.threads.unblock_waiters_on(args[1]);
+        (0, woken)
     }
 
     /// Pick and switch after the running thread blocked or exited.
