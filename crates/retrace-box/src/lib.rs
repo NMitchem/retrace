@@ -2845,19 +2845,6 @@ impl Box_ {
         self.threads.set_mask_of(cur, retrace_arch::SIG_SETMASK, mask);
     }
 
-    /// Deliver `sig` to thread `tid`, which need NOT be the running one.
-    ///
-    /// Returns `(frame writes, resume_pc)`. Called by BOTH record and replay — that is what makes
-    /// "both sides recompute the same frame" true by construction rather than by discipline.
-    ///
-    /// `esr`/`far` are the guest's own fault syndrome for a fault-derived signal, and 0 for a
-    /// self-raise (no hardware fault happened, and inventing one would be the same lie M11 refused
-    /// when it kept `Event::Signal` out of `Event::Crash`).
-    ///
-    /// The table is the authority for EVERY thread, including the running one whose entry is stale
-    /// between switches — so the current context is saved into it first and reloaded at the end. That
-    /// is what lets one code path serve a self-signal and a cross-thread signal identically, instead
-    /// of two paths that drift (M13 Task 8 shipped a test that checked only one of a mirrored pair).
     /// Can `tid` receive a signal frame? `Ok(())`, or `Err(diagnostic)` saying why not.
     ///
     /// A `Blocked` thread's ctx is the saved state its blocking syscall must resume through, so
@@ -2932,6 +2919,19 @@ impl Box_ {
             || matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_))
     }
 
+    /// Deliver `sig` to thread `tid`, which need NOT be the running one.
+    ///
+    /// Returns `(frame writes, resume_pc)`. Called by BOTH record and replay — that is what makes
+    /// "both sides recompute the same frame" true by construction rather than by discipline.
+    ///
+    /// `esr`/`far` are the guest's own fault syndrome for a fault-derived signal, and 0 for a
+    /// self-raise (no hardware fault happened, and inventing one would be the same lie M11 refused
+    /// when it kept `Event::Signal` out of `Event::Crash`).
+    ///
+    /// The table is the authority for EVERY thread, including the running one whose entry is stale
+    /// between switches — so the current context is saved into it first and reloaded at the end. That
+    /// is what lets one code path serve a self-signal and a cross-thread signal identically, instead
+    /// of two paths that drift (M13 Task 8 shipped a test that checked only one of a mirrored pair).
     pub fn deliver_signal_to(
         &mut self, tid: usize, sig: u64, si_code: u64, si_addr: u64, esr: u64, far: u64,
     ) -> (Vec<Region>, u64) {
