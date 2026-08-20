@@ -2628,18 +2628,23 @@ the thread they belong to, with the oracle checking all four. **The gate: 387 pa
 with `-D warnings` (`CLIPPY_EXIT=0`).
 
 That total was again **measured in chunks, not by one `just gate` run**, every chunk
-`--no-fail-fast` with cargo's exit code captured before any pipe, and every chunk returned
-`CARGO_EXIT=0`. M15 closed at **360 / 0 / 1 over 98 binaries**, so M16 adds **27 passing tests, one
-new `#[ignore]`, and 3 test binaries** — and the delta reconciles *exactly* rather than being waved
-through. It was checked by diffing `#[test]` counts file-by-file between M15's close (`ed819c2`)
-and this HEAD: `kport.rs` +2 (new), `sigthread_e2e.rs` +3 (new), `sigblocked_e2e.rs` +1 (new, and
-the one `#[ignore]`), `thread_oracle.rs` +4, `thread.rs` 0→9, `sig.rs` 23→20, `deliver.rs` +7,
-`threads.rs` +1, `retrace-box/src/lib.rs` +2, `retrace-trace/src/lib.rs` +2. That is **+28 raw new
-tests, one of them ignored = +27 passed + 1 ignored**, and the +3 binaries are exactly the three
-new files. **`sig.rs`'s −3 is a relocation, not a deletion** — the three mask/altstack unit tests
-moved to `thread.rs` when the state they test moved there, which is why `thread.rs`'s +9 contains
-them. `retrace-core`'s test count is byte-identical across the milestone. Every headline gate ran
-and passed **by name** in the logs: `hello_dyn_e2e`, `hello_rust_e2e`, **both** `jq` gates —
+`--no-fail-fast` with cargo's exit code captured before any pipe, and **six of the seven chunks
+returned `CARGO_EXIT=0`; the seventh (`gate-chunk-3.log`) was killed at the harness's 600 s ceiling
+and contributes only the 60 results, over 27 binaries, that had already printed `test result: ok`
+before the kill** — see hazard 2 below, where the kill and its handling are set out in full.
+`rung.rs`, the one target cut off mid-test, recorded no result there and was re-run to completion in
+the split, so nothing is counted twice and nothing is dropped. M15 closed at **360 / 0 / 1 over 98
+binaries**, so M16 adds **27 passing tests, one new `#[ignore]`, and 3 test binaries** — and the
+delta reconciles *exactly* rather than being waved through. It was checked by diffing `#[test]`
+counts file-by-file between M15's close (`ed819c2`) and this HEAD: `kport.rs` +2 (new),
+`sigthread_e2e.rs` +3 (new), `sigblocked_e2e.rs` +1 (new, and the one `#[ignore]`),
+`thread_oracle.rs` +4, `thread.rs` 0→9, `sig.rs` 23→20, `deliver.rs` +7, `threads.rs` +1,
+`retrace-box/src/lib.rs` +2, `retrace-trace/src/lib.rs` +2. That is **+28 raw new tests, one of them
+ignored = +27 passed + 1 ignored**, and the +3 binaries are exactly the three new files.
+**`sig.rs`'s −3 is a relocation, not a deletion** — the three mask/altstack unit tests moved to
+`thread.rs` when the state they test moved there, which is why `thread.rs`'s +9 contains them.
+`retrace-core`'s test count is byte-identical across the milestone. Every headline gate ran and
+passed **by name** in the logs: `hello_dyn_e2e`, `hello_rust_e2e`, **both** `jq` gates —
 `/opt/homebrew/bin/jq` was present and no skip `eprintln!` fired anywhere in any log, so that green
 is earned — `panic_e2e`, `thread_watch_e2e`, and M16's own `sigthread_e2e` at 3/0.
 
@@ -2706,9 +2711,11 @@ three checks where there is one. What each *uniquely* contributes: Task 7 owns "
 thread the port names"; Task 9 owns "a masked signal pends and materialises at the unmask"; and
 Task 10 owns the **stdout-ordering proof** (`masked` precedes `kill rc`) — the only one of the three
 that makes the per-thread mask an observable of the guest's own behaviour rather than an assertion
-about a struct. One deferred minor sits alongside: `sigthread_e2e.rs:188-192`, Task 10's trace-side
-check, is mechanically the same assertion as Task 7's `delivered[0] == 1u32`. It was specified
-verbatim by the task brief and self-disclosed; noted for whoever tightens test independence.
+about a struct. One deferred minor sits alongside: the `first` binding and its `assert_eq!` in
+`sigthread_e2e::main_masking_a_signal_does_not_block_it_for_the_child` — Task 10's trace-side check —
+are mechanically the same assertion as Task 7's `delivered[0] == 1u32`. It was specified verbatim by
+the task brief and self-disclosed; noted for whoever tightens test independence. (Anchored to the
+symbol rather than to the line numbers this paragraph used to cite, which had already drifted.)
 
 **M15's standing fidelity caveat is discharged, and the evidence is specific rather than
 rhetorical.** M15 shipped the oracle's caught-raise and `sigreturn` mirrors proven to *fire* but not
@@ -2743,8 +2750,10 @@ until someone remembers to add its oracle call**. Nothing structural couples "ad
 its `verify_thread`"; today the coupling is a habit and a grep.
 
 **The `sigaltstack` oldstack writeback is the one remaining serviced-syscall writeback with no
-divergence check — pre-existing, and deliberately not fixed here.** Replay's hook
-(`crates/retrace-core/src/lib.rs:1400-1407`) reads the *new* stack out of guest memory and calls
+divergence check — pre-existing, and deliberately not fixed here.** Replay's hook — the
+`num == retrace_arch::SYS_SIGALTSTACK && args[0] != 0` block inside `ReplaySession::advance`'s
+generic dispatch arm, in `crates/retrace-core/src/lib.rs`; anchored to the symbol rather than to a
+line number, per this branch's own `3ce67aa` — reads the *new* stack out of guest memory and calls
 `set_altstack_of` so the thread table stays in step, then applies the recorded bytes. It never
 recomputes or byte-compares the *old* `stack_t` that record writes back at `args[1]` — unlike the
 `sigaction` oldact compare six lines above it, the `sigprocmask` oldset compare in the hoisted mask
@@ -2763,6 +2772,29 @@ the failure modes of a *schedule* divergence, and the `pthread_kill` landmark's 
 checks the **caller**, not the target, so it would not catch such a divergence first. M16 elsewhere
 prefers a named `Divergence` at a landmark to a process abort. Recorded as a known rough edge, not
 fixed.
+
+**The spec's open question 4 is answered, and the answer is not the one the spec predicted.** It
+asked whether the debugger should surface the *receiving* thread at a `SignalDelivery` landmark, and
+reasoned that "`where` already reports the box's live `current_thread()`, which at a delivery
+landmark is the receiver, so the answer may be 'nothing to do' — but that needs checking rather than
+assuming". **Checked, in the code, and the premise is false in exactly the case M16 created.** A
+cross-thread delivery does not switch: `deliver_signal_to` saves the caller's context, builds the
+frame into the *target's* saved ctx, and then `load_ctx`es the **caller** back onto the vCPU, leaving
+`threads.current()` untouched. So at such a landmark `cmd_where` prints
+`at (N, K) pc=… thread=<caller>` — main, in `sigthread`'s headline case — while the thread that will
+run the handler is the child. `threads` marks the same caller with its `*`, and **no debug line
+renders a `SignalDelivery` at all**: `Outcome` carries only `Exit`/`Crash`/`Signal`, so the spec's
+conditional second half ("if a debug line prints `SignalDelivery` today it should carry the tag") has
+no subject. Nothing printed is *wrong* — the guest really is executing on the caller, and
+`current_thread()`'s doc already warns that a boundary names the thread that issued the landmark
+rather than the one that will retire the next instruction. **Surfacing the receiver was considered
+and declined for M16, and is named here as a follow-up rather than a non-issue:** the receiver is in
+the trace (`Event::SignalDelivery.thread`) and the oracle checks it, but `ReplaySession` exposes no
+accessor for the recorded landmark's tag, so a `where` that named it would be a new API surface plus
+a rendering decision (two thread numbers on one line) — real design, not a one-line print, and not
+what the Components table's "`where`/`threads` reporting unchanged but re-verified" reserved room
+for. The re-verification is this paragraph; the spec's now-false clause has been struck at its
+source.
 
 **The named limits, stated here rather than discovered later:**
 
@@ -2813,6 +2845,17 @@ unexamined than perfect.** This one did not survive unamended:
   blocked thread's saved ctx is a resume point that cannot simply be redirected); the *mechanism*
   was an already-installed assert, not a live discovery. The `#[ignore]` reason was written from the
   measurement rather than forced into the predicted shape.
+- **The spec's `M16-target` rule is contradicted by the implementation, and the implementation is
+  right.** The spec says `complete_syscall_before_delivery` is applied "**only when
+  `target == current`**", reasoning that a non-current target is not returning from a syscall and
+  applying the completion would corrupt its `x0`. Record's caught-raise arm calls it
+  **unconditionally**, before `deliver_signal_to`. That is correct *because of* the refactor the
+  same spec section describes: after it, the function operates on the live vCPU — the **caller** —
+  whose context `deliver_signal_to` then saves into the table, while the target's frame is built
+  from the target's own saved ctx and never touches the caller's. The conditional the spec
+  imagined would break the caller instead: `pthread_kill` must still return 0 with `PSTATE.C` clear
+  whether or not it signalled itself. The call site carries the reasoning; the spec sentence has
+  been corrected at its source, the way its Fail-loud section was earlier on this branch.
 - **The `verify_thread` census drifted three times in one milestone.** Documented above; it is
   listed here too because it is at least as much a *planning* failure as a code one — the count
   lived in a doc comment that each successive task had to notice was stale, and Task 12 is where it
@@ -2889,7 +2932,21 @@ trace-format type doc is oversold (Task 2, no action taken); Task 10's duplicate
 (above); Tasks 12a/12b assert only `rep.code == 3` with no stderr message pin, unlike their siblings
 — Task 12's mutation proof substitutes for the pin, and both were verbatim brief content rather than
 implementer choices; and 12b's doc claims the `sigreturn` tag is a "nonzero id" without asserting
-it, where 12c pins its equivalent precondition with `assert_eq!(orig, 1, …)`.
+it, where 12c pins its equivalent precondition with `assert_eq!(orig, 1, …)`. **Three more were
+named by the final whole-branch review and are carried here rather than fixed**, each a test or doc
+tightening with no behaviour behind it: `deliver.rs`'s
+`a_second_signal_to_an_unrun_redirected_thread_fails_loud` asserts only that
+`catch_unwind(…).is_err()`, which the `Blocked`, `Exited` and `sig_bit` panics would also satisfy —
+today only the intended assert can fire (the target is `Runnable` and unblocked), but its siblings
+set the standard with `should_panic(expected = "is Blocked(")`, so it should downcast the payload
+and assert it contains "already redirected"; `Box_::on_altstack()` has **no product caller left**
+after M16 routed everything through `on_altstack_of`, so its doc line "Unchanged for every existing
+caller" is now vacuously true and should either point at the `deliver.rs` test that keeps it or be
+folded into that test; and the fault path carries a **textual** asymmetry — record's `Stop::Fault`
+arm calls `b.deliver_signal(sig, …)` while replay's mirror calls `deliver_signal_to(cur, …)`. Those
+are the same call (`deliver_signal` is a one-line delegation to `deliver_signal_to(current)`), so
+symmetry rule 1 holds behaviourally; but this branch works hard to make symmetry *visible*, and
+passing `thread as usize` on the record side would make the pair grep-identical.
 
 **Everything M15 and earlier carry forward is unchanged.** Per-thread reverse execution as its own
 position space, preemption (scheduling is still cooperative, so a guest that spin-waits without

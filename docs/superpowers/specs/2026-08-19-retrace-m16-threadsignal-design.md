@@ -152,10 +152,17 @@ A port matching no live thread is a fail-loud panic naming the ports searched.
 build the frame from the target's `ThreadCtx`, rewrite that ctx to enter the handler, then
 `load_ctx(current)`. A self-signal and a cross-thread signal take the identical path.
 
-`complete_syscall_before_delivery` is applied **only when `target == current`**. M12 measured that a
-self-raise's frame snapshots the post-return context (`x0 = 0`, `PSTATE.C` clear) because delivery
-happens at a syscall boundary; a non-current target is not returning from a syscall, and applying the
-completion would corrupt its `x0`.
+~~`complete_syscall_before_delivery` is applied **only when `target == current`**.~~
+**AMENDED AT THE CLOSE — the implementation applies it UNCONDITIONALLY, and is right to.** M12
+measured that a self-raise's frame snapshots the post-return context (`x0 = 0`, `PSTATE.C` clear)
+because delivery happens at a syscall boundary. What this sentence got backwards is *whose* context
+the completion touches: after the refactor described just below, it operates on the **live vCPU** —
+the *caller* — whose context `deliver_signal_to` then saves into the table, while the target's frame
+is built from the target's own saved ctx and is never reached by it. So there is no `x0` of a
+non-current target to corrupt, and the conditional would instead break the caller: `pthread_kill`
+must return 0 with `PSTATE.C` clear whether or not it signalled itself. See the call site in
+`record_box`'s caught-raise arm, which carries the same reasoning, and the close's "what contradicted
+this plan".
 
 **What a never-run target's context is.** Cooperative scheduling switches only on block or exit, so a
 Runnable-but-not-current thread is either never-run or freshly woken. In the headline case it is
@@ -359,10 +366,17 @@ this milestone was chosen to build.
 3. **Ordering of the two `pthread_kill`s in the fixture.** Step 5 self-signals main while masked. If
    `sigpending`'s new answer proves awkward to assert from a bare-`rustc` guest, printing the mask
    word is an acceptable substitute — but it must remain an assertion on recorded behaviour.
-4. **Should the debugger surface the receiving thread at a `SignalDelivery` landmark?** `where`
+4. **Should the debugger surface the receiving thread at a `SignalDelivery` landmark?** ~~`where`
    already reports the box's live `current_thread()`, which at a delivery landmark is the receiver, so
-   the answer may be "nothing to do" — but that needs checking rather than assuming, and if a debug
+   the answer may be "nothing to do"~~ — but that needs checking rather than assuming, and if a debug
    line prints `SignalDelivery` today it should carry the tag.
+   **ANSWERED AT THE CLOSE, and the struck premise is false in exactly the case M16 created.** A
+   cross-thread delivery does not switch — `deliver_signal_to` `load_ctx`es the *caller* back and
+   leaves `threads.current()` untouched — so at that landmark `where` reports the **caller**, not the
+   receiver. No debug line renders a `SignalDelivery` at all (`Outcome` carries only
+   `Exit`/`Crash`/`Signal`), so the second clause has no subject. Nothing printed is wrong; surfacing
+   the receiver was considered and **declined for M16**, and is carried as a named follow-up. Full
+   answer in the README's M16-threadsignal Status section.
 5. **Whether `Exit`'s thread tag is worth its break on its own.** A process exits once; the tag is
    cheap and consistent, but if it proves to carry no assertion anywhere, say so in the close rather
    than pretending it earned its place.
