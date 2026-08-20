@@ -688,7 +688,7 @@ fn a_clean_exit_with_no_pending_signals_passes_the_guard() {
 
 /// Mutation-killer 1: a Blocked thread with NO pending signal must pass. The brief's two tests above
 /// cannot distinguish a guard that checks `Blocked` state from one that fires on ANY blocked thread
-/// regardless of a pending signal — this isolates that the `take_deliverable_peek` check is load-
+/// regardless of a pending signal — this isolates that the `peek_deliverable` check is load-
 /// bearing, not decorative.
 #[test]
 fn a_blocked_thread_with_no_pending_signal_passes_the_guard() {
@@ -717,7 +717,7 @@ fn a_runnable_thread_with_a_pending_signal_passes_the_guard() {
 
 /// Mutation-killer 3, and the POSIX-correct case in its own right: a Blocked thread whose pending
 /// signal is MASKED must pass. Isolates that the guard reads `pending & !mask` (via
-/// `take_deliverable_peek`), not `pending` alone — a masked pending signal at exit was never owed a
+/// `peek_deliverable`), not `pending` alone — a masked pending signal at exit was never owed a
 /// delivery, so a guard that fired on it would be a false positive parking a future guest at a wall
 /// that does not exist.
 #[test]

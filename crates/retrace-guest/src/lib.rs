@@ -177,10 +177,10 @@ pub const WATCHTHREAD: &str = concat!(env!("OUT_DIR"), "/watchthread");
 /// while the child is Runnable-but-not-current. Today retrace ignores the target port and
 /// delivers to whoever is running (main); M16 fixes attribution so the child takes it instead.
 pub const SIGTHREAD: &str = concat!(env!("OUT_DIR"), "/sigthread");
-/// M16 t13: the guest for the PARKED `sigblocked_e2e` gate — three threads so that `b` can signal
-/// `a` while `a` is genuinely BLOCKED in `__ulock_wait` (joining `b`), not merely Runnable-and-
-/// never-run. The cooperative scheduler switches only on block or exit, so main can never observe
-/// a blocked peer directly; a blocked joiner leaves its own joinee running instead.
+/// M16 t13, un-parked by M17: the guest for the `sigblocked_e2e` gate — three threads so that `b`
+/// can signal `a` while `a` is genuinely BLOCKED in `__ulock_wait` (joining `b`), not merely
+/// Runnable-and-never-run. The cooperative scheduler switches only on block or exit, so main can
+/// never observe a blocked peer directly; a blocked joiner leaves its own joinee running instead.
 pub const SIGBLOCKED: &str = concat!(env!("OUT_DIR"), "/sigblocked");
 /// M13 t11: the recursion behind the PARKED `stackoverflow_rust_e2e` gate. Cannot strike libstd's
 /// guard today — that guard sits 7.73 MiB below retrace's real stack bottom (M8 spec risk R3).

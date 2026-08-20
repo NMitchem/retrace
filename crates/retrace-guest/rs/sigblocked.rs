@@ -1,7 +1,7 @@
 // crates/retrace-guest/rs/sigblocked.rs
 //
-// The guest for the PARKED sigblocked_e2e gate: a signal whose target is BLOCKED in __ulock_wait,
-// not merely not-current.
+// The guest for the sigblocked_e2e gate, which M17 un-parked: a signal whose target is BLOCKED in
+// __ulock_wait, not merely not-current.
 //
 // Three threads, not two, and that is forced rather than incidental. The cooperative scheduler
 // switches only on block or exit, so main can never be running while a peer is blocked — for the
@@ -9,7 +9,10 @@
 // running: main joins a, a joins b, so b runs while a sits in __ulock_wait. b is the only thread
 // that can express this signal.
 //
-// Built so the parked test is real code that compiles and can be un-ignored the day the wall falls.
+// Written while the gate was still parked (M16 t13), deliberately as real code that compiled and
+// could be un-ignored the day the wall fell rather than as prose describing a guest that did not
+// exist. M17 Tasks 3-6 cleared that wall; Task 7 then only had to delete the `#[ignore]`, and the
+// gate's four assertions passed unchanged.
 use std::sync::atomic::{AtomicU64, Ordering};
 
 extern "C" {

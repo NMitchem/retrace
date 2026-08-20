@@ -2896,7 +2896,7 @@ impl Box_ {
     pub fn assert_no_stranded_signals(&self) {
         for tid in 0..self.threads.len() {
             if !matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_)) { continue; }
-            if let Some(sig) = self.threads.take_deliverable_peek(tid) {
+            if let Some(sig) = self.threads.peek_deliverable(tid) {
                 panic!("thread {tid} is exiting still Blocked with pending signal {sig}, which it \
                         can therefore never take: M17 materialises a pended signal at the WAKE, and \
                         this thread was never woken. Either the guest deadlocked, or the signal \
