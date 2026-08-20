@@ -2846,7 +2846,19 @@ impl Box_ {
     /// divergence. One definition and two callers, so the two sides cannot drift on what
     /// "deliverable" means; `deliver_signal_to` itself still calls this and still panics, so its
     /// behaviour and its message are unchanged.
-    ///
+    pub fn check_deliverable(&self, tid: usize) -> Result<(), String> {
+        match self.threads.state_of(tid) {
+            thread::ThreadState::Runnable => Ok(()),
+            thread::ThreadState::Blocked(reason) => Err(format!(
+                "thread {tid} is Blocked({reason:?}), not Runnable; deliver_signal_to would \
+                 overwrite the saved context its blocking syscall must resume through. Wake or \
+                 skip it instead of redirecting a thread that cannot run yet.")),
+            thread::ThreadState::Exited(code) => Err(format!(
+                "thread {tid} has Exited({code}), not Runnable; it has no saved context left to \
+                 resume into a handler. deliver_signal_to must not target a dead thread.")),
+        }
+    }
+
     /// M17: should a raise targeting `tid` PEND rather than deliver?
     ///
     /// Two reasons, and they are independent. The mask reason is M16's and unchanged. The state
@@ -2871,19 +2883,6 @@ impl Box_ {
     pub fn should_pend_for(&self, tid: usize, sig: u64) -> bool {
         self.threads.is_blocked_for(tid, sig)
             || matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_))
-    }
-
-    pub fn check_deliverable(&self, tid: usize) -> Result<(), String> {
-        match self.threads.state_of(tid) {
-            thread::ThreadState::Runnable => Ok(()),
-            thread::ThreadState::Blocked(reason) => Err(format!(
-                "thread {tid} is Blocked({reason:?}), not Runnable; deliver_signal_to would \
-                 overwrite the saved context its blocking syscall must resume through. Wake or \
-                 skip it instead of redirecting a thread that cannot run yet.")),
-            thread::ThreadState::Exited(code) => Err(format!(
-                "thread {tid} has Exited({code}), not Runnable; it has no saved context left to \
-                 resume into a handler. deliver_signal_to must not target a dead thread.")),
-        }
     }
 
     pub fn deliver_signal_to(
