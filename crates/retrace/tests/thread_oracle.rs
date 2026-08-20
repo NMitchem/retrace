@@ -92,5 +92,92 @@ fn a_wrong_thread_on_the_exit_landmark_is_a_divergence() {
 
     let rep = util::replay(&trace);
     assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
-    assert!(rep.stderr.contains("thread"), "the divergence must name the thread mismatch:\n{}", rep.stderr);
+    assert!(rep.stderr.contains("schedule diverged"),
+        "the divergence detail should name what diverged (the schedule), not just that something \
+         did; stderr:\n{}", rep.stderr);
+}
+
+/// M16 Task 12a. The CAUGHT-RAISE mirror, reached with two live threads for the first time.
+///
+/// M15 could only prove this arm FIRES: SIGFRAME is single-threaded, so there was no other live id
+/// to retag to and the test had to use a bogus constant. SIGTHREAD's pthread_kill lands here with a
+/// real second thread in the table, so the retag below is to a thread the guest actually scheduled.
+#[test]
+fn a_wrong_thread_at_the_caught_raise_mirror_is_a_divergence() {
+    retag_and_expect_divergence(retrace_arch::SYS_PTHREAD_KILL);
+}
+
+/// M16 Task 12b. The SIGRETURN mirror. Stronger than 12a: the thread current at this landmark is
+/// the CHILD, so the recorded tag here is a nonzero id — a value this arm has never seen.
+#[test]
+fn a_wrong_thread_at_the_sigreturn_mirror_is_a_divergence() {
+    retag_and_expect_divergence(retrace_arch::SYS_SIGRETURN);
+}
+
+/// Retag the first `Syscall` landmark for `num` to some OTHER live thread id from this same trace
+/// and assert replay refuses it. Shared by 12a and 12b; the reasoning for why the retag target must
+/// be a genuinely live id, not an out-of-range constant, is the same one
+/// `a_wrong_thread_on_replay_is_a_divergence` above already documents.
+fn retag_and_expect_divergence(num_wanted: u64) {
+    let (rec, trace) = util::record_dynamic(retrace_guest::SIGTHREAD);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let mut ids: Vec<u32> = events.iter().filter_map(|e| match e {
+        Event::Syscall { thread, .. } => Some(*thread), _ => None }).collect();
+    ids.sort_unstable(); ids.dedup();
+    assert!(ids.len() >= 2,
+        "SIGTHREAD must schedule at least two threads that issue syscalls, or this mutation is the \
+         bogus-constant one M15 was stuck with; got {ids:?}");
+
+    let i = events.iter().position(|e| matches!(e, Event::Syscall { num, .. } if *num == num_wanted))
+        .unwrap_or_else(|| panic!("no Syscall landmark for num {num_wanted} — this fixture no \
+                                   longer reaches the mirror this test exists to cover"));
+    let orig = match &events[i] { Event::Syscall { thread, .. } => *thread, _ => unreachable!() };
+    let other = *ids.iter().find(|&&t| t != orig)
+        .expect("a genuinely live second id, not a constant");
+    if let Event::Syscall { thread, .. } = &mut events[i] { *thread = other; }
+
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+}
+
+/// M16 Task 12c. `SignalDelivery.thread` is the one tag whose check the frame byte-compare does NOT
+/// subsume — and the only one with no test until now.
+///
+/// The retag leaves `writes` untouched on purpose. A wrong-thread DELIVERY lands the frame on a
+/// different stack, so `Region`'s derived PartialEq (over `ipa` as well as `bytes`) trips the frame
+/// compare first and this check never speaks. Corrupting only the TAG is the one input that isolates
+/// it. Task 8's review measured the failure this guards: changing record's `thread: target as u32`
+/// to `thread` — tagging the delivery with the caller instead of the resolved target, the exact
+/// "simplification" the comments there warn against — yields a perfectly valid trace that every
+/// other check accepts.
+#[test]
+fn a_wrong_thread_on_the_delivery_landmark_is_a_divergence() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::SIGTHREAD);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let i = events.iter().position(|e| matches!(e, Event::SignalDelivery { .. }))
+        .expect("SIGTHREAD must record a delivery");
+    let orig = match &events[i] { Event::SignalDelivery { thread, .. } => *thread, _ => unreachable!() };
+    assert_eq!(orig, 1, "the delivery must be tagged with the CHILD, or this fixture no longer \
+                         exercises a cross-thread delivery and the retag below proves nothing");
+    // Only the tag. Not one byte of `writes`.
+    if let Event::SignalDelivery { thread, .. } = &mut events[i] { *thread = 0; }
+
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+    assert!(rep.stderr.contains("signal delivery thread mismatch"),
+        "the divergence must be the DELIVERY thread check, not the frame compare — if the frame \
+         compare fired, the retag touched `writes` and the test is measuring the wrong thing:\n{}",
+        rep.stderr);
 }

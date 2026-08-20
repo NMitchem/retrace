@@ -1053,23 +1053,29 @@ impl ReplaySession {
     }
 
     /// M15 Task 4, fix round 1: the thread comparison shared by every point in `advance` that
-    /// consumes a recorded `Event::Syscall` landmark. There are THREE such points, not one: the
-    /// generic dispatch below, plus two signal-delivery mirrors that sit ABOVE it and return before
-    /// ever reaching it — the caught-raise mirror (`Disposition::Handler` under `SYS_KILL` /
-    /// `SYS_PTHREAD_KILL`) and the `SYS_SIGRETURN` mirror. A threaded guest that also takes a
-    /// caught signal is the only guest shape that ever reaches either of those two, so a hole in
-    /// just those two paths is invisible to every gate that doesn't combine both — which is exactly
-    /// how the first cut of this check missed them. Each of the three call sites invokes this
-    /// AFTER its own local (num, args) verification, for the same reason the check is ordered that
-    /// way inline: a genuine syscall divergence should be reported as one, not masked by the thread
-    /// mismatch it caused.
+    /// consumes a recorded landmark and returns before reaching the generic dispatch below (itself
+    /// one of the call sites). There are SEVEN call sites now, not three — each added because a new
+    /// mirror was found to return before ever reaching the generic dispatch, so it needed its own
+    /// call:
+    ///   - M15 Task 4's original three: the generic dispatch below (`Event::Syscall`), the
+    ///     caught-raise mirror (`Disposition::Handler` under `SYS_KILL` / `SYS_PTHREAD_KILL`), and
+    ///     the `SYS_SIGRETURN` mirror. A threaded guest that also takes a caught signal is the only
+    ///     guest shape that ever reaches either of the latter two, so a hole in just those two paths
+    ///     was invisible to every gate that doesn't combine both — which is exactly how the first
+    ///     cut of this check missed them.
+    ///   - M16 Task 8's fourth, whose landmark is not an `Event::Syscall` at all: the terminal-raise
+    ///     mirror's `Event::Signal`, whose `thread` the trace format also defines as the RAISING
+    ///     thread.
+    ///   - M16 Task 9's fifth: the sigprocmask/pthread_sigmask mask mirror, hoisted into its own arm.
+    ///   - M16 Task 11's sixth and seventh: the `Exit` and `Crash` mirrors.
     ///
-    /// M16 Task 8 adds a FOURTH call site whose landmark is not an `Event::Syscall` at all: the
-    /// terminal-raise mirror's `Event::Signal`, whose `thread` the trace format also defines as the
-    /// RAISING thread. Same comparison, same ordering rule. What this helper never checks is a
-    /// `SignalDelivery`'s tag — that one names the RECEIVER, which for `pthread_kill(child, sig)`
-    /// is a different thread from the caller, so it is compared against the recomputed target
-    /// inside `mirror_delivery` instead.
+    /// Each call site invokes this AFTER its own local comparison (num/args, sig/pc, exit code, or
+    /// crash triple), for the same reason the check is ordered that way inline: a genuine mismatch
+    /// should be reported as itself, not masked by the thread mismatch it caused.
+    ///
+    /// What this helper never checks is a `SignalDelivery`'s tag — that one names the RECEIVER,
+    /// which for `pthread_kill(child, sig)` is a different thread from the caller, so it is compared
+    /// against the recomputed target inside `mirror_delivery` instead.
     fn verify_thread(&self, rthread: u32, pc: u64) -> Result<(), Divergence> {
         if self.current_thread() != rthread {
             return Err(Divergence { landmark: self.idx, pc, detail: format!(
