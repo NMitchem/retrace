@@ -1262,6 +1262,98 @@ impl ReplaySession {
                         self.b.sigreturn_restore(args[0], args[2]);
                         return self.finish_event();
                     }
+                    // M16 Task 9 mirror of record's mask arm — and its OWN arm, rather than the
+                    // hook inside the serviced block below where it lived until this task. It had
+                    // to be HOISTED: record now appends TWO landmarks at an unmasking call (the
+                    // ordinary Syscall, then the materialised SignalDelivery), and the serviced
+                    // block ends by falling through to `finish_event()`, which consumes exactly
+                    // ONE. Left there, the delivery landmark is met by the next unrelated stop and
+                    // reports as "expected recorded syscall, got SignalDelivery" at some landmark
+                    // well past the unmask (measured before the hoist: landmark 280 of the
+                    // sigthread trace, whose unmask is at 271) — the same confusing failure the
+                    // caught-raise mirror above was written to prevent, and for the same reason.
+                    // Hoisted, record's arm and this one are the same shape in the same order, so
+                    // symmetry rule 1 is structurally visible here and not merely behavioural.
+                    if num == retrace_arch::SYS_SIGPROCMASK
+                        || num == retrace_arch::SYS_PTHREAD_SIGMASK {
+                        let (rret, rerr, rwrites) = match self.events.get(self.idx) {
+                            Some(Event::Syscall { num: rn, args: ra, ret, err, writes,
+                                                  thread: rthread }) if *rn == num && *ra == args => {
+                                // This arm consumes a recorded Event::Syscall landmark and RETURNS
+                                // before ever reaching the generic dispatch, so — exactly like the
+                                // caught-raise and sigreturn mirrors above — it needs its own call
+                                // to the thread oracle (see `verify_thread`'s doc). Ordered after
+                                // the (num, args) match for the usual reason: report a genuine
+                                // syscall divergence as itself, not as the thread mismatch it
+                                // caused.
+                                self.verify_thread(*rthread, pc)?;
+                                (*ret, *err, writes.clone())
+                            }
+                            other => return Err(Divergence { landmark: self.idx, pc, detail:
+                                format!("expected the recorded sigprocmask, got {other:?} \
+                                         (live: num={num}, args={args:?})") }),
+                        };
+                        // M16: the mask belongs to the CALLING (current) thread. Recomputed with
+                        // the same `Box_` calls and the same arguments record used, and the oldset
+                        // writeback byte-compared against the recording — that comparison IS the
+                        // divergence check (symmetry rule 1). The recorded bytes are what
+                        // `apply_and_return` then writes, exactly as the generic path does: the
+                        // mirror's job is to keep the TABLE in step and prove the bytes match, not
+                        // to re-perform the write.
+                        let cur = self.current_thread() as usize;
+                        let old = if args[1] != 0 {
+                            let set = u32::from_le_bytes(
+                                self.b.read_guest(args[1], 4).try_into().unwrap());
+                            self.b.threads_mut().set_mask_of(cur, args[0], set)
+                        } else {
+                            self.b.threads().mask_of(cur)
+                        };
+                        if args[2] != 0 {
+                            let mine = old.to_le_bytes().to_vec();
+                            let recorded = rwrites.iter().find(|r| r.ipa == args[2])
+                                .map(|r| r.bytes.clone()).unwrap_or_default();
+                            if mine != recorded {
+                                return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    "sigprocmask oldset mismatch at {:#x}: recomputed {mine:02x?} \
+                                     != recorded {recorded:02x?}", args[2]) });
+                            }
+                        }
+                        self.b.apply_and_return(rret, rerr, &rwrites);
+                        // THE ANCHOR's mirror. `take_pending_delivery` is the SAME function record
+                        // calls, with the SAME `(b, tid)` — that identity is what makes "both sides
+                        // materialise the same signal" true by construction instead of by two
+                        // matches that could drift while both stayed green. It CLEARS the bit it
+                        // takes, so it is called exactly ONCE per unmask on this side too, and a
+                        // signal can never be materialised twice.
+                        //
+                        // The target is the CALLING thread — the one holding the vCPU — so
+                        // `deliver_signal_to`'s Runnable guard is satisfied by construction, the
+                        // same argument the record arm states.
+                        return match take_pending_delivery(&mut self.b, cur) {
+                            Some((psig, _handler)) => {
+                                // Consume the Syscall landmark by hand, because this stop consumes
+                                // TWO and `finish_event` consumes one: `mirror_delivery` takes the
+                                // second. Same shape as the caught-raise mirror above.
+                                self.idx += 1;
+                                // Record completes the syscall BEFORE building the frame — the
+                                // frame's PSTATE comes from SPSR_EL1, which `apply_and_return`
+                                // never writes — so this side must too, or every materialised
+                                // delivery diverges on that field.
+                                self.b.complete_syscall_before_delivery(0, false);
+                                // `mirror_delivery` owns both the frame byte-compare and the
+                                // recorded-`thread` comparison; this is its THIRD call site and
+                                // deliberately not a fourth copy of that logic. `_handler` is the
+                                // recomputed handler entry, unused here for the same reason the
+                                // caught-raise mirror does not compare one: the frame bytes are
+                                // what the oracle checks.
+                                self.mirror_delivery(cur, psig, retrace_arch::SI_USER, 0, 0, 0, pc)
+                            }
+                            // Nothing materialised — a masking call, a query, or an unmask with an
+                            // empty pending set. ONE landmark, finished exactly as the generic
+                            // path would have finished it.
+                            None => self.finish_event(),
+                        };
+                    }
                     match self.events.get(self.idx) {
                         Some(Event::Syscall { num: rn, args: ra, ret, err, writes, thread: rthread }) => {
                             if num != *rn || args != *ra {
@@ -1302,28 +1394,6 @@ impl ReplaySession {
                                         return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                             "sigaction oldact mismatch at {:#x}: recomputed {mine:02x?} \
                                              != recorded {recorded:02x?}", args[2]) });
-                                    }
-                                }
-                            }
-                            if num == retrace_arch::SYS_SIGPROCMASK
-                                || num == retrace_arch::SYS_PTHREAD_SIGMASK {
-                                // M16: the mask belongs to the CALLING (current) thread.
-                                let cur = self.current_thread() as usize;
-                                let old = if args[1] != 0 {
-                                    let set = u32::from_le_bytes(
-                                        self.b.read_guest(args[1], 4).try_into().unwrap());
-                                    self.b.threads_mut().set_mask_of(cur, args[0], set)
-                                } else {
-                                    self.b.threads().mask_of(cur)
-                                };
-                                if args[2] != 0 {
-                                    let mine = old.to_le_bytes().to_vec();
-                                    let recorded = writes.iter().find(|r| r.ipa == args[2])
-                                        .map(|r| r.bytes.clone()).unwrap_or_default();
-                                    if mine != recorded {
-                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
-                                            "sigprocmask oldset mismatch at {:#x}: recomputed \
-                                             {mine:02x?} != recorded {recorded:02x?}", args[2]) });
                                     }
                                 }
                             }
