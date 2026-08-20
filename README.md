@@ -2640,19 +2640,19 @@ claims retrace could recompute it.
 
 **What is proven and what is merely exercised are not the same list, and the pended-raise path is
 where the difference bites.** Both halves of the pend path — record's `pend` and replay's mirror —
-were verified consistent *in source* by Task 8's review, including the fall-through equivalence
-that lets replay's blocked branch drop into generic dispatch. Source agreement is not a test. What
-Task 9's guest actually exercises end to end is the **self-directed** case: main masks `SIGUSR1`,
+were verified consistent *in source* by Task 8's review, including the fall-through equivalence that
+lets replay's blocked branch drop into generic dispatch. Source agreement is not a test. What Task
+9's guest actually exercises end to end is the **self-directed** case: main masks `SIGUSR1`,
 `pthread_kill`s *itself*, the signal pends, `sigpending` reports it, and the unmask materialises it
 into a real `SignalDelivery` — and that is genuinely proven rather than argued, because mutating
 replay's recomputed pending set to a constant `0` took `sigthread_e2e` — two tests, as that file
 stood at Task 9 — from 2 passed to 2 failed, with a named divergence (`sigpending set mismatch …
-recomputed [00,00,00,00] != recorded [00,00,00,20]`, bit 29 = `SIGUSR1`). **What remains source-level agreement only** is the
-*cross-thread* pend — `pend(target, …)` where `target != current`, which no guest reaches, since
-`sigthread`'s masked raise is self-directed and its cross-thread raise is unmasked — and
-`take_pending_delivery`'s `Ign` / `Dfl`-ignore discard branches, which no guest reaches either.
-Those write and read a bit that both sides agree about because they call the same function with the
-same arguments, not because anything runs them.
+recomputed [00,00,00,00] != recorded [00,00,00,20]`, bit 29 = `SIGUSR1`). **What remains
+source-level agreement only** is the *cross-thread* pend — `pend(target, …)` where `target !=
+current`, which no guest reaches, since `sigthread`'s masked raise is self-directed and its
+cross-thread raise is unmasked — and `take_pending_delivery`'s `Ign` / `Dfl`-ignore discard
+branches, which no guest reaches either. Those write and read a bit that both sides agree about
+because they call the same function with the same arguments, not because anything runs them.
 
 **The `Crash` thread check is installed and unexercised, and the reason is a missing fixture rather
 than an oversight.** Task 11 added `verify_thread` at both the `Exit` and `Crash` replay sites. The
@@ -2699,15 +2699,15 @@ seven, with attribution: M15 Task 4's three (the generic dispatch, the caught-ra
 `SYS_SIGRETURN` mirror); M16 Task 8's terminal `Signal`; M16 Task 9's hoisted mask mirror; M16 Task
 11's `Exit` and `Crash`. Verified by grep at this close rather than inherited from the census — and
 the grep turns up a detail the census does not state: the **`SignalDelivery` landmark's thread is
-checked by an eighth comparison that is not a `verify_thread` call at all**, but an inline
-`rthread != tid` test inside `mirror_delivery`, because that tag names the *receiving* thread rather
-than the current one. So "seven `verify_thread` sites" and "eight places the oracle compares a
-thread" are both true, and only the first is what a grep for `verify_thread` returns. The census in
-its own doc drifted **three times inside this one milestone** and was corrected in Task 12. The pattern underneath is what matters: every one of those sites
-exists because a mirror was found that `return`s *before* reaching the generic dispatch, so **each
-new mirror silently creates a new hole until someone remembers to add its oracle call**. Nothing
-structural couples "add a mirror" to "add its `verify_thread`"; today the coupling is a habit and a
-grep.
+checked by an eighth comparison that is not a `verify_thread` call at all**, but an inline `rthread
+!= tid` test inside `mirror_delivery`, because that tag names the *receiving* thread rather than the
+current one. So "seven `verify_thread` sites" and "eight places the oracle compares a thread" are
+both true, and only the first is what a grep for `verify_thread` returns. The census in its own doc
+drifted **three times inside this one milestone** and was corrected in Task 12. The pattern
+underneath is what matters: every one of those sites exists because a mirror was found that
+`return`s *before* reaching the generic dispatch, so **each new mirror silently creates a new hole
+until someone remembers to add its oracle call**. Nothing structural couples "add a mirror" to "add
+its `verify_thread`"; today the coupling is a habit and a grep.
 
 **The `sigaltstack` oldstack writeback is the one remaining serviced-syscall writeback with no
 divergence check — pre-existing, and deliberately not fixed here.** Replay's hook
