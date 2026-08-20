@@ -64,3 +64,34 @@ fn a_port_resolves_to_the_thread_that_owns_it() {
             "each thread's own port must resolve back to it");
     }
 }
+
+/// Fast-follow (the replay-side abort -> `Divergence` change). Port resolution failing is the
+/// signature of a SCHEDULE divergence on the replay side, so replay must be able to *observe* the
+/// failure rather than die of it. This pins the fallible form's two obligations: it returns `Err`
+/// rather than unwinding, and the diagnostic still names every thread it searched — that list is
+/// the whole debugging value of the message, and a `Result` refactor is exactly the kind of change
+/// that quietly drops it.
+///
+/// `0xDEAD_BEEF` is safe as a never-issued port precisely because the test above pins what IS
+/// issued: children get `GUEST_THREAD_PORT_BASE | tid` (`0x0BAD_7001` for tid 1) and main's comes
+/// from libpthread. Neither can collide with this.
+#[test]
+fn an_unissued_port_is_reported_rather_than_aborted_on() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::THREADRUST);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+    let mut s = ReplaySession::open(Path::new(&trace)).unwrap();
+    seek_to_two_threads(&mut s);
+
+    // Sanity: a REAL port still resolves, so a blanket-Err regression cannot pass this test.
+    let child = s.dbg_kport_of(1).expect("the child's pthread must be mapped and readable");
+    assert_eq!(s.dbg_try_thread_of_port(child), Ok(1),
+        "a genuinely issued port must still resolve through the fallible form");
+
+    let err = s.dbg_try_thread_of_port(0xDEAD_BEEF)
+        .expect_err("a port no thread owns must not resolve");
+    assert!(err.contains("belongs to no live guest thread"),
+        "the diagnostic must say what went wrong; got:\n{err}");
+    assert!(err.contains("tid=0") && err.contains("tid=1"),
+        "the diagnostic must still name EVERY thread searched — that list is what makes it \
+         actionable, and it is the first thing a Result refactor drops; got:\n{err}");
+}

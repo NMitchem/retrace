@@ -459,3 +459,60 @@ fn delivering_to_an_exited_thread_fails_loud() {
 
     b.deliver_signal_to(tid, 30, retrace_arch::SI_USER, 0, 0, 0);
 }
+
+// ---- Fast-follow: the fallible form of the same guard -------------------------------------------
+//
+// The two `should_panic` tests above pin the RECORD side's reaction and are now also the regression
+// guard that splitting the check out of `deliver_signal_to` left that reaction byte-identical. The
+// three below pin the shared condition itself, which replay reads through `check_deliverable` to
+// raise a named `Divergence` instead of aborting. One definition, two callers: that is what stops
+// the two sides drifting on what "deliverable" means.
+
+/// A blocked target is refused, and the reason names the state — replay puts this string straight
+/// into its `Divergence` detail, so an unhelpful message here is an unhelpful divergence there.
+#[test]
+fn check_deliverable_reports_a_blocked_target_without_unwinding() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.threads_mut().switch_to(0);
+
+    let err = b.check_deliverable(tid).expect_err("a Blocked target must be refused");
+    assert!(err.contains("is Blocked("), "the reason must name the state; got:\n{err}");
+    assert!(err.contains("resume through"),
+        "and must say WHY it is refused — that the blocking syscall's resume point would be \
+         overwritten; got:\n{err}");
+}
+
+/// The other half: an exited target has no context left to resume into a handler.
+#[test]
+fn check_deliverable_reports_an_exited_target_without_unwinding() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().exit_current(0);
+    b.threads_mut().switch_to(0);
+
+    let err = b.check_deliverable(tid).expect_err("an Exited target must be refused");
+    assert!(err.contains("has Exited("), "the reason must name the state; got:\n{err}");
+}
+
+/// And the positive case, so a `check_deliverable` that refused EVERYTHING — which would turn every
+/// real delivery on the replay side into a spurious divergence — cannot pass the two tests above.
+#[test]
+fn check_deliverable_accepts_a_runnable_target() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    assert_eq!(b.check_deliverable(tid), Ok(()),
+        "a freshly spawned thread is Runnable and must be deliverable");
+    assert_eq!(b.check_deliverable(0), Ok(()), "and so is the current thread");
+}
