@@ -624,12 +624,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.apply_and_return(0, false, &writes);
             }
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGALTSTACK => {
-                // stack_t { void *ss_sp; size_t ss_size; int ss_flags; } — 24 bytes with padding.
+                // Fast-follow: decode/encode moved to `retrace_box::decode_stack`/`encode_oldstack`
+                // (one shared pair, like `decode_act`/`encode_oldact` for `sigaction`) — no
+                // behaviour change, this arm wrote the identical bytes by hand before.
                 let new = if args[0] != 0 {
-                    let raw = b.read_guest(args[0], 24);
-                    Some((u64::from_le_bytes(raw[0..8].try_into().unwrap()),
-                          u64::from_le_bytes(raw[8..16].try_into().unwrap()),
-                          u32::from_le_bytes(raw[16..20].try_into().unwrap()) as u64))
+                    Some(retrace_box::decode_stack(&b.read_guest(args[0], 24)))
                 } else { None };
                 // M16: the alternate stack belongs to the CALLING thread.
                 let old = match new {
@@ -637,12 +636,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     None => b.threads().altstack_of(thread as usize),
                 };
                 let writes = if args[1] != 0 {
-                    let (sp, size, flags) = old.unwrap_or((0, 0, 0));
-                    let mut bytes = vec![0u8; 24];
-                    bytes[0..8].copy_from_slice(&sp.to_le_bytes());
-                    bytes[8..16].copy_from_slice(&size.to_le_bytes());
-                    bytes[16..20].copy_from_slice(&(flags as u32).to_le_bytes());
-                    vec![Region { ipa: args[1], bytes }]
+                    vec![Region {
+                        ipa: args[1],
+                        bytes: retrace_box::encode_oldstack(old.unwrap_or((0, 0, 0))).to_vec(),
+                    }]
                 } else { vec![] };
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append sigaltstack: {e}"))?; count += 1;

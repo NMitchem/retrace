@@ -116,6 +116,41 @@ pub fn encode_oldact(a: SigAction) -> [u8; 16] {
     o
 }
 
+/// Decode the sigaltstack NEW argument: `struct sigaltstack { void *ss_sp; size_t ss_size; int
+/// ss_flags; }`, 24 bytes with padding (`sys/signal.h`) — `sigaction`'s sibling syscall, and this is
+/// `decode_act`'s counterpart for it. Returned as `(ss_sp, ss_size, ss_flags)`, matching
+/// `Threads::altstack_of`'s `Option<(u64, u64, u64)>`; `ss_flags` widens to u64 here even though the
+/// wire field is a u32, for that same reason.
+pub fn decode_stack(bytes: &[u8]) -> (u64, u64, u64) {
+    assert!(
+        bytes.len() >= 24,
+        "struct sigaltstack is 24 bytes, got {} — the caller read too few guest bytes",
+        bytes.len()
+    );
+    (
+        u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+        u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as u64,
+    )
+}
+
+/// Encode the OLDSTACK writeback: the same 24-byte `struct sigaltstack` — unlike `sigaction`'s
+/// asymmetric in/out structs, sigaltstack's NEW and OLD shapes are IDENTICAL, so this is symmetric
+/// with `decode_stack` rather than narrower the way `encode_oldact` is narrower than `decode_act`.
+/// `ss_flags` narrows back to its wire width; bytes 20..24 are zero padding.
+///
+/// One encoder called by both record and replay, exactly as `encode_oldact` already is for
+/// `sigaction`: if replay re-spelled this layout by hand, a byte-compare against record's hand-rolled
+/// copy would only be comparing a duplicate against itself, not proving the two sides agree.
+pub fn encode_oldstack(ss: (u64, u64, u64)) -> [u8; 24] {
+    let (sp, size, flags) = ss;
+    let mut o = [0u8; 24];
+    o[0..8].copy_from_slice(&sp.to_le_bytes());
+    o[8..16].copy_from_slice(&size.to_le_bytes());
+    o[16..20].copy_from_slice(&(flags as u32).to_le_bytes());
+    o
+}
+
 // ---- The signal frame -------------------------------------------------------------------------
 
 /// Frame geometry, measured by `spikes/sigabi.c` against the live SDK. The frame is ONE block at
@@ -352,6 +387,39 @@ mod tests {
         assert_eq!(u64::from_le_bytes(d[0..8].try_into().unwrap()), 0);
         let i = encode_oldact(SigAction { disp: Disposition::Ign, tramp: 0, mask: 0, flags: 0 });
         assert_eq!(u64::from_le_bytes(i[0..8].try_into().unwrap()), 1);
+    }
+
+    // ---- Fast-follow: sigaltstack's decode/encode pair -----------------------------------------
+
+    #[test]
+    fn decode_stack_and_encode_oldstack_round_trip() {
+        let mut b = [0u8; 24];
+        b[0..8].copy_from_slice(&0x7000_0000u64.to_le_bytes());
+        b[8..16].copy_from_slice(&0x4000u64.to_le_bytes());
+        b[16..20].copy_from_slice(&0x1u32.to_le_bytes());
+        let ss = decode_stack(&b);
+        assert_eq!(ss, (0x7000_0000, 0x4000, 0x1));
+        let out = encode_oldstack(ss);
+        assert_eq!(
+            out[0..20], b[0..20],
+            "round trip must reproduce the same bytes decode_stack read"
+        );
+    }
+
+    // The counterpart to `encode_oldact_is_exactly_16_bytes_with_no_sa_tramp`: pins the offsets and
+    // the zero tail padding so record and replay cannot silently drift onto different layouts.
+    #[test]
+    fn encode_oldstack_is_24_bytes_with_ss_flags_at_16_and_zero_padding() {
+        let out = encode_oldstack((0x9_0000, 0x2000, SS_ONSTACK));
+        assert_eq!(out.len(), 24);
+        assert_eq!(u64::from_le_bytes(out[0..8].try_into().unwrap()), 0x9_0000, "ss_sp at 0");
+        assert_eq!(u64::from_le_bytes(out[8..16].try_into().unwrap()), 0x2000, "ss_size at 8");
+        assert_eq!(
+            u32::from_le_bytes(out[16..20].try_into().unwrap()),
+            SS_ONSTACK as u32,
+            "ss_flags at 16, narrowed to u32"
+        );
+        assert_eq!(&out[20..24], &[0u8; 4], "bytes 20..24 are padding and must be zero");
     }
 
     // ---- M12: the frame builder ---------------------------------------------------------------
