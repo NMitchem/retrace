@@ -1406,6 +1406,42 @@ impl ReplaySession {
                                 let cur = self.current_thread() as usize;
                                 self.b.threads_mut().set_altstack_of(cur, Some(ss));
                             }
+                            // M16 Task 9, fix round 1: sigpending's mirror. Record's arm used to
+                            // write a constant zero, so there was nothing to recompute and nothing
+                            // to check; Task 9 made it write real per-thread state
+                            // (`pending_of`), and symmetry rule 1 then applies with teeth —
+                            // recompute the SAME value with the SAME call on the SAME thread and
+                            // byte-compare it against the recording, because that comparison IS
+                            // the divergence check. Without it a divergent pending set would be
+                            // painted over with the recorded bytes and the run would continue;
+                            // it would surface, if at all, only later and only if it changed what
+                            // the next unmask materialised (which the `SignalDelivery` mirror does
+                            // compare) — a landmark after the one that could have named it.
+                            //
+                            // This one stays a HOOK here, deliberately, while the mask mirror
+                            // above was hoisted into its own arm. The hoist was forced by landmark
+                            // arithmetic: an unmasking call appends TWO landmarks (the Syscall,
+                            // then a materialised SignalDelivery) and this block ends in
+                            // `finish_event()`, which consumes exactly ONE. `sigpending` appends
+                            // exactly ONE landmark and materialises nothing, so the generic path
+                            // finishes it correctly and an arm of its own would be structure
+                            // copied for its own sake.
+                            //
+                            // Guarded on args[0] != 0 for the same reason record is: a NULL
+                            // out-pointer means the guest asked for nothing, record wrote no
+                            // region, and there is nothing to compare.
+                            if num == retrace_arch::SYS_SIGPENDING && args[0] != 0 {
+                                // The CALLING thread's set, exactly as record's arm takes it.
+                                let cur = self.current_thread() as usize;
+                                let mine = self.b.threads().pending_of(cur).to_le_bytes().to_vec();
+                                let recorded = writes.iter().find(|r| r.ipa == args[0])
+                                    .map(|r| r.bytes.clone()).unwrap_or_default();
+                                if mine != recorded {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "sigpending set mismatch at {:#x}: recomputed {mine:02x?} \
+                                         != recorded {recorded:02x?}", args[0]) });
+                                }
+                            }
                             // Learn the guest's task-port name (mirror of record) from the recorded −28 result.
                             if num == MACH_TASK_SELF && !*err { self.guest_task_port = Some(*ret); }
                             // Mirror fd-1/2 write output (the buffer is already filled by prior applied reads).
