@@ -1,5 +1,13 @@
 // M12: SA_ONSTACK + sigaltstack. The handler checks its OWN sp is inside the alternate stack, which
 // is the only way to prove the frame was placed there rather than on the normal stack.
+//
+// Fast-follow (sigaltstack replay mirror): after installing, the guest also QUERIES with
+// sigaltstack(NULL, &oss) and checks the three returned fields against what it installed. This is
+// what makes record's oldstack writeback path (`args[1] != 0`) live on every run of this fixture —
+// without it, ALTSTACK only ever calls with oss=NULL and record never writes an oldstack `Region`.
+// Exit codes: 31 the SA_ONSTACK frame was not placed on the alternate stack (pre-existing);
+// 32 queried ss_sp != installed altbuf; 33 queried ss_size != installed size;
+// 34 queried ss_flags != installed flags (0).
 .section __TEXT,__text
 .global _start
 .p2align 2
@@ -16,6 +24,28 @@ _start:
     mov  x1, #0                 // oss = NULL
     mov  x16, #53               // SYS_sigaltstack
     svc  #0x80
+
+    // sigaltstack(NULL, &oss): query the just-installed stack and verify the writeback matches
+    // what was installed above, field by field, each mismatch exiting its own code.
+    mov  x0, #0                 // ss = NULL (query only)
+    adrp x1, oss@PAGE
+    add  x1, x1, oss@PAGEOFF
+    mov  x16, #53               // SYS_sigaltstack
+    svc  #0x80
+
+    adrp x2, oss@PAGE
+    add  x2, x2, oss@PAGEOFF
+    ldr  x3, [x2, #0]           // oss.ss_sp
+    adrp x4, altbuf@PAGE
+    add  x4, x4, altbuf@PAGEOFF
+    cmp  x3, x4
+    b.ne oss_sp_mismatch
+    ldr  x3, [x2, #8]           // oss.ss_size
+    mov  x4, #0x2000
+    cmp  x3, x4
+    b.ne oss_size_mismatch
+    ldr  w3, [x2, #16]          // oss.ss_flags
+    cbnz w3, oss_flags_mismatch
 
     adrp x1, act@PAGE
     add  x1, x1, act@PAGEOFF
@@ -66,6 +96,21 @@ not_on_alt:
     mov  x16, #1
     svc  #0x80
 
+oss_sp_mismatch:
+    mov  x0, #32                // queried ss_sp != installed altbuf
+    mov  x16, #1
+    svc  #0x80
+
+oss_size_mismatch:
+    mov  x0, #33                // queried ss_size != installed size
+    mov  x16, #1
+    svc  #0x80
+
+oss_flags_mismatch:
+    mov  x0, #34                // queried ss_flags != installed flags
+    mov  x16, #1
+    svc  #0x80
+
 handler:
     ret
 
@@ -73,5 +118,6 @@ handler:
 .p2align 3
 act:      .space 24
 ss:       .space 24
+oss:      .space 24
 .p2align 4
 altbuf:   .space 0x2000
