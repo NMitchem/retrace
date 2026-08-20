@@ -2883,6 +2883,29 @@ impl Box_ {
         }
     }
 
+    /// M17: fail loud if the guest is exiting with a signal pended on a thread that can never take
+    /// it. Pend-until-wake delivers a pended signal at the wake that makes its thread runnable — so
+    /// a thread still `Blocked` at exit, holding a signal its mask does not block, never got it.
+    ///
+    /// This is the semantic gap between pend-until-wake and POSIX, which would interrupt the wait.
+    /// Named rather than hidden: exiting 0 while swallowing a signal makes record and replay agree
+    /// with each other and both be wrong, which is the one failure a determinism oracle cannot see.
+    ///
+    /// Clean-exit path only. A guest that is already crashing must be diagnosed by its crash, not
+    /// by a secondary guard firing on top of it.
+    pub fn assert_no_stranded_signals(&self) {
+        for tid in 0..self.threads.len() {
+            if !matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_)) { continue; }
+            if let Some(sig) = self.threads.take_deliverable_peek(tid) {
+                panic!("thread {tid} is exiting still Blocked with pending signal {sig}, which it \
+                        can therefore never take: M17 materialises a pended signal at the WAKE, and \
+                        this thread was never woken. Either the guest deadlocked, or the signal \
+                        needs the wait to be interrupted (EINTR) rather than deferred — which M17 \
+                        deliberately does not model. State: {:?}", self.threads.state_of(tid));
+            }
+        }
+    }
+
     /// M17: should a raise targeting `tid` PEND rather than deliver?
     ///
     /// Two reasons, and they are independent. The mask reason is M16's and unchanged. The state
