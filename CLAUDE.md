@@ -37,7 +37,9 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
   8 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in **none** of
-  the other chunks; only the unchunked `--workspace` run reaches them. Leaving it out silently costs
+  the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
+  with no `--test` filter, reaches them — which is why closes before M17 are not owed a
+  correction. Leaving it out silently costs
   8 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.

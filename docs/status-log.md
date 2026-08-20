@@ -3264,12 +3264,17 @@ not prevent, because it serialises threads *inside* a binary while cargo runs bi
 M16 deferred the fix and wrote that `kport` and `sigthread_e2e` were two callers, "with
 `sigblocked_e2e` a third the day it is un-parked — so it raises the collision odds it is deferring."
 
-Today is that day, and the caller count did grow: **25** `crates/retrace` test binaries reached
-`bin()` on a gate run at `b73bdbb`, and **27** do now — `sigblocked_e2e`, which was in the tree but
-`#[ignore]`d and so never invoked `bin()` until Task 7 un-parked it, plus `blockedctx`, Task 1's new
-measurement gate, which records through `util::record_dynamic` like the rest. A prediction about one
-gate under-counted the milestone that fulfilled it, which is the ordinary way this kind of thing
-grows: nobody adds a `bin()` caller on purpose, they add a gate.
+Today is that day, and the caller count did grow — **by two, where M16 predicted one**. The two are
+`sigblocked_e2e`, which was in the tree but `#[ignore]`d and so never invoked `bin()` until Task 7
+un-parked it, and `blockedctx`, Task 1's new measurement gate, which records through
+`util::record_dynamic` like the rest. Those are the only two: `sigblocked_e2e` was the sole fully-
+ignored such file at `b73bdbb`, and `blockedctx` is the only new one. **The delta is stated rather
+than the absolute deliberately.** A first draft of this paragraph published absolute totals for both
+commits; re-measurement did not reproduce them, and the number that carries the argument is the
+change, not the base — M16's own "two callers" was likewise an ordinal counting what M16 added, not a
+census of the directory. A prediction about one gate under-counted the milestone that fulfilled it,
+which is the ordinary way this kind of thing grows: nobody adds a `bin()` caller on purpose, they add
+a gate.
 
 **The odds it raises are of nothing, because `bin()` was fixed in M16's own fast-follow sweep.**
 Commit `92bc793`, "fast-follow A19b: sign a per-process copy, not the shared binary", landed after

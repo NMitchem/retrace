@@ -164,10 +164,9 @@ without a `--test` filter, reaches them.** Leaving it out silently costs 8 tests
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 
-**Run each `crates/retrace` test target as its own cargo invocation.** `tests/util/mod.rs::bin()`
-codesigns one *shared* binary with `codesign -f`, so two test processes running concurrently can
-catch it mid-replacement and fail spuriously; `--test-threads=1` does not prevent this, because it
-serialises threads within a binary while cargo runs binaries concurrently.
+**Run each `crates/retrace` test target as its own cargo invocation** — that is what keeps a chunk
+inside the 10-minute ceiling above. It is no longer a codesigning requirement: `bin()` signs a
+pid-unique copy (see Codesigning above), so concurrent test processes do not contend for it.
 
 Some end-to-end gates depend on `/opt/homebrew/bin/jq`, which is not a repo artifact. They skip with
 a loud `eprintln!` rather than passing quietly — a silent skip would read as a green it did not earn.
