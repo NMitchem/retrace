@@ -939,7 +939,7 @@ git commit -m "M17 t8: a wrong thread on a wake-materialised delivery is a diver
 
 - [ ] **Step 1: Run the full gate and get the real numbers**
 
-Run each chunk from Global Constraints, then `cargo clippy --workspace --all-targets -- -D warnings`. Reconcile the total against the previous close (**395 passed / 0 failed / 2 ignored across 102 test binaries at `b73bdbb`**) by counting the tests this milestone added: Task 1 adds 1 (and 1 new binary), Task 3 adds 4, Task 4 adds 1, Task 6 adds 2, Task 8 adds 1, and Task 7 moves 1 test from ignored to passing. **Expected: 405 passed / 0 failed / 1 ignored across 103 test binaries.** If the measured number differs, the measured number wins — find and explain the difference rather than adjusting the arithmetic.
+Run each chunk from Global Constraints, then `cargo clippy --workspace --all-targets -- -D warnings`. Reconcile the total against the previous close (**395 passed / 0 failed / 2 ignored across 102 test binaries at `b73bdbb`**) by counting the tests this milestone added: Task 1 adds 1 (and 1 new binary), Task 2 adds 1, Task 3 adds 4, Task 4 adds 1, Task 6 adds 2, Task 8 adds 1, and Task 7 moves 1 test from ignored to passing. **Expected: 406 passed / 0 failed / 1 ignored across 103 test binaries.** If the measured number differs, the measured number wins — find and explain the difference rather than adjusting the arithmetic.
 
 - [ ] **Step 2: Update the README in place**
 
