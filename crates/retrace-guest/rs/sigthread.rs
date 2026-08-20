@@ -5,7 +5,10 @@
 // fidelity caveat), and `pthread_kill`'s target port has never been decoded at all.
 //
 // The ordering is the proof, not a convenience:
-//   * the child is spawned BEFORE main masks anything, so it inherits an empty mask (Task 9)
+//   * the child is spawned BEFORE main masks anything, so it inherits an empty mask (Task 10) —
+//     and Task 10 is also what makes that inheritance consequential: main now masks ITSELF and
+//     THEN signals the child, so if the mask were process-global rather than per-thread the raise
+//     below would pend instead of reaching the child at all
 //   * main signals the child while the child is Runnable-but-NOT-current — the cooperative
 //     scheduler switches only on block or exit, so main still holds the vCPU
 //   * the child therefore takes the signal in its NEVER-RUN entry context: the handler runs, then
@@ -31,7 +34,10 @@
 // worth reporting, not the thing being tested.
 //
 // Task 5 shipped steps 1-4; Task 9 appended the mask/pending half at the end of `main`, whose own
-// claim is stated at that code rather than repeated here.
+// claim is stated at that code rather than repeated here. Task 10 moved the mask block (only)
+// from there to just before the child kill — the pending half stays where Task 9 put it, still
+// downstream of `join` — which is what turns "spawned before any mask" from an incidental fact
+// about source order into the guest actually exercising per-thread mask independence.
 //
 // Same rustc recipe as watchthread: no -C panic=abort.
 
@@ -94,9 +100,21 @@ fn main() {
     });
 
     // The child's pthread_t, which is what `pthread_kill` names. std exposes it; no libc crate.
+    // Spawned and named BEFORE main masks anything, so the child inherits an EMPTY mask — that
+    // inheritance is the whole point of Task 10's reorder (see the module comment).
     use std::os::unix::thread::JoinHandleExt;
     let child = h.as_pthread_t() as u64;
     println!("child pthread {child:#x}");
+
+    // Task 10: main masks SIGUSR1 for itself BEFORE signalling the child, not after. If the mask
+    // were process-global rather than per-thread, this block would suppress the child's delivery
+    // too and the raise below would pend instead of running the child's handler. `println!` fires
+    // immediately after `pthread_sigmask` returns so the e2e can read stdout, not source order, as
+    // proof that main was already masked at the moment it signalled.
+    let set: u32 = 1u32 << (SIGUSR1 - 1);
+    let mut old: u32 = 0;
+    unsafe { pthread_sigmask(SIG_BLOCK, &set, &mut old) };
+    println!("masked");
 
     let rc = unsafe { pthread_kill(child, SIGUSR1) };
     println!("kill rc {rc}");
@@ -104,14 +122,9 @@ fn main() {
     h.join().unwrap();
     println!("joined");
 
-    // The mask/pending half (Task 9). Main blocks SIGUSR1 for ITSELF, raises it on itself so it
-    // must pend, observes sigpending reporting it, then unblocks — which is the landmark the
-    // delivery is anchored to. Every step is main's own: the child has already been joined, so
-    // nothing here depends on a second live thread, and the pending set is exercised on the one
-    // thread whose Runnable-ness at its own sigprocmask is true by construction.
-    let set: u32 = 1u32 << (SIGUSR1 - 1);
-    let mut old: u32 = 0;
-    unsafe { pthread_sigmask(SIG_BLOCK, &set, &mut old) };
+    // The pending half (Task 9). Main is still masked from above, so raising SIGUSR1 on itself
+    // must pend rather than deliver; `sigpending` observes the pended bit; the later unmask below
+    // is the landmark the delivery is anchored to.
     let rc2 = unsafe { pthread_kill(pthread_self(), SIGUSR1) };
     println!("self kill rc {rc2}");
 

@@ -55,15 +55,18 @@ fn the_signal_is_delivered_to_the_named_child_thread() {
     // catches it. The pthread line is matched by prefix so an unrelated memory-layout change cannot
     // raise a false alarm here. Task 9 appended four lines to the guest (`self kill rc 0` ..
     // `unblocked`), and they are asserted here as well as in the pending test below: this test owns
-    // "every line, in order", which it cannot keep while stopping at line 6.
+    // "every line, in order", which it cannot keep while stopping at line 6. Task 10 moved the mask
+    // block above the child kill and added its own `masked` announcement, so the line count grew by
+    // one (10 -> 11) and `masked` now sits between the pthread line and `kill rc 0` — MEASURED, not
+    // assumed: this is the exact stdout the reordered guest produces.
     let out = String::from_utf8_lossy(&rec.stdout);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 10, "unexpected extra or missing stdout line:\n{out}");
+    assert_eq!(lines.len(), 11, "unexpected extra or missing stdout line:\n{out}");
     assert_eq!(lines[0], "installed");
     assert!(lines[1].starts_with("child pthread 0x"), "line 2 was {:?}", lines[1]);
-    assert_eq!(&lines[2..], &["kill rc 0", "handler", "child body", "joined",
+    assert_eq!(&lines[2..], &["masked", "kill rc 0", "handler", "child body", "joined",
                               "self kill rc 0", "pending 1", "handler", "unblocked"],
-        "post-M16 order: the CHILD takes the signal. Full stdout:\n{out}");
+        "post-M16 order: main masks itself, THEN the CHILD takes the signal. Full stdout:\n{out}");
 
     let rep = util::replay(&trace);
     assert_eq!(rep.code, 0, "replay must be clean; stderr:\n{}", rep.stderr);
@@ -111,4 +114,33 @@ fn a_masked_signal_pends_and_is_delivered_when_the_mask_lifts() {
     let rep = util::replay(&trace);
     assert_eq!(rep.code, 0, "replay must be clean; stderr:\n{}", rep.stderr);
     assert_eq!(rep.stdout, rec.stdout, "replay must be byte-identical");
+}
+
+/// M16 Task 10: main is masked when it signals the child, and the child takes the signal anyway.
+///
+/// The single fact that separates a per-thread mask from a process-global one, expressed as
+/// something the guest does rather than something a unit test asserts about a struct.
+#[test]
+fn main_masking_a_signal_does_not_block_it_for_the_child() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::SIGTHREAD);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+    let out = String::from_utf8_lossy(&rec.stdout);
+
+    // Ordering in stdout is the ground truth that main really was masked first.
+    let masked_at = out.find("masked").expect("guest must announce its own mask");
+    let killed_at = out.find("kill rc").expect("guest must announce the child kill");
+    assert!(masked_at < killed_at,
+        "main must already be masked when it signals the child, or this test measures nothing:\n{out}");
+
+    let events = retrace_trace::Reader::open(&trace).unwrap();
+    let first = events.iter().find_map(|e| match e {
+        Event::SignalDelivery { sig: 30, thread, .. } => Some(*thread),
+        _ => None,
+    }).expect("the child's delivery must exist");
+    assert_eq!(first, 1,
+        "the child inherited an EMPTY mask and must take the signal even though main has it \
+         blocked. A process-global mask would pend this instead and deliver nothing here.");
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 0, "replay must be clean; stderr:\n{}", rep.stderr);
 }
