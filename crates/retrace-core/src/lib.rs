@@ -1843,8 +1843,10 @@ impl ReplaySession {
         }
         // M12: a caught raise writes TWO landmarks at ONE stop (the syscall, then the delivery),
         // so the coordinate between them names a position the guest never occupies — the syscall
-        // is completed and the frame written as one indivisible transition. Overshooting it is the
-        // honest outcome; overshooting it SILENTLY is not, and every caller here is a debugger
+        // is completed and the frame written as one indivisible transition. M16 Task 9 gives the
+        // unmasking `sigprocmask` that same two-landmark shape, for the same reason and with the
+        // same consequence here, so this check now covers two arms rather than one. Overshooting
+        // such a coordinate is the honest outcome; overshooting it SILENTLY is not, and every caller here is a debugger
         // seek whose whole contract is landing where it was asked to. The terminal Exit/Signal
         // pairs cannot reach this: they report through the `Exited` arm above.
         if self.idx != n {
