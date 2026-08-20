@@ -127,8 +127,9 @@ These are real and current, not aspirational gaps.
   currently working artifacts, not things to keep across milestones.
 - **A signal to a thread that never wakes is never delivered.** Signals to a blocked thread are
   pended and materialised at the wake that makes the thread runnable; retrace does not interrupt the
-  wait with `EINTR` as a real kernel would. A guest that strands a signal this way fails loud at
-  exit rather than exiting 0 and swallowing it.
+  wait with `EINTR` as a real kernel would. A guest that strands a signal this way fails loud at a
+  **clean** exit rather than exiting 0 and swallowing it; a guest that is already crashing is
+  diagnosed by its crash instead.
 - **One gate is parked `#[ignore]`d** at a documented, *measured* wall — the reason is on the test
   itself:
   - `stackoverflow_rust_e2e` — libstd computes its guard page from a constant macOS 26 libpthread
@@ -145,8 +146,8 @@ just gate     # cargo test --workspace + clippy -D warnings
 VM tests must run serially. `just gate` sets it; a bare `cargo test` flakes with `HV_BUSY`.
 
 **`just gate` does not currently complete as one command.** The full workspace run exceeds a
-10-minute ceiling and gets killed — M14, M15 and M16 each closed on a chunked run instead. Split it,
-run every chunk `--no-fail-fast`, and capture cargo's exit code *before* any pipe:
+10-minute ceiling and gets killed — M14, M15, M16 and M17 each closed on a chunked run instead.
+Split it, run every chunk `--no-fail-fast`, and capture cargo's exit code *before* any pipe:
 
 ```sh
 cargo test --workspace --exclude retrace-box --exclude retrace -- --test-threads=1
@@ -157,9 +158,11 @@ cargo test -p retrace --bins -- --test-threads=1            # don't omit: see be
 
 **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the 8
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
-other chunks. Leaving it out silently costs 8 tests and one binary — 404 / 0 / 1 over 102 instead of
-412 / 0 / 1 over 103 — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`, which
-is invalid for this crate (there is no lib target) and fails the whole invocation loudly.
+other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
+without a `--test` filter, reaches them.** Leaving it out silently costs 8 tests and one binary —
+404 / 0 / 1 over 102 instead of 412 / 0 / 1 over 103 — and nothing fails to warn you. Contrast
+`cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
+whole invocation loudly.
 
 **Run each `crates/retrace` test target as its own cargo invocation.** `tests/util/mod.rs::bin()`
 codesigns one *shared* binary with `codesign -f`, so two test processes running concurrently can
