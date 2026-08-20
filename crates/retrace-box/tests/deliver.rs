@@ -591,3 +591,66 @@ fn should_pend_for_is_false_for_an_exited_target_so_it_still_fails_loud() {
         "an Exited target must not pend — `delivering_to_an_exited_thread_fails_loud` is the \
          posture the spec keeps, and a pend would route around it into a silent swallow");
 }
+
+// ---- M17 Task 4c: correcting a WOKEN receiver's saved PSTATE ------------------------------------
+//
+// Task 4b measured a Wait-blocked thread's saved SPSR as 0x60000000 (`crates/retrace/tests/
+// blockedctx.rs`) — Z set, C **set** — on a thread whose saved x0 is already 0, i.e. a completed,
+// SUCCESSFUL `__ulock_wait`. Left alone, `sigreturn` would restore that carry bit and the guest
+// would resume its successful wait reading it as a failure. `complete_saved_syscall_before_delivery`
+// is `complete_syscall_before_delivery`'s sibling for a thread that is not live: it patches
+// `ctx.spsr` directly instead of the live vCPU's SPSR_EL1.
+
+/// Pin the measured correction on the receiver's SAVED context: C clears, and Z — the OTHER flag
+/// Task 4b's measured `0x60000000` carries — survives untouched. That second assertion is the
+/// point: a correction that clobbered all of PSTATE instead of just bit 29 would still pass a
+/// C-only assertion while being wrong, exactly as the `sigraisex0` kernel probe measured Z
+/// surviving a real completed-syscall PSTATE fixup while C did not.
+#[test]
+fn complete_saved_syscall_before_delivery_clears_c_and_leaves_z_untouched() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.threads_mut().switch_to(0);
+
+    // Mirror Task 4b's measured value on the saved context: Z set, C set, EL0t (0x60000000).
+    b.threads_mut().ctx_mut(tid).spsr = 0x6000_0000;
+
+    b.complete_saved_syscall_before_delivery(tid, false);
+
+    let spsr = b.threads_mut().ctx_mut(tid).spsr;
+    assert_eq!(spsr & retrace_arch::PSTATE_C, 0,
+        "C must clear for a successful completion (err=false), mirroring the live version's \
+         behaviour and the kernel's own `0x40000000` for a successful self-raise");
+    assert_eq!(spsr & (1 << 30), 1 << 30,
+        "Z must survive untouched — Task 4b's measured 0x60000000 carries it, and it is not this \
+         correction's business to touch any bit but C");
+}
+
+/// The mirror direction: `err = true` must SET C, not merely leave it alone. Without this, `err`
+/// would be a decorative parameter that a `false`-shaped implementation could satisfy just as well.
+#[test]
+fn complete_saved_syscall_before_delivery_sets_c_when_err_is_true() {
+    let mut b = boxed();
+    let mut ctx = b.save_ctx();
+    ctx.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(ctx, (0, 0));
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
+    b.threads_mut().switch_to(0);
+
+    // Start from C clear (the shape the sigraisex0 probe measured for a successful completion) and
+    // correct it as a FAILURE.
+    b.threads_mut().ctx_mut(tid).spsr = 0x4000_0000;
+
+    b.complete_saved_syscall_before_delivery(tid, true);
+
+    let spsr = b.threads_mut().ctx_mut(tid).spsr;
+    assert_eq!(spsr & retrace_arch::PSTATE_C, retrace_arch::PSTATE_C,
+        "err=true must SET C — this is the direction that proves the parameter is read, not just \
+         its false-branch counterpart above");
+    assert_eq!(spsr & (1 << 30), 1 << 30, "Z must still survive untouched in this direction too");
+}

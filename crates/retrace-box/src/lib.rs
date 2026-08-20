@@ -2518,6 +2518,30 @@ impl Box_ {
         self.vcpu.set_sys(sysreg::SPSR_EL1, spsr).unwrap();
     }
 
+    /// `complete_syscall_before_delivery`'s sibling for the one caller that needs the SAME
+    /// correction applied to a thread that is not live: M17's wake-materialised delivery. That
+    /// arm builds the receiver's frame from its *saved* context, never the vCPU — the receiver is
+    /// Blocked, not current — so there is no `reg::CPSR`/`SPSR_EL1` to patch, only `ctx.spsr`.
+    ///
+    /// Measured, not inferred, on both ends of the gap this closes. The real kernel: the
+    /// `sigraisex0` probe (cited above) delivered `0x40000000` for a successful self-raise — C
+    /// **clear** — because it snapshots PSTATE *after* completing the return, not before. Task 4b
+    /// measured what a Wait-blocked thread's saved SPSR holds instead: `0x60000000`
+    /// (`crates/retrace/tests/blockedctx.rs`) — C **set**, on a thread whose saved x0 is already 0,
+    /// i.e. a successful `__ulock_wait`. That saved SPSR is untouched raw exception-entry state
+    /// (nothing on the wake path patches it), so it disagrees with the completed return sitting
+    /// right next to it in x0. Left alone, `sigreturn` would restore that carry bit and the guest
+    /// would resume its successful wait reading it as a failure — the same bug
+    /// `complete_syscall_before_delivery` exists to prevent on the live path, here on the saved one.
+    ///
+    /// No `x0` write, deliberately: unlike the live version, this has no `set_x0_err_and_return`
+    /// call. Task 1 already measured the receiver's saved x0 as 0 — the completed return value —
+    /// so only the PSTATE axis is wrong; touching x0 again would be redundant at best.
+    pub fn complete_saved_syscall_before_delivery(&mut self, tid: usize, err: bool) {
+        let ctx = self.threads.ctx_mut(tid);
+        ctx.spsr = (ctx.spsr & !retrace_arch::PSTATE_C) | if err { retrace_arch::PSTATE_C } else { 0 };
+    }
+
     // Translate a guest IPA to (host pointer, bytes available to the end of its backing).
     fn host_span(&self, ipa: u64) -> Option<(*mut u8, usize)> {
         for bk in &self.backings {
