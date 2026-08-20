@@ -2464,6 +2464,9 @@ brief's Step 3 had specified only one of the three.
   `Divergence` at each site; they do **not** prove it *distinguishes two live schedules* there, since
   there is no second live thread id in the fixture to retag to. Only the generic arm gets that, via
   `THREADRUST`. Closing it needs a guest that is both threaded and signalling, which does not exist.
+  *(Discharged by M16-threadsignal, and left standing here as M15's own account: `rs/sigthread.rs`
+  is that guest, and independent mutation of each arm now fails its own gate while the other stays
+  green. See the M16-threadsignal Status section.)*
 
 **A thread scope naming a thread that never exists is silently inert — and arm-time validation is
 the wrong fix.** `watch 0x… thread 99` parses, arms, and then suppresses every hit forever:
@@ -2690,9 +2693,11 @@ census returned to seven after each. The review strengthened the transcript into
 establishing that `self.verify_thread(*rthread, pc)?` is **the only statement in either arm capable
 of producing a divergence once `(num, args)` has already matched**, so the observed exit-code flip
 is mechanically attributable to the thread check and to nothing incidental; and the two arms are
-structurally non-overlapping branches, so neither mutation can contaminate the other's test. The
-`CLAUDE.md` and README sentences that carried that caveat have been rewritten, not left standing
-next to the work that discharged them.
+structurally non-overlapping branches, so neither mutation can contaminate the other's test.
+`CLAUDE.md`'s statement of the caveat has been **rewritten**, not left standing beside the work that
+discharged it. M15's Status section keeps its own wording, because a Status section is a historical
+log rather than a live claim; it gains a forward pointer instead — the same treatment M11's stale
+`SigTable` sentence gets in this milestone.
 
 **`verify_thread` has seven call sites, not three, four or six — and the drift is the lesson.** The
 seven, with attribution: M15 Task 4's three (the generic dispatch, the caught-raise mirror, the
