@@ -894,8 +894,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // NO `complete_syscall_before_delivery` here, and that is the difference from the
                 // other two materialisation sites. That call fixes SPSR_EL1 on the LIVE vCPU, which
                 // is the CALLER — and here the caller is the WAKER, not the receiver. The receiver's
-                // frame is built from its own saved context, which Task 1 measured to be a already
-                // completed syscall. Calling it would corrupt the waker's PSTATE instead.
+                // frame is built from its own saved context: Task 1 measured x0 on it to already
+                // hold `__ulock_wait`'s completed return value, and Task 4b measured the saved
+                // PSTATE to be correspondingly UNPATCHED rather than "also completed" — its C flag
+                // is whatever the guest's own pre-`svc` state was, not a manufactured
+                // success/failure flag (`crates/retrace/tests/blockedctx.rs`, both axes). Calling
+                // `complete_syscall_before_delivery` here would corrupt the waker's PSTATE instead.
                 let deliver_to: Vec<usize> = woken.iter().copied()
                     .filter(|&t| b.threads().take_deliverable_peek(t).is_some())
                     .collect();
