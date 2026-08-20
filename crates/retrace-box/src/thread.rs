@@ -171,6 +171,18 @@ impl ThreadTable {
 
     pub fn pending_of(&self, tid: usize) -> u32 { self.threads[tid].pending }
 
+    /// M17: the same question `take_deliverable` answers, WITHOUT clearing the bit.
+    ///
+    /// Needed because the wake site must count how many woken threads have a deliverable signal
+    /// before materialising any of them — and `take_deliverable`'s clear is exactly what makes it
+    /// safe to call once per landmark. Asking with it would consume the signal it was asking about.
+    pub fn take_deliverable_peek(&self, tid: usize) -> Option<u64> {
+        let t = &self.threads[tid];
+        let ready = t.pending & !t.mask;
+        if ready == 0 { return None; }
+        Some(ready.trailing_zeros() as u64 + 1)
+    }
+
     /// The lowest-numbered pending signal this thread's mask no longer blocks, CLEARED as it is
     /// taken.
     pub fn take_deliverable(&mut self, tid: usize) -> Option<u64> {
@@ -291,15 +303,12 @@ impl ThreadTable {
     ///
     /// so equality on the address the guest itself supplies is the whole correlation.
     ///
-    /// Returning a count rather than `()` is what lets the caller's test tell "woke the right one"
-    /// apart from "woke everything"; nothing in the box branches on it. Zero is legal and not an
-    /// error: the real kernel answers `ENOENT` when no one is waiting and `__pthread_joiner_wake`
-    /// treats that as success (its `cmn w0, #0x2` / `b.eq` return path).
-    ///
-    /// M17: returns the woken tids rather than a count. The count told a caller's test "woke the
-    /// right one" apart from "woke everything"; the IDENTITY is what lets the dispatch arms
-    /// materialise a pending signal on the thread that just became runnable. `Vec::len()` still
-    /// answers the old question, so no existing claim is lost.
+    /// Returning the woken tids rather than `()` is what lets the caller's test tell "woke the
+    /// right one" apart from "woke everything" — `Vec::len()` still answers that older question —
+    /// and since M17 the IDENTITY is what lets the dispatch arms materialise a pending signal on
+    /// the thread that just became runnable. An empty result is legal and not an error: the real
+    /// kernel answers `ENOENT` when no one is waiting and `__pthread_joiner_wake` treats that as
+    /// success (its `cmn w0, #0x2` / `b.eq` return path).
     pub fn unblock_waiters_on(&mut self, addr: u64) -> Vec<usize> {
         let mut woken = Vec::new();
         for (tid, t) in self.threads.iter_mut().enumerate() {
@@ -422,6 +431,22 @@ mod tests {
         t.set_mask_of(0, retrace_arch::SIG_UNBLOCK, 1 << 30);
         assert_eq!(t.take_deliverable(0), Some(31));
         assert_eq!(t.take_deliverable(0), None);
+    }
+
+    // M17: the peek must be non-destructive, which is the entire reason it exists — the wake site
+    // asks the question before deciding to materialise, and `take_deliverable`'s clear would
+    // consume the signal it was asking about.
+    #[test]
+    fn take_deliverable_peek_does_not_clear_the_bit() {
+        // `ThreadCtx::zeroed()`, not the `ctx(pc)` helper — that helper lives in
+        // `crates/retrace-box/tests/threads.rs`, a different file. Every test in THIS inline module
+        // builds its table the way the siblings above do.
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        t.pend(0, 30);
+        assert_eq!(t.take_deliverable_peek(0), Some(30));
+        assert_eq!(t.take_deliverable_peek(0), Some(30), "peeking twice must answer twice");
+        assert_eq!(t.take_deliverable(0), Some(30), "and the real take still finds it");
+        assert_eq!(t.take_deliverable_peek(0), None, "which DID clear it");
     }
 
     #[test]

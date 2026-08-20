@@ -77,10 +77,12 @@ pub fn record_dynamic(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded,
     record_box(Box_::load_dynamic(exe, dyld, argv), trace_path)
 }
 
-/// M16 Task 9: the decision an unmasking `sigprocmask`/`pthread_sigmask` makes about the calling
-/// thread's pending set — written ONCE and called by record's mask arm and replay's mirror with the
-/// SAME `(b, tid)`. That identity is what makes "both sides materialise the same signal" true by
-/// construction instead of by two matches that could drift while both stayed green (symmetry rule 1).
+/// M16 Task 9: the decision made about a thread's pending set at an unmask (`sigprocmask`/
+/// `pthread_sigmask`) or, since M17, a wake (`__ulock_wake`) that just made a peer runnable.
+/// Written ONCE and called by record's mask and wake arms and replay's mirrors with the SAME
+/// `(b, tid)`. That identity is what makes "both sides materialise the same signal" true by
+/// construction instead of by two matches that could drift while both stayed green (symmetry
+/// rule 1).
 ///
 /// `Some((sig, handler))` is the only shape that produces a second landmark. `None` covers BOTH
 /// "nothing was pending" and "the signal was discarded", which are indistinguishable to the trace
@@ -88,7 +90,7 @@ pub fn record_dynamic(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded,
 /// signal whose disposition is ignore: it never runs anything, and the pending bit is gone.
 ///
 /// `ThreadTable::take_deliverable` CLEARS the bit it returns, so this must be called exactly ONCE
-/// per unmask on each side, and a signal can never be materialised twice.
+/// per unmask or wake on each side, and a signal can never be materialised twice.
 fn take_pending_delivery(b: &mut Box_, tid: usize) -> Option<(u64, u64)> {
     let sig = b.threads_mut().take_deliverable(tid)?;
     match b.sigtable().action(sig).disp {
@@ -107,10 +109,10 @@ fn take_pending_delivery(b: &mut Box_, tid: usize) -> Option<(u64, u64)> {
             // oracle, because the recording and the replay would agree with each other and both be
             // wrong. Both sides reach this panic at the same landmark.
             retrace_arch::DefaultAction::Terminate => panic!(
-                "signal {sig} became deliverable at an unmask and its default action is Terminate: \
-                 the process must die here, and the terminal path (Event::Signal + final snapshot + \
-                 break, plus its replay mirror) is not modelled at the mask landmark. Implement it \
-                 before a guest needs this; do not drop the signal."),
+                "signal {sig} became deliverable at an unmask or a wake and its default action is \
+                 Terminate: the process must die here, and the terminal path (Event::Signal + final \
+                 snapshot + break, plus its replay mirror) is not modelled at either landmark. \
+                 Implement it before a guest needs this; do not drop the signal."),
         },
     }
 }
@@ -878,11 +880,44 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // __ulock_wake from retrace's OWN process against a guest address. Writes nothing to
             // guest memory (it only moves thread-table state), so the event carries no writes.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAKE => {
-                // M17 Task 4 makes use of `_woken`; this task only threads it through.
-                let (rc, _woken) = b.guest_ulock_wake(args);
+                let (rc, woken) = b.guest_ulock_wake(args);
                 w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append ulock_wake: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
+
+                // M17: THE ANCHOR. A signal pended on a thread because it could not run is
+                // materialised HERE, at the wake landmark that made it runnable — the same argument
+                // the mask arm above makes for the unmask landmark, and for the same reason: the
+                // scheduler's switch point lives inside `Box_::run()`, below the trace, where a
+                // `SignalDelivery` could not be emitted at all.
+                //
+                // NO `complete_syscall_before_delivery` here, and that is the difference from the
+                // other two materialisation sites. That call fixes SPSR_EL1 on the LIVE vCPU, which
+                // is the CALLER — and here the caller is the WAKER, not the receiver. The receiver's
+                // frame is built from its own saved context, which Task 1 measured to be a already
+                // completed syscall. Calling it would corrupt the waker's PSTATE instead.
+                let deliver_to: Vec<usize> = woken.iter().copied()
+                    .filter(|&t| b.threads().take_deliverable_peek(t).is_some())
+                    .collect();
+                assert!(deliver_to.len() <= 1,
+                    "one wake made {} threads deliverable at once ({deliver_to:?}); that needs N+1 \
+                     landmarks at a single stop and a decision about their order, which M17 does \
+                     not model. No fixture produces it — measure the guest before modelling it.",
+                    deliver_to.len());
+                if let Some(&wtid) = deliver_to.first() {
+                    if let Some((psig, handler)) = take_pending_delivery(&mut b, wtid) {
+                        let (dwrites, resume_pc) =
+                            b.deliver_signal_to(wtid, psig, retrace_arch::SI_USER, 0, 0, 0);
+                        // The tag is the RECEIVER — the woken thread — not `thread`, which is the
+                        // waker whose syscall this landmark belongs to. They always differ here, so
+                        // this is the sharpest case of the rule `Event::SignalDelivery.thread`
+                        // states, and `mirror_delivery`'s inline check is what enforces it.
+                        w.append(&Event::SignalDelivery { sig: psig, si_code: retrace_arch::SI_USER,
+                                                          si_addr: 0, handler, resume_pc,
+                                                          writes: dwrites, thread: wtid as u32 })
+                            .map_err(|e| format!("append woken delivery: {e}"))?; count += 1;
+                    }
+                }
             }
 
             // Every other syscall goes through the general memory-diff engine (forwarded once).
