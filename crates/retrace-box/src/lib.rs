@@ -3622,9 +3622,9 @@ impl Box_ {
         let mut x = [0u64; 31];
         for (i, xi) in x.iter_mut().enumerate() { *xi = self.vcpu.get_reg(reg::x(i as u32)).unwrap(); }
         let mut s = Self::format_gprs(&x);
-        s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x}",
+        s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x} spsr={:#x}",
             self.vcpu.get_sys(sysreg::SP_EL0).unwrap(), self.pc(),
-            self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(), self.last_far);
+            self.vcpu.get_sys(sysreg::ELR_EL1).unwrap(), self.last_far, self.spsr());
         s
     }
 
@@ -3643,8 +3643,8 @@ impl Box_ {
         }
         let ctx = self.threads.ctx_of(tid);
         let mut s = Self::format_gprs(&ctx.regs.x);
-        s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x}",
-            ctx.regs.sp_el0, ctx.regs.pc, ctx.elr, 0);
+        s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x} spsr={:#x}",
+            ctx.regs.sp_el0, ctx.regs.pc, ctx.elr, 0, ctx.spsr);
         Some(s)
     }
 
