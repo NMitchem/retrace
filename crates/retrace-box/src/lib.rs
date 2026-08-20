@@ -2846,6 +2846,33 @@ impl Box_ {
     /// divergence. One definition and two callers, so the two sides cannot drift on what
     /// "deliverable" means; `deliver_signal_to` itself still calls this and still panics, so its
     /// behaviour and its message are unchanged.
+    ///
+    /// M17: should a raise targeting `tid` PEND rather than deliver?
+    ///
+    /// Two reasons, and they are independent. The mask reason is M16's and unchanged. The state
+    /// reason is M17's: a BLOCKED target cannot be redirected into a handler yet — its saved
+    /// context is the resume point its blocking syscall owes a return through — so the signal waits
+    /// on its pending set and is materialised at the wake instead.
+    ///
+    /// `Blocked(_)` specifically, NOT "anything but `Runnable`". An `Exited` target must keep
+    /// reaching `check_deliverable`'s refusal: the spec keeps that arm a panic because a signal to
+    /// a dead thread is a modelling bug rather than a schedule divergence, and there is no wake to
+    /// materialise it at. Pending on a dead thread would swallow the signal in silence instead —
+    /// `assert_no_stranded_signals` scans `Blocked` threads only — which is the one failure shape a
+    /// determinism oracle cannot see.
+    ///
+    /// This is the predicate BOTH dispatch loops consult, written once so they cannot drift on the
+    /// pend-vs-deliver decision while both stayed green. `take_deliverable` already filters by
+    /// mask, so a signal pended for both reasons is released only when both have cleared.
+    ///
+    /// Note the relationship to `check_deliverable`: this decides whether to pend, that decides
+    /// whether a delivery may proceed. They agree on `Runnable` by construction — which is why the
+    /// raise path can no longer reach that guard's refusal for a merely-blocked target.
+    pub fn should_pend_for(&self, tid: usize, sig: u64) -> bool {
+        self.threads.is_blocked_for(tid, sig)
+            || matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_))
+    }
+
     pub fn check_deliverable(&self, tid: usize) -> Result<(), String> {
         match self.threads.state_of(tid) {
             thread::ThreadState::Runnable => Ok(()),

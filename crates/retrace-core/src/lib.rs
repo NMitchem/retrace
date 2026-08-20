@@ -696,7 +696,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 let sig = args[1];
                 let act = b.sigtable().action(sig);
 
-                if b.threads().is_blocked_for(target, sig) {
+                // M17: the pend condition is now `should_pend_for` — mask OR not-Runnable — and it
+                // is a `Box_` method precisely so replay's mirror consults the identical predicate
+                // rather than a second copy of the same `||`.
+                if b.should_pend_for(target, sig) {
                     // M16 replaces M11's assert: M11 modelled no pending set (measured: no gate
                     // guest raised a blocked signal; abort() unblocks SIGABRT before raising), so
                     // it could only refuse this case, not handle it. The signal goes PENDING on the
@@ -1226,7 +1229,7 @@ impl ReplaySession {
                         // surfaced as a divergence rather than as corruption — loud, which is why
                         // it was not a Task 7 defect — but it was still the two dispatch loops
                         // disagreeing about control flow, and the order below closes it.
-                        if self.b.threads().is_blocked_for(target, sig) {
+                        if self.b.should_pend_for(target, sig) {
                             // A pended raise produces ONE landmark — the ordinary Syscall — and no
                             // delivery, so it falls through to the generic dispatch below, which
                             // already verifies (num, args), checks the thread tag, and applies the
