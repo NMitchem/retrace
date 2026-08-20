@@ -2840,9 +2840,9 @@ milestone does not rediscover them:**
    closing gate run (every chunk log was grepped for the failure string; zero hits), so the 387/0/2
    above is not a re-run of a spurious red. The fix is to sign a per-test-binary copy rather than
    the shared file. Deferred because `bin()` is shared test infrastructure and touching it at the
-   close would be unreviewed. **M16 adds three more test binaries that go through `bin()`** — `kport`,
-   `sigthread_e2e` and `sigblocked_e2e` all reach it via `util::record_dynamic` — **so it raises the
-   collision odds it is deferring.** A gate that can go spuriously red teaches the reader to dismiss
+   close would be unreviewed. **M16 adds two more test binaries that reach `bin()` on every gate run** —
+   `kport` and `sigthread_e2e`, both via `util::record_dynamic`, with `sigblocked_e2e` a third the
+   day it is un-parked — **so it raises the collision odds it is deferring.** A gate that can go spuriously red teaches the reader to dismiss
    red, which is the real cost.
 2. **The plan's own gate recipe exceeds the 10-minute tool-call ceiling.** New this milestone. The
    plan mandated a single `-p retrace-core -p retrace` chunk; it was killed mid-`rung.rs` at the
