@@ -3099,8 +3099,11 @@ totals **404 / 0 / 1 over 102 binaries**, not 412 / 0 / 1 over 103. The gap is
 `crates/retrace/src/debug.rs`, which holds 8
 `#[test]`s inside the `retrace` **bin** target: `--test <name>` selects integration-test targets only
 and never builds the binary's own unittest harness. `just gate`'s unchunked `--workspace` run does
-include it, so the shortfall exists only in the chunked substitute the README recommends — which is
-the recipe every close since M14 has actually used. `cargo test -p retrace --bins` supplies exactly
+include it, and so does any **whole-package** chunk like `cargo test -p retrace`, because dropping
+the `--test` filter builds every target in the package. The shortfall belongs specifically to the
+per-target substitute the README recommends, and this close is the first to have leaned on it
+end-to-end — see the reconciliation below, which measures that no earlier published number was
+affected. `cargo test -p retrace --bins` supplies exactly
 the missing 8, and the README's recipe now names it. Note the asymmetry that hid this: `--lib` is
 invalid for this crate (there is no lib target) and fails the whole invocation loudly, which is
 documented; `--bins` is valid, and omitting it fails **silently**, which was not.
@@ -3108,9 +3111,30 @@ documented; `--bins` is valid, and omitting it fails **silently**, which was not
 The reconciliation against the previous close was done from **commits, never the working tree**:
 `#[test]` counts at `e78019c` versus `3501c9a` give `thread.rs` +1, `deliver.rs` +11 (23 → 34),
 `threads.rs` +1, `thread_oracle.rs` +1, and `blockedctx.rs` +2 as a new binary — **+16**, with a
-tree-wide count of 397 → 413 agreeing independently. M16 closed at 395 / 0 / 2 over 102 binaries;
-395 + 16 = 411, plus `sigblocked_e2e` moving from ignored to passing = **412 passed, 1 ignored, 103
-binaries**, which is what the run measured.
+tree-wide count of 397 → 413 agreeing independently. The baseline is main's tip at `b73bdbb`,
+**395 passed / 0 failed / 2 ignored over 102 binaries** — one README line off this branch's
+merge-base. So 395 + 16 = 411, plus `sigblocked_e2e` moving from ignored to passing = **412 passed,
+1 ignored, 103 binaries**, which is what the run measured.
+
+**That baseline is not the figure M16 published, and the difference is real work rather than a
+counting error.** M16's own close (above, at `:2638`) published **387 / 0 / 2 over 101 binaries at
+`dc04e48`**. Between `dc04e48` and `b73bdbb`, M16's fast-follow sweep added exactly 8 tests and one
+binary: `sig.rs` +2, `deliver.rs` +3, `kport.rs` +1, `sigdeliver_e2e.rs` +1, and `harness.rs` new
+with +1 — that new file being the 102nd binary. Both figures are internally complete, and the check
+is the same one used above: 387 + 2 ignored = 389, the tree-wide `#[test]` count at `dc04e48`;
+395 + 2 = 397, the count at `b73bdbb`.
+
+**One coincidence is worth disarming here, because it is tempting and it is wrong.** 387 + 8 = 395
+and 101 + 1 = 102 match the `--bins` shortfall above *exactly*, which invites reading M16's number as
+having been 8 short for that reason — M17 catching a trap that had already fired once, unnoticed.
+It reads well and it is false. Measured: M16's 387 + 2 equals the full tree-wide count at its own
+commit, so it accounted for every `#[test]` in the tree, `debug.rs`'s 8 included; M15's 360 + 1 = 361
+checks out identically at `259a4db`. The reason earlier closes were unaffected is that they chunked
+with **whole-package** invocations — M16's plan mandated a single `-p retrace-core -p retrace` chunk
+— and `cargo test -p retrace` *without* a `--test` filter does build the bin's unittest target. The
+shortfall belongs specifically to the per-target `--test <name>` recipe the README wrote down, which
+this close was the first to lean on end-to-end. The trap is newly created, not newly discovered, and
+no published number before this one is owed a correction.
 
 **The load-bearing claim was MEASURED before anything was built on it, and that is why the milestone
 did not ship a bug.** The design rested on one reading of record's `SYS_ULOCK_WAIT` arm: that a
@@ -3232,27 +3256,37 @@ satisfy the assertions as written, which is why the second tooth — that thread
 `__ulock_wait` *before* the delivery index — is load-bearing rather than decorative.
 
 **M17 makes `sigblocked_e2e` the third gate reaching `util::bin()` on every gate run, exactly as M16
-predicted — and then adds a fourth M16 did not.** M16's own close named the hazard —
-`crates/retrace/tests/util/mod.rs::bin()` runs `codesign -f` on the *one shared* `retrace` binary, so
-a second test **process** can observe it missing mid-replacement, which `--test-threads=1` does not
-prevent because it serialises threads inside a binary while cargo runs binaries concurrently — and
-wrote that `kport` and `sigthread_e2e` were two, "with `sigblocked_e2e` a third the day it is
-un-parked — so it raises the collision odds it is deferring." **Today is that day, and M17 raised
-those odds by two, not one.** Counted at this close: **25** `crates/retrace` test binaries actually
-reached `bin()` on a gate run at `b73bdbb`, and **27** do now. `sigblocked_e2e` is the predicted
-third in M16's sequence — it was present in the tree but `#[ignore]`d, so it never invoked `bin()`
-until Task 7 un-parked it — and `blockedctx`, Task 1's new measurement gate, is a fourth in that same
-sequence, because it records `THREADRUST` through `util::record_dynamic` like the rest. (Those
-ordinals count what M16 and M17 *added*; the absolute totals are the 25 and 27 above.) A prediction
-about one gate under-counted
-the milestone that fulfilled it, which is the ordinary way this hazard grows: nobody adds a `bin()`
-caller on purpose, they add a gate. The mitigation actually used at this
-close was to run every `crates/retrace` test target as its **own** cargo invocation, one per target,
-so no two `bin()` callers are ever live at once; the failure string was grepped for across every
-chunk log and did not appear. `bin()` itself is **not fixed**, and M16's reason for deferring still
-holds: it is shared test infrastructure and touching it at a milestone close would be unreviewed. The
-real fix remains signing a per-test-binary copy rather than the shared file. Recorded here as a
-still-open item that one more milestone has now made likelier, not as one M17 discharged.
+predicted — and then adds a fourth M16 did not. But the hazard the prediction was about had already
+been fixed, and we nearly wrote the opposite into this log.** M16's close named it:
+`crates/retrace/tests/util/mod.rs::bin()` ran `codesign -f` on the *one shared* `retrace` binary, so
+a second test **process** could observe it missing mid-replacement — which `--test-threads=1` does
+not prevent, because it serialises threads *inside* a binary while cargo runs binaries concurrently.
+M16 deferred the fix and wrote that `kport` and `sigthread_e2e` were two callers, "with
+`sigblocked_e2e` a third the day it is un-parked — so it raises the collision odds it is deferring."
+
+Today is that day, and the caller count did grow: **25** `crates/retrace` test binaries reached
+`bin()` on a gate run at `b73bdbb`, and **27** do now — `sigblocked_e2e`, which was in the tree but
+`#[ignore]`d and so never invoked `bin()` until Task 7 un-parked it, plus `blockedctx`, Task 1's new
+measurement gate, which records through `util::record_dynamic` like the rest. A prediction about one
+gate under-counted the milestone that fulfilled it, which is the ordinary way this kind of thing
+grows: nobody adds a `bin()` caller on purpose, they add a gate.
+
+**The odds it raises are of nothing, because `bin()` was fixed in M16's own fast-follow sweep.**
+Commit `92bc793`, "fast-follow A19b: sign a per-process copy, not the shared binary", landed after
+M16's close at `dc04e48` and at or before `b73bdbb`. `bin()` now signs
+`format!("{p}-signed-{}", std::process::id())` — a per-process copy — which is exactly the fix M16
+named as the real one, applied by M16 itself within days of deferring it. So M17 adds two callers to
+a race that no longer exists.
+
+**Why this is recorded at length rather than quietly corrected.** M17's controller wrote a ruling
+instructing this milestone to *state that it had raised the collision odds*, and this section was
+drafted saying `bin()` was "not fixed" and M16's reason for deferring "still holds". Both were false.
+The error came from reading M16's Status section as a description of the code *now* — and it is
+history, true as of `dc04e48` and preserved verbatim, exactly as this file's contract requires. The
+log is the authority on what was believed; the code is the authority on what is. Reading the first as
+the second is the specific way an append-only history misleads a reader who trusts it, and this
+milestone caught it one commit before it became permanent, by opening `util/mod.rs` instead of citing
+the log a third time. M16's deferral text stays standing; this paragraph is its forward pointer.
 
 **Fail-loud boundaries, unchanged or newly stated:**
 
