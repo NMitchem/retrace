@@ -2831,6 +2831,31 @@ impl Box_ {
     /// between switches — so the current context is saved into it first and reloaded at the end. That
     /// is what lets one code path serve a self-signal and a cross-thread signal identically, instead
     /// of two paths that drift (M13 Task 8 shipped a test that checked only one of a mirrored pair).
+    /// Can `tid` receive a signal frame? `Ok(())`, or `Err(diagnostic)` saying why not.
+    ///
+    /// A `Blocked` thread's ctx is the saved state its blocking syscall must resume through, so
+    /// redirecting it overwrites that resume point out from under the syscall waiting on it. An
+    /// `Exited` thread's ctx is a dead entry with nothing left to resume.
+    ///
+    /// Fast-follow: split out of `deliver_signal_to` for the same reason as `try_thread_of_port`.
+    /// Record wants the panic — a target that cannot run means retrace's model is wrong. Replay
+    /// wants a named `Divergence`, because there the same condition is the signature of a schedule
+    /// divergence. One definition and two callers, so the two sides cannot drift on what
+    /// "deliverable" means; `deliver_signal_to` itself still calls this and still panics, so its
+    /// behaviour and its message are unchanged.
+    pub fn check_deliverable(&self, tid: usize) -> Result<(), String> {
+        match self.threads.state_of(tid) {
+            thread::ThreadState::Runnable => Ok(()),
+            thread::ThreadState::Blocked(reason) => Err(format!(
+                "thread {tid} is Blocked({reason:?}), not Runnable; deliver_signal_to would \
+                 overwrite the saved context its blocking syscall must resume through. Wake or \
+                 skip it instead of redirecting a thread that cannot run yet.")),
+            thread::ThreadState::Exited(code) => Err(format!(
+                "thread {tid} has Exited({code}), not Runnable; it has no saved context left to \
+                 resume into a handler. deliver_signal_to must not target a dead thread.")),
+        }
+    }
+
     pub fn deliver_signal_to(
         &mut self, tid: usize, sig: u64, si_code: u64, si_addr: u64, esr: u64, far: u64,
     ) -> (Vec<Region>, u64) {
@@ -2844,18 +2869,7 @@ impl Box_ {
         // Exited thread's ctx is a dead entry with nothing left to resume. Neither is reachable
         // today (no product caller passes tid != cur), but the next task makes both reachable and
         // the failure mode would be silent corruption, not a panic — so check now, not then.
-        match self.threads.state_of(tid) {
-            thread::ThreadState::Runnable => {}
-            thread::ThreadState::Blocked(reason) => panic!(
-                "thread {tid} is Blocked({reason:?}), not Runnable; deliver_signal_to would \
-                 overwrite the saved context its blocking syscall must resume through. Wake or \
-                 skip it instead of redirecting a thread that cannot run yet."
-            ),
-            thread::ThreadState::Exited(code) => panic!(
-                "thread {tid} has Exited({code}), not Runnable; it has no saved context left to \
-                 resume into a handler. deliver_signal_to must not target a dead thread."
-            ),
-        }
+        self.check_deliverable(tid).unwrap_or_else(|d| panic!("{d}"));
 
         // M16: a second signal to a thread already redirected into an un-run handler would stack a
         // frame the kernel's queueing semantics would order — unmodelled, so fail loud rather than
@@ -3147,10 +3161,20 @@ impl Box_ {
     /// exact latent defect M16 exists to close — `pthread_kill(child, sig)` running MAIN's handler
     /// on MAIN's stack, silently. A port retrace cannot place is a modelling gap that must surface
     /// as a panic.
-    pub fn thread_of_port(&self, port: u32) -> usize {
+    /// The fallible form: `Ok(tid)`, or `Err(diagnostic)` naming every thread searched.
+    ///
+    /// Fast-follow: this exists so the two dispatch loops can share the RESOLUTION while differing
+    /// in how they react to it failing. On the record side a port that resolves to nothing means
+    /// retrace's own model is wrong, so `thread_of_port` below still panics. On the replay side the
+    /// same failure is the signature of a SCHEDULE divergence, and M16 prefers a named `Divergence`
+    /// at a landmark to a process abort — the `pthread_kill` landmark's own `verify_thread` checks
+    /// the CALLER, not the target, so it would not catch such a divergence first. Symmetry rule 1
+    /// still holds where it bites: both sides run this identical scan with identical arguments, and
+    /// only the reaction differs.
+    pub fn try_thread_of_port(&self, port: u32) -> Result<usize, String> {
         // Exited threads are included in the diagnostic dump too (fix round 1, review finding 2),
         // tagged, so a port that belonged to a thread that has SINCE exited reads differently in
-        // the panic from a port retrace never issued at all — two different bugs to go looking
+        // the diagnostic from a port retrace never issued at all — two different bugs to go looking
         // for. They are still excluded from MATCHING (`!exited &&` below): only a live thread can
         // claim a port. That acceptance behaviour is unchanged; only the diagnostic widened, per
         // the brief's own "measure before widening this" caution, which stays about what this
@@ -3159,12 +3183,18 @@ impl Box_ {
         for tid in 0..self.threads.len() {
             let exited = matches!(self.threads.state_of(tid), thread::ThreadState::Exited(_));
             let p = self.kport_of(tid);
-            if !exited && p == Some(port) { return tid; }
+            if !exited && p == Some(port) { return Ok(tid); }
             seen.push(format_seen_entry(tid, p, exited));
         }
-        panic!("__pthread_kill names mach port {port:#x}, which belongs to no live guest thread \
-                (searched [{}]). Either the guest holds a port retrace never issued, or its \
-                pthread struct moved — measure before widening this.", seen.join(", "));
+        Err(format!("__pthread_kill names mach port {port:#x}, which belongs to no live guest \
+                     thread (searched [{}]). Either the guest holds a port retrace never issued, \
+                     or its pthread struct moved — measure before widening this.", seen.join(", ")))
+    }
+
+    /// Resolve a mach port to a thread, or panic. The RECORD-side form — see
+    /// `try_thread_of_port` for why replay takes the fallible one instead.
+    pub fn thread_of_port(&self, port: u32) -> usize {
+        self.try_thread_of_port(port).unwrap_or_else(|d| panic!("{d}"))
     }
 
     /// The address the kernel enters a NEW thread at, learned from the guest's own

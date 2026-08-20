@@ -1021,6 +1021,15 @@ impl ReplaySession {
             other => return Err(Divergence { landmark: self.idx, pc, detail: format!(
                 "expected recorded SignalDelivery, got {other:?} (live: sig={sig} far={far:#x})") }),
         };
+        // Fast-follow: refuse an undeliverable target with a named `Divergence` rather than let
+        // `deliver_signal_to`'s own assertion abort the process. Same condition and the same single
+        // definition in `Box_`; only the reaction differs. On this side the condition means the
+        // live schedule put the target in a state the recorded schedule did not — a divergence,
+        // which is precisely what this function exists to report.
+        if let Err(d) = self.b.check_deliverable(tid) {
+            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                "signal delivery target not deliverable on replay: {d}") });
+        }
         let (mine, _resume_pc) = self.b.deliver_signal_to(tid, sig, si_code, si_addr, esr, far);
         if sig != rsig || mine != rwrites {
             // Name the first differing byte: a frame mismatch is usually one field, and the
@@ -1158,7 +1167,19 @@ impl ReplaySession {
                         // is fail-loud on this side too, deliberately — a "fall back to the current
                         // thread" path here would silently resurrect the exact bug M16 closes.
                         let target = if num == retrace_arch::SYS_PTHREAD_KILL {
-                            self.b.thread_of_port(args[0] as u32)
+                            // Fast-follow: the FALLIBLE form on this side. A port that resolves to
+                            // no live thread means retrace's model is wrong on the record side, but
+                            // here it means the live schedule disagrees with the recorded one — and
+                            // nothing else would name it, because this landmark's own
+                            // `verify_thread` checks the CALLER, not the target. Aborting would end
+                            // the process with a panic where every other replay-side failure
+                            // reports a `Divergence` at its landmark. The scan itself is unchanged
+                            // and shared with record, so symmetry rule 1 still holds.
+                            match self.b.try_thread_of_port(args[0] as u32) {
+                                Ok(t) => t,
+                                Err(d) => return Err(Divergence { landmark: self.idx, pc, detail:
+                                    format!("pthread_kill target unresolvable on replay: {d}") }),
+                            }
                         } else {
                             // kill names the process, not a thread; a process-directed signal may
                             // go to any thread with it unblocked and retrace picks the caller,
@@ -1970,6 +1991,12 @@ impl ReplaySession {
     /// `dbg_kport_of`.
     #[doc(hidden)]
     pub fn dbg_thread_of_port(&self, port: u32) -> usize { self.b.thread_of_port(port) }
+
+    /// Fast-follow: the fallible form, so a test can observe the FAILURE without the process
+    /// aborting under it. `dbg_thread_of_port` above still panics, matching record.
+    pub fn dbg_try_thread_of_port(&self, port: u32) -> Result<usize, String> {
+        self.b.try_thread_of_port(port)
+    }
     /// How many threads the guest has created so far. Test-only.
     #[doc(hidden)]
     pub fn b_thread_count(&self) -> usize { self.b.threads().len() }
