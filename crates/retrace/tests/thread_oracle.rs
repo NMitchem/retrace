@@ -197,3 +197,41 @@ fn a_wrong_thread_on_the_delivery_landmark_is_a_divergence() {
          compare fired, the retag touched `writes` and the test is measuring the wrong thing:\n{}",
         rep.stderr);
 }
+
+/// M17. The signal materialised at a WAKE is tagged with the woken thread — neither the caller of
+/// the syscall that produced the landmark (that is the waker) nor the thread that was current. No
+/// other delivery in the tree has that shape, so `mirror_delivery`'s inline receiving-thread check
+/// reaches this route for the first time here.
+///
+/// Only the TAG is corrupted, not one byte of `writes` — the same isolation
+/// `a_wrong_thread_on_the_delivery_landmark_is_a_divergence` documents above: a wrong-thread
+/// delivery lands the frame on a different stack, so `Region`'s derived `PartialEq` would trip the
+/// frame compare first and this check would never speak.
+#[test]
+fn a_wrong_thread_on_a_wake_materialised_delivery_is_a_divergence() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::SIGBLOCKED);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let i = events.iter().position(|e| matches!(e, Event::SignalDelivery { sig: 30, .. }))
+        .expect("SIGBLOCKED must record exactly one SIGUSR1 delivery — sigblocked_e2e asserts it");
+    let orig = match &events[i] { Event::SignalDelivery { thread, .. } => *thread, _ => unreachable!() };
+    assert_eq!(orig, 1,
+        "the delivery must be tagged with `a` (tid 1), the BLOCKED target — if this is 0 or 2 the \
+         signal went to the waker or to main and M17's whole claim is wrong");
+
+    // Retag to the WAKER (tid 2, `b`), which is the specific wrong answer this route invites: it is
+    // the thread whose syscall produced the landmark, and therefore the tag a careless
+    // implementation would reach for.
+    if let Event::SignalDelivery { thread, .. } = &mut events[i] { *thread = 2; }
+
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+    assert!(rep.stderr.contains("signal delivery thread mismatch"),
+        "the divergence must be the DELIVERY thread check, not merely some divergence — exit 3 \
+         alone would pass on any of them; stderr:\n{}", rep.stderr);
+}
