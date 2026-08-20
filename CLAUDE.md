@@ -33,10 +33,19 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test --workspace --exclude retrace-box --exclude retrace -- --test-threads=1
   cargo test -p retrace-box -- --test-threads=1
   cargo test -p retrace --test <name> -- --test-threads=1   # per-target for the e2e gates
+  cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
+  **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
+  8 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in **none** of
+  the other chunks; only the unchunked `--workspace` run reaches them. Leaving it out silently costs
+  8 tests and one binary — M17 measured 404/0/1 over 102 without it against 412/0/1 over 103 with it
+  — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`, which is invalid for this
+  crate (there is no lib target) and fails the whole invocation **loudly**: the trap is that the
+  wrong flag is loud and the missing one is silent.
+
   Then reconcile the total against the previous milestone's close by diffing `#[test]` counts
-  file-by-file, rather than trusting a sum. `cargo test -p retrace --lib` is invalid and fails the
-  whole invocation. Grep gate logs with `grep -a` — they carry ANSI and UTF-8 that trips plain grep.
+  file-by-file, rather than trusting a sum. Grep gate logs with `grep -a` — they carry ANSI and
+  UTF-8 that trips plain grep.
 - **`--test-threads=1` is mandatory.** HVF allows only one VM per process, so in-process VM tests
   must run serially. `just gate` sets it; a bare `cargo test` will flake with `HV_BUSY`.
 - Single test: `cargo test -p <crate> <name> -- --test-threads=1`
@@ -189,15 +198,24 @@ through, or `pthread_join` returns success without ever waiting: the child's mac
 `PTHREAD_START_TSD_BASE_SET` in `w5`, which `__pthread_start` `tbz`-tests and `brk`s on. Each is
 documented with its measurement at the call site.
 
-**Signals are per-thread too (M16).** The signal path resolves `__pthread_kill`'s target port to a
+**Signals are per-thread too (M16–M17).** The signal path resolves `__pthread_kill`'s target port to a
 thread — `thread_of_port` reads `[pthread + PTHREAD_KPORT_OFF]` back out of guest memory, so main
 needs no special case — and `deliver_signal_to` builds the frame into *that thread's saved context*
 rather than off the live vCPU. Masks, pending sets and alternate stacks live on `Thread`
 (`crates/retrace-box/src/thread.rs`) because POSIX makes them per-thread; **dispositions stay
-process-global** on `SigTable`, because POSIX makes those per-process. A masked signal pends and is
-materialised at the *calling* thread's next unmasking `sigprocmask`/`pthread_sigmask` — a syscall
-landmark, so both dispatch loops can see it, which is the same argument that keeps delivery above
-the trace.
+process-global** on `SigTable`, because POSIX makes those per-process. A signal pends when the target
+cannot take it yet, for **two** independent reasons with **two** matching materialisation sites, both
+of them syscall landmarks so that both dispatch loops can see them — the same argument that keeps
+delivery above the trace:
+
+- **Masked (M16)** — materialised at the *calling* thread's next unmasking
+  `sigprocmask`/`pthread_sigmask`.
+- **Blocked (M17)** — a target blocked in `__ulock_wait` cannot be redirected into a handler, because
+  its saved context is the resume point its blocking syscall owes a return through. The signal is
+  materialised at the `__ulock_wake` that makes the thread runnable, onto the **woken** thread. A
+  signal pended for both reasons is released only when both have cleared. A signal to a thread
+  nothing ever wakes is therefore never delivered; `assert_no_stranded_signals` fails loud at a clean
+  exit rather than swallowing it.
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (`TRACE_MAGIC` is now
