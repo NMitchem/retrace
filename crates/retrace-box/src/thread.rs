@@ -176,7 +176,7 @@ impl ThreadTable {
     /// Needed because the wake site must count how many woken threads have a deliverable signal
     /// before materialising any of them — and `take_deliverable`'s clear is exactly what makes it
     /// safe to call once per landmark. Asking with it would consume the signal it was asking about.
-    pub fn take_deliverable_peek(&self, tid: usize) -> Option<u64> {
+    pub fn peek_deliverable(&self, tid: usize) -> Option<u64> {
         let t = &self.threads[tid];
         let ready = t.pending & !t.mask;
         if ready == 0 { return None; }
@@ -437,16 +437,16 @@ mod tests {
     // asks the question before deciding to materialise, and `take_deliverable`'s clear would
     // consume the signal it was asking about.
     #[test]
-    fn take_deliverable_peek_does_not_clear_the_bit() {
+    fn peek_deliverable_does_not_clear_the_bit() {
         // `ThreadCtx::zeroed()`, not the `ctx(pc)` helper — that helper lives in
         // `crates/retrace-box/tests/threads.rs`, a different file. Every test in THIS inline module
         // builds its table the way the siblings above do.
         let mut t = ThreadTable::new(ThreadCtx::zeroed());
         t.pend(0, 30);
-        assert_eq!(t.take_deliverable_peek(0), Some(30));
-        assert_eq!(t.take_deliverable_peek(0), Some(30), "peeking twice must answer twice");
+        assert_eq!(t.peek_deliverable(0), Some(30));
+        assert_eq!(t.peek_deliverable(0), Some(30), "peeking twice must answer twice");
         assert_eq!(t.take_deliverable(0), Some(30), "and the real take still finds it");
-        assert_eq!(t.take_deliverable_peek(0), None, "which DID clear it");
+        assert_eq!(t.peek_deliverable(0), None, "which DID clear it");
     }
 
     #[test]

@@ -492,8 +492,8 @@ fn main() {
         .status().expect("rustc sigthread");
     assert!(status.success(), "sigthread guest build failed");
 
-    // sigblocked: the guest for the PARKED sigblocked_e2e gate — a signal whose target is BLOCKED
-    // in __ulock_wait, not merely not-current. Same rustc recipe as sigthread.
+    // sigblocked: the guest for the sigblocked_e2e gate, which M17 un-parked — a signal whose target
+    // is BLOCKED in __ulock_wait, not merely not-current. Same rustc recipe as sigthread.
     let src = format!("{}/rs/sigblocked.rs", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/sigblocked");
     println!("cargo:rerun-if-changed={src}");

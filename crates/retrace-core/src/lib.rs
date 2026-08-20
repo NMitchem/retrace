@@ -911,7 +911,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // the saved version is called because the receiver's own PSTATE needs the same
                 // completed-syscall correction the kernel applies, just against different state.
                 let deliver_to: Vec<usize> = woken.iter().copied()
-                    .filter(|&t| b.threads().take_deliverable_peek(t).is_some())
+                    .filter(|&t| b.threads().peek_deliverable(t).is_some())
                     .collect();
                 assert!(deliver_to.len() <= 1,
                     "one wake made {} threads deliverable at once ({deliver_to:?}); that needs N+1 \
@@ -919,7 +919,34 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                      not model. No fixture produces it — measure the guest before modelling it.",
                     deliver_to.len());
                 if let Some(&wtid) = deliver_to.first() {
-                    if let Some((psig, handler)) = take_pending_delivery(&mut b, wtid) {
+                    // M17 fix round 5: the sibling of the `deliver_to.len() <= 1` bound above, on
+                    // the other axis, and it is there for the same reason. That one bounds how many
+                    // THREADS one wake can make deliverable; this one bounds how many SIGNALS one
+                    // woken thread can have. `take_pending_delivery` consumes exactly ONE bit, and
+                    // the woken thread is Runnable by now — so `assert_no_stranded_signals`, which
+                    // `continue`s on anything that is not `Blocked(_)`, would never see the
+                    // leftover. A signal the guest was owed would simply vanish while record and
+                    // replay agreed with each other: the one failure a determinism oracle cannot
+                    // see, and the exact class that guard exists to catch.
+                    //
+                    // Deliberately OUTSIDE the `Some`/`None` match on the result, because the
+                    // `None` case swallows just as silently: a disposition of `Ign` makes
+                    // `take_pending_delivery` return `None` AFTER `take_deliverable` has already
+                    // cleared the bit.
+                    //
+                    // Reachable in principle — two `pthread_kill`s at one blocked target — but no
+                    // fixture in the tree produces it, so queueing at a wake is left unmodelled and
+                    // LOUD rather than guessed.
+                    let taken = take_pending_delivery(&mut b, wtid);
+                    let second = b.threads().peek_deliverable(wtid);
+                    assert!(second.is_none(),
+                        "woken thread {wtid} still has deliverable signal {second:?} after this \
+                         wake materialised one: M17 materialises at most ONE signal per wake, so \
+                         the second is silently swallowed — the thread is Runnable now, and \
+                         assert_no_stranded_signals scans Blocked threads only. Queueing at a wake \
+                         is deliberately unmodelled because no guest in the tree measures it; \
+                         measure one before modelling it.");
+                    if let Some((psig, handler)) = taken {
                         b.complete_saved_syscall_before_delivery(wtid, false); // always false: the receiver's own wait succeeded (its saved x0 is 0)
                         let (dwrites, resume_pc) =
                             b.deliver_signal_to(wtid, psig, retrace_arch::SI_USER, 0, 0, 0);
@@ -1856,40 +1883,62 @@ impl ReplaySession {
                                 // same order, so which signal materialises on which thread is
                                 // identical by construction rather than by two matches agreeing.
                                 let deliver_to: Vec<usize> = woken.iter().copied()
-                                    .filter(|&t| self.b.threads().take_deliverable_peek(t).is_some())
+                                    .filter(|&t| self.b.threads().peek_deliverable(t).is_some())
                                     .collect();
                                 assert!(deliver_to.len() <= 1,
                                     "one wake made {} threads deliverable at once ({deliver_to:?}) \
                                      — record asserts the same bound; see its arm",
                                     deliver_to.len());
                                 return match deliver_to.first() {
-                                    Some(&wtid) => match take_pending_delivery(&mut self.b, wtid) {
-                                        Some((psig, _handler)) => {
-                                            // The SAME Box_ calls record makes, in the SAME order,
-                                            // with the SAME arguments — that identity IS symmetry
-                                            // rule 1 holding by construction rather than by two
-                                            // matches happening to agree.
-                                            //
-                                            // `complete_saved_syscall_before_delivery` IS called
-                                            // and `complete_syscall_before_delivery` is NOT, for
-                                            // the reason record's arm spells out at length: the
-                                            // live vCPU here is the WAKER, so the live version
-                                            // would correct the wrong thread's PSTATE — while the
-                                            // receiver's own saved SPSR was measured (0x60000000,
-                                            // C set, `crates/retrace/tests/blockedctx.rs`) to
-                                            // disagree with the completed x0 beside it. Omit this
-                                            // call and replay's frame bytes differ from record's,
-                                            // which surfaces as a divergence in `mirror_delivery`'s
-                                            // byte-compare rather than as silent corruption.
-                                            self.b.complete_saved_syscall_before_delivery(wtid, false);
-                                            // Consume the Syscall landmark by hand; mirror_delivery
-                                            // takes the SignalDelivery.
-                                            self.idx += 1;
-                                            self.mirror_delivery(wtid, psig, retrace_arch::SI_USER,
-                                                                 0, 0, 0, pc)
+                                    Some(&wtid) => {
+                                        // The second bound, and record's mirror: at most ONE signal
+                                        // materialises per wake. Checked OUTSIDE the `Some`/`None`
+                                        // match below, because the `None` (`Ign`) case swallows a
+                                        // leftover just as silently — record's arm carries the full
+                                        // reasoning. Same check, same message, same position in the
+                                        // call sequence as record's, which is symmetry rule 1: the
+                                        // two sides cannot drift on what they consume per wake.
+                                        let taken = take_pending_delivery(&mut self.b, wtid);
+                                        let second = self.b.threads().peek_deliverable(wtid);
+                                        assert!(second.is_none(),
+                                            "woken thread {wtid} still has deliverable signal \
+                                             {second:?} after this wake materialised one: M17 \
+                                             materialises at most ONE signal per wake, so the \
+                                             second is silently swallowed — the thread is Runnable \
+                                             now, and assert_no_stranded_signals scans Blocked \
+                                             threads only. Queueing at a wake is deliberately \
+                                             unmodelled because no guest in the tree measures it; \
+                                             measure one before modelling it.");
+                                        match taken {
+                                            Some((psig, _handler)) => {
+                                                // The SAME Box_ calls record makes, in the SAME
+                                                // order, with the SAME arguments — that identity IS
+                                                // symmetry rule 1 holding by construction rather
+                                                // than by two matches happening to agree.
+                                                //
+                                                // `complete_saved_syscall_before_delivery` IS
+                                                // called and `complete_syscall_before_delivery` is
+                                                // NOT, for the reason record's arm spells out at
+                                                // length: the live vCPU here is the WAKER, so the
+                                                // live version would correct the wrong thread's
+                                                // PSTATE — while the receiver's own saved SPSR was
+                                                // measured (0x60000000, C set,
+                                                // `crates/retrace/tests/blockedctx.rs`) to disagree
+                                                // with the completed x0 beside it. Omit this call
+                                                // and replay's frame bytes differ from record's,
+                                                // which surfaces as a divergence in
+                                                // `mirror_delivery`'s byte-compare rather than as
+                                                // silent corruption.
+                                                self.b.complete_saved_syscall_before_delivery(wtid, false);
+                                                // Consume the Syscall landmark by hand;
+                                                // mirror_delivery takes the SignalDelivery.
+                                                self.idx += 1;
+                                                self.mirror_delivery(wtid, psig, retrace_arch::SI_USER,
+                                                                     0, 0, 0, pc)
+                                            }
+                                            None => self.finish_event(),
                                         }
-                                        None => self.finish_event(),
-                                    },
+                                    }
                                     None => self.finish_event(),
                                 };
                             }
