@@ -1090,10 +1090,18 @@ impl ReplaySession {
         //
         // Unreachable by trace mutation for the same structural reason as the port-resolution arm
         // in `advance`'s raise mirror (see its comment): the target's state is recomputed from the
-        // live schedule, which no recorded field steers. `sigblocked_e2e` is the guest that would
-        // exercise it, and it is parked `#[ignore]`d at record's OWN fail-loud guard — so the
-        // condition cannot yet even be RECORDED, let alone replayed. Un-parking that gate is what
-        // would make this arm live.
+        // live schedule, which no recorded field steers.
+        //
+        // M17 Task 7 un-parked `sigblocked_e2e`, so this FUNCTION is now genuinely called — via
+        // replay's `SYS_ULOCK_WAKE` arm, on the woken-delivery path. But the Err branch above it is
+        // still not exercised, for a different reason than "the gate can't run": it now can, and it
+        // is not this arm that it reaches. `deliver_to` (both dispatch loops') is filtered from
+        // `woken`, which `guest_ulock_wake`'s own `unblock_waiters_on` has already transitioned to
+        // Runnable as part of the SAME call that produced `woken` — so every `wtid` this function is
+        // called with is already Runnable, on record and replay alike, before `check_deliverable`
+        // ever runs. Firing this arm needs a genuine live/recorded schedule mismatch, which this
+        // gate's own correct schedule cannot produce by construction — same as the port-resolution
+        // arm it echoes. Ruling out that mismatch is the gate's job, not manufacturing one.
         if let Err(d) = self.b.check_deliverable(tid) {
             return Err(Divergence { landmark: self.idx, pc, detail: format!(
                 "signal delivery target not deliverable on replay: {d}") });
