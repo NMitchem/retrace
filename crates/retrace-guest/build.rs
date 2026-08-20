@@ -492,6 +492,17 @@ fn main() {
         .status().expect("rustc sigthread");
     assert!(status.success(), "sigthread guest build failed");
 
+    // sigblocked: the guest for the PARKED sigblocked_e2e gate — a signal whose target is BLOCKED
+    // in __ulock_wait, not merely not-current. Same rustc recipe as sigthread.
+    let src = format!("{}/rs/sigblocked.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sigblocked");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc sigblocked");
+    assert!(status.success(), "sigblocked guest build failed");
+
     // overflow: the guest for the PARKED stackoverflow_rust_e2e gate (M8 spec risk R3). Built so the
     // parked test is real code that compiles and can be un-ignored the day R3 is fixed.
     let src = format!("{}/rs/overflow.rs", env!("CARGO_MANIFEST_DIR"));
