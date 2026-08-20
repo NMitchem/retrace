@@ -2812,6 +2812,38 @@ checks the **caller**, not the target, so it would not catch such a divergence f
 prefers a named `Divergence` at a landmark to a process abort. Recorded as a known rough edge, not
 fixed.
 
+**[Closed after M16 by the replay-divergence fast-follow, `fcc308b`.]** Left standing above because
+this log is append-only. `Box_` now exposes `try_thread_of_port` and `check_deliverable`, returning
+the existing diagnostics as `Err`; the panicking forms are thin wrappers over them, so record's
+behaviour and both messages are unchanged — the two `should_panic` tests in
+`retrace-box/tests/deliver.rs` are the regression guard proving that, and a mutation making
+`check_deliverable` always succeed kills exactly those two plus the two new `Err` tests. Replay maps
+`Err` to a named `Divergence` at the landmark.
+
+**The honest limit, measured rather than assumed.** Neither converted arm is reachable by trace
+mutation, so neither has an end-to-end gate: the conversion is proven at the seam (`Err` is returned
+and carries its diagnostic) and by construction above that, not through a live guest. The reason is
+structural and worth knowing before anyone tries again — **every mirror recomputes from live guest
+state, and the trace supplies recorded values only to compare against**, so no recorded field's
+corruption can make replay's thread table disagree with the port the live guest passes. Three
+candidate levers were tried and all three fail:
+
+- Main's kport *is* covered by the initial `Snapshot`'s Region (ipa `0x28000`, len 65536). But
+  `__pthread_main_thread_init` rewrites that field with an ordinary guest store that replay
+  re-executes, so the corruption does not survive — corrupted, replayed, `dbg_kport_of(0)` read back
+  the original value unchanged.
+- The child's kport is covered by **no** Region at all: `record_box`'s `SYS_BSDTHREAD_CREATE` arm
+  appends `writes: vec![]` deliberately, since both sides recompute the identical byte.
+- Corrupting `bsdthread_create`'s recorded `args[3]` (the pthread pointer) fails for the same
+  reason as the first: replay's mirror calls `guest_bsdthread_create(args)` with **live** args, so
+  the corruption surfaces as an ordinary argument divergence and proves nothing about this code.
+
+Evidence in `.superpowers/sdd/kport-probe-findings.md`. Practically, these arms fire only when
+retrace itself has a real schedule bug — precisely the case where a named landmark beats a process
+abort. The delivery arm additionally cannot even be *recorded* today: `sigblocked_e2e`, the guest
+that would produce it, is parked at record's own fail-loud guard. **Un-parking that gate is what
+would make the delivery arm live**, and is the natural next step for whoever wants it covered.
+
 **The spec's open question 4 is answered, and the answer is not the one the spec predicted.** It
 asked whether the debugger should surface the *receiving* thread at a `SignalDelivery` landmark, and
 reasoned that "`where` already reports the box's live `current_thread()`, which at a delivery

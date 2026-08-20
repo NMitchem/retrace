@@ -1026,6 +1026,13 @@ impl ReplaySession {
         // definition in `Box_`; only the reaction differs. On this side the condition means the
         // live schedule put the target in a state the recorded schedule did not — a divergence,
         // which is precisely what this function exists to report.
+        //
+        // Unreachable by trace mutation for the same structural reason as the port-resolution arm
+        // in `advance`'s raise mirror (see its comment): the target's state is recomputed from the
+        // live schedule, which no recorded field steers. `sigblocked_e2e` is the guest that would
+        // exercise it, and it is parked `#[ignore]`d at record's OWN fail-loud guard — so the
+        // condition cannot yet even be RECORDED, let alone replayed. Un-parking that gate is what
+        // would make this arm live.
         if let Err(d) = self.b.check_deliverable(tid) {
             return Err(Divergence { landmark: self.idx, pc, detail: format!(
                 "signal delivery target not deliverable on replay: {d}") });
@@ -1175,6 +1182,20 @@ impl ReplaySession {
                             // the process with a panic where every other replay-side failure
                             // reports a `Divergence` at its landmark. The scan itself is unchanged
                             // and shared with record, so symmetry rule 1 still holds.
+                            //
+                            // NOT reachable by trace mutation, and the reason is structural rather
+                            // than a gap in the fixtures: this mirror resolves the LIVE `args[0]`,
+                            // and every mirror likewise recomputes from live guest state — the trace
+                            // supplies recorded values only to compare against. So no recorded field
+                            // exists whose corruption makes the replay-side table disagree with the
+                            // port the live guest passes. Measured, not assumed (see
+                            // `.superpowers/sdd/kport-probe-findings.md`): main's kport IS covered by
+                            // the initial Snapshot's Region, but libpthread rewrites it with a plain
+                            // guest store that replay re-executes, so the corruption does not
+                            // survive; the child's kport is covered by no Region at all, because
+                            // `guest_bsdthread_create`'s write is deliberately never recorded. This
+                            // arm therefore fires only when retrace itself has a real schedule bug —
+                            // exactly the case where a named landmark beats a process abort.
                             match self.b.try_thread_of_port(args[0] as u32) {
                                 Ok(t) => t,
                                 Err(d) => return Err(Divergence { landmark: self.idx, pc, detail:
