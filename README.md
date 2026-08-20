@@ -102,7 +102,7 @@ Passed to `debug --script`, semicolon-separated:
 - **Threads** — emulated `bsdthread_create`, a cooperative block-driven scheduler, and a divergence
   oracle that checks thread identity on every landmark.
 
-**Gate:** 395 passed / 0 failed / 2 ignored across 102 test binaries, **measured at `462dea4`**,
+**Gate:** 395 passed / 0 failed / 2 ignored across 102 test binaries, **measured at `b73bdbb`**,
 clippy clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how
 that number is assembled.
 
