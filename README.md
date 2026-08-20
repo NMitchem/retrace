@@ -2786,8 +2786,9 @@ unexamined than perfect.** This one did not survive unamended:
   was an already-installed assert, not a live discovery. The `#[ignore]` reason was written from the
   measurement rather than forced into the predicted shape.
 - **The `verify_thread` census drifted three times in one milestone.** Documented above; it is
-  listed here too because it is a *plan* failure, not only a code one — each task's brief carried a
-  count that was already stale by the time the task ran.
+  listed here too because it is at least as much a *planning* failure as a code one — the count
+  lived in a doc comment that each successive task had to notice was stale, and Task 12 is where it
+  was finally corrected rather than re-copied.
 - **Task 11's brief contradicted itself about how many call sites to add**, naming three where two
   were correct: the terminal `Signal` site's call had already landed in Task 8 (`449cf90`). The
   implementer resolved it by grepping rather than obeying, found the existing call with its
