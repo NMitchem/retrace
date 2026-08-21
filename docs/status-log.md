@@ -3569,14 +3569,16 @@ real panic at `retrace-box/src/lib.rs:3394` is visible in the captured stderr); 
    `MACH_VM_MAP`, zero residual. What stands from Stage 1 is the crash report, which was conclusive
    on its own. The lesson is narrow and worth keeping: *a real finding with a wrong supporting
    argument is still a wrong argument*, and the wrong half propagates.
-2. **The `verify_thread` census stays at SEVEN, not nine.** The M18 spec's earlier section said the
-   oracle "must grow with the mirrors" and that `CLAUDE.md`'s census would be updated to nine. That
-   was wrong for these two mirrors, and it was *measured* wrong rather than argued: Stage 2a's
-   mirrors sit inside the generic recorded-`Event::Syscall` arm, which calls `verify_thread` **before**
-   the `if num == …` chain begins, so they inherit the check. The rule underneath is the one to
-   carry: a mirror that `return`s from *before* the arm's own `verify_thread` creates a hole and owes
-   a site; a mirror placed *after* it inherits one, and adding a second call there would make the
-   census wrong in the other direction. `CLAUDE.md` is unedited by this stage.
+2. **The `verify_thread` census stays at SEVEN.** The M18 spec's earlier section said the oracle
+   "must grow with the mirrors" — that M18 adds "at least two such mirrors … and possibly a third",
+   that each "needs its own `verify_thread`", and that `CLAUDE.md`'s census would be updated in the
+   same commit as the last one. That was wrong for these two mirrors, and it was *measured* wrong
+   rather than argued: Stage 2a's mirrors sit inside the generic recorded-`Event::Syscall` arm, which
+   calls `verify_thread` **before** the `if num == …` chain begins, so they inherit the check. The
+   rule underneath is the one to carry: a mirror that `return`s from *before* the arm's own
+   `verify_thread` creates a hole and owes a site; a mirror placed *after* it inherits one, and
+   adding a second call there would make the census wrong in the other direction. `CLAUDE.md` is
+   unedited by this stage.
 
 ### What Task 4 measured behind the wall
 
@@ -3597,9 +3599,14 @@ repo's history and a trap for the next `git clean`.
   named three of them as if that were the list; corrected in place before commit.
 - **The run ends in a hang, not a crash.** `num=-36` has no arm, so it reaches `forward_and_diff` and
   issues a real blocking wait **in retrace's own process** on a port nothing in that process will
-  ever signal. Both runs hung until the alarm killed them (exit 142), 0 bytes of guest stdout. This
-  is the same "never forward it" rule as the workq pair, milder in kind — no new host thread, no null
-  jump — and just as fatal to a recording.
+  ever signal. Both runs hung there and both produced 0 bytes of guest stdout (preserved artifacts,
+  `wc -c`); the exit code was captured for only one of them — 142, the external alarm — and the
+  measurement document says in bold that the other's is **unmeasured, not a different outcome**,
+  because that run's recorder ended when the agent process driving it died rather than when an alarm
+  fired. The hang itself is not an inference from either exit code: it is read off both traces
+  ending on the identical trap with nothing after, and off the code path. This is the same "never
+  forward it" rule as the workq pair, milder in kind — no new host thread, no null jump — and just as
+  fatal to a recording.
 - **No third `workq_kernreturn` opcode appeared**, even with REQTHREADS permissive. Still a floor and
   not a ceiling: the park/return opcodes a *running* worker issues cannot be enumerated until one
   runs.
