@@ -115,15 +115,23 @@ that number is assembled.
 These are real and current, not aspirational gaps.
 
 - **No GCD / libdispatch path.** Programs that get concurrency through libdispatch — most real macOS
-  applications — are not supported. M18 Stage 1 moved this wall but did not clear it. What changed:
-  `bsdthread_register` is no longer forwarded to retrace's own already-registered host process, so
-  it returns a real feature word, `_pthread_workqueue_supported` returns true, and libdispatch now
-  gets as far as bringing its workqueue up — `workq_open` and `workq_kernreturn` fire for the first
-  time. What remains: neither has an arm in either dispatch loop, so both still reach the generic
-  forward arm, and **forwarding them is whole-process fatal for the recorder** — the host kernel
-  creates a real workqueue worker thread inside retrace, which jumps to address 0 and takes a
-  SIGSEGV. That is the same class of hazard `bsdthread_create` is asserted for. Emulating the two
-  syscalls below the trace is Stage 2, which is specified but not implemented.
+  applications — are not supported. M18 has moved this wall twice and not yet cleared it. Stage 1
+  stopped forwarding `bsdthread_register` to retrace's own already-registered host process, so it
+  returns a real feature word, `_pthread_workqueue_supported` returns true, and libdispatch gets as
+  far as bringing its workqueue up — `workq_open` (367) and `workq_kernreturn` (368) fire for the
+  first time in this project's history. **Stage 2a emulates both below the trace**
+  (`Box_::guest_workq_open` / `guest_workq_kernreturn`, a record arm and a replay mirror each, plus
+  a fail-loud guard on the generic forward arm), so neither reaches the host kernel any more: the
+  recorder no longer brings up a real workqueue for its own process and no longer has a host worker
+  thread created inside it that jumps to address 0 and SIGSEGVs. What remains is **worker
+  construction**. `workq_kernreturn`'s `REQTHREADS` opcode (`0x20`) is a deliberate named `panic!`,
+  because the kernel enters a workqueue thread at the registered `wqthread` with a register contract
+  no run here has measured, and building one from a guess would be invention. Behind that wall the
+  next one is already measured
+  (`docs/superpowers/specs/2026-08-21-retrace-m18-stage2b-measurements.md`): `dispatch_semaphore_wait`
+  lowers to a raw Mach trap (`num=-36`) on a port minted by a forwarded `semaphore_create`, **not**
+  to `__ulock_wait` — so the park/wake seam M14/M17 built on `pthread + 0x34` address equality does
+  not fit it, and forwarding that trap wedges the recorder in an unbounded host blocking call.
 - **The scheduler is cooperative,** switching only when a thread blocks or exits. That is what makes
   the schedule replayable without recording it, and it is a deliberate trade: interleavings that
   require preemption mid-critical-section never occur, so **races that need preemption to manifest
@@ -145,9 +153,13 @@ These are real and current, not aspirational gaps.
     reports and retrace cannot influence, so the recursion takes a stage-2 fault instead of striking
     the guard (M8 risk R3).
   - `dispatch_e2e` (rung 5, a guest that `dispatch_async`es onto a global concurrent queue) — parked
-    at the Stage-2 wall above: the guest reaches `workq_kernreturn`/`workq_open`, and forwarding
-    those kills the recorder on a host worker thread. M18 parked this gate for a capability retrace
-    does not yet have, and moved it once when Stage 1 cleared the earlier wall.
+    at the Stage-2b wall above: retrace's own deliberate `REQTHREADS` refusal, because worker
+    construction is not built. M18 parked this gate for a capability retrace does not yet have, and
+    has moved it twice — once when Stage 1 cleared the `_pthread_workqueue_supported` BRK, and again
+    when Stage 2a removed the host-worker hazard. Its file also carries an **un-parked** gate,
+    `the_workqueue_syscalls_are_emulated_not_forwarded`, which asserts the difference Stage 2a made:
+    the record run stops at retrace's own named wall, in its own process, rather than on a host
+    workqueue thread.
 
 ## Testing
 
