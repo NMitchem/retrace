@@ -187,6 +187,8 @@ pub const SIGBLOCKED: &str = concat!(env!("OUT_DIR"), "/sigblocked");
 pub const OVERFLOW: &str = concat!(env!("OUT_DIR"), "/overflow");
 pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
 pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
+/// M18 rung 5: a dynamically-linked C guest that `dispatch_async`es onto a global queue.
+pub const DISPATCH_DYN: &str = concat!(env!("OUT_DIR"), "/dispatch_dyn");
 
 #[cfg(test)]
 mod tests {

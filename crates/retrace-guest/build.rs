@@ -535,4 +535,15 @@ fn main() {
             .status().expect("clang signal guest");
         assert!(status.success(), "{name} guest build failed");
     }
+
+    // dispatch_dyn: M18's headline — a real dynamic guest that uses libdispatch. Same recipe as
+    // hello_dyn (real toolchain, links libSystem, plain -arch arm64); blocks need no extra flags
+    // because libSystem carries the blocks runtime.
+    let src = format!("{}/c/dispatch_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/dispatch_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang dispatch_dyn");
+    assert!(status.success(), "dispatch_dyn guest build failed");
 }
