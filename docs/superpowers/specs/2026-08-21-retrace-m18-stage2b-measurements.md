@@ -1,5 +1,13 @@
 # M18 Task 4 (t10) — measuring what is behind the Stage 2a wall
 
+> **Relocated by Task 5 (t11).** This document was first committed (t10, `62f7491`) at
+> `.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2b-measurements.md`, inside a tree whose
+> `.gitignore` is `*` — it had to be `git add -f`ed and was the only tracked file in that tree.
+> Its raw artifacts (`task-4-raw-trace.err`, `task-4-raw-trace-rerun.err`,
+> `task-4-raw-stdout.out`, `task-4-raw-stdout-rerun.out`) stay UNTRACKED in
+> `.superpowers/sdd/2026-08-21-retrace-m18-workq-stage2a/`, which is what "this task's
+> `.superpowers/sdd/` directory" below refers to.
+
 Measured 2026-08-21 on `m18-workq-stage2a` at `8f8331e` (M18 t9 — 367/368 emulated, `WQOPS_QUEUE_REQTHREADS`
 still a fail-loud `panic!`), macOS 26.x / Apple Silicon.
 

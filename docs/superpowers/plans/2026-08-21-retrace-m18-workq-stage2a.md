@@ -383,7 +383,9 @@ git commit -m "M18 t9: 367/368 stop being forwarded; both arms, both mirrors, an
 ### Task 4: Measure what is behind the wall — the input to Stage 2b
 
 **Files:**
-- Create: `.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2b-measurements.md`
+- Create: `docs/superpowers/specs/2026-08-21-retrace-m18-stage2b-measurements.md`
+  (this plan originally named `.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2b-measurements.md`;
+  Task 5 relocated it out of the gitignored `.superpowers/` tree, where it had to be `git add -f`ed)
 - Temporarily modify (and **revert**, never commit): `crates/retrace-box/src/lib.rs`
 
 **Interfaces:**
@@ -426,7 +428,7 @@ tail -60 /tmp/m18-2a.err
 
 - [ ] **Step 4: Record the findings verbatim**
 
-Write `.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2b-measurements.md` containing, each quoted exactly rather than summarised:
+Write `docs/superpowers/specs/2026-08-21-retrace-m18-stage2b-measurements.md` containing, each quoted exactly rather than summarised:
 
 1. The exit code, and whether the timeout fired (124).
 2. The dispatched trap count, stated **without** attributing run-to-run variance to anything — Task 6's §4 made exactly that error and the spec withdraws it. If you want to claim instability means something, you must first show it exceeds the variance dyld guests already have from 18 forwarded `gettimeofday` and 2 `getentropy` calls.
@@ -448,7 +450,7 @@ cargo test -p retrace-box --test threads workq_ -- --test-threads=1  # 5 passed,
 - [ ] **Step 6: Commit the measurement only**
 
 ```bash
-git add .superpowers/sdd/2026-08-20-retrace-m18-workq/stage2b-measurements.md
+git add docs/superpowers/specs/2026-08-21-retrace-m18-stage2b-measurements.md
 git commit -m "M18 t10: measure what is behind the Stage 2a wall"
 ```
 
@@ -506,7 +508,7 @@ Replace the entire `#[ignore = "..."]` attribute on `a_dispatch_async_guest_reco
 
 - that 367/368 are now emulated in the box and no longer forwarded, so the host-thread hazard is gone;
 - that the wall is now retrace's own **deliberate** `REQTHREADS` assert, because worker construction is Stage 2b;
-- what Task 4 measured behind it (cite `stage2b-measurements.md` and name the `mach_msg2` finding and what `dispatch_semaphore_wait` lowers to);
+- what Task 4 measured behind it (cite `2026-08-21-retrace-m18-stage2b-measurements.md` and name the `mach_msg2` finding and what `dispatch_semaphore_wait` lowers to);
 - that un-parking needs a worker thread built and entered at the registered `wqthread`.
 
 - [ ] **Step 3: Verify the gate is in exactly two honest states**

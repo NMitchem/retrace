@@ -1,26 +1,38 @@
 //! M18 rung 5: a guest that dispatch_asyncs onto a global concurrent queue.
 //!
-//! Parked at the Stage-2 wall. See the `#[ignore]` reason for what stops it today.
+//! Parked at the Stage-2b wall. See the `#[ignore]` reason for what stops it today. The second test
+//! in this file is NOT parked: it is Stage 2a's own gate, and it asserts what Stage 2a changed.
 
 mod util;
 
 #[test]
-#[ignore = "M18 Stage 2 not implemented: workq_open(367) and workq_kernreturn(368) are still \
-            FORWARDED, and forwarding them is whole-process fatal for the recorder. Stage 1's wall \
-            is gone — t5 stopped forwarding bsdthread_register, so _pthread_workqueue_supported now \
-            returns true and libdispatch brings its workqueue up rather than BRKing at .cold.1. \
-            Measured (Task 6 Step 1, RETRACE_TRACE=1, see stage2-measurements.md): the guest now \
-            reaches num=368 args[0]=0x400 (dispatch setup), num=367, num=368 args[0]=0x20 (request \
-            threads) — the first time either syscall has ever fired — and then dies at the mach_msg2 \
-            (num=-47) at pc=0x1804adc34. It is NOT the guest that dies: neither dispatch loop has an \
-            arm for 367/368, so both reach the generic forward arm and the HOST kernel acts on \
-            retrace's own process, creating a real workqueue worker thread inside the recorder. The \
-            crash report shows the faulting thread is start_wqthread -> _pthread_wqthread jumping to \
-            address 0x0 (EXC_BAD_ACCESS at 0). exit(139) here is that SIGSEGV, NOT Outcome::Crash — \
-            no 'guest crashed' line is printed and the guest's stdout is 0 bytes. Because a real \
-            host thread races the vCPU thread, the dispatched-trap count is not even stable: three \
-            identical runs measured 252, 253 and 254. Un-park when 367/368 are emulated below the \
-            trace and the guest reaches its worker."]
+#[ignore = "M18 Stage 2b not implemented: the guest reaches a mach semaphore nothing can signal. \
+            Stage 2a moved this wall — workq_open(367) and workq_kernreturn(368) are now EMULATED \
+            in the box (Box_::guest_workq_open / guest_workq_kernreturn), each with a record arm, a \
+            replay mirror and a fail-loud guard on the generic forward arm, so the host kernel no \
+            longer acts on retrace's own process and the host-worker-thread hazard that produced the \
+            recorder's own SIGSEGV is GONE. The wall today is retrace's OWN deliberate refusal: \
+            workq_kernreturn opcode 0x20 (REQTHREADS) panics with 'worker construction is Stage 2b', \
+            because the kernel-side register contract for entering `wqthread` is unmeasured and \
+            building a worker here would be invention. Measured behind it (Task 4/t10, two runs, \
+            REQTHREADS temporarily stubbed to 0, see \
+            docs/superpowers/specs/2026-08-21-retrace-m18-stage2b-measurements.md): the mach_msg2 \
+            at pc=0x1804adc34 is NOT specific to this path — it is libsystem_kernel's shared \
+            mach_msg2 trampoline, hit 12 times across 10 msgh_ids per run — and the one right after \
+            REQTHREADS is semaphore_create (msgh_id 3418), already forward-allowlisted, whose reply \
+            mints port name 0x1403. dispatch_semaphore_wait then lowers NOT to __ulock_wait (515 \
+            appears nowhere in either trace) but to a raw Mach trap, num=-36 at pc=0x1804adbb0, \
+            carrying that same port in args[0] (the name semaphore_wait_trap is attributed, not \
+            verified on this machine). Having no arm, it reaches forward_and_diff and blocks \
+            FOREVER in retrace's own process, which nothing there will ever signal: both runs hang \
+            and are killed by an external alarm (exit 142), 0 bytes of guest stdout. So Stage 2b \
+            owes both halves: a worker thread built and entered at the wqthread registered by \
+            bsdthread_register (Box_::wq_thread_pc / pthread_size, captured in Stage 1 and consumed \
+            by nothing yet), and a park/wake seam for the mach semaphore — which cannot reuse M14/ \
+            M17's `pthread + 0x34` address-equality correlation, since that is specific to \
+            __ulock_wait's guest-memory address and this primitive correlates on a port name in \
+            retrace's own IPC space. Un-park when the worker actually runs the block and main \
+            observes the signal."]
 fn a_dispatch_async_guest_records_and_replays() {
     // A REAL body that genuinely fails at the wall — the `stackoverflow_rust_e2e` pattern. Parking
     // is then one attribute, and un-parking is deleting one line rather than writing a test. A
@@ -28,10 +40,12 @@ fn a_dispatch_async_guest_records_and_replays() {
     // discipline exists to prevent.
     //
     // Record the guest through real dyld, replay it, and replay it again — same harness shape as
-    // `thread_rust_e2e.rs`. Today this fails at the wall named in the #[ignore] reason above:
-    // record dies with a SIGSEGV taken by RETRACE ITSELF on a host workqueue worker thread, so it
-    // exits 139 having written no guest stdout at all — the first assertion below is what catches
-    // it. Note 139 is the same code `crashy_e2e` asserts for an uncaught GUEST fault, which is
+    // `thread_rust_e2e.rs`. Today this fails at the wall named in the #[ignore] reason above: the
+    // record run stops at retrace's own deliberate REQTHREADS panic, having written no guest stdout
+    // at all — the first assertion below is what catches it. It must stay an assertion about what
+    // the guest PRINTED: before Stage 2a the same body failed the same way on a completely
+    // different cause (a SIGSEGV taken by retrace itself on a host workqueue worker thread, exit
+    // 139), and 139 is also what `crashy_e2e` asserts for an uncaught GUEST fault — which is
     // exactly why this test must never assert on the exit code alone.
     let (rec, trace) = util::record_dynamic(retrace_guest::DISPATCH_DYN);
     let out = String::from_utf8_lossy(&rec.stdout);
@@ -51,4 +65,35 @@ fn a_dispatch_async_guest_records_and_replays() {
         assert_eq!(rep.code, 0, "replay {i}; stderr:\n{}", rep.stderr);
         assert_eq!(rep.stdout, rec.stdout, "replay {i} stdout diverged — the schedule is not pure");
     }
+}
+
+/// M18 Stage 2a's own gate — NOT ignored, and it asserts the one thing Stage 2a changed.
+///
+/// Before Stage 2a, `workq_open`/`workq_kernreturn` fell to the generic forward arm and the HOST
+/// kernel acted on retrace's own process: it created a real workqueue worker thread inside the
+/// recorder, entered it at `start_wqthread` -> `_pthread_wqthread`, and died at address 0. The
+/// record run exited 139 from RETRACE's own SIGSEGV, having written no guest stdout at all.
+///
+/// After Stage 2a both syscalls are emulated in the box, and the run stops at retrace's own named
+/// REQTHREADS wall instead — deterministically, in its own process, on its own terms.
+///
+/// **The assertion is on the message, not the exit code.** `crashy_e2e` asserts 139 for an uncaught
+/// GUEST fault, so an exit code alone cannot tell "retrace SIGSEGV'd" apart from "the guest
+/// faulted" — the honest-gate rule this repo learned from `segv_rust_e2e`. The panic text can only
+/// appear if the guest's `workq_kernreturn` reached retrace's own emulation.
+#[test]
+fn the_workqueue_syscalls_are_emulated_not_forwarded() {
+    let (rec, _trace) = util::record_dynamic(retrace_guest::DISPATCH_DYN);
+
+    assert!(rec.stderr.contains("worker construction is Stage 2b"),
+        "the record run must stop at retrace's OWN named REQTHREADS wall, which is only reachable \
+         if workq_kernreturn was emulated rather than forwarded; stderr:\n{}", rec.stderr);
+    // The pre-2a signature, named so a regression is legible rather than just red. 139 is SIGSEGV;
+    // this is a supporting check, not the assertion above.
+    assert_ne!(rec.code, 139,
+        "exit 139 is the pre-Stage-2a signature: retrace itself took a SIGSEGV on a host workqueue \
+         worker thread. stderr:\n{}", rec.stderr);
+    // Nothing from the recorder's own crash path may appear — that path is what Stage 2a removed.
+    assert!(!rec.stderr.contains("_pthread_wqthread"),
+        "no host workqueue thread may exist inside the recorder; stderr:\n{}", rec.stderr);
 }

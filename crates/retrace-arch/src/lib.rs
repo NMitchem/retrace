@@ -204,12 +204,24 @@ pub const SYS_BSDTHREAD_TERMINATE: u64 = 361;
 /// `bsdthread_register(threadstart, wqthread, pthsize, …)`. Already fires on EVERY dynamic guest
 /// since M7, unremarked; `threadstart` is the address a new thread must be entered at.
 pub const SYS_BSDTHREAD_REGISTER: u64 = 366;
-/// `workq_open()` — brings up the process's kernel workqueue. Has NEVER fired: M14 measured zero
-/// from a pthread guest, M18's probe measured zero from a libdispatch guest, because libdispatch
-/// dies asking whether workqueues exist before it uses one. Pinned before first fire.
+/// `workq_open()` — brings up the process's kernel workqueue. **Never forwarded** (M18 Stage 2a):
+/// the host would bring up a real workqueue for RETRACE's own process, and the `REQTHREADS` that
+/// follows would then start a real worker thread inside the recorder, which jumps to address 0.
+/// `Box_::guest_workq_open` emulates it. It first fired once M18 Stage 1 stopped forwarding
+/// `bsdthread_register` — before that it had never fired at all, and the doc here said so.
+/// Measured order is `kernreturn(0x400)` -> `open` -> `kernreturn(0x20)`, so a `workq_kernreturn`
+/// precedes the `workq_open` (M18 Task 6,
+/// `.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2-measurements.md` §2).
 pub const SYS_WORKQ_OPEN: u64 = 367;
 /// `workq_kernreturn(options, item, affinity, prio)` — the workqueue's whole control surface: a
-/// worker parks, returns, and is dispatched through it. Never fired; see `SYS_WORKQ_OPEN`.
+/// worker parks, returns, and is dispatched through it. **Never forwarded** for the reason
+/// `SYS_WORKQ_OPEN` gives; `Box_::guest_workq_kernreturn` dispatches on `args[0]` and refuses by
+/// value every operation word no run has measured. Two have: `0x400` (dispatch setup) and `0x20`
+/// (request threads), each once per run, measured M18 Task 6 and re-measured with a permissive
+/// REQTHREADS stub in Task 4 without a third appearing
+/// (`docs/superpowers/specs/2026-08-21-retrace-m18-stage2b-measurements.md` §5). That is a floor,
+/// not a ceiling: the park/return opcodes a *running* worker issues cannot be enumerated until
+/// Stage 2b makes one run.
 pub const SYS_WORKQ_KERNRETURN: u64 = 368;
 /// `thread_selfid()` — already fires and already survives.
 pub const SYS_THREAD_SELFID: u64 = 372;
