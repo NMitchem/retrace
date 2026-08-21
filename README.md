@@ -104,7 +104,7 @@ Passed to `debug --script`, semicolon-separated:
 - **Threads** — emulated `bsdthread_create`, a cooperative block-driven scheduler, and a divergence
   oracle that checks thread identity on every landmark.
 
-**Gate:** 412 passed / 0 failed / 1 ignored across 103 test binaries, **measured at `3501c9a`**,
+**Gate:** 414 passed / 0 failed / 2 ignored across 104 test binaries, **measured at `faad6ba`**,
 clippy clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how
 that number is assembled.
 
@@ -114,9 +114,16 @@ that number is assembled.
 
 These are real and current, not aspirational gaps.
 
-- **No GCD / libdispatch path.** Threading is emulated at `bsdthread_create`; there is no
-  `workq_open` / `workq_kernreturn` handling. Programs that get concurrency through libdispatch —
-  most real macOS applications — are not supported.
+- **No GCD / libdispatch path.** Programs that get concurrency through libdispatch — most real macOS
+  applications — are not supported. M18 Stage 1 moved this wall but did not clear it. What changed:
+  `bsdthread_register` is no longer forwarded to retrace's own already-registered host process, so
+  it returns a real feature word, `_pthread_workqueue_supported` returns true, and libdispatch now
+  gets as far as bringing its workqueue up — `workq_open` and `workq_kernreturn` fire for the first
+  time. What remains: neither has an arm in either dispatch loop, so both still reach the generic
+  forward arm, and **forwarding them is whole-process fatal for the recorder** — the host kernel
+  creates a real workqueue worker thread inside retrace, which jumps to address 0 and takes a
+  SIGSEGV. That is the same class of hazard `bsdthread_create` is asserted for. Emulating the two
+  syscalls below the trace is Stage 2, which is specified but not implemented.
 - **The scheduler is cooperative,** switching only when a thread blocks or exits. That is what makes
   the schedule replayable without recording it, and it is a deliberate trade: interleavings that
   require preemption mid-critical-section never occur, so **races that need preemption to manifest
@@ -132,11 +139,15 @@ These are real and current, not aspirational gaps.
   diagnosed by its crash instead. **At most one signal materialises per wake**, and a second
   deliverable one aborts loudly rather than being dropped: queueing at a wake is unmodelled because
   no guest in the tree measures it.
-- **One gate is parked `#[ignore]`d** at a documented, *measured* wall — the reason is on the test
+- **Two gates are parked `#[ignore]`d** at documented, *measured* walls — the reason is on each test
   itself:
   - `stackoverflow_rust_e2e` — libstd computes its guard page from a constant macOS 26 libpthread
     reports and retrace cannot influence, so the recursion takes a stage-2 fault instead of striking
     the guard (M8 risk R3).
+  - `dispatch_e2e` (rung 5, a guest that `dispatch_async`es onto a global concurrent queue) — parked
+    at the Stage-2 wall above: the guest reaches `workq_kernreturn`/`workq_open`, and forwarding
+    those kills the recorder on a host worker thread. M18 parked this gate for a capability retrace
+    does not yet have, and moved it once when Stage 1 cleared the earlier wall.
 
 ## Testing
 
@@ -148,7 +159,7 @@ just gate     # cargo test --workspace + clippy -D warnings
 VM tests must run serially. `just gate` sets it; a bare `cargo test` flakes with `HV_BUSY`.
 
 **`just gate` does not currently complete as one command.** The full workspace run exceeds a
-10-minute ceiling and gets killed — M14, M15, M16 and M17 each closed on a chunked run instead.
+10-minute ceiling and gets killed — M14 through M18 each closed on a chunked run instead.
 Split it, run every chunk `--no-fail-fast`, and capture cargo's exit code *before* any pipe:
 
 ```sh
@@ -162,7 +173,7 @@ cargo test -p retrace --bins -- --test-threads=1            # don't omit: see be
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
 without a `--test` filter, reaches them.** Leaving it out silently costs 8 tests and one binary —
-404 / 0 / 1 over 102 instead of 412 / 0 / 1 over 103 — and nothing fails to warn you. Contrast
+406 / 0 / 2 over 103 instead of 414 / 0 / 2 over 104 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 

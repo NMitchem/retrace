@@ -3340,3 +3340,154 @@ fail-loud), guest stdin still being retrace's, `RLIMIT_NOFILE`, asynchronous sig
 process, per-thread *dispositions* (correctly process-global — POSIX, not a gap), and arm64e guests.
 
 See `docs/superpowers/specs/2026-08-20-retrace-m17-blockedsignal-design.md`.
+
+## Status: M18-workq (Stage 1) — libdispatch brings its workqueue up, and the recorder cannot follow it yet
+
+No 🎉 on this one, deliberately. M18 Stage 1 moved the GCD wall a long way and did not clear it. The
+headline gate `dispatch_e2e` (rung 5, a guest that `dispatch_async`es a block onto a global concurrent
+queue) is parked `#[ignore]`d — parked *twice* in one milestone, once when it was written and once
+when Stage 1 knocked out the wall it was written against. A milestone that parks a new gate for a
+capability it does not have has regressed nothing; this section is what makes that claim checkable.
+
+**Gate: 414 passed / 0 failed / 2 ignored across 104 test binaries, measured at `faad6ba`**, clippy
+clean over `--workspace --all-targets -D warnings`. Reconciled against M17's 412/0/1 over 103 by
+diffing `#[test]` counts file-by-file rather than trusting the sum: `main` carries 413 attributes
+(412 + 1 ignored), HEAD carries 416, and the three new ones are the feature-word test, the
+`guest_bsdthread_register` test, and the parked `dispatch_e2e` — so 416 = 414 passed + 2 ignored,
+exactly. The +1 binary is `dispatch_e2e` itself. `cargo metadata` reports 97 test+lib+bin targets and
+the chunked run executed all 97, plus 7 doc-test runs = the 104 above.
+
+### The Stage-1 wall, and why it was the fourth instance of one recurring bug
+
+libdispatch never reached a workqueue syscall. `_dispatch_root_queues_init_once` calls
+`_pthread_workqueue_supported`, which trapped at `.cold.1` (BRK, `EC=0x3c ISS=0xb001 FSC=0x1`,
+`pc=0x1804f5f20`) because `__pthread_supported_features` was 0. libpthread stores that word only when
+`bsdthread_register` returns >= 1 — and retrace **forwarded** that call to its own process, which the
+host kernel had already registered at startup. Measured: `ret=0x16 err=true`, EINVAL. A genuine
+host-call failure, not a wrong-but-successful answer.
+
+That is the same bug retrace has now found four times: the guest's fds were retrace's (M10), the
+guest's signal dispositions were retrace's (M11), the guest's pthread registration was retrace's
+(here). The fix is the same shape every time — the guest's X is the guest's.
+
+### `bsdthread_register` stopped being forwarded for TWO reasons, and the second was the urgent one
+
+1. The answer was wrong, as above.
+2. **`args[0]` and `args[1]` are thread ENTRY POINTS.** Forwarding the call handed *guest* addresses
+   to the host kernel as **retrace's own** process's thread-start functions — the same
+   whole-process-fatal class as forwarding `bsdthread_create`, which retrace has asserted against
+   since M14. It had been harmless only because it *failed*. **Latent since M14; closed here.**
+
+Reason 2 is the one worth carrying forward: a call that is wrong-but-failing looks identical to a
+call that is fine, right up until it starts succeeding.
+
+### The feature word: synthesized, and pinned to its gates rather than to itself
+
+`WORKQ_FEATURE_WORD = 0x4000005E`, the smallest value satisfying every gate measured in the shipped
+binaries. The test asserts the four gates, each with its address, rather than restating the literal —
+a test that only re-asserted `0x4000005E` would pass even if the value were wrong for its purpose:
+
+- `__pthread_init +0x1040`: `cmp w0,#1 / b.lt` — below 1 and the word is never stored (the Stage-1 bug).
+- `__pthread_init +0x1048`: `bics wzr, w8, w0` against `0x4000001E` — every one of those bits must be present.
+- `_dispatch_root_queues_init_once` `0x180348F68`: `tbz w0,#4` → `.cold.5`.
+- `0x180348F90/F94`: bit 7 set registers three worker callbacks including the workloop worker; bit 7
+  clear with bit 6 set registers two. **Bit 7 is deliberately CLEAR — it is the scope lever that keeps
+  the workloop path out of M18, not an accident.**
+
+Being a fixed constant is also what makes it deterministic for free: both runs compute the identical
+value with nothing recorded. Symmetry rule 2's argument applied to a return value instead of an
+instruction.
+
+### Approach B was killed by measurement, and that is worth recording
+
+The obvious cheap milestone would have been to push libdispatch onto a non-workqueue fallback and
+reuse the `pthread_create` machinery M14–M17 already proved. **That fallback does not exist for the
+global root queues on macOS 26.** Every exit from the workqueue path is a `.cold.N` crash stub; there
+is no branch to a pool initialiser. `__dispatch_worker_thread` *is* in the binary, but it belongs to
+`_dispatch_pthread_root_queue_create` — the public API for *user-created* root queues, not the global
+ones. Making `_pthread_workqueue_supported` answer "unsupported" does not buy a fallback; it buys
+`.cold.5`. The global concurrent queues have exactly one implementation and it is the kernel
+workqueue. The cost of learning this was one probe; the cost of learning it later would have been a
+half-built milestone.
+
+### What Stage 1 actually bought, measured
+
+`workq_open` (367) and `workq_kernreturn` (368) **fire for the first time in this project's history** —
+answering the spec's open question 4, which M14 and M18's own probe had both measured as "never". In
+order, verbatim:
+
+```
+[trap] num=368 pc=0x1804af9f0 args=[0x400,0x27ff6a8,0x18,0x0,0x0,0x20]
+[trap] num=367 pc=0x1804afa1c args=[0x0,0x27ff6a8,0x18,0x0,0x0,0x20]
+[trap] num=368 pc=0x1804af9f0 args=[0x20,0x0,0x1,0x40008ff,0x0,0x20]
+```
+
+Note a `workq_kernreturn` fires *before* `workq_open`, not after. Two distinct opcodes in `args[0]`
+are reached — `0x400` and `0x20` — and those raw values, not their names, are the measurement:
+`pthread/workqueue_private.h` is a private header that ships in neither `/usr/include` nor the Xcode
+SDK, so the plausible XNU names (`WQOPS_SETUP_DISPATCH`, `WQOPS_QUEUE_REQTHREADS`) are recorded as
+unverified leads. The list is a floor, not a ceiling: the park/return opcodes a *running* worker would
+issue cannot be enumerated until a worker runs.
+
+### The new wall: forwarding 367/368 kills the recorder, and it is not even deterministic
+
+Neither dispatch loop has an arm for 367 or 368, so both reach the generic forward arm and the **host
+kernel acts on retrace's own process**: it brings up a real workqueue for the recorder, is told to
+configure it for dispatch with *guest* pointers, is asked for worker threads — and duly creates a real
+worker thread **inside retrace**, entering it at `start_wqthread` → `_pthread_wqthread`, which jumps
+through a dispatch function pointer that is NULL in this process and dies at address 0.
+
+`EXC_BAD_ACCESS / SIGSEGV, KERN_INVALID_ADDRESS at 0x0`, faulting thread 2, from the crash report.
+**The `exit(139)` this produces is NOT `Outcome::Crash`** — a distinction that matters because 139 is
+exactly what `crashy_e2e` asserts for an uncaught *guest* fault. Three independent tells separate
+them: no `guest crashed:` line on stderr, the guest's buffered stdout is 0 bytes, and the trace tail is
+cut mid-`args=[…]`. This is the third demonstration of one rule — **a syscall whose arguments are
+addresses or whose effect is a thread must never be forwarded to the recorder's own process.**
+
+It is also a determinism violation, and the cheapest possible proof of one: three identical
+consecutive runs dispatched **252, 253 and 254** traps. A real host thread races the vCPU thread and
+kills the process at a different point each time. Nothing nondeterministic entered a trace — the
+recording never completes — but a racing host thread inside the recorder is precisely the class of
+thing retrace exists not to have. Stage 2's first job is a fail-loud assert on that forward path,
+the same shape `bsdthread_create` has carried since M14.
+
+### Honest-gate posture at this close
+
+- `dispatch_e2e` — **parked, re-parked once.** Its `#[ignore]` reason was rewritten from the Stage-1
+  BRK to the Stage-2 host-worker SIGSEGV, and the stale reason deleted. Verified to be in exactly one
+  honest state: `1 ignored` normally, and it genuinely **FAILS** when run `--ignored`, caught by its
+  worker-ran assertion against empty stdout — a parked body that could not fail would be the thing
+  this discipline exists to prevent. Its body also documents why it must never assert on the exit
+  code alone.
+- `stackoverflow_rust_e2e` — unchanged, still parked at M8 risk R3.
+
+### Boundaries and non-changes, stated so a later reader does not go looking
+
+- **The oracle census in `CLAUDE.md` is UNCHANGED by this milestone.** Seven `verify_thread` call
+  sites plus the eighth inline comparison in `mirror_delivery`. Task 5's replay mirror sits inside the
+  generic recorded-`Event::Syscall` block, which has already called `verify_thread` before reaching
+  it; adding a second call there would have been wrong. There is no eighth site to find.
+- **`set_thread_start_pc` was NOT deleted.** The plan made that conditional on it becoming unused; it
+  did not — 12 callers remain in `retrace-box/tests/threads.rs`, which construct thread-start state
+  directly rather than through a trap.
+- `guest_bsdthread_register` records `err: false` and `writes: vec![]` because it writes no guest
+  memory and returns a constant; the replay mirror recomputes it and byte-compares. That comparison is
+  vacuous today and becomes the oracle the moment the return stops being constant — the same shape as
+  `bsdthread_create`'s mirror.
+- `wq_thread_pc()` and `pthread_size()` are captured and tested but **consumed by nothing**. They are
+  Stage 2's, and they are the reason Stage 2 does not have to re-measure the worker entry contract.
+- **Task 5 changed libpthread's init path for every dynamic guest, not just the dispatch one** — the
+  one risk this plan carried and could not retire. The five threading/dynamic gates were run as the
+  detector with an explicit instruction to report BLOCKED rather than patch around a regression:
+  `thread_rust_e2e`, `sigthread_e2e`, `thread_watch_e2e`, `hello_dyn_e2e`, `hello_rust_e2e` all pass
+  unchanged.
+
+**Everything M17 and earlier carry forward is unchanged**, none of it fixed here: per-thread reverse
+execution, preemption, thread priority, hardware watchpoint scoping, `guest_bsdthread_create` still
+returning `0` where the real syscall returns the child's `pthread_t`, `dup2` (fail-loud),
+`fcntl(F_DUPFD)` (unmodelled and not fail-loud), guest stdin still being retrace's, `RLIMIT_NOFILE`,
+asynchronous signals from outside the process, the unexercised `Crash` oracle site, and arm64e guests.
+
+The Stage-2 measurement this milestone exists to produce is in
+`.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2-measurements.md`. See
+`docs/superpowers/specs/2026-08-20-retrace-m18-workq-design.md`.

@@ -1,22 +1,26 @@
 //! M18 rung 5: a guest that dispatch_asyncs onto a global concurrent queue.
 //!
-//! Parked at the Stage-1 wall. See the `#[ignore]` reason for what stops it today.
+//! Parked at the Stage-2 wall. See the `#[ignore]` reason for what stops it today.
 
 mod util;
 
 #[test]
-#[ignore = "M18 Stage 1: libdispatch dies before any workqueue syscall fires. \
-            _dispatch_root_queues_init_once calls _pthread_workqueue_supported, which traps at \
-            .cold.1 because __pthread_supported_features is 0 — libpthread stores that word only \
-            when bsdthread_register returns >= 1, and retrace forwards that call to its own \
-            already-registered host process. Measured (Step 5, RETRACE_TRACE=1): \
-            bsdthread_register args=[0x1804ecc14, 0x1804ecc08, 0x4000, 0x27fc0e0, 0x38, 0xa0, \
-            0x4f00000000, 0x0] returns ret=0x16 err=true — EINVAL, confirming the forwarded call \
-            genuinely fails rather than merely returning < 1. The guest then dies: BRK (EC=0x3c \
-            ISS=0xb001 FSC=0x1) at pc=0x1804f5f20 (_pthread_workqueue_supported.cold.1), 241 \
-            dispatched syscalls in (NOT the pre-spec probe's 405 — see task-1-report.md for that \
-            discrepancy; the BRK site, EC/ISS/FSC and pc all match the probe exactly), with \
-            workq_open/workq_kernreturn never fired. Un-park when the guest reaches its worker."]
+#[ignore = "M18 Stage 2 not implemented: workq_open(367) and workq_kernreturn(368) are still \
+            FORWARDED, and forwarding them is whole-process fatal for the recorder. Stage 1's wall \
+            is gone — t5 stopped forwarding bsdthread_register, so _pthread_workqueue_supported now \
+            returns true and libdispatch brings its workqueue up rather than BRKing at .cold.1. \
+            Measured (Task 6 Step 1, RETRACE_TRACE=1, see stage2-measurements.md): the guest now \
+            reaches num=368 args[0]=0x400 (dispatch setup), num=367, num=368 args[0]=0x20 (request \
+            threads) — the first time either syscall has ever fired — and then dies at the mach_msg2 \
+            (num=-47) at pc=0x1804adc34. It is NOT the guest that dies: neither dispatch loop has an \
+            arm for 367/368, so both reach the generic forward arm and the HOST kernel acts on \
+            retrace's own process, creating a real workqueue worker thread inside the recorder. The \
+            crash report shows the faulting thread is start_wqthread -> _pthread_wqthread jumping to \
+            address 0x0 (EXC_BAD_ACCESS at 0). exit(139) here is that SIGSEGV, NOT Outcome::Crash — \
+            no 'guest crashed' line is printed and the guest's stdout is 0 bytes. Because a real \
+            host thread races the vCPU thread, the dispatched-trap count is not even stable: three \
+            identical runs measured 252, 253 and 254. Un-park when 367/368 are emulated below the \
+            trace and the guest reaches its worker."]
 fn a_dispatch_async_guest_records_and_replays() {
     // A REAL body that genuinely fails at the wall — the `stackoverflow_rust_e2e` pattern. Parking
     // is then one attribute, and un-parking is deleting one line rather than writing a test. A
@@ -24,8 +28,11 @@ fn a_dispatch_async_guest_records_and_replays() {
     // discipline exists to prevent.
     //
     // Record the guest through real dyld, replay it, and replay it again — same harness shape as
-    // `thread_rust_e2e.rs`. Today this fails at the BRK named in the #[ignore] reason above: record
-    // exits 4 with a RECORD ERROR rather than reaching either write.
+    // `thread_rust_e2e.rs`. Today this fails at the wall named in the #[ignore] reason above:
+    // record dies with a SIGSEGV taken by RETRACE ITSELF on a host workqueue worker thread, so it
+    // exits 139 having written no guest stdout at all — the first assertion below is what catches
+    // it. Note 139 is the same code `crashy_e2e` asserts for an uncaught GUEST fault, which is
+    // exactly why this test must never assert on the exit code alone.
     let (rec, trace) = util::record_dynamic(retrace_guest::DISPATCH_DYN);
     let out = String::from_utf8_lossy(&rec.stdout);
 
