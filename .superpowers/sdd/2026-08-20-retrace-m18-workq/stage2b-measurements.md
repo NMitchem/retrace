@@ -27,12 +27,23 @@ evidence against a 142: it ends on the identical trap, at the identical `pc`, wi
 just stops), which is what a mid-syscall kill looks like on both runs. Treat Run A's exit code as
 **unmeasured, not as a different outcome from Run B's**.
 
+The "guest stdout: 0 bytes" row is backed by a preserved artifact for each run: `task-4-raw-stdout.out`
+(Run A) and `task-4-raw-stdout-rerun.out` (Run B), both in this task's `.superpowers/sdd/` directory,
+both confirmed 0 bytes (`wc -c`).
+
 ---
 
 ## 1. Headline: `dispatch_semaphore_wait` lowers to a mach semaphore trap, not a ulock
 
-This is a **negative answer to the Stage 2 design spec's open question 5**. Grepping both raw traces
-for the ulock/semaphore family (`grep -an 'num=515\|num=-3[0-9]\|semaphore'`):
+This is a **negative answer to the specific question the Stage 2a spec section poses in "The
+measurement Stage 2a owes Stage 2b"**
+(`docs/superpowers/specs/2026-08-20-retrace-m18-workq-design.md:416-418`): "whether
+`dispatch_semaphore_wait` lowers to a `__ulock_wait` (515), a mach semaphore trap, or a `mach_msg2`
+RPC." (**Not** the spec's numbered "Open questions for implementation planning" item 5 — that item,
+at line 303-305, is a different question, about whether the *parked-worker wake* needs to distinguish
+"work available" from "thread requested." This document's first commit mislabeled the citation as
+"open question 5"; corrected here.) Grepping both raw traces for the ulock/semaphore family
+(`grep -an 'num=515\|num=-3[0-9]\|semaphore'`):
 
 Run A:
 ```
@@ -51,18 +62,31 @@ Run B:
 `num=515` (`__ulock_wait`) does not appear **anywhere in either trace** — confirmed directly:
 `grep -ac 'num=515' task-4-raw-trace.err` and the `-rerun` file both print `0`.
 
-`num=-36` is `semaphore_wait_trap` (XNU's Mach trap table, index 36; this codebase's own naming
-convention for adjacent traps in the same table is already load-bearing elsewhere —
+**`num=-36`'s name is an inferred attribution, not a verified one — labelled as such, the way t8/t9
+label the `workq_kernreturn` opcode names.** The *measurement* is the raw number, `num=-36`. Its
+commonly-cited name, `semaphore_wait_trap`, comes from XNU's public `osfmk/mach/syscall_sw.h`, which
+this task did not check against an actual copy on this machine (the earlier draft of this document
+claimed SDK verification via a grep for `SYS_gettimeofday`/`SYS_getentropy` in
+`sys/syscall.h` — those are unrelated **BSD** syscall constants in a different table, not Mach trap
+numbers, and that grep verifies neither `-36` nor `-33`; that claim is withdrawn here). Retrace's own
 `crates/retrace-core/src/lib.rs:29-33` names `-10`/`-12`/`-14`/`-15`/`-47` as
-`MACH_VM_ALLOCATE`/`MACH_VM_DEALLOCATE`/`MACH_VM_PROTECT`/`MACH_VM_MAP`/`MACH_MSG2` from the same table,
-and `-36` sits in the same numbering scheme two slots past the semaphore-signal family). Both runs end
-on this exact trap, at this exact `pc`, with the exact same first argument (`0x1403` — see §3, this is
-the port name the immediately-preceding `semaphore_create` reply minted), and nothing follows it.
+`MACH_VM_ALLOCATE`/`MACH_VM_DEALLOCATE`/`MACH_VM_PROTECT`/`MACH_VM_MAP`/`MACH_MSG2` from the same Mach
+trap table, which is consistent with `-36` sitting in the same table, but does not by itself establish
+`-36`'s specific name — it is supporting context, not a citation. Both runs end on this exact trap, at
+this exact `pc`, with the exact same first argument (`0x1403` — see §3, this is the port name the
+immediately-preceding `semaphore_create` reply minted), and nothing follows it — those are the
+measured facts, and they hold regardless of what `-36` turns out to be called: the sequence is
+"forward a `mach_msg2` that mints a port, then forward a trap carrying that same port number, then
+hang forever," independent of whichever kernel primitive `-36` names.
 
 **So: `dispatch_semaphore_create`/`dispatch_semaphore_wait` do not lower to a `__ulock_wait`/`__ulock_wake`
-pair at all.** They lower to `semaphore_create` (a `mach_msg2` RPC, msgh_id 3418) followed by
-`semaphore_wait_trap` (a raw Mach trap, `num=-36`), which is a **different kernel object with a
-different wake primitive** (`semaphore_signal_trap`, `num=-33`, never reached — nothing signals it).
+pair at all.** They lower to `semaphore_create` (a `mach_msg2` RPC, msgh_id 3418) followed by a raw
+Mach trap, `num=-36` (attributed, unverified on this machine, to `semaphore_wait_trap`), which is a
+**different kernel object with a different wake primitive** — by the same unverified attribution,
+`semaphore_signal_trap`, `num=-33` — never reached in either trace; nothing signals it. This
+conclusion does not depend on the names being right: what's measured is that the blocking trap is a
+raw Mach trap keyed on a mach-port-namespace value (`0x1403`), not `num=515`, and that is sufficient
+on its own to establish the "not a ulock" finding below.
 Stage 2b's park/wake seam **cannot** reuse the `pthread + 0x34` address-equality correlation M14 and
 M17 built the thread-blocking model on ("Guest threads" / "Signals are per-thread too" in
 `CLAUDE.md`): that correlation is specific to `__ulock_wait`/`__ulock_wake`'s address argument, and no
@@ -81,7 +105,8 @@ closing that trap's `args=[...]`, with nothing after it. This is what an externa
 like: the vCPU-driving thread was inside a blocking host syscall (see below) when the alarm fired, so
 nothing else was ever printed.
 
-**The mechanism, read against the code**: `semaphore_wait_trap` (`num=-36`) has **no dedicated arm** in
+**The mechanism, read against the code**: `num=-36` (named `semaphore_wait_trap` per §1's attribution,
+unverified on this machine) has **no dedicated arm** in
 `record_box`'s dispatch (unlike `MACH_VM_ALLOCATE`/`_DEALLOCATE`/`_PROTECT`/`_MAP`/`MACH_MSG2`, and
 unlike `SYS_WORKQ_OPEN`/`SYS_WORKQ_KERNRETURN`, which now have both dedicated arms *and* a fail-loud
 assert at `crates/retrace-core/src/lib.rs:1012` guarding the generic-forward arm against them). It
@@ -103,9 +128,13 @@ machine.
 ## 3. The `mach_msg2` at `pc=0x1804adc34`
 
 `pc=0x1804adc34` is **not unique to one call** — it is the shared `libsystem_kernel.dylib` trampoline
-address for every `mach_msg2_trap`, and it recurs multiple times per run (this trace alone hits it for
-msgh_id 3410 `task_set_special_port`, 3405 `task_info`, and 3418 `semaphore_create`, all at that same
-`pc`). The specific occurrence the brief means is the one **immediately after** `WQOPS_QUEUE_REQTHREADS`
+address for every `mach_msg2_trap`. Counted directly (`grep -ac 'pc=0x1804adc34'`), it recurs **12
+times per run**, across **10 distinct `msgh_id` values** (identical set in both runs): `200`, `206`,
+`3405`, `3409`, `3410`, `3418` (twice), `4811` (twice), `4822`, `8000`, `8001`. (An earlier draft of
+this document named only 3410/3405/3418 as if that were the complete list; it understated the count.
+The point stands regardless — the `pc` is a shared trampoline, not evidence of anything specific to
+this call — but the earlier enumeration was not what the trace contains.) The specific occurrence the
+brief means is the one **immediately after** `WQOPS_QUEUE_REQTHREADS`
 (`num=368 args=[0x20,...]`) — the one Task 6's run could only see truncated. Identified by matching the
 first three (untruncated) args against Task 6's truncated line
 (`stage2-measurements.md` §3: `args=[0x27ff6e0,0x200000003,0x2800001513`): both runs here reproduce that
@@ -198,8 +227,12 @@ something makes a worker actually run.
 ## 6. Trap-count variance: fully reconciled to two already-known nondeterministic forwards, zero left over
 
 258 (Run A) vs. 254 (Run B) — a difference of 4. Per the withdrawn lesson in
-`stage2-measurements.md` §4 ("read count instability as evidence of a racing host thread" — **formally
-withdrawn**, `CLAUDE.md`'s "A trap you must not fall into"), this delta is not asserted to mean anything
+`stage2-measurements.md` §4 ("read count instability as evidence of a racing host thread" —
+**formally withdrawn** by
+`docs/superpowers/specs/2026-08-20-retrace-m18-workq-design.md:325-341`, "A correction to Task 6's
+§4, before it propagates" — an earlier draft of this document misattributed the withdrawal to a
+`CLAUDE.md` section called "A trap you must not fall into," which does not exist anywhere in this
+repository; corrected here), this delta is not asserted to mean anything
 until shown to exceed the baseline dyld guests already have from forwarded `gettimeofday`/`getentropy`.
 Checked directly, and reconciled completely — every syscall whose count differs between the two runs,
 and by exactly how much:
@@ -251,11 +284,12 @@ measurement deliverable and carries no code state.
 
 1. **The park/wake seam is not a `__ulock_wait`/`__ulock_wake` problem for this primitive.**
    `dispatch_semaphore_wait` lowers to `semaphore_create` (mach_msg2, already forward-allowlisted) +
-   `semaphore_wait_trap` (`num=-36`, currently unarmed and hazardous to forward). Stage 2b needs a
-   `num=-36`/`num=-33` (`semaphore_wait_trap`/`semaphore_signal_trap`) emulation pair, keyed on the
-   semaphore's port name (e.g. `0x1403` here) rather than a guest memory address, the same shape as
-   `workq_open`/`workq_kernreturn`'s "emulate, never forward" rule but for a different object class.
-2. **`semaphore_wait_trap` must never reach `forward_and_diff`** — it is not whole-process-fatal the way
+   a raw Mach trap, `num=-36` (attributed, unverified on this machine, to `semaphore_wait_trap`),
+   currently unarmed and hazardous to forward. Stage 2b needs a `num=-36`/`num=-33` emulation pair
+   (names attributed, not verified — see §1), keyed on the semaphore's port name (e.g. `0x1403` here)
+   rather than a guest memory address, the same shape as `workq_open`/`workq_kernreturn`'s "emulate,
+   never forward" rule but for a different object class.
+2. **The `num=-36` trap must never reach `forward_and_diff`** — it is not whole-process-fatal the way
    forwarding `workq_open`/`bsdthread_create` is (no new host thread, no null-pointer jump), but it is
    whole-process-**hanging**, which is just as fatal to a recording. The same fail-loud-assert shape
    CLAUDE.md documents for the workq pair (`crates/retrace-core/src/lib.rs:1012`) is the template for a
