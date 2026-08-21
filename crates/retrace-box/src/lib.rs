@@ -3318,7 +3318,7 @@ impl Box_ {
     ///    host-call FAILURE, not merely a wrong-but-successful answer — because the host kernel
     ///    refuses a second registration for an already-registered process. So the guest's
     ///    `__pthread_supported_features` never gets set and the first `dispatch_async` trips a
-    ///    `brk`. Fourth instance of one recurring bug: the guest's fds were retrace's (M10), its
+    ///    `brk`. Third instance of one recurring bug: the guest's fds were retrace's (M10), its
     ///    dispositions were retrace's (M11), its pthread registration was retrace's (here).
     /// 2. `args[0]`/`args[1]` are thread ENTRY POINTS. Forwarding this call hands GUEST addresses
     ///    to the host kernel as **retrace's own** process's thread-start functions — the same
@@ -3365,6 +3365,45 @@ impl Box_ {
              with no registered wqthread entry point. Every dynamic guest registers one at startup \
              (measured, M14 Task 2), so this means the guest took a path no measurement covers.");
         0
+    }
+
+    /// `workq_kernreturn(op, arg2, arg3, arg4)` — the workqueue's whole control surface.
+    ///
+    /// **Emulated, never forwarded**, for the reason `guest_workq_open` documents. Dispatches on
+    /// `args[0]`, the opcode, and takes the `guest_ulock_wake` fail-loud posture
+    /// (`Box_::guest_ulock_wake`): every operation word this box has not measured is refused BY
+    /// VALUE, so the panic names what to go measure.
+    ///
+    /// The two opcodes below are the ONLY ones any guest has ever reached — measured M18 Task 6,
+    /// `.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2-measurements.md` §2. That list is a
+    /// floor, not a ceiling: the park/return opcodes a RUNNING worker issues cannot be enumerated
+    /// until Stage 2b makes a worker run, which is precisely why this refuses rather than guesses.
+    ///
+    /// The XNU names in the constants are attributed from public libpthread sources and are NOT
+    /// verified on this machine — `pthread/workqueue_private.h` ships in neither `/usr/include` nor
+    /// the Xcode SDK. The raw values are the measurement; the names are a lead.
+    pub fn guest_workq_kernreturn(&mut self, args: [u64; 8]) -> u64 {
+        // libdispatch configuring the workqueue for dispatch. Carries a guest pointer in `args[1]`
+        // (measured `0x27ff6a8`) that Stage 2b needs and Stage 2a only has to not forward.
+        const WQOPS_SETUP_DISPATCH: u64 = 0x400;
+        // libdispatch asking for worker threads. Stage 2b's entry point; Stage 2a's wall.
+        const WQOPS_QUEUE_REQTHREADS: u64 = 0x20;
+
+        match args[0] {
+            WQOPS_SETUP_DISPATCH => 0,
+            WQOPS_QUEUE_REQTHREADS => panic!(
+                "M18 Stage 2a: workq_kernreturn REQTHREADS ({:#x}) reached — worker construction \
+                 is Stage 2b. This is a DELIBERATE wall, not a defect: the kernel allocates the \
+                 stack and the pthread struct for a workqueue thread and enters `wqthread` with a \
+                 register contract that is still unmeasured, so building one here would be \
+                 invention. args={args:#x?}", args[0]),
+            other => panic!(
+                "M18 Stage 2a: unmeasured workq_kernreturn opcode {other:#x} — only \
+                 SETUP_DISPATCH ({WQOPS_SETUP_DISPATCH:#x}) and REQTHREADS \
+                 ({WQOPS_QUEUE_REQTHREADS:#x}) have ever been observed (M18 Task 6). Measure what \
+                 issues this one before modelling it; a guessed opcode silently corrupts the \
+                 guest's workqueue state. args={args:#x?}"),
+        }
     }
 
     /// `bsdthread_create(func, arg, stack, pthread, flags)`, emulated.
