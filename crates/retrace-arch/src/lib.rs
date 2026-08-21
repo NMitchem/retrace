@@ -204,6 +204,13 @@ pub const SYS_BSDTHREAD_TERMINATE: u64 = 361;
 /// `bsdthread_register(threadstart, wqthread, pthsize, …)`. Already fires on EVERY dynamic guest
 /// since M7, unremarked; `threadstart` is the address a new thread must be entered at.
 pub const SYS_BSDTHREAD_REGISTER: u64 = 366;
+/// `workq_open()` — brings up the process's kernel workqueue. Has NEVER fired: M14 measured zero
+/// from a pthread guest, M18's probe measured zero from a libdispatch guest, because libdispatch
+/// dies asking whether workqueues exist before it uses one. Pinned before first fire.
+pub const SYS_WORKQ_OPEN: u64 = 367;
+/// `workq_kernreturn(options, item, affinity, prio)` — the workqueue's whole control surface: a
+/// worker parks, returns, and is dispatched through it. Never fired; see `SYS_WORKQ_OPEN`.
+pub const SYS_WORKQ_KERNRETURN: u64 = 368;
 /// `thread_selfid()` — already fires and already survives.
 pub const SYS_THREAD_SELFID: u64 = 372;
 /// `__ulock_wait(operation, addr, value, timeout_us)` — the primitive `__pthread_join`'s retry
@@ -626,5 +633,12 @@ mod tests {
              SYS_ULOCK_WAIT, SYS_ULOCK_WAKE),
             (360, 361, 366, 372, 515, 516)
         );
+
+        // M18: the workqueue pair. Both are SDK values (`MacOSX.sdk/usr/include/sys/syscall.h`).
+        // M14 measured BOTH as firing zero times from a pthread guest; M18's probe measured them
+        // as STILL firing zero times from a libdispatch guest, because libdispatch dies before it
+        // reaches them. They are pinned here before they have ever fired, so the number is right
+        // the first time one does.
+        assert_eq!((SYS_WORKQ_OPEN, SYS_WORKQ_KERNRETURN), (367, 368));
     }
 }
