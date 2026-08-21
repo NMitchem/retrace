@@ -820,6 +820,29 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     .map_err(|e| format!("append bsdthread_register: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
+            // M18 Stage 2a: workq_open is EMULATED, never forwarded (see Box_::guest_workq_open).
+            // Forwarding brings up a real kernel workqueue for retrace's own process, which with
+            // the REQTHREADS below makes the host create a worker thread INSIDE the recorder —
+            // measured in a crash report, M18 Task 6.
+            //
+            // `writes` is empty and that is deliberate: the call writes no guest memory, and its
+            // return is a constant the replay mirror recomputes identically. The byte-compare
+            // there IS the oracle (symmetry rule 1).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_WORKQ_OPEN => {
+                let rc = b.guest_workq_open(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append workq_open: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
+            // M18 Stage 2a: workq_kernreturn is EMULATED, never forwarded — same reason. Note this
+            // arm may PANIC by design: REQTHREADS is Stage 2a's deliberate named wall, so the
+            // recorder stops here rather than handing the syscall to the host kernel.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_WORKQ_KERNRETURN => {
+                let rc = b.guest_workq_kernreturn(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append workq_kernreturn: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
             // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
             // real thread inside retrace's own process at a guest address (see
             // Box_::guest_bsdthread_create).
@@ -978,6 +1001,18 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 assert!(num != retrace_arch::SYS_DUP2,
                     "dup2 is not modelled by the M10 fd table (unexercised by any gate guest); \
                      implement target-slot allocation before a guest uses it");
+                // M18 Stage 2a: the workqueue pair must never reach here. Forwarding them is not
+                // merely wrong but whole-process fatal for the RECORDER: the host kernel brings up
+                // a workqueue for retrace's own process and then creates a real worker thread in
+                // it, entering `start_wqthread` -> `_pthread_wqthread`, which jumps through a
+                // dispatch function pointer that is NULL in this process and dies at address 0.
+                // Measured in a crash report, M18 Task 6 (stage2-measurements.md §3). The arms
+                // above service both; this assert is what stops a later edit from removing one and
+                // silently restoring the hazard — the same shape as the dup2 guard above.
+                assert!(num != retrace_arch::SYS_WORKQ_OPEN && num != retrace_arch::SYS_WORKQ_KERNRETURN,
+                    "workq syscall {num} reached the generic forward arm — it must be emulated \
+                     above (M18 Stage 2a). Forwarding it creates a real host worker thread inside \
+                     the recorder and takes a SIGSEGV at address 0.");
                 // M10: `ret` is already a GUEST descriptor when this syscall produced one, and a
                 // successful close has already retired its slot — forward_and_diff owns both halves
                 // of the fd contract so no caller has to remember the second one.
@@ -1783,6 +1818,31 @@ impl ReplaySession {
                                 if rc != *ret {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("bsdthread_register rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M18 Stage 2a: the record arms' mirrors (symmetry rule 1). Same
+                            // method, same args, so both sides compute the identical return; the
+                            // byte-compare below is the divergence check. Placed HERE, with the
+                            // other `if num ==` mirrors, deliberately: this arm already called
+                            // `verify_thread` at the top of the arm, before the whole chain, so these
+                            // inherit the thread oracle and must NOT add their own. See the spec's
+                            // "Stage 2, split by what is measured" for the measurement behind that.
+                            if num == retrace_arch::SYS_WORKQ_OPEN {
+                                let rc = self.b.guest_workq_open(args);
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("workq_open rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            if num == retrace_arch::SYS_WORKQ_KERNRETURN {
+                                let rc = self.b.guest_workq_kernreturn(args);
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("workq_kernreturn rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
