@@ -806,17 +806,19 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                  guest). It is asserted rather than forwarded because forwarding it kills the \
                  RECORDER. Model it as a second terminal event shape if a guest needs it."),
 
-            // M14 Task 7: capture the trampoline address the guest registers with the kernel. x0 is
-            // the address `__pthread_start`'s caller loads `threadstart` from (measured, Task 2, on
-            // every dynamic guest since M7 — which is why M14 never has to synthesize one). The call
-            // already works today and must keep working exactly as before; this arm only observes
-            // x0 and then does what the generic forward arm below does (duplicated here because a
-            // guard arm cannot fall through to it — Rust match has no fallthrough).
+            // M18 t5: bsdthread_register is EMULATED, never forwarded (see
+            // Box_::guest_bsdthread_register for both reasons — the guest's registration is the
+            // guest's, AND forwarding hands guest addresses to the host kernel as retrace's own
+            // thread-start functions).
+            //
+            // `writes` is empty and that is deliberate: the call writes no guest memory, and its
+            // return is a compile-time constant that the replay mirror recomputes identically.
+            // The byte-compare there IS the oracle (symmetry rule 1).
             Stop::Syscall { num, args } if num == retrace_arch::SYS_BSDTHREAD_REGISTER => {
-                b.set_thread_start_pc(args[0]);
-                let (ret, err, writes) = b.forward_and_diff(num, args);
-                w.append(&Event::Syscall { num, args, ret, err, writes, thread }).map_err(|e| format!("append bsdthread_register: {e}"))?; count += 1;
-                b.set_x0_err_and_return(ret, err);
+                let rc = b.guest_bsdthread_register(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append bsdthread_register: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
             }
             // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
             // real thread inside retrace's own process at a guest address (see
@@ -1771,15 +1773,18 @@ impl ReplaySession {
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
-                            // M14 Task 7: capture the registered trampoline on replay too (the
-                            // record arm's mirror), then apply exactly as the generic path does —
-                            // this call already worked pre-M14 and is unchanged here. Without this
-                            // capture, a later bsdthread_create on THIS side hits the same
-                            // fail-loud `.expect()` an unregistered guest does, reappearing as a
-                            // replay-only wall (see the M14 Task 7 dispatch note).
+                            // M18 t5: the record arm's mirror (symmetry rule 1). Same method, same
+                            // args, so both sides capture the identical three addresses and compute
+                            // the identical return. The byte-compare below is the divergence check;
+                            // it is vacuous while the return is a constant and becomes the oracle
+                            // the moment it is not — the same shape as bsdthread_create's mirror.
                             if num == retrace_arch::SYS_BSDTHREAD_REGISTER {
-                                self.b.set_thread_start_pc(args[0]);
-                                self.b.apply_and_return(*ret, *err, writes);
+                                let rc = self.b.guest_bsdthread_register(args);
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("bsdthread_register rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
                             // M14 Task 7: the record arm's mirror (symmetry rule 1). Record and
