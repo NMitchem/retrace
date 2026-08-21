@@ -142,6 +142,20 @@ const SCTLR_PAC_EN: u64 = 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
 /// rests on explicit and checkable instead of buried.
 pub const EXE_BASE: u64 = 0x1_0000_0000;
 
+/// The `bsdthread_register` feature word retrace reports to the guest.
+///
+/// **Synthesized, never the host's.** The host is retrace's own already-registered process, so its
+/// answer describes retrace, not the guest — the same category error as M10's fd table and M11's
+/// signal dispositions. A fixed constant is also what makes this deterministic for free: both runs
+/// compute the identical value with nothing recorded (symmetry rule 2's argument, applied to a
+/// return value rather than an instruction).
+///
+/// The value is not arbitrary. It is the SMALLEST word satisfying every gate measured in the
+/// shipped binaries (see the test beside this constant for the four, each with its address).
+/// Bit 7 is deliberately CLEAR: with it set, libdispatch additionally registers
+/// `_dispatch_workloop_worker_thread`, and the workloop path is out of M18's scope.
+pub const WORKQ_FEATURE_WORD: u32 = 0x4000_005E;
+
 /// **The one derivation.** All four SCTLR install sites go through this (directly, or through the
 /// two wrappers below). macOS enables pointer authentication per process, only for `arm64e` main
 /// executables — a plain-`arm64` process sees `PAC*`/`AUT*` as NOPs and `BRAA`/`BLRAA` as
@@ -4086,5 +4100,33 @@ mod stack_geometry_tests {
             "guard page {guard:#x} overlaps the stack backing [{:#x}, {DYN_STACK_TOP:#x}) — it must \
              sit BELOW the stack it guards", DYN_STACK_TOP - DYN_STACK_SIZE);
         const { assert!(DYN_STACK_TOP <= 1 << 36, "the stack must fit in the 36-bit guest IPA space") };
+    }
+}
+
+// M18. `bsdthread_register`'s feature word cannot be forwarded to the host (the host is retrace's
+// own already-registered process, and returns EINVAL — see WORKQ_FEATURE_WORD's doc comment), so
+// this pins the SYNTHESIZED value against the four gates it was measured against in the shipped
+// binaries, not against the literal itself — a test that only restated 0x4000005E would pass even
+// if the value were wrong for its purpose.
+#[cfg(test)]
+mod workq_feature_word_tests {
+    use super::*;
+
+    #[test]
+    fn the_feature_word_satisfies_every_gate_it_was_measured_against() {
+        let w = WORKQ_FEATURE_WORD;
+        // libpthread __pthread_init (+0x1040): `cmp w0,#1 / b.lt skip` — a value < 1 means the
+        // feature word is never stored at all, which is the M18 Stage-1 bug.
+        assert!(w >= 1, "must be >= 1 or libpthread skips the store");
+        // libpthread __pthread_init (+0x1048): `mov w8,#0x1e / movk w8,#0x4000,lsl#16 /
+        // bics wzr,w8,w0 / b.ne crash` — every bit of 0x4000001E must be present.
+        assert_eq!(w & 0x4000_001E, 0x4000_001E, "libpthread requires all of 0x4000001E");
+        // libdispatch _dispatch_root_queues_init_once (0x180348F68): `tbz w0,#4 -> .cold.5`.
+        assert_ne!(w & (1 << 4), 0, "bit 4 clear crashes libdispatch at .cold.5");
+        // libdispatch (0x180348F90/F94): bit 7 set registers THREE worker callbacks including the
+        // workloop worker; bit 7 clear with bit 6 set registers two. Neither set is .cold.4.
+        // Bit 7 is deliberately clear — it is the scope lever, not an accident.
+        assert_ne!(w & (1 << 6), 0, "bit 6 must be set when bit 7 is clear, else .cold.4");
+        assert_eq!(w & (1 << 7), 0, "bit 7 must stay CLEAR to keep the workloop worker out of scope");
     }
 }
