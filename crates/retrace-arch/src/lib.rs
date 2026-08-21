@@ -210,8 +210,11 @@ pub const SYS_BSDTHREAD_REGISTER: u64 = 366;
 /// `Box_::guest_workq_open` emulates it. It first fired once M18 Stage 1 stopped forwarding
 /// `bsdthread_register` — before that it had never fired at all, and the doc here said so.
 /// Measured order is `kernreturn(0x400)` -> `open` -> `kernreturn(0x20)`, so a `workq_kernreturn`
-/// precedes the `workq_open` (M18 Task 6,
-/// `.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2-measurements.md` §2).
+/// precedes the `workq_open` (M18 Task 6, `stage2-measurements.md` §2 — Stage 1's measurement, which
+/// is an UNTRACKED working-tree artifact under `.superpowers/sdd/2026-08-20-retrace-m18-workq/` and
+/// so is absent from a fresh clone; Stage 2b's, cited below, was relocated into `docs/` for exactly
+/// that reason. The same order is restated in `docs/status-log.md`'s M18 Stage 1 section, which is
+/// tracked).
 pub const SYS_WORKQ_OPEN: u64 = 367;
 /// `workq_kernreturn(options, item, affinity, prio)` — the workqueue's whole control surface: a
 /// worker parks, returns, and is dispatched through it. **Never forwarded** for the reason

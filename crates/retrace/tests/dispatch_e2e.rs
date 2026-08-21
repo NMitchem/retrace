@@ -25,14 +25,16 @@ mod util;
             carrying that same port in args[0] (the name semaphore_wait_trap is attributed, not \
             verified on this machine). Having no arm, it reaches forward_and_diff and blocks \
             FOREVER in retrace's own process, which nothing there will ever signal: both runs hang \
-            and are killed by an external alarm (exit 142), 0 bytes of guest stdout. So Stage 2b \
-            owes both halves: a worker thread built and entered at the wqthread registered by \
-            bsdthread_register (Box_::wq_thread_pc / pthread_size, captured in Stage 1 and consumed \
-            by nothing yet), and a park/wake seam for the mach semaphore — which cannot reuse M14/ \
-            M17's `pthread + 0x34` address-equality correlation, since that is specific to \
-            __ulock_wait's guest-memory address and this primitive correlates on a port name in \
-            retrace's own IPC space. Un-park when the worker actually runs the block and main \
-            observes the signal."]
+            there and both produced 0 bytes of guest stdout, and the one run whose exit code was \
+            captured was killed by the external alarm (142) — the other run's exit code is \
+            unmeasured, which that document says in bold rather than reading it as a different \
+            outcome. So Stage 2b owes both halves: a worker thread built and entered at the \
+            wqthread registered by bsdthread_register (Box_::wq_thread_pc / pthread_size, \
+            captured in Stage 1 and consumed by nothing yet), and a park/wake seam for the mach \
+            semaphore — which cannot reuse M14/M17's `pthread + 0x34` address-equality \
+            correlation, since that is specific to __ulock_wait's guest-memory address and this \
+            primitive correlates on a port name in retrace's own IPC space. Un-park when the \
+            worker actually runs the block and main observes the signal."]
 fn a_dispatch_async_guest_records_and_replays() {
     // A REAL body that genuinely fails at the wall — the `stackoverflow_rust_e2e` pattern. Parking
     // is then one attribute, and un-parking is deleting one line rather than writing a test. A
@@ -93,7 +95,11 @@ fn the_workqueue_syscalls_are_emulated_not_forwarded() {
     assert_ne!(rec.code, 139,
         "exit 139 is the pre-Stage-2a signature: retrace itself took a SIGSEGV on a host workqueue \
          worker thread. stderr:\n{}", rec.stderr);
-    // Nothing from the recorder's own crash path may appear — that path is what Stage 2a removed.
+    // A tripwire, not a discriminator, and it is worth being exact about which: the pre-2a symbol
+    // was observed in a CRASH REPORT under ~/Library/Logs/DiagnosticReports, not on stderr — a
+    // process killed by SIGSEGV prints nothing — so this would have passed pre-2a too. It stays
+    // because a future path that does print it to stderr is a host workqueue thread inside the
+    // recorder, which is the one thing this file exists to forbid.
     assert!(!rec.stderr.contains("_pthread_wqthread"),
         "no host workqueue thread may exist inside the recorder; stderr:\n{}", rec.stderr);
 }
