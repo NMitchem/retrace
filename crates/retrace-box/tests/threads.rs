@@ -990,3 +990,41 @@ fn workq_open_before_registration_fails_loud() {
     let mut b = tb();
     b.guest_workq_open([0, 0, 0, 0, 0, 0, 0, 0]);
 }
+
+/// M18 Stage 2a: the `0x400` opcode — libdispatch configuring the workqueue for dispatch. It
+/// carries a guest pointer in `args[1]` that Stage 2b will need; Stage 2a only has to not forward
+/// it. Measured as the FIRST of the three workqueue traps, before `workq_open`.
+#[test]
+fn workq_kernreturn_setup_dispatch_succeeds() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    // The measured args vector, verbatim from stage2-measurements.md §2.
+    let rc = b.guest_workq_kernreturn([0x400, 0x27ff6a8, 0x18, 0x0, 0x0, 0x20, 0, 0]);
+    assert_eq!(rc, 0, "setup must report success or libdispatch abandons the workqueue");
+}
+
+/// The deliberate, self-imposed Stage 2a wall. `REQTHREADS` is where a worker would be built, and
+/// worker construction is Stage 2b — so this refuses BY NAME rather than returning a success the
+/// guest would then wait forever on. Refusing here is strictly better than the behaviour it
+/// replaces, which was handing the syscall to the host kernel and having the host spawn a real
+/// thread inside the recorder.
+#[test]
+#[should_panic(expected = "worker construction is Stage 2b")]
+fn workq_kernreturn_reqthreads_is_the_named_stage_2a_wall() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    // The measured args vector, verbatim. args[3]=0x40008ff looks like a packed priority/QoS word
+    // and is Stage 2b's to decode.
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+}
+
+/// The `guest_ulock_wake` posture: an operation word nobody measured is refused BY VALUE, so the
+/// panic tells the next reader exactly what to go measure. Asserting that the message names the
+/// value is the point of the test — a panic that just said "unsupported" would be useless.
+#[test]
+#[should_panic(expected = "0xbeef")]
+fn workq_kernreturn_refuses_an_unmeasured_opcode_by_value() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0xbeef, 0, 0, 0, 0, 0, 0, 0]);
+}
