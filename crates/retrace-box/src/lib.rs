@@ -474,6 +474,13 @@ pub struct Box_ {
     // registering syscall sits behind the checkpoint. Plain `Option<u64>` (no Drop), declared after
     // vcpu/vm, so the load-bearing vcpu-before-vm drop order is unaffected.
     thread_start_pc: Option<u64>,
+    /// M18: the workqueue thread entry point from `bsdthread_register`'s `args[1]`. The address the
+    /// kernel enters when it hands a worker thread to userspace. Captured in Stage 1, entered in
+    /// Stage 2.
+    wq_thread_pc: Option<u64>,
+    /// M18: the guest's pthread struct size from `bsdthread_register`'s `args[2]`. The kernel — not
+    /// the guest — allocates a workqueue thread's pthread struct, so Stage 2 needs this size.
+    pthread_size: Option<u32>,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -651,6 +658,11 @@ pub struct BoxState {
     // restored session hits the same fail-loud `.expect()` an unregistered guest hits, even though
     // this guest already registered before the capture.
     pub thread_start_pc: Option<u64>,
+    // M18: carried for the same reason as `thread_start_pc` immediately above — the guest's own
+    // `bsdthread_register` call sits behind the checkpoint the moment one is taken after it, so a
+    // restored session replaying forward can never observe it again.
+    pub wq_thread_pc: Option<u64>,
+    pub pthread_size: Option<u32>,
     pub mmap_next: u64,
     pub bootstrap_port: Option<u32>,
     pub cache_installed: bool,
@@ -1040,7 +1052,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1628,7 +1640,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None };
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
         // first `switch_to_thread` rather than an all-zero placeholder.
@@ -2486,7 +2498,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -3296,6 +3308,38 @@ impl Box_ {
     /// `guest_bsdthread_create`), which is why this is `pub`: retrace-box cannot call itself here.
     pub fn set_thread_start_pc(&mut self, pc: u64) { self.thread_start_pc = Some(pc); }
 
+    /// `bsdthread_register(threadstart, wqthread, pthsize, …)`, emulated.
+    ///
+    /// **Never forwarded, as of M18.** Two independent reasons, and the second is the one that
+    /// makes this urgent rather than tidy:
+    ///
+    /// 1. The host is retrace's OWN process, which registered its own libpthread at startup.
+    ///    MEASURED (Task 1): forwarding this call returns `ret=0x16 err=true` — EINVAL, a genuine
+    ///    host-call FAILURE, not merely a wrong-but-successful answer — because the host kernel
+    ///    refuses a second registration for an already-registered process. So the guest's
+    ///    `__pthread_supported_features` never gets set and the first `dispatch_async` trips a
+    ///    `brk`. Fourth instance of one recurring bug: the guest's fds were retrace's (M10), its
+    ///    dispositions were retrace's (M11), its pthread registration was retrace's (here).
+    /// 2. `args[0]`/`args[1]` are thread ENTRY POINTS. Forwarding this call hands GUEST addresses
+    ///    to the host kernel as **retrace's own** process's thread-start functions — the same
+    ///    whole-process-fatal class as forwarding `bsdthread_create`. It has been harmless only
+    ///    because it fails. Latent since M14; closed here.
+    ///
+    /// Does not replace `set_thread_start_pc`/`thread_start_pc` above: `retrace-core`'s dispatch
+    /// and a dozen existing `retrace-box` tests still construct a box's thread-start state through
+    /// that direct setter, and this method only WIDENS what a real `bsdthread_register` trap
+    /// captures. Task 5 wires this method into the dispatch loops in its place.
+    pub fn guest_bsdthread_register(&mut self, args: [u64; 8]) -> u64 {
+        self.thread_start_pc = Some(args[0]);
+        self.wq_thread_pc = Some(args[1]);
+        self.pthread_size = Some(args[2] as u32);
+        WORKQ_FEATURE_WORD as u64
+    }
+
+    /// M18 Stage 2 reads these; Stage 1 only captures them.
+    pub fn wq_thread_pc(&self) -> Option<u64> { self.wq_thread_pc }
+    pub fn pthread_size(&self) -> Option<u32> { self.pthread_size }
+
     /// `bsdthread_create(func, arg, stack, pthread, flags)`, emulated.
     ///
     /// **Never forwarded.** The host would create a real thread inside retrace's own process
@@ -3786,6 +3830,9 @@ impl Box_ {
             },
             // M14 t7 fix round 1: carried, not re-derived — see the field comment on `BoxState`.
             thread_start_pc: self.thread_start_pc,
+            // M18: carried for the same reason — see the `BoxState` field comment.
+            wq_thread_pc: self.wq_thread_pc,
+            pthread_size: self.pthread_size,
             mmap_next: self.mmap_next,
             bootstrap_port: self.bootstrap_port,
             cache_installed: self.cache.is_some(),
@@ -3898,6 +3945,11 @@ impl Box_ {
             // `bsdthread_register`, even when it did — the fail-loud `.expect()` this field exists
             // to prevent.
             thread_start_pc: state.thread_start_pc,
+            // M18: RESTORED from the capture, never reset — see the `BoxState` field comment. A
+            // `None` here would tell a restored session it never saw the guest's own
+            // `bsdthread_register`, even when it did.
+            wq_thread_pc: state.wq_thread_pc,
+            pthread_size: state.pthread_size,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b

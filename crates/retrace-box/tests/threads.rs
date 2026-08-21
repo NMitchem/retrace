@@ -952,3 +952,19 @@ fn an_armed_watchpoint_survives_a_context_switch() {
         "MDSCR_EL1.MDE must still be set after the switch — the watch machine stays armed for \
          EVERY thread, which is what lets it catch any thread's store");
 }
+
+/// M18 Task 4: `bsdthread_register(threadstart, wqthread, pthsize, …)` must capture all three of
+/// its first three args — `threadstart` for M14's `bsdthread_create` (unchanged), plus the two new
+/// Stage-2 fields — and return the synthesized `WORKQ_FEATURE_WORD` rather than whatever the host
+/// would say about retrace's own process.
+#[test]
+fn bsdthread_register_captures_all_three_and_returns_the_feature_word() {
+    // args per the Darwin signature: (threadstart, wqthread, pthsize, …). The arch crate's own
+    // doc comment on SYS_BSDTHREAD_REGISTER names them in this order.
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    let rc = b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    assert_eq!(rc, retrace_box::WORKQ_FEATURE_WORD as u64, "the guest must get the synthesized word");
+    assert_eq!(b.thread_start_pc(), Some(0x1111), "threadstart still captured (M14's need)");
+    assert_eq!(b.wq_thread_pc(), Some(0x2222), "wqthread captured — Stage 2 enters here");
+    assert_eq!(b.pthread_size(), Some(0x3333), "pthsize captured — Stage 2 allocates this");
+}
