@@ -28,7 +28,7 @@ built with the existing dynamic-guest recipe (`clang -arch arm64 -o <bin> <src>`
 line at `crates/retrace-guest/build.rs:169-172`). Natively it prints `worker` / `done` and exits 0.
 
 Under `RETRACE_TRACE=1 retrace record-dyn`, it loads through real `/usr/lib/dyld`, completes
-libSystem initialisation, **reaches `main`**, and dies 405 traps in:
+libSystem initialisation, **reaches `main`**, and dies 245 traps in:
 
 ```
 RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0xb001 FSC=0x1) pc=0x1804f5f20
@@ -45,7 +45,7 @@ _dispatch_root_queue_poke_slow          libdispatch   0x180344744
           └ _pthread_workqueue_supported.cold.1  libsystem_pthread  0x1804f5f20
 ```
 
-**`workq_open` (367) and `workq_kernreturn` (368) never fired — not once in 405 traps.** libdispatch
+**`workq_open` (367) and `workq_kernreturn` (368) never fired — not once in 245 traps.** libdispatch
 dies at the moment it asks *whether* workqueues are supported, before it ever uses one. The
 workqueue syscalls are behind a gate that has never opened.
 

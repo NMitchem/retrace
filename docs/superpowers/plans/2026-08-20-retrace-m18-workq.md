@@ -151,7 +151,7 @@ mod util;
             _dispatch_root_queues_init_once calls _pthread_workqueue_supported, which traps at \
             .cold.1 because __pthread_supported_features is 0 — libpthread stores that word only \
             when bsdthread_register returns >= 1, and retrace forwards that call to its own \
-            already-registered host process. Measured: BRK (EC=0x3c) at pc=0x1804f5f20, 405 traps \
+            already-registered host process. Measured: BRK (EC=0x3c) at pc=0x1804f5f20, 245 traps \
             in, with workq_open/workq_kernreturn never fired. Un-park when the guest reaches its \
             worker."]
 fn a_dispatch_async_guest_records_and_replays() {
@@ -518,7 +518,7 @@ tail -40 /tmp/m18-trace.log
 ```
 
 Record verbatim in `stage2-measurements.md`:
-- the total trap count (`grep -ac '^\[trap\]' /tmp/m18-trace.log`) against Stage 1's **405** — the number that shows the wall moved;
+- the total trap count (`grep -ac '^\[trap\]' /tmp/m18-trace.log`) against Stage 1's **245** (the probe's own log; a same-config re-run measured 241 — argv differs, so a small delta is expected and is not a divergence) — the number that shows the wall moved;
 - whether `num=367` and `num=368` appear at all (`grep -anE 'num=(367|368)' /tmp/m18-trace.log`), which answers the spec's open question 4;
 - for every `num=368`, the full `args` vector — `args[0]` is the opcode, and the **set of distinct opcodes is what Stage 2 must implement**;
 - the final line of the log, whether it is a `RECORD ERROR`, a panic, or a clean exit.
