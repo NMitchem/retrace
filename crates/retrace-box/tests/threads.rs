@@ -968,3 +968,25 @@ fn bsdthread_register_captures_all_three_and_returns_the_feature_word() {
     assert_eq!(b.wq_thread_pc(), Some(0x2222), "wqthread captured — Stage 2 enters here");
     assert_eq!(b.pthread_size(), Some(0x3333), "pthsize captured — Stage 2 allocates this");
 }
+
+/// M18 Stage 2a: `workq_open` is EMULATED, never forwarded. Forwarding it brings up a real kernel
+/// workqueue for RETRACE's own process, which is half of what makes the pair whole-process fatal
+/// (Task 6's crash report: a host worker enters `start_wqthread` and jumps to address 0).
+#[test]
+fn workq_open_returns_success_once_the_guest_has_registered() {
+    let mut b = tb();   // see `fn tb()` at the top of this file
+    // The registration is the precondition: it is what captures `wqthread`, which Stage 2b enters.
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    assert_eq!(b.guest_workq_open([0, 0, 0, 0, 0, 0, 0, 0]), 0,
+        "workq_open must report success — libdispatch treats a failure as no workqueue at all");
+}
+
+/// The fail-loud half. A `workq_open` with no registered `wqthread` means the guest took a path no
+/// measurement covers — the same posture `guest_bsdthread_create`'s `thread_start_pc.expect(...)`
+/// takes, and for the same reason: refusing to invent a thread entry point.
+#[test]
+#[should_panic(expected = "workq_open before bsdthread_register")]
+fn workq_open_before_registration_fails_loud() {
+    let mut b = tb();
+    b.guest_workq_open([0, 0, 0, 0, 0, 0, 0, 0]);
+}
