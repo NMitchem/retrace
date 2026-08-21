@@ -3340,6 +3340,33 @@ impl Box_ {
     pub fn wq_thread_pc(&self) -> Option<u64> { self.wq_thread_pc }
     pub fn pthread_size(&self) -> Option<u32> { self.pthread_size }
 
+    /// `workq_open()` — the guest asks the kernel to bring up its workqueue.
+    ///
+    /// **Emulated, never forwarded.** Forwarding it brings up a real kernel workqueue for
+    /// RETRACE's own process; combined with the `REQTHREADS` that follows, the host then creates a
+    /// real worker thread inside the recorder and enters it at `start_wqthread`, which jumps
+    /// through a dispatch function pointer that is NULL in this process and dies at address 0.
+    /// That is measured, not theorised — M18 Task 6 caught it in a crash report
+    /// (`.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2-measurements.md` §3).
+    ///
+    /// This is the fourth instance of one recurring bug: the guest's fds were retrace's fds (M10),
+    /// the guest's signal dispositions were retrace's (M11), the guest's pthread registration was
+    /// retrace's (M18 Stage 1), and the guest's workqueue was retrace's (here).
+    ///
+    /// Returns 0. libdispatch reads a failure as "no workqueue at all", which would put it straight
+    /// back on the path Stage 1 existed to clear.
+    ///
+    /// **There is deliberately no "open before kernreturn" assert.** The measured order is
+    /// `kernreturn(0x400)` -> `open` -> `kernreturn(0x20)`: the first `workq_kernreturn` fires
+    /// BEFORE `workq_open`. A plausible-looking ordering assert would fire on the real sequence.
+    pub fn guest_workq_open(&mut self, _args: [u64; 8]) -> u64 {
+        assert!(self.wq_thread_pc.is_some(),
+            "M18 Stage 2a: workq_open before bsdthread_register — refusing to bring up a workqueue \
+             with no registered wqthread entry point. Every dynamic guest registers one at startup \
+             (measured, M14 Task 2), so this means the guest took a path no measurement covers.");
+        0
+    }
+
     /// `bsdthread_create(func, arg, stack, pthread, flags)`, emulated.
     ///
     /// **Never forwarded.** The host would create a real thread inside retrace's own process
