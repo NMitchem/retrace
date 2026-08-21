@@ -324,14 +324,14 @@ git commit -m "M18 t3: the synthesized feature word and the four gates it was me
 
 - [ ] **Step 1: Write the failing test**
 
-In `crates/retrace-box/src/lib.rs`'s test module. This is a pure state test — it needs no VM, so it does not contend for HVF:
+In `crates/retrace-box/tests/threads.rs`, beside that file's other VM-backed tests, using its existing `tb()` helper (`crates/retrace-box/tests/threads.rs:139-142`). **`Box_::for_test()` does not exist — do not invent it.** Every `Box_` in this repo is built by `Box_::load(&loaded)`, which is what `tb()` wraps; the test therefore needs a VM and runs under the mandatory `--test-threads=1`:
 
 ```rust
     #[test]
     fn bsdthread_register_captures_all_three_and_returns_the_feature_word() {
         // args per the Darwin signature: (threadstart, wqthread, pthsize, …). The arch crate's own
         // doc comment on SYS_BSDTHREAD_REGISTER names them in this order.
-        let mut b = Box_::for_test();
+        let mut b = tb();   // see `fn tb()` at the top of this file
         let rc = b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
         assert_eq!(rc, WORKQ_FEATURE_WORD as u64, "the guest must get the synthesized word");
         assert_eq!(b.thread_start_pc(), Some(0x1111), "threadstart still captured (M14's need)");
@@ -340,7 +340,7 @@ In `crates/retrace-box/src/lib.rs`'s test module. This is a pure state test — 
     }
 ```
 
-If `Box_::for_test()` and `thread_start_pc()` do not exist, check how the existing `retrace-box` unit tests construct state (`crates/retrace-box/tests/` and the in-file test module) and follow that pattern instead — **do not** build a VM for this test, and **do not** add a constructor that only tests use if a suitable one already exists.
+`Box_::thread_start_pc()` already exists (`crates/retrace-box/src/lib.rs:3278`), so that assertion needs nothing new. The two new getters come from Step 3.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
