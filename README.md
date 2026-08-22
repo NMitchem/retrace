@@ -104,9 +104,10 @@ Passed to `debug --script`, semicolon-separated:
 - **Threads** — emulated `bsdthread_create`, a cooperative block-driven scheduler, and a divergence
   oracle that checks thread identity on every landmark.
 
-**Gate:** 414 passed / 0 failed / 2 ignored across 104 test binaries, **measured at `faad6ba`**,
-clippy clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how
-that number is assembled.
+**Gate:** 420 passed / 0 failed / 2 ignored across 104 test binaries, **measured at `67e9a13`**,
+clippy clean over `--workspace --all-targets` with `-D warnings` (clippy re-verified at `4d0f780`, the
+only commit since — comments and documentation only, no executable code). See the testing note below
+for how that number is assembled.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
 
@@ -185,7 +186,7 @@ cargo test -p retrace --bins -- --test-threads=1            # don't omit: see be
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
 without a `--test` filter, reaches them.** Leaving it out silently costs 8 tests and one binary —
-406 / 0 / 2 over 103 instead of 414 / 0 / 2 over 104 — and nothing fails to warn you. Contrast
+412 / 0 / 2 over 103 instead of 420 / 0 / 2 over 104 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 
