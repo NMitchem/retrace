@@ -117,10 +117,12 @@ nothing else was ever printed.
 unverified on this machine) has **no dedicated arm** in
 `record_box`'s dispatch (unlike `MACH_VM_ALLOCATE`/`_DEALLOCATE`/`_PROTECT`/`_MAP`/`MACH_MSG2`, and
 unlike `SYS_WORKQ_OPEN`/`SYS_WORKQ_KERNRETURN`, which now have both dedicated arms *and* a fail-loud
-assert at `crates/retrace-core/src/lib.rs:1012` guarding the generic-forward arm against them). It
-therefore falls straight through to the generic arm at `crates/retrace-core/src/lib.rs:1019`,
-`b.forward_and_diff(num, args)`, which issues the real `semaphore_wait_trap` syscall **in retrace's own
-process** against the semaphore port `0x1403` that the immediately-preceding forwarded
+assert at `crates/retrace-core/src/lib.rs:1012` guarding the generic-forward **BSD** arm against them —
+a guard `num=-36` cannot reach, since Mach traps are negative and that BSD arm sits downstream of a
+positive-only match). Being negative, `num=-36` instead falls into the generic **Mach-trap** arm at
+`crates/retrace-core/src/lib.rs:531` (`Stop::Syscall { num, args } if (num as i64) < 0`), which forwards
+at line 532, `b.forward_and_diff(num, args)`, and issues the real `semaphore_wait_trap` syscall **in
+retrace's own process** against the semaphore port `0x1403` that the immediately-preceding forwarded
 `semaphore_create` minted in retrace's own IPC space. Nothing in retrace's process will ever call
 `semaphore_signal` on that port — no worker thread was created (`WQOPS_QUEUE_REQTHREADS` is stubbed to
 return `0` rather than actually starting anything for this measurement, and even un-stubbed, Stage 2a's
@@ -271,8 +273,9 @@ fully explains it.**
 Both runs: `[trap] num=-36 (0xffffffffffffffdc) pc=0x1804adbb0 args=[0x1403,...]` — a **clean trace
 line**, not a panic, not a `RECORD ERROR`, not a mid-line truncation (contrast Task 6's Stage 1
 measurement, whose tail was cut mid-`args=[...]` by a concurrent SIGSEGV in the recorder itself). The
-file simply stops after this line. Combined with §2's read of `record_box`'s dispatch (no arm for
-`num=-36`, so it reaches `forward_and_diff` and blocks) and Run B's confirmed `EXIT=142`, the
+file simply stops after this line. Combined with §2's read of `record_box`'s dispatch (no dedicated arm for
+`num=-36` — it is caught only by the generic negative-trap arm at `crates/retrace-core/src/lib.rs:531`,
+which forwards it) and Run B's confirmed `EXIT=142`, the
 interpretation is: **the recorder hung inside a real, host-forwarded `semaphore_wait_trap` with nothing
 in its own process ever able to signal it, and the external alarm killed it there.** This is not a
 guest-side wall (the guest's own logic — `dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER)` — is
@@ -299,9 +302,12 @@ measurement deliverable and carries no code state.
    never forward" rule but for a different object class.
 2. **The `num=-36` trap must never reach `forward_and_diff`** — it is not whole-process-fatal the way
    forwarding `workq_open`/`bsdthread_create` is (no new host thread, no null-pointer jump), but it is
-   whole-process-**hanging**, which is just as fatal to a recording. The same fail-loud-assert shape
+   whole-process-**hanging**, which is just as fatal to a recording. The same fail-loud-assert *shape*
    CLAUDE.md documents for the workq pair (`crates/retrace-core/src/lib.rs:1012`) is the template for a
-   `num=-36`/`num=-33` guard once Stage 2b has arms to guard for.
+   `num=-36`/`num=-33` guard — but not its *location*: that assert guards the generic **BSD** forward
+   arm, which negative trap numbers never reach. Once Stage 2b has arms to guard for, the guard belongs
+   inside or before the generic **negative-trap** arm at `crates/retrace-core/src/lib.rs:531`, next to
+   wherever `num=-36`/`num=-33` end up being serviced.
 3. **No new `workq_kernreturn` opcode to implement yet** — the only two measured (`0x400`, `0x20`) are
    already both emulated by t8/t9. Opcodes a running worker would issue on its park/return path remain
    unmeasured; they cannot be measured until a worker actually runs, which needs the semaphore seam (or

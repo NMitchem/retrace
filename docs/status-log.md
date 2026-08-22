@@ -3500,8 +3500,10 @@ headline gate `dispatch_e2e` is still parked, re-parked for the second time in o
 this section is what makes "parked at a real wall" checkable rather than a claim.
 
 **Gate:** this section deliberately carries **no measured pass/fail stamp**. The closing task did not
-run the full chunked workspace gate — it was run separately at the close, and the README's stamp
-comes from that run, not from here. What was measured here is the arithmetic CLAUDE.md says to trust
+run the full chunked workspace gate — it was run separately, at the close, measured at `67e9a13` (420
+passed / 0 failed / 2 ignored across 104 test binaries; clippy re-verified at `4d0f780`), and the
+README's "Gate" line now carries that stamp, not this section. What was measured here is the
+arithmetic CLAUDE.md says to trust
 over a sum: the tree carries **422 `#[test]` attributes and exactly 2 live `#[ignore]`** (counted
 with `grep -rn '^\s*#\[ignore'`, anchored — an unanchored grep matches a dozen prose mentions). That
 is Stage 1's close of 416 plus this stage's six: two `workq_open` tests and three
@@ -3597,7 +3599,7 @@ repo's history and a trap for the next `git clean`.
 - **The `mach_msg2` at `pc=0x1804adc34` is not specific to anything.** It is libsystem_kernel's
   shared `mach_msg2` trampoline, hit 12 times per run across 10 distinct msgh_ids. An earlier draft
   named three of them as if that were the list; corrected in place before commit.
-- **The run ends in a hang, not a crash.** `num=-36` has no arm, so it reaches `forward_and_diff` and
+- **The run ends in a hang, not a crash.** `num=-36` has no dedicated arm, so it reaches `forward_and_diff` and
   issues a real blocking wait **in retrace's own process** on a port nothing in that process will
   ever signal. Both runs hung there and both produced 0 bytes of guest stdout (preserved artifacts,
   `wc -c`); the exit code was captured for only one of them — 142, the external alarm — and the

@@ -23,7 +23,7 @@ mod util;
             mints port name 0x1403. dispatch_semaphore_wait then lowers NOT to __ulock_wait (515 \
             appears nowhere in either trace) but to a raw Mach trap, num=-36 at pc=0x1804adbb0, \
             carrying that same port in args[0] (the name semaphore_wait_trap is attributed, not \
-            verified on this machine). Having no arm, it reaches forward_and_diff and blocks \
+            verified on this machine). Having no dedicated arm, it reaches forward_and_diff and blocks \
             FOREVER in retrace's own process, which nothing there will ever signal: both runs hang \
             there and both produced 0 bytes of guest stdout, and the one run whose exit code was \
             captured was killed by the external alarm (142) — the other run's exit code is \
