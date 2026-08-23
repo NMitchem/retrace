@@ -522,6 +522,84 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     }
                 }
             }
+            // M18 Stage 2b: the mach semaphore WAIT (see `Box_::guest_sem_wait`). EMULATED, never
+            // forwarded — forwarding it blocks retrace's OWN process forever on a semaphore only
+            // the guest's worker could signal, which is exactly what both Stage 2a measurement runs
+            // did (zero bytes of guest stdout; the one run whose exit code was captured was killed
+            // by the external alarm). Writes nothing to guest memory — it only moves thread-table
+            // state — so the event carries no writes, the same posture as the ulock pair's arms
+            // below. `err` is hardcoded `false` because `guest_sem_wait` has no failure path; the
+            // replay mirror recomputes that same constant and compares it, which is what keeps the
+            // hardcode honest rather than merely quiet.
+            //
+            // `set_x0_err_and_return` is called even though the thread has just blocked, and that
+            // is the `SYS_ULOCK_WAIT` arm's shape exactly: x0 is being set for the return this
+            // thread will eventually resume THROUGH, and the next entry to `Box_::run()` sees
+            // `needs_reschedule()` and switches to the worker. The switch itself stays below the
+            // trace (symmetry rule 2), so nothing about the schedule is recorded.
+            //
+            // **The ORDER of these two arms is load-bearing.** They sit BEFORE the generic
+            // negative-trap arm, whose first statement is Task 2's family-wide
+            // `is_mach_semaphore_trap` guard; placed after it they would be dead code that compiles,
+            // passes clippy, and silently hit the guard instead. The guard itself stays exactly
+            // where it is: the other five stubs of the verified `-39..=-33` family are still
+            // unserviced and must keep reaching it.
+            Stop::Syscall { num, args } if num == retrace_arch::MACH_SEMAPHORE_WAIT => {
+                let rc = b.guest_sem_wait(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append sem_wait: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
+            // M18 Stage 2b: the mach semaphore SIGNAL (see `Box_::guest_sem_signal`). Never
+            // forwarded, for the wait arm's reason exactly.
+            //
+            // This landmark does NOT appear once per guest signal, and nothing here may assume it
+            // does. §5 item 7 of
+            // `docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md`
+            // measured `dispatch_semaphore_signal`'s FAST path as a bare `ldaddl` on the count word
+            // at `sem+0x30`, inside libdispatch's own object, issuing no trap at all — only the slow
+            // path (a waiter exists) falls through to the trap. So an EMPTY `woken` is an ordinary
+            // outcome here, not a lost wake, and neither this arm nor its mirror may read it as one.
+            Stop::Syscall { num, args } if num == retrace_arch::MACH_SEMAPHORE_SIGNAL => {
+                let (rc, woken) = b.guest_sem_signal(args);
+                w.append(&Event::Syscall { num, args, ret: rc, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append sem_signal: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+
+                // M17 materialisation at this wake: **ASSERTED, not mirrored** — the deliberate
+                // choice, made identically on both sides so record and replay cannot drift on it.
+                //
+                // `woken` may not simply be dropped. `Box_::should_pend_for` pends a signal on ANY
+                // `Blocked(_)` target, `Sem { .. }` included, while `assert_no_stranded_signals`
+                // scans `Blocked` threads ONLY — so a signal pended on a semaphore waiter that this
+                // arm wakes would leave the thread Runnable with the bit still set and vanish, while
+                // record and replay agreed with each other. That is the one failure class a
+                // determinism oracle cannot see, which is why it gets a guard and not a comment.
+                //
+                // Why a guard rather than a copy of the `SYS_ULOCK_WAKE` arm below: that arm does
+                // not merely deliver, it calls `complete_saved_syscall_before_delivery(wtid, false)`
+                // against the woken thread's SAVED context, and that `false` is a MEASUREMENT — M17
+                // Task 4b measured a `__ulock_wait`-blocked thread's saved x0 as 0 with its saved
+                // SPSR left C-SET (`crates/retrace/tests/blockedctx.rs`). Nothing has measured the
+                // equivalent for a thread parked in `semaphore_wait_trap`, and no fixture in this
+                // tree pends a signal on one. Copying M17's correction here would be guessing at
+                // unmeasured saved state — the thing this file refuses BY VALUE everywhere else
+                // (`guest_workq_kernreturn`'s opcode refusal, the dup2 guard, the
+                // `deliver_to.len() <= 1` bound). So it fails loud the day a fixture produces it,
+                // naming the measurement that is owed first.
+                let deliverable: Vec<usize> = woken.iter().copied()
+                    .filter(|&t| b.threads().peek_deliverable(t).is_some())
+                    .collect();
+                assert!(deliverable.is_empty(),
+                    "semaphore signal woke thread(s) {deliverable:?} carrying a pending deliverable \
+                     signal. M18 Stage 2b deliberately does NOT materialise at this wake: unlike \
+                     __ulock_wake, the saved context of a semaphore-parked thread is unmeasured, so \
+                     the completed-syscall correction M17 applies there would be a guess here — and \
+                     waking the thread without materialising strands the signal where \
+                     assert_no_stranded_signals cannot see it. Measure the parked thread's saved \
+                     x0/SPSR (the blockedctx.rs shape) and mirror the SYS_ULOCK_WAKE arm on BOTH \
+                     sides before allowing this.");
+            }
             // Mach traps arrive as `svc #0x80` with a NEGATIVE trap number in x16. They forward +
             // memory-diff exactly like a BSD syscall (a negative x16 is a valid mach-trap selector
             // to the kernel; the reply is either in x0 — captured as `ret` — or written into a
@@ -2038,6 +2116,71 @@ impl ReplaySession {
                                     }
                                     None => self.finish_event(),
                                 };
+                            }
+                            // M18 Stage 2b: the record arms' mirrors (symmetry rule 1). Both call
+                            // the SAME `Box_` method with IDENTICAL args, so both sides move the
+                            // thread table identically — that identity is what makes the rule hold
+                            // by construction rather than by two matches happening to agree, and the
+                            // recorded `(num, args)` byte-compare at the top of this arm IS the
+                            // divergence check. Omit the wait mirror and replay leaves main Runnable
+                            // against a recording in which it blocked; omit the signal mirror and
+                            // replay leaves main blocked, `pick_next` returns None, and a run that
+                            // recorded cleanly deadlocks — the same failure the ulock pair's mirrors
+                            // just above describe.
+                            //
+                            // NO `verify_thread` of their own, for the reason the Stage 2a mirrors
+                            // above state: this arm already called it, before the whole `if num ==`
+                            // chain, so every mirror in the chain inherits the thread oracle. A
+                            // second call would re-ask an identical question about an identical
+                            // landmark — neither `guest_sem_wait` nor `guest_sem_signal` switches
+                            // the vCPU (the switch happens below the trace, in `Box_::run()`), so
+                            // `current_thread()` is unchanged across both.
+                            if num == retrace_arch::MACH_SEMAPHORE_WAIT {
+                                let (rc, rerr) = (self.b.guest_sem_wait(args), false);
+                                // `err` is bound and compared, not skipped — the same shape as the
+                                // `SYS_ULOCK_WAIT` mirror above and for its reason: record's arm
+                                // hardcodes `false`, so a recorded `err: true` here could only come
+                                // from a trace some other build wrote, which is a divergence rather
+                                // than something to pass silently into `set_x0_err_and_return`.
+                                if rc != *ret || rerr != *err {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!(
+                                            "sem_wait mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            if num == retrace_arch::MACH_SEMAPHORE_SIGNAL {
+                                let ((rc, woken), rerr) = (self.b.guest_sem_signal(args), false);
+                                if rc != *ret || rerr != *err {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!(
+                                            "sem_signal mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                // Record's arm ASSERTS on `woken` rather than materialising a
+                                // pended signal, and this side makes the IDENTICAL choice with the
+                                // identical check after the identical call sequence. The two sides
+                                // must agree on what happens to `woken` or replay diverges from
+                                // record on a path the byte-compare cannot see: neither side appends
+                                // a second landmark either way, so nothing in the trace would show
+                                // the disagreement.
+                                //
+                                // PANICS rather than returning a named `Divergence`, for the reason
+                                // the `SYS_ULOCK_WAKE` mirror's own two bounds do: it is recomputed
+                                // entirely from live state that no recorded field steers, and record
+                                // asserts the same bound first, so no recordable trace can reach it.
+                                // Firing it means retrace's own model is wrong, not that this replay
+                                // diverged from its recording.
+                                let deliverable: Vec<usize> = woken.iter().copied()
+                                    .filter(|&t| self.b.threads().peek_deliverable(t).is_some())
+                                    .collect();
+                                assert!(deliverable.is_empty(),
+                                    "semaphore signal woke thread(s) {deliverable:?} carrying a \
+                                     pending deliverable signal — record asserts the same bound \
+                                     first; see its arm for why M18 Stage 2b refuses this by value \
+                                     rather than modelling it on unmeasured saved state");
+                                return self.finish_event();
                             }
                             // shared_region_check_np (#294): install the demand-pager on replay too
                             // (record installed it here), so cache faults regenerate identical pages, then
