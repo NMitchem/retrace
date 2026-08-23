@@ -162,16 +162,31 @@ git commit -m "M18 Stage 2b t1: measure the wqthread entry contract and verify t
 
 **Files:**
 - Modify: `crates/retrace-box/src/lib.rs` — `guest_workq_kernreturn`'s `WQOPS_QUEUE_REQTHREADS` arm; add `guest_workq_reqthreads`
+- Modify: `crates/retrace-arch/src/lib.rs` — the two mach-semaphore trap-number constants
+- Modify: `crates/retrace-core/src/lib.rs:531` — the fail-loud guard on the generic negative-trap forward
+- Modify: `crates/retrace/tests/dispatch_e2e.rs` — retarget one assertion (see Step 7)
 - Test: `crates/retrace-box/tests/threads.rs`
+
+**Why this task reaches outside `retrace-box`.** Worker construction on its own needs no
+`retrace-core` change — that is the plan's headline simplification and it still holds. But a worker
+that exists is a worker that walks main into the mach semaphore wait, and until that trap is either
+serviced (Task 4) or refused, it hangs the recorder. The guard is what makes this task's own
+deliverable safe to leave in the tree, so it lands here rather than two tasks later.
 
 **Interfaces:**
 - Consumes: §1 (register contract), §2 (memory layout) and §4 (struct-init verdict) of
   `docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md`. **Read that
   document before writing code** — the register seeding below is driven by its §1 table and the
   values in it are not guessable.
-- Produces: `Box_::guest_workq_reqthreads(&mut self, args: [u64; 8]) -> u64`, returning 0. After it
-  returns, the thread table holds exactly one additional `Runnable` thread whose `ctx.regs.pc` and
-  `ctx.elr` are `self.wq_thread_pc.unwrap()`.
+- Produces:
+  - `Box_::guest_workq_reqthreads(&mut self, args: [u64; 8]) -> u64`, returning 0. After it returns,
+    the thread table holds exactly one additional `Runnable` thread whose `ctx.regs.pc` and
+    `ctx.elr` are `self.wq_thread_pc.unwrap()`.
+  - `retrace_arch::MACH_SEMAPHORE_WAIT` and `retrace_arch::MACH_SEMAPHORE_SIGNAL` — the verified
+    trap numbers from Task 1 §3. **Task 4 consumes these; it does not define them.**
+  - The fail-loud guard on the generic negative-trap forward arm
+    (`crates/retrace-core/src/lib.rs:531`). Task 4's arms sit before it, which is what makes it
+    stop firing without being removed.
 
 **If Task 1's §4 verdict is KILLED, stop and report BLOCKED** with that verdict quoted. Do not
 invent a struct layout. The controller will route to Task 5 to park the gate at that wall.
@@ -321,7 +336,79 @@ does. Do not seed a register §1 does not show being read.
 for teardown and diagnostics only. `guest_bsdthread_create` passes `(stack, 0)` with a placeholder
 length because the syscall carries no size; here the box *does* know the size, so pass the real one.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Add the trap-number constants**
+
+In `crates/retrace-arch/src/lib.rs`, beside the existing syscall numbers. Use the values Task 1 §3
+**verified**, not the predicted `-36`/`-33`, and say in the doc comment whether §3 confirmed or
+corrected the prediction:
+
+```rust
+/// The mach semaphore wait trap. Negative x16, like the other Mach traps.
+///
+/// Measured: Stage 2a's two runs both ended on this trap at `pc=0x1804adbb0` carrying the port name
+/// its preceding `semaphore_create` minted. Task 1 §3 verified the number against
+/// libsystem_kernel's own stub. `Box_::guest_sem_wait` emulates it; it is never forwarded.
+pub const MACH_SEMAPHORE_WAIT: u64 = /* Task 1 §3 */;
+/// The mach semaphore signal trap — the wake half of the pair. Task 1 §3 measured it; before that
+/// it had never been observed by anything, and this plan says so rather than inheriting a guess.
+pub const MACH_SEMAPHORE_SIGNAL: u64 = /* Task 1 §3 */;
+```
+
+- [ ] **Step 5: Add the fail-loud guard at the generic negative-trap arm**
+
+In `record_box`, inside the arm at `:531` (`Stop::Syscall { num, args } if (num as i64) < 0`), as its
+first statement:
+
+```rust
+                // M18 Stage 2b: the semaphore pair must never reach here. Forwarding either is not
+                // whole-process-fatal the way forwarding the workq pair is, but it is
+                // whole-process-HANGING, which is just as fatal to a recording: both Stage 2a
+                // measurement runs blocked here forever and produced zero bytes of guest stdout.
+                //
+                // This guard's SHAPE is the one the workq pair uses on the generic BSD forward arm,
+                // but deliberately not its LOCATION: that arm is BSD-only and a negative trap
+                // number never reaches it (measurements doc §2, corrected in 60cea11). Negative
+                // traps are caught here, so the guard belongs here.
+                assert!(num != retrace_arch::MACH_SEMAPHORE_WAIT
+                     && num != retrace_arch::MACH_SEMAPHORE_SIGNAL,
+                    "M18 Stage 2b: mach semaphore trap {num:#x} reached the generic forward arm — \
+                     it must be serviced by its dedicated arm above (Box_::guest_sem_wait / \
+                     guest_sem_signal). Forwarding it blocks retrace's own process forever on a \
+                     semaphore only the guest's worker could signal. args={args:#x?}");
+```
+
+- [ ] **Step 6: Verify the guard fires — this is what makes worker construction safe**
+
+```sh
+cargo test -p retrace --test dispatch_e2e --no-fail-fast -- --test-threads=1 --nocapture --ignored 2>&1 | tail -40
+```
+
+Expected: FAIL, and **the failure must be the guard's assert message**. That is the whole point of
+landing the guard in this task: the moment a worker exists, main reaches the semaphore wait, and
+without the guard that trap reaches `forward_and_diff` and **hangs retrace's own process forever** —
+burning the full tool timeout on every suite run from here until Task 4, with no reviewer able to
+tell a hang from a broken task.
+
+If the run hangs instead of asserting, the guard is misplaced: it is sitting *after* the forward
+rather than before it. Fix the placement, do not raise the timeout.
+
+- [ ] **Step 7: Retarget the companion test's moving assertion**
+
+`crates/retrace/tests/dispatch_e2e.rs::the_workqueue_syscalls_are_emulated_not_forwarded` asserts
+`rec.stderr.contains("worker construction is Stage 2b")` — the panic Step 3 just removed. It is now
+red for a stale reason.
+
+Change **only that one assertion** to name the guard's message instead, and update the doc comment
+above the test to say what it now proves (the workqueue syscalls are emulated *and* a built worker
+reaches the semaphore trap, which the guard refuses to forward).
+
+**Keep the test's other two assertions verbatim.** `assert_ne!(rec.code, 139)` and the
+`_pthread_wqthread` stderr tripwire are durable — they are the "no host workqueue thread inside the
+recorder" guarantee this file exists to enforce, and they outlive every wall that moves past them.
+Task 4 moves this assertion once more, and Task 5 sets its final state; that churn is deliberate, so
+that every task boundary leaves the suite green rather than knowingly red.
+
+- [ ] **Step 8: Run the tests to verify they pass**
 
 ```sh
 cargo test -p retrace-box --test threads workq_reqthreads -- --test-threads=1
@@ -329,11 +416,17 @@ cargo test -p retrace-box --test threads workq_reqthreads -- --test-threads=1
 
 Expected: PASS, 3 tests.
 
-- [ ] **Step 5: Run the full box suite for regressions**
+- [ ] **Step 9: Run the full box suite plus the two chunks this task now reaches**
 
 ```sh
-cargo test -p retrace-box -- --test-threads=1
+cargo test -p retrace-box --no-fail-fast -- --test-threads=1
+cargo test -p retrace --test dispatch_e2e --no-fail-fast -- --test-threads=1
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+The second chunk is here because Steps 4-7 reached into `retrace-arch`, `retrace-core` and the
+e2e test; a `-p retrace-box`-only run would not have seen any of it. Expected: PASS (the headline
+gate stays `#[ignore]`d and is not run by this command).
 
 Expected: PASS. Note that `workq_kernreturn_reqthreads_is_the_named_stage_2a_wall` **will now fail**
 — it is a `#[should_panic(expected = "worker construction is Stage 2b")]` on the wall you just
@@ -342,11 +435,13 @@ removed. Delete that test in this task and say so in the commit message: its suc
 the wall. Keep `workq_kernreturn_refuses_an_unmeasured_opcode_by_value` untouched — the unmeasured-opcode
 posture is unchanged and still load-bearing.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add crates/retrace-box/src/lib.rs crates/retrace-box/tests/threads.rs
-git commit -m "M18 Stage 2b t2: REQTHREADS builds the worker instead of refusing to"
+git add crates/retrace-box/src/lib.rs crates/retrace-box/tests/threads.rs \
+        crates/retrace-arch/src/lib.rs crates/retrace-core/src/lib.rs \
+        crates/retrace/tests/dispatch_e2e.rs
+git commit -m "M18 Stage 2b t2: REQTHREADS builds the worker, and the guard that makes it safe"
 ```
 
 ---
@@ -586,11 +681,17 @@ git commit -m "M18 Stage 2b t3: a park/wake seam keyed on a port name, not a gue
 
 ---
 
-### Task 4: Both dispatch loops, both mirrors, the oracle sites and the guard
+### Task 4: Both dispatch loops, both mirrors, and the two oracle sites
 
 **Files:**
-- Modify: `crates/retrace-arch/src/lib.rs` — trap-number constants
-- Modify: `crates/retrace-core/src/lib.rs` — record arms (near `:899`), replay mirrors (near `:1903`), guard at the generic negative-trap arm (`:531`)
+- Modify: `crates/retrace-core/src/lib.rs` — record arms (near `:899`), replay mirrors (near `:1903`)
+- Modify: `crates/retrace/tests/dispatch_e2e.rs` — one assertion (see Step 4)
+
+**The constants and the guard are NOT yours** — Task 2 landed both, because a built worker reaches
+the semaphore trap and a trap with neither an arm nor a guard hangs the recorder. Use
+`retrace_arch::MACH_SEMAPHORE_WAIT` / `MACH_SEMAPHORE_SIGNAL` as they already exist; do not
+redefine them, and do not remove the guard — your arms sit *before* it, which is what makes it
+stop firing.
 
 **Interfaces:**
 - Consumes: `Box_::guest_sem_wait` / `Box_::guest_sem_signal` from Task 3; §3 (verified trap
@@ -609,59 +710,7 @@ nothing in the compiler enforces either:
 2. **New arms go BEFORE the generic negative-trap arm** at `:531`. An arm placed after it is dead
    code that compiles, passes clippy, and silently forwards.
 
-- [ ] **Step 1: Add the trap-number constants**
-
-In `crates/retrace-arch/src/lib.rs`, beside the existing syscall numbers. Use the values Task 1 §3
-**verified**, not the predicted `-36`/`-33`, and say in the doc comment whether §3 confirmed or
-corrected the prediction:
-
-```rust
-/// The mach semaphore wait trap. Negative x16, like the other Mach traps.
-///
-/// Measured: Stage 2a's two runs both ended on this trap at `pc=0x1804adbb0` carrying the port name
-/// its preceding `semaphore_create` minted. Task 1 §3 verified the number against
-/// libsystem_kernel's own stub. `Box_::guest_sem_wait` emulates it; it is never forwarded.
-pub const MACH_SEMAPHORE_WAIT: u64 = /* Task 1 §3 */;
-/// The mach semaphore signal trap — the wake half of the pair. Task 1 §3 measured it; before that
-/// it had never been observed by anything, and this plan says so rather than inheriting a guess.
-pub const MACH_SEMAPHORE_SIGNAL: u64 = /* Task 1 §3 */;
-```
-
-- [ ] **Step 2: Add the fail-loud guard at the generic negative-trap arm**
-
-In `record_box`, inside the arm at `:531` (`Stop::Syscall { num, args } if (num as i64) < 0`), as its
-first statement:
-
-```rust
-                // M18 Stage 2b: the semaphore pair must never reach here. Forwarding either is not
-                // whole-process-fatal the way forwarding the workq pair is, but it is
-                // whole-process-HANGING, which is just as fatal to a recording: both Stage 2a
-                // measurement runs blocked here forever and produced zero bytes of guest stdout.
-                //
-                // This guard's SHAPE is the one the workq pair uses on the generic BSD forward arm,
-                // but deliberately not its LOCATION: that arm is BSD-only and a negative trap
-                // number never reaches it (measurements doc §2, corrected in 60cea11). Negative
-                // traps are caught here, so the guard belongs here.
-                assert!(num != retrace_arch::MACH_SEMAPHORE_WAIT
-                     && num != retrace_arch::MACH_SEMAPHORE_SIGNAL,
-                    "M18 Stage 2b: mach semaphore trap {num:#x} reached the generic forward arm — \
-                     it must be serviced by its dedicated arm above (Box_::guest_sem_wait / \
-                     guest_sem_signal). Forwarding it blocks retrace's own process forever on a \
-                     semaphore only the guest's worker could signal. args={args:#x?}");
-```
-
-- [ ] **Step 3: Run the guard's test to verify it fires**
-
-```sh
-cargo test -p retrace --test dispatch_e2e the_workqueue -- --test-threads=1 --nocapture
-```
-
-Expected: FAIL, and the failure must be the assert above — the guest now builds a worker (Task 2),
-main reaches the wait trap, and with no dedicated arm yet it hits the guard. **That is the guard
-proving it works.** If instead the run hangs, the guard is misplaced: it is after the forward rather
-than before it.
-
-- [ ] **Step 4: Add the record arms**
+- [ ] **Step 1: Add the record arms**
 
 In `record_box`, immediately **before** the generic negative-trap arm at `:531`. Model them on the
 `SYS_ULOCK_WAIT` / `SYS_ULOCK_WAKE` arms at `:899` and `:911`:
@@ -688,7 +737,7 @@ In `record_box`, immediately **before** the generic negative-trap arm at `:531`.
             }
 ```
 
-- [ ] **Step 5: Decide the signal arm's materialisation, and write down which you chose**
+- [ ] **Step 2: Decide the signal arm's materialisation, and write down which you chose**
 
 M17's `SYS_ULOCK_WAKE` arm at `:911` does more than wake: it materialises a signal pended on a thread
 that could not run, with a `deliver_to.len() <= 1` bound and a
@@ -708,7 +757,7 @@ tree does today. Choose one and justify it in a comment at the arm:
 anything not `Blocked(_)`, so a signal pended on a thread this arm wakes would vanish while record
 and replay agreed with each other — the one failure class a determinism oracle cannot see.
 
-- [ ] **Step 6: Add the replay mirrors, each with its oracle site**
+- [ ] **Step 3: Add the replay mirrors, each with its oracle site**
 
 In `ReplaySession::advance`, beside the `SYS_ULOCK_WAIT` / `SYS_ULOCK_WAKE` mirrors at `:1903` and
 `:1931`. Both must call the same `Box_` method with the same args — that identity is what makes
@@ -744,7 +793,21 @@ symmetry rule 1 hold by construction.
 Copy the surrounding mirrors' exact comparison-and-return structure rather than inventing one; they
 already handle the recorded-`ret`/recomputed-`rc` compare and the `err` handling.
 
-- [ ] **Step 7: Verify the census is 9, by counting**
+- [ ] **Step 4: Update the companion test — the guard is now unreachable for this guest**
+
+Task 2 pointed `the_workqueue_syscalls_are_emulated_not_forwarded` at the guard's message. Your arms
+sit before the guard, so the semaphore traps are now serviced and that message no longer appears:
+the test is red again, for the third and second-to-last time.
+
+Run the guest and read what actually happens now — the worker runs, main wakes, and the run reaches
+either a clean exit or the next unmeasured wall (most likely a `workq_kernreturn` park opcode, which
+the `other =>` arm refuses **by value** and therefore names for you). Retarget that one assertion at
+what you observe, and **keep the two durable tripwires verbatim** as Task 2 did.
+
+Do not attempt to make the headline `#[ignore]`d gate pass here. Task 5 owns the gate's final state
+and both of its honest outcomes.
+
+- [ ] **Step 5: Verify the census is 9, by counting**
 
 ```sh
 grep -c 'self\.verify_thread(' crates/retrace-core/src/lib.rs
@@ -753,7 +816,7 @@ grep -c 'self\.verify_thread(' crates/retrace-core/src/lib.rs
 Expected: `9`. If it prints 7 or 8, a mirror is missing its oracle call and the hole is silent —
 CLAUDE.md's count is the thing to check when adding an arm, and this is that check.
 
-- [ ] **Step 8: Run the workspace chunks**
+- [ ] **Step 6: Run the workspace chunks**
 
 ```sh
 cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1
@@ -763,10 +826,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Expected: PASS all three. The `retrace` e2e targets are Task 5's.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add crates/retrace-arch/src/lib.rs crates/retrace-core/src/lib.rs
+git add crates/retrace-core/src/lib.rs crates/retrace/tests/dispatch_e2e.rs
 git commit -m "M18 Stage 2b t4: the semaphore seam in both dispatch loops, with sites 8 and 9"
 ```
 
@@ -795,7 +858,7 @@ lost through a pipe, so capture it separately if you need it. Two outcomes:
 - **It passes.** The worker ran, main observed the signal, and both replays are byte-identical.
 - **It fails.** Read the failure carefully and identify the wall. Likely candidates, all of which
   fail loud by construction: an unmeasured `workq_kernreturn` park opcode (named by value by the
-  `other =>` arm Task 2 kept), the guard from Task 4 Step 2, or a deadlock assert.
+  `other =>` arm Task 2 kept), the guard Task 2 landed, or a deadlock assert.
 
 - [ ] **Step 2a: If it passed — un-park the gate**
 
@@ -873,7 +936,7 @@ git commit -m "M18 Stage 2b t5: the gate in its honest state, and the two docume
 
 **Spec coverage.** Every spec section maps to a task: worker construction → Task 2; the seam → Task 3;
 arms, mirrors, oracle sites and guard → Task 4; determinism posture → enforced by Task 2's
-determinism test and Task 4's same-method-same-args mirrors; fail-loud boundaries → Task 4 Step 2 and
+determinism test and Task 4's same-method-same-args mirrors; fail-loud boundaries → Task 2 Step 5 and
 Task 2's retained `other =>` arm; "two things that will bite" → Task 4's preamble (census) and Task 5
 Step 3 (companion test); exit criterion → Task 5 Steps 2a/2b; testing → Tasks 2, 3, 5; the five open
 questions → Task 1 Steps 2–5. Risk 1 (struct-init) has an explicit BLOCKED route at Task 2's head;
