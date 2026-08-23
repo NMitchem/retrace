@@ -513,6 +513,40 @@ const PTHREAD_START_TSD_BASE_SET: u64 = 0x1000_0000;
 /// `bsdthread_terminate`'s `port` argument, both of which stay inside the box.
 const GUEST_THREAD_PORT_BASE: u32 = 0x0BAD_7000;
 
+/// The stack retrace gives a workqueue worker, in bytes. **This number is retrace's own choice**,
+/// and uniquely among the constants around `guest_workq_reqthreads` it is not a measurement:
+/// M18 Stage 2b Task 1 §2c states it outright — "the size is retrace's choice — nothing in the
+/// entry path requires a particular value." The host was observed handing a worker `0x83000`
+/// (524 KiB, and NOT page-aligned); this is the nearest round page-aligned size, which lets the
+/// pthread struct sit on a page boundary. The floor is not zero: `_thread_chkstk_darwin` compares
+/// `sp - framesize` against `[pthread+0xb8]` (= the `x2` this size derives), so a too-small stack
+/// fails there rather than at entry.
+const WQ_WORKER_STACK_SIZE: u64 = 0x8_0000;
+
+/// The `x4` flags word retrace hands a **fresh** workqueue worker, minus its low-byte QoS index —
+/// the whole word is `WQ_ENTRY_FLAGS_FRESH | qos_index`. Task 1 §1d decoded every bit from
+/// `__pthread_wqthread`'s own `tbnz`/`tbz`; §5 item 4 is the form:
+///
+/// - **bit 21** (`0x200000`) — "the kernel called `thread_set_tsd_base()`". REQUIRED: clear takes
+///   `0x3048 tbz w3, #0x15` into `brk #0xb001`. It is an *assertion*, tested against the flag and
+///   never against the register, so setting it obliges `TPIDRRO_EL0` to be right — §2c: bit 21 set
+///   with the register wrong is **silent** corruption with no `brk` to hunt for.
+/// - **bit 18** (`0x40000`) — set in 13/13 observed entries and read by nothing on this path.
+///   Carried to match the kernel; Task 1 records that either choice is untested.
+/// - **bit 14** (`0x4000`) — "the low byte is a QoS index". REQUIRED with bit 15: both clear reaches
+///   `"BUG IN LIBPTHREAD: Missing priority"` + `brk #0xb001`.
+///
+/// Two bits are deliberately CLEAR and are the reason this is a named constant rather than a
+/// literal at the call site:
+/// - **bit 17** (`0x20000`) selects *reused* over *fresh*. Clear is what makes libpthread call
+///   `__pthread_wqthread_setup` and write its own struct — including its own `pacdb` signature —
+///   which is what keeps M14's "retrace invents an address, not a layout" rule intact here.
+/// - **bit 23** (`0x800000`) forces the priority to the constant `0x040008ff`, which is exactly the
+///   value the guest's own REQTHREADS request carries and therefore looks like the right bit. It is
+///   a **different thread role**: it also writes `pthread+0xa4 = 1` and bypasses the QoS arithmetic
+///   entirely. Task 1 §5 item 3 names setting it as the precise mistake to avoid.
+const WQ_ENTRY_FLAGS_FRESH: u64 = 0x24_4000;
+
 #[derive(Debug)]
 pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, far: u64 }, Other { esr: u64 }, Step }
 
@@ -3391,12 +3425,7 @@ impl Box_ {
 
         match args[0] {
             WQOPS_SETUP_DISPATCH => 0,
-            WQOPS_QUEUE_REQTHREADS => panic!(
-                "M18 Stage 2a: workq_kernreturn REQTHREADS ({:#x}) reached — worker construction \
-                 is Stage 2b. This is a DELIBERATE wall, not a defect: the kernel allocates the \
-                 stack and the pthread struct for a workqueue thread and enters `wqthread` with a \
-                 register contract that is still unmeasured, so building one here would be \
-                 invention. args={args:#x?}", args[0]),
+            WQOPS_QUEUE_REQTHREADS => self.guest_workq_reqthreads(args),
             other => panic!(
                 "M18 Stage 2a: unmeasured workq_kernreturn opcode {other:#x} — only \
                  SETUP_DISPATCH ({WQOPS_SETUP_DISPATCH:#x}) and REQTHREADS \
@@ -3404,6 +3433,208 @@ impl Box_ {
                  issues this one before modelling it; a guessed opcode silently corrupts the \
                  guest's workqueue state. args={args:#x?}"),
         }
+    }
+
+    /// `workq_kernreturn(WQOPS_QUEUE_REQTHREADS, 0, numthreads, priority)` — libdispatch asking the
+    /// kernel for worker threads. **Emulated, never forwarded**, for the reason `guest_workq_open`
+    /// documents.
+    ///
+    /// Stage 2a parked a deliberate panic here because the kernel allocates a workqueue thread's
+    /// stack and pthread struct and enters `wqthread` with a register contract nobody had measured.
+    /// M18 Stage 2b Task 1 measured it; every citation below is to
+    /// `docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md`.
+    ///
+    /// **This differs from `bsdthread_create` in who owns the memory.** There the guest had already
+    /// mapped the stack and populated the struct, so M14 seeded registers and touched nothing else.
+    /// Here the kernel owns both, so the box must place them — but it places an ADDRESS, not a
+    /// LAYOUT: on the fresh path (flags bit 17 clear) `__pthread_wqthread_setup` writes the struct
+    /// itself — 19 fields in its first 60 instructions, including its own `pacdb` signature and the
+    /// TSD self-pointers, and reading only `+0x31` and `+0x4e` first, both read-modify-write on
+    /// zeroed memory (§4, verified instruction by instruction). M14's no-invention rule survives
+    /// without an exception rather than being carved into.
+    ///
+    /// `args[2]` is `numthreads` — MEASURED (§5 item 5) from libpthread's own caller,
+    /// `__pthread_workqueue_addthreads`, whose `mov x2, x0` puts its `numthreads` argument there.
+    /// Only `1` has ever been observed; the loop honours whatever the guest asks rather than
+    /// building one worker and leaving libdispatch waiting forever for the rest, which is the
+    /// failure a hardcoded `1` would produce silently.
+    ///
+    /// Deterministic with nothing recorded: `place_worker_stack` bumps the same `mmap_next` cursor
+    /// every other emulated placement uses, so it is a pure function of the guest's syscall
+    /// sequence, and both dispatch arms reach this through the same `guest_workq_kernreturn(args)`
+    /// call — symmetry rule 1 holding by construction, exactly as it does for `bsdthread_create`.
+    fn guest_workq_reqthreads(&mut self, args: [u64; 8]) -> u64 {
+        let entry = self.wq_thread_pc.expect(
+            "M18 Stage 2b: REQTHREADS with no registered wqthread entry point — refusing to build \
+             a worker that would enter an invented address. Every dynamic guest registers one at \
+             startup (measured, M14 Task 2), so this means the guest took a path no measurement \
+             covers.");
+        let pthsize = self.pthread_size.expect(
+            "M18 Stage 2b: REQTHREADS with no registered pthread size — captured by the same \
+             bsdthread_register that captures the entry point, so this cannot happen without the \
+             assert above firing first.") as u64;
+        let count = args[2];
+        assert!(count >= 1,
+            "M18 Stage 2b: REQTHREADS for {count} threads. `args[2]` is numthreads (§5 item 5) and \
+             a request for none is meaningless — libdispatch would then wait forever on work no \
+             worker was built to run. args={args:#x?}");
+        // The flags word is the same for every worker in one request: it encodes the request's own
+        // QoS, and `args[3]` is a property of the request, not of the individual thread.
+        let flags = WQ_ENTRY_FLAGS_FRESH | Self::wq_qos_index(args[3]);
+
+        for _ in 0..count {
+            // Stack and struct, in ONE reservation, so their relative placement is what §2c
+            // measured rather than two independent bumps that could drift apart.
+            let (stack_base, stack_top, pthread) = self.place_worker_stack(pthsize);
+
+            // `spawn` appends, so the index it will return is the table's length right now. Asserted
+            // below rather than assumed, because the kport MUST be part of the register block: it is
+            // derived from the index, and splitting it out to a `ctx_mut` write after the spawn
+            // would scatter one measured contract across two places.
+            let tid = self.threads.len();
+
+            let mut ctx = thread::ThreadCtx::zeroed();
+            ctx.elr = entry;
+            ctx.regs.pc = entry;
+            // The creating thread's EL0 PSTATE, NOT zeroed()'s 0 — M14's lesson, restated at
+            // `guest_bsdthread_create` in full: 0 is EL0t with DAIF clear, which looks like it
+            // works right up until the mask bits matter. `regs.cpsr` is the one HVF resumes from.
+            ctx.spsr = self.spsr();
+            ctx.regs.cpsr = ctx.spsr;
+
+            // ---- THE WQTHREAD ENTRY CONTRACT, MEASURED (§1c's table) ------------------------
+            // `_start_wqthread` is three instructions and moves NO register (§1a), so the kernel's
+            // entry contract is exactly `__pthread_wqthread`'s argument registers. Each line below
+            // names the instruction that READS it. Registers §1 does not show being read are left
+            // at `zeroed()`'s 0 — seeding one the code never reads is invention that happens to be
+            // harmless today.
+            //
+            // x0 — the pthread struct pointer. `0x2dbc mov x19, x0`; everything downstream writes
+            // through x19 (`str x9,[x19,#0x100]`, `stp x8,x0,[x19,#0x90]`, …).
+            ctx.regs.x[0] = pthread;
+            // x1 — the thread's mach port name. `0x302c str w1, [x0, #0xf8]` inside
+            // `__pthread_wqthread_setup` — the SAME `pthread + 0xf8` M14 measured for a
+            // `bsdthread_create` child, which is why this reuses `GUEST_THREAD_PORT_BASE | tid`
+            // rather than minting a new scheme. Uniqueness is load-bearing beyond the `brk` below:
+            // `Box_::thread_of_port` resolves a port back to a thread by reading that field out of
+            // guest memory, and M16's signal delivery routes on the answer, so a worker sharing a
+            // kport with another thread would misroute signals.
+            //
+            // Unlike M14's silent `pthread_join` failure, a bad value here is LOUD: `0x30c8 ldr
+            // w8,[x19,#0xf8]; add w9,w8,#1; cmp w9,#1; b.ls` fires `brk #0xb001` with "BUG IN
+            // CLIENT OF LIBPTHREAD: Unable to allocate thread port" for BOTH `0` and `-1` (§4).
+            ctx.regs.x[1] = (GUEST_THREAD_PORT_BASE | tid as u32) as u64;
+            // x2 — the LOW end of the stack region. `0x2fe0 sub x10, x2, x10` and
+            // `0x2ff0 stp x0, x2, [x0, #0xb0]` inside setup, which derive every stack field of the
+            // struct from x0 and x2 alone. §2c: "Neither is derived from the other, and neither is
+            // derived from SP — libpthread never inspects SP. Retrace must supply both."
+            ctx.regs.x[2] = stack_base;
+            // x4 — the flags word. `0x2dc0 tbnz w4, #0x11` is the first instruction to read it, and
+            // it selects fresh-vs-reused; the rest of the word asserts the TSD base and encodes the
+            // QoS. See `WQ_ENTRY_FLAGS_FRESH` for the bit-by-bit decode, including the two bits that
+            // are deliberately CLEAR, and `wq_qos_index` for the low byte.
+            ctx.regs.x[4] = flags;
+            // x3, x5, x6, x7 and LR are LEFT AT ZERO, which is what the kernel itself supplies —
+            // not an omission. x3 (the kevent list) is read only on the bit-22/bit-19 branches the
+            // flags above do not take, so it is dead here (§1c, 0 in 7/7). x5 (the event count) is
+            // the one whose zero is LOAD-BEARING rather than merely faithful: `0x2e44 cmn w20, #0x1`
+            // treats `-1` as a kill sentinel and branches straight to `__pthread_wqthread_exit`.
+            // x6/x7 are read by nothing (6/6 zero), and LR is 0 (7/7) because `_start_wqthread`'s
+            // `brk #0x1` is its only return target and is unreachable.
+            //
+            // SP — §2c: "SP == x0, 7/7 entries that read it. The stack top IS the struct base."
+            // `_start_wqthread`'s first instruction is `stp xzr, xzr, [sp, #-0x10]!`, so
+            // `[x0-0x10, x0)` must be writable stack, which is why `place_worker_stack` puts the
+            // struct at the TOP of the region with the stack growing down into it.
+            ctx.regs.sp_el0 = stack_top;
+            // TPIDRRO_EL0 — EL0 cannot write it, so the KERNEL must, and flags bit 21 above is
+            // retrace asserting that it did. M14's `pthread + 0xe0`, reconfirmed for a workqueue
+            // thread two independent ways (host probe 3/3 across thread kinds; `_pthread_exit`'s
+            // `mrs x8, TPIDRRO_EL0; sub x0, x8, #0xe0`). §2c is emphatic that getting this wrong is
+            // NOT caught by the bit-21 `brk` — libpthread tests the flag, never the register — so a
+            // mismatch here is silent corruption with nothing to hunt for.
+            ctx.tpidrro_el0 = pthread + PTHREAD_TSD_OFF;
+
+            // `(stack_base, stack_top - stack_base)` — a REAL length, unlike `bsdthread_create`'s
+            // `(stack, 0)` placeholder. That syscall carries no size; this one is placed by the box,
+            // so the box knows it. `Thread::stack` is for teardown and diagnostics only.
+            let spawned = self.threads.spawn(ctx, (stack_base, stack_top - stack_base));
+            assert_eq!(spawned, tid, "ThreadTable::spawn appends; the kport above assumed it");
+        }
+        0
+    }
+
+    /// Place ONE workqueue worker's stack and pthread struct. Returns `(stack_base, stack_top,
+    /// pthread)`, where `stack_top == pthread` — that equality is §2c's measurement (`SP == x0`,
+    /// 7/7), not an implementation convenience, and both are named so the call site reads as the
+    /// contract rather than as arithmetic.
+    ///
+    /// The layout is §2c's, and each part of it is required by something:
+    /// - the struct sits at the **top**, the stack below it: `x0 > x2` is what makes
+    ///   `[pthread+0xc8]`, the size libpthread computes as `round_up(x0,P) - (x2-P) + round_up(
+    ///   0x18e0,P)`, come out sane;
+    /// - the struct memory must read as **zero** — `__pthread_wqthread_setup` does read-modify-write
+    ///   on `ldrb w11,[x0,#0x31]` and `ldrh w9,[x0,#0x4e]` before storing them back;
+    /// - the guard page libpthread records at `pthread+0xc0` is `[x2 - vm_page_size, x2)`. It only
+    ///   *records* it — it neither maps nor checks it — and leaving that page outside the
+    ///   reservation makes it a genuine guard: nothing can demand-commit it, so a stack overrun
+    ///   faults fatally instead of being silently backed.
+    ///
+    /// **A reservation, not an `mmap`.** `guest_vm_reserve` is bookkeeping only, and each page is
+    /// demand-committed with a fresh zeroed anon page on first touch by `commit_reserved_page` —
+    /// the path both dispatch loops already run for the guest's own reservations. That satisfies
+    /// the zero requirement by construction, and it keeps the ~0.5 MiB a worker is *given* from
+    /// being ~0.5 MiB every subsequent syscall has to diff (M8-stack's measured lesson: growing a
+    /// guest region costs per-syscall diff time). A worker touches a handful of those pages.
+    ///
+    /// Deterministic: `guest_vm_reserve(.., anywhere)` hands out `mmap_next` and advances it, so
+    /// an identical call sequence places an identical worker on record and on replay.
+    fn place_worker_stack(&mut self, pthsize: u64) -> (u64, u64, u64) {
+        let base = self.guest_vm_reserve(0, WQ_WORKER_STACK_SIZE + pthsize, true);
+        let pthread = base + WQ_WORKER_STACK_SIZE;
+        (base, pthread, pthread)
+    }
+
+    /// Recover the QoS index that belongs in the low byte of the `wqthread` entry flags from the
+    /// priority word a `REQTHREADS` request carries in `args[3]`.
+    ///
+    /// This inverts arithmetic `__pthread_wqthread` performs in the other direction (§1d, verbatim
+    /// from the disassembly): `priority = (1 << ((flags + 7) & 31)) | 0xff`, applied only when the
+    /// index is in `1..=6` (`cmp w9,#5; csel ... hi` discards it otherwise, leaving priority 0). So
+    /// the request's QoS bit is `1 << (qos_index + 7)`, which lives in bits `[15:8]` — the byte this
+    /// reads — and `qos_index = trailing_zeros(byte) + 1`.
+    ///
+    /// Checked against all three measured `(request → fresh entry flags)` pairs (§1e): `0x10ff` →
+    /// `0x244005`, `0x04ff` → `0x244003`, and the reused-path `0x02ff` → `0x064002`. The guest's own
+    /// request is `0x040008ff` → byte `0x08` → index **4**, i.e. flags `0x244004`.
+    ///
+    /// **`0x244004` is an EXTRAPOLATION, not an observation, and it is the single load-bearing
+    /// unverified claim in Task 1's document (§1e, §5 item 4).** No live `(request → flags)` pair
+    /// was captured for `0x040008ff`; six queue configurations were tried and none reproduced that
+    /// request, because a host process's main thread carries a real QoS. If a worker ever misbehaves
+    /// in a way that smells like a QoS bucket, suspect this first.
+    ///
+    /// Every OTHER bit of the request is dropped, which is fidelity rather than laziness: §1e
+    /// measured that no flags bit maps to priority bit 26, so a real kernel delivering `0x244004`
+    /// hands the dispatch callback `0x8ff` and not the `0x040008ff` it was asked for. The round trip
+    /// is lossy by design. (The one request bit that IS known to survive — bit 31, overcommit,
+    /// which becomes flags bit 16 — was observed only on the reused path and is deliberately not
+    /// modelled here; the guest's request has it clear.)
+    fn wq_qos_index(priority: u64) -> u64 {
+        let byte = ((priority >> 8) & 0xff) as u32;
+        // `is_power_of_two()` is false for 0, so this rejects "no QoS bit" as well as "several".
+        assert!(byte.is_power_of_two(),
+            "M18 Stage 2b: REQTHREADS priority {priority:#x} has QoS byte {byte:#x}, which is not a \
+             single set bit. Every measured request carries exactly one (§1e), and the flags word \
+             libpthread demands encodes exactly one index — measure what issues this before \
+             modelling it rather than picking a bit.");
+        let idx = byte.trailing_zeros() as u64 + 1;
+        assert!((1..=6).contains(&idx),
+            "M18 Stage 2b: REQTHREADS priority {priority:#x} decodes to QoS index {idx}, outside \
+             the 1..=6 libpthread accepts (`0x2e34 cmp w9, #0x5` after a `sub w9,w9,#1`). Outside \
+             that range libpthread silently leaves the worker's priority 0 rather than failing, so \
+             this refuses by value instead of shipping a worker at a priority nobody asked for.");
+        idx
     }
 
     /// `bsdthread_create(func, arg, stack, pthread, flags)`, emulated.

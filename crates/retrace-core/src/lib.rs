@@ -529,6 +529,23 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // kernel state the diff can't reproduce (ports mapped into the guest, allocations that
             // must land in guest IPA space) are added here as they are discovered.
             Stop::Syscall { num, args } if (num as i64) < 0 => {
+                // M18 Stage 2b: the semaphore pair must never reach here. Forwarding either is not
+                // whole-process-fatal the way forwarding the workq pair is, but it is
+                // whole-process-HANGING, which is just as fatal to a recording: both Stage 2a
+                // measurement runs blocked here forever and produced zero bytes of guest stdout.
+                //
+                // This guard's SHAPE is the one the workq pair uses on the generic BSD forward arm,
+                // but deliberately not its LOCATION: that arm is BSD-only and a negative trap
+                // number never reaches it (measurements doc §2, corrected in 60cea11). Negative
+                // traps are caught here, so the guard belongs here — and it sits BEFORE the
+                // forward, which is the whole point: after it, the process is already blocked and
+                // there is nothing left to assert from.
+                assert!(num != retrace_arch::MACH_SEMAPHORE_WAIT
+                     && num != retrace_arch::MACH_SEMAPHORE_SIGNAL,
+                    "M18 Stage 2b: mach semaphore trap {num:#x} reached the generic forward arm — \
+                     it must be serviced by its dedicated arm above (Box_::guest_sem_wait / \
+                     guest_sem_signal). Forwarding it blocks retrace's own process forever on a \
+                     semaphore only the guest's worker could signal. args={args:#x?}");
                 let (ret, err, writes) = b.forward_and_diff(num, args);
                 // Learn the guest's task-port name from task_self_trap (−28) so machmsg routing can
                 // recognize task-destined kernel RPCs. Mirrored on replay from the recorded result.

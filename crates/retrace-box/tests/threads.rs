@@ -1003,20 +1003,10 @@ fn workq_kernreturn_setup_dispatch_succeeds() {
     assert_eq!(rc, 0, "setup must report success or libdispatch abandons the workqueue");
 }
 
-/// The deliberate, self-imposed Stage 2a wall. `REQTHREADS` is where a worker would be built, and
-/// worker construction is Stage 2b — so this refuses BY NAME rather than returning a success the
-/// guest would then wait forever on. Refusing here is strictly better than the behaviour it
-/// replaces, which was handing the syscall to the host kernel and having the host spawn a real
-/// thread inside the recorder.
-#[test]
-#[should_panic(expected = "worker construction is Stage 2b")]
-fn workq_kernreturn_reqthreads_is_the_named_stage_2a_wall() {
-    let mut b = tb();
-    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
-    // The measured args vector, verbatim. args[3]=0x40008ff looks like a packed priority/QoS word
-    // and is Stage 2b's to decode.
-    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
-}
+// M18 Stage 2b t2 DELETED `workq_kernreturn_reqthreads_is_the_named_stage_2a_wall` here — a
+// `#[should_panic(expected = "worker construction is Stage 2b")]` on the wall this task removed.
+// Its successor is `workq_reqthreads_spawns_one_runnable_worker_at_the_registered_entry` below,
+// which asserts what replaced the wall rather than that the wall is still standing.
 
 /// The `guest_ulock_wake` posture: an operation word nobody measured is refused BY VALUE, so the
 /// panic tells the next reader exactly what to go measure. Asserting that the message names the
@@ -1027,4 +1017,137 @@ fn workq_kernreturn_refuses_an_unmeasured_opcode_by_value() {
     let mut b = tb();
     b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
     b.guest_workq_kernreturn([0xbeef, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/// M18 Stage 2b: REQTHREADS builds the worker libdispatch asked for. Before Stage 2b this panicked
+/// by design ("worker construction is Stage 2b"); that wall is now gone and this is what replaced it.
+#[test]
+fn workq_reqthreads_spawns_one_runnable_worker_at_the_registered_entry() {
+    let mut b = tb();
+    // bsdthread_register captures the wqthread entry pc (arg 1) and the pthread size (arg 2).
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    let before = b.threads().len();
+    // The measured REQTHREADS args vector, verbatim (M18 Task 6 / Stage 2a t10).
+    let rc = b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    assert_eq!(rc, 0, "libdispatch reads a failure as 'no workqueue at all'");
+    assert_eq!(b.threads().len(), before + 1, "exactly one worker, not zero and not two");
+    let w = before; // the new thread's index
+    assert_eq!(b.threads().state_of(w), ThreadState::Runnable,
+        "the worker must be runnable but NOT current — a switch here would reorder the guest's \
+         own output, the same argument ThreadTable::spawn already makes for bsdthread_create");
+    assert_eq!(b.threads().current(), 0, "REQTHREADS must not switch away from the caller");
+    assert_eq!(b.threads().ctx_of(w).regs.pc, 0x2222, "entered at the REGISTERED wqthread, not an invented pc");
+    assert_eq!(b.threads().ctx_of(w).elr, 0x2222,
+        "both pc and elr, for the reason guest_bsdthread_create's comment gives: the two resume \
+         paths read different registers");
+}
+
+/// The `wqthread` ENTRY CONTRACT, asserted register by register against Task 1's §1 table
+/// (`docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md`).
+///
+/// Not in the plan's sketch, and added anyway: §1 is the whole substance of this task, and the
+/// sketch's three tests check only the entry `pc`. A wrong `x2`, a wrong `TPIDRRO_EL0` or a set
+/// bit 23 would leave every one of them green while the worker either `brk`s on its first
+/// libpthread check or — worse, and §2c says so explicitly — corrupts the TSD *silently*.
+#[test]
+fn workq_reqthreads_seeds_the_measured_entry_contract() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    // PIN the creator's PSTATE before the request, for the reason
+    // `a_created_thread_resumes_with_the_creating_threads_el0_pstate` documents at length: `Box_::
+    // load` never writes SPSR_EL1, so without this the PSTATE assertion below compares HVF's reset
+    // value (0 in practice) against `ThreadCtx::zeroed()`'s 0 and passes whether the box seeds the
+    // PSTATE or not. `0x8000_03c4` is the same architecturally-legal EL0t+N value that test uses.
+    b.set_spsr(0x8000_03c4);
+    let creator_spsr = b.spsr();
+    assert_eq!(creator_spsr, 0x8000_03c4, "the pinned creator PSTATE must survive the write");
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    let c = b.threads().ctx_of(1).clone();
+
+    // §2c: "SP == x0, 7/7 entries that read it. The stack top *is* the struct base."
+    assert_eq!(c.regs.sp_el0, c.regs.x[0], "SP == x0 is measured, not a convention");
+    // §2c: the struct sits at the TOP of the region, the stack below it. `x0 > x2` is REQUIRED for
+    // [pthread+0xc8] (the size libpthread computes from them) to be sane.
+    assert!(c.regs.x[0] > c.regs.x[2], "x0 (struct) must sit above x2 (stack low)");
+    // §1c x1: the thread's mach port name, stored to pthread+0xf8 by __pthread_wqthread_setup and
+    // checked ~40 instructions later — 0 and -1 both `brk #0xb001`.
+    assert_ne!(c.regs.x[1], 0, "a zero kport brk's in __pthread_wqthread_setup");
+    assert_ne!(c.regs.x[1] as u32, u32::MAX, "-1 brk's there too");
+    // §1c x3/x5/x6/x7: the kernel supplies 0. x5 == 0 is load-bearing (-1 is the kill sentinel,
+    // `cmn w20, #0x1` -> __pthread_wqthread_exit); the rest are dead on the measured path.
+    assert_eq!((c.regs.x[3], c.regs.x[5], c.regs.x[6], c.regs.x[7]), (0, 0, 0, 0));
+    assert_eq!(c.regs.x[30], 0, "§1c: LR == 0, 7/7 — _start_wqthread's brk #0x1 is unreachable");
+    // §1d/§5 item 4: fresh flags are `0x244000 | qos_index`, and the guest's request 0x40008ff
+    // carries QoS bit 0x800 == 1<<11 => index 4. Bit 17 CLEAR selects the fresh path (which is what
+    // makes libpthread initialise its own struct); bit 23 must NOT be set — it is a different
+    // thread role, and §5 item 3 names setting it as the exact mistake to avoid.
+    assert_eq!(c.regs.x[4], 0x244004, "the extrapolated fresh-worker flags for this request");
+    assert_eq!(c.regs.x[4] & 0x20000, 0, "bit 17 clear == fresh: libpthread runs its own setup");
+    assert_eq!(c.regs.x[4] & 0x800000, 0, "bit 23 is a DIFFERENT thread role, never a worker");
+    // §2c / §1c: the kernel sets TPIDRRO_EL0, EL0 cannot. M14's offset, reconfirmed for a
+    // workqueue thread (3/3 thread kinds by host probe, and independently in _pthread_exit's
+    // `mrs x8, TPIDRRO_EL0; sub x0, x8, #0xe0`).
+    assert_eq!(c.tpidrro_el0, c.regs.x[0] + 0xe0, "TPIDRRO_EL0 = pthread + 0xe0");
+    // M14's lesson, inherited: PSTATE must be the creating thread's EL0 PSTATE, not zeroed()'s 0 —
+    // which is EL0t with DAIF clear, and looks like it works right up until the mask bits matter.
+    assert_eq!(c.regs.cpsr, creator_spsr, "the worker resumes under its creator's EL0 PSTATE");
+    assert_eq!(c.spsr, creator_spsr, "…and its saved SPSR must agree");
+}
+
+/// The `guest_workq_open` posture: refuse to build a worker with no registered entry point rather
+/// than invent one. Same failure mode M14 refused for bsdthread_create.
+#[test]
+#[should_panic(expected = "no registered wqthread")]
+fn workq_reqthreads_refuses_without_a_registered_entry_point() {
+    let mut b = tb();
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+}
+
+/// Determinism: the worker's stack and struct must land at the same IPAs on record and replay.
+/// Two boxes driven through an identical call sequence must agree — that IS the property, and it is
+/// what lets the whole worker half stay below the trace with nothing recorded.
+#[test]
+fn workq_reqthreads_allocates_deterministically() {
+    let sp = |b: &retrace_box::Box_, w: usize| b.threads().ctx_of(w).regs.sp_el0;
+    let mut a = tb();
+    a.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    a.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    let first = sp(&a, 1);
+    drop(a); // HVF: one VM per process, so the second box cannot coexist with the first.
+    let mut c = tb();
+    c.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    c.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    assert_eq!(sp(&c, 1), first, "identical call sequence must yield an identical worker stack IPA");
+    assert_ne!(first, 0, "a zero stack pointer would mean nothing was allocated");
+}
+
+/// `args[2]` is `numthreads` — MEASURED from `__pthread_workqueue_addthreads`' own `mov x2, x0`
+/// (Task 1 §5 item 5), which is why `guest_workq_reqthreads` loops over it instead of hardcoding
+/// the `1` every observed request happens to carry. A hardcoded 1 fails silently the first time a
+/// guest asks for two: libdispatch waits forever for work no worker was built to run.
+///
+/// The per-worker assertions are the point. **The kports must differ**, because
+/// `Box_::thread_of_port` resolves a port back to a thread by reading `[pthread + 0xf8]` out of
+/// guest memory and M16's signal delivery routes on the answer — two workers sharing a kport would
+/// misroute signals, which is a failure far away from its cause. **The stacks must not overlap**,
+/// or the second worker's `_start_wqthread` writes 16 bytes into the first worker's struct.
+#[test]
+fn workq_reqthreads_builds_numthreads_workers_each_with_its_own_stack_and_port() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    let before = b.threads().len();
+    b.guest_workq_kernreturn([0x20, 0x0, 0x2, 0x40008ff, 0x0, 0x20, 0, 0]);
+    assert_eq!(b.threads().len(), before + 2, "two requested, two built");
+
+    let (a, c) = (b.threads().ctx_of(before).clone(), b.threads().ctx_of(before + 1).clone());
+    assert_ne!(a.regs.x[1], c.regs.x[1], "each worker needs its OWN mach port name");
+    // Each worker's region is [x2, SP); disjointness is what keeps one worker's first stack write
+    // out of the other's pthread struct.
+    assert!(a.regs.sp_el0 <= c.regs.x[2] || c.regs.sp_el0 <= a.regs.x[2],
+        "worker stacks overlap: [{:#x},{:#x}) and [{:#x},{:#x})",
+        a.regs.x[2], a.regs.sp_el0, c.regs.x[2], c.regs.sp_el0);
+    // Both still enter at the registered wqthread with the same request-derived flags — the flags
+    // encode the REQUEST's QoS, which is a property of the request and not of the individual thread.
+    assert_eq!((a.regs.pc, c.regs.pc), (0x2222, 0x2222));
+    assert_eq!(a.regs.x[4], c.regs.x[4]);
 }
