@@ -1366,6 +1366,36 @@ fn sem_signal_with_nobody_parked_is_a_legal_no_op() {
     assert!(woken.is_empty());
 }
 
+/// **Two waiters on one port is refused BY VALUE, because `-33` wakes exactly ONE.**
+///
+/// Fix round 1. `unblock_sem_waiters_on` wakes every waiter on the port — the right shape for
+/// `_semaphore_signal_all_trap` (-34), which is a SEPARATE selector this box does not service and
+/// which `retrace_arch::is_mach_semaphore_trap` still refuses by name. Reached through `-33` with two
+/// threads parked, that shape over-wakes: the extra thread returns 0 from a wait it should still be
+/// blocked in, and does so SILENTLY, with record and replay agreeing with each other — the one
+/// failure class the divergence oracle cannot see, which is why this is an assert and not a comment.
+///
+/// No fixture in this tree parks two threads on one semaphore (`dispatch_dyn.c` has exactly one
+/// waiter), so nothing else would ever catch the day one does. That is the whole argument for the
+/// bound: it guards the case that is unreachable today and wrong tomorrow. Same posture as
+/// `ulock_wake_rejects_an_unmeasured_operation_word` and
+/// `workq_kernreturn_refuses_an_unmeasured_opcode_by_value` above.
+#[test]
+#[should_panic(expected = "wakes exactly ONE")]
+fn sem_signal_refuses_to_wake_more_than_one_waiter() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    // Main parks on the port, then the worker parks on the SAME port.
+    b.guest_sem_wait([0x1403, 0, 0, 0, 0, 0, 0, 0]);
+    b.switch_to_thread(1);
+    b.guest_sem_wait([0x1403, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
+    assert_eq!(b.threads().state_of(1), ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
+    // One `-33`. The plural wake belongs to `-34`, so this must name that rather than wake both.
+    b.guest_sem_signal([0x1403, 0, 0, 0, 0, 0, 0, 0]);
+}
+
 /// M18 Stage 2b: the worker's own park, `workq_kernreturn(0x4, 0, 0, 0)` — Task 1 §3d, measured
 /// from `__pthread_wqthread`'s `mov w0, #0x4` and confirmed live on the host as the last
 /// `workq_kernreturn` before exit.

@@ -4129,6 +4129,35 @@ impl Box_ {
     /// recomputes this identically from the same `(num, args)`.
     pub fn guest_sem_signal(&mut self, args: [u64; 8]) -> (u64, Vec<usize>) {
         let woken = self.threads.unblock_sem_waiters_on(args[0]);
+        // **`-33` wakes exactly ONE waiter; the plural case is a DIFFERENT TRAP.** Task 1 §3a read
+        // the whole family off libsystem_kernel's own stubs, and `-34` is `_semaphore_signal_all_trap`
+        // — a separate selector, still refused by `is_mach_semaphore_trap`'s guard because no run has
+        // ever issued it. `unblock_sem_waiters_on` wakes every waiter on the port, which is the right
+        // shape for that future `-34` arm and the WRONG one here the moment two threads park on one
+        // semaphore: the extra thread would return 0 from a wait it should still be blocked in, and
+        // it would do so silently, with record and replay agreeing.
+        //
+        // Refused BY VALUE rather than documented, matching this file's neighbours — `guest_ulock_wake`'s
+        // operation-word assert, `guest_workq_park`'s `(0,0,0)` assert, M17's `deliver_to.len() <= 1`.
+        // A sentence does not stop a wrong answer. No fixture in this tree parks two threads on one
+        // port, which is exactly why the bound has to be here rather than left to a future reader.
+        //
+        // Placed in the box, BELOW the trace, deliberately: both dispatch loops reach it through the
+        // same call, so it is symmetric by construction and there is no second site to keep in step.
+        //
+        // What servicing the plural case owes first: an arm for `-34` in both loops, a decision on
+        // whether `-33` should wake the LONGEST-parked waiter rather than the lowest-indexed one
+        // (`unblock_sem_waiters_on` imposes table order, which is arbitrary once there are two), and
+        // a guest that measures either.
+        assert!(woken.len() <= 1,
+            "semaphore_signal_trap (-33) on port {:#x} found {} waiters parked ({woken:?}), but \
+             -33 wakes exactly ONE. Waking all of them is _semaphore_signal_all_trap (-34), a \
+             separate trap this box does not service — it is still refused by name by \
+             retrace_arch::is_mach_semaphore_trap. Servicing the plural case owes a -34 arm in \
+             BOTH dispatch loops and a measured answer to WHICH waiter -33 wakes when several are \
+             parked; table order is arbitrary. Measure a guest that parks two threads on one \
+             semaphore before modelling this.",
+            args[0], woken.len());
         (0, woken)
     }
 

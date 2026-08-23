@@ -371,6 +371,13 @@ impl ThreadTable {
     /// freely whether or not anyone is parked on it — and the semaphore signal's FAST path issues
     /// **no trap at all** (Task 1 §5 item 7: it is a pure atomic increment, and only the slow path,
     /// which has a waiter, traps), so "woke nobody" is never evidence of a lost wake.
+    ///
+    /// **Waking ALL waiters is this function's contract, and its `-33` caller assumes there is at
+    /// most one.** `semaphore_signal_trap` (-33) wakes exactly one waiter; the wake-everybody
+    /// selector is `_semaphore_signal_all_trap` (-34), a separate trap no run has issued. The
+    /// all-waiters shape here is kept because it is what a future `-34` arm needs; the single-waiter
+    /// assumption is enforced BY VALUE in `Box_::guest_sem_signal`, which asserts `woken.len() <= 1`
+    /// rather than trusting that no guest ever parks two threads on one port.
     pub fn unblock_sem_waiters_on(&mut self, port: u64) -> Vec<usize> {
         let mut woken = Vec::new();
         for (tid, t) in self.threads.iter_mut().enumerate() {
