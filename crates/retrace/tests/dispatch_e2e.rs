@@ -49,9 +49,11 @@ fn a_dispatch_async_guest_records_and_replays() {
     // discipline exists to prevent.
     //
     // Record the guest through real dyld, replay it, and replay it again — same harness shape as
-    // `thread_rust_e2e.rs`. Today this fails at the wall named in the #[ignore] reason above: the
-    // record run stops at retrace's own deliberate REQTHREADS panic, having written no guest stdout
-    // at all — the first assertion below is what catches it. It must stay an assertion about what
+    // `thread_rust_e2e.rs`. Today this fails at the wall named in the #[ignore] reason above, which
+    // is the primary record of where that wall is: since Stage 2b t2 the record run gets a worker
+    // built and stops one trap later, at retrace's own fail-loud refusal to forward the mach
+    // semaphore wait, still having written no guest stdout at all — the first assertion below is
+    // what catches it. It must stay an assertion about what
     // the guest PRINTED: before Stage 2a the same body failed the same way on a completely
     // different cause (a SIGSEGV taken by retrace itself on a host workqueue worker thread, exit
     // 139), and 139 is also what `crashy_e2e` asserts for an uncaught GUEST fault — which is

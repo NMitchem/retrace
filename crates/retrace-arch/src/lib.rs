@@ -283,6 +283,30 @@ pub const MACH_SEMAPHORE_WAIT: u64 = (-36i64) as u64;
 /// no landmark: the park/wake seam must not assume a signal trap always appears. Return `0`.
 pub const MACH_SEMAPHORE_SIGNAL: u64 = (-33i64) as u64;
 
+/// Is `num` any of the seven mach semaphore traps? Task 1 §3a read the whole contiguous family off
+/// libsystem_kernel's own stubs on this machine, so the bound is measured rather than assumed:
+///
+/// | selector | stub | | selector | stub |
+/// |---|---|---|---|---|
+/// | `-33` | `_semaphore_signal_trap` | | `-37` | `_semaphore_wait_signal_trap` |
+/// | `-34` | `_semaphore_signal_all_trap` | | `-38` | `_semaphore_timedwait_trap` |
+/// | `-35` | `_semaphore_signal_thread_trap` | | `-39` | `_semaphore_timedwait_signal_trap` |
+/// | `-36` | `_semaphore_wait_trap` | | | |
+///
+/// The neighbours pin both ends: `-32` is `_mach_msg_overwrite_trap` and `-40` is not a semaphore
+/// stub, so the family is exactly `-39..=-33`.
+///
+/// **The guard covers all seven, not just the two libdispatch's measured path uses** (fix round 1,
+/// finding 5). Only `-36` has ever been observed in a retrace trace and only `-33` is known to be
+/// reachable from `_dispatch_sema4_signal`, but every one of the other five would reach
+/// `forward_and_diff` and block retrace's own process on a semaphore only the guest could signal —
+/// the identical hazard, and a hang is expensive to diagnose precisely because it produces no
+/// output to diagnose it with. Guarding by family costs nothing and makes the refusal name the
+/// trap that got there.
+pub fn is_mach_semaphore_trap(num: u64) -> bool {
+    (-39..=-33).contains(&(num as i64))
+}
+
 /// `NSIG` from `sys/signal.h:76` — "counting 0; could be 33 (mask is 1-32)". Signal numbers run
 /// 1..=31 in the table; index 0 is unused so indexing mirrors signal numbering.
 pub const NSIG: usize = 32;

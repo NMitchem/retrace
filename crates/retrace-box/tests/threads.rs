@@ -1141,13 +1141,97 @@ fn workq_reqthreads_builds_numthreads_workers_each_with_its_own_stack_and_port()
 
     let (a, c) = (b.threads().ctx_of(before).clone(), b.threads().ctx_of(before + 1).clone());
     assert_ne!(a.regs.x[1], c.regs.x[1], "each worker needs its OWN mach port name");
-    // Each worker's region is [x2, SP); disjointness is what keeps one worker's first stack write
-    // out of the other's pthread struct.
-    assert!(a.regs.sp_el0 <= c.regs.x[2] || c.regs.sp_el0 <= a.regs.x[2],
-        "worker stacks overlap: [{:#x},{:#x}) and [{:#x},{:#x})",
-        a.regs.x[2], a.regs.sp_el0, c.regs.x[2], c.regs.sp_el0);
+    // Fix round 1, finding 6: compare WHOLE regions — `[x2, x0 + pthsize)`, stack AND struct — not
+    // stack against stack. The hazard this test names is one worker's stack writes landing in the
+    // OTHER worker's pthread struct, and `[x2, SP)` excludes the struct entirely (SP == x0 is the
+    // struct base), so the old stack-vs-stack comparison could not have caught it.
+    const PTHSIZE: u64 = 0x3333; // the size handed to bsdthread_register above
+    let region = |c: &ThreadCtx| (c.regs.x[2], c.regs.x[0] + PTHSIZE);
+    let ((a_lo, a_hi), (c_lo, c_hi)) = (region(&a), region(&c));
+    assert!(a_hi <= c_lo || c_hi <= a_lo,
+        "worker regions overlap: [{a_lo:#x},{a_hi:#x}) and [{c_lo:#x},{c_hi:#x})");
     // Both still enter at the registered wqthread with the same request-derived flags — the flags
     // encode the REQUEST's QoS, which is a property of the request and not of the individual thread.
     assert_eq!((a.regs.pc, c.regs.pc), (0x2222, 0x2222));
     assert_eq!(a.regs.x[4], c.regs.x[4]);
+}
+
+/// Fix round 1, Important 1: the guard page below each worker's stack must be a page
+/// `commit_reserved_page` **refuses**, not the tail of the neighbouring reservation.
+///
+/// Without `place_worker_stack`'s one-granule bump, `guest_vm_reserve` hands out `mmap_next`
+/// contiguously, so `[x2 - GRANULE, x2)` is the last page of whatever precedes it — for worker 2
+/// that is worker 1's pthread struct page, which sits inside a tracked reservation and therefore
+/// demand-commits on first touch. A worker-2 stack overrun would corrupt worker 1's struct in
+/// silence, which is exactly what a guard page exists to prevent.
+///
+/// Two workers, because the cross-worker case is the one that was wrong. The positive control is
+/// what makes the refusals mean something: if `commit_reserved_page` refused every address here,
+/// three `assert!(!...)` lines would pass while proving nothing.
+#[test]
+fn workq_reqthreads_leaves_an_uncommittable_guard_page_below_each_worker_stack() {
+    const GRANULE: u64 = 0x4000;
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 0x2, 0x40008ff, 0x0, 0x20, 0, 0]);
+    let (w1, w2) = (b.threads().ctx_of(1).regs.x[2], b.threads().ctx_of(2).regs.x[2]);
+
+    // NON-VACUITY FIRST, before anything is committed: the stacks themselves must be committable,
+    // or "refused" below would just mean "nothing here is reachable at all".
+    assert!(b.commit_reserved_page(w1), "worker 1's stack must be inside a tracked reservation");
+    assert!(b.commit_reserved_page(w2), "worker 2's stack must be inside a tracked reservation");
+
+    // The guard pages themselves. Worker 2's is the one the review caught: it abuts worker 1's
+    // reservation, so it is the page that used to be silently backable.
+    assert!(!b.commit_reserved_page(w1 - GRANULE),
+        "worker 1's guard page at {:#x} must not be demand-committable", w1 - GRANULE);
+    assert!(!b.commit_reserved_page(w2 - GRANULE),
+        "worker 2's guard page at {:#x} must not be demand-committable — it abuts worker 1's \
+         reservation, and backing it is how a worker-2 stack overrun would silently land in \
+         worker 1's pthread struct", w2 - GRANULE);
+}
+
+/// The three fail-loud guards `guest_workq_reqthreads` added, pinned the way
+/// `workq_kernreturn_refuses_an_unmeasured_opcode_by_value` pins its own refuse-by-value posture:
+/// the panic must NAME the offending value, or it tells the next reader nothing.
+///
+/// The QoS range guard is the one that matters most, and it is not defensive coding. §1d measured
+/// that libpthread does NOT fail on an out-of-range index — `0x2e34 cmp w9,#5; csel ... hi`
+/// silently discards the priority and leaves the worker at 0 — so this assert is the only thing in
+/// the system that would ever surface it.
+#[test]
+#[should_panic(expected = "not a single set bit")]
+fn workq_reqthreads_refuses_a_qos_byte_that_is_not_one_bit() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    // 0x0300 is two QoS bits at once — no measured request carries more than one.
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40003ff, 0x0, 0x20, 0, 0]);
+}
+
+#[test]
+#[should_panic(expected = "QoS index 7")]
+fn workq_reqthreads_refuses_a_qos_index_libpthread_would_silently_drop() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    // Byte 0x40 == 1<<6 => index 7, one past the 1..=6 libpthread's `cmp w9,#5` accepts.
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40040ff, 0x0, 0x20, 0, 0]);
+}
+
+#[test]
+#[should_panic(expected = "REQTHREADS for 0 threads")]
+fn workq_reqthreads_refuses_a_request_for_no_threads() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 0x0, 0x40008ff, 0x0, 0x20, 0, 0]);
+}
+
+/// The ceiling half of the same guard. `WQ_MAX_WORKERS_PER_REQUEST` is retrace's own sanity bound,
+/// not a measurement — its job is to turn a misread `args[2]` into a named refusal instead of tens
+/// of megabytes of silently reserved IPA space.
+#[test]
+#[should_panic(expected = "REQTHREADS for 65 threads")]
+fn workq_reqthreads_refuses_a_count_past_the_sanity_ceiling() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 65, 0x40008ff, 0x0, 0x20, 0, 0]);
 }

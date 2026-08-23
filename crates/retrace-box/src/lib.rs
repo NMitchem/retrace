@@ -547,6 +547,15 @@ const WQ_WORKER_STACK_SIZE: u64 = 0x8_0000;
 ///   entirely. Task 1 §5 item 3 names setting it as the precise mistake to avoid.
 const WQ_ENTRY_FLAGS_FRESH: u64 = 0x24_4000;
 
+/// Ceiling on the `numthreads` a single `REQTHREADS` may ask for. **Not a measurement** — like
+/// `WQ_WORKER_STACK_SIZE` this is retrace's own number, and it exists only so that a garbage
+/// `args[2]` becomes a named refusal instead of `N` × half a megabyte of silently reserved IPA
+/// space. Every observed request asks for exactly `1` (M18 Task 6 / Stage 2a t10), and libdispatch
+/// asks incrementally, so a request anywhere near this bound means the box's reading of `args[2]`
+/// is wrong rather than that the guest wants that many workers — which is precisely what a
+/// fail-loud ceiling is for. Raise it with a measurement, not with a guess.
+const WQ_MAX_WORKERS_PER_REQUEST: u64 = 64;
+
 #[derive(Debug)]
 pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, far: u64 }, Other { esr: u64 }, Step }
 
@@ -3474,10 +3483,12 @@ impl Box_ {
              bsdthread_register that captures the entry point, so this cannot happen without the \
              assert above firing first.") as u64;
         let count = args[2];
-        assert!(count >= 1,
-            "M18 Stage 2b: REQTHREADS for {count} threads. `args[2]` is numthreads (§5 item 5) and \
-             a request for none is meaningless — libdispatch would then wait forever on work no \
-             worker was built to run. args={args:#x?}");
+        assert!((1..=WQ_MAX_WORKERS_PER_REQUEST).contains(&count),
+            "M18 Stage 2b: REQTHREADS for {count} threads, outside 1..={WQ_MAX_WORKERS_PER_REQUEST}. \
+             `args[2]` is numthreads (§5 item 5). Zero is meaningless — libdispatch would wait \
+             forever on work no worker was built to run — and anything near the ceiling means this \
+             box is reading the wrong argument, not that the guest wants that many workers; each \
+             one costs a stack reservation. Every observed request asks for 1. args={args:#x?}");
         // The flags word is the same for every worker in one request: it encodes the request's own
         // QoS, and `args[3]` is a property of the request, not of the individual thread.
         let flags = WQ_ENTRY_FLAGS_FRESH | Self::wq_qos_index(args[3]);
@@ -3576,9 +3587,25 @@ impl Box_ {
     /// - the struct memory must read as **zero** — `__pthread_wqthread_setup` does read-modify-write
     ///   on `ldrb w11,[x0,#0x31]` and `ldrh w9,[x0,#0x4e]` before storing them back;
     /// - the guard page libpthread records at `pthread+0xc0` is `[x2 - vm_page_size, x2)`. It only
-    ///   *records* it — it neither maps nor checks it — and leaving that page outside the
-    ///   reservation makes it a genuine guard: nothing can demand-commit it, so a stack overrun
-    ///   faults fatally instead of being silently backed.
+    ///   *records* that address — it neither maps nor checks it — so if this page is to guard
+    ///   anything, **the guard is retrace's, not libpthread's.**
+    ///
+    /// **The one-granule bump is what makes the guard page real** (fix round 1, Important 1).
+    /// `guest_vm_reserve` hands out `mmap_next` and advances it CONTIGUOUSLY, so without the bump
+    /// `[x2 - GRANULE, x2)` is the last page of whatever reservation precedes it — for the second
+    /// worker of a `numthreads=2` request, that is the FIRST worker's pthread struct page, and
+    /// `commit_reserved_page` would back it on first touch because it lies inside a tracked
+    /// reservation. A worker-2 stack overrun would then corrupt worker 1's struct in silence. With
+    /// the bump the page falls in a hole no reservation covers, so `commit_reserved_page` returns
+    /// `false` for it and the access stays a fatal stage-2 fault — which is the whole point: an
+    /// overrun that faults is a bug you can find.
+    ///
+    /// That hole is a gap, not a claim on the address space: nothing marks it forbidden, so a later
+    /// ANYWHERE-with-hint placement (`first_fit`) could still fit a small mapping into it, after
+    /// which an overrun would land in that mapping instead. What the bump guarantees is the case
+    /// that was actually silent — demand-commit — and `retrace-box/tests/threads.rs`'s
+    /// `workq_reqthreads_leaves_an_uncommittable_guard_page_below_each_worker_stack` pins exactly
+    /// that, refusal and non-vacuous positive control both.
     ///
     /// **A reservation, not an `mmap`.** `guest_vm_reserve` is bookkeeping only, and each page is
     /// demand-committed with a fresh zeroed anon page on first touch by `commit_reserved_page` —
@@ -3590,6 +3617,9 @@ impl Box_ {
     /// Deterministic: `guest_vm_reserve(.., anywhere)` hands out `mmap_next` and advances it, so
     /// an identical call sequence places an identical worker on record and on replay.
     fn place_worker_stack(&mut self, pthsize: u64) -> (u64, u64, u64) {
+        // Skip one granule so the guard page below `x2` lands in a hole no reservation covers.
+        // Deterministic like everything else here: a fixed bump of the same cursor.
+        self.mmap_next += GRANULE as u64;
         let base = self.guest_vm_reserve(0, WQ_WORKER_STACK_SIZE + pthsize, true);
         let pthread = base + WQ_WORKER_STACK_SIZE;
         (base, pthread, pthread)
