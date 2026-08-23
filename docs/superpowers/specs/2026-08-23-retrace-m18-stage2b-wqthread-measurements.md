@@ -67,18 +67,37 @@ this host (`vm_page_size = 0x4000`, printed by the host probe).
 
 ### The host probes
 
-Two throwaway probes were built and run; neither is committed (they live in this session's scratch
-directory, in the spirit of `spikes/`). Both are reproduced in full in §6 so every number below can
-be regenerated.
+Four throwaway probes were built and run; none is committed (they live in this session's scratch
+directory, in the spirit of `spikes/`). **§6 reproduces each one's source and lldb script verbatim
+as they were on disk, so every number below can be regenerated** — the sources there are the actual
+files, not retyped summaries of them.
 
 - `wqprobe.c` — dumps `pthread_self()`, `TPIDRRO_EL0`, `sp`, `pthread_get_stackaddr_np`,
   `pthread_get_stacksize_np`, `mach_thread_self()` and the raw struct words at the offsets
   `__pthread_wqthread_setup` writes, for **three** thread kinds: `main`, a `pthread_create` thread,
   and a libdispatch worker.
-- `qosprobe.c` / `dispatch_host.c` — run under `lldb` with breakpoints on `__workq_kernreturn` and
-  `start_wqthread`, to capture the `(REQTHREADS request → wqthread entry registers)` pairs.
-  `dispatch_host.c` is a byte-identical copy of the actual guest,
-  `crates/retrace-guest/c/dispatch_dyn.c`.
+- `dispatch_host.c` — a byte-identical copy of the actual guest,
+  `crates/retrace-guest/c/dispatch_dyn.c`, run under `lldb`.
+- `qosprobe.c` — five global queues at different QoS, to capture
+  `(REQTHREADS request → wqthread entry registers)` pairs.
+- `qos2.c` — the same, for `QOS_CLASS_DEFAULT` alone.
+
+### The observation ledger
+
+Because several counts below are "n/n", here is exactly where every live `start_wqthread` entry came
+from. **Five lldb runs, 13 entries.**
+
+| run | binary | lldb script | entries | registers read at entry |
+|---|---|---|---|---|
+| A | `wqprobe` | ad-hoc `-o` flags (§6) | 1 | `x0`–`x7`, `sp`, `pc`, `lr` |
+| B | `dispatch_host` | `cmds.txt` | 1 | `x0`–`x5`, `sp`, `lr` |
+| C | `qosprobe` | `cmds2.txt` | 5 | `x0`, `x2`, `x4` (+ `x0`, `x3` at `__workq_kernreturn`) |
+| D | `qosprobe` | `cmds3.txt` | 5 | `x0`–`x7`, `sp`, `lr` |
+| E | `qos2` | `cmds2.txt` | 1 | `x0`, `x2`, `x4` (+ `x0`, `x3` at `__workq_kernreturn`) |
+
+So the denominators are: **7/7** for anything involving `sp`/`lr`/`x3`/`x5` (runs A, B, D);
+**6/6** for `x6`/`x7` (runs A, D — run B's script does not read them); **13/13** for `x4`; and
+**7 `(request → flags)` pairs** across **6 distinct queue configurations** (runs B, C, E).
 
 ---
 
@@ -138,7 +157,9 @@ load-bearing, and `__pthread_wqthread_setup`'s body (§1c, §4) is where they la
 ### 1c. Where each register ends up
 
 Live capture, first instruction of `start_wqthread`, on the real guest program compiled for the host
-(`dispatch_host.c` == `crates/retrace-guest/c/dispatch_dyn.c`):
+(`dispatch_host.c` == `crates/retrace-guest/c/dispatch_dyn.c`) — **run B**, quoted exactly as `lldb`
+printed it. `cmds.txt` reads `x0`–`x5`, `sp`, `lr` and no more, so `x6`/`x7` are absent here by
+construction:
 
 ```sh
 lldb -b -s cmds.txt ./dispatch_host        # cmds.txt in §6
@@ -146,6 +167,23 @@ lldb -b -s cmds.txt ./dispatch_host        # cmds.txt in §6
 ```
       x0 = 0x000000016fe87000
       x1 = 0x0000000000000e03
+      x2 = 0x000000016fe04000
+      x3 = 0x0000000000000000
+      x4 = 0x0000000000244005
+      x5 = 0x0000000000000000
+      sp = 0x000000016fe87000
+      lr = 0x0000000000000000
+```
+
+`x6`/`x7` come from the runs whose script does read them — **run D**, first of its five entries,
+again verbatim:
+
+```sh
+lldb -b -s cmds3.txt ./qosprobe             # cmds3.txt in §6
+```
+```
+      x0 = 0x000000016fe87000
+      x1 = 0x0000000000001b03
       x2 = 0x000000016fe04000
       x3 = 0x0000000000000000
       x4 = 0x0000000000244005
@@ -161,14 +199,14 @@ lldb -b -s cmds.txt ./dispatch_host        # cmds.txt in §6
 | reg | value observed | first instruction that READS it | what it is used for |
 |---|---|---|---|
 | `x0` | `0x16fe87000` | `0x2dbc mov x19, x0` | **the pthread struct pointer.** Everything writes through `x19`: `strb wzr,[x19,#0xa4]`, `str x9,[x19,#0x100]`, `stp x8,x0,[x19,#0x90]`, `ldrsw x8,[x19,#0xac]`, and `mov x0,x19; bl __pthread_wqthread_exit`. |
-| `x1` | `0xe03` | `0x302c str w1, [x0, #0xf8]` (inside `__pthread_wqthread_setup`) | **the thread's mach port name**, stored to `pthread + 0xf8` — the same offset M14 measured for a `bsdthread_create` child. Checked immediately afterwards; `0` or `-1` is fatal (§4). |
+| `x1` | `0xe03` | `0x302c str w1, [x0, #0xf8]` (inside `__pthread_wqthread_setup`) | **the thread's mach port name**, stored to `pthread + 0xf8` — the same offset M14 measured for a `bsdthread_create` child. Checked later in the same routine (at `0x30c8`, ~40 instructions on, past `___thread_selfid`, the unfair lock and the thread-list link); `0` or `-1` is fatal (§4). |
 | `x2` | `0x16fe04000` | `0x2fe0 sub x10, x2, x10` / `0x2ff0 stp x0, x2, [x0, #0xb0]` (inside setup) | **the low end of the stack region.** Stored to `pthread + 0xb8`; the guard-page base `x2 - vm_page_size` is stored to `pthread + 0xc0`. See §2. |
-| `x3` | `0x0` | `0x2db8 mov x21, x3`, consumed only at `0x2e94 sub x0, x21, #0x8` (flags bit 22) and `0x2edc str x21,[x22,#0x98]!` (flags bit 19) | **the kevent / workloop event list.** On the measured flags neither branch is taken, so **`x3` is never read on the path a plain `dispatch_async` worker takes.** Observed `0` in 6/6 entries. |
+| `x3` | `0x0` | `0x2db8 mov x21, x3`, consumed only at `0x2e94 sub x0, x21, #0x8` (flags bit 22) and `0x2edc str x21,[x22,#0x98]!` (flags bit 19) | **the kevent / workloop event list.** On the measured flags neither branch is taken, so **`x3` is never read on the path a plain `dispatch_async` worker takes.** Observed `0` in 7/7 entries that read it (runs A, B, D). |
 | `x4` | `0x244005` | `0x2dc0 tbnz w4, #0x11` | **the flags word.** It selects fresh-vs-reused, asserts the kernel set the TSD base, and *encodes the worker's QoS*. Decoded in §1d. |
-| `x5` | `0x0` | `0x2db0 mov x20, x5`, tested at `0x2e44 cmn w20, #0x1` | **the event count**, and the **kill sentinel**: `w5 == -1` branches to `__pthread_wqthread_exit`. Otherwise stored into the event block on the bits-22/19 paths only. Observed `0` in 6/6 entries. |
-| `x6`, `x7` | `0x0` | — | **never read.** |
-| `SP` | `0x16fe87000` | `0x1c08 stp xzr, xzr, [sp, #-0x10]!` | **MEASURED `SP == x0` exactly, 6/6 observations** across two programs and five different QoS classes. The stack top *is* the struct base. |
-| `LR` | `0x0` | — | **MEASURED `0`, 6/6.** `_start_wqthread`'s `brk #0x1` is the only return target and is unreachable. |
+| `x5` | `0x0` | `0x2db0 mov x20, x5`, tested at `0x2e44 cmn w20, #0x1` | **the event count**, and the **kill sentinel**: `w5 == -1` branches to `__pthread_wqthread_exit`. Otherwise stored into the event block on the bits-22/19 paths only. Observed `0` in 7/7 entries that read it (runs A, B, D). |
+| `x6`, `x7` | `0x0` | — | **never read.** Observed `0` in 6/6 entries that read them (runs A, D). |
+| `SP` | `0x16fe87000` | `0x1c08 stp xzr, xzr, [sp, #-0x10]!` | **MEASURED `SP == x0` exactly, 7/7 entries that read it** (runs A, B, D) across three programs and five QoS classes. The stack top *is* the struct base. |
+| `LR` | `0x0` | — | **MEASURED `0`, 7/7 entries that read it** (runs A, B, D). `_start_wqthread`'s `brk #0x1` is the only return target and is unreachable. |
 
 Answering the design spec's **open question 1** (does the entry contract read a kevent list, and does
 the fresh path accept it empty): **yes, `x3`/`x5` are that list and its count, and no — on the fresh
@@ -189,7 +227,7 @@ Every bit below is **MEASURED** — either a `tbnz`/`tbz` in the disassembly, or
 | 16 | `0x10000` | `0x2de4 lsr w9, w22, #16; 0x2de8 bfi w8, w9, #31, #1` | copied into `priority` bit 31 (the request's `0x80000000`). Set only in the overcommit observation. |
 | 15 | `0x8000` | `0x2df0 tbz w22, #0xf, 0x2f50` | if **both** 14 and 15 are clear ⇒ `__pthread_wqthread.cold.1`, `"BUG IN LIBPTHREAD: Missing priority"`, `brk #0xb001`. |
 | 14 | `0x4000` | `0x2dec tbnz w22, #0xe, 0x2e18` | **the QoS-index encoding.** SET in every observation. See the arithmetic below. |
-| 18 | `0x40000` | *(nothing on this path tests it)* | SET in every observation, **read by nothing `__pthread_wqthread` executes.** |
+| 18 | `0x40000` | *(nothing on this path tests it)* | SET in **13/13** entries, **read by nothing `__pthread_wqthread` executes.** |
 | 7:0 | `0xff` | `0x2e18`–`0x2e38` | the **QoS index**. Must be in `1..=6` (see the guard below). |
 
 The bit-14 arithmetic, verbatim, because Task 2 must reproduce its inverse:
@@ -209,7 +247,10 @@ The bit-14 arithmetic, verbatim, because Task 2 must reproduce its inverse:
 ```
 
 i.e. `priority = (1 << ((flags + 7) & 31)) | 0xff`, applied **only when `1 <= (flags & 0xff) <= 6`**
-(the `csel ... hi` discards it otherwise, leaving priority `0`). The result is stored at
+(the `csel ... hi` discards it otherwise, leaving priority `0`). That closed form is exact **only with
+flags bits 16/19/20 clear** — `0x2e2c add w10, w8, w10` accumulates into `w8`, which those three bits
+have already contributed to (bit 16 -> prio 31, bit 19 -> prio 24, bit 20 -> prio 25). All three are
+clear in the fresh-worker flags this document recommends. The result is stored at
 `pthread + 0x100` and, on the plain worker path, passed to the dispatch callback in `x0`:
 
 ```
@@ -236,31 +277,36 @@ the **IA key, zero modifier**.
 
 ### 1e. The measured `(request → entry flags)` map
 
-Captured by breaking on `__workq_kernreturn` and `start_wqthread` in the same run (`qosprobe`, §6):
+Captured by breaking on `__workq_kernreturn` and `start_wqthread` in the same run — **seven pairs
+across six distinct queue configurations**, from runs B, C and E of the ledger in §0:
 
-| REQTHREADS `x3` (priority) | entry `x4` (flags) | struct `x0` | fresh? |
-|---|---|---|---|
-| `0x000010ff` | `0x244005` | `0x16fe87000` | fresh (bit 17 clear, bit 21 set) |
-| `0x000002ff` | `0x064002` | `0x16fe87000` | reused (bit 17 set) |
-| `0x000004ff` | `0x244003` | `0x16ff13000` | fresh |
-| `0x000010ff` | `0x064005` | `0x16ff13000` | reused |
-| `0x800010ff` | `0x074005` | `0x16ff13000` | reused, + bit 16 |
+| run | queue configuration | REQTHREADS `x3` (priority) | entry `x4` (flags) | struct `x0` | fresh? |
+|---|---|---|---|---|---|
+| C | legacy `DISPATCH_QUEUE_PRIORITY_DEFAULT` | `0x000010ff` | `0x244005` | `0x16fe87000` | fresh (bit 17 clear, bit 21 set) |
+| C | `QOS_CLASS_BACKGROUND` | `0x000002ff` | `0x064002` | `0x16fe87000` | reused (bit 17 set) |
+| C | `QOS_CLASS_UTILITY` | `0x000004ff` | `0x244003` | `0x16ff13000` | fresh |
+| C | `QOS_CLASS_USER_INITIATED` | `0x000010ff` | `0x064005` | `0x16ff13000` | reused |
+| C | `QOS_CLASS_DEFAULT` + overcommit | `0x800010ff` | `0x074005` | `0x16ff13000` | reused, + bit 16 |
+| E | `QOS_CLASS_DEFAULT` | `0x000010ff` | `0x244005` | `0x16fe87000` | fresh |
+| B | legacy `DISPATCH_QUEUE_PRIORITY_DEFAULT` (the guest's own source) | `0x000010ff` | `0x244005` | `0x16fe87000` | fresh |
 
-**MEASURED:** every **fresh** entry has flags of the exact form `0x244000 | qos_index`, twice, with
+Rows B and E are independent runs of different programs; they duplicate row C-1's values rather than
+adding new configurations, which is itself the reproducibility check.
+
+**MEASURED:** every **fresh** entry has flags of the exact form `0x244000 | qos_index` — three
+observations, two distinct indices — with
 `qos_index` the inverse of the arithmetic above (`0x10ff` → bit 12 → index 5; `0x04ff` → bit 10 →
 index 3). Every **reused** entry has `0x064000 | qos_index` (bit 17 in place of bit 21), plus bit 16
 when the request carried `0x80000000`.
 
 **The guest's own request is `0x040008ff`** (Stage 2a `args[3]`), whose QoS bit is `0x800` = `1<<11`
-⇒ index **4**, predicting fresh flags `0x244004`.
+⇒ index **4**, predicting fresh flags **`0x244004`** — **unverified; see the blockquote below**.
 
-> **UNVERIFIED: no live `(request → flags)` pair was captured for `0x040008ff`.** Six queue
-> configurations were tried and none reproduced it — the host's main thread carries a real QoS, and
-> legacy `DISPATCH_QUEUE_PRIORITY_DEFAULT`, `QOS_CLASS_DEFAULT`, `QOS_CLASS_BACKGROUND`,
-> `QOS_CLASS_UTILITY`, `QOS_CLASS_USER_INITIATED` and `QOS_CLASS_DEFAULT`+overcommit produced
-> `0x10ff` / `0x10ff` / `0x02ff` / `0x04ff` / `0x10ff` / `0x800010ff` instead. `0x244004` is an
-> **extrapolation** from two measured points of the `0x244000 | n` form plus the measured
-> arithmetic — not an observation.
+> **UNVERIFIED: no live `(request → flags)` pair was captured for `0x040008ff`.** The six queue
+> configurations in the table above are every configuration tried, and none reproduced it — the
+> host's main thread carries a real QoS, so the requests came out `0x10ff` / `0x02ff` / `0x04ff` /
+> `0x10ff` / `0x800010ff` / `0x10ff` instead. **`0x244004`** is an **extrapolation** from the
+> measured points of the `0x244000 | n` form plus the measured arithmetic — not an observation.
 
 One measured fact that *reduces* the risk in that extrapolation: **the `0x04000000` bit in the
 request cannot survive to the worker on this path at all.** `__pthread_wqthread` reconstructs the
@@ -281,7 +327,9 @@ callback. Its `0x04000000` bit must be **dropped**, per the paragraph above.
 
 ### 2a. Struct-relative facts, from the host probe
 
-`wqprobe` output, worker-thread stanza (full output in §6):
+`wqprobe` output, worker-thread stanza — **an excerpt**: the `sp`, `mach_thread_self()`,
+`[pthread+0x000]`, `+0x048`, `+0x0a4`, `+0x0a6`, `+0x0ac`, `+0x0d8`, `+0x0e8` and `+0x118` lines are
+elided here and appear in §6's unabridged copy.
 
 ```
 === dispatch worker (workqueue) thread ===
@@ -373,8 +421,8 @@ struct's own size constant is `0x18e0`, page-rounded to `0x4000` — which is pr
 | struct alignment | **not page-aligned in the observation** (`0x16b61b000 & 0x3fff = 0x3000`); the code page-rounds it itself. Retrace may page-align it; nothing measured forbids either. |
 | stack region | `[x2, x0)`. Host-observed size `0x83000` (524 KiB). **The size is retrace's choice — nothing in the entry path requires a particular value.** |
 | guard page | `[x2 - vm_page_size, x2)`. libpthread only *records* its base at `pthread+0xc0`; it does not map or check it. Retrace need not make it `PROT_NONE` for the entry path to work. |
-| `SP` at entry | **`SP == x0`, 6/6.** `_start_wqthread` immediately writes 16 bytes at `SP-0x10`, so `[x0-0x10, x0)` must be writable stack. |
-| `TPIDRRO_EL0` | **`= pthread + 0xe0`.** Not optional: EL0 cannot write `TPIDRRO_EL0`, so the *kernel* must set it, and libpthread `brk`s if flags bit 21 claims it was set and it was not (§4). |
+| `SP` at entry | **`SP == x0`, 7/7 entries that read it** (§0 ledger). `_start_wqthread` immediately writes 16 bytes at `SP-0x10`, so `[x0-0x10, x0)` must be writable stack. |
+| `TPIDRRO_EL0` | **`= pthread + 0xe0`.** Not optional: EL0 cannot write `TPIDRRO_EL0`, so the *kernel* must set it. **The guard is weaker than it looks: libpthread `brk`s only when flags bit 21 is CLEAR** (`0x3048 tbz w3, #0x15`) — it tests the *flag*, never the register. Bit 21 set with `TPIDRRO_EL0` wrong is **silent corruption, with no `brk` to hunt for** (§4). |
 | struct memory must be **zero** | `__pthread_wqthread_setup` does read-modify-write on `ldrb w11,[x0,#0x31]` and `ldrh w9,[x0,#0x4e]` before storing them back. Fresh anonymous guest memory is zero, so this is satisfied by construction — but it is a real requirement, not a nicety. |
 | stack depth check | `_thread_chkstk_darwin` requires `sp - framesize >= [pthread+0xb8] = x2`. A too-small stack fails there, not at entry. |
 
@@ -636,21 +684,26 @@ issues. Its return value is stored at `pthread + 0xd8` and only checked against 
 4. **The flags word to use is `0x244000 | qos_index`** where `qos_index` inverts
    `priority_qos_bit == 1 << (qos_index + 7)` over the request's bits `[15:8]`, and must land in
    `1..=6`. For the guest's measured request `0x040008ff` that is `qos_index = 4`, i.e.
-   **`0x244004` — an extrapolation, flagged unverified in §1e.** Two measured fresh points
+   **`0x244004` — an extrapolation, flagged unverified in §1e.** Two distinct measured fresh values
    (`0x244005`, `0x244003`) support the form. The `0x04000000` bit of the request is dropped; that
    loss is what the real kernel path does too (§1e).
 5. **`args[2]` of `REQTHREADS` really is the thread count.** The spec explicitly flagged
    "one worker" as an attribution. It is now **MEASURED** from libpthread's own caller:
    ```
    __pthread_workqueue_addthreads:
-   0000000000002d60	mov	x2, x0            ; numthreads
-   0000000000002d64	and	w3, w1, #0xdfffffff ; priority, bit 29 masked off
-   0000000000002d68	mov	w0, #0x20         ; REQTHREADS
+   [0x2d48 .. 0x2d5c ELIDED — the null-callback check and the prologue]
+   0000000000002d60	mov	x2, x0
+   0000000000002d64	and	w3, w1, #0xdfffffff
+   0000000000002d68	mov	w0, #0x20
    0000000000002d6c	mov	x1, #0x0
-   0000000000002d70	bl	___workq_kernreturn
+   0000000000002d70	bl	0xb5e8 ; symbol stub for: ___workq_kernreturn
    ```
+   The bracketed line is **the only edit** to `otool`'s output; every instruction above is verbatim.
+   Reading it — **annotation, not disassembly**: `x2 = x0` is `numthreads`, `w3` is the
+   priority with bit 29 masked off, `w0 = 0x20` is `REQTHREADS`, `x1 = 0`.
    The guest's `[0x20, 0x0, 0x1, 0x40008ff]` is therefore literally "one thread, at this priority."
-   It must not return `-1`: `0x2d74 cmn w0,#0x1; b.ne` falls into an errno read on failure.
+   It must not return `-1`: `0x2d74 cmn w0,#0x1; b.ne 0x2d88` takes the **success** branch to the
+   epilogue; `-1` is the fall-through, into the errno read at `0x2d7c`.
 6. **The park opcode is `0x4` and it must never return** (§3d). Task 2's `REQTHREADS` arm has a
    known counterpart to implement, and `guest_workq_kernreturn`'s refuse-by-value posture keeps any
    *other* opcode loud.
@@ -662,10 +715,11 @@ issues. Its return value is stored at `pthread + 0xd8` and only checked against 
 
 ### Deliberately not measured
 
-- **The `0x040008ff` → flags pair on a live kernel.** Five host attempts failed (§1e). It could only
-  be closed by making a host process whose main thread has no QoS, which was not achievable inside
-  this task. **Stated as unverified rather than inferred.**
-- **What flags bit 18 (`0x40000`) means.** Set in 6/6 observations; read by nothing on the path
+- **The `0x040008ff` → flags pair on a live kernel.** All six queue configurations tried failed to
+  produce that request value (§1e). It could only be closed by making a host process whose main
+  thread has no QoS, which was not achievable inside this task. **Stated as unverified rather than
+  inferred.**
+- **What flags bit 18 (`0x40000`) means.** Set in 13/13 entries; read by nothing on the path
   `__pthread_wqthread` executes. Retrace can set it (matching the kernel) or not; **untested either
   way.**
 - **The reused-thread path.** Measured to exist (flags bit 17, three observations) but Stage 2b
@@ -681,7 +735,10 @@ issues. Its return value is stored at `pthread + 0xd8` and only checked against 
 
 ## 6. Reproduction
 
-### Commands, verbatim
+Everything in this section is the **actual file as it sat on disk**, not a retyped summary. The
+probes themselves are not committed; these listings are what makes their output regenerable.
+
+### Commands, verbatim, in the order they were run
 
 ```sh
 sw_vers; uname -a
@@ -700,26 +757,41 @@ otool -tV /usr/lib/system/libsystem_pthread.dylib \
 otool -tV /usr/lib/system/libsystem_pthread.dylib \
   | sed -n '/^__pthread_wqthread:/,/^_[a-z]/p' | head -200
 
-# §3c — libdispatch, via lldb because the dylib is not on disk
+# §2a — the struct/stack/TSD probe (produces the output at the end of this section)
+clang -g -O0 -o wqprobe wqprobe.c && ./wqprobe
+
+# run A — ad-hoc entry capture, and the source of the pc/lr reading
+lldb -b -o "breakpoint set -n start_wqthread" -o "run" \
+     -o "register read x0 x1 x2 x3 x4 x5 x6 x7 sp pc lr" -o "bt" \
+     -o "disassemble -n _pthread_wqthread -c 12" ./wqprobe
+
+# §3c — libdispatch, via lldb because the dylib is not on disk. TWO separate invocations.
 lldb -b -o "b main" -o "run" -o "disassemble -n dispatch_semaphore_signal" ./wqprobe
 lldb -b -o "b main" -o "run" \
-  -o "disassemble -n _dispatch_semaphore_signal_slow" \
-  -o "disassemble -n dispatch_semaphore_wait" \
-  -o "disassemble -n _dispatch_semaphore_wait_slow" \
-  -o "disassemble -n _dispatch_sema4_signal" \
-  -o "disassemble -n _dispatch_sema4_wait" ./wqprobe
+     -o "disassemble -n _dispatch_semaphore_signal_slow" \
+     -o "disassemble -n dispatch_semaphore_wait" \
+     -o "disassemble -n _dispatch_semaphore_wait_slow" ./wqprobe
+lldb -b -o "b main" -o "run" \
+     -o "disassemble -n _dispatch_sema4_signal" \
+     -o "disassemble -n _dispatch_sema4_wait" \
+     -o "disassemble -n _dispatch_sema4_create_slow" ./wqprobe
 
-# §1c / §1e — the live entry registers
-clang -g -O0 -o dispatch_host dispatch_host.c   # == crates/retrace-guest/c/dispatch_dyn.c
+# run B — the real guest source, compiled for the host
+cp crates/retrace-guest/c/dispatch_dyn.c ./dispatch_host.c
+clang -g -O0 -o dispatch_host dispatch_host.c
 lldb -b -s cmds.txt ./dispatch_host
+
+# runs C and D — the QoS sweep, then the same binary re-run for sp/lr
 clang -g -O0 -o qosprobe qosprobe.c
 lldb -b -s cmds2.txt ./qosprobe
+lldb -b -s cmds3.txt ./qosprobe
 
-# §2a — the struct/stack/TSD probe
-clang -g -O0 -o wqprobe wqprobe.c && ./wqprobe
+# run E — QOS_CLASS_DEFAULT alone
+clang -g -O0 -o qos2 qos2.c
+lldb -b -s cmds2.txt ./qos2
 ```
 
-### `cmds.txt` (used for `dispatch_host` and, as `cmds2.txt`, for `qosprobe`)
+### `cmds.txt` (run B)
 
 ```
 breakpoint set -n __workq_kernreturn
@@ -729,6 +801,33 @@ continue
 DONE
 breakpoint set -n start_wqthread
 breakpoint command add 2
+register read x0 x1 x2 x3 x4 x5 sp lr
+continue
+DONE
+run
+```
+
+### `cmds2.txt` (runs C and E)
+
+```
+breakpoint set -n __workq_kernreturn
+breakpoint command add 1
+register read x0 x3
+continue
+DONE
+breakpoint set -n start_wqthread
+breakpoint command add 2
+register read x0 x2 x4
+continue
+DONE
+run
+```
+
+### `cmds3.txt` (run D)
+
+```
+breakpoint set -n start_wqthread
+breakpoint command add 1
 register read x0 x1 x2 x3 x4 x5 x6 x7 sp lr
 continue
 DONE
@@ -738,48 +837,73 @@ run
 ### `wqprobe.c`
 
 ```c
+// M18 Stage 2b Task 1 host probe: measure the workqueue thread's pthread-struct /
+// stack / TPIDRRO_EL0 relationships on the real OS, the way M14 measured
+// pthread+0xe0 and pthread+0xf8 for a bsdthread_create child.
 #include <dispatch/dispatch.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <mach/mach.h>
+#include <unistd.h>
 
 static uint64_t tpidrro(void) { uint64_t v; __asm__ volatile("mrs %0, TPIDRRO_EL0" : "=r"(v)); return v; }
 static uint64_t sp_now(void)  { uint64_t v; __asm__ volatile("mov %0, sp"          : "=r"(v)); return v; }
 
 static void dump(const char *who) {
     pthread_t self = pthread_self();
-    uint64_t  p = (uint64_t)self, t = tpidrro(), sp = sp_now();
-    void  *sa = pthread_get_stackaddr_np(self);
-    size_t ss = pthread_get_stacksize_np(self);
+    uint64_t  p    = (uint64_t)self;
+    uint64_t  t    = tpidrro();
+    uint64_t  sp   = sp_now();
+    void     *sa   = pthread_get_stackaddr_np(self);
+    size_t    ss   = pthread_get_stacksize_np(self);
     const unsigned char *b = (const unsigned char *)p;
+
     printf("=== %s ===\n", who);
-    printf("  pthread_self = 0x%016llx\n", p);
-    printf("  TPIDRRO_EL0  = 0x%016llx (delta 0x%llx)\n", t, (unsigned long long)(t - p));
-    printf("  sp           = 0x%016llx\n", sp);
-    printf("  stackaddr_np = 0x%016llx  stacksize_np = 0x%zx\n", (unsigned long long)(uintptr_t)sa, ss);
-    printf("  mach_thread_self() = 0x%x   vm_page_size = 0x%lx\n",
-           (unsigned)mach_thread_self(), (unsigned long)vm_page_size);
-    printf("  +0x0b0=0x%016llx +0x0b8=0x%016llx +0x0c0=0x%016llx +0x0c8=0x%016llx +0x0d0=0x%016llx\n",
-           *(const uint64_t *)(b+0xb0), *(const uint64_t *)(b+0xb8), *(const uint64_t *)(b+0xc0),
-           *(const uint64_t *)(b+0xc8), *(const uint64_t *)(b+0xd0));
-    printf("  +0x0d8=0x%016llx +0x0e0=0x%016llx +0x0e8=0x%016llx +0x0f8=0x%08x +0x100=0x%016llx\n",
-           *(const uint64_t *)(b+0xd8), *(const uint64_t *)(b+0xe0), *(const uint64_t *)(b+0xe8),
-           *(const uint32_t *)(b+0xf8), *(const uint64_t *)(b+0x100));
+    printf("  pthread_self         = 0x%016llx\n", p);
+    printf("  TPIDRRO_EL0          = 0x%016llx   (TPIDRRO - pthread = 0x%llx)\n", t, (unsigned long long)(t - p));
+    printf("  sp                   = 0x%016llx   (pthread - sp = 0x%llx)\n", sp, (unsigned long long)(p - sp));
+    printf("  stackaddr_np         = 0x%016llx   (pthread - stackaddr = 0x%llx)\n",
+           (unsigned long long)(uintptr_t)sa, (unsigned long long)(p - (uint64_t)(uintptr_t)sa));
+    printf("  stacksize_np         = 0x%zx\n", ss);
+    printf("  mach_thread_self()   = 0x%x\n", (unsigned)mach_thread_self());
+    printf("  vm_page_size         = 0x%lx\n", (unsigned long)vm_page_size);
+    /* raw struct words at the offsets __pthread_wqthread_setup writes */
+    printf("  [pthread+0x000] (sig)      = 0x%016llx\n", *(const uint64_t *)(b + 0x000));
+    printf("  [pthread+0x048]            = 0x%08x\n",    *(const uint32_t *)(b + 0x048));
+    printf("  [pthread+0x0a4] (byte)     = 0x%02x\n",    *(const uint8_t  *)(b + 0x0a4));
+    printf("  [pthread+0x0a6] (half)     = 0x%04x\n",    *(const uint16_t *)(b + 0x0a6));
+    printf("  [pthread+0x0ac] (i32)      = %d\n",        *(const int32_t  *)(b + 0x0ac));
+    printf("  [pthread+0x0b0]            = 0x%016llx\n", *(const uint64_t *)(b + 0x0b0));
+    printf("  [pthread+0x0b8]            = 0x%016llx\n", *(const uint64_t *)(b + 0x0b8));
+    printf("  [pthread+0x0c0]            = 0x%016llx\n", *(const uint64_t *)(b + 0x0c0));
+    printf("  [pthread+0x0c8]            = 0x%016llx\n", *(const uint64_t *)(b + 0x0c8));
+    printf("  [pthread+0x0d0]            = 0x%016llx\n", *(const uint64_t *)(b + 0x0d0));
+    printf("  [pthread+0x0d8] (selfid)   = 0x%016llx\n", *(const uint64_t *)(b + 0x0d8));
+    printf("  [pthread+0x0e0] (tsd[0])   = 0x%016llx\n", *(const uint64_t *)(b + 0x0e0));
+    printf("  [pthread+0x0e8] (tsd[1])   = 0x%016llx\n", *(const uint64_t *)(b + 0x0e8));
+    printf("  [pthread+0x0f8] (kport)    = 0x%08x\n",    *(const uint32_t *)(b + 0x0f8));
+    printf("  [pthread+0x100] (prio)     = 0x%016llx\n", *(const uint64_t *)(b + 0x100));
+    printf("  [pthread+0x118]            = 0x%016llx\n", *(const uint64_t *)(b + 0x118));
     fflush(stdout);
 }
 
-static void *pt_main(void *a) { (void)a; dump("pthread_create thread"); return NULL; }
+static void *pt_main(void *arg) { (void)arg; dump("pthread_create thread"); return NULL; }
 
 int main(void) {
     dump("main thread");
-    pthread_t th; pthread_create(&th, NULL, pt_main, NULL); pthread_join(th, NULL);
+
+    pthread_t th;
+    pthread_create(&th, NULL, pt_main, NULL);
+    pthread_join(th, NULL);
+
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
         dump("dispatch worker (workqueue) thread");
         dispatch_semaphore_signal(sem);
     });
     dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    printf("done\n");
     return 0;
 }
 ```
@@ -799,19 +923,43 @@ int main(void) {
     one(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0),            "QOS BACKGROUND");
     one(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),               "QOS UTILITY");
     one(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),        "QOS USER_INITIATED");
-    one(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0x2ull),          "DEFAULT overcommit");
+    one(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0x2ull), "DEFAULT overcommit");
     return 0;
 }
 ```
 
-### Full `wqprobe` output
+### `qos2.c`
+
+```c
+#include <dispatch/dispatch.h>
+#include <stdio.h>
+static void one(dispatch_queue_t q, const char *tag) {
+    dispatch_semaphore_t s = dispatch_semaphore_create(0);
+    dispatch_async(q, ^{ printf("ran on %s\n", tag); fflush(stdout); dispatch_semaphore_signal(s); });
+    dispatch_semaphore_wait(s, DISPATCH_TIME_FOREVER);
+}
+int main(void) {
+    one(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), "QOS DEFAULT");
+    return 0;
+}
+```
+
+### `dispatch_host.c`
+
+Byte-identical to `crates/retrace-guest/c/dispatch_dyn.c`; not reproduced here, since the repo
+already carries it.
+
+### Full `wqprobe` output — verbatim, unabridged
+
+This is the complete stdout of `./wqprobe`, unedited. The `wqprobe.c` listing above is the source
+that produced it.
 
 ```
 === main thread ===
   pthread_self         = 0x00000001f97add80
   TPIDRRO_EL0          = 0x00000001f97ade60   (TPIDRRO - pthread = 0xe0)
-  sp                   = 0x000000016b5925d0
-  stackaddr_np         = 0x000000016b594000
+  sp                   = 0x000000016b5925d0   (pthread - sp = 0x8e21b7b0)
+  stackaddr_np         = 0x000000016b594000   (pthread - stackaddr = 0x8e219d80)
   stacksize_np         = 0x7fc000
   mach_thread_self()   = 0x103
   vm_page_size         = 0x4000
@@ -834,8 +982,8 @@ int main(void) {
 === pthread_create thread ===
   pthread_self         = 0x000000016b61b000
   TPIDRRO_EL0          = 0x000000016b61b0e0   (TPIDRRO - pthread = 0xe0)
-  sp                   = 0x000000016b61af40
-  stackaddr_np         = 0x000000016b61b000
+  sp                   = 0x000000016b61af40   (pthread - sp = 0xc0)
+  stackaddr_np         = 0x000000016b61b000   (pthread - stackaddr = 0x0)
   stacksize_np         = 0x83000
   mach_thread_self()   = 0x1f03
   vm_page_size         = 0x4000
@@ -858,8 +1006,8 @@ int main(void) {
 === dispatch worker (workqueue) thread ===
   pthread_self         = 0x000000016b61b000
   TPIDRRO_EL0          = 0x000000016b61b0e0   (TPIDRRO - pthread = 0xe0)
-  sp                   = 0x000000016b61adb0
-  stackaddr_np         = 0x000000016b61b000
+  sp                   = 0x000000016b61adb0   (pthread - sp = 0x250)
+  stackaddr_np         = 0x000000016b61b000   (pthread - stackaddr = 0x0)
   stacksize_np         = 0x83000
   mach_thread_self()   = 0x1d03
   vm_page_size         = 0x4000
