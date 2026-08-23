@@ -185,13 +185,26 @@ Everything Stage 2b adds is **below the trace or symmetric by construction**:
 
 ## Two things that will bite if they are not planned for
 
-1. **The `verify_thread` census goes 7 → 9.** There are exactly 7 call sites today
-   (`crates/retrace-core/src/lib.rs` lines 1271, 1381, 1412, 1439, 1472, 1555, 2143). CLAUDE.md:
-   "every new mirror silently creates a new hole until its oracle call is added — nothing
-   structural couples the two." The wait and signal mirrors each `return` before the generic
-   dispatch, so each needs its own call, **placed after that arm's own field comparison** so a
-   genuine argument divergence still reports as itself. Stage 2a's mirrors inherited the check and
-   the census correctly stayed at 7; these do not inherit it.
+1. **The `verify_thread` census STAYS AT 7. This section said 7 → 9 and that was WRONG** —
+   corrected 2026-08-23, mid-execution, after Task 4 checked the premise instead of executing it.
+
+   The claim was that the wait and signal mirrors each `return` before the generic dispatch and so
+   each needs its own oracle site. They do not. Verified structurally in
+   `crates/retrace-core/src/lib.rs`: the `Some(Event::Syscall { .., thread: rthread }) => {` arm
+   opens at `:1642`, does its own field comparison at `:1643`, calls
+   `self.verify_thread(*rthread, pc)?` at `:1656` — after that comparison, exactly as the placement
+   rule requires — and does not close until the `other =>` arm at `:2273`. Every `if num == …`
+   mirror in between (`SYS_WORKQ_OPEN` at `:1930`, `SYS_ULOCK_WAIT` at `:2001`, and the new
+   semaphore pair) is inside that arm and **inherits** the call.
+
+   **The distinction this section collapsed is arm vs. mirror-within-arm.** A new arm in
+   `match self.events.get(self.idx)` needs its own site; an `if num == …` mirror inside the
+   already-verified Syscall arm does not — a second call there would re-ask an identical question
+   about an identical landmark. CLAUDE.md's wording ("seven call sites, one in each arm that
+   consumes a landmark and `return`s") was accurate as written and needs no edit, and Stage 2a
+   recorded the same conclusion in a comment at `:1930`. The invariant that actually matters — no
+   mirror is a silent oracle hole — holds by inheritance. What a new mirror owes is a **comment
+   documenting that inheritance**, so the next reader does not re-derive it.
 2. **Stage 2a's companion gate breaks on purpose.**
    `dispatch_e2e.rs::the_workqueue_syscalls_are_emulated_not_forwarded` asserts
    `rec.stderr.contains("worker construction is Stage 2b")`. Removing that panic makes it red. It

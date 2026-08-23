@@ -738,12 +738,15 @@ stop firing.
 **This is the task the spec names as the one that bites.** Two requirements are structural and
 nothing in the compiler enforces either:
 
-1. **The `verify_thread` census goes 7 → 9.** There are exactly 7 sites today
-   (`crates/retrace-core/src/lib.rs` lines 1271, 1381, 1412, 1439, 1472, 1555, 2143). CLAUDE.md:
-   "every new mirror silently creates a new hole until its oracle call is added — nothing structural
-   couples the two." Each new mirror `return`s before the generic dispatch, so each needs its own
-   call, **placed after that arm's own field comparison** so a genuine argument divergence still
-   reports as itself.
+1. **The `verify_thread` census STAYS AT 7. (This plan said 7 → 9; that was wrong, corrected
+   mid-execution.)** Your mirrors live inside the `Some(Event::Syscall { .., thread: rthread }) => {`
+   arm, which opens at `crates/retrace-core/src/lib.rs:1642`, compares its own fields at `:1643`,
+   calls `self.verify_thread(*rthread, pc)?` at `:1656`, and does not close until the `other =>` arm
+   at `:2273`. Your mirrors **inherit** that call, exactly as `SYS_WORKQ_OPEN` (`:1930`) and
+   `SYS_ULOCK_WAIT` (`:2001`) do — Stage 2a's comment at `:1930` says so. Adding your own would be
+   redundant and would contradict it. **Document the inheritance at your mirrors.** The rule is arm
+   vs. mirror-within-arm: a new arm in `match self.events.get(self.idx)` needs its own site; a
+   mirror inside an already-verified arm does not.
 2. **New arms go BEFORE the generic negative-trap arm** at `:531`. An arm placed after it is dead
    code that compiles, passes clippy, and silently forwards.
 
@@ -844,14 +847,17 @@ what you observe, and **keep the two durable tripwires verbatim** as Task 2 did.
 Do not attempt to make the headline `#[ignore]`d gate pass here. Task 5 owns the gate's final state
 and both of its honest outcomes.
 
-- [ ] **Step 5: Verify the census is 9, by counting**
+- [ ] **Step 5: Verify the census is still 7, by counting**
 
 ```sh
 grep -c 'self\.verify_thread(' crates/retrace-core/src/lib.rs
 ```
 
-Expected: `9`. If it prints 7 or 8, a mirror is missing its oracle call and the hole is silent —
-CLAUDE.md's count is the thing to check when adding an arm, and this is that check.
+Expected: **`7`** — unchanged, because your mirrors inherit the arm's call (see the preamble). If it
+prints 8 or 9 you have added a redundant site. If you added a new *arm* to
+`match self.events.get(self.idx)` rather than a mirror inside the existing Syscall arm, that arm DOES
+need its own site and the count should rise — CLAUDE.md's count is the thing to check when adding an
+arm, and this is that check.
 
 - [ ] **Step 6: Run the workspace chunks**
 
@@ -956,8 +962,8 @@ proved wrong is left standing with a forward pointer rather than quietly correct
 
 Include, following the Stage 2a section's shape: what landed, the measurement Task 1 produced
 (especially whether §3 confirmed or corrected the `-36`/`-33` attribution, and the §4 struct-init
-verdict), the `verify_thread` census moving 7 → 9 and why these mirrors needed sites when Stage 2a's
-did not, the gate numbers, and a "boundaries and non-changes" list carrying forward what is still
+verdict), the `verify_thread` census STAYING at 7 and why these mirrors inherit their oracle call the
+way Stage 2a's did (this plan's original 7 → 9 claim was wrong and was corrected mid-execution), the gate numbers, and a "boundaries and non-changes" list carrying forward what is still
 unfixed.
 
 - [ ] **Step 7: Commit**
