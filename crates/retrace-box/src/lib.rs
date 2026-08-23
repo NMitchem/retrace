@@ -3417,10 +3417,16 @@ impl Box_ {
     /// (`Box_::guest_ulock_wake`): every operation word this box has not measured is refused BY
     /// VALUE, so the panic names what to go measure.
     ///
-    /// The two opcodes below are the ONLY ones any guest has ever reached — measured M18 Task 6,
-    /// `.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2-measurements.md` §2. That list is a
-    /// floor, not a ceiling: the park/return opcodes a RUNNING worker issues cannot be enumerated
-    /// until Stage 2b makes a worker run, which is precisely why this refuses rather than guesses.
+    /// The first two opcodes below were measured M18 Task 6 (Stage 2a) as the only ones a guest had
+    /// ever reached (`.superpowers/sdd/2026-08-20-retrace-m18-workq/stage2-measurements.md` §2),
+    /// and this comment called that "a floor, not a ceiling: the park/return opcodes a RUNNING
+    /// worker issues cannot be enumerated until Stage 2b makes a worker run". Stage 2b Task 1 read
+    /// one of them straight off `__pthread_wqthread` before any worker ran, so **THREAD_RETURN is
+    /// now measured too** (§3d of
+    /// `docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md`, which every
+    /// §-citation below is to). The list is still a floor — `x5 == -1` at entry selects
+    /// `__pthread_wqthread_exit`, a second teardown path this box has never seen — which is why
+    /// every other value is still refused BY VALUE rather than guessed at.
     ///
     /// The XNU names in the constants are attributed from public libpthread sources and are NOT
     /// verified on this machine — `pthread/workqueue_private.h` ships in neither `/usr/include` nor
@@ -3431,17 +3437,92 @@ impl Box_ {
         const WQOPS_SETUP_DISPATCH: u64 = 0x400;
         // libdispatch asking for worker threads. Stage 2b's entry point; Stage 2a's wall.
         const WQOPS_QUEUE_REQTHREADS: u64 = 0x20;
+        // A worker parking once its dispatch callback has returned. MEASURED by Stage 2b Task 1
+        // (§3d) two ways: `__pthread_wqthread` at `0x2e84 mov w0, #0x4` … `bl ___workq_kernreturn`,
+        // and a live host breakpoint on the last call before exit showing `x0=4, x1=x2=x3=0`.
+        const WQOPS_THREAD_RETURN: u64 = 0x4;
 
         match args[0] {
             WQOPS_SETUP_DISPATCH => 0,
             WQOPS_QUEUE_REQTHREADS => self.guest_workq_reqthreads(args),
+            WQOPS_THREAD_RETURN => self.guest_workq_park(args),
             other => panic!(
-                "M18 Stage 2a: unmeasured workq_kernreturn opcode {other:#x} — only \
-                 SETUP_DISPATCH ({WQOPS_SETUP_DISPATCH:#x}) and REQTHREADS \
-                 ({WQOPS_QUEUE_REQTHREADS:#x}) have ever been observed (M18 Task 6). Measure what \
+                "M18 Stage 2b: unmeasured workq_kernreturn opcode {other:#x} — only \
+                 SETUP_DISPATCH ({WQOPS_SETUP_DISPATCH:#x}), REQTHREADS \
+                 ({WQOPS_QUEUE_REQTHREADS:#x}) and THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) have \
+                 ever been observed (M18 Task 6; Stage 2b Task 1 §3d). Measure what \
                  issues this one before modelling it; a guessed opcode silently corrupts the \
                  guest's workqueue state. args={args:#x?}"),
         }
+    }
+
+    /// `workq_kernreturn(WQOPS_THREAD_RETURN, 0, 0, 0)` — a worker parking after its dispatch
+    /// callback returned, asking the kernel for more work. **Emulated, never forwarded**, for the
+    /// reason `guest_workq_open` documents.
+    ///
+    /// **This call must NOT return, and libpthread says so at the top of its voice.** §3d
+    /// disassembled what follows the `bl`: `ldrsw x8, [x19, #0xac]`, then an `adrp`/`add` pair onto
+    /// the literal `"BUG IN LIBPTHREAD: __workq_kernreturn returned"`, which stores the crash
+    /// message and falls off the end into `_start_wqthread`'s `brk #0x1`. A park that returns kills
+    /// the run right after the worker's useful work.
+    ///
+    /// Two things make that unreachable, and they are separate:
+    ///
+    /// 1. **The worker ends up non-runnable**, so `pick_next` hands the vCPU to main and the guest
+    ///    can finish. `BlockReason::Parked` rather than `Exited`: a parked workqueue thread is
+    ///    ALIVE — the real kernel can re-enter it with new work — and `Exited` carries a return
+    ///    value it does not have. Stage 2b models no thread reuse, so nothing wakes it; that is
+    ///    expected, not a leak. See `BlockReason::Parked`.
+    /// 2. **The saved context is rewound onto the `svc` itself.** This is the sharp edge, and it is
+    ///    not optional: both dispatch arms call `set_x0_err_and_return(rc, false)` *after* this
+    ///    method returns, unconditionally, which sets `PC = ELR_EL1` — the instruction AFTER the
+    ///    `svc`, i.e. exactly the return libpthread `brk`s on. `guest_bsdthread_terminate`'s arms
+    ///    solve their version of this by omitting that call, but they can: they are their own
+    ///    dispatch arms. This is one opcode inside an arm shared with SETUP_DISPATCH and REQTHREADS,
+    ///    both of which do return. So instead of removing the write, this moves what it writes: back
+    ///    up one A64 instruction, onto the `svc`. The parked context is then not resumable into a
+    ///    return at all.
+    ///
+    /// What a resume WOULD do, stated honestly rather than left to be discovered: it re-executes the
+    /// `svc` with `x0` clobbered to 0 by that same `set_x0_err_and_return`, so it re-enters this
+    /// dispatch and hits the refuse-by-value panic above naming opcode `0x0`. Loud and named, which
+    /// is the right answer for a thread nothing in Stage 2b intends to resume — and strictly better
+    /// than the alternative it replaces, which is the guest `brk`ing inside libpthread. Re-entering
+    /// at `_start_wqthread` instead (what the real kernel does for a REUSED worker) is deliberately
+    /// NOT done here: that path needs a fresh register block with flags bit 17 set, which no
+    /// measurement covers, and inventing one is the invention M14's rule forbids.
+    ///
+    /// **There is no "only a worker may park" assert.** This table does not distinguish workqueue
+    /// threads from any other kind, so such a check would be inventing a distinction to enforce it;
+    /// and the harmful case — the last runnable thread parking — is already loud, as
+    /// `schedule_after_block`'s deadlock panic.
+    ///
+    /// Deterministic and below the trace: nothing here reads guest memory, both dispatch arms reach
+    /// this through the same `guest_workq_kernreturn(args)` call, and the ELR rewind is arithmetic
+    /// on state both sides already hold identically. Symmetry rule 1 holds by construction.
+    fn guest_workq_park(&mut self, args: [u64; 8]) -> u64 {
+        // The measured park carries `(0, 0, 0)` — §3d twice over: `__pthread_wqthread` sets
+        // `x1/w2/w3` to zero with three unconditional `mov`s immediately before the `bl`, and the
+        // live host breakpoint read them back as zero. This refuses anything else BY VALUE for a
+        // concrete reason, not as hygiene: XNU's THREAD_RETURN also carries a kevent list
+        // (`workq_kernreturn(THREAD_RETURN, eventlist, nevents, ...)`), and §5 item 8's "nothing
+        // here requires a kevent list" holds only because those arguments are dead on the path this
+        // guest takes. A kevent-carrying park means "hand these events back AND park" — parking
+        // while dropping the events on the floor is exactly the silent corruption the refuse-by-
+        // value posture exists to prevent.
+        assert_eq!((args[1], args[2], args[3]), (0, 0, 0),
+            "M18 Stage 2b: workq_kernreturn THREAD_RETURN with unmeasured arguments \
+             {:#x?} — the only measured park is (0x4, 0, 0, 0) (Task 1 §3d). Non-zero args here \
+             are XNU's kevent-carrying variant, which must return events rather than merely park; \
+             measure it before modelling it. args={args:#x?}",
+            (args[1], args[2], args[3]));
+        self.threads.block(thread::BlockReason::Parked);
+        // A64 instructions are 4 bytes, and `ELR_EL1` on an SVC trap holds the address of the one
+        // AFTER the `svc` — so `- 4` is the `svc` itself. `wrapping_sub` because an ELR this low is
+        // a broken box, not a case for this arm to police.
+        let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        self.vcpu.set_sys(sysreg::ELR_EL1, elr.wrapping_sub(4)).unwrap();
+        0
     }
 
     /// `workq_kernreturn(WQOPS_QUEUE_REQTHREADS, 0, numthreads, priority)` — libdispatch asking the
@@ -3983,6 +4064,71 @@ impl Box_ {
              address wake is modelled; ULF_WAKE_THREAD names a thread port in x2 and would wake the \
              wrong thread if treated as an address wake", args[0]);
         let woken = self.threads.unblock_waiters_on(args[1]);
+        (0, woken)
+    }
+
+    /// `semaphore_wait_trap(port)` — mach trap `-36`, the wait half of the pair
+    /// `dispatch_semaphore_wait` lowers to. `args[0]` is the semaphore's port name.
+    ///
+    /// **Never forwarded.** Forwarding it is not whole-process-*fatal* the way forwarding
+    /// `bsdthread_create` is — no host thread is created and nothing jumps to a guest address — but
+    /// it is whole-process-*hanging*: it blocks retrace's own process on a semaphore that only the
+    /// guest's own worker could ever signal, and nothing in retrace's process will. Both Stage 2a
+    /// measurement runs ended on this very trap having produced zero bytes of guest stdout, and the
+    /// one whose exit code was captured died to a 120-second alarm — a hang, not a crash
+    /// (`docs/superpowers/specs/2026-08-21-retrace-m18-stage2b-measurements.md`, its run table and
+    /// §2). A hang is the expensive failure to diagnose precisely because it produces no output to
+    /// diagnose it with, which is why Stage 2b Task 2 put a fail-loud guard in front of the whole
+    /// trap family.
+    ///
+    /// **Returns 0, and 0 is the only safe answer** — §3's table, measured, not chosen:
+    /// `_dispatch_sema4_wait` returns cleanly ONLY on `0`; `0xe` sends libdispatch round a retry
+    /// loop that re-issues `-36` forever (`0x18d3ec49c b.eq 0x18d3ec488`), `0xf` is fatal, and every
+    /// other value reaches a `cold` routine.
+    ///
+    /// It returns 0 *unconditionally*, with no already-satisfied re-read — the one structural
+    /// difference from `guest_ulock_wait`, whose guard re-reads the compared word out of guest
+    /// memory. There is nothing to re-read: a semaphore's count lives inside libdispatch's own
+    /// object, not at an address this trap names, and the trap is only reached on the SLOW path
+    /// (§3's table names it as such), i.e. after the guest's own counter decrement has already
+    /// decided it must block. The signal side of that same fast/slow split is measured outright in
+    /// §3c — a bare `ldaddl` with no trap.
+    ///
+    /// **There is deliberately no operation-word assert**, unlike its two neighbours.
+    /// `guest_ulock_wait` and `guest_ulock_wake` both refuse an unmeasured `args[0]` because syscall
+    /// 515/516 multiplex many operations through ONE syscall number, and an unmeasured operation
+    /// width would silently deadlock. The semaphore traps do not multiplex: the trap number *is* the
+    /// operation — §3a of
+    /// `docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md` read all
+    /// seven of the family's stubs off libsystem_kernel and they are seven distinct numbers — and
+    /// `args[0]` is the port. There is no operation word here to guard.
+    pub fn guest_sem_wait(&mut self, args: [u64; 8]) -> u64 {
+        self.threads.block(thread::BlockReason::Sem { port: args[0] });
+        0
+    }
+
+    /// `semaphore_signal_trap(port)` — mach trap `-33`. `args[0]` is the port name; returns the
+    /// woken tids for the reason `guest_ulock_wake` does: M17 materialises a signal pended on a
+    /// thread that could not run at the wake that makes it runnable, and that site needs the
+    /// identity of who woke.
+    ///
+    /// **Never forwarded**, for `guest_sem_wait`'s reason exactly — and **no operation-word assert**,
+    /// for `guest_sem_wait`'s reason exactly (the trap number is the operation).
+    ///
+    /// **Returns 0 (`KERN_SUCCESS`), and again 0 is the only safe answer** (§3's table):
+    /// `_dispatch_sema4_signal` treats a non-zero return as fatal (`cbnz w0, …cold.7`), with
+    /// `-301` separately fatal (`cmn w0, #0x12d`). Returned whether or not anyone was parked.
+    ///
+    /// An empty `woken` is a legal, ordinary outcome, not an error: §5 item 7 measured that the
+    /// signal's **fast path issues no trap at all** — a bare `ldaddl` on the counter at `sem+0x30`,
+    /// with only the negative (a waiter exists) case falling through to the trap. So a worker
+    /// signalling a semaphore nobody is parked on produces no landmark whatsoever, and this seam
+    /// must never read "woke nobody" as a lost wake.
+    ///
+    /// Reads and writes no guest memory, so the recorded event carries no writes and replay's mirror
+    /// recomputes this identically from the same `(num, args)`.
+    pub fn guest_sem_signal(&mut self, args: [u64; 8]) -> (u64, Vec<usize>) {
+        let woken = self.threads.unblock_sem_waiters_on(args[0]);
         (0, woken)
     }
 
