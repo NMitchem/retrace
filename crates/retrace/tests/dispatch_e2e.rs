@@ -11,10 +11,16 @@ mod util;
             in the box (Box_::guest_workq_open / guest_workq_kernreturn), each with a record arm, a \
             replay mirror and a fail-loud guard on the generic forward arm, so the host kernel no \
             longer acts on retrace's own process and the host-worker-thread hazard that produced the \
-            recorder's own SIGSEGV is GONE. The wall today is retrace's OWN deliberate refusal: \
-            workq_kernreturn opcode 0x20 (REQTHREADS) panics with 'worker construction is Stage 2b', \
-            because the kernel-side register contract for entering `wqthread` is unmeasured and \
-            building a worker here would be invention. Measured behind it (Task 4/t10, two runs, \
+            recorder's own SIGSEGV is GONE. **Stage 2b Task 2 then moved this wall again.** The old \
+            wall was retrace's own REQTHREADS panic ('worker construction is Stage 2b'), parked \
+            because the register contract for entering `wqthread` was unmeasured; Task 1 measured \
+            it (docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md) and \
+            Task 2 built the worker, so that panic is gone and REQTHREADS now spawns a Runnable \
+            thread at the registered wqthread entry. The wall today is one trap further on and is \
+            still retrace's OWN deliberate refusal: main reaches the mach semaphore wait and the \
+            fail-loud guard on record_box's generic negative-trap forward arm refuses trap -36 by \
+            name, because forwarding it would block retrace's own process forever on a semaphore \
+            only the guest's worker could signal. Measured behind it (Task 4/t10, two runs, \
             REQTHREADS temporarily stubbed to 0, see \
             docs/superpowers/specs/2026-08-21-retrace-m18-stage2b-measurements.md): the mach_msg2 \
             at pc=0x1804adc34 is NOT specific to this path — it is libsystem_kernel's shared \
@@ -22,18 +28,19 @@ mod util;
             REQTHREADS is semaphore_create (msgh_id 3418), already forward-allowlisted, whose reply \
             mints port name 0x1403. dispatch_semaphore_wait then lowers NOT to __ulock_wait (515 \
             appears nowhere in either trace) but to a raw Mach trap, num=-36 at pc=0x1804adbb0, \
-            carrying that same port in args[0] (the name semaphore_wait_trap is attributed, not \
-            verified on this machine). Having no dedicated arm, it reaches forward_and_diff and blocks \
-            FOREVER in retrace's own process, which nothing there will ever signal: both runs hang \
-            there and both produced 0 bytes of guest stdout, and the one run whose exit code was \
-            captured was killed by the external alarm (142) — the other run's exit code is \
-            unmeasured, which that document says in bold rather than reading it as a different \
-            outcome. So Stage 2b owes both halves: a worker thread built and entered at the \
-            wqthread registered by bsdthread_register (Box_::wq_thread_pc / pthread_size, \
-            captured in Stage 1 and consumed by nothing yet), and a park/wake seam for the mach \
+            carrying that same port in args[0] (the name semaphore_wait_trap was attributed then \
+            and is now VERIFIED — Task 1 §3a read `mov x16, #-0x24` off libsystem_kernel's own \
+            stub; retrace_arch::MACH_SEMAPHORE_WAIT). Before Task 2's guard existed it reached \
+            forward_and_diff and blocked FOREVER in retrace's own process, which nothing there will \
+            ever signal: both runs hung there and both produced 0 bytes of guest stdout, and the \
+            one run whose exit code was captured was killed by the external alarm (142) — the other \
+            run's exit code is unmeasured, which that document says in bold rather than reading it \
+            as a different outcome. That hang is what the guard now converts into a named assert. \
+            So what Stage 2b still owes is the SECOND half: a park/wake seam for the mach \
             semaphore — which cannot reuse M14/M17's `pthread + 0x34` address-equality \
             correlation, since that is specific to __ulock_wait's guest-memory address and this \
-            primitive correlates on a port name in retrace's own IPC space. Un-park when the \
+            primitive correlates on a port name in retrace's own IPC space — plus the park opcode \
+            a running worker issues (measured 0x4, and it must not return). Un-park when the \
             worker actually runs the block and main observes the signal."]
 fn a_dispatch_async_guest_records_and_replays() {
     // A REAL body that genuinely fails at the wall — the `stackoverflow_rust_e2e` pattern. Parking
@@ -76,20 +83,32 @@ fn a_dispatch_async_guest_records_and_replays() {
 /// recorder, entered it at `start_wqthread` -> `_pthread_wqthread`, and died at address 0. The
 /// record run exited 139 from RETRACE's own SIGSEGV, having written no guest stdout at all.
 ///
-/// After Stage 2a both syscalls are emulated in the box, and the run stops at retrace's own named
-/// REQTHREADS wall instead — deterministically, in its own process, on its own terms.
+/// After Stage 2a both syscalls are emulated in the box, and the run stops at a wall of retrace's
+/// own making instead — deterministically, in its own process, on its own terms.
+///
+/// **Stage 2b Task 2 moved which wall that is, and the assertion moved with it.** It used to name
+/// the `REQTHREADS` panic ("worker construction is Stage 2b"); that panic is gone, because
+/// `REQTHREADS` now builds the worker. So the run walks one step further, into the mach semaphore
+/// wait main blocks on — and stops at the fail-loud guard on `record_box`'s generic negative-trap
+/// forward arm, which refuses trap `-36` by name rather than letting it reach `forward_and_diff`
+/// and hang retrace's own process forever. The guard's message still proves what this test exists
+/// to prove — the workqueue syscalls were emulated rather than forwarded, or the run would have
+/// died at 139 long before reaching it — and additionally that the run advanced past `REQTHREADS`,
+/// which no longer refuses. It is deliberately NOT evidence that the worker is correctly built:
+/// nothing has entered it yet, and `retrace-box`'s `workq_reqthreads_*` tests are what assert the
+/// thread table and the entry contract. Task 4 services this trap and moves the assertion once more.
 ///
 /// **The assertion is on the message, not the exit code.** `crashy_e2e` asserts 139 for an uncaught
 /// GUEST fault, so an exit code alone cannot tell "retrace SIGSEGV'd" apart from "the guest
-/// faulted" — the honest-gate rule this repo learned from `segv_rust_e2e`. The panic text can only
-/// appear if the guest's `workq_kernreturn` reached retrace's own emulation.
+/// faulted" — the honest-gate rule this repo learned from `segv_rust_e2e`.
 #[test]
 fn the_workqueue_syscalls_are_emulated_not_forwarded() {
     let (rec, _trace) = util::record_dynamic(retrace_guest::DISPATCH_DYN);
 
-    assert!(rec.stderr.contains("worker construction is Stage 2b"),
-        "the record run must stop at retrace's OWN named REQTHREADS wall, which is only reachable \
-         if workq_kernreturn was emulated rather than forwarded; stderr:\n{}", rec.stderr);
+    assert!(rec.stderr.contains("mach semaphore trap") &&
+            rec.stderr.contains("reached the generic forward arm"),
+        "the record run must stop at retrace's OWN named semaphore-forward guard, which is only \
+         reachable if workq_kernreturn was emulated rather than forwarded; stderr:\n{}", rec.stderr);
     // The pre-2a signature, named so a regression is legible rather than just red. 139 is SIGSEGV;
     // this is a supporting check, not the assertion above.
     assert_ne!(rec.code, 139,

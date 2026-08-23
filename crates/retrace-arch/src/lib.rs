@@ -251,6 +251,38 @@ pub const SYS_ULOCK_WAKE: u64 = 516;
 pub const SYS_TERMINATE_WITH_PAYLOAD: u64 = 520;
 pub const SYS_ABORT_WITH_PAYLOAD: u64 = 521;
 
+// ---- Mach traps ---------------------------------------------------------------------------
+// Mach traps arrive as `svc #0x80` with a NEGATIVE selector in x16, so these are stored as their
+// two's-complement `u64` — the form `Stop::Syscall { num, .. }` actually carries, and the form
+// `retrace-core`'s own `MACH_MSG2`/`MACH_TASK_SELF` already use.
+
+/// The mach semaphore **wait** trap, `-36`. `dispatch_semaphore_wait`'s slow path reaches it via
+/// `_dispatch_sema4_wait` -> `semaphore_wait` -> `b _semaphore_wait_trap`.
+///
+/// M18 Stage 2b Task 1 §3a **CONFIRMED** the predecessor document's prediction: it is not merely
+/// attributed any more, it is read off libsystem_kernel's own stub on this machine
+/// (`_semaphore_wait_trap: mov x16, #-0x24; svc #0x80`), with `_mach_msg2_trap`'s `#-0x2f` in the
+/// same table cross-checking the numbering against the existing `MACH_MSG2 = -47`. Stage 2a
+/// independently observed the trap itself, twice, at `pc=0x1804adbb0` carrying the port name its
+/// preceding `semaphore_create` minted.
+///
+/// **Never forwarded.** Forwarding blocks retrace's OWN process forever on a semaphore only the
+/// guest's worker could signal — measured, not theorised: both Stage 2a measurement runs hung
+/// there and produced zero bytes of guest stdout. Its return value must be `0`; `0xe` makes
+/// libdispatch re-issue the trap forever and everything else is fatal (§3).
+pub const MACH_SEMAPHORE_WAIT: u64 = (-36i64) as u64;
+
+/// The mach semaphore **signal** trap, `-33` — the wake half of the pair, reached from
+/// `_dispatch_sema4_signal`. Task 1 §3a CONFIRMED this prediction the same way, from
+/// `_semaphore_signal_trap: mov x16, #-0x21; svc #0x80`.
+///
+/// Two things about it are deliberately kept distinct. It has been **verified as the instruction
+/// libdispatch reaches**, but it has still **never been observed in a retrace trace** — no run has
+/// got far enough to execute it. And `dispatch_semaphore_signal`'s FAST path issues no trap at all
+/// (`ldaddl` on `sem+0x30`, §3c), so a worker signalling a semaphore nobody is waiting on produces
+/// no landmark: the park/wake seam must not assume a signal trap always appears. Return `0`.
+pub const MACH_SEMAPHORE_SIGNAL: u64 = (-33i64) as u64;
+
 /// `NSIG` from `sys/signal.h:76` — "counting 0; could be 33 (mask is 1-32)". Signal numbers run
 /// 1..=31 in the table; index 0 is unused so indexing mirrors signal numbering.
 pub const NSIG: usize = 32;
