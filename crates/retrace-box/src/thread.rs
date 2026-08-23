@@ -60,6 +60,42 @@ pub enum BlockReason {
     Join { target: usize },
     /// Waiting on a futex-shaped address (the primitive Task 1 measured).
     Wait { addr: u64 },
+    /// M18 Stage 2b: waiting on a mach semaphore, keyed by PORT NAME.
+    ///
+    /// **The key lives in a different address space from every other variant here, and that is the
+    /// whole point.** `Wait { addr }` correlates on `pthread + 0x34`, a guest memory address the box
+    /// already tracks, because that is the value `__ulock_wait`/`__ulock_wake` name. A mach
+    /// semaphore names a PORT in retrace's OWN IPC space, minted by a forwarded `semaphore_create`
+    /// (a `mach_msg2` RPC, msgh_id 3418) and reaching the guest in that call's recorded reply. Both
+    /// halves of the pair then carry it in `args[0]` — the traps name no guest address at all, so
+    /// there is nothing here for `Wait`'s correlation to work on.
+    /// Stage 2a measured that `dispatch_semaphore_wait` does not lower to a ulock at all
+    /// (`num=515` appears nowhere in either trace), so there is no address to correlate on and this
+    /// cannot be folded into `Wait`.
+    ///
+    /// That port name **varies between recordings** — `0x1403` in Stage 2a's traces, `0x1103` in
+    /// Stage 2b Task 2's run — because it is whatever the host kernel handed retrace's own
+    /// `semaphore_create`. Harmless, and load-bearing to keep harmless: replay applies the recorded
+    /// reply verbatim, so both halves of ONE record/replay pair key on an identical value. Nothing
+    /// may cache, hardcode, or compare this port across runs.
+    ///
+    /// Numeric collision with a `Wait` address is possible and harmless: the variants are distinct,
+    /// so `unblock_waiters_on` and `unblock_sem_waiters_on` cannot wake each other's sleepers.
+    Sem { port: u64 },
+    /// M18 Stage 2b: a workqueue worker parked in `workq_kernreturn(0x4)`, waiting for the kernel
+    /// to hand it more work.
+    ///
+    /// **Keyless, and nothing wakes it.** Stage 2b's scope excludes thread reuse, so no wake seam
+    /// matches this variant — by construction, since it carries no key for either seam to compare.
+    /// A parked worker therefore stays parked for the rest of the run, which is exactly what makes
+    /// `pick_next` hand the vCPU back to main and lets the guest finish.
+    ///
+    /// `Blocked`, not `Exited`, because a parked workqueue thread is **alive**: the real kernel can
+    /// re-enter it with new work. `Exited` carries a return value a parked worker does not have, and
+    /// would make `live()` lie about how many threads the guest has. If a later stage models reuse,
+    /// the wake belongs here — re-entering at `_start_wqthread` with a fresh register block (flags
+    /// bit 17 SET, the reused path), not resuming the park trap's return.
+    Parked,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,6 +287,10 @@ impl ThreadTable {
     /// module's own tests — gets the guard, not just callers who remembered the wrapper existed.
     /// `Wait { .. }` is unaffected: it has no analogous "already satisfied" state to check here
     /// (that check is `guest_ulock_wait`'s, against live guest memory, not this table's).
+    /// `Sem { .. }` and `Parked` are unaffected for the same shape of reason: a mach semaphore's
+    /// count lives in guest memory libdispatch owns — this table never sees it, and the guest's own
+    /// fast path already decided it must block before issuing the trap — and a park is
+    /// unconditional, having nothing to be already-satisfied by.
     pub fn block(&mut self, reason: BlockReason) {
         if let BlockReason::Join { target } = reason {
             if matches!(self.state_of(target), ThreadState::Exited(_)) {
@@ -314,6 +354,28 @@ impl ThreadTable {
         for (tid, t) in self.threads.iter_mut().enumerate() {
             if let ThreadState::Blocked(BlockReason::Wait { addr: a }) = t.state {
                 if a == addr {
+                    t.state = ThreadState::Runnable;
+                    woken.push(tid);
+                }
+            }
+        }
+        woken
+    }
+
+    /// Wake every thread waiting on the mach semaphore named by `port`. Returns which tids woke.
+    ///
+    /// Sibling of `unblock_waiters_on`, and identical in every respect except the namespace of the
+    /// key — see `BlockReason::Sem`. Returning the tids rather than `()` is what lets the caller
+    /// materialise a signal pended on a thread that could not run, exactly as M17 uses the ulock
+    /// wake's return. An empty result is legal and not an error: a counting semaphore is signalled
+    /// freely whether or not anyone is parked on it — and the semaphore signal's FAST path issues
+    /// **no trap at all** (Task 1 §5 item 7: it is a pure atomic increment, and only the slow path,
+    /// which has a waiter, traps), so "woke nobody" is never evidence of a lost wake.
+    pub fn unblock_sem_waiters_on(&mut self, port: u64) -> Vec<usize> {
+        let mut woken = Vec::new();
+        for (tid, t) in self.threads.iter_mut().enumerate() {
+            if let ThreadState::Blocked(BlockReason::Sem { port: p }) = t.state {
+                if p == port {
                     t.state = ThreadState::Runnable;
                     woken.push(tid);
                 }

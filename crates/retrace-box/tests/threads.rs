@@ -128,6 +128,87 @@ fn switch_to_clears_redirected_for_the_thread_it_switches_to() {
     assert!(!t.is_redirected(1), "thread 1 is now running — the un-run redirection is over");
 }
 
+// ---- M18 Stage 2b: the mach-semaphore park/wake seam -------------------------------------------
+//
+// Pure table tests, so they live here with the other scheduling tests rather than in `thread.rs`'s
+// in-module `mod tests`, which holds only the M16 per-thread *state* tests.
+
+/// The seam itself: main parks on the semaphore, the worker becomes the only runnable thread, and
+/// the signal on that port makes main runnable again. Port `0x1403` is the name Stage 2a's traces
+/// carry — a real observation, not a placeholder, though nothing may depend on its value: it is a
+/// name in retrace's own IPC space and it varied between recordings (`0x1403` in Stage 2a, `0x1103`
+/// in Task 2's run). That is harmless because replay applies the recorded `semaphore_create` reply,
+/// so both halves of one record/replay pair key on an identical value.
+#[test]
+fn a_thread_blocked_on_a_semaphore_is_woken_by_that_ports_signal() {
+    let mut t = ThreadTable::new(ctx(0x1000));
+    t.spawn(ctx(0x2000), (0x30200000, 0x8000));
+    t.block(BlockReason::Sem { port: 0x1403 });
+    assert_eq!(t.pick_next(), Some(1), "main parked on the semaphore, so the worker runs");
+    assert_eq!(t.unblock_sem_waiters_on(0x1403), vec![0]);
+    assert_eq!(t.state_of(0), ThreadState::Runnable);
+}
+
+#[test]
+fn a_semaphore_signal_wakes_only_its_own_port() {
+    let mut t = ThreadTable::new(ctx(0x1000));
+    t.spawn(ctx(0x2000), (0x30200000, 0x8000));
+    t.block(BlockReason::Sem { port: 0x1403 });
+    // A DIFFERENT port must not wake it. Port names are dense small integers in retrace's own
+    // IPC space, so a wake that ignored the key would look correct in a one-semaphore fixture.
+    assert!(t.unblock_sem_waiters_on(0x1404).is_empty());
+    assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
+}
+
+#[test]
+fn a_semaphore_signal_with_no_waiter_is_legal_and_not_an_error() {
+    let mut t = ThreadTable::new(ctx(0x1000));
+    // The posture unblock_waiters_on already documents: the real kernel answers "nobody was
+    // waiting" as an ordinary outcome, and dispatch's counting semaphore signals freely.
+    //
+    // Sharper here than for the ulock pair, and Task 1 §5 item 7 is why: the semaphore signal's
+    // FAST path issues no trap at all (it is a pure atomic increment), so a worker that signals a
+    // semaphore nobody is parked on produces no landmark whatsoever. This seam must therefore never
+    // treat "woke nobody" as evidence of a lost wake.
+    assert!(t.unblock_sem_waiters_on(0x1403).is_empty());
+}
+
+#[test]
+fn a_semaphore_block_does_not_disturb_the_ulock_wake_seam() {
+    // Sem and Wait key on values from DIFFERENT address spaces that can collide numerically.
+    // A port name of 0x1403 and a guest address of 0x1403 must never wake each other.
+    let mut t = ThreadTable::new(ctx(0x1000));
+    t.spawn(ctx(0x2000), (0x30200000, 0x8000));
+    t.block(BlockReason::Sem { port: 0x1403 });
+    assert!(t.unblock_waiters_on(0x1403).is_empty(), "an address wake must not wake a port waiter");
+    assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
+    // …and the converse, so neither direction is left to inspection: a ulock waiter on the numerically
+    // identical address must survive a semaphore signal on that "port".
+    t.switch_to(1);
+    t.block(BlockReason::Wait { addr: 0x1403 });
+    assert_eq!(t.unblock_sem_waiters_on(0x1403), vec![0], "the semaphore signal wakes the SEM waiter…");
+    assert_eq!(t.state_of(1), ThreadState::Blocked(BlockReason::Wait { addr: 0x1403 }),
+        "…and leaves the ulock waiter on the same number blocked");
+}
+
+/// A parked worker is `Blocked`, and NOTHING in either wake seam can wake it. That is a structural
+/// property, not an accident of the current guest: `BlockReason::Parked` carries no key, so neither
+/// `unblock_waiters_on` (address) nor `unblock_sem_waiters_on` (port) can ever match it. Stage 2b
+/// does not model thread reuse, so a parked worker stays parked for the rest of the run — which is
+/// exactly what makes `pick_next` hand the vCPU back to main.
+#[test]
+fn a_parked_worker_is_unwakeable_by_either_seam_and_leaves_main_pickable() {
+    let mut t = ThreadTable::new(ctx(0x1000));
+    t.spawn(ctx(0x2000), (0x30200000, 0x8000));
+    t.switch_to(1);
+    t.block(BlockReason::Parked);
+    assert!(t.unblock_waiters_on(0x1403).is_empty());
+    assert!(t.unblock_sem_waiters_on(0x1403).is_empty());
+    assert_eq!(t.state_of(1), ThreadState::Blocked(BlockReason::Parked));
+    assert_eq!(t.pick_next(), Some(0), "the park is what hands the vCPU back to main");
+    assert_eq!(t.live(), 2, "a parked worker is ALIVE — the real kernel can hand it more work");
+}
+
 /// A `Box_` for the VM-backed tests in this file.
 ///
 /// There is no `Box_::for_test()`; the constructor is `Box_::load(&loaded)`, and every existing
@@ -1234,4 +1315,126 @@ fn workq_reqthreads_refuses_a_count_past_the_sanity_ceiling() {
     let mut b = tb();
     b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
     b.guest_workq_kernreturn([0x20, 0x0, 65, 0x40008ff, 0x0, 0x20, 0, 0]);
+}
+
+// ---- M18 Stage 2b: the semaphore seam and the worker's park, through the box -------------------
+
+/// M18 Stage 2b: the wait trap parks the caller on the port it names. The port comes from args[0],
+/// measured: both Stage 2a runs ended on this trap carrying 0x1403, the name the immediately
+/// preceding semaphore_create reply minted. Nothing may depend on that VALUE — it is a name in
+/// retrace's own IPC space and varied between recordings (0x1403 there, 0x1103 in Task 2's run) —
+/// only on it being the same one on both halves of a record/replay pair, which the recorded reply
+/// guarantees.
+#[test]
+fn sem_wait_blocks_the_caller_on_the_port_in_arg0() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    let rc = b.guest_sem_wait([0x1403, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(rc, 0);
+    assert_eq!(b.threads().state_of(0),
+        ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
+    assert_eq!(b.threads().pick_next(), Some(1), "the worker is now the only runnable thread");
+}
+
+/// The signal trap wakes it, and names who it woke — the shape Task 4's record arm needs.
+#[test]
+fn sem_signal_wakes_the_waiter_and_names_it() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    b.guest_sem_wait([0x1403, 0, 0, 0, 0, 0, 0, 0]);
+    let (rc, woken) = b.guest_sem_signal([0x1403, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(rc, 0);
+    assert_eq!(woken, vec![0], "identity matters: M17 materialises a pended signal on the woken thread");
+    assert_eq!(b.threads().state_of(0), ThreadState::Runnable);
+}
+
+/// A signal nobody is parked on is a legal no-op, through the box as well as through the table.
+///
+/// Not redundant with `a_semaphore_signal_with_no_waiter_is_legal_and_not_an_error`: that one pins
+/// `ThreadTable`'s answer, this one pins that the BOX method does not add a guard of its own on top
+/// of it. Task 1 §5 item 7 is why it would be wrong to: the signal's fast path is a pure atomic
+/// increment that issues NO trap, so the only signals this arm ever sees are slow-path ones — but
+/// the guest is free to signal a semaphore whose waiter has already been woken by an earlier
+/// signal, and answering that with anything but `(0, [])` would abort a correct guest.
+#[test]
+fn sem_signal_with_nobody_parked_is_a_legal_no_op() {
+    let mut b = tb();
+    let (rc, woken) = b.guest_sem_signal([0x1403, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(rc, 0, "KERN_SUCCESS — the guest reads a failure here as a broken semaphore");
+    assert!(woken.is_empty());
+}
+
+/// M18 Stage 2b: the worker's own park, `workq_kernreturn(0x4, 0, 0, 0)` — Task 1 §3d, measured
+/// from `__pthread_wqthread`'s `mov w0, #0x4` and confirmed live on the host as the last
+/// `workq_kernreturn` before exit.
+///
+/// **Both halves of the contract are asserted, and the second is the one with teeth.** The worker
+/// must go non-runnable so `pick_next` returns main — without that the guest deadlocks — AND its
+/// saved context must not be left resumable into a RETURN from `workq_kernreturn`, because
+/// what libpthread executes after the `bl` stores "BUG IN LIBPTHREAD: __workq_kernreturn returned"
+/// and falls into a `brk`. The dispatch arms call `set_x0_err_and_return` unconditionally, so this
+/// test drives that call too: asserting only the block state would leave the whole hazard untested,
+/// since `set_x0_err_and_return` is what would put the resume PC past the `svc`.
+#[test]
+fn workq_kernreturn_park_blocks_the_worker_and_leaves_it_unresumable() {
+    // The wqthread entry registered below. It stands in here for the address ELR_EL1 holds at a
+    // real park trap — one instruction PAST the `svc` — which is what `switch_to_thread`'s
+    // `load_ctx` puts on the vCPU when it makes the worker current.
+    const ENTRY: u64 = 0x2222;
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, ENTRY, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    // The park is issued BY the worker, so the worker has to be the current thread.
+    b.switch_to_thread(1);
+
+    let rc = b.guest_workq_kernreturn([0x4, 0x0, 0x0, 0x0, 0, 0, 0, 0]);
+    assert_eq!(rc, 0);
+    assert_eq!(b.threads().state_of(1), ThreadState::Blocked(BlockReason::Parked),
+        "Blocked, not Exited: a parked worker is alive and live() must not start lying");
+
+    // Now exactly what happens next in production: the dispatch arm completes the syscall return,
+    // then the next `Box_::run()` entry sees `needs_reschedule()` and switches.
+    b.set_x0_err_and_return(rc, false);
+    b.schedule_after_block();
+
+    assert_eq!(b.threads().current(), 0, "the park hands the vCPU back to main");
+    // The teeth. Without the ELR rewind in `guest_workq_park` this is ENTRY — the return address,
+    // i.e. the "BUG IN LIBPTHREAD" path. With it, the saved pc points AT the `svc`.
+    assert_eq!(b.threads().ctx_of(1).regs.pc, ENTRY - 4,
+        "the parked worker's resume pc must point AT the svc, never past it");
+    assert_eq!(b.threads().ctx_of(1).elr, ENTRY - 4, "…and its saved ELR with it");
+}
+
+/// The park must not be reachable as a way to strand the guest: if the parking worker is the last
+/// runnable thread, that is a deadlock and it must be LOUD rather than a silent hang — the same
+/// posture `a_deadlock_fails_loud_instead_of_hanging` pins for a mutual join. This is also why
+/// `guest_workq_park` needs no "only a worker may park" assert: the harmful case already fails by
+/// name here.
+#[test]
+#[should_panic(expected = "DEADLOCK")]
+fn a_park_that_strands_the_guest_fails_loud_rather_than_hanging() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    // Main parks on a semaphore nobody will ever signal, then the worker parks too.
+    b.guest_sem_wait([0x1403, 0, 0, 0, 0, 0, 0, 0]);
+    b.switch_to_thread(1);
+    b.guest_workq_kernreturn([0x4, 0x0, 0x0, 0x0, 0, 0, 0, 0]);
+    b.schedule_after_block();
+}
+
+/// The park's own refuse-by-value guard, pinned the way its neighbours are: the panic must NAME
+/// what it refused. `0x4` with a non-zero `args[1]`/`args[2]` is XNU's kevent-carrying THREAD_RETURN
+/// — "hand these events back AND park" — and parking while dropping the events would be silent.
+#[test]
+#[should_panic(expected = "unmeasured arguments")]
+fn workq_kernreturn_park_refuses_a_kevent_carrying_variant() {
+    let mut b = tb();
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
+    b.switch_to_thread(1);
+    // A plausible kevent list pointer and count in the two arguments the measured park zeroes.
+    b.guest_workq_kernreturn([0x4, 0x27ff6a8, 0x1, 0x0, 0, 0, 0, 0]);
 }
