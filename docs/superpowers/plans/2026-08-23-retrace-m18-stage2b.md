@@ -446,11 +446,11 @@ git commit -m "M18 Stage 2b t2: REQTHREADS builds the worker, and the guard that
 
 ---
 
-### Task 3: The mach-semaphore park/wake seam
+### Task 3: The mach-semaphore park/wake seam, and the worker's own park
 
 **Files:**
-- Modify: `crates/retrace-box/src/thread.rs` — `BlockReason`, `unblock_sem_waiters_on`
-- Modify: `crates/retrace-box/src/lib.rs` — `guest_sem_wait`, `guest_sem_signal`
+- Modify: `crates/retrace-box/src/thread.rs` — `BlockReason` (two new variants), `unblock_sem_waiters_on`
+- Modify: `crates/retrace-box/src/lib.rs` — `guest_sem_wait`, `guest_sem_signal`, and `guest_workq_kernreturn`'s new park arm
 - Test: `crates/retrace-box/tests/threads.rs` (both the pure-table tests and the box-method tests)
 
 **Where the tests go, because this crate splits them by kind.** `src/thread.rs`'s in-module
@@ -466,6 +466,8 @@ stacks) and builds contexts with a bare `ThreadCtx::zeroed()`. The *scheduling* 
   - `ThreadTable::unblock_sem_waiters_on(&mut self, port: u64) -> Vec<usize>`
   - `Box_::guest_sem_wait(&mut self, args: [u64; 8]) -> u64` — returns 0
   - `Box_::guest_sem_signal(&mut self, args: [u64; 8]) -> (u64, Vec<usize>)` — returns `(0, woken)`
+  - a park arm in `guest_workq_kernreturn` for opcode `0x4`, leaving the worker non-runnable
+    (see Step 9 — measured by Task 1, and required for the gate to go green)
 
   The `(rc, woken)` shape of `guest_sem_signal` deliberately mirrors `guest_ulock_wake`, because
   Task 4's record arm needs the woken tids for the same reason M17's wake arm does: to materialise a
@@ -672,11 +674,46 @@ cargo test -p retrace-box -- --test-threads=1
 
 Expected: PASS both.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Handle the worker's park — opcode `0x4`, measured by Task 1**
+
+Task 1 measured something nothing could measure before a worker ran, and it changes this task's
+scope. When the worker finishes its block it calls `workq_kernreturn(0x4, 0, 0, 0)` to park, and
+libpthread `brk`s with `"BUG IN LIBPTHREAD: __workq_kernreturn returned"` **immediately after the
+call**. See §5 of `docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md`.
+
+Without this, `guest_workq_kernreturn`'s `other =>` arm refuses `0x4` by value and kills the run
+right after the worker's useful work — so the gate cannot go green.
+
+Two constraints, and the mechanism between them is yours:
+
+1. **The parked worker must end up non-runnable**, so `pick_next()` returns main and the guest can
+   finish. A parked workqueue thread is *alive* — the real kernel can hand it more work — so
+   modelling it as `Exited` is a poorer fit than a `Blocked` variant: `Exited` carries a return
+   value a parked worker does not have, and `live()` would start lying. Stage 2b's scope excludes
+   thread reuse, so nothing will wake it; that is fine and expected.
+2. **It must not be left resumable into a return from `workq_kernreturn`.** This is the sharp edge.
+   The existing dispatch arms call `b.set_x0_err_and_return(rc, false)` unconditionally, which
+   advances the saved PC past the `svc` — leaving a context that, if anything ever resumed it, would
+   return from the call libpthread `brk`s on. `bsdthread_terminate`'s arm shows the established
+   shape for a syscall that does not return: it deliberately omits that call and documents why.
+
+**This needs NO new dispatch arm and no `retrace-core` change.** `guest_workq_kernreturn` is already
+mirrored on both sides by Stage 2a, so a new opcode arm inside it is symmetric by construction — the
+same property that let Task 2 change REQTHREADS without touching the core. If you find yourself
+editing `retrace-core`, stop and re-read this paragraph.
+
+Write a test in `crates/retrace-box/tests/threads.rs` asserting that after a park the worker is not
+pickable and `pick_next()` returns main. Then run:
+
+```sh
+cargo test -p retrace-box --test threads -- --test-threads=1
+```
+
+- [ ] **Step 10: Commit**
 
 ```bash
 git add crates/retrace-box/src/thread.rs crates/retrace-box/src/lib.rs crates/retrace-box/tests/threads.rs
-git commit -m "M18 Stage 2b t3: a park/wake seam keyed on a port name, not a guest address"
+git commit -m "M18 Stage 2b t3: a park/wake seam keyed on a port name, and the worker's own park"
 ```
 
 ---
