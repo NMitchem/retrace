@@ -1,44 +1,27 @@
 //! M18 rung 5: a guest that dispatch_asyncs onto a global concurrent queue.
 //!
-//! Still parked as of Stage 2b Task 4, but no longer parked at a WALL — see the `#[ignore]` reason,
-//! which is the primary record of that and says plainly that nothing is left to park it at. Task 5
-//! owns un-parking it on its own green. The second test in this file is NOT parked: it is Stage
-//! 2a's own gate, narrowed to the one guarantee it exists to keep.
+//! **UN-PARKED at the M18 Stage 2b close** (Task 5), on its own green rather than on Task 4's
+//! hand-run beside it: this body spawns the codesigned CLI through `util::record_dynamic`, and it
+//! was run — `cargo test -p retrace --test dispatch_e2e -- --test-threads=1 --ignored`, ok, exit 0
+//! — before the attribute came off. It had been parked since Stage 1 and re-parked twice, each time
+//! at a measured wall; there is no wall left. The second test in this file has never been parked: it
+//! is Stage 2a's own gate, narrowed to the one guarantee it exists to keep, plus (Stage 2b) the
+//! trap census that proves this milestone's seam actually ran.
 
 mod util;
 
+use retrace_trace::Event;
+
 #[test]
-#[ignore = "M18 Stage 2b Task 5 owns this gate's final state, and this reason is stamped by Task \
-            4 to say what is true now rather than what used to be. The wall this reason used to \
-            name is GONE. Stage 2a emulated workq_open(367)/workq_kernreturn(368) in the box; Task \
-            1 measured the wqthread entry contract \
-            (docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md); Task \
-            2 made REQTHREADS build a worker there, plus the fail-loud guard on record_box's \
-            generic negative-trap arm that refused the whole -39..=-33 semaphore family by name; \
-            Task 3 built the park/wake seam (BlockReason::Sem keyed on the PORT name, since \
-            dispatch_semaphore_wait lowers to a raw Mach trap and not to __ulock_wait, so M14/M17's \
-            `pthread + 0x34` address correlation has nothing to work on) and the worker's own park \
-            at workq_kernreturn opcode 0x4; and Task 4 wired both halves into BOTH dispatch loops, \
-            so -36 and -33 are serviced by arms sitting BEFORE that guard instead of reaching it. \
-            Task 4 hand-ran this exact guest end to end and the whole thing worked: main blocks in \
-            semaphore_wait_trap(-36) on port 0x1503, the box schedules the worker it built, the \
-            worker writes 'worker', signals semaphore_signal_trap(-33) on that same port, parks in \
-            workq_kernreturn(0x4), main resumes and writes 'done', and the guest exits 0 — replayed \
-            twice, byte-identical stdout both times. So there is NOTHING LEFT TO PARK THIS AT, and \
-            un-parking it is Task 5's first job. It stays parked here only because that hand-run \
-            was a bare CLI record-dyn/replay, not this test: this body spawns the codesigned CLI \
-            through util::record_dynamic and has not itself been run green under the workspace \
-            gate. A gate must be un-parked on its own green, not on a measurement taken beside it."]
 fn a_dispatch_async_guest_records_and_replays() {
-    // A REAL body — the `stackoverflow_rust_e2e` pattern. Parking is one attribute and un-parking is
-    // deleting one line, rather than writing a test. A body that asserts nothing would be a test
-    // that cannot fail, which is what the honest-gate discipline exists to prevent.
+    // A REAL body — the `stackoverflow_rust_e2e` pattern. Parking was one attribute and un-parking
+    // was deleting it, rather than writing a test. A body that asserts nothing would be a test that
+    // cannot fail, which is what the honest-gate discipline exists to prevent.
     //
     // Record the guest through real dyld, replay it, and replay it again — same harness shape as
-    // `thread_rust_e2e.rs`. UNCHANGED by Stage 2b Task 4, deliberately: the assertions below are
-    // already exactly the ones the cleared wall calls for, and t4's hand-run of this same guest
-    // through the bare CLI satisfied every one of them (see the #[ignore] reason). Task 5 runs this
-    // body itself and decides the attribute.
+    // `thread_rust_e2e.rs`. The assertions are UNCHANGED across the un-park: they were already
+    // exactly the ones the cleared wall called for, so Task 5 ran this body and deleted the
+    // attribute without touching a single one of them. Nothing here was loosened to earn the green.
     //
     // The assertions stay about what the guest PRINTED, and must: before Stage 2a the same body
     // failed on a completely different cause (a SIGSEGV taken by retrace ITSELF on a host workqueue
@@ -81,17 +64,22 @@ fn a_dispatch_async_guest_records_and_replays() {
 /// before writing anything — while both earlier signatures were merely things that happened to sit
 /// past the fork in the road.
 ///
-/// This test is deliberately NARROWER than the headline gate above and stays that way even once
-/// that gate is un-parked: it says nothing about replay, about determinism, or about the guest
-/// finishing. It is the tripwire for one specific hazard, and its two supporting checks below are
-/// there because they outlive every wall that passes them.
+/// This test is deliberately NARROWER than the headline gate above in what it says about the RUN —
+/// and it stays that way now that gate is un-parked: it says nothing about replay, about
+/// determinism, or about the guest finishing. It is the tripwire for one specific hazard, and its
+/// two supporting checks below are there because they outlive every wall that passes them.
+///
+/// It is, however, WIDER in one direction, and Stage 2b widened it deliberately: it reads the
+/// **trace** and takes a census of the mach-semaphore pair. See the comment on that census — every
+/// other assertion in this file, this test's and the headline gate's alike, is satisfied by a run in
+/// which Stage 2b's seam never executes.
 ///
 /// **It never asserts on the exit code as the discriminator.** `crashy_e2e` asserts 139 for an
 /// uncaught GUEST fault, so an exit code alone cannot tell "retrace SIGSEGV'd" apart from "the guest
 /// faulted" — the honest-gate rule this repo learned from `segv_rust_e2e`.
 #[test]
 fn the_workqueue_syscalls_are_emulated_not_forwarded() {
-    let (rec, _trace) = util::record_dynamic(retrace_guest::DISPATCH_DYN);
+    let (rec, trace) = util::record_dynamic(retrace_guest::DISPATCH_DYN);
 
     // Stage 2b Task 4 moved this assertion for the third and last time, onto the thing that is
     // now actually observable: the worker block's OWN stdout. Servicing the semaphore pair let the
@@ -125,4 +113,52 @@ fn the_workqueue_syscalls_are_emulated_not_forwarded() {
     // recorder, which is the one thing this file exists to forbid.
     assert!(!rec.stderr.contains("_pthread_wqthread"),
         "no host workqueue thread may exist inside the recorder; stderr:\n{}", rec.stderr);
+
+    // ---- The mach-semaphore census: assert on the TRACE, because printed output is not enough ----
+    //
+    // Everything above — and every assertion the headline gate makes (`worker\n`, `done\n`, exit 0,
+    // two byte-identical replays) — is satisfied by output this guest produces EVEN IF Stage 2b's
+    // semaphore seam never executes. That is not a hypothetical. `dispatch_semaphore_signal`'s FAST
+    // path is a pure atomic increment that issues NO TRAP AT ALL (measured, Stage 2b Task 1 §5 item
+    // 7); the slow path is taken only because a waiter already exists. Main happens to reach `-36`
+    // and block before the worker is ever scheduled, so the count is negative by the time the worker
+    // signals and `ldaddl` falls through to the trap — but had the worker run first, BOTH halves
+    // would have taken their fast paths, no landmark would exist, this milestone's arms would be
+    // dead code, and the guest would still have printed `worker` and `done` and exited 0.
+    //
+    // So a green run of this guest is not by itself proof that the semaphore arms work. This census
+    // is. It is `segv_rust_e2e`'s rule applied here: assert on the difference your work makes, in
+    // the one form no weaker path can fake.
+    //
+    // The DIFFERING THREAD TAGS are the load-bearing part, not the counts. Both fast paths would
+    // give zero landmarks; a single-threaded run of the same code would give the same tag twice; a
+    // FORWARDED workq_kernreturn would give none at all, because its host worker dies at address 0
+    // before writing anything. One thread waited and a DIFFERENT thread signalled is the shape only
+    // an in-box worker built by `guest_workq_reqthreads`, scheduled by the box, parking and waking
+    // through `BlockReason::Sem`, can produce.
+    let (events, _) = retrace_trace::Reader::open_checked(&trace).unwrap();
+    let tags = |want: u64| -> Vec<u32> {
+        events.iter().filter_map(|e| match e {
+            Event::Syscall { num, thread, .. } if *num == want => Some(*thread),
+            _ => None,
+        }).collect()
+    };
+    // The guest issues exactly one `dispatch_semaphore_wait` and exactly one
+    // `dispatch_semaphore_signal` (see `c/dispatch_dyn.c`), so anything but one landmark each means
+    // the trap census stopped matching the source — a fast path taken, or a trap taken twice.
+    let waits = tags(retrace_arch::MACH_SEMAPHORE_WAIT);
+    let signals = tags(retrace_arch::MACH_SEMAPHORE_SIGNAL);
+    assert_eq!(waits.len(), 1,
+        "expected exactly one semaphore_wait_trap(-36) landmark in the trace, got {}: {waits:?}. \
+         Zero means the wait took its fast path and Stage 2b's seam never ran, which every other \
+         assertion in this file would still have passed.", waits.len());
+    assert_eq!(signals.len(), 1,
+        "expected exactly one semaphore_signal_trap(-33) landmark in the trace, got {}: \
+         {signals:?}. Zero means the signal took its fast path — a pure atomic increment that issues \
+         no trap at all — leaving this milestone's arms unexercised behind a green run.",
+        signals.len());
+    assert_ne!(waits[0], signals[0],
+        "the waiter and the signaller must be DIFFERENT threads — that is the difference M18 Stage \
+         2b makes. Same tag ({}) means one thread did both, so no in-box workqueue worker ran and \
+         the park/wake seam was never crossed.", waits[0]);
 }
