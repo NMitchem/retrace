@@ -182,15 +182,20 @@ at the top of `crates/retrace-box/src/lib.rs`.
 
 A guest may be multi-threaded even though retrace's core is not. `bsdthread_create` is **emulated in
 the box, never forwarded**: `Box_` holds a thread table of register contexts, and a cooperative,
-block-driven scheduler switches only when a thread blocks or exits. That choice is a pure function of
-the guest's own syscall sequence, so record and replay produce identical schedules with **nothing
+block-driven scheduler switches only when a thread blocks or exits. That choice is a pure function
+of the guest's own syscall sequence, so record and replay produce identical schedules with **nothing
 recorded** and no trace-format change — symmetry rule 2 doing its job. The switch reuses the
-save/restore discipline the PAC signing oracle and `flush_guest_tlb` already established. Blocking is
-`__ulock_wait` (515) and waking is `__ulock_wake` (516), correlated by **address equality** on
-`pthread + 0x34` — measured in both `__pthread_join` and `__pthread_joiner_wake`, so no
-address→thread-index mapping is needed. Forwarding `bsdthread_create` is not merely wrong but
-whole-process fatal (the host starts a real thread on retrace's own `_pthread_start`, which
-PAC-fails on the guest's pthread struct), so it asserts.
+save/restore discipline the PAC signing oracle and `flush_guest_tlb` already established. A thread
+blocks for **three** reasons, and the correlation key is not the same for all of them:
+`__ulock_wait` (515) / `__ulock_wake` (516) are correlated by **address equality**
+on `pthread + 0x34` — measured in both `__pthread_join` and `__pthread_joiner_wake`, so no
+address→thread-index mapping is needed; the mach semaphore pair `semaphore_wait_trap` (`-36`) / `semaphore_signal_trap`
+(`-33`) is correlated by **port name**, since what that trap carries is a name in retrace's own IPC
+space and never a guest address (M18 Stage 2b); and a workqueue worker parked at `workq_kernreturn`
+opcode `0x4` (`BlockReason::Parked`) has **no waker at all** — libpthread `brk`s if that call ever
+returns. Forwarding `bsdthread_create` is not merely wrong but whole-process fatal (the host starts
+a real thread on retrace's own `_pthread_start`, which PAC-fails on the guest's pthread struct), so
+it asserts.
 
 **Emulating a syscall's entry contract is not the same as emulating the syscall.** Besides the new
 thread's registers, `guest_bsdthread_create` must reproduce what the *kernel* writes on the way
@@ -207,7 +212,8 @@ rather than off the live vCPU. Masks, pending sets and alternate stacks live on 
 process-global** on `SigTable`, because POSIX makes those per-process. A signal pends when the target
 cannot take it yet, for **two** independent reasons with **two** matching materialisation sites, both
 of them syscall landmarks so that both dispatch loops can see them — the same argument that keeps
-delivery above the trace:
+delivery above the trace — plus, since M18, a **third** blocked state that pends but deliberately
+does *not* materialise:
 
 - **Masked (M16)** — materialised at the *calling* thread's next unmasking
   `sigprocmask`/`pthread_sigmask`.
@@ -217,6 +223,13 @@ delivery above the trace:
   signal pended for both reasons is released only when both have cleared. A signal to a thread
   nothing ever wakes is therefore never delivered; `assert_no_stranded_signals` fails loud at a clean
   exit rather than swallowing it.
+- **Parked on a semaphore (M18)** — the exception, and it **aborts** rather than materialising.
+  M17's materialisation applies a *measured* correction to the woken thread's saved context
+  (`blockedctx.rs`: saved `x0` 0, saved SPSR left C-set for a `__ulock_wait`-blocked thread). Nothing
+  has measured the equivalent for a thread parked in `semaphore_wait_trap`, so the `-33` arm asserts
+  and names the measurement it owes, on both sides identically. Dropping the wake silently was the
+  alternative and is the one failure a determinism oracle **cannot** see: record and replay would
+  agree with each other while the signal vanished.
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (`TRACE_MAGIC` is now
