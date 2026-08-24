@@ -89,6 +89,7 @@ Passed to `debug --script`, semicolon-separated:
 | 2 | `jq` | stock `brew` binary |
 | 3 | `jq` + a file argument | |
 | 4 | `threadrust` | `std::thread::spawn` + `join` |
+| 5 | `dispatch_dyn` (C) | `dispatch_async` onto a global concurrent queue, joined by a `dispatch_semaphore` |
 
 **Capabilities**
 
@@ -103,11 +104,18 @@ Passed to `debug --script`, semicolon-separated:
   is materialised at the wake that makes the thread runnable.
 - **Threads** — emulated `bsdthread_create`, a cooperative block-driven scheduler, and a divergence
   oracle that checks thread identity on every landmark.
+- **libdispatch / GCD** — since M18, a guest that `dispatch_async`es onto a global concurrent queue
+  runs, records and replays. `workq_open` (367) and `workq_kernreturn` (368) are emulated in the box
+  and never forwarded; `REQTHREADS` builds the worker thread *inside* the VM and enters it at the
+  guest's own registered `wqthread`; and the mach-semaphore pair — `semaphore_wait_trap` (`-36`) and
+  `semaphore_signal_trap` (`-33`), which is what `dispatch_semaphore` actually lowers to — is a
+  park/wake seam keyed on the port name. All of it is below or symmetric across the trace: nothing
+  new is recorded and `TRACE_MAGIC` did not move.
 
-**Gate:** 420 passed / 0 failed / 2 ignored across 104 test binaries, **measured at `67e9a13`**,
-clippy clean over `--workspace --all-targets` with `-D warnings` (clippy re-verified at `4d0f780`, the
-only commit since — comments and documentation only, no executable code). See the testing note below
-for how that number is assembled.
+**Gate:** 442 passed / 0 failed / 1 ignored across 104 test binaries, **measured at `4928487`**,
+clippy clean over `--workspace --all-targets` with `-D warnings`. Anything committed after that SHA in
+this milestone is documentation only, no executable code. See the testing note below for how that
+number is assembled.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
 
@@ -115,24 +123,20 @@ for how that number is assembled.
 
 These are real and current, not aspirational gaps.
 
-- **No GCD / libdispatch path.** Programs that get concurrency through libdispatch — most real macOS
-  applications — are not supported. M18 has moved this wall twice and not yet cleared it. Stage 1
-  stopped forwarding `bsdthread_register` to retrace's own already-registered host process, so it
-  returns a real feature word, `_pthread_workqueue_supported` returns true, and libdispatch gets as
-  far as bringing its workqueue up — `workq_open` (367) and `workq_kernreturn` (368) fire for the
-  first time in this project's history. **Stage 2a emulates both below the trace**
-  (`Box_::guest_workq_open` / `guest_workq_kernreturn`, a record arm and a replay mirror each, plus
-  a fail-loud guard on the generic forward arm), so neither reaches the host kernel any more: the
-  recorder no longer brings up a real workqueue for its own process and no longer has a host worker
-  thread created inside it that jumps to address 0 and SIGSEGVs. What remains is **worker
-  construction**. `workq_kernreturn`'s `REQTHREADS` opcode (`0x20`) is a deliberate named `panic!`,
-  because the kernel enters a workqueue thread at the registered `wqthread` with a register contract
-  no run here has measured, and building one from a guess would be invention. Behind that wall the
-  next one is already measured
-  (`docs/superpowers/specs/2026-08-21-retrace-m18-stage2b-measurements.md`): `dispatch_semaphore_wait`
-  lowers to a raw Mach trap (`num=-36`) on a port minted by a forwarded `semaphore_create`, **not**
-  to `__ulock_wait` — so the park/wake seam M14/M17 built on `pthread + 0x34` address equality does
-  not fit it, and forwarding that trap wedges the recorder in an unbounded host blocking call.
+- **libdispatch runs only as far as it has been measured.** Rung 5 records and replays, but the
+  workqueue emulation is a floor built from measurements rather than an implementation of the
+  kernel's, and everything past that floor refuses **by value** instead of guessing. `workq_kernreturn`
+  knows exactly three opcodes — `0x400` (dispatch setup), `0x20` (`REQTHREADS`, which builds the
+  worker) and `0x4` (the worker's park, which must never return) — and names any other in a `panic!`,
+  because the opcodes a *running* worker can issue cannot be enumerated until one issues them.
+  `semaphore_signal_trap` (`-33`) wakes **exactly one** waiter and asserts if it would wake more: the
+  plural case owes two unmeasured answers, `semaphore_signal_all_trap` (`-34`, still refused by a
+  family-wide guard over `-39..=-33`) and *which* waiter a single signal should pick. And a pending
+  signal on a thread parked in `semaphore_wait_trap` **aborts** rather than being delivered — M17
+  materialises at `__ulock_wake` using a measured correction to the woken thread's saved context, and
+  nothing has measured the equivalent here, so the wake names the measurement it owes. One further
+  value is an extrapolation and flagged as such at its call site: the QoS entry-flags word
+  `0x244004`, which no live run reproduced.
 - **The scheduler is cooperative,** switching only when a thread blocks or exits. That is what makes
   the schedule replayable without recording it, and it is a deliberate trade: interleavings that
   require preemption mid-critical-section never occur, so **races that need preemption to manifest
@@ -148,19 +152,12 @@ These are real and current, not aspirational gaps.
   diagnosed by its crash instead. **At most one signal materialises per wake**, and a second
   deliverable one aborts loudly rather than being dropped: queueing at a wake is unmodelled because
   no guest in the tree measures it.
-- **Two gates are parked `#[ignore]`d** at documented, *measured* walls — the reason is on each test
-  itself:
-  - `stackoverflow_rust_e2e` — libstd computes its guard page from a constant macOS 26 libpthread
-    reports and retrace cannot influence, so the recursion takes a stage-2 fault instead of striking
-    the guard (M8 risk R3).
-  - `dispatch_e2e` (rung 5, a guest that `dispatch_async`es onto a global concurrent queue) — parked
-    at the Stage-2b wall above: retrace's own deliberate `REQTHREADS` refusal, because worker
-    construction is not built. M18 parked this gate for a capability retrace does not yet have, and
-    has moved it twice — once when Stage 1 cleared the `_pthread_workqueue_supported` BRK, and again
-    when Stage 2a removed the host-worker hazard. Its file also carries an **un-parked** gate,
-    `the_workqueue_syscalls_are_emulated_not_forwarded`, which asserts the difference Stage 2a made:
-    the record run stops at retrace's own named wall, in its own process, rather than on a host
-    workqueue thread.
+- **One gate is parked `#[ignore]`d** at a documented, *measured* wall, and the reason is on the
+  test itself: `stackoverflow_rust_e2e`, because libstd computes its guard page from a constant
+  macOS 26 libpthread reports and retrace cannot influence, so the recursion takes a stage-2 fault
+  instead of striking the guard (M8 risk R3). It has been the only parked gate since M18 un-parked
+  `dispatch_e2e` — a gate M18 itself parked for a capability retrace did not have, moved twice as
+  each measured wall fell, and then cleared.
 
 ## Testing
 
