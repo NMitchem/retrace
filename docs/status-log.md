@@ -3652,3 +3652,202 @@ repo's history and a trap for the next `git clean`.
 
 See `docs/superpowers/specs/2026-08-20-retrace-m18-workq-design.md` (the "Stage 2, split by what is
 measured" section) and `docs/superpowers/plans/2026-08-21-retrace-m18-workq-stage2a.md`.
+
+## Status: M18-workq (Stage 2b) — 🎉 a guest that `dispatch_async`es runs, records and replays
+
+The 🎉 Stage 2a withheld. `dispatch_e2e::a_dispatch_async_guest_records_and_replays` is
+**un-parked**: a dynamically-linked C guest that `dispatch_async`es a block onto a global concurrent
+queue and joins it with a `dispatch_semaphore` records through real `/usr/lib/dyld`, replays
+bit-for-bit, and replays again byte-identically. That is rung 5, and it is the first guest in this
+project whose second thread of control is created by **libdispatch** rather than by the guest's own
+`pthread_create`.
+
+**Gate:** **442 passed / 0 failed / 1 ignored across 104 test binaries**, measured at `4928487`, clippy clean
+over `--workspace --all-targets` with `-D warnings`. Run chunked, as every milestone since M14 has
+been — the unchunked `--workspace` run exceeds the tool ceiling and gets killed — with each chunk's
+exit code captured *before* any pipe and every one of them `0`.
+
+Reconciled file-by-file against Stage 2a's close of 422 `#[test]` / 2 ignored at `67e9a13`, rather
+than by trusting a sum. **The entire delta is one file.** `crates/retrace-box/tests/threads.rs` goes
+42 -> 63: Task 2 deleted `workq_kernreturn_reqthreads_is_the_named_stage_2a_wall` (-1, the Stage 2a
+wall it removed) and added ten `workq_reqthreads_*`; Task 3 added the park pair, the three semaphore
+unit tests and six cross-seam cases; fix round 1 added
+`sem_signal_refuses_to_wake_more_than_one_waiter`. 422 - 1 + 22 = **443 `#[test]`**, of which one is
+ignored. No new test file: still 99 files with tests, still 104 binaries. The ignored count moved
+2 -> 1 on the un-park and nothing else touched it.
+
+The un-park was earned on this test's own green, not on the hand-run Task 4 took beside it. Task 4
+had driven the same guest end-to-end through the bare CLI — that is a different argv, environment and
+codesigning path — and the `#[ignore]` reason it left said so in as many words, parking the gate on
+the explicit ground that *a gate must be un-parked on its own green*. Task 5 ran the body
+(`--ignored`, ok, exit 0) and only then deleted the attribute. No assertion was loosened to earn it;
+the body is unchanged across the un-park.
+
+### What landed: the worker is built inside the VM, and the semaphore is a seam
+
+Three things, all of them below or symmetric across the trace, none of them adding a byte to the
+recording — `TRACE_MAGIC` does not move:
+
+1. **`REQTHREADS` (`workq_kernreturn` opcode `0x20`) builds a worker.** Stage 2a's deliberate
+   `panic!` is gone. `Box_::guest_workq_reqthreads` places a stack and a pthread struct in **one**
+   `guest_vm_reserve` (so their relative placement is what §2c measured, not two bumps that could
+   drift apart), seeds the measured `wqthread` entry contract into a fresh `ThreadCtx`, and enters
+   the thread at the guest's **own registered** `wqthread` — an address the guest supplied at
+   `bsdthread_register`, never an invented one.
+2. **The mach-semaphore pair is a park/wake seam.** `semaphore_wait_trap` (`-36`) parks the caller in
+   `BlockReason::Sem { port }`; `semaphore_signal_trap` (`-33`) wakes it. The key is a **port name in
+   retrace's own IPC space**, because that is what the trap carries — M14/M17's `pthread + 0x34`
+   address correlation has nothing to work on here, exactly as Stage 2a's measurement warned.
+3. **The worker parks rather than returning.** `workq_kernreturn` opcode `0x4` is
+   `Box_::guest_workq_park`, which blocks in `BlockReason::Parked` and never returns to the guest —
+   libpthread `brk`s if it does.
+
+Both new traps get a record arm and a replay mirror calling the same `Box_` method with the same
+arguments (symmetry rule 1), positioned **immediately before** the generic negative-trap arm whose
+first statement is Task 2's family-wide guard. That order is load-bearing: placed after it, the arms
+would be dead code that compiles, passes clippy, and silently hits the guard instead. The guard stays
+where it is, because the other five stubs of the verified `-39..=-33` family are still unserviced and
+must keep reaching it.
+
+### What Task 1 measured, and what it retired
+
+`docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md`. Three results
+worth carrying:
+
+- **§3 — the trap numbers are now VERIFIED, and Stage 2a's attributions were right.** Read straight
+  off libsystem_kernel's own stubs on this machine: `_semaphore_signal_trap` is `mov x16, #-0x21`
+  (**-33**) and `_semaphore_wait_trap` is `mov x16, #-0x24` (**-36**). The whole `-33..=-39` block is
+  pinned, cross-checked by two neighbours — `_mach_msg_overwrite_trap` at -32 and `_mach_msg2_trap`
+  at -47, the latter matching the `MACH_MSG2 = -47` this crate has used since M2. Stage 2a's largest
+  attribution debt is discharged: the predecessor document labelled both numbers with an explicit
+  "not checked against this machine" caveat, and both labels held.
+- **§4 — the struct-init hypothesis is CONFIRMED, and it is why this milestone is possible at all.**
+  libpthread distinguishes a *fresh* worker from a *reused* one by entry-flags bit 17, and on the
+  fresh path calls `__pthread_wqthread_setup`, which **writes** the pthread struct rather than
+  reading it — including the struct's own PAC signature, computed in-guest with the guest's own keys
+  (`mov w16,#0x5b9; pacdb x17,x16`). So retrace hands over zeroed memory with the bit clear and
+  libpthread authors the layout itself. **Retrace invents an address, not a layout** — the property
+  M14's rule wanted, and the reason worker construction turned out to be measurable rather than a
+  reimplementation of the kernel.
+- **§3d — the park opcode came free.** `0x4` with `(0, 0, 0)`, and a **no-return** contract:
+  libpthread stores "BUG IN LIBPTHREAD: __workq_kernreturn returned" and falls into `brk #0x1` if it
+  ever comes back. The design spec's risk 3 is partially retired — one park opcode known by value,
+  its contract known too. Still a floor, not a ceiling.
+
+### The `verify_thread` census stays at SEVEN — the plan's `7 → 9` was wrong
+
+This stage's plan and design both said the oracle census had to grow to nine, one new site per new
+mirror, and that `CLAUDE.md` would be edited to match. **That was wrong, and it was caught by reading
+the code rather than by trusting the plan** (commit `d781c30`, a correction with no code change).
+Both new mirrors sit *inside* the generic recorded-`Event::Syscall` arm, which calls `verify_thread`
+**before** its `if num == …` chain begins — so they inherit the check, exactly as Stage 2a's two
+mirrors do. Adding a call would have made the census wrong in the other direction.
+
+The rule underneath is the one to carry, and it is now stated for the second milestone running: **a
+mirror that `return`s from before the arm's own `verify_thread` creates a hole and owes a site; a
+mirror placed after it inherits one.** Position, not count, is what to check.
+
+### Honest-gate posture at this close
+
+- `dispatch_e2e::a_dispatch_async_guest_records_and_replays` — **UN-PARKED.** Parked at Stage 1 and
+  re-parked twice, each time at a measured wall; there is no wall left. This is the discipline
+  closing the loop it opened: M18 parked a gate for a capability retrace did not have, moved it as
+  each wall fell, and un-parked it on a real green.
+- `dispatch_e2e::the_workqueue_syscalls_are_emulated_not_forwarded` — **kept and widened.** Its
+  Stage-2a assertion on the panic message "worker construction is Stage 2b" is gone, because Task 2
+  removed that panic. Both of its durable checks are unchanged verbatim: `assert_ne!(code, 139)` and
+  "no `_pthread_wqthread` on stderr", the tripwire the file exists to keep.
+- `stackoverflow_rust_e2e` — unchanged, still parked at M8 risk R3. **It is now the only parked gate
+  in the tree.**
+
+### The census this close added, and why a green run was not proof
+
+Everything the headline gate asserts — `worker`, `done`, exit 0, two byte-identical replays — is
+satisfied by a run in which **this milestone's code never executes.** That is not hypothetical:
+`dispatch_semaphore_signal`'s fast path is a bare `ldaddl` on the count word inside libdispatch's own
+object and issues **no trap at all** (§5 item 7). Main happens to reach `-36` and block before the
+worker is scheduled, so the count is negative by the time the worker signals and the atomic falls
+through to the trap — but had the worker run first, both halves would have taken their fast paths,
+no landmark would exist, the arms would be dead code, and the guest would still have printed both
+lines and exited 0.
+
+So the companion test now reads the **trace** and takes a census: exactly one `-36` landmark, exactly
+one `-33`, and — the load-bearing part — **different thread tags**. One thread waited and a
+*different* thread signalled is a shape only an in-box worker, built by `guest_workq_reqthreads`,
+scheduled by the box, parking and waking through `BlockReason::Sem`, can produce. This is
+`segv_rust_e2e`'s rule applied here: assert on the difference your work makes, in the one form no
+weaker path can fake.
+
+**And that census assertion was written inverted.** It shipped as `assert_eq!(waits[0], signals[0])`
+under a message demanding the tags DIFFER — an assertion that passes in exactly the case it exists to
+forbid and fails on the correct run. It was caught at the close, by reading the assertion against its
+own message before running it, and corrected to `assert_ne!`. The lesson is narrow and specific: **an
+assertion and the message explaining it are two statements of the same claim, and nothing in the
+toolchain checks them against each other.** Clippy cannot see it; a green gate would not have caught
+the reverse case, where an inverted assertion passes. Read them as a pair. This is the same class as
+Task 4's heredoc lesson — an artifact that compiles, passes clippy, and is wrong in a way only a
+human reading it can see.
+
+### Boundaries and non-changes, stated so a later reader does not go looking
+
+- **`-33` wakes exactly ONE waiter, asserted by value** (fix round 1, `eca70d7`), in
+  `Box_::guest_sem_signal` — below the trace, so both dispatch loops inherit the bound through the
+  same call and there is no second site to keep in step. The bound guards **two** unmeasured things,
+  not one: `semaphore_signal_all_trap` (`-34`) is a separate trap that is still refused by the
+  family guard, **and** *which* waiter `-33` should pick when several are parked has never been
+  measured — `unblock_sem_waiters_on` would impose thread-table order, which is arbitrary the moment
+  there are two. Servicing the plural case owes both answers.
+- **A pending signal on a semaphore-parked thread ABORTS rather than being delivered**, deliberately,
+  on both sides identically. M17 materialises at `__ulock_wake` using a *measured* correction to the
+  woken thread's saved context (`blockedctx.rs`: saved `x0` 0, saved SPSR left C-set). Nothing has
+  measured the equivalent for a thread parked in `semaphore_wait_trap`, and no fixture in this tree
+  produces one, so copying M17's correction here would be a guess at unmeasured saved state. The
+  assert names the measurement that is owed first. Silently dropping the wake was the alternative and
+  is the one failure a determinism oracle **cannot** see: record and replay would agree with each
+  other while the signal vanished.
+- **`workq_kernreturn` knows exactly three opcodes** — `0x400`, `0x20`, `0x4` — and refuses any other
+  **by value**, naming it. The opcodes a running worker can issue cannot be enumerated until one
+  issues them, and now that one does, the floor may rise.
+- **The QoS entry-flags word `0x244004` is an EXTRAPOLATION, not an observation** — Task 1's single
+  load-bearing unverified claim (§1e, §5 item 4). Six queue configurations were tried and none
+  reproduced the guest's own `0x040008ff` request live, because a host process's main thread carries
+  a real QoS. Three neighbouring `(request → flags)` pairs were measured and the inversion is
+  checked against all three. If a worker ever misbehaves in a way that smells like a QoS bucket,
+  suspect this first.
+- **One worker per request, `1..=WQ_MAX_WORKERS_PER_REQUEST`.** Every observed request asks for 1.
+- **`thread_selfid` (372) hands every guest thread retrace's own host tid.** This is **pre-existing
+  since M14**, not a Stage 2b regression — `retrace-arch` has forwarded 372 generically since before
+  M14, so `thread_rust_e2e` and `sigthread_e2e` already share one id across threads. Recorded here
+  because Stage 2b is the first stage where a reader might reasonably mistake it for new.
+- **`dispatch_e2e` now costs two full dyld record runs of the same guest plus two replays**, because
+  the companion test's first assertion is the headline gate's own. Accepted as the price of keeping
+  the tripwire independent of the gate it guards.
+- **`CLAUDE.md` is unedited by this stage** — see the note below, which is a decision for the
+  repository's owner rather than something a milestone should take on its own.
+- **Everything M17 and earlier carry forward is unchanged**, none of it fixed here: per-thread reverse
+  execution, preemption, thread priority, hardware watchpoint scoping, `guest_bsdthread_create` still
+  returning `0` where the real syscall returns the child's `pthread_t`, `dup2` (fail-loud),
+  `fcntl(F_DUPFD)` (unmodelled and not fail-loud), guest stdin still being retrace's, `RLIMIT_NOFILE`,
+  asynchronous signals from outside the process, the unexercised `Crash` oracle site, and arm64e
+  guests.
+
+### One thing this stage did NOT do, and is handing to the reader
+
+`CLAUDE.md`'s "Guest threads" section is now **factually incomplete** in two sentences, and Stage 2b
+deliberately left them standing rather than edit the repository's own instruction file on a
+subagent's finding:
+
+1. *"Blocking is `__ulock_wait` (515) and waking is `__ulock_wake` (516), correlated by address
+   equality on `pthread + 0x34`"* — there is now a **second** blocking primitive with a **different**
+   correlation key (the mach semaphore pair, keyed on a port name) and a **third** block state with
+   no waker at all (`BlockReason::Parked`).
+2. The *"two independent reasons with two matching materialisation sites"* paragraph now has an
+   exception: Stage 2b adds a pend-capable `Blocked` state whose wake deliberately **asserts**
+   instead of materialising, for the reason in the boundaries list above.
+
+The section is demonstrably milestone-maintained — it already names M14, M15, M16 and M17 — so this
+is factual correction rather than policy change. It is two sentences.
+
+See `docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-design.md`,
+`docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md`, and
+`docs/superpowers/plans/2026-08-23-retrace-m18-stage2b.md`.
