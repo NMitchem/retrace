@@ -243,9 +243,15 @@ because a mirror `return`s before reaching the generic dispatch, so **every new 
 creates a new hole until its oracle call is added** — nothing structural couples the two. Without
 the check, two threads running the same code issue byte-identical `(num, args)` and a wrong-thread
 replay continues in silence. `Event::Sched` is **gone**, not reserved: emitting it would silently
-renumber every landmark, and nothing in either dispatch loop can see a switch. One site is still
-unexercised — `Crash`, because no threaded guest in the tree crashes, so its retag mutation has no
-live second thread to target. (M14-threads, M15-threaddebug, M16-threadsignal; see their specs and
+renumber every landmark, and nothing in either dispatch loop can see a switch. **All seven sites are
+exercised**, the last of them only since the M18 fast-follow: `Crash` had no fixture, because every
+crashing guest was single-threaded and every threaded guest exited cleanly. `crashthread` (C,
+threaded AND fatal — main blocks in `pthread_join`, the child faults with no handler, so the
+terminal `Event::Crash` carries a NONZERO tag) is that missing intersection, and `thread_oracle.rs`
+retags it. That test was verified able to fail, and what it caught is the quiet kind of failure:
+with the `Crash` arm's `verify_thread` deleted, replay **accepts** the wrong-thread trace and exits
+139 — the identical outcome a correct replay produces, so nothing outside the oracle can tell them
+apart. (M14-threads, M15-threaddebug, M16-threadsignal, M18-workq; see their specs and
 `docs/status-log.md`.)
 
 ## Milestone / SDD workflow

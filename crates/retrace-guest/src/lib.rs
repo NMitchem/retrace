@@ -103,6 +103,11 @@ pub const EXECMAP_FIXTURE: &str = concat!(env!("OUT_DIR"), "/execmap_fixture.bin
 pub const MACHMSG: &str = concat!(env!("OUT_DIR"), "/machmsg");
 pub const HELLO_DYN: &str = concat!(env!("OUT_DIR"), "/hello_dyn");
 pub const CRASHY: &str = concat!(env!("OUT_DIR"), "/crashy");
+
+/// The M18 fast-follow crash fixture: threaded AND fatal. Main blocks in `pthread_join`, the child
+/// runs and faults at `0x4000_DEAD_0000` with no handler installed, so the terminal `Event::Crash`
+/// is tagged with the CHILD. Exists to exercise the one `verify_thread` site that had no fixture.
+pub const CRASHTHREAD: &str = concat!(env!("OUT_DIR"), "/crashthread");
 /// M12: catches SIGSEGV through Apple's real `_sigtramp` (libc's `sigaction()` installs its own
 /// `sa_tramp`) — the only guest that exercises the trampoline that actually ships.
 pub const SIGCATCH_DYN: &str = concat!(env!("OUT_DIR"), "/sigcatch_dyn");
