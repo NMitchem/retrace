@@ -3851,3 +3851,95 @@ is factual correction rather than policy change. It is two sentences.
 See `docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-design.md`,
 `docs/superpowers/specs/2026-08-23-retrace-m18-stage2b-wqthread-measurements.md`, and
 `docs/superpowers/plans/2026-08-23-retrace-m18-stage2b.md`.
+
+---
+
+## Status: M18 fast-follow — the `Crash` oracle site stops being the one nobody tested
+
+Closes the gap the three sections above carried forward by name. Those sections are left exactly as
+written: each was true when written, and "the unexercised `Crash` oracle site" appearing in their
+boundary lists is the record of how long it stayed open, not an error to be tidied away.
+
+### The hole, and why it survived four milestones
+
+`ReplaySession::advance` calls `verify_thread` at seven sites, one per arm that consumes a landmark
+and `return`s before the generic dispatch, plus an eighth inline comparison in `mirror_delivery`.
+Six of the seven had a test that retagged a real recording and proved the check fires. `Crash` had
+none.
+
+Not from neglect — from **absence**. Every crashing guest in the tree is single-threaded (`crashy`,
+`segvy`, the `asm/` micro-guests), and every threaded guest exits cleanly (`threadrust`,
+`watchthread`, `sigthread`, `sigblocked`, `dispatch_dyn`). The intersection was empty, so the
+terminal `Event::Crash`'s thread tag had never once been recorded as anything but main's, and a
+retag test had no second live thread to retag *to*. M16 created the site; M16, M17 and both M18
+stages each noted it and moved on, because closing it needed a fixture rather than a fix.
+
+### `crashthread`, and why its schedule is the whole design
+
+`crates/retrace-guest/c/crashthread.c`: `main` writes, spawns a child, and blocks in `pthread_join`;
+the child writes, then stores to `0x4000DEAD0000` with no handler installed.
+
+The ordering is a consequence of the **cooperative scheduler**, not of source order. The box switches
+only when a thread blocks or exits, so main runs uninterrupted through `pthread_create` and does not
+yield until `pthread_join`'s `__ulock_wait`. Only then does the child run — so the child holds the
+vCPU when it faults, and the `Crash` landmark is tagged with the **child**. A nonzero tag: the case
+no recording had produced.
+
+Three choices in that file are load-bearing and each is commented where it is made:
+
+- **C, not Rust.** A full-`std` Rust guest installs libstd's own `SIGSEGV` handler, so the fault
+  would route through `SignalDelivery` → `sigreturn` → re-fault and never reach the `Crash` path at
+  all. That is precisely what `segv_rust_e2e` exists to assert. Here there is no handler, so the
+  disposition is not a handler and the fault lands on `Crash` directly — the distinction `CLAUDE.md`
+  draws between a raised signal and a hardware fault.
+- **Both threads write.** The retag needs two *distinct live* thread ids in the trace, and a thread
+  that issues no syscall contributes no id. Without the child's `write` the mutation would degrade
+  into the bogus-constant form M15 was stuck with.
+- **The same poison constant** as `crashy.c` and `asm/crash.s` (bit 46 set, `< 2^47`), so the fault
+  is a stage-1 EL0 data abort with `FAR == GARBAGE_VA` and cannot be mistaken by the demand-pager or
+  the reservation-commit path for work of its own.
+
+### The failure it catches is the kind a green run cannot rule out
+
+`a_wrong_thread_on_the_crash_landmark_is_a_divergence` was **verified able to fail**, and what the
+verification showed is the reason the site mattered more than its five-year-old-looking size
+suggests.
+
+With `self.verify_thread(*rthread, pc)?` deleted from the `Crash` arm and nothing else changed,
+replay does **not** report some other problem. It accepts the retagged trace, completes the crash,
+and exits **139** — byte-for-byte the outcome a *correct* replay of this guest produces. The
+uncaught case is therefore not merely undetected; it is **indistinguishable from success by every
+signal outside the oracle**. Exit code, stdout, and the final memory compare all agree with a clean
+run. Only the check itself can tell them apart, which is exactly why it could not be left
+unexercised. Restored, the test passes.
+
+This is the `Crash`-arm instance of the rule M15 stated for `Syscall`: two threads running the same
+code produce byte-identical landmarks, so identity has to be checked rather than inferred. On the
+terminal arm it is sharper still, because there is no *subsequent* divergence to catch what the
+missing check let through — the run is over.
+
+### Gate
+
+**443 passed / 0 failed / 1 ignored across 104 test binaries**, measured at `114b19d`; clippy clean
+at `-D warnings`. Run chunked, one `--test` target per invocation, with cargo's exit code captured
+before any pipe — all 54 chunks `rc=0`.
+
+Reconciles against Stage 2b's 442/0/1 at `4928487` by **exactly the one test added here**: `#[test]`
+count in source is 444 and 444 ran, the binary count is unchanged at 104 because the test joined an
+existing target, and the lone ignored gate is still `stackoverflow_rust_e2e` at M8 risk R3. No new
+gate was parked and none was un-parked.
+
+### Boundaries
+
+`TRACE_MAGIC` did not move and no `Event` variant changed — this is a fixture and a test, not a
+format or dispatch change. The `verify_thread` census stays at **seven**, plus `mirror_delivery`'s
+inline eighth; nothing was added to either dispatch loop. What changed is that all eight are now
+**exercised**, where before, seven were.
+
+Still open, and unchanged by this work: asynchronous signals from outside the process, arm64e guests,
+preemption-dependent races (the scheduler is cooperative by design), and symbol-level debugging —
+addresses are still raw hex, which is what M19 takes up.
+
+One note for a later reader on where the primary record lives: the `#[ignore]` reason on a parked
+test, and the doc comment on a retag test, are the primary records for those tests. This section
+summarises; it does not restate them, so the two cannot drift.
