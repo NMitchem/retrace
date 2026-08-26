@@ -103,7 +103,10 @@ Passed to `debug --script`, semicolon-separated:
   Since M17 the child may be **blocked** in `__ulock_wait` when it is signalled: the signal pends and
   is materialised at the wake that makes the thread runnable.
 - **Threads** — emulated `bsdthread_create`, a cooperative block-driven scheduler, and a divergence
-  oracle that checks thread identity on every landmark.
+  oracle that checks thread identity on every landmark. Every one of the oracle's eight checks now
+  has a test that retags a real recording and proves it fires; the last of them, on the terminal
+  `Crash` landmark, needed a guest that was threaded *and* fatal, which nothing in the tree was until
+  `crashthread`.
 - **libdispatch / GCD** — since M18, a guest that `dispatch_async`es onto a global concurrent queue
   runs, records and replays. `workq_open` (367) and `workq_kernreturn` (368) are emulated in the box
   and never forwarded; `REQTHREADS` builds the worker thread *inside* the VM and enters it at the
@@ -112,10 +115,9 @@ Passed to `debug --script`, semicolon-separated:
   park/wake seam keyed on the port name. All of it is below or symmetric across the trace: nothing
   new is recorded and `TRACE_MAGIC` did not move.
 
-**Gate:** 442 passed / 0 failed / 1 ignored across 104 test binaries, **measured at `4928487`**,
-clippy clean over `--workspace --all-targets` with `-D warnings`. Anything committed after that SHA in
-this milestone is documentation only, no executable code. See the testing note below for how that
-number is assembled.
+**Gate:** 443 passed / 0 failed / 1 ignored across 104 test binaries, **measured at `114b19d`**,
+clippy clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how
+that number is assembled. The single ignored gate is `stackoverflow_rust_e2e`, parked at M8 risk R3.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
 
