@@ -235,3 +235,77 @@ fn a_wrong_thread_on_a_wake_materialised_delivery_is_a_divergence() {
         "the divergence must be the DELIVERY thread check, not merely some divergence — exit 3 \
          alone would pass on any of them; stderr:\n{}", rep.stderr);
 }
+
+/// M18 fast-follow. **The last unexercised `verify_thread` site.**
+///
+/// `CLAUDE.md` has carried this hole since M16, in as many words: "One site is still unexercised —
+/// `Crash`, because no threaded guest in the tree crashes, so its retag mutation has no live second
+/// thread to target." Every other landmark got its retag test as its milestone landed; this one
+/// could not, because the fixture did not exist. `crashy` and `segvy` are single-threaded, and every
+/// threaded guest — `threadrust`, `watchthread`, `sigthread`, `sigblocked`, `dispatch_dyn` — exits
+/// cleanly. CRASHTHREAD is the missing intersection: threaded AND fatal.
+///
+/// The hole matters because the `Crash` arm is the one place a wrong-thread replay is *least*
+/// visible from the outside. A crash reports the same `(pc, esr, far)` whichever thread took it, so
+/// the triple compare above the oracle call cannot distinguish them, and the run ends either way —
+/// there is no subsequent divergence to catch what this check misses.
+///
+/// **VERIFIED ABLE TO FAIL, and the failure is worse than a bare red.** With
+/// `self.verify_thread(*rthread, pc)?` deleted from the `Crash` arm (`retrace-core/src/lib.rs`) and
+/// nothing else changed, this test fails — but *not* by replay reporting some other problem. Replay
+/// accepts the retagged trace, completes the crash, and exits **139**: byte-for-byte the outcome a
+/// CORRECT replay of this guest produces. So the uncaught case is not merely undetected, it is
+/// indistinguishable from success by every signal outside the oracle — which is precisely why the
+/// check cannot be left unexercised. Restored, this test passes.
+///
+/// The retag touches ONLY the tag, for `a_wrong_thread_on_the_delivery_landmark_is_a_divergence`'s
+/// reason: leaving `(pc, esr, far)` alone is what forces the divergence to come from
+/// `verify_thread` rather than from the triple compare that sits above it.
+#[test]
+fn a_wrong_thread_on_the_crash_landmark_is_a_divergence() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHTHREAD);
+    // 139 is the uncaught-fault signature `crashy_e2e` pins. Asserted here only as a precondition
+    // — that the guest really did die on the fault rather than exiting some other way — never as
+    // the thing under test, per the honest-gate rule that a weaker failure must not produce it.
+    assert_eq!(rec.code, 139,
+        "the child thread must actually fault for this trace to contain a Crash landmark; \
+         stderr:\n{}", rec.stderr);
+    let out = String::from_utf8_lossy(&rec.stdout);
+    assert!(out.contains("main") && out.contains("child"),
+        "both threads must issue a syscall of their own, or the trace carries only one live thread \
+         id and the retag below has nothing genuine to retag to; stdout:\n{out}");
+
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let mut ids: Vec<u32> = events.iter().filter_map(|e| match e {
+        Event::Syscall { thread, .. } => Some(*thread), _ => None }).collect();
+    ids.sort_unstable(); ids.dedup();
+    assert!(ids.len() >= 2,
+        "need syscalls from at least two live threads, or this mutation degrades into the \
+         bogus-constant one M15 was stuck with; got {ids:?}");
+
+    let i = events.iter().position(|e| matches!(e, Event::Crash { .. }))
+        .expect("a guest that faults with no handler must record a terminal Event::Crash");
+    let orig = match &events[i] { Event::Crash { thread, .. } => *thread, _ => unreachable!() };
+    // The strong form, and the whole reason this fixture had to be built rather than reusing
+    // `crashy`: the faulting thread must be the CHILD. A crash tagged with main is a tag this arm
+    // has already seen on every single-threaded crash gate in the tree, so retagging it would
+    // re-prove nothing. A NONZERO tag here is the case no recording has ever produced.
+    assert_ne!(orig, 0,
+        "the CHILD must be the thread that faults, or this test degrades into a single-threaded \
+         crash retag; got tag {orig}. The fixture's schedule changed — main is expected to block in \
+         pthread_join before the child runs.");
+    let other = *ids.iter().find(|&&t| t != orig)
+        .expect("a genuinely live second id, not an out-of-range constant");
+    if let Event::Crash { thread, .. } = &mut events[i] { *thread = other; }
+
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+    assert!(rep.stderr.contains("the schedule diverged"),
+        "the divergence must be the THREAD oracle's, not the (pc, esr, far) compare that sits above \
+         it — if the crash compare fired, the retag touched more than the tag; stderr:\n{}",
+        rep.stderr);
+}

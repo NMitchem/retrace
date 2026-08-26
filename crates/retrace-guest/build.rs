@@ -182,6 +182,17 @@ fn main() {
         .status().expect("clang crashy");
     assert!(status.success(), "crashy guest build failed");
 
+    // crashthread: the M18 fast-follow fixture — threaded AND fatal, the intersection no guest in
+    // the tree covered. Same recipe as crashy (real toolchain, links libSystem, plain -arch arm64,
+    // no -O so the volatile faulting store survives); pthreads live in libSystem, so no -lpthread.
+    let src = format!("{}/c/crashthread.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/crashthread");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang crashthread");
+    assert!(status.success(), "crashthread guest build failed");
+
     // sigcatch_dyn: the M12 guest that catches SIGSEGV through APPLE's _sigtramp (libc's
     // sigaction() installs its own sa_tramp). Same recipe as crashy — real toolchain, links
     // libSystem, no -O so the volatile faulting store survives — and it faults at the same
