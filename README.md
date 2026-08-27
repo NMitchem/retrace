@@ -69,7 +69,7 @@ Passed to `debug --script`, semicolon-separated:
 |---|---|
 | `continue` / `reverse-continue` | run forward / backward to the next stop |
 | `stepi [n]` / `reverse-stepi [n]` | single-step forward / backward |
-| `break <addr>` / `delete <addr>` | set / clear a breakpoint |
+| `break <addr\|symbol>` / `delete <addr\|symbol>` | set / clear a breakpoint, by address or by name |
 | `watch <addr> [len] [thread <n>]` | watch a write, optionally scoped to one thread |
 | `unwatch <addr>` | clear a watch |
 | `where` | current landmark coordinate `(N,K)` and owning thread |
@@ -105,6 +105,15 @@ Passed to `debug --script`, semicolon-separated:
   needed**, existing recordings gained symbols retroactively, and a stale-binary mismatch is not
   merely avoided but unrepresentable. The main executable and dyld resolve; see Known limits for
   where it stops.
+- **Symbol operands** — since M20, `break _main` and `delete _main` accept a name wherever they
+  accept an address, so the name the debugger just printed is a name it will take back. Resolution
+  happens when the command *runs*, not when it parses, because parsing completes before the trace is
+  opened and the symbol table does not exist yet. Name → address is **not** a function — a real
+  `threadrust` binds 19 names to more than one address, and one dyld name carries 13 — so an
+  ambiguous name is an **error listing every candidate address**, never a silent pick; a name that
+  matches nothing is an error, never a fallback to reinterpreting the token as hex. A token that
+  parses completely as hex stays an address, which is what keeps every existing debug script working
+  verbatim.
 - **Signals** — dispositions, handlers that actually run, `sigreturn`, alternate stacks, masks and
   pending sets. Per-thread since M16: `pthread_kill(child, SIGUSR1)` runs the handler on the child.
   Since M17 the child may be **blocked** in `__ulock_wait` when it is signalled: the signal pends and
@@ -122,10 +131,13 @@ Passed to `debug --script`, semicolon-separated:
   park/wake seam keyed on the port name. All of it is below or symmetric across the trace: nothing
   new is recorded and `TRACE_MAGIC` did not move.
 
-**Gate:** 461 passed / 0 failed / 2 ignored across 105 test binaries, **measured at `97a4163`**,
+**Gate:** 476 passed / 0 failed / 2 ignored across 106 test binaries, **measured at `b8c2e33`**,
 clippy clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how
-that number is assembled. The two ignored gates are `stackoverflow_rust_e2e` (M8 risk R3) and
-`cache_symbol_e2e` (the M19 shared-cache symbol wall); both are described under Known limits.
+that number is assembled. "106 test binaries" is 99 test executables plus the 7 `Doc-tests`
+harnesses cargo reports, each of which runs zero tests — the convention every milestone since M14
+has counted by, kept for comparability and written out here so nobody has to re-derive it. The two
+ignored gates are `stackoverflow_rust_e2e` (M8 risk R3) and `cache_symbol_e2e` (the M19
+shared-cache symbol wall); both are described under Known limits.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
 
@@ -153,15 +165,29 @@ These are real and current, not aspirational gaps.
   will not reproduce here.**
 - **Symbolication stops at the shared cache, and at whatever the binary kept.** Since M19 the
   debugger names functions in the guest's own image and in dyld, but three limits are real. **Shared
-  cache addresses resolve to nothing** — cache images carry no `LC_SYMTAB` in the region mapped into
-  the guest, and the cache's local-symbol area lives in the on-disk cache file that `cache.rs`
-  demand-pages but never stages into guest memory, so those symbols are not in the recording at all.
-  Since most of a dynamically-linked guest's executing pcs are *in* the cache, this is the difference
-  between naming your own functions and naming everything; `cache_symbol_e2e` is parked there.
+  cache addresses resolve to nothing** — and re-measured during M20, the reason is not the one M19
+  gave. There is no local-symbol area to stage: `localSymbolsOffset` is **zero in all thirteen**
+  cache headers on this machine and no `*.symbols*` artifact ships at all. The cached dylibs *do*
+  carry `LC_SYMTAB`, and their `__LINKEDIT` — 1.37 GiB of the cache's 5.40 GiB — sits inside the
+  guest's 6.00 GiB shared-region window and is **already routed** by `cache.rs`'s demand-pager. Those
+  pages are simply never *faulted*, because nothing in the guest reads a symbol table at runtime, so
+  they are never staged into an anon page and never snapshotted. The exe and dyld resolve for the
+  mirror reason: the guest's own loading does touch their `__LINKEDIT`. Since most of a
+  dynamically-linked guest's executing pcs are *in* the cache, this is the difference between naming
+  your own functions and naming everything; `cache_symbol_e2e` is parked there.
   **Stripped binaries yield nothing**, which is a property of the binary and not of retrace —
   `brew jq` ships with 7 defined text symbols against `threadrust`'s 969. And **Rust names are
   mangled** (`_ZN…E`): raw mangled names beat hex and need no demangler, but they are not pretty.
-  Debugger *operands* are still raw addresses — you cannot yet `break _main`.
+  Since M20 `break`/`delete` take a name, but **`watch` and `x` stay address-only** — and on
+  evidence, not effort: `nlist_64` has five fields and **no size**, so `watch _global` would have to
+  invent a width, and a watch of the wrong width silently misses writes to the bytes it failed to
+  cover. That is the same quiet wrongness that makes an ambiguous `break` an error, refused for the
+  same reason. A symbol named in pure hex (`deadbeef`) is also unreachable by name, because the
+  hex-wins rule is what preserves existing scripts; Mach-O's leading underscore means real C symbols
+  never collide.
+- **A bad debugger operand now fails later than it used to.** `where; break zzz` printed nothing and
+  exited 5 before M20; it now runs the `where`, prints it, then fails — still exiting 5. That is the
+  measured price of resolving at execution rather than at parse, it is deliberate, and a test pins it.
 - **No DWARF, no line numbers, no backtraces.** M19 reads `LC_SYMTAB` only, so an address becomes
   `_child+0x30` and never `crashthread.c:35`. There is no unwinder, so there is no stack trace.
 - **The trace format is not stable.** `TRACE_MAGIC` broke in both M15 and M16. Recordings are
@@ -191,7 +217,7 @@ just gate     # cargo test --workspace + clippy -D warnings
 VM tests must run serially. `just gate` sets it; a bare `cargo test` flakes with `HV_BUSY`.
 
 **`just gate` does not currently complete as one command.** The full workspace run exceeds a
-10-minute ceiling and gets killed — M14 through M19 each closed on a chunked run instead.
+10-minute ceiling and gets killed — M14 through M20 each closed on a chunked run instead.
 Split it, run every chunk `--no-fail-fast`, and capture cargo's exit code *before* any pipe:
 
 ```sh
@@ -201,11 +227,11 @@ cargo test -p retrace --test <name> -- --test-threads=1     # per-target for the
 cargo test -p retrace --bins -- --test-threads=1            # don't omit: see below
 ```
 
-**Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the 8
+**Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the 11
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
-without a `--test` filter, reaches them.** Leaving it out silently costs 8 tests and one binary —
-453 / 0 / 2 over 104 instead of 461 / 0 / 2 over 105 — and nothing fails to warn you. Contrast
+without a `--test` filter, reaches them.** Leaving it out silently costs 11 tests and one binary —
+465 / 0 / 2 over 105 instead of 476 / 0 / 2 over 106 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 

@@ -26,7 +26,7 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
 ```
 
 - **`just gate` does not currently complete as one command — expect to chunk it.** The full
-  workspace run exceeds the 10-minute tool ceiling and gets killed; M14 through M17 each closed on
+  workspace run exceeds the 10-minute tool ceiling and gets killed; M14 through M20 each closed on
   a chunked run instead. Do not read a kill as a red. Split it, run every chunk `--no-fail-fast`,
   and capture cargo's exit code **before any pipe** (a pipe swallows it):
   ```sh
@@ -36,11 +36,11 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
-  8 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in **none** of
+  11 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in **none** of
   the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
   with no `--test` filter, reaches them — which is why closes before M17 are not owed a
   correction. Leaving it out silently costs
-  8 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
+  11 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 

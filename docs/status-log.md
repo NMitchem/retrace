@@ -4217,3 +4217,197 @@ smaller gap than it was — but it is not closed, and no test claims it is.
 Unchanged by this work: no DWARF and so no line numbers — an address becomes `_child+0x30` and never
 `crashthread.c:35` — no unwinder and so no backtraces, asynchronous signals from outside the process,
 arm64e guests, and preemption-dependent races.
+
+---
+
+## Status: M20-symbolops — the debugger stops demanding hex back
+
+`break _child` works. That is the whole milestone, and its point is smaller and sharper than a
+feature list suggests: M19 taught the debugger to *print* `in _child+0x30`, and every operand stayed
+a raw address, so the tool spent a milestone telling you a name it would then refuse to accept. You
+read the name off the transcript, went to `nm`, and typed the hex back. M20 closes that loop.
+
+Like M19 it is presentation-layer. Nothing under `record_box`, `ReplaySession::advance`, or
+`Box_::run()` was touched; `TRACE_MAGIC` is still `RT\x00\x08`; **neither symmetry rule is engaged
+and the divergence oracle cannot see this milestone**, because nothing here can make a recording
+diverge.
+
+### The measurement that decided the design, and the one that was wrong
+
+**S1 is the binding constraint.** `run_script` calls `parse_script` to completion *before* it calls
+`Exec::new`, so at parse time the trace is not open and `Exec::syms` does not exist. M20 therefore
+cannot resolve names inside `parse_addr`, which is where anyone would first try to put it. The
+obvious repair — build `Exec` first, then parse with the table in hand — is foreclosed by a contract
+`debug.rs` states in its own header: an over-long `x` span is *deliberately* a parse error raised
+**before any VM work**. Reordering to buy a smaller diff would move every parse diagnostic behind VM
+setup.
+
+So `Cmd::Break`/`Cmd::Delete` carry an `Operand { Addr(u64), Sym(String) }`, parsing classifies but
+never fails on an unknown name, and `Exec` resolves when it *runs* the command.
+
+**S4 is the hard problem, and it is the one M19's code could not have shown.** M19's direction is
+total: an address falls inside exactly one symbol's range. The reverse is not a function at all.
+A real `threadrust` binds **19** names to more than one address — compiler-generated locals
+(`_OUTLINED_FUNCTION_0`, `GCC_except_table0`) repeated per translation unit, every one of which
+Mach-O keeps — and one dyld name, `___Block_byref_object_copy_`, carries **13 distinct addresses**.
+"Pick the lowest" would silently choose one of thirteen, and the transcript would look entirely
+normal. So an ambiguous name is an **error that lists every candidate**, and a name matching nothing
+is an error that never falls back to reinterpreting the token as hex.
+
+**And S4's first draft was wrong by a factor of ~235.** It reported dyld as 6331 defined text
+symbols with **3255** duplicated names. `/usr/lib/dyld` is a Mach-O **universal binary**, and `nm`
+without `-arch` concatenates the `x86_64` and `arm64e` slices, so almost every symbol appears twice
+and reads as duplicated. The recorded guest loads the arm64e slice only, where the real figure is
+**14**.
+
+What caught it is worth recording, because it did not look like a measurement bug. The plan's own
+Self-Review step said "check against a real dyld name from S4, not only a synthetic one". The first
+name tried, `____chkstk_darwin`, resolved to a *single* address instead of erroring — which reads as
+an implementation bug in `addrs_of`. It was not: that name is duplicated only *across* slices and
+occurs exactly once in arm64e, so resolving it was correct and the number was wrong. A synthetic
+test would never have surfaced it, and neither would a green gate.
+
+The correction changed the rhetoric and not the design. 19 in `threadrust`, 14 in dyld, and a single
+name carrying 13 addresses all say the identical thing: name → address is not a function, and a
+lookup that silently picks is wrong on real input. **The conclusion was over-argued, not
+unsupported** — which is a distinction worth naming, because the tempting response to discovering a
+supporting number is inflated is to re-examine the conclusion, and here the conclusion never rested
+on the inflated number.
+
+The measurements document was corrected **in place**, with a note recording that it changed. That is
+the opposite of this log's rule and deliberately so: a spec records what is true, while
+`docs/status-log.md` is append-only precisely so an earlier claim that proved wrong is left standing.
+
+### Rules decided rather than fallen into
+
+- **Hex wins.** `0x`-prefixed ⇒ address; parses completely as hex ⇒ address; otherwise ⇒ name. Rule 2
+  is what keeps every existing debug script working verbatim, and it costs one thing: a symbol
+  literally named `deadbeef` is unreachable. Documented rather than papered over — Mach-O C symbols
+  carry a leading underscore, so `_deadbeef` lands on rule 3 cleanly, and mangled Rust names are
+  never all-hex. A sigil escape hatch is the additive follow-up if anything ever needs it; M20 does
+  not build one speculatively.
+- **The executable shadows dyld**, and that is a stated rule with a test, not an artifact of
+  `images` happening to be built in `[EXE_BASE, DYLD_BASE]` order — a later reader reordering that
+  array must break a test rather than silently change where a breakpoint lands. Matches are *not*
+  merged across images: returning the union would report a name as ambiguous whenever dyld happened
+  to define it too, refusing breakpoints the user is entitled to set. Measured mitigation for the
+  common case — dyld does not define `_main`.
+- **Exact match only.** Substring or suffix matching on mangled names is a convenience that
+  reintroduces by construction the ambiguity S4 exists to refuse.
+
+### The cost that was measured instead of discovered
+
+Resolving at execution has one observable consequence, and it is a regression. `where; break zzz`
+used to print **nothing** and exit 5, because a bad operand rejected the whole script before any
+command ran. It now runs the `where`, prints it, and *then* fails — still exit 5. The exit code, the
+compatibility question one would expect to be the hard one, does not change at all: `main.rs` has a
+single `Err` arm, so parse errors and execution errors already shared exit 5.
+
+This is in the design spec, in the README's Known limits, and pinned by a test. A behavioural
+regression that is stated up front and asserted is a different object from one found later.
+
+### `watch <name>` is out of scope on evidence, not effort
+
+`nlist_64` has five fields in 16 bytes and **no size**. A symbol supplies an address and nothing
+else. `watch` takes `<addr> [len]` and `x` takes `<addr> <len>`, so `watch _global` would have to
+invent a width — and a watch of the wrong width silently misses writes to the bytes it failed to
+cover, which is the same class of quiet wrongness that makes an ambiguous `break` an error. Refused
+for the same reason, and a different milestone wearing the same syntax.
+
+A related fact, confirmed by test rather than left as a source-read: `__DATA` symbols **are** in the
+table and **are** reachable by name, because the filter keeps any defined symbol while `resolve`
+clamps to `text_end`. Reaching them costs nothing — and is still not licence to ship `watch <name>`,
+which the missing size blocks independently.
+
+### Verifying the gate can fail, and one guard that earned its keep
+
+Stubbing `Symbols::addrs_of` to return `Vec::new()` turns four of the five new e2e tests red. Two
+details from that run matter more than the count:
+
+- `a_stripped_guest_errors_cleanly_instead_of_guessing` went red **only because of its second half**.
+  Its first half asserts that a missing name errors — which a resolver that resolves *nothing*
+  satisfies perfectly. The `break _main` must-succeed check is the guard against that vacuity, and
+  the stub run is what proved the guard load-bearing rather than decorative. A negative test needs a
+  positive control or it is a green that measures nothing.
+- `a_bad_name_fails_after_earlier_commands_have_run` stayed **green**, correctly. It pins the
+  *ordering* change, not resolution; a debugger that resolves nothing still runs `where` before
+  failing.
+
+The headline itself avoids asserting that the code agrees with itself. `break _child; continue` is
+checked on the **pc the guest stops at**, and the expected address comes from the *recording* rather
+than from `addrs_of`: M1/M2 measured `crashthread`'s fault as `_child+0x30`, so the trace's terminal
+`Event::Crash` says where `_child` begins without consulting the table under test. A no-op that
+accepted the token and armed nothing would run to the fault; one that armed a wrong address would
+stop at a pc whose distance from the crash is not `0x30`. Neither is excluded by asserting that the
+command parsed.
+
+The real-dyld ambiguity test discovers its duplicated name at runtime with `nm -arch arm64e` instead
+of hardcoding one, both because which symbols dyld duplicates is a property of whatever OS shipped —
+an update would turn a genuine pass into a spurious red — and because hardcoding without `-arch`
+would have baked S4's own mistake into the gate, passing against names that are not ambiguous at all.
+
+### What is still address-only
+
+`watch`, `unwatch`, and `x`, on S5 above. Demangling remains separable — `break _ZN…E` works today by
+exact match; raw mangled names beat hex and need no demangler, but they are not pretty. And the M19
+shared-cache wall is untouched: `cache_symbol_e2e` stays parked, since a name M20 cannot print is a
+name M20 cannot accept either.
+
+### The M19 wall turned out to be documented with a mechanism that does not exist
+
+Not planned work — it fell out of starting M21's measurements while M20's gate ran, and it is
+recorded here because it changes what the *next* milestone should go looking for.
+
+M19 parked `cache_symbol_e2e` and explained it this way: cache symbols are unreachable because "the
+cache's local-symbol area lives in the on-disk cache file that `cache.rs` demand-pages but never
+stages into guest memory." Measured on this machine, 2026-08-27:
+
+- **`localSymbolsOffset` and `localSymbolsSize` are zero in all thirteen cache headers** — root,
+  `.01` through `.12`. No `*.symbols*` artifact ships anywhere under the dyld directory. **There is
+  no local-symbol area.** M19's suggested remedy — "stage the local-symbol area at record time" —
+  named a thing that does not exist, and would have sent the next milestone hunting for it.
+- Cached dylibs **do** carry `LC_SYMTAB`, `LC_DYSYMTAB` and `LC_DYLD_EXPORTS_TRIE`.
+- Their `__LINKEDIT` lives in the `.dyldlinkedit` subcaches: **1.37 GiB of the cache's 5.40 GiB**,
+  entirely inside the guest's 6.00 GiB shared-region window `[0x1_8000_0000, 0x3_0000_0000)` and
+  **already routed** by `cache.rs`'s demand-pager, whose `assert_covers_window` requires
+  `main -> .01 -> … -> .12.dyldlinkedit` to be contiguous.
+
+So the bytes are neither missing nor unroutable. They are never **faulted** — nothing in the guest
+reads a symbol table at runtime, so those pages are never staged into an anon page and never
+captured by `snapshot()`. The exe and dyld resolve for the mirror reason: the guest's own loading
+*does* touch their `__LINKEDIT`.
+
+The wall is real and stays parked. But it is **narrower and more tractable** than its own text said,
+and the measurement it owes is different: not "how do we get the bytes into the process" but "which
+images does a real recording execute in", since staging `__LINKEDIT` for only those is bounded work
+rather than 1.37 GiB. Both the README and the `#[ignore]` reason were corrected in place.
+
+This is the third instance in two milestones of the same shape — M19's P3, M20's S4, and now this —
+**a conclusion that was correct resting on a supporting fact nobody had measured.** All three were
+caught by going to measure something adjacent, never by review and never by a green gate. That is an
+argument for the measure-before-designing discipline that is stronger than any of the three
+individually, because in every case the conclusion survived and only the reasoning was wrong — which
+is precisely the error a passing test suite cannot see.
+
+### Gate
+
+**476 passed / 0 failed / 2 ignored across 106 test binaries**, clippy clean at `-D warnings`,
+measured at `b8c2e33` over all 56 chunks, every one `EXIT=0`.
+
+Reconciled against M19's 463/461/2 **file-by-file rather than by sum**, and each delta traces to
+exactly one file: `symbols.rs` +7, `debug.rs` +3, the new `symbolops_e2e` target +5 = **+15**, giving
+478 `#[test]` of which 476 run and 2 stay parked (`stackoverflow_rust_e2e` at M8 R3,
+`cache_symbol_e2e` at the shared-cache wall above). Per chunk: A 111 → 118, B 219 → 219, `--bins`
+8 → **11**.
+
+That `--bins` number mattered twice. The plan predicted **no** CLAUDE.md edit was owed; that was
+wrong. CLAUDE.md and the README both hardcode the count as the reason never to omit that chunk — the
+one chunk whose omission is *silent* by design — so leaving it at 8 would have under-reported the
+very thing the sentence exists to protect. Corrected in both.
+
+One tallying error worth recording because it nearly entered the log: an early count of chunk A
+read 337 instead of 118, because `cat *.log` swept in `retrace-box`'s half-written log. The
+giveaway was that the excess was exactly 219, chunk B's total. The tally script now sums only chunks
+recorded complete in `exitcodes.txt`. And "106 test binaries" is 99 test executables plus 7
+`Doc-tests` harnesses that run zero tests each — the convention every milestone since M14 has used,
+kept for comparability and now written down in the README rather than silently re-derived.

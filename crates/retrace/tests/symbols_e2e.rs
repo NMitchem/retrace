@@ -162,28 +162,42 @@ fn dyld_is_a_second_image_and_resolves() {
 /// image or dyld — so this is the difference between "M19 names your functions" and "M19 names
 /// everything", and a reader deserves to see exactly where it stops.
 ///
-/// The wall, measured (M7) rather than assumed: cache images carry no `LC_SYMTAB` in the region that
-/// is mapped into the guest. The cache's local-symbol area lives in a separate part of the on-disk
-/// cache file, which `cache.rs` demand-pages for its *page contents* but never stages into guest
-/// memory. So unlike the main executable and dyld — whose `__LINKEDIT` the loader maps and
-/// `snapshot()` captures, which is the whole reason M19 needed no format change (M4/M5) — a cache
-/// symbol is simply not in the recording.
+/// **The wall, as M19 described it, was wrong about WHY — corrected here from measurements taken
+/// 2026-08-27 during M20.** M19 said the cache's *local-symbol area* is never staged into guest
+/// memory. There is no local-symbol area: `localSymbolsOffset` and `localSymbolsSize` are **zero in
+/// all thirteen** cache headers on this machine (root, `.01`–`.12`), and no `*.symbols*` artifact
+/// ships anywhere under the dyld directory. A remedy aimed at "staging the local-symbol area" would
+/// have gone looking for a thing that does not exist.
+///
+/// What is actually there, and actually reachable: cached dylibs do carry `LC_SYMTAB`,
+/// `LC_DYSYMTAB` and `LC_DYLD_EXPORTS_TRIE`, and their `__LINKEDIT` bytes live in the
+/// `.dyldlinkedit` subcaches — **1.37 GiB of the cache's 5.40 GiB**, all of it inside the guest's
+/// 6.00 GiB shared-region window and all of it already routed by `cache.rs`'s demand-pager, whose
+/// `assert_covers_window` requires `main -> .01 -> … -> .12.dyldlinkedit` to be contiguous.
+///
+/// So the bytes are neither missing nor unroutable. They are simply never **faulted**: nothing in
+/// the guest reads a symbol table at runtime, so those pages are never staged into an anon page and
+/// never captured by `snapshot()`. That is the whole wall. The exe and dyld resolve for the mirror
+/// reason — the guest's own loading *does* touch their `__LINKEDIT` (M4/M5).
 ///
 /// **What clearing it would owe.** Reading the on-disk cache at debug time would reintroduce exactly
 /// the external-file dependency M6 eliminated, and with it the stale-file mis-symbolication that
 /// dependency makes possible: the cache on disk at debug time need not be the cache that was
-/// recorded. A real fix therefore has to either (a) stage the cache's local-symbol area into guest
-/// memory at record time, which is a recording-size and determinism question, not a formatting one,
-/// or (b) record a cache identity the debugger can verify a local file against before trusting it.
-/// Neither has been measured, and this test asserts nothing until one is.
+/// recorded. The measurement now owed is narrower than M19 thought — **which images a real recording
+/// actually executes in** — because staging `__LINKEDIT` for only those images is bounded work
+/// rather than 1.37 GiB. This test asserts nothing until that is measured.
 #[test]
-#[ignore = "M19 wall: shared-cache addresses carry no symbols in the recording. Cache images have \
-no LC_SYMTAB in the mapped region, and the cache's local-symbol area lives in the on-disk cache file \
-that cache.rs demand-pages but never stages into guest memory — so unlike the exe and dyld, whose \
-__LINKEDIT is mapped and snapshotted (M4/M5), a cache symbol is not in the trace at all. Clearing \
-this owes a measurement: either stage the local-symbol area at record time (a determinism and \
-recording-size question), or record a cache identity the debugger can verify a local file against. \
-Until then a cache pc prints as bare hex, which an_address_with_no_symbol_degrades_to_bare_hex pins."]
+#[ignore = "M19 wall, RE-MEASURED during M20 (see below): a shared-cache pc resolves to nothing \
+because the cache's __LINKEDIT pages are never FAULTED, not because they are unreachable. Measured \
+2026-08-27: the cache is 5.40 GiB, of which 1.37 GiB is .dyldlinkedit, and all of it lies inside \
+the guest's 6.00 GiB shared-region window [0x1_8000_0000, 0x3_0000_0000) and is already routed by \
+cache.rs's demand-pager (assert_covers_window requires main -> .01 -> ... -> .12.dyldlinkedit to be \
+contiguous). Nothing in the guest reads a symbol table at runtime, so those pages are never staged \
+into an anon page and never captured by Box_::snapshot — which is why a cache symbol is not in the \
+trace, unlike the exe and dyld whose __LINKEDIT the guest's own loading does touch (M4/M5). \
+Clearing this owes a measurement of WHICH images a real recording executes in, then staging their \
+__LINKEDIT only. Until then a cache pc prints as bare hex, which \
+an_address_with_no_symbol_degrades_to_bare_hex pins."]
 fn cache_symbol_e2e() {
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
     assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
