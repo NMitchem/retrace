@@ -3943,3 +3943,277 @@ addresses are still raw hex, which is what M19 takes up.
 One note for a later reader on where the primary record lives: the `#[ignore]` reason on a parked
 test, and the doc comment on a retag test, are the primary records for those tests. This section
 summarises; it does not restate them, so the two cannot drift.
+
+
+## Status: M19-symbols — 🎉 the debugger says `_child+0x30`, and never opens the binary to do it
+
+`guest crashed: pc=0x10000050c far=0x4000dead0000 esr=0x92000045  in _child+0x30`.
+
+The address on that line is the one M18's fast-follow already printed. The four words after it are
+the milestone — and the interesting claim is not that the name appears, but **where it comes from**:
+the recording, and nothing else. No binary path is supplied, no `--exe` flag exists, no file is
+opened at debug time, and `TRACE_MAGIC` did not move.
+
+### The symbols were already in every recording
+
+M19 is the rare milestone whose enabling work was done years of milestones earlier and never noticed.
+Two facts, measured before the design was written rather than assumed:
+
+- **M4** — `parse_macho` maps every `LC_SEGMENT_64` except `__PAGEZERO`, so `__LINKEDIT`, which holds
+  the `nlist_64` array and the string table, is mapped into guest memory like any other segment.
+- **M5** — `Box_::snapshot` captures every backing in full.
+
+Together those mean the symbol table is inside the opening `Event::Snapshot` of **every recording
+already made in the current format**. M19 adds no field, no variant, and no bytes; it reads what M4
+and M5 had been putting there all along. Recordings made before this milestone gained symbols
+retroactively, which is the sharpest available evidence that nothing was added to the format.
+
+That is also why the milestone is safe. The module is a pure function of bytes that are already in
+the trace plus the fixed IPA layout constants. It never touches `record_box`,
+`ReplaySession::advance`, or `Box_::run()`; **neither symmetry rule is engaged and the divergence
+oracle cannot see M19 at all**, because nothing here is capable of making a recording diverge. A
+milestone the oracle cannot see is normally a reason for suspicion — here it is a structural
+consequence of staying above the trace, and it is what made a one-pass implementation defensible
+where M18 needed three staged ones.
+
+### Why not `--exe <path>`, the obvious alternative
+
+The trace carries no path, UUID, or image identity (M6), so the two candidate designs were a
+format break or a debug-time flag naming the binary. The flag is worse than it looks. A path can
+name a *different build* than the one recorded — same filename, recompiled since — and the failure
+mode is not an error but a confidently wrong name attached to a real address. Silent
+mis-symbolication is worse than no symbolication, because hex at least tells the truth.
+
+Reading the snapshot does not merely avoid that mismatch; it makes it **unrepresentable**. There is
+no second artifact to disagree with, and no staleness window. The limits that remain (below) are
+limits on what the recording *contains*, which is a much better class of limit to have.
+
+### `LC_SYMTAB`, not the exports trie — and the lowercase `t` that decides it
+
+M1 measured `crashthread`'s six symbols and found the one that matters is a **local**:
+
+```
+0000000100000460 T _main
+00000001000004dc t _child        <-- lowercase t
+```
+
+`_child` is `static`, so it is in `LC_SYMTAB` but not in `LC_DYSYMTAB`'s external range and not in
+the exports trie. A symbolicator built on exports — the more modern-looking choice — would name
+`_main`, miss `_child`, and so fail to name **the exact function the M18 fast-follow exists to make
+crash**. The reader parses `nlist_64` for that reason and no other. `0x10000050c − 0x1000004dc =
+0x30` resolves with no slide arithmetic at all, because `EXE_BASE` equals the executable's own
+`__TEXT` vmaddr (M2) — a property of the chosen IPA layout, not a coincidence of one binary.
+
+### Two defects measurement caught that review would not have
+
+**The design spec's own risk mitigation was wrong (P3).** R3 named the failure mode "confidently
+wrong names" and prescribed deriving dyld's slide as `DYLD_BASE − dyld __TEXT vmaddr`. Measuring it
+showed dyld's `__TEXT` vmaddr is `0x0`, so that expression yields the right number *here* — and only
+here. It is the wrong rule, and for any image with a nonzero vmaddr it produces exactly the
+confidently-wrong slide R3 was written to prevent. The mitigation contained the bug it was guarding
+against, and it read as correct until a number was put next to it. The rule is the loader's own,
+uniform across both images: `guest_va = file_vmaddr + slide`, with `slide` `0` for the main
+executable and `DYLD_BASE` for dyld. The spec's R3 row was edited in place, before it had been
+committed or acted on, and the measurements document records that it changed.
+
+**`N_SECT` numerically equals the `N_TYPE` mask (P2).** Both are `0x0e`. The correct test is
+`n_type & N_TYPE == N_SECT`; the slip `n_type & N_SECT != 0` compiles, reads plausibly, and silently
+accepts `N_PBUD` (`0xc`) and `N_INDR` (`0xa`), neither of which carries an address in `n_value`. The
+constant is spelled out rather than inlined so the equality is visible at the use site, and
+`an_indirect_symbol_is_dropped` pins it.
+
+### One deliberate deviation from the plan: malformation does not assert
+
+The plan's global constraints said "absence is data, malformation is a bug", and required a
+malformed table — offsets outside `__LINKEDIT`, an `n_strx` past `strsize` — to **assert**. The
+implementation returns `None` and skips the entry instead, and the deviation is recorded at the
+decision itself (`symbols.rs`, `for_image`'s doc comment) rather than left for a reader to discover
+as a discrepancy.
+
+The reasoning is a cost asymmetry that the constraint, written before the call site existed, could
+not see. This code runs inside an interactive debug session over a *recording of a crash* — often
+the only copy of a bug someone is chasing. A panic there costs the session; printing hex where a
+name was possible costs almost nothing. Fail-loud is the right posture for the recorder, where a
+wrong byte silently corrupts a trace; it is the wrong posture for a presentation layer that cannot
+corrupt anything. A reader bug does not hide behind the leniency, because the unit tests assert on
+specific *resolved names* — a reader that silently produced nothing would fail them rather than pass
+quietly.
+
+The rule behind it is that **symbolication may never fail a debug session**. It is
+presentation; a name is a convenience and its absence must cost nothing. So `Exec::new` builds the
+table inside a chain that ends in `unwrap_or_default()`: an unreadable trace, an absent `Snapshot`,
+or a stripped image all yield an empty table rather than an error. No `Divergence` can originate in
+this milestone, and none does.
+
+The design spec left three questions for implementation, and all three closed. Two closed as the
+spec leaned: only pc-bearing lines are symbolicated, and the table is built once per session rather
+than per query. The third — R1, whether `__LINKEDIT` spans `Region`s — was settled by measurement
+(P1: exactly one region for both images) and then **deliberately not relied on**: the spanning
+gather was written anyway, because other backings in the same snapshot genuinely are per-page, so a
+reader that assumed one-region-per-lookup would be correct today and wrong the first time anything
+else was read.
+
+Worth recording is *how* the once-per-session question closed, because the spec flagged a real
+hazard: the seek machinery restores snapshots repeatedly, so a table cached off "the session's
+snapshot" would need a cache key nobody had thought through. The implementation sidesteps the hazard
+instead of solving it — it reads the **opening** `Snapshot` straight from the trace via
+`Reader::open`, independent of wherever the session has since seeked. There is no key because there
+is nothing to invalidate: the image as loaded is what every pc in the session refers to, and it never
+changes. That is also why the debug CLI took a real dependency on `retrace-trace`, which it had
+previously needed only in its tests.
+
+`resolve` also clamps at `text_end` and returns `None` past it, rather than the nearest preceding
+symbol. Without the clamp, any address above the last symbol — a cache pc, a stack address — would
+resolve to `last_symbol + huge_offset`: a name, always, and wrong whenever it appeared. Bare hex is
+the correct answer to "I don't know," and `an_address_with_no_symbol_degrades_to_bare_hex` pins it.
+
+### The annotation is a suffix, deliberately
+
+Every symbolicated line is `…existing text…  in _child+0x30` — appended at end of line, never
+inserted after the address. `crashy_cli` greps `guest crashed: pc={pc:#x} far=…`; `debug_cli` greps
+`hit 0x{pc:x} at (`. Inserting the name inside those lines would have broken established assertions
+for no gain, and the two tests that did need touching were loosened by exactly the width of the new
+suffix (an `ends_with` on the final `where` line became a `contains`), not weakened in what they
+check. The raw address survives in every case, symbolicated or not — `format` is tested for it
+explicitly, because something elsewhere in the tree may still be grepping for it.
+
+`far` and `x <addr>` were left alone on purpose: `far` is a data address whose nearest text symbol is
+noise, and an operand the user typed does not need to be told back to them.
+
+One consequence a later reader should not have to rediscover: there are **two renderings**, and the
+CLI does not use the library's. `Symbols::format` produces the self-contained
+`0x10000050c (_child+0x30)`; the debug CLI uses its own `Exec::annot`, which produces the
+` in _child+0x30` suffix appended to a line that already printed the address. The split exists
+because the CLI's lines already contain the address in a shape other tests grep for, so a
+self-contained rendering would have had to replace text those assertions depend on. `format` remains
+the right thing for any consumer holding an address and no line to append to, and it is the one the
+unit tests pin.
+
+### The gate asserts the name, because the address is not the difference
+
+Honest-gate discipline has a specific bite here. `pc=0x10000050c` printed before M19 too, so a gate
+asserting on the address passes against a no-op implementation — it would be green on the day the
+work started. The headline `the_debug_cli_names_the_faulting_function` therefore asserts on
+**`_child`**, with a second assertion that the address is still present beside it.
+
+**Verified able to fail, in this session rather than on report.** With
+`SymbolTable::resolve` stubbed to return `None` — a faithful simulation of "M19 was never written" —
+`symbols_e2e` goes to **0 passed / 4 failed**; restored, **4 passed / 0 failed**. The stub was
+applied to the resolver rather than to the CLI on purpose: it makes every address unresolvable
+without touching the printing path, so what goes red is the naming and nothing else.
+
+Worth recording is *which* four went red, because one of them is a negative test and negative tests
+are where vacuous greens live. `an_address_with_no_symbol_degrades_to_bare_hex` asserts that an
+unresolvable address prints as hex — which a totally broken symbolicator would satisfy perfectly.
+It fails under the stub anyway, because it carries a guard asserting that `hello_dyn`'s *own* image
+still yields a usable table: "or the bare-hex assertion above is vacuous". So the test cannot pass by
+everything being unresolvable, which is the only way a bare-hex assertion can lie.
+
+### What the full gate caught that the working tree did not admit
+
+The implementation looked finished before the gate ran. It was not: **four assertions in two files
+were broken**, and only a complete chunked run surfaced them.
+
+`watch_cli` (3 failures) and `thread_watch_e2e` (1) both pin the *end* of a `where` or watch-hit
+line with `ends_with`. M19 appends its annotation to exactly those lines, so all four broke. Two
+sibling files — `crashy_cli` and `debug_cli` — had already been updated for precisely this reason,
+which is what made the omission easy to miss: the problem had been recognised and then only
+partially applied. Nothing about the tree advertised the gap; the new gate was green, the new module
+was green, and the failures lived in tests M19 never mentions.
+
+The interesting part is the **fix that would have been wrong**. The two already-updated files had
+been loosened from `ends_with` to `contains`, so copying that pattern was the obvious move — and for
+`thread_watch_e2e` it would have silently destroyed the assertion. Its own comment says why it used
+`ends_with`: `cmd_where` prints nothing after the thread id, so `thread=1` can only be a suffix, and
+`contains("thread=1")` would **also pass a wrong-thread `thread=10`**. That test exists to catch a
+misattributed store; loosening it would have left it green and blind, which is the same failure
+shape as the M18 fast-follow's unexercised `Crash` site — a check that still runs and no longer
+checks.
+
+So the fix strips the annotation and **keeps** `ends_with`, via one shared helper
+(`util::strip_annot`) rather than four local hacks. The same helper was then applied *back* to
+`crashy_cli` and `debug_cli`, restoring the strength those two lost when they were loosened. Six
+assertions now hold exactly the property they held before M19, and the one file that documented why
+its form mattered is the reason all six do.
+
+Two process notes a later reader may want. First, `contains` is the natural repair for a broken
+`ends_with` and is *usually* harmless — the case where it is not is the case where a shorter value
+is a prefix of a longer one, which is invisible unless the test says so. This one said so, in a
+comment; had it not, the weakening would have shipped. Second, the gate that caught all four is the
+per-target chunked run, not the new milestone's own tests: M19's gate was green throughout.
+
+### The wall, and the gate parked at it
+
+`cache_symbol_e2e` is parked `#[ignore]`d, and the reason on the test is the primary record.
+
+Cache images carry no `LC_SYMTAB` in the region mapped into the guest, and the cache's local-symbol
+area lives in a separate part of the on-disk cache file that `cache.rs` demand-pages for page
+*contents* but never stages into guest memory. So the symmetry that makes the exe and dyld work —
+`__LINKEDIT` mapped, therefore snapshotted — simply does not hold for the cache. Those symbols are
+not in the recording.
+
+This is the honest size of the limit, and it is large: most of a dynamically-linked guest's executing
+pcs are *in* the cache, so M19 is the difference between naming your own functions and naming
+everything. Clearing it owes a measurement, not an afternoon: either stage the local-symbol area at
+record time — a determinism and recording-size question — or record a cache identity the debugger can
+verify a local file against before trusting it. Reading the on-disk cache unverified would
+reintroduce precisely the external-file dependency, and the stale-artifact mis-symbolication, that
+choosing the snapshot eliminated.
+
+Parking a gate for a capability the milestone does not have has regressed nothing; `dispatch_e2e` was
+parked the same way by M18, moved twice as each measured wall fell, and then cleared.
+
+**Both halves of that limit were observed directly, on a real `jq` recording**, rather than argued
+from the code. Breaking at jq's own `_main` and stepping forward:
+
+```
+hit 0x100001130 at (294, +?)  in _main      <- jq's own 7 symbols: resolves
+at (294, 203) pc=0x1804f8bf0 thread=0       <- shared cache: bare hex, no annotation
+at (294, 603) pc=0x180389414 thread=0       <- shared cache: bare hex, no annotation
+```
+
+Exit 0 throughout, no panic. This is the stripped-binary case and the shared-cache case in one
+transcript, and it is worth having because it shows the *shape* of the limit rather than its
+statement: jq's own table is thin but real and names the entry point, while forty instructions later
+the guest is in libSystem and every pc after that is a number. It is also the argument for the
+`text_end` clamp — without it those cache pcs would each have resolved to jq's last symbol plus an
+enormous offset, and the transcript would have looked informative while being false.
+
+### Gate
+
+**461 passed / 0 failed / 2 ignored across 105 test binaries**, measured at the M19 close; clippy
+clean at `-D warnings` over `--workspace --all-targets`. Run chunked — the workspace chunk,
+`retrace-box`, `--bins`, and one `--test` target per invocation for each of the 52 `retrace`
+integration gates — with cargo's exit code captured before any pipe. **All 56 chunks `rc=0`**
+(55 test chunks plus clippy).
+
+Reconciles against the M18 fast-follow's 443/0/1 at `114b19d` by exactly the code added here, checked
+by diffing `#[test]` counts file-by-file rather than trusting a sum: **444 → 463**, with the only
+per-file deltas being the two new files — `crates/retrace-core/src/symbols.rs` (+14 unit tests, no VM,
+in the fast workspace chunk) and `crates/retrace/tests/symbols_e2e.rs` (+5, of which 4 are live). No
+existing file's count moved, which is the check that M19 was additive rather than a rewrite.
+
+The ignored count moves **1 → 2**, and the second is the deliberate `cache_symbol_e2e` above. The
+binary count moves **104 → 105**, because `symbols_e2e` is a **new** integration-test target — where
+the M18 fast-follow's one added test had joined an existing one, which is why that close moved the
+test total without moving the binary total.
+
+### Boundaries
+
+`TRACE_MAGIC` is still `RT\x00\x08` and no `Event` variant changed. Nothing under `record_box`,
+`ReplaySession::advance`, or `Box_::run()` was modified — the only edit to `retrace-core/src/lib.rs`
+is the one-line `pub mod symbols;`. The `verify_thread` census is untouched at **seven** call sites
+plus `mirror_delivery`'s inline eighth.
+
+Still open, and stated as limits rather than left implicit: shared-cache addresses (above); stripped
+binaries, which yield nothing because the *binary* kept nothing — `brew jq` ships 7 defined text
+symbols against `threadrust`'s 969, and that is a fact about jq, not about retrace; and mangled Rust
+names, printed as `_ZN…E` because a raw mangled name beats hex and needs no demangler.
+
+Symbolication is also still **output-only**: `break _main` does not work, because every debugger
+*operand* remains a raw address. The table needed to reverse that lookup now exists, so this is a
+smaller gap than it was — but it is not closed, and no test claims it is.
+
+Unchanged by this work: no DWARF and so no line numbers — an address becomes `_child+0x30` and never
+`crashthread.c:35` — no unwinder and so no backtraces, asynchronous signals from outside the process,
+arm64e guests, and preemption-dependent races.

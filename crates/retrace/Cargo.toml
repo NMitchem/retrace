@@ -11,6 +11,9 @@ path = "src/main.rs"
 [dependencies]
 retrace-core = { path = "../retrace-core" }
 retrace-guest = { path = "../retrace-guest" }
+# M19: the debug CLI reads the recording's opening Snapshot to build its symbol table, so the trace
+# format is now a real dependency of the binary and not only of its tests.
+retrace-trace = { path = "../retrace-trace" }
 
 [dev-dependencies]
 retrace-guest = { path = "../retrace-guest" }

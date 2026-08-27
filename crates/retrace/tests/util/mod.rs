@@ -164,3 +164,17 @@ pub fn assert_trace_reproducible(guest: &str) {
                b1.len(), b2.len(), at);
     }
 }
+
+/// Strip M19's symbol annotation (`"  in _child+0x30"`) from the end of a debugger line.
+///
+/// M19 appends that annotation to every pc-bearing line, which breaks assertions that used
+/// `ends_with` to pin what comes *last*. Loosening those to `contains` is **not** an adequate
+/// substitute and would silently weaken them: `thread_watch_e2e` depends on `thread=1` not also
+/// matching a hypothetical `thread=10`, and only "nothing follows it" expresses that. Stripping the
+/// annotation and keeping `ends_with` preserves the original property exactly.
+///
+/// The separator is two spaces before `in`, which is what `Exec::annot` emits and which no other
+/// debugger line contains — symbol names never contain spaces.
+pub fn strip_annot(line: &str) -> &str {
+    line.split("  in ").next().unwrap_or(line)
+}

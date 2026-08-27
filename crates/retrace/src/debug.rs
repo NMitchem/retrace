@@ -6,6 +6,7 @@
 use std::io::Write;
 use std::path::Path;
 use retrace_core::{checkpointed_seek, Advance, CheckpointCache, Outcome, ReplayReport, ReplaySession};
+use retrace_core::symbols::Symbols;
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
 /// 5), guarding the inherited u64 span-overflow edge at the CLI boundary before any VM work.
@@ -212,6 +213,13 @@ struct Exec<'a> {
     /// not retired, so `cmd_continue`'s progress rule must pre-step off it before resuming.
     last_watch_hit: Option<(usize, u64)>,
     cache: CheckpointCache,
+    /// M19: address → name, built ONCE per session from the recording's opening snapshot.
+    ///
+    /// Preserves this module's bit-reproducibility contract (see the file header): the names derive
+    /// from *guest state* — the `__LINKEDIT` bytes the snapshot already carries — not from a host
+    /// path, the host's own symbols, or anything timing- or iteration-order-dependent. An empty
+    /// table (static guest, stripped binary) simply formats every address as bare hex.
+    syms: Symbols,
 }
 
 impl<'a> Exec<'a> {
@@ -219,10 +227,36 @@ impl<'a> Exec<'a> {
     fn new(trace: &'a Path) -> Result<Self, String> {
         let mut cache = CheckpointCache::new(CHECKPOINT_BYTE_BUDGET, CHECKPOINT_COST_GATE_STEPS);
         let session = checkpointed_seek(trace, &mut cache, 1, 0)?;
+        // M19: build the symbol table from the OPENING snapshot, once. It is the image as loaded,
+        // which is what every pc in the session refers to. Any failure here — unreadable trace, no
+        // Snapshot, stripped binary — yields an empty table and bare-hex output rather than an
+        // error: symbolication is presentation, and must never be able to fail a debug session.
+        let syms = retrace_trace::Reader::open(trace).ok()
+            .and_then(|events| events.iter().find_map(|e| match e {
+                retrace_trace::Event::Snapshot { mem, .. } => Some(Symbols::from_snapshot(mem)),
+                _ => None,
+            }))
+            .unwrap_or_default();
         Ok(Exec {
             trace, session: Some(session), n: 1, k: 0,
-            breakpoints: Vec::new(), watches: Vec::new(), last_watch_hit: None, cache,
+            breakpoints: Vec::new(), watches: Vec::new(), last_watch_hit: None, cache, syms,
         })
+    }
+
+    /// M19: `"  in _child+0x30"` for an address that resolves, or the empty string for one that does
+    /// not.
+    ///
+    /// **Appended at end of line, never inserted after the address.** Every pc in this file is
+    /// already matched by existing assertions that read up to whatever follows it — `crashy_cli`
+    /// greps `"guest crashed: pc={pc:#x} far=..."`, `debug_cli` greps `"hit 0x{pc:x} at ("` — so an
+    /// insertion would break them for no gain. A suffix leaves every one of those substrings
+    /// intact, which is why this returns an annotation rather than a replacement for the address.
+    fn annot(&self, addr: u64) -> String {
+        match self.syms.resolve(addr) {
+            Some((n, 0)) => format!("  in {n}"),
+            Some((n, off)) => format!("  in {n}+{off:#x}"),
+            None => String::new(),
+        }
     }
 
     fn sess(&self) -> &ReplaySession { self.session.as_ref().expect("live session") }
@@ -362,7 +396,8 @@ impl<'a> Exec<'a> {
 
     fn cmd_where<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
         let pc = self.sess().pc();
-        line(out, format_args!("at ({}, {}) pc={pc:#x} thread={}",
+        let a = self.annot(pc);
+        line(out, format_args!("at ({}, {}) pc={pc:#x} thread={}{a}",
             self.n, self.k, self.sess().current_thread()))
     }
 
@@ -435,7 +470,8 @@ impl<'a> Exec<'a> {
                 self.reseek(e, 0)
             }
             Outcome::Crash { pc, esr, far } => {
-                line(out, format_args!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"))?;
+                let a = self.annot(pc);
+                line(out, format_args!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}{a}"))?;
                 let c = self.sess().landmark();
                 let kf = self.probe_window_len(c)?; // drops the live session (one VM per process)
                 self.reseek(c, kf)
@@ -520,7 +556,8 @@ impl<'a> Exec<'a> {
                 Advance::Break => {
                     let n = self.sess().landmark();
                     let p_hit = self.sess().pc();
-                    line(out, format_args!("hit {p_hit:#x} at ({n}, +?)"))?;
+                    let a = self.annot(p_hit);
+                    line(out, format_args!("hit {p_hit:#x} at ({n}, +?){a}"))?;
                     // K_cur = the pre-continue step only if the hit is in that same window; else 0
                     // (we entered window n via a landmark). Resolve the FIRST occurrence past it.
                     let kctx = if n == start_n { start_k } else { 0 };
@@ -533,7 +570,8 @@ impl<'a> Exec<'a> {
                     let pc = self.sess().pc();
                     if bps.contains(&pc) {
                         let n = self.sess().landmark();
-                        line(out, format_args!("hit {pc:#x} at ({n}, 0)"))?;
+                        let a = self.annot(pc);
+                        line(out, format_args!("hit {pc:#x} at ({n}, 0){a}"))?;
                         self.sess_mut().clear_breakpoints(); // keep this session, breakpoint-clean
                         self.sess_mut().clear_watchpoints(); // invariant: never leave WPs armed on a kept session (stepi runs on it)
                         self.n = n;
@@ -554,7 +592,8 @@ impl<'a> Exec<'a> {
                     let watched = watched_of(&ws, self.sess().far());
                     let matched = self.watch_thread_matches(watched, thread);
                     if matched {
-                        line(out, format_args!("hit watch {watched:#x} (write at {p_hit:#x}) at ({n}, +?)"))?;
+                        let a = self.annot(p_hit);
+                        line(out, format_args!("hit watch {watched:#x} (write at {p_hit:#x}) at ({n}, +?){a}"))?;
                     }
                     // Resolve from kctx, NOT kctx+1: unlike a breakpoint (whose parked-on case the
                     // pre-step already moved off), a watched store CAN legitimately fire at the
@@ -673,11 +712,13 @@ impl<'a> Exec<'a> {
         }
         match last {
             Some((n, k, RHit::Bp(pc))) => {
-                line(out, format_args!("hit {pc:#x} at ({n}, {k})"))?;
+                let a = self.annot(pc);
+                line(out, format_args!("hit {pc:#x} at ({n}, {k}){a}"))?;
                 self.reseek(n, k)
             }
             Some((n, k, RHit::Watch { watched, pc, .. })) => {
-                line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k})"))?;
+                let a = self.annot(pc);
+                line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k}){a}"))?;
                 self.last_watch_hit = Some((n, k));
                 self.reseek(n, k)
             }

@@ -65,7 +65,14 @@ fn continue_hits_mid_window_and_reverse_continue_returns() {
     // reverse-continue from (W,5): the (W,3) hit is strictly earlier -> returns to it.
     assert!(out.contains(&format!("hit 0x{p_mid:x} at ({w}, 3)")), "reverse-continue hit:\n{out}");
     // HELLO_DYN is single-threaded throughout, so thread=0 is the only truthful answer (M15).
-    assert!(out.trim_end().ends_with(&format!("at ({w}, 3) pc=0x{p_mid:x} thread=0")), "final where:\n{out}");
+    //
+    // M19 appends a symbol annotation to pc-bearing lines ("… thread=0  in _main+0x30"). Strip it
+    // and keep `ends_with`: what the assertion protects is that the FINAL line of the transcript is
+    // this `where` output — reverse-continue returned to (W,3) and nothing followed it — and only
+    // "nothing follows" pins the second half. The annotation itself is asserted in `symbols_e2e`,
+    // which owns it.
+    let last = util::strip_annot(out.trim_end().lines().last().unwrap_or(""));
+    assert!(last.ends_with(&format!("at ({w}, 3) pc=0x{p_mid:x} thread=0")), "final where:\n{out}");
 }
 
 #[test]
