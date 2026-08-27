@@ -1,4 +1,5 @@
 pub mod machmsg;
+pub mod symbols;
 
 use std::path::Path;
 use std::rc::Rc;

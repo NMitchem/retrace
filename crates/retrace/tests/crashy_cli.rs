@@ -34,7 +34,14 @@ fn continue_parks_at_the_crash_and_where_names_it() {
             "crash line:\n{out}");
     // Parked AT the fault: where's pc is the crash pc (the faulting instruction, un-retired).
     // CRASHY is single-threaded throughout, so thread=0 is the only truthful answer (M15).
-    assert!(out.trim_end().ends_with(&format!("pc={crash_pc:#x} thread=0")), "where:\n{out}");
+    //
+    // M19 appends a symbol annotation to pc-bearing lines ("… thread=0  in _main+0xcc"). Strip it
+    // and keep `ends_with`: the assertion's content is that the LAST line of the transcript is the
+    // `where` output parked at the crash pc, with nothing after the thread id. Loosening to
+    // `contains` would preserve the first half and quietly drop the second. The annotation itself
+    // is asserted in `symbols_e2e`, which owns that behaviour.
+    let last = util::strip_annot(out.trim_end().lines().last().unwrap_or(""));
+    assert!(last.ends_with(&format!("pc={crash_pc:#x} thread=0")), "where:\n{out}");
 }
 
 #[test]

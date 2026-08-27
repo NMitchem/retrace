@@ -98,6 +98,13 @@ Passed to `debug --script`, semicolon-separated:
   reverse-continue-to-last-writer, thread-attributed.
 - **Crashes are first-class** — a faulting guest is recorded, replayed, and seekable;
   reverse-continue reaches the corrupting store.
+- **Symbolicated addresses** — since M19, pc-bearing debugger output names the function it is in:
+  `guest crashed: pc=0x10000050c far=… esr=…  in _child+0x30`. The names are read from the
+  recording's own opening snapshot, because `__LINKEDIT` is mapped into guest memory and the
+  snapshot captures every backing — so **no binary path is supplied and no trace-format change was
+  needed**, existing recordings gained symbols retroactively, and a stale-binary mismatch is not
+  merely avoided but unrepresentable. The main executable and dyld resolve; see Known limits for
+  where it stops.
 - **Signals** — dispositions, handlers that actually run, `sigreturn`, alternate stacks, masks and
   pending sets. Per-thread since M16: `pthread_kill(child, SIGUSR1)` runs the handler on the child.
   Since M17 the child may be **blocked** in `__ulock_wait` when it is signalled: the signal pends and
@@ -115,9 +122,10 @@ Passed to `debug --script`, semicolon-separated:
   park/wake seam keyed on the port name. All of it is below or symmetric across the trace: nothing
   new is recorded and `TRACE_MAGIC` did not move.
 
-**Gate:** 443 passed / 0 failed / 1 ignored across 104 test binaries, **measured at `114b19d`**,
+**Gate:** 461 passed / 0 failed / 2 ignored across 105 test binaries, **measured at the M19 close**,
 clippy clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how
-that number is assembled. The single ignored gate is `stackoverflow_rust_e2e`, parked at M8 risk R3.
+that number is assembled. The two ignored gates are `stackoverflow_rust_e2e` (M8 risk R3) and
+`cache_symbol_e2e` (the M19 shared-cache symbol wall); both are described under Known limits.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
 
@@ -143,8 +151,19 @@ These are real and current, not aspirational gaps.
   the schedule replayable without recording it, and it is a deliberate trade: interleavings that
   require preemption mid-critical-section never occur, so **races that need preemption to manifest
   will not reproduce here.**
-- **Debugging is address-level.** No symbolization, no DWARF, no backtraces — every debugger operand
-  is a raw address.
+- **Symbolication stops at the shared cache, and at whatever the binary kept.** Since M19 the
+  debugger names functions in the guest's own image and in dyld, but three limits are real. **Shared
+  cache addresses resolve to nothing** — cache images carry no `LC_SYMTAB` in the region mapped into
+  the guest, and the cache's local-symbol area lives in the on-disk cache file that `cache.rs`
+  demand-pages but never stages into guest memory, so those symbols are not in the recording at all.
+  Since most of a dynamically-linked guest's executing pcs are *in* the cache, this is the difference
+  between naming your own functions and naming everything; `cache_symbol_e2e` is parked there.
+  **Stripped binaries yield nothing**, which is a property of the binary and not of retrace —
+  `brew jq` ships with 7 defined text symbols against `threadrust`'s 969. And **Rust names are
+  mangled** (`_ZN…E`): raw mangled names beat hex and need no demangler, but they are not pretty.
+  Debugger *operands* are still raw addresses — you cannot yet `break _main`.
+- **No DWARF, no line numbers, no backtraces.** M19 reads `LC_SYMTAB` only, so an address becomes
+  `_child+0x30` and never `crashthread.c:35`. There is no unwinder, so there is no stack trace.
 - **The trace format is not stable.** `TRACE_MAGIC` broke in both M15 and M16. Recordings are
   currently working artifacts, not things to keep across milestones.
 - **A signal to a thread that never wakes is never delivered.** Signals to a blocked thread are
@@ -154,11 +173,12 @@ These are real and current, not aspirational gaps.
   diagnosed by its crash instead. **At most one signal materialises per wake**, and a second
   deliverable one aborts loudly rather than being dropped: queueing at a wake is unmodelled because
   no guest in the tree measures it.
-- **One gate is parked `#[ignore]`d** at a documented, *measured* wall, and the reason is on the
-  test itself: `stackoverflow_rust_e2e`, because libstd computes its guard page from a constant
+- **Two gates are parked `#[ignore]`d** at documented, *measured* walls, and the reason is on each
+  test itself. `stackoverflow_rust_e2e`, because libstd computes its guard page from a constant
   macOS 26 libpthread reports and retrace cannot influence, so the recursion takes a stage-2 fault
-  instead of striking the guard (M8 risk R3). It has been the only parked gate since M18 un-parked
-  `dispatch_e2e` — a gate M18 itself parked for a capability retrace did not have, moved twice as
+  instead of striking the guard (M8 risk R3). And `cache_symbol_e2e` since M19, at the shared-cache
+  symbol wall above — a gate M19 parked for a capability it does not have, which by this repo's
+  discipline has regressed nothing: `dispatch_e2e` was parked the same way by M18, moved twice as
   each measured wall fell, and then cleared.
 
 ## Testing
@@ -171,7 +191,7 @@ just gate     # cargo test --workspace + clippy -D warnings
 VM tests must run serially. `just gate` sets it; a bare `cargo test` flakes with `HV_BUSY`.
 
 **`just gate` does not currently complete as one command.** The full workspace run exceeds a
-10-minute ceiling and gets killed — M14 through M18 each closed on a chunked run instead.
+10-minute ceiling and gets killed — M14 through M19 each closed on a chunked run instead.
 Split it, run every chunk `--no-fail-fast`, and capture cargo's exit code *before* any pipe:
 
 ```sh
@@ -185,7 +205,7 @@ cargo test -p retrace --bins -- --test-threads=1            # don't omit: see be
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
 without a `--test` filter, reaches them.** Leaving it out silently costs 8 tests and one binary —
-412 / 0 / 2 over 103 instead of 420 / 0 / 2 over 104 — and nothing fails to warn you. Contrast
+453 / 0 / 2 over 104 instead of 461 / 0 / 2 over 105 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 

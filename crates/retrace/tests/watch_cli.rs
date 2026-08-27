@@ -61,7 +61,11 @@ fn watch_continue_hits_first_store_and_progress_rule_advances() {
     // execution of the same store pc — ks[1], not ks[0] again.
     assert!(out.contains(&format!("resolved (1, {})", ks[1])), "second hit advances:\n{out}");
     // WATCHLOOP is single-threaded throughout, so thread=0 is the only truthful answer (M15).
-    assert!(out.trim_end().ends_with(&format!("at (1, {}) pc=0x{spc:x} thread=0", ks[1])), "final where:\n{out}");
+    // M19 appends a symbol annotation to the position line. Strip it and keep `ends_with` — the
+    // assertion's content is that the final line IS the `where` output with nothing after the
+    // thread id, which `contains` would stop pinning.
+    let last = util::strip_annot(out.trim_end().lines().last().unwrap_or(""));
+    assert!(last.ends_with(&format!("at (1, {}) pc=0x{spc:x} thread=0", ks[1])), "final where:\n{out}");
 }
 
 #[test]
@@ -116,7 +120,10 @@ fn reverse_continue_finds_last_store() {
     assert!(out.contains(&format!("hit watch 0x{t:x} (write at 0x{spc:x}) at (1, {k_last})")),
         "last-writer hit:\n{out}");
     // WATCHLOOP is single-threaded throughout, so thread=0 is the only truthful answer (M15).
-    assert!(out.trim_end().ends_with(&format!("at (1, {k_last}) pc=0x{spc:x} thread=0")), "final where:\n{out}");
+    // M19 annotation stripped; `ends_with` kept deliberately (see the note on the first such
+    // assertion in this file).
+    let last = util::strip_annot(out.trim_end().lines().last().unwrap_or(""));
+    assert!(last.ends_with(&format!("at (1, {k_last}) pc=0x{spc:x} thread=0")), "final where:\n{out}");
 }
 
 #[test]
@@ -267,6 +274,9 @@ fn pre_step_boundary_cross_reports_a_watched_syscall_write() {
     assert!(out.contains(&format!("hit watch 0x{buf:x} (syscall write) at ({after_read}, 0)")),
         "the crossed boundary event's write must be reported:\n{out}");
     // FILEIO is single-threaded throughout, so thread=0 is the only truthful answer (M15).
-    assert!(out.trim_end().ends_with(&format!("at ({after_read}, 0) pc=0x{bpc:x} thread=0")),
+    // M19 annotation stripped; `ends_with` kept deliberately (see the note on the first such
+    // assertion in this file).
+    let last = util::strip_annot(out.trim_end().lines().last().unwrap_or(""));
+    assert!(last.ends_with(&format!("at ({after_read}, 0) pc=0x{bpc:x} thread=0")),
         "parked at the post-event boundary:\n{out}");
 }

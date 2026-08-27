@@ -118,9 +118,12 @@ fn reverse_continue_names_the_thread_that_wrote_the_watched_cell() {
     // exercised by Task 8's `watch_thread_scoping_filters_the_others_write` (`watch_cli.rs`), not
     // here: this script never scopes a watch to a thread.
     let where_line = out2.lines().last().expect("a `where` line");
-    // `ends_with`, not `contains`: `cmd_where`'s format (`"…thread={}"`) puts nothing after the
-    // thread number, so "thread=1" can only ever be a suffix — `contains` would also pass a
-    // hypothetical "thread=10".
+    // `ends_with`, not `contains`: "thread=1" must be the END of the position text, or a
+    // hypothetical "thread=10" would also pass. M19 appends a symbol annotation
+    // ("…thread=1  in _foo+0x8"), so the annotation is stripped first and the `ends_with` is kept —
+    // deliberately NOT loosened to `contains`, which would give up exactly the discrimination this
+    // assertion exists for.
+    let where_line = util::strip_annot(where_line);
     assert!(where_line.ends_with("thread=1"),
         "`where` after reverse-continue must name thread 1 — the CHILD actually wrote the watched \
          cell, main never touches it. got:\n{where_line}\nfull transcript:\n{out2}");
