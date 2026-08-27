@@ -19,7 +19,8 @@ printed is the information it will not accept.
   the symbol table does not exist at parse time. This decides *where* resolution happens and
   forecloses the obvious implementation.
 - **S4** is the hard problem, and it was not visible from M19's code: **name → address is not a
-  function.** 19 ambiguous names in `threadrust`, **3255** in dyld.
+  function.** 19 ambiguous names in `threadrust`, 14 in dyld's arm64e slice, and one dyld name
+  (`___Block_byref_object_copy_`) carrying **13 distinct addresses**.
 - **S2** removed the compatibility worry: exit codes already coincide at 5. What changes is ordering.
 - **S5** put `watch <name>` out of scope on evidence rather than taste: `nlist_64` has no size field.
 
@@ -78,7 +79,7 @@ and the CLI's rule is:
 | >1 | error naming the count **and the addresses**, so the user re-issues with `break 0x…` |
 
 Picking the lowest silently is rejected: it is R3's confidently-wrong class, and S4 says it would
-fire on real names 3255 times over in dyld. The `>1` message must list the addresses, because a
+choose one of `___Block_byref_object_copy_`'s thirteen. The `>1` message must list the addresses, because a
 message that only says "ambiguous" leaves the user with no way forward — and the addresses are
 exactly what M19 taught the debugger to print.
 

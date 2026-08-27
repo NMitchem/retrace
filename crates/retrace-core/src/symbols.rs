@@ -240,8 +240,9 @@ impl SymbolTable {
     /// Every address this image defines under `name`, sorted ascending and deduped.
     ///
     /// **Returns a `Vec`, not an `Option`, and that is the point (M20 S4).** Address → name is a
-    /// function; name → address is not. `/usr/lib/dyld` binds **3255** names to more than one
-    /// address and `threadrust` 19, because compiler-generated locals repeat per translation unit
+    /// function; name → address is not. `threadrust` binds **19** names to more than one address and
+    /// dyld's arm64e slice 14 — with `___Block_byref_object_copy_` alone at **13 distinct addresses**
+    /// — because compiler-generated locals repeat per translation unit
     /// and Mach-O keeps every one. Collapsing that here — "return the first" — would put a
     /// confidently wrong address behind a plausible name, which is R3's failure mode aimed at a
     /// breakpoint instead of at a printed string. Deciding what to do about ambiguity is the
@@ -589,7 +590,8 @@ mod tests {
     // M20: the reverse direction, name -> address.
     //
     // S4 is why these exist and why none of them assert `Some(one_address)`: name -> address is
-    // NOT a function. dyld binds 3255 names to more than one address and threadrust 19, so the
+    // NOT a function. threadrust binds 19 names to more than one address and dyld's arm64e slice
+    // 14, one of them at 13 addresses, so the
     // return type is a Vec and "how many" is the caller's problem to refuse, not this layer's to
     // guess.
     // ---------------------------------------------------------------------------------------

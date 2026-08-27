@@ -169,7 +169,7 @@ regression corpus).
 1. **`TRACE_MAGIC` is still `RT\x00\x08`** and no `Event` variant changed.
 2. **Nothing under `record_box` / `ReplaySession::advance` / `Box_::run()` was modified.**
 3. **`verify_thread` still has exactly seven call sites** plus `mirror_delivery`'s inline eighth.
-4. **An ambiguous name errors and lists addresses** — check against a real dyld name from S4's 3255,
+4. **An ambiguous name errors and lists addresses** — check against a real dyld name from S4,
    not only a synthetic one.
 5. **A bare-hex token is still an address.** `break 1000` must not become a symbol lookup; the
    existing debug scripts in the regression corpus are the evidence.

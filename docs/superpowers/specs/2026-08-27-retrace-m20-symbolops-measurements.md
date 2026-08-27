@@ -81,22 +81,49 @@ untested.
 ## S4. Name → address is NOT a function — the milestone's hard problem
 
 ```sh
-nm <bin> | grep ' [TtSs] ' | awk '{print $NF}' | sort | uniq -d | wc -l
+nm -arch <arch> <bin> | grep ' [TtSs] ' | awk '{print $NF}' | sort | uniq -d | wc -l
 ```
 
-| image | defined syms (M3's `[TtSs]` rule) | **names bound to >1 address** |
-|---|---:|---:|
-| `crashthread` (C) | 2 | **0** |
-| `threadrust` (Rust) | 969 | **19** |
-| `/usr/lib/dyld` | 6331 defined text | **3255** |
+**`-arch` is load-bearing, and omitting it is how this measurement was first got wrong.** See the
+correction note below.
+
+| image | arch | defined syms (M3's `[TtSs]` rule) | **names bound to >1 address** |
+|---|---|---:|---:|
+| `crashthread` (C) | arm64, non-fat | 3 | **0** |
+| `jq` | arm64, non-fat | 7 | **0** |
+| `threadrust` (Rust) | arm64, non-fat | 969 | **19** |
+| `/usr/lib/dyld` | **arm64e slice** | 3298 defined text | **14** |
 
 M19's direction is total and unambiguous — an address falls inside exactly one symbol's range. **The
 reverse is not.** Duplicates in `threadrust` are compiler-generated locals (`_OUTLINED_FUNCTION_0`,
-`GCC_except_table0`, …) repeated per translation unit, which Mach-O keeps all of; dyld has 3255 such
-names.
+`GCC_except_table0`, …) repeated per translation unit, which Mach-O keeps every one of.
 
-So `break <name>` is not a lookup — it is a query that may return many rows, and the design must say
-what happens then. "Pick the lowest" would fire silently on real names 3255 times over in dyld alone.
+The sharper number is not the count of ambiguous names but **how ambiguous one name gets**:
+`___Block_byref_object_copy_` has **13** distinct addresses in dyld's arm64e slice, measured against
+a real recording. "Pick the lowest" would silently choose one of thirteen.
+
+### Correction: the first version of this table was wrong (dyld)
+
+As first written this row read *6331 defined text / 3255 duplicated names* — a factor of ~235 too
+high. `/usr/lib/dyld` is a **Mach-O universal binary with two architectures** (`x86_64` and
+`arm64e`), and `nm` without `-arch` concatenates both slices, so almost every symbol appears twice
+and reads as "duplicated". The recorded guest loads the **arm64e** slice only.
+
+It was caught by the plan's own Self-Review step 4 — "check against a real dyld name from S4, not
+only a synthetic one". The first name tried, `____chkstk_darwin`, resolved to a single address
+instead of erroring, which looked like an implementation bug and was in fact a measurement bug: that
+name is duplicated only *across* slices and occurs once in arm64e, so resolving it was correct.
+
+Two things this changes and one it does not. It **changes** the rhetoric — ambiguity is a
+double-digit phenomenon, not a four-digit one — and it **changes** the right way to cite dyld's size.
+It does **not** change the design: 19 names in `threadrust`, 14 in dyld, and a single name carrying
+13 addresses all say the same thing, which is that name → address is not a function and a lookup that
+silently picks would be wrong on real input. The conclusion was over-argued, not unsupported.
+
+The row is corrected **in place** rather than annotated-and-left, because this document records what
+is true, not what was believed; this note is the record that it changed. (Contrast
+`docs/status-log.md`, which is append-only for exactly the opposite reason.) M19's P3 correction set
+the same precedent.
 
 **The reassuring half**, also measured: the names anyone actually types are unique. `_main` is unique
 in every guest checked, `_child` is unique in `crashthread`, and
@@ -165,5 +192,5 @@ and records nothing.
 2. Should `Operand` be threaded through *every* address-taking `Cmd`, or only `break`/`delete`? A
    uniform type is tidier but widens the diff into commands whose symbol support S5 rules out — and
    a type that permits what the CLI rejects invites the reader to assume support that is not there.
-3. Linear scan or an index for name lookup? dyld's 6331 defined text symbols bound the cost; nothing
+3. Linear scan or an index for name lookup? dyld's 3298 arm64e defined text symbols bound the cost; nothing
    has measured whether a scan is perceptible. Measure before optimising.

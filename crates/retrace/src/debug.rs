@@ -26,8 +26,8 @@ const CHECKPOINT_COST_GATE_STEPS: u64 = 64;
 /// sites, never armed in hardware.
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
-    Break(u64),
-    Delete(u64),
+    Break(Operand),
+    Delete(Operand),
     Continue,
     ReverseContinue,
     Stepi(u64),
@@ -49,9 +49,56 @@ fn segments(script: &str) -> impl Iterator<Item = &str> {
 }
 
 /// A guest address: hex, `0x`-prefix optional (the brief writes `<hex-addr>`). `zzz` → Err.
+///
+/// Still the parser for every operand M20 did **not** take symbols for (`watch`, `unwatch`, `x`) —
+/// see `Operand` for why those were left alone.
 fn parse_addr(tok: &str) -> Result<u64, String> {
     let hex = tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")).unwrap_or(tok);
     u64::from_str_radix(hex, 16).map_err(|_| format!("bad hex address: {tok}"))
+}
+
+/// An unresolved `break`/`delete` operand: either a literal address or a symbol name (M20).
+///
+/// **Why the name is not resolved here.** `parse_script` runs to completion *before* `Exec::new`
+/// opens the trace (S1), so the symbol table does not exist during parsing. Resolution therefore
+/// happens at execution, in `Exec::addr_of`. The alternative — construct `Exec` first and parse
+/// afterwards — would move every parse diagnostic behind VM setup, and this file deliberately
+/// raises an over-long `x` span as a *parse* error "before any VM work" (see `MAX_EXAMINE_LEN`).
+///
+/// Only `break` and `delete` carry this. `watch`/`unwatch`/`x` keep `parse_addr` because a symbol
+/// cannot supply their **length**: `nlist_64` has no size field (S5), and a watch of invented width
+/// silently misses writes to the bytes it failed to cover. A uniform operand type across every
+/// command would have been tidier and would have implied support that does not exist.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum Operand {
+    Addr(u64),
+    Sym(String),
+}
+
+/// Classify a `break`/`delete` operand. **Total — never fails**, because an unknown name is not a
+/// parse error under M20; it is a lookup that may find nothing at execution time.
+///
+/// The rule is ordered, and the order is the decision (S2):
+/// 1. `0x`/`0X` prefix ⇒ address. Explicit prefix, explicit intent.
+/// 2. Parses completely as hex ⇒ address. **This is the backward-compatibility guarantee**: every
+///    script that worked before M20 parses identically after it.
+/// 3. Otherwise ⇒ symbol name.
+///
+/// Rule 2 costs one thing, documented rather than hidden: a symbol literally named `deadbeef` is
+/// unreachable, because that token is also valid hex. Mach-O C symbols carry a leading underscore
+/// (M1), so `_deadbeef` lands on rule 3, and mangled Rust names are never all-hex. An escape sigil
+/// is the additive follow-up if one is ever needed; M20 does not build it speculatively.
+fn parse_operand(tok: &str) -> Operand {
+    match tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")) {
+        Some(hex) => match u64::from_str_radix(hex, 16) {
+            Ok(a) => Operand::Addr(a),
+            Err(_) => Operand::Sym(tok.to_string()),
+        },
+        None => match u64::from_str_radix(tok, 16) {
+            Ok(a) => Operand::Addr(a),
+            Err(_) => Operand::Sym(tok.to_string()),
+        },
+    }
 }
 
 /// A byte length: decimal, or hex with a `0x` prefix. Capped at `MAX_EXAMINE_LEN` (a larger value
@@ -86,8 +133,8 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
         if ops.is_empty() { Ok(cmd) } else { Err(format!("`{verb}` takes no arguments")) }
     };
     match verb {
-        "break"           => { one_operand(verb, &ops)?; Ok(Cmd::Break(parse_addr(ops[0])?)) }
-        "delete"          => { one_operand(verb, &ops)?; Ok(Cmd::Delete(parse_addr(ops[0])?)) }
+        "break"           => { one_operand(verb, &ops)?; Ok(Cmd::Break(parse_operand(ops[0]))) }
+        "delete"          => { one_operand(verb, &ops)?; Ok(Cmd::Delete(parse_operand(ops[0]))) }
         "watch"           => {
             // Grammar: `watch <addr> [len] [thread <n>]` — `len` stays purely positional (as
             // before Task 8); `thread <n>` is a trailing keyword clause so it composes with an
@@ -283,8 +330,8 @@ impl<'a> Exec<'a> {
 
     fn exec<W: Write>(&mut self, cmd: &Cmd, out: &mut W) -> Result<(), String> {
         match cmd {
-            Cmd::Break(a)         => self.cmd_break(*a, out),
-            Cmd::Delete(a)        => self.cmd_delete(*a, out),
+            Cmd::Break(op)        => { let a = self.addr_of(op)?; self.cmd_break(a, out) }
+            Cmd::Delete(op)       => { let a = self.addr_of(op)?; self.cmd_delete(a, out) }
             Cmd::Continue         => self.cmd_continue(out),
             Cmd::ReverseContinue  => self.cmd_reverse_continue(out),
             Cmd::Stepi(count)     => self.cmd_stepi(*count, out),
@@ -299,6 +346,44 @@ impl<'a> Exec<'a> {
         }
     }
 
+    /// M20: turn a `break`/`delete` operand into an address, resolving a symbol name against the
+    /// session's table. Runs at **execution** because the table does not exist at parse time (S1).
+    ///
+    /// The three cases are the milestone's whole contract:
+    ///
+    /// - **no match** → error. Never a fallback to reinterpreting the token as hex: that would turn
+    ///   a typo into a breakpoint at a wrong-but-valid address, which is precisely the silent
+    ///   wrongness this design is arranged against.
+    /// - **one match** → use it.
+    /// - **many** → error, **listing the addresses**. Real input reaches this: dyld's arm64e slice
+    ///   binds 14 names to more than one address and `___Block_byref_object_copy_` alone has 13 of
+    ///   them (S4), so this is not a defensive branch, and a message that only
+    ///   said "ambiguous" would leave the user with no way forward. The addresses are exactly what
+    ///   M19 taught this debugger to print, so the error hands back something re-issuable as
+    ///   `break 0x…`.
+    ///
+    /// This does not contradict M19's "symbolication may never fail a session": there, a missing
+    /// *name* costs nothing because the debugger is only printing. Here a missing *address* means
+    /// there is no command to carry out.
+    fn addr_of(&self, op: &Operand) -> Result<u64, String> {
+        match op {
+            Operand::Addr(a) => Ok(*a),
+            Operand::Sym(name) => {
+                let hits = self.syms.addrs_of(name);
+                match hits.len() {
+                    0 => Err(format!("no symbol \"{name}\"")),
+                    1 => Ok(hits[0]),
+                    n => {
+                        let list = hits.iter().map(|a| format!("{a:#x}"))
+                            .collect::<Vec<_>>().join(", ");
+                        Err(format!("\"{name}\" is ambiguous: {n} addresses ({list}) — \
+                                     re-issue with the one you meant"))
+                    }
+                }
+            }
+        }
+    }
+
     fn cmd_break<W: Write>(&mut self, addr: u64, out: &mut W) -> Result<(), String> {
         if let Err(i) = self.breakpoints.binary_search(&addr) {
             if self.breakpoints.len() >= 6 {
@@ -306,7 +391,12 @@ impl<'a> Exec<'a> {
             }
             self.breakpoints.insert(i, addr); // sorted + deduped (≤ 6: one per DBGBVR slot)
         }
-        line(out, format_args!("breakpoint at {addr:#x}"))
+        // M20 symbolicates this echo, deliberately extending M19's pc-bearing-lines-only rule by
+        // one line: when the operand itself can be a name, confirming what it resolved to IS the
+        // feedback, and it makes the ambiguity error above actionable. Safe by inspection — both
+        // existing assertions on this line use `contains("breakpoint at 0x…")`, never `ends_with`,
+        // which is the check M19's four broken assertions earned.
+        line(out, format_args!("breakpoint at {}", self.syms.format(addr)))
     }
 
     fn cmd_delete<W: Write>(&mut self, addr: u64, out: &mut W) -> Result<(), String> {
@@ -751,16 +841,56 @@ mod tests {
 
     #[test] fn parses_commands() {
         let cs = parse_script("break 0x1804af834; continue; reverse-stepi 2; x 0x1000 16; where").unwrap();
-        assert_eq!(cs, vec![Cmd::Break(0x1804af834), Cmd::Continue, Cmd::ReverseStepi(2),
+        assert_eq!(cs, vec![Cmd::Break(Operand::Addr(0x1804af834)), Cmd::Continue, Cmd::ReverseStepi(2),
                             Cmd::Examine(0x1000, 16), Cmd::Where]);
     }
     #[test] fn stepi_defaults_to_one() {
         assert_eq!(parse_script("stepi").unwrap(), vec![Cmd::Stepi(1)]);
         assert_eq!(parse_script("reverse-stepi").unwrap(), vec![Cmd::ReverseStepi(1)]);
     }
-    #[test] fn rejects_unknown_and_bad_hex() {
+    #[test] fn rejects_unknown_verbs() {
+        // An unknown VERB stays a parse error under M20 (S3). Only the *operand* rule changed, and
+        // these two cases used to sit in one test where they read as the same thing; they are not.
         assert!(parse_script("frobnicate").is_err());
-        assert!(parse_script("break zzz").is_err());
+        assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // M20: operand classification. The rule, in order (S2/S4):
+    //   1. `0x`/`0X` prefix        => address, always
+    //   2. parses completely as hex => address   (this is what keeps existing scripts working)
+    //   3. otherwise                => symbol name
+    // -------------------------------------------------------------------------------------------
+
+    #[test] fn a_prefixed_or_bare_hex_operand_is_still_an_address() {
+        // Rule 1 and rule 2. This is the backward-compatibility guarantee: every debug script that
+        // worked before M20 parses to exactly the same Cmd afterwards.
+        assert_eq!(parse_script("break 0x1000").unwrap(), vec![Cmd::Break(Operand::Addr(0x1000))]);
+        assert_eq!(parse_script("break 1000").unwrap(), vec![Cmd::Break(Operand::Addr(0x1000))]);
+        assert_eq!(parse_script("delete 0x1000").unwrap(), vec![Cmd::Delete(Operand::Addr(0x1000))]);
+    }
+
+    #[test] fn a_non_hex_operand_is_now_a_symbol_name() {
+        // REPLACES the old `assert!(parse_script("break zzz").is_err())` (S3). That assertion was
+        // the single one whose meaning M20 changes, so it is replaced by the new rule rather than
+        // deleted — deleting it would have shipped the rule untested.
+        assert_eq!(parse_script("break zzz").unwrap(), vec![Cmd::Break(Operand::Sym("zzz".into()))]);
+        assert_eq!(parse_script("break _main").unwrap(), vec![Cmd::Break(Operand::Sym("_main".into()))]);
+        assert_eq!(parse_script("delete _child").unwrap(),
+                   vec![Cmd::Delete(Operand::Sym("_child".into()))]);
+        // A mangled Rust name is just a name; no demangler is involved (M3).
+        assert_eq!(parse_script("break _ZN4core3ptrE").unwrap(),
+                   vec![Cmd::Break(Operand::Sym("_ZN4core3ptrE".into()))]);
+    }
+
+    #[test] fn an_all_hex_token_is_an_address_even_when_it_looks_like_a_name() {
+        // The documented collision: `deadbeef` is valid hex AND a valid identifier, and rule 2 wins
+        // so that existing scripts keep working. A symbol genuinely named `deadbeef` is unreachable;
+        // Mach-O's leading underscore means the realistic form `_deadbeef` is not.
+        assert_eq!(parse_script("break deadbeef").unwrap(),
+                   vec![Cmd::Break(Operand::Addr(0xdeadbeef))]);
+        assert_eq!(parse_script("break _deadbeef").unwrap(),
+                   vec![Cmd::Break(Operand::Sym("_deadbeef".into()))]);
     }
     #[test] fn empty_segments_are_skipped() {
         assert_eq!(parse_script("regs;; where ;").unwrap(), vec![Cmd::Regs, Cmd::Where]);
