@@ -4181,7 +4181,7 @@ enormous offset, and the transcript would have looked informative while being fa
 
 ### Gate
 
-**461 passed / 0 failed / 2 ignored across 105 test binaries**, measured at the M19 close; clippy
+**461 passed / 0 failed / 2 ignored across 105 test binaries**, measured at `97a4163`; clippy
 clean at `-D warnings` over `--workspace --all-targets`. Run chunked — the workspace chunk,
 `retrace-box`, `--bins`, and one `--test` target per invocation for each of the 52 `retrace`
 integration gates — with cargo's exit code captured before any pipe. **All 56 chunks `rc=0`**

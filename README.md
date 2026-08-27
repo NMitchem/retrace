@@ -122,7 +122,7 @@ Passed to `debug --script`, semicolon-separated:
   park/wake seam keyed on the port name. All of it is below or symmetric across the trace: nothing
   new is recorded and `TRACE_MAGIC` did not move.
 
-**Gate:** 461 passed / 0 failed / 2 ignored across 105 test binaries, **measured at the M19 close**,
+**Gate:** 461 passed / 0 failed / 2 ignored across 105 test binaries, **measured at `97a4163`**,
 clippy clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how
 that number is assembled. The two ignored gates are `stackoverflow_rust_e2e` (M8 risk R3) and
 `cache_symbol_e2e` (the M19 shared-cache symbol wall); both are described under Known limits.
