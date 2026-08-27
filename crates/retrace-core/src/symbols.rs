@@ -236,6 +236,36 @@ impl SymbolTable {
     }
 }
 
+impl SymbolTable {
+    /// Every address this image defines under `name`, sorted ascending and deduped.
+    ///
+    /// **Returns a `Vec`, not an `Option`, and that is the point (M20 S4).** Address → name is a
+    /// function; name → address is not. `/usr/lib/dyld` binds **3255** names to more than one
+    /// address and `threadrust` 19, because compiler-generated locals repeat per translation unit
+    /// and Mach-O keeps every one. Collapsing that here — "return the first" — would put a
+    /// confidently wrong address behind a plausible name, which is R3's failure mode aimed at a
+    /// breakpoint instead of at a printed string. Deciding what to do about ambiguity is the
+    /// caller's job; this layer's job is not to hide it.
+    ///
+    /// Exact match only. Substring or suffix matching would manufacture ambiguity rather than
+    /// report it, which is the opposite of the above.
+    ///
+    /// **Not clamped to `__TEXT`**, unlike [`SymbolTable::resolve`]: `for_image` keeps any defined
+    /// section, so a `__DATA` symbol is here and is reachable by name even though no pc will ever
+    /// resolve *to* it (S6).
+    pub fn addrs_of(&self, name: &str) -> Vec<u64> {
+        let mut out: Vec<u64> = self
+            .syms
+            .iter()
+            .filter(|(_, n)| n == name)
+            .map(|(a, _)| *a)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
 /// Read a NUL-terminated string at `off` in the string table.
 fn cstr_at(strs: &[u8], off: usize) -> Option<String> {
     let rest = strs.get(off..)?;
@@ -271,6 +301,27 @@ impl Symbols {
     /// `(name, offset)` from whichever image claims the address.
     pub fn resolve(&self, addr: u64) -> Option<(&str, u64)> {
         self.images.iter().find_map(|t| t.resolve(addr))
+    }
+
+    /// Every address defined under `name`, searching the **executable first** and consulting dyld
+    /// only if the executable defines nothing (M20).
+    ///
+    /// The precedence is a decided rule, not an artifact of `images` happening to be built in
+    /// `[EXE_BASE, DYLD_BASE]` order — a later reader reordering that array must break a test, not
+    /// silently change which symbol a breakpoint lands on. A guest symbol shadows a dyld symbol of
+    /// the same name because the guest is what the user is debugging.
+    ///
+    /// Matches are *not* merged across images. Returning the union would report a name as ambiguous
+    /// whenever dyld happened to define it too, which would refuse breakpoints the user is entitled
+    /// to set. Measured mitigation for the common case: dyld does not define `_main` (S4).
+    pub fn addrs_of(&self, name: &str) -> Vec<u64> {
+        for t in &self.images {
+            let hits = t.addrs_of(name);
+            if !hits.is_empty() {
+                return hits;
+            }
+        }
+        Vec::new()
     }
 
     /// `"0x10000050c (_child+0x30)"` — or `"0x100000460 (_main)"` exactly at a symbol, or bare
@@ -532,5 +583,93 @@ mod tests {
     fn an_empty_symbols_formats_everything_as_bare_hex() {
         let s = Symbols::default();
         assert_eq!(s.format(0x1_0000_050c), "0x10000050c");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // M20: the reverse direction, name -> address.
+    //
+    // S4 is why these exist and why none of them assert `Some(one_address)`: name -> address is
+    // NOT a function. dyld binds 3255 names to more than one address and threadrust 19, so the
+    // return type is a Vec and "how many" is the caller's problem to refuse, not this layer's to
+    // guess.
+    // ---------------------------------------------------------------------------------------
+
+    /// Build a `Symbols` holding an exe image and a dyld image, the way `from_snapshot` routes them.
+    fn both(exe: &Img, dyld: &Img) -> Symbols {
+        let mut mem = exe.build();
+        mem.extend(dyld.build());
+        Symbols::from_snapshot(&mem)
+    }
+
+    #[test]
+    fn a_unique_name_yields_exactly_one_address() {
+        let img = Img::new(0x1_0000_0000, 0).sym(0x1_0000_0460, "_main").sym(0x1_0000_04dc, "_child");
+        let t = table(&img);
+        assert_eq!(t.addrs_of("_child"), vec![0x1_0000_04dc]);
+        assert_eq!(t.addrs_of("_main"), vec![0x1_0000_0460]);
+    }
+
+    #[test]
+    fn an_absent_name_yields_nothing_not_a_guess() {
+        let img = Img::new(0x1_0000_0000, 0).sym(0x1_0000_0460, "_main");
+        // Empty, NOT the nearest name and not a fallback: a typo must never become a breakpoint at
+        // a wrong-but-valid address.
+        assert!(table(&img).addrs_of("_mian").is_empty());
+    }
+
+    #[test]
+    fn a_name_at_two_addresses_yields_both_sorted() {
+        // S4's case, and the one that must not regress into silently returning one.
+        // `_OUTLINED_FUNCTION_0` is a real repeated name from threadrust, not an invention.
+        let img = Img::new(0x1_0000_0000, 0)
+            .sym(0x1_0000_0800, "_OUTLINED_FUNCTION_0")
+            .sym(0x1_0000_0100, "_OUTLINED_FUNCTION_0")
+            .sym(0x1_0000_0460, "_main");
+        assert_eq!(table(&img).addrs_of("_OUTLINED_FUNCTION_0"),
+                   vec![0x1_0000_0100, 0x1_0000_0800]);
+    }
+
+    #[test]
+    fn one_name_at_one_address_is_not_reported_twice() {
+        // `syms` is deduped at build, but a caller reading "2 matches" would print an ambiguity
+        // error for a name that is not ambiguous, so pin it.
+        let img = Img::new(0x1_0000_0000, 0).sym(0x1_0000_0460, "_main").sym(0x1_0000_0460, "_main");
+        assert_eq!(table(&img).addrs_of("_main"), vec![0x1_0000_0460]);
+    }
+
+    #[test]
+    fn a_name_only_in_dyld_still_resolves() {
+        let exe = Img::new(0x1_0000_0000, 0).sym(0x1_0000_0460, "_main");
+        let dyld = Img::new(0, retrace_box::DYLD_BASE).sym(0x1000, "_dyld_start");
+        assert_eq!(both(&exe, &dyld).addrs_of("_dyld_start"),
+                   vec![retrace_box::DYLD_BASE + 0x1000]);
+    }
+
+    #[test]
+    fn the_executable_shadows_dyld_for_a_shared_name() {
+        // The precedence rule is DECIDED (exe first), not inherited from the order of a Vec field.
+        // Measured mitigation: dyld does not define _main (S4), so this collision is synthetic —
+        // which is exactly why it needs a test rather than a measurement.
+        let exe = Img::new(0x1_0000_0000, 0).sym(0x1_0000_0460, "_shared");
+        let dyld = Img::new(0, retrace_box::DYLD_BASE).sym(0x1000, "_shared");
+        assert_eq!(both(&exe, &dyld).addrs_of("_shared"), vec![0x1_0000_0460],
+            "the guest's own symbol must win, and dyld's must not be appended to it");
+    }
+
+    #[test]
+    fn a_data_symbol_is_reachable_by_name_but_not_by_address() {
+        // Confirms S6, which the measurements document recorded as source-read rather than measured:
+        // `for_image` keeps any defined section, so a __DATA symbol IS in the table, while
+        // `resolve`'s text_end clamp means address -> name can never return it.
+        //
+        // This does NOT license `watch <name>`: S5 blocks that independently, because nlist_64
+        // carries no size and a watch of invented width silently misses writes.
+        let past_text = 0x1_0000_0000u64 + 0x8000; // text_vmsize is 0x4000, so this is past text_end
+        let img = Img::new(0x1_0000_0000, 0)
+            .sym(0x1_0000_0460, "_main")
+            .raw_sym(past_text, "_a_global", N_SECT, 2);
+        let t = table(&img);
+        assert_eq!(t.addrs_of("_a_global"), vec![past_text], "name -> address reaches data");
+        assert_eq!(t.resolve(past_text), None, "address -> name must still stop at text_end");
     }
 }
