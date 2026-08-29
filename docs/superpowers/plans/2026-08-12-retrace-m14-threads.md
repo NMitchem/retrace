@@ -115,7 +115,7 @@ int main(void) {
 - [ ] **Step 2: Build and run it natively**
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 clang -o spikes/threadjoin spikes/threadjoin.c -lpthread
 ./spikes/threadjoin; echo "exit=$?"
 ```
@@ -127,7 +127,7 @@ Expected: `before` / `child` / `joined 42`, exit 0. If this fails, stop — the 
 `dtruss` needs root and a SIP carve-out, so prefer the tool that needs neither: run the same binary **under retrace** and read `RETRACE_TRACE=1`. It dies at `bsdthread_create` exactly as the Rust probe does, which is the point — capture everything *up to and including* that trap, then get the join-side answer from the disassembly of libsystem_pthread's `pthread_join`:
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 RETRACE_TRACE=1 cargo run -q -p retrace -- record-dyn ./spikes/threadjoin -o /tmp/tj.bin 2>&1 | tail -40
 
 # The join path, read from the shared cache's own code:
@@ -141,7 +141,7 @@ Record which of `psynch_cvwait` (`SYS_PSYNCH_CVWAIT`), `__ulock_wait` (515) / `_
 The spec flags this as an unverified hazard: if trap 360 is forwarded, the host may create a real thread inside retrace's own process starting at a guest address.
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 # Does the dispatch have an allowlist, or is forward the default?
 grep -n "Stop::Syscall" -A 40 crates/retrace-core/src/lib.rs | head -60
 ```
@@ -164,7 +164,7 @@ RPID=$!; sleep 3; ps -M $RPID 2>/dev/null | wc -l; wait $RPID
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 git add spikes/threadjoin.c
 git commit -m "M14 t1: spike — what pthread_join blocks on, measured not assumed"
 ```
@@ -187,7 +187,7 @@ git commit -m "M14 t1: spike — what pthread_join blocks on, measured not assum
 This is the call that tells the kernel where to start new threads, and it already fires on every dynamic guest. Its arguments *are* the thread-start contract:
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 RETRACE_TRACE=1 cargo run -q -p retrace -- record-dyn \
   target/debug/build/retrace-guest-*/out/hello_rust -o /tmp/hr.bin 2>&1 \
   | grep -E 'num=366|num=372'
@@ -268,7 +268,7 @@ fn thread_syscall_numbers_are_the_darwin_ones() {
 - [ ] **Step 2: Run it and watch it fail**
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 cargo test -p retrace-arch thread_syscall_numbers -- --test-threads=1
 ```
 
@@ -1313,7 +1313,7 @@ M9 built `flush_guest_tlb` and then discovered jq never used it. M13 measured it
 - [ ] **Step 1: Record the baseline**
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 cargo test -p retrace-box --test threads -- --test-threads=1 2>&1 | tail -3
 ```
 

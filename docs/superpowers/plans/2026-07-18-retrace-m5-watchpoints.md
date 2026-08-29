@@ -63,7 +63,7 @@ retrace records a guest program's run (every syscall + the kernel's memory write
 - [ ] **Step 1: Create the branch**
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 git checkout -b m5-watchpoints main
 ```
 

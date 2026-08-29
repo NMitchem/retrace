@@ -95,7 +95,7 @@ measuring before writing.
 Re-run the two committed probes to confirm the numbers this plan is built on still hold:
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 clang -arch arm64 -o spikes/sigabi spikes/sigabi.c && ./spikes/sigabi
 clang -arch arm64 -O0 -o spikes/sigtramp spikes/sigtramp.c && ./spikes/sigtramp
 ```

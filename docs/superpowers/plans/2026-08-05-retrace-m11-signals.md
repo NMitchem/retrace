@@ -100,7 +100,7 @@ truncated histogram.
 - [ ] **Step 0: Measure the real signal surface (spec §"Unmeasured", R1/R3 mitigation)**
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 
 # The C and Rust guests are build.rs artifacts in OUT_DIR, not repo files. Build the workspace
 # first so they exist, then locate them.

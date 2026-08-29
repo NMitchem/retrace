@@ -81,7 +81,7 @@ trust this table blindly — Step 0 re-derives it.
 - [ ] **Step 0: Re-derive the fd surface from a full histogram (spec R1 mitigation)**
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 printf '{"name":"retrace","rung":3}\n' > /tmp/rung3.json
 RETRACE_TRACE=1 cargo run -q -p retrace -- record-dyn /opt/homebrew/bin/jq \
   -o /tmp/m10.bin -- '.name' /tmp/rung3.json > /tmp/m10.trace 2>&1
