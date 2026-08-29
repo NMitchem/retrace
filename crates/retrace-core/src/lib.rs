@@ -65,7 +65,12 @@ pub enum Outcome {
     Signal { sig: u64 },
 }
 
-pub struct RecordSummary { pub stdout: Vec<u8>, pub outcome: Outcome, pub events: usize }
+/// `fall_throughs` is the EL1 vector fall-through count (M23 t1/t2). It is carried out here rather
+/// than into the trace on purpose: an `Event` variant would renumber every landmark, which
+/// `Event::Sched`'s removal settled. `Box_::run()` is shared by record and replay, so each side
+/// computes its own and the GATE compares the two — no single process holds both numbers.
+pub struct RecordSummary { pub stdout: Vec<u8>, pub outcome: Outcome, pub events: usize,
+                           pub fall_throughs: u64 }
 
 pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<RecordSummary, String> {
     record_box(Box_::load(loaded), trace_path)
@@ -1149,11 +1154,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             Stop::Step => unreachable!("record_box drives run(), which never single-steps"),
         }
     }
-    Ok(RecordSummary { stdout, outcome, events: count })
+    Ok(RecordSummary { stdout, outcome, events: count, fall_throughs: b.fall_throughs() })
 }
 
 #[derive(Debug)]
-pub struct ReplayReport { pub stdout: Vec<u8>, pub outcome: Outcome }
+pub struct ReplayReport { pub stdout: Vec<u8>, pub outcome: Outcome, pub fall_throughs: u64 }
 #[derive(Debug)]
 pub struct Divergence { pub landmark: usize, pub pc: u64, pub detail: String }
 
@@ -1385,7 +1390,8 @@ impl ReplaySession {
                                         }
                                         return Ok(Advance::Exited(ReplayReport {
                                             stdout: std::mem::take(&mut self.stdout),
-                                            outcome: Outcome::Exit { code: *code } }));
+                                            outcome: Outcome::Exit { code: *code },
+                                            fall_throughs: self.b.fall_throughs() }));
                                     }
                                     other => return Err(Divergence { landmark: self.idx + 1, pc,
                                         detail: format!("expected final memory Snapshot, got {other:?}") }),
@@ -1495,7 +1501,8 @@ impl ReplaySession {
                                             }
                                             return Ok(Advance::Exited(ReplayReport {
                                                 stdout: std::mem::take(&mut self.stdout),
-                                                outcome: Outcome::Signal { sig: *rsig } }));
+                                                outcome: Outcome::Signal { sig: *rsig },
+                                                fall_throughs: self.b.fall_throughs() }));
                                         }
                                         other => return Err(Divergence { landmark: self.idx + 1, pc,
                                             detail: format!("expected final memory Snapshot after Signal, got {other:?}") }),
@@ -2331,7 +2338,8 @@ impl ReplaySession {
                                     }
                                     return Ok(Advance::Exited(ReplayReport {
                                         stdout: std::mem::take(&mut self.stdout),
-                                        outcome: Outcome::Crash { pc, esr, far } }));
+                                        outcome: Outcome::Crash { pc, esr, far },
+                                        fall_throughs: self.b.fall_throughs() }));
                                 }
                                 other => return Err(Divergence { landmark: self.idx + 1, pc,
                                     detail: format!("expected final memory Snapshot after Crash, got {other:?}") }),
