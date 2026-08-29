@@ -501,6 +501,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
                     machmsg::Route::Forward(name) => {
+                        // Body-level guard. `route()` is handed only the packed register file — the
+                        // message HEADER — so a check that depends on the request BODY runs here,
+                        // from the SAME function the replay mirror calls with the SAME bytes
+                        // (symmetry rule 1 by construction). A no-op for ids with nothing to check.
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        machmsg::check_forward_body(m.msgh_id, &buf)
+                            .unwrap_or_else(|e| panic!("mach_msg2 forward guard: {e}"));
                         eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id);
                         let (ret, err, writes) = b.forward_and_diff(num, args);
                         if trace_log {
@@ -1824,7 +1831,16 @@ impl ReplaySession {
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
-                                    machmsg::Route::Forward(_) => self.b.apply_and_return(*ret, *err, writes),
+                                    machmsg::Route::Forward(_) => {
+                                        // The mirror of record's body guard, same function, same
+                                        // bytes — read here out of replay's OWN re-executed guest
+                                        // memory, so it doubles as a cheap deterministic check that
+                                        // the request the guest built is the one it built on record.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        machmsg::check_forward_body(m.msgh_id, &buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay forward guard: {e}") })?;
+                                        self.b.apply_and_return(*ret, *err, writes)
+                                    }
                                     machmsg::Route::Unsupported(why) => {
                                         return Err(Divergence { landmark: self.idx, pc,
                                             detail: format!("unsupported mach_msg2 on replay: {why}") });
