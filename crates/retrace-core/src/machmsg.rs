@@ -52,7 +52,18 @@ const FORWARD_ALLOWLIST: &[(u32, &str)] =
       // process's audit token (flavor 15 = TASK_AUDIT_TOKEN). A read-only DATA query with no ports —
       // forwarded to retrace's own task (== the process) and recorded (forward-and-record; the token
       // is nondeterministic). NOT synthesized like the port RPCs 3409/3410 (M2-taskinfo).
-      (3405, "task_info")];
+      (3405, "task_info"),
+      // host_get_special_port (host_priv subsystem base 400, slot 12): sent to the port
+      // `host_self_trap` (-29) returns — a trap measured immediately before each of these sends
+      // (M23 measurements S3), which is how the id was identified rather than inferred from the
+      // number. 17 of the 20 M22 Apple-system-binary failures collapsed onto this single id once
+      // the `pc=0x4204` masking defect stopped hiding them. A read-only query, and for
+      // `which == HOST_PORT` it returns the same right `host_self_trap` already hands out — so it
+      // is FORWARDED and recorded like 3405 (the returned name is nondeterministic, so replay
+      // applies the recorded reply rather than recomputing it). The PRIVILEGED HOST_PRIV_PORT is
+      // refused by `check_forward_body`, not forwarded; `route()` cannot make that distinction
+      // because it never sees the request body.
+      (412, "host_get_special_port")];
 
 pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     if m.options != MACH64_SEND_MSG | MACH64_RCV_MSG | MACH64_SEND_KOBJECT_CALL {
@@ -109,6 +120,14 @@ const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 /// mis-route; the Task 2 walk confirms non-collision.
 pub const SYNTHETIC_BOOTSTRAP_PORT: u32 = 0x0BAD_0B03;
 
+/// `host_get_special_port` arguments, from `<mach/host_special_ports.h>`. `HOST_LOCAL_NODE` is the
+/// only node retrace has ever observed, and `HOST_PORT` the only port; `HOST_PRIV_PORT` is named
+/// here because it is the one that must be REFUSED (see `check_forward_body`), not because it is
+/// handled.
+pub const HOST_LOCAL_NODE: i32 = -1;
+pub const HOST_PORT: i32 = 1;
+pub const HOST_PRIV_PORT: i32 = 2;
+
 /// _kernelrpc_mach_vm_map (4811) request body (mig __Request__, pack(4); offsets in the plan).
 pub struct VmMapReq {
     pub address: u64, pub size: u64, pub mask: u64, pub flags: u32,
@@ -154,6 +173,46 @@ pub fn decode_set_special_port(buf: &[u8]) -> Result<u32, String> {
     let id = u32_at(buf, 20);
     if id != 3410 { return Err(format!("msgh_id {id} != 3410")); }
     Ok(u32_at(buf, 48)) // which_port = header(24) + desc_count(4) + descriptor(12) + NDR(8)
+}
+
+/// host_get_special_port (412) request body: header(24) + NDR(8) + `node: int`(4) +
+/// `which: int`(4) = 40 bytes — the exact 40 bytes measured, uniform across all 17 binaries
+/// (M23 S3), one send each. Returns `(node, which)`; `check_forward_body` decides which pairs are
+/// admissible. Validates the length and msgh_id so a malformed/mis-routed request fails loud.
+pub fn decode_host_get_special_port(buf: &[u8]) -> Result<(i32, i32), String> {
+    if buf.len() < 40 {
+        return Err(format!("host_get_special_port request short: {} < 40", buf.len()));
+    }
+    let id = u32_at(buf, 20);
+    if id != 412 { return Err(format!("msgh_id {id} != 412")); }
+    Ok((u32_at(buf, 32) as i32, u32_at(buf, 36) as i32)) // node = header(24)+NDR(8); which = +4
+}
+
+/// Body-level guard for a FORWARDED kobject RPC. Returns `Ok(())` for any id with nothing to check.
+///
+/// `route()` is given only the packed register file — the message HEADER — so a check that depends
+/// on the request BODY cannot live there. It lives in ONE function called from BOTH dispatch arms
+/// with the SAME bytes, rather than in a dedicated `Route` variant, because that identity is what
+/// makes symmetry rule 1 hold by construction: a variant would mean two copies of the guard (and of
+/// the whole forward body around it), and two copies are what drift. Replay reads the body out of
+/// its own re-executed guest memory, so the guard doubles as a cheap deterministic cross-check.
+pub fn check_forward_body(msgh_id: u32, buf: &[u8]) -> Result<(), String> {
+    if msgh_id != 412 { return Ok(()); }
+    let (node, which) = decode_host_get_special_port(buf)?;
+    // (HOST_LOCAL_NODE, HOST_PORT) is the pair measured in all 17. HOST_PRIV_PORT (2) is the
+    // privileged host right: forwarding it would hand the guest whatever privileged access RETRACE
+    // happens to hold, which is neither the guest's to have nor anything any measurement has seen.
+    // Fail loud rather than forward silently — the M18 `semaphore_wait_trap` argument, and for the
+    // same reason: a silent wrong answer here is agreed upon by record and replay alike, so the
+    // determinism oracle structurally cannot see it.
+    if (node, which) != (HOST_LOCAL_NODE, HOST_PORT) {
+        return Err(format!(
+            "host_get_special_port (412): only (node, which) == ({HOST_LOCAL_NODE}, {HOST_PORT}) \
+             (HOST_LOCAL_NODE, HOST_PORT) is modeled; got ({node}, {which})\
+             {}",
+            if which == HOST_PRIV_PORT { " — HOST_PRIV_PORT is deliberately refused" } else { "" }));
+    }
+    Ok(())
 }
 
 // Received-reply header constants, golden-copied from the captured kernel reply (fixture is
@@ -424,5 +483,62 @@ mod tests {
     fn decode_set_special_port_rejects_malformed() {
         assert!(decode_set_special_port(&set_special_port_req(3410, 10)[..51]).is_err()); // short (<52)
         assert!(decode_set_special_port(&set_special_port_req(3411, 10)).is_err());       // wrong id
+    }
+
+    // --- host_get_special_port (412) — M23 t3 ---
+
+    /// 412 is the wall that 17 of the 20 M22 Apple-system-binary failures collapsed onto once the
+    /// `pc=0x4204` masking defect was removed (M23 measurements S3). It belongs to the **host_priv**
+    /// MIG subsystem (base 400, slot 12) and is sent to the port `host_self_trap` (-29) returns — a
+    /// trap measured immediately before each of these sends — so it is allowlisted at the TOP level
+    /// of `route()`, beside the other host-subsystem ids (200, 206), NOT under the task-port arm.
+    #[test]
+    fn routes_host_get_special_port_to_forward() {
+        assert!(matches!(route(&msg(412, 0x1f03, KOBJ), Some(0x203)),
+                         Route::Forward("host_get_special_port")));
+    }
+
+    /// Hand-built `host_get_special_port` request — the 40 bytes measured in M23 S3, uniform across
+    /// all 17 binaries: header(24) + NDR(8) + `node`:int(4) + `which`:int(4). msgh_id at offset 20.
+    fn host_get_special_port_req(id: u32, node: i32, which: i32) -> Vec<u8> {
+        let mut b = vec![0u8; 40];
+        b[20..24].copy_from_slice(&id.to_le_bytes());
+        b[24..32].copy_from_slice(&NDR);
+        b[32..36].copy_from_slice(&node.to_le_bytes());
+        b[36..40].copy_from_slice(&which.to_le_bytes());
+        b
+    }
+    #[test]
+    fn decodes_host_get_special_port_node_and_which() {
+        assert_eq!(decode_host_get_special_port(&host_get_special_port_req(412, -1, 1)).unwrap(),
+                   (HOST_LOCAL_NODE, HOST_PORT));
+    }
+    #[test]
+    fn decode_host_get_special_port_rejects_malformed() {
+        assert!(decode_host_get_special_port(&host_get_special_port_req(412, -1, 1)[..39]).is_err());
+        assert!(decode_host_get_special_port(&host_get_special_port_req(413, -1, 1)).is_err());
+    }
+
+    /// The body guard is where a check that needs the request BODY lives, because `route()` sees
+    /// only the packed register file (the header). It is called from BOTH dispatch arms with the
+    /// same bytes, which is what makes symmetry rule 1 hold by construction here.
+    #[test]
+    fn the_forward_body_guard_admits_only_the_plain_host_port() {
+        // (node, which) == (HOST_LOCAL_NODE, HOST_PORT) is the shape measured in all 17 binaries.
+        assert!(check_forward_body(412, &host_get_special_port_req(412, -1, 1)).is_ok());
+        // HOST_PRIV_PORT (2) is the privileged host right. Forwarding it hands the guest whatever
+        // privileged access RETRACE has, which is not the guest's to have and is not what any
+        // measurement observed — so it must fail loud rather than be forwarded silently.
+        assert!(check_forward_body(412, &host_get_special_port_req(412, -1, 2)).is_err());
+        // A non-local node is likewise unmeasured.
+        assert!(check_forward_body(412, &host_get_special_port_req(412, 0, 1)).is_err());
+    }
+    #[test]
+    fn the_forward_body_guard_is_a_no_op_for_unguarded_ids() {
+        // Every other allowlisted id has no body-level check. The guard must pass them through
+        // untouched — in particular it must not try to decode their bodies as 412 requests.
+        for id in [200u32, 206, 3418, 3405] {
+            assert!(check_forward_body(id, &[]).is_ok(), "id {id} must pass the body guard");
+        }
     }
 }
