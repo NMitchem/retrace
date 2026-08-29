@@ -54,6 +54,17 @@ pub const DYLD_BASE: u64 = 0x1_4000_0000;      // 5 GiB slide for dyld
 // the guard page. That was equally true when the stack sat at 2 MiB.
 const DYN_STACK_TOP:  u64 = 0x0280_0000;       // 40 MiB — above PT_L3_CEIL by libpthread's 0x7fc000
 const DYN_STACK_SIZE: u64 = 0x0004_0000;       // 256 KiB
+/// macOS 26 libpthread's main-thread stack size: 8 MiB minus one 16 KiB page. It calls
+/// `getrlimit(RLIMIT_STACK)` and then IGNORES the reply — M8 measured that answering 0x10000000
+/// instead of 0x40000 left libstd's computed guard address bit-identical, so retrace cannot
+/// influence this subtrahend and must lay its geometry out around it.
+pub const LIBPTHREAD_MAIN_STACK_SIZE: u64 = 0x7fc000;
+/// The guest's BELIEVED stack bottom — where libstd's `install_main_guard` mmaps its guard page.
+const GUARD_PAGE_IPA: u64 = DYN_STACK_TOP - LIBPTHREAD_MAIN_STACK_SIZE;   // 0x2004000
+/// The believed-but-unbacked window M21 reserves: one granule ABOVE the guard page (so the guard
+/// stays in free space and faults at stage 1), up to the real backed stack bottom.
+const GUARD_TOP: u64 = GUARD_PAGE_IPA + GRANULE as u64;                    // 0x2008000
+const DYN_STACK_BOTTOM: u64 = DYN_STACK_TOP - DYN_STACK_SIZE;              // 0x27C0000
 pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 // Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 36-bit (64 GiB)
 // IPA space and ABOVE the loaded segments (~4-5 GiB), the demand-paged shared-cache window
@@ -1105,6 +1116,11 @@ impl Box_ {
     /// Size of the guest's stack in bytes — what `RLIMIT_STACK` must report (M8-stack).
     pub fn stack_size(&self) -> u64 { self.stack_size }
 
+    /// `[start, end)` of the stack the guest BELIEVES it has but retrace does not back — reserved at
+    /// load, grown page-by-page by `commit_reserved_page`. Excludes libstd's guard page by one granule
+    /// at the bottom, and the really-backed stack at the top.
+    pub fn believed_stack_window(&self) -> (u64, u64) { (GUARD_TOP, DYN_STACK_BOTTOM) }
+
     /// Re-sign a batch of shared-cache auth slots with the GUEST's fixed PAC keys, returning the
     /// signed pointers (in slot order). Each slot is signed in-guest with `pacia` (IA,
     /// `key_is_data == false`) or `pacda` (DA, `key_is_data == true`) — the guest's own keys sign by
@@ -1684,6 +1700,7 @@ impl Box_ {
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
         let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None };
+        b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
         // first `switch_to_thread` rather than an all-zero placeholder.
@@ -3656,6 +3673,43 @@ impl Box_ {
         0
     }
 
+    /// Reserve the main thread's believed-but-unbacked stack (M8 spec risk R3).
+    ///
+    /// **A reservation, not an `mmap`** — the same choice, for the same measured reason, as
+    /// `place_worker_stack`: `guest_vm_reserve` is bookkeeping only, and each page is demand-committed
+    /// with a fresh zeroed anon page on first touch by `commit_reserved_page`. Eagerly backing the full
+    /// 8 MiB was measured at ~1.7x on `hello_rust` and worse across the dyld suite, because the
+    /// per-syscall diff scales with total MAPPED memory — and a reservation maps nothing. A guest that
+    /// never recurses deeply commits zero pages and pays zero.
+    ///
+    /// **The window deliberately stops one granule ABOVE the guard page.** libstd mmaps its guard
+    /// `MAP_FIXED PROT_NONE` at `GUARD_PAGE_IPA`; a backed PROT_NONE page faults at STAGE 1 (permission,
+    /// via the EL1 trampoline) and arrives as `Stop::Fault` for M12's disposition check, which is what
+    /// delivers SIGSEGV to libstd's handler. If the guard were inside the reservation it would instead
+    /// be unbacked, fault at STAGE 2, and be silently committed here — turning a stack overflow into a
+    /// corrupted guest that keeps running. That is M13's invariant (see `protect_none`), and this is the
+    /// one place M21 could have broken it.
+    ///
+    /// Deterministic and trace-free: `load_dynamic` runs identically on record and replay, so the same
+    /// reservation exists on both sides and nothing about it enters the trace (symmetry rule 2).
+    fn reserve_believed_stack(&mut self) {
+        // These three are pure functions of compile-time constants (GUARD_TOP, GUARD_PAGE_IPA,
+        // DYN_STACK_BOTTOM, PT_L3_CEIL never vary at runtime), so clippy's assertions_on_constants
+        // rightly refuses a plain assert! here — const { assert!(..) } is the existing convention
+        // this file already uses for the same situation (see stack_geometry_tests's DYN_STACK_TOP
+        // <= 1 << 36 check), and it is strictly stronger: a layout mistake fails the BUILD, not a
+        // test run or a live load.
+        const { assert!(GUARD_TOP > GUARD_PAGE_IPA,
+            "the window must start ABOVE the guard page, or an overflow is silently committed \
+             instead of faulting") };
+        const { assert!(GUARD_TOP < DYN_STACK_BOTTOM,
+            "believed-stack window inverted: DYN_STACK_TOP or DYN_STACK_SIZE moved without moving \
+             this") };
+        const { assert!(GUARD_TOP >= PT_L3_CEIL,
+            "the window would overlap the L3 translation tables") };
+        self.guest_vm_reserve(GUARD_TOP, DYN_STACK_BOTTOM - GUARD_TOP, false);
+    }
+
     /// Place ONE workqueue worker's stack and pthread struct. Returns `(stack_base, stack_top,
     /// pthread)`, where `stack_top == pthread` — that equality is §2c's measurement (`SP == x0`,
     /// 7/7), not an implementation convenience, and both are named so the call site reads as the
@@ -4640,7 +4694,6 @@ mod stack_geometry_tests {
     #[test]
     fn the_guard_page_libstd_computes_is_a_mappable_guest_address() {
         // macOS 26 libpthread's main-thread stack size: 8 MiB minus one 16 KiB page.
-        const LIBPTHREAD_MAIN_STACK_SIZE: u64 = 0x7fc000;
         let guard = DYN_STACK_TOP.checked_sub(LIBPTHREAD_MAIN_STACK_SIZE).unwrap_or_else(|| panic!(
             "DYN_STACK_TOP {DYN_STACK_TOP:#x} is below libpthread's constant main-thread stack size \
              {LIBPTHREAD_MAIN_STACK_SIZE:#x}: libstd's guard-page subtraction underflows to a wild \
