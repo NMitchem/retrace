@@ -7,6 +7,11 @@ fn u32le(b: &[u8], o: usize) -> u32 { u32::from_le_bytes(b[o..o+4].try_into().un
 fn u64le(b: &[u8], o: usize) -> u64 { u64::from_le_bytes(b[o..o+8].try_into().unwrap()) }
 
 pub fn parse_macho(b: &[u8]) -> Loaded {
+    // A universal (fat) file is the normal shape for a macOS system binary and for dyld itself,
+    // so pick the slice this machine would execute before reading a mach_header out of it. A thin
+    // file passes through, and so does a non-Mach-O — the assert below stays the single place a
+    // file that is neither is rejected, with the message that says so.
+    let b = slice_native(b);
     assert_eq!(u32le(b, 0), 0xfeed_facf, "not a 64-bit Mach-O (MH_MAGIC_64)");
     // mach_header_64: magic(0) cputype(4) cpusubtype(8). The low 24 bits are the subtype proper;
     // the top 8 are capability bits (arm64e carries a ptrauth ABI version there). The box derives
@@ -59,32 +64,56 @@ pub fn parse_macho(b: &[u8]) -> Loaded {
     Loaded { segments, entry: entry.expect("no LC_MAIN/LC_UNIXTHREAD entry point"), dylinker, cpusubtype }
 }
 
-pub fn slice_arm64e(fat: &[u8]) -> &[u8] {
-    let magic = u32::from_le_bytes(fat[0..4].try_into().unwrap());
-    if magic == 0xfeed_facf { return fat; }                         // already a thin 64-bit Mach-O
-    let be32 = |o: usize| u32::from_be_bytes(fat[o..o+4].try_into().unwrap());
-    let fatmagic = be32(0);
-    let is64 = fatmagic == retrace_arch::FAT_MAGIC_64;
-    assert!(fatmagic == retrace_arch::FAT_MAGIC || is64, "not a fat binary");
-    let nfat = be32(4) as usize;
-    // fat_arch{,_64}.offset is at struct byte 8 in BOTH layouts; only the stride differs (20 vs 32).
-    let (entry_sz, off_field) = if is64 { (32usize, 8usize) } else { (20usize, 8usize) };
-    for i in 0..nfat {
-        let e = 8 + i * entry_sz;                                   // fat_arch[i]
-        let cputype = be32(e);
-        let cpusubtype = be32(e + 4);
-        if cputype == retrace_arch::CPU_TYPE_ARM64
-            && (cpusubtype & 0x00ff_ffff) == retrace_arch::CPU_SUBTYPE_ARM64E {
-            let (off, size) = if is64 {
-                (u64::from_be_bytes(fat[e+off_field..e+off_field+8].try_into().unwrap()) as usize,
-                 u64::from_be_bytes(fat[e+off_field+8..e+off_field+16].try_into().unwrap()) as usize)
-            } else {
-                (be32(e + off_field) as usize, be32(e + off_field + 4) as usize)
-            };
-            return &fat[off..off + size];
+/// True for a thin 64-bit Mach-O — the shape every slice picker passes through untouched.
+fn is_thin(b: &[u8]) -> bool { u32::from_le_bytes(b[0..4].try_into().unwrap()) == 0xfeed_facf }
+
+fn is_fat(b: &[u8]) -> bool {
+    let m = u32::from_be_bytes(b[0..4].try_into().unwrap());
+    m == retrace_arch::FAT_MAGIC || m == retrace_arch::FAT_MAGIC_64
+}
+
+/// The `CPU_TYPE_ARM64` slice whose cpusubtype (low 24 bits) is `want_sub`, or `None`.
+///
+/// Fat headers and their `fat_arch` tables are BIG-endian on disk — the one place in a Mach-O
+/// where that is true. `fat_arch{,_64}.offset` sits at struct byte 8 in both layouts; only the
+/// stride (20 vs 32) and the field width (u32 vs u64) differ.
+fn fat_find(fat: &[u8], want_sub: u32) -> Option<&[u8]> {
+    let be32 = |o: usize| u32::from_be_bytes(fat[o..o + 4].try_into().unwrap());
+    let is64 = be32(0) == retrace_arch::FAT_MAGIC_64;
+    let entry_sz = if is64 { 32usize } else { 20usize };
+    (0..be32(4) as usize).find_map(|i| {
+        let e = 8 + i * entry_sz;
+        if be32(e) != retrace_arch::CPU_TYPE_ARM64 || be32(e + 4) & 0x00ff_ffff != want_sub {
+            return None;
         }
-    }
-    panic!("no arm64e slice in fat binary");
+        let (off, size) = if is64 {
+            (u64::from_be_bytes(fat[e + 8..e + 16].try_into().unwrap()) as usize,
+             u64::from_be_bytes(fat[e + 16..e + 24].try_into().unwrap()) as usize)
+        } else {
+            (be32(e + 8) as usize, be32(e + 12) as usize)
+        };
+        Some(&fat[off..off + size])
+    })
+}
+
+pub fn slice_arm64e(fat: &[u8]) -> &[u8] {
+    if is_thin(fat) { return fat; }
+    assert!(is_fat(fat), "not a fat binary");
+    fat_find(fat, retrace_arch::CPU_SUBTYPE_ARM64E).expect("no arm64e slice in fat binary")
+}
+
+/// The slice this machine would actually execute: arm64e if the file carries one, else plain
+/// arm64. A thin Mach-O — and anything that is not a fat file at all — passes through unchanged,
+/// so a caller never has to know which shape it holds.
+///
+/// The preference order is load-bearing, not cosmetic. `cpusubtype` is what `pac_posture` reads,
+/// so taking the plain-arm64 slice of a file that carries both would run an arm64e guest with PAC
+/// turned off — M7's wall, reached by a different road.
+pub fn slice_native(fat: &[u8]) -> &[u8] {
+    if is_thin(fat) || !is_fat(fat) { return fat; }
+    fat_find(fat, retrace_arch::CPU_SUBTYPE_ARM64E)
+        .or_else(|| fat_find(fat, retrace_arch::CPU_SUBTYPE_ARM64_ALL))
+        .expect("fat binary carries no arm64e or arm64 slice (retrace runs arm64 guests only)")
 }
 
 pub const HELLO: &str = concat!(env!("OUT_DIR"), "/hello");
@@ -236,7 +265,7 @@ mod tests {
         // only for arm64e main executables. Every guest this repo builds is plain arm64.
         let l = parse_macho(&std::fs::read(HELLO_RUST).unwrap());
         assert_eq!(l.cpusubtype & 0x00ff_ffff, 0,
-                   "hello_rust must be CPU_SUBTYPE_ARM64_ALL, got {:#x}", l.cpusubtype);
+                   "hello_rust must be retrace_arch::CPU_SUBTYPE_ARM64_ALL, got {:#x}", l.cpusubtype);
         assert_ne!(l.cpusubtype & 0x00ff_ffff, retrace_arch::CPU_SUBTYPE_ARM64E,
                    "hello_rust is not arm64e — the ladder's premise is self-built arm64 binaries");
     }
@@ -249,5 +278,85 @@ mod tests {
         // Rung 1's whole premise is a real dynamic binary through the real dynamic linker.
         assert_eq!(l.dylinker.as_deref(), Some("/usr/lib/dyld"),
                    "hello_rust must be dynamically linked through real dyld");
+    }
+}
+
+#[cfg(test)]
+mod fat_tests {
+    use super::*;
+
+    const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+
+    /// Build a `FAT_MAGIC` (32-bit) universal wrapper around `slices`, laid out the way `lipo`
+    /// lays one out: a big-endian header, a `fat_arch[]` table, then each slice padded to its
+    /// 2^14 alignment. Synthetic because no Apple binary carries the arm64e+arm64 pair the
+    /// preference rule below turns on, so only a fixture can exercise it.
+    fn fat_wrap(slices: &[(u32, u32, &[u8])]) -> Vec<u8> {
+        let n = slices.len();
+        let mut hdr = Vec::new();
+        hdr.extend_from_slice(&retrace_arch::FAT_MAGIC.to_be_bytes());
+        hdr.extend_from_slice(&(n as u32).to_be_bytes());
+        let align = 0x4000usize;
+        let mut off = (8 + n * 20 + align - 1) & !(align - 1);
+        let mut offs = Vec::new();
+        for (ct, cs, b) in slices {
+            hdr.extend_from_slice(&ct.to_be_bytes());
+            hdr.extend_from_slice(&cs.to_be_bytes());
+            hdr.extend_from_slice(&(off as u32).to_be_bytes());
+            hdr.extend_from_slice(&(b.len() as u32).to_be_bytes());
+            hdr.extend_from_slice(&14u32.to_be_bytes()); // align = 2^14
+            offs.push(off);
+            off = (off + b.len() + align - 1) & !(align - 1);
+        }
+        let mut out = hdr;
+        for (i, (_, _, b)) in slices.iter().enumerate() {
+            out.resize(offs[i], 0);
+            out.extend_from_slice(b);
+        }
+        out
+    }
+
+    #[test]
+    fn parse_macho_accepts_a_fat_binary() {
+        // Every macOS system binary — and /usr/lib/dyld itself — ships universal (x86_64 +
+        // arm64e). Parsing one must select the arm64e slice rather than reject the fat header,
+        // and must land on exactly what explicit slicing already produces.
+        let bytes = std::fs::read(DYLD_PATH).unwrap();
+        assert_ne!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 0xfeed_facf,
+                   "{DYLD_PATH} is thin on this machine, so this test proves nothing");
+        let via_fat = parse_macho(&bytes);
+        let via_slice = parse_macho(slice_arm64e(&bytes));
+        assert_eq!(via_fat.entry, via_slice.entry, "fat parse must reach the same entry");
+        assert_eq!(via_fat.cpusubtype, via_slice.cpusubtype);
+        assert_eq!(via_fat.segments.len(), via_slice.segments.len());
+    }
+
+    #[test]
+    fn fat_parse_prefers_arm64e_over_plain_arm64() {
+        // The subtype chosen here is what `pac_posture` reads, so picking the plain-arm64 slice
+        // of a dual binary would silently run an arm64e guest with PAC OFF — M7's wall, back
+        // again by a different route. arm64 is listed FIRST so a first-match loop picks wrong.
+        let hello = std::fs::read(HELLO).unwrap();
+        let mut e = hello.clone();
+        e[8..12].copy_from_slice(&retrace_arch::CPU_SUBTYPE_ARM64E.to_le_bytes());
+        let fat = fat_wrap(&[
+            (retrace_arch::CPU_TYPE_ARM64, retrace_arch::CPU_SUBTYPE_ARM64_ALL, &hello),
+            (retrace_arch::CPU_TYPE_ARM64, retrace_arch::CPU_SUBTYPE_ARM64E, &e),
+        ]);
+        assert_eq!(parse_macho(&fat).cpusubtype & 0x00ff_ffff, retrace_arch::CPU_SUBTYPE_ARM64E,
+                   "a fat binary carrying both arm64 slices must yield the arm64e one");
+    }
+
+    #[test]
+    fn fat_parse_falls_back_to_plain_arm64() {
+        // The Homebrew universal shape: x86_64 + arm64, no arm64e. `slice_arm64e` panics on
+        // this file; parsing must not.
+        let hello = std::fs::read(HELLO).unwrap();
+        let fat = fat_wrap(&[
+            (CPU_TYPE_X86_64, 3, &[0u8; 64][..]),
+            (retrace_arch::CPU_TYPE_ARM64, retrace_arch::CPU_SUBTYPE_ARM64_ALL, &hello),
+        ]);
+        assert_eq!(parse_macho(&fat).cpusubtype & 0x00ff_ffff, retrace_arch::CPU_SUBTYPE_ARM64_ALL,
+                   "an x86_64+arm64 universal must yield the plain-arm64 slice");
     }
 }

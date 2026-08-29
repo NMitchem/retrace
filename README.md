@@ -9,6 +9,21 @@ effects. Because replay is deterministic, execution can be driven *backwards*: s
 the run, set a watchpoint on an address, and ask which instruction — and which **thread** — last
 wrote it.
 
+It runs real programs, not toys: a full-`std` Rust binary, stock `brew jq`, a guest that spawns
+threads, one that `dispatch_async`es onto a GCD queue, and — since M22 — most of the Apple binaries
+already sitting in `/bin` and `/usr/bin`, arm64e and PAC and all.
+
+```
+$ retrace record-dyn ./mytool -o t.bin
+$ retrace debug t.bin --script 'continue; watch 0x100008008 4; reverse-continue; where; regs'
+hit watch 0x100008008 (write at 0x1804fb520) at (244, 242)
+at (244, 242) pc=0x1804fb520 thread=0
+x0 =0x0000000100008000  x1 =0x000000010000059c   …
+```
+
+That is a program run to completion, then run *backwards* to the instruction that last wrote a
+corrupted word — with the thread that did it named.
+
 Determinism is the whole design constraint. Nothing nondeterministic is allowed into the trace.
 Anything that would be (shared-cache page contents, timing, PAC signatures, the thread schedule) is
 instead *regenerated identically* on both sides rather than recorded. A divergence oracle compares
@@ -79,7 +94,9 @@ Passed to `debug --script`, semicolon-separated:
 
 ## What works today
 
-**Guest breadth** — each of these records and replays byte-identically, twice:
+**Guest breadth.** In short: anything you compile yourself (C or Rust), stock Homebrew arm64
+binaries, and — since M22 — most of the Apple binaries already on your machine. Each rung below
+records and replays byte-identically, twice:
 
 | Rung | Guest | Notes |
 |---|---|---|
@@ -90,6 +107,15 @@ Passed to `debug --script`, semicolon-separated:
 | 3 | `jq` + a file argument | |
 | 4 | `threadrust` | `std::thread::spawn` + `join` |
 | 5 | `dispatch_dyn` (C) | `dispatch_async` onto a global concurrent queue, joined by a `dispatch_semaphore` |
+| 6 | `/bin/echo` | an **Apple system binary**, arm64e with PAC on, straight from `/bin` |
+
+**Apple's own binaries, measured.** Sampled across `/bin` + `/usr/bin`, pointing retrace straight at
+each file: **34 of 54 record and replay** — stdout byte-identical and exit codes equal. Among them
+`cat`, `ls`, `cp`, `mv`, `rm`, `chmod`, `mkdir`, `ln`, `df`, `grep`, `wc`, `uname`, `sh`, `dash`,
+`expr`, `bzip2`. Before M22 that number was **zero**, and not for the reason it looked like: every
+macOS system binary is a *universal* file whose first four bytes are `0xcafebabe`, and the loader
+asserted `MH_MAGIC_64` against them. retrace could always run Apple's binaries; it could not open
+them. See Known limits for the 20 that still fail, which are four named causes rather than a tail.
 
 **Capabilities**
 
@@ -139,12 +165,35 @@ has counted by, kept for comparability and written out here so nobody has to re-
 ignored gates are `stackoverflow_rust_e2e` (M8 risk R3) and `cache_symbol_e2e` (the M19
 shared-cache symbol wall); both are described under Known limits.
 
+> **M22 has not re-run the full gate.** Its own targets are green — `retrace-guest --lib` 9/0/0 and
+> `retrace --test sysbin_e2e` 1 passed / 1 ignored, both verified able to fail by mutating the fix
+> back out — but the whole-workspace run was not repeated, because another milestone held the
+> machine and every VM test needs exclusive use of it. The expected delta is **+4 tests and +1 test
+> binary** (3 in `retrace-guest`, 1 running + 1 ignored in the new `sysbin_e2e` target), giving
+> 480 / 0 / 3 over 107 — *expected, not measured*. Re-running it is the outstanding task in
+> `docs/superpowers/plans/2026-08-29-retrace-m22-fatheader.md`.
+
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
 
 ## Known limits
 
 These are real and current, not aspirational gaps.
 
+- **Roughly a third of Apple's system binaries still fail, in four named ways.** Of 54 sampled,
+  20 did not make it, and the distribution is the useful part — this is a narrow wall, not a tail.
+  **13** are modern ObjC/Swift-heavy `/usr/bin` tools (`aa`, `avmediainfo`, `bioutil`, …) that die
+  identically before reaching their own code: `non-syscall exit: unknown/uncategorized (EC=0x00
+  ISS=0x0 FSC=0x0) far/ipa=0x0 (UNMAPPED) pc=0x4204 elr=0x4404`. `EC=0x00` is the exception class
+  the box cannot categorise at all, and the pc is a low address one granule in, so control has left
+  the loaded images rather than faulting inside them — **the cause is unmeasured**, and
+  `sysbin_e2e.rs`'s second gate is parked there rather than guessing. **4** (`bash`, `zsh`, `date`,
+  `cal`) need one unrouted `mach_msg2` `msgh_id` 412. **2** (`csh`, `tcsh`) hit the M10 fd table's
+  fail-loud unmodelled `dup2`, working exactly as designed. **1** (`ps`) is a genuine replay
+  divergence — the oracle catching nondeterminism rather than reproducing something wrong in
+  silence. Diagnosing the first group is plausibly the difference between 63% and ~87%.
+- **A guest must be arm64 or arm64e.** `slice_native` picks the slice this machine would execute —
+  arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
+  binary is refused by name. There is no emulation of another ISA and none is planned.
 - **libdispatch runs only as far as it has been measured.** Rung 5 records and replays, but the
   workqueue emulation is a floor built from measurements rather than an implementation of the
   kernel's, and everything past that floor refuses **by value** instead of guessing. `workq_kernreturn`
@@ -241,6 +290,28 @@ pid-unique copy (see Codesigning above), so concurrent test processes do not con
 
 Some end-to-end gates depend on `/opt/homebrew/bin/jq`, which is not a repo artifact. They skip with
 a loud `eprintln!` rather than passing quietly — a silent skip would read as a green it did not earn.
+The same applies to the gates that record binaries out of `/bin` and `/usr/bin`: those are OS
+artifacts, present on any macOS 26 machine, but announced rather than skipped silently if absent.
+
+### Continuous integration — there isn't any, and there can't be
+
+**No hosted CI can run this test suite.** It needs macOS 26 on Apple Silicon, and every VM test needs
+the `com.apple.security.hypervisor` entitlement and a working `hv_vm_create`. GitHub-hosted macOS
+runners are virtualized and do not offer nested virtualization, so `hv_*` is unavailable there; the
+suite cannot merely be slow on hosted CI, it cannot start. This is a property of the platform, not
+an unfinished chore.
+
+Two consequences worth stating plainly, because they change what review means here:
+
+- **A contributor must run the gate locally, on real hardware**, and paste the counts. There is no
+  automated check that will catch a red for you.
+- **A pull request cannot be validated by the maintainer without the same hardware.** If you do not
+  have an Apple Silicon Mac on macOS 26, you can still usefully contribute to `retrace-arch`,
+  `retrace-trace`, `retrace-sim` and the docs — those crates have no VM dependency and their tests
+  run anywhere the toolchain does.
+
+A self-hosted Apple Silicon runner would work, and is the only route to automation. None is
+configured.
 
 ## Repository layout
 
@@ -260,8 +331,37 @@ real OS before they were committed to the architecture; see `spikes/README.md`.
 
 ## Documentation
 
-- [`docs/status-log.md`](docs/status-log.md) — the milestone-by-milestone engineering record, M0–M16,
-  preserved verbatim. Historical: each entry is true as of its own milestone.
-- `docs/superpowers/specs/` — per-milestone design specs.
+- [`docs/status-log.md`](docs/status-log.md) — the milestone-by-milestone engineering record,
+  preserved verbatim and append-only. Historical by design: each entry is true as of its own
+  milestone, so a claim that later proved wrong is left standing with a forward pointer rather than
+  quietly corrected. This README is the document that is edited in place to say what is true *now*.
+- `docs/superpowers/specs/` — per-milestone design specs and the measurements they rest on.
 - `docs/superpowers/plans/` — per-milestone task plans.
 - `CLAUDE.md` — architecture invariants and working rules for this repository.
+
+## Contributing
+
+The one rule that matters most here: **the walls are documented honestly, and they stay that way.**
+A gate parked at a limit with its reason written on the test is worth more than a green that was
+bought by loosening an assertion. If you clear a wall, move the gate forward and rewrite all three
+places its reason lives — the test's `#[ignore]`, "Known limits" above, and a new appended section in
+`docs/status-log.md`. If you cannot clear it, say so precisely and park it.
+
+Two rules those gates taught, which bind their successors:
+
+- **Never assert on an exit code a weaker failure would also produce.** An uncaught fault exits 139
+  exactly like a caught-then-fatal one, so `segv_rust_e2e` asserts on the *trace* instead. Assert on
+  the difference your change makes.
+- **A skipped test must announce itself.** A silent skip reads as a green it did not earn.
+
+Read `CLAUDE.md` before starting — it holds the platform invariants that will otherwise hang or panic
+your machine (W^X, anon-only memory, one VM per process, `Box_`'s field drop order). They are not
+style rules; violating them takes the whole system down.
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
+
+`hv-sys` binds Hypervisor.framework by running `bindgen` against the macOS SDK **on your machine at
+build time**. No Apple headers, source, or binaries are redistributed here, and none of Apple's dyld
+or shared-cache bytes are vendored — they are read from the host at runtime.
