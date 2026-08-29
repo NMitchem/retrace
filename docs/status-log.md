@@ -4411,3 +4411,79 @@ giveaway was that the excess was exactly 219, chunk B's total. The tally script 
 recorded complete in `exitcodes.txt`. And "106 test binaries" is 99 test executables plus 7
 `Doc-tests` harnesses that run zero tests each — the convention every milestone since M14 has used,
 kept for comparability and now written down in the README rather than silently re-derived.
+
+---
+
+## Status: M22-fatheader — 🎉 retrace opens Apple's own binaries, and it was never a capability wall
+
+**2026-08-29.** Branch `worktree-m22-fatheader`, cut from `main` at `ccfc8f9`.
+
+### What happened
+
+The milestone did not start as a milestone. It started as a question about whether the project was
+useful yet, and the first probe — pointing `record-dyn` at a spread of real system binaries — failed
+on every single one, identically:
+
+```
+thread 'main' panicked at crates/retrace-guest/src/lib.rs:10:5:
+assertion `left == right` failed: not a 64-bit Mach-O (MH_MAGIC_64)
+  left: 3199925962      # 0xBEBAFECA — FAT_MAGIC read little-endian
+```
+
+Twenty milestones of guest-ladder work had been built on self-compiled binaries plus Homebrew's thin
+`jq`, and the natural reading of that history was that Apple's binaries were beyond retrace's
+runtime. **They were not.** Every macOS system binary is a *universal* file whose first four bytes
+are `0xcafebabe`, and `parse_macho` asserted `MH_MAGIC_64` against byte 0. retrace could always run
+them. It could not **open** them.
+
+`lipo -thin arm64e` and re-running settled it in one command: `/bin/echo` recorded, and replayed.
+Nothing below the loader had to change — and the reason is structural, not lucky. An arm64e main
+turns PAC on through M7's existing `pac_posture(cpusubtype)` path, and replay never reads the file at
+all: `restore()` re-derives the posture from the snapshot's own mach header via
+`pac_posture_from_memory`. The arm64e guests this unlocks therefore replay **by construction**.
+`TRACE_MAGIC` did not move, and no existing recording was invalidated.
+
+### What it unlocked, measured
+
+Sampled `/bin` + every 8th of `/usr/bin`, pointing retrace straight at each file; PASS requires
+record, replay, byte-identical stdout **and** equal exit codes. **34 of 54 pass — from a baseline of
+exactly zero.** `cat`, `ls`, `cp`, `mv`, `rm`, `chmod`, `mkdir`, `ln`, `df`, `grep`, `wc`, `uname`,
+`sh`, `dash`, `expr`, `bzip2` among them.
+
+The distribution mattered more than the number. The 20 failures are **four** causes, not a tail:
+13 × an uncategorised `EC=0x00` exit at `pc=0x4204` (modern ObjC/Swift `/usr/bin` tools, cause
+**unmeasured**), 4 × an unrouted `mach_msg2` `msgh_id` 412, 2 × the M10 fd table's fail-loud
+unmodelled `dup2` working exactly as designed, and 1 genuine divergence (`ps`) — the oracle catching
+nondeterminism rather than reproducing something wrong in silence. `sysbin_e2e`'s second gate is
+parked at the first group, naming the exception text and stating plainly that nothing has measured
+why. Clearing it is plausibly the difference between 63% and ~87%.
+
+### The lesson worth keeping
+
+**A wall that every instance of a class hits identically deserves one probe before it is believed.**
+The evidence for "retrace cannot run Apple binaries" was overwhelming and entirely circumstantial:
+twenty milestones, a guest ladder built around the limitation, and a 100% failure rate across every
+binary tried. None of it was evidence about the *cause*. One `lipo` invocation — thirty seconds —
+would have distinguished a loader defect from a capability wall at any point in those twenty
+milestones, and the reading that had accumulated was wrong in the direction that costs most: it made
+a five-line omission look like a research problem.
+
+The M19→M20 correction on the shared-cache symbol wall was the same shape, one milestone earlier:
+the stated mechanism was false, and the wall turned out narrower than its own text. Two in a row is a
+pattern, not a coincidence. **The failure mode is a right conclusion resting on an unmeasured
+supporting fact** — a passing test suite cannot see it, because nothing is failing.
+
+### Gate
+
+**Not re-run.** M22's own targets are green — `retrace-guest --lib` 9/0/0, `retrace --test
+sysbin_e2e` 1 passed / 1 ignored — and **both were verified able to fail** by mutating the
+`slice_native` call back out of `parse_macho` and observing the exact `MH_MAGIC_64` failure, then
+restoring. Clippy clean at `-D warnings` over the changed crates.
+
+The whole-workspace run was **deliberately not attempted**: a concurrent M21-stackgrow session held
+the machine, mid-`cargo test -p retrace-box`, and every VM test needs exclusive use of the hardware.
+Running the two gates simultaneously risks flaking the other milestone's result, which is a worse
+outcome than an unrun chunk that is honestly labelled. Expected delta is **+4 tests, +1 test binary**
+→ 480 / 0 / 3 over 107 — *expected, not measured*, and recorded as the outstanding task in
+`docs/superpowers/plans/2026-08-29-retrace-m22-fatheader.md`. It is the first thing to run when the
+machine is free.
