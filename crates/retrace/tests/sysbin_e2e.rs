@@ -44,16 +44,18 @@ fn an_apple_system_binary_records_and_replays() {
     util::assert_rung_records_and_replays("/bin/echo", &["hi"], b"hi\n");
 }
 
+/// **UN-PARKED in M23.** M22 parked this at `pc=0x4204`, reading it as an unmeasured wall in which
+/// "control has left the loaded images entirely". That reading was wrong, and wrong in a specific
+/// way worth keeping: `0x4204` is inside retrace's OWN trampoline, and the run reached it because
+/// vector-slot padding was zero — `UDF #0`. A fall-through past a slot head executed that `UDF` at
+/// EL1, which overwrote `ELR_EL1`/`SPSR_EL1` and re-vectored, **destroying the original exception**
+/// before anything could read it. There was no single wall here at all: `0x4204` was a mask over
+/// whatever each guest was really doing, which is why `EC=0x00` looked uncategorisable.
+///
+/// Making the padding trap (M23 t1) removed the mask, and 13 of those failures collapsed onto ONE
+/// cause: `mach_msg2` `msgh_id` 412, and behind it the guest opening a real XPC connection.
+/// Forwarding 412 (t3) and refusing the message-queue send truthfully (t5) cleared both.
 #[test]
-#[ignore = "M22's measured wall. 13 of the 20 sampled failures — every one of them a modern \
-            ObjC/Swift-heavy /usr/bin tool — die identically before reaching their own code: \
-            `non-syscall exit: unknown/uncategorized (EC=0x00 ISS=0x0 FSC=0x0) far/ipa=0x0 \
-            (UNMAPPED) pc=0x4204 elr=0x4404`. EC=0x00 is the exception class the box cannot \
-            categorise at all, and the pc is a low address one granule in, so control has left the \
-            loaded images entirely rather than faulting inside them. Nothing has measured WHY, and \
-            this gate is parked here rather than guessed at. The other three causes are separately \
-            named and much narrower: mach_msg2 msgh_id 412 (4 binaries), the M10 fd table's \
-            fail-loud unmodelled dup2 (2), and one genuine divergence in `ps` (1)."]
 fn an_objc_heavy_system_tool_records_and_replays() {
     // `/usr/bin/aa` (Apple Archive) is the representative of the 13. It is chosen because it is a
     // plain non-setuid tool that fails with no arguments, so the wall is reached without the test
@@ -66,12 +68,21 @@ fn an_objc_heavy_system_tool_records_and_replays() {
                    on this machine. It is an OS artifact, not a repo artifact.");
         return;
     }
-    // When this wall falls, `aa` with no args exits 1 after printing its usage. Assert on the
-    // clean-exit discriminator the same way the green gate above does, NOT on the exit code alone:
-    // the current failure is a RECORD ERROR (exit 4), and a weaker future failure could still
-    // produce a nonzero exit while running none of `aa`'s own code.
-    let (rec, _trace) = util::record_dynamic("/usr/bin/aa");
-    assert_ne!(rec.code, 4,
-        "still parked at the M22 wall — record aborted rather than running the guest. stderr:\n{}",
-        rec.stderr);
+    let (rec, trace) = util::record_dynamic("/usr/bin/aa");
+    assert_eq!(rec.code, 0, "record must complete: {}", rec.stderr);
+
+    // Assert `aa` reached its OWN code, not merely that recording finished. `assert_ne!(code, 4)`
+    // — what this gate checked while parked — would also pass for a guest that died inside dyld,
+    // and the M22 note that "`aa` with no args exits 1" was a guess: it exits **0** after printing
+    // its usage. Measure, then assert on what was measured.
+    let out = String::from_utf8_lossy(&rec.stdout).into_owned();
+    assert!(out.starts_with("Usage: aa command"),
+        "`aa` must print its own usage text, i.e. run its own code; got {} bytes: {:?}",
+        out.len(), &out[..out.len().min(120)]);
+
+    // ...and that it replays bit-for-bit. 11 KB of usage text is a far stronger agreement check
+    // than the exit code: a replay that re-derived any of it differently would show here.
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 0, "replay must not diverge: {}", rep.stderr);
+    assert_eq!(rec.stdout, rep.stdout, "replay stdout must be byte-identical to the recording");
 }
