@@ -4475,15 +4475,24 @@ supporting fact** — a passing test suite cannot see it, because nothing is fai
 
 ### Gate
 
-**Not re-run.** M22's own targets are green — `retrace-guest --lib` 9/0/0, `retrace --test
-sysbin_e2e` 1 passed / 1 ignored — and **both were verified able to fail** by mutating the
-`slice_native` call back out of `parse_macho` and observing the exact `MH_MAGIC_64` failure, then
-restoring. Clippy clean at `-D warnings` over the changed crates.
+**480 passed / 0 failed / 3 ignored across 107 test binaries**, clippy clean at `-D warnings` over
+`--workspace --all-targets`, measured over all **58 chunks, every one `EXIT=0`**.
 
-The whole-workspace run was **deliberately not attempted**: a concurrent M21-stackgrow session held
-the machine, mid-`cargo test -p retrace-box`, and every VM test needs exclusive use of the hardware.
-Running the two gates simultaneously risks flaking the other milestone's result, which is a worse
-outcome than an unrun chunk that is honestly labelled. Expected delta is **+4 tests, +1 test binary**
-→ 480 / 0 / 3 over 107 — *expected, not measured*, and recorded as the outstanding task in
-`docs/superpowers/plans/2026-08-29-retrace-m22-fatheader.md`. It is the first thing to run when the
-machine is free.
+Reconciled against M20's 476 / 0 / 2 over 106 **file-by-file rather than by sum**, and every delta
+traces to exactly one place: `retrace-guest` +3 (the fat-header tests) and the new `sysbin_e2e`
+target +1 running / +1 ignored. Per chunk: A 118 → **121**, B 219 → **219**, `--bins` 11 → **11**.
+Chunk B and `--bins` holding still is the load-bearing part of that reconciliation — it is what says
+a change to the loader disturbed nothing below it. The third ignored gate is M22's own parked
+`pc=0x4204` wall, joining `stackoverflow_rust_e2e` (M8 R3) and `cache_symbol_e2e` (M19).
+
+Both green targets were additionally **verified able to fail**, by mutating the `slice_native` call
+back out of `parse_macho`, observing the exact `MH_MAGIC_64` failure in each, and restoring.
+
+**The gate was deferred, not skipped, and the deferral is worth recording.** A concurrent
+M21-stackgrow session held the machine mid-`cargo test -p retrace-box`, and every VM test wants the
+hardware to itself. Rather than run both and risk flaking the *other* milestone's result, the runner
+polled for the M21 session's test processes to go quiet for a full minute and only then started —
+45-minute backstop, so it could not hang forever. The cost was about half an hour of waiting; the
+alternative was a number neither milestone could trust. An earlier draft of this section published
+the expected delta as *"expected, not measured"*; the measurement then matched it exactly, which is
+pleasant but is not what made publishing the hedge correct.

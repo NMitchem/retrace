@@ -63,5 +63,20 @@ against `main`'s 476 / 0 / 2 over 106 binaries by diffing `#[test]` counts file-
 trusting a sum. Expected delta: **+4 tests** (3 in `retrace-guest`, 1 running + 1 ignored in the new
 `sysbin_e2e` target) and **+1 test binary**.
 
-**Not yet run at time of writing** — a concurrent M21 session held the machine, and the sweep and
-gate both spawn a VM per test. This task is outstanding.
+**DONE.** **480 passed / 0 failed / 3 ignored across 107 test binaries**, all **58 chunks `EXIT=0`**,
+clippy clean at `-D warnings` over `--workspace --all-targets`.
+
+The predicted delta was exact. Per chunk: A 118 → **121** (the three `retrace-guest` fat-header
+tests), B **219 → 219**, `--bins` **11 → 11**, retrace targets 128 → **129** (`sysbin_e2e`'s one
+running test, plus its ignored one). B and `--bins` holding still is the reconciliation's real
+content: a loader change disturbed nothing beneath it.
+
+Two process notes worth keeping:
+
+- **The runner waited for the machine.** A concurrent M21 session was mid-`cargo test -p
+  retrace-box`. The gate script polled until that session's VM processes were quiet for a full
+  minute before starting, with a 45-minute backstop so it could not hang. Half an hour of waiting
+  bought a result both milestones can trust; running concurrently risked flaking *theirs*.
+- **The tally reads only chunks recorded complete in `gate-exitcodes.txt`**, never `cat *.log` —
+  M20's log records a tally that read 337 instead of 118 because a glob swept in another chunk's
+  half-written log, and the giveaway was that the excess was exactly chunk B's total.
