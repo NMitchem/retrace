@@ -8,6 +8,9 @@
 const MACH64_SEND_MSG: u64 = 0x1;
 const MACH64_RCV_MSG: u64 = 0x2;
 const MACH64_SEND_KOBJECT_CALL: u64 = 0x2_0000_0000;
+/// A real message-queue send — a message to a receiver on a queue, not a call into a kernel object.
+/// Everything retrace services is a kernel-object call; this bit marks the one thing it is not.
+const MACH64_SEND_MQ_CALL: u64 = 0x4_0000_0000;
 
 /// The eight mach_msg2_trap registers, unpacked (see the spec's ABI table).
 pub struct Msg2 {
@@ -42,7 +45,8 @@ impl Msg2 {
 /// optional/no-op kernel routine (no out-params) with a mig_reply_error carrying `retcode`; Forward
 /// is the decided read-only/create-once allowlist (memory-diff'd like any mach trap); Unsupported
 /// carries a decoded description for the fail-loud error.
-pub enum Route { ServiceVmMap, ServiceGetSpecialPort, ServiceSetSpecialPort, StubMigReply(i32), Forward(&'static str), Unsupported(String) }
+pub enum Route { ServiceVmMap, ServiceGetSpecialPort, ServiceSetSpecialPort, StubMigReply(i32),
+                 RefuseMqSend, Forward(&'static str), Unsupported(String) }
 
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
 /// msgh_id alone: these are kernel-subsystem ids, unambiguous under the KOBJECT options shape.
@@ -66,6 +70,26 @@ const FORWARD_ALLOWLIST: &[(u32, &str)] =
       (412, "host_get_special_port")];
 
 pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
+    // A message-queue send, checked BEFORE the kernel-object shape gate below, which would
+    // otherwise reject it as an unrecognized options word (that rejection is what the whole M22
+    // breadth sweep was stuck behind). It addresses a real receiver on a real queue — an XPC
+    // daemon — and the box contains no receivers at all: no launchd, no daemons, no services. So
+    // the refusal is not a stub standing in for something missing; the destination genuinely does
+    // not exist, and saying so is the faithful answer. Deterministic, no host contact, and no guest
+    // reply port handed to a real daemon. Measured survivable by 13 of the 17 (M23 S6); the other
+    // four `brk` regardless of which of seven refusal codes is returned, so they are parked at that
+    // wall rather than forcing a proxy design for a quarter of the set.
+    //
+    // Narrowed to the RPC shape the measurement actually saw (SEND|RCV together with the MQ bit).
+    // An MQ send in any other shape — a one-way send, say — has never been observed and keeps the
+    // fail-loud default rather than being swept in here.
+    if m.options & MACH64_SEND_MQ_CALL != 0 {
+        if m.options & (MACH64_SEND_MSG | MACH64_RCV_MSG) == MACH64_SEND_MSG | MACH64_RCV_MSG {
+            return Route::RefuseMqSend;
+        }
+        return Route::Unsupported(format!(
+            "options {:#x}: message-queue send without the send+rcv RPC shape", m.options));
+    }
     if m.options != MACH64_SEND_MSG | MACH64_RCV_MSG | MACH64_SEND_KOBJECT_CALL {
         return Route::Unsupported(format!(
             "options {:#x} (not the kernel-object send+rcv shape)", m.options));
@@ -107,6 +131,13 @@ pub const MACH_MSG_SUCCESS: u64 = 0;
 pub const KERN_SUCCESS: i32 = 0;
 pub const KERN_NOT_SUPPORTED: i32 = 46;
 pub const KERN_NO_SPACE: i32 = 3;
+/// The refusal returned for a message-queue send (`Route::RefuseMqSend`): the destination does not
+/// exist. **Chosen by measurement, not preference** (M23 S6): of seven refusal codes tried against
+/// the four binaries that abort anyway, `MACH_SEND_INVALID_RIGHT` (0x1000000a) is the ONLY one that
+/// also breaks `/bin/date`, which every other code survives — and this is one of only two codes
+/// under which the guest gives up after a single send instead of retrying three to five times,
+/// which is the behaviour a box containing no message-queue receivers ought to produce.
+pub const MACH_SEND_INVALID_DEST: u64 = 0x1000_0003;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 
 /// A fixed sample port name. NOTE (M2-xpcport): its runtime role is RETIRED — the 3409 handler now
@@ -540,5 +571,39 @@ mod tests {
         for id in [200u32, 206, 3418, 3405] {
             assert!(check_forward_body(id, &[]).is_ok(), "id {id} must pass the body guard");
         }
+    }
+
+    // --- the XPC message-queue send (M23 t5) ---
+
+    /// The RPC shape all 17 send: SEND|RCV plus MACH64_SEND_MQ_CALL. Measured verbatim (M23 S4):
+    /// options 0x4_0311_4207, send_size 248, an "@XPC"-magic body, a reply port, one send per run.
+    const MQ_RPC: u64 = 0x4_0311_4207;
+
+    #[test]
+    fn routes_a_message_queue_send_to_refusal() {
+        // A message-queue send addresses a REAL receiver on a REAL queue, which is a thing the box
+        // does not contain: no launchd, no XPC daemon, no service of any kind. Refusing it is not a
+        // stub for something missing — it is the truthful answer.
+        assert!(matches!(route(&msg(0x4000010f, 0x1403, MQ_RPC), Some(0x203)), Route::RefuseMqSend));
+        // The dest is a NONDETERMINISTIC port name (measured 0x1103 / 0x1403 / 0x1503 on three
+        // runs), so the refusal must not be keyed on it. The reply is a constant either way.
+        assert!(matches!(route(&msg(0x4000010f, 0x1103, MQ_RPC), Some(0x203)), Route::RefuseMqSend));
+    }
+
+    #[test]
+    fn a_message_queue_send_without_the_rpc_shape_still_fails_loud() {
+        // MQ_CALL set but neither SEND nor RCV: not the shape anything has been measured sending,
+        // so it keeps the fail-loud default rather than being swept into the refusal.
+        assert!(matches!(route(&msg(0x4000010f, 0x1403, 0x4_0000_0000), Some(0x203)),
+                         Route::Unsupported(_)));
+    }
+
+    #[test]
+    fn the_refusal_is_send_invalid_dest_and_not_invalid_right() {
+        // Measured (M23 S6): of seven refusal codes, MACH_SEND_INVALID_RIGHT is the ONLY one that
+        // breaks /bin/date, which every other code survives. The choice is a measurement, not a
+        // preference, so it is asserted rather than left to a comment.
+        assert_eq!(MACH_SEND_INVALID_DEST, 0x1000_0003);
+        assert_ne!(MACH_SEND_INVALID_DEST, 0x1000_000a);
     }
 }
