@@ -505,6 +505,25 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append mach_msg2 stub: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
+                    machmsg::Route::RefuseMqSend => {
+                        // M23 t5. The guest is sending to a real message queue — an XPC daemon.
+                        // The box hosts no receivers, so the destination genuinely does not exist
+                        // and `MACH_SEND_INVALID_DEST` is the truthful answer, not a stub. NEVER
+                        // forwarded: forwarding would hand a live system daemon the guest's reply
+                        // port and drag its nondeterministic replies into the trace, which is the
+                        // proxy posture the measurement (S6) says is not needed for 13 of 17.
+                        //
+                        // Writes NOTHING: the guest's receive buffer is left exactly as it was, so
+                        // both the return and the (empty) write set are constants, which is what
+                        // lets replay recompute and byte-compare them instead of trusting them.
+                        eprintln!("[retrace] refusing mach_msg2 message-queue send (msgh_id {:#x} \
+                            dest {:#x} send_size {}): the box hosts no message-queue receivers",
+                            m.msgh_id, m.dest, m.send_size);
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_SEND_INVALID_DEST,
+                            err: false, writes: vec![], thread })
+                            .map_err(|e| format!("append mach_msg2 mq refusal: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_SEND_INVALID_DEST, false, &[]);
+                    }
                     machmsg::Route::Forward(name) => {
                         // Body-level guard. `route()` is handed only the packed register file — the
                         // message HEADER — so a check that depends on the request BODY runs here,
@@ -1835,6 +1854,22 @@ impl ReplaySession {
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
                                                 detail: "mach_msg2 stub reply mismatch".into() });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::RefuseMqSend => {
+                                        // STANDARD symmetric posture (contrast ServiceGetSpecialPort,
+                                        // whose nondeterministic minted name forces verbatim-apply):
+                                        // both the return and the empty write set are CONSTANTS, so
+                                        // replay recomputes them and compares — and that comparison
+                                        // IS the divergence check. Note the refusal is deliberately
+                                        // not keyed on `dest`, which is a nondeterministic port name
+                                        // (measured 0x1103 / 0x1403 / 0x1503 across three runs).
+                                        if *ret != machmsg::MACH_SEND_INVALID_DEST || *err
+                                            || !writes.is_empty() {
+                                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                                "mach_msg2 message-queue refusal mismatch: recorded \
+                                                 ret {ret:#x} err {err} with {} write(s)", writes.len()) });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }

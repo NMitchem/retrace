@@ -143,3 +143,86 @@ ls sh dash echo df pwd bzip2 ed     # ft=0 on BOTH record and replay, all 8
 
 So no guest that completes a recording exhibits one. The ordering is forced: the padding must land
 first, and the invariant must be *checked* rather than assumed — see the design.
+
+## S6. Refusing the XPC send is survivable for 13 of 17 — and Risk R2 fired
+
+**This is the measurement that decides Task 3's posture** (design: refuse vs proxy). The probe returns
+a chosen mach error in `x0` for any `mach_msg2` carrying `MACH64_SEND_MQ_CALL`, writes nothing to
+guest memory, and lets the run continue. Nothing was appended to the trace: this measures *guest
+behaviour*, not replay.
+
+### The headline
+
+`/bin/date` **completes and prints the correct date**, exit 0, after exactly one refused XPC send:
+
+```
+[xpcprobe] refuse #1 pc=0x1804adc34 id=0x4000010f dest=0x1403 reply=0x2003 send=248 rcv=248
+           -> x0=0x10000003
+Sat Aug 29 18:39:15 EDT 2026
+```
+
+libxpc takes a no-service path. This is the *preferred* posture from the design, and it works.
+
+### All 17, under `MACH_SEND_INVALID_DEST` (0x10000003)
+
+| outcome | count | binaries |
+|---|---|---|
+| survived the refusal | **13** | aa, afktool, AssetCacheManagerUtil, avmediainfo, bioutil, chfn, csrutil, dddiagnose, dserr, bash, cal, date, zsh |
+| new wall | **4** | automationmodetool, desdp, dyld_info, flex |
+
+Every one sends **exactly one** XPC message before the refusal, so the shape is uniform up to this
+point. "Survived" means the recording completed; the exit codes vary (0, 1, 64, 77, 139, 201, 205,
+255) and were not compared against native runs — `date`, `bash`, `cal` and `zsh` exit 0, and `date`
+was verified to print correct output.
+
+**Risk R2 fired.** The 17 do *not* stay uniform past the refusal.
+
+### The new wall is a guest `brk`, and no refusal code avoids it
+
+```
+RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED)
+              pc=0x18035f084 elr=0x1804af110
+```
+
+`EC=0x3c` is BRK-instruction execution; `ISS=0x1` is `brk #1` — a *deliberate* guest abort, not a
+fault. All four binaries land on the identical pc.
+
+The four were re-run against **seven** refusal codes. None survives:
+
+| code | automationmodetool | desdp | dyld_info | flex | date |
+|---|---|---|---|---|---|
+| `MACH_SEND_INVALID_DEST` 0x10000003 | brk (1 refusal) | brk (1) | brk (1) | brk (1) | **ok** |
+| `MACH_SEND_TIMED_OUT` 0x10000004 | brk (3) | brk (5) | brk (5) | brk (5) | **ok** |
+| `MACH_SEND_INVALID_REPLY` 0x10000009 | brk (3) | brk (5) | brk (5) | brk (5) | **ok** |
+| `MACH_SEND_INVALID_RIGHT` 0x1000000a | brk (1) | brk (1) | brk (1) | brk (1) | **brk** |
+| `MACH_RCV_TIMED_OUT` 0x10004003 | brk (3) | brk (5) | brk (5) | brk (5) | **ok** |
+| `MACH_RCV_PORT_DIED` 0x10004009 | brk (3) | brk (5) | brk (5) | brk (5) | **ok** |
+| `MACH_MSG_SUCCESS`, no reply written | brk (3) | brk (5) | brk (5) | brk (5) | **ok** |
+
+Two things this table settles that reasoning would not have:
+
+1. **The code is not the problem.** Seven different refusals, including "success with no reply", reach
+   the same `brk` at the same pc. The four binaries need a *real* reply, not a better error.
+2. **The code still matters.** `MACH_SEND_INVALID_RIGHT` is the one refusal that breaks `date`, which
+   every other code survives. Picking a refusal at random would have looked like a much worse result.
+   `MACH_SEND_INVALID_DEST` is also the only code (with `INVALID_RIGHT`) under which the guest gives
+   up after **one** send rather than retrying 3–5 times, which is the behaviour a box with no
+   message-queue receivers should produce.
+
+**Posture chosen: refuse, with `MACH_SEND_INVALID_DEST`.** Deterministic, no host contact, no guest
+reply port handed to a real daemon, symmetric by construction — and it is what 13 of the 17 tolerate.
+The remaining 4 are Risk R3 materialising exactly as the design predicted, and are parked at the wall
+named above rather than forcing the proxy design for a quarter of the set.
+
+### Two negative results worth recording
+
+**The wall's addresses could not be symbolicated**, so it is named by address, not by function. The
+in-tree symbolicator returns the address unchanged for all three (`0x18035f084`, `0x1804af110`,
+`0x1804adc34`) — the shared-cache symbol wall, whose LINKEDIT pages these runs never faulted.
+
+**And `dyld_info -all_dyld_cache -segments` cannot substitute for it.** It prints `unslid-addr` for
+most cache images but `load-offset` for others — including `/usr/lib/system/libsystem_kernel.dylib`,
+which is precisely the image a trap pc lands in. Attributing addresses from that listing therefore
+silently assigns them to whichever image happens to precede them, and the attributions it produced
+here (`libc++abi + 0x1bc34` for a `mach_msg2` site) are wrong on their face. Recorded so the next
+attempt does not repeat it.
