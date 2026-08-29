@@ -15,33 +15,50 @@ mod util;
 /// reported numbers — which is why the invariant fails loud *here* rather than at a runtime assert:
 /// no single process holds both numbers.
 ///
-/// **Known limit 1 (design risk R1):** the count is per-run, not per-position. A mismatch says
-/// determinism broke, not where. Recording positions would be a trace-format change for a phenomenon
-/// expected to be empty in every gate guest; if this ever fires, that is the moment to spend it.
+/// **Known limit (design risk R1):** the count is per-run, not per-position. A mismatch says
+/// determinism broke, not where. Recording positions would be a trace-format change, and this gate
+/// is what would justify spending it; if it ever fires, that is the moment.
 ///
-/// **Known limit 2 — the fixture is 0 == 0, and that is measured, not assumed.** Every one of the 34
-/// Apple system binaries that records end-to-end today takes ZERO fall-throughs (M23 t2 sweep: 34/34
-/// `rec=0 rep=0`), and `hello_dyn` is one more. The guests that DO fall through (measured 4 or 8
-/// each: `aa`, `flex`, `dyld_info`, `desdp`, ...) are exactly the ones that cannot yet be recorded —
-/// they stop at the XPC wall. So no fixture with a nonzero count exists to build this gate on.
-///
-/// What that costs, stated plainly rather than left implicit: a 0 == 0 fixture catches a count that
-/// is OFFSET (mutation: replay reports `n + 1` -> caught) and a count that is MISSING (mutation:
-/// record stops reporting -> caught), but it cannot catch a replay side that stops counting
-/// altogether and reports a constant 0 (mutation: verified **NOT** caught). The in-process test
-/// `retrace-box/tests/trampoline.rs::a_fall_through_onto_vector_padding_is_counted` covers the
-/// counter itself; what stays uncovered is only the plumbing from the box to the reported number, on
-/// the replay side. Revisit when a fall-through-taking guest becomes recordable — that is a fixture
-/// this gate should be moved onto, not a second test.
+/// **Two fixtures, and the second one is the whole point.** `hello_dyn` takes zero fall-throughs, as
+/// does every one of the 34 Apple system binaries that recorded before this milestone (t2 sweep:
+/// 34/34 `rec=0 rep=0`). A `0 == 0` fixture catches a count that is OFFSET or MISSING but *cannot*
+/// catch a replay side that stops counting and reports a constant 0 — verified by mutation, not
+/// assumed. When t2 was written no nonzero fixture existed: the guests that fall through were
+/// exactly the ones stuck at the XPC wall. **t5 cleared that wall**, so `/usr/bin/aa` now records
+/// and replays with a stable count of 5 (four consecutive runs, record and replay alike), and the
+/// constant-0 mutation is caught. It skips loudly rather than passing quietly if the binary is
+/// absent, the rule `jq_e2e` established for a fixture that is not a repo artifact.
 #[test]
 fn fall_through_counts_match_between_record_and_replay() {
-    let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
-    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    // The always-available baseline: zero, but it proves the reporting path exists at all.
+    check("hello_dyn", retrace_guest::HELLO_DYN, None);
+
+    // The fixture that actually exercises the phenomenon.
+    const AA: &str = "/usr/bin/aa";
+    if !std::path::Path::new(AA).exists() {
+        eprintln!("SKIPPING the nonzero half of this gate: {AA} is missing. The zero fixture cannot \
+                   catch a replay side that stops counting, so this run checked strictly less.");
+        return;
+    }
+    let n = check("aa", AA, None);
+    assert!(n > 0,
+        "/usr/bin/aa took {n} fall-throughs, but 5 were measured on this platform. A zero here means \
+         the counter stopped counting, which is the exact silent failure this gate exists for — \
+         investigate before relaxing this assertion.");
+}
+
+/// Record and replay `guest`, require BOTH sides to report a count, and return it. `expect` pins the
+/// value when the caller knows it.
+fn check(name: &str, guest: &str, expect: Option<u64>) -> u64 {
+    let (rec, trace) = util::record_dynamic(guest);
+    assert_eq!(rec.code, 0, "{name}: record failed: {}", rec.stderr);
     let rep = util::replay(&trace);
-    assert_eq!(rep.code, 0, "replay failed: {}", rep.stderr);
+    assert_eq!(rep.code, 0, "{name}: replay failed: {}", rep.stderr);
     let r = fall_throughs(&rec.stderr, "record");
     let p = fall_throughs(&rep.stderr, "replay");
-    assert_eq!(r, p, "EL1 vector fall-through count diverged: record {r}, replay {p}");
+    assert_eq!(r, p, "{name}: EL1 vector fall-through count diverged: record {r}, replay {p}");
+    if let Some(e) = expect { assert_eq!(r, e, "{name}: expected {e} fall-throughs, got {r}"); }
+    r
 }
 
 /// Both sides must *report* the count, not merely compute it — an unreported count is exactly as
