@@ -16,6 +16,13 @@ fn main() {
                 Ok(s) => {
                     use std::io::Write;
                     std::io::stdout().write_all(&s.stdout).unwrap();
+                    // M23 t2: both sides report the EL1 vector fall-through count so the gate can
+                    // compare them (crates/retrace/tests/fallthrough_e2e.rs). It is not in the
+                    // trace — an Event variant would renumber every landmark — so an UNREPORTED
+                    // count is exactly as invisible as an uncounted one, which is what t1 exists
+                    // to prevent. Printed before the outcome match: every outcome exits from it,
+                    // and a crashing guest owes the count just as much as a clean one.
+                    eprintln!("[retrace] fall-throughs: {}", s.fall_throughs);
                     match s.outcome {
                         retrace_core::Outcome::Exit { code } => exit(code as i32),
                         retrace_core::Outcome::Crash { pc, esr, far } => {
@@ -52,6 +59,13 @@ fn main() {
                 Ok(s) => {
                     use std::io::Write;
                     std::io::stdout().write_all(&s.stdout).unwrap();
+                    // M23 t2: both sides report the EL1 vector fall-through count so the gate can
+                    // compare them (crates/retrace/tests/fallthrough_e2e.rs). It is not in the
+                    // trace — an Event variant would renumber every landmark — so an UNREPORTED
+                    // count is exactly as invisible as an uncounted one, which is what t1 exists
+                    // to prevent. Printed before the outcome match: every outcome exits from it,
+                    // and a crashing guest owes the count just as much as a clean one.
+                    eprintln!("[retrace] fall-throughs: {}", s.fall_throughs);
                     match s.outcome {
                         retrace_core::Outcome::Exit { code } => exit(code as i32),
                         retrace_core::Outcome::Crash { pc, esr, far } => {
@@ -75,6 +89,7 @@ fn main() {
                 Ok(r) => {
                     use std::io::Write;
                     std::io::stdout().write_all(&r.stdout).unwrap();
+                    eprintln!("[retrace] fall-throughs: {}", r.fall_throughs);
                     match r.outcome {
                         retrace_core::Outcome::Exit { code } => exit(code as i32),
                         retrace_core::Outcome::Crash { pc, esr, far } => {
