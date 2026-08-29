@@ -157,21 +157,20 @@ them. See Known limits for the 20 that still fail, which are four named causes r
   park/wake seam keyed on the port name. All of it is below or symmetric across the trace: nothing
   new is recorded and `TRACE_MAGIC` did not move.
 
-**Gate:** 476 passed / 0 failed / 2 ignored across 106 test binaries, **measured at `b8c2e33`**,
-clippy clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how
-that number is assembled. "106 test binaries" is 99 test executables plus the 7 `Doc-tests`
-harnesses cargo reports, each of which runs zero tests — the convention every milestone since M14
-has counted by, kept for comparability and written out here so nobody has to re-derive it. The two
-ignored gates are `stackoverflow_rust_e2e` (M8 risk R3) and `cache_symbol_e2e` (the M19
-shared-cache symbol wall); both are described under Known limits.
+**Gate:** 480 passed / 0 failed / 3 ignored across 107 test binaries, **measured at M22** over all
+58 chunks, every one `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`. See
+the testing note below for how that number is assembled. "107 test binaries" is 100 test executables
+plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the convention every
+milestone since M14 has counted by, kept for comparability and written out here so nobody has to
+re-derive it. The three ignored gates are `stackoverflow_rust_e2e` (M8 risk R3), `cache_symbol_e2e`
+(the M19 shared-cache symbol wall) and `sysbin_e2e`'s second test (the M22 `pc=0x4204` wall); all
+three are described under Known limits.
 
-> **M22 has not re-run the full gate.** Its own targets are green — `retrace-guest --lib` 9/0/0 and
-> `retrace --test sysbin_e2e` 1 passed / 1 ignored, both verified able to fail by mutating the fix
-> back out — but the whole-workspace run was not repeated, because another milestone held the
-> machine and every VM test needs exclusive use of it. The expected delta is **+4 tests and +1 test
-> binary** (3 in `retrace-guest`, 1 running + 1 ignored in the new `sysbin_e2e` target), giving
-> 480 / 0 / 3 over 107 — *expected, not measured*. Re-running it is the outstanding task in
-> `docs/superpowers/plans/2026-08-29-retrace-m22-fatheader.md`.
+Reconciled against M20's 476 / 0 / 2 over 106 **file-by-file rather than by sum**, and every delta
+traces to exactly one place: `retrace-guest`'s three new fat-header tests (chunk A, 118 → **121**)
+and the new `sysbin_e2e` target (1 running + 1 ignored). Chunk B stayed 219 and `--bins` stayed 11,
+which is what says the change did not disturb anything below the loader. Total **+4 running, +1
+ignored, +1 binary**.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
 
