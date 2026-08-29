@@ -238,3 +238,63 @@ near `0x2004000`, the whole premise would be wrong; it did not.
 | T0-4 | today's actual failure | Confirmed **exactly**: EC=0x24 FSC=0x7 (stage-2 translation) at `0x27bff60`, ~160B below `DYN_STACK_BOTTOM`, nowhere near the guard page |
 
 Task 1 may proceed.
+
+## Task 1 Step 8: after-numbers (T0-3 re-measured with `reserve_believed_stack` in place)
+
+Same commands as T0-3, verbatim, run after `reserve_believed_stack()` was wired into `load_dynamic`
+(both suites warm-built first). `retrace-box`'s own full test suite passed 220/220 first (including
+an explicit `carveout` re-run for constraint C1) before these were taken.
+
+```sh
+for i in 1 2 3; do
+  /usr/bin/time -p cargo test -p retrace --test hello_rust_e2e -- --test-threads=1 2>&1 | tail -6
+done
+for i in 1 2 3; do
+  /usr/bin/time -p cargo test -p retrace --test hello_dyn_e2e -- --test-threads=1 2>&1 | tail -6
+done
+```
+
+**Contention caveat — these runs were NOT taken on a quiet machine, unlike T0-3's baseline.** While
+they were in flight, `ps` showed two unrelated `cargo test` processes active on this machine from
+other sessions: `cargo test -p ts-fixture-app` and `cargo test -p guide-examples`, neither belonging
+to this repo. This is exactly the apples-to-oranges risk T0-3 warned about, so it is recorded here
+rather than left implicit.
+
+Raw output:
+
+```
+=== hello_rust_e2e (after) ===
+run 1: test result: ok. 1 passed ... finished in 40.00s  | real 107.48  user 7.71  sys 0.13
+run 2: test result: ok. 1 passed ... finished in 7.98s   | real 193.65  user 7.72  sys 0.11
+run 3: test result: ok. 1 passed ... finished in 8.14s   | real 37.57   user 6.90  sys 0.29
+
+=== hello_dyn_e2e (after) ===
+run 1: test result: ok. 1 passed ... finished in 5.00s   | real 36.15   user 4.31  sys 0.19
+run 2: test result: ok. 1 passed ... finished in 13.19s  | real 45.33   user 4.98  sys 0.14
+run 3: test result: ok. 1 passed ... finished in 14.60s  | real 49.93   user 5.03  sys 0.12
+```
+
+All 6 runs passed (`0 failed`).
+
+**`real` (wall-clock) is exactly the unreliable column T0-3 predicted, and worse here because of the
+contention:** it ranges 37.57s–193.65s across these six runs — a 2-5x spread with zero code difference
+between runs of the *same already-built binary*. Comparing wall-clock before/after would report a
+large, entirely fake regression. This is not a hypothetical: it is the observed shape of this run,
+and it is the reason Step 8 is specified against `user` CPU time rather than `real`.
+
+**`user` CPU time, before vs. after (the load-bearing comparison):**
+
+| suite | before (user) | before mean | after (user) | after mean | Δ |
+|---|---:|---:|---:|---:|---:|
+| hello_rust_e2e | 7.97 / 6.86 / 6.84 | 7.22s | 7.71 / 7.72 / 6.90 | 7.44s | **+3.0%** |
+| hello_dyn_e2e | 4.27 / 4.30 / 5.06 | 4.54s | 4.31 / 4.98 / 5.03 | 4.77s | **+5.1%** |
+
+Both deltas (+3.0%, +5.1%) sit comfortably inside T0-3's measured noise floor (~15-18% of the
+minimum) and nowhere near the ~1.7x (+70%) regression that would invalidate the approach. Per the
+brief's stop condition, that threshold was not approached, so no quiet-machine re-run was needed —
+the contention caveat above stands as the recorded condition, not as an asterisk on the conclusion.
+
+**Verdict: no cost regression.** A reservation that maps nothing until touched costs nothing until
+touched, exactly as designed — `hello_rust_e2e`/`hello_dyn_e2e` never grow into the believed-stack
+window, so `reserve_believed_stack`'s bookkeeping-only `guest_vm_reserve` call is the only per-load
+cost it adds, and it does not show up above the noise floor.
