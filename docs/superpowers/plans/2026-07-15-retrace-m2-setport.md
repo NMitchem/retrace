@@ -213,7 +213,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Run the bounded traced walk.**
 
-Run: `RETRACE_TRACE=1 cargo test -p retrace --test hello_dyn_e2e -- --ignored --test-threads=1 --nocapture 2>&1 | tee /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/0273832d-93d1-452d-9232-14f5f9cdfac6/scratchpad/setport-walk.log`
+Run: `RETRACE_TRACE=1 cargo test -p retrace --test hello_dyn_e2e -- --ignored --test-threads=1 --nocapture 2>&1 | tee /tmp/setport-walk.log`
 Confirm (quote from the log): the `mach_msg2 msgh_id=3410` is serviced (no `RECORD ERROR: unsupported mach_msg2 … msgh_id 3410`); the trap count advances beyond ~242.
 
 - [ ] **Step 2: Triage the outcome.** Read the tail of the walk log. Exactly one holds:

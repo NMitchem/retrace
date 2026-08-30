@@ -29,6 +29,45 @@ pub use sig::{
 pub const PSTATE_USER_MASK: u64 = 0xf000_0000;
 
 pub const TRAMPOLINE_IPA: u64 = 0x0000_4000; // 16 KiB-aligned (hv_vm_map rejects 4 KiB alignment under the default granule)
+
+/// `hvc #0` — the instruction at each EL1 vector slot head; traps straight to EL2 so the VMM sees
+/// every exception the guest takes.
+const HVC_VECTOR_HEAD: u32 = 0xd400_0002;
+/// `hvc #1` — the instruction filling the rest of every slot. A slot is 0x80 bytes but only its
+/// first 4 are the head, and the remaining 0x7c used to be left ZERO, which decodes as `UDF #0`.
+///
+/// M23 t1: execution occasionally falls through a slot head (measured ~0.27% of vector entries;
+/// whether the head's `hvc` fails to trap or HVF coalesces two exceptions into one exit is still
+/// unresolved and sits below retrace). Landing on `UDF #0` raised an undefined-instruction exception
+/// **at EL1**, which overwrote ELR_EL1/SPSR_EL1 with the trampoline's own address and re-vectored to
+/// VBAR+0x200 — destroying the original exception before any handler could read it, and reporting
+/// `pc=0x4204`. That one misattribution accounted for 13 of the 20 Apple-system-binary failures in
+/// the M22 breadth sweep. Padding that TRAPS keeps ESR_EL1/ELR_EL1 intact, so the dispatch simply
+/// re-reads the still-valid exception and resumes.
+///
+/// The immediate is 1, not 0, on purpose: it is what distinguishes a fall-through from a genuine
+/// vector entry at the VM exit (ESR_EL2 ISS), which is what makes fall-throughs *countable* — and a
+/// silently self-healing recovery is exactly the failure a determinism oracle cannot see.
+const HVC_VECTOR_PAD: u32 = 0xd400_0022;
+/// The `HVC_VECTOR_PAD` immediate, as it appears in ESR_EL2's ISS field on a fall-through exit.
+pub const VECTOR_PAD_IMM: u64 = 1;
+
+/// Build the 16-slot EL1 vector table: `hvc #0` at each slot head, `hvc #1` filling the rest.
+///
+/// **One builder, deliberately.** There are two construction sites (`load_with_pac` and
+/// `load_dynamic`) and `record-dyn` uses the second; while these were two copies of the same loop,
+/// a change applied to only one was silently ineffective — a trap that cost four misdirected probes
+/// during the M23 measurements. They now share this.
+fn build_vector_table() -> Vec<u8> {
+    let mut v = vec![0u8; 0x800];
+    for slot in 0..16 {
+        for w in 0..0x20 {
+            let insn = if w == 0 { HVC_VECTOR_HEAD } else { HVC_VECTOR_PAD };
+            v[slot * 0x80 + w * 4..slot * 0x80 + w * 4 + 4].copy_from_slice(&insn.to_le_bytes());
+        }
+    }
+    v
+}
 pub const STACK_TOP_IPA:  u64 = 0x0002_0000;
 // Dynamic-path constants (M1 static path is untouched). dyld is a PIE MH_DYLINKER at vmaddr 0,
 // so it must be slid to a free base: 5 GiB is above the exe (~4 GiB) and below guest_mmap (8 GiB).
@@ -492,6 +531,16 @@ pub struct Box_ {
     /// M18: the guest's pthread struct size from `bsdthread_register`'s `args[2]`. The kernel — not
     /// the guest — allocates a workqueue thread's pthread struct, so Stage 2 needs this size.
     pthread_size: Option<u32>,
+    /// M23 t1: how many times execution has fallen through an EL1 vector slot head onto the
+    /// trapping padding (see `HVC_VECTOR_PAD`). Recovery is automatic — the padding leaves
+    /// ESR_EL1/ELR_EL1 intact, so the dispatch re-reads the still-valid exception — which is exactly
+    /// why it must be COUNTED: a silently self-healing recovery is the one failure a determinism
+    /// oracle cannot see, since record and replay would agree with each other while the anomaly
+    /// vanished. The count is compared across record and replay rather than recorded as a landmark;
+    /// emitting an `Event` would renumber every landmark, which `Event::Sched`'s removal settled.
+    /// Plain u64 (no Drop), declared last, so the load-bearing vcpu-before-vm drop order is
+    /// unaffected. Starts at 0 in `restore` too: replay counts its own.
+    fall_throughs: u64,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -747,6 +796,12 @@ pub struct BoxState {
     // signal would terminate the guest. That divergence would read as a signal bug and actually be
     // a checkpoint bug. The fourth field in this struct to exist for exactly this reason.
     pub sigtable: SigTable,
+    // M23 t1: carried for the same reason as `pac_enabled`, `stack_top`, the fd slots and the
+    // sigtable — a mid-run capture cannot re-derive it, since the fall-throughs it counts happened
+    // behind the checkpoint. Resetting it to 0 here would make a seeked session report "no
+    // fall-throughs" no matter how many it had actually taken, which is the exact silent-zero this
+    // counter exists to prevent. The fifth field in this struct to exist for that reason.
+    pub fall_throughs: u64,
 }
 
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
@@ -1072,9 +1127,8 @@ impl Box_ {
         for s in &loaded.segments { map(&vm, &mut backings, s.vaddr, &s.data, s.memsz); }
         // Stack.
         map(&vm, &mut backings, STACK_TOP_IPA - GRANULE as u64, &[], GRANULE);
-        // EL1 vector table: 16 slots * 0x80 bytes; every slot begins with `hvc #0` (0xd4000002).
-        let mut vectors = vec![0u8; 0x800];
-        for slot in 0..16 { vectors[slot*0x80..slot*0x80+4].copy_from_slice(&0xd4000002u32.to_le_bytes()); }
+        // EL1 vector table (see build_vector_table): `hvc #0` heads, trapping padding.
+        let vectors = build_vector_table();
         map(&vm, &mut backings, TRAMPOLINE_IPA, &vectors, 0x800);
 
         // Build the W^X identity stage-1 map: the EL1 trampoline + every executable guest
@@ -1106,7 +1160,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1640,9 +1694,8 @@ impl Box_ {
         // page-table backings, so build_start_stack can address the stack backing by index.
         let stack_idx = backings.len();
         map(&vm, &mut backings, DYN_STACK_TOP - DYN_STACK_SIZE, &[], DYN_STACK_SIZE as usize);
-        // EL1 vector table: 16 slots * 0x80; every slot begins with `hvc #0`.
-        let mut vectors = vec![0u8; 0x800];
-        for slot in 0..16 { vectors[slot*0x80..slot*0x80+4].copy_from_slice(&0xd4000002u32.to_le_bytes()); }
+        // EL1 vector table (see build_vector_table): `hvc #0` heads, trapping padding.
+        let vectors = build_vector_table();
         map(&vm, &mut backings, TRAMPOLINE_IPA, &vectors, 0x800);
         // Frozen commpage copies (see COMMPAGE_IPA / COMMPAGE2_IPA): SAFETY — each is a live RO
         // kernel mapping at this exact VA in every process; read one granule of each.
@@ -1705,7 +1758,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -2239,6 +2292,10 @@ impl Box_ {
     /// the map set without exposing `backings` itself).
     pub fn mapped_len(&self) -> usize { self.backings.iter().map(|b| b.len).sum() }
 
+    /// How many EL1 vector fall-throughs this run has taken (M23 t1). Compared between record and
+    /// replay; any difference is a divergence, since `run()` is shared by both.
+    pub fn fall_throughs(&self) -> u64 { self.fall_throughs }
+
     /// The tracked PROT_NONE reservation extents as `(start, len)` (test/diagnostic observability:
     /// proves a `mach_vm_deallocate` hole-punch splits/trims the table with exact bounds).
     pub fn reservations(&self) -> &[(u64, u64)] { &self.reservations }
@@ -2273,6 +2330,37 @@ impl Box_ {
             if e.reason != EXIT_EXCEPTION { continue; }         // vtimer/canceled: control-plane only
             match ec_of(e.syndrome) {
                 Ec::Hvc => {
+                    // M23 t1: a fall-through past a slot head lands on the trapping padding
+                    // (`hvc #1`, hence ISS == VECTOR_PAD_IMM). The padding does not touch
+                    // ESR_EL1/ELR_EL1, so the still-valid exception is re-read and dispatched
+                    // normally below — recovery is automatic. Counting it is what keeps that
+                    // recovery from being silent; see the `fall_throughs` field.
+                    if e.syndrome & 0xffff == VECTOR_PAD_IMM {
+                        // `hvc #1` is written to exactly one place in guest memory: the padding
+                        // words of the 16 vector slots (`build_vector_table`). A fall-through exit
+                        // whose PC is outside that table therefore did not come from the anomaly
+                        // this counter models, and dispatching ESR_EL1 on its behalf would be a
+                        // guess dressed as a recovery. Fail loud instead. (The bound is inclusive:
+                        // an HVC exit reports the address AFTER the instruction, so the last
+                        // padding word of the last slot lands exactly on the end.)
+                        //
+                        // What this deliberately does NOT catch, said plainly so no later reader
+                        // credits it with more: a fall-through arriving after ESR_EL1 was ALREADY
+                        // dispatched -- the stale-PC resume that the pc=0x4204 history records as
+                        // never root-caused. That case presents an identical PC, an identical
+                        // ESR_EL1 and an identical SPSR_EL1 (EL0t) to a genuine first fall-through,
+                        // because `set_x0_and_return` clears none of them, so nothing measurable at
+                        // THIS exit separates the two. It would re-dispatch the same (num, args),
+                        // record and replay would agree on the duplicate, and the oracle could not
+                        // see it. Closing it needs resume-side state, not a check here.
+                        let vec_end = TRAMPOLINE_IPA + 0x800;
+                        let pc = self.vcpu.get_reg(reg::PC).unwrap();
+                        assert!(pc >= TRAMPOLINE_IPA && pc <= vec_end,
+                            "fall-through (hvc #1) reported at pc {pc:#x}, outside the EL1 vector \
+                             table [{TRAMPOLINE_IPA:#x}, {vec_end:#x}] -- `hvc #1` is written \
+                             nowhere else, so this is not the padding fall-through it claims to be");
+                        self.fall_throughs += 1;
+                    }
                     // The trampoline (VBAR_EL1) fires `hvc #0` for ANY exception EL0 takes to EL1;
                     // ESR_EL1 says which. SVC => a syscall/mach-trap. Anything else (a trapped
                     // sysreg access, an EL0 fault) is surfaced as Stop::Other carrying the EL1 ESR
@@ -2564,7 +2652,7 @@ impl Box_ {
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
         // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 }
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -4419,6 +4507,7 @@ impl Box_ {
             stack_size: self.stack_size,
             fd_slots: self.fds.slots(),
             sigtable: self.sigtable.clone(),
+            fall_throughs: self.fall_throughs,
         }
     }
 
@@ -4508,6 +4597,7 @@ impl Box_ {
             // M11: RESTORED from the capture, never reset — see the BoxState field comment. A fresh
             // table here would tell a seeked session every signal is at its default disposition.
             sigtable: state.sigtable.clone(),
+            fall_throughs: state.fall_throughs,
             // M14 t6: RESTORED from the capture, never reset — see the BoxState field comment. A
             // fresh table here would tell a seeked session the guest has exactly one thread, so the
             // scheduler would never pick the child and a join on it would deadlock. The RUNNING

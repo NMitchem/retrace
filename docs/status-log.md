@@ -4411,3 +4411,212 @@ giveaway was that the excess was exactly 219, chunk B's total. The tally script 
 recorded complete in `exitcodes.txt`. And "106 test binaries" is 99 test executables plus 7
 `Doc-tests` harnesses that run zero tests each — the convention every milestone since M14 has used,
 kept for comparability and now written down in the README rather than silently re-derived.
+
+---
+
+## Status: M22-fatheader — 🎉 retrace opens Apple's own binaries, and it was never a capability wall
+
+**2026-08-29.** Branch `worktree-m22-fatheader`, cut from `main` at `ccfc8f9`.
+
+### What happened
+
+The milestone did not start as a milestone. It started as a question about whether the project was
+useful yet, and the first probe — pointing `record-dyn` at a spread of real system binaries — failed
+on every single one, identically:
+
+```
+thread 'main' panicked at crates/retrace-guest/src/lib.rs:10:5:
+assertion `left == right` failed: not a 64-bit Mach-O (MH_MAGIC_64)
+  left: 3199925962      # 0xBEBAFECA — FAT_MAGIC read little-endian
+```
+
+Twenty milestones of guest-ladder work had been built on self-compiled binaries plus Homebrew's thin
+`jq`, and the natural reading of that history was that Apple's binaries were beyond retrace's
+runtime. **They were not.** Every macOS system binary is a *universal* file whose first four bytes
+are `0xcafebabe`, and `parse_macho` asserted `MH_MAGIC_64` against byte 0. retrace could always run
+them. It could not **open** them.
+
+`lipo -thin arm64e` and re-running settled it in one command: `/bin/echo` recorded, and replayed.
+Nothing below the loader had to change — and the reason is structural, not lucky. An arm64e main
+turns PAC on through M7's existing `pac_posture(cpusubtype)` path, and replay never reads the file at
+all: `restore()` re-derives the posture from the snapshot's own mach header via
+`pac_posture_from_memory`. The arm64e guests this unlocks therefore replay **by construction**.
+`TRACE_MAGIC` did not move, and no existing recording was invalidated.
+
+### What it unlocked, measured
+
+Sampled `/bin` + every 8th of `/usr/bin`, pointing retrace straight at each file; PASS requires
+record, replay, byte-identical stdout **and** equal exit codes. **34 of 54 pass — from a baseline of
+exactly zero.** `cat`, `ls`, `cp`, `mv`, `rm`, `chmod`, `mkdir`, `ln`, `df`, `grep`, `wc`, `uname`,
+`sh`, `dash`, `expr`, `bzip2` among them.
+
+The distribution mattered more than the number. The 20 failures are **four** causes, not a tail:
+13 × an uncategorised `EC=0x00` exit at `pc=0x4204` (modern ObjC/Swift `/usr/bin` tools, cause
+**unmeasured**), 4 × an unrouted `mach_msg2` `msgh_id` 412, 2 × the M10 fd table's fail-loud
+unmodelled `dup2` working exactly as designed, and 1 genuine divergence (`ps`) — the oracle catching
+nondeterminism rather than reproducing something wrong in silence. `sysbin_e2e`'s second gate is
+parked at the first group, naming the exception text and stating plainly that nothing has measured
+why. Clearing it is plausibly the difference between 63% and ~87%.
+
+### The lesson worth keeping
+
+**A wall that every instance of a class hits identically deserves one probe before it is believed.**
+The evidence for "retrace cannot run Apple binaries" was overwhelming and entirely circumstantial:
+twenty milestones, a guest ladder built around the limitation, and a 100% failure rate across every
+binary tried. None of it was evidence about the *cause*. One `lipo` invocation — thirty seconds —
+would have distinguished a loader defect from a capability wall at any point in those twenty
+milestones, and the reading that had accumulated was wrong in the direction that costs most: it made
+a five-line omission look like a research problem.
+
+The M19→M20 correction on the shared-cache symbol wall was the same shape, one milestone earlier:
+the stated mechanism was false, and the wall turned out narrower than its own text. Two in a row is a
+pattern, not a coincidence. **The failure mode is a right conclusion resting on an unmeasured
+supporting fact** — a passing test suite cannot see it, because nothing is failing.
+
+### Gate
+
+**480 passed / 0 failed / 3 ignored across 107 test binaries**, clippy clean at `-D warnings` over
+`--workspace --all-targets`, measured over all **58 chunks, every one `EXIT=0`**.
+
+Reconciled against M20's 476 / 0 / 2 over 106 **file-by-file rather than by sum**, and every delta
+traces to exactly one place: `retrace-guest` +3 (the fat-header tests) and the new `sysbin_e2e`
+target +1 running / +1 ignored. Per chunk: A 118 → **121**, B 219 → **219**, `--bins` 11 → **11**.
+Chunk B and `--bins` holding still is the load-bearing part of that reconciliation — it is what says
+a change to the loader disturbed nothing below it. The third ignored gate is M22's own parked
+`pc=0x4204` wall, joining `stackoverflow_rust_e2e` (M8 R3) and `cache_symbol_e2e` (M19).
+
+Both green targets were additionally **verified able to fail**, by mutating the `slice_native` call
+back out of `parse_macho`, observing the exact `MH_MAGIC_64` failure in each, and restoring.
+
+**The gate was deferred, not skipped, and the deferral is worth recording.** A concurrent
+M21-stackgrow session held the machine mid-`cargo test -p retrace-box`, and every VM test wants the
+hardware to itself. Rather than run both and risk flaking the *other* milestone's result, the runner
+polled for the M21 session's test processes to go quiet for a full minute and only then started —
+45-minute backstop, so it could not hang forever. The cost was about half an hour of waiting; the
+alternative was a number neither milestone could trust. An earlier draft of this section published
+the expected delta as *"expected, not measured"*; the measurement then matched it exactly, which is
+pleasant but is not what made publishing the hedge correct.
+
+## Status: M23-xpcpipe — 🎉 Apple's binaries were behind one message, and `pc=0x4204` was our own trampoline
+
+M22 left 20 of 54 Apple system binaries failing in four named causes and parked a gate at the
+largest of them. M23 cleared the two biggest: **46 of 54 now record and replay** (stdout
+byte-identical, exit codes equal, fall-through counts equal), up from 34.
+
+Neither cause was what M22's text said it was.
+
+**`pc=0x4204` was never a wall — it was retrace destroying its own evidence.** Each of the 16 EL1
+vector slots is 0x80 bytes, of which only the first 4 held `hvc #0`. The remaining 0x7c were zero,
+which decodes as `UDF #0`. When execution ran past a slot head it executed that `UDF` **at EL1**,
+which overwrote `ELR_EL1`/`SPSR_EL1` with the trampoline's own address and re-vectored — destroying
+the original exception's identity and reporting a pc inside retrace that had nothing to do with the
+guest. Thirteen of M22's twenty failures were that one masking defect wearing thirteen faces. The
+padding is now `hvc #1`: a fall-through is distinguishable at the VM exit, **counted**, and compared
+across record and replay.
+
+The honest part is what that did **not** explain. The masking is root-caused; the stale-PC resume
+that lands on the padding in the first place is **not**. M23 removed the thing that hid it and
+measured where it happens (~0.27% of vector entries), and nothing more. Calling that "the pc=0x4204
+wall, cleared" would be the same overclaim the M19→M20 correction caught.
+
+**The second cause was one unserviced message.** `host_get_special_port` (`msgh_id` 412) accounted
+for 17 of the 20 once the loader defect below it was fixed. It is **forwarded and recorded**, not
+synthesized, because the reply carries a host-minted port name that is nondeterministic by
+construction — the `task_self` posture, a documented exception to symmetry rule 1 rather than drift
+from it. The XPC message-queue send proper is refused deterministically, both sides recomputing an
+identical refusal.
+
+### The review this milestone should have had first
+
+t1–t6 landed with **no code review of any kind**, and this milestone had no `.superpowers/sdd/`
+directory at all — the only one since M6 without one. The review ran afterwards, three static
+reviewers, one per seam. It found **no Critical defects**: symmetry rules 1 and 2 hold, the
+divergence oracle gains no new hole (7 `verify_thread` sites plus `mirror_delivery`'s inline check =
+8, unchanged, because M23 adds no early-returning mirror), and the un-parking is earned. Reviewing
+after the fact still worked; it was luck that it did.
+
+It also found three things worth the delay, landed as t6.5:
+
+**A new abort path on four working syscalls.** `Route::Forward` read the request body for *every*
+allowlisted id, but the body guard has something to check for exactly one of them (412), and
+`read_guest` **panics** when a span does not fit inside a single backing. So t3 put a new way to kill
+the recorder on four ids that had never touched guest memory before it (200 / 206 / 3418 / 3405).
+Symmetry was not the problem — both arms read identically, exactly as rule 1 asks. Correctness under
+rule 1 does not imply the thing being done identically is safe to do at all.
+
+**A test that asserted the wrong half of its own claim.** `tests/trampoline.rs` discarded `run()`'s
+`Stop`, so the suite asserted a fall-through was *counted* and never that the interrupted exception
+was still *dispatched*. t1 claims both. Verified as a real hole rather than a theoretical one: with
+the arm perturbed to count and then drop the exception,
+`a_fall_through_onto_vector_padding_is_counted` still **passes** while the new
+`a_fall_through_still_dispatches_the_exception_it_interrupted` **fails**.
+
+**A guard that cannot do what it was asked to do, kept anyway for what it can.** The review proposed
+asserting PC-in-padding and `SPSR_EL1 == EL0t` to catch a fall-through arriving after `ESR_EL1` was
+already dispatched. Reading `set_x0_and_return` shows that cannot work: it clears neither `ESR_EL1`
+nor `SPSR_EL1` nor `ELR_EL1`, so a duplicate presents byte-identical registers to a genuine first
+fall-through and nothing measurable at that exit separates them. What landed is the narrower true
+claim — `hvc #1` is written to exactly one place in guest memory, so a fall-through reported from
+outside the vector table fails loud — with the duplicate-dispatch hole stated plainly in the code
+and in the README rather than implied closed. **That hole is the one a determinism oracle
+structurally cannot see:** the duplicate re-dispatches the same `(num, args)`, record and replay
+agree, and the trace is self-consistently wrong. It is the M18 `semaphore_wait_trap` argument again,
+and the third milestone in a row where the interesting finding is a *right conclusion resting on an
+unmeasured supporting fact*.
+
+### Left standing, deliberately
+
+- **`TRACE_MAGIC` was not bumped, and should probably have been.** t1 changed the vector padding,
+  which lives in the trampoline page and is therefore snapshot **content**. A pre-M23 recording still
+  opens, and `restore` faithfully restores its old zero padding while the current code assumes
+  trapping padding — so a fall-through on that replay reproduces the exact misattribution M23
+  removed. The written rule covers changing `Event`'s *shape*; this changed what a snapshot's bytes
+  *mean*, which the rule does not name.
+- **`Box_::restore` does not rebuild the vector table.** `build_vector_table` is called only from
+  `Box_::load` and `load_dynamic`, so the padding reaches replay purely because the trampoline page
+  happens to be a snapshot backing — right by luck, not construction. The concurrent M21-stackgrow
+  review found the same shape where the luck did **not** hold: a reservation built in `load_dynamic`
+  that `restore` reset to empty, making that milestone record-only. Two milestones, one root pattern
+  — **state established on a record-only path with replay left to reconstruct it** — which argues for
+  auditing everything `load_dynamic` establishes that `restore` does not, rather than fixing two
+  instances.
+- **The new `brk` wall has no parked gate.** Four binaries (`automationmodetool`, `desdp`,
+  `dyld_info`, `flex`) reach it and the cause is unmeasured. M22 parked a gate for its wall; M23 did
+  not park one for the wall it found. By this repo's own discipline that is a gap, not a decision.
+- The trampoline page is padded for only 0x800 of its 16 KiB; the rest is the same `UDF #0` M23
+  removed from the slots. Nothing reaches it, and a test pins the boundary.
+
+### A documentation defect this close inherited
+
+The README's Known-limits bullet said "**Two gates are parked**" for the whole M22→M23 window while
+its own Gate paragraph said three — M22 parked `sysbin_e2e`'s second gate and never updated the
+bullet. M23's un-parking makes "two" true again by accident. It is recorded here rather than
+silently corrected, because a current-state document that contradicted itself for a milestone is
+precisely what the two-document split exists to prevent.
+
+### Gate
+
+**497 passed / 0 failed / 2 ignored across 109 test binaries**, clippy clean at `-D warnings` over
+`--workspace --all-targets`, measured over all **59 test chunks, every one `EXIT=0`**.
+
+Reconciled against M22's 480 / 0 / 3 over 107 **file-by-file rather than by sum**. Per chunk:
+A 121 → **129**, B 219 → **225**, `--bins` **11 → 11**. Every delta traces to exactly one place —
+all eight of A's to `machmsg.rs`, all six of B's to `trampoline.rs` (which already existed with one
+test, so the box crate gains no new *suite*, which is why its suite count holds at 29 while the
+concurrent M21 branch shows 30). The remaining +3 is one test each from the new `xpc_e2e` and
+`fallthrough_e2e` targets plus `sysbin_e2e`'s second test moving from ignored to running. Total
+**+17 running, −1 ignored, +2 binaries**.
+
+`--bins` holding at 11 is the load-bearing part of that reconciliation: a change to the trampoline
+and to the `mach_msg2` router disturbed nothing in the CLI below it. The ignored count going *down*
+is the milestone's headline in one number — the first time since M2-taskinfo that a close removes a
+parked gate without adding one, and the honest asterisk is that M23 found a new wall (the `brk`
+group) and parked nothing for it.
+
+Two of the three t6.5 fixes were verified able to fail, and the third was verified *unable* to do
+what it was asked. `a_fall_through_still_dispatches_the_exception_it_interrupted` was falsified by
+perturbing the arm to count-then-drop the exception, which leaves the pre-existing
+`a_fall_through_onto_vector_padding_is_counted` **passing** — the cleanest demonstration in this
+milestone that the old assertion was blind. `a_fall_through_from_outside_the_vector_table_fails_loud`
+pokes an `hvc #1` one word past the table and pins the inclusive upper bound. F1's proposed
+duplicate-dispatch guard was not landed, because reading `set_x0_and_return` shows it cannot work.

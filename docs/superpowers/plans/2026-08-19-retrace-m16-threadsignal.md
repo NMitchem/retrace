@@ -2114,7 +2114,7 @@ paragraph in the section.
 Every chunk gets `--no-fail-fast`, and cargo's exit code is captured **before** any pipe:
 
 ```bash
-cd /Users/noahmitchem/Documents/GitHub/retrace
+cd "$(git rev-parse --show-toplevel)"
 for chunk in "-p retrace-arch -p retrace-trace -p retrace-sim -p hv-sys" \
              "-p retrace-box -p retrace-guest" \
              "-p retrace-core -p retrace"; do
