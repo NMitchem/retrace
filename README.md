@@ -171,22 +171,32 @@ them. See Known limits for the 20 that still fail, which are four named causes r
   padding is now `hvc #1`, so a fall-through is distinguishable at the VM exit, **counted**, and
   compared across record and replay by `fallthrough_e2e`. That single misattribution accounted for
   13 of M22's 20 failures, and it was never a capability wall.
+- **A deep recursion reaches its own stack guard page.** Since M21, retrace *reserves* the stack the
+  guest believes it has — macOS 26's libpthread reports a constant `0x7fc000` main-thread size that
+  retrace cannot influence, so libstd installs its overflow guard 7.72 MiB below where retrace's
+  256 KiB backing actually ends. The window `[0x2008000, 0x27C0000)` is reserved but unbacked, and
+  `commit_reserved_page` grows into it one zeroed page per stage-2 fault, so a recursion walks all
+  7.72 MiB down. The guard page is deliberately left **outside** the reservation, so it stays a
+  backed `PROT_NONE` page that faults at **stage 1** and routes to libstd's handler as a signal:
+  measured `far=0x2007f30`, inside the guard page, `DFSC 0x0f` — a *permission* fault, where before
+  M21 the same run died on a *translation* fault at `far/ipa=0x27bff60 (UNMAPPED)`, 7.72 MiB away.
+  Nothing about the reservation enters the trace; `Box_::restore` re-establishes it so replay starts
+  from identical state.
 
-**Gate:** 497 passed / 0 failed / 2 ignored across 109 test binaries, **measured at M23** over all
+**Gate:** 504 passed / 0 failed / 2 ignored across 111 test binaries, **measured at M21** over all
 59 test chunks, every one `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
-See the testing note below for how that number is assembled. "109 test binaries" is 102 test
+See the testing note below for how that number is assembled. "111 test binaries" is 104 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
-nobody has to re-derive it. The two ignored gates are `stackoverflow_rust_e2e` (M8 risk R3) and
+nobody has to re-derive it. The two ignored gates are `stackoverflow_rust_e2e` (re-parked by M21 at a
+signal-model wall, **not** the M8 risk R3 wall it stood at from M8 through M20) and
 `cache_symbol_e2e` (the M19 shared-cache symbol wall); both are described under Known limits.
 
-Reconciled against M22's 480 / 0 / 3 over 107 **file-by-file rather than by sum**, and every delta
-traces to exactly one place. Per chunk: A 121 → **129** (all eight in `machmsg.rs`), B 219 → **225**
-(all six in `trampoline.rs`, which already existed with one test, so the box gains no new suite), and
-`--bins` **11 → 11**. The remaining +3 is one test each from the two new targets `xpc_e2e` and
-`fallthrough_e2e`, plus `sysbin_e2e`'s second test moving from ignored to running. Total **+17
-running, −1 ignored, +2 binaries**. `--bins` holding still is the load-bearing part: a change to the
-trampoline and the mach_msg2 router disturbed nothing in the CLI below it.
+Reconciled against M23's 497 / 0 / 2 over 109 **file-by-file rather than by sum**. Per chunk:
+A **129 → 129** (M21 touches no crate in that chunk), B 225 → **231**, and `--bins` **11 → 11**. All
+six of B's are itemised: `stackgrow.rs` 1, three new `stack_geometry_tests`, `restorereserve.rs` 2.
+The remaining +1 is `stackoverflow_rust_e2e`'s new *running* gate, which pins the progress M21 made
+while its headline gate stays parked. Total **+7 running, ±0 ignored, +2 binaries**.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
 M23 did **not** move it, and that is a known sharp edge rather than a clean bill of health: M23
@@ -273,9 +283,11 @@ These are real and current, not aspirational gaps.
   deliverable one aborts loudly rather than being dropped: queueing at a wake is unmodelled because
   no guest in the tree measures it.
 - **Two gates are parked `#[ignore]`d** at documented, *measured* walls, and the reason is on each
-  test itself. `stackoverflow_rust_e2e`, because libstd computes its guard page from a constant
-  macOS 26 libpthread reports and retrace cannot influence, so the recursion takes a stage-2 fault
-  instead of striking the guard (M8 risk R3). And `cache_symbol_e2e` since M19, at the shared-cache
+  test itself. `stackoverflow_rust_e2e` — but **no longer for the reason it carried from M8 through
+  M20**. M8 risk R3 is CLEARED: the recursion now grows through M21's reservation and strikes its own
+  guard page at stage 1. It is re-parked one wall further on, at the blocked-signal limit below, and
+  the progress it used to stand for is gated by a *running* test beside it so it cannot regress in
+  silence. And `cache_symbol_e2e` since M19, at the shared-cache
   symbol wall above. It was **three** between M22 and M23 — M22 parked `sysbin_e2e`'s second gate at
   `pc=0x4204`, reading it as a capability wall, and M23 un-parked it after finding it was a masking
   defect in retrace's own trampoline. This bullet said "two" throughout that window and was simply
@@ -306,6 +318,17 @@ These are real and current, not aspirational gaps.
   on mismatch" is true of the gate and not of retrace. It is also not comparable across a seek:
   `run_one_for_step` has no `Ec::Hvc` arm, so a stepped window cannot take a fall-through that the
   same window takes under `run()`.
+- **A synchronously-raised signal that the target thread has blocked is not modelled.** A hardware
+  fault cannot be deferred — POSIX leaves the case undefined and Darwin force-delivers — but M11
+  models no pending set for it, so `retrace-core` **asserts by name** rather than guessing. This is
+  now reachable rather than theoretical: a Rust stack overflow strikes its guard page, libstd *has* a
+  handler installed for the resulting signal (10, SIGBUS), and the faulting thread has that signal
+  blocked. Clearing it means giving M11 a pending set and revisiting `sigpending`'s always-empty
+  answer. `stackoverflow_rust_e2e` is parked exactly there.
+- **A stack frame larger than one granule can still vault the guard.** The reservation stops one
+  granule above the guard page so the guard itself keeps faulting. A single frame bigger than 16 KiB
+  can therefore step over it into unreserved space and take the old fatal stage-2 fault. Accepted by
+  decision at M21, not overlooked.
 
 ## Testing
 

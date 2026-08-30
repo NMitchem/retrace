@@ -4620,3 +4620,123 @@ perturbing the arm to count-then-drop the exception, which leaves the pre-existi
 milestone that the old assertion was blind. `a_fall_through_from_outside_the_vector_table_fails_loud`
 pokes an `hvc #1` one word past the table and pins the inclusive upper bound. F1's proposed
 duplicate-dispatch guard was not landed, because reading `set_x0_and_return` shows it cannot work.
+
+## Status: M21-stackgrow — 🎉 M8 risk R3 falls after thirteen milestones, and the gate stays parked
+
+M8 measured that macOS 26's libpthread reports a **constant** `0x7fc000` main-thread stack size that
+retrace cannot influence — answering `getrlimit(RLIMIT_STACK)` with `0x10000000` instead of `0x40000`
+left libstd's computed guard address bit-identical. With retrace backing 256 KiB, libstd installed
+its stack-overflow guard at `0x2004000`, **7.72 MiB below** where the real backing ended. A deep
+recursion never reached it: it ran off the backing into unbacked IPA and killed the recorder with a
+stage-2 translation fault. M8 rejected both obvious fixes with measurements — eager 8 MiB backing
+cost ~1.7× on `hello_rust` and worse across the dyld suite; `getrlimit` cannot move the subtrahend —
+and parked `stackoverflow_rust_e2e` there. It stayed parked from M8 through M20.
+
+M21 stops trying to out-synthesize the constant and moves the other operand: **reserve the stack the
+guest believes it has.** `[0x2008000, 0x27C0000)` is reserved but unbacked, and `commit_reserved_page`
+— which already existed for `PROT_NONE` reservations since M2-mmapcommit — grows into it one zeroed
+page per stage-2 fault. Nothing is eagerly backed, so M8's 1.7× is not paid.
+
+The measurement that says it worked is the fault's *class*, not its presence:
+
+    [fault] pc=0x100000a70 esr=0x9200004f far=0x2007f30 ec=0x24
+    [fault] pc=0x1804fb710 esr=0x9200004f far=0x2007a90 ec=0x24
+
+`far` 0x2007f30 and 0x2007a90 are inside the guard page `[0x2004000, 0x2008000)` — 208 and 1392 bytes
+below `GUARD_TOP` — and `esr 0x9200004f` decodes to **DFSC 0x0f, a permission fault**. The
+before-picture was `far/ipa=0x27bff60 (UNMAPPED)`, **FSC 0x7, a translation fault**, 7.72 MiB away at
+the stack bottom. Permission versus translation is the whole argument: permission means the page is
+*there* and the guest may not touch it, which is what a guard page is. That is the same distinction
+`protnone_rust_e2e` was built to assert, reused as the oracle here.
+
+The guard page is deliberately left **outside** the reservation, one granule below its start. Inside
+it, a stack overflow would take the stage-2 route and be silently committed — converting an overflow
+into a corrupted guest that keeps running, the one failure mode this design must never reach.
+
+### The gate does not come green, and that is the discipline working
+
+Behind M8's wall stands a different one. libstd **has** a handler installed for the signal the guard
+fault maps to — signal 10, SIGBUS — so the disposition check passes; but the faulting thread has that
+signal **blocked**, and `retrace-core/src/lib.rs:203` asserts rather than guessing:
+
+> raising blocked signal 10 synchronously is not modelled: a fault cannot be deferred, POSIX leaves
+> it undefined, and Darwin force-delivers. M11 models no pending set, so implement one — and revisit
+> sigpending's always-empty answer — before a guest needs this.
+
+M11 wrote that assert naming the measurement it owed. A guest now needs it. Clearing it means giving
+M11 a pending set for synchronously-raised blocked signals, which is a signal-model milestone and not
+a stack one, so the gate is **re-parked there** with that text rather than un-parked or faked green.
+
+**The progress is gated anyway, and that gap was worth closing.** A parked headline gate means
+nothing end-to-end would notice if the reservation stopped working — `stackgrow.rs` and
+`restorereserve.rs` prove the reservation *exists* on both sides, and neither proves a real deep
+recursion *uses* it. `a_rust_stack_overflow_now_reaches_its_guard_page_and_a_different_wall` runs, and
+asserts on the difference rather than on an outcome a weaker failure would also produce. It was
+verified able to fail by regressing M21 itself: with `reserve_believed_stack()` removed from
+`load_dynamic` it fails with `far/ipa=0x27bff60 (UNMAPPED) pc=0x100000a70` — byte-identical to T0-4's
+recorded before-picture.
+
+### The defect every task before it was blind to
+
+Task 2's code review found M21 was **record-only**, and t0–t2 could not have caught it: every one of
+them tested the record side. `load_dynamic` is called only from `record_dynamic`; replay builds its
+box through `Box_::restore`, which reset `reservations` to empty; and `commit_reserved_page` services
+a growth fault only inside a reservation. So the first stack growth on replay was unserviced and came
+back as a divergence. **The headline gate's two-replay requirement could never have passed**, for a
+reason unrelated to the wall it named.
+
+`restore`'s reset is *correct* for the guest's own reservations — replay rebuilds those by
+re-executing its `mach_vm_reserve` landmarks through mirrored dispatch arms. M21's is the one entry
+with no landmark to rebuild from, precisely because M21 keeps it below the trace. The asymmetry was
+exactly one entry wide. The reset's own comment says reservations are cleared "so replay's
+demand-commit address sequence matches record's" — and the operative clause is *matches record's*:
+empty was right only while record's list was empty at snapshot time, and M21 made record start with
+one entry without moving the other side.
+
+Two documents asserted the opposite and are **corrected rather than reworded**: the doc comment on
+`reserve_believed_stack` claimed "`load_dynamic` runs identically on record and replay, so the same
+reservation exists on both sides" (replay never calls `load_dynamic` at all), and the design spec's
+line 96 claimed the replay arms "service the growth without modification". Both now say what is true
+and say that they were wrong.
+
+**This is the second instance of one pattern, found the same week.** M23's review turned up the same
+shape where the luck held: `build_vector_table` is called from `Box_::load` and `load_dynamic` but
+not `restore`, so its trapping vector padding reaches replay only because the trampoline page happens
+to be a snapshot backing. Two milestones, one root cause — **state established on a record-only path
+with replay left to reconstruct it** — which argues for auditing everything `load_dynamic` establishes
+that `restore` does not, rather than fixing instances as they surface.
+
+### Two smaller corrections worth keeping
+
+Task 2's review also found that the assert naming M21's central invariant was a **tautology**:
+`GUARD_TOP > GUARD_PAGE_IPA` cannot fail given `GUARD_TOP = GUARD_PAGE_IPA + GRANULE` unless GRANULE
+is 0. It was replaced with alignment checks, which the derivation does not already give — though the
+tautology moved one link down rather than vanishing, and after the fix **no build-time assert covers
+the central invariant at all**; it lives in a unit test.
+
+And the task brief's own falsification recipe was wrong about its own test. Perturbing `GUARD_TOP`
+fails on `assert_eq!(GUARD_TOP, 0x2008000)` — the absolute anchor — not on the "EXACTLY one granule"
+assertion the brief and Ruling R2 both name. The test is non-vacuous; the brief's account of *why*
+was not. Third milestone running where the notable finding is a right conclusion resting on an
+unmeasured supporting fact.
+
+### Gate
+
+**504 passed / 0 failed / 2 ignored across 111 test binaries**, clippy clean at `-D warnings` over
+`--workspace --all-targets`, measured over all **59 test chunks, every one `EXIT=0`**.
+
+Reconciled against M23's 497 / 0 / 2 over 109 **file-by-file rather than by sum**. Per chunk:
+A **129 → 129**, B 225 → **231**, `--bins` **11 → 11**. All six of B's are itemised — `stackgrow.rs`
+1, three new `stack_geometry_tests`, `restorereserve.rs` 2 — and the remaining +1 is
+`stackoverflow_rust_e2e`'s new running gate. Total **+7 running, ±0 ignored, +2 binaries**.
+
+Chunk A holding exactly still is the load-bearing part here: M21 touches no crate in it, so any
+movement would have meant something unintended. The ignored count holding at 2 is the honest number —
+M21 cleared a wall and re-parked the same gate one wall further on, which is neither progress to
+claim nor a regression to hide.
+
+**The plan's own baseline was stale and would have produced a false reconciliation.** Task 4 says to
+reconcile against "M20 closed at 478 `#[test]` — 476 run, 2 parked", written before M22 and M23
+landed. Following it literally would have manufactured a ~21-test discrepancy out of two intervening
+milestones. `main` was merged into the branch before the gate ran, and the reconciliation above is
+against M23's actual close.
