@@ -219,7 +219,13 @@ pub fn decode_host_get_special_port(buf: &[u8]) -> Result<(i32, i32), String> {
     Ok((u32_at(buf, 32) as i32, u32_at(buf, 36) as i32)) // node = header(24)+NDR(8); which = +4
 }
 
-/// Body-level guard for a FORWARDED kobject RPC. Returns `Ok(())` for any id with nothing to check.
+/// Does this forwarded id have a body-level check at all?
+///
+/// Split out of `check_forward_body` so a caller can decide whether it needs the request body
+/// BEFORE reading guest memory for it. `Box_::read_guest` panics when the span does not fit inside a
+/// single backing, so reading unconditionally would put a new abort path on the four allowlisted ids
+/// that have nothing to check and never touched the body before (200 / 206 / 3418 / 3405). Both
+/// dispatch arms call this same predicate, so they still read -- or skip -- identically.
 ///
 /// `route()` is given only the packed register file — the message HEADER — so a check that depends
 /// on the request BODY cannot live there. It lives in ONE function called from BOTH dispatch arms
@@ -227,8 +233,11 @@ pub fn decode_host_get_special_port(buf: &[u8]) -> Result<(i32, i32), String> {
 /// makes symmetry rule 1 hold by construction: a variant would mean two copies of the guard (and of
 /// the whole forward body around it), and two copies are what drift. Replay reads the body out of
 /// its own re-executed guest memory, so the guard doubles as a cheap deterministic cross-check.
+pub fn forward_body_is_checked(msgh_id: u32) -> bool { msgh_id == 412 }
+
+/// Body-level guard for a FORWARDED kobject RPC. Returns `Ok(())` for any id with nothing to check.
 pub fn check_forward_body(msgh_id: u32, buf: &[u8]) -> Result<(), String> {
-    if msgh_id != 412 { return Ok(()); }
+    if !forward_body_is_checked(msgh_id) { return Ok(()); }
     let (node, which) = decode_host_get_special_port(buf)?;
     // (HOST_LOCAL_NODE, HOST_PORT) is the pair measured in all 17. HOST_PRIV_PORT (2) is the
     // privileged host right: forwarding it would hand the guest whatever privileged access RETRACE

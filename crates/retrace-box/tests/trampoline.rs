@@ -107,3 +107,77 @@ fn normal_vector_entries_are_not_counted_as_fall_throughs() {
     assert!(matches!(b.run(), Stop::Syscall { .. }), "guest reaches its write() via the slot head");
     assert_eq!(b.fall_throughs(), 0, "a genuine vector entry is not a fall-through");
 }
+
+/// ...and the recovery must actually RECOVER: the interrupted exception is dispatched, not dropped.
+///
+/// M23 review F3. The counted test above discards `run()`'s `Stop`, so it passes just as happily
+/// against a box that counts the fall-through and then throws the guest's exception away —
+/// `set_reg(PC, pc + 4); continue;` in place of re-reading `ESR_EL1` satisfies every assertion in
+/// it. Countable and recoverable are two different claims and t1 makes both, so both are asserted.
+///
+/// The entry is the load-bearing part. This runs the guest to a REAL EL0 `svc` first, so
+/// `ESR_EL1`/`ELR_EL1`/`SPSR_EL1` hold a live, dispatchable exception rather than the zeroed state a
+/// freshly-loaded box carries; parking on the padding then reproduces a fall-through *on top of a
+/// genuine pending exception*, which is the only situation the trampoline actually meets. The
+/// syscall is deliberately NOT serviced in between — servicing it is what `set_x0_and_return` does,
+/// and doing so would consume the very exception this test needs to still be pending.
+#[test]
+fn a_fall_through_still_dispatches_the_exception_it_interrupted() {
+    let bytes = std::fs::read(retrace_guest::HELLO).unwrap();
+    let loaded = retrace_guest::parse_macho(&bytes);
+    let mut b = Box_::load(&loaded);
+    assert!(matches!(b.run(), Stop::Syscall { .. }), "guest reaches its write() via the slot head");
+    assert_eq!(b.fall_throughs(), 0, "a genuine vector entry is not a fall-through");
+
+    let mut ctx = b.save_ctx();
+    ctx.regs.pc = TRAMPOLINE_IPA + 0x404;
+    ctx.regs.cpsr = 0x3C5;
+    b.load_ctx(&ctx);
+
+    match b.run() {
+        Stop::Syscall { num, args } => {
+            assert_eq!(num, retrace_arch::SYS_WRITE,
+                "the interrupted exception must survive the fall-through and still be dispatched");
+            assert_eq!(args[0], 1, "fd = stdout");
+            assert_eq!(args[2], 6, "len = 6");
+        }
+        Stop::Other { esr } =>
+            panic!("fall-through dropped the guest's exception: Stop::Other esr=0x{esr:x}"),
+        Stop::Fault { pc, esr, far } =>
+            panic!("fall-through faulted: pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+        Stop::Step => unreachable!("run() does not single-step"),
+    }
+    assert_eq!(b.fall_throughs(), 1, "and the fall-through must still be counted");
+}
+
+/// A fall-through reported from OUTSIDE the vector table must fail loud, not be counted.
+///
+/// M23 review F1. The counter's whole meaning is "execution ran past a slot head onto the padding",
+/// and `hvc #1` is written to exactly one place in guest memory to make that inference safe
+/// (`build_vector_table`). If one is ever reached from anywhere else, dispatching `ESR_EL1` on its
+/// behalf would be a guess wearing a recovery's clothes, and the count would quietly stop meaning
+/// what `fallthrough_e2e` compares it as meaning. Without this test the guard is an assert nothing
+/// exercises.
+///
+/// The trampoline page is a full 16 KiB but `build_vector_table` fills only its first 0x800, so
+/// `TRAMPOLINE_IPA + 0x800` is both executable and outside the table — the one address that can
+/// stage this. That the region is reachable at all is the hazard the review logged as F8: it is
+/// zero-filled, and zero is `UDF #0`, the same masking defect t1 removed from the slots themselves.
+///
+/// The bound is inclusive on purpose and this pins the edge: an HVC exit reports the address AFTER
+/// the instruction, so the LAST padding word of the last slot (at 0x7fc) exits at exactly 0x800 and
+/// must still count, while an `hvc #1` at 0x800 exits at 0x804 and must not.
+#[test]
+#[should_panic(expected = "outside the EL1 vector table")]
+fn a_fall_through_from_outside_the_vector_table_fails_loud() {
+    let bytes = std::fs::read(retrace_guest::HELLO).unwrap();
+    let loaded = retrace_guest::parse_macho(&bytes);
+    let mut b = Box_::load(&loaded);
+    // `hvc #1` (0xd4000022) one word past the end of the 16-slot table, still on the exec page.
+    b.poke_guest(TRAMPOLINE_IPA + 0x800, &0xd400_0022u32.to_le_bytes());
+    let mut ctx = b.save_ctx();
+    ctx.regs.pc = TRAMPOLINE_IPA + 0x800;
+    ctx.regs.cpsr = 0x3C5;
+    b.load_ctx(&ctx);
+    let _ = b.run();
+}

@@ -2312,7 +2312,32 @@ impl Box_ {
                     // ESR_EL1/ELR_EL1, so the still-valid exception is re-read and dispatched
                     // normally below — recovery is automatic. Counting it is what keeps that
                     // recovery from being silent; see the `fall_throughs` field.
-                    if e.syndrome & 0xffff == VECTOR_PAD_IMM { self.fall_throughs += 1; }
+                    if e.syndrome & 0xffff == VECTOR_PAD_IMM {
+                        // `hvc #1` is written to exactly one place in guest memory: the padding
+                        // words of the 16 vector slots (`build_vector_table`). A fall-through exit
+                        // whose PC is outside that table therefore did not come from the anomaly
+                        // this counter models, and dispatching ESR_EL1 on its behalf would be a
+                        // guess dressed as a recovery. Fail loud instead. (The bound is inclusive:
+                        // an HVC exit reports the address AFTER the instruction, so the last
+                        // padding word of the last slot lands exactly on the end.)
+                        //
+                        // What this deliberately does NOT catch, said plainly so no later reader
+                        // credits it with more: a fall-through arriving after ESR_EL1 was ALREADY
+                        // dispatched -- the stale-PC resume that the pc=0x4204 history records as
+                        // never root-caused. That case presents an identical PC, an identical
+                        // ESR_EL1 and an identical SPSR_EL1 (EL0t) to a genuine first fall-through,
+                        // because `set_x0_and_return` clears none of them, so nothing measurable at
+                        // THIS exit separates the two. It would re-dispatch the same (num, args),
+                        // record and replay would agree on the duplicate, and the oracle could not
+                        // see it. Closing it needs resume-side state, not a check here.
+                        let vec_end = TRAMPOLINE_IPA + 0x800;
+                        let pc = self.vcpu.get_reg(reg::PC).unwrap();
+                        assert!(pc >= TRAMPOLINE_IPA && pc <= vec_end,
+                            "fall-through (hvc #1) reported at pc {pc:#x}, outside the EL1 vector \
+                             table [{TRAMPOLINE_IPA:#x}, {vec_end:#x}] -- `hvc #1` is written \
+                             nowhere else, so this is not the padding fall-through it claims to be");
+                        self.fall_throughs += 1;
+                    }
                     // The trampoline (VBAR_EL1) fires `hvc #0` for ANY exception EL0 takes to EL1;
                     // ESR_EL1 says which. SVC => a syscall/mach-trap. Anything else (a trapped
                     // sysreg access, an EL0 fault) is surfaced as Stop::Other carrying the EL1 ESR
