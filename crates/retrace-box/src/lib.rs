@@ -1116,9 +1116,15 @@ impl Box_ {
     /// Size of the guest's stack in bytes — what `RLIMIT_STACK` must report (M8-stack).
     pub fn stack_size(&self) -> u64 { self.stack_size }
 
-    /// `[start, end)` of the stack the guest BELIEVES it has but retrace does not back — reserved at
-    /// load, grown page-by-page by `commit_reserved_page`. Excludes libstd's guard page by one granule
-    /// at the bottom, and the really-backed stack at the top.
+    /// `[start, end)` of the stack the guest BELIEVES it has but retrace does not back — reserved by
+    /// `reserve_believed_stack` at the end of the DYNAMIC load path (`load_dynamic`), grown
+    /// page-by-page by `commit_reserved_page`. Excludes libstd's guard page by one granule at the
+    /// bottom, and the really-backed stack at the top.
+    ///
+    /// Ignores `&self` and returns the same compile-time window for any `Box_` — it is not
+    /// per-instance state. In particular a `Box_` built by the STATIC `Box_::load` path has no such
+    /// reservation at all; this accessor still returns the dynamic-path window regardless, so callers
+    /// on the static path must not treat its answer as meaning anything was reserved.
     pub fn believed_stack_window(&self) -> (u64, u64) { (GUARD_TOP, DYN_STACK_BOTTOM) }
 
     /// Re-sign a batch of shared-cache auth slots with the GUEST's fixed PAC keys, returning the
@@ -3693,15 +3699,27 @@ impl Box_ {
     /// Deterministic and trace-free: `load_dynamic` runs identically on record and replay, so the same
     /// reservation exists on both sides and nothing about it enters the trace (symmetry rule 2).
     fn reserve_believed_stack(&mut self) {
-        // These three are pure functions of compile-time constants (GUARD_TOP, GUARD_PAGE_IPA,
+        // These are pure functions of compile-time constants (GUARD_TOP, GUARD_PAGE_IPA,
         // DYN_STACK_BOTTOM, PT_L3_CEIL never vary at runtime), so clippy's assertions_on_constants
         // rightly refuses a plain assert! here — const { assert!(..) } is the existing convention
         // this file already uses for the same situation (see stack_geometry_tests's DYN_STACK_TOP
         // <= 1 << 36 check), and it is strictly stronger: a layout mistake fails the BUILD, not a
         // test run or a live load.
-        const { assert!(GUARD_TOP > GUARD_PAGE_IPA,
-            "the window must start ABOVE the guard page, or an overflow is silently committed \
-             instead of faulting") };
+        //
+        // The window deliberately starts exactly ONE GRANULE above GUARD_PAGE_IPA, not AT it: that
+        // gap is what keeps libstd's PROT_NONE guard page in free (unreserved) space, so an overflow
+        // that reaches it faults at STAGE 1 through the EL1 trampoline instead of landing inside this
+        // reservation, where it would be silently demand-committed and turn a stack overflow into
+        // corrupted, silently-continuing execution — the one failure mode this design exists to
+        // prevent. `GUARD_TOP = GUARD_PAGE_IPA + GRANULE` gives that gap BY CONSTRUCTION, which makes
+        // a bare `GUARD_TOP > GUARD_PAGE_IPA` check here a tautology, not a guard: it could only fail
+        // if GRANULE somehow became 0. What the derivation does NOT already prove is alignment, so
+        // that is what these check instead — an unaligned GUARD_PAGE_IPA or GUARD_TOP would still let
+        // guest_vm_reserve reserve the wrong bytes, and a tautological assert would never catch it.
+        const { assert!(GUARD_PAGE_IPA.is_multiple_of(GRANULE as u64),
+            "guard page must be granule-aligned") };
+        const { assert!(GUARD_TOP.is_multiple_of(GRANULE as u64),
+            "window start must be granule-aligned") };
         const { assert!(GUARD_TOP < DYN_STACK_BOTTOM,
             "believed-stack window inverted: DYN_STACK_TOP or DYN_STACK_SIZE moved without moving \
              this") };
@@ -4693,6 +4711,12 @@ mod stack_geometry_tests {
     // cost this milestone two walls. The end-to-end proof is `hello_rust_e2e`.
     #[test]
     fn the_guard_page_libstd_computes_is_a_mappable_guest_address() {
+        // NOTE (M21-stackgrow): this checked_sub is now UNREACHABLE in practice. Module-level
+        // GUARD_PAGE_IPA (`DYN_STACK_TOP - LIBPTHREAD_MAIN_STACK_SIZE`) performs the identical
+        // subtraction at const-eval time, so a layout bad enough to underflow here fails the BUILD
+        // before this test ever runs. The panic! below is kept as documentation, not a live guard —
+        // don't trust it as the thing standing between a bad layout and a wild address.
+        //
         // macOS 26 libpthread's main-thread stack size: 8 MiB minus one 16 KiB page.
         let guard = DYN_STACK_TOP.checked_sub(LIBPTHREAD_MAIN_STACK_SIZE).unwrap_or_else(|| panic!(
             "DYN_STACK_TOP {DYN_STACK_TOP:#x} is below libpthread's constant main-thread stack size \
@@ -4707,6 +4731,54 @@ mod stack_geometry_tests {
             "guard page {guard:#x} overlaps the stack backing [{:#x}, {DYN_STACK_TOP:#x}) — it must \
              sit BELOW the stack it guards", DYN_STACK_TOP - DYN_STACK_SIZE);
         const { assert!(DYN_STACK_TOP <= 1 << 36, "the stack must fit in the 36-bit guest IPA space") };
+    }
+
+    // M21. The believed-stack window is derived, not typed — this pins the arithmetic both ways so
+    // that moving DYN_STACK_TOP or DYN_STACK_SIZE without moving the window fails here, instantly
+    // and on every gate, rather than in a guest that silently keeps running after an overflow.
+    #[test]
+    fn the_believed_stack_window_brackets_the_guard_page_and_the_backing() {
+        assert_eq!(GUARD_PAGE_IPA, 0x2004000, "libstd's computed guard page");
+        assert_eq!(GUARD_TOP, 0x2008000, "one granule above it");
+        assert_eq!(DYN_STACK_BOTTOM, 0x27C0000, "the real backed stack bottom");
+        assert_eq!(DYN_STACK_BOTTOM - GUARD_TOP, 0x7B8000, "7.72 MiB of believed-but-unbacked stack");
+
+        assert_eq!(GUARD_TOP, GUARD_PAGE_IPA + GRANULE as u64,
+            "the window must clear the guard page by EXACTLY one granule: more would leave a hole \
+             a growing stack faults fatally in, less would swallow the guard");
+        // Deviation from the task brief, and the one the brief could not have known: clippy's
+        // `assertions_on_constants` rejects a plain `assert!` over two constants, and the gate runs
+        // `-D warnings`, so the brief's line as written is a hard red. This takes the const-block
+        // form `reserve_believed_stack` already uses for the identical check. A const-block panic
+        // message must be a literal, so the `{PT_L3_CEIL:#x}` capture goes with it.
+        const { assert!(GUARD_TOP >= PT_L3_CEIL,
+            "the window must not overlap the L3 translation tables") };
+        assert_eq!(GUARD_PAGE_IPA % GRANULE as u64, 0, "the guard page must be granule-aligned");
+    }
+
+    // M21 risk 7. `restore` re-derives the stack geometry from the snapshot's regions and FAILS LOUD
+    // rather than guessing. Growth pages become new backings, so the question is whether they can
+    // change its answer. They cannot — `covers` matches on `r.ipa == base`, an EXACT base rather
+    // than containment, and every growth page starts below DYN_STACK_BOTTOM at its own granule.
+    // This is a property M21 depends on but did not create, so it is pinned rather than argued.
+    #[test]
+    fn growth_pages_below_the_stack_do_not_shadow_the_geometry_probe() {
+        let mut regions = vec![region(DYN_STACK_BOTTOM, DYN_STACK_SIZE)];
+        // Three committed growth pages walking down, exactly as a deep recursion would leave them.
+        for i in 1..=3u64 {
+            regions.push(region(DYN_STACK_BOTTOM - i * GRANULE as u64, GRANULE as u64));
+        }
+        assert_eq!(stack_geometry_from_memory(&regions), (DYN_STACK_TOP, DYN_STACK_SIZE),
+            "growth pages must not shadow the stack backing the probe matches on");
+    }
+
+    // Non-vacuity for the test above, split out so it can use the module's existing #[should_panic]
+    // idiom rather than catch_unwind: a growth page ALONE must NOT satisfy the dynamic arm. Without
+    // this, the assertion above could pass because the probe matches growth pages too.
+    #[test]
+    #[should_panic(expected = "refusing to guess a stack geometry")]
+    fn a_growth_page_alone_does_not_satisfy_the_dynamic_arm() {
+        let _ = stack_geometry_from_memory(&[region(DYN_STACK_BOTTOM - GRANULE as u64, GRANULE as u64)]);
     }
 }
 
