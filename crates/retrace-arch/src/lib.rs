@@ -144,6 +144,7 @@ pub const FAT_MAGIC: u32 = 0xcafe_babe;      // big-endian on disk; read with fr
 pub const FAT_MAGIC_64: u32 = 0xcafe_babf;
 pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 pub const CPU_SUBTYPE_ARM64E: u32 = 2;
+pub const CPU_SUBTYPE_ARM64_ALL: u32 = 0;
 pub const PSTATE_C: u64 = 1 << 29;           // carry bit in NZCV (SPSR_EL1 / CPSR)
 
 pub fn ec_of(esr_el2: u64) -> Ec {

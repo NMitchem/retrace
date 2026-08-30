@@ -65,7 +65,12 @@ pub enum Outcome {
     Signal { sig: u64 },
 }
 
-pub struct RecordSummary { pub stdout: Vec<u8>, pub outcome: Outcome, pub events: usize }
+/// `fall_throughs` is the EL1 vector fall-through count (M23 t1/t2). It is carried out here rather
+/// than into the trace on purpose: an `Event` variant would renumber every landmark, which
+/// `Event::Sched`'s removal settled. `Box_::run()` is shared by record and replay, so each side
+/// computes its own and the GATE compares the two — no single process holds both numbers.
+pub struct RecordSummary { pub stdout: Vec<u8>, pub outcome: Outcome, pub events: usize,
+                           pub fall_throughs: u64 }
 
 pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<RecordSummary, String> {
     record_box(Box_::load(loaded), trace_path)
@@ -500,7 +505,39 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append mach_msg2 stub: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
+                    machmsg::Route::RefuseMqSend => {
+                        // M23 t5. The guest is sending to a real message queue — an XPC daemon.
+                        // The box hosts no receivers, so the destination genuinely does not exist
+                        // and `MACH_SEND_INVALID_DEST` is the truthful answer, not a stub. NEVER
+                        // forwarded: forwarding would hand a live system daemon the guest's reply
+                        // port and drag its nondeterministic replies into the trace, which is the
+                        // proxy posture the measurement (S6) says is not needed for 13 of 17.
+                        //
+                        // Writes NOTHING: the guest's receive buffer is left exactly as it was, so
+                        // both the return and the (empty) write set are constants, which is what
+                        // lets replay recompute and byte-compare them instead of trusting them.
+                        eprintln!("[retrace] refusing mach_msg2 message-queue send (msgh_id {:#x} \
+                            dest {:#x} send_size {}): the box hosts no message-queue receivers",
+                            m.msgh_id, m.dest, m.send_size);
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_SEND_INVALID_DEST,
+                            err: false, writes: vec![], thread })
+                            .map_err(|e| format!("append mach_msg2 mq refusal: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_SEND_INVALID_DEST, false, &[]);
+                    }
                     machmsg::Route::Forward(name) => {
+                        // Body-level guard. `route()` is handed only the packed register file — the
+                        // message HEADER — so a check that depends on the request BODY runs here,
+                        // from the SAME function the replay mirror calls with the SAME bytes
+                        // (symmetry rule 1 by construction). A no-op for ids with nothing to check.
+                        // Read the body ONLY for an id that has something to check: read_guest
+                        // panics on a span that crosses a backing, and the other allowlisted ids
+                        // never touched guest memory before this guard existed. Both arms gate on
+                        // the same predicate, so they still read identically.
+                        if machmsg::forward_body_is_checked(m.msgh_id) {
+                            let buf = b.read_guest(m.data, m.send_size as usize);
+                            machmsg::check_forward_body(m.msgh_id, &buf)
+                                .unwrap_or_else(|e| panic!("mach_msg2 forward guard: {e}"));
+                        }
                         eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id);
                         let (ret, err, writes) = b.forward_and_diff(num, args);
                         if trace_log {
@@ -1142,11 +1179,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             Stop::Step => unreachable!("record_box drives run(), which never single-steps"),
         }
     }
-    Ok(RecordSummary { stdout, outcome, events: count })
+    Ok(RecordSummary { stdout, outcome, events: count, fall_throughs: b.fall_throughs() })
 }
 
 #[derive(Debug)]
-pub struct ReplayReport { pub stdout: Vec<u8>, pub outcome: Outcome }
+pub struct ReplayReport { pub stdout: Vec<u8>, pub outcome: Outcome, pub fall_throughs: u64 }
 #[derive(Debug)]
 pub struct Divergence { pub landmark: usize, pub pc: u64, pub detail: String }
 
@@ -1378,7 +1415,8 @@ impl ReplaySession {
                                         }
                                         return Ok(Advance::Exited(ReplayReport {
                                             stdout: std::mem::take(&mut self.stdout),
-                                            outcome: Outcome::Exit { code: *code } }));
+                                            outcome: Outcome::Exit { code: *code },
+                                            fall_throughs: self.b.fall_throughs() }));
                                     }
                                     other => return Err(Divergence { landmark: self.idx + 1, pc,
                                         detail: format!("expected final memory Snapshot, got {other:?}") }),
@@ -1488,7 +1526,8 @@ impl ReplaySession {
                                             }
                                             return Ok(Advance::Exited(ReplayReport {
                                                 stdout: std::mem::take(&mut self.stdout),
-                                                outcome: Outcome::Signal { sig: *rsig } }));
+                                                outcome: Outcome::Signal { sig: *rsig },
+                                                fall_throughs: self.b.fall_throughs() }));
                                         }
                                         other => return Err(Divergence { landmark: self.idx + 1, pc,
                                             detail: format!("expected final memory Snapshot after Signal, got {other:?}") }),
@@ -1824,7 +1863,35 @@ impl ReplaySession {
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
-                                    machmsg::Route::Forward(_) => self.b.apply_and_return(*ret, *err, writes),
+                                    machmsg::Route::RefuseMqSend => {
+                                        // STANDARD symmetric posture (contrast ServiceGetSpecialPort,
+                                        // whose nondeterministic minted name forces verbatim-apply):
+                                        // both the return and the empty write set are CONSTANTS, so
+                                        // replay recomputes them and compares — and that comparison
+                                        // IS the divergence check. Note the refusal is deliberately
+                                        // not keyed on `dest`, which is a nondeterministic port name
+                                        // (measured 0x1103 / 0x1403 / 0x1503 across three runs).
+                                        if *ret != machmsg::MACH_SEND_INVALID_DEST || *err
+                                            || !writes.is_empty() {
+                                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                                "mach_msg2 message-queue refusal mismatch: recorded \
+                                                 ret {ret:#x} err {err} with {} write(s)", writes.len()) });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::Forward(_) => {
+                                        // The mirror of record's body guard, same function, same
+                                        // bytes — read here out of replay's OWN re-executed guest
+                                        // memory, so it doubles as a cheap deterministic check that
+                                        // the request the guest built is the one it built on record.
+                                        // Same predicate as record's arm -- see forward_body_is_checked.
+                                        if machmsg::forward_body_is_checked(m.msgh_id) {
+                                            let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                            machmsg::check_forward_body(m.msgh_id, &buf).map_err(|e| Divergence {
+                                                landmark: self.idx, pc, detail: format!("replay forward guard: {e}") })?;
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes)
+                                    }
                                     machmsg::Route::Unsupported(why) => {
                                         return Err(Divergence { landmark: self.idx, pc,
                                             detail: format!("unsupported mach_msg2 on replay: {why}") });
@@ -2315,7 +2382,8 @@ impl ReplaySession {
                                     }
                                     return Ok(Advance::Exited(ReplayReport {
                                         stdout: std::mem::take(&mut self.stdout),
-                                        outcome: Outcome::Crash { pc, esr, far } }));
+                                        outcome: Outcome::Crash { pc, esr, far },
+                                        fall_throughs: self.b.fall_throughs() }));
                                 }
                                 other => return Err(Divergence { landmark: self.idx + 1, pc,
                                     detail: format!("expected final memory Snapshot after Crash, got {other:?}") }),
