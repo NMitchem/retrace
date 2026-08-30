@@ -2651,8 +2651,27 @@ impl Box_ {
             .filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL)
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
-        // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 }
+        // address sequence matches record's from a clean slate. The operative clause is *matches
+        // record's*: empty is correct for the guest's OWN reservations, which replay rebuilds by
+        // re-executing its `mach_vm_reserve` landmarks through mirrored dispatch arms. It is NOT
+        // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
+        // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
+        // That one entry is re-established below.
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 };
+        // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
+        // would not exist here and the first stack-growth fault would go unserviced and report as a
+        // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
+        // restored STATIC box does not acquire a reservation it never had (the mirrored
+        // over-correction, which `restorereserve.rs`'s static control exists to catch).
+        //
+        // Call the METHOD, never `reservations.push(..)`: `guest_vm_reserve` also granule-rounds the
+        // size and carries the "jump mmap_next past a FIXED reservation it sits inside" branch.
+        // Neither fires at today's geometry, but open-coding the push would silently skip both and a
+        // future geometry move would then diverge record from replay through a path nobody is
+        // watching. Identical method, identical arguments, both sides — symmetry rule 1's
+        // identity-by-construction, which is the whole reason the rule is phrased that way.
+        if stack_top == DYN_STACK_TOP { b.reserve_believed_stack(); }
+        b
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -3784,8 +3803,16 @@ impl Box_ {
     /// corrupted guest that keeps running. That is M13's invariant (see `protect_none`), and this is the
     /// one place M21 could have broken it.
     ///
-    /// Deterministic and trace-free: `load_dynamic` runs identically on record and replay, so the same
-    /// reservation exists on both sides and nothing about it enters the trace (symmetry rule 2).
+    /// Trace-free, and symmetric only because `restore` was made to say so. The original claim here
+    /// was that "`load_dynamic` runs identically on record and replay" — it does not. **Replay never
+    /// calls `load_dynamic`**; it builds its box through [`Box_::restore`], which resets
+    /// `reservations` to empty. That reset is right for the guest's OWN reservations (replay rebuilds
+    /// those by re-executing its `mach_vm_reserve` landmarks through mirrored dispatch arms) and
+    /// wrong for this one, which has no landmark to rebuild from precisely because it stays below the
+    /// trace. Left as it was, the first stack-growth fault on replay went unserviced and came back as
+    /// a divergence: M21 was record-only. `restore` now re-establishes exactly this reservation, by
+    /// calling this same method with the same arguments, so both sides enter landmark 1 with
+    /// identical reservation state and nothing about it enters the trace (symmetry rule 2).
     fn reserve_believed_stack(&mut self) {
         // These are pure functions of compile-time constants (GUARD_TOP, GUARD_PAGE_IPA,
         // DYN_STACK_BOTTOM, PT_L3_CEIL never vary at runtime), so clippy's assertions_on_constants

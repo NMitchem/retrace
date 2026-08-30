@@ -93,7 +93,7 @@ window            = 0x007B_8000   // 7.72 MiB
 
 and nothing else changes. The four existing dispatch sites that already call
 `commit_reserved_page(fault_ipa())` on a stage-2 fault (`retrace-core/src/lib.rs:1131` on record;
-`:2343`, `:2505`, `:2533` on replay) service the growth without modification.
+`:2343`, `:2505`, `:2533` on replay) service the growth without modification — **but only since task 2.5**. As first written this was false: replay never runs `load_dynamic`, and `Box_::restore` reset `reservations` to empty, so those arms saw no reservation covering the fault and returned `Divergence`. `restore` now re-establishes the reservation.
 
 ### The two fault routes are the whole design
 
@@ -133,7 +133,9 @@ is **T0-3**, and the exit criterion requires it measured.
 ### Determinism
 
 Below the trace, by symmetry rule 2. The reservation is created in `load_dynamic`, which runs
-identically on record and replay; `commit_reserved_page` is already documented as "deterministic and
+identically on record and replay — **corrected in task 2.5: it does not, because replay never calls
+`load_dynamic` at all. The reservation is re-established in `Box_::restore` instead, by calling the
+same method with the same arguments.** `commit_reserved_page` is already documented as "deterministic and
 trace-free: record and replay re-execute the guest's own stores, fault at the same IPAs in the same
 order, and commit identical all-zero pages." No `Event` variant, no `TRACE_MAGIC` bump, no new mirror
 arm, and therefore **no new `verify_thread` hole** — the seven-call-site count in `CLAUDE.md` is
