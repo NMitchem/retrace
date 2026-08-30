@@ -156,40 +156,65 @@ them. See Known limits for the 20 that still fail, which are four named causes r
   `semaphore_signal_trap` (`-33`), which is what `dispatch_semaphore` actually lowers to — is a
   park/wake seam keyed on the port name. All of it is below or symmetric across the trace: nothing
   new is recorded and `TRACE_MAGIC` did not move.
+- **Apple's own system binaries** — since M23, `/bin/date`, `bash`, `zsh` and `cal` record and
+  replay. The wall was one unserviced `mach_msg2`: `host_get_special_port` (`msgh_id` 412), which
+  **17 of the 20** M22 failures collapsed onto once the loader defect below it was fixed. It is
+  forwarded and recorded rather than synthesized, because the reply carries a host-minted port name
+  that is nondeterministic by construction — the `task_self` posture, and a documented exception to
+  symmetry rule 1 rather than a drift from it. A message-queue send (the XPC pipe proper) is
+  refused deterministically, both sides recomputing the identical refusal.
+- **The trampoline's vector padding traps rather than undefs.** Each of the 16 EL1 vector slots is
+  0x80 bytes of which only the first 4 held `hvc #0`; the remaining 0x7c were zero, which decodes as
+  `UDF #0`. Execution that ran past a slot head then executed that `UDF` **at EL1**, overwriting
+  `ELR_EL1`/`SPSR_EL1` and destroying the original exception's identity — reported as the notorious
+  `pc=0x4204`, an address inside retrace's own trampoline with nothing to do with the guest. The
+  padding is now `hvc #1`, so a fall-through is distinguishable at the VM exit, **counted**, and
+  compared across record and replay by `fallthrough_e2e`. That single misattribution accounted for
+  13 of M22's 20 failures, and it was never a capability wall.
 
-**Gate:** 480 passed / 0 failed / 3 ignored across 107 test binaries, **measured at M22** over all
-58 chunks, every one `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`. See
-the testing note below for how that number is assembled. "107 test binaries" is 100 test executables
-plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the convention every
-milestone since M14 has counted by, kept for comparability and written out here so nobody has to
-re-derive it. The three ignored gates are `stackoverflow_rust_e2e` (M8 risk R3), `cache_symbol_e2e`
-(the M19 shared-cache symbol wall) and `sysbin_e2e`'s second test (the M22 `pc=0x4204` wall); all
-three are described under Known limits.
+**Gate:** 497 passed / 0 failed / 2 ignored across 109 test binaries, **measured at M23** over all
+59 test chunks, every one `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
+See the testing note below for how that number is assembled. "109 test binaries" is 102 test
+executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
+convention every milestone since M14 has counted by, kept for comparability and written out here so
+nobody has to re-derive it. The two ignored gates are `stackoverflow_rust_e2e` (M8 risk R3) and
+`cache_symbol_e2e` (the M19 shared-cache symbol wall); both are described under Known limits.
 
-Reconciled against M20's 476 / 0 / 2 over 106 **file-by-file rather than by sum**, and every delta
-traces to exactly one place: `retrace-guest`'s three new fat-header tests (chunk A, 118 → **121**)
-and the new `sysbin_e2e` target (1 running + 1 ignored). Chunk B stayed 219 and `--bins` stayed 11,
-which is what says the change did not disturb anything below the loader. Total **+4 running, +1
-ignored, +1 binary**.
+Reconciled against M22's 480 / 0 / 3 over 107 **file-by-file rather than by sum**, and every delta
+traces to exactly one place. Per chunk: A 121 → **129** (all eight in `machmsg.rs`), B 219 → **225**
+(all six in `trampoline.rs`, which already existed with one test, so the box gains no new suite), and
+`--bins` **11 → 11**. The remaining +3 is one test each from the two new targets `xpc_e2e` and
+`fallthrough_e2e`, plus `sysbin_e2e`'s second test moving from ignored to running. Total **+17
+running, −1 ignored, +2 binaries**. `--bins` holding still is the load-bearing part: a change to the
+trampoline and the mach_msg2 router disturbed nothing in the CLI below it.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
+M23 did **not** move it, and that is a known sharp edge rather than a clean bill of health: M23
+changed the vector table's padding, which lives in the trampoline page and is therefore snapshot
+*content*. A pre-M23 recording still opens, and `Box_::restore` faithfully restores its **old**
+zero padding while the current code assumes trapping padding — so a fall-through on that replay
+reproduces the exact `pc=0x4204` misattribution M23 removed. The rule this repo writes down covers
+changing `Event`'s *shape*; this was a change to what a snapshot's bytes *mean*, which the rule does
+not name and which went unbumped.
 
 ## Known limits
 
 These are real and current, not aspirational gaps.
 
-- **Roughly a third of Apple's system binaries still fail, in four named ways.** Of 54 sampled,
-  20 did not make it, and the distribution is the useful part — this is a narrow wall, not a tail.
-  **13** are modern ObjC/Swift-heavy `/usr/bin` tools (`aa`, `avmediainfo`, `bioutil`, …) that die
-  identically before reaching their own code: `non-syscall exit: unknown/uncategorized (EC=0x00
-  ISS=0x0 FSC=0x0) far/ipa=0x0 (UNMAPPED) pc=0x4204 elr=0x4404`. `EC=0x00` is the exception class
-  the box cannot categorise at all, and the pc is a low address one granule in, so control has left
-  the loaded images rather than faulting inside them — **the cause is unmeasured**, and
-  `sysbin_e2e.rs`'s second gate is parked there rather than guessing. **4** (`bash`, `zsh`, `date`,
-  `cal`) need one unrouted `mach_msg2` `msgh_id` 412. **2** (`csh`, `tcsh`) hit the M10 fd table's
-  fail-loud unmodelled `dup2`, working exactly as designed. **1** (`ps`) is a genuine replay
-  divergence — the oracle catching nondeterminism rather than reproducing something wrong in
-  silence. Diagnosing the first group is plausibly the difference between 63% and ~87%.
+- **About one in seven of Apple's system binaries still fails, and the remaining wall is one
+  named cause.** Of 54 sampled, **46 now record and replay** (M23, up from 34 at M22), stdout
+  byte-identical and exit codes equal. M22's four named causes are down to one plus a tail: the
+  `pc=0x4204` group (13) and the `msgh_id` 412 group (4) are both cleared, `csh`/`tcsh` still hit the
+  M10 fd table's fail-loud unmodelled `dup2` (working exactly as designed), and `ps` remains a
+  genuine replay divergence — the oracle catching nondeterminism rather than reproducing something
+  wrong in silence. The **new** group is four binaries (`automationmodetool`, `desdp`, `dyld_info`,
+  `flex`) that reach a `brk`. That cause is **unmeasured**, and unlike M22's wall it has **no parked
+  gate standing for it** — a gap in this repo's own discipline rather than a decision, recorded here
+  rather than quietly left out. The 46 is the swept number and deliberately not the flattering one:
+  `dddiagnose` is **intermittent** — 5 of 6 repeat runs record cleanly, 1 of 6 hits the `brk` — so it
+  is counted as a failure, making the honest figure "46 as swept, 47 on most runs" rather than a 47
+  that picks the run it likes. Eight of the 54 now report a **nonzero** fall-through count that
+  record and replay agree on: the first binaries ever to exercise that invariant at all.
 - **A guest must be arm64 or arm64e.** `slice_native` picks the slice this machine would execute —
   arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
   binary is refused by name. There is no emulation of another ISA and none is planned.
@@ -251,9 +276,36 @@ These are real and current, not aspirational gaps.
   test itself. `stackoverflow_rust_e2e`, because libstd computes its guard page from a constant
   macOS 26 libpthread reports and retrace cannot influence, so the recursion takes a stage-2 fault
   instead of striking the guard (M8 risk R3). And `cache_symbol_e2e` since M19, at the shared-cache
-  symbol wall above — a gate M19 parked for a capability it does not have, which by this repo's
+  symbol wall above. It was **three** between M22 and M23 — M22 parked `sysbin_e2e`'s second gate at
+  `pc=0x4204`, reading it as a capability wall, and M23 un-parked it after finding it was a masking
+  defect in retrace's own trampoline. This bullet said "two" throughout that window and was simply
+  wrong; it is noted rather than silently corrected, because a current-state document that
+  contradicted itself for a milestone is exactly the failure the two-document split exists to catch — a gate M19 parked for a capability it does not have, which by this repo's
   discipline has regressed nothing: `dispatch_e2e` was parked the same way by M18, moved twice as
   each measured wall fell, and then cleared.
+- **A fall-through that arrives after its exception was already dispatched is undetectable.** The
+  padding fall-through is counted, and a fall-through reported from outside the vector table fails
+  loud. But a *duplicate* — a stale-PC resume landing on the padding after `ESR_EL1` was already
+  serviced — presents a byte-identical PC, `ESR_EL1` and `SPSR_EL1` to a genuine first fall-through,
+  because `set_x0_and_return` clears none of them. It would re-dispatch the same `(num, args)`,
+  **record and replay would agree on the duplicate, and the divergence oracle structurally cannot
+  see it.** Closing it needs resume-side state, not a check at the exit. The stale-PC resume itself
+  was never root-caused; M23 root-caused only the masking that hid it.
+- **`Box_::restore` does not rebuild the vector table.** `build_vector_table` is called from
+  `Box_::load` and `load_dynamic` only, so the trapping padding reaches replay purely because the
+  trampoline page happens to be a snapshot backing — correct today by luck rather than by
+  construction, and the same shape as a defect found concurrently in M21 where the luck did not
+  hold. An assert in `restore` would pin it and would also turn the stale-trace case above into a
+  loud refusal instead of a wrong replay.
+- **The trampoline page is padded for only 0x800 of its 16 KiB.** The rest is zero, which is
+  `UDF #0` — the very encoding M23 removed from the vector slots. Nothing reaches it today, and a
+  test pins the boundary, but the hazard is the one M23 exists to have eliminated.
+- **The fall-through count is compared in one gate, not in the product.** It is deliberately not in
+  the trace, so no single process ever holds both numbers; `fallthrough_e2e` diffs two stderr lines.
+  `retrace replay` prints a count nobody checks and `retrace debug` never reports it, so "fails loud
+  on mismatch" is true of the gate and not of retrace. It is also not comparable across a seek:
+  `run_one_for_step` has no `Ec::Hvc` arm, so a stepped window cannot take a fall-through that the
+  same window takes under `run()`.
 
 ## Testing
 
