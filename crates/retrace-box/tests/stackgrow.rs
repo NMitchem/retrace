@@ -39,6 +39,12 @@ fn the_believed_stack_window_is_reserved_and_the_guard_page_is_not() {
     // The guard page itself, and everything below it. Committing the guard page is the failure this
     // design exists to prevent: it would turn an overflow into silent corruption.
     let guard = start - GRANULE;
+    // Anchor against a uniform shift: every assertion above derives its expected value from
+    // believed_stack_window() itself, so a bug that shifted the WHOLE geometry (e.g. DYN_STACK_TOP
+    // moved without anything else noticing) would still leave all of them green. Pin one absolute
+    // address to catch that.
+    assert_eq!(guard, 0x2004000, "guard page absolute address — pins this file against a uniform \
+        shift of the whole geometry that believed_stack_window()-derived checks alone can't catch");
     assert!(!b.commit_reserved_page(guard),
         "libstd's guard page at {guard:#x} must NOT be demand-committable — it must stay unbacked \
          free space so libstd's own PROT_NONE mmap lands there and faults at STAGE 1");
