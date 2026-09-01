@@ -429,6 +429,13 @@ pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
 // requires `hv_vcpu_destroy` before `hv_vm_destroy` — reordering `vm` before `vcpu` would
 // silently reintroduce an HV_BUSY bug on the second in-process VM. `vcpu` MUST stay
 // declared before `vm`.
+// M24-restoreaudit. Every field here is part of a record/replay contract: `load`/`load_dynamic` run
+// on the RECORD path only, and replay builds its box through `restore`. A field this struct gains
+// that `restore` does not re-establish is an asymmetry whose signature is a PASSING RECORD followed
+// by a REPLAY DIVERGENCE — which no record-side test can see, and which shipped twice (M21's
+// believed-stack reservation, M23's vector table). `tests/restoreparity.rs` diffs a load box against
+// a restore box built from its own snapshot; a new field must be equal there, or be named in that
+// file's `normalise` with the mirrored mechanism that rebuilds it on replay.
 pub struct Box_ {
     vcpu: Vcpu,
     #[allow(dead_code)] // never read; held only so Drop runs hv_vm_destroy after vcpu's
@@ -2617,13 +2624,39 @@ impl Box_ {
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, PT_L1_IPA).unwrap();
         vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap(); // match load: EL0/EL1 FP/SIMD enabled
-        vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();   // match load: thread pointer (harmless for M1)
+        // M8-stack: DERIVED, not hardcoded — restore() rebuilds the static and the dynamic path
+        // alike, and the replay mirror byte-compares the reply it recomputes from this geometry.
+        // Hoisted above the remaining sysreg sets because TPIDRRO_EL0 now depends on which path
+        // this is.
+        let (stack_top, stack_size) = stack_geometry_from_memory(regions);
+        // M24 G1: "match load" was true of load_dynamic and FALSE of the static load, which never
+        // sets TPIDRRO_EL0 at all — a fresh vCPU leaves it 0. Setting TSD_IPA unconditionally gave a
+        // static guest a different thread pointer on replay than it had on record, and TSD_IPA is
+        // not even mapped in a static box, so a deref would have faulted on REPLAY ONLY. Gate it the
+        // way the believed-stack reservation below is gated, so "match load" is true of both paths.
+        if stack_top == DYN_STACK_TOP {
+            vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap(); // match load_dynamic: kernel TSD
+        }
         vcpu.set_sys(sysreg::TPIDR_EL0,   0).unwrap();         // match load: cpu 0 / cluster 0 (M2-cpuid)
         Self::set_pac_keys(&vcpu);
         let pac = pac_posture_from_memory(regions);
-        // M8-stack: DERIVED, not hardcoded — restore() rebuilds the static and the dynamic path
-        // alike, and the replay mirror byte-compares the reply it recomputes from this geometry.
-        let (stack_top, stack_size) = stack_geometry_from_memory(regions);
+        // M24 L1 (M23 review F5): build_vector_table() runs in BOTH load paths and never here, so the
+        // trapping vector padding reaches replay only because the trampoline happens to be a snapshot
+        // backing — right by luck, pinned by nothing. Assert the snapshot carries the table THIS build
+        // makes. That also turns M23's un-bumped TRACE_MAGIC from a silent wrong replay into a loud
+        // refusal: a pre-M23 recording carries `UDF #0` padding, which the current code would have
+        // executed at EL1, destroying ESR_EL1 and reproducing the pc=0x4204 misattribution M23 removed.
+        {
+            let want = build_vector_table();
+            let got = regions.iter().find(|r| r.ipa == TRAMPOLINE_IPA)
+                .unwrap_or_else(|| panic!("restore: no trampoline region at {TRAMPOLINE_IPA:#x} — \
+                     the EL1 vector table is not in this snapshot"));
+            assert!(got.bytes.len() >= want.len() && got.bytes[..want.len()] == want[..],
+                "restore: this snapshot's EL1 vector table is not the one this build makes. A \
+                 recording from before the padding became trapping (`hvc #1`) replays with `UDF #0` \
+                 behind each slot head, which executes at EL1 and destroys the faulting exception's \
+                 ESR_EL1. Re-record with this build.");
+        }
         vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(pac)).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
@@ -2671,6 +2704,23 @@ impl Box_ {
         // watching. Identical method, identical arguments, both sides — symmetry rule 1's
         // identity-by-construction, which is the whole reason the rule is phrased that way.
         if stack_top == DYN_STACK_TOP { b.reserve_believed_stack(); }
+        // M24 L2: load_dynamic folds the real startup state into thread 0's saved context; leaving it
+        // zeroed here made record and replay differ for any reader of `ctx_of(current)` that does not
+        // refresh it first. Every consumer today happens to refresh, or to read only NON-current
+        // threads — which is luck, not a mechanism, and the same shape as L1.
+        //
+        // GATED, and the gate is not cosmetic: the STATIC load (`load_with_pac`) does NOT populate
+        // thread 0 either, so seeding unconditionally traded one asymmetry for its mirror image —
+        // restore populated where a static load had left zeros. `tests/restoreparity.rs` caught that
+        // within minutes of existing, which is the argument for it. Residual, symmetric and
+        // therefore NOT a record/replay defect: a static box's thread 0 context is zeroed on BOTH
+        // sides, so a consumer reading `ctx_of(current)` without refreshing gets zeros identically
+        // on record and replay. Wrong in the same way twice is the oracle's blind spot, but it is
+        // not this milestone's to fix.
+        if stack_top == DYN_STACK_TOP {
+            let ctx0 = b.save_ctx();
+            *b.threads.ctx_mut(0) = ctx0;
+        }
         b
     }
 
