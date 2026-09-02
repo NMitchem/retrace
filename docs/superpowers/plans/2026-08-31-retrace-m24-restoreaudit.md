@@ -67,8 +67,10 @@ and by which mechanism.
 ### Task 4: The gate and the two documents
 
 1. Full chunked gate + clippy, exit codes captured per the constraint above.
-2. Reconcile file-by-file against 504/0/2 over 111. Expected after t1–t3: **512/0/2 over 112**
-   (t1 +5, t2 +3, both in `retrace-box`; t3 adds none). Any deviation gets chased, not accepted.
+2. Reconcile file-by-file against 504/0/2 over 111. Expected after t1–t3: **509/0/2 over 112**
+   (t1 +5 in `retrace-box`; t2 added five assertions inside the shared parity helper and **no new
+   `#[test]` functions** — an earlier draft of this line said +3 and was wrong; t3 adds none). Any
+   deviation gets chased, not accepted.
 3. **README** — edit in place. "Known limits": remove F5, remove F4, and rewrite the
    restore-asymmetry entry to say what is now true: the `load`↔`restore` path is guarded by a
    standing test, the `from_checkpoint` path is **not**. Do not write that the class is closed.
