@@ -67,6 +67,14 @@ pub const SYS_OPEN_NOCANCEL: u64 = 398;
 pub const SYS_FCNTL_NOCANCEL: u64 = 406;
 pub const SYS_OPENAT: u64 = 463;
 pub const SYS_FSTATAT64: u64 = 470;
+/// `fstatfs64(int, struct statfs64 *)` — SDK `sys/mount.h:444`, header-declared like its M10
+/// siblings.
+pub const SYS_FSTATFS64: u64 = 346;
+/// `getdirentries64` — **not in the SDK at all** (libc calls it privately from `opendir`/
+/// `readdir`, so no `sys/syscall.h`-adjacent header declares its prototype). Its fd-in-`x0`
+/// position is therefore MEASURED, not header-derived: M25-cpython Finding 3 captured the trap
+/// arguments `[fd=0x4, buf, 0x2000, &basep]` from CPython's stdlib-directory listing.
+pub const SYS_GETDIRENTRIES64: u64 = 344;
 /// `map_with_linking_np` — dyld's overmap-with-linking call. **Its fd is not in a register**: x0 is a
 /// guest pointer to `struct mwl_region[]` (x1 = count) and the descriptor is the struct's first
 /// field. `fd_operands` cannot express that; see `MWL_REGION_STRIDE` and the box's translation.
@@ -101,7 +109,10 @@ pub fn fd_operands(num: u64) -> &'static [usize] {
         | SYS_FSTAT | SYS_FSTAT64 | SYS_LSEEK | SYS_IOCTL | SYS_DUP
         | SYS_CONNECT | SYS_SENDTO | SYS_FGETATTRLIST
         // openat/fstatat64 take a *dirfd*; AT_FDCWD passes through translation untouched.
-        | SYS_OPENAT | SYS_FSTATAT64 => &[0],
+        | SYS_OPENAT | SYS_FSTATAT64
+        // fstatfs64 and getdirentries64: M25-cpython Task 3. See their constants' doc comments
+        // for which of the two is header-derived and which is measured-from-a-trap.
+        | SYS_FSTATFS64 | SYS_GETDIRENTRIES64 => &[0],
         SYS_DUP2 => &[0, 1],
         // The exception that makes a single choke point insufficient: mmap's fd is consumed by
         // guest_mmap_file, which never reaches forward_and_diff.
@@ -512,7 +523,8 @@ mod tests {
         for num in [SYS_CLOSE, SYS_CLOSE_NOCANCEL, SYS_READ, SYS_READ_NOCANCEL, SYS_PREAD,
                     SYS_WRITE, SYS_WRITE_NOCANCEL, SYS_FCNTL, SYS_FCNTL_NOCANCEL,
                     SYS_FSTAT, SYS_FSTAT64, SYS_LSEEK, SYS_IOCTL, SYS_DUP,
-                    SYS_CONNECT, SYS_SENDTO, SYS_FGETATTRLIST, SYS_OPENAT, SYS_FSTATAT64] {
+                    SYS_CONNECT, SYS_SENDTO, SYS_FGETATTRLIST, SYS_OPENAT, SYS_FSTATAT64,
+                    SYS_GETDIRENTRIES64, SYS_FSTATFS64] {
             assert_eq!(fd_operands(num), &[0], "syscall {num} holds its fd in x0");
         }
         assert_eq!(fd_operands(SYS_MMAP), &[4], "mmap's fd is x4, consumed by guest_mmap_file");
@@ -525,6 +537,10 @@ mod tests {
         // map_with_linking_np carries its fd INSIDE a guest struct, so it is deliberately absent
         // here — an arg index cannot name it. The box translates it separately.
         assert_eq!(fd_operands(SYS_MAP_WITH_LINKING_NP), &[] as &[usize]);
+        // fsgetpath(char*, size_t, fsid_t*, uint64_t) (SDK sys/fsgetpath.h:45) takes an fsid_t*
+        // identifying a *volume*, not a file descriptor — 427 is deliberately absent from the
+        // table (M25-cpython Task 3, Step 1 census).
+        assert_eq!(fd_operands(427), &[] as &[usize], "fsgetpath (427) takes no descriptor");
     }
 
     #[test]
@@ -559,6 +575,11 @@ mod tests {
         assert_eq!((SYS_READ_NOCANCEL, SYS_OPEN_NOCANCEL, SYS_FCNTL_NOCANCEL), (396, 398, 406));
         assert_eq!((SYS_OPENAT, SYS_FSTATAT64, SYS_MAP_WITH_LINKING_NP), (463, 470, 550));
         assert_eq!((MWL_REGION_STRIDE, MWL_MAX_REGION_COUNT, AT_FDCWD), (32, 5, -2));
+    }
+
+    #[test]
+    fn m25_syscall_numbers() {
+        assert_eq!((SYS_GETDIRENTRIES64, SYS_FSTATFS64), (344, 346));
     }
 
     #[test]
