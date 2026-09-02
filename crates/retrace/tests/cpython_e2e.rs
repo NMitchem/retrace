@@ -2,8 +2,10 @@
 //
 // Two guests, two very different postures:
 //
-// - `the_real_cpython_interpreter_records_and_replays` points at the actual interpreter and is
-//   parked `#[ignore]`d at M25 wall 1 (see its reason string) until Task 2 clears it.
+// - `the_real_cpython_interpreter_records_and_replays` points at the actual interpreter. Tasks 2
+//   and 3 cleared every record-side wall (record now reaches a clean exit(0) with stdout "1\n"),
+//   but Task 4 found a replay-side divergence and re-parked the test `#[ignore]`d there (see its
+//   reason string for the verbatim evidence).
 // - `the_launcher_records_and_replays_its_own_posix_spawn_failure` points at the launcher shim
 //   `python3` resolves to on PATH, and it RUNS from this commit onward — but it pins a KNOWN GAP,
 //   not a capability. The launcher's job is to `posix_spawn` (syscall 244, `POSIX_SPAWN_SETEXEC`)
@@ -33,13 +35,22 @@ const REAL: &str =
 const LAUNCHER: &str = "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14";
 
 #[test]
-#[ignore = "M25 wall 1 (unfixed as of this commit): the real interpreter dies on one instruction. \
-            RECORD ERROR: non-syscall exit: MSR/MRS/sysreg trap (EC=0x18 ISS=0x12dc68 FSC=0x28) \
-            far/ipa=0x0 (UNMAPPED) pc=0x4404 elr=0x1804fb070 — ISS 0x12dc68 decodes to \
-            SYS #3, C7, C4, #1, Xt = DC ZVA, in _platform_memset zeroing 0x7f80 bytes for \
-            CPython's allocator. An EL0 DC ZVA traps to EL1 with EC 0x18 when SCTLR_EL1.DZE == 0, \
-            and run()'s only Ec::SysReg arm is try_emulate_timebase. UN-IGNORE when Task 2 sets \
-            bit 14 of SCTLR_MMU_ON_BASE and the run reaches its own exit(0)."]
+#[ignore = "M25 wall 2, replay-side (unfixed as of this commit): record reaches a clean exit(0) \
+            with stdout exactly \"1\\n\" — RETRACE_TRACE=1 shows SYS_write(1, \"1\\n\") as the \
+            last real trap before exit, reproduced twice. Every record-side wall (DC ZVA, \
+            fd_operands) is cleared. But of the two replays this test requires, the FIRST \
+            diverges. Verbatim: DIVERGENCE at landmark 568 pc=0x1804b1834: syscall mismatch: \
+            live (num=4, args=[2, 30086578176, 106, 1, 0, 42963282272, 10, 200]) != recorded \
+            (num=75, args=[30086955008, 98304, 7, 0, 0, 42972720880, 42972417888, \
+            18446726482597246976]). num=4 is write (live's args[0]=2, fd 2/stderr); num=75 is \
+            mmap — at landmark 568 live re-execution is issuing a DIFFERENT syscall than the one \
+            the recording holds there, so the two runs' syscall SEQUENCES have already diverged \
+            by this point, not merely one call's arguments. No unit test at any single layer \
+            reproduces this, and closing it would mean tracing which earlier syscall's count or \
+            ordering differs between record and its own replay — modelling unmeasured \
+            guest/kernel behaviour, which Task 4's stop criterion 4 rules out for a single pass. \
+            UN-IGNORE when a successor milestone identifies and closes that specific sequence \
+            divergence."]
 fn the_real_cpython_interpreter_records_and_replays() {
     if !std::path::Path::new(REAL).exists() {
         eprintln!(
