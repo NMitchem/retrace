@@ -90,8 +90,10 @@ the discipline holds from day one.
   ```sh
   grep -n "sctlr_mmu_on(" crates/retrace-box/src/lib.rs
   ```
-  Expect five hits — the definition plus four call sites (1139, 1735, 2604, 4474 before the merge).
-  If a fifth call site appeared or one stopped going through the derivation, **stop and report**:
+  Expect seven lines: the definition, **four `set_sys` call sites** (1139, 1735, 2604, 4474 before
+  the merge), and two mentions inside a doc comment and an assert message near 4576–4584. The four
+  call sites are the invariant. If a fifth call site appeared or one stopped going through the
+  derivation, **stop and report**:
   Fix 1's whole symmetry argument rests on that invariant.
 
 - [ ] **Step 2: `cpython_e2e.rs`, parked.** One test,
@@ -116,13 +118,17 @@ the discipline holds from day one.
   and assert, in this order:
   1. `rec.code == 1` — the guest's own exit. Exit 4 is `RECORD ERROR`, 139 is a crash, so this
      discriminates against both.
-  2. `rec.stderr.contains("posix_spawn")` — **the load-bearing assertion.** Exit 1 alone is a code a
-     weaker failure would also produce; only the guest's own error text proves it ran `pythonw.c`'s
-     `err(1, …)` path. Note in a comment that retrace owns the guest's fd 2, so the guest's stderr
-     arrives mixed with retrace's own `[retrace]` lines — assert `contains`, never equality.
-  3. `rep.code == rec.code` and `rep.stdout == rec.stdout` from `util::replay(&trace)`, and
-     `rep.stderr.contains("posix_spawn")` so the replay is shown to have reproduced the guest's
-     output rather than merely exited the same way.
+  2. `rec.stdout` contains the bytes `posix_spawn` — **the load-bearing assertion.** Exit 1 alone
+     is a code a weaker failure would also produce; only the guest's own error text proves it ran
+     `pythonw.c`'s `err(1, …)` path. The text is on **stdout, not stderr**: retrace mirrors guest
+     writes to fd 1 AND fd 2 into one buffer and prints it on its own stdout (the `is_console_write`
+     arm of `record_box` in `crates/retrace-core/src/lib.rs`; the predicate at
+     `crates/retrace-arch/src/lib.rs:22` covers both fds). Retrace's own `[retrace]` diagnostics go
+     to its stderr, so `rec.stderr` never carries guest text. Say this in a comment. Assert
+     `contains` on the bytes, never equality against the whole buffer.
+  3. `rep.code == rec.code` and `rep.stdout == rec.stdout` from `util::replay(&trace)`. Because the
+     mirrored buffer carries the guest's fd-2 text, this byte-equality IS the proof that replay
+     reproduced the guest's output rather than merely exiting the same way.
 
 - [ ] **Step 4: the file header says why the launcher gate exists.** Write, in as many words, that
   it pins a **known gap** — exec-in-place is unmodelled, the forwarded `posix_spawn` returns an error
@@ -134,7 +140,8 @@ the discipline holds from day one.
 **Do not**
 
 - Do not run any fix yet. This task must be committed with `cpython_e2e` still parked.
-- Do not assert on the launcher's stdout alone — it is empty, so the assertion would be vacuous.
+- Do not assert on `rec.stderr` for guest text — it carries only retrace's own diagnostics, and the
+  assertion would fail for a reason unrelated to the guest. Do not assert on the exit code alone.
 - Do not use `assert_rung_records_and_replays` for the launcher; it requires exit 0 and will fail.
 - Do not hard-code the `Cellar/python@3.14/3.14.6/…` paths.
 
