@@ -4720,6 +4720,30 @@ impl Box_ {
             self.pac_enabled)
     }
 
+    /// Test-only (M24 t2): the guest's memory map as `(ipa, len)` pairs — what `tests/restoreparity.rs`
+    /// compares between a load box and a restore box built from that box's own snapshot.
+    ///
+    /// The `host` pointer is deliberately NOT exposed. Two boxes get their backings from two separate
+    /// `mmap` calls, so hosts differ by construction and comparing them would be a test that can only
+    /// fail. `(ipa, len)` is the part that is a record/replay contract: `load` derives it from the
+    /// Mach-O and `restore` from the snapshot regions, by different code, and nothing checked that
+    /// the two derivations agree.
+    ///
+    /// Kept out of `dbg_internal_state`'s string on purpose — that one is a round-trip diagnostic for
+    /// scalar bookkeeping, and folding a whole region list into it would make every unrelated failure
+    /// print a page of hex.
+    #[doc(hidden)]
+    pub fn dbg_backings(&self) -> Vec<(u64, usize)> {
+        self.backings.iter().map(|b| (b.ipa, b.len)).collect()
+    }
+
+    /// Test-only (M24 t2): the next free L3 table IPA. `load` bumps it as `build_tables` mints
+    /// tables; `restore` re-derives it by scanning the restored backings in the L3 window. Two
+    /// independent derivations of one value, which is the shape that drifts — and a drift here is
+    /// silent until a runtime exec-mmap promotion on replay mints an L3 at an IPA record never used.
+    #[doc(hidden)]
+    pub fn dbg_next_l3(&self) -> u64 { self.next_l3 }
+
     /// Test-only: the guest's live PAC posture, read back from SCTLR_EL1 and cross-checked against
     /// the field the constructor derived. PANICS if they disagree — i.e. if some install site set
     /// SCTLR without going through `sctlr_mmu_on(pac_enabled)`. A posture mismatch between the four
