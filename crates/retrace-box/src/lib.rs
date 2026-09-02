@@ -170,8 +170,13 @@ const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 // validateAlreadyRealizedClass fatal. See docs/.../2026-07-14-retrace-m2-tbi-design.md.
 const TCR_EL1_V:  u64 = 0x8_0021_0080_B511;    // +TBI0+TBID0. T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
-// base 0x30d00800 + M(1) + C(4) + I(0x1000). PAC is NOT in the base: it is per-guest (see below).
-const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000;
+// base 0x30d00800 + M(1) + C(4) + I(0x1000) + DZE(0x4000). PAC is NOT in the base: it is per-guest
+// (see below). DZE(14) is SET so EL0 `DC ZVA` executes natively instead of trapping to EL1 with
+// EC 0x18: Apple's `_platform_memset` issues `DC ZVA` above a size threshold, and CPython's
+// allocator hits that threshold at startup (M25-cpython). UCT(15) and UCI(26) are deliberately
+// left CLEAR pending measurement: nothing has measured a guest issuing `DC CVAU` / `IC IVAU` or
+// reading `CTR_EL0` from EL0, and the existing EC 0x18 exit already fails loud on that case.
+const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000;
 // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
 const SCTLR_PAC_EN: u64 = 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
 
@@ -4668,6 +4673,31 @@ mod pac_posture_tests {
         // this test does, so if `pac_posture_from_memory` ever stopped panicking here (e.g. someone
         // "fixed" it into a silent default), `#[should_panic]` would fail the test for real.
         let _ = pac_posture_from_memory(&regions);
+    }
+}
+
+// M25-cpython. EL0 `DC ZVA` traps to EL1 (EC 0x18) when SCTLR_EL1.DZE is clear; Apple's
+// `_platform_memset` issues it above a size threshold, and CPython's allocator hits that threshold
+// at startup. `sctlr_mmu_on` is the one derivation all four SCTLR install sites route through, so
+// pinning DZE there fixes every guest, not just CPython's.
+#[cfg(test)]
+mod sctlr_dze_tests {
+    use super::*;
+
+    // DZE(14) must be SET so `DC ZVA` executes natively at EL0 instead of trapping. UCT(15) and
+    // UCI(26) stay CLEAR deliberately: nothing has measured a guest issuing `DC CVAU` / `IC IVAU`
+    // or reading `CTR_EL0` from EL0, and the existing EC 0x18 non-syscall exit is already the
+    // fail-loud path for that case — setting them speculatively would be exactly the "right
+    // conclusion resting on an unmeasured supporting fact" this repo keeps catching. If a later
+    // wall needs one of them, that is a new measured finding with its own task.
+    #[test]
+    fn sctlr_enables_dc_zva_for_el0_and_nothing_else() {
+        for pac_enabled in [false, true] {
+            let sctlr = sctlr_mmu_on(pac_enabled);
+            assert!(sctlr & 0x4000 != 0, "DZE (bit 14) must be SET: {sctlr:#x}");
+            assert!(sctlr & 0x8000 == 0, "UCT (bit 15) must stay CLEAR: {sctlr:#x}");
+            assert!(sctlr & 0x0400_0000 == 0, "UCI (bit 26) must stay CLEAR: {sctlr:#x}");
+        }
     }
 }
 
