@@ -233,7 +233,7 @@ does *not* materialise:
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (`TRACE_MAGIC` is now
-`RT\x00\x08`, so every pre-M16 recording is unreadable) — and replay recomputes the current thread
+`RT\x00\x09`, so every pre-M16 recording is unreadable) — and replay recomputes the current thread
 and compares it. `verify_thread` has **seven** call sites, one in each arm that consumes a landmark
 and `return`s, each placed *after* that arm's own field comparison so a genuine argument divergence
 still reports as itself; the `SignalDelivery` landmark is checked by an eighth, inline comparison in

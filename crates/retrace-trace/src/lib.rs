@@ -66,7 +66,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x08"; // "RT" + format version 0x0008 (M16: landmark threads)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x09"; // "RT" + format version 0x0009 (M24: trampoline vector padding is `hvc #1`, so pre-M23 snapshots must be refused whole)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -258,9 +258,9 @@ mod tests {
         std::fs::remove_file(&p).ok();
     }
 
-    // M11's magic assertion moved to `magic_bumped_for_the_landmark_thread_tags` (now asserting
-    // v8, M16's bump). What is left here is the half that does not go stale: a v4 trace stays
-    // rejected.
+    // M11's magic assertion moved to `magic_bumped_for_the_m24_trampoline_vector_padding` (now
+    // asserting v9, M24's bump). What is left here is the half that does not go stale: a v4 trace
+    // stays rejected.
     #[test]
     fn rejects_v4_traces() {
         let p = named_tempfile("oldmagic");
@@ -295,11 +295,12 @@ mod tests {
     }
 
     #[test]
-    fn magic_bumped_for_the_landmark_thread_tags() {
-        // M16: Exit/Crash/Signal/SignalDelivery each gained `thread`, so a pre-M16 trace is not
-        // merely older — it is missing data the reader requires. Two tests, because "forgot to
-        // bump" and "bumped to the wrong value" are different mistakes.
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x08");
+    fn magic_bumped_for_the_m24_trampoline_vector_padding() {
+        // M24: the trampoline page's vector padding changed from `UDF #0` to `hvc #1` (M23),
+        // which is snapshot *content*, not `Event` shape — a pre-M24 snapshot is not merely
+        // older, it means something different at the bytes `Box_::restore` re-applies. Two
+        // tests, because "forgot to bump" and "bumped to the wrong value" are different mistakes.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x09");
     }
 
     #[test]
@@ -313,10 +314,10 @@ mod tests {
 
     #[test]
     fn a_trace_written_with_the_previous_magic_is_rejected_whole() {
-        // The M16 bump: the immediately-prior (v7, M15) magic must be rejected wholesale, not
-        // misparsed as if the four landmark variants still had no `thread` field.
-        let p = named_tempfile("v7magic");
-        std::fs::write(&p, b"RT\x00\x07rest-of-a-trace-that-will-never-be-read").unwrap();
+        // The M24 bump: the immediately-prior (v8, M16) magic must be rejected wholesale, not
+        // misparsed as if the trampoline page's vector padding were still `UDF #0`.
+        let p = named_tempfile("v8magic");
+        std::fs::write(&p, b"RT\x00\x08rest-of-a-trace-that-will-never-be-read").unwrap();
         let (evs, rejected) = Reader::open_checked(&p).unwrap();
         assert!(evs.is_empty() && rejected,
             "a magic mismatch must keep NOTHING, not misparse the tail");
