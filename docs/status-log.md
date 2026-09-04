@@ -4740,3 +4740,158 @@ reconcile against "M20 closed at 478 `#[test]` — 476 run, 2 parked", written b
 landed. Following it literally would have manufactured a ~21-test discrepancy out of two intervening
 milestones. `main` was merged into the branch before the gate ran, and the reconciliation above is
 against M23's actual close.
+
+## Status: M24-restoreaudit — the eighth instance of a seven-time bug gets a mechanism instead of a fix
+
+`Box_` has three construction paths, and only one of them runs on the record side:
+
+| Path | Runs on | Builds from |
+|---|---|---|
+| `load` / `load_dynamic` | **record only** | the Mach-O + dyld |
+| `restore` | **replay only** | a landmark-0 `Event::Snapshot` |
+| `from_checkpoint` | **replay only** (M4 seeks) | a mid-run `BoxState` |
+
+Anything a load path establishes that a replay path does not re-establish is a defect whose signature
+is **a passing record followed by a diverging replay**. Every record-side test is blind to it by
+construction. So, worse, is the determinism oracle — whenever *both* replay paths are wrong in the
+same way, because the oracle compares replay against record's **trace**, never against record's
+**box**.
+
+The class is neither hypothetical nor new. By this repo's own written record it has shipped **seven**
+times: M9 t3 (`from_checkpoint` reset a flag the restored state contradicted), M10 (fd slots not
+carried, so a seeked session believed every fd Free and a post-seek `pread` returned `EBADF`), M11
+(`sigtable` not carried, so a seek into a run that installed a disposition restored a box that had
+forgotten it — an *ignored* signal would terminate the guest), M14 (`thread_start_pc`), M18
+(`wq_thread_pc`), M21 (the believed-stack reservation made in `load_dynamic` only, which made M21
+**record-only** until its own t2.5), and M23 t1 (the EL1 vector table, left open as finding **F5**).
+The `BoxState` field comments are themselves a log of it — one of them reads *"the fifth field in
+this struct to exist for that reason."*
+
+Seven instances across fifteen milestones, each fixed individually, **none of them leaving behind a
+mechanism that would catch the eighth.** That absence is what M24 exists to fix. Fixing the instances
+turned out to be the smaller half.
+
+### The four asymmetries the audit found
+
+**G1 — `TPIDRRO_EL0` set unconditionally.** `restore` set it to `TSD_IPA` under a comment claiming to
+"match load". True of `load_dynamic`; false of the static load, which never sets it and does not map
+`TSD_IPA` at all — so a static guest's deref would have faulted on **replay only**. Corroboration
+worth recording: `from_checkpoint` already did this correctly, taking the value per-thread from the
+captured table with a comment explaining that a constant here is wrong. G1 brings `restore` into line
+with a sibling path that had been right since M14 — independent evidence that the constant was a
+genuine defect and not a harmless simplification.
+
+**L1 — the vector table, M23's F5.** `restore` never called `build_vector_table`; the trapping padding
+reached replay only because the trampoline page happens to be a snapshot backing. Correct by luck,
+pinned by nothing. `restore` now asserts the snapshot carries the table this build makes.
+
+**L2 — thread 0's saved context.** `load_dynamic` folds real startup state into it; `restore` left it
+`ThreadCtx::zeroed()`. The fix is gated on the dynamic path, and **the gate is load-bearing**: seeding
+it unconditionally traded the asymmetry for its mirror image, since the static load does not populate
+thread 0 either. The parity test caught that over-correction immediately, which is the argument for
+the test in one line.
+
+**G2 — stranded signals on replay.** `ReplaySession::advance`'s terminal-exit arm now calls
+`assert_no_stranded_signals()`, mirroring the guard record already had. Replay can strand a signal
+record did not: a seek can land *past* the `__ulock_wake` a pended signal was waiting to materialise
+at. A vanished signal is the one class the oracle structurally cannot see, because both sides agree —
+so it has to be caught by a guard, and the guard has to exist on both sides.
+
+### The part meant to outlive the instances
+
+`crates/retrace-box/tests/restoreparity.rs` diffs a load box against a `restore` box built from that
+same box's own snapshot, field by field, and states an obligation for future work: a new `Box_` field
+or load-time write must be **either** covered there and equal, **or** named in `normalise()` with the
+mirrored replay mechanism that re-establishes it, cited by file and line. There is no third option
+that is safe. `normalise()` holds exactly one entry today — the shared-cache pager, which
+`load_dynamic` installs eagerly and replay installs through the mirrored `#294`/`#536` dispatch arms.
+That is a real mirror, not an excuse, and the entry names it.
+
+t2 deepened the guard to 15 of `Box_`'s 27 state fields, plus two sysregs and the 0x800 vector table:
+it added `backings` (count and the `(ipa, len)` set — load builds them from the Mach-O, `restore` from
+`mem`, expected equal and nothing checked it), `next_l3` (derived from `backings` on both paths by
+*different code*, which is exactly the shape that drifts), and the full thread-0 `ThreadCtx` plus the
+thread count where only `ctx_of(0).regs.pc` had been compared.
+
+**And it declined eleven, which is as much the point as the three.** `noaccess`, `bps_armed`,
+`wps_armed`, `watch_ranges`, `syscall_watch_hit`, `tlbi_stub_ready`, `fds`, `sigtable`,
+`thread_start_pc`, `wq_thread_pc` and `pthread_size` are all default on both sides at landmark 0.
+Asserting `Default == Default` there is a test that passes for a reason unrelated to its name; adding
+all eleven would have made the guard look twice as thorough while making it no more capable of
+catching anything. The refusal is written into the test file with this reasoning, so the next reader
+does not mistake it for an oversight — and the obligation text already requires them to be added the
+moment a load path starts setting one before the first landmark.
+
+### F4 closed at the layer it belongs to
+
+M23 changed snapshot *content* — the trampoline's vector padding, `UDF #0` → `hvc #1` — without
+bumping `TRACE_MAGIC`, and was honest about it as finding **F4**. L1's assert had already converted
+that from a silent wrong replay into a loud refusal, which is strictly better and still the wrong
+layer: a format break belongs at `open_checked`, not in an assert deep inside box construction. t3
+moved `TRACE_MAGIC` `RT\x00\x08` → `RT\x00\x09`, so a pre-M23 recording is now refused before a
+single byte of it is trusted.
+
+**L1 stays anyway, and is not made redundant.** The magic guards the *file*; L1 guards the *box
+construction*; they fail at different layers for different callers. A future change to
+`build_vector_table()` that does not touch the format is caught only by L1.
+
+The written rule is what actually changed. It said *changing `Event`'s shape is a format break*. This
+was a change to what a snapshot's bytes **mean**, which a shape rule cannot see. Both are format
+breaks now, in the README and in CLAUDE.md.
+
+t3 also found that the new previous-magic rejection test wrote the **current** magic instead of the
+previous one it names, so it was passing through the torn-tail path rather than the magic check.
+Fixed to write `RT\x00\x08`, and the magic-specific rejection proven separately: the old magic alone
+is rejected, the current magic alone is not.
+
+### The gate
+
+**509 passed / 0 failed / 2 ignored across 112 test binaries**, every chunk `EXIT=0`; clippy clean
+over `--workspace --all-targets` with `-D warnings`. "112 test binaries" is 105 test executables plus
+the 7 `Doc-tests` harnesses, the convention every milestone since M14 has counted by.
+
+Reconciled against M21's 504 / 0 / 2 over 111 **file-by-file rather than by sum**, and the diff came
+back exactly one file wide: `restoreparity.rs` **0 → 5**, every other file byte-identical in its
+`#[test]` count. Source totals 506 → 511, which is 509 running plus the 2 parked. The ignored count
+is unchanged and both parked gates are the same two — `stackoverflow_rust_e2e` at M21's signal-model
+wall and `cache_symbol_e2e` at M19's shared-cache symbol wall. **M24 parks no new gate and un-parks
+none**, which is correct for a milestone that buys a guarantee rather than a capability.
+
+One gap was found *by* running the gate, and is recorded rather than smoothed over. Chunk B had to be
+split per-target for CPU reasons, and `cargo test -p <crate> --test <name>` selects integration
+targets **only** — so `retrace-box`'s `Doc-tests` harness ran in no chunk at all. It executes zero
+tests, so nothing went red; it silently cost one of the 112. This is the exact sibling of the `--bins`
+trap CLAUDE.md has documented since M17, and it was caught only because the reconciliation is
+file-by-file rather than a sum. It was then run on its own (`--doc`, `EXIT=0`) so the 112 is measured
+and not asserted. Both documents now name the second mouth of that trap.
+
+### Residual, stated rather than left to be rediscovered
+
+1. **`from_checkpoint` has no parity guard at all — this is the successor milestone.** It is the path
+   with the *documented five-instance history* of this exact class (M9 t3, M10, M11, M14, M18), it
+   restores far more state than `restore` does, and it runs mid-run where nothing is at a default.
+   M24 closes the class on the path it has bitten **twice** and leaves it open on the path it has
+   bitten **five times**. It is out of scope deliberately: it needs a different fixture — a box driven
+   to a mid-run landmark, checkpointed, restored and diffed — and a judgement about what *should*
+   legitimately differ at a mid-run landmark. That is a milestone's work, not a task's, and a shallow
+   version of it inside M24 would be the same kind of near-miss the class is made of.
+2. **Symmetric-but-wrong stays invisible.** A static box's thread-0 context is zeroed on *both* sides;
+   a consumer reading it without refreshing gets zeros identically on record and replay. Wrong in the
+   same way twice is the oracle's blind spot by construction, and no parity test between two boxes can
+   see it either.
+3. **Landmark 0 only.** The guard compares construction, not evolution. Two boxes that agree at
+   landmark 0 and drift later are outside what this pins.
+
+M23's section stands as written, F4 and F5 included; this section is their forward pointer. Both are
+now closed — F5 by L1, F4 by the magic bump — and neither of M23's entries is edited to say so, which
+is what the append-only rule is for.
+
+### A process note
+
+t1 landed **before** the spec and plan existed, which is a deviation from the SDD flow CLAUDE.md
+describes. It is recorded in the spec under "Why this spec is retroactive" rather than back-dated,
+because the audit found its first four asymmetries by following M21's and M23's scent rather than by
+systematic enumeration — and an audit milestone that does not publish its negative space is
+indistinguishable from four ad-hoc fixes wearing a milestone's name. The "Coverage" section of the
+spec exists to be that negative space, and the README's Known-limits entry deliberately does **not**
+say the class is closed.

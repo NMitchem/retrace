@@ -34,7 +34,7 @@ not, and the distinction is the task.
 - Deepen the `threads` comparison from `ctx_of(0).regs.pc` to the full thread-0 `ThreadCtx` plus the
   thread count.
 
-**Do not**, and say so in the test file rather than silently omitting: the ten
+**Do not**, and say so in the test file rather than silently omitting: the eleven
 default-on-both-sides fields (`noaccess`, `bps_armed`, `wps_armed`, `watch_ranges`,
 `syscall_watch_hit`, `tlbi_stub_ready`, `fds`, `sigtable`, `thread_start_pc`, `wq_thread_pc`,
 `pthread_size`). Asserting `Default == Default` at landmark 0 is a test that passes for a reason
@@ -83,9 +83,9 @@ other.
 
 ## Self-Review
 
-- **Is t2 padding?** It adds three comparisons and explicitly declines ten. If the declined ten were
-  added instead, the guard would look twice as thorough and be no more capable of catching anything.
-  The task is as much about the refusal as the additions.
+- **Is t2 padding?** It adds three comparisons and explicitly declines eleven. If the declined eleven
+  were added instead, the guard would look twice as thorough and be no more capable of catching
+  anything. The task is as much about the refusal as the additions.
 - **Does t3 risk invalidating existing traces?** Yes, deliberately — that is what a format break is
   for, and every e2e gate records fresh. The only casualty is a hand-kept trace file from before
   today, which is the thing F4 exists to reject.

@@ -105,6 +105,12 @@ through explicit assertions (`stack_top`, `stack_size`, `fall_throughs`, and `th
 only as `ctx_of(0).regs.pc`). It also compares two sysregs and the 0x800 vector-table bytes, neither
 of which is a struct field.
 
+**Note (t2):** the paragraph above and the list below describe the guard **as t1 landed it**, and are
+kept in that tense because they are the audit's finding. t2 then moved three of them into the
+compared set — `backings`, `next_l3`, and the `threads` comparison deepened to the full thread-0
+`ThreadCtx` plus the count — so the standing numbers are **15 compared, 12 uncompared** (the eleven
+defaults below, plus `l2_host`). The reasoning in the list is unchanged for everything still in it.
+
 **The 14 it does not compare**, and the honest reason each is currently safe:
 
 - `noaccess`, `bps_armed`, `wps_armed`, `watch_ranges`, `syscall_watch_hit`, `tlbi_stub_ready`,
