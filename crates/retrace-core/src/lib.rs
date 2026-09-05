@@ -1408,6 +1408,16 @@ impl ReplaySession {
                                 // reason: a genuine code mismatch should be reported as itself, not
                                 // masked by the thread mismatch it caused.
                                 self.verify_thread(*rthread, pc)?;
+                                // M24 G2: the mirror of record's clean-exit guard (see
+                                // `assert_no_stranded_signals`, called at the record arm above).
+                                // Replay can strand a signal record did not -- a seek or
+                                // `from_checkpoint` can land past the `__ulock_wake` a pended signal
+                                // was waiting to materialise at -- and without this that replay
+                                // exits 0 in silence. A signal that vanishes is the one class the
+                                // divergence oracle structurally cannot see, because both sides
+                                // agree; it has to be caught by a guard, and the guard has to exist
+                                // on both sides. Placed AFTER verify_thread for the usual reason.
+                                self.b.assert_no_stranded_signals();
                                 match self.events.get(self.idx + 1) {
                                     Some(Event::Snapshot { mem: final_mem, .. }) => {
                                         if let Some(d) = self.b.diff_memory(final_mem) {

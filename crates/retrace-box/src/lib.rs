@@ -93,6 +93,17 @@ pub const DYLD_BASE: u64 = 0x1_4000_0000;      // 5 GiB slide for dyld
 // the guard page. That was equally true when the stack sat at 2 MiB.
 const DYN_STACK_TOP:  u64 = 0x0280_0000;       // 40 MiB — above PT_L3_CEIL by libpthread's 0x7fc000
 const DYN_STACK_SIZE: u64 = 0x0004_0000;       // 256 KiB
+/// macOS 26 libpthread's main-thread stack size: 8 MiB minus one 16 KiB page. It calls
+/// `getrlimit(RLIMIT_STACK)` and then IGNORES the reply — M8 measured that answering 0x10000000
+/// instead of 0x40000 left libstd's computed guard address bit-identical, so retrace cannot
+/// influence this subtrahend and must lay its geometry out around it.
+pub const LIBPTHREAD_MAIN_STACK_SIZE: u64 = 0x7fc000;
+/// The guest's BELIEVED stack bottom — where libstd's `install_main_guard` mmaps its guard page.
+const GUARD_PAGE_IPA: u64 = DYN_STACK_TOP - LIBPTHREAD_MAIN_STACK_SIZE;   // 0x2004000
+/// The believed-but-unbacked window M21 reserves: one granule ABOVE the guard page (so the guard
+/// stays in free space and faults at stage 1), up to the real backed stack bottom.
+const GUARD_TOP: u64 = GUARD_PAGE_IPA + GRANULE as u64;                    // 0x2008000
+const DYN_STACK_BOTTOM: u64 = DYN_STACK_TOP - DYN_STACK_SIZE;              // 0x27C0000
 pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 // Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 36-bit (64 GiB)
 // IPA space and ABOVE the loaded segments (~4-5 GiB), the demand-paged shared-cache window
@@ -423,6 +434,13 @@ pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
 // requires `hv_vcpu_destroy` before `hv_vm_destroy` — reordering `vm` before `vcpu` would
 // silently reintroduce an HV_BUSY bug on the second in-process VM. `vcpu` MUST stay
 // declared before `vm`.
+// M24-restoreaudit. Every field here is part of a record/replay contract: `load`/`load_dynamic` run
+// on the RECORD path only, and replay builds its box through `restore`. A field this struct gains
+// that `restore` does not re-establish is an asymmetry whose signature is a PASSING RECORD followed
+// by a REPLAY DIVERGENCE — which no record-side test can see, and which shipped twice (M21's
+// believed-stack reservation, M23's vector table). `tests/restoreparity.rs` diffs a load box against
+// a restore box built from its own snapshot; a new field must be equal there, or be named in that
+// file's `normalise` with the mirrored mechanism that rebuilds it on replay.
 pub struct Box_ {
     vcpu: Vcpu,
     #[allow(dead_code)] // never read; held only so Drop runs hv_vm_destroy after vcpu's
@@ -1164,6 +1182,17 @@ impl Box_ {
     /// Size of the guest's stack in bytes — what `RLIMIT_STACK` must report (M8-stack).
     pub fn stack_size(&self) -> u64 { self.stack_size }
 
+    /// `[start, end)` of the stack the guest BELIEVES it has but retrace does not back — reserved by
+    /// `reserve_believed_stack` at the end of the DYNAMIC load path (`load_dynamic`), grown
+    /// page-by-page by `commit_reserved_page`. Excludes libstd's guard page by one granule at the
+    /// bottom, and the really-backed stack at the top.
+    ///
+    /// Ignores `&self` and returns the same compile-time window for any `Box_` — it is not
+    /// per-instance state. In particular a `Box_` built by the STATIC `Box_::load` path has no such
+    /// reservation at all; this accessor still returns the dynamic-path window regardless, so callers
+    /// on the static path must not treat its answer as meaning anything was reserved.
+    pub fn believed_stack_window(&self) -> (u64, u64) { (GUARD_TOP, DYN_STACK_BOTTOM) }
+
     /// Re-sign a batch of shared-cache auth slots with the GUEST's fixed PAC keys, returning the
     /// signed pointers (in slot order). Each slot is signed in-guest with `pacia` (IA,
     /// `key_is_data == false`) or `pacda` (DA, `key_is_data == true`) — the guest's own keys sign by
@@ -1742,6 +1771,7 @@ impl Box_ {
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
         let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 };
+        b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
         // first `switch_to_thread` rather than an all-zero placeholder.
@@ -2599,13 +2629,39 @@ impl Box_ {
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TTBR0_EL1, PT_L1_IPA).unwrap();
         vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap(); // match load: EL0/EL1 FP/SIMD enabled
-        vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();   // match load: thread pointer (harmless for M1)
+        // M8-stack: DERIVED, not hardcoded — restore() rebuilds the static and the dynamic path
+        // alike, and the replay mirror byte-compares the reply it recomputes from this geometry.
+        // Hoisted above the remaining sysreg sets because TPIDRRO_EL0 now depends on which path
+        // this is.
+        let (stack_top, stack_size) = stack_geometry_from_memory(regions);
+        // M24 G1: "match load" was true of load_dynamic and FALSE of the static load, which never
+        // sets TPIDRRO_EL0 at all — a fresh vCPU leaves it 0. Setting TSD_IPA unconditionally gave a
+        // static guest a different thread pointer on replay than it had on record, and TSD_IPA is
+        // not even mapped in a static box, so a deref would have faulted on REPLAY ONLY. Gate it the
+        // way the believed-stack reservation below is gated, so "match load" is true of both paths.
+        if stack_top == DYN_STACK_TOP {
+            vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap(); // match load_dynamic: kernel TSD
+        }
         vcpu.set_sys(sysreg::TPIDR_EL0,   0).unwrap();         // match load: cpu 0 / cluster 0 (M2-cpuid)
         Self::set_pac_keys(&vcpu);
         let pac = pac_posture_from_memory(regions);
-        // M8-stack: DERIVED, not hardcoded — restore() rebuilds the static and the dynamic path
-        // alike, and the replay mirror byte-compares the reply it recomputes from this geometry.
-        let (stack_top, stack_size) = stack_geometry_from_memory(regions);
+        // M24 L1 (M23 review F5): build_vector_table() runs in BOTH load paths and never here, so the
+        // trapping vector padding reaches replay only because the trampoline happens to be a snapshot
+        // backing — right by luck, pinned by nothing. Assert the snapshot carries the table THIS build
+        // makes. That also turns M23's un-bumped TRACE_MAGIC from a silent wrong replay into a loud
+        // refusal: a pre-M23 recording carries `UDF #0` padding, which the current code would have
+        // executed at EL1, destroying ESR_EL1 and reproducing the pc=0x4204 misattribution M23 removed.
+        {
+            let want = build_vector_table();
+            let got = regions.iter().find(|r| r.ipa == TRAMPOLINE_IPA)
+                .unwrap_or_else(|| panic!("restore: no trampoline region at {TRAMPOLINE_IPA:#x} — \
+                     the EL1 vector table is not in this snapshot"));
+            assert!(got.bytes.len() >= want.len() && got.bytes[..want.len()] == want[..],
+                "restore: this snapshot's EL1 vector table is not the one this build makes. A \
+                 recording from before the padding became trapping (`hvc #1`) replays with `UDF #0` \
+                 behind each slot head, which executes at EL1 and destroys the faulting exception's \
+                 ESR_EL1. Re-record with this build.");
+        }
         vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(pac)).unwrap(); // MMU on (tables from snapshot)
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
@@ -2633,8 +2689,44 @@ impl Box_ {
             .filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL)
             .map(|b| b.ipa + GRANULE as u64).max().unwrap_or(PT_L3_BASE);
         // reservations reset to empty here (mirroring mmap_next: MMAP_BASE) so replay's demand-commit
-        // address sequence matches record's from a clean slate.
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 }
+        // address sequence matches record's from a clean slate. The operative clause is *matches
+        // record's*: empty is correct for the guest's OWN reservations, which replay rebuilds by
+        // re-executing its `mach_vm_reserve` landmarks through mirrored dispatch arms. It is NOT
+        // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
+        // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
+        // That one entry is re-established below.
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 };
+        // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
+        // would not exist here and the first stack-growth fault would go unserviced and report as a
+        // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
+        // restored STATIC box does not acquire a reservation it never had (the mirrored
+        // over-correction, which `restorereserve.rs`'s static control exists to catch).
+        //
+        // Call the METHOD, never `reservations.push(..)`: `guest_vm_reserve` also granule-rounds the
+        // size and carries the "jump mmap_next past a FIXED reservation it sits inside" branch.
+        // Neither fires at today's geometry, but open-coding the push would silently skip both and a
+        // future geometry move would then diverge record from replay through a path nobody is
+        // watching. Identical method, identical arguments, both sides — symmetry rule 1's
+        // identity-by-construction, which is the whole reason the rule is phrased that way.
+        if stack_top == DYN_STACK_TOP { b.reserve_believed_stack(); }
+        // M24 L2: load_dynamic folds the real startup state into thread 0's saved context; leaving it
+        // zeroed here made record and replay differ for any reader of `ctx_of(current)` that does not
+        // refresh it first. Every consumer today happens to refresh, or to read only NON-current
+        // threads — which is luck, not a mechanism, and the same shape as L1.
+        //
+        // GATED, and the gate is not cosmetic: the STATIC load (`load_with_pac`) does NOT populate
+        // thread 0 either, so seeding unconditionally traded one asymmetry for its mirror image —
+        // restore populated where a static load had left zeros. `tests/restoreparity.rs` caught that
+        // within minutes of existing, which is the argument for it. Residual, symmetric and
+        // therefore NOT a record/replay defect: a static box's thread 0 context is zeroed on BOTH
+        // sides, so a consumer reading `ctx_of(current)` without refreshing gets zeros identically
+        // on record and replay. Wrong in the same way twice is the oracle's blind spot, but it is
+        // not this milestone's to fix.
+        if stack_top == DYN_STACK_TOP {
+            let ctx0 = b.save_ctx();
+            *b.threads.ctx_mut(0) = ctx0;
+        }
+        b
     }
 
     pub fn set_x0_and_return(&mut self, ret: u64) {
@@ -3749,6 +3841,63 @@ impl Box_ {
         0
     }
 
+    /// Reserve the main thread's believed-but-unbacked stack (M8 spec risk R3).
+    ///
+    /// **A reservation, not an `mmap`** — the same choice, for the same measured reason, as
+    /// `place_worker_stack`: `guest_vm_reserve` is bookkeeping only, and each page is demand-committed
+    /// with a fresh zeroed anon page on first touch by `commit_reserved_page`. Eagerly backing the full
+    /// 8 MiB was measured at ~1.7x on `hello_rust` and worse across the dyld suite, because the
+    /// per-syscall diff scales with total MAPPED memory — and a reservation maps nothing. A guest that
+    /// never recurses deeply commits zero pages and pays zero.
+    ///
+    /// **The window deliberately stops one granule ABOVE the guard page.** libstd mmaps its guard
+    /// `MAP_FIXED PROT_NONE` at `GUARD_PAGE_IPA`; a backed PROT_NONE page faults at STAGE 1 (permission,
+    /// via the EL1 trampoline) and arrives as `Stop::Fault` for M12's disposition check, which is what
+    /// delivers SIGSEGV to libstd's handler. If the guard were inside the reservation it would instead
+    /// be unbacked, fault at STAGE 2, and be silently committed here — turning a stack overflow into a
+    /// corrupted guest that keeps running. That is M13's invariant (see `protect_none`), and this is the
+    /// one place M21 could have broken it.
+    ///
+    /// Trace-free, and symmetric only because `restore` was made to say so. The original claim here
+    /// was that "`load_dynamic` runs identically on record and replay" — it does not. **Replay never
+    /// calls `load_dynamic`**; it builds its box through [`Box_::restore`], which resets
+    /// `reservations` to empty. That reset is right for the guest's OWN reservations (replay rebuilds
+    /// those by re-executing its `mach_vm_reserve` landmarks through mirrored dispatch arms) and
+    /// wrong for this one, which has no landmark to rebuild from precisely because it stays below the
+    /// trace. Left as it was, the first stack-growth fault on replay went unserviced and came back as
+    /// a divergence: M21 was record-only. `restore` now re-establishes exactly this reservation, by
+    /// calling this same method with the same arguments, so both sides enter landmark 1 with
+    /// identical reservation state and nothing about it enters the trace (symmetry rule 2).
+    fn reserve_believed_stack(&mut self) {
+        // These are pure functions of compile-time constants (GUARD_TOP, GUARD_PAGE_IPA,
+        // DYN_STACK_BOTTOM, PT_L3_CEIL never vary at runtime), so clippy's assertions_on_constants
+        // rightly refuses a plain assert! here — const { assert!(..) } is the existing convention
+        // this file already uses for the same situation (see stack_geometry_tests's DYN_STACK_TOP
+        // <= 1 << 36 check), and it is strictly stronger: a layout mistake fails the BUILD, not a
+        // test run or a live load.
+        //
+        // The window deliberately starts exactly ONE GRANULE above GUARD_PAGE_IPA, not AT it: that
+        // gap is what keeps libstd's PROT_NONE guard page in free (unreserved) space, so an overflow
+        // that reaches it faults at STAGE 1 through the EL1 trampoline instead of landing inside this
+        // reservation, where it would be silently demand-committed and turn a stack overflow into
+        // corrupted, silently-continuing execution — the one failure mode this design exists to
+        // prevent. `GUARD_TOP = GUARD_PAGE_IPA + GRANULE` gives that gap BY CONSTRUCTION, which makes
+        // a bare `GUARD_TOP > GUARD_PAGE_IPA` check here a tautology, not a guard: it could only fail
+        // if GRANULE somehow became 0. What the derivation does NOT already prove is alignment, so
+        // that is what these check instead — an unaligned GUARD_PAGE_IPA or GUARD_TOP would still let
+        // guest_vm_reserve reserve the wrong bytes, and a tautological assert would never catch it.
+        const { assert!(GUARD_PAGE_IPA.is_multiple_of(GRANULE as u64),
+            "guard page must be granule-aligned") };
+        const { assert!(GUARD_TOP.is_multiple_of(GRANULE as u64),
+            "window start must be granule-aligned") };
+        const { assert!(GUARD_TOP < DYN_STACK_BOTTOM,
+            "believed-stack window inverted: DYN_STACK_TOP or DYN_STACK_SIZE moved without moving \
+             this") };
+        const { assert!(GUARD_TOP >= PT_L3_CEIL,
+            "the window would overlap the L3 translation tables") };
+        self.guest_vm_reserve(GUARD_TOP, DYN_STACK_BOTTOM - GUARD_TOP, false);
+    }
+
     /// Place ONE workqueue worker's stack and pthread struct. Returns `(stack_base, stack_top,
     /// pthread)`, where `stack_top == pthread` — that equality is §2c's measurement (`SP == x0`,
     /// 7/7), not an implementation convenience, and both are named so the call site reads as the
@@ -4576,6 +4725,30 @@ impl Box_ {
             self.pac_enabled)
     }
 
+    /// Test-only (M24 t2): the guest's memory map as `(ipa, len)` pairs — what `tests/restoreparity.rs`
+    /// compares between a load box and a restore box built from that box's own snapshot.
+    ///
+    /// The `host` pointer is deliberately NOT exposed. Two boxes get their backings from two separate
+    /// `mmap` calls, so hosts differ by construction and comparing them would be a test that can only
+    /// fail. `(ipa, len)` is the part that is a record/replay contract: `load` derives it from the
+    /// Mach-O and `restore` from the snapshot regions, by different code, and nothing checked that
+    /// the two derivations agree.
+    ///
+    /// Kept out of `dbg_internal_state`'s string on purpose — that one is a round-trip diagnostic for
+    /// scalar bookkeeping, and folding a whole region list into it would make every unrelated failure
+    /// print a page of hex.
+    #[doc(hidden)]
+    pub fn dbg_backings(&self) -> Vec<(u64, usize)> {
+        self.backings.iter().map(|b| (b.ipa, b.len)).collect()
+    }
+
+    /// Test-only (M24 t2): the next free L3 table IPA. `load` bumps it as `build_tables` mints
+    /// tables; `restore` re-derives it by scanning the restored backings in the L3 window. Two
+    /// independent derivations of one value, which is the shape that drifts — and a drift here is
+    /// silent until a runtime exec-mmap promotion on replay mints an L3 at an IPA record never used.
+    #[doc(hidden)]
+    pub fn dbg_next_l3(&self) -> u64 { self.next_l3 }
+
     /// Test-only: the guest's live PAC posture, read back from SCTLR_EL1 and cross-checked against
     /// the field the constructor derived. PANICS if they disagree — i.e. if some install site set
     /// SCTLR without going through `sctlr_mmu_on(pac_enabled)`. A posture mismatch between the four
@@ -4759,8 +4932,13 @@ mod stack_geometry_tests {
     // cost this milestone two walls. The end-to-end proof is `hello_rust_e2e`.
     #[test]
     fn the_guard_page_libstd_computes_is_a_mappable_guest_address() {
+        // NOTE (M21-stackgrow): this checked_sub is now UNREACHABLE in practice. Module-level
+        // GUARD_PAGE_IPA (`DYN_STACK_TOP - LIBPTHREAD_MAIN_STACK_SIZE`) performs the identical
+        // subtraction at const-eval time, so a layout bad enough to underflow here fails the BUILD
+        // before this test ever runs. The panic! below is kept as documentation, not a live guard —
+        // don't trust it as the thing standing between a bad layout and a wild address.
+        //
         // macOS 26 libpthread's main-thread stack size: 8 MiB minus one 16 KiB page.
-        const LIBPTHREAD_MAIN_STACK_SIZE: u64 = 0x7fc000;
         let guard = DYN_STACK_TOP.checked_sub(LIBPTHREAD_MAIN_STACK_SIZE).unwrap_or_else(|| panic!(
             "DYN_STACK_TOP {DYN_STACK_TOP:#x} is below libpthread's constant main-thread stack size \
              {LIBPTHREAD_MAIN_STACK_SIZE:#x}: libstd's guard-page subtraction underflows to a wild \
@@ -4774,6 +4952,54 @@ mod stack_geometry_tests {
             "guard page {guard:#x} overlaps the stack backing [{:#x}, {DYN_STACK_TOP:#x}) — it must \
              sit BELOW the stack it guards", DYN_STACK_TOP - DYN_STACK_SIZE);
         const { assert!(DYN_STACK_TOP <= 1 << 36, "the stack must fit in the 36-bit guest IPA space") };
+    }
+
+    // M21. The believed-stack window is derived, not typed — this pins the arithmetic both ways so
+    // that moving DYN_STACK_TOP or DYN_STACK_SIZE without moving the window fails here, instantly
+    // and on every gate, rather than in a guest that silently keeps running after an overflow.
+    #[test]
+    fn the_believed_stack_window_brackets_the_guard_page_and_the_backing() {
+        assert_eq!(GUARD_PAGE_IPA, 0x2004000, "libstd's computed guard page");
+        assert_eq!(GUARD_TOP, 0x2008000, "one granule above it");
+        assert_eq!(DYN_STACK_BOTTOM, 0x27C0000, "the real backed stack bottom");
+        assert_eq!(DYN_STACK_BOTTOM - GUARD_TOP, 0x7B8000, "7.72 MiB of believed-but-unbacked stack");
+
+        assert_eq!(GUARD_TOP, GUARD_PAGE_IPA + GRANULE as u64,
+            "the window must clear the guard page by EXACTLY one granule: more would leave a hole \
+             a growing stack faults fatally in, less would swallow the guard");
+        // Deviation from the task brief, and the one the brief could not have known: clippy's
+        // `assertions_on_constants` rejects a plain `assert!` over two constants, and the gate runs
+        // `-D warnings`, so the brief's line as written is a hard red. This takes the const-block
+        // form `reserve_believed_stack` already uses for the identical check. A const-block panic
+        // message must be a literal, so the `{PT_L3_CEIL:#x}` capture goes with it.
+        const { assert!(GUARD_TOP >= PT_L3_CEIL,
+            "the window must not overlap the L3 translation tables") };
+        assert_eq!(GUARD_PAGE_IPA % GRANULE as u64, 0, "the guard page must be granule-aligned");
+    }
+
+    // M21 risk 7. `restore` re-derives the stack geometry from the snapshot's regions and FAILS LOUD
+    // rather than guessing. Growth pages become new backings, so the question is whether they can
+    // change its answer. They cannot — `covers` matches on `r.ipa == base`, an EXACT base rather
+    // than containment, and every growth page starts below DYN_STACK_BOTTOM at its own granule.
+    // This is a property M21 depends on but did not create, so it is pinned rather than argued.
+    #[test]
+    fn growth_pages_below_the_stack_do_not_shadow_the_geometry_probe() {
+        let mut regions = vec![region(DYN_STACK_BOTTOM, DYN_STACK_SIZE)];
+        // Three committed growth pages walking down, exactly as a deep recursion would leave them.
+        for i in 1..=3u64 {
+            regions.push(region(DYN_STACK_BOTTOM - i * GRANULE as u64, GRANULE as u64));
+        }
+        assert_eq!(stack_geometry_from_memory(&regions), (DYN_STACK_TOP, DYN_STACK_SIZE),
+            "growth pages must not shadow the stack backing the probe matches on");
+    }
+
+    // Non-vacuity for the test above, split out so it can use the module's existing #[should_panic]
+    // idiom rather than catch_unwind: a growth page ALONE must NOT satisfy the dynamic arm. Without
+    // this, the assertion above could pass because the probe matches growth pages too.
+    #[test]
+    #[should_panic(expected = "refusing to guess a stack geometry")]
+    fn a_growth_page_alone_does_not_satisfy_the_dynamic_arm() {
+        let _ = stack_geometry_from_memory(&[region(DYN_STACK_BOTTOM - GRANULE as u64, GRANULE as u64)]);
     }
 }
 

@@ -44,6 +44,13 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 
+  **`Doc-tests` is the same trap's second mouth.** `--test <name>` skips doc-test harnesses too, so
+  splitting a *library* crate per-target drops that crate's `Doc-tests` target from every chunk. It
+  runs zero tests, so nothing goes red; it silently costs one of the counted binaries. M24 split
+  `retrace-box` per-target for CPU reasons and lost exactly that one, caught only by the file-by-file
+  reconciliation below. If you split a library crate per-target, run `cargo test -p <crate> --doc`
+  beside it.
+
   Then reconcile the total against the previous milestone's close by diffing `#[test]` counts
   file-by-file, rather than trusting a sum. Grep gate logs with `grep -a` — they carry ANSI and
   UTF-8 that trips plain grep.
@@ -101,7 +108,10 @@ are gitignored); build/run recipes and findings are in `spikes/README.md`.
   decode), `decode_aut_rd` (PAC AUT* instruction decode), Mach-O/PSTATE constants.
 - **`retrace-trace`** — the on-disk trace format: the `Event` enum (`Snapshot`/`Syscall`/`Exit`),
   `Writer`/`Reader` with a magic+version header and per-record CRC32. **Changing `Event`'s shape is a
-  format break — bump `TRACE_MAGIC`.** `open_checked` drops a torn/corrupt tail rather than panicking.
+  format break — bump `TRACE_MAGIC`.** **So is changing what a snapshot's bytes _mean_**: M23 changed
+  the trampoline's vector padding without bumping, and a pre-M23 trace then restored its old padding
+  under code that assumed the new — M24 bumped for it (`RT\x00\x09`). `open_checked` drops a
+  torn/corrupt tail rather than panicking.
 - **`retrace-guest`** — the Mach-O loader (`parse_macho`, `slice_arm64e`) **and** the guest test
   programs. `asm/*.s` (freestanding, `-nostdlib -static`) and `c/hello_dyn.c` are compiled by
   `build.rs` into `OUT_DIR`; path constants (`HELLO`, `HELLO_DYN`, …) point at them.
@@ -232,9 +242,9 @@ does *not* materialise:
   agree with each other while the signal vanished.
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
-`Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (`TRACE_MAGIC` is now
-`RT\x00\x08`, so every pre-M16 recording is unreadable) — and replay recomputes the current thread
-and compares it. `verify_thread` has **seven** call sites, one in each arm that consumes a landmark
+`Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (which bumped
+`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x09`, moved again by M24, so every pre-M23
+recording is unreadable) — and replay recomputes the current thread and compares it. `verify_thread` has **seven** call sites, one in each arm that consumes a landmark
 and `return`s, each placed *after* that arm's own field comparison so a genuine argument divergence
 still reports as itself; the `SignalDelivery` landmark is checked by an eighth, inline comparison in
 `mirror_delivery`, deliberately not `verify_thread`, because its tag is the **receiving** thread
