@@ -120,6 +120,11 @@ pub const HELLO: &str = concat!(env!("OUT_DIR"), "/hello");
 pub const STEPPY: &str = concat!(env!("OUT_DIR"), "/steppy");
 pub const FILEIO: &str = concat!(env!("OUT_DIR"), "/fileio");
 pub const FIXTURE: &str = concat!(env!("OUT_DIR"), "/fixture.txt");
+/// M26: a guest whose one `read()` returns 96 KiB — more than `PTR_WINDOW_CAP` — so the record
+/// side's diff window must cover what the kernel actually wrote, not a fixed 64 KiB.
+pub const BIGREAD: &str = concat!(env!("OUT_DIR"), "/bigread");
+/// The 96 KiB fixture `BIGREAD` reads: all `A`, final byte `Z`.
+pub const BIGREAD_FIXTURE: &str = concat!(env!("OUT_DIR"), "/bigread_fixture.bin");
 pub const MMAPGUEST: &str = concat!(env!("OUT_DIR"), "/mmapguest");
 pub const UNALIGNED: &str = concat!(env!("OUT_DIR"), "/unaligned");
 pub const PACGUEST: &str = concat!(env!("OUT_DIR"), "/pacguest");

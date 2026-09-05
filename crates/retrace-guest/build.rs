@@ -50,6 +50,23 @@ fn main() {
         .status().expect("clang fileio");
     assert!(status.success(), "fileio guest build failed");
 
+    // M26: a fixture LARGER than PTR_WINDOW_CAP (64 KiB), so one read() writes past the
+    // record-side diff window. All 'A' except the final byte, which is 'Z' — the guest emits
+    // only that last byte, so a truncated capture is a single wrong character on stdout.
+    let big = format!("{out}/bigread_fixture.bin");
+    let mut bytes = vec![b'A'; 0x18000];
+    *bytes.last_mut().unwrap() = b'Z';
+    std::fs::write(&big, &bytes).unwrap();
+    let gen = format!("{out}/bigread_gen.s");
+    std::fs::write(&gen, format!(".section __DATA,__data\n.p2align 3\n.global path\npath: .asciz \"{big}\"\n")).unwrap();
+    let src = format!("{}/asm/bigread.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/bigread");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
+        .status().expect("clang bigread");
+    assert!(status.success(), "bigread guest build failed");
+
     // mmap guest: allocates via SYS_mmap, writes the mapping with plain stores, munmaps.
     let src = format!("{}/asm/mmapguest.s", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/mmapguest");
