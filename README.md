@@ -108,6 +108,7 @@ records and replays byte-identically, twice:
 | 4 | `threadrust` | `std::thread::spawn` + `join` |
 | 5 | `dispatch_dyn` (C) | `dispatch_async` onto a global concurrent queue, joined by a `dispatch_semaphore` |
 | 6 | `/bin/echo` | an **Apple system binary**, arm64e with PAC on, straight from `/bin` |
+| 7 | the real **CPython** interpreter | `-c 'print(1)'` — the 2026-07-05 vision spec's headline target |
 
 **Apple's own binaries, measured.** Sampled across `/bin` + `/usr/bin`, pointing retrace straight at
 each file: **46 of 54 record and replay** — stdout byte-identical and exit codes equal. Among them
@@ -193,33 +194,44 @@ failure on purpose.
   **clear**: nothing has measured a guest issuing `dc cvau` / `ic ivau` or reading `CTR_EL0` from
   EL0, and the existing exit fails loud if one does. Both changes sit below the trace or beside it —
   nothing new is recorded and `TRACE_MAGIC` did not move.
+- **The record-side diff window covers what the kernel may write.** `forward_and_diff` captures the
+  kernel's writes by snapshotting a pre-image window of each pointer argument, forwarding, and
+  diffing that window. Until M26 the window was a flat 64 KiB while the forwarded read *count* was
+  clamped only by the destination's backing — two bounds that must agree, written twice — so a read
+  returning more than 64 KiB had its tail written into guest memory on record and captured in **no**
+  `Event`. Replay restored stale bytes there. The clamp and the window now share one predicate, so
+  they cannot drift apart again, and the window widens only for the argument whose length is
+  genuinely known; everything else keeps the 64 KiB heuristic, because widening unconditionally
+  costs a pre-image copy on every pointer operand of every syscall. The class is **not** closed —
+  see Known limits for the syscalls still truncating, including the one `/bin/ps` hits.
 
-**Gate:** 512 passed / 0 failed / 3 ignored across 113 test binaries, **measured at M25** over all
-113 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
-See the testing note below for how that number is assembled. "113 test binaries" is 106 test
+**Gate:** 515 passed / 0 failed / 2 ignored across 114 test binaries, **measured at M26** over all
+114 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
+See the testing note below for how that number is assembled. "114 test binaries" is 107 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
-nobody has to re-derive it. The three ignored gates are `stackoverflow_rust_e2e` (re-parked by M21 at
-a signal-model wall, **not** the M8 risk R3 wall it stood at from M8 through M20), `cache_symbol_e2e`
-(the M19 shared-cache symbol wall), and `the_real_cpython_interpreter_records_and_replays` (parked by
-M25 at a replay-side sequence divergence); all three are described under Known limits.
+nobody has to re-derive it. The ignored gates are back down to **two**: `stackoverflow_rust_e2e`
+(re-parked by M21 at a signal-model wall, **not** the M8 risk R3 wall it stood at from M8 through
+M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). Both are described under Known
+limits. M25's third — the CPython gate — is un-parked, and rung 7 is why.
 
-Reconciled against M24's 509 / 0 / 2 over 112 **file-by-file rather than by sum**, and the diff came
-back three files wide: `retrace-arch/src/lib.rs` **22 → 23**, `retrace-box/src/lib.rs` **12 → 13**,
-and the new `retrace/tests/cpython_e2e.rs` **0 → 2** — one running, one ignored. Every other file
-unchanged, and `--bins` **11 → 11**, which is the load-bearing half: M25 touches nothing in
-`crates/retrace/src/`, so a `--bins` that moved would mean the reconciliation was measuring something
-other than what it claimed. Total **+3 running, +1 ignored, +1 binary**. The count closes at both
-ends rather than only summing: the tree holds 511 `#[test]` at M24 = 509 running + 2 ignored, and 515
-at M25 = 512 + 3, so no test is unaccounted for in either direction.
+Reconciled against M25's 512 / 0 / 3 over 113 **file-by-file rather than by sum**, and the diff came
+back two files wide: `retrace-box/tests/memdiff.rs` **1 → 2** and the new
+`retrace/tests/bigread_e2e.rs` **0 → 1**. Every other file unchanged, and `--bins` **11 → 11**. Total
+**+3 running, −1 ignored, +1 binary** — and the +3 from only +2 new tests is the point of the
+milestone: the third is `the_real_cpython_interpreter_records_and_replays` moving out of the ignored
+column rather than a test being added. The count closes at both ends rather than only summing: the
+tree holds 515 `#[test]` at M25 = 512 running + 3 ignored, and 517 at M26 = 515 + 2.
 
-M24's gate found a sharp edge that this one acted on rather than rediscovered: splitting a *library*
-crate per-target drops that crate's `Doc-tests` harness from every chunk in silence. M25's chunk B
-therefore ran `cargo test -p retrace-box` as a **whole package**, and `Doc-tests retrace_box` duly
-appears in its log. The `retrace` package still had to be split — the whole-package run was killed by
-the ceiling with 35 of its 58 targets done — but it was split by *target set* and the remaining 23
-swept in two further chunks, so every target ran in exactly one chunk and the union is the package.
-A kill is not a red; the run it killed had zero failures in everything it reached.
+Chunk B again ran `cargo test -p retrace-box` as a **whole package** so its `Doc-tests` harness is
+not silently dropped (M24's lesson, now standing practice), and the `retrace` package was split into
+four explicit target sets rather than run whole, so no chunk is killed by the ceiling and every
+target runs in exactly one chunk.
+
+One timing trap is worth knowing before it is mistaken for a hang: `bigread_e2e` took **536s** on its
+first run and **47s** on its second, with the recording process sitting at 0:00.00 CPU throughout the
+stall. That is first-execution codesign validation of a freshly signed binary, not a hung guest. The
+second number is the honest one.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x09`, moved by **M24**. Recordings from before M23 are
 rejected whole, at `Reader::open_checked`, before a single byte of them is trusted. M23 had changed
@@ -239,9 +251,16 @@ These are real and current, not aspirational gaps.
   named cause.** Of 54 sampled, **46 now record and replay** (M23, up from 34 at M22), stdout
   byte-identical and exit codes equal. M22's four named causes are down to one plus a tail: the
   `pc=0x4204` group (13) and the `msgh_id` 412 group (4) are both cleared, `csh`/`tcsh` still hit the
-  M10 fd table's fail-loud unmodelled `dup2` (working exactly as designed), and `ps` remains a
-  genuine replay divergence — the oracle catching nondeterminism rather than reproducing something
-  wrong in silence. The **new** group is four binaries (`automationmodetool`, `desdp`, `dyld_info`,
+  M10 fd table's fail-loud unmodelled `dup2` (working exactly as designed), and `ps` diverges on
+  replay for a reason **M26 measured and this sentence used to get wrong**: it was published here as
+  "the oracle catching nondeterminism", but replay never *executes* a syscall — it applies recorded
+  writes — so a process list cannot vary between the two runs, and the repo's own M22 measurement
+  document said "also not diagnosed" while the README said it with confidence. `ps` sizes a
+  `sysctl(KERN_PROC_ALL)` buffer at roughly `nproc x sizeof(struct kinfo_proc)`, far past 64 KiB, and
+  is an instance of the truncating diff window above. Measured: the tripwire fires once, on
+  `num=202`, and replay then diverges at `ipa 0x700810091` — 145 bytes past that window's end, with
+  replay holding zeros where the recording holds data. Closing `sysctl` should move this count from
+  46 to 47. The **new** group is four binaries (`automationmodetool`, `desdp`, `dyld_info`,
   `flex`) that reach a `brk`. That cause is **unmeasured**, and unlike M22's wall it has **no parked
   gate standing for it** — a gap in this repo's own discipline rather than a decision, recorded here
   rather than quietly left out. The 46 is the swept number and deliberately not the flattering one:
@@ -252,19 +271,30 @@ These are real and current, not aspirational gaps.
 - **A guest must be arm64 or arm64e.** `slice_native` picks the slice this machine would execute —
   arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
   binary is refused by name. There is no emulation of another ISA and none is planned.
-- **The real CPython interpreter records, but does not yet replay.** M25 pointed retrace at
-  `Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python` running
-  `-c 'print(1)'` and cleared every wall on the **record** side: the run reaches a clean `exit(0)`
-  having written exactly `1\n`, reproduced twice. Replay is where it stops. The first of the two
-  replays the gate demands diverges at **landmark 568**, `pc=0x1804b1834`, with live re-execution
-  issuing `num=4` (`write`, fd 2) where the recording holds `num=75` (`mmap`) — a difference in the
-  syscall **sequence**, not in one call's arguments, which means the two runs had already parted ways
-  somewhere earlier than the oracle's first complaint. Closing it means finding *which* earlier
-  syscall's count or ordering differs between a record and its own replay; that is a milestone, not a
-  one-line fix, so `the_real_cpython_interpreter_records_and_replays` is parked `#[ignore]`d with the
-  divergence line verbatim in its reason. It is deliberately **not** a rung in the ladder above: that
-  ladder's entry condition is "records *and replays* byte-identically, twice", and this meets half of
-  it. Parking a new gate for a capability the repo does not yet have has regressed nothing.
+- **The record-side diff window still truncates for most syscalls, and the failure is quiet.**
+  `forward_and_diff` snapshots a pre-image window per pointer argument and diffs that same window;
+  M26 widened it to the real length only where that length is genuinely known — `read` (3), `pread`
+  (153), `read_nocancel` (396), whose `x2` is a byte count. **Everything else still gets a flat 64
+  KiB**, and anything the kernel writes past it lands in guest memory on record and in no `Event`.
+  Named rather than implied, each checked against the SDK: `sysctl` (202), whose length lives at
+  `*(size_t*)x3` and is unbounded; `pread_nocancel` (414), missing from `fd_operands`, the clamp
+  **and** the window — its missing clamp means it forwards *unclamped*, which is a host
+  memory-safety hazard rather than a fidelity gap; `getdirentries64` (344) and `recvfrom` (29/403),
+  which have exactly the shape M26 fixed but are not in its predicate; `getfsstat64` (347), where 30
+  mounts crosses the cap and this machine has 24; `proc_info` (336); `getattrlist`/`fgetattrlist`
+  (220/228); `csops` (169/170). The `readv`/`recvmsg` family (120/27/540/411/401/480) is a **worse**
+  class, not a truncating one: their destination sits behind a pointer *inside* a guest struct that
+  nothing translates, so a guest IPA would reach the host kernel as a host address.
+  There is **no BSD-syscall allowlist** — everything not explicitly intercepted is forwarded — so
+  this set is open-ended rather than enumerable.
+  The saving grace is that it is *latently* silent, not silent: `Box_::diff_memory` compares every
+  recorded region at exit and all three terminal replay arms fail on mismatch, so stale bytes
+  surface there unless the guest acts on them first or drops their backing. A read into a mapping
+  that is then `munmap`'d would evade even that; no gate does it today. A tripwire that would make
+  the whole class fail loud was prototyped and measured during M26 — it fired exactly once, on the
+  real culprit — but deliberately **not landed**, because landing a `panic!` without first measuring
+  whether it fires on existing gate guests is the kind of unmeasured supporting fact this repo keeps
+  catching in itself.
 - **Exec-in-place is unmodelled — point retrace at the real binary, not the shim.** A launcher that
   `posix_spawn`s with `POSIX_SPAWN_SETEXEC`, which is exactly what Homebrew's `python3.14` shim does
   to hand off to the interpreter above, gets an **error** back instead of a replaced image and takes
@@ -421,13 +451,13 @@ cargo test -p retrace --bins -- --test-threads=1            # don't omit: see be
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
 without a `--test` filter, reaches them.** Leaving it out silently costs 11 tests and one binary —
-at M25, 501 / 0 / 3 over 112 instead of 512 / 0 / 3 over 113 — and nothing fails to warn you. Contrast
+at M26, 504 / 0 / 2 over 113 instead of 515 / 0 / 2 over 114 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 
 **The same trap has a second mouth: `Doc-tests`.** `--test <name>` skips those too, so splitting a
 *library* crate per-target — as M24's gate had to for `retrace-box` — drops that crate's `Doc-tests`
-harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 113
+harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 114
 binaries. If you split a library crate per-target, run `cargo test -p <crate> --doc` alongside it —
 or, as M25's gate did, run that crate as a whole package and let cargo include it for you.
 

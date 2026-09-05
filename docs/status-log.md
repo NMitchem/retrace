@@ -4999,3 +4999,133 @@ than by anything structural.
 The successor is **M26-cpythonreplay**: find the earlier syscall whose count or ordering differs between
 record and its own replay, and close it. Everything before landmark 568 is known-good on the record side,
 which is a much narrower search than M25 started with.
+
+---
+
+## Status: M26-cpythonreplay — 🎉 rung 7, and the wall was ours, not CPython's
+
+M25 parked rung 7 at a replay divergence and named the successor. The successor took one afternoon,
+because the wall was not in CPython, not in the replay path, and not new: it was a 64 KiB constant
+written in M1 and a clamp written in M2 that were never asked to agree.
+
+**M25's own account of the wall was wrong in three ways, and each one mattered.** The `#[ignore]`
+reason said the two runs' syscall *sequences* had parted ways, that `num=75` was `mmap`, and that the
+divergence was at landmark 568.
+
+1. `num=75` is **`madvise`** (`sys/syscall.h:115`; `mmap` is 197). The recorded call was
+   `madvise(…, MADV_FREE_REUSABLE)` — routine libmalloc housekeeping. Read as `mmap` the two sides
+   look like unrelated code paths; read correctly they are *normal path* versus *error path*, which
+   is what pointed at the answer.
+2. The sequences had **not** parted ways. Landmarks 0..559 matched exactly — they had to, or the
+   oracle would have complained sooner.
+3. The landmark index was never a stable fact. M25 pinned 568; this machine diverges at 560, same
+   `pc`, same live args. Pinning it as evidence pinned noise beside signal.
+
+**The measurement that closed it took one probe.** The live side was about to `write(2, …, 106)`. Read
+those 106 bytes out of guest memory:
+
+```
+Error in sitecustomize; set PYTHONVERBOSE for traceback:
+ValueError: bad marshal data (unknown type code)
+```
+
+A **data** divergence. The guest was unmarshalling a `.pyc` and hit a byte that is not a valid type
+code — reacting correctly to bytes replay had failed to restore. Dumping the recorded events before
+the divergence found it at landmark 556: `read(fd=4, buf=0x701528020, count=88104)` returned
+**88103** bytes and recorded **65536**. 22567 bytes read and captured nowhere.
+
+**Root cause.** `forward_and_diff` snapshots a pre-image window of each pointer argument, forwards,
+then diffs that same window. The window was a flat `PTR_WINDOW_CAP` (64 KiB). The "Debt #1" clamp
+immediately below bounds the forwarded read *count* by the destination's backing, **not** by the
+window. Two bounds that must agree, written twice — so the kernel may legitimately write past what
+the diff ever inspects.
+
+**This was booked 25 milestones ago and half-paid.** M1's plan
+(`2026-07-05-retrace-m1.md:874`) flagged the window policy as needing revisiting "once real programs
+(large mappings, failing syscalls) are recorded". M2 then deliberately declined to touch it
+(`2026-07-06-retrace-m2.md:462`) — and was *right* in the direction it considered: `x2` is only a
+count for the read family, so clamping the snapshot by it would under-snapshot `fstat`'s buffer and
+regress M1. Nobody asked the inverse — whether the window should widen **up** to `x2` where `x2`
+genuinely is a count. M1's design spec even called this its "main engine risk", asserting it was
+"caught loudly, never silently". That mitigation was half-right, and the half that failed is
+explained below.
+
+**Nothing previously green was corrupted, and this is structural rather than lucky.** No gate in the
+repo's history ever ran a guest capable of a >64 KiB read through `forward_and_diff`. Every bulk file
+read bypasses it: file-backed `mmap` goes through `guest_mmap_file`, which records its full extent;
+the shared-cache pager reads fixed 16 KiB pages; retrace's own Mach-O loading is host-side
+`std::fs::read`. The largest count that ever reached `forward_and_diff` was dyld's `pread` of 0x4000.
+`jq_file_e2e`'s fixture is 28 bytes. The defect was unreachable by construction until CPython.
+
+**The failure is *latently* silent, and M26's own test misdescribed this before an audit caught it.**
+The per-landmark oracle genuinely cannot see it — `(num, args)` match, so the recording is
+self-consistent and merely incomplete. But `Box_::diff_memory` compares every recorded region at
+exit, and all three terminal replay arms fail on mismatch. So stale bytes surface **unless** the
+guest acts on them first or drops their backing. That is why the two known instances failed in
+different places:
+
+| guest | what it did with the bad bytes | where it failed |
+|---|---|---|
+| CPython (M25) | branched on them | syscall landmark ~560 |
+| `bigread` (M26) | ignored them | terminal memory compare, at `buf+0x10000` |
+
+The genuinely silent escape hatch is a read into a mapping that is then `munmap`'d, since
+`guest_munmap` removes the backing. No gate does that today, which is recorded here rather than left
+unstated. The correction to `bigread_e2e`'s comment is its own commit (`4bcfc6c`) because the
+milestone's own test claiming the wrong failure mode is exactly the kind of thing that ossifies.
+
+**The fix is not a bigger constant** — 300 KiB would break identically. The clamp and the window now
+consult one predicate, `writes_x2_bytes_to_x1`, so they cannot drift apart again; `diff_window`
+widens only that argument for those syscalls and never exceeds `avail`. Everything else keeps the
+heuristic, because widening unconditionally costs a pre-image copy on every pointer operand of every
+syscall and M8 measured that per-syscall diff time is not free.
+
+**🎉 Rung 7.** `the_real_cpython_interpreter_records_and_replays` is un-`#[ignore]`d. The real CPython
+interpreter running `-c 'print(1)'` records and replays byte-identically, **twice**, exit 0, stdout
+exactly `1\n`. The assertion never moved — it demands what it demanded while parked. The 2026-07-05
+vision spec's headline target runs.
+
+**`/bin/ps` was this bug, filed as something else.** The README said since M22 that `ps` is "the
+oracle catching nondeterminism". It cannot be: replay never *executes* a syscall, so a process list
+cannot vary between runs — and the M22 measurement document itself said "also not diagnosed" while
+the README stated it with confidence. Measured with a prototype tripwire: it fires once, on
+`num=202` (`sysctl`), and replay then diverges at `ipa 0x700810091`, **145 bytes past that window's
+end**, replay holding zeros where the recording holds data. The README is corrected. M26's fix does
+**not** cover it, because `sysctl`'s length lives at `*(size_t*)x3` rather than in a register.
+
+**The gate: 515 passed / 0 failed / 2 ignored across 114 test binaries**, every chunk `EXIT=0`,
+clippy clean. Reconciled against M25's 512 / 0 / 3 over 113 file-by-file: `memdiff.rs` 1 → 2,
+the new `bigread_e2e.rs` 0 → 1, `--bins` 11 → 11, everything else unchanged. **+3 running from only
++2 new tests** — the third is the CPython gate leaving the ignored column. 515 `#[test]` at M25 =
+512 + 3; 517 at M26 = 515 + 2. The ignored gates are back to two.
+
+`bigread` is a new repo-owned guest rather than a reliance on `cpython_e2e`, and deliberately so:
+that gate *skips* when Homebrew Python is absent, and a gate that can silently not-run cannot guard
+anything. It deletes its fixture between record and replay, which is what proves the tail byte came
+out of the trace rather than off the disk.
+
+**What is left standing, named rather than implied.** The fix covers three syscalls of an
+**open-ended** forwarded set — there is no BSD-syscall allowlist; everything not explicitly
+intercepted is forwarded. Still truncating, each checked against the SDK: `sysctl` (202, unbounded,
+and this is `ps`); `pread_nocancel` (414, absent from `fd_operands`, the clamp **and** the window,
+where the missing clamp is a host memory-safety hazard rather than a fidelity gap);
+`getdirentries64` (344) and `recvfrom` (29/403), which have exactly the fixed shape but are not in
+the predicate; `getfsstat64` (347), where 30 mounts crosses the cap and this machine has 24;
+`proc_info` (336); `getattrlist`/`fgetattrlist` (220/228); `csops` (169/170). The `readv`/`recvmsg`
+family is a worse class — nested destination pointers that nothing translates. Two further holes
+found and not paid: `diff_memory` silently truncates a recorded region longer than its replay backing
+(`.min(avail)`, flagged in M1's own branch review and deferred to M2, where only the clamp half was
+paid), and the `if !err` gate skips write capture entirely on a failed syscall, which the comment
+treats as universal and which `sysctl`'s `ENOMEM` behaviour may contradict — **unmeasured, and named
+rather than fixed on inference.**
+
+**The tripwire exists, works, and was deliberately not landed.** Between the pre-image and post-image
+copies the only thing that runs is `host_svc` — the guest vCPU is halted and recorder threads are
+banned — so any pre≠post byte is provably a kernel write from that syscall. If the window was capped
+and its final 64 bytes all changed, the write reached the window's last byte and likely ran past it.
+Prototyped, it fired exactly once on `/bin/ps`, on the real culprit, with no false positives. Turning
+it into the `panic!` it should be requires knowing whether it fires on any existing gate guest, and
+that measurement was not run. Landing a fail-loud assert without it would be precisely the "right
+conclusion resting on an unmeasured supporting fact" this repo keeps catching in itself. It is
+**M27**'s first task, ahead of `sysctl`, `pread_nocancel`, a general `dest_buffers` table, and
+`diff_memory`'s own hole.
