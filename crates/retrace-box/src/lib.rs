@@ -2812,6 +2812,46 @@ impl Box_ {
     /// available bytes. Inert when the guest's count already fits (the normal case).
     pub fn clamp_count(avail: usize, count: usize) -> usize { count.min(avail) }
 
+    /// The syscalls whose `x1` is a destination buffer and whose `x2` is that buffer's byte count.
+    ///
+    /// **The forwarded-count clamp and the diff window must agree on this set**, which is why it is
+    /// one predicate rather than two lists. The clamp decides how many bytes the host kernel is
+    /// allowed to write into the guest buffer; the window decides how many are looked at afterwards
+    /// and captured as `Event::Syscall` writes. A set the two disagree about is precisely the M26
+    /// defect: the kernel writes past what the diff inspects, the excess lands in guest memory on
+    /// record and in no `Event`, and replay restores stale bytes there. Nothing in the divergence
+    /// oracle can see that — `(num, args)` are identical on both sides, so the recording is
+    /// self-consistent and merely incomplete.
+    pub fn writes_x2_bytes_to_x1(num: u64) -> bool {
+        num == retrace_arch::SYS_READ
+            || num == retrace_arch::SYS_PREAD
+            || num == retrace_arch::SYS_READ_NOCANCEL
+    }
+
+    /// How many bytes of the region behind `args[i]` to snapshot for the pre/post memory diff.
+    ///
+    /// `PTR_WINDOW_CAP` is a *heuristic*, and has been since M1: most pointer args name a struct
+    /// whose size the box does not know, so it snapshots a fixed window and hopes it is enough.
+    /// M1's own plan flagged that policy as needing revisiting "once real programs (large mappings,
+    /// failing syscalls) are recorded", and M25's CPython guest is the program that finally
+    /// exceeded it — an 88 KB `.pyc` read whose last 22567 bytes were never captured.
+    ///
+    /// For the buffer-filling syscalls the length is not a guess: `x2` is a byte count, and the
+    /// forwarded count is clamped only by the destination's backing. So widen the window for that
+    /// one argument to cover exactly what may be written. Everything else keeps the 64 KiB
+    /// heuristic, because widening it unconditionally costs a pre-image copy on every pointer
+    /// operand of every syscall (M8 measured that per-syscall diff time is not free).
+    ///
+    /// Never exceeds `avail`: `clamp_count` is bounded by it, so the widened window is too.
+    pub fn diff_window(num: u64, i: usize, avail: usize, count: usize) -> usize {
+        let base = avail.min(PTR_WINDOW_CAP);
+        if i == 1 && Self::writes_x2_bytes_to_x1(num) {
+            base.max(Self::clamp_count(avail, count))
+        } else {
+            base
+        }
+    }
+
     /// Record-side memory-diff. For each arg that points into a mapped region, snapshot a
     /// window (capped) and translate it to a host address; forward the real syscall via the
     /// raw-svc shim; diff. Returns the full 64-bit x0, the BSD carry flag (`err`), and any
@@ -2907,7 +2947,10 @@ impl Box_ {
         for i in 0..8 {
             match self.host_span(args[i]) {
                 Some((hp, avail)) => {
-                    let win = avail.min(PTR_WINDOW_CAP);
+                    // M26: not a flat cap. For a buffer-filling syscall the destination window
+                    // must cover what the clamp below will let the kernel write, or the tail is
+                    // written to guest memory and captured nowhere. See `diff_window`.
+                    let win = Self::diff_window(num, i, avail, args[2] as usize);
                     let pre = unsafe { std::slice::from_raw_parts(hp, win) }.to_vec();
                     windows.push((args[i], win, pre));
                     hargs[i] = hp as i64;
@@ -2925,8 +2968,7 @@ impl Box_ {
         // M10: `read_nocancel` (396) belongs here too and was missing — the same plain-vs-_nocancel
         // trap as M9's console bug, in the clamp rather than in a predicate. `jq` reads through 396
         // and never through 3, so before M10 its reads were forwarded UNCLAMPED.
-        if num == retrace_arch::SYS_READ || num == retrace_arch::SYS_PREAD
-            || num == retrace_arch::SYS_READ_NOCANCEL {
+        if Self::writes_x2_bytes_to_x1(num) {
             let count = args[2] as usize;
             hargs[2] = match self.host_span(args[1]) {
                 Some((_, avail)) => Self::clamp_count(avail, count) as i64,
