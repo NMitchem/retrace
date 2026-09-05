@@ -66,7 +66,11 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   its own page and faults on it), `thread_rust_e2e` (rung 4 — a guest that spawns a thread and
   joins it), `thread_watch_e2e` (a guest whose two threads write different cells, where
   `reverse-continue` must name the thread that wrote the watched one), `sigthread_e2e` (a guest
-  whose main signals its child by name, so the *child* runs the handler). Run one with
+  whose main signals its child by name, so the *child* runs the handler), `cpython_e2e` (rung 7 —
+  the real CPython interpreter running `-c 'print(1)'`, plus the launcher shim that pins
+  exec-in-place as unmodelled), `bigread_e2e` (a guest whose one `read` returns more than the
+  record-side diff window, guarding the M26 truncation class — repo-owned precisely because
+  `cpython_e2e` *skips* without Homebrew Python and so cannot guard anything). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
