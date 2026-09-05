@@ -4895,3 +4895,107 @@ systematic enumeration — and an audit milestone that does not publish its nega
 indistinguishable from four ad-hoc fixes wearing a milestone's name. The "Coverage" section of the
 spec exists to be that negative space, and the README's Known-limits entry deliberately does **not**
 say the class is closed.
+
+---
+
+## Status: M25-cpython — the headline target records on the first probe, and parks on the second replay
+
+The 2026-07-05 vision spec names reverse-debugging a real CPython interpreter as the headline. Twenty-four
+milestones later, nothing in the tree had ever pointed `record-dyn` at `python3` — no spec, no plan, no
+test, no entry in this log. The belief carrying that absence was that an interpreter was far away, and
+**nobody had checked**. M22's lesson applies verbatim: a wall that every instance of a class is assumed to
+hit deserves one probe before it is believed. M25 is that probe, and it found the same shape M22 did —
+the distance was mostly imagined.
+
+**Finding 0: the thing on your `PATH` is not the interpreter.** `/opt/homebrew/bin/python3` resolves to a
+`pythonw.c`-style shim that `posix_spawn`s (syscall 244, `POSIX_SPAWN_SETEXEC`) the real binary at
+`Python.app/Contents/MacOS/Python` in its own place. retrace forwards 244 through the generic arm, the
+call returns an error rather than replacing the image, and the shim takes its own `err(1, …)` path. That
+run **records and replays byte-identically** — the oracle has nothing to disagree about, because retrace
+reproduced the guest's own behaviour faithfully. It is retrace working, not a bug; but a probe that had
+stopped there would have concluded "CPython does not run" while never having executed a line of CPython.
+The two guest paths are pinned as constants in `cpython_e2e.rs`, in their version-stable framework form
+rather than the `Cellar/python@3.14/3.14.6/…` form a `brew upgrade` moves.
+
+**Wall 1 was one bit.** The real interpreter died at `non-syscall exit: MSR/MRS/sysreg trap (EC=0x18
+ISS=0x12dc68)`. The ISS decodes to `dc zva, x3` — Apple's `_platform_memset` issues `DC ZVA` above a size
+threshold, and CPython's allocator reaches that threshold during startup. It trapped because
+`SCTLR_MMU_ON_BASE` left **DZE (bit 14)** clear and `run()`'s only `Ec::SysReg` arm handles the timebase.
+The fix is `| 0x4000` on the one constant all four `set_sys(SCTLR_EL1, …)` sites derive from — **symmetry
+rule 2**, below the trace: `DC ZVA` now executes natively inside `Box_::run()` on both sides, nothing is
+recorded, and `TRACE_MAGIC` did not move. `sctlr_enables_dc_zva_for_el0_and_nothing_else` pins all three
+bits as one decision, because **UCT (15) and UCI (26) stay deliberately clear**: nothing has measured a
+guest issuing `DC CVAU` / `IC IVAU` or reading `CTR_EL0` from EL0, and the existing EC 0x18 exit already
+fails loud if one does. Setting them speculatively would have been exactly the "right conclusion resting
+on an unmeasured supporting fact" M19, M20 and M22 each caught in themselves.
+
+**Wall 2 was two table entries, and it failed silently.** `os.listdir` on the stdlib directory called
+`getdirentries64` (344), which is absent from `retrace_arch::fd_operands`, so guest fd 4 reached the host
+kernel as *retrace's* fd 4 — not a directory — and XNU answered `EINVAL`. `fstatfs64` (346) had the same
+gap. Both are now in the `&[0]` arm. The census step resolved three more numbers against this machine's
+SDK and changed nothing: 228 (`fgetattrlist`) and 406 (`fcntl_nocancel`) were already present, and 427
+(`fsgetpath`) takes an `fsid_t*` naming a volume rather than a descriptor, so its absence is **correct** —
+pinned as an assertion so it is not re-opened later. `getdirentries64` is not in the SDK at all (libc
+calls it privately from `opendir`/`readdir`), so its fd-in-`x0` position rests on captured trap arguments
+and its constant is documented as **measured** rather than header-derived, beside siblings that are.
+
+**What the chain reached.** With both fixes in, the real CPython interpreter running `-c 'print(1)'`
+**records to a clean `exit(0)` having written exactly `1\n`** — `RETRACE_TRACE=1` shows `SYS_write(1,
+"1\n")` as the last real trap before exit, reproduced twice. Every record-side wall on that path is gone.
+
+**Wall 3 is on the replay side, and it is where the milestone parks.** Of the two replays the gate
+demands, the first diverges:
+
+```
+DIVERGENCE at landmark 568 pc=0x1804b1834: syscall mismatch:
+  live     (num=4,  args=[2, 30086578176, 106, 1, 0, 42963282272, 10, 200])
+  recorded (num=75, args=[30086955008, 98304, 7, 0, 0, 42972720880, 42972417888, …])
+```
+
+`num=4` is `write` with `args[0]=2` (stderr); `num=75` is `mmap`. Live re-execution is issuing a
+*different syscall* from the one the recording holds at that landmark, so the two runs' **sequences** had
+already parted ways before the oracle's first complaint — this is not one call's arguments drifting. No
+unit test at any single layer reproduces it, and closing it means tracing which earlier syscall's count or
+ordering differs between a record and its own replay. That is modelling unmeasured guest/kernel behaviour,
+which Task 4's stop criterion 4 rules out for a single pass, so `the_real_cpython_interpreter_records_and_replays`
+was **re-`#[ignore]`d with that divergence verbatim in its reason** rather than loosened, deleted, or
+asserted around. Rung 7 is deliberately **not** added to the README's ladder: the ladder's entry condition
+is "records *and replays* byte-identically, twice", and this meets half of it. A milestone that parks a
+new gate for a capability it does not have has regressed nothing.
+
+**The gate: 512 passed / 0 failed / 3 ignored across 113 test binaries**, every chunk `EXIT=0`, clippy
+clean over `--workspace --all-targets`. Reconciled against M24's 509 / 0 / 2 over 112 **file-by-file**:
+`retrace-arch/src/lib.rs` 22 → 23, `retrace-box/src/lib.rs` 12 → 13, the new `retrace/tests/cpython_e2e.rs`
+0 → 2 (one running, one ignored), every other file unchanged, and `--bins` **11 → 11**. The count closes
+at both ends rather than only summing — 511 `#[test]` in the tree at M24 = 509 + 2, and 515 at M25 =
+512 + 3 — so nothing is unaccounted for in either direction. M24's `Doc-tests` discovery was **acted on
+rather than rediscovered**: chunk B ran `cargo test -p retrace-box` as a whole package and `Doc-tests
+retrace_box` duly appears in its log. The `retrace` package still exceeded the ceiling, killed with 35 of
+58 targets done; the remaining 23 were swept in two further chunks, so every target ran in exactly one
+chunk and the union is the package.
+
+**M24 landed first, so M25 reconciled the README** — the Coordination clause working as written. Merging
+`main` was clean and all four `sctlr_mmu_on` install sites survived M24's rewrite of `restore` (M24 in
+fact *added* a guard asserting that none of them builds SCTLR ad hoc, which now protects Fix 1 too).
+Reconciling also surfaced a stale figure M23 had left: "What works today" still claimed **34 of 54** Apple
+binaries while "Known limits" already said **46**. The README now says 46 in both places. That is the
+hazard of a two-section current-state document, and it was caught by a milestone editing it second rather
+than by anything structural.
+
+**What is left standing, named rather than implied:**
+
+- **`fd_operands`' default is still `_ => &[]`** — silent, not fail-loud. The next missing fd-taking
+  syscall fails exactly the way 344 did, and unlike the fd table's `dup2` path it will not announce
+  itself. Making it loud needs a blast-radius measurement nobody has taken.
+- **Exec-in-place is unmodelled.** `POSIX_SPAWN_SETEXEC` returns an error instead of replacing the image,
+  so shim-style launchers (`python3`, and `/usr/bin/git`'s relatives) run their failure path. The launcher
+  gate holds that visible and must be **rewritten, not defended**, when exec-in-place lands.
+- **`UCT` and `UCI` are unmeasured, not decided.** A guest with a JIT calling `sys_icache_invalidate`, or
+  reading `CTR_EL0`, will hit the same EC 0x18 exit `DC ZVA` did. It will fail loud.
+- **Reverse execution over a CPython trace is entirely ungated.** M25 measured record and one replay. No
+  seek, checkpoint, watchpoint or `reverse-continue` has ever been pointed at a trace this size, and the
+  M4 checkpoint cache's behaviour at CPython's landmark counts is unknown.
+
+The successor is **M26-cpythonreplay**: find the earlier syscall whose count or ordering differs between
+record and its own replay, and close it. Everything before landmark 568 is known-good on the record side,
+which is a much narrower search than M25 started with.
