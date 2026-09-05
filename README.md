@@ -171,31 +171,50 @@ them. See Known limits for the 20 that still fail, which are four named causes r
   padding is now `hvc #1`, so a fall-through is distinguishable at the VM exit, **counted**, and
   compared across record and replay by `fallthrough_e2e`. That single misattribution accounted for
   13 of M22's 20 failures, and it was never a capability wall.
+- **A deep recursion reaches its own stack guard page.** Since M21, retrace *reserves* the stack the
+  guest believes it has — macOS 26's libpthread reports a constant `0x7fc000` main-thread size that
+  retrace cannot influence, so libstd installs its overflow guard 7.72 MiB below where retrace's
+  256 KiB backing actually ends. The window `[0x2008000, 0x27C0000)` is reserved but unbacked, and
+  `commit_reserved_page` grows into it one zeroed page per stage-2 fault, so a recursion walks all
+  7.72 MiB down. The guard page is deliberately left **outside** the reservation, so it stays a
+  backed `PROT_NONE` page that faults at **stage 1** and routes to libstd's handler as a signal:
+  measured `far=0x2007f30`, inside the guard page, `DFSC 0x0f` — a *permission* fault, where before
+  M21 the same run died on a *translation* fault at `far/ipa=0x27bff60 (UNMAPPED)`, 7.72 MiB away.
+  Nothing about the reservation enters the trace; `Box_::restore` re-establishes it so replay starts
+  from identical state.
 
-**Gate:** 497 passed / 0 failed / 2 ignored across 109 test binaries, **measured at M23** over all
-59 test chunks, every one `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
-See the testing note below for how that number is assembled. "109 test binaries" is 102 test
+**Gate:** 509 passed / 0 failed / 2 ignored across 112 test binaries, **measured at M24** over all
+112 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
+See the testing note below for how that number is assembled. "112 test binaries" is 105 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
-nobody has to re-derive it. The two ignored gates are `stackoverflow_rust_e2e` (M8 risk R3) and
+nobody has to re-derive it. The two ignored gates are `stackoverflow_rust_e2e` (re-parked by M21 at a
+signal-model wall, **not** the M8 risk R3 wall it stood at from M8 through M20) and
 `cache_symbol_e2e` (the M19 shared-cache symbol wall); both are described under Known limits.
 
-Reconciled against M22's 480 / 0 / 3 over 107 **file-by-file rather than by sum**, and every delta
-traces to exactly one place. Per chunk: A 121 → **129** (all eight in `machmsg.rs`), B 219 → **225**
-(all six in `trampoline.rs`, which already existed with one test, so the box gains no new suite), and
-`--bins` **11 → 11**. The remaining +3 is one test each from the two new targets `xpc_e2e` and
-`fallthrough_e2e`, plus `sysbin_e2e`'s second test moving from ignored to running. Total **+17
-running, −1 ignored, +2 binaries**. `--bins` holding still is the load-bearing part: a change to the
-trampoline and the mach_msg2 router disturbed nothing in the CLI below it.
+Reconciled against M21's 504 / 0 / 2 over 111 **file-by-file rather than by sum**, and the diff came
+back one file wide: `retrace-box/tests/restoreparity.rs` **0 → 5**, every other file unchanged. Per
+chunk: A **129 → 129**, B 231 → **236**, C's e2e **133 → 133**, and `--bins` **11 → 11**. Total
+**+5 running, ±0 ignored, +1 binary** — M24 adds one test file and nothing else, which is what an
+audit milestone should look like when it is honest about having bought a guarantee rather than a
+capability.
 
-**Trace format:** `TRACE_MAGIC` is `RT\x00\x08`. Recordings from before M16 are rejected whole.
-M23 did **not** move it, and that is a known sharp edge rather than a clean bill of health: M23
-changed the vector table's padding, which lives in the trampoline page and is therefore snapshot
-*content*. A pre-M23 recording still opens, and `Box_::restore` faithfully restores its **old**
-zero padding while the current code assumes trapping padding — so a fall-through on that replay
-reproduces the exact `pc=0x4204` misattribution M23 removed. The rule this repo writes down covers
-changing `Event`'s *shape*; this was a change to what a snapshot's bytes *mean*, which the rule does
-not name and which went unbumped.
+One sharp edge was found *by* running this gate and is recorded rather than smoothed over: chunk B
+had to be split per-target for CPU reasons, and `cargo test -p <crate> --test <name>` selects
+integration targets **only**, so `retrace-box`'s `Doc-tests` harness ran in no chunk at all. That is
+the exact sibling of the `--bins` trap CLAUDE.md already documents — the wrong flag fails loudly, the
+missing one costs a target in silence. It was run separately (`--doc`, `EXIT=0`, zero tests) to make
+the 112 real rather than asserted.
+
+**Trace format:** `TRACE_MAGIC` is `RT\x00\x09`, moved by **M24**. Recordings from before M23 are
+rejected whole, at `Reader::open_checked`, before a single byte of them is trusted. M23 had changed
+the vector table's padding — which lives in the trampoline page and is therefore snapshot *content* —
+without moving the magic, so a pre-M23 recording still opened and `Box_::restore` faithfully restored
+its **old** zero padding while the current code assumed trapping padding, reproducing the exact
+`pc=0x4204` misattribution M23 removed. M24 closes that at the layer it belongs to. The lesson is in
+the rule now: the repo's written rule covered changing `Event`'s *shape*, and this was a change to
+what a snapshot's bytes *mean*, which a shape rule cannot see. Both are format breaks and both bump
+the magic.
 
 ## Known limits
 
@@ -263,8 +282,9 @@ These are real and current, not aspirational gaps.
   measured price of resolving at execution rather than at parse, it is deliberate, and a test pins it.
 - **No DWARF, no line numbers, no backtraces.** M19 reads `LC_SYMTAB` only, so an address becomes
   `_child+0x30` and never `crashthread.c:35`. There is no unwinder, so there is no stack trace.
-- **The trace format is not stable.** `TRACE_MAGIC` broke in both M15 and M16. Recordings are
-  currently working artifacts, not things to keep across milestones.
+- **The trace format is not stable.** `TRACE_MAGIC` broke in M15, M16 and again in M24. Recordings
+  are currently working artifacts, not things to keep across milestones — and M24 is the milestone
+  that made the refusal honest, so a stale one is now rejected at open instead of half-read.
 - **A signal to a thread that never wakes is never delivered.** Signals to a blocked thread are
   pended and materialised at the wake that makes the thread runnable; retrace does not interrupt the
   wait with `EINTR` as a real kernel would. A guest that strands a signal this way fails loud at a
@@ -273,9 +293,11 @@ These are real and current, not aspirational gaps.
   deliverable one aborts loudly rather than being dropped: queueing at a wake is unmodelled because
   no guest in the tree measures it.
 - **Two gates are parked `#[ignore]`d** at documented, *measured* walls, and the reason is on each
-  test itself. `stackoverflow_rust_e2e`, because libstd computes its guard page from a constant
-  macOS 26 libpthread reports and retrace cannot influence, so the recursion takes a stage-2 fault
-  instead of striking the guard (M8 risk R3). And `cache_symbol_e2e` since M19, at the shared-cache
+  test itself. `stackoverflow_rust_e2e` — but **no longer for the reason it carried from M8 through
+  M20**. M8 risk R3 is CLEARED: the recursion now grows through M21's reservation and strikes its own
+  guard page at stage 1. It is re-parked one wall further on, at the blocked-signal limit below, and
+  the progress it used to stand for is gated by a *running* test beside it so it cannot regress in
+  silence. And `cache_symbol_e2e` since M19, at the shared-cache
   symbol wall above. It was **three** between M22 and M23 — M22 parked `sysbin_e2e`'s second gate at
   `pc=0x4204`, reading it as a capability wall, and M23 un-parked it after finding it was a masking
   defect in retrace's own trampoline. This bullet said "two" throughout that window and was simply
@@ -291,12 +313,25 @@ These are real and current, not aspirational gaps.
   **record and replay would agree on the duplicate, and the divergence oracle structurally cannot
   see it.** Closing it needs resume-side state, not a check at the exit. The stale-PC resume itself
   was never root-caused; M23 root-caused only the masking that hid it.
-- **`Box_::restore` does not rebuild the vector table.** `build_vector_table` is called from
-  `Box_::load` and `load_dynamic` only, so the trapping padding reaches replay purely because the
-  trampoline page happens to be a snapshot backing — correct today by luck rather than by
-  construction, and the same shape as a defect found concurrently in M21 where the luck did not
-  hold. An assert in `restore` would pin it and would also turn the stale-trace case above into a
-  loud refusal instead of a wrong replay.
+- **Record-only box state is guarded on one replay path and not the other.** `Box_` has three
+  construction paths — `load`/`load_dynamic` (record only), `restore` and `from_checkpoint` (both
+  replay only) — and anything a load path establishes that a replay path does not re-establish is a
+  bug whose signature is *a passing record followed by a diverging replay*. The determinism oracle
+  cannot see it when both replay paths are wrong the same way, because the oracle compares replay
+  against record's **trace**, never against record's **box**. By this repo's own written record the
+  class has shipped seven times (M9 t3, M10, M11, M14, M18, M21, M23), each fixed individually and
+  none leaving behind anything that would catch the eighth. Since M24 the `load`↔`restore` pair is
+  pinned by a standing test — `retrace-box/tests/restoreparity.rs` diffs a load box against a
+  `restore` box built from that box's own snapshot, comparing 15 of `Box_`'s 27 state fields plus two
+  sysregs and the 0x800 vector table, and it states an obligation: a new field must be either covered
+  there and equal, or named in `normalise()` citing the mirrored replay mechanism by file and line.
+  **`from_checkpoint` has no such guard**, and that is the path with the documented *five*-instance
+  history — it restores far more state than `restore` does and runs mid-run where nothing is at a
+  default. So the class is **not closed**; it is closed on the path it has bitten twice and open on
+  the path it has bitten five times, which is the successor milestone. Two blind spots are structural
+  even where the guard runs: it compares construction at landmark 0 and not evolution after it, and
+  two boxes that are wrong in the *same* way (a static box's zeroed thread-0 context, identical on
+  both sides) are invisible to any test that only diffs the two against each other.
 - **The trampoline page is padded for only 0x800 of its 16 KiB.** The rest is zero, which is
   `UDF #0` — the very encoding M23 removed from the vector slots. Nothing reaches it today, and a
   test pins the boundary, but the hazard is the one M23 exists to have eliminated.
@@ -306,6 +341,17 @@ These are real and current, not aspirational gaps.
   on mismatch" is true of the gate and not of retrace. It is also not comparable across a seek:
   `run_one_for_step` has no `Ec::Hvc` arm, so a stepped window cannot take a fall-through that the
   same window takes under `run()`.
+- **A synchronously-raised signal that the target thread has blocked is not modelled.** A hardware
+  fault cannot be deferred — POSIX leaves the case undefined and Darwin force-delivers — but M11
+  models no pending set for it, so `retrace-core` **asserts by name** rather than guessing. This is
+  now reachable rather than theoretical: a Rust stack overflow strikes its guard page, libstd *has* a
+  handler installed for the resulting signal (10, SIGBUS), and the faulting thread has that signal
+  blocked. Clearing it means giving M11 a pending set and revisiting `sigpending`'s always-empty
+  answer. `stackoverflow_rust_e2e` is parked exactly there.
+- **A stack frame larger than one granule can still vault the guard.** The reservation stops one
+  granule above the guard page so the guard itself keeps faulting. A single frame bigger than 16 KiB
+  can therefore step over it into unreserved space and take the old fatal stage-2 fault. Accepted by
+  decision at M21, not overlooked.
 
 ## Testing
 
@@ -334,6 +380,11 @@ without a `--test` filter, reaches them.** Leaving it out silently costs 11 test
 465 / 0 / 2 over 105 instead of 476 / 0 / 2 over 106 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
+
+**The same trap has a second mouth: `Doc-tests`.** `--test <name>` skips those too, so splitting a
+*library* crate per-target — as M24's gate had to for `retrace-box` — drops that crate's `Doc-tests`
+harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 112
+binaries. If you split a library crate per-target, run `cargo test -p <crate> --doc` alongside it.
 
 **Run each `crates/retrace` test target as its own cargo invocation** — that is what keeps a chunk
 inside the 10-minute ceiling above. It is no longer a codesigning requirement: `bin()` signs a
