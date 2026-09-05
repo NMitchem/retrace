@@ -110,12 +110,13 @@ records and replays byte-identically, twice:
 | 6 | `/bin/echo` | an **Apple system binary**, arm64e with PAC on, straight from `/bin` |
 
 **Apple's own binaries, measured.** Sampled across `/bin` + `/usr/bin`, pointing retrace straight at
-each file: **34 of 54 record and replay** — stdout byte-identical and exit codes equal. Among them
+each file: **46 of 54 record and replay** — stdout byte-identical and exit codes equal. Among them
 `cat`, `ls`, `cp`, `mv`, `rm`, `chmod`, `mkdir`, `ln`, `df`, `grep`, `wc`, `uname`, `sh`, `dash`,
 `expr`, `bzip2`. Before M22 that number was **zero**, and not for the reason it looked like: every
 macOS system binary is a *universal* file whose first four bytes are `0xcafebabe`, and the loader
 asserted `MH_MAGIC_64` against them. retrace could always run Apple's binaries; it could not open
-them. See Known limits for the 20 that still fail, which are four named causes rather than a tail.
+them. See Known limits for the 8 that still fail, and for why one of the 8 is counted as a
+failure on purpose.
 
 **Capabilities**
 
@@ -182,29 +183,43 @@ them. See Known limits for the 20 that still fail, which are four named causes r
   M21 the same run died on a *translation* fault at `far/ipa=0x27bff60 (UNMAPPED)`, 7.72 MiB away.
   Nothing about the reservation enters the trace; `Box_::restore` re-establishes it so replay starts
   from identical state.
+- **`DC ZVA` runs natively at EL0, and `fd_operands` covers directory reads.** Two facts M25
+  established while walking the real CPython interpreter. `SCTLR_EL1.DZE` is now **set**, so a
+  guest's `dc zva` — which Apple's `_platform_memset` issues above a size threshold, and which
+  CPython's allocator reaches at startup — zeroes its cache line instead of trapping to EL1 as an
+  unhandled `MSR/MRS` exit. And `retrace_arch::fd_operands` now knows `getdirentries64` (344) and
+  `fstatfs64` (346), so a guest that lists a directory has its own fd translated instead of handing
+  the host a number that means a different file there. `UCT` (15) and `UCI` (26) stay deliberately
+  **clear**: nothing has measured a guest issuing `dc cvau` / `ic ivau` or reading `CTR_EL0` from
+  EL0, and the existing exit fails loud if one does. Both changes sit below the trace or beside it —
+  nothing new is recorded and `TRACE_MAGIC` did not move.
 
-**Gate:** 509 passed / 0 failed / 2 ignored across 112 test binaries, **measured at M24** over all
-112 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
-See the testing note below for how that number is assembled. "112 test binaries" is 105 test
+**Gate:** 512 passed / 0 failed / 3 ignored across 113 test binaries, **measured at M25** over all
+113 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
+See the testing note below for how that number is assembled. "113 test binaries" is 106 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
-nobody has to re-derive it. The two ignored gates are `stackoverflow_rust_e2e` (re-parked by M21 at a
-signal-model wall, **not** the M8 risk R3 wall it stood at from M8 through M20) and
-`cache_symbol_e2e` (the M19 shared-cache symbol wall); both are described under Known limits.
+nobody has to re-derive it. The three ignored gates are `stackoverflow_rust_e2e` (re-parked by M21 at
+a signal-model wall, **not** the M8 risk R3 wall it stood at from M8 through M20), `cache_symbol_e2e`
+(the M19 shared-cache symbol wall), and `the_real_cpython_interpreter_records_and_replays` (parked by
+M25 at a replay-side sequence divergence); all three are described under Known limits.
 
-Reconciled against M21's 504 / 0 / 2 over 111 **file-by-file rather than by sum**, and the diff came
-back one file wide: `retrace-box/tests/restoreparity.rs` **0 → 5**, every other file unchanged. Per
-chunk: A **129 → 129**, B 231 → **236**, C's e2e **133 → 133**, and `--bins` **11 → 11**. Total
-**+5 running, ±0 ignored, +1 binary** — M24 adds one test file and nothing else, which is what an
-audit milestone should look like when it is honest about having bought a guarantee rather than a
-capability.
+Reconciled against M24's 509 / 0 / 2 over 112 **file-by-file rather than by sum**, and the diff came
+back three files wide: `retrace-arch/src/lib.rs` **22 → 23**, `retrace-box/src/lib.rs` **12 → 13**,
+and the new `retrace/tests/cpython_e2e.rs` **0 → 2** — one running, one ignored. Every other file
+unchanged, and `--bins` **11 → 11**, which is the load-bearing half: M25 touches nothing in
+`crates/retrace/src/`, so a `--bins` that moved would mean the reconciliation was measuring something
+other than what it claimed. Total **+3 running, +1 ignored, +1 binary**. The count closes at both
+ends rather than only summing: the tree holds 511 `#[test]` at M24 = 509 running + 2 ignored, and 515
+at M25 = 512 + 3, so no test is unaccounted for in either direction.
 
-One sharp edge was found *by* running this gate and is recorded rather than smoothed over: chunk B
-had to be split per-target for CPU reasons, and `cargo test -p <crate> --test <name>` selects
-integration targets **only**, so `retrace-box`'s `Doc-tests` harness ran in no chunk at all. That is
-the exact sibling of the `--bins` trap CLAUDE.md already documents — the wrong flag fails loudly, the
-missing one costs a target in silence. It was run separately (`--doc`, `EXIT=0`, zero tests) to make
-the 112 real rather than asserted.
+M24's gate found a sharp edge that this one acted on rather than rediscovered: splitting a *library*
+crate per-target drops that crate's `Doc-tests` harness from every chunk in silence. M25's chunk B
+therefore ran `cargo test -p retrace-box` as a **whole package**, and `Doc-tests retrace_box` duly
+appears in its log. The `retrace` package still had to be split — the whole-package run was killed by
+the ceiling with 35 of its 58 targets done — but it was split by *target set* and the remaining 23
+swept in two further chunks, so every target ran in exactly one chunk and the union is the package.
+A kill is not a red; the run it killed had zero failures in everything it reached.
 
 **Trace format:** `TRACE_MAGIC` is `RT\x00\x09`, moved by **M24**. Recordings from before M23 are
 rejected whole, at `Reader::open_checked`, before a single byte of them is trusted. M23 had changed
@@ -237,6 +252,35 @@ These are real and current, not aspirational gaps.
 - **A guest must be arm64 or arm64e.** `slice_native` picks the slice this machine would execute —
   arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
   binary is refused by name. There is no emulation of another ISA and none is planned.
+- **The real CPython interpreter records, but does not yet replay.** M25 pointed retrace at
+  `Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python` running
+  `-c 'print(1)'` and cleared every wall on the **record** side: the run reaches a clean `exit(0)`
+  having written exactly `1\n`, reproduced twice. Replay is where it stops. The first of the two
+  replays the gate demands diverges at **landmark 568**, `pc=0x1804b1834`, with live re-execution
+  issuing `num=4` (`write`, fd 2) where the recording holds `num=75` (`mmap`) — a difference in the
+  syscall **sequence**, not in one call's arguments, which means the two runs had already parted ways
+  somewhere earlier than the oracle's first complaint. Closing it means finding *which* earlier
+  syscall's count or ordering differs between a record and its own replay; that is a milestone, not a
+  one-line fix, so `the_real_cpython_interpreter_records_and_replays` is parked `#[ignore]`d with the
+  divergence line verbatim in its reason. It is deliberately **not** a rung in the ladder above: that
+  ladder's entry condition is "records *and replays* byte-identically, twice", and this meets half of
+  it. Parking a new gate for a capability the repo does not yet have has regressed nothing.
+- **Exec-in-place is unmodelled — point retrace at the real binary, not the shim.** A launcher that
+  `posix_spawn`s with `POSIX_SPAWN_SETEXEC`, which is exactly what Homebrew's `python3.14` shim does
+  to hand off to the interpreter above, gets an **error** back instead of a replaced image and takes
+  its own failure path. retrace records and replays *that* outcome byte-for-byte — the oracle has
+  nothing to disagree about, so this is retrace working rather than a bug — but the guest you get is
+  the shim reporting a failure, not the program you meant to run. The behaviour is pinned by a test
+  whose job is to hold the limitation visible, and which is to be **rewritten rather than defended**
+  when exec-in-place lands.
+- **`fd_operands` fails quietly, not loudly, on a syscall it has never seen.** A syscall that takes a
+  file descriptor but is missing from `retrace_arch::fd_operands` has its guest fd forwarded to the
+  host **unchanged**, where the same integer names a different file. M25 hit precisely that:
+  `getdirentries64` (344) and `fstatfs64` (346) were absent, so `os.listdir` handed guest fd 4
+  straight to the host kernel, which returned `EINVAL` for a vnode that was not a directory. Both are
+  in the table now, but the **class** is still open — the default arm is `_ => &[]`, so the next
+  missing entry fails the same silent way, and unlike the fd table's `dup2` path it does not announce
+  itself. Making the default fail loud needs a blast-radius measurement nobody has taken.
 - **libdispatch runs only as far as it has been measured.** Rung 5 records and replays, but the
   workqueue emulation is a floor built from measurements rather than an implementation of the
   kernel's, and everything past that floor refuses **by value** instead of guessing. `workq_kernreturn`
@@ -377,14 +421,15 @@ cargo test -p retrace --bins -- --test-threads=1            # don't omit: see be
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
 without a `--test` filter, reaches them.** Leaving it out silently costs 11 tests and one binary —
-465 / 0 / 2 over 105 instead of 476 / 0 / 2 over 106 — and nothing fails to warn you. Contrast
+at M25, 501 / 0 / 3 over 112 instead of 512 / 0 / 3 over 113 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 
 **The same trap has a second mouth: `Doc-tests`.** `--test <name>` skips those too, so splitting a
 *library* crate per-target — as M24's gate had to for `retrace-box` — drops that crate's `Doc-tests`
-harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 112
-binaries. If you split a library crate per-target, run `cargo test -p <crate> --doc` alongside it.
+harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 113
+binaries. If you split a library crate per-target, run `cargo test -p <crate> --doc` alongside it —
+or, as M25's gate did, run that crate as a whole package and let cargo include it for you.
 
 **Run each `crates/retrace` test target as its own cargo invocation** — that is what keeps a chunk
 inside the 10-minute ceiling above. It is no longer a codesigning requirement: `bin()` signs a
