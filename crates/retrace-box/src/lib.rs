@@ -105,6 +105,15 @@ const GUARD_PAGE_IPA: u64 = DYN_STACK_TOP - LIBPTHREAD_MAIN_STACK_SIZE;   // 0x2
 const GUARD_TOP: u64 = GUARD_PAGE_IPA + GRANULE as u64;                    // 0x2008000
 const DYN_STACK_BOTTOM: u64 = DYN_STACK_TOP - DYN_STACK_SIZE;              // 0x27C0000
 pub const PTR_WINDOW_CAP: usize = 64 * 1024;
+/// Bytes snapshotted immediately PAST a capped diff window, to detect a kernel write that ran
+/// past it (M27).
+///
+/// One byte would suffice for contiguity — kernel writes into a destination buffer start at the
+/// buffer and run forward, so an overrun always touches the first byte past the window. Sixty-four
+/// is for confidence rather than coverage: a single byte matching its pre-image by chance is ~1/256
+/// for random data and far likelier for the zero-heavy data a `.pyc` or a freshly zeroed page
+/// contains, and the consequence of a miss is a silently incomplete recording.
+pub const GUARD_BAND: usize = 64;
 // Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 36-bit (64 GiB)
 // IPA space and ABOVE the loaded segments (~4-5 GiB), the demand-paged shared-cache window
 // [SHARED_REGION_START, SHARED_REGION_END), AND libmalloc's FIXED 24-GiB nano "pointer range"
@@ -2812,6 +2821,19 @@ impl Box_ {
     /// available bytes. Inert when the guest's count already fits (the normal case).
     pub fn clamp_count(avail: usize, count: usize) -> usize { count.min(avail) }
 
+    /// Did the kernel write past the diff window? (M27)
+    ///
+    /// Pure so the policy is reviewable apart from the `unsafe` slice plumbing that feeds it. The
+    /// caller guarantees both slices are the same region sampled before and after exactly one
+    /// `host_svc`, which is what makes a difference *proof* of a kernel write rather than evidence
+    /// of one: the guest vCPU is halted across that call and `clippy.toml` bans recorder threads,
+    /// so nothing else could have touched those bytes.
+    ///
+    /// An empty band (the window already covered the whole backing) is never an overrun.
+    pub fn overran_window(pre_guard: &[u8], post_guard: &[u8]) -> bool {
+        !pre_guard.is_empty() && pre_guard != post_guard
+    }
+
     /// The syscalls whose `x1` is a destination buffer and whose `x2` is that buffer's byte count.
     ///
     /// **The forwarded-count clamp and the diff window must agree on this set**, which is why it is
@@ -2942,7 +2964,8 @@ impl Box_ {
                 Err(e) => return (e, true, Vec::new()),
             }
         } else { None };
-        let mut windows: Vec<(u64, usize, Vec<u8>)> = Vec::new(); // (guest_ipa, len, pre-image)
+        // (guest_ipa, len, pre-image, pre-image of the M27 guard band past the window)
+        let mut windows: Vec<(u64, usize, Vec<u8>, Vec<u8>)> = Vec::new();
         let mut hargs = [0i64; 8];
         for i in 0..8 {
             match self.host_span(args[i]) {
@@ -2952,7 +2975,13 @@ impl Box_ {
                     // written to guest memory and captured nowhere. See `diff_window`.
                     let win = Self::diff_window(num, i, avail, args[2] as usize);
                     let pre = unsafe { std::slice::from_raw_parts(hp, win) }.to_vec();
-                    windows.push((args[i], win, pre));
+                    // M27: when the window is CAPPED there is backing beyond what the diff will
+                    // look at, and a kernel write reaching into it would be captured nowhere.
+                    // Snapshot a band immediately past the window so an overrun is provable rather
+                    // than inferred. Bounded by `avail`, so this never reads past the backing.
+                    let band = GUARD_BAND.min(avail - win);
+                    let pre_band = unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
+                    windows.push((args[i], win, pre, pre_band));
                     hargs[i] = hp as i64;
                 }
                 None => hargs[i] = args[i] as i64,
@@ -2988,9 +3017,26 @@ impl Box_ {
         // post-diff write capture entirely.
         let mut writes = Vec::new();
         if !err {
-            for (ipa, len, pre) in windows {
-                let (hp, _) = self.host_span(ipa).unwrap();
+            for (ipa, len, pre, pre_band) in windows {
+                // Take `avail` rather than discarding it: the guard-band read below is `unsafe` and
+                // must stay inside this backing. The band was sized from the PRE-forward `avail`,
+                // and a syscall that remapped guest memory could in principle shrink it — mmap /
+                // munmap / mprotect are all intercepted upstream and never reach here, but re-
+                // clamping costs nothing and does not rely on that staying true.
+                let (hp, avail_now) = self.host_span(ipa).unwrap();
+                let band = pre_band.len().min(avail_now.saturating_sub(len));
                 let post = unsafe { std::slice::from_raw_parts(hp, len) };
+                // M27 Task 1: WARNING ONLY. Task 3 turns this into a panic, and deliberately not
+                // before: landing a fail-loud assert without first measuring what it fires on
+                // across the whole gate is the unmeasured-supporting-fact trap this milestone
+                // exists to avoid.
+                let post_band = unsafe { std::slice::from_raw_parts(hp.add(len), band) };
+                if Self::overran_window(&pre_band[..band], post_band) {
+                    eprintln!("[M27 TRUNCATION] syscall {} wrote past its {}-byte diff window at \
+                               ipa {:#x}: the bytes past it are captured in NO Event, so replay \
+                               will restore stale data there",
+                        num as i64, len, ipa);
+                }
                 if post != pre.as_slice() {
                     writes.push(Region { ipa, bytes: post.to_vec() });
                 }
