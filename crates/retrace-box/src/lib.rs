@@ -562,6 +562,14 @@ pub struct Box_ {
     /// Plain u64 (no Drop), declared last, so the load-bearing vcpu-before-vm drop order is
     /// unaffected. Starts at 0 in `restore` too: replay counts its own.
     fall_throughs: u64,
+    /// M28: the diff-window cap, defaulting to `PTR_WINDOW_CAP`. A FIELD rather than the bare
+    /// constant so a test can shrink it and hand the guard band a REAL kernel overrun to detect.
+    /// Before M28 the band had no positive control at all: `let band = 0;` passed the whole gate.
+    /// Production never writes this except at construction. Plain `usize` (no Drop), declared last,
+    /// so the load-bearing vcpu-before-vm drop order is unaffected. Deliberately NOT carried in
+    /// `BoxState`: it is always `PTR_WINDOW_CAP` in production, so `from_checkpoint` restoring the
+    /// default is correct rather than lossy.
+    window_cap: usize,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -1181,7 +1189,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1779,7 +1787,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -2704,7 +2712,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0 };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -2834,6 +2842,14 @@ impl Box_ {
         !pre_guard.is_empty() && pre_guard != post_guard
     }
 
+    /// Test seam (M28). Shrinks the diff-window cap so a syscall the `dest_buffer` table does not
+    /// know can be made to overrun its window on purpose. **Production never calls this.**
+    ///
+    /// Shrinking the cap does NOT weaken a `dest_buffer` widening — `diff_window` takes the MAX of
+    /// this base and the table's length, so a known length still widens past a small cap. That is
+    /// exactly why the positive control uses `fstat` (absent from the table) rather than `read`.
+    pub fn set_window_cap_for_test(&mut self, cap: usize) { self.window_cap = cap; }
+
     /// The destination length `num` will fill at argument `i`, if the table knows it.
     ///
     /// Takes `args` as a parameter and stores nothing: `Box_` gets no new field for this. Reads
@@ -2859,7 +2875,7 @@ impl Box_ {
     /// pre-image copy on every pointer operand of every syscall (M8 measured that per-syscall diff
     /// time is not free). Never exceeds `avail`.
     fn diff_window(&self, num: u64, i: usize, avail: usize, args: &[u64; 8]) -> usize {
-        let base = avail.min(PTR_WINDOW_CAP);
+        let base = avail.min(self.window_cap);
         match self.dest_len_bytes(num, i, args) {
             Some(len) => base.max(Self::clamp_count(avail, len)),
             None => base,
@@ -4795,6 +4811,9 @@ impl Box_ {
             // `bsdthread_register`, even when it did.
             wq_thread_pc: state.wq_thread_pc,
             pthread_size: state.pthread_size,
+            // M28: NOT carried in `BoxState` — always the production default here, per the field
+            // comment on `window_cap`.
+            window_cap: PTR_WINDOW_CAP,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
