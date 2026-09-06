@@ -69,3 +69,39 @@ fn the_band_fires_when_the_kernel_writes_past_the_window() {
         }
     }
 }
+
+// M28: a changed guard-band byte proves A KERNEL WRITE in that range — the guest vCPU is halted
+// across `host_svc` and recorder threads are banned, so nothing else could have touched it. It does
+// NOT prove the write was THIS argument's overrun. `forward_and_diff` takes a window for EVERY
+// argument that looks like a mapped pointer (including a non-pointer whose value collides with a
+// mapped IPA — see the dyld pread-count case in that function), so a write belonging to another
+// argument of the same call, fully captured by ITS window, would trip this argument's band and
+// panic a correct recording.
+#[test]
+fn a_band_with_no_neighbours_keeps_its_full_length() {
+    assert_eq!(Box_::band_not_covered(0x1000, 256, 64, &[]), 64);
+    // A window entirely past the band does not shrink it: band is [0x1100, 0x1140).
+    assert_eq!(Box_::band_not_covered(0x1000, 256, 64, &[(0x2000, 16)]), 64);
+}
+
+#[test]
+fn a_neighbour_starting_inside_the_band_truncates_it_there() {
+    // band is [0x1100, 0x1140); a neighbour at 0x1120 leaves the first 0x20 bytes unambiguous.
+    assert_eq!(Box_::band_not_covered(0x1000, 256, 64, &[(0x1120, 8)]), 0x20);
+}
+
+// The rule is SPAN INTERSECTION, not start position. A window beginning BEFORE the band but
+// extending into it overlaps exactly as much as one beginning inside it, and a rule phrased on
+// start position alone would miss precisely this case.
+#[test]
+fn a_neighbour_starting_before_the_band_but_reaching_into_it_still_truncates() {
+    // band is [0x1100, 0x1140); neighbour spans [0x10f0, 0x1110) and covers the band's start.
+    assert_eq!(Box_::band_not_covered(0x1000, 256, 64, &[(0x10f0, 0x20)]), 0);
+}
+
+// The argument's OWN window ends exactly where its band begins, so it can never suppress its own
+// band. This is why the caller may pass every span without filtering itself out.
+#[test]
+fn an_argument_never_suppresses_its_own_band() {
+    assert_eq!(Box_::band_not_covered(0x1000, 256, 64, &[(0x1000, 256)]), 64);
+}

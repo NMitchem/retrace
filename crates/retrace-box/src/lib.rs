@@ -2842,6 +2842,33 @@ impl Box_ {
         !pre_guard.is_empty() && pre_guard != post_guard
     }
 
+    /// M28: how many of a guard band's bytes are attributable to THIS argument.
+    ///
+    /// A changed band byte proves a kernel write in that range — but not that the write was this
+    /// argument's overrun. `forward_and_diff` snapshots a window for every mapped-looking argument,
+    /// so a band past argument *i* can overlap argument *j*'s window, where the kernel's write is
+    /// real and FULLY CAPTURED. Blaming it on *i* would panic a correct recording. Shrink the band
+    /// to the bytes no other window covers; a change in those is unambiguously past everything this
+    /// call inspected.
+    ///
+    /// **Shrink, not skip-on-overlap.** Several arguments of one call routinely land in one backing
+    /// (`/bin/ps`'s `sysctl` had three, two adjacent on the stack), so skipping wholesale would
+    /// disable the detector exactly where arguments crowd and truncation is likeliest.
+    ///
+    /// The test is **span intersection, not start position**: a window beginning before the band
+    /// but extending into it overlaps just as much as one beginning inside it. An argument's own
+    /// window ends exactly where its band begins, so it never suppresses itself and the caller need
+    /// not filter it out.
+    pub fn band_not_covered(ipa: u64, len: usize, band: usize, others: &[(u64, usize)]) -> usize {
+        let start = ipa + len as u64;
+        let mut end = start + band as u64;
+        for &(oi, ol) in others {
+            let (os, oe) = (oi, oi + ol as u64);
+            if os < end && oe > start { end = end.min(os.max(start)); }
+        }
+        (end - start) as usize
+    }
+
     /// Test seam (M28). Shrinks the diff-window cap so a syscall the `dest_buffer` table does not
     /// know can be made to overrun its window on purpose. **Production never calls this.**
     ///
@@ -3039,6 +3066,11 @@ impl Box_ {
         // post-diff write capture entirely.
         let mut writes = Vec::new();
         if !err {
+            // M28: every window this call took, so a band comparison can exclude bytes another
+            // argument's window already covers. Collected BEFORE the loop because the loop consumes
+            // `windows`. Each entry's own span ends exactly where its band begins, so passing the
+            // whole list (including self) is correct — see `band_not_covered`.
+            let spans: Vec<(u64, usize)> = windows.iter().map(|(i, l, _, _)| (*i, *l)).collect();
             for (ipa, len, pre, pre_band) in windows {
                 // Take `avail` rather than discarding it: the guard-band read below is `unsafe` and
                 // must stay inside this backing. Nothing between the pre-image loop and here
@@ -3046,7 +3078,17 @@ impl Box_ {
                 // no-op today — it is defensive against a FUTURE edit that makes this function
                 // mutate backings between the two loops, not against anything reachable now.
                 let (hp, avail_now) = self.host_span(ipa).unwrap();
-                let band = pre_band.len().min(avail_now.saturating_sub(len));
+                let raw_band = pre_band.len().min(avail_now.saturating_sub(len));
+                let band = Self::band_not_covered(ipa, len, raw_band, &spans);
+                // M28 Task 2: WARNING ONLY, and Task 3 is the measurement it exists for. R1 says
+                // this shrink could suppress far more than expected, which would quietly weaken the
+                // detector this milestone is meant to strengthen. Count it across the gate rather
+                // than assume it is rare.
+                if band < raw_band {
+                    eprintln!("[M28 BANDSHRINK] syscall {} band past ipa {:#x} len {} shrunk {} -> {} \
+                               by an overlapping window of the same call",
+                        num as i64, ipa, len, raw_band, band);
+                }
                 let post = unsafe { std::slice::from_raw_parts(hp, len) };
                 // M27: fail-loud. Landed as an `eprintln!` first and flipped to this assert only
                 // after Task 2 measured it firing ZERO times across the whole gate (523/0/2 over
