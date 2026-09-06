@@ -1152,6 +1152,16 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     "workq syscall {num} reached the generic forward arm — it must be emulated \
                      above (M18 Stage 2a). Forwarding it creates a real host worker thread inside \
                      the recorder and takes a SIGSEGV at address 0.");
+                // M27: the destination sits behind a pointer INSIDE a guest struct, which
+                // forward_and_diff never translates — so forwarding hands the host kernel a guest
+                // IPA as a host address. No guest in the gate calls these (measured: absent from
+                // M25's 69-number CPython census), so refuse rather than model it wrong.
+                assert!(!retrace_arch::writes_via_nested_pointer(num),
+                    "syscall {num} writes through a nested guest pointer (iovec.iov_base / \
+                     msghdr.msg_iov) and retrace translates only top-level register operands, so \
+                     forwarding it would hand the host kernel a guest address. Translating it needs \
+                     the translate_mwl_regions treatment plus a measurement of the struct layout. \
+                     Implement that before a guest needs this; do not forward it.");
                 // M10: `ret` is already a GUEST descriptor when this syscall produced one, and a
                 // successful close has already retired its slot — forward_and_diff owns both halves
                 // of the fd contract so no caller has to remember the second one.

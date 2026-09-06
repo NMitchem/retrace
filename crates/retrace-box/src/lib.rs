@@ -3028,12 +3028,14 @@ impl Box_ {
                 // across the whole gate is the unmeasured-supporting-fact trap this milestone
                 // exists to avoid.
                 let post_band = unsafe { std::slice::from_raw_parts(hp.add(len), band) };
-                if Self::overran_window(&pre_band[..band], post_band) {
-                    eprintln!("[M27 TRUNCATION] syscall {} wrote past its {}-byte diff window at \
-                               ipa {:#x}: the bytes past it are captured in NO Event, so replay \
-                               will restore stale data there",
-                        num as i64, len, ipa);
-                }
+                assert!(!Self::overran_window(&pre_band[..band], post_band),
+                    "syscall {} wrote PAST its {}-byte diff window at ipa {:#x}. The bytes past it \
+                     are captured in no Event, so the recording is silently incomplete and replay \
+                     would restore stale data there — a failure the divergence oracle cannot see, \
+                     because (num, args) match on both sides. Add this syscall's destination buffer \
+                     to retrace_arch::dest_buffer with the argument its length lives in; if that \
+                     length is not knowable, measure it before guessing.",
+                    num as i64, len, ipa);
                 if post != pre.as_slice() {
                     writes.push(Region { ipa, bytes: post.to_vec() });
                 }

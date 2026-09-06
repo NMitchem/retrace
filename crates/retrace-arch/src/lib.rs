@@ -170,6 +170,23 @@ pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> {
     }
 }
 
+/// `readv`(120) / `readv_nocancel`(411) / `recvmsg`(27) / `recvmsg_nocancel`(401) /
+/// `preadv`(540) / `recvmsg_x`(480). All header-derived from `sys/syscall.h`.
+///
+/// M27: these put their destination behind a pointer INSIDE a guest struct (iovec.iov_base,
+/// msghdr.msg_iov). `forward_and_diff` translates only top-level register arguments, so a guest
+/// IPA would reach the host kernel AS A HOST ADDRESS. That is not a fidelity gap like the
+/// truncation class — it is a potential wild write into retrace's own process.
+///
+/// The reading that they would merely EFAULT (guest IPAs being unlikely to be mapped in
+/// retrace's process) is an INFERENCE, and the downside of it being wrong is severe. So they are
+/// refused by value rather than tested or translated, the way `guest_workq_kernreturn` refuses an
+/// unenumerated opcode. Translating them properly needs the `translate_mwl_regions` treatment and
+/// its own measurement.
+pub fn writes_via_nested_pointer(num: u64) -> bool {
+    matches!(num, 120 | 411 | 27 | 401 | 540 | 480)
+}
+
 pub const SYS_SYSCTL: u64 = 202;
 pub const SYS_GETRLIMIT: u64 = 194;
 /// sysctl top-level: `CTL_KERN` (`sys/sysctl.h`).
@@ -610,6 +627,26 @@ mod tests {
         // there is no SYS_FSGETPATH constant in this crate and this test must not invent one.
         assert_eq!(dest_buffer(427), None, "fsgetpath takes an fsid_t*, not a sized buffer");
         assert_eq!(dest_buffer(SYS_WRITE), None, "write reads the buffer, it does not fill it");
+    }
+
+    // M27: these put their destination behind a pointer INSIDE a guest struct (iovec.iov_base,
+    // msghdr.msg_iov). forward_and_diff translates only top-level register arguments, so a guest
+    // IPA would reach the host kernel AS A HOST ADDRESS. That is not a fidelity gap like the
+    // truncation class — it is a potential wild write into retrace's own process.
+    //
+    // The reading that they would merely EFAULT (guest IPAs being unlikely to be mapped in
+    // retrace's process) is an INFERENCE, and the downside of it being wrong is severe. So they are
+    // refused by value rather than tested or translated, the way guest_workq_kernreturn refuses an
+    // unenumerated opcode. Translating them properly needs the translate_mwl_regions treatment and
+    // its own measurement.
+    #[test]
+    fn the_nested_pointer_family_is_named_in_full() {
+        for num in [120u64, 411, 27, 401, 540, 480] {
+            assert!(writes_via_nested_pointer(num), "syscall {num} must be refused");
+        }
+        for num in [SYS_READ, SYS_PREAD, SYS_SYSCTL, SYS_WRITE] {
+            assert!(!writes_via_nested_pointer(num), "syscall {num} has top-level operands");
+        }
     }
 
     #[test]
