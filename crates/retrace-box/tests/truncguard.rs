@@ -45,7 +45,7 @@ fn an_empty_guard_band_is_never_an_overrun() {
 // MEASURED: `sizeof(struct stat)` is 144 bytes on this SDK, so a 64-byte window
 // is genuinely overrun by a real kernel write.
 #[test]
-#[should_panic(expected = "changed a byte in the")]
+#[should_panic(expected = "syscall 189 changed a byte in the")]
 fn the_band_fires_when_the_kernel_writes_past_the_window() {
     const CAP: usize = 64;
     let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
@@ -104,4 +104,34 @@ fn a_neighbour_starting_before_the_band_but_reaching_into_it_still_truncates() {
 #[test]
 fn an_argument_never_suppresses_its_own_band() {
     assert_eq!(Box_::band_not_covered(0x1000, 256, 64, &[(0x1000, 256)]), 64);
+}
+
+// `band_not_covered`'s loop is a running `min` over every entry in `others`, not a first-match: a
+// caller with three or more overlapping arguments (measured on `/bin/ps`'s `sysctl`) depends on the
+// MOST restrictive overlap winning regardless of list order, not just the first one seen.
+#[test]
+fn two_overlapping_neighbours_produce_the_minimum_of_their_truncations() {
+    // band is [0x1100, 0x1140). Alone, (0x1120, 8) truncates to 0x20 and (0x1108, 8) truncates to
+    // 0x08 — the second is strictly more restrictive, so together the result must be 0x08, and it
+    // must be 0x08 in EITHER order: a running min cannot depend on which neighbour comes first.
+    assert_eq!(Box_::band_not_covered(0x1000, 256, 64, &[(0x1120, 8), (0x1108, 8)]), 0x08);
+    assert_eq!(Box_::band_not_covered(0x1000, 256, 64, &[(0x1108, 8), (0x1120, 8)]), 0x08);
+}
+
+// `band == 0` means the window already covered the whole backing, so there is no band to shrink —
+// and it must stay 0 rather than underflow, even against a neighbour that would otherwise truncate
+// deeply into it.
+#[test]
+fn a_zero_length_band_never_underflows() {
+    assert_eq!(Box_::band_not_covered(0x1000, 256, 0, &[]), 0);
+    assert_eq!(Box_::band_not_covered(0x1000, 256, 0, &[(0x1000, 300)]), 0);
+}
+
+// `len == 0` is the argument's own window being degenerate (e.g. a zero-byte `dest_buffer` length).
+// Its span in `others` is then a zero-length window at the same `ipa` it starts from — and that
+// must still fail to suppress its own band, for the same reason a normal-length self entry does:
+// `oe == start` fails the strict `oe > start` test.
+#[test]
+fn a_zero_length_argument_still_never_suppresses_its_own_band() {
+    assert_eq!(Box_::band_not_covered(0x1000, 0, 64, &[(0x1000, 0)]), 64);
 }

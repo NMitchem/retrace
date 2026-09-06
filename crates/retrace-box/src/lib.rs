@@ -2842,14 +2842,27 @@ impl Box_ {
         !pre_guard.is_empty() && pre_guard != post_guard
     }
 
-    /// M28: how many of a guard band's bytes are attributable to THIS argument.
+    /// M28: shrink a guard band to exclude the bytes another window of this call already covers.
     ///
     /// A changed band byte proves a kernel write in that range — but not that the write was this
     /// argument's overrun. `forward_and_diff` snapshots a window for every mapped-looking argument,
     /// so a band past argument *i* can overlap argument *j*'s window, where the kernel's write is
-    /// real and FULLY CAPTURED. Blaming it on *i* would panic a correct recording. Shrink the band
-    /// to the bytes no other window covers; a change in those is unambiguously past everything this
-    /// call inspected.
+    /// real and FULLY CAPTURED. Blaming it on *i* would panic a correct recording. A byte that
+    /// survives this shrink is proof of a kernel write past everything this *call's* diff inspected
+    /// — it does not by itself say which argument overran: a different argument's own overrun,
+    /// running past its own window, can still reach a band that no overlap suppressed.
+    ///
+    /// **Truncates, not differences.** This walks `start..start+band` down to the first overlapping
+    /// window's *start*, so a band byte lying past an overlapping window's *end* is discarded too,
+    /// even though nothing actually covers it there — narrower than a true set difference, but only
+    /// in the safe direction (a dropped byte can suppress a firing, never manufacture one), and that
+    /// dropped tail sits inside the suppressing window's own band regardless.
+    ///
+    /// **The frontier is always guarded.** The window with the maximal end address `E` in a backing
+    /// can never be suppressed: suppression needs some other window with `oe > E`, which contradicts
+    /// `E` being maximal (a tie, `oe == E`, fails the strict `oe > start` test below). So the band
+    /// immediately past everything this call's diff inspected in that backing is never the one that
+    /// gets truncated away, however many inner bands are.
     ///
     /// **Shrink, not skip-on-overlap.** Several arguments of one call routinely land in one backing
     /// (`/bin/ps`'s `sysctl` had three, two adjacent on the stack), so skipping wholesale would
@@ -3078,7 +3091,7 @@ impl Box_ {
             // argument's window already covers. Collected BEFORE the loop because the loop consumes
             // `windows`. Each entry's own span ends exactly where its band begins, so passing the
             // whole list (including self) is correct — see `band_not_covered`.
-            let spans: Vec<(u64, usize)> = windows.iter().map(|(i, l, _, _)| (*i, *l)).collect();
+            let spans: Vec<(u64, usize)> = windows.iter().map(|(ipa, len, _, _)| (*ipa, *len)).collect();
             for (ipa, len, pre, pre_band) in windows {
                 // Take `avail` rather than discarding it: the guard-band read below is `unsafe` and
                 // must stay inside this backing. Nothing between the pre-image loop and here
@@ -3092,7 +3105,13 @@ impl Box_ {
                 // this shrink could suppress far more than expected, which would quietly weaken the
                 // detector this milestone is meant to strengthen. Count it across the gate rather
                 // than assume it is rare.
-                if band < raw_band {
+                //
+                // Gated behind RETRACE_TRACE (same flag as retrace-core's own bring-up diagnostic):
+                // unconditional, this was 31 lines of production stderr for one `/bin/ps` recording
+                // alone and unbounded for a larger guest, printed only to be counted by a harness
+                // that pipes the recorder's stderr and so can never see it — see the reproduction
+                // note in docs/status-log.md.
+                if band < raw_band && std::env::var_os("RETRACE_TRACE").is_some() {
                     eprintln!("[M28 BANDSHRINK] syscall {} band past ipa {:#x} len {} shrunk {} -> {} \
                                by an overlapping window of the same call",
                         num as i64, ipa, len, raw_band, band);
