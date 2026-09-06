@@ -325,8 +325,10 @@ These are real and current, not aspirational gaps.
   overrun, because `forward_and_diff` takes a window for every mapped-looking argument and a write by
   another argument of the same call, landing in that same range, would also trip it. `Box_::band_not_covered`
   now shrinks each band to exclude only the bytes some *other* window of the same call already
-  inspects, so a byte that still changes in what remains cannot be blamed on another argument — it is
-  proof of a kernel write past everything this call's diff inspected. And M28 proved the band can
+  inspects, so a byte that still changes in what remains cannot be a write that another window of
+  this call already captured — it is proof of a kernel write past everything this call's diff
+  inspected. Which argument overran is still not established: a different argument's overrun, running
+  past its own window, can still reach this band. And M28 proved the band can
   fire at all, which nothing had: a positive control (`truncguard.rs`) shrinks the window cap to 64
   bytes and drives `fileio`'s `fstat` — writing a MEASURED `sizeof(struct stat) = 144` bytes,
   deliberately absent from `dest_buffer` so no widening can rescue it — into the band; `let band = 0;`
@@ -340,7 +342,11 @@ These are real and current, not aspirational gaps.
   one argument's 64 KiB window fully covers the other's band. **That is not a blind spot**: a
   suppressed byte is one some other window of the same call already inspects, so the kernel write
   there is captured anyway, recorded against that other argument's own ipa — nothing is lost by not
-  flagging it a second time. What the 31 actually measures is how much of M27's claimed proof was
+  flagging it a second time. And it cannot become one structurally: the window with the maximal end
+  address in a backing can never itself be suppressed, since suppression needs some other window
+  ending even further out, which is impossible for whichever window already ends furthest — so the
+  band immediately past everything the call inspected stays guarded no matter how many inner bands
+  get truncated to zero. What the 31 actually measures is how much of M27's claimed proof was
   never attributable in the first place, which is a finding about M27's own strength and not a
   weakness M28 introduced.
   **That silence is not proof of absence, and this is measured rather than argued.** Before the

@@ -17,11 +17,18 @@ fn a_failing_sysctl_is_measured_for_writes() {
         match b.run() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL => {
                 // Snapshot the destination before, so the measurement does not depend on
-                // forward_and_diff's own (skipped) capture.
-                let before = b.read_bytes_for_test(args[2], 16);
-                let (ret, err, _writes) = b.forward_and_diff(num, args);
-                let after = b.read_bytes_for_test(args[2], 16);
+                // forward_and_diff's own (skipped) capture. `buf` is the full 64-byte backing
+                // (`.space 64` in failsysctl.s), read whole rather than just the 2 requested bytes
+                // so the contamination check covers everything the kernel could have touched.
+                let before = b.read_bytes_for_test(args[2], 64);
+                let (ret, err, writes) = b.forward_and_diff(num, args);
+                let after = b.read_bytes_for_test(args[2], 64);
                 assert!(err, "the undersized sysctl should FAIL; got ret={ret} err={err}");
+                // The `if !err` skip means `forward_and_diff` never even LOOKS for writes on this
+                // path — pin that directly, not just its effect on `buf`.
+                assert!(writes.is_empty(),
+                    "forward_and_diff captured writes on a failing syscall; the `if !err` skip is \
+                     no longer skipping");
                 // MEASURED (M28 Task 4): this failing sysctl writes NOTHING into the guest buffer,
                 // so `forward_and_diff`'s `if !err` skip loses nothing HERE. That is a measurement
                 // of one case, not a proof about failing syscalls in general — the gate stays open,
@@ -29,7 +36,7 @@ fn a_failing_sysctl_is_measured_for_writes() {
                 assert_eq!(before, after,
                     "a failing sysctl wrote into the guest buffer after all: the `if !err` skip is \
                      dropping real kernel writes, and this test's premise has changed — see the \
-                     M28 spec's Component 3, Branch A");
+                     M28 spec's Component 3");
                 return;
             }
             Stop::Syscall { num, args } => {

@@ -5270,22 +5270,33 @@ every span (including the argument's own, which ends exactly where its band begi
 suppress itself) must be visible when each band is computed. Proven on span *intersection*, not
 merely start position, which is the case a naive implementation misses: a neighbour beginning
 *before* the band but reaching into it truncates exactly as much as one starting inside it. With this
-in place, a changed byte in what remains of the band cannot be blamed on any other argument of the
-call — it is proof of a kernel write past everything this call's diff inspected, full stop. The
+in place, a changed byte in what remains of the band cannot be a write that another window of this
+call already captured — so it is proof of a kernel write past everything this call's diff inspected.
+Which *argument* overran is still not established: a different argument's overrun, running past its
+own window, reaches this band too. The
 shrink itself announces through an `eprintln!("[M28 BANDSHRINK] …")` rather than a second assert,
 because whether it fires rarely or commonly was still unmeasured — that measurement is Task 3, not
 an assumption Task 2 was entitled to make about its own code.
 
-**Task 3: the shrink is not rare, and that is a finding about M27, not a regression in M28.** The
-full gate at Task 2's commit shrank a band zero times. `/bin/ps` alone shrank one **31 times** — six
-syscalls, 344 (`getdirentries64`) ×15, 399 ×11, 33 (`access`) ×2, and one each of 5 (`open`), 347,
-339 (`fstat64`) — every one a complete `64 -> 0` on a capped 65536-byte window. The mechanism is
-address arithmetic, not a bug: two arguments of one call routinely point into the same backing
-(`ps`'s two pointers sit 304 bytes apart on the stack), and once both take a 64 KiB window, each
-argument's band lands entirely inside the other's window. **Suppression is not a blind spot.** A
-suppressed byte is one some other window of the same call already inspects — the kernel write there
-is captured, just recorded against a different argument's ipa — so nothing is lost by not flagging it
-a second time. What the 31 actually measures is how often M27's band was claiming proof it did not
+**Task 3: the shrink is not rare, and that is a finding about M27, not a regression in M28.** No
+`[M28 BANDSHRINK]` line was visible in the full gate's captured output at Task 2's commit — but that
+is not a count: the line is recorder stderr, and every e2e gate test drives the recorder as a child
+process via `crates/retrace/tests/util/mod.rs`, which pipes its stderr into a `String` a passing test
+never prints, so no such line could have reached that log regardless of how often it fired. The one direct
+measurement is `/bin/ps`, run by hand (reproduce with `RETRACE_TRACE=1 cargo run -p retrace --
+record-dyn /bin/ps`, now that the line is gated behind that flag — see Known limits): it shrank a
+band **31 times** — six syscalls, 344 (`getdirentries64`) ×15, 399 ×11, 33 (`access`) ×2, and one
+each of 5 (`open`), 347, 339 (`fstat64`) — every one a complete `64 -> 0` on a capped 65536-byte
+window. The mechanism is address arithmetic, not a bug: two arguments of one call routinely point
+into the same backing (`ps`'s two pointers sit 304 bytes apart on the stack), and once both take a
+64 KiB window, each argument's band lands entirely inside the other's window. **Suppression is not a
+blind spot.** A suppressed byte is one some other window of the same call already inspects — the
+kernel write there is captured, just recorded against a different argument's ipa — so nothing is lost
+by not flagging it a second time. And it cannot become one structurally: the window with the maximal
+end address in a backing can never itself be suppressed, since suppression needs some other window
+ending even further out, which is impossible for whichever window already ends furthest — so the band
+immediately past everything the call inspected stays guarded no matter how many inner bands get
+truncated to zero. What the 31 actually measures is how often M27's band was claiming proof it did not
 have: the band was weaker than M27's own text admitted, and only becomes correct — for the first
 time — with Task 2's shrink in place. The ruling was explicit: do not narrow the shrink to make this
 number smaller; a band that cannot be attributed proves nothing, which is the whole thesis of Task 2.
