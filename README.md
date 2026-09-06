@@ -229,7 +229,7 @@ them is counted as a failure on purpose.
   still not proof the class is gone** — see Known limits for the measured false negative that makes
   this the honest statement rather than the stronger one.
 
-**Gate:** 529 passed / 0 failed / 2 ignored across 116 test binaries, **measured at M28** over all
+**Gate:** 532 passed / 0 failed / 2 ignored across 116 test binaries, **measured at M28** over all
 116 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
 See the testing note below for how that number is assembled. "116 test binaries" is 109 test
 executables (the new `failwrite.rs` target) plus the 7 `Doc-tests` harnesses cargo reports, each of
@@ -240,13 +240,14 @@ wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cac
 are described under Known limits. M28 parked nothing new.
 
 Reconciled against M27's 523 / 0 / 2 over 115 **file-by-file rather than by sum**: the existing
-`retrace-box/tests/truncguard.rs` **+5** (the positive control plus four `band_not_covered` tests,
-covering span intersection and self-exclusion, not merely start position), the new
+`retrace-box/tests/truncguard.rs` **+8** (the positive control, Task 2's four `band_not_covered`
+tests — covering span intersection and self-exclusion, not merely start position — and three more
+from the fix wave: multiple-overlap, `band == 0`, and `len == 0`), the new
 `retrace-box/tests/failwrite.rs` **+1 and +1 binary** (the `if !err` measurement). Every other file
-unchanged, and `--bins` **11 → 11**. **+6 running from +6 new tests** — unlike M26, nothing moved out
+unchanged, and `--bins` **11 → 11**. **+9 running from +9 new tests** — unlike M26, nothing moved out
 of the ignored column this time; M28 hardened the tripwire without un-parking a gate. The count
-closes at both ends: the tree holds 525 `#[test]` at M27 = 523 running + 2 ignored, and 531 at M28 =
-529 + 2.
+closes at both ends: the tree holds 525 `#[test]` at M27 = 523 running + 2 ignored, and 534 at M28 =
+532 + 2.
 
 Chunk B again ran `cargo test -p retrace-box` as a **whole package** so its `Doc-tests` harness is
 not silently dropped (M24's lesson, now standing practice), and the `retrace` package was split into
@@ -534,7 +535,7 @@ cargo test -p retrace --bins -- --test-threads=1            # don't omit: see be
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
 without a `--test` filter, reaches them.** Leaving it out silently costs 11 tests and one binary —
-at M28, 518 / 0 / 2 over 115 instead of 529 / 0 / 2 over 116 — and nothing fails to warn you. Contrast
+at M28, 521 / 0 / 2 over 115 instead of 532 / 0 / 2 over 116 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 

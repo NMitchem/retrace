@@ -5326,13 +5326,14 @@ past everything this call's diff inspected, and still points at `retrace_arch::d
 fix. The positive control's `#[should_panic(expected = "changed a byte in the")]` still matches the
 rewritten wording; re-run after the change: 8 passed, 0 failed.
 
-**The gate: 529 passed / 0 failed / 2 ignored across 116 test binaries**, every chunk `EXIT=0`,
+**The gate: 532 passed / 0 failed / 2 ignored across 116 test binaries**, every chunk `EXIT=0`,
 clippy clean over `--workspace --all-targets`. Reconciled against M27's 523 / 0 / 2 over 115
-file-by-file: the existing `retrace-box/tests/truncguard.rs` **+5** (the positive control plus four
-`band_not_covered` tests, covering span intersection and self-exclusion, not merely start position),
+file-by-file: the existing `retrace-box/tests/truncguard.rs` **+8** (the positive control, Task 2's
+four `band_not_covered` tests — covering span intersection and self-exclusion, not merely start
+position — and three more from the fix wave: multiple-overlap, `band == 0`, and `len == 0`),
 the new `retrace-box/tests/failwrite.rs` **+1 and +1 binary**. `--bins` unchanged at **11**, every
-other file unchanged. 523 + 5 + 1 = 529; the tree holds 525 `#[test]` at M27 = 523 + 2, and 531 at
-M28 = 529 + 2. The two ignored gates (`stackoverflow_rust_e2e`, `cache_symbol_e2e`) are unchanged
+other file unchanged. 523 + 8 + 1 = 532; the tree holds 525 `#[test]` at M27 = 523 + 2, and 534 at
+M28 = 532 + 2. The two ignored gates (`stackoverflow_rust_e2e`, `cache_symbol_e2e`) are unchanged
 from M27. **M28 parked nothing new.**
 
 **What is left standing, named rather than implied:**
