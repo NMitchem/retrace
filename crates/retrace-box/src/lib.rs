@@ -2834,43 +2834,35 @@ impl Box_ {
         !pre_guard.is_empty() && pre_guard != post_guard
     }
 
-    /// The syscalls whose `x1` is a destination buffer and whose `x2` is that buffer's byte count.
+    /// The destination length `num` will fill at argument `i`, if the table knows it.
     ///
-    /// **The forwarded-count clamp and the diff window must agree on this set**, which is why it is
-    /// one predicate rather than two lists. The clamp decides how many bytes the host kernel is
-    /// allowed to write into the guest buffer; the window decides how many are looked at afterwards
-    /// and captured as `Event::Syscall` writes. A set the two disagree about is precisely the M26
-    /// defect: the kernel writes past what the diff inspects, the excess lands in guest memory on
-    /// record and in no `Event`, and replay restores stale bytes there. Nothing in the divergence
-    /// oracle can see that — `(num, args)` are identical on both sides, so the recording is
-    /// self-consistent and merely incomplete.
-    pub fn writes_x2_bytes_to_x1(num: u64) -> bool {
-        num == retrace_arch::SYS_READ
-            || num == retrace_arch::SYS_PREAD
-            || num == retrace_arch::SYS_READ_NOCANCEL
+    /// Takes `args` as a parameter and stores nothing: `Box_` gets no new field for this. Reads
+    /// guest memory for the `DerefU64` shape, which is the only reason it needs `&self`.
+    fn dest_len_bytes(&self, num: u64, i: usize, args: &[u64; 8]) -> Option<usize> {
+        match retrace_arch::dest_buffer(num) {
+            Some((di, len)) if di == i => Some(match len {
+                retrace_arch::DestLen::Reg(n) => args[n] as usize,
+                // `*(size_t*)args[n]` — sysctl's oldlenp. A null or unmapped pointer would be a
+                // guest bug; `read_u64` is the same accessor the rest of the box uses for guest
+                // scalars, so it behaves identically to every other guest-memory read here.
+                retrace_arch::DestLen::DerefU64(n) => self.read_u64(args[n]) as usize,
+            }),
+            _ => None,
+        }
     }
 
     /// How many bytes of the region behind `args[i]` to snapshot for the pre/post memory diff.
     ///
-    /// `PTR_WINDOW_CAP` is a *heuristic*, and has been since M1: most pointer args name a struct
-    /// whose size the box does not know, so it snapshots a fixed window and hopes it is enough.
-    /// M1's own plan flagged that policy as needing revisiting "once real programs (large mappings,
-    /// failing syscalls) are recorded", and M25's CPython guest is the program that finally
-    /// exceeded it — an 88 KB `.pyc` read whose last 22567 bytes were never captured.
-    ///
-    /// For the buffer-filling syscalls the length is not a guess: `x2` is a byte count, and the
-    /// forwarded count is clamped only by the destination's backing. So widen the window for that
-    /// one argument to cover exactly what may be written. Everything else keeps the 64 KiB
-    /// heuristic, because widening it unconditionally costs a pre-image copy on every pointer
-    /// operand of every syscall (M8 measured that per-syscall diff time is not free).
-    ///
-    /// Never exceeds `avail`: `clamp_count` is bounded by it, so the widened window is too.
-    pub fn diff_window(num: u64, i: usize, avail: usize, count: usize) -> usize {
+    /// `PTR_WINDOW_CAP` is a heuristic and has been since M1: most pointer args name a struct whose
+    /// size the box does not know. Where `dest_buffer` DOES know the length, widen to cover it;
+    /// everything else keeps the 64 KiB heuristic, because widening unconditionally costs a
+    /// pre-image copy on every pointer operand of every syscall (M8 measured that per-syscall diff
+    /// time is not free). Never exceeds `avail`.
+    fn diff_window(&self, num: u64, i: usize, avail: usize, args: &[u64; 8]) -> usize {
         let base = avail.min(PTR_WINDOW_CAP);
-        if i == 1 && Self::writes_x2_bytes_to_x1(num) {
-            base.max(Self::clamp_count(avail, count))
-        } else {
-            base
+        match self.dest_len_bytes(num, i, args) {
+            Some(len) => base.max(Self::clamp_count(avail, len)),
+            None => base,
         }
     }
 
@@ -2973,7 +2965,7 @@ impl Box_ {
                     // M26: not a flat cap. For a buffer-filling syscall the destination window
                     // must cover what the clamp below will let the kernel write, or the tail is
                     // written to guest memory and captured nowhere. See `diff_window`.
-                    let win = Self::diff_window(num, i, avail, args[2] as usize);
+                    let win = self.diff_window(num, i, avail, &args);
                     let pre = unsafe { std::slice::from_raw_parts(hp, win) }.to_vec();
                     // M27: when the window is CAPPED there is backing beyond what the diff will
                     // look at, and a kernel write reaching into it would be captured nowhere.
@@ -2987,19 +2979,24 @@ impl Box_ {
                 None => hargs[i] = args[i] as i64,
             }
         }
-        // Debt #1: read/pread fill the x1 buffer with up to x2 bytes; cap x2 at that buffer's
-        // backing so the host kernel can never write past it. x2 is a COUNT, never a pointer, so
-        // use the ORIGINAL arg (the generic loop above may have mis-"translated" it to a host
-        // pointer if the count value happened to equal a mapped low IPA — e.g. dyld's pread count
-        // 0x4000 collides with the trampoline IPA). This both fixes that mis-forward and keeps the
-        // host kernel from writing past the destination backing.
+        // Debt #1: for the `Reg` shape (read/pread/pread_nocancel) the destination's length is a
+        // register; cap it at that buffer's backing so the host kernel can never write past it. The
+        // length is a COUNT, never a pointer, so use the ORIGINAL arg (the generic loop above may
+        // have mis-"translated" it to a host pointer if the count value happened to equal a mapped
+        // low IPA — e.g. dyld's pread count 0x4000 collides with the trampoline IPA). This both
+        // fixes that mis-forward and keeps the host kernel from writing past the destination
+        // backing.
         //
         // M10: `read_nocancel` (396) belongs here too and was missing — the same plain-vs-_nocancel
         // trap as M9's console bug, in the clamp rather than in a predicate. `jq` reads through 396
         // and never through 3, so before M10 its reads were forwarded UNCLAMPED.
-        if Self::writes_x2_bytes_to_x1(num) {
-            let count = args[2] as usize;
-            hargs[2] = match self.host_span(args[1]) {
+        //
+        // `DerefU64` (sysctl's `*oldlenp`) is deliberately UNCLAMPED here: it is an in-out length
+        // the kernel also writes back, and clamping it would mean guessing sysctl's own semantics.
+        // sysctl is unclamped today, so this regresses nothing — owed and unmeasured, a follow-up.
+        if let Some((di, retrace_arch::DestLen::Reg(li))) = retrace_arch::dest_buffer(num) {
+            let count = args[li] as usize;
+            hargs[li] = match self.host_span(args[di]) {
                 Some((_, avail)) => Self::clamp_count(avail, count) as i64,
                 None => count as i64,
             };
