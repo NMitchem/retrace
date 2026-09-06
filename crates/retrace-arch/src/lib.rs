@@ -183,6 +183,10 @@ pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> {
 /// refused by value rather than tested or translated, the way `guest_workq_kernreturn` refuses an
 /// unenumerated opcode. Translating them properly needs the `translate_mwl_regions` treatment and
 /// its own measurement.
+///
+/// This is the MEASURED family, not a proof of exhaustiveness: `aio_read` (216, via
+/// `aiocb.aio_buf`) and `sendfile` (337, via `sf_hdtr`'s iovecs) have the same nested-pointer shape
+/// and are not covered here, because no guest this repo runs is measured to call either.
 pub fn writes_via_nested_pointer(num: u64) -> bool {
     matches!(num, 120 | 411 | 27 | 401 | 540 | 480)
 }
@@ -640,7 +644,7 @@ mod tests {
     // unenumerated opcode. Translating them properly needs the translate_mwl_regions treatment and
     // its own measurement.
     #[test]
-    fn the_nested_pointer_family_is_named_in_full() {
+    fn the_nested_pointer_family_is_pinned_by_number() {
         for num in [120u64, 411, 27, 401, 540, 480] {
             assert!(writes_via_nested_pointer(num), "syscall {num} must be refused");
         }

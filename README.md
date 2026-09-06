@@ -206,10 +206,12 @@ them is counted as a failure on purpose.
   unclamped forward lets the host kernel write past the guest's actual backing. The `readv`/
   `recvmsg` nested-pointer family (120/27/540/411/401/480) moved from "would hand the host kernel a
   guest address" to **refused by value**, fail-loud. Everything else that still gets only the 64 KiB
-  heuristic is now backed by a guard band: a 64-byte region immediately past every diff window is
-  snapshotted before the forward and compared after, and a changed byte there **panics**, because
-  nothing but the halted guest's own `host_svc` call runs in between — a changed byte is *proof* of a
-  kernel write the diff never looked at. It ran across the whole M27 gate and fired zero times. **That
+  heuristic is now backed by a guard band: a 64-byte region immediately past every *capped* diff
+  window is snapshotted before the forward and compared after, and a changed byte there **panics**,
+  because nothing but the halted guest's own `host_svc` call runs in between — a changed byte is
+  *proof* of a kernel write the diff may not have inspected, though not proof it belongs to *this*
+  argument's overrun specifically: a write by another argument of the same call, landing in that
+  same range, would also trip it. It ran across the whole M27 gate and fired zero times. **That
   silence is not proof the class is gone** — see Known limits for the measured false negative that
   makes this the honest statement rather than the stronger one.
 
@@ -299,11 +301,14 @@ These are real and current, not aspirational gaps.
   treatment and its own measurement extend to them.
   There is still **no BSD-syscall allowlist** — everything not explicitly intercepted is forwarded —
   so the remaining set is open-ended rather than enumerable, which is what the **M27 guard band**
-  exists for: it snapshots 64 bytes immediately past every diff window before the forward and
-  compares them after, and **panics** if a byte changed, because between the two snapshots nothing
-  but the halted guest's own `host_svc` call can have touched that memory — a changed byte is *proof*
-  of a kernel write the diff never inspected, not an inference. It ran across the whole M27 gate and
-  fired zero times, including on `/bin/ps`.
+  exists for: it snapshots 64 bytes immediately past every *capped* diff window before the forward
+  and compares them after, and **panics** if a byte changed, because between the two snapshots
+  nothing but the halted guest's own `host_svc` call can have touched that memory — a changed byte
+  is *proof* of a kernel write the diff may not have inspected, not an inference. It is not proof the
+  write belongs to *this* argument's overrun, though: `forward_and_diff` takes a window for every
+  mapped-looking argument, so a write by another argument of the same call, landing in that same
+  range, would also trip it. It ran across the whole M27 gate and fired zero times, including on
+  `/bin/ps`.
   **That silence is not proof of absence, and this is measured rather than argued.** Before the
   `sysctl` fix landed, `ps`'s own overrun was the band's would-be catch: the kernel wrote 139,880
   bytes past the window, and the band still did not fire, because `struct kinfo_proc` carries long
@@ -317,9 +322,10 @@ These are real and current, not aspirational gaps.
   their backing before then — a read into a mapping that is then `munmap`'d would evade both, and no
   gate does that today. Two holes stay open and unmeasured: `Box_::diff_memory`'s own `.min(avail)`
   clamp on the replay side (flagged in M1's own branch review, deferred at M2, still unpaid), and the
-  `if !err` gate, which skips write capture entirely on a failed syscall — M27 measured that this is
-  *not* what `ps` hit (`err=false` on all 83 of its `sysctl` calls), which narrows the question
-  without closing it. Strengthening the band itself — sampling across the whole remaining backing
+  `if !err` gate, which skips write capture entirely on a failed syscall — and the band is not
+  evaluated on that path either, so a failing syscall is neither diffed nor guarded. M27 measured
+  that this is *not* what `ps` hit (`err=false` on all 83 of its `sysctl` calls), which narrows the
+  question without closing it. Strengthening the band itself — sampling across the whole remaining backing
   under a fixed byte budget, rather than one contiguous 64-byte run immediately past the window — was
   deliberately not attempted in M27.
 - **Exec-in-place is unmodelled — point retrace at the real binary, not the shim.** A launcher that

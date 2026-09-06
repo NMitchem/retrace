@@ -2991,15 +2991,24 @@ impl Box_ {
         // trap as M9's console bug, in the clamp rather than in a predicate. `jq` reads through 396
         // and never through 3, so before M10 its reads were forwarded UNCLAMPED.
         //
-        // `DerefU64` (sysctl's `*oldlenp`) is deliberately UNCLAMPED here: it is an in-out length
-        // the kernel also writes back, and clamping it would mean guessing sysctl's own semantics.
-        // sysctl is unclamped today, so this regresses nothing — owed and unmeasured, a follow-up.
-        if let Some((di, retrace_arch::DestLen::Reg(li))) = retrace_arch::dest_buffer(num) {
-            let count = args[li] as usize;
-            hargs[li] = match self.host_span(args[di]) {
-                Some((_, avail)) => Self::clamp_count(avail, count) as i64,
-                None => count as i64,
-            };
+        // A `match` over `DestLen` rather than an `if let` on `Reg` alone: a future third variant
+        // fails to compile here unless it is given an explicit arm, so it cannot be silently
+        // skipped the way this clamp itself once could have been.
+        if let Some((di, dest_len)) = retrace_arch::dest_buffer(num) {
+            match dest_len {
+                retrace_arch::DestLen::Reg(li) => {
+                    let count = args[li] as usize;
+                    hargs[li] = match self.host_span(args[di]) {
+                        Some((_, avail)) => Self::clamp_count(avail, count) as i64,
+                        None => count as i64,
+                    };
+                }
+                // `DerefU64` (sysctl's `*oldlenp`) is deliberately UNCLAMPED here: it is an in-out
+                // length the kernel also writes back, and clamping it would mean guessing
+                // sysctl's own semantics. sysctl is unclamped today, so this regresses nothing —
+                // owed and unmeasured, a follow-up.
+                retrace_arch::DestLen::DerefU64(_) => {}
+            }
         }
         // M10: forward the TRANSLATED copy of map_with_linking_np's region array, not the guest's
         // (whose mwlr_fd fields still hold guest fds, and must keep holding them).
@@ -3016,26 +3025,29 @@ impl Box_ {
         if !err {
             for (ipa, len, pre, pre_band) in windows {
                 // Take `avail` rather than discarding it: the guard-band read below is `unsafe` and
-                // must stay inside this backing. The band was sized from the PRE-forward `avail`,
-                // and a syscall that remapped guest memory could in principle shrink it — mmap /
-                // munmap / mprotect are all intercepted upstream and never reach here, but re-
-                // clamping costs nothing and does not rely on that staying true.
+                // must stay inside this backing. Nothing between the pre-image loop and here
+                // mutates `self.backings`, so `avail_now == avail` always and this re-clamp is a
+                // no-op today — it is defensive against a FUTURE edit that makes this function
+                // mutate backings between the two loops, not against anything reachable now.
                 let (hp, avail_now) = self.host_span(ipa).unwrap();
                 let band = pre_band.len().min(avail_now.saturating_sub(len));
                 let post = unsafe { std::slice::from_raw_parts(hp, len) };
-                // M27 Task 1: WARNING ONLY. Task 3 turns this into a panic, and deliberately not
-                // before: landing a fail-loud assert without first measuring what it fires on
-                // across the whole gate is the unmeasured-supporting-fact trap this milestone
-                // exists to avoid.
+                // M27: fail-loud. Landed as an `eprintln!` first and flipped to this assert only
+                // after Task 2 measured it firing ZERO times across the whole gate (523/0/2 over
+                // 115) — landing a panic without that measurement is the unmeasured-supporting-
+                // fact trap this milestone exists to avoid. Note the band is a one-directional
+                // detector: see the README's Known limits for the measured false negative (zeros
+                // written over zeros on /bin/ps).
                 let post_band = unsafe { std::slice::from_raw_parts(hp.add(len), band) };
                 assert!(!Self::overran_window(&pre_band[..band], post_band),
-                    "syscall {} wrote PAST its {}-byte diff window at ipa {:#x}. The bytes past it \
-                     are captured in no Event, so the recording is silently incomplete and replay \
-                     would restore stale data there — a failure the divergence oracle cannot see, \
-                     because (num, args) match on both sides. Add this syscall's destination buffer \
-                     to retrace_arch::dest_buffer with the argument its length lives in; if that \
-                     length is not knowable, measure it before guessing.",
-                    num as i64, len, ipa);
+                    "syscall {} changed a byte in the {}-byte guard band past its {}-byte diff \
+                     window at ipa {:#x}. That is proof of a kernel write the diff may not have \
+                     inspected — but not proof it belongs to THIS argument's overrun: a write by \
+                     another argument of the same call, landing in this range, would also trip it. \
+                     Add this syscall's destination buffer to retrace_arch::dest_buffer with the \
+                     argument its length lives in; if that length is not knowable, measure it \
+                     before guessing.",
+                    num as i64, band, len, ipa);
                 if post != pre.as_slice() {
                     writes.push(Region { ipa, bytes: post.to_vec() });
                 }
