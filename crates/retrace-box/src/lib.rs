@@ -2877,6 +2877,14 @@ impl Box_ {
     /// exactly why the positive control uses `fstat` (absent from the table) rather than `read`.
     pub fn set_window_cap_for_test(&mut self, cap: usize) { self.window_cap = cap; }
 
+    /// Test seam (M28). Reads `len` bytes of guest memory at `ipa`, for tests that must observe
+    /// memory independently of `forward_and_diff`'s own capture — which is exactly what the
+    /// `if !err` measurement needs, since that path captures nothing. Production never calls this.
+    pub fn read_bytes_for_test(&self, ipa: u64, len: usize) -> Vec<u8> {
+        let (hp, avail) = self.host_span(ipa).expect("read_bytes_for_test: ipa not mapped");
+        unsafe { std::slice::from_raw_parts(hp, len.min(avail)) }.to_vec()
+    }
+
     /// The destination length `num` will fill at argument `i`, if the table knows it.
     ///
     /// Takes `args` as a parameter and stores nothing: `Box_` gets no new field for this. Reads

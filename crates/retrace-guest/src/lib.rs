@@ -125,6 +125,10 @@ pub const FIXTURE: &str = concat!(env!("OUT_DIR"), "/fixture.txt");
 pub const BIGREAD: &str = concat!(env!("OUT_DIR"), "/bigread");
 /// The 96 KiB fixture `BIGREAD` reads: all `A`, final byte `Z`.
 pub const BIGREAD_FIXTURE: &str = concat!(env!("OUT_DIR"), "/bigread_fixture.bin");
+/// M28: a guest whose one `sysctl` fails (`ENOMEM`, undersized `oldp`). Measures whether the kernel
+/// writes into a guest buffer on a FAILING syscall — the path where `forward_and_diff` skips write
+/// capture and the guard band alike.
+pub const FAILSYSCTL: &str = concat!(env!("OUT_DIR"), "/failsysctl");
 pub const MMAPGUEST: &str = concat!(env!("OUT_DIR"), "/mmapguest");
 pub const UNALIGNED: &str = concat!(env!("OUT_DIR"), "/unaligned");
 pub const PACGUEST: &str = concat!(env!("OUT_DIR"), "/pacguest");

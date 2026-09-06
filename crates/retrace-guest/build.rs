@@ -67,6 +67,16 @@ fn main() {
         .status().expect("clang bigread");
     assert!(status.success(), "bigread guest build failed");
 
+    // M28: a guest whose sysctl FAILS with an undersized buffer, to measure whether the kernel
+    // writes anyway — the `if !err` path, where write capture AND the guard band are both off.
+    let src = format!("{}/asm/failsysctl.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/failsysctl");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang failsysctl");
+    assert!(status.success(), "failsysctl guest build failed");
+
     // mmap guest: allocates via SYS_mmap, writes the mapping with plain stores, munmaps.
     let src = format!("{}/asm/mmapguest.s", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/mmapguest");
