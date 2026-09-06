@@ -5129,3 +5129,113 @@ that measurement was not run. Landing a fail-loud assert without it would be pre
 conclusion resting on an unmeasured supporting fact" this repo keeps catching in itself. It is
 **M27**'s first task, ahead of `sysctl`, `pread_nocancel`, a general `dest_buffers` table, and
 `diff_memory`'s own hole.
+
+---
+
+## Status: M27-truncguard — the band proved silence isn't proof, and `ps` was M26's bug the whole time
+
+M26 prototyped the guard band by hand and named the blast-radius measurement it was withholding a
+`panic!` on. **M27 Task 1 lands it as an `eprintln!` first**, deliberately not a `panic!` — landing a
+fail-loud assert without measuring what it fires on across the whole gate is the unmeasured-
+supporting-fact trap this milestone exists to avoid — and Task 2 runs that measurement. It did not
+confirm what the design predicted; it found something more important than a missing table entry.
+
+**Task 2's measurement: zero firings, and `/bin/ps` did not converge the way the plan expected.**
+With the band live as a warning, the full chunked gate ran 518 / 0 / 2 over 115 binaries, every
+chunk `EXIT=0`, and the band fired **nowhere** in the gate. That much the plan expected. `/bin/ps`
+did not: the design predicted exactly one firing, on `sysctl` (202). There were none — and `ps`
+still diverged on replay, now as a **syscall mismatch** (live `fstat64` vs. recorded
+`open_nocancel`) at landmark 6528, roughly 6,100 traps *after* the `sysctl` call in question, not as
+M26's memory-compare divergence at the window's edge. The corruption's visible symptom had moved
+downstream between M26's measurement and this one — the same root cause, a different place the
+stale bytes were finally read and acted on. That the fix in Task 3 closed the divergence at *this*
+new site too, not just the one M26 saw, is itself evidence R2 (whether `ps` has one cause or
+several) resolves to **one**.
+
+**The false negative.** Probing `forward_and_diff` directly killed three competing explanations in
+order, each with its own measurement: the `if !err` gate did not skip the capture (`err=false` on
+all 83 `sysctl` calls in the run); the band **was** taken (`win=65536, band=64`); and the kernel
+**did** overrun (`*oldlenp` after the call is 205,416 — 139,880 bytes past the window). The band's
+64 bytes at `[65536, 65600)` were zeros before the call **and** zeros after. `struct kinfo_proc`
+carries long zero runs, and offset 65536 happens to land inside one — the kernel wrote zeros over
+zeros, and a byte-compare cannot tell that from no write at all.
+
+That is exactly the false negative the design document named for a 1-byte band — "a tail of zeros
+written over zeros" — and then argued a 64-byte band made negligible. **That argument is measured
+false, on this milestone's own headline case.** The band is proof when it fires; it is not proof of
+absence when it stays silent, and both documents say so rather than the stronger claim the design
+hoped for. This did not change what Tasks 3 and 4 had to do: `dest_buffer`'s `DerefU64` shape reads
+`*oldlenp` *before* the forward, where `ps` has already stored its own allocation size, so the
+window covers the whole write regardless of whether the band would ever have caught it.
+
+**Task 3: `pread_nocancel`, and a table instead of a predicate.** `retrace_arch::writes_x2_bytes_to_x1`
+— M26's yes/no predicate, good for exactly one shape (a register holding a byte count) — could not
+express `sysctl`'s shape (a length behind a guest pointer), so it is gone, not extended a second
+time. `retrace_arch::dest_buffer(num) -> Option<(usize, DestLen)>` replaces it: `DestLen::Reg(n)`
+for the read family, `DestLen::DerefU64(n)` for `sysctl`'s `*oldlenp`. One table drives both the
+clamp and the window, which is the property that matters — a disagreement between them is exactly
+the M26 defect. `pread_nocancel` (414) turned out to be missing from **three** places at once:
+`fd_operands`, the forwarded-count clamp, and the window. The missing clamp was the serious third of
+those — an unclamped forward lets the host kernel write past the guest buffer's actual backing,
+which is a host memory-safety hazard, not merely a fidelity gap. `sysctl` (202) is seeded with
+`DestLen::DerefU64(3)`. The table's doc comment says plainly what is and is not in it: seeded only
+with what is measured or SDK-verified, and everything else is deliberately absent so it announces
+itself through the band rather than being guessed at.
+
+**Task 4: `/bin/ps` records and replays.** `ps_records_and_replays` (`crates/retrace/tests/sysbin_e2e.rs`)
+asserts a genuine record-and-replay agreement, not merely a quiet tripwire, precisely because Task
+2 found the divergence's visible site is not fixed across measurements. Guest stdout is
+byte-identical between record and replay. The Apple-binary sweep moves **46 → 47**.
+
+**Task 5: the class fails loud.** The band's `eprintln!` becomes an `assert!` that panics on the
+first overrun it sees, naming the syscall, the window size, and the IPA, and pointing at
+`retrace_arch::dest_buffer` as the fix. And the `readv`/`recvmsg` nested-pointer family — `readv`
+(120), `readv_nocancel` (411), `recvmsg` (27), `recvmsg_nocancel` (401), `preadv` (540), `recvmsg_x`
+(480) — is refused **by value** in `retrace-core`'s record dispatch (`writes_via_nested_pointer`),
+the same discipline `guest_workq_kernreturn` already uses for an opcode nothing has measured: their
+destination sits behind a pointer *inside* a guest struct (`iovec.iov_base`, `msghdr.msg_iov`), which
+`forward_and_diff` never translates, so before this fix forwarding one would have handed the host
+kernel a **guest** address to write through, as a **host** one — a wild-write hazard, not a
+truncation. Reading that as merely `EFAULT`-safe (guest IPAs being unlikely to collide with mapped
+host addresses) is an inference nobody had measured and the downside of it being wrong is severe, so
+the assert refuses rather than guesses. No guest anywhere in the gate calls any of the six — measured
+absent from M25's 69-number CPython syscall census — so nothing that passed today is affected.
+
+**The gate: 523 passed / 0 failed / 2 ignored across 115 test binaries**, every chunk `EXIT=0`,
+clippy clean over `--workspace --all-targets`. Reconciled against M26's 515 / 0 / 2 over 114
+**file-by-file**: `retrace-arch/src/lib.rs` **+4** (`pread_nocancel_is_treated_exactly_like_pread`,
+`dest_buffer_knows_where_each_length_lives`, `dest_buffer_omits_what_it_should` from Task 3, plus
+`the_nested_pointer_family_is_named_in_full` from Task 5); the new
+`retrace-box/tests/truncguard.rs` **+3 and +1 binary** (the guard band's own unit tests, written
+against `Box_::overran_window` directly rather than through a live syscall); `retrace/tests/sysbin_e2e.rs`
+**+1** (`ps_records_and_replays`); `--bins` unchanged at **11**. **+8 running from +8 new tests** —
+unlike M26, nothing moved out of the ignored column this time, so the count closes as pure addition:
+515 + 4 + 3 + 1 = 523, and the tree holds 517 `#[test]` at M26 = 515 + 2, 525 at M27 = 523 + 2.
+
+**What is left standing, named rather than implied:**
+
+- **`Box_::diff_memory`'s own `.min(avail)` clamp**, on the *replay* side, silently truncates a
+  recorded region longer than its replay-side backing. Flagged in M1's own branch review, deferred
+  at M2 alongside the clamp M26 eventually paid, and still unpaid.
+- **The `if !err` gate**, which skips write capture entirely on a failed syscall. M27 measured that
+  this is *not* what `/bin/ps` hit — `err=false` on all 83 of its `sysctl` calls in the run — which
+  narrows the question without closing it. The comment at the call site still treats the skip as
+  universally safe; nothing has measured whether a failing `sysctl` (`ENOMEM`, say) writes a partial
+  reply anyway.
+- **The remainder of the audit table** — `getdirentries64` (344), `recvfrom` (29/403),
+  `getfsstat64` (347), `proc_info` (336), `getattrlist`/`fgetattrlist` (220/228), `csops` (169/170) —
+  moved from *listed* to *guarded* by the band, which is a weaker statement than *closed* and is
+  written as the weaker one in both documents: the band is proof when it fires and not proof of
+  absence when silent, so these syscalls are unmeasured rather than verified safe.
+- **A clamp for the `DerefU64` shape** is owed and unmeasured: the window widens to cover `sysctl`'s
+  `*oldlenp`, but the forwarded count itself is not clamped by it. `sysctl` was unclamped before M27
+  too, so this regresses nothing — it is a debt carried forward, not a new one.
+- **Strengthening the band itself** — sampling across the whole remaining backing under a fixed byte
+  budget, rather than one contiguous 64-byte run immediately past the window, which is exactly the
+  shape the zeros-over-zeros false negative exploited — was deliberately not attempted in M27. It is
+  the obvious successor to this milestone's own finding.
+
+The successor is open: no gate anywhere in the tree is currently parked on a truncation-class wall,
+and the guard band stands as a live panic rather than a prototype. The next candidates are the
+band-strengthening question above, the `if !err` gate, and `diff_memory`'s replay-side clamp —
+whichever of the three a future measurement makes urgent first.
