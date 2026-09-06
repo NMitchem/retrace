@@ -40,6 +40,8 @@ pub fn is_console_close(num: u64, fd: u64) -> bool {
 
 pub const SYS_READ: u64 = 3;
 pub const SYS_PREAD: u64 = 153;
+/// `pread_nocancel`. Header-derived (`sys/syscall.h`: `#define SYS_pread_nocancel 414`).
+pub const SYS_PREAD_NOCANCEL: u64 = 414;
 pub const SYS_OPEN: u64 = 5;
 pub const SYS_CLOSE: u64 = 6;
 pub const SYS_MUNMAP: u64 = 73;
@@ -105,6 +107,7 @@ pub const AT_FDCWD: i64 = -2;
 pub fn fd_operands(num: u64) -> &'static [usize] {
     match num {
         SYS_CLOSE | SYS_CLOSE_NOCANCEL | SYS_READ | SYS_READ_NOCANCEL | SYS_PREAD
+        | SYS_PREAD_NOCANCEL
         | SYS_WRITE | SYS_WRITE_NOCANCEL | SYS_FCNTL | SYS_FCNTL_NOCANCEL
         | SYS_FSTAT | SYS_FSTAT64 | SYS_LSEEK | SYS_IOCTL | SYS_DUP
         | SYS_CONNECT | SYS_SENDTO | SYS_FGETATTRLIST
@@ -131,6 +134,40 @@ pub fn fd_operands(num: u64) -> &'static [usize] {
 /// it rather than modelling it wrong — a silently mis-modelled `dup2` aliases the wrong file.
 pub fn allocates_fd(num: u64) -> bool {
     matches!(num, SYS_OPEN | SYS_OPEN_NOCANCEL | SYS_OPENAT | SYS_DUP | SYS_SOCKET | SYS_SHM_OPEN)
+}
+
+/// Where a destination buffer's byte length lives for a given syscall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestLen {
+    /// The length is the value of register `x{n}`.
+    Reg(usize),
+    /// The length is a `u64` in GUEST MEMORY at the address in `x{n}` — `sysctl`'s `*oldlenp`.
+    DerefU64(usize),
+}
+
+/// The destination buffer `num` fills, as `(argument index, where its length lives)`.
+///
+/// **The forwarded-count clamp and the diff window must both consult this**, which is why it is one
+/// table rather than a predicate per shape. The clamp decides how many bytes the host kernel may
+/// write into the guest buffer; the window decides how many are looked at afterwards and captured
+/// as `Event::Syscall` writes. A disagreement between them is the M26 defect: the kernel writes past
+/// what the diff inspects, the excess lands in guest memory on record and in no `Event`, and replay
+/// restores stale bytes there — invisibly, because `(num, args)` still match.
+///
+/// **Seeded only with what is measured or SDK-verified.** Other syscalls are structurally capable of
+/// overrunning (`getdirentries64`, `recvfrom`, `getfsstat64`, `proc_info`, `getattrlist`, `csops`)
+/// and are deliberately ABSENT: none has been measured to do so, and the M27 guard band exists
+/// precisely so they announce themselves instead of being guessed at. Absence means "not measured",
+/// and the guard band is what makes that safe.
+pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> {
+    match num {
+        SYS_READ | SYS_READ_NOCANCEL | SYS_PREAD | SYS_PREAD_NOCANCEL => Some((1, DestLen::Reg(2))),
+        // sysctl(name, namelen, oldp, oldlenp, newp, newlen): the destination is x2 and its length
+        // is `*(size_t*)x3`, in guest memory rather than a register. Measured via /bin/ps, whose
+        // KERN_PROC_ALL buffer runs far past the 64 KiB window (M26).
+        SYS_SYSCTL => Some((2, DestLen::DerefU64(3))),
+        _ => None,
+    }
 }
 
 pub const SYS_SYSCTL: u64 = 202;
@@ -541,6 +578,38 @@ mod tests {
         // identifying a *volume*, not a file descriptor — 427 is deliberately absent from the
         // table (M25-cpython Task 3, Step 1 census).
         assert_eq!(fd_operands(427), &[] as &[usize], "fsgetpath (427) takes no descriptor");
+    }
+
+    // M27: 414 was missing from THREE places at once — fd_operands, the forwarded-count clamp, and
+    // the diff window — and the missing clamp is the serious one: an unclamped forward lets the
+    // host kernel write past the guest buffer's backing. `fd_operands`' own doc comment already
+    // states the rule this broke: "A plain-only table fails *silently*."
+    #[test]
+    fn pread_nocancel_is_treated_exactly_like_pread() {
+        assert_eq!(SYS_PREAD_NOCANCEL, 414);
+        assert_eq!(fd_operands(SYS_PREAD_NOCANCEL), fd_operands(SYS_PREAD));
+        assert_eq!(dest_buffer(SYS_PREAD_NOCANCEL), dest_buffer(SYS_PREAD));
+    }
+
+    // The read family's length is a register. sysctl's is behind a guest pointer — the shape M26's
+    // yes/no predicate could not express, and the reason this is a table.
+    #[test]
+    fn dest_buffer_knows_where_each_length_lives() {
+        assert_eq!(dest_buffer(SYS_READ),     Some((1, DestLen::Reg(2))));
+        assert_eq!(dest_buffer(SYS_PREAD),    Some((1, DestLen::Reg(2))));
+        assert_eq!(dest_buffer(SYS_READ_NOCANCEL), Some((1, DestLen::Reg(2))));
+        assert_eq!(dest_buffer(SYS_SYSCTL),   Some((2, DestLen::DerefU64(3))));
+    }
+
+    // Absence must mean "provably writes no buffer we can size", never "not gotten to yet".
+    // fsgetpath takes an fsid_t* naming a VOLUME, not a descriptor and not a sized buffer; M25
+    // pinned that and it must not silently reopen.
+    #[test]
+    fn dest_buffer_omits_what_it_should() {
+        // 427 as a bare literal, matching how `fd_operands`' existing assertion pins it —
+        // there is no SYS_FSGETPATH constant in this crate and this test must not invent one.
+        assert_eq!(dest_buffer(427), None, "fsgetpath takes an fsid_t*, not a sized buffer");
+        assert_eq!(dest_buffer(SYS_WRITE), None, "write reads the buffer, it does not fill it");
     }
 
     #[test]
