@@ -86,3 +86,30 @@ fn an_objc_heavy_system_tool_records_and_replays() {
     assert_eq!(rep.code, 0, "replay must not diverge: {}", rep.stderr);
     assert_eq!(rec.stdout, rep.stdout, "replay stdout must be byte-identical to the recording");
 }
+
+// M27: /bin/ps was published in the README from M22 to M26 as "a genuine replay divergence — the
+// oracle catching nondeterminism". That could not have been true: replay never EXECUTES a syscall,
+// it applies recorded writes, so a process list cannot vary between the two runs. M22's own
+// measurement document said "also not diagnosed" while the README stated it with confidence.
+//
+// It was the M26 truncation class. `ps` sizes a sysctl(KERN_PROC_ALL) buffer at roughly
+// nproc * sizeof(struct kinfo_proc) — far past the old 64 KiB window — and replay diverged at
+// ipa 0x700810091, 145 bytes past that window's end, holding zeros where the recording held data.
+//
+// This asserts ps actually records AND REPLAYS, not merely that the guard band stopped firing:
+// M23's measurements left open "whether ps's divergence is one cause or several", so a quiet
+// tripwire would not be evidence that the guest is correct.
+#[test]
+fn ps_records_and_replays() {
+    if !std::path::Path::new("/bin/ps").exists() {
+        eprintln!("SKIPPED ps_records_and_replays: /bin/ps not found. This gate did NOT run — it \
+                   is not evidence of anything.");
+        return;
+    }
+    let (rec, trace) = util::record_dynamic("/bin/ps");
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    assert!(!rec.stdout.is_empty(), "ps printed nothing; it should list at least its own process");
+    let rp = util::replay(&trace);
+    assert_eq!(rp.code, 0, "divergence: {}", rp.stderr);
+    assert_eq!(rp.stdout, rec.stdout, "replay stdout diverged from the recording");
+}
