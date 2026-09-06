@@ -5239,3 +5239,108 @@ The successor is open: no gate anywhere in the tree is currently parked on a tru
 and the guard band stands as a live panic rather than a prototype. The next candidates are the
 band-strengthening question above, the `if !err` gate, and `diff_memory`'s replay-side clamp —
 whichever of the three a future measurement makes urgent first.
+
+---
+
+## Status: M28-bandproof — a tripwire proven able to fire, made attributable, and its silence explained rather than assumed
+
+M27 landed the guard band as a fail-loud `assert!` after measuring it fire zero times across the
+whole gate — and closed with the same softened claim it opened with: a changed band byte was proof
+of *some* kernel write past the diff window, but not proof it belonged to the argument whose overrun
+it was meant to catch, because another argument's own window landing in that range would trip it
+too. M27's final review put paying that debt at the top of the successor list, ahead of widening
+anything. **M28 is that milestone, and it does not widen the band — it makes the band trustworthy
+first**, per the design's own title.
+
+**Task 1: nobody had proven the band could fire at all.** Every existing guest that reaches the
+band's `assert!` reaches it *not firing* — that is what "zero firings across 523 tests" meant — and
+`let band = 0;`, a mutation that disables the band outright, passed that same 523-test gate
+identically to the shipped code. A test that has never watched the code it guards fail is not a
+control. `Box_::set_window_cap_for_test` shrinks the diff-window cap to a test-chosen value, and a
+positive control drives `fileio`'s `fstat` — which writes a MEASURED `sizeof(struct stat) = 144`
+bytes and is deliberately absent from `retrace_arch::dest_buffer`, so no widening rescues it —
+through a 64-byte cap. With `let band = 0;` applied, the test was verified to **FAIL**, panicking
+`NOT-THE-GUARD-BAND: fstat wrote past a 64-byte window and nothing fired` rather than silently
+passing; reverted, it is green. The guard band can now be shown to fire.
+
+**Task 2: a band means this argument, or it means nothing.** `Box_::band_not_covered(ipa, len, band,
+others)` shrinks each argument's band to exclude any byte some *other* window of the same call
+already inspects — the spans are collected before the post-forward loop consumes `windows`, since
+every span (including the argument's own, which ends exactly where its band begins and so can never
+suppress itself) must be visible when each band is computed. Proven on span *intersection*, not
+merely start position, which is the case a naive implementation misses: a neighbour beginning
+*before* the band but reaching into it truncates exactly as much as one starting inside it. With this
+in place, a changed byte in what remains of the band cannot be blamed on any other argument of the
+call — it is proof of a kernel write past everything this call's diff inspected, full stop. The
+shrink itself announces through an `eprintln!("[M28 BANDSHRINK] …")` rather than a second assert,
+because whether it fires rarely or commonly was still unmeasured — that measurement is Task 3, not
+an assumption Task 2 was entitled to make about its own code.
+
+**Task 3: the shrink is not rare, and that is a finding about M27, not a regression in M28.** The
+full gate at Task 2's commit shrank a band zero times. `/bin/ps` alone shrank one **31 times** — six
+syscalls, 344 (`getdirentries64`) ×15, 399 ×11, 33 (`access`) ×2, and one each of 5 (`open`), 347,
+339 (`fstat64`) — every one a complete `64 -> 0` on a capped 65536-byte window. The mechanism is
+address arithmetic, not a bug: two arguments of one call routinely point into the same backing
+(`ps`'s two pointers sit 304 bytes apart on the stack), and once both take a 64 KiB window, each
+argument's band lands entirely inside the other's window. **Suppression is not a blind spot.** A
+suppressed byte is one some other window of the same call already inspects — the kernel write there
+is captured, just recorded against a different argument's ipa — so nothing is lost by not flagging it
+a second time. What the 31 actually measures is how often M27's band was claiming proof it did not
+have: the band was weaker than M27's own text admitted, and only becomes correct — for the first
+time — with Task 2's shrink in place. The ruling was explicit: do not narrow the shrink to make this
+number smaller; a band that cannot be attributed proves nothing, which is the whole thesis of Task 2.
+
+**Task 4: the `if !err` skip, measured on one purpose-built case.** `forward_and_diff` skips write
+capture — and the band along with it — entirely when a syscall's carry flag is set, on the stated
+but unmeasured assumption that a failed syscall writes nothing. A guest built to fail deliberately
+(`sysctl(KERN_OSTYPE)` into a 2-byte buffer, where `"Darwin\0"` needs seven) measured it directly:
+`err=true ret=12 (ENOMEM) writes_captured=0 buf_changed=false` — the kernel wrote nothing, before or
+after. The reviewer went beyond the brief and reproduced this independently, out-of-band:
+disassembling the committed guest to confirm the mib, namelen and undersized `oldlenp` are what it
+actually issues, and replaying the identical syscall twice against the live host kernel. This is one
+measured case, not a general proof about failing syscalls — the gate stays open, now with a datum in
+it instead of none.
+
+**Task 5: Branch B, by the measurement, not by default.** The spec offered two branches for the
+`if !err` finding: hoist the diff out of the skip (Branch A) if the measurement found a real loss, or
+land the measurement as a standing test with no code change (Branch B) if it did not. Task 4 found no
+loss on the one case built to provoke it, so Branch A is not taken and is not half-implemented "just
+in case" — `failwrite.rs` lands as a standing measurement
+(`a_failing_sysctl_is_measured_for_writes`), asserting only what is known (the call fails) and the
+datum Task 4 measured (the buffer is unchanged), not a general claim neither task earned.
+
+**Task 6 restores the strong claim in the assert's own message.** M27 had softened it because it was
+false; Task 2 made it true, so the message now says a changed band byte IS proof of a kernel write
+past everything this call's diff inspected, and still points at `retrace_arch::dest_buffer` as the
+fix. The positive control's `#[should_panic(expected = "changed a byte in the")]` still matches the
+rewritten wording; re-run after the change: 8 passed, 0 failed.
+
+**The gate: 529 passed / 0 failed / 2 ignored across 116 test binaries**, every chunk `EXIT=0`,
+clippy clean over `--workspace --all-targets`. Reconciled against M27's 523 / 0 / 2 over 115
+file-by-file: the existing `retrace-box/tests/truncguard.rs` **+5** (the positive control plus four
+`band_not_covered` tests, covering span intersection and self-exclusion, not merely start position),
+the new `retrace-box/tests/failwrite.rs` **+1 and +1 binary**. `--bins` unchanged at **11**, every
+other file unchanged. 523 + 5 + 1 = 529; the tree holds 525 `#[test]` at M27 = 523 + 2, and 531 at
+M28 = 529 + 2. The two ignored gates (`stackoverflow_rust_e2e`, `cache_symbol_e2e`) are unchanged
+from M27. **M28 parked nothing new.**
+
+**What is left standing, named rather than implied:**
+
+- **The band's coverage limit is untouched.** M27 measured a contiguous 64-byte band missing a real
+  139,880-byte overrun on `/bin/ps`, because the bytes past the window were zeros before and after
+  (`struct kinfo_proc` carries long zero runs) — a byte-compare cannot tell a kernel write of zeros
+  from no write at all. M28 did not fix that and did not attempt to: the band is proof when it fires;
+  its silence is still not proof of absence.
+- **`Box_::diff_memory`'s own `.min(avail)` clamp**, on the replay side, is still unpaid — flagged in
+  M1's own branch review, deferred at M2.
+- **The `DerefU64` clamp for `sysctl`'s in-out `*oldlenp`** is still owed: the window widens to cover
+  it, but the forwarded count itself is not clamped by it.
+- **The remainder of the audit table** — `getdirentries64` (344), `recvfrom` (29/403), `getfsstat64`
+  (347), `proc_info` (336), `getattrlist`/`fgetattrlist` (220/228), `csops` (169/170) — stays guarded
+  by the band rather than cleared by `dest_buffer`, unchanged from M27.
+- **Strengthening the band itself** — sampling across the whole remaining backing under a fixed byte
+  budget, rather than one contiguous 64-byte run — is now *unblocked*: the "not covered by another
+  window of this call" precondition Task 2 needed exists in code as `band_not_covered`. But Task 3's
+  count is a warning to whoever takes it up next, not an invitation: a naive wider sample would be
+  suppressed even more often than 31 times, not less, and a successor milestone that skips that
+  measurement would be repeating M27's original mistake rather than correcting it.

@@ -3107,9 +3107,9 @@ impl Box_ {
                 let post_band = unsafe { std::slice::from_raw_parts(hp.add(len), band) };
                 assert!(!Self::overran_window(&pre_band[..band], post_band),
                     "syscall {} changed a byte in the {}-byte guard band past its {}-byte diff \
-                     window at ipa {:#x}. That is proof of a kernel write the diff may not have \
-                     inspected — but not proof it belongs to THIS argument's overrun: a write by \
-                     another argument of the same call, landing in this range, would also trip it. \
+                     window at ipa {:#x}. This band already excludes every byte any OTHER window \
+                     of this same call inspects (see `band_not_covered`), so this IS proof of a \
+                     kernel write past everything this call's diff inspected — not a maybe. \
                      Add this syscall's destination buffer to retrace_arch::dest_buffer with the \
                      argument its length lives in; if that length is not knowable, measure it \
                      before guessing.",

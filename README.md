@@ -208,30 +208,45 @@ them is counted as a failure on purpose.
   guest address" to **refused by value**, fail-loud. Everything else that still gets only the 64 KiB
   heuristic is now backed by a guard band: a 64-byte region immediately past every *capped* diff
   window is snapshotted before the forward and compared after, and a changed byte there **panics**,
-  because nothing but the halted guest's own `host_svc` call runs in between — a changed byte is
-  *proof* of a kernel write the diff may not have inspected, though not proof it belongs to *this*
-  argument's overrun specifically: a write by another argument of the same call, landing in that
-  same range, would also trip it. It ran across the whole M27 gate and fired zero times. **That
-  silence is not proof the class is gone** — see Known limits for the measured false negative that
-  makes this the honest statement rather than the stronger one.
+  because nothing but the halted guest's own `host_svc` call runs in between. **M28 made that panic
+  trustworthy on both axes it previously lacked.** First, that it can fire at all: a positive control
+  (`truncguard.rs`) shrinks the window cap to 64 bytes and drives `fileio`'s `fstat` — which writes a
+  MEASURED `sizeof(struct stat) = 144` bytes and is deliberately absent from `dest_buffer`, so no
+  widening can rescue it — into the band; the mutation `let band = 0;` was verified to **FAIL** that
+  test (`NOT-THE-GUARD-BAND: fstat wrote past a 64-byte window and nothing fired`) before being
+  reverted, where before M28 that identical mutation passed the entire 523-test gate unnoticed.
+  Second, that a firing is attributable: `Box_::band_not_covered` shrinks each band to exclude only
+  the bytes some *other* window of the same call already inspects, so a byte that still changes *is*
+  proof of a kernel write past everything this call's diff inspected — not merely past this one
+  argument's window, and not a maybe. It ran across the whole M28 gate and fired zero times, same as
+  M27. What M28 *did* measure is how often the shrink itself narrows a band: **31 times on
+  `/bin/ps`** alone, across six syscalls, every one a complete `64 -> 0` on a capped 65536-byte
+  window — two arguments of the same call sharing a backing closely enough that one argument's
+  window fully covers the other's band. That is not a blind spot: a suppressed byte is one some
+  other window of the same call already inspects, so the write is captured anyway, just against that
+  argument's own ipa. What the 31 measures is how much of M27's claimed proof was never attributable
+  in the first place — a finding about M27, not a new weakness M28 introduced. **A silent band is
+  still not proof the class is gone** — see Known limits for the measured false negative that makes
+  this the honest statement rather than the stronger one.
 
-**Gate:** 523 passed / 0 failed / 2 ignored across 115 test binaries, **measured at M27** over all
-115 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
-See the testing note below for how that number is assembled. "115 test binaries" is 108 test
-executables (the new `truncguard.rs` target) plus the 7 `Doc-tests` harnesses cargo reports, each of
+**Gate:** 529 passed / 0 failed / 2 ignored across 116 test binaries, **measured at M28** over all
+116 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
+See the testing note below for how that number is assembled. "116 test binaries" is 109 test
+executables (the new `failwrite.rs` target) plus the 7 `Doc-tests` harnesses cargo reports, each of
 which runs zero tests — the convention every milestone since M14 has counted by, kept for
 comparability and written out here so nobody has to re-derive it. The ignored gates are unchanged at
 **two**: `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). Both
-are described under Known limits. M27 parked nothing new.
+are described under Known limits. M28 parked nothing new.
 
-Reconciled against M26's 515 / 0 / 2 over 114 **file-by-file rather than by sum**: `retrace-arch/src/lib.rs`
-**+4** (the `dest_buffer` table and the nested-pointer refusal, each pinned by name), the new
-`retrace-box/tests/truncguard.rs` **+3 and +1 binary** (the guard band's own unit tests), and
-`retrace/tests/sysbin_e2e.rs` **+1** (`ps_records_and_replays`). Every other file unchanged, and
-`--bins` **11 → 11**. **+8 running from +8 new tests** — unlike M26, nothing moved out of the ignored
-column this time; M27 added capability without un-parking a gate. The count closes at both ends: the
-tree holds 517 `#[test]` at M26 = 515 running + 2 ignored, and 525 at M27 = 523 + 2.
+Reconciled against M27's 523 / 0 / 2 over 115 **file-by-file rather than by sum**: the existing
+`retrace-box/tests/truncguard.rs` **+5** (the positive control plus four `band_not_covered` tests,
+covering span intersection and self-exclusion, not merely start position), the new
+`retrace-box/tests/failwrite.rs` **+1 and +1 binary** (the `if !err` measurement). Every other file
+unchanged, and `--bins` **11 → 11**. **+6 running from +6 new tests** — unlike M26, nothing moved out
+of the ignored column this time; M28 hardened the tripwire without un-parking a gate. The count
+closes at both ends: the tree holds 525 `#[test]` at M27 = 523 running + 2 ignored, and 531 at M28 =
+529 + 2.
 
 Chunk B again ran `cargo test -p retrace-box` as a **whole package** so its `Doc-tests` harness is
 not silently dropped (M24's lesson, now standing practice), and the `retrace` package was split into
@@ -280,7 +295,8 @@ These are real and current, not aspirational gaps.
   arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
   binary is refused by name. There is no emulation of another ISA and none is planned.
 - **The record-side diff window still truncates for most syscalls, and a guard band now proves an
-  overrun when it fires — but a silent band is not proof there wasn't one.** `forward_and_diff`
+  overrun when it fires — attributably, since M28 — but a silent band is still not proof there
+  wasn't one.** `forward_and_diff`
   snapshots a pre-image window per pointer argument and diffs that same window; the window widens to
   the real length only where `retrace_arch::dest_buffer` knows it. M26 covered `read`(3)/`pread`(153)/
   `read_nocancel`(396); **M27 adds `sysctl`(202)** (length at `*(size_t*)x3`, unbounded, and the
@@ -304,11 +320,29 @@ These are real and current, not aspirational gaps.
   exists for: it snapshots 64 bytes immediately past every *capped* diff window before the forward
   and compares them after, and **panics** if a byte changed, because between the two snapshots
   nothing but the halted guest's own `host_svc` call can have touched that memory — a changed byte
-  is *proof* of a kernel write the diff may not have inspected, not an inference. It is not proof the
-  write belongs to *this* argument's overrun, though: `forward_and_diff` takes a window for every
-  mapped-looking argument, so a write by another argument of the same call, landing in that same
-  range, would also trip it. It ran across the whole M27 gate and fired zero times, including on
-  `/bin/ps`.
+  is *proof* of a kernel write the diff may not have inspected, not an inference. **M28 closed the
+  gap that used to sit right here**: it was not proof the write belonged to *this* argument's
+  overrun, because `forward_and_diff` takes a window for every mapped-looking argument and a write by
+  another argument of the same call, landing in that same range, would also trip it. `Box_::band_not_covered`
+  now shrinks each band to exclude only the bytes some *other* window of the same call already
+  inspects, so a byte that still changes in what remains cannot be blamed on another argument — it is
+  proof of a kernel write past everything this call's diff inspected. And M28 proved the band can
+  fire at all, which nothing had: a positive control (`truncguard.rs`) shrinks the window cap to 64
+  bytes and drives `fileio`'s `fstat` — writing a MEASURED `sizeof(struct stat) = 144` bytes,
+  deliberately absent from `dest_buffer` so no widening can rescue it — into the band; `let band = 0;`
+  was verified to FAIL that test before being reverted, where before M28 the identical mutation passed
+  the entire 523-test gate unnoticed.
+  It ran across the whole M28 gate too and fired zero times, including on `/bin/ps`. What M28 did
+  measure is how often the *shrink itself* narrows a band: **31 times on `/bin/ps`** alone, across
+  six syscalls — 344 (`getdirentries64`) ×15, 399 ×11, 33 (`access`) ×2, and one each of 5 (`open`),
+  347, 339 (`fstat64`) — every one a complete `64 -> 0` on a capped 65536-byte window, because two
+  arguments of that call share a backing closely enough (adjacent stack slots, 304 bytes apart) that
+  one argument's 64 KiB window fully covers the other's band. **That is not a blind spot**: a
+  suppressed byte is one some other window of the same call already inspects, so the kernel write
+  there is captured anyway, recorded against that other argument's own ipa — nothing is lost by not
+  flagging it a second time. What the 31 actually measures is how much of M27's claimed proof was
+  never attributable in the first place, which is a finding about M27's own strength and not a
+  weakness M28 introduced.
   **That silence is not proof of absence, and this is measured rather than argued.** Before the
   `sysctl` fix landed, `ps`'s own overrun was the band's would-be catch: the kernel wrote 139,880
   bytes past the window, and the band still did not fire, because `struct kinfo_proc` carries long
@@ -325,9 +359,19 @@ These are real and current, not aspirational gaps.
   `if !err` gate, which skips write capture entirely on a failed syscall — and the band is not
   evaluated on that path either, so a failing syscall is neither diffed nor guarded. M27 measured
   that this is *not* what `ps` hit (`err=false` on all 83 of its `sysctl` calls), which narrows the
-  question without closing it. Strengthening the band itself — sampling across the whole remaining backing
-  under a fixed byte budget, rather than one contiguous 64-byte run immediately past the window — was
-  deliberately not attempted in M27.
+  question without closing it. **M28 measured one further, purpose-built case**: a guest whose
+  `sysctl(KERN_OSTYPE)` deliberately fails on a 2-byte buffer (`"Darwin\0"` needs seven) came back
+  `err=true ret=12 (ENOMEM) writes_captured=0 buf_changed=false` — the kernel wrote nothing into the
+  guest's buffer either before or after the call, independently reproduced by disassembling the
+  committed guest and replaying the identical syscall twice against the live host kernel. So the
+  `if !err` skip loses nothing on this case, but this is one measured datum, not a general proof about
+  failing syscalls — the gate stays open, now with a data point in it instead of none. Strengthening
+  the band itself — sampling across the whole remaining backing under a fixed byte budget, rather
+  than one contiguous 64-byte run immediately past the window — is now *unblocked*, since the "not
+  covered by another window of this call" precondition Task 2 needed exists in code as
+  `band_not_covered`, but was still deliberately not attempted in M28: the suppression count above is
+  a warning to whoever takes it up, since a naive wider sample would be suppressed even more often,
+  not less.
 - **Exec-in-place is unmodelled — point retrace at the real binary, not the shim.** A launcher that
   `posix_spawn`s with `POSIX_SPAWN_SETEXEC`, which is exactly what Homebrew's `python3.14` shim does
   to hand off to the interpreter above, gets an **error** back instead of a replaced image and takes
@@ -484,13 +528,13 @@ cargo test -p retrace --bins -- --test-threads=1            # don't omit: see be
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
 without a `--test` filter, reaches them.** Leaving it out silently costs 11 tests and one binary —
-at M27, 512 / 0 / 2 over 114 instead of 523 / 0 / 2 over 115 — and nothing fails to warn you. Contrast
+at M28, 518 / 0 / 2 over 115 instead of 529 / 0 / 2 over 116 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 
 **The same trap has a second mouth: `Doc-tests`.** `--test <name>` skips those too, so splitting a
 *library* crate per-target — as M24's gate had to for `retrace-box` — drops that crate's `Doc-tests`
-harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 115
+harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 116
 binaries. If you split a library crate per-target, run `cargo test -p <crate> --doc` alongside it —
 or, as M25's gate did, run that crate as a whole package and let cargo include it for you.
 
