@@ -5324,7 +5324,8 @@ datum Task 4 measured (the buffer is unchanged), not a general claim neither tas
 false; Task 2 made it true, so the message now says a changed band byte IS proof of a kernel write
 past everything this call's diff inspected, and still points at `retrace_arch::dest_buffer` as the
 fix. The positive control's `#[should_panic(expected = "changed a byte in the")]` still matches the
-rewritten wording; re-run after the change: 8 passed, 0 failed.
+rewritten wording; re-run of `truncguard.rs` after the change: 8 passed, 0 failed — the file
+as it stood at Task 6, before the fix wave took it to 11.
 
 **The gate: 532 passed / 0 failed / 2 ignored across 116 test binaries**, every chunk `EXIT=0`,
 clippy clean over `--workspace --all-targets`. Reconciled against M27's 523 / 0 / 2 over 115
