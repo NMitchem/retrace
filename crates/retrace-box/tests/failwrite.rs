@@ -19,12 +19,17 @@ fn a_failing_sysctl_is_measured_for_writes() {
                 // Snapshot the destination before, so the measurement does not depend on
                 // forward_and_diff's own (skipped) capture.
                 let before = b.read_bytes_for_test(args[2], 16);
-                let (ret, err, writes) = b.forward_and_diff(num, args);
+                let (ret, err, _writes) = b.forward_and_diff(num, args);
                 let after = b.read_bytes_for_test(args[2], 16);
                 assert!(err, "the undersized sysctl should FAIL; got ret={ret} err={err}");
-                eprintln!("[M28 FAILWRITE] err={err} ret={} writes_captured={} \
-                           buf_changed={} before={:02x?} after={:02x?}",
-                    ret as i64, writes.len(), before != after, before, after);
+                // MEASURED (M28 Task 4): this failing sysctl writes NOTHING into the guest buffer,
+                // so `forward_and_diff`'s `if !err` skip loses nothing HERE. That is a measurement
+                // of one case, not a proof about failing syscalls in general — the gate stays open,
+                // now with one datum in it instead of none.
+                assert_eq!(before, after,
+                    "a failing sysctl wrote into the guest buffer after all: the `if !err` skip is \
+                     dropping real kernel writes, and this test's premise has changed — see the \
+                     M28 spec's Component 3, Branch A");
                 return;
             }
             Stop::Syscall { num, args } => {
