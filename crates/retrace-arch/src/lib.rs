@@ -243,6 +243,72 @@ pub fn writes_via_nested_pointer(num: u64) -> bool {
     matches!(num, 120 | 411 | 27 | 401 | 540 | 480)
 }
 
+/// Does the host kernel READ guest memory through this call, in an amount no diff window bounds?
+/// (M30)
+///
+/// The M30 guard-band canary is written into guest memory just past each argument's diff window and
+/// restored before the vCPU resumes, so no *guest* can observe it. The kernel can. When a syscall
+/// READS more than its diff window through a pointer, it consumes those canary bytes as data: the
+/// guest's externally visible output is silently wrong on record, while record and replay stay
+/// bit-identical (the bytes are restored, so nothing diverges) — the one failure class a
+/// determinism oracle cannot see. `forward_and_diff` therefore skips the fill entirely for these
+/// calls, falling back to M27's original before/after band comparison.
+///
+/// **REPRODUCED** at M30 Task 4 fix round 1: a guest writing a 128 KiB buffer of `'A'` produced 64
+/// corrupt bytes at offset `0x10080`, matching `canary_byte` exactly. The corrupting entry was a
+/// **stale register** holding `buf + 128`, whose own band therefore landed 64 KiB downstream —
+/// inside the region the kernel read. So the trigger is not "an input buffer bigger than the
+/// window": ANY register pointing into a large buffer plants a canary 64 KiB past itself, and the
+/// band shrink cannot help (that same stale window had shrunk the real buffer's band to zero). That
+/// is why this predicate takes only `num` and the caller must skip all eight registers, not just
+/// the arguments the call actually declares.
+///
+/// **Membership rule**: the call's documented contract has the kernel read a caller-supplied buffer
+/// whose length the CALLER chooses, and which no `dest_buffer` entry widens the window to cover.
+/// That is checkable against the man page and `sys/syscall.h`, not guessed.
+///
+/// **Deliberately asymmetric.** Over-including costs only canary coverage on a call that has no
+/// destination buffer worth canarying — the M27 comparison still runs there, so the detector
+/// degrades to what shipped before this milestone. Under-including corrupts the guest's output
+/// silently. Every `_nocancel` spelling is listed beside its plain one: that pairing is the trap
+/// M9, M10 and M27 each hit separately.
+///
+/// **The residual gap, stated plainly**: an unlisted syscall that reads past its window still
+/// corrupts, in exactly the way the reproduction did and with exactly as little noise. This is the
+/// contract-derived family of guest→kernel transfers, not a proof of exhaustiveness. `ioctl` is the
+/// clearest admitted hole — a `_IOW` request code hands the kernel a buffer whose length is encoded
+/// in the request rather than in an argument, so no rule over `num` alone can size it; no guest this
+/// repo runs is measured to issue a large one.
+pub fn reads_guest_buffer(num: u64) -> bool {
+    matches!(num,
+        // write(fd, buf, nbyte) / pwrite(fd, buf, nbyte, offset): x1 is read for x2 bytes, and x2
+        // is the caller's. This is the reproduced case.
+        SYS_WRITE | SYS_WRITE_NOCANCEL | 154 | 415
+        // writev/pwritev(fd, iov, iovcnt): the kernel reads each `iov_base`, and the TOTAL across
+        // the vector is unbounded even though the iovec array itself is small. Those nested
+        // pointers are not translated either, which `writes_via_nested_pointer` covers for the
+        // read side only — a separate hazard, listed here for the one this predicate owns.
+        | 121 | 412 | 541
+        // sendto(s, buf, len, ...) / sendmsg(s, msghdr, ...) / sendmsg_x: the socket-side spelling
+        // of the same two shapes, flat buffer and iovec vector.
+        | SYS_SENDTO | 413 | 28 | 402 | 481
+        // sendfile(fd, s, offset, len, hdtr, flags): the bulk data comes from a FILE, but `hdtr`'s
+        // header and trailer iovecs are guest memory the kernel reads, with caller-chosen lengths.
+        | 337
+        // msync(addr, len, flags): `len` is the caller's and the kernel reads the range to flush
+        // it. All guest memory is anonymous (the SPTM rule), which probably makes the read moot —
+        // but "probably" is an inference about kernel internals, and the cost of being wrong is a
+        // silent corruption while the cost of listing it is nothing.
+        | 65 | 405
+        // mach_msg2_trap: the kernel reads the message buffer at x0. retrace-core bounds
+        // `send_size` to 4 KiB by assert, so the exposure is small — but a band lands wherever some
+        // register points, and nothing relates that to the message's own extent. Written as the
+        // two's-complement of the trap number, matching how the negative mach traps are compared
+        // everywhere else.
+        | 0xffff_ffff_ffff_ffd1 // -47
+    )
+}
+
 pub const SYS_SYSCTL: u64 = 202;
 pub const SYS_GETRLIMIT: u64 = 194;
 /// sysctl top-level: `CTL_KERN` (`sys/sysctl.h`).
@@ -732,6 +798,30 @@ mod tests {
         for num in [SYS_READ, SYS_PREAD, SYS_SYSCTL, SYS_WRITE] {
             assert!(!writes_via_nested_pointer(num), "syscall {num} has top-level operands");
         }
+    }
+
+    // M30 fix round 1. Every number here is from `sys/syscall.h` on this SDK, checked rather than
+    // recalled — the whole family is numeric, so a typo would silently unprotect one spelling while
+    // its neighbour stayed safe, which is precisely the `_nocancel` trap M9/M10/M27 each hit.
+    #[test]
+    fn the_guest_buffer_readers_are_pinned_by_number() {
+        for num in [SYS_WRITE, SYS_WRITE_NOCANCEL, 154, 415, 121, 412, 541,
+                    SYS_SENDTO, 413, 28, 402, 481, 337, 65, 405] {
+            assert!(reads_guest_buffer(num), "syscall {num} hands the kernel guest bytes to read");
+        }
+        assert!(reads_guest_buffer((-47i64) as u64), "mach_msg2_trap reads its message buffer");
+
+        // The destination-side calls must NOT be listed: they are where the canary earns its keep,
+        // and silently disabling the fill for them would leave the milestone shipping a detector
+        // that never runs on the very syscalls it was built for.
+        for num in [SYS_READ, SYS_READ_NOCANCEL, SYS_PREAD, SYS_SYSCTL, SYS_FSTAT,
+                    SYS_GETDIRENTRIES64, SYS_RECVFROM, SYS_GETFSSTAT64, SYS_OPEN, SYS_EXIT] {
+            assert!(!reads_guest_buffer(num), "syscall {num} is a destination, not a source");
+        }
+        // `SYS_FSTAT` in particular: `the_canary_catches_zeros_written_over_zeros` and M28's
+        // positive control both drive trap 189, so listing it would turn both green for the wrong
+        // reason rather than red.
+        assert!(!reads_guest_buffer(SYS_FSTAT));
     }
 
     #[test]
