@@ -77,6 +77,19 @@ pub const SYS_FSTATFS64: u64 = 346;
 /// position is therefore MEASURED, not header-derived: M25-cpython Finding 3 captured the trap
 /// arguments `[fd=0x4, buf, 0x2000, &basep]` from CPython's stdlib-directory listing.
 pub const SYS_GETDIRENTRIES64: u64 = 344;
+/// `recvfrom(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen_t *fromlen)`.
+/// SDK `sys/syscall.h`. Its `x0` is a socket fd, so it belongs in `fd_operands` too — it was in
+/// neither table before M29, while its `sendto` counterpart was already in `fd_operands`.
+pub const SYS_RECVFROM: u64 = 29;
+/// The `_nocancel` spelling of `recvfrom`. Every `_nocancel` variant this repo has met so far was
+/// missing from a table its plain sibling was in (M9's console bug, M10's `read_nocancel`, M27's
+/// `pread_nocancel`); adding both together is the only way that trap stops repeating.
+pub const SYS_RECVFROM_NOCANCEL: u64 = 403;
+/// `sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen)`.
+pub const SYS_SYSCTLBYNAME: u64 = 274;
+/// `getfsstat64(struct statfs64 *buf, int bufsize, int flags)`. `bufsize` is in BYTES.
+pub const SYS_GETFSSTAT64: u64 = 347;
+
 /// `map_with_linking_np` — dyld's overmap-with-linking call. **Its fd is not in a register**: x0 is a
 /// guest pointer to `struct mwl_region[]` (x1 = count) and the descriptor is the struct's first
 /// field. `fd_operands` cannot express that; see `MWL_REGION_STRIDE` and the box's translation.
@@ -110,7 +123,7 @@ pub fn fd_operands(num: u64) -> &'static [usize] {
         | SYS_PREAD_NOCANCEL
         | SYS_WRITE | SYS_WRITE_NOCANCEL | SYS_FCNTL | SYS_FCNTL_NOCANCEL
         | SYS_FSTAT | SYS_FSTAT64 | SYS_LSEEK | SYS_IOCTL | SYS_DUP
-        | SYS_CONNECT | SYS_SENDTO | SYS_FGETATTRLIST
+        | SYS_CONNECT | SYS_SENDTO | SYS_RECVFROM | SYS_RECVFROM_NOCANCEL | SYS_FGETATTRLIST
         // openat/fstatat64 take a *dirfd*; AT_FDCWD passes through translation untouched.
         | SYS_OPENAT | SYS_FSTATAT64
         // fstatfs64 and getdirentries64: M25-cpython Task 3. See their constants' doc comments
@@ -154,11 +167,12 @@ pub enum DestLen {
 /// what the diff inspects, the excess lands in guest memory on record and in no `Event`, and replay
 /// restores stale bytes there — invisibly, because `(num, args)` still match.
 ///
-/// **Seeded only with what is measured or SDK-verified.** Other syscalls are structurally capable of
-/// overrunning (`getdirentries64`, `recvfrom`, `getfsstat64`, `proc_info`, `getattrlist`, `csops`)
-/// and are deliberately ABSENT: none has been measured to do so, and the M27 guard band exists
-/// precisely so they announce themselves instead of being guessed at. Absence means "not measured",
-/// and the guard band is what makes that safe.
+/// **Seeded only with what is measured or SDK-verified.** M29 added `getdirentries64`, `recvfrom`
+/// (both spellings) and `getfsstat64`/`sysctlbyname` (sysctl's own shape). Other syscalls are still
+/// structurally capable of overrunning (`proc_info`, `getattrlist`, `csops`) and remain deliberately
+/// ABSENT: none has been measured to do so, and the M27 guard band exists precisely so they announce
+/// themselves instead of being guessed at. Absence means "not measured", and the guard band is what
+/// makes that safe.
 pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> {
     match num {
         SYS_READ | SYS_READ_NOCANCEL | SYS_PREAD | SYS_PREAD_NOCANCEL => Some((1, DestLen::Reg(2))),
@@ -166,6 +180,25 @@ pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> {
         // is `*(size_t*)x3`, in guest memory rather than a register. Measured via /bin/ps, whose
         // KERN_PROC_ALL buffer runs far past the 64 KiB window (M26).
         SYS_SYSCTL => Some((2, DestLen::DerefU64(3))),
+        // M29 additions. Each names its own second destination where it has one, so a later reader
+        // can see it was considered and dismissed on a number rather than overlooked.
+        //
+        // getdirentries64(fd, buf, bufsize, off_t *position): destination x1, length x2. It also
+        // writes 8 bytes at `*position` (x3) — unmodelled by decision: 8 bytes sits far inside the
+        // flat 64 KiB window every pointer argument already receives, so it cannot produce the
+        // truncation class this table exists to prevent.
+        SYS_GETDIRENTRIES64 => Some((1, DestLen::Reg(2))),
+        // getfsstat64(buf, bufsize, flags): destination x0, length x1 in BYTES rather than a mount
+        // count. ~24 mounts x sizeof(struct statfs64) on this machine, which crosses the 64 KiB cap.
+        SYS_GETFSSTAT64 => Some((0, DestLen::Reg(1))),
+        // recvfrom(s, buf, len, flags, from, fromlen): destination x1, length x2. It also writes
+        // `from` (x4) — unmodelled by decision: the kernel caps that write at the real address size
+        // (`sockaddr_storage` is 128 bytes), NOT at `*fromlen`, so it is self-bounding and already
+        // deep inside the flat window.
+        SYS_RECVFROM | SYS_RECVFROM_NOCANCEL => Some((1, DestLen::Reg(2))),
+        // sysctlbyname(name, oldp, oldlenp, newp, newlen): sysctl's exact shape, one index lower.
+        // One `DerefU64` arm therefore covers both syscalls wherever the box matches on the shape.
+        SYS_SYSCTLBYNAME => Some((1, DestLen::DerefU64(2))),
         _ => None,
     }
 }
@@ -631,6 +664,33 @@ mod tests {
         // there is no SYS_FSGETPATH constant in this crate and this test must not invent one.
         assert_eq!(dest_buffer(427), None, "fsgetpath takes an fsid_t*, not a sized buffer");
         assert_eq!(dest_buffer(SYS_WRITE), None, "write reads the buffer, it does not fill it");
+    }
+
+    #[test]
+    fn dest_buffer_knows_the_m29_additions() {
+        // getdirentries64(fd, buf, bufsize, off_t *position) — destination x1, length x2.
+        assert_eq!(dest_buffer(SYS_GETDIRENTRIES64), Some((1, DestLen::Reg(2))));
+        // getfsstat64(struct statfs64 *buf, int bufsize, int flags) — destination x0, and the
+        // length in x1 is BYTES, not a mount count.
+        assert_eq!(dest_buffer(SYS_GETFSSTAT64), Some((0, DestLen::Reg(1))));
+        // recvfrom(s, buf, len, flags, sockaddr *from, socklen_t *fromlen) — both spellings.
+        assert_eq!(dest_buffer(SYS_RECVFROM), Some((1, DestLen::Reg(2))));
+        assert_eq!(dest_buffer(SYS_RECVFROM_NOCANCEL), Some((1, DestLen::Reg(2))));
+        // sysctlbyname(name, oldp, size_t *oldlenp, newp, newlen) — sysctl's shape, one index
+        // lower. It was missing from this table AND from the README's list of what was missing.
+        assert_eq!(dest_buffer(SYS_SYSCTLBYNAME), Some((1, DestLen::DerefU64(2))));
+    }
+
+    #[test]
+    fn recvfrom_translates_its_socket_fd() {
+        // sendto (133) has been in fd_operands since the fd table landed; recvfrom was not, so a
+        // guest receiving on a socket handed the host kernel an untranslated guest fd — the M10
+        // class, and the same both-tables-at-once asymmetry M27 found in pread_nocancel.
+        assert_eq!(fd_operands(SYS_RECVFROM), &[0]);
+        assert_eq!(fd_operands(SYS_RECVFROM_NOCANCEL), &[0]);
+        // getfsstat64 and sysctlbyname take no fd, and must NOT have gained one.
+        assert_eq!(fd_operands(SYS_GETFSSTAT64), &[] as &[usize]);
+        assert_eq!(fd_operands(SYS_SYSCTLBYNAME), &[] as &[usize]);
     }
 
     // M27: these put their destination behind a pointer INSIDE a guest struct (iovec.iov_base,
