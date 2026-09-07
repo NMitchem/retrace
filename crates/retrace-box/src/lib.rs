@@ -914,6 +914,11 @@ pub fn subtract_range_for_test(table: &mut Vec<(u64, u64)>, addr: u64, len: u64)
     subtract_range(table, addr, len)
 }
 
+/// `forward_and_diff`'s per-argument bookkeeping: (guest_ipa, len, pre-image, pre-image of the
+/// M27 guard band past the window, M28/M30 shrunk band length). Factored out at M30 because the
+/// fifth field pushed the inline tuple over clippy's type-complexity threshold.
+type Window = (u64, usize, Vec<u8>, Vec<u8>, usize);
+
 impl Box_ {
     // Promote every 32 MiB L2 block covering [ipa, ipa+len) from a data BLOCK to an L3 TABLE
     // (identity-filled with ATTR_DATA), then set the pages this range covers to `attr`. A block
@@ -3091,8 +3096,7 @@ impl Box_ {
                 Err(e) => return (e, true, Vec::new()),
             }
         } else { None };
-        // (guest_ipa, len, pre-image, pre-image of the M27 guard band past the window)
-        let mut windows: Vec<(u64, usize, Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut windows: Vec<Window> = Vec::new();
         let mut hargs = [0i64; 8];
         for i in 0..8 {
             match self.host_span(args[i]) {
@@ -3108,11 +3112,24 @@ impl Box_ {
                     // than inferred. Bounded by `avail`, so this never reads past the backing.
                     let band = GUARD_BAND.min(avail - win);
                     let pre_band = unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
-                    windows.push((args[i], win, pre, pre_band));
+                    windows.push((args[i], win, pre, pre_band, 0));
                     hargs[i] = hp as i64;
                 }
                 None => hargs[i] = args[i] as i64,
             }
+        }
+        // M30: the band shrink moves here, BEFORE the syscall, because Task 4 writes a canary into
+        // the band. A canary in the raw band could land inside another argument's window, and
+        // restoring it afterwards would erase a genuine kernel write from the recording. Shrinking
+        // first confines every canary to bytes no window inspects.
+        //
+        // Each entry's own span ends exactly where its band begins, so passing the whole list
+        // (including self) is correct — see `band_not_covered`.
+        let spans: Vec<(u64, usize)> =
+            windows.iter().map(|(ipa, len, _, _, _)| (*ipa, *len)).collect();
+        for w in windows.iter_mut() {
+            let (ipa, len, _, pre_band, band) = w;
+            *band = Self::band_not_covered(*ipa, *len, pre_band.len(), &spans);
         }
         // Debt #1: for the `Reg` shape (read/pread/pread_nocancel) the destination's length is a
         // register; cap it at that buffer's backing so the host kernel can never write past it. The
@@ -3259,20 +3276,15 @@ impl Box_ {
         // post-diff write capture entirely.
         let mut writes = Vec::new();
         if !err {
-            // M28: every window this call took, so a band comparison can exclude bytes another
-            // argument's window already covers. Collected BEFORE the loop because the loop consumes
-            // `windows`. Each entry's own span ends exactly where its band begins, so passing the
-            // whole list (including self) is correct — see `band_not_covered`.
-            let spans: Vec<(u64, usize)> = windows.iter().map(|(ipa, len, _, _)| (*ipa, *len)).collect();
-            for (ipa, len, pre, pre_band) in windows {
+            for (ipa, len, pre, pre_band, band) in windows {
                 // Take `avail` rather than discarding it: the guard-band read below is `unsafe` and
-                // must stay inside this backing. Nothing between the pre-image loop and here
-                // mutates `self.backings`, so `avail_now == avail` always and this re-clamp is a
-                // no-op today — it is defensive against a FUTURE edit that makes this function
-                // mutate backings between the two loops, not against anything reachable now.
+                // must stay inside this backing. Nothing between the pre-pass and here mutates
+                // `self.backings`, so `avail_now == avail` always and this re-clamp is a no-op
+                // today — it is defensive against a FUTURE edit that makes this function mutate
+                // backings between the two passes, not against anything reachable now.
                 let (hp, avail_now) = self.host_span(ipa).unwrap();
+                let band = band.min(avail_now.saturating_sub(len));
                 let raw_band = pre_band.len().min(avail_now.saturating_sub(len));
-                let band = Self::band_not_covered(ipa, len, raw_band, &spans);
                 // M28 Task 2: WARNING ONLY, and Task 3 is the measurement it exists for. R1 says
                 // this shrink could suppress far more than expected, which would quietly weaken the
                 // detector this milestone is meant to strengthen. Count it across the gate rather
