@@ -473,8 +473,9 @@ These are real and current, not aspirational gaps.
   cannot distinguish from no write at all; `/bin/ps` passes today because `dest_buffer` covers
   `sysctl`, never because the band caught it. M30 fills each shrunk band with
   `canary_byte(ipa) = (ipa as u8) ^ 0xA5` before the forward, asks `Box_::canary_intact` after, and
-  restores it before the guest resumes, so any kernel write over the band destroys a pattern retrace
-  itself placed and **aborts the recording** — matching or not. `GUARD_BAND` is unchanged at **64**.
+  restores it before the guest resumes, so a kernel write over the band destroys a pattern retrace
+  itself placed, whatever bytes it wrote — subject only to residual (4) below — and **aborts the
+  recording**. `GUARD_BAND` is unchanged at **64**.
   The address-derived pattern buys two things a constant would not: two overlapping bands agree on
   every byte they share, and a constant-value `memset` cannot reproduce it. `truncguard.rs` carries
   the before/after pair at one fixture and one cap — the same real trap-189 overrun that the old

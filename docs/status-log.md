@@ -5631,9 +5631,9 @@ M27 could only write the finding down in prose.
 
 **M30 changes the kind of detector, not its size.** `GUARD_BAND` is still **64**. `forward_and_diff`
 now *fills* each shrunk band with `Box_::canary_byte(ipa) = (ipa as u8) ^ 0xA5` before forwarding,
-asks `Box_::canary_intact` after, and restores the bytes before the guest resumes. Any kernel write
-across that band destroys a pattern retrace itself placed, matching or not, and **aborts the
-recording**. This is a hardening milestone: it adds no capability, un-parks nothing, bumps no magic,
+asks `Box_::canary_intact` after, and restores the bytes before the guest resumes. A kernel write
+across that band destroys a pattern retrace itself placed, whatever bytes it wrote — subject only to
+the 1/256 residual recorded below — and **aborts the recording**. This is a hardening milestone: it adds no capability, un-parks nothing, bumps no magic,
 and changes no recorded bytes.
 
 It is also, unavoidably, a milestone about instruments that cannot fire — because during M30 **three

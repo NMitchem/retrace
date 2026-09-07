@@ -570,12 +570,15 @@ pub struct Box_ {
     /// `BoxState`: it is always `PTR_WINDOW_CAP` in production, so `from_checkpoint` restoring the
     /// default is correct rather than lossy.
     window_cap: usize,
-    /// M30: how many times `forward_and_diff` found the guard-band canary disturbed. Phase A is
-    /// report-only, so this is instrumentation and nothing else — never recorded, never read by
-    /// production code, so it cannot reach the trace and cannot affect determinism. It exists
-    /// because the gated stderr line is a CROSS-PROCESS channel (sweeps, dynamic guests) and an
-    /// in-process test cannot read it without a harness that pipes and greps; M29 was defeated one
-    /// layer downstream of a correct instrument, so each channel gets its own positive control.
+    /// M30: how many times `forward_and_diff` found the guard-band canary disturbed. Phase A
+    /// shipped this report-only; since the Phase B flip the same value is asserted on, so on a
+    /// filled band the increment is immediately followed by a panic and **no surviving run can
+    /// observe a non-zero count**. It stays because the increment and the gated stderr line both
+    /// run BEFORE that panic — so a `RETRACE_CANARY` run still names the syscall, band and ipa on
+    /// the way down — and because it lets a test assert "no disturbance was manufactured" directly
+    /// rather than inferring it from the absence of a panic. It remains instrumentation and nothing
+    /// else: never recorded, never read by production code, so it cannot reach the trace and cannot
+    /// affect determinism.
     /// Plain `u64` (no Drop), declared last, so the load-bearing vcpu-before-vm drop order is
     /// unaffected. Deliberately NOT carried in `BoxState`, for the same reason as `window_cap`:
     /// production never reads it, so a restored session starting its own count at 0 is correct.
@@ -2979,11 +2982,16 @@ impl Box_ {
     pub fn host_span_for_test(&self, ipa: u64) -> Option<(*mut u8, usize)> { self.host_span(ipa) }
 
     /// M30: how many times the canary was found disturbed. Test-only instrumentation — never
-    /// recorded, never read by production code, so it cannot reach the trace. The gated stderr line
-    /// is the CROSS-PROCESS channel (sweeps, dynamic guests); this counter is the in-process one,
-    /// and unlike stderr a test reads it without depending on a harness that pipes and greps. M29
-    /// was defeated exactly one layer downstream of a correct instrument, so this milestone gives
-    /// each channel its own positive control.
+    /// recorded, never read by production code, so it cannot reach the trace.
+    ///
+    /// **Post-flip this returns 0 in any run that survives to read it**, because a disturbance on a
+    /// filled band now panics in the same loop iteration that increments. Its remaining job is
+    /// therefore the negative: a test asserts the count did NOT move, which says "no disturbance was
+    /// manufactured" in its own words instead of leaving the reader to infer it from nothing having
+    /// panicked. `a_duplicated_pointer_argument_does_not_manufacture_a_disturbance` is that test.
+    /// During Phase A it also served as the in-process channel, paired with the gated stderr line as
+    /// the cross-process one — M29 was defeated a layer downstream of a correct instrument, so each
+    /// channel was given its own positive control.
     pub fn canary_disturbances_for_test(&self) -> u64 { self.canary_disturbances }
 
     /// Test seam (M28). Reads `len` bytes of guest memory at `ipa`, for tests that must observe
