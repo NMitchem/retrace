@@ -189,7 +189,13 @@ pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> {
         // truncation class this table exists to prevent.
         SYS_GETDIRENTRIES64 => Some((1, DestLen::Reg(2))),
         // getfsstat64(buf, bufsize, flags): destination x0, length x1 in BYTES rather than a mount
-        // count. ~24 mounts x sizeof(struct statfs64) on this machine, which crosses the 64 KiB cap.
+        // count — the reason this entry is easy to get wrong, since a mount count would be small
+        // enough never to matter. It does NOT currently overrun on this machine, and the earlier
+        // version of this comment claimed it did. MEASURED at M29 (Task 7) against the live system:
+        // `sizeof(struct statfs)` is 2168 bytes and this machine reports 16 mounts, so a full reply
+        // is 34,688 bytes and it takes 31 mounts to cross a 65536-byte window. The entry is here
+        // because the call is structurally able to cross that cap on a machine with more mounts,
+        // not because it has been seen to.
         SYS_GETFSSTAT64 => Some((0, DestLen::Reg(1))),
         // recvfrom(s, buf, len, flags, from, fromlen): destination x1, length x2. It also writes
         // `from` (x4) — unmodelled by decision: the kernel caps that write at the real address size

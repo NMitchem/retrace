@@ -119,9 +119,11 @@ it looked like: every macOS system binary is a *universal* file whose first four
 `0xcafebabe`, and the loader asserted `MH_MAGIC_64` against them. retrace could always run Apple's
 binaries; it could not open them. The figure moved from 47 to 46 when the sweep became a script
 rather than a memory: scripting it exposed one binary that had always been diverging and added one
-that cannot terminate, while a third — intermittent — happened to land on a clean run. See Known
-limits for all 8 that fail, which two are new to the list, and why one of them is a failure by
-design.
+that cannot terminate, while a third — intermittent — happened to land on a clean run. **Read that
+decomposition as an account, not an audit**: the 54-binary sample behind the old 47 was never
+committed, so the corpus here is a reconstruction and the two figures are not strictly comparable.
+See Known limits for all 8 that fail, which two are new to the list, why one of them is a failure by
+design, and the reconstruction caveat in full.
 
 **Capabilities**
 
@@ -290,11 +292,16 @@ These are real and current, not aspirational gaps.
   **reconstruction**: the original sample behind the 47 published at M27 (46 at M23, 34 at M22) was
   never committed, so 46 is not strictly comparable to those numbers. It is simply the first such
   figure a later reader can re-derive.
-  The eight are `csh` and `tcsh` (the M10 fd table's fail-loud unmodelled `dup2`, working exactly as
-  designed); `automationmodetool`, `desdp`, `dyld_info` and `flex` — the **new** group from M23,
-  which stands unmeasured to this day: they reach a `brk` for a cause nothing has measured, with **no
-  parked gate standing for it**, a gap in this repo's own discipline rather than a decision, recorded
-  here rather than quietly left out; **`/bin/launchctl`** (replay diverged); and `/usr/bin/yes`.
+  The eight, with the reason string the sweep itself prints: `csh` and `tcsh` (`recorder panicked` —
+  the M10 fd table's fail-loud unmodelled `dup2`, working exactly as designed);
+  `automationmodetool`, `desdp`, `dyld_info`, `flex` and **`/bin/launchctl`** (`replay diverged`);
+  and `/usr/bin/yes` (`timed out after 30s recording`).
+  **What the sweep reports is not why they fail**, and for the M23 group the two must not be
+  conflated: those four have been believed since M23 to reach a `brk`, but the sweep classifies them
+  only as diverging replays and corroborates nothing about a `brk`. (`csh`/`tcsh` are different — the
+  `dup2` panic text was read directly off a re-run, not inferred from the category.) That cause **stands unmeasured to
+  this day**, with **no parked gate standing for it** — a gap in this repo's own discipline rather
+  than a decision, recorded here rather than quietly left out.
   **Two of those eight are new to this list, and neither is a regression.** `/bin/launchctl` was
   always diverging — the sweep script's first draft compared a variable against itself, making its
   exit-code check a tautology that reported four binaries as passing when they were not, and fixing
@@ -409,8 +416,9 @@ These are real and current, not aspirational gaps.
   asserts the observed count is **greater than zero**. That is deliberately a **floor, not a
   number**: the assertion is what the gate enforces, and the count itself reaches only a
   `--nocapture` run, which reported **32** on this machine. Why 32 rather than M28's hand-counted 31
-  is **not root-caused** — and that is precisely why the assertion is `> 0` rather than `== 31`, so
-  a portable property is what fails, not a machine's mount count.
+  is **not root-caused** — nothing measured which call produced the extra suppression — and that is
+  precisely why the assertion is `> 0` rather than `== 31`: what fails should be a portable property,
+  and this milestone does not know what makes the count vary.
   **That silence is not proof of absence, and this is measured rather than argued.** Before the
   `sysctl` fix landed, `ps`'s own overrun was the band's would-be catch: the kernel wrote 139,880
   bytes past the window, and the band still did not fire, because `struct kinfo_proc` carries long
