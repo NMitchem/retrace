@@ -2948,6 +2948,11 @@ impl Box_ {
     /// exactly why the positive control uses `fstat` (absent from the table) rather than `read`.
     pub fn set_window_cap_for_test(&mut self, cap: usize) { self.window_cap = cap; }
 
+    /// Test seam (M30): `host_span` is private, and the false-negative reproduction needs the same
+    /// host pointer and `avail` the diff loop computes. `&self`, pure delegation, no production
+    /// caller — the same posture as `diff_window_for_test`.
+    pub fn host_span_for_test(&self, ipa: u64) -> Option<(*mut u8, usize)> { self.host_span(ipa) }
+
     /// Test seam (M28). Reads `len` bytes of guest memory at `ipa`, for tests that must observe
     /// memory independently of `forward_and_diff`'s own capture — which is exactly what the
     /// `if !err` measurement needs, since that path captures nothing. Production never calls this.
