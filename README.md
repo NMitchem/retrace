@@ -110,14 +110,18 @@ records and replays byte-identically, twice:
 | 6 | `/bin/echo` | an **Apple system binary**, arm64e with PAC on, straight from `/bin` |
 | 7 | the real **CPython** interpreter | `-c 'print(1)'` — the 2026-07-05 vision spec's headline target |
 
-**Apple's own binaries, measured.** Sampled across `/bin` + `/usr/bin`, pointing retrace straight at
-each file: **47 of 54 record and replay** — stdout byte-identical and exit codes equal. Among them
-`cat`, `ls`, `cp`, `mv`, `rm`, `chmod`, `mkdir`, `ln`, `df`, `grep`, `wc`, `uname`, `sh`, `dash`,
-`expr`, `bzip2`, and — since M27 — `ps`. Before M22 that number was **zero**, and not for the reason
+**Apple's own binaries, measured — and, since M29, re-measurable.** `tools/apple-sweep.sh` points
+retrace straight at each file in a committed 54-entry corpus and prints a tally: **46 of 54 record
+and replay**, stdout byte-identical and exit codes equal. Among them `cat`, `ls`, `cp`, `mv`, `rm`,
+`chmod`, `mkdir`, `ln`, `df`, `grep`, `wc`, `uname`, `sh`, `dash`, `expr`, `bzip2`, and — since M27 —
+`ps`. Before M22 that number was **zero**, and not for the reason
 it looked like: every macOS system binary is a *universal* file whose first four bytes are
 `0xcafebabe`, and the loader asserted `MH_MAGIC_64` against them. retrace could always run Apple's
-binaries; it could not open them. See Known limits for the 7 that still fail, and for why one of
-them is counted as a failure on purpose.
+binaries; it could not open them. The figure moved from 47 to 46 when the sweep became a script
+rather than a memory: scripting it exposed one binary that had always been diverging and added one
+that cannot terminate, while a third — intermittent — happened to land on a clean run. See Known
+limits for all 8 that fail, which two are new to the list, and why one of them is a failure by
+design.
 
 **Capabilities**
 
@@ -224,30 +228,33 @@ them is counted as a failure on purpose.
   window — two arguments of the same call sharing a backing closely enough that one argument's
   window fully covers the other's band. That is not a blind spot: a suppressed byte is one some
   other window of the same call already inspects, so the write is captured anyway, just against that
-  argument's own ipa. What the 31 measures is how much of M27's claimed proof was never attributable
-  in the first place — a finding about M27, not a new weakness M28 introduced. **A silent band is
+  argument's own ipa. What that count measures is how much of M27's claimed proof was never
+  attributable in the first place — a finding about M27, not a new weakness M28 introduced. **M29
+  made the count a real observation**, which M28's own was not: M28 published "zero across the full
+  gate" from a channel that could not have carried it, since every e2e test drives the recorder as a
+  child and pipes its stderr into a `String` a passing test never prints. `ps_records_and_replays`
+  now records `/bin/ps` with `RETRACE_BANDSHRINK=1` set on the recorder and **asserts the count is
+  at least one** — the gate enforces a floor, not an exact number. **A silent band is
   still not proof the class is gone** — see Known limits for the measured false negative that makes
   this the honest statement rather than the stronger one.
 
-**Gate:** 532 passed / 0 failed / 2 ignored across 116 test binaries, **measured at M28** over all
+**Gate:** 537 passed / 0 failed / 2 ignored across 116 test binaries, **measured at M29** over all
 116 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
 See the testing note below for how that number is assembled. "116 test binaries" is 109 test
-executables (the new `failwrite.rs` target) plus the 7 `Doc-tests` harnesses cargo reports, each of
-which runs zero tests — the convention every milestone since M14 has counted by, kept for
-comparability and written out here so nobody has to re-derive it. The ignored gates are unchanged at
+executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
+convention every milestone since M14 has counted by, kept for comparability and written out here so
+nobody has to re-derive it. The ignored gates are unchanged at
 **two**: `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). Both
-are described under Known limits. M28 parked nothing new.
+are described under Known limits. M29 parked nothing new and un-parked nothing.
 
-Reconciled against M27's 523 / 0 / 2 over 115 **file-by-file rather than by sum**: the existing
-`retrace-box/tests/truncguard.rs` **+8** (the positive control, Task 2's four `band_not_covered`
-tests — covering span intersection and self-exclusion, not merely start position — and three more
-from the fix wave: multiple-overlap, `band == 0`, and `len == 0`), the new
-`retrace-box/tests/failwrite.rs` **+1 and +1 binary** (the `if !err` measurement). Every other file
-unchanged, and `--bins` **11 → 11**. **+9 running from +9 new tests** — unlike M26, nothing moved out
-of the ignored column this time; M28 hardened the tripwire without un-parking a gate. The count
-closes at both ends: the tree holds 525 `#[test]` at M27 = 523 running + 2 ignored, and 534 at M28 =
-532 + 2.
+Reconciled against M28's 532 / 0 / 2 over 116 **file-by-file rather than by sum**:
+`retrace-arch/src/lib.rs` **+2** (the new `dest_buffer` entries and `recvfrom`'s `fd_operands` pair),
+and the existing `retrace-box/tests/truncguard.rs` **+3** (one proving the window widens for each new
+`Reg` entry, two for the `*oldlenp` refusal). Every other file unchanged, and `--bins` **11 → 11**.
+**No new test binary**: `oldlensysctl.s` is a guest fixture rather than a test target and
+`truncguard.rs` already existed, so the binary count holds at 116. The count closes at both ends: the
+tree holds 534 `#[test]` at M28 = 532 running + 2 ignored, and **539** at M29 = 537 + 2.
 
 Chunk B again ran `cargo test -p retrace-box` as a **whole package** so its `Doc-tests` harness is
 not silently dropped (M24's lesson, now standing practice), and the `retrace` package was split into
@@ -273,25 +280,42 @@ the magic.
 
 These are real and current, not aspirational gaps.
 
-- **About one in seven of Apple's system binaries still fails, and `ps` is no longer one of them.**
-  Of 54 sampled, **47 now record and replay** (M27, up from 46 at M23, up from 34 at M22), stdout
-  byte-identical and exit codes equal. M22's four named causes are down to one plus a genuinely
-  unmeasured tail: the `pc=0x4204` group (13) and the `msgh_id` 412 group (4) were both cleared at
-  M23, `csh`/`tcsh` still hit the M10 fd table's fail-loud unmodelled `dup2` (working exactly as
-  designed), and **`ps` is fixed at M27.** It was published here from M22 through M26 as "the oracle
-  catching nondeterminism" — a claim that could not have been true, since replay never *executes* a
-  syscall, only applies recorded writes, so a process list cannot vary between the two runs; M26
-  corrected the *description* (the real cause is the truncating diff window) without closing it, and
-  M27 closes it: `ps` sizes its `sysctl(KERN_PROC_ALL)` buffer at 205,416 bytes, `retrace_arch::dest_buffer`
-  now knows that length lives at `*(size_t*)x3`, and the window widens to cover the whole reply. The
-  **new** group from M23 stands unmeasured: four binaries (`automationmodetool`, `desdp`,
-  `dyld_info`, `flex`) that reach a `brk` for a cause nothing has measured, with **no parked gate
-  standing for it** — a gap in this repo's own discipline rather than a decision, recorded here
-  rather than quietly left out. The 47 is the swept number and deliberately not the flattering one:
-  `dddiagnose` is **intermittent** — 5 of 6 repeat runs record cleanly, 1 of 6 hits the `brk` — so it
-  is counted as a failure, making the honest figure "47 as swept, 48 on most runs" rather than a 48
-  that picks the run it likes. Eight of the 54 now report a **nonzero** fall-through count that
-  record and replay agree on: the first binaries ever to exercise that invariant at all.
+- **Eight of 54 sampled Apple system binaries still fail, and the sweep that says so is a script
+  now rather than a memory.** `tools/apple-sweep.sh`, over the committed 54-entry corpus
+  `tools/apple-sweep-binaries.txt`, records and replays each binary and prints a `TALLY` line, so
+  since M29 this figure is **reproducible instead of remembered**. The measured tally is
+  **`TALLY pass=46 fail=8 skip=0`** — stdout byte-identical and exit codes equal for the 46 — and on
+  every run that landed there, both the PASS set and the FAIL set were byte-for-byte the same. (One
+  binary moves between runs; see `dddiagnose` below.) The corpus is a
+  **reconstruction**: the original sample behind the 47 published at M27 (46 at M23, 34 at M22) was
+  never committed, so 46 is not strictly comparable to those numbers. It is simply the first such
+  figure a later reader can re-derive.
+  The eight are `csh` and `tcsh` (the M10 fd table's fail-loud unmodelled `dup2`, working exactly as
+  designed); `automationmodetool`, `desdp`, `dyld_info` and `flex` — the **new** group from M23,
+  which stands unmeasured to this day: they reach a `brk` for a cause nothing has measured, with **no
+  parked gate standing for it**, a gap in this repo's own discipline rather than a decision, recorded
+  here rather than quietly left out; **`/bin/launchctl`** (replay diverged); and `/usr/bin/yes`.
+  **Two of those eight are new to this list, and neither is a regression.** `/bin/launchctl` was
+  always diverging — the sweep script's first draft compared a variable against itself, making its
+  exit-code check a tautology that reported four binaries as passing when they were not, and fixing
+  it is what exposed `launchctl`. `/usr/bin/yes` never terminates, so it cannot pass under any method
+  that requires a bounded comparison; it is counted a FAIL **on purpose**, since excluding it would
+  raise the tally without changing anything about retrace.
+  **`dddiagnose` is intermittent, and M29 watched that happen** rather than only asserting it: two
+  runs of the same script against the same tree gave 45/9 and 46/8, with `dddiagnose` the only mover.
+  It is **not** among the eight above because the runs quoted here are ones it passed — which is
+  exactly the point. The number is quoted as swept rather than as best-of, and a re-run that returns
+  45/9 has found nothing new.
+  M22's four named causes are down to one plus that unmeasured tail — the `pc=0x4204` group (13) and
+  the `msgh_id` 412 group (4) were both cleared at M23 — and **`ps` was fixed at M27**. It was
+  published here from M22 through M26 as "the oracle catching nondeterminism", a claim that could not
+  have been true, since replay never *executes* a syscall, only applies recorded writes, so a process
+  list cannot vary between the two runs; M26 corrected the *description* (the real cause is the
+  truncating diff window) without closing it, and M27 closed it: `ps` sizes its
+  `sysctl(KERN_PROC_ALL)` buffer at 205,416 bytes, `retrace_arch::dest_buffer` now knows that length
+  lives at `*(size_t*)x3`, and the window widens to cover the whole reply. Separately — and this is a
+  different eight from the failures above — eight of the 54 report a **nonzero** fall-through count
+  that record and replay agree on: the first binaries ever to exercise that invariant at all.
 - **A guest must be arm64 or arm64e.** `slice_native` picks the slice this machine would execute —
   arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
   binary is refused by name. There is no emulation of another ISA and none is planned.
@@ -300,17 +324,42 @@ These are real and current, not aspirational gaps.
   wasn't one.** `forward_and_diff`
   snapshots a pre-image window per pointer argument and diffs that same window; the window widens to
   the real length only where `retrace_arch::dest_buffer` knows it. M26 covered `read`(3)/`pread`(153)/
-  `read_nocancel`(396); **M27 adds `sysctl`(202)** (length at `*(size_t*)x3`, unbounded, and the
+  `read_nocancel`(396); **M27 added `sysctl`(202)** (length at `*(size_t*)x3`, unbounded, and the
   reason `/bin/ps` now passes) and **`pread_nocancel`(414)**, which before M27 was missing from
   `fd_operands`, the clamp **and** the window at once — the missing clamp was the serious half, since
-  an unclamped forward lets the host kernel write past the guest's actual backing. **Everything else
-  still gets a flat 64 KiB**: named rather than implied, each checked against the SDK, `getdirentries64`
-  (344) and `recvfrom` (29/403), which have exactly the shape M26/M27 fixed but are not yet in the
-  table; `getfsstat64` (347), where 30 mounts crosses the cap and this machine has 24; `proc_info`
-  (336); `getattrlist`/`fgetattrlist` (220/228); `csops` (169/170). One clamp stays owed and
-  unmeasured even for a covered syscall: the `DerefU64` shape widens `sysctl`'s window but does not
-  clamp the forwarded count by it — `sysctl` was unclamped before M27 too, so this regresses nothing,
-  but it is not yet paid. The `readv`/`recvmsg` family (120/27/540/411/401/480) **moved classes in
+  an unclamped forward lets the host kernel write past the guest's actual backing. **M29 adds four
+  more, leaving three — the shortest this list has been since M26**: `getdirentries64`(344) and
+  `recvfrom`(29/403), which had exactly the shape M26/M27 fixed and were named right here as absent;
+  `getfsstat64`(347), whose `x1` is a byte count rather than a mount count; and `sysctlbyname`(274) —
+  the interesting one, because it was missing from the table **and** from this list of what was
+  missing, so a list of known gaps turned out to be only as complete as the audit that wrote it. Its
+  raw kernel entry takes `namelen` first, exactly like `sysctl`, so its indices are `(2, DerefU64(3))`
+  — **identical** to `sysctl`'s, not one lower as this milestone's own plan and spec first said. That
+  error survived a review that checked all five new entries against the SDK, because raw-versus-libc
+  argument shape is invisible in a man page; it was caught only by calling `syscall(274, …)` against
+  the live kernel with libc's 5-arg wrapper bypassed. **Three still get a flat 64 KiB**: `proc_info`
+  (336); `getattrlist`/`fgetattrlist` (220/228); `csops` (169/170).
+  **The clamp M27 and M28 both left owed is paid, and by refusing rather than clamping.** `sysctl`'s
+  `*oldlenp` is an *in-out* length — the guest writes how much room it has, the kernel writes back
+  how much it used — so silently clamping it would tell the kernel a smaller buffer than the guest
+  asked for and hand the guest a truncated reply it has no way to know was truncated: a wrong answer
+  dressed as a right one. `forward_and_diff` therefore **refuses**. When `*oldlenp` exceeds the
+  backing behind `oldp`, it asserts by name instead of forwarding — the same fail-loud discipline
+  `guest_workq_kernreturn` uses for an unenumerated opcode — and `RETRACE_DEREFLEN=1` prints the
+  backing span that settles which side is wrong. Refusing was chosen on measurement, not taste:
+  across **826 dispatches** of the `DerefU64` arm (783 across all 54 binaries of the Apple sweep, 13
+  from `jq`, and 15 each from two CPython startups), **every one fit inside its backing** — none
+  oversized, none unbacked — so nothing that runs today is refused. A purpose-built guest
+  (`oldlensysctl.s`) asking for `1 << 40` bytes proves the refusal fires, and a second test proves a
+  NULL-`oldp` size query still passes.
+  **Three narrownesses bound that zero, because they say what it does not cover.** All 826 dispatches
+  are `sysctl`(202): `sysctlbyname`(274) is exercised by **nothing** in any corpus, so its new entry
+  is correct by measurement of the kernel's argument shape but untested by any guest — the refusal
+  covers it by code-path symmetry only. "Reached" means reaching `forward_and_diff`, so the
+  `sysctl(KERN_USRSTACK64)` that `retrace-core` answers itself never arrives there and is not in the
+  count. And the two CPython rows are one interpreter startup measured twice — once through Homebrew's
+  launcher shim, once through the real binary — so the evidence base is **56 effectively-independent
+  binaries**, not 57. The `readv`/`recvmsg` family (120/27/540/411/401/480) **moved classes in
   M27**: their destination sits behind a pointer *inside* a guest struct that nothing translates, so
   before M27 a guest IPA would have reached the host kernel as a host address — a wild-write hazard,
   not a fidelity gap. They are now **refused by value**, fail-loud, the same discipline
@@ -347,9 +396,21 @@ These are real and current, not aspirational gaps.
   address in a backing can never itself be suppressed, since suppression needs some other window
   ending even further out, which is impossible for whichever window already ends furthest — so the
   band immediately past everything the call inspected stays guarded no matter how many inner bands
-  get truncated to zero. What the 31 actually measures is how much of M27's claimed proof was
+  get truncated to zero. What that count actually measures is how much of M27's claimed proof was
   never attributable in the first place, which is a finding about M27's own strength and not a
   weakness M28 introduced.
+  **That 31 was hand-measured and could not be re-derived from the gate; since M29 it can.** M28
+  also reported the count as zero across the full gate, which no channel could have delivered: the
+  `[M28 BANDSHRINK]` line is recorder stderr, and every e2e test drives the recorder as a child
+  process whose stderr `crates/retrace/tests/util/mod.rs` pipes into a `String` that a passing test
+  never prints. M29's `ps_records_and_replays` records `/bin/ps` through a new
+  `util::record_dynamic_env` helper with **`RETRACE_BANDSHRINK=1`** set on the recorder — a gate
+  separate from `RETRACE_TRACE` so the count is obtainable without the per-trap firehose — and
+  asserts the observed count is **greater than zero**. That is deliberately a **floor, not a
+  number**: the assertion is what the gate enforces, and the count itself reaches only a
+  `--nocapture` run, which reported **32** on this machine. Why 32 rather than M28's hand-counted 31
+  is **not root-caused** — and that is precisely why the assertion is `> 0` rather than `== 31`, so
+  a portable property is what fails, not a machine's mount count.
   **That silence is not proof of absence, and this is measured rather than argued.** Before the
   `sysctl` fix landed, `ps`'s own overrun was the band's would-be catch: the kernel wrote 139,880
   bytes past the window, and the band still did not fire, because `struct kinfo_proc` carries long
@@ -535,7 +596,7 @@ cargo test -p retrace --bins -- --test-threads=1            # don't omit: see be
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
 without a `--test` filter, reaches them.** Leaving it out silently costs 11 tests and one binary —
-at M28, 521 / 0 / 2 over 115 instead of 532 / 0 / 2 over 116 — and nothing fails to warn you. Contrast
+at M29, 526 / 0 / 2 over 115 instead of 537 / 0 / 2 over 116 — and nothing fails to warn you. Contrast
 `cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
 whole invocation loudly.
 
