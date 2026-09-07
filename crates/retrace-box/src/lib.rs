@@ -3165,11 +3165,35 @@ impl Box_ {
         // The fill uses the SHRUNK band, so a canary can never land inside another argument's
         // window, where restoring it afterwards would erase a genuine kernel write from the
         // recording. That is the whole reason Task 3 moved the shrink above this point.
-        for (ipa, len, _, _, band) in windows.iter() {
-            let (hp, _) = self.host_span(*ipa).expect("the pre-pass above established this mapping");
-            let base = *ipa + *len as u64;
-            for k in 0..*band {
-                unsafe { *hp.add(*len + k) = Self::canary_byte(base + k as u64) };
+        //
+        // **Not filled for a syscall the kernel READS through** — see `reads_guest_buffer`, and the
+        // reproduction it documents. The canary is invisible to the guest but not to the kernel:
+        // when the kernel reads past a diff window it consumes these bytes as data, corrupting the
+        // guest's output while record and replay stay bit-identical. The decision is per-SYSCALL
+        // and covers all eight registers, because the reproduction's corrupting entry was a stale
+        // register that was not an argument at all.
+        //
+        // Restored on every `return` path — both of `forward_and_diff`'s two `return`s (the
+        // `translate_fds` and `translate_mwl_regions` EBADF arms) sit ABOVE this fill, so neither
+        // can leak. NOT restored on unwind: four panic sites lie between here and the restore pass
+        // (`read_u64`, the M29 `deref_len_fits` assert, `host_span(..).unwrap()`, and the M27
+        // overrun assert). That is deliberate rather than overlooked — a panicking recorder produces
+        // no usable trace, and a `#[should_panic]` test drops the whole `Box_` — but do not read the
+        // guarantee as wider than it is.
+        let fill_canary = !retrace_arch::reads_guest_buffer(num);
+        if fill_canary {
+            for (ipa, len, _, _, band) in windows.iter() {
+                let (hp, avail_now) =
+                    self.host_span(*ipa).expect("the pre-pass above established this mapping");
+                // Re-clamped against `avail_now` exactly as the check loop and the restore pass do.
+                // Inert today for the reason documented at the check loop, and `*band` is provably
+                // `<= avail - len` already; the symmetry is the point, so a future edit that makes
+                // this function mutate backings meets one rule at all three sites rather than two.
+                let band = (*band).min(avail_now.saturating_sub(*len));
+                let base = *ipa + *len as u64;
+                for k in 0..band {
+                    unsafe { *hp.add(*len + k) = Self::canary_byte(base + k as u64) };
+                }
             }
         }
         // Debt #1: for the `Reg` shape (read/pread/pread_nocancel) the destination's length is a
@@ -3355,7 +3379,11 @@ impl Box_ {
                 // fail-loud is Phase B and is conditional on this measuring zero across the gate
                 // and the sweep — landing a panic without that measurement is the trap M27's own
                 // status log names.
-                let disturbed = !Self::canary_intact(post_band, base);
+                // `fill_canary` gates the QUESTION, not just the fill: an unfilled band holds the
+                // guest's own bytes, which are not the canary, so asking `canary_intact` there
+                // would report a phantom disturbance on every such call — straight into the Phase A
+                // tally this whole milestone turns on.
+                let disturbed = fill_canary && !Self::canary_intact(post_band, base);
                 if disturbed {
                     self.canary_disturbances += 1;
                     if std::env::var_os("RETRACE_CANARY").is_some() {
@@ -3384,6 +3412,13 @@ impl Box_ {
                 // that offset (1/256). That is inherent to any canary, it is the price of replacing
                 // a detector that is currently 100% blind to zeros-over-zeros, and Phase B keeps the
                 // same 1/256 rather than introducing it.
+                //
+                // Unconditional on purpose — it needs no `fill_canary` gate, because it DEGRADES to
+                // the old detector when the band was not filled. An unfilled band holds the guest's
+                // bytes, so the first conjunct is true for every byte but a 1/256 coincidence and
+                // the condition collapses to `post_band[k] != pre_band[k]`, which is exactly
+                // `overran_window`. So a `reads_guest_buffer` call keeps precisely the M27
+                // protection it had before this milestone, no more and no less.
                 let kernel_wrote_over_original = (0..band).any(|k| {
                     post_band[k] != Self::canary_byte(base + k as u64) && post_band[k] != pre_band[k]
                 });
@@ -3423,10 +3458,16 @@ impl Box_ {
         // Only `band` bytes are restored — exactly what was filled. The window [0,len) and the band
         // [len,len+band) are disjoint, so neither the fill nor this restore can touch the window
         // post-image captured above.
-        for (ipa, len, _pre, pre_band, band) in windows.iter() {
-            let (hp, avail_now) = self.host_span(*ipa).unwrap();
-            let band = (*band).min(avail_now.saturating_sub(*len));
-            unsafe { std::ptr::copy_nonoverlapping(pre_band.as_ptr(), hp.add(*len), band) };
+        // 3. **Only when something was filled.** An unfilled band holds the guest's own bytes
+        //    already, and for a `reads_guest_buffer` call this write would land in a buffer the
+        //    kernel has just read — writing the same bytes back, but into memory this code has no
+        //    business touching on that path at all.
+        if fill_canary {
+            for (ipa, len, _pre, pre_band, band) in windows.iter() {
+                let (hp, avail_now) = self.host_span(*ipa).unwrap();
+                let band = (*band).min(avail_now.saturating_sub(*len));
+                unsafe { std::ptr::copy_nonoverlapping(pre_band.as_ptr(), hp.add(*len), band) };
+            }
         }
         // M10 fd bookkeeping — the other half of the contract, deliberately here rather than in the
         // caller (see this function's doc comment).
