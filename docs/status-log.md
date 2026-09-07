@@ -5517,10 +5517,14 @@ a passing test never prints. `ps_records_and_replays` now records `/bin/ps` thro
 separate from `RETRACE_TRACE`, so the count is obtainable without the per-trap firehose — and asserts
 the count is **greater than zero**, keeping all four of its pre-existing assertions. The gate
 therefore enforces a **floor, not a number**; the number itself reaches only a `--nocapture` run,
-which reported **32** on this machine. Why 32 rather than M28's 31 is **not root-caused**: nothing
-measured which call produced the extra suppression, and no explanation for it is offered here. That
-is exactly why the assertion is `> 0` and not `== 31` — what fails should be a portable property, and
-this milestone does not know what makes the count vary.
+which reported **32** on one run and **30** on another of the same tree at the milestone's close. So
+the count is not a property of the machine either, and neither it nor its distance from M28's 31 is
+**root-caused**: nothing measured which call produces a given suppression, and no explanation is
+offered here. That is exactly why the assertion is `> 0` and not `== 31` — what fails should be a
+portable property, and this milestone does not know what makes the count vary. The second
+observation arrived late, in the final fix wave, and is recorded because it narrows the claim: an
+earlier draft of this section said "32 on this machine", which reads as a stable machine property and
+is not one.
 
 **Gate: 537 passed / 0 failed / 2 ignored over 116 test binaries**, every one of ten chunks
 `EXIT=0`, clippy clean over `--workspace --all-targets` at `-D warnings`. Reconciled against M28's

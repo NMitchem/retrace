@@ -415,10 +415,11 @@ These are real and current, not aspirational gaps.
   separate from `RETRACE_TRACE` so the count is obtainable without the per-trap firehose — and
   asserts the observed count is **greater than zero**. That is deliberately a **floor, not a
   number**: the assertion is what the gate enforces, and the count itself reaches only a
-  `--nocapture` run, which reported **32** on this machine. Why 32 rather than M28's hand-counted 31
-  is **not root-caused** — nothing measured which call produced the extra suppression — and that is
-  precisely why the assertion is `> 0` rather than `== 31`: what fails should be a portable property,
-  and this milestone does not know what makes the count vary.
+  `--nocapture` run, which reported **32** on one run and **30** on another of the same tree. The
+  count is therefore not a property of the machine, and neither it nor its distance from M28's
+  hand-counted 31 is **root-caused** — nothing measured which call produces a given suppression.
+  That is precisely why the assertion is `> 0` rather than any exact number: what fails should be a
+  portable property, and this milestone does not know what makes the count vary.
   **That silence is not proof of absence, and this is measured rather than argued.** Before the
   `sysctl` fix landed, `ps`'s own overrun was the band's would-be catch: the kernel wrote 139,880
   bytes past the window, and the band still did not fire, because `struct kinfo_proc` carries long

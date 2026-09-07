@@ -56,6 +56,13 @@ fn run(args: &[&str]) -> RunOut {
 fn run_env(args: &[&str], env: &[(&str, &str)]) -> RunOut {
     let mut c = Command::new(bin());
     c.args(args);
+    // `Command` inherits this process's environment, so an exported RETRACE_TRACE=1 would
+    // reach the recorder and fire the [M28 BANDSHRINK] counter on its own -- greening
+    // sysbin_e2e's suppression assertion even with the RETRACE_BANDSHRINK limb deleted.
+    // Removing it first makes that assertion pass BECAUSE of the gate it is testing.
+    // Cleared before the explicit pairs below, so a caller that passes RETRACE_TRACE
+    // deliberately still wins.
+    c.env_remove("RETRACE_TRACE");
     for (k, v) in env { c.env(k, v); }
     let out = c.output().unwrap();
     RunOut {
