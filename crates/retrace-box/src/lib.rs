@@ -2824,6 +2824,18 @@ impl Box_ {
         None
     }
 
+    /// The `[ipa, ipa+len)` span of the backing containing `ipa`, or `None` if unmapped.
+    ///
+    /// `host_span` returns *remaining* bytes from `ipa`, which cannot distinguish "this buffer is
+    /// genuinely oversized" from "this buffer legitimately continues into the next backing". The
+    /// M29 diagnostic reports the whole span so a reader can check whether a neighbouring backing
+    /// starts exactly where this one ends — see the M29 spec's R1.
+    fn backing_of(&self, ipa: u64) -> Option<(u64, usize)> {
+        self.backings.iter()
+            .find(|bk| ipa >= bk.ipa && ipa < bk.ipa + bk.len as u64)
+            .map(|bk| (bk.ipa, bk.len))
+    }
+
     /// Memory-safety clamp (debt #1): a buffer-filling syscall must not have the host kernel write
     /// past the destination backing, so its forwarded byte count is capped at the buffer's
     /// available bytes. Inert when the guest's count already fits (the normal case).
@@ -3075,11 +3087,61 @@ impl Box_ {
                         None => count as i64,
                     };
                 }
-                // `DerefU64` (sysctl's `*oldlenp`) is deliberately UNCLAMPED here: it is an in-out
-                // length the kernel also writes back, and clamping it would mean guessing
-                // sysctl's own semantics. sysctl is unclamped today, so this regresses nothing —
-                // owed and unmeasured, a follow-up.
-                retrace_arch::DestLen::DerefU64(_) => {}
+                // M29 Phase A: measure before deciding. `*oldlenp` is an in-out length the kernel
+                // also writes back, so clamping it would mean writing into guest memory the guest
+                // reads back, turning a call that succeeds natively into ENOMEM — a fidelity change
+                // wearing a safety fix's clothes. Whether a refusal is safe to land depends on
+                // whether `want > avail` ever actually happens, which nothing had measured.
+                //
+                // Gated behind its own env var rather than RETRACE_TRACE, which is also the
+                // full trap firehose: M28's lesson is that a diagnostic must reach a channel
+                // someone can actually read without paying for tracing every dispatched trap.
+                //
+                // Every non-NULL `oldp` dispatch emits exactly one tagged line — OVERSIZED, FIT,
+                // or UNBACKED — never zero. A silent "fits" case makes a zero count ambiguous
+                // between "every request measured, none oversized" and "this arm never ran": both
+                // print nothing. M28's lesson repeats here — a published count must trace to a
+                // channel that could actually have delivered it.
+                retrace_arch::DestLen::DerefU64(n) => {
+                    let want = self.read_u64(args[n]) as usize;
+                    let gated = std::env::var_os("RETRACE_DEREFLEN").is_some();
+                    match self.host_span(args[di]) {
+                        Some((_, avail)) => {
+                            if want > avail {
+                                if gated {
+                                    let (bi, bl) = self.backing_of(args[di]).unwrap();
+                                    eprintln!("[M29 DEREFLEN] syscall {} want {} avail {} dest {:#x} \
+                                               backing [{:#x},{:#x})",
+                                        num as i64, want, avail, args[di], bi, bi + bl as u64);
+                                }
+                            } else if gated {
+                                // Exists so a zero-OVERSIZED result can be told apart from an
+                                // arm that never ran at all: both print nothing without this line.
+                                // Nobody needs to read a fitting call's details, only to count that
+                                // one happened — so this carries the minimum that makes the count
+                                // meaningful (syscall, want, avail), not the backing span.
+                                eprintln!("[M29 DEREFLEN-FIT] syscall {} want {} avail {}",
+                                    num as i64, want, avail);
+                            }
+                        }
+                        // `host_span` returns `None` for two different reasons that must not be
+                        // conflated: `oldp == NULL` is a legal "just tell me the size" sysctl with
+                        // nothing to bound (correctly silent below), but a NON-NULL destination
+                        // with no backing at all is a pre-existing hazard — the generic argument-
+                        // translation loop above leaves an unmapped-looking value untranslated, so
+                        // the host kernel would receive a raw guest address. That is not this
+                        // task's to fix, but silently folding it into "zero oversized requests"
+                        // would misreport the measurement as cleaner than it is, so it gets its own
+                        // tag rather than being counted (or silently dropped) as a `want > avail`.
+                        None => {
+                            if args[di] != 0 && gated {
+                                eprintln!("[M29 DEREFLEN-UNBACKED] syscall {} dest {:#x} want {} \
+                                           has NO backing (not NULL) — cannot evaluate against avail",
+                                    num as i64, args[di], want);
+                            }
+                        }
+                    }
+                }
             }
         }
         // M10: forward the TRANSLATED copy of map_with_linking_np's region array, not the guest's
