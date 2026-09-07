@@ -2830,6 +2830,12 @@ impl Box_ {
     /// genuinely oversized" from "this buffer legitimately continues into the next backing". The
     /// M29 diagnostic reports the whole span so a reader can check whether a neighbouring backing
     /// starts exactly where this one ends — see the M29 spec's R1.
+    ///
+    /// That ambiguity used to be inert (the diagnostic only warned); the `DerefU64` arm's
+    /// `assert!(want <= avail, ...)` now makes it FATAL — a buffer that legitimately spans two
+    /// adjacent backings is refused, not merely logged. Run with `RETRACE_DEREFLEN=1` to print the
+    /// backing span an assertion failure names, which is what settles whether the panic is this R1
+    /// case or a genuinely oversized request.
     fn backing_of(&self, ipa: u64) -> Option<(u64, usize)> {
         self.backings.iter()
             .find(|bk| ipa >= bk.ipa && ipa < bk.ipa + bk.len as u64)
@@ -3103,6 +3109,14 @@ impl Box_ {
                 // print nothing. M28's lesson repeats here — a published count must trace to a
                 // channel that could actually have delivered it.
                 //
+                // That was true when this arm was diagnostic-only. It no longer is: the
+                // `assert!(want <= avail, ...)` below now follows an OVERSIZED line immediately, so
+                // that line is necessarily the LAST thing the process prints — the assert aborts
+                // before a second dispatch can ever be reached. Do not tally OVERSIZED occurrences
+                // across a wider corpus expecting more than one; the refusal stops the process at
+                // the first. Repeating that mistake here is exactly the M28 failure this comment
+                // already invokes.
+                //
                 // Fix round 1 (Ruling 15): `read_u64(args[n])` must not run on an UNGATED dispatch
                 // unless `dest_len_bytes` (called just above, for every dispatch, gate or no gate,
                 // to size the diff window) already reads that SAME pointer under that SAME
@@ -3146,7 +3160,9 @@ impl Box_ {
                                 want <= avail,
                                 "unmodelled: syscall {} asked for {want} bytes at ipa {:#x} whose \
                                  backing holds only {avail} — forwarding it would let the host \
-                                 kernel write past the backing. See the M29 spec, Component 1.",
+                                 kernel write past the backing. See the M29 spec, Component 1. If \
+                                 this buffer might legitimately continue into an adjacent backing, \
+                                 re-run with RETRACE_DEREFLEN=1 to print the backing span and check.",
                                 num as i64, args[di],
                             );
                         }
@@ -3222,7 +3238,13 @@ impl Box_ {
                 // alone and unbounded for a larger guest, printed only to be counted by a harness
                 // that pipes the recorder's stderr and so can never see it — see the reproduction
                 // note in docs/status-log.md.
-                if band < raw_band && std::env::var_os("RETRACE_TRACE").is_some() {
+                //
+                // M29 adds RETRACE_BANDSHRINK as a second gate so a test can turn this counter on
+                // without also turning on RETRACE_TRACE's per-trap firehose.
+                if band < raw_band
+                    && (std::env::var_os("RETRACE_TRACE").is_some()
+                        || std::env::var_os("RETRACE_BANDSHRINK").is_some())
+                {
                     eprintln!("[M28 BANDSHRINK] syscall {} band past ipa {:#x} len {} shrunk {} -> {} \
                                by an overlapping window of the same call",
                         num as i64, ipa, len, raw_band, band);
