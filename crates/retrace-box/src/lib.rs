@@ -2860,6 +2860,33 @@ impl Box_ {
     /// mapped address, which is in bounds.
     pub fn deref_len_fits(want: usize, avail: usize) -> bool { want <= avail }
 
+    /// The canary byte belonging to guest address `ipa`. (M30)
+    ///
+    /// A pure function of the address, not a constant, for two reasons that are both load-bearing.
+    /// A kernel that memsets a constant cannot reproduce a per-byte-varying pattern, so the
+    /// commonest accidental write cannot forge an intact band. And because the value depends only
+    /// on the address, two *bands* that legitimately overlap each other agree on every shared byte,
+    /// which makes filling and verification order-independent — an index- or counter-derived
+    /// pattern would not have that property.
+    ///
+    /// `^ 0xA5` so neither an all-zero nor an all-`0xFF` fill matches at `ipa = 0`; those are the
+    /// two commonest uninitialised contents, and the zero case is the one M27 measured going
+    /// undetected on `/bin/ps`.
+    pub fn canary_byte(ipa: u64) -> u8 { (ipa as u8) ^ 0xA5 }
+
+    /// Does `band` still hold the canary written for guest address `base_ipa` onward? (M30)
+    ///
+    /// This replaces the question `overran_window` asks. A comparison of before against after can
+    /// only report a change that happened, so it is blind whenever the kernel writes bytes
+    /// identical to what was already there — most often zeros over zeros. Checking against a
+    /// pattern we placed ourselves has a signal to lose in every case.
+    ///
+    /// An empty band is never disturbed, matching `overran_window`'s own rule for the case where
+    /// the window already covered the whole backing.
+    pub fn canary_intact(band: &[u8], base_ipa: u64) -> bool {
+        band.iter().enumerate().all(|(i, &b)| b == Self::canary_byte(base_ipa + i as u64))
+    }
+
     /// Did the kernel write past the diff window? (M27)
     ///
     /// Pure so the policy is reviewable apart from the `unsafe` slice plumbing that feeds it. The
