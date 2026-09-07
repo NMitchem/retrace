@@ -240,8 +240,9 @@ design, and the reconstruction caveat in full.
   still not proof the class is gone** — see Known limits for the measured false negative that makes
   this the honest statement rather than the stronger one.
 
-**Gate:** 537 passed / 0 failed / 2 ignored across 116 test binaries, **measured at M29** over all
-116 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with `-D warnings`.
+**Gate:** 538 passed / 0 failed / 2 ignored across 116 test binaries, **measured at the M29
+fast-follow** over all 116 targets, every chunk `EXIT=0`; clippy clean over `--workspace
+--all-targets` with `-D warnings`.
 See the testing note below for how that number is assembled. "116 test binaries" is 109 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
@@ -252,11 +253,13 @@ are described under Known limits. M29 parked nothing new and un-parked nothing.
 
 Reconciled against M28's 532 / 0 / 2 over 116 **file-by-file rather than by sum**:
 `retrace-arch/src/lib.rs` **+2** (the new `dest_buffer` entries and `recvfrom`'s `fd_operands` pair),
-and the existing `retrace-box/tests/truncguard.rs` **+3** (one proving the window widens for each new
-`Reg` entry, two for the `*oldlenp` refusal). Every other file unchanged, and `--bins` **11 → 11**.
+and the existing `retrace-box/tests/truncguard.rs` **+4** — three at M29 (one proving the window
+widens for each new `Reg` entry, two for the `*oldlenp` refusal) and one at the fast-follow that
+pins the refusal's `want == avail` boundary through the extracted `Box_::deref_len_fits` predicate.
+Every other file unchanged, and `--bins` **11 → 11**.
 **No new test binary**: `oldlensysctl.s` is a guest fixture rather than a test target and
 `truncguard.rs` already existed, so the binary count holds at 116. The count closes at both ends: the
-tree holds 534 `#[test]` at M28 = 532 running + 2 ignored, and **539** at M29 = 537 + 2.
+tree holds 534 `#[test]` at M28 = 532 running + 2 ignored, and **540** now = 538 + 2.
 
 Chunk B again ran `cargo test -p retrace-box` as a **whole package** so its `Doc-tests` harness is
 not silently dropped (M24's lesson, now standing practice), and the `retrace` package was split into

@@ -5565,6 +5565,28 @@ mistake as one that trusts a channel without checking what could reach it.
   and e2e gates catch a change there only if some real call happens to sit on it.
   **The fix is cheap and is owed:** a third `sysctl` in `crates/retrace-guest/asm/oldlensysctl.s`
   between calls 1 and 2 — `oldp = buf`, `*oldlenp = 64`, which *fits* — driven by the null test.
+
+  > **CLOSED, but NOT by the remedy this bullet prescribes — that remedy could not have worked.**
+  > `avail` is the distance from the destination to the end of its *backing*, not to the end of the
+  > 64-byte `buf` symbol. `buf` sits at `__DATA+0x18` inside a mapping at least a page long, so a
+  > `*oldlenp = 64` request sits far *under* `avail`, and the strictness mutation `want < avail`
+  > stays green against it exactly as it did before. Only `want == avail` separates `<` from `<=`,
+  > and a freestanding guest cannot know `avail` — so no guest fixture can reach this boundary at
+  > all. The bullet correctly identified the gap and then prescribed something that does not close
+  > it.
+  >
+  > Closed instead by extracting the comparison as a pure predicate, `Box_::deref_len_fits(want,
+  > avail)`, and testing the boundary directly — the same treatment `clamp_count` and
+  > `overran_window` already get, for the reason `overran_window`'s own doc comment gives: the
+  > policy is reviewable apart from the plumbing that feeds it. Here it is also the only way the
+  > policy is *testable*. `truncguard.rs::a_deref_len_is_refused_only_past_its_backing` pins
+  > `63/64` (under), `64/64` (exact), `65/64` (past), plus `0/0` and `1/0`.
+  >
+  > Verified by mutation, all four caught where `want < avail` previously survived the whole unit
+  > gate: `<` → 14 passed/1 failed; `>=`, `>`, `!=` → 13 passed/2 failed each; source reverted
+  > byte-for-byte after each, baseline re-run green. The generalisable point is the one this
+  > milestone kept relearning: **a gap correctly identified is not a gap correctly closed**, and a
+  > prescribed remedy deserves the same "does the channel reach it" test as a prescribed number.
   This is stated from measurement rather than from reading. Both mutations were applied to
   `crates/retrace-box/src/lib.rs` with `truncguard` re-run against each, then reverted byte-for-byte:
   the **inversion** `want >= avail` is **caught** (13 passed, 1 failed) —
