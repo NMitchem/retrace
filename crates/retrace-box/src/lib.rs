@@ -3162,8 +3162,8 @@ impl Box_ {
         // M30: give the band a signal it can lose. `overran_window` can only report a CHANGE, so it
         // is blind whenever the kernel writes bytes identical to those already there — zeros over
         // zeros, which `the_same_fixture_and_cap_that_fooled_the_old_comparison_now_aborts`
-        // reproduces on a real `fstat`. A pattern we placed ourselves is destroyed by any kernel write, matching or
-        // not.
+        // reproduces on a real `fstat`. A pattern we placed ourselves is destroyed by any kernel
+        // write, matching or not.
         //
         // Sound because the guest vCPU is halted across `host_svc` and `clippy.toml` bans recorder
         // threads, so nothing but the kernel can touch these bytes in the interval; they are
