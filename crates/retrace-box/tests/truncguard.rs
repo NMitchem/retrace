@@ -46,8 +46,14 @@ fn an_empty_guard_band_is_never_an_overrun() {
 // — not the 144 bytes of `sizeof(struct stat)`, which belongs to trap 339, the call libc's `fstat()`
 // routes to and this guest never issues. The conclusion is unchanged and is what matters: a 64-byte
 // window is genuinely overrun by a real kernel write, with 56 bytes of it landing in the band.
+//
+// M30 Phase B moved the words this pins, and a CORRECT flip is what breaks the old string: the
+// assert now says *wrote into* rather than *changed a byte in*, because a canary-filled band proves
+// a write rather than merely reporting a change. The pinned substring keeps the syscall NUMBER for
+// the reason it always did — this fixture forwards other syscalls at the same shrunken cap, and a
+// bare phrase could be satisfied by one of their overruns instead of this one.
 #[test]
-#[should_panic(expected = "syscall 189 changed a byte in the")]
+#[should_panic(expected = "syscall 189 wrote into the")]
 fn the_band_fires_when_the_kernel_writes_past_the_window() {
     const CAP: usize = 64;
     let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
@@ -264,18 +270,29 @@ fn a_deref_len_is_refused_only_past_its_backing() {
 // therefore reads identically before and after a REAL kernel overrun, and `overran_window`, which
 // can only report a change, has nothing to report.
 //
-// This asserts the BLINDNESS, and it stays green after M30 closes the hole: it documents the
-// question the old predicate asks, not the answer the new one gives. Task 4 adds the matching
-// caught-half.
+// The BEFORE half of the milestone's headline pair, kept at the same fixture and the same cap as
+// the AFTER half below so the two read as one before/after over one overrun.
+//
+// Phase B took its in-line assertion away, and that is the flip working rather than a regression:
+// `forward_and_diff` now ABORTS on this very call, so no code after it in this test can run. Both
+// of its claims moved, and neither was lost:
+//
+//   * the BLINDNESS itself now lives in `canary.rs`'s `zeros_written_over_the_band_are_caught`,
+//     which runs `overran_window` and `canary_intact` over identical all-zero buffers and shows the
+//     first silent where the second fires. Two pure predicates state it more sharply than a guest
+//     ever could, and without needing a kernel to cooperate.
+//   * that a REAL kernel write happens at THIS fixture and THIS cap — the part no predicate test
+//     can carry — is what the panic below now proves outright. Nothing but a kernel write past the
+//     window can disturb a canary that retrace itself wrote and nothing else touched.
+//
+// Kept rather than deleted because it is the only e2e-shaped record of why this milestone happened,
+// and because a pair sharing one fixture and one cap is the whole argument: change either and
+// neither test says anything about the other.
 #[test]
+#[should_panic(expected = "syscall 189 wrote into the")]
 fn the_old_comparison_is_blind_to_zeros_written_over_zeros() {
     // Measured, not assumed: trap 189 writes a 120-byte reply whose trailing zero run is [90,120).
     // 96 leaves 24 kernel-written ZERO bytes past the window — a real overrun with no signal in it.
-    //
-    // Nothing in THIS test demonstrates that the overrun is real: its own assertions can only show
-    // the band unchanged, which is equally consistent with no kernel write at all. The evidence is
-    // `the_canary_catches_zeros_written_over_zeros` below, which drives the same fixture at the same
-    // cap and observes the canary destroyed there. The two are a pair; neither alone says this.
     const CAP: usize = 96;
     let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
     let mut b = Box_::load(&loaded);
@@ -287,13 +304,15 @@ fn the_old_comparison_is_blind_to_zeros_written_over_zeros() {
                 let win = CAP.min(avail);
                 let band = retrace_box::GUARD_BAND.min(avail - win);
                 let pre: Vec<u8> = unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
-                b.forward_and_diff(num, args);
-                let post: Vec<u8> = unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
+                // The fixture claim this test still makes on its own, and the one that makes the
+                // overrun invisible to a comparison: the band is ALREADY zero going in, so the
+                // kernel's zeros land over zeros and change nothing. Checked before the call,
+                // because after it there is no `after` — the assert aborts.
                 assert!(pre.iter().all(|&x| x == 0), "precondition: the band starts zeroed");
-                assert!(!Box_::overran_window(&pre, &post),
-                    "this test exists because the old detector is blind here; if it now fires, \
-                     the fixture no longer reproduces the false negative and must be re-measured");
-                return;
+                b.forward_and_diff(num, args);
+                // Deliberately worded to share NO substring with the assert's message, so
+                // `should_panic` cannot be satisfied by this panic instead of the real one.
+                panic!("NOT-THE-CANARY: fstat put zeros over a zeroed band and nothing fired");
             }
             Stop::Syscall { num, args } => {
                 let (ret, _e, _w) = b.forward_and_diff(num, args);
@@ -306,18 +325,36 @@ fn the_old_comparison_is_blind_to_zeros_written_over_zeros() {
     }
 }
 
-// M30: the other half of the reproduction directly above. Same guest, same window cap, same real
-// kernel overrun — but asked the NEW question. Together the two tests are the milestone's headline
-// claim in one fixture: the old detector is blind here (that test) and the canary is not (this one).
-// If this ever fails while `the_old_comparison_is_blind_to_zeros_written_over_zeros` still passes,
-// the canary has stopped being written or stopped being checked.
+// M30: the AFTER half of the reproduction directly above. Same guest, same window cap, same real
+// kernel overrun — asked the NEW question.
 //
-// This asserts CATCHING, not merely restoring. Phase A only reports, so the disturbance is not
-// observable through a panic — it is observable through `canary_disturbances_for_test`, the
-// in-process channel that exists precisely so this claim does not have to be made by a harness that
-// pipes and greps stderr. The restore is asserted too, because both claims matter: a canary that
-// caught the overrun but leaked into the guest's memory would be a determinism bug, not a fix.
+// Since Phase B the two run the same detector and expect the same panic, and the near-duplication is
+// deliberate rather than an oversight. What separates them is what each RECORDS: that one holds the
+// fixture claim (the band is zero going in, so a comparison has nothing to find) and the history of
+// why this milestone happened; this one holds the claim the milestone is judged on (that fact now
+// stops the recorder). Collapsing them into one test would lose whichever half was not kept.
+//
+// This asserts CATCHING, and since Phase B it asserts it the strongest way available: the
+// recording ABORTS. That is the milestone reduced to one line — a kernel write of zeros over zeros
+// stops the recorder here, where before M30 it passed silently into a trace whose replay would then
+// diverge or, worse, agree while both sides were wrong.
+//
+// `should_panic` rather than a reading of `canary_disturbances_for_test`, because the assert fires
+// INSIDE `forward_and_diff` and nothing after that call runs. The counter is still a live channel —
+// `a_duplicated_pointer_argument_does_not_manufacture_a_disturbance` reads it for the NEGATIVE
+// claim, which a panic cannot make — but the positive claim is now the panic itself.
+//
+// What the conversion costs, stated rather than glossed: the success-path restore assertion this
+// test used to carry is gone, because the band is deliberately NOT restored on unwind (see
+// `forward_and_diff`). `a_failing_syscall_still_restores_the_canary` still covers the error path,
+// and every record/replay e2e in the workspace covers the success path — a leaked canary is bytes
+// the recording has and the replay does not, i.e. a final full-memory divergence.
+//
+// The pinned substring carries the SYSCALL NUMBER for the same reason M28's positive control does:
+// this guest forwards other syscalls at the same shrunken cap, and a bare phrase could be satisfied
+// by an unrelated overrun rather than the one this test is about.
 #[test]
+#[should_panic(expected = "syscall 189 wrote into the")]
 fn the_canary_catches_zeros_written_over_zeros() {
     // The SAME cap as `the_old_comparison_is_blind_to_zeros_written_over_zeros`, and the identity
     // is the whole point: that test shows the old detector blind on this exact fixture and cap,
@@ -331,24 +368,10 @@ fn the_canary_catches_zeros_written_over_zeros() {
     loop {
         match b.run() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_FSTAT => {
-                let (hp, avail) = b.host_span_for_test(args[1]).expect("stat buffer is mapped");
-                let win = CAP.min(avail);
-                let band = retrace_box::GUARD_BAND.min(avail - win);
-                // Snapshotted around the call, not read absolutely: the guest issues other syscalls
-                // before its fstat, and any of them could legitimately move the count, so an
-                // absolute expectation would be brittle for reasons unrelated to this claim.
-                let before = b.canary_disturbances_for_test();
                 b.forward_and_diff(num, args);
-                assert_eq!(b.canary_disturbances_for_test(), before + 1,
-                    "the canary must catch the same overrun \
-                     `the_old_comparison_is_blind_to_zeros_written_over_zeros` cannot see");
-                // `forward_and_diff` restores the band before returning, so what is readable here
-                // is the guest's own pre-syscall bytes — zeros — and not the canary.
-                let restored: Vec<u8> =
-                    unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
-                assert!(restored.iter().all(|&x| x == 0),
-                    "the band must be restored to its pre-syscall bytes before the guest resumes");
-                return;
+                // Deliberately worded to share NO substring with the assert's message, so
+                // `should_panic` cannot be satisfied by this panic instead of the real one.
+                panic!("NOT-THE-CANARY: fstat put zeros over a zeroed band and nothing fired");
             }
             Stop::Syscall { num, args } => {
                 let (ret, _e, _w) = b.forward_and_diff(num, args);
@@ -463,45 +486,4 @@ fn a_duplicated_pointer_argument_does_not_manufacture_a_disturbance() {
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
-}
-
-// M30 fix round 2. The two band detectors differ, and `forward_and_diff` must pick between them on
-// `fill_canary`. This pins the difference at the seam, because it is otherwise invisible: both
-// predicates return the same answer on every case EXCEPT the one below, and that one cannot be
-// reached through a guest (it needs a `reads_guest_buffer` syscall that also writes past its own
-// diff window with a byte equal to the canary at that offset; nothing in the corpus does the first
-// two together, let alone the third). So this is the only guard the semantic difference can have,
-// and the reason `canary_overran` is a pure function rather than an inline condition.
-//
-// Round 1 shipped the reconstruction UNGATED, having verified it cannot FALSE-ALARM on an unfilled
-// band and never asking whether it could MISS. It can: on an unfilled band it is M27 minus this
-// case, i.e. strictly weaker than what shipped before M30, on exactly the family the fill was
-// withdrawn from to protect.
-#[test]
-fn the_filled_detector_is_a_strict_subset_of_the_unfilled_one() {
-    const BASE: u64 = 0x1000;
-    let pre = [0u8; 4];
-
-    // A kernel write of a value that is neither the canary nor the original: both detectors fire,
-    // which is the ordinary case and the reason the substitution looked free.
-    let post = [0xEEu8, 0, 0, 0];
-    assert!(Box_::canary_overran(&pre, &post, BASE));
-    assert!(Box_::overran_window(&pre, &post));
-
-    // THE DIVERGENCE. The kernel wrote `canary_byte(BASE)` at offset 0 — a real write, over an
-    // original of 0. `overran_window` sees a change and fires; `canary_overran` cannot tell that
-    // byte from a canary it wrote itself, and misses. On a FILLED band this is the 1/256 a canary
-    // inherently costs. On an UNFILLED band it is pure loss, which is why the gate exists.
-    let coincidence = [Box_::canary_byte(BASE), 0, 0, 0];
-    assert_ne!(coincidence[0], pre[0], "the fixture must be a real change to be a real miss");
-    assert!(!Box_::canary_overran(&pre, &coincidence, BASE),
-        "the filled detector misses a kernel byte equal to the canary at its offset");
-    assert!(Box_::overran_window(&pre, &coincidence),
-        "the unfilled detector catches it — that gap IS what gating on `fill_canary` restores");
-
-    // Both agree that nothing happened when nothing happened, and on the empty band.
-    let intact: Vec<u8> = (0..4).map(|k| Box_::canary_byte(BASE + k)).collect();
-    assert!(!Box_::canary_overran(&pre, &intact, BASE), "an intact canary is not an overrun");
-    assert!(!Box_::canary_overran(&[], &[], BASE));
-    assert!(!Box_::overran_window(&[], &[]));
 }
