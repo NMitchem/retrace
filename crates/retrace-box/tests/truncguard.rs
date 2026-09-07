@@ -174,3 +174,61 @@ fn the_window_widens_for_each_m29_reg_addition() {
     // A syscall absent from the table gets the flat cap at every index.
     assert_eq!(b.diff_window_for_test(retrace_arch::SYS_WRITE, 1, AVAIL, &args), FLAT);
 }
+
+// M29 Phase B. Two tests over ONE guest, split because a panic ends a test: the first drives only
+// the legal call and must complete, the second drives both and must abort on the second.
+//
+// `expected` pins the SYSCALL NUMBER, not just a message fragment — M28's positive-control lesson.
+// A message-only match would also be satisfied by the refusal firing on the wrong call.
+//
+// Every arm resumes the guest with `set_x0_err_and_return` after forwarding — `forward_and_diff`
+// only forwards and diffs, it never advances the vCPU (that is `retrace-core`'s job in production).
+// Without it `b.run()` re-traps the SAME un-advanced `svc`, which silently turns "drive to the
+// second sysctl" into "drive to the first sysctl twice" (`failsys.rs`/`the_band_fires...` above
+// establish this pattern).
+#[test]
+#[should_panic(expected = "syscall 202 asked for")]
+fn an_oldlenp_past_its_backing_is_refused() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::OLDLENSYSCTL).unwrap());
+    let mut b = Box_::load(&loaded);
+    let mut seen = 0;
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL => {
+                seen += 1;
+                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                assert!(seen < 2, "NOT-THE-REFUSAL: the second sysctl carries *oldlenp = 1 TiB and \
+                                   forward_and_diff returned normally");
+                b.set_x0_err_and_return(ret, err);
+            }
+            Stop::Syscall { num, args } => {
+                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                b.set_x0_err_and_return(ret, err);
+            }
+            other => panic!("NOT-THE-REFUSAL: guest stopped with {other:?} before the second sysctl"),
+        }
+    }
+}
+
+// The other half, and the one that makes the refusal narrow rather than blunt: `oldp == NULL` is a
+// legal sysctl asking only for the size. There is no destination to bound, so it must forward
+// untouched — a refusal that fired here would break every size-query in every guest.
+#[test]
+fn a_null_oldp_sysctl_is_not_refused() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::OLDLENSYSCTL).unwrap());
+    let mut b = Box_::load(&loaded);
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL => {
+                assert_eq!(args[2], 0, "the FIRST sysctl this guest issues has oldp == NULL");
+                b.forward_and_diff(num, args); // must not panic
+                return;
+            }
+            Stop::Syscall { num, args } => {
+                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                b.set_x0_err_and_return(ret, err);
+            }
+            other => panic!("guest stopped with {other:?} before its first sysctl"),
+        }
+    }
+}

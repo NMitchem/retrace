@@ -646,7 +646,13 @@ pub const OLDLENSYSCTL: &str = concat!(env!("OUT_DIR"), "/oldlensysctl");
 
 - [ ] **Step 3: Write the two failing tests**
 
-Append to `crates/retrace-box/tests/truncguard.rs`:
+**Corrected in execution (Task 5).** The block first drafted here was missing a resume call on every
+non-panicking arm. `forward_and_diff` only forwards the syscall and diffs memory — it never advances
+the vCPU (that is `retrace-core`'s job in production, and `set_x0_and_return`/`set_x0_err_and_return`
+do it for a raw `Box_` test, exactly as `failsys.rs` and `the_band_fires_when_the_kernel_writes_past_
+the_window` above already do). Without it, `b.run()` re-traps the SAME un-advanced `svc` — measured:
+the guest never reached its second `sysctl` at all, and both tests appeared to drive two calls while
+actually re-driving the first one twice. Append to `crates/retrace-box/tests/truncguard.rs`:
 
 ```rust
 // M29 Phase B. Two tests over ONE guest, split because a panic ends a test: the first drives only
@@ -654,6 +660,12 @@ Append to `crates/retrace-box/tests/truncguard.rs`:
 //
 // `expected` pins the SYSCALL NUMBER, not just a message fragment — M28's positive-control lesson.
 // A message-only match would also be satisfied by the refusal firing on the wrong call.
+//
+// Every arm resumes the guest with `set_x0_err_and_return` after forwarding — `forward_and_diff`
+// only forwards and diffs, it never advances the vCPU (that is `retrace-core`'s job in production).
+// Without it `b.run()` re-traps the SAME un-advanced `svc`, which silently turns "drive to the
+// second sysctl" into "drive to the first sysctl twice" (`failsys.rs`/`the_band_fires...` above
+// establish this pattern).
 #[test]
 #[should_panic(expected = "syscall 202 asked for")]
 fn an_oldlenp_past_its_backing_is_refused() {
@@ -664,11 +676,15 @@ fn an_oldlenp_past_its_backing_is_refused() {
         match b.run() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL => {
                 seen += 1;
-                b.forward_and_diff(num, args);
+                let (ret, err, _writes) = b.forward_and_diff(num, args);
                 assert!(seen < 2, "NOT-THE-REFUSAL: the second sysctl carries *oldlenp = 1 TiB and \
                                    forward_and_diff returned normally");
+                b.set_x0_err_and_return(ret, err);
             }
-            Stop::Syscall { num, args } => { b.forward_and_diff(num, args); }
+            Stop::Syscall { num, args } => {
+                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                b.set_x0_err_and_return(ret, err);
+            }
             other => panic!("NOT-THE-REFUSAL: guest stopped with {other:?} before the second sysctl"),
         }
     }
@@ -688,7 +704,10 @@ fn a_null_oldp_sysctl_is_not_refused() {
                 b.forward_and_diff(num, args); // must not panic
                 return;
             }
-            Stop::Syscall { num, args } => { b.forward_and_diff(num, args); }
+            Stop::Syscall { num, args } => {
+                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                b.set_x0_err_and_return(ret, err);
+            }
             other => panic!("guest stopped with {other:?} before its first sysctl"),
         }
     }
@@ -708,32 +727,77 @@ refusal and not to some other panic.
 
 - [ ] **Step 5: Land the refusal**
 
-In the `DerefU64` arm, keep Task 4's diagnostic and add the assertion after it:
+**Corrected in execution (Task 5).** The block below is stale in one way the plan's own commit
+history had already moved past by the time this step ran: Task 4's fix rounds put `want`'s read
+*inside* the `Some((_, avail))` arm (an ungated `read_u64` on the unconditional `None` path panics
+on the ordinary write-only form `sysctl(mib, 2, NULL, NULL, &val, sizeof val)`), and added a
+`[M29 DEREFLEN-FIT]` line and an `[M29 DEREFLEN-UNBACKED]` arm so a zero-oversized count can be told
+apart from an arm that never ran, and an unbacked-but-non-NULL destination from a legal NULL one.
+The version actually landed keeps all three and adds the assertion after the existing gated
+diagnostics, still inside `Some((_, avail))` where `want`/`avail` are already in scope:
 
 ```rust
                 retrace_arch::DestLen::DerefU64(n) => {
-                    let want = self.read_u64(args[n]) as usize;
-                    // `oldp == NULL` is a legal "just tell me the size" call — there is no
-                    // destination to bound, and `host_span` returning None is exactly that case.
-                    if let Some((_, avail)) = self.host_span(args[di]) {
-                        if want > avail && std::env::var_os("RETRACE_DEREFLEN").is_some() {
-                            let (bi, bl) = self.backing_of(args[di]).unwrap();
-                            eprintln!("[M29 DEREFLEN] syscall {} want {} avail {} dest {:#x} \
-                                       backing [{:#x},{:#x})",
-                                num as i64, want, avail, args[di], bi, bi + bl as u64);
+                    let gated = std::env::var_os("RETRACE_DEREFLEN").is_some();
+                    match self.host_span(args[di]) {
+                        Some((_, avail)) => {
+                            let want = self.read_u64(args[n]) as usize;
+                            if want > avail {
+                                if gated {
+                                    let (bi, bl) = self.backing_of(args[di]).unwrap();
+                                    eprintln!("[M29 DEREFLEN] syscall {} want {} avail {} dest {:#x} \
+                                               backing [{:#x},{:#x})",
+                                        num as i64, want, avail, args[di], bi, bi + bl as u64);
+                                }
+                            } else if gated {
+                                // Exists so a zero-OVERSIZED result can be told apart from an
+                                // arm that never ran at all: both print nothing without this line.
+                                // Nobody needs to read a fitting call's details, only to count that
+                                // one happened — so this carries the minimum that makes the count
+                                // meaningful (syscall, want, avail), not the backing span.
+                                eprintln!("[M29 DEREFLEN-FIT] syscall {} want {} avail {}",
+                                    num as i64, want, avail);
+                            }
+                            // Refuse rather than clamp. Clamping would write into guest memory the
+                            // guest reads back, turning a natively-succeeding call into ENOMEM; that
+                            // is a fidelity change, not a safety fix. Measured across the Apple
+                            // sweep, jq and CPython at M29 (Task 4): 826 dispatches, zero oversized,
+                            // so every legitimate call forwards untouched and this only catches the
+                            // unmodelled case.
+                            assert!(
+                                want <= avail,
+                                "unmodelled: syscall {} asked for {want} bytes at ipa {:#x} whose \
+                                 backing holds only {avail} — forwarding it would let the host \
+                                 kernel write past the backing. See the M29 spec, Component 1.",
+                                num as i64, args[di],
+                            );
                         }
-                        // Refuse rather than clamp. Clamping would write into guest memory the
-                        // guest reads back, turning a natively-succeeding call into ENOMEM; that
-                        // is a fidelity change, not a safety fix. Measured across the Apple sweep,
-                        // /bin/ps, CPython and jq at M29: zero occurrences, so every legitimate
-                        // call forwards untouched and this only catches the unmodelled case.
-                        assert!(
-                            want <= avail,
-                            "unmodelled: syscall {} asked for {want} bytes at ipa {:#x} whose \
-                             backing holds only {avail} — forwarding it would let the host kernel \
-                             write past the backing. See the M29 spec, Component 1.",
-                            num as i64, args[di],
-                        );
+                        // `host_span` returns `None` for two different reasons that must not be
+                        // conflated: `oldp == NULL` is a legal "just tell me the size" sysctl with
+                        // nothing to bound (correctly silent below), but a NON-NULL destination
+                        // with no backing at all is a pre-existing hazard the refusal cannot see
+                        // (the generic argument-translation loop leaves it untranslated, so the
+                        // host kernel would receive a raw guest address) — so it gets its own tag
+                        // rather than being silently folded into "zero oversized requests".
+                        None => {
+                            if args[di] != 0 && gated {
+                                match self.read_guest_checked(args[n], 8) {
+                                    Some(b) => {
+                                        let want = u64::from_le_bytes(b.try_into().unwrap());
+                                        eprintln!("[M29 DEREFLEN-UNBACKED] syscall {} dest {:#x} \
+                                                   want {} has NO backing (not NULL) — cannot \
+                                                   evaluate against avail",
+                                            num as i64, args[di], want);
+                                    }
+                                    None => {
+                                        eprintln!("[M29 DEREFLEN-UNBACKED] syscall {} dest {:#x} \
+                                                   oldlenp {:#x} also unreadable — cannot evaluate \
+                                                   against avail",
+                                            num as i64, args[di], args[n]);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 ```
