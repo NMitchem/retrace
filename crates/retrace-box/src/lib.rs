@@ -2898,6 +2898,14 @@ impl Box_ {
         unsafe { std::slice::from_raw_parts(hp, len.min(avail)) }.to_vec()
     }
 
+    /// Test-only view of `diff_window`, which is private because nothing outside the diff needs to
+    /// choose a window. Exposed so the M29 table additions can be proven to widen the window
+    /// without building a guest per syscall — the widening is a pure function of
+    /// `retrace_arch::dest_buffer` and the arguments.
+    pub fn diff_window_for_test(&self, num: u64, i: usize, avail: usize, args: &[u64; 8]) -> usize {
+        self.diff_window(num, i, avail, args)
+    }
+
     /// The destination length `num` will fill at argument `i`, if the table knows it.
     ///
     /// Takes `args` as a parameter and stores nothing: `Box_` gets no new field for this. Reads
