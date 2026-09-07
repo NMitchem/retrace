@@ -232,3 +232,26 @@ fn a_null_oldp_sysctl_is_not_refused() {
         }
     }
 }
+
+// The boundary the refusal turns on, pinned directly. M29 shipped the `want <= avail` comparison
+// with no test that exercises `want == avail`: `a_null_oldp_sysctl_is_not_refused` passes
+// `oldp = NULL`, so `host_span(0)` is `None` and it never reaches the comparison, and
+// `an_oldlenp_past_its_backing_is_refused` asks for `1 << 40`. Mutation-tested at M29: the
+// INVERSION `want >= avail` is caught by those two, but the STRICTNESS mutation `want < avail`
+// survives them both.
+//
+// M29's own status-log entry proposed closing this with a third *fitting* sysctl in the guest
+// fixture (`*oldlenp = 64`). That would not have worked: `avail` is the distance from the buffer to
+// the end of its BACKING, not the end of the 64-byte symbol, so a 64-byte request sits far under it
+// and `want < avail` stays green. Only `want == avail` separates the two, and a freestanding guest
+// cannot know `avail`. Hence a pure predicate, tested directly — the same treatment `clamp_count`
+// and `overran_window` already get, and for the same stated reason: the policy is reviewable apart
+// from the plumbing that feeds it.
+#[test]
+fn a_deref_len_is_refused_only_past_its_backing() {
+    assert!( Box_::deref_len_fits(/*want=*/63, /*avail=*/64)); // under  => forwards (kills `want >= avail`)
+    assert!( Box_::deref_len_fits(/*want=*/64, /*avail=*/64)); // EXACT  => forwards (kills `want < avail`)
+    assert!(!Box_::deref_len_fits(/*want=*/65, /*avail=*/64)); // past   => refused  (kills `want > avail` never firing)
+    assert!( Box_::deref_len_fits(/*want=*/0,  /*avail=*/0));  // a zero-length request into a full backing still fits
+    assert!(!Box_::deref_len_fits(/*want=*/1,  /*avail=*/0));  // no room at all => refused
+}

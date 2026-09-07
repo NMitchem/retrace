@@ -2847,6 +2847,19 @@ impl Box_ {
     /// available bytes. Inert when the guest's count already fits (the normal case).
     pub fn clamp_count(avail: usize, count: usize) -> usize { count.min(avail) }
 
+    /// Does an in-out `*oldlenp` request fit the backing behind its destination? (M29 fast-follow)
+    ///
+    /// Pure for the same reason `overran_window` is: the policy is reviewable — and testable —
+    /// apart from the plumbing that feeds it. That matters here specifically because the boundary
+    /// is not reachable from a guest fixture. `avail` is the distance from the destination to the
+    /// end of its *backing*, which a freestanding guest cannot know, so no guest can be written
+    /// that asks for exactly `avail` bytes. Inlined, the `want == avail` case was exercised by
+    /// nothing and a `want < avail` mutation survived the entire unit gate.
+    ///
+    /// Equality fits: a request that exactly fills the backing writes its last byte at the last
+    /// mapped address, which is in bounds.
+    pub fn deref_len_fits(want: usize, avail: usize) -> bool { want <= avail }
+
     /// Did the kernel write past the diff window? (M27)
     ///
     /// Pure so the policy is reviewable apart from the `unsafe` slice plumbing that feeds it. The
@@ -3157,7 +3170,7 @@ impl Box_ {
                             // so every legitimate call forwards untouched and this only catches the
                             // unmodelled case.
                             assert!(
-                                want <= avail,
+                                Self::deref_len_fits(want, avail),
                                 "unmodelled: syscall {} asked for {want} bytes at ipa {:#x} whose \
                                  backing holds only {avail} — forwarding it would let the host \
                                  kernel write past the backing. See the M29 spec, Component 1. If \
