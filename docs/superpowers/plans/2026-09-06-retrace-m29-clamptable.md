@@ -572,9 +572,9 @@ Create `crates/retrace-guest/asm/oldlensysctl.s`. It issues two `sysctl(KERN_OST
 // The order matters: the second call is expected to abort the recorder, so anything that must
 // be observed has to happen before it.
 .section __TEXT,__text
-.globl _main
+.global _start
 .p2align 2
-_main:
+_start:
     // mib[0] = CTL_KERN (1), mib[1] = KERN_OSTYPE (1)
     adrp x9, mib@PAGE
     add  x9, x9, mib@PAGEOFF
@@ -625,7 +625,7 @@ buf:      .space 64
 
 - [ ] **Step 2: Register it in the guest build**
 
-In `crates/retrace-guest/build.rs`, copy the block that compiles `failsysctl.s` (M28's fixture, the nearest neighbour — same spinloop-free shape, no generated path) and change the name to `oldlensysctl`. In `crates/retrace-guest/src/lib.rs`, add the path constant beside `FAILSYSCTL`:
+In `crates/retrace-guest/build.rs`, copy the block that compiles `failsysctl.s` (M28's fixture, the nearest neighbour — same spinloop-free shape, no generated path) at lines 71-78 and change the name to `oldlensysctl`. The link line is `-Wl,-e,_start`, which is why the fixture above declares `_start` and not `_main` — every guest in this crate does, and `_main` would not link. In `crates/retrace-guest/src/lib.rs`, add the path constant beside `FAILSYSCTL`:
 
 ```rust
 /// A guest issuing a legal NULL-`oldp` `sysctl` and then one whose `*oldlenp` (1 TiB) is far
