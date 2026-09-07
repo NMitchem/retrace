@@ -5388,9 +5388,14 @@ variable inside the timeout helper clobbered the caller's captured exit code, an
 compared a variable against itself, making it a tautology. With both fixed the tally is
 **`TALLY pass=46 fail=8 skip=0`**, and fixing the tautology is what exposed **`/bin/launchctl`** as a
 genuine replay divergence — it had always been diverging, and had never before been visible. The eight
-are `csh`/`tcsh` (the M10 fd table's fail-loud unmodelled `dup2`, by design), the four M23 `brk`
-binaries (`automationmodetool`, `desdp`, `dyld_info`, `flex`) that remain unmeasured with no parked
-gate standing for them, `/bin/launchctl`, and `/usr/bin/yes` — which never terminates and so cannot
+are `csh`/`tcsh` (`recorder panicked` — the M10 fd table's fail-loud unmodelled `dup2`, by design);
+`automationmodetool`, `desdp`, `dyld_info`, `flex` and `/bin/launchctl` (`replay diverged`); and
+`/usr/bin/yes` (`timed out after 30s recording`). Those reason strings are what the sweep prints, not
+why the binaries fail: `automationmodetool`, `desdp`, `dyld_info` and `flex` have been believed since
+M23 to reach a `brk`, and the sweep neither confirms nor contradicts that — it sees a diverging
+replay and nothing more. That cause remains unmeasured, with no parked gate standing for it.
+`csh`/`tcsh` are the exception: their `dup2` panic text was read directly off a re-run outside the
+sweep harness, so that one is a measurement rather than a category. `/usr/bin/yes` never terminates and so cannot
 pass under any bounded method; it is counted FAIL **on purpose**, since excluding it would raise the
 tally without changing retrace. `dddiagnose`'s documented intermittency stopped being an assertion and
 became an observation: two runs of the same script against the same tree gave 45/9 and 46/8, with
@@ -5512,11 +5517,10 @@ a passing test never prints. `ps_records_and_replays` now records `/bin/ps` thro
 separate from `RETRACE_TRACE`, so the count is obtainable without the per-trap firehose — and asserts
 the count is **greater than zero**, keeping all four of its pre-existing assertions. The gate
 therefore enforces a **floor, not a number**; the number itself reaches only a `--nocapture` run,
-which reported **32** on this machine. Why 32 rather than M28's 31 is **not root-caused** — M28's own
-breakdown decomposes 31 as `getdirentries64` ×15, 399 ×11, `access` ×2 and one each of `open`/347/
-`fstat64`, so a 32nd is most cheaply one more directory entry — and that is exactly why the assertion
-is `> 0` and not `== 31`: what fails should be a portable property, not a machine's directory
-contents.
+which reported **32** on this machine. Why 32 rather than M28's 31 is **not root-caused**: nothing
+measured which call produced the extra suppression, and no explanation for it is offered here. That
+is exactly why the assertion is `> 0` and not `== 31` — what fails should be a portable property, and
+this milestone does not know what makes the count vary.
 
 **Gate: 537 passed / 0 failed / 2 ignored over 116 test binaries**, every one of ten chunks
 `EXIT=0`, clippy clean over `--workspace --all-targets` at `-D warnings`. Reconciled against M28's
@@ -5549,22 +5553,23 @@ mistake as one that trusts a channel without checking what could reach it.
   overrun.
 - **The `readv`/`recvmsg` family** (120/27/540/411/401/480) stays refused by value since M27, until
   the `translate_mwl_regions` treatment and its own measurement extend to them.
-- **The refusal's *fitting* direction is not pinned by any unit test — but the finding that says so
-  had to be corrected first, by running it.** Task 5's review recorded that an inverted
-  `want <= avail` would survive both new `truncguard` tests, and this section was going to repeat
-  that. Measured at the close, both mutations applied to
-  `crates/retrace-box/src/lib.rs` and `truncguard` re-run each time: the **inversion**
-  (`want >= avail`) is **caught** — `an_oldlenp_past_its_backing_is_refused` fails, because its own
-  `NOT-THE-REFUSAL` sentinel fires when the second `sysctl` returns normally and that message is not
-  the one `should_panic(expected = "syscall 202 asked for")` wants. What **does** survive is a
-  **strictness** mutation: `want < avail` leaves all 14 tests green. The reason is the real gap, and
-  it is narrower and more specific than "an inversion survives": **no unit test drives a backed,
-  fitting `sysctl` through the assert at all.** `a_null_oldp_sysctl_is_not_refused` passes `oldp =
-  NULL`, so `host_span(0)` is `None` and it never reaches the comparison. Only the oversized
-  direction is pinned; the boundary `want == avail` is pinned by nothing, and the sweep and e2e
-  gates catch a strictness change only if some real call happens to sit exactly on it. The fix the
-  review named is still the right one and is still owed: a third `sysctl` in `oldlensysctl.s`
-  between calls 1 and 2 — `oldp = buf`, `*oldlenp = 64`, which fits — driven by the null test.
+- **The refusal's boundary is pinned by nothing: no unit test drives a backed, *fitting* `sysctl`
+  through the assert at all.** Only the oversized direction is covered.
+  `a_null_oldp_sysctl_is_not_refused` passes `oldp = NULL`, so `host_span(0)` is `None` and it never
+  reaches the comparison, and the other test's guest asks for `1 << 40`. So `want == avail` — the
+  exact boundary the comparison turns on — is exercised by no test in the unit gate, and the sweep
+  and e2e gates catch a change there only if some real call happens to sit on it.
+  **The fix is cheap and is owed:** a third `sysctl` in `crates/retrace-guest/asm/oldlensysctl.s`
+  between calls 1 and 2 — `oldp = buf`, `*oldlenp = 64`, which *fits* — driven by the null test.
+  This is stated from measurement rather than from reading. Both mutations were applied to
+  `crates/retrace-box/src/lib.rs` with `truncguard` re-run against each, then reverted byte-for-byte:
+  the **inversion** `want >= avail` is **caught** (13 passed, 1 failed) —
+  `an_oldlenp_past_its_backing_is_refused`'s own `NOT-THE-REFUSAL` sentinel fires when the second
+  `sysctl` returns normally, and `should_panic(expected = "syscall 202 asked for")` rejects that
+  message, which is precisely the job the sentinel was written to do. What **survives** is the
+  **strictness** mutation `want < avail`: all 14 tests green. Task 5's review had recorded the
+  inversion as the surviving case; testing it moved the finding to a narrower and more actionable
+  place, which is the only reason the mutation results are recorded here at all.
 - **The new BANDSHRINK assertion can be greened by an exported `RETRACE_TRACE=1`**, because
   `Command` inherits the parent environment and the box's gate fires on either variable. The test
   proves the count is non-zero; it does not prove `RETRACE_BANDSHRINK` is what delivered it.
