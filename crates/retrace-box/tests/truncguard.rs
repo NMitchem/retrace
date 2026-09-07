@@ -255,3 +255,46 @@ fn a_deref_len_is_refused_only_past_its_backing() {
     assert!( Box_::deref_len_fits(/*want=*/0,  /*avail=*/0));  // a zero-length request into a full backing still fits
     assert!(!Box_::deref_len_fits(/*want=*/1,  /*avail=*/0));  // no room at all => refused
 }
+
+// M30: a repo-owned reproduction of the false negative M27 measured on `/bin/ps`, and the reason
+// `canary_intact` exists. The window cap is placed so the only bytes the kernel writes past the
+// window are trap 189's trailing zero field — written over a band that is already zero. The band
+// therefore reads identically before and after a REAL kernel overrun, and `overran_window`, which
+// can only report a change, has nothing to report.
+//
+// This asserts the BLINDNESS, and it stays green after M30 closes the hole: it documents the
+// question the old predicate asks, not the answer the new one gives. Task 4 adds the matching
+// caught-half.
+#[test]
+fn the_old_comparison_is_blind_to_zeros_written_over_zeros() {
+    // Measured, not assumed: trap 189 writes a 120-byte reply whose trailing zero run is [90,120).
+    // 96 leaves 24 kernel-written ZERO bytes past the window — a real overrun with no signal in it.
+    const CAP: usize = 96;
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
+    let mut b = Box_::load(&loaded);
+    b.set_window_cap_for_test(CAP);
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_FSTAT => {
+                let (hp, avail) = b.host_span_for_test(args[1]).expect("stat buffer is mapped");
+                let win = CAP.min(avail);
+                let band = retrace_box::GUARD_BAND.min(avail - win);
+                let pre: Vec<u8> = unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
+                b.forward_and_diff(num, args);
+                let post: Vec<u8> = unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
+                assert!(pre.iter().all(|&x| x == 0), "precondition: the band starts zeroed");
+                assert!(!Box_::overran_window(&pre, &post),
+                    "this test exists because the old detector is blind here; if it now fires, \
+                     the fixture no longer reproduces the false negative and must be re-measured");
+                return;
+            }
+            Stop::Syscall { num, args } => {
+                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                b.set_x0_and_return(ret);
+            }
+            Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
+            Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}
