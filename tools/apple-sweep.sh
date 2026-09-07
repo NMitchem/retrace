@@ -117,11 +117,10 @@ while IFS= read -r g <&3; do
     if [ -n "${RETRACE_DEREFLEN:-}" ] && grep -qa "\[M29 DEREFLEN" "$TMP/rec.err"; then
         grep -a "\[M29 DEREFLEN" "$TMP/rec.err" | sed "s#^#$g: #"
     fi
-    # M30 Task 5: the same hole, one milestone later, in this same file. This task's ENTIRE
-    # deliverable is a grep of this script's output for "[M30 CANARY]", and Phase B flips a
-    # report-only counter to a hard assert only if that grep reads zero — so unsurfaced, it would
-    # read zero for every possible guest behaviour and decide the next task on plumbing rather than
-    # on the kernel. "[M28 BANDSHRINK]" is surfaced beside it because it is that measurement's
+    # M30: the same hole, one milestone later, in this same file. M30's Phase A measurement was a
+    # grep of this script's output for "[M30 CANARY]", and its Phase B flipped a report-only counter
+    # to a hard assert because that grep read zero — so unsurfaced, it would have read zero for every
+    # possible guest behaviour and decided the flip on plumbing rather than on the kernel. "[M28 BANDSHRINK]" is surfaced beside it because it is that measurement's
     # positive control ON THIS PATH: it leaves `forward_and_diff` by the same `eprintln!`, on the
     # same stream, in the same process as the canary line, and is already measured non-zero (29-31
     # lines on one /bin/ps recording), so a sweep run under RETRACE_BANDSHRINK that surfaces those
