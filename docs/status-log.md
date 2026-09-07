@@ -5357,3 +5357,214 @@ from M27. **M28 parked nothing new.**
   count is a warning to whoever takes it up next, not an invitation: a naive wider sample would be
   suppressed even more often than 31 times, not less, and a successor milestone that skips that
   measurement would be repeating M27's original mistake rather than correcting it.
+
+---
+
+## Status: M29-clamptable — the audit table shortens to three, and a zero is only as good as the channel that carried it
+
+M26 found the truncating-diff-window class, M27 made it fail loud and freed `/bin/ps`, and M28 proved
+the tripwire could fire and made a firing attributable. What all three left behind was written down
+in one README paragraph: a named list of syscalls that still get a flat 64 KiB window, and one clamp
+that "stays owed and unmeasured even for a covered syscall." **M29 pays the clamp and halves that list**, from the six
+entries it named (`getdirentries64`, `recvfrom`, `getfsstat64`, `proc_info`,
+`getattrlist`/`fgetattrlist`, `csops`) to three — plus one, `sysctlbyname`, that the list had never
+named at all. It is a hardening milestone — it adds no capability, un-parks nothing,
+and bumps no magic.
+
+It is also the milestone that hit its own subject three times: **a measurement is only as good as the
+channel that carried it.** M28's "zero band shrinks across the full gate" came off a channel no
+passing test could have written to; M29's own first Apple-sweep measurement came off a file that was
+grepped for something else and then deleted; and the controller repeated that second false zero
+onward before a reviewer caught it. Two of the three were caught only by asking what the channel
+could physically have carried, which is the habit this section is written to pass on.
+
+**Task 1: the Apple sweep is a script now, not a memory.** `tools/apple-sweep.sh` and a committed
+54-entry corpus (`tools/apple-sweep-binaries.txt`) record and replay each binary and print a `TALLY`
+line, so the figure this repo has quoted since M22 is reproducible instead of remembered. The corpus
+is a **reconstruction** — the original sample behind the 47 published at M27 was never committed — so
+the new number is not strictly comparable to the old one, and is reported rather than massaged toward
+it. Two bugs in the script's own first draft had to be fixed before it measured anything: a scratch
+variable inside the timeout helper clobbered the caller's captured exit code, and the divergence check
+compared a variable against itself, making it a tautology. With both fixed the tally is
+**`TALLY pass=46 fail=8 skip=0`**, and fixing the tautology is what exposed **`/bin/launchctl`** as a
+genuine replay divergence — it had always been diverging, and had never before been visible. The eight
+are `csh`/`tcsh` (the M10 fd table's fail-loud unmodelled `dup2`, by design), the four M23 `brk`
+binaries (`automationmodetool`, `desdp`, `dyld_info`, `flex`) that remain unmeasured with no parked
+gate standing for them, `/bin/launchctl`, and `/usr/bin/yes` — which never terminates and so cannot
+pass under any bounded method; it is counted FAIL **on purpose**, since excluding it would raise the
+tally without changing retrace. `dddiagnose`'s documented intermittency stopped being an assertion and
+became an observation: two runs of the same script against the same tree gave 45/9 and 46/8, with
+`dddiagnose` the only mover.
+
+**Task 2: four syscalls that already fit the table's shape, and one that nobody had noticed was
+missing.** `retrace_arch::dest_buffer` gained `getdirentries64`(344) `=> (1, Reg(2))`,
+`getfsstat64`(347) `=> (0, Reg(1))` (its `x1` is a byte count, not a mount count),
+`recvfrom`/`recvfrom_nocancel`(29/403) `=> (1, Reg(2))`, and `sysctlbyname`(274) `=> (2, DerefU64(3))`.
+`fd_operands` gained both `recvfrom` spellings, which had been in neither table while `sendto` was
+already in one — the same both-tables-at-once asymmetry M27 found in `pread_nocancel`, and the fourth
+time a `_nocancel` variant was missing from a table its plain sibling was in. Three of the four have a
+*second* destination; each is named in the code and dismissed on a number (`getdirentries64`'s 8-byte
+`*position`; `recvfrom`'s `from`, capped by the kernel at `sockaddr_storage`'s 128 bytes rather than
+at `*fromlen`), because all of them sit far inside the flat window and so cannot produce the class
+this table exists to prevent. No general multi-destination table was built.
+
+One number attached to `getfsstat64` did not survive being checked. Its match arm is commented
+"~24 mounts x sizeof(struct statfs64) on this machine, which crosses the 64 KiB cap," and the
+README carried a matching "30 mounts crosses the cap and this machine has 24." Measured at this
+milestone's close: `sizeof(struct statfs)` is **2168** bytes and this machine has **16** mounts, so
+the call needs **31** mounts to cross a 65536-byte window and currently asks for 34,688. The table
+entry is right and worth having — `getfsstat64` is structurally able to overrun, and its `x1` really
+is a byte count — but the comment's justification is not, and the README sentence that repeated it
+has been replaced rather than carried forward.
+
+**`sysctlbyname` is the interesting one, twice over.** First, it was absent from `dest_buffer` **and**
+from the README's own list of what was absent — a list of known gaps is only as complete as the audit
+that wrote it, which is the argument for closing a table rather than extending it entry by entry.
+Second, it was added with the **wrong indices**. The entry went in as `(1, DerefU64(2))` under the
+comment "sysctl's exact shape, one index lower," reasoning from libc's 5-arg `sysctlbyname(3)`
+prototype straight onto register positions. The raw kernel entry takes `namelen` first, exactly like
+`SYS_SYSCTL`, so the true pair is `(2, DerefU64(3))` — **identical** to `sysctl`'s, not one lower.
+The old sentence reached a true conclusion ("one arm covers both") from a false premise ("their
+indices differ by one"), and it **survived a review that checked all five new entries against the
+SDK**, because raw-versus-libc argument shape is invisible in a man page. It was caught in Task 4 and
+settled by calling `syscall(274, …)` against the live kernel with the wrapper bypassed: the 6-arg form
+on `"kern.ostype"` returns 0 with `oldp` filled and `*oldlenp` 7; the 5-arg reading returns −1. Had it
+shipped, a real `sysctlbyname` would have read `want` out of the destination buffer's own first eight
+bytes and treated `namelen` as the destination pointer — misdiagnosed as unbacked, not measured.
+
+**Task 3 proved the entries take effect** rather than assuming the table is wired to anything.
+`the_window_widens_for_each_m29_reg_addition` drives `Box_::diff_window_for_test` at the seam, with
+`avail` set to 1 MiB so the backing is never the binding constraint — a too-small `avail` would make
+every case clamp to the same number and pass for the wrong reason. It carries two negative controls
+that matter more than the positive ones: `getdirentries64`'s `x3` (its `*position`, not its buffer)
+still gets the flat cap, so the test would fail if `dest_buffer` widened *every* pointer argument;
+and `write`, absent from the table, gets the flat cap at every index. It covers the three `Reg`
+additions only. `sysctlbyname`'s `DerefU64` pair is asserted in `retrace-arch`'s own table test and
+nowhere at the window seam — the first of several places this milestone's newest entry is thinner
+than its siblings.
+
+**Task 4 measured `*oldlenp` against its backing before anything was refused — and the first version
+of that measurement was the exact failure this milestone exists to correct.** A diagnostic arm printed
+`[M29 DEREFLEN]` (want > backing), `[M29 DEREFLEN-FIT]` (want fits) and `[M29 DEREFLEN-UNBACKED]` (no
+backing) around `Box_::backing_of`, and the Apple sweep was run under it. It reported **zero
+dispatches across all 54 binaries** — and that zero was structurally guaranteed: `apple-sweep.sh`
+redirects each recorder's stderr into `$TMP/rec.err`, greps it only for `"panicked at"`, and deletes
+it in an `EXIT` trap, so no `[M29 DEREFLEN*]` line ever had a path onto the channel being grepped, for
+any guest, ever. The sweep script now greps that captured stderr for the tag and echoes matching
+lines onto its own stdout, prefixed by guest name, gated behind `RETRACE_DEREFLEN`. The repaired
+channel was then required to pass a **positive control** — a corrected channel still reporting 0 for
+`/bin/ps` would still be broken — and `/bin/ps` returned 66 lines, matching its standalone run.
+The false zero had already been reported onward as fact before a reviewer asked how the number could
+have reached the log at all; the corrected figure below is the opposite extreme, not a near miss.
+
+The corrected Phase A result, per corpus part, each from a command whose output was read:
+
+| part | dispatches reaching `forward_and_diff` | oversized | unbacked |
+|---|---|---|---|
+| Apple sweep, all 54 binaries (`RETRACE_DEREFLEN=1 tools/apple-sweep.sh`) | 783 | 0 | 0 |
+| `jq --version` (`record-dyn /opt/homebrew/bin/jq`) | 13 | 0 | 0 |
+| CPython via the Homebrew launcher shim (`-c 'print(1)'`) | 15 | 0 | 0 |
+| CPython via the real interpreter binary (`-c 'print(1)'`) | 15 | 0 | 0 |
+
+**826 dispatches, every one fitting inside its backing.** `/bin/ps` is inside the sweep's 783 and is
+**not** a fifth addend; its standalone count varies run to run (62, then 66, then 66) because it walks
+the live host process table, which is guest-environment variance and not a recorder property. All 826
+are `syscall 202`.
+
+**Three narrownesses bound that zero, and they are the reason it is not a stronger claim.**
+`sysctlbyname`(274) is exercised by **nothing** in any corpus — its table entry is correct by
+measurement of the kernel's argument shape, but untested by any guest, and the refusal covers it by
+code-path symmetry only. "Reached" means reaching `forward_and_diff`: the `sysctl(KERN_USRSTACK64)`
+that `retrace-core` answers itself never arrives there and is not in the count. And the two CPython
+rows are one interpreter startup measured twice — identical `want` value sets, differing only by a
+small allocator offset in `avail` — so the evidence base is **56 effectively-independent binaries**,
+not 57.
+
+**Task 5 took Branch B-REFUSE: refuse, do not clamp.** `sysctl`'s `*oldlenp` is an *in-out* length —
+the guest writes how much room it has, the kernel writes back how much it used — so a silent clamp
+would tell the kernel a smaller buffer than the guest asked for and hand the guest a truncated reply
+it has no way to know was truncated: a wrong answer dressed as a right one. `forward_and_diff` now
+asserts by name when `want > avail`, the discipline `guest_workq_kernreturn` uses for an unenumerated
+opcode, with `RETRACE_DEREFLEN=1` named in the message as the way to print the backing span that
+settles which side is wrong. The 826-dispatch zero is what makes this safe rather than reckless:
+nothing that runs today is refused. A purpose-built guest, `crates/retrace-guest/asm/oldlensysctl.s`,
+issues a legal size query and then an illegal `*oldlenp = 1 << 40`; one test proves the refusal fires
+and a second proves the NULL-`oldp` size query still passes.
+
+A second bug surfaced only because TDD demanded a genuine RED: the test loop drove `forward_and_diff`
+without ever calling `set_x0_err_and_return`, so the vCPU never advanced past the guest's first `svc`
+and **both tests were re-driving the first syscall forever**, never reaching the illegal second one.
+The RED they produced was textually the expected one and would have been accepted. Without the fix,
+the assertion could never have been exercised by either test.
+
+**A tension this creates, recorded so nobody re-derives a number that can no longer be taken:**
+`forward_and_diff` now **aborts on the first oversized dispatch**, so the Phase A diagnostic can no
+longer survey a corpus. Measurement mode and refusal mode are in tension; an OVERSIZED line is now
+necessarily the last thing the process prints, and a corpus-wide OVERSIZED tally is not an available
+measurement any more.
+
+**Task 6 made M28's band-suppression count a real observation.** M28 published two numbers here: 31
+suppressions on `/bin/ps`, hand-measured, and "zero band shrinks across the full gate" — and the
+second could not have been true, because `[M28 BANDSHRINK]` is recorder stderr and every e2e test
+drives the recorder as a child whose stderr `crates/retrace/tests/util/mod.rs` pipes into a `String`
+a passing test never prints. `ps_records_and_replays` now records `/bin/ps` through a new
+`util::record_dynamic_env` helper with **`RETRACE_BANDSHRINK=1`** set on the recorder — a gate
+separate from `RETRACE_TRACE`, so the count is obtainable without the per-trap firehose — and asserts
+the count is **greater than zero**, keeping all four of its pre-existing assertions. The gate
+therefore enforces a **floor, not a number**; the number itself reaches only a `--nocapture` run,
+which reported **32** on this machine. Why 32 rather than M28's 31 is **not root-caused** — M28's own
+breakdown decomposes 31 as `getdirentries64` ×15, 399 ×11, `access` ×2 and one each of `open`/347/
+`fstat64`, so a 32nd is most cheaply one more directory entry — and that is exactly why the assertion
+is `> 0` and not `== 31`: what fails should be a portable property, not a machine's directory
+contents.
+
+**Gate: 537 passed / 0 failed / 2 ignored over 116 test binaries**, every one of ten chunks
+`EXIT=0`, clippy clean over `--workspace --all-targets` at `-D warnings`. Reconciled against M28's
+532 / 0 / 2 over 116 **file-by-file rather than by sum**: `crates/retrace-arch/src/lib.rs` **+2**
+(Task 2), `crates/retrace-box/tests/truncguard.rs` **+3** (Task 3's window-widening test, Task 5's
+two refusal tests). Every other file unchanged;
+`--bins` **11 → 11**. Task 6 added no test — it extended `ps_records_and_replays`. No new test binary:
+`oldlensysctl.s` is a guest fixture and `truncguard.rs` already existed, so the binary count stays
+**116**. The count closes at both ends: the tree holds 534 `#[test]` at M28 = 532 + 2 ignored, and
+**539** at M29 = 537 + 2. The two ignored gates (`stackoverflow_rust_e2e`,
+`cache_symbol_e2e`) are unchanged. **M29 parked nothing new and un-parked nothing** — as its design
+predicted for a hardening milestone.
+
+The sweep was re-run at the close: **`TALLY pass=46 fail=8 skip=0`**, with both the PASS set and the
+FAIL set byte-identical to Task 4's post-fix run — the third independent run to land there with the
+same sets. The baseline it was compared against is Task 4's own post-fix sweep and deliberately
+**not** the `/tmp` file the plan named, which is a pre-Task-4 artifact holding 51 passes from the
+tautological run; diffing against that would have shown a large and entirely spurious set change.
+A milestone that compares against a baseline without checking what produced it is making the same
+mistake as one that trusts a channel without checking what could reach it.
+
+**What stays owed, named rather than implied:**
+
+- **M27's measured coverage false negative is untouched.** A 64-byte band of zeros still misses an
+  overrun into zeros; M28 hardened the tripwire without closing that and M29 did not touch it either.
+- **`Box_::diff_memory`'s own `.min(avail)` clamp** on the replay side is still unpaid — flagged in
+  M1's own branch review and deferred at M2.
+- **`proc_info`(336), `getattrlist`/`fgetattrlist`(220/228) and `csops`(169/170)** still get a flat
+  64 KiB window. They are what remains of the audit table after M29, and none has been measured to
+  overrun.
+- **The `readv`/`recvmsg` family** (120/27/540/411/401/480) stays refused by value since M27, until
+  the `translate_mwl_regions` treatment and its own measurement extend to them.
+- **The refusal's *fitting* direction is not pinned by any unit test — but the finding that says so
+  had to be corrected first, by running it.** Task 5's review recorded that an inverted
+  `want <= avail` would survive both new `truncguard` tests, and this section was going to repeat
+  that. Measured at the close, both mutations applied to
+  `crates/retrace-box/src/lib.rs` and `truncguard` re-run each time: the **inversion**
+  (`want >= avail`) is **caught** — `an_oldlenp_past_its_backing_is_refused` fails, because its own
+  `NOT-THE-REFUSAL` sentinel fires when the second `sysctl` returns normally and that message is not
+  the one `should_panic(expected = "syscall 202 asked for")` wants. What **does** survive is a
+  **strictness** mutation: `want < avail` leaves all 14 tests green. The reason is the real gap, and
+  it is narrower and more specific than "an inversion survives": **no unit test drives a backed,
+  fitting `sysctl` through the assert at all.** `a_null_oldp_sysctl_is_not_refused` passes `oldp =
+  NULL`, so `host_span(0)` is `None` and it never reaches the comparison. Only the oversized
+  direction is pinned; the boundary `want == avail` is pinned by nothing, and the sweep and e2e
+  gates catch a strictness change only if some real call happens to sit exactly on it. The fix the
+  review named is still the right one and is still owed: a third `sysctl` in `oldlensysctl.s`
+  between calls 1 and 2 — `oldp = buf`, `*oldlenp = 64`, which fits — driven by the null test.
+- **The new BANDSHRINK assertion can be greened by an exported `RETRACE_TRACE=1`**, because
+  `Command` inherits the parent environment and the box's gate fires on either variable. The test
+  proves the count is non-zero; it does not prove `RETRACE_BANDSHRINK` is what delivered it.
