@@ -196,9 +196,22 @@ pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> {
         // (`sockaddr_storage` is 128 bytes), NOT at `*fromlen`, so it is self-bounding and already
         // deep inside the flat window.
         SYS_RECVFROM | SYS_RECVFROM_NOCANCEL => Some((1, DestLen::Reg(2))),
-        // sysctlbyname(name, oldp, oldlenp, newp, newlen): sysctl's exact shape, one index lower.
-        // One `DerefU64` arm therefore covers both syscalls wherever the box matches on the shape.
-        SYS_SYSCTLBYNAME => Some((1, DestLen::DerefU64(2))),
+        // sysctlbyname: the RAW syscall's shape, not libc's 5-arg wrapper. `sysctlbyname(3)`'s
+        // C signature is (name, oldp, oldlenp, newp, newlen), but the kernel entry point behind it
+        // takes an extra `namelen` first, exactly like `SYS_SYSCTL`: (name, namelen, oldp, oldlenp,
+        // newp, newlen). Measured directly against the live kernel (M29 fix round 1) with a raw
+        // `syscall(274, ...)` bypassing libc's wrapper: the 6-arg form on `"kern.ostype"` returns 0
+        // with `oldp` filled (`"Darwin"`, `*oldlenp` 7); the naive 5-arg reading of the libc
+        // prototype (`oldp` at index 1) returns -1. So `oldp` is index 2 and `oldlenp` index 3 —
+        // IDENTICAL to `SYS_SYSCTL`, not "one index lower" as this entry previously (and wrongly)
+        // claimed. That wrong claim was never caught here: nothing in the M29 measurement corpus
+        // ever dispatched syscall 274 (see the M29 report's Finding B), so a real `sysctlbyname`
+        // call would have computed `want` from the first 8 bytes of the destination buffer's own
+        // CONTENTS (reading `args[2]`, the actual `oldp`, as if it were `oldlenp`) and treated
+        // `namelen` (`args[1]`) as the destination pointer — misdiagnosing a legal call as
+        // `[M29 DEREFLEN-UNBACKED]` rather than measuring it. One `DerefU64` arm covers both
+        // syscalls because both now use the same indices, not despite them differing by one.
+        SYS_SYSCTLBYNAME => Some((2, DestLen::DerefU64(3))),
         _ => None,
     }
 }
@@ -676,9 +689,11 @@ mod tests {
         // recvfrom(s, buf, len, flags, sockaddr *from, socklen_t *fromlen) — both spellings.
         assert_eq!(dest_buffer(SYS_RECVFROM), Some((1, DestLen::Reg(2))));
         assert_eq!(dest_buffer(SYS_RECVFROM_NOCANCEL), Some((1, DestLen::Reg(2))));
-        // sysctlbyname(name, oldp, size_t *oldlenp, newp, newlen) — sysctl's shape, one index
-        // lower. It was missing from this table AND from the README's list of what was missing.
-        assert_eq!(dest_buffer(SYS_SYSCTLBYNAME), Some((1, DestLen::DerefU64(2))));
+        // sysctlbyname: the RAW syscall's shape (name, namelen, oldp, oldlenp, newp, newlen) —
+        // IDENTICAL indices to `SYS_SYSCTL`, measured against the live kernel (M29 fix round 1;
+        // see the `dest_buffer` match arm's comment). It was missing from this table AND from the
+        // README's list of what was missing.
+        assert_eq!(dest_buffer(SYS_SYSCTLBYNAME), Some((2, DestLen::DerefU64(3))));
     }
 
     #[test]

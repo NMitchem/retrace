@@ -99,6 +99,18 @@ while IFS= read -r g <&3; do
     # passes and false failures, exactly what this script exists to prevent.
     rm -f "$TMP/t.bin"
     run_timeout "$BIN" record-dyn "$g" -o "$TMP/t.bin" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+    # M29 fix round 1 (Critical): the recorder's stderr goes to $TMP/rec.err, grepped only
+    # for "panicked at" below and destroyed by this script's own EXIT trap — so a caller
+    # capturing only this script's OWN stdout/stderr (as the M29 measurement did) never sees
+    # a `[M29 DEREFLEN*]` line no matter how many times the guest dispatched that arm.
+    # Surface them here, before rec.err is ever at risk of going away, tagged with the guest
+    # path the way every PASS/FAIL/SKIP line already is. Runs regardless of what the record
+    # phase does next (panic/timeout/success) so a diagnostic emitted just before a crash is
+    # not lost either. `grep -qa` first avoids an unconditional (and here pointless) `sed` on
+    # every binary when the var is unset or the guest never dispatched the arm.
+    if [ -n "${RETRACE_DEREFLEN:-}" ] && grep -qa "\[M29 DEREFLEN" "$TMP/rec.err"; then
+        grep -a "\[M29 DEREFLEN" "$TMP/rec.err" | sed "s#^#$g: #"
+    fi
     if [ -e "$TMP/.timedout" ]; then
         echo "FAIL $g (timed out after ${TIMEOUT_SECS}s recording)"; fail=$((fail+1)); continue
     fi
