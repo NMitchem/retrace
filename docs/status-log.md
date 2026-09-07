@@ -5577,3 +5577,19 @@ mistake as one that trusts a channel without checking what could reach it.
 - **The new BANDSHRINK assertion can be greened by an exported `RETRACE_TRACE=1`**, because
   `Command` inherits the parent environment and the box's gate fires on either variable. The test
   proves the count is non-zero; it does not prove `RETRACE_BANDSHRINK` is what delivered it.
+
+  > **CLOSED before merge, by this same milestone — the bullet above was already false when M29
+  > landed.** The final fix wave (`a4b7e90`) added `c.env_remove("RETRACE_TRACE")` to `run_env`
+  > (`crates/retrace/tests/util/mod.rs:65`), placed after `c.args(args)` and *before* the caller's
+  > env loop, so a caller passing the variable deliberately still overrides. It was proven rather
+  > than argued: with the `RETRACE_BANDSHRINK` limb deleted and `RETRACE_TRACE=1` exported,
+  > `sysbin_e2e` FAILS (`saw none`, exit 101) where it previously passed — which can only happen if
+  > `env_remove` stripped the inherited variable *and* nothing but the deleted limb was enabling the
+  > counter. The assertion now passes because of the gate it tests.
+  >
+  > The bullet is left standing rather than corrected in place, per this log's append-only
+  > discipline. It is recorded here because the failure is worth more than the fix: the wave that
+  > closed this item ran *after* the section above was written, and the owed-list was not re-checked
+  > against it. A milestone that closes an item during its own fix wave must re-read what it already
+  > published as owed — the same "a claim must trace to the state that produced it" rule this
+  > milestone is about, applied to its own closing document.
