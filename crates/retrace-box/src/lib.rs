@@ -3136,6 +3136,19 @@ impl Box_ {
                                 eprintln!("[M29 DEREFLEN-FIT] syscall {} want {} avail {}",
                                     num as i64, want, avail);
                             }
+                            // Refuse rather than clamp. Clamping would write into guest memory the
+                            // guest reads back, turning a natively-succeeding call into ENOMEM; that
+                            // is a fidelity change, not a safety fix. Measured across the Apple
+                            // sweep, jq and CPython at M29 (Task 4): 826 dispatches, zero oversized,
+                            // so every legitimate call forwards untouched and this only catches the
+                            // unmodelled case.
+                            assert!(
+                                want <= avail,
+                                "unmodelled: syscall {} asked for {want} bytes at ipa {:#x} whose \
+                                 backing holds only {avail} — forwarding it would let the host \
+                                 kernel write past the backing. See the M29 spec, Component 1.",
+                                num as i64, args[di],
+                            );
                         }
                         // `host_span` returns `None` for two different reasons that must not be
                         // conflated: `oldp == NULL` is a legal "just tell me the size" sysctl with

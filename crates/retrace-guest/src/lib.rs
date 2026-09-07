@@ -129,6 +129,9 @@ pub const BIGREAD_FIXTURE: &str = concat!(env!("OUT_DIR"), "/bigread_fixture.bin
 /// writes into a guest buffer on a FAILING syscall — the path where `forward_and_diff` skips write
 /// capture and the guard band alike.
 pub const FAILSYSCTL: &str = concat!(env!("OUT_DIR"), "/failsysctl");
+/// A guest issuing a legal NULL-`oldp` `sysctl` and then one whose `*oldlenp` (1 TiB) is far
+/// larger than any backing — the fixture for M29's `DerefU64` refusal.
+pub const OLDLENSYSCTL: &str = concat!(env!("OUT_DIR"), "/oldlensysctl");
 pub const MMAPGUEST: &str = concat!(env!("OUT_DIR"), "/mmapguest");
 pub const UNALIGNED: &str = concat!(env!("OUT_DIR"), "/unaligned");
 pub const PACGUEST: &str = concat!(env!("OUT_DIR"), "/pacguest");

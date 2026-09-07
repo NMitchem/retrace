@@ -77,6 +77,16 @@ fn main() {
         .status().expect("clang failsysctl");
     assert!(status.success(), "failsysctl guest build failed");
 
+    // M29: a guest issuing a legal NULL-oldp sysctl (size query) followed by one whose *oldlenp
+    // (1 TiB) is far larger than any backing — the fixture for the DerefU64 refusal.
+    let src = format!("{}/asm/oldlensysctl.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/oldlensysctl");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang oldlensysctl");
+    assert!(status.success(), "oldlensysctl guest build failed");
+
     // mmap guest: allocates via SYS_mmap, writes the mapping with plain stores, munmaps.
     let src = format!("{}/asm/mmapguest.s", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/mmapguest");
