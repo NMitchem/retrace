@@ -267,11 +267,31 @@ pub fn writes_via_nested_pointer(num: u64) -> bool {
 /// whose length the CALLER chooses, and which no `dest_buffer` entry widens the window to cover.
 /// That is checkable against the man page and `sys/syscall.h`, not guessed.
 ///
-/// **Deliberately asymmetric.** Over-including costs only canary coverage on a call that has no
-/// destination buffer worth canarying — the M27 comparison still runs there, so the detector
-/// degrades to what shipped before this milestone. Under-including corrupts the guest's output
-/// silently. Every `_nocancel` spelling is listed beside its plain one: that pairing is the trap
-/// M9, M10 and M27 each hit separately.
+/// **Deliberately asymmetric.** Under-including corrupts the guest's output silently, so where the
+/// two errors compete, listing wins. Every `_nocancel` spelling is listed beside its plain one: that
+/// pairing is the trap M9, M10 and M27 each hit separately. Whatever is listed still gets M27's
+/// before/after band comparison, which `forward_and_diff` runs unchanged on an unfilled band, so
+/// nothing here is left weaker than it was before M30.
+///
+/// **But over-including is NOT free, and it is not free for two entries listed below.** The claim
+/// that a listed call "has no destination buffer worth canarying" holds for `write`, `writev`,
+/// `sendto` and `msync`. It is FALSE for:
+///
+/// - **`sendfile` (337)** — `int sendfile(int, int, off_t, off_t *, struct sf_hdtr *, int)`. Its
+///   4th argument is in-out: the kernel writes the transferred byte count back through it. That is
+///   a destination.
+/// - **`mach_msg2_trap`** — the receive buffer is a live destination. `machmsg.rs`'s
+///   `FORWARD_ALLOWLIST` sends five ids through `forward_and_diff`, and `3405 task_info` and
+///   `412 host_get_special_port` are there *precisely because* the kernel writes a reply into guest
+///   memory which is then captured as `writes`. This is a path the corpus exercises on every jq and
+///   CPython run, not a hypothetical.
+///
+/// So for those two the exclusion costs real destination-side canary coverage on live traffic. They
+/// stay listed anyway: both genuinely read guest memory, dropping either risks the reproduced
+/// Critical, and a predicate keyed on `num` alone has no way to say "fill past argument 3 but not
+/// argument 4". **Recovering that coverage needs a per-ARGUMENT direction notion this predicate
+/// cannot express** — a `dest_buffer`-shaped table of which arguments are sources — which is owed
+/// successor work rather than something this milestone quietly has.
 ///
 /// **Why every path-taking call is absent**, since they plainly read guest memory: a path is
 /// NUL-terminated and the kernel stops at `PATH_MAX` (1024), which sits far inside the 64 KiB

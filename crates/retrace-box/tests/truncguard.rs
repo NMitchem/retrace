@@ -371,6 +371,13 @@ fn the_canary_catches_zeros_written_over_zeros() {
 // The failing call is an `open` of the FILEIO guest's own path with its leading `/` skipped: a
 // relative path that cannot exist, NUL-terminated by the fixture, and mapped so a window and band
 // are really taken. Nothing about the failure depends on errno, so the assertion is on `err`.
+//
+// `CAP = 64` puts the band at `path + 64`, INSIDE `PATH_MAX`, so the kernel really does read canary
+// bytes as part of the path here. That is deliberate and harmless, not an oversight: the open must
+// fail either way, which is why the assertion is on `err` and not on a particular errno. It cannot
+// happen in production, and `reads_guest_buffer`'s doc comment gives the reason a path argument is
+// absent from that allowlist — the kernel stops at `PATH_MAX` (1024), far inside the real 64 KiB
+// window, so only a test that shrinks `window_cap` below `PATH_MAX` can bring a band into reach.
 #[test]
 fn a_failing_syscall_still_restores_the_canary() {
     const CAP: usize = 64;
@@ -456,4 +463,45 @@ fn a_duplicated_pointer_argument_does_not_manufacture_a_disturbance() {
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
+}
+
+// M30 fix round 2. The two band detectors differ, and `forward_and_diff` must pick between them on
+// `fill_canary`. This pins the difference at the seam, because it is otherwise invisible: both
+// predicates return the same answer on every case EXCEPT the one below, and that one cannot be
+// reached through a guest (it needs a `reads_guest_buffer` syscall that also writes past its own
+// diff window with a byte equal to the canary at that offset; nothing in the corpus does the first
+// two together, let alone the third). So this is the only guard the semantic difference can have,
+// and the reason `canary_overran` is a pure function rather than an inline condition.
+//
+// Round 1 shipped the reconstruction UNGATED, having verified it cannot FALSE-ALARM on an unfilled
+// band and never asking whether it could MISS. It can: on an unfilled band it is M27 minus this
+// case, i.e. strictly weaker than what shipped before M30, on exactly the family the fill was
+// withdrawn from to protect.
+#[test]
+fn the_filled_detector_is_a_strict_subset_of_the_unfilled_one() {
+    const BASE: u64 = 0x1000;
+    let pre = [0u8; 4];
+
+    // A kernel write of a value that is neither the canary nor the original: both detectors fire,
+    // which is the ordinary case and the reason the substitution looked free.
+    let post = [0xEEu8, 0, 0, 0];
+    assert!(Box_::canary_overran(&pre, &post, BASE));
+    assert!(Box_::overran_window(&pre, &post));
+
+    // THE DIVERGENCE. The kernel wrote `canary_byte(BASE)` at offset 0 — a real write, over an
+    // original of 0. `overran_window` sees a change and fires; `canary_overran` cannot tell that
+    // byte from a canary it wrote itself, and misses. On a FILLED band this is the 1/256 a canary
+    // inherently costs. On an UNFILLED band it is pure loss, which is why the gate exists.
+    let coincidence = [Box_::canary_byte(BASE), 0, 0, 0];
+    assert_ne!(coincidence[0], pre[0], "the fixture must be a real change to be a real miss");
+    assert!(!Box_::canary_overran(&pre, &coincidence, BASE),
+        "the filled detector misses a kernel byte equal to the canary at its offset");
+    assert!(Box_::overran_window(&pre, &coincidence),
+        "the unfilled detector catches it — that gap IS what gating on `fill_canary` restores");
+
+    // Both agree that nothing happened when nothing happened, and on the empty band.
+    let intact: Vec<u8> = (0..4).map(|k| Box_::canary_byte(BASE + k)).collect();
+    assert!(!Box_::canary_overran(&pre, &intact, BASE), "an intact canary is not an overrun");
+    assert!(!Box_::canary_overran(&[], &[], BASE));
+    assert!(!Box_::overran_window(&[], &[]));
 }
