@@ -86,8 +86,14 @@ pass=0; fail=0; skip=0
 # the rest of this very file as its own script — measured happening (M29: /bin/bash
 # swallowed the next line, /bin/cat vanished entirely, and the sweep quietly stopped
 # after 6 of 59 lines with a TALLY that looked complete). Explicitly pointing every
-# child's stdin at /dev/null closes both holes: the fd-3 list is never visible to any
-# child, and no guest blocks waiting on a real terminal.
+# child's stdin at /dev/null is what closes the hole: a shell guest reads its script from
+# /dev/null and gets immediate EOF, and no guest blocks waiting on a real terminal.
+# NOT because fd 3 is hidden from children -- it is not. Descriptors above 2 are inherited
+# across exec unless marked close-on-exec, so fd 3 IS present in the child; what makes that
+# harmless is that a guest would have to go looking for it, and `Box_::translate_fds`
+# returns EBADF for any fd the guest never opened through retrace's own fd table. Stating
+# it the old way ("never visible to any child") would leave the next person believing
+# inheritance was prevented, and reaching for fd 3 elsewhere on that belief.
 while IFS= read -r g <&3; do
     case "$g" in ''|\#*) continue ;; esac
     if [ ! -x "$g" ]; then echo "SKIP $g (not present)"; skip=$((skip+1)); continue; fi
