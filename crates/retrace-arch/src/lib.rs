@@ -273,6 +273,12 @@ pub fn writes_via_nested_pointer(num: u64) -> bool {
 /// silently. Every `_nocancel` spelling is listed beside its plain one: that pairing is the trap
 /// M9, M10 and M27 each hit separately.
 ///
+/// **Why every path-taking call is absent**, since they plainly read guest memory: a path is
+/// NUL-terminated and the kernel stops at `PATH_MAX` (1024), which sits far inside the 64 KiB
+/// production window, so no band can be in reach. That bound is the argument — not "paths are
+/// short" — and it is why a test that shrinks `window_cap` below `PATH_MAX` can make the kernel read
+/// a canary as path bytes while production cannot.
+///
 /// **The residual gap, stated plainly**: an unlisted syscall that reads past its window still
 /// corrupts, in exactly the way the reproduction did and with exactly as little noise. This is the
 /// contract-derived family of guest→kernel transfers, not a proof of exhaustiveness. `ioctl` is the

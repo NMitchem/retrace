@@ -360,3 +360,100 @@ fn the_canary_catches_zeros_written_over_zeros() {
         }
     }
 }
+
+// M30 fix round 1, defect (a): the fill is UNCONDITIONAL but the write-capture loop runs only when
+// the syscall succeeded, so a failing call used to leave the canary in guest memory permanently.
+// `forward_and_diff` is record-side only — replay applies recorded writes instead — so leaked bytes
+// are memory the recording has and the replay does not, i.e. a final full-memory divergence. 36
+// such restores were measured in one `jq -n '1+1'` recording, so this path is ordinary traffic
+// rather than a corner.
+//
+// The failing call is an `open` of the FILEIO guest's own path with its leading `/` skipped: a
+// relative path that cannot exist, NUL-terminated by the fixture, and mapped so a window and band
+// are really taken. Nothing about the failure depends on errno, so the assertion is on `err`.
+#[test]
+fn a_failing_syscall_still_restores_the_canary() {
+    const CAP: usize = 64;
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
+    let mut b = Box_::load(&loaded);
+    b.set_window_cap_for_test(CAP);
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_OPEN => {
+                let path = args[0] + 1; // drop the leading '/' => a relative path that cannot exist
+                let (_, avail) = b.host_span_for_test(path).expect("the path buffer is mapped");
+                let win = CAP.min(avail);
+                let band = retrace_box::GUARD_BAND.min(avail - win);
+                assert!(band > 0, "precondition: this test needs a non-empty band to leak");
+                let base = path + win as u64;
+                let pre = b.read_bytes_for_test(base, band);
+                assert!(!Box_::canary_intact(&pre, base),
+                    "precondition: the band must not already look like a canary, or a missing \
+                     restore would be indistinguishable from a correct one");
+
+                let mut a = [0u64; 8];
+                a[0] = path;
+                let (_ret, err, writes) = b.forward_and_diff(retrace_arch::SYS_OPEN, a);
+                assert!(err, "precondition: opening {path:#x} as a relative path must FAIL, or this \
+                              test drives the success path it is not about");
+                assert!(writes.is_empty(), "a failed syscall captures nothing");
+
+                assert_eq!(b.read_bytes_for_test(base, band), pre,
+                    "the canary must be restored on the FAILING path too — a leak here is bytes \
+                     the recording has and the replay does not");
+                return;
+            }
+            Stop::Syscall { num, args } => {
+                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                b.set_x0_and_return(ret);
+            }
+            Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
+            Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}
+
+// M30 fix round 1, defect (b): two arguments of one call can hold the SAME value — measured on 60
+// of 341 traps in one `jq` recording, including `open`'s x0 == x3 and `stat64`'s x0 == x2 — which
+// pushes two `windows` entries with the same ipa, len and band. `band_not_covered` deliberately
+// does not let an entry suppress its own band, so it does not suppress a duplicate's either, and
+// both entries check the same bytes. Restoring per entry made the first erase the canary the second
+// was about to read, reporting a disturbance no kernel caused: a phantom straight into the Phase A
+// tally the milestone's flip decision turns on.
+//
+// The cap is 256 deliberately: trap 189 writes 120 bytes, so nothing overruns and the ONLY thing
+// that could move the counter is the ordering defect. At Task 2's cap of 96 a real overrun would
+// increment it and hide the bug.
+#[test]
+fn a_duplicated_pointer_argument_does_not_manufacture_a_disturbance() {
+    const CAP: usize = 256;
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
+    let mut b = Box_::load(&loaded);
+    b.set_window_cap_for_test(CAP);
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_FSTAT => {
+                let (_, avail) = b.host_span_for_test(args[1]).expect("stat buffer is mapped");
+                assert!(avail > CAP, "precondition: a band must exist past a {CAP}-byte window");
+                // x2 is not an operand of fstat, so duplicating the buffer pointer there changes
+                // nothing the kernel does — only how many entries the pre-pass pushes.
+                let mut a = args;
+                a[2] = args[1];
+                let before = b.canary_disturbances_for_test();
+                b.forward_and_diff(num, a);
+                assert_eq!(b.canary_disturbances_for_test(), before,
+                    "two entries sharing one band must not report a disturbance: no kernel write \
+                     reaches past a {CAP}-byte window for a 120-byte fstat reply");
+                return;
+            }
+            Stop::Syscall { num, args } => {
+                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                b.set_x0_and_return(ret);
+            }
+            Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
+            Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}
