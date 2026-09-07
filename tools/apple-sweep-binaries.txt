@@ -1,0 +1,59 @@
+# The Apple-binary sweep corpus. One absolute path per line; '#' comments.
+# Committed so the sweep number is reproducible rather than remembered.
+# Criterion for PASS: record and replay both complete, their exit codes are
+# equal, and their stdout is byte-identical. A guest that legitimately exits
+# nonzero (e.g. /bin/false) still PASSes when both runs agree.
+/bin/[
+/bin/bash
+/bin/cat
+/bin/chmod
+/bin/cp
+/bin/csh
+/bin/dash
+/bin/date
+/bin/dd
+/bin/df
+/bin/echo
+/bin/ed
+/bin/expr
+/bin/hostname
+/bin/kill
+/bin/ksh
+/bin/launchctl
+/bin/link
+/bin/ln
+/bin/ls
+/bin/mkdir
+/bin/mv
+/bin/pax
+/bin/ps
+/bin/pwd
+/bin/realpath
+/bin/rm
+/bin/rmdir
+/bin/sh
+/bin/sleep
+/bin/stty
+/bin/sync
+/bin/tcsh
+/bin/test
+/bin/unlink
+/bin/wait4path
+/bin/zsh
+/usr/bin/automationmodetool
+/usr/bin/desdp
+/usr/bin/dyld_info
+/usr/bin/flex
+/usr/bin/dddiagnose
+/usr/bin/basename
+/usr/bin/dirname
+/usr/bin/env
+/usr/bin/head
+/usr/bin/tail
+/usr/bin/sort
+/usr/bin/uniq
+/usr/bin/cut
+/usr/bin/tr
+/usr/bin/yes
+/usr/bin/true
+/usr/bin/printenv
