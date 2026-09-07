@@ -53,6 +53,18 @@ fn run(args: &[&str]) -> RunOut {
     }
 }
 
+fn run_env(args: &[&str], env: &[(&str, &str)]) -> RunOut {
+    let mut c = Command::new(bin());
+    c.args(args);
+    for (k, v) in env { c.env(k, v); }
+    let out = c.output().unwrap();
+    RunOut {
+        code: out.status.code().unwrap_or(-1),
+        stdout: out.stdout,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
 // Record `guest` into a fresh trace file in the system tempdir; a monotonic counter (plus
 // this process's pid) keeps concurrent/repeated calls within one test binary from colliding.
 pub fn record(guest: &str) -> (RunOut, std::path::PathBuf) {
@@ -73,6 +85,17 @@ pub fn record_dynamic(guest: &str) -> (RunOut, std::path::PathBuf) {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let trace = std::env::temp_dir().join(format!("retrace-dyn-{}-{n}.bin", std::process::id()));
     let out = run(&["record-dyn", guest, "-o", trace.to_str().unwrap()]);
+    (out, trace)
+}
+
+// Record a dynamically-linked guest with extra environment set on the RECORDER, not the guest.
+// Set on the child rather than via std::env::set_var, which is process-global and `unsafe` under
+// the pinned 2024-edition toolchain — a test binary runs many tests in one process.
+pub fn record_dynamic_env(guest: &str, env: &[(&str, &str)]) -> (RunOut, std::path::PathBuf) {
+    static NEXT: AtomicU64 = AtomicU64::new(2_000_000);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let trace = std::env::temp_dir().join(format!("retrace-dynenv-{}-{n}.bin", std::process::id()));
+    let out = run_env(&["record-dyn", guest, "-o", trace.to_str().unwrap()], env);
     (out, trace)
 }
 

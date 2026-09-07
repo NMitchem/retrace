@@ -106,10 +106,22 @@ fn ps_records_and_replays() {
                    is not evidence of anything.");
         return;
     }
-    let (rec, trace) = util::record_dynamic("/bin/ps");
+    let (rec, trace) = util::record_dynamic_env("/bin/ps", &[("RETRACE_BANDSHRINK", "1")]);
     assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
     assert!(!rec.stdout.is_empty(), "ps printed nothing; it should list at least its own process");
     let rp = util::replay(&trace);
     assert_eq!(rp.code, 0, "divergence: {}", rp.stderr);
     assert_eq!(rp.stdout, rec.stdout, "replay stdout diverged from the recording");
+
+    // M29: M28 published "the full gate shrank a band zero times", which its method could not have
+    // measured — the recorder's stderr is piped into a String a passing test never prints. This is
+    // that claim made checkable. `> 0` rather than `== 31`: pinning the exact count would break on
+    // a different mount count, machine or OS point release, and a brittle failure here teaches
+    // nothing. What matters is that the gate reaches the suppression path at all.
+    let shrinks = rec.stderr.matches("[M28 BANDSHRINK]").count();
+    assert!(shrinks > 0,
+        "expected /bin/ps to shrink at least one guard band (M28 measured 31 by hand); saw none. \
+         Either the band-suppression path stopped being reached, or RETRACE_BANDSHRINK stopped \
+         reaching the recorder.");
+    eprintln!("ps_records_and_replays: {shrinks} band suppressions observed");
 }
