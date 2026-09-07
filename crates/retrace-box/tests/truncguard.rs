@@ -135,3 +135,42 @@ fn a_zero_length_band_never_underflows() {
 fn a_zero_length_argument_still_never_suppresses_its_own_band() {
     assert_eq!(Box_::band_not_covered(0x1000, 0, 64, &[(0x1000, 0)]), 64);
 }
+
+// M29: `dest_buffer`'s job is to widen the diff window past the flat cap for syscalls whose
+// destination is bigger than the cap. That is a pure function of the table and the arguments, so
+// it is tested at the seam rather than through a guest that would have to be built to call each
+// of these four syscalls with a large buffer.
+//
+// `avail` is passed as 1 MiB so the backing never becomes the binding constraint — this test is
+// about the table, and a too-small `avail` would silently make every case clamp to the same
+// number and pass for the wrong reason.
+#[test]
+fn the_window_widens_for_each_m29_reg_addition() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO).unwrap());
+    let b = Box_::load(&loaded);
+    const AVAIL: usize = 1 << 20;
+    const FLAT: usize = 64 * 1024; // PTR_WINDOW_CAP
+
+    let mut args = [0u64; 8];
+
+    args[2] = 200_000; // getdirentries64 bufsize
+    assert_eq!(b.diff_window_for_test(retrace_arch::SYS_GETDIRENTRIES64, 1, AVAIL, &args), 200_000,
+        "getdirentries64's destination is x1 and its length x2");
+
+    args[1] = 150_000; // getfsstat64 bufsize, in bytes
+    assert_eq!(b.diff_window_for_test(retrace_arch::SYS_GETFSSTAT64, 0, AVAIL, &args), 150_000,
+        "getfsstat64's destination is x0 and its length x1");
+
+    args[2] = 90_000; // recvfrom len
+    assert_eq!(b.diff_window_for_test(retrace_arch::SYS_RECVFROM, 1, AVAIL, &args), 90_000);
+    assert_eq!(b.diff_window_for_test(retrace_arch::SYS_RECVFROM_NOCANCEL, 1, AVAIL, &args), 90_000,
+        "the _nocancel spelling must widen identically — that pairing is the trap M9/M10/M27 each hit");
+
+    // An argument index that is NOT this syscall's destination still gets the flat cap. Without
+    // this the test would pass even if `dest_buffer` widened every pointer argument, which would
+    // be a far worse bug than the one it is guarding.
+    assert_eq!(b.diff_window_for_test(retrace_arch::SYS_GETDIRENTRIES64, 3, AVAIL, &args), FLAT,
+        "x3 is getdirentries64's *position, not its buffer");
+    // A syscall absent from the table gets the flat cap at every index.
+    assert_eq!(b.diff_window_for_test(retrace_arch::SYS_WRITE, 1, AVAIL, &args), FLAT);
+}
