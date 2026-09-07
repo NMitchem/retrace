@@ -267,15 +267,16 @@ fn a_deref_len_is_refused_only_past_its_backing() {
 // M30: a repo-owned reproduction of the false negative M27 measured on `/bin/ps`, and the reason
 // `canary_intact` exists. The window cap is placed so the only bytes the kernel writes past the
 // window are trap 189's trailing zero field — written over a band that is already zero. The band
-// therefore reads identically before and after a REAL kernel overrun, and `overran_window`, which
-// can only report a change, has nothing to report.
+// therefore read identically before and after a REAL kernel overrun, and `overran_window`, which
+// can only report a change, had nothing to report. Since Phase B that same fixture at that same cap
+// ABORTS the recording, which is what this test now asserts and what its name says.
 //
 // The BEFORE half of the milestone's headline pair, kept at the same fixture and the same cap as
 // the AFTER half below so the two read as one before/after over one overrun.
 //
 // Phase B took its in-line assertion away, and that is the flip working rather than a regression:
 // `forward_and_diff` now ABORTS on this very call, so no code after it in this test can run. Both
-// of its claims moved, and neither was lost:
+// of the claims this test used to make in its own body moved, and neither was lost:
 //
 //   * the BLINDNESS itself now lives in `canary.rs`'s `zeros_written_over_the_band_are_caught`,
 //     which runs `overran_window` and `canary_intact` over identical all-zero buffers and shows the
@@ -290,7 +291,7 @@ fn a_deref_len_is_refused_only_past_its_backing() {
 // neither test says anything about the other.
 #[test]
 #[should_panic(expected = "syscall 189 wrote into the")]
-fn the_old_comparison_is_blind_to_zeros_written_over_zeros() {
+fn the_same_fixture_and_cap_that_fooled_the_old_comparison_now_aborts() {
     // Measured, not assumed: trap 189 writes a 120-byte reply whose trailing zero run is [90,120).
     // 96 leaves 24 kernel-written ZERO bytes past the window — a real overrun with no signal in it.
     const CAP: usize = 96;
@@ -356,8 +357,8 @@ fn the_old_comparison_is_blind_to_zeros_written_over_zeros() {
 #[test]
 #[should_panic(expected = "syscall 189 wrote into the")]
 fn the_canary_catches_zeros_written_over_zeros() {
-    // The SAME cap as `the_old_comparison_is_blind_to_zeros_written_over_zeros`, and the identity
-    // is the whole point: that test shows the old detector blind on this exact fixture and cap,
+    // The SAME cap as `the_same_fixture_and_cap_that_fooled_the_old_comparison_now_aborts`, and the
+    // identity is the whole point: that fixture and cap are the ones the old detector was blind on,
     // this one shows the new detector catching THE SAME overrun. If the two caps differed, neither
     // test would prove anything about the other. Measured (trap 189 writes 120 bytes, trailing zero
     // run [90,120)): 96 leaves 24 kernel-written ZERO bytes past the window.
