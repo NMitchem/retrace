@@ -125,9 +125,11 @@ pub const FIXTURE: &str = concat!(env!("OUT_DIR"), "/fixture.txt");
 pub const BIGREAD: &str = concat!(env!("OUT_DIR"), "/bigread");
 /// The 96 KiB fixture `BIGREAD` reads: all `A`, final byte `Z`.
 pub const BIGREAD_FIXTURE: &str = concat!(env!("OUT_DIR"), "/bigread_fixture.bin");
-/// M30: writes 128 KiB of `'A'` to stdout in ONE `write`, with x4 deliberately pointing 128 bytes
+/// M30: writes 128 KiB of `'A'` to a FILE in ONE `write`, with x4 deliberately pointing 128 bytes
 /// into that buffer. The guard-band canary's read-side hazard; see `asm/bigwrite.s`.
 pub const BIGWRITE: &str = concat!(env!("OUT_DIR"), "/bigwrite");
+/// The 128 KiB file `BIGWRITE` writes: every byte must come back `'A'`.
+pub const BIGWRITE_OUT: &str = concat!(env!("OUT_DIR"), "/bigwrite_out.bin");
 /// M28: a guest whose one `sysctl` fails (`ENOMEM`, undersized `oldp`). Measures whether the kernel
 /// writes into a guest buffer on a FAILING syscall — the path where `forward_and_diff` skips write
 /// capture and the guard band alike.
