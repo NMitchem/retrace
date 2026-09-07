@@ -3102,11 +3102,24 @@ impl Box_ {
                 // between "every request measured, none oversized" and "this arm never ran": both
                 // print nothing. M28's lesson repeats here — a published count must trace to a
                 // channel that could actually have delivered it.
+                //
+                // Fix round 1 (Ruling 15): `read_u64(args[n])` must not run on an UNGATED dispatch
+                // unless `dest_len_bytes` (called just above, for every dispatch, gate or no gate,
+                // to size the diff window) already reads that SAME pointer under that SAME
+                // precondition — i.e. only inside the `Some((_, avail))` arm below, where `oldp` is
+                // mapped. That precondition predates M29. Reading it there adds no new panic
+                // surface. The `None` arm is different: nothing before M29 ever read `oldlenp` when
+                // `oldp` was unmapped/NULL, so an UNGATED run must not start now, and even gated,
+                // `args[n]` is a DIFFERENT address than `args[di]` whose mapping status this branch
+                // has not established — `sysctl(mib, 2, NULL, NULL, &val, sizeof val)` (the standard
+                // WRITE-only form: legal, common, both null) leaves it unmapped too, and that must
+                // stay a message, not a panic. Reads `read_guest_checked` there instead of the
+                // panicking `read_u64`.
                 retrace_arch::DestLen::DerefU64(n) => {
-                    let want = self.read_u64(args[n]) as usize;
                     let gated = std::env::var_os("RETRACE_DEREFLEN").is_some();
                     match self.host_span(args[di]) {
                         Some((_, avail)) => {
+                            let want = self.read_u64(args[n]) as usize;
                             if want > avail {
                                 if gated {
                                     let (bi, bl) = self.backing_of(args[di]).unwrap();
@@ -3135,9 +3148,24 @@ impl Box_ {
                         // tag rather than being counted (or silently dropped) as a `want > avail`.
                         None => {
                             if args[di] != 0 && gated {
-                                eprintln!("[M29 DEREFLEN-UNBACKED] syscall {} dest {:#x} want {} \
-                                           has NO backing (not NULL) — cannot evaluate against avail",
-                                    num as i64, args[di], want);
+                                match self.read_guest_checked(args[n], 8) {
+                                    Some(b) => {
+                                        let want = u64::from_le_bytes(b.try_into().unwrap());
+                                        eprintln!("[M29 DEREFLEN-UNBACKED] syscall {} dest {:#x} \
+                                                   want {} has NO backing (not NULL) — cannot \
+                                                   evaluate against avail",
+                                            num as i64, args[di], want);
+                                    }
+                                    // `oldlenp` itself is unmapped too (the write-only form with a
+                                    // non-NULL but unbacked `oldp`, e.g. a guest bug) — nothing to
+                                    // read, so say so rather than guessing or panicking.
+                                    None => {
+                                        eprintln!("[M29 DEREFLEN-UNBACKED] syscall {} dest {:#x} \
+                                                   oldlenp {:#x} also unreadable — cannot evaluate \
+                                                   against avail",
+                                            num as i64, args[di], args[n]);
+                                    }
+                                }
                             }
                         }
                     }
