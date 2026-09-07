@@ -2902,6 +2902,29 @@ impl Box_ {
         band.iter().enumerate().all(|(i, &b)| b == Self::canary_byte(base_ipa + i as u64))
     }
 
+    /// Did the kernel write past the diff window, on a band that WAS canary-filled? (M30)
+    ///
+    /// The filled counterpart of `overran_window`, pure for the same reason: the policy is
+    /// reviewable apart from the `unsafe` slice plumbing that feeds it, and the difference between
+    /// the two is otherwise invisible. A filled band no longer holds the guest's bytes, so
+    /// `overran_window`'s question — "did anything change?" — is meaningless there; every byte the
+    /// kernel did not write reads as canary. The question that survives the fill is "is this byte
+    /// neither the canary we wrote nor the original the guest had?", which fires on exactly the
+    /// writes `overran_window` would have caught.
+    ///
+    /// **It is a strict SUBSET of `overran_window`, and that is why the caller must not use it on an
+    /// unfilled band.** A kernel byte that happens to equal `canary_byte` at its offset (1/256) is
+    /// missed here and caught there. On a filled band that is unavoidable and is the price of
+    /// closing a detector otherwise 100% blind to zeros-over-zeros. On an UNFILLED band it is pure
+    /// loss — M27 minus 1/256, weaker than what shipped before this milestone — which is the M30 fix
+    /// round 2 finding. `forward_and_diff` therefore picks between the two on `fill_canary`.
+    ///
+    /// `pre_band` must be at least as long as `post_band`; the caller slices it to the band length.
+    pub fn canary_overran(pre_band: &[u8], post_band: &[u8], base_ipa: u64) -> bool {
+        post_band.iter().enumerate()
+            .any(|(k, &v)| v != Self::canary_byte(base_ipa + k as u64) && v != pre_band[k])
+    }
+
     /// Did the kernel write past the diff window? (M27)
     ///
     /// Pure so the policy is reviewable apart from the `unsafe` slice plumbing that feeds it. The
@@ -3398,31 +3421,39 @@ impl Box_ {
                 // detector: see the README's Known limits for the measured false negative (zeros
                 // written over zeros on /bin/ps).
                 //
-                // M30: `overran_window` cannot be used directly any more — the band holds a canary,
-                // not the guest's bytes at syscall time, so its premise is gone. Every byte the
-                // kernel did NOT write now reads as canary rather than as the original, and asking
-                // the old question of that post-image would fire on essentially every capped-window
-                // syscall. Reconstruct the question instead: a byte the kernel wrote is one that no
-                // longer matches the canary, and the old detector fired when such a byte ALSO
-                // differed from the original. Keeping this assert, with its message unchanged, is
-                // what keeps M28's positive control proving the band can still fire while Phase A
-                // only measures the stronger signal.
+                // M30: on a FILLED band, `overran_window` cannot be used directly — the band holds
+                // a canary, not the guest's bytes at syscall time, so its premise is gone. Every
+                // byte the kernel did NOT write now reads as canary rather than as the original,
+                // and asking the old question of that post-image would fire on essentially every
+                // capped-window syscall. Reconstruct the question instead: a byte the kernel wrote
+                // is one that no longer matches the canary, and the old detector fired when such a
+                // byte ALSO differed from the original. Keeping this assert, with its message
+                // unchanged, is what keeps M28's positive control proving the band can still fire
+                // while Phase A only measures the stronger signal.
                 //
-                // Honest caveat: this misses a kernel byte that happens to equal the canary byte at
-                // that offset (1/256). That is inherent to any canary, it is the price of replacing
-                // a detector that is currently 100% blind to zeros-over-zeros, and Phase B keeps the
-                // same 1/256 rather than introducing it.
+                // Honest caveat, and it applies to the FILLED branch only: that branch misses a
+                // kernel byte which happens to equal the canary byte at that offset (1/256). It is
+                // inherent to any canary, it is the price of closing a detector that is otherwise
+                // 100% blind to zeros-over-zeros, and Phase B keeps the same 1/256 rather than
+                // introducing it.
                 //
-                // Unconditional on purpose — it needs no `fill_canary` gate, because it DEGRADES to
-                // the old detector when the band was not filled. An unfilled band holds the guest's
-                // bytes, so the first conjunct is true for every byte but a 1/256 coincidence and
-                // the condition collapses to `post_band[k] != pre_band[k]`, which is exactly
-                // `overran_window`. So a `reads_guest_buffer` call keeps precisely the M27
-                // protection it had before this milestone, no more and no less.
-                let kernel_wrote_over_original = (0..band).any(|k| {
-                    post_band[k] != Self::canary_byte(base + k as u64) && post_band[k] != pre_band[k]
-                });
-                assert!(!kernel_wrote_over_original,
+                // **The unfilled branch calls `overran_window` itself, and the gate is the whole
+                // point.** Fix round 2: running the reconstruction on an unfilled band tests the
+                // first conjunct against a canary that was never written, which is M27's detector
+                // MINUS that same 1/256 — strictly weaker than what shipped before this milestone,
+                // on precisely the `reads_guest_buffer` family the fill was withdrawn from to
+                // protect. Round 1 checked only that the reconstruction cannot FALSE-ALARM when
+                // unfilled and concluded it needed no gate; it never checked whether it could MISS.
+                // With this gate the unfilled path is bit-for-bit M27, so a `reads_guest_buffer`
+                // call keeps precisely the protection it had before this milestone — no more and no
+                // less, now true as written. `overran_window` is therefore NOT superseded: it is the
+                // live detector for that family, which is why it keeps a production caller.
+                let overran = if fill_canary {
+                    Self::canary_overran(&pre_band[..band], post_band, base)
+                } else {
+                    Self::overran_window(&pre_band[..band], post_band)
+                };
+                assert!(!overran,
                     "syscall {} changed a byte in the {}-byte guard band past its {}-byte diff \
                      window at ipa {:#x}. This band already excludes every byte any OTHER window \
                      of this same call inspects (see `band_not_covered`), so this IS proof of a \
