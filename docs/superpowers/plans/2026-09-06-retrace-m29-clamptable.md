@@ -173,7 +173,7 @@ Claude-Session: https://claude.ai/code/session_01GsCTi11rokPvMP9y3ngSZy"
 
 **Interfaces:**
 - Consumes: `DestLen` (already `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`, so `assert_eq!` on it compiles today).
-- Produces: `SYS_RECVFROM = 29`, `SYS_SYSCTLBYNAME = 274`, `SYS_GETFSSTAT64 = 347`, `SYS_RECVFROM_NOCANCEL = 403`; `dest_buffer` returning `Some((1, DestLen::Reg(2)))` for 344/29/403, `Some((0, DestLen::Reg(1)))` for 347, `Some((1, DestLen::DerefU64(2)))` for 274. Tasks 3, 4 and 5 depend on these.
+- Produces: `SYS_RECVFROM = 29`, `SYS_SYSCTLBYNAME = 274`, `SYS_GETFSSTAT64 = 347`, `SYS_RECVFROM_NOCANCEL = 403`; `dest_buffer` returning `Some((1, DestLen::Reg(2)))` for 344/29/403, `Some((0, DestLen::Reg(1)))` for 347, `Some((2, DestLen::DerefU64(3)))` for 274 (CORRECTED in Task 4 fix round 1, Ruling 14 — this plan originally printed `Some((1, DestLen::DerefU64(2)))`, the libc wrapper's indices rather than the raw syscall's; measured wrong against the live kernel, see the code block below). Tasks 3, 4 and 5 depend on these.
 
 This is a pure table crate with no VM and no I/O. All numbers below are verified against the macOS 26.5 SDK (`sys/syscall.h`, `sys/socket.h`, `sys/mount.h`).
 
@@ -192,9 +192,13 @@ Add to the test module at the bottom of `crates/retrace-arch/src/lib.rs`, beside
         // recvfrom(s, buf, len, flags, sockaddr *from, socklen_t *fromlen) — both spellings.
         assert_eq!(dest_buffer(SYS_RECVFROM), Some((1, DestLen::Reg(2))));
         assert_eq!(dest_buffer(SYS_RECVFROM_NOCANCEL), Some((1, DestLen::Reg(2))));
-        // sysctlbyname(name, oldp, size_t *oldlenp, newp, newlen) — sysctl's shape, one index
-        // lower. It was missing from this table AND from the README's list of what was missing.
-        assert_eq!(dest_buffer(SYS_SYSCTLBYNAME), Some((1, DestLen::DerefU64(2))));
+        // sysctlbyname: the RAW syscall's shape (name, namelen, oldp, oldlenp, newp, newlen) —
+        // IDENTICAL indices to `SYS_SYSCTL`, not "one index lower" as this plan originally (and
+        // wrongly) printed; the raw syscall takes `namelen` first, which libc's `sysctlbyname(3)`
+        // C prototype hides. CORRECTED in Task 4 fix round 1 (Ruling 14), measured against the
+        // live kernel with a raw `syscall(274, ...)` bypassing the libc wrapper. It was missing
+        // from this table AND from the README's list of what was missing.
+        assert_eq!(dest_buffer(SYS_SYSCTLBYNAME), Some((2, DestLen::DerefU64(3))));
     }
 
     #[test]
@@ -265,9 +269,16 @@ pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> {
         // (`sockaddr_storage` is 128 bytes), NOT at `*fromlen`, so it is self-bounding and already
         // deep inside the flat window.
         SYS_RECVFROM | SYS_RECVFROM_NOCANCEL => Some((1, DestLen::Reg(2))),
-        // sysctlbyname(name, oldp, oldlenp, newp, newlen): sysctl's exact shape, one index lower.
-        // One `DerefU64` arm therefore covers both syscalls wherever the box matches on the shape.
-        SYS_SYSCTLBYNAME => Some((1, DestLen::DerefU64(2))),
+        // sysctlbyname: the RAW syscall's shape, not libc's 5-arg wrapper. `sysctlbyname(3)`'s C
+        // signature is (name, oldp, oldlenp, newp, newlen), but the kernel entry point behind it
+        // takes an extra `namelen` first, exactly like `SYS_SYSCTL`: (name, namelen, oldp, oldlenp,
+        // newp, newlen). CORRECTED in Task 4 fix round 1 (Ruling 14) — this plan originally printed
+        // `Some((1, DestLen::DerefU64(2)))` ("one index lower"), measured wrong against the live
+        // kernel with a raw `syscall(274, ...)` bypassing libc's wrapper: the 6-arg form succeeds,
+        // the naive 5-arg reading fails. `oldp` is index 2 and `oldlenp` index 3 — IDENTICAL to
+        // `SYS_SYSCTL`. One `DerefU64` arm covers both syscalls because both use the same indices,
+        // not despite them differing by one.
+        SYS_SYSCTLBYNAME => Some((2, DestLen::DerefU64(3))),
         _ => None,
     }
 }

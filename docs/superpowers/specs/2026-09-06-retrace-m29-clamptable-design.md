@@ -137,16 +137,26 @@ All four fit the existing `Option<(usize, DestLen)>` shape. Verified against the
 | `getfsstat64` | 347 | `(0, Reg(1))` | n/a — takes no fd |
 | `recvfrom` | 29 | `(1, Reg(2))` | **NO — must be added, `&[0]`** |
 | `recvfrom_nocancel` | 403 | `(1, Reg(2))` | **NO — must be added, `&[0]`** |
-| `sysctlbyname` | 274 | `(1, DerefU64(2))` | n/a — takes no fd |
+| `sysctlbyname` | 274 | `(2, DerefU64(3))` (CORRECTED — see note below; this spec originally printed `(1, DerefU64(2))`) | n/a — takes no fd |
 
 Three of these need new `SYS_*` constants in `retrace-arch` (347, 29/403, 274); `SYS_GETDIRENTRIES64`
 already exists.
 
-**`sysctlbyname` (274) is a gap the README never named.** Its signature is
-`sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen)` — the
-destination is `x1` and its length is `*(size_t*)x2`, byte-identical in shape to `sysctl`. It was
-absent from the table *and* from the README's list of what is missing. One `DerefU64` arm now
-covers both syscalls, so Component 1's refusal picks it up for free.
+**`sysctlbyname` (274) is a gap the README never named.** `sysctlbyname(3)`'s C signature is
+`(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen)`, but that is libc's
+wrapper, not the raw syscall's argument register layout: the kernel entry point behind it takes an
+extra `namelen` first, exactly like `sysctl`'s own raw shape — `(name, namelen, oldp, oldlenp, newp,
+newlen)`. So the destination is `x2` and its length is `*(size_t*)x3`, IDENTICAL in shape (and
+indices) to `sysctl`, not "one index lower" as this spec originally (and wrongly) stated by reading
+the libc prototype straight onto register positions. **Correction, made in Task 4 fix round 1
+(Ruling 14):** this spec and the plan it drove both originally gave the table entry as
+`(1, DerefU64(2))`; that was measured wrong against the live kernel with a raw `syscall(274, ...)`
+call bypassing the libc wrapper (the 6-arg `(name, namelen, oldp, oldlenp, newp, newlen)` form
+succeeds; the naive 5-arg reading fails). Task 4's own measurement never caught this because no guest
+it exercised ever called syscall 274 at all — the wrong entry sat untested until Task 4's fix round.
+It was absent from the table *and* from the README's list of what is missing. One `DerefU64` arm now
+covers both syscalls because both use the same indices, not despite them differing by one, so
+Component 1's refusal picks it up for free.
 
 **`recvfrom` is missing from `fd_operands`, and `sendto` (133) is present.** A guest that receives
 on a socket hands the host kernel an untranslated guest fd today. That is the M10 class — the same
