@@ -5825,6 +5825,16 @@ here rather than smoothed over.
   enumeration prevents the class it guards.
 * **The `fill_canary` gate's presence** is unguarded by any test, and cannot be guarded without a
   guest that does not exist.
+* **The fill's use of the *shrunk* band** is the second unpinned invariant in the same function, and
+  it is the one with a path into the trace. Task 3 moved `band_not_covered` before the fill precisely
+  so a canary cannot land inside another argument's diff window — where the post-image capture would
+  record retrace's own bytes into the trace as a kernel write, and replay would apply them. Reverting
+  the fill loop to `pre_band.len()` instead of the shrunk `*band` reintroduces that, and
+  `sysbin_e2e`'s `> 0` BANDSHRINK assertion does **not** catch it: the shrink still happens, only the
+  fill stops honouring it. It would likely surface as a divergence in `jq_e2e` or `sysbin_e2e`, since
+  overlapping windows run 29–31 per `/bin/ps` recording — but "probably, via an unrelated test" is
+  the standing this milestone rejected for its own instruments, so it is named here rather than
+  relied on.
 * **A named success-path restore test.** Converting the caught-half to `should_panic` cost its restore
   assertion; the error path is still covered directly, and the success path only indirectly, by every
   record/replay e2e in the workspace (a leaked canary is a final full-memory divergence).
