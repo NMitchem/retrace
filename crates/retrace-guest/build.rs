@@ -67,6 +67,22 @@ fn main() {
         .status().expect("clang bigread");
     assert!(status.success(), "bigread guest build failed");
 
+    // M30: the mirror of bigread — a guest whose single write() hands the kernel 128 KiB of its
+    // own memory to READ, with x4 deliberately pointing into that buffer so a band lands 64 KiB
+    // downstream, inside what the kernel reads. The fixture for the canary's read-side hazard.
+    // It writes to a FILE, not stdout: `is_console_write` makes fd 0/1/2 mirrored-and-faked in
+    // retrace-core, so a stdout guest never reaches `forward_and_diff` and cannot exercise this.
+    let outp = format!("{out}/bigwrite_out.bin");
+    let gen = format!("{out}/bigwrite_gen.s");
+    std::fs::write(&gen, format!(".section __DATA,__data\n.p2align 3\n.global outpath\noutpath: .asciz \"{outp}\"\n")).unwrap();
+    let src = format!("{}/asm/bigwrite.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/bigwrite");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src,&gen])
+        .status().expect("clang bigwrite");
+    assert!(status.success(), "bigwrite guest build failed");
+
     // M28: a guest whose sysctl FAILS with an undersized buffer, to measure whether the kernel
     // writes anyway — the `if !err` path, where write capture AND the guard band are both off.
     let src = format!("{}/asm/failsysctl.s", env!("CARGO_MANIFEST_DIR"));

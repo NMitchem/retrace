@@ -236,35 +236,77 @@ design, and the reconstruction caveat in full.
   gate" from a channel that could not have carried it, since every e2e test drives the recorder as a
   child and pipes its stderr into a `String` a passing test never prints. `ps_records_and_replays`
   now records `/bin/ps` with `RETRACE_BANDSHRINK=1` set on the recorder and **asserts the count is
-  at least one** — the gate enforces a floor, not an exact number. **A silent band is
-  still not proof the class is gone** — see Known limits for the measured false negative that makes
-  this the honest statement rather than the stronger one.
+  at least one** — the gate enforces a floor, not an exact number.
+  **M30 changed the kind of detector, not its size.** `GUARD_BAND` is still **64**. What changed is
+  the question: M27's band was a pre/post *comparison*, so it was **100% blind whenever the kernel
+  wrote bytes identical to those already there** — not hypothetical, but what M27 measured on
+  `/bin/ps`, whose 139,880-byte overrun landed inside `struct kinfo_proc`'s long zero runs and
+  reported nothing. `forward_and_diff` now **fills** each shrunk band with
+  `canary_byte(ipa) = (ipa as u8) ^ 0xA5` before forwarding, asks `canary_intact` after, and restores
+  the bytes before the guest resumes. A kernel write of zeros over zeros destroys that pattern and
+  **aborts the recording**; the same fixture and window cap that fooled the old comparison now does
+  exactly that, in both halves of `truncguard.rs`'s before/after pair. The pattern is derived from the
+  *address* rather than being a constant so that two overlapping bands agree on every shared byte and
+  a constant-value `memset` cannot reproduce it.
+  **That new strength does not cover every forwarded syscall, and the exclusion is not small.** The
+  canary is withheld from `retrace_arch::reads_guest_buffer` — `write`/`pwrite`/`writev`, the `send*`
+  family, `sendfile`, `msync`, and **`mach_msg2_trap`**, each with its `_nocancel` spelling — because
+  the kernel reads *through* those buffers and would consume the canary as data. That is measured,
+  not feared: filling them made a 128 KiB-write guest produce a file with **64 corrupted bytes
+  matching `canary_byte` exactly**, while record exited 0, replay exited 0 and the canary count read
+  0 — record and replay agreeing while the guest's output was wrong, which is the one failure a
+  determinism oracle cannot see. `bigwrite_e2e` is the repo-owned reproduction. That family keeps
+  M27's `overran_window` **bit-for-bit**: no weaker than before M30, and no stronger.
+  **Two of those exclusions cost real destination-side coverage**, and it is not a footnote:
+  `sendfile`'s 4th argument is an in-out `off_t *` the kernel writes the transferred count back
+  through, and `mach_msg2`'s receive buffer is a live destination — `machmsg.rs`'s
+  `FORWARD_ALLOWLIST` forwards five ids through `forward_and_diff`, and two of them
+  (`3405 task_info`, `412 host_get_special_port`) exist *precisely* because the kernel writes a reply
+  into guest memory. Recovering that needs a per-**argument** direction notion — a `dest_buffer`-shaped
+  table of which arguments are sources — that a predicate over the syscall number cannot express;
+  it is owed successor work, not something this milestone quietly has. `ioctl` is the named residual
+  hole in the list itself: a `_IOW` request encodes its buffer length in the request code, so no rule
+  over the syscall number can size it, and `msync` is the one entry justified by inference rather
+  than measurement and says so at its definition. And on a *filled* band, a kernel write that
+  reproduces the canary pattern **exactly** is still undetectable in principle — 1/256 per byte, with
+  the kernel having to hit it on every byte it writes to stay invisible. That is inherent to any
+  canary, and it is the price of replacing a detector that was 100% blind to the zeros case.
+  **The flip was taken on a measurement, not on confidence.** Phase A ran the fill report-only and
+  measured **zero** disturbed bands on every path, each carrying a positive control taken first on
+  that same path: in-process (one `[M30 CANARY]` line from the caught-half test), the CLI (**27**
+  `[M28 BANDSHRINK]` control lines off `/bin/ps`, then zero canary lines from `/bin/ps`,
+  `jq --version` and the real CPython interpreter), and the Apple sweep (**392** control lines from
+  **54** distinct guests, zero canary lines, tally unmoved at `pass=46 fail=8 skip=0`).
 
-**Gate:** 538 passed / 0 failed / 2 ignored across 116 test binaries, **measured at the M29
-fast-follow** over all 116 targets, every chunk `EXIT=0`; clippy clean over `--workspace
---all-targets` with `-D warnings`.
-See the testing note below for how that number is assembled. "116 test binaries" is 109 test
+**Gate:** 549 passed / 0 failed / 2 ignored across 118 test binaries, **measured at M30** over all
+118 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with
+`-D warnings`.
+See the testing note below for how that number is assembled. "118 test binaries" is 111 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
 nobody has to re-derive it. The ignored gates are unchanged at
 **two**: `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). Both
-are described under Known limits. M29 parked nothing new and un-parked nothing.
+are described under Known limits. M30 parked nothing new and un-parked nothing.
 
-Reconciled against M28's 532 / 0 / 2 over 116 **file-by-file rather than by sum**:
-`retrace-arch/src/lib.rs` **+2** (the new `dest_buffer` entries and `recvfrom`'s `fd_operands` pair),
-and the existing `retrace-box/tests/truncguard.rs` **+4** — three at M29 (one proving the window
-widens for each new `Reg` entry, two for the `*oldlenp` refusal) and one at the fast-follow that
-pins the refusal's `want == avail` boundary through the extracted `Box_::deref_len_fits` predicate.
-Every other file unchanged, and `--bins` **11 → 11**.
-**No new test binary**: `oldlensysctl.s` is a guest fixture rather than a test target and
-`truncguard.rs` already existed, so the binary count holds at 116. The count closes at both ends: the
-tree holds 534 `#[test]` at M28 = 532 running + 2 ignored, and **540** now = 538 + 2.
+Reconciled against the M29 fast-follow's 538 / 0 / 2 over 116 **file-by-file rather than by sum**:
 
-Chunk B again ran `cargo test -p retrace-box` as a **whole package** so its `Doc-tests` harness is
-not silently dropped (M24's lesson, now standing practice), and the `retrace` package was split into
-four explicit target sets rather than run whole, so no chunk is killed by the ceiling and every
-target runs in exactly one chunk.
+| file | M29 | M30 | delta |
+|---|---|---|---|
+| `retrace-arch/src/lib.rs` | 29 | 30 | **+1** — `reads_guest_buffer` pinned by number |
+| `retrace-box/tests/canary.rs` | 0 | 5 | **+5, a NEW binary** — the two canary predicates |
+| `retrace-box/tests/truncguard.rs` | 15 | 19 | **+4** — five added across the fill and its two measured restore defects, minus `canary_overran`'s unit test, deleted with the function once the flip left it uncalled |
+| `retrace/tests/bigwrite_e2e.rs` | 0 | 1 | **+1, a NEW binary** — the read-side corruption reproduction |
+
+Every other file unchanged, and `--bins` **11 → 11**. **Two new test binaries**, which is what moves
+the count 116 → 118 — unlike M29, where the new work landed in files that already existed. The count
+closes at both ends: the tree held 540 `#[test]` at the M29 fast-follow = 538 running + 2 ignored,
+and **551** now = 549 + 2.
+
+The `retrace-box` chunk again ran as a **whole package** so its `Doc-tests` harness is not silently
+dropped (M24's lesson, now standing practice), and the `retrace` package was split into `--bins` plus
+six explicit target sets of at most 11, so no chunk is killed by the ceiling and every target runs in
+exactly one chunk.
 
 One timing trap is worth knowing before it is mistaken for a hang: `bigread_e2e` took **536s** on its
 first run and **47s** on its second, with the recording process sitting at 0:00.00 CPU throughout the
@@ -329,9 +371,9 @@ These are real and current, not aspirational gaps.
 - **A guest must be arm64 or arm64e.** `slice_native` picks the slice this machine would execute —
   arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
   binary is refused by name. There is no emulation of another ISA and none is planned.
-- **The record-side diff window still truncates for most syscalls, and a guard band now proves an
-  overrun when it fires — attributably, since M28 — but a silent band is still not proof there
-  wasn't one.** `forward_and_diff`
+- **The record-side diff window still truncates for most syscalls. Since M30 the guard band catches
+  a kernel write whose *effect* it cannot see — but only on the bands it is allowed to fill, and that
+  exclusion is large.** `forward_and_diff`
   snapshots a pre-image window per pointer argument and diffs that same window; the window widens to
   the real length only where `retrace_arch::dest_buffer` knows it. M26 covered `read`(3)/`pread`(153)/
   `read_nocancel`(396); **M27 added `sysctl`(202)** (length at `*(size_t*)x3`, unbounded, and the
@@ -423,14 +465,56 @@ These are real and current, not aspirational gaps.
   hand-counted 31 is **root-caused** — nothing measured which call produces a given suppression.
   That is precisely why the assertion is `> 0` rather than any exact number: what fails should be a
   portable property, and this milestone does not know what makes the count vary.
-  **That silence is not proof of absence, and this is measured rather than argued.** Before the
-  `sysctl` fix landed, `ps`'s own overrun was the band's would-be catch: the kernel wrote 139,880
-  bytes past the window, and the band still did not fire, because `struct kinfo_proc` carries long
-  zero runs and the window boundary happened to land inside one — the kernel wrote zeros over zeros,
-  indistinguishable from no write at all. `/bin/ps` passes today because `dest_buffer` covers
-  `sysctl`, never because the band caught it. **The band is proof when it fires; it is not proof of
-  absence when silent**, and the remainder of the table above is *guarded* by it in that weaker sense,
-  not cleared by it. The saving grace underneath stays what it was: `Box_::diff_memory` compares
+  **The false negative M27 measured is closed on a filled band, and M30 closed it by changing the
+  question rather than the size.** The measurement that forced this: before the `sysctl` fix landed,
+  `ps`'s own overrun was the band's would-be catch — the kernel wrote 139,880 bytes past the window
+  and the band did not fire, because `struct kinfo_proc` carries long zero runs and the window
+  boundary landed inside one. The kernel wrote **zeros over zeros**, which a pre/post *comparison*
+  cannot distinguish from no write at all; `/bin/ps` passes today because `dest_buffer` covers
+  `sysctl`, never because the band caught it. M30 fills each shrunk band with
+  `canary_byte(ipa) = (ipa as u8) ^ 0xA5` before the forward, asks `Box_::canary_intact` after, and
+  restores it before the guest resumes, so a kernel write over the band destroys a pattern retrace
+  itself placed, whatever bytes it wrote — subject only to residual (4) below — and **aborts the
+  recording**. `GUARD_BAND` is unchanged at **64**.
+  The address-derived pattern buys two things a constant would not: two overlapping bands agree on
+  every byte they share, and a constant-value `memset` cannot reproduce it. `truncguard.rs` carries
+  the before/after pair at one fixture and one cap — the same real trap-189 overrun that the old
+  comparison could not see now aborts — and `canary.rs`'s `zeros_written_over_the_band_are_caught`
+  states the blindness itself as two pure predicates over identical all-zero buffers.
+  **Four things keep a silent band from being proof of absence, and none of them is small.**
+  *(1)* The canary is not filled for `retrace_arch::reads_guest_buffer` —
+  `write`/`pwrite`/`writev`, the `send*` family, `sendfile`, `msync` and **`mach_msg2_trap`**, each
+  with its `_nocancel` spelling — because the kernel reads *through* those buffers and would consume
+  the canary as data. Filling them was measured to corrupt the guest's own output: a 128 KiB-write
+  guest produced a file with **64 corrupted bytes matching `canary_byte` exactly** while record
+  exited 0, replay exited 0 and the canary count read 0 — record and replay agreeing while the
+  guest's output was wrong, the one failure a determinism oracle cannot see. `bigwrite_e2e` is the
+  repo-owned reproduction, and it went green with the fix reverted until its guest was changed to
+  write to a **file** rather than to fd 1, which `is_console_write` mirrors and never forwards.
+  That family keeps `overran_window` **bit-for-bit**, so it is exactly as strong as M27 left it and
+  no stronger — a fix-round-2 correction, since running the canary question over an *unfilled* band
+  would have made it strictly *weaker* than M27 by that same 1/256.
+  *(2)* Two of those exclusions cost real **destination-side** coverage: `sendfile`'s 4th argument is
+  an in-out `off_t *` the kernel writes the transferred count back through, and `mach_msg2`'s receive
+  buffer is a live destination — `machmsg.rs`'s `FORWARD_ALLOWLIST` forwards five ids through
+  `forward_and_diff` (`host_info` 200, `host_get_clock_service` 206, `semaphore_create` 3418,
+  `task_info` 3405, `host_get_special_port` 412), and the last two exist *precisely* because the
+  kernel writes a reply into guest memory — traffic every jq and CPython run exercises. Recovering it
+  needs a per-**argument** direction notion, a `dest_buffer`-shaped table of which arguments are
+  sources, which a predicate over the syscall number cannot express. That is **owed successor work**,
+  not something this milestone has.
+  *(3)* `reads_guest_buffer` is a list, and a list is not a proof. **`ioctl` is the named hole**: a
+  `_IOW` request encodes its buffer length in the request code, so no rule over the syscall number
+  can size it. Path-taking calls are deliberately absent because a path is NUL-terminated and bounded
+  by `PATH_MAX` (1024), far inside the production window — the bound is the argument, not "paths are
+  short". `msync` is the single entry justified by inference rather than measurement, listed because
+  nothing is lost by listing and a silent corruption follows if the inference is wrong, and it says
+  so at its definition. An unlisted reader syscall corrupts exactly as silently as before.
+  *(4)* On a filled band, a kernel write that reproduces the canary pattern **exactly** is still
+  undetectable in principle — 1/256 per byte, with the kernel having to hit it on every byte it
+  writes. That is inherent to any canary, and it is the price of replacing a detector that was 100%
+  blind to the zeros case rather than 1-in-256 blind.
+  The saving grace underneath stays what it was: `Box_::diff_memory` compares
   every recorded region at exit and all three terminal replay arms fail on mismatch, so a truncation
   the band misses can still surface there, unless the guest acts on the stale bytes first or drops
   their backing before then — a read into a mapping that is then `munmap`'d would evade both, and no
@@ -449,8 +533,9 @@ These are real and current, not aspirational gaps.
   the band itself — sampling across the whole remaining backing under a fixed byte budget, rather
   than one contiguous 64-byte run immediately past the window — is now *unblocked*, since the "not
   covered by another window of this call" precondition Task 2 needed exists in code as
-  `band_not_covered`, but was still deliberately not attempted in M28: the suppression count above is
-  a warning to whoever takes it up, since a naive wider sample would be suppressed even more often,
+  `band_not_covered`, but was deliberately not attempted in M28 and not in M30 either — M30 changed
+  what the band asks, not how much of the backing it looks at. The suppression count above is a
+  warning to whoever takes it up, since a naive wider sample would be suppressed even more often,
   not less.
 - **Exec-in-place is unmodelled — point retrace at the real binary, not the shim.** A launcher that
   `posix_spawn`s with `POSIX_SPAWN_SETEXEC`, which is exactly what Homebrew's `python3.14` shim does
@@ -614,7 +699,7 @@ whole invocation loudly.
 
 **The same trap has a second mouth: `Doc-tests`.** `--test <name>` skips those too, so splitting a
 *library* crate per-target — as M24's gate had to for `retrace-box` — drops that crate's `Doc-tests`
-harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 116
+harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 118
 binaries. If you split a library crate per-target, run `cargo test -p <crate> --doc` alongside it —
 or, as M25's gate did, run that crate as a whole package and let cargo include it for you.
 

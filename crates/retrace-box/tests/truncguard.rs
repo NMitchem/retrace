@@ -42,10 +42,18 @@ fn an_empty_guard_band_is_never_an_overrun() {
 // how small the cap is, and this test would be vacuously green. `fstat` is deliberately absent from
 // that table (its length is not in a register), so a shrunken cap really does truncate it.
 //
-// MEASURED: `sizeof(struct stat)` is 144 bytes on this SDK, so a 64-byte window
-// is genuinely overrun by a real kernel write.
+// MEASURED, and corrected by M30: this test drives the RAW trap 189, which writes a 120-byte reply
+// — not the 144 bytes of `sizeof(struct stat)`, which belongs to trap 339, the call libc's `fstat()`
+// routes to and this guest never issues. The conclusion is unchanged and is what matters: a 64-byte
+// window is genuinely overrun by a real kernel write, with 56 bytes of it landing in the band.
+//
+// M30 Phase B moved the words this pins, and a CORRECT flip is what breaks the old string: the
+// assert now says *wrote into* rather than *changed a byte in*, because a canary-filled band proves
+// a write rather than merely reporting a change. The pinned substring keeps the syscall NUMBER for
+// the reason it always did — this fixture forwards other syscalls at the same shrunken cap, and a
+// bare phrase could be satisfied by one of their overruns instead of this one.
 #[test]
-#[should_panic(expected = "syscall 189 changed a byte in the")]
+#[should_panic(expected = "syscall 189 wrote into the")]
 fn the_band_fires_when_the_kernel_writes_past_the_window() {
     const CAP: usize = 64;
     let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
@@ -254,4 +262,229 @@ fn a_deref_len_is_refused_only_past_its_backing() {
     assert!(!Box_::deref_len_fits(/*want=*/65, /*avail=*/64)); // past   => refused  (kills `want > avail` never firing)
     assert!( Box_::deref_len_fits(/*want=*/0,  /*avail=*/0));  // a zero-length request into a full backing still fits
     assert!(!Box_::deref_len_fits(/*want=*/1,  /*avail=*/0));  // no room at all => refused
+}
+
+// M30: a repo-owned reproduction of the false negative M27 measured on `/bin/ps`, and the reason
+// `canary_intact` exists. The window cap is placed so the only bytes the kernel writes past the
+// window are trap 189's trailing zero field — written over a band that is already zero. The band
+// therefore read identically before and after a REAL kernel overrun, and `overran_window`, which
+// can only report a change, had nothing to report. Since Phase B that same fixture at that same cap
+// ABORTS the recording, which is what this test now asserts and what its name says.
+//
+// The BEFORE half of the milestone's headline pair, kept at the same fixture and the same cap as
+// the AFTER half below so the two read as one before/after over one overrun.
+//
+// Phase B took its in-line assertion away, and that is the flip working rather than a regression:
+// `forward_and_diff` now ABORTS on this very call, so no code after it in this test can run. Both
+// of the claims this test used to make in its own body moved, and neither was lost:
+//
+//   * the BLINDNESS itself now lives in `canary.rs`'s `zeros_written_over_the_band_are_caught`,
+//     which runs `overran_window` and `canary_intact` over identical all-zero buffers and shows the
+//     first silent where the second fires. Two pure predicates state it more sharply than a guest
+//     ever could, and without needing a kernel to cooperate.
+//   * that a REAL kernel write happens at THIS fixture and THIS cap — the part no predicate test
+//     can carry — is what the panic below now proves outright. Nothing but a kernel write past the
+//     window can disturb a canary that retrace itself wrote and nothing else touched.
+//
+// Kept rather than deleted because it is the only e2e-shaped record of why this milestone happened,
+// and because a pair sharing one fixture and one cap is the whole argument: change either and
+// neither test says anything about the other.
+#[test]
+#[should_panic(expected = "syscall 189 wrote into the")]
+fn the_same_fixture_and_cap_that_fooled_the_old_comparison_now_aborts() {
+    // Measured, not assumed: trap 189 writes a 120-byte reply whose trailing zero run is [90,120).
+    // 96 leaves 24 kernel-written ZERO bytes past the window — a real overrun with no signal in it.
+    const CAP: usize = 96;
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
+    let mut b = Box_::load(&loaded);
+    b.set_window_cap_for_test(CAP);
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_FSTAT => {
+                let (hp, avail) = b.host_span_for_test(args[1]).expect("stat buffer is mapped");
+                let win = CAP.min(avail);
+                let band = retrace_box::GUARD_BAND.min(avail - win);
+                let pre: Vec<u8> = unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
+                // The fixture claim this test still makes on its own, and the one that makes the
+                // overrun invisible to a comparison: the band is ALREADY zero going in, so the
+                // kernel's zeros land over zeros and change nothing. Checked before the call,
+                // because after it there is no `after` — the assert aborts.
+                assert!(pre.iter().all(|&x| x == 0), "precondition: the band starts zeroed");
+                b.forward_and_diff(num, args);
+                // Deliberately worded to share NO substring with the assert's message, so
+                // `should_panic` cannot be satisfied by this panic instead of the real one.
+                panic!("NOT-THE-CANARY: fstat put zeros over a zeroed band and nothing fired");
+            }
+            Stop::Syscall { num, args } => {
+                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                b.set_x0_and_return(ret);
+            }
+            Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
+            Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}
+
+// M30: the AFTER half of the reproduction directly above. Same guest, same window cap, same real
+// kernel overrun — asked the NEW question.
+//
+// Since Phase B the two run the same detector and expect the same panic, and the near-duplication is
+// deliberate rather than an oversight. What separates them is what each RECORDS: that one holds the
+// fixture claim (the band is zero going in, so a comparison has nothing to find) and the history of
+// why this milestone happened; this one holds the claim the milestone is judged on (that fact now
+// stops the recorder). Collapsing them into one test would lose whichever half was not kept.
+//
+// This asserts CATCHING, and since Phase B it asserts it the strongest way available: the
+// recording ABORTS. That is the milestone reduced to one line — a kernel write of zeros over zeros
+// stops the recorder here, where before M30 it passed silently into a trace whose replay would then
+// diverge or, worse, agree while both sides were wrong.
+//
+// `should_panic` rather than a reading of `canary_disturbances_for_test`, because the assert fires
+// INSIDE `forward_and_diff` and nothing after that call runs. The counter is still a live channel —
+// `a_duplicated_pointer_argument_does_not_manufacture_a_disturbance` reads it for the NEGATIVE
+// claim, which a panic cannot make — but the positive claim is now the panic itself.
+//
+// What the conversion costs, stated rather than glossed: the success-path restore assertion this
+// test used to carry is gone, because the band is deliberately NOT restored on unwind (see
+// `forward_and_diff`). `a_failing_syscall_still_restores_the_canary` still covers the error path,
+// and every record/replay e2e in the workspace covers the success path — a leaked canary is bytes
+// the recording has and the replay does not, i.e. a final full-memory divergence.
+//
+// The pinned substring carries the SYSCALL NUMBER for the same reason M28's positive control does:
+// this guest forwards other syscalls at the same shrunken cap, and a bare phrase could be satisfied
+// by an unrelated overrun rather than the one this test is about.
+#[test]
+#[should_panic(expected = "syscall 189 wrote into the")]
+fn the_canary_catches_zeros_written_over_zeros() {
+    // The SAME cap as `the_same_fixture_and_cap_that_fooled_the_old_comparison_now_aborts`, and the
+    // identity is the whole point: that fixture and cap are the ones the old detector was blind on,
+    // this one shows the new detector catching THE SAME overrun. If the two caps differed, neither
+    // test would prove anything about the other. Measured (trap 189 writes 120 bytes, trailing zero
+    // run [90,120)): 96 leaves 24 kernel-written ZERO bytes past the window.
+    const CAP: usize = 96;
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
+    let mut b = Box_::load(&loaded);
+    b.set_window_cap_for_test(CAP);
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_FSTAT => {
+                b.forward_and_diff(num, args);
+                // Deliberately worded to share NO substring with the assert's message, so
+                // `should_panic` cannot be satisfied by this panic instead of the real one.
+                panic!("NOT-THE-CANARY: fstat put zeros over a zeroed band and nothing fired");
+            }
+            Stop::Syscall { num, args } => {
+                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                b.set_x0_and_return(ret);
+            }
+            Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
+            Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}
+
+// M30 fix round 1, defect (a): the fill is UNCONDITIONAL but the write-capture loop runs only when
+// the syscall succeeded, so a failing call used to leave the canary in guest memory permanently.
+// `forward_and_diff` is record-side only — replay applies recorded writes instead — so leaked bytes
+// are memory the recording has and the replay does not, i.e. a final full-memory divergence. 36
+// such restores were measured in one `jq -n '1+1'` recording, so this path is ordinary traffic
+// rather than a corner.
+//
+// The failing call is an `open` of the FILEIO guest's own path with its leading `/` skipped: a
+// relative path that cannot exist, NUL-terminated by the fixture, and mapped so a window and band
+// are really taken. Nothing about the failure depends on errno, so the assertion is on `err`.
+//
+// `CAP = 64` puts the band at `path + 64`, INSIDE `PATH_MAX`, so the kernel really does read canary
+// bytes as part of the path here. That is deliberate and harmless, not an oversight: the open must
+// fail either way, which is why the assertion is on `err` and not on a particular errno. It cannot
+// happen in production, and `reads_guest_buffer`'s doc comment gives the reason a path argument is
+// absent from that allowlist — the kernel stops at `PATH_MAX` (1024), far inside the real 64 KiB
+// window, so only a test that shrinks `window_cap` below `PATH_MAX` can bring a band into reach.
+#[test]
+fn a_failing_syscall_still_restores_the_canary() {
+    const CAP: usize = 64;
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
+    let mut b = Box_::load(&loaded);
+    b.set_window_cap_for_test(CAP);
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_OPEN => {
+                let path = args[0] + 1; // drop the leading '/' => a relative path that cannot exist
+                let (_, avail) = b.host_span_for_test(path).expect("the path buffer is mapped");
+                let win = CAP.min(avail);
+                let band = retrace_box::GUARD_BAND.min(avail - win);
+                assert!(band > 0, "precondition: this test needs a non-empty band to leak");
+                let base = path + win as u64;
+                let pre = b.read_bytes_for_test(base, band);
+                assert!(!Box_::canary_intact(&pre, base),
+                    "precondition: the band must not already look like a canary, or a missing \
+                     restore would be indistinguishable from a correct one");
+
+                let mut a = [0u64; 8];
+                a[0] = path;
+                let (_ret, err, writes) = b.forward_and_diff(retrace_arch::SYS_OPEN, a);
+                assert!(err, "precondition: opening {path:#x} as a relative path must FAIL, or this \
+                              test drives the success path it is not about");
+                assert!(writes.is_empty(), "a failed syscall captures nothing");
+
+                assert_eq!(b.read_bytes_for_test(base, band), pre,
+                    "the canary must be restored on the FAILING path too — a leak here is bytes \
+                     the recording has and the replay does not");
+                return;
+            }
+            Stop::Syscall { num, args } => {
+                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                b.set_x0_and_return(ret);
+            }
+            Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
+            Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
+}
+
+// M30 fix round 1, defect (b): two arguments of one call can hold the SAME value — measured on 60
+// of 341 traps in one `jq` recording, including `open`'s x0 == x3 and `stat64`'s x0 == x2 — which
+// pushes two `windows` entries with the same ipa, len and band. `band_not_covered` deliberately
+// does not let an entry suppress its own band, so it does not suppress a duplicate's either, and
+// both entries check the same bytes. Restoring per entry made the first erase the canary the second
+// was about to read, reporting a disturbance no kernel caused: a phantom straight into the Phase A
+// tally the milestone's flip decision turns on.
+//
+// The cap is 256 deliberately: trap 189 writes 120 bytes, so nothing overruns and the ONLY thing
+// that could move the counter is the ordering defect. At Task 2's cap of 96 a real overrun would
+// increment it and hide the bug.
+#[test]
+fn a_duplicated_pointer_argument_does_not_manufacture_a_disturbance() {
+    const CAP: usize = 256;
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FILEIO).unwrap());
+    let mut b = Box_::load(&loaded);
+    b.set_window_cap_for_test(CAP);
+    loop {
+        match b.run() {
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_FSTAT => {
+                let (_, avail) = b.host_span_for_test(args[1]).expect("stat buffer is mapped");
+                assert!(avail > CAP, "precondition: a band must exist past a {CAP}-byte window");
+                // x2 is not an operand of fstat, so duplicating the buffer pointer there changes
+                // nothing the kernel does — only how many entries the pre-pass pushes.
+                let mut a = args;
+                a[2] = args[1];
+                let before = b.canary_disturbances_for_test();
+                b.forward_and_diff(num, a);
+                assert_eq!(b.canary_disturbances_for_test(), before,
+                    "two entries sharing one band must not report a disturbance: no kernel write \
+                     reaches past a {CAP}-byte window for a 120-byte fstat reply");
+                return;
+            }
+            Stop::Syscall { num, args } => {
+                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                b.set_x0_and_return(ret);
+            }
+            Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
+            Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
+        }
+    }
 }
