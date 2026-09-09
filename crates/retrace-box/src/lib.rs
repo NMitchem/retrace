@@ -5315,11 +5315,19 @@ impl Box_ {
     #[doc(hidden)]
     pub fn dbg_next_l3(&self) -> u64 { self.next_l3 }
 
-    /// Test-only (M31): the four debugger fields, which are the only `Box_` state no accessor
-    /// reaches. `tests/checkpointparity.rs` needs them to *observe* that `from_checkpoint` resets
-    /// them — an assertion about a field nothing can read is an assertion about nothing. Kept out
-    /// of `dbg_internal_state` deliberately: that string is compared by
-    /// `restoreparity.rs` too, and adding fields to it changes an existing contract.
+    /// Test-only (M31): `from_checkpoint` RE-DERIVES this from the restored backings
+    /// (`backings.iter().any(|b| b.ipa == TLBI_STUB_IPA)`) rather than carrying it, exactly as it
+    /// re-derives `next_l3` above — so it is a second derivation of one fact, and the parity guard
+    /// compares both.
+    #[doc(hidden)]
+    pub fn dbg_tlbi_stub_ready(&self) -> bool { self.tlbi_stub_ready }
+
+    /// Test-only (M31): the four debugger fields — not the only `Box_` state with no accessor
+    /// (`window_cap` and `l2_host` also have none), but the ones `tests/checkpointparity.rs` needs
+    /// to *observe* that `from_checkpoint` resets them — an assertion about a field nothing can
+    /// read is an assertion about nothing. Kept out of `dbg_internal_state` deliberately: that
+    /// string is compared by `restoreparity.rs` too, and adding fields to it changes an existing
+    /// contract.
     #[doc(hidden)]
     pub fn dbg_debug_state(&self) -> String {
         format!("bps_armed={} wps_armed={} watch_ranges={:?} syscall_watch_hit={:?}",
