@@ -205,7 +205,7 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 /// `self.thread_start_pc = Some(args[0]); self.wq_thread_pc = Some(args[1]); self.pthread_size =
 /// Some(args[2] as u32); WORKQ_FEATURE_WORD as u64`.
 ///
-/// **Honest reach limit.** Even with everything below staged, eight fields the structural diff
+/// **Honest reach limit.** Even with everything below staged, seven fields the structural diff
 /// reaches are STILL `Default == Default` here, so this fixture proves nothing about
 /// `from_checkpoint` restoring them:
 ///   - `synthetic_tsc` — advances only when the guest issues the timebase MRS `run()` emulates;
@@ -219,14 +219,19 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 ///   - `pac_enabled` — deliberately NOT staged: M7 established PAC is a per-process macOS posture
 ///     (arm64e guests only), so forcing it on via `load_with_pac(.., true)` over a non-arm64e guest
 ///     would assert a posture the guest's own binary never claims.
-///   - `stack_top` / `stack_size` — fixed at construction from the Mach-O; no public method moves
-///     them post-load.
 ///   - `fall_throughs` — increments only on one specific dispatch fallback path, not reachable from
 ///     a static box through any staging call.
 ///   - `tpidr_el0` — no public setter exists (contrast `tpidrro_el0`, staged below via
 ///     `set_tpidrro_el0`).
 ///   - `syscall_watch_hit` — set only when a real watched write occurs during syscall-diff
 ///     application, not reachable without forwarding an actual syscall.
+///
+/// `stack_top` / `stack_size` are a DIFFERENT class from the seven above, and do not belong in that
+/// list: they are not absent defaults but always-identical non-trivial constants (`STACK_TOP_IPA` /
+/// `GRANULE`). Nothing in `Box_`'s public interface moves them post-load, so this fixture cannot
+/// force them away from the landmark-0 value, and the comparison cannot tell a genuine carry-through
+/// of `state.stack_top`/`state.stack_size` (`crates/retrace-box/src/lib.rs:5232-5233`) from a
+/// hardcoded recomputation of the same constant.
 #[test]
 fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
     let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
