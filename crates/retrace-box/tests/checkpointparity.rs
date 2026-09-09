@@ -235,7 +235,7 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 /// `self.thread_start_pc = Some(args[0]); self.wq_thread_pc = Some(args[1]); self.pthread_size =
 /// Some(args[2] as u32); WORKQ_FEATURE_WORD as u64`.
 ///
-/// **Honest reach limit.** Even with everything below staged, seven fields the structural diff
+/// **Honest reach limit.** Even with everything below staged, eight fields the structural diff
 /// reaches are STILL `Default == Default` here, so this fixture proves nothing about
 /// `from_checkpoint` restoring them:
 ///   - `synthetic_tsc` — advances only when the guest issues the timebase MRS `run()` emulates;
@@ -244,8 +244,10 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 ///     timebase" setter, only a guest whose code contains the instruction.
 ///   - `last_far` — written only when `run()` takes a genuine stage-2 fault; there is no public
 ///     "stage a fault" method, only a guest that actually faults (same class of limit as above).
-///   - `cache_refault_ipa` / `cache_refault_count` — advance only on a real demand-page refault
-///     against the dyld shared cache; HELLO's static asm path never walks the cache at all.
+///   - `cache_refault_ipa` — advances only on a real demand-page refault against the dyld shared
+///     cache.
+///   - `cache_refault_count` — same event, same limit; HELLO's static asm path never walks the
+///     cache at all.
 ///   - `pac_enabled` — deliberately NOT staged: M7 established PAC is a per-process macOS posture
 ///     (arm64e guests only), so forcing it on via `load_with_pac(.., true)` over a non-arm64e guest
 ///     would assert a posture the guest's own binary never claims.
@@ -256,7 +258,7 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 ///   - `syscall_watch_hit` — set only when a real watched write occurs during syscall-diff
 ///     application, not reachable without forwarding an actual syscall.
 ///
-/// `stack_top` / `stack_size` are a DIFFERENT class from the seven above, and do not belong in that
+/// `stack_top` / `stack_size` are a DIFFERENT class from the eight above, and do not belong in that
 /// list: they are not absent defaults but always-identical non-trivial constants (`STACK_TOP_IPA` /
 /// `GRANULE`). Nothing in `Box_`'s public interface moves them post-load, so this fixture cannot
 /// force them away from the landmark-0 value, and the comparison cannot tell a genuine carry-through

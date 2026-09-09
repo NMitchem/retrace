@@ -6022,13 +6022,13 @@ bytes.
 * **Symmetric-but-wrong stays invisible.** Two boxes wrong in the *same* way are invisible to any
   test that only diffs them against each other — inherited from M24 unchanged, and unchanged for the
   same structural reason the determinism oracle cannot see the class either.
-* **Seven fields are still `Default == Default` in the rich fixture**, so the guard's comparison of
-  them proves nothing: `synthetic_tsc`, `last_far`, `cache_refault_ipa`/`cache_refault_count`,
+* **Eight fields are still `Default == Default` in the rich fixture**, so the guard's comparison of
+  them proves nothing: `synthetic_tsc`, `last_far`, `cache_refault_ipa`, `cache_refault_count`,
   `pac_enabled`, `fall_throughs`, `tpidr_el0`, `syscall_watch_hit`. Each needs a guest that executes
   the instruction or takes the fault rather than a setter — there is no public "bump the timebase" or
   "stage a fault" method — and `pac_enabled` is deliberately not staged because forcing it on over a
   non-arm64e guest would assert a posture the binary never claims (M7's finding).
-* **`stack_top` / `stack_size` are a different class, and conflating them with the seven is the
+* **`stack_top` / `stack_size` are a different class, and conflating them with the eight is the
   mistake to avoid.** They are not absent defaults but always-identical non-trivial constants
   (`STACK_TOP_IPA` / `GRANULE`) that nothing in `Box_`'s public interface moves post-load. The
   comparison therefore cannot distinguish a genuine carry-through of `state.stack_top` /

@@ -667,11 +667,11 @@ These are real and current, not aspirational gaps.
   Three limits remain, the first two carried over from M24 unchanged. The guard compares
   **construction** at one landmark and not **evolution** after it (`retrace/tests/checkpoint_seek.rs`
   is that axis). Two boxes wrong in the *same* way stay invisible to any test that only diffs them
-  against each other. And reach is bounded by what a fixture can stage from a static box: seven
+  against each other. And reach is bounded by what a fixture can stage from a static box: eight
   fields the diff reaches are still `Default == Default` there — `synthetic_tsc`, `last_far`,
-  `cache_refault_ipa`/`cache_refault_count`, `pac_enabled`, `fall_throughs`, `tpidr_el0` and
+  `cache_refault_ipa`, `cache_refault_count`, `pac_enabled`, `fall_throughs`, `tpidr_el0` and
   `syscall_watch_hit`, each needing a guest that executes the instruction or takes the fault, not a
-  setter. `stack_top`/`stack_size` are a **different** class and not part of that seven: they are
+  setter. `stack_top`/`stack_size` are a **different** class and not part of that eight: they are
   always-identical non-trivial constants that no public API moves post-load, so the comparison cannot
   tell a genuine carry-through from a hardcoded recomputation of the same constant.
 - **The trampoline page is padded for only 0x800 of its 16 KiB.** The rest is zero, which is
