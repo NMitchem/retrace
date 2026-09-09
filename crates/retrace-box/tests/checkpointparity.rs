@@ -3,6 +3,15 @@
 // a point test written after its own bug (pacposture.rs, sigcheckpoint.rs, protnone.rs, tlbi.rs,
 // threads.rs); what none of them provide is a forcing function for the NEXT field. This file is
 // that: one structural diff, plus an obligation.
+//
+// THE RESULT, recorded so a guard that found nothing does not read as a guard that did not look:
+// on its first run this diff found NO asymmetry. `from_checkpoint` reproduced every field both
+// tiers reach — a two-thread table, fd slots (Open and Closed), the signal table, all three
+// pthread/workqueue scalars, a PROT_NONE extent, the cache pager, a bootstrap port, an armed
+// breakpoint, an armed watchpoint, and `tpidrro_el0`. That is a real finding about the code's
+// current state, not an absence of effort, and it is bounded exactly by what the fixtures reach —
+// the bound is stated under "What this deliberately does NOT do" below, and the guard was proven
+// able to fail by the two M31 t4 mutations recorded there.
 use retrace_box::Box_;
 use retrace_guest::{parse_macho, HELLO};
 
@@ -78,7 +87,14 @@ fn assert_debug_state_is_deliberately_reset(r: &Box_, label: &str) {
 /// either (a) compared here and EQUAL, (b) asserted above as deliberately reset, with the mechanism
 /// that re-establishes it on the replay side cited by file and line, or (c) named HERE as knowingly
 /// excluded, citing the comment that documents the exclusion. There is no fourth option that is
-/// safe. This path has dropped a field at least five times, each caught only after it shipped.
+/// safe. How often this path has actually dropped a field is counted in ONE place — the
+/// `M24-restoreaudit` section of `docs/status-log.md` — and is deliberately not recounted here; the
+/// `BoxState` field list is a different thing and not that count (see the note on `BoxState`). The
+/// clause that used to end this sentence, "each caught only after it shipped", was too strong and
+/// is withdrawn (M31 t5): every instance that list attributes to this path was closed inside its own
+/// milestone — M9 t3 by a code-review follow-up, M10 t4 and M11 t6 by a later task, M14 by `t7 fix
+/// round 1` — and M18's `wq_thread_pc` was carried in `e93f8dc`, the same commit that introduced it,
+/// so it never had a gap at all.
 /// `window_cap` (`crates/retrace-box/src/lib.rs:5259`) and `canary_disturbances` (`:5264`) are
 /// bucket (c): both are test-only instrumentation nothing in production reads (M28 and M30
 /// respectively), documented at those two lines as deliberately NOT carried in `BoxState`, so a
