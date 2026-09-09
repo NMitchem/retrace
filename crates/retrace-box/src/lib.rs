@@ -797,8 +797,11 @@ impl FdTable {
 /// append-only: M24's list attributes an instance to **M18 (`wq_thread_pc`)**, but that field was
 /// carried and restored in `e93f8dc` alongside its own introduction, and M18's own status-log
 /// section files its recurring bug under a *different* class ("the guest's X is retrace's", with
-/// M10 and M11 as its siblings). No M18 instance of THIS class appears in the log. Treat M24's
-/// count as the authority for the class and this as a flag against that one entry.
+/// M10 and M11 as its siblings). No M18 instance of THIS class appears in the log. That flag is now
+/// RESOLVED (M31 t5): the `M31-checkpointparity` section of `docs/status-log.md` is M24's forward
+/// pointer, and it drops the M18 entry — superseding M24's seven/five with six/four. M24's own
+/// section still reads seven because the log is append-only, so the authority for the class count is
+/// the M31 section, not the M24 one.
 #[derive(Clone)]
 pub struct BoxState {
     pub regs: Regs,
