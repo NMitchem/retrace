@@ -100,8 +100,10 @@ fn slots_round_trip_through_from_slots() {
 }
 
 // M10 t4, in the shape of M9 t3's regression test. State a mid-run capture cannot re-derive must be
-// CARRIED — this is the third field in BoxState to exist for that reason (after pac_enabled and
-// stack_top). If from_checkpoint installed a fresh table, a seeked session would believe every fd is
+// CARRIED — one of several fields in BoxState that exist for that reason (M31 t5 retired the ordinal
+// this comment used to carry, because it read as a count of the CLASS and is not one; the note on
+// `BoxState` says where the class is counted).
+// If from_checkpoint installed a fresh table, a seeked session would believe every fd is
 // Free, so a post-seek guest pread returns EBADF and reverse execution diverges from the forward run.
 #[test]
 fn fd_table_survives_checkpoint_restore() {

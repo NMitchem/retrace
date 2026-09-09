@@ -4,7 +4,9 @@
 // If from_checkpoint installed a fresh SigTable, a seeked session would believe every signal is at
 // its default disposition — so a post-seek raise of an IGNORED signal would terminate the guest,
 // and reverse execution would diverge from the forward run. That is the same failure shape the fd
-// slots and pac_enabled exist to prevent, and this is the fourth field to exist for that reason.
+// slots and pac_enabled exist to prevent, and it is carried in BoxState for that same reason.
+// (M31 t5 retired the ordinal this comment used to carry — it read as a count of the CLASS and is
+// not one; the note on `BoxState` says where the class is counted.)
 //
 // M16 split the blocked mask, the pending set and the alternate stack off SigTable and onto Thread
 // (they are per-thread; disposition stays process-wide) — `BoxState` already carries `threads`
