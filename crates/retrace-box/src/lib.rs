@@ -570,6 +570,19 @@ pub struct Box_ {
     /// `BoxState`: it is always `PTR_WINDOW_CAP` in production, so `from_checkpoint` restoring the
     /// default is correct rather than lossy.
     window_cap: usize,
+    /// M30: how many times `forward_and_diff` found the guard-band canary disturbed. Phase A
+    /// shipped this report-only; since the Phase B flip the same value is asserted on, so on a
+    /// filled band the increment is immediately followed by a panic and **no surviving run can
+    /// observe a non-zero count**. It stays because the increment and the gated stderr line both
+    /// run BEFORE that panic — so a `RETRACE_CANARY` run still names the syscall, band and ipa on
+    /// the way down — and because it lets a test assert "no disturbance was manufactured" directly
+    /// rather than inferring it from the absence of a panic. It remains instrumentation and nothing
+    /// else: never recorded, never read by production code, so it cannot reach the trace and cannot
+    /// affect determinism.
+    /// Plain `u64` (no Drop), declared last, so the load-bearing vcpu-before-vm drop order is
+    /// unaffected. Deliberately NOT carried in `BoxState`, for the same reason as `window_cap`:
+    /// production never reads it, so a restored session starting its own count at 0 is correct.
+    canary_disturbances: u64,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -914,6 +927,11 @@ pub fn subtract_range_for_test(table: &mut Vec<(u64, u64)>, addr: u64, len: u64)
     subtract_range(table, addr, len)
 }
 
+/// `forward_and_diff`'s per-argument bookkeeping: (guest_ipa, len, pre-image, pre-image of the
+/// M27 guard band past the window, M28/M30 shrunk band length). Factored out at M30 because the
+/// fifth field pushed the inline tuple over clippy's type-complexity threshold.
+type Window = (u64, usize, Vec<u8>, Vec<u8>, usize);
+
 impl Box_ {
     // Promote every 32 MiB L2 block covering [ipa, ipa+len) from a data BLOCK to an L3 TABLE
     // (identity-filled with ATTR_DATA), then set the pages this range covers to `attr`. A block
@@ -1189,7 +1207,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0 }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1787,7 +1805,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0 };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -2712,7 +2730,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0 };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -2860,7 +2878,44 @@ impl Box_ {
     /// mapped address, which is in bounds.
     pub fn deref_len_fits(want: usize, avail: usize) -> bool { want <= avail }
 
+    /// The canary byte belonging to guest address `ipa`. (M30)
+    ///
+    /// A pure function of the address, not a constant, for two reasons that are both load-bearing.
+    /// A kernel that memsets a constant cannot reproduce a per-byte-varying pattern, so the
+    /// commonest accidental write cannot forge an intact band. And because the value depends only
+    /// on the address, two *bands* that legitimately overlap each other agree on every shared byte,
+    /// which makes filling and verification order-independent — an index- or counter-derived
+    /// pattern would not have that property.
+    ///
+    /// `^ 0xA5` so neither an all-zero nor an all-`0xFF` fill matches at `ipa = 0`; those are the
+    /// two commonest uninitialised contents, and the zero case is the one M27 measured going
+    /// undetected on `/bin/ps`.
+    pub fn canary_byte(ipa: u64) -> u8 { (ipa as u8) ^ 0xA5 }
+
+    /// Does `band` still hold the canary written for guest address `base_ipa` onward? (M30)
+    ///
+    /// The live band detector for every syscall whose pointer arguments the kernel does not read
+    /// through, and it replaces the question `overran_window` asks *there*. A comparison of before
+    /// against after can only report a change that happened, so it is blind whenever the kernel
+    /// writes bytes identical to what was already there — most often zeros over zeros, which M27
+    /// measured going undetected on `/bin/ps`. Checking against a pattern we placed ourselves has a
+    /// signal to lose in every case.
+    ///
+    /// `overran_window` is NOT superseded: it stays the live detector for the `reads_guest_buffer`
+    /// family, whose bands are deliberately left unfilled — see `forward_and_diff`.
+    ///
+    /// An empty band is never disturbed, matching `overran_window`'s own rule for the case where
+    /// the window already covered the whole backing.
+    pub fn canary_intact(band: &[u8], base_ipa: u64) -> bool {
+        band.iter().enumerate().all(|(i, &b)| b == Self::canary_byte(base_ipa + i as u64))
+    }
+
     /// Did the kernel write past the diff window? (M27)
+    ///
+    /// Still live, and only for the `reads_guest_buffer` family: those bands are not canary-filled,
+    /// because a canary in a buffer the kernel READS is consumed as data, so "did these bytes
+    /// change?" remains the only question that means anything there. Every other syscall's band is
+    /// filled and asked `canary_intact` instead.
     ///
     /// Pure so the policy is reviewable apart from the `unsafe` slice plumbing that feeds it. The
     /// caller guarantees both slices are the same region sampled before and after exactly one
@@ -2920,6 +2975,24 @@ impl Box_ {
     /// this base and the table's length, so a known length still widens past a small cap. That is
     /// exactly why the positive control uses `fstat` (absent from the table) rather than `read`.
     pub fn set_window_cap_for_test(&mut self, cap: usize) { self.window_cap = cap; }
+
+    /// Test seam (M30): `host_span` is private, and the false-negative reproduction needs the same
+    /// host pointer and `avail` the diff loop computes. `&self`, pure delegation, no production
+    /// caller — the same posture as `diff_window_for_test`.
+    pub fn host_span_for_test(&self, ipa: u64) -> Option<(*mut u8, usize)> { self.host_span(ipa) }
+
+    /// M30: how many times the canary was found disturbed. Test-only instrumentation — never
+    /// recorded, never read by production code, so it cannot reach the trace.
+    ///
+    /// **Post-flip this returns 0 in any run that survives to read it**, because a disturbance on a
+    /// filled band now panics in the same loop iteration that increments. Its remaining job is
+    /// therefore the negative: a test asserts the count did NOT move, which says "no disturbance was
+    /// manufactured" in its own words instead of leaving the reader to infer it from nothing having
+    /// panicked. `a_duplicated_pointer_argument_does_not_manufacture_a_disturbance` is that test.
+    /// During Phase A it also served as the in-process channel, paired with the gated stderr line as
+    /// the cross-process one — M29 was defeated a layer downstream of a correct instrument, so each
+    /// channel was given its own positive control.
+    pub fn canary_disturbances_for_test(&self) -> u64 { self.canary_disturbances }
 
     /// Test seam (M28). Reads `len` bytes of guest memory at `ipa`, for tests that must observe
     /// memory independently of `forward_and_diff`'s own capture — which is exactly what the
@@ -3059,8 +3132,7 @@ impl Box_ {
                 Err(e) => return (e, true, Vec::new()),
             }
         } else { None };
-        // (guest_ipa, len, pre-image, pre-image of the M27 guard band past the window)
-        let mut windows: Vec<(u64, usize, Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut windows: Vec<Window> = Vec::new();
         let mut hargs = [0i64; 8];
         for i in 0..8 {
             match self.host_span(args[i]) {
@@ -3076,10 +3148,71 @@ impl Box_ {
                     // than inferred. Bounded by `avail`, so this never reads past the backing.
                     let band = GUARD_BAND.min(avail - win);
                     let pre_band = unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
-                    windows.push((args[i], win, pre, pre_band));
+                    windows.push((args[i], win, pre, pre_band, 0));
                     hargs[i] = hp as i64;
                 }
                 None => hargs[i] = args[i] as i64,
+            }
+        }
+        // M30: the band shrink moves here, BEFORE the syscall, because Task 4 writes a canary into
+        // the band. A canary in the raw band could land inside another argument's window, and
+        // restoring it afterwards would erase a genuine kernel write from the recording. Shrinking
+        // first confines every canary to bytes no window inspects.
+        //
+        // Each entry's own span ends exactly where its band begins, so passing the whole list
+        // (including self) is correct — see `band_not_covered`.
+        let spans: Vec<(u64, usize)> =
+            windows.iter().map(|(ipa, len, _, _, _)| (*ipa, *len)).collect();
+        for w in windows.iter_mut() {
+            let (ipa, len, _, pre_band, band) = w;
+            *band = Self::band_not_covered(*ipa, *len, pre_band.len(), &spans);
+        }
+        // M30: give the band a signal it can lose. `overran_window` can only report a CHANGE, so it
+        // is blind whenever the kernel writes bytes identical to those already there — zeros over
+        // zeros, which `the_same_fixture_and_cap_that_fooled_the_old_comparison_now_aborts`
+        // reproduces on a real `fstat`. A pattern we placed ourselves is destroyed by any kernel
+        // write, matching or not.
+        //
+        // Sound because the guest vCPU is halted across `host_svc` and `clippy.toml` bans recorder
+        // threads, so nothing but the kernel can touch these bytes in the interval; they are
+        // restored in the post-syscall loop before the vCPU resumes, so no guest can observe them
+        // and nothing reaches the trace. Never gated behind a measurement flag: Phase A had to
+        // measure the path production actually takes, and gating the fill would have measured a
+        // path nothing runs — the dead-channel trap M29 hit twice. (The `fill_canary` exception
+        // below is a CORRECTNESS gate, not a measurement one.)
+        //
+        // The fill uses the SHRUNK band, so a canary can never land inside another argument's
+        // window, where restoring it afterwards would erase a genuine kernel write from the
+        // recording. That is the whole reason Task 3 moved the shrink above this point.
+        //
+        // **Not filled for a syscall the kernel READS through** — see `reads_guest_buffer`, and the
+        // reproduction it documents. The canary is invisible to the guest but not to the kernel:
+        // when the kernel reads past a diff window it consumes these bytes as data, corrupting the
+        // guest's output while record and replay stay bit-identical. The decision is per-SYSCALL
+        // and covers all eight registers, because the reproduction's corrupting entry was a stale
+        // register that was not an argument at all.
+        //
+        // Restored on every `return` path — both of `forward_and_diff`'s two `return`s (the
+        // `translate_fds` and `translate_mwl_regions` EBADF arms) sit ABOVE this fill, so neither
+        // can leak. NOT restored on unwind: four panic sites lie between here and the restore pass
+        // (`read_u64`, the M29 `deref_len_fits` assert, `host_span(..).unwrap()`, and the M27
+        // overrun assert). That is deliberate rather than overlooked — a panicking recorder produces
+        // no usable trace, and a `#[should_panic]` test drops the whole `Box_` — but do not read the
+        // guarantee as wider than it is.
+        let fill_canary = !retrace_arch::reads_guest_buffer(num);
+        if fill_canary {
+            for (ipa, len, _, _, band) in windows.iter() {
+                let (hp, avail_now) =
+                    self.host_span(*ipa).expect("the pre-pass above established this mapping");
+                // Re-clamped against `avail_now` exactly as the check loop and the restore pass do.
+                // Inert today for the reason documented at the check loop, and `*band` is provably
+                // `<= avail - len` already; the symmetry is the point, so a future edit that makes
+                // this function mutate backings meets one rule at all three sites rather than two.
+                let band = (*band).min(avail_now.saturating_sub(*len));
+                let base = *ipa + *len as u64;
+                for k in 0..band {
+                    unsafe { *hp.add(*len + k) = Self::canary_byte(base + k as u64) };
+                }
             }
         }
         // Debt #1: for the `Reg` shape (read/pread/pread_nocancel) the destination's length is a
@@ -3227,20 +3360,16 @@ impl Box_ {
         // post-diff write capture entirely.
         let mut writes = Vec::new();
         if !err {
-            // M28: every window this call took, so a band comparison can exclude bytes another
-            // argument's window already covers. Collected BEFORE the loop because the loop consumes
-            // `windows`. Each entry's own span ends exactly where its band begins, so passing the
-            // whole list (including self) is correct — see `band_not_covered`.
-            let spans: Vec<(u64, usize)> = windows.iter().map(|(ipa, len, _, _)| (*ipa, *len)).collect();
-            for (ipa, len, pre, pre_band) in windows {
+            for (ipa, len, pre, pre_band, band) in windows.iter() {
+                let (ipa, len, band) = (*ipa, *len, *band);
                 // Take `avail` rather than discarding it: the guard-band read below is `unsafe` and
-                // must stay inside this backing. Nothing between the pre-image loop and here
-                // mutates `self.backings`, so `avail_now == avail` always and this re-clamp is a
-                // no-op today — it is defensive against a FUTURE edit that makes this function
-                // mutate backings between the two loops, not against anything reachable now.
+                // must stay inside this backing. Nothing between the pre-pass and here mutates
+                // `self.backings`, so `avail_now == avail` always and this re-clamp is a no-op
+                // today — it is defensive against a FUTURE edit that makes this function mutate
+                // backings between the two passes, not against anything reachable now.
                 let (hp, avail_now) = self.host_span(ipa).unwrap();
+                let band = band.min(avail_now.saturating_sub(len));
                 let raw_band = pre_band.len().min(avail_now.saturating_sub(len));
-                let band = Self::band_not_covered(ipa, len, raw_band, &spans);
                 // M28 Task 2: WARNING ONLY, and Task 3 is the measurement it exists for. R1 says
                 // this shrink could suppress far more than expected, which would quietly weaken the
                 // detector this milestone is meant to strengthen. Count it across the gate rather
@@ -3263,25 +3392,125 @@ impl Box_ {
                         num as i64, ipa, len, raw_band, band);
                 }
                 let post = unsafe { std::slice::from_raw_parts(hp, len) };
-                // M27: fail-loud. Landed as an `eprintln!` first and flipped to this assert only
-                // after Task 2 measured it firing ZERO times across the whole gate (523/0/2 over
-                // 115) — landing a panic without that measurement is the unmeasured-supporting-
-                // fact trap this milestone exists to avoid. Note the band is a one-directional
-                // detector: see the README's Known limits for the measured false negative (zeros
-                // written over zeros on /bin/ps).
+                let base = ipa + len as u64;
                 let post_band = unsafe { std::slice::from_raw_parts(hp.add(len), band) };
-                assert!(!Self::overran_window(&pre_band[..band], post_band),
-                    "syscall {} changed a byte in the {}-byte guard band past its {}-byte diff \
-                     window at ipa {:#x}. This band already excludes every byte any OTHER window \
-                     of this same call inspects (see `band_not_covered`), so this IS proof of a \
-                     kernel write past everything this call's diff inspected — not a maybe. \
-                     Add this syscall's destination buffer to retrace_arch::dest_buffer with the \
-                     argument its length lives in; if that length is not knowable, measure it \
-                     before guessing.",
-                    num as i64, band, len, ipa);
+                // M30 Phase B: the NEW detector, now fail-loud. It shipped in Phase A as
+                // count-and-report and measured ZERO disturbed band entries everywhere the
+                // measurement was taken — the 54-guest Apple sweep, and the dynamic guests driven
+                // through the CLI (`/bin/ps`, `jq`, the real CPython interpreter). Each of the
+                // three channels that can carry this signal (in-process, CLI, sweep) was given its
+                // own positive control on its own path FIRST, because a zero out of a channel that
+                // could not have carried a nonzero is worth nothing — the M29 lesson this milestone
+                // was not allowed to repeat. The flip below is that measurement's conclusion, not
+                // an assumption; landing a panic without it is the trap M27's own status log
+                // names.
+                //
+                // The counter and its gated line stay, and stay AHEAD of the assert: a
+                // `RETRACE_CANARY` run still names the syscall, band and ipa on the way to the
+                // panic, and the counter remains the in-process channel the unit tests read for the
+                // NEGATIVE claim (no disturbance where none is due), which a panic cannot make.
+                //
+                // `fill_canary` gates the QUESTION, not just the fill: an unfilled band holds the
+                // guest's own bytes, which are not the canary, so asking `canary_intact` there
+                // would report a phantom disturbance on every such call.
+                let disturbed = fill_canary && !Self::canary_intact(post_band, base);
+                if disturbed {
+                    self.canary_disturbances += 1;
+                    if std::env::var_os("RETRACE_CANARY").is_some() {
+                        eprintln!("[M30 CANARY] syscall {} disturbed the {}-byte band past its \
+                                   {}-byte window at ipa {:#x}", num as i64, band, len, ipa);
+                    }
+                }
+                // Fail-loud since M27, in two flavours since M30, and which flavour runs is the
+                // whole of this milestone's fix.
+                //
+                // FILLED — reuse `disturbed`. The band was overwritten with a known,
+                // address-derived pattern before the call, so ANY kernel write destroys it whatever
+                // bytes it wrote, including zeros over zeros: the case M27's pre/post comparison was
+                // 100% blind to and which was measured happening on `/bin/ps`. Reusing `disturbed`
+                // rather than recomputing the predicate is deliberate — the counter, the gated line
+                // and this assert must be three views of ONE decision, never two that can drift.
+                //
+                // UNFILLED — M27, bit for bit. The `reads_guest_buffer` family gets no fill,
+                // because a canary in a buffer the kernel READS is consumed as data and corrupts
+                // the guest's own output; with nothing filled, "did these bytes change?" is again
+                // the only question that means anything. Fix round 2 is what forced these two apart:
+                // a canary-shaped question asked of a band that was never filled is STRICTLY WEAKER
+                // than M27, on precisely the family the fill was withdrawn from to protect. With the
+                // branch, that family keeps exactly the protection it had before this milestone —
+                // no more and no less.
+                //
+                // Honest residual, on the FILLED branch only: a kernel byte that happens to equal
+                // `canary_byte` at its own offset is missed (1/256 per byte, and the kernel would
+                // have to hit it on every byte it wrote to stay invisible). That is inherent to any
+                // canary and is the price of closing a detector otherwise blind to a whole class.
+                //
+                // And the SCOPE of that new strength, so this assert is not read as covering the
+                // whole of `forward_and_diff`: the `reads_guest_buffer` family is excluded by
+                // construction — `write`/`pwrite`/`writev`, the `send*` family, `sendfile`, `msync`
+                // and `mach_msg2_trap`, which carries the five MIG ids `machmsg.rs` forwards
+                // (`host_info`, `host_get_clock_service`, `semaphore_create`, `task_info`,
+                // `host_get_special_port`). Those keep M27 exactly and gain nothing here.
+                let overran = if fill_canary {
+                    disturbed
+                } else {
+                    Self::overran_window(&pre_band[..band], post_band)
+                };
+                assert!(!overran,
+                    "syscall {} wrote into the {}-byte guard band past its {}-byte diff window at \
+                     ipa {:#x}. {} The band already excludes every byte any OTHER window of this \
+                     same call inspects (see `band_not_covered`), so this IS proof of a kernel \
+                     write past everything this call's diff inspected — not a maybe. Add this \
+                     syscall's destination buffer to retrace_arch::dest_buffer with the argument \
+                     its length lives in; if that length is not knowable, measure it before \
+                     guessing.",
+                    num as i64, band, len, ipa,
+                    if fill_canary {
+                        "The band was filled with a known pattern before the call and checked \
+                         after, so this holds whatever bytes the kernel wrote — including zeros \
+                         over zeros, which the pre/post comparison this replaced could not see."
+                    } else {
+                        "The kernel READS through this syscall's pointer arguments (see \
+                         `reads_guest_buffer`), so this band was NOT canary-filled and the detector \
+                         here is M27's pre/post comparison: these bytes changed across the call, \
+                         and nothing but the kernel could have changed them."
+                    });
                 if post != pre.as_slice() {
                     writes.push(Region { ipa, bytes: post.to_vec() });
                 }
+            }
+        }
+        // M30: restore the canary bytes — a SEPARATE pass, after every band above has been checked,
+        // and outside the `if !err` so it runs on both paths. Two things force this shape, and both
+        // were measured on a `jq` recording rather than reasoned about:
+        //
+        // 1. **After all checks, never interleaved.** Two arguments of one call can hold the SAME
+        //    value (`open`'s x0 and a stale x3; `stat64`'s x0 and x2 — both seen on jq), which puts
+        //    two entries with the same `ipa`, `len` and band into `windows`. `band_not_covered`
+        //    deliberately does not let an entry suppress its own band, so it does not suppress a
+        //    DUPLICATE's either, and both entries check the same bytes. Restoring inside the loop
+        //    made the first entry erase the canary the second was about to check, reporting a
+        //    disturbance no kernel caused — 2 of them on one jq run. A pass that runs after every
+        //    check makes the result independent of entry order.
+        // 2. **On the error path too.** The fill is unconditional, so the restore must be. A failed
+        //    syscall wrote nothing — which is exactly why the capture loop skips it — so the band
+        //    still holds the canary retrace itself wrote, and leaving it there would hand the guest
+        //    bytes no kernel ever produced, on the ordinary path every EINTR/ENOENT/EAGAIN takes.
+        //    Measured: 36 error-path restores in that same jq recording, so this is load-bearing,
+        //    not defensive. Nothing is CHECKED there for the same reason nothing is captured.
+        //
+        // Only `band` bytes are restored — exactly what was filled. The window [0,len) and the band
+        // [len,len+band) are disjoint, so neither the fill nor this restore can touch the window
+        // post-image captured above.
+        // 3. **Only when something was filled.** An unfilled band holds the guest's own bytes
+        //    already, and for a `reads_guest_buffer` call this write would land in a buffer the
+        //    kernel has just read — writing the same bytes back, but into memory this code has no
+        //    business touching on that path at all.
+        if fill_canary {
+            for (ipa, len, _pre, pre_band, band) in windows.iter() {
+                let (hp, avail_now) = self.host_span(*ipa).unwrap();
+                let band = (*band).min(avail_now.saturating_sub(*len));
+                unsafe { std::ptr::copy_nonoverlapping(pre_band.as_ptr(), hp.add(*len), band) };
             }
         }
         // M10 fd bookkeeping — the other half of the contract, deliberately here rather than in the
@@ -5029,6 +5258,10 @@ impl Box_ {
             // M28: NOT carried in `BoxState` — always the production default here, per the field
             // comment on `window_cap`.
             window_cap: PTR_WINDOW_CAP,
+            // M30: NOT carried in `BoxState` either — it is test-only instrumentation nothing in
+            // production reads, so a restored session counting its own disturbances from zero is
+            // correct rather than lossy. Same argument as `window_cap` directly above.
+            canary_disturbances: 0,
         };
         if state.cache_installed { b.install_cache_pager(); }
         b

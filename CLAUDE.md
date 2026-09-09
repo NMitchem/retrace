@@ -70,7 +70,11 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   the real CPython interpreter running `-c 'print(1)'`, plus the launcher shim that pins
   exec-in-place as unmodelled), `bigread_e2e` (a guest whose one `read` returns more than the
   record-side diff window, guarding the M26 truncation class — repo-owned precisely because
-  `cpython_e2e` *skips* without Homebrew Python and so cannot guard anything). Run one with
+  `cpython_e2e` *skips* without Homebrew Python and so cannot guard anything), `bigwrite_e2e` (its
+  mirror on the write side: a guest whose one `write` sends more than the diff window, guarding the
+  M30 class where retrace's own guard-band canary reached the kernel as data and corrupted the
+  guest's output — record and replay both exited 0 while the output file was wrong, so it asserts on
+  the written bytes and never on an exit code). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
