@@ -94,6 +94,20 @@ fn assert_debug_state_is_deliberately_reset(r: &Box_, label: &str) {
 /// populates every backing's bytes with a `memcpy` straight from `state.mem`, so a byte-for-byte
 /// compare here would be near-tautological. (`restoreparity.rs`'s L1 case, by contrast, does
 /// byte-compare the EL1 vector table — a reader should not assume this file does the same.)
+///
+/// **Proven able to fire (M31 t4).** Replacing `sigtable: state.sigtable.clone()` with
+/// `SigTable::default()` in `from_checkpoint` turns
+/// `a_checkpointed_box_with_rich_state_matches_the_box_it_came_from` RED at `rich: signal
+/// dispositions`. Recorded because a guard nobody has watched fail is a guard nobody knows is wired
+/// up — M28's `let band = 0;` passed a 523-test gate before its own positive control existed.
+///
+/// **Second control: the two-thread fixture is load-bearing, not decorative.** Replacing
+/// `threads: state.threads.clone()` with a version that zeroes every NON-current thread's `ctx`
+/// (keeping thread count and `current` unchanged) turns the rich tier RED at `rich: the restored
+/// thread table must reproduce the CAPTURED table exactly` — but leaves the static tier GREEN,
+/// because with only one thread there is no non-current entry to corrupt. That asymmetry is the
+/// point: on Task 2's single-thread fixture this exact bug would have been invisible, caught only
+/// after Task 3 added a second thread.
 fn assert_checkpoint_parity(b: Box_, label: &str) {
     let live_internal = b.dbg_internal_state();
     let (top, size) = (b.stack_top(), b.stack_size());
