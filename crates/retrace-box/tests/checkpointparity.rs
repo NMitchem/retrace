@@ -91,7 +91,13 @@ fn assert_debug_state_is_deliberately_reset(r: &Box_, label: &str) {
 /// either (a) compared here and EQUAL, (b) asserted above as deliberately reset, with the mechanism
 /// that re-establishes it on the replay side cited by file and line, or (c) named HERE as knowingly
 /// excluded, citing the comment that documents the exclusion. There is no fourth option that is
-/// safe. How often this path has actually dropped a field is counted in ONE place — the
+/// safe. **Cite by file, line AND symbol name** — `lib.rs:4150` (`guest_bsdthread_register`), never
+/// a bare `lib.rs:4150`. A line number into a file the SAME commit also edits goes stale between
+/// the moment it is verified and the moment it is committed; this branch did exactly that twice,
+/// the second time inside the very commit that fixed the first, leaving a citation that landed on
+/// `set_thread_start_pc` — the setter the surrounding sentence said had been REJECTED. The symbol
+/// name is what makes a shifted citation a recoverable pointer instead of a confidently wrong one.
+/// How often this path has actually dropped a field is counted in ONE place — the
 /// `M24-restoreaudit` section of `docs/status-log.md`, read with its forward pointer, the
 /// `M31-checkpointparity` section, which supersedes M24's seven/five with six/four; the log is
 /// append-only, so M24's own text still reads seven and the M31 number is the current one. It is
@@ -104,18 +110,18 @@ fn assert_debug_state_is_deliberately_reset(r: &Box_, label: &str) {
 /// so it never had a gap at all.
 /// Bucket (c) has THREE members, and the list has to stay complete: the obligation says there is no
 /// fourth option that is safe, so a field missing from here misleads exactly the reader auditing
-/// field N+1. `window_cap` (`crates/retrace-box/src/lib.rs:5291`) and `canary_disturbances`
-/// (`:5295`) are the first two: both are test-only instrumentation nothing in production reads (M28
-/// and M30 respectively), documented at those two lines as deliberately NOT carried in `BoxState`,
-/// so a restored box always gets the production default / a fresh zero rather than the live value —
-/// correct, not lossy, and not worth asserting on since "always the default" is not a fact about
-/// `from_checkpoint` doing anything.
-/// `l2_host` (`crates/retrace-box/src/lib.rs:485`) is the third, excluded for a different reason: it
-/// is a HOST pointer into a freshly-allocated backing, so two boxes hold different values there by
-/// construction and no equality between them would be meaningful. What it points AT is pinned
-/// instead — the L2 table's own backing is covered by the `dbg_backings()` map compared below, and
-/// the allocation cursor that walks with it by `dbg_next_l3()`. (`restoreparity.rs` makes exactly
-/// this argument for the same field.)
+/// field N+1. `window_cap` (`crates/retrace-box/src/lib.rs:5294`, in `from_checkpoint`'s `Box_`
+/// literal) and `canary_disturbances` (`:5298`, same literal) are the first two: both are test-only
+/// instrumentation nothing in production reads (M28 and M30 respectively), documented at those two
+/// lines as deliberately NOT carried in `BoxState`, so a restored box gets the production default
+/// or a fresh zero rather than the live value — correct, not lossy, and not worth asserting on,
+/// since "always the default" is not a fact about `from_checkpoint` doing anything.
+/// `l2_host` (`crates/retrace-box/src/lib.rs:485`, the `Box_` field declaration) is the third,
+/// excluded for a different reason: it is a HOST pointer into a freshly-allocated backing, so two
+/// boxes hold different values there by construction and no equality between them is meaningful.
+/// What it points AT is pinned instead — the L2 table's own backing is covered by the
+/// `dbg_backings()` map compared below, and the allocation cursor that walks with it by
+/// `dbg_next_l3()`. (`restoreparity.rs` makes exactly this argument for the same field.)
 ///
 /// **What this deliberately does NOT do**, so it is not mistaken for more than it is:
 /// it compares CONSTRUCTION at one landmark, not evolution afterwards
@@ -249,10 +255,10 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 /// The three pthread/workqueue scalars are staged via `guest_bsdthread_register`, not
 /// `set_thread_start_pc`: the setter only reaches `thread_start_pc`, leaving `wq_thread_pc` and
 /// `pthread_size` at `None` on both the live and restored box — `Default == Default`, the exact
-/// trap this fixture exists to eliminate. `guest_bsdthread_register`'s whole body
-/// (`crates/retrace-box/src/lib.rs:4147`) sets all three from one call and has no other effect:
-/// `self.thread_start_pc = Some(args[0]); self.wq_thread_pc = Some(args[1]); self.pthread_size =
-/// Some(args[2] as u32); WORKQ_FEATURE_WORD as u64`.
+/// trap this fixture exists to eliminate. The whole body of `guest_bsdthread_register`
+/// (`crates/retrace-box/src/lib.rs:4150`, that fn's signature line) sets all three from one call
+/// and has no other effect: `self.thread_start_pc = Some(args[0]); self.wq_thread_pc =
+/// Some(args[1]); self.pthread_size = Some(args[2] as u32); WORKQ_FEATURE_WORD as u64`.
 ///
 /// **Honest reach limit.** Even with everything below staged, eight fields the structural diff
 /// reaches are STILL `Default == Default` here, so this fixture proves nothing about
@@ -281,7 +287,8 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 /// list: they are not absent defaults but always-identical non-trivial constants (`STACK_TOP_IPA` /
 /// `GRANULE`). Nothing in `Box_`'s public interface moves them post-load, so this fixture cannot
 /// force them away from the landmark-0 value, and the comparison cannot tell a genuine carry-through
-/// of `state.stack_top`/`state.stack_size` (`crates/retrace-box/src/lib.rs:5263-5264`) from a
+/// of `state.stack_top`/`state.stack_size` (`crates/retrace-box/src/lib.rs:5266-5267`, the
+/// `stack_top:`/`stack_size:` lines of `from_checkpoint`'s `Box_` literal) from a
 /// hardcoded recomputation of the same constant.
 #[test]
 fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
