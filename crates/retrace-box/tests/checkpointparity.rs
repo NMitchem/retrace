@@ -204,6 +204,29 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 /// (`crates/retrace-box/src/lib.rs:4119`) sets all three from one call and has no other effect:
 /// `self.thread_start_pc = Some(args[0]); self.wq_thread_pc = Some(args[1]); self.pthread_size =
 /// Some(args[2] as u32); WORKQ_FEATURE_WORD as u64`.
+///
+/// **Honest reach limit.** Even with everything below staged, eight fields the structural diff
+/// reaches are STILL `Default == Default` here, so this fixture proves nothing about
+/// `from_checkpoint` restoring them:
+///   - `synthetic_tsc` — advances only when the guest issues the timebase MRS `run()` emulates;
+///     HELLO never executes that instruction. `tests/checkpoint.rs` reaches it, but only by
+///     `Box_::step`-ping a DIFFERENT guest (STEPPY) that does — there is no public "bump the
+///     timebase" setter, only a guest whose code contains the instruction.
+///   - `last_far` — written only when `run()` takes a genuine stage-2 fault; there is no public
+///     "stage a fault" method, only a guest that actually faults (same class of limit as above).
+///   - `cache_refault_ipa` / `cache_refault_count` — advance only on a real demand-page refault
+///     against the dyld shared cache; HELLO's static asm path never walks the cache at all.
+///   - `pac_enabled` — deliberately NOT staged: M7 established PAC is a per-process macOS posture
+///     (arm64e guests only), so forcing it on via `load_with_pac(.., true)` over a non-arm64e guest
+///     would assert a posture the guest's own binary never claims.
+///   - `stack_top` / `stack_size` — fixed at construction from the Mach-O; no public method moves
+///     them post-load.
+///   - `fall_throughs` — increments only on one specific dispatch fallback path, not reachable from
+///     a static box through any staging call.
+///   - `tpidr_el0` — no public setter exists (contrast `tpidrro_el0`, staged below via
+///     `set_tpidrro_el0`).
+///   - `syscall_watch_hit` — set only when a real watched write occurs during syscall-diff
+///     application, not reachable without forwarding an actual syscall.
 #[test]
 fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
     let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
@@ -222,8 +245,25 @@ fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
     // per-thread signal state (carried wholesale inside `threads`).
     b.threads_mut().set_mask_of(0, retrace_arch::SIG_SETMASK, 0b1010);
 
-    // the three pthread/workqueue scalars, all from one call — see the doc comment above.
-    b.guest_bsdthread_register([0x1234_5000, 0x5678_9000, 0x4000, 0, 0, 0, 0, 0]);
+    // A SECOND thread, so the non-current-context comparison inside `assert_checkpoint_parity` is
+    // not empty-vs-empty. With only one thread `cur == 0` and `live_other_ctxs`/
+    // `restored_other_ctxs` are both `[]` — the assertion that exists specifically to stop this
+    // guard being clone-fidelity-only would be comparing nothing to nothing. The context is
+    // derived from the live vCPU (same pattern as `tests/deliver.rs:307-312`), on a different
+    // stack offset still inside the live stack backing, so no new backing is needed.
+    let mut child = b.save_ctx();
+    let other_sp = child.regs.sp_el0 - 0x2000;
+    child.regs.sp_el0 = other_sp;
+    let tid = b.threads_mut().spawn(child, (other_sp, 0));
+    // A DISTINCT mask on tid 1: two near-identical contexts would let an index-swap bug in
+    // `checkpoint()`'s fold pass unnoticed, so differentiating the entries is part of the point.
+    b.threads_mut().set_mask_of(tid, retrace_arch::SIG_SETMASK, 0b0101);
+
+    // the three pthread/workqueue scalars, all from one call — see the doc comment above. The
+    // pthread_size value is deliberately distinctive (not 0x4000, which the PROT_NONE extent and
+    // the mmap below also use) — a bug that fed either of those lengths into this slot by mistake
+    // must not coincidentally satisfy the precondition.
+    b.guest_bsdthread_register([0x1234_5000, 0x5678_9000, 0x2A10, 0, 0, 0, 0, 0]);
 
     // noaccess: a real PROT_NONE extent over backed memory (protect_none asserts on unbacked).
     let base = b.guest_vm_reserve(0, 0x10000, true);
@@ -233,10 +273,24 @@ fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
     // an ordinary anon mmap, to move mmap_next off its initial value.
     let _mapped = b.guest_mmap(0, 0x4000, 3, 0x1002);
 
+    // cache_installed and bootstrap_port: both bundled inside `dbg_internal_state`'s one string
+    // (no individual accessor exists), staged exactly as `tests/checkpoint.rs` does on a static box.
+    b.install_cache_pager();
+    let _port = b.mint_bootstrap_port();
+
     // A watchpoint, ARMED — so `assert_debug_state_is_deliberately_reset` is observing a real reset
     // rather than a field that was already at its default. Without this the reset assertion would
     // pass on a box that never armed anything, which proves nothing about from_checkpoint.
     b.arm_hw_watchpoint(0, base, 8);
+
+    // A hardware BREAKPOINT too — `bps_armed` is the other half of the debugger-four reset check,
+    // and until now nothing armed it, so that half of the reset assertion was as vacuous as the
+    // fields above.
+    b.arm_hw_breakpoint(0, b.stack_top() - 0x200);
+
+    // tpidrro_el0: the box-level sysreg (distinct from each thread's saved `ThreadCtx.tpidrro_el0`),
+    // read back by `assert_checkpoint_parity` via `Box_::tpidrro_el0()`.
+    b.set_tpidrro_el0(0xDEAD_0000);
 
     // PRECONDITIONS. Without these the comparison below is Default == Default.
     assert_eq!(b.fds().slots()[open_fd as usize], retrace_box::FdSlot::Open,
@@ -246,12 +300,30 @@ fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
     assert_ne!(format!("{:?}", b.sigtable()), format!("{:?}", retrace_box::SigTable::default()),
         "precondition: a non-default disposition table");
     assert_eq!(b.threads().mask_of(0), 0b1010, "precondition: a non-default blocked mask");
+    assert_eq!(tid, 1, "precondition: the second thread must land at index 1");
+    assert_eq!(b.threads().len(), 2, "precondition: a second thread must actually exist");
+    assert_eq!(b.threads().mask_of(tid), 0b0101, "precondition: tid 1's own non-default mask");
+    assert_ne!(b.threads().mask_of(0), b.threads().mask_of(tid),
+        "precondition: tid 0 and tid 1 must carry DIFFERENT masks, or an index-swap bug is invisible");
     assert_eq!(b.thread_start_pc(), Some(0x1234_5000), "precondition: bsdthread_register seen");
     assert_eq!(b.wq_thread_pc(), Some(0x5678_9000), "precondition: bsdthread_register seen");
-    assert_eq!(b.pthread_size(), Some(0x4000), "precondition: bsdthread_register seen");
+    assert_eq!(b.pthread_size(), Some(0x2A10), "precondition: bsdthread_register seen");
     assert_eq!(b.noaccess(), &[(base, 0x4000)], "precondition: a non-empty PROT_NONE map");
-    assert!(b.dbg_debug_state().contains("wps_armed=true"),
-        "precondition: a watchpoint is ARMED, so the reset assertion has something to observe");
+    let internal = b.dbg_internal_state();
+    assert!(internal.contains("cache_installed=true"),
+        "precondition: install_cache_pager must flip cache_installed, got {internal}");
+    assert!(internal.contains("bootstrap_port=Some("),
+        "precondition: mint_bootstrap_port must set bootstrap_port, got {internal}");
+    assert!(!internal.contains(&format!("mmap_next={:#x} ", retrace_box::MMAP_BASE)),
+        "precondition: mmap_next must move off MMAP_BASE, got {internal}");
+    let debug_state = b.dbg_debug_state();
+    assert!(debug_state.contains("wps_armed=true"),
+        "precondition: a watchpoint is ARMED, so the reset assertion has something to observe, \
+         got {debug_state}");
+    assert!(debug_state.contains("bps_armed=true"),
+        "precondition: a breakpoint is ARMED too — the other half of the debugger-four reset \
+         check, got {debug_state}");
+    assert_eq!(b.tpidrro_el0(), 0xDEAD_0000, "precondition: tpidrro_el0 staged");
 
     assert_checkpoint_parity(b, "rich");
 }
