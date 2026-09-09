@@ -183,3 +183,75 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
     let _ = b.run(); // reach the first syscall, so this is genuinely mid-run
     assert_checkpoint_parity(b, "static");
 }
+
+/// The rich tier, and the reason this milestone is not just Task 2.
+///
+/// A field left at its default is compared, and the comparison proves nothing: `Default ==
+/// Default` passes for a reason unrelated to the assertion's name. `restoreparity.rs` names that
+/// trap explicitly. So this stages a NON-DEFAULT value into every field the structural diff reaches
+/// that the static tier leaves empty, and asserts each one is non-default BEFORE capturing — the
+/// preconditions are what separate a guard that agrees from a guard that cannot see.
+///
+/// State is staged through `Box_`'s own public methods rather than by running a real threaded guest:
+/// a guest that spawns threads needs dyld and libpthread, and `retrace-box` cannot depend on
+/// `retrace-core`. `tests/threads.rs` established this pattern (it builds thread contexts by hand on
+/// a static box for exactly the same reason).
+///
+/// The three pthread/workqueue scalars are staged via `guest_bsdthread_register`, not
+/// `set_thread_start_pc`: the setter only reaches `thread_start_pc`, leaving `wq_thread_pc` and
+/// `pthread_size` at `None` on both the live and restored box — `Default == Default`, the exact
+/// trap this fixture exists to eliminate. `guest_bsdthread_register`'s whole body
+/// (`crates/retrace-box/src/lib.rs:4119`) sets all three from one call and has no other effect:
+/// `self.thread_start_pc = Some(args[0]); self.wq_thread_pc = Some(args[1]); self.pthread_size =
+/// Some(args[2] as u32); WORKQ_FEATURE_WORD as u64`.
+#[test]
+fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    let _ = b.run(); // mid-run
+
+    // fds: one open, one closed — Closed must stay distinguishable from Free across the restore.
+    let open_fd = b.fds_mut().alloc();
+    let closed_fd = b.fds_mut().alloc();
+    b.fds_mut().close(closed_fd);
+
+    // sigtable: a non-default disposition.
+    b.sigtable_mut().set_action(6, retrace_box::SigAction {
+        disp: retrace_box::Disposition::Ign, tramp: 0, mask: 0xf, flags: 0x2 });
+
+    // per-thread signal state (carried wholesale inside `threads`).
+    b.threads_mut().set_mask_of(0, retrace_arch::SIG_SETMASK, 0b1010);
+
+    // the three pthread/workqueue scalars, all from one call — see the doc comment above.
+    b.guest_bsdthread_register([0x1234_5000, 0x5678_9000, 0x4000, 0, 0, 0, 0, 0]);
+
+    // noaccess: a real PROT_NONE extent over backed memory (protect_none asserts on unbacked).
+    let base = b.guest_vm_reserve(0, 0x10000, true);
+    assert!(b.commit_reserved_page(base), "precondition: the reservation must commit");
+    b.protect_none(base, 0x4000);
+
+    // an ordinary anon mmap, to move mmap_next off its initial value.
+    let _mapped = b.guest_mmap(0, 0x4000, 3, 0x1002);
+
+    // A watchpoint, ARMED — so `assert_debug_state_is_deliberately_reset` is observing a real reset
+    // rather than a field that was already at its default. Without this the reset assertion would
+    // pass on a box that never armed anything, which proves nothing about from_checkpoint.
+    b.arm_hw_watchpoint(0, base, 8);
+
+    // PRECONDITIONS. Without these the comparison below is Default == Default.
+    assert_eq!(b.fds().slots()[open_fd as usize], retrace_box::FdSlot::Open,
+        "precondition: an OPEN guest fd");
+    assert_eq!(b.fds().slots()[closed_fd as usize], retrace_box::FdSlot::Closed,
+        "precondition: a CLOSED guest fd, distinct from Free");
+    assert_ne!(format!("{:?}", b.sigtable()), format!("{:?}", retrace_box::SigTable::default()),
+        "precondition: a non-default disposition table");
+    assert_eq!(b.threads().mask_of(0), 0b1010, "precondition: a non-default blocked mask");
+    assert_eq!(b.thread_start_pc(), Some(0x1234_5000), "precondition: bsdthread_register seen");
+    assert_eq!(b.wq_thread_pc(), Some(0x5678_9000), "precondition: bsdthread_register seen");
+    assert_eq!(b.pthread_size(), Some(0x4000), "precondition: bsdthread_register seen");
+    assert_eq!(b.noaccess(), &[(base, 0x4000)], "precondition: a non-empty PROT_NONE map");
+    assert!(b.dbg_debug_state().contains("wps_armed=true"),
+        "precondition: a watchpoint is ARMED, so the reset assertion has something to observe");
+
+    assert_checkpoint_parity(b, "rich");
+}
