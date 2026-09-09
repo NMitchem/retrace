@@ -23,9 +23,32 @@ M24 closed half of it. `crates/retrace-box/tests/restoreparity.rs` diffs a `load
 and the 0x800 vector table — and states an obligation: a new field must be either covered there and
 equal, or named in `normalise()` citing the mirrored replay mechanism by file and line.
 
-**`from_checkpoint` has no such guard.** It is the path that restores far more state than `restore`
-does, runs mid-run where nothing sits at a default, and has the longer bug history. M24's own closing
-comment names this milestone and its real difficulty:
+**`from_checkpoint` has no such guard** — but the honest version of that claim is narrower than
+M24's phrasing, and this milestone corrects it rather than inheriting it.
+
+What already exists on this path, verified 2026-09-08:
+
+| test | covers |
+|---|---|
+| `tests/checkpoint.rs::checkpoint_round_trip_is_lossless_mid_run` | registers, FP/SIMD, the nine `dbg_internal_state` scalars, full memory — **mid-run**, with non-default state staged via `guest_vm_reserve`, `guest_mmap`, `install_cache_pager`, `mint_bootstrap_port`, and five steps to advance `synthetic_tsc` |
+| `tests/pacposture.rs::from_checkpoint_carries_the_posture` | `pac_enabled` |
+| `tests/sigcheckpoint.rs::from_checkpoint_carries_the_signal_table_and_per_thread_signal_state` | `sigtable`, per-thread signal state |
+| `tests/threads.rs` (R4) | `threads` |
+| `tests/protnone.rs` | `noaccess` |
+| `tests/tlbi.rs` | `tlbi_stub_ready` |
+| `tests/fdtable.rs::fd_table_survives_checkpoint_restore` | `FdTable::from_slots` **as a pure type test** — it builds no `Box_` and so does not exercise `from_checkpoint`'s wiring at all |
+
+That is exactly the shape the README describes: *"each fixed individually, none leaving behind
+anything that would catch the next."* Every historical bug has a point test written after the fact.
+**What is missing is not coverage of the past; it is a forcing function for the future** — one
+structural diff that covers every field at once, and a written obligation that makes field N+1
+somebody's problem before it ships rather than after it breaks.
+
+So this milestone's value is precisely: the structural diff, the obligation, and the fields no test
+reaches at all. It is *not* the first `from_checkpoint` test, and the spec says so rather than
+claiming a gap it does not have.
+
+M24's closing comment still names this milestone and its real difficulty:
 
 > That guard needs a mid-run fixture and a judgement about what *should* legitimately differ at a
 > mid-run landmark; it is the successor milestone, not something this file quietly covers.
@@ -34,10 +57,11 @@ This milestone builds that guard and makes that judgement.
 
 ## Goals
 
-1. A standing parity guard on the `from_checkpoint` path, with the same written obligation
-   `restoreparity.rs` carries, so a new field has to get past a **test** rather than a reviewer.
-2. Enough **reach** that the guard covers the fields this class has actually broken — which today
-   no accessor can even observe.
+1. A standing **structural** parity guard on the `from_checkpoint` path, carrying the same written
+   obligation `restoreparity.rs` does, so a new field has to get past a **test** rather than a
+   reviewer. This is the forcing function the path has never had, not its first test.
+2. Enough **reach** that the guard covers the fields no existing test observes through
+   `from_checkpoint`.
 3. A measured judgement about what legitimately differs at a mid-run landmark, recorded with its
    mechanism rather than asserted.
 4. Fix every asymmetry the guard catches that a real guest can reach; park the rest honestly.
@@ -51,6 +75,10 @@ This milestone builds that guard and makes that judgement.
 - **Closing M24's two structural blind spots.** They carry over unchanged and are restated under
   *Stated limits* rather than left to look covered.
 - **A `BoxState` round-trip test.** Rejected on the merits — see below.
+- **Re-testing what the point tests already cover.** `pac_enabled`, `sigtable`, `threads`,
+  `noaccess` and `tlbi_stub_ready` each have a passing point test. The structural guard will
+  compare them as part of comparing everything, but this milestone deletes none of them and
+  writes no second copy.
 
 ## The rejected approach, and why it is written down
 
@@ -97,15 +125,30 @@ option that is safe.**
 accessors for stack geometry, the two thread-pointer sysregs, `ctx_of(0)`, thread count,
 fall-throughs, the vector table and the backing map.
 
-**None of that reaches `fds`, `sigtable`, `thread_start_pc`, `wq_thread_pc`, `noaccess` or
-`pthread_size`** — and those are where this class has actually lived. A guard built only from today's
-accessors would compare the nine scalars, pass cleanly, and reach almost nothing that has ever
-broken.
+`checkpoint.rs` already compares those nine scalars plus registers, FP and memory. **What no test
+reaches through `from_checkpoint` at all** is the remainder:
 
-So this milestone adds `#[doc(hidden)]` test-only accessors for exactly those six, mirroring
-`dbg_backings`'s existing treatment (guest-visible state only; host pointers deliberately not
+| field | existing coverage |
+|---|---|
+| `fds` | none through `Box_` — `fdtable.rs` tests the `FdTable` type directly |
+| `thread_start_pc` | none |
+| `wq_thread_pc` | none |
+| `pthread_size` | none |
+| `stack_top` / `stack_size` | none |
+| `fall_throughs` | none |
+| `bps_armed`, `wps_armed`, `watch_ranges`, `syscall_watch_hit` | none — and unsettled, see Component 3 |
+| backing map `(ipa, len)` / `next_l3` | implied by `diff_memory`, never compared as a map |
+
+So this milestone adds `#[doc(hidden)]` test-only accessors for the fields that need one, mirroring
+`dbg_backings`'s existing treatment: guest-visible state only, host pointers deliberately not
 exposed, because two boxes differ there by construction and comparing them is a test that can only
-fail).
+fail.
+
+Two type facts constrain the accessor shapes, verified 2026-09-08: `FdTable`, `SigTable` and
+`ThreadTable` derive only `Clone`/`Debug` — **no `PartialEq`** — while `FdSlot` and `ThreadCtx` do
+derive it. So accessors return comparable *projections* (`Vec<FdSlot>` via the existing
+`FdTable::slots()`, a `Debug` string for `SigTable`) rather than the tables themselves, and no
+production type gains a derive it does not otherwise need.
 
 ## Component 3 — the judgement about legitimate mid-run difference
 
