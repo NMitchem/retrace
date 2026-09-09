@@ -6,8 +6,9 @@
 use retrace_box::Box_;
 use retrace_guest::{parse_macho, HELLO};
 
-/// The four debugger fields are the only `Box_` state with no accessor at all, and the guard cannot
-/// honestly assert a field is reset unless a test can observe it being reset.
+/// The four debugger fields are not the only `Box_` state with no accessor — `window_cap` and
+/// `l2_host` also have none — but they are the ones this guard needs to observe being reset, and
+/// the guard cannot honestly assert a reset unless a test can observe it.
 #[test]
 fn the_debug_state_accessor_reports_armed_watchpoints() {
     let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
@@ -74,14 +75,25 @@ fn assert_debug_state_is_deliberately_reset(r: &Box_, label: &str) {
 /// The structural guard.
 ///
 /// **OBLIGATION when you add a field to `Box_`, or any `from_checkpoint`-time write:** it must be
-/// either (a) compared here and EQUAL, or (b) asserted above as deliberately reset, with the
-/// mechanism that re-establishes it on the replay side cited by file and line. There is no third
-/// option that is safe. This path has dropped a field at least five times, each caught only after it shipped.
+/// either (a) compared here and EQUAL, (b) asserted above as deliberately reset, with the mechanism
+/// that re-establishes it on the replay side cited by file and line, or (c) named HERE as knowingly
+/// excluded, citing the comment that documents the exclusion. There is no fourth option that is
+/// safe. This path has dropped a field at least five times, each caught only after it shipped.
+/// `window_cap` (`crates/retrace-box/src/lib.rs:5259`) and `canary_disturbances` (`:5264`) are
+/// bucket (c): both are test-only instrumentation nothing in production reads (M28 and M30
+/// respectively), documented at those two lines as deliberately NOT carried in `BoxState`, so a
+/// restored box always gets the production default / a fresh zero rather than the live value —
+/// correct, not lossy, and not worth asserting on since "always the default" is not a fact about
+/// `from_checkpoint` doing anything.
 ///
 /// **What this deliberately does NOT do**, so it is not mistaken for more than it is:
 /// it compares CONSTRUCTION at one landmark, not evolution afterwards
-/// (`crates/retrace/tests/checkpoint_seek.rs` is that axis); and two boxes wrong in the SAME way are
-/// invisible to any test that only diffs them against each other.
+/// (`crates/retrace/tests/checkpoint_seek.rs` is that axis); two boxes wrong in the SAME way are
+/// invisible to any test that only diffs them against each other; and the memory comparison below
+/// is over the MAP (which `(ipa, len)` regions exist), never over CONTENTS — `from_checkpoint`
+/// populates every backing's bytes with a `memcpy` straight from `state.mem`, so a byte-for-byte
+/// compare here would be near-tautological. (`restoreparity.rs`'s L1 case, by contrast, does
+/// byte-compare the EL1 vector table — a reader should not assume this file does the same.)
 fn assert_checkpoint_parity(b: Box_, label: &str) {
     let live_internal = b.dbg_internal_state();
     let (top, size) = (b.stack_top(), b.stack_size());
@@ -95,6 +107,14 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     // comparing the two directly asserts something that is false by design. It failed on this
     // guard's first run for exactly that reason.
     let live_cur_ctx = b.save_ctx();
+    // Non-current entries are authoritative in a live box — `switch_to_thread` refreshes them on
+    // the way out — so they are compared against the LIVE box, not merely against the captured
+    // state. Without this the guard is clone-fidelity only: a `checkpoint()` that folded into the
+    // wrong index, or corrupted another thread's ctx, would make restored == captured and pass.
+    let live_other_ctxs: Vec<String> = (0..nthreads)
+        .filter(|&i| i != cur)
+        .map(|i| format!("{:?}", b.threads().ctx_of(i)))
+        .collect();
     let fds = b.fds().slots();
     let sigtable = format!("{:?}", b.sigtable());
     let start_pc = b.thread_start_pc();
@@ -105,6 +125,7 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     let mut live_backings = b.dbg_backings();
     live_backings.sort_unstable();
     let next_l3 = b.dbg_next_l3();
+    let tlbi_ready = b.dbg_tlbi_stub_ready();
 
     let state = b.checkpoint();
     drop(b); // one VM per process (HVF)
@@ -121,6 +142,13 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
         "{label}: the current thread's restored context must equal the live box's save_ctx() — \
          checkpoint() folds the live vCPU into the table before carrying it, so this is the fold \
          itself being asserted, not the stale live table");
+    let restored_other_ctxs: Vec<String> = (0..nthreads)
+        .filter(|&i| i != cur)
+        .map(|i| format!("{:?}", r.threads().ctx_of(i)))
+        .collect();
+    assert_eq!(restored_other_ctxs, live_other_ctxs,
+        "{label}: non-current threads' saved contexts must match the LIVE box — these are not \
+         stale, unlike the running thread's entry");
     assert_eq!(r.fds().slots(), fds, "{label}: guest-visible fd slots");
     assert_eq!(format!("{:?}", r.sigtable()), sigtable, "{label}: signal dispositions");
     assert_eq!(r.thread_start_pc(), start_pc, "{label}: bsdthread_register start pc");
@@ -136,11 +164,18 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     assert_eq!(r.dbg_next_l3(), next_l3,
         "{label}: next free L3 table IPA — restored derived {:#x}, live had {next_l3:#x}",
         r.dbg_next_l3());
+    assert_eq!(r.dbg_tlbi_stub_ready(), tlbi_ready,
+        "{label}: TLBI stub readiness — from_checkpoint re-derives this from the restored backings, \
+         exactly as it re-derives next_l3 above, so this is a second derivation of one fact");
 }
 
 /// The static tier. Deliberately mid-run, not landmark 0: at landmark 0 a defaulted field and a
 /// correctly-restored one are indistinguishable, which is the whole reason `checkpoint.rs` runs
-/// mid-run too.
+/// mid-run too. Its reach is still narrow, though: running `HELLO` to its first syscall moves only
+/// pc/elr/spsr off their landmark-0 values — `dbg_internal_state`, the signal table, the fd table,
+/// `thread_start_pc`, `wq_thread_pc`, `pthread_size` and `noaccess` are all still default-vs-default
+/// here, so this tier cannot catch a bug in restoring any of them. Task 3's richer fixture is where
+/// that reach arrives.
 #[test]
 fn a_checkpointed_static_box_matches_the_box_it_came_from() {
     let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
