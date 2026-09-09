@@ -5315,6 +5315,17 @@ impl Box_ {
     #[doc(hidden)]
     pub fn dbg_next_l3(&self) -> u64 { self.next_l3 }
 
+    /// Test-only (M31): the four debugger fields, which are the only `Box_` state no accessor
+    /// reaches. `tests/checkpointparity.rs` needs them to *observe* that `from_checkpoint` resets
+    /// them — an assertion about a field nothing can read is an assertion about nothing. Kept out
+    /// of `dbg_internal_state` deliberately: that string is compared by
+    /// `restoreparity.rs` too, and adding fields to it changes an existing contract.
+    #[doc(hidden)]
+    pub fn dbg_debug_state(&self) -> String {
+        format!("bps_armed={} wps_armed={} watch_ranges={:?} syscall_watch_hit={:?}",
+            self.bps_armed, self.wps_armed, self.watch_ranges, self.syscall_watch_hit)
+    }
+
     /// Test-only: the guest's live PAC posture, read back from SCTLR_EL1 and cross-checked against
     /// the field the constructor derived. PANICS if they disagree — i.e. if some install site set
     /// SCTLR without going through `sctlr_mmu_on(pac_enabled)`. A posture mismatch between the four
