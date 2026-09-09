@@ -5869,9 +5869,14 @@ see what it asserts: `Box_::dbg_debug_state()` and `Box_::dbg_tlbi_stub_ready()`
 **The premise M24 handed down was too strong, and this milestone corrected it in the spec rather than
 inheriting it.** "No parity guard at all" is true of a *structural* guard and false of coverage.
 `tests/checkpoint.rs::checkpoint_round_trip_is_lossless_mid_run` already covered registers, FP/SIMD,
-the nine `dbg_internal_state` scalars and full memory, mid-run, with non-default state staged; five
-point tests (`pacposture.rs`, `sigcheckpoint.rs`, `threads.rs`, `protnone.rs`, `tlbi.rs`) each
-covered exactly one field — one test per historical bug, each written after its own bug. What was
+the nine `dbg_internal_state` scalars and full memory, mid-run, with non-default state staged; six
+point tests (`pacposture.rs`, `sigcheckpoint.rs`, `threads.rs`, `protnone.rs`, `tlbi.rs`,
+`fdtable.rs`) each covered exactly one field — per-field carriage tests, written alongside or after
+the field each covers. They are **not** one test per historical bug, and this section will not say
+so: M7's `pac_enabled` and M13's `noaccess` were never dropped by `from_checkpoint` (M13's was
+planned staging, `2ebbb7b`, not a review-caught bug), while `fdtable.rs` — missing from the list this
+sentence originally carried — does cover a counted instance. Reading *same reason* as *same
+instance* is the precise slip this milestone exists to correct, so it is not reproduced here. What was
 missing was never coverage of the past. **It was a forcing function for the future**: one diff that
 sees every field at once, and an obligation that makes field N+1 somebody's problem *before* it ships
 rather than after it breaks. Stating that narrower claim is worth more than inheriting the wider one,

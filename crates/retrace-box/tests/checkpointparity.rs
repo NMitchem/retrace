@@ -1,8 +1,12 @@
 // M31-checkpointparity. `from_checkpoint` is the replay-side construction path that restores the
-// most state and runs mid-run, where nothing sits at a default. Each field it has ever dropped got
-// a point test written after its own bug (pacposture.rs, sigcheckpoint.rs, protnone.rs, tlbi.rs,
-// threads.rs); what none of them provide is a forcing function for the NEXT field. This file is
-// that: one structural diff, plus an obligation.
+// most state and runs mid-run, where nothing sits at a default. Several of its fields have a
+// per-field carriage test (pacposture.rs, sigcheckpoint.rs, protnone.rs, tlbi.rs, threads.rs,
+// fdtable.rs), each written alongside or after the field it covers. That is NOT the same as one
+// test per instance of the dropped-field class, and must not be read as it: M7's `pac_enabled` and
+// M13's `noaccess` were never dropped by `from_checkpoint` at all (M13's was planned staging,
+// `2ebbb7b`, not a review-caught bug), while fdtable.rs — absent from the earlier list — does cover
+// a counted instance. What none of them provide is a forcing function for the NEXT field. This file
+// is that: one structural diff, plus an obligation.
 //
 // THE RESULT, recorded so a guard that found nothing does not read as a guard that did not look:
 // on its first run this diff found NO asymmetry. `from_checkpoint` reproduced every field both
@@ -88,19 +92,30 @@ fn assert_debug_state_is_deliberately_reset(r: &Box_, label: &str) {
 /// that re-establishes it on the replay side cited by file and line, or (c) named HERE as knowingly
 /// excluded, citing the comment that documents the exclusion. There is no fourth option that is
 /// safe. How often this path has actually dropped a field is counted in ONE place — the
-/// `M24-restoreaudit` section of `docs/status-log.md` — and is deliberately not recounted here; the
+/// `M24-restoreaudit` section of `docs/status-log.md`, read with its forward pointer, the
+/// `M31-checkpointparity` section, which supersedes M24's seven/five with six/four; the log is
+/// append-only, so M24's own text still reads seven and the M31 number is the current one. It is
+/// deliberately not recounted here; the
 /// `BoxState` field list is a different thing and not that count (see the note on `BoxState`). The
 /// clause that used to end this sentence, "each caught only after it shipped", was too strong and
 /// is withdrawn (M31 t5): every instance that list attributes to this path was closed inside its own
 /// milestone — M9 t3 by a code-review follow-up, M10 t4 and M11 t6 by a later task, M14 by `t7 fix
 /// round 1` — and M18's `wq_thread_pc` was carried in `e93f8dc`, the same commit that introduced it,
 /// so it never had a gap at all.
-/// `window_cap` (`crates/retrace-box/src/lib.rs:5259`) and `canary_disturbances` (`:5264`) are
-/// bucket (c): both are test-only instrumentation nothing in production reads (M28 and M30
-/// respectively), documented at those two lines as deliberately NOT carried in `BoxState`, so a
-/// restored box always gets the production default / a fresh zero rather than the live value —
+/// Bucket (c) has THREE members, and the list has to stay complete: the obligation says there is no
+/// fourth option that is safe, so a field missing from here misleads exactly the reader auditing
+/// field N+1. `window_cap` (`crates/retrace-box/src/lib.rs:5291`) and `canary_disturbances`
+/// (`:5295`) are the first two: both are test-only instrumentation nothing in production reads (M28
+/// and M30 respectively), documented at those two lines as deliberately NOT carried in `BoxState`,
+/// so a restored box always gets the production default / a fresh zero rather than the live value —
 /// correct, not lossy, and not worth asserting on since "always the default" is not a fact about
 /// `from_checkpoint` doing anything.
+/// `l2_host` (`crates/retrace-box/src/lib.rs:485`) is the third, excluded for a different reason: it
+/// is a HOST pointer into a freshly-allocated backing, so two boxes hold different values there by
+/// construction and no equality between them would be meaningful. What it points AT is pinned
+/// instead — the L2 table's own backing is covered by the `dbg_backings()` map compared below, and
+/// the allocation cursor that walks with it by `dbg_next_l3()`. (`restoreparity.rs` makes exactly
+/// this argument for the same field.)
 ///
 /// **What this deliberately does NOT do**, so it is not mistaken for more than it is:
 /// it compares CONSTRUCTION at one landmark, not evolution afterwards
@@ -110,6 +125,10 @@ fn assert_debug_state_is_deliberately_reset(r: &Box_, label: &str) {
 /// populates every backing's bytes with a `memcpy` straight from `state.mem`, so a byte-for-byte
 /// compare here would be near-tautological. (`restoreparity.rs`'s L1 case, by contrast, does
 /// byte-compare the EL1 vector table — a reader should not assume this file does the same.)
+/// One further reduction, stated so it is not read as coverage it is not: `cache` reaches this diff
+/// only through `dbg_internal_state`, which reports it as a BOOLEAN (`cache_installed={}` fed by
+/// `self.cache.is_some()`). The `CacheMeta` it wraps is never diffed, so a `from_checkpoint` that
+/// installed a pager over different cache metadata would still compare equal here.
 ///
 /// **Proven able to fire (M31 t4).** Replacing `sigtable: state.sigtable.clone()` with
 /// `SigTable::default()` in `from_checkpoint` turns
@@ -231,7 +250,7 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 /// `set_thread_start_pc`: the setter only reaches `thread_start_pc`, leaving `wq_thread_pc` and
 /// `pthread_size` at `None` on both the live and restored box — `Default == Default`, the exact
 /// trap this fixture exists to eliminate. `guest_bsdthread_register`'s whole body
-/// (`crates/retrace-box/src/lib.rs:4119`) sets all three from one call and has no other effect:
+/// (`crates/retrace-box/src/lib.rs:4147`) sets all three from one call and has no other effect:
 /// `self.thread_start_pc = Some(args[0]); self.wq_thread_pc = Some(args[1]); self.pthread_size =
 /// Some(args[2] as u32); WORKQ_FEATURE_WORD as u64`.
 ///
@@ -262,7 +281,7 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 /// list: they are not absent defaults but always-identical non-trivial constants (`STACK_TOP_IPA` /
 /// `GRANULE`). Nothing in `Box_`'s public interface moves them post-load, so this fixture cannot
 /// force them away from the landmark-0 value, and the comparison cannot tell a genuine carry-through
-/// of `state.stack_top`/`state.stack_size` (`crates/retrace-box/src/lib.rs:5232-5233`) from a
+/// of `state.stack_top`/`state.stack_size` (`crates/retrace-box/src/lib.rs:5263-5264`) from a
 /// hardcoded recomputation of the same constant.
 #[test]
 fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {

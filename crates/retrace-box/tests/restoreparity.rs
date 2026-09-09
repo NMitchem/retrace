@@ -150,8 +150,11 @@ fn diff_backings(load: &[(u64, usize)], restore: &[(u64, usize)]) -> String {
 /// all — its fix was the opposite remedy, `from_checkpoint` DERIVING `tlbi_stub_ready` from the
 /// restored backings (`70629c4`) — while the field comments additionally name M7 t6, M8, M13 and
 /// M23 t1, which are carries rather than instances. The count of the class lives in ONE place, the
-/// `M24-restoreaudit` section of `docs/status-log.md`; the note on `BoxState` explains why a field
-/// there is not evidence of an instance, and flags the one entry (M18) the git record contradicts.
+/// `M24-restoreaudit` section of `docs/status-log.md` — read with its forward pointer, the
+/// `M31-checkpointparity` section, which supersedes M24's seven/five with six/four (the log is
+/// append-only, so M24's own text still reads seven). The note on `BoxState` explains why a field
+/// there is not evidence of an instance; the one entry (M18) the git record contradicts was flagged
+/// there and is now resolved by that M31 section.
 fn assert_load_restore_parity(b: Box_, label: &str) {
     let load_state = normalise(&b.dbg_internal_state());
     let (top, size) = (b.stack_top(), b.stack_size());
