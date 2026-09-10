@@ -203,7 +203,34 @@ real `machmsg::route()`, never a hand-copied allow-list.
 
 `band > 0` requires `avail > window_cap`. No governed call comes within 40 KiB of it. So
 `is_known_dest_arg(-47, 0)` — the entry §5a exists to add — **would have been inert on the day it
-shipped**, not by argument but by measurement.
+shipped**, not by argument but by measurement, across the three fixtures walked.
+
+**That the 13 are shallow is one fact, not thirteen coincidences.** All five ids in
+`FORWARD_ALLOWLIST` (200, 206, 3418, 3405, 412) are MIG-generated kernel-RPC stubs, and a MIG stub
+builds `union { Request; Reply; } Mess;` as a **stack local** and passes `&Mess` as the message
+buffer. `avail` is the distance from a buffer to the end of its backing, so for a governed call
+`avail` *is* the stack depth measured from that stack's top — and the geometry holds for all three
+stacks retrace produces: the main stack is 256 KiB backed with the buffer below its top
+(`crates/retrace-box/src/lib.rs:94-95`), a pthread stack is the guest's own mmap with the pthread
+struct at the high end (`crates/retrace-box/src/thread.rs:114-116`), and a workqueue worker's stack
+puts the struct at the top and grows down into the region
+(`crates/retrace-box/src/lib.rs:4426-4441`). A shallow governed call is a shallow *frame*, and
+every governed call measured here was made during process initialisation.
+
+The same structure explains the outlier. The one landmark that DID carry a nonzero band — msgh_id
+`0x400000cf` at ~4.1 MB `avail` — is a **libxpc message-queue send with a heap buffer**, the only
+class in the corpus where `avail` is unrelated to stack depth at all, and exactly the class
+`route()` excludes as `Route::RefuseMqSend`.
+
+**What stays open, and this section will not pretend otherwise: nothing bounds the DEPTH at which a
+governed id can fire.** All 13 measured calls are process-initialisation calls, which are shallow by
+construction, so the population is **biased** — the sample size says less than it looks like it
+does. A `semaphore_create` (3418) from a dispatch semaphore built deep inside a call chain, or a
+`host_info` (200) behind a `sysconf`, are ordinary things for a program to do, and 64 KiB of frames
+sits well inside a 256 KiB stack. The inertness finding is **unlikely to reverse and mechanistically
+explained, but not proven**. `every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band`
+therefore asserts `governed_max_avail < PTR_WINDOW_CAP` rather than only printing it, so the day a
+fixture contradicts this section, this section reds instead of quietly rotting.
 
 ### Why that closes the whole milestone, not just the `mach_msg2` entry
 
@@ -212,7 +239,10 @@ with a genuine kernel-written argument — `sendfile` (337) and `mach_msg2` (−
 (`write`, `pwrite`, `writev`, `pwritev`, the `send*` family, `msync`) has none. Both candidates are
 now measured dead: one has no guest, the other has no band.
 
-**This milestone's coverage deliverable is therefore empty — measured empty, not suspected empty.**
+**This milestone's coverage deliverable is therefore empty across every fixture it could walk —
+measured empty on hello_dyn, jq and CPython, not suspected empty.** The corpus is those three;
+`/bin/ps` and the threaded/GCD fixtures were not walked, and the paragraph above says what that
+costs the claim.
 
 ### The finding that replaces it
 
@@ -258,13 +288,15 @@ per-argument direction then stops being a table and becomes a field.
   collapse.
 - The 35-landmark corpus measurement itself, which is the evidence this section rests on.
 
-### A category error caught three times, worth naming once
+### A category error caught twice, worth naming once
 
-The same mistake recurred at three scales and was caught by three different mechanisms: Task 1's
+The same mistake recurred at two scales and was caught by two different mechanisms: Task 1's
 original fixture measured msgh_id 4811, which `Route::ServiceVmMap` services and never forwards
 (caught by review); fix round 2's corpus walk initially risked counting a refused message-queue send
 with a genuine 64-byte band at ~4.1 MB `avail` (caught by the implementer, by classifying via the
 real `route()` before drawing a conclusion). Both would have produced a confident, wrong headline.
+(This heading said "three times" and listed two. Fix round 1's re-derivation of the band formula is
+a different class — calling production versus copying it — so it does not make the count up.)
 **The generalisable rule: classify by calling the production router, never by a copy of its
 allow-list.**
 
