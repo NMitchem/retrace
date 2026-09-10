@@ -5359,16 +5359,24 @@ impl Box_ {
     /// (`-47`) or any other mach trap — its match is keyed entirely on BSD syscall numbers — so for
     /// every `num` this accessor is used against, `dest_len_bytes` returns `None` and `diff_window`
     /// collapses to exactly this expression regardless of which `i`/`args` would have been passed.
-    /// Returns 0 for an `ipa` `host_span` cannot resolve, matching `diff_window`'s own behaviour
-    /// (never called on an unmapped pointer, since `forward_and_diff`'s loop only calls it inside
-    /// the `Some((hp, avail))` arm).
+    ///
+    /// Returns `None` when `host_span` cannot resolve `ipa` at all — an unmapped pointer has NO
+    /// window, which is a different fact from a window of length zero. Fix round 1 (Minor 5):
+    /// collapsing those two into a bare `0` made a caller that asserts `len >= send_size` read
+    /// "the hypothesis is REFUTED" for a buffer that was never mapped, rather than "this ipa isn't
+    /// a valid argument to ask about" — the wrong failure for what actually went wrong.
     #[doc(hidden)]
-    pub fn dbg_window_len_for(&self, ipa: u64) -> usize {
-        match self.host_span(ipa) {
-            Some((_, avail)) => avail.min(self.window_cap),
-            None => 0,
-        }
+    pub fn dbg_window_len_for(&self, ipa: u64) -> Option<usize> {
+        self.host_span(ipa).map(|(_, avail)| avail.min(self.window_cap))
     }
+
+    /// Test-only (M32 Task 1 fix round 1): the raw `window_cap` field of a `Box_` built by a
+    /// PRODUCTION constructor — `load`/`load_dynamic`/`restore`/the `BoxState` restore path all
+    /// hard-code it to `PTR_WINDOW_CAP`, and `set_window_cap_for_test` is the only thing that ever
+    /// sets it otherwise (called only from `truncguard.rs`). Lets a proof assert that fact against
+    /// a live instance instead of citing the four call sites as a sentence in a comment.
+    #[doc(hidden)]
+    pub fn dbg_window_cap(&self) -> usize { self.window_cap }
 
     /// Test-only (M31): `from_checkpoint` RE-DERIVES this from the restored backings
     /// (`backings.iter().any(|b| b.ipa == TLBI_STUB_IPA)`) rather than carrying it, exactly as it

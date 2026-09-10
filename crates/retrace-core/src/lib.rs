@@ -2515,6 +2515,20 @@ impl ReplaySession {
     /// How many threads the guest has created so far. Test-only.
     #[doc(hidden)]
     pub fn b_thread_count(&self) -> usize { self.b.threads().len() }
+    /// M32 Task 1 fix round 1: `Box_::dbg_window_len_for`, delegated so a test positioned at a
+    /// REAL forwarded mach_msg2 landmark (via `seek`) can ask what window `forward_and_diff` would
+    /// compute for its message buffer, without this bare `retrace-core`-less `retrace-box` test
+    /// harness having to re-implement `retrace-core`'s routing itself. Test-only, like the other
+    /// `dbg_*` delegators on this type.
+    #[doc(hidden)]
+    pub fn dbg_window_len_for(&self, ipa: u64) -> Option<usize> { self.b.dbg_window_len_for(ipa) }
+    /// M32 Task 1 fix round 1: `Box_::dbg_window_cap`, delegated for the same reason as
+    /// `dbg_window_len_for` above — lets a proof check the `restore` constructor's `window_cap`
+    /// (this session's `self.b` was built by `Box_::restore`/`Box_::from_checkpoint`, the two
+    /// production constructors `crates/retrace-box/tests/machmsgband.rs`'s structural proof does
+    /// not reach directly) against a REAL instance rather than the source citation alone.
+    #[doc(hidden)]
+    pub fn dbg_window_cap(&self) -> usize { self.b.dbg_window_cap() }
     /// Peek the NEXT trace event to be consumed: its `(num, args)` when it is a `Syscall`, else
     /// `None` (a `Snapshot`/`Exit`, or past the last event). Read-only — does NOT advance the guest.
     /// Lets a discovery session recognize a target syscall landmark (e.g. `write(1, …)`) before
