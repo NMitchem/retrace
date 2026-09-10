@@ -278,32 +278,33 @@ design, and the reconstruction caveat in full.
   `jq --version` and the real CPython interpreter), and the Apple sweep (**392** control lines from
   **54** distinct guests, zero canary lines, tally unmoved at `pass=46 fail=8 skip=0`).
 
-**Gate:** 552 passed / 0 failed / 2 ignored across 119 test binaries, **measured at M31** over all
-119 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with
-`-D warnings`.
-See the testing note below for how that number is assembled. "119 test binaries" is 112 test
+**Gate:** 556 passed / 0 failed / 2 ignored across 121 test binaries, **measured at M32** over all
+121 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
+`--workspace --all-targets` with `-D warnings`.
+See the testing note below for how that number is assembled. "121 test binaries" is 114 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
 nobody has to re-derive it. The ignored gates are unchanged at
 **two**: `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). Both
-are described under Known limits. M31 parked nothing new and un-parked nothing.
+are described under Known limits. M32 parked nothing new and un-parked nothing.
 
-Reconciled against M30's 549 / 0 / 2 over 118 **file-by-file rather than by sum**:
+Reconciled against M31's 552 / 0 / 2 over 119 **file-by-file rather than by sum**:
 
-| file | M30 | M31 | delta |
+| file | M31 | M32 | delta |
 |---|---|---|---|
-| `retrace-box/tests/checkpointparity.rs` | 0 | 3 | **+3, a NEW binary** — the two tiers of the `from_checkpoint` structural guard, plus the accessor test that makes the deliberate-reset assertion observable |
+| `retrace-box/tests/machmsgband.rs` | 0 | 2 | **+2, a NEW binary** — the serviced-call observation (whose band is asserted zero) and the structural proof that a guard band, whenever one exists, starts past every `send_size` the kernel is permitted to read |
+| `retrace-core/tests/machmsgband_dyn.rs` | 0 | 2 | **+2, a NEW binary** — one real forwarded `task_info` triple, and the 35-landmark corpus walk that measured the milestone's own coverage deliverable empty |
 
-Every other file unchanged, and `--bins` **11 → 11**. **One new test binary**, which is what moves
-the count 118 → 119. The count closes at both ends: the tree held 551 `#[test]` at M30 = 549 running
-+ 2 ignored, and **554** now = 552 + 2 — and that total was **predicted from source before the gate
-ran**, then matched exactly by the run.
+Every other file unchanged, and `--bins` **11 → 11**. **Two new test binaries**, which is what moves
+the count 119 → 121. The count closes at both ends: the tree held 554 `#[test]` at M31 = 552 running
++ 2 ignored, and **558** now = 556 + 2. Both derivations were made independently — one predicted
+from the diff, one taken from the run — and they agreed.
 
-The `retrace-box` chunk again ran as a **whole package** so its `Doc-tests` harness is not silently
-dropped (M24's lesson, now standing practice), and the `retrace` package was split into `--bins` plus
-six explicit target sets of at most 11, so no chunk is killed by the ceiling and every target runs in
-exactly one chunk.
+Both `retrace-box` and `retrace` ran as **whole packages** rather than per-target, so neither
+`retrace-box`'s `Doc-tests` harness (M24's lesson, standing practice since) nor the 11 unit tests
+that live only in the `retrace` binary could be silently dropped — the two halves of the same trap,
+one of which fails loudly and one of which does not.
 
 One timing trap is worth knowing before it is mistaken for a hang: `bigread_e2e` took **536s** on its
 first run and **47s** on its second, with the recording process sitting at 0:00.00 CPU throughout the
@@ -500,6 +501,37 @@ These are real and current, not aspirational gaps.
   needs a per-**argument** direction notion, a `dest_buffer`-shaped table of which arguments are
   sources, which a predicate over the syscall number cannot express. That is **owed successor work**,
   not something this milestone has.
+  **M32 went to build that entry and measured it inert instead, so the gap above is still open and is
+  now known to cost nothing observable today.** The exclusion is unchanged — `mach_msg2`'s band is
+  still never filled — but what would change if it were filled has been measured rather than
+  guessed. A band exists only where a buffer sits more than `window_cap` (65,536) bytes from the end
+  of its backing; M32 walked **35 real `mach_msg2` landmarks** across `hello_dyn`, `jq` and CPython,
+  classified each by calling the production `machmsg::route()` rather than a copy of its allow-list,
+  and found **13 governed** (`Route::Forward`, the only route `forward_and_diff` ever runs for) with
+  a **maximum `avail` of 24,672 bytes** and **zero bands**. The entry would have shipped inert.
+  That is structural, not luck: all five forwarded ids are MIG-generated kernel-RPC stubs, and a MIG
+  stub builds its `union { Request; Reply; }` as a **stack local**, so a governed call's `avail` is
+  its stack depth measured from the top of whichever stack it runs on — and every stack retrace
+  builds puts the buffer below the top (main 256 KiB, a pthread stack the guest's own mmap, a
+  workqueue worker's struct-at-top growing down). The single landmark in the whole corpus that *did*
+  carry a nonzero band is the heap-backed libxpc message-queue send `route()` refuses, which
+  `forward_and_diff` never sees.
+  **The residual is depth, and it is a real one**: nothing bounds the stack depth at which a
+  governed id can fire, and all 13 measured calls are process-initialisation calls, shallow by
+  construction — a biased population. A `semaphore_create` from a dispatch semaphore built deep in a
+  call chain, or a `host_info` behind a `sysconf`, are ordinary, and 64 KiB of frames sits well
+  inside a 256 KiB stack. So the finding is mechanistically explained and unlikely to reverse, **not
+  proven** — which is why `machmsgband_dyn.rs` **asserts** the maximum governed `avail` stays under
+  the threshold rather than only printing it: the first fixture **in that test's own corpus** that
+  contradicts this paragraph reds the gate instead of silently ageing it — a new e2e guest added
+  elsewhere in the repo is not walked by it and would not. `sendfile`'s half of the gap cannot be measured at all
+  here, for the reason M32 re-confirmed by `grep`: nothing in this repo exercises it.
+  **And the shape of the owed work changed.** M32's entry would have been a *fifth* function
+  answering "what does this syscall do with each of its arguments" — after `fd_operands` (keyed by
+  argument index), `dest_buffer` (index plus length source), and `reads_guest_buffer` /
+  `writes_via_nested_pointer` (whole-syscall booleans that lost the index the other two keep). The
+  successor named by M32 is therefore a **unification**, `arg_kinds(num) -> &'static [ArgKind]` with
+  an equivalence sweep proving it reproduces all four, not another view to reconcile against them.
   *(3)* `reads_guest_buffer` is a list, and a list is not a proof. **`ioctl` is the named hole**: a
   `_IOW` request encodes its buffer length in the request code, so no rule over the syscall number
   can size it. Path-taking calls are deliberately absent because a path is NUL-terminated and bounded
@@ -725,8 +757,9 @@ whole invocation loudly.
 
 **The same trap has a second mouth: `Doc-tests`.** `--test <name>` skips those too, so splitting a
 *library* crate per-target — as M24's gate had to for `retrace-box` — drops that crate's `Doc-tests`
-harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the 118
-binaries. If you split a library crate per-target, run `cargo test -p <crate> --doc` alongside it —
+harness from every chunk. It runs zero tests, so nothing fails; it just quietly costs one of the
+counted binaries (the figure was 118 when M24 hit it, and it moves every milestone — which is why
+this sentence no longer names one). If you split a library crate per-target, run `cargo test -p <crate> --doc` alongside it —
 or, as M25's gate did, run that crate as a whole package and let cargo include it for you.
 
 **Run each `crates/retrace` test target as its own cargo invocation** — that is what keeps a chunk

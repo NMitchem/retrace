@@ -432,7 +432,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // anything unrecognized fails loudly with its decoded name (spec §Mechanism).
             Stop::Syscall { num, args } if num == MACH_MSG2 => {
                 let m = machmsg::Msg2::unpack(&args);
-                assert!(m.send_size as usize <= 0x1000,
+                assert!(m.send_size as usize <= machmsg::SEND_SIZE_MAX,
                     "mach_msg2 send_size {:#x} implausibly large", m.send_size);
                 match machmsg::route(&m, guest_task_port) {
                     machmsg::Route::ServiceVmMap => {
@@ -2515,6 +2515,32 @@ impl ReplaySession {
     /// How many threads the guest has created so far. Test-only.
     #[doc(hidden)]
     pub fn b_thread_count(&self) -> usize { self.b.threads().len() }
+    /// M32 Task 1 fix round 1: `Box_::dbg_window_len_for`, delegated so a test positioned at a
+    /// REAL forwarded mach_msg2 landmark (via `seek`) can ask what window `forward_and_diff` would
+    /// compute for its message buffer, without this bare `retrace-core`-less `retrace-box` test
+    /// harness having to re-implement `retrace-core`'s routing itself. Test-only, like the other
+    /// `dbg_*` delegators on this type.
+    #[doc(hidden)]
+    pub fn dbg_window_len_for(&self, ipa: u64) -> Option<usize> { self.b.dbg_window_len_for(ipa) }
+    /// M32 Task 1 fix round 1: `Box_::dbg_window_cap`, delegated for the same reason as
+    /// `dbg_window_len_for` above — lets a proof check the `restore` constructor's `window_cap`
+    /// (this session's `self.b` was built by `Box_::restore`/`Box_::from_checkpoint`, the two
+    /// production constructors `crates/retrace-box/tests/machmsgband.rs`'s structural proof does
+    /// not reach directly) against a REAL instance rather than the source citation alone.
+    #[doc(hidden)]
+    pub fn dbg_window_cap(&self) -> usize { self.b.dbg_window_cap() }
+    /// M32 Task 1 fix round 2 (Important C): the RAW `avail` `host_span` reports for `ipa` --
+    /// distinct from `dbg_window_len_for`'s `win` (`avail.min(window_cap)`), and needed
+    /// separately: the corpus walk in `machmsgband_dyn.rs` must tell a `win < window_cap` call
+    /// (where `avail == win` is guaranteed, so `band == 0` follows without needing this) apart
+    /// from a `win == window_cap` one (where `avail` could still exceed `window_cap`, and only
+    /// this raw value says by how much). Delegates to the EXISTING `Box_::host_span_for_test`
+    /// (no new `Box_`-side accessor needed) rather than adding a second box-level seam for the
+    /// same underlying data `dbg_window_len_for` already reads.
+    #[doc(hidden)]
+    pub fn dbg_avail_for(&self, ipa: u64) -> Option<usize> {
+        self.b.host_span_for_test(ipa).map(|(_, avail)| avail)
+    }
     /// Peek the NEXT trace event to be consumed: its `(num, args)` when it is a `Syscall`, else
     /// `None` (a `Snapshot`/`Exit`, or past the last event). Read-only — does NOT advance the guest.
     /// Lets a discovery session recognize a target syscall landmark (e.g. `write(1, …)`) before

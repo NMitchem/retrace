@@ -12,6 +12,24 @@ const MACH64_SEND_KOBJECT_CALL: u64 = 0x2_0000_0000;
 /// Everything retrace services is a kernel-object call; this bit marks the one thing it is not.
 const MACH64_SEND_MQ_CALL: u64 = 0x4_0000_0000;
 
+/// The ceiling `record_box`'s mach_msg2 arm asserts every `send_size` against, before `route()`
+/// even distinguishes a serviced id from a forwarded one (`crates/retrace-core/src/lib.rs`, the
+/// `MACH_MSG2` arm). A `pub const` rather than a literal at that assert because it is a load-bearing
+/// PREMISE elsewhere, not just a plausibility check: M32's structural proof that a guard band can
+/// never land inside the region the kernel reads out of a message buffer is exactly
+/// `PTR_WINDOW_CAP (65536) > SEND_SIZE_MAX (4096)`, so a test that pins the proof must be able to
+/// read the real bound rather than its own copy of the number.
+///
+/// **If you widen this, the thing that stops you is the module-scope
+/// `const _: () = assert!(machmsg::SEND_SIZE_MAX < retrace_box::PTR_WINDOW_CAP)` at the top of
+/// `crates/retrace-core/tests/machmsgband_dyn.rs`** — a COMPILE-TIME check, in the only crate where
+/// both operands are visible. That file's other uses of this constant are `send_size <=
+/// SEND_SIZE_MAX` per-landmark checks, which a widening only makes more permissive; they check that
+/// real traffic obeys the bound, never that the bound is still small enough for the proof. For one
+/// round this comment claimed they did the second job, which is the M32 finding-2 defect recurring
+/// inside its own fix.
+pub const SEND_SIZE_MAX: usize = 0x1000;
+
 /// The eight mach_msg2_trap registers, unpacked (see the spec's ABI table).
 pub struct Msg2 {
     pub data: u64, pub options: u64,

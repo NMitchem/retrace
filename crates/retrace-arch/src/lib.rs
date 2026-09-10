@@ -327,10 +327,34 @@ pub fn reads_guest_buffer(num: u64) -> bool {
         // silent corruption while the cost of listing it is nothing.
         | 65 | 405
         // mach_msg2_trap: the kernel reads the message buffer at x0. retrace-core bounds
-        // `send_size` to 4 KiB by assert, so the exposure is small — but a band lands wherever some
-        // register points, and nothing relates that to the message's own extent. Written as the
-        // two's-complement of the trap number, matching how the negative mach traps are compared
-        // everywhere else.
+        // `send_size` to `machmsg::SEND_SIZE_MAX` (4 KiB) by assert, before `route()` even runs.
+        //
+        // **M32 measured the reason this entry used to give, and disproved it.** That reason was:
+        // "a band lands wherever some register points, and nothing relates that to the message's
+        // own extent." For argument 0 the two ARE related — the band's start is `ipa + window_cap`,
+        // `window_cap` is 65536 on every production constructor, and the 4096 ceiling above holds
+        // for every mach_msg2 call — so a band on this argument provably cannot land inside the
+        // region the kernel reads. The old sentence is left NAMED rather than silently swapped,
+        // per CLAUDE.md's own rule: a superseded claim is left standing with a forward pointer
+        // rather than quietly corrected, so a reader who met it before can tell it was overturned
+        // rather than wonder whether they misremembered it. (An earlier draft of this comment said
+        // the sentence is kept "because it is cited by the proof that replaced it" — it is not
+        // cited anywhere; that was a wrong supporting fact bolted to a right decision, which is the
+        // class M32 spent the milestone catching.)
+        //
+        // **The entry stays anyway, and the reason is now the measurement, not the hazard.** M32
+        // walked 35 real mach_msg2 landmarks across hello_dyn, jq and CPython: 13 were `Route::
+        // Forward` (the only route `forward_and_diff`, and so any canary fill, ever runs for), and
+        // their maximum `avail` was 24,672 bytes against the 65,536 a band needs to exist at all —
+        // zero bands. Removing this entry would therefore change nothing observable today, while
+        // requiring a per-ARGUMENT direction notion this whole-syscall predicate cannot express.
+        // The residual is depth, not shape: nothing bounds the stack depth at which a governed id
+        // can fire, and all 13 measured calls are process-initialisation calls. See
+        // `docs/superpowers/specs/2026-09-09-retrace-m32-dirtable-design.md` §9 and M32's section
+        // of `docs/status-log.md`.
+        //
+        // Written as the two's-complement of the trap number, matching how the negative mach traps
+        // are compared everywhere else.
         | 0xffff_ffff_ffff_ffd1 // -47
     )
 }

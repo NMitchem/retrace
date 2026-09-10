@@ -6047,3 +6047,240 @@ bytes.
   backing's bytes with a `memcpy` straight from `state.mem`, so a byte-for-byte compare here would be
   near-tautological — but `restoreparity.rs` *does* byte-compare the EL1 vector table, so a reader
   must not assume the two files do the same thing.
+
+## Status: M32-dirtable — the table said not to build the table
+
+M32 set out to make the M30 canary decision belong to the **argument** rather than the syscall.
+`retrace_arch::reads_guest_buffer` is a whole-syscall predicate: a syscall that reads *any* guest
+buffer has *every* argument's guard band withheld from the canary fill, and two of the excluded
+calls have a genuine kernel-**written** argument — `sendfile`'s in-out `off_t *`, and `mach_msg2`'s
+receive buffer. Recovering that coverage needed a per-argument notion (`is_known_dest_arg`), six
+tasks were planned for it, and Task 1 was the measurement that had to come first: *does a guard band
+on `mach_msg2`'s buffer land past `send_size`, the boundary the kernel reads to?*
+
+**The measurement said the entry would ship inert, so it was not built.** Tasks 2–6 were dropped and
+the milestone closes as a measurement. That is the honest-gate discipline applied one level up: a
+milestone that measures its own deliverable empty and says so is worth more than one that ships the
+entry anyway and lets a future reader assume it does something.
+
+### What was measured
+
+Task 1, after two review-driven fix rounds, walked **35 real `mach_msg2` landmarks** across
+`hello_dyn`, `jq` and CPython — all three present on the machine, all three walked, none skipped.
+Each landmark was classified by calling the production `machmsg::route()`, never a hand-copied
+allow-list.
+
+| | |
+|---|---|
+| landmarks measured | 35 |
+| **governed** by this milestone (`Route::Forward`) | **13** |
+| maximum `avail` among governed calls | **24,672 bytes** |
+| `window_cap` — the threshold below which no band exists at all | **65,536** |
+| governed calls producing a nonzero band | **zero** |
+
+A band exists only where `avail > window_cap`. No governed call comes within 40 KiB of that. So the
+entry §5a of the spec exists to add would have changed nothing observable on the day it shipped —
+by measurement, not by argument. `sendfile`, the only other member of `reads_guest_buffer` with a
+kernel-written argument, has **no guest**: a `grep` across `crates/` finds it in the arch constant
+table and the box's own implementation and nowhere else. Both candidates for this milestone's
+coverage deliverable are dead, and the deliverable is empty.
+
+### Why the 13 are shallow — one fact, not thirteen coincidences
+
+All five ids in `FORWARD_ALLOWLIST` (200 `host_info`, 206 `host_get_clock_service`, 3418
+`semaphore_create`, 3405 `task_info`, 412 `host_get_special_port`) are MIG-generated kernel-RPC
+stubs, and a MIG stub builds `union { Request; Reply; } Mess;` as a **stack local** and passes
+`&Mess`. `avail` is the distance from a buffer to the end of its backing, so for a governed call
+`avail` **is** the stack depth measured from that stack's top. The geometry holds for all three
+stacks retrace produces: the main stack is 256 KiB backed with the buffer below its top
+(`crates/retrace-box/src/lib.rs:94-95`), a pthread stack is the guest's own mmap and what
+libpthread hands `bsdthread_create` is the stack **TOP**, with SP starting there and growing down
+(`crates/retrace-box/src/lib.rs:4681-4683`), and a workqueue worker's stack
+puts the struct at the top and grows down (`crates/retrace-box/src/lib.rs:4426-4441`).
+
+The same structure explains the corpus's one outlier. Exactly one landmark carried a nonzero band —
+msgh_id `0x400000cf` at ~4.1 MB `avail`, band 64 — and it is a **libxpc message-queue send with a
+heap buffer**, the only class in the corpus where `avail` has nothing to do with stack depth, and
+precisely the class `route()` refuses as `Route::RefuseMqSend`. `forward_and_diff` never runs for
+it. Counted naively it would have produced a confident, wrong "NOT inert" headline; the implementer
+caught it by classifying through the real router before drawing the conclusion.
+
+### What stays open in the finding itself: depth
+
+**Nothing bounds the stack depth at which a governed id can fire.** All 13 measured calls are
+process-initialisation calls, which are shallow by construction, so the population is **biased** —
+the sample says less than 13 rows across three guests looks like it says. A `semaphore_create` from
+a dispatch semaphore built deep inside a call chain, or a `host_info` behind a `sysconf`, are
+ordinary things for a program to do, and 64 KiB of frames sits well inside a 256 KiB stack. The
+finding is mechanistically explained and unlikely to reverse. It is **not proven**, and this section
+will not say otherwise.
+
+That is why the closing measurement now **asserts** rather than only reporting. Through the review
+round the corpus walk printed its conclusion with `eprintln!` and was green by construction: the
+number the milestone closed on could become false without anything going red, while spec §9's claim
+stayed load-bearing for the successor's scoping with nothing watching it.
+`every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band` now asserts
+`governed_max_avail < PTR_WINDOW_CAP` — deliberately one step stricter than "no governed band was
+nonzero", since `avail == window_cap` exactly still yields band 0, so the tripwire fires before the
+finding is actually overturned. It reds on an *improvement* (a fixture that finally reaches a deep
+governed call), and that red is the correct signal: it says the closed milestone's premise moved.
+The discipline is M28's "prove the instrument can fire" and M29's "gate the channel that reports it",
+applied to a conclusion instead of an instrument — including the part M28 taught the hard way: the
+assertion was **verified able to fail** before it was trusted, by temporarily lowering its threshold
+to 24,000 against the corpus's real 24,672 and watching the test go red with its own message. The
+mutation was reverted, the revert verified with an empty `git status --porcelain=v1`, and the suite
+re-run green. The control is recorded on the test itself, which is where its next reader will be.
+
+### The finding that replaces the deliverable: four views of one question
+
+The per-argument defect is real, but it is not a defect in `reads_guest_buffer`. It is a defect in
+the **schema**. Four functions answer one question — *what does this syscall do with each of its
+arguments* — in four incompatible shapes, and two of them threw away the argument index the other
+two keep:
+
+| function | shape | keyed by |
+|---|---|---|
+| `fd_operands` | `&'static [usize]` | argument indices |
+| `dest_buffer` | `Option<(usize, DestLen)>` | argument index + length source |
+| `reads_guest_buffer` | `bool` | whole syscall |
+| `writes_via_nested_pointer` | `bool` | whole syscall |
+
+M32's entry would have added a **fifth** view, to recover per-argument information `dest_buffer`
+already stores eight lines away. That is the M26–M32 lineage's recurring shape: each milestone adds
+a view and reconciles it against the others, and each new view is a fresh chance to ship inert.
+
+**The successor is therefore a unification, not another view**: one
+`arg_kinds(num) -> &'static [ArgKind]` table from which all four current functions derive, proven by
+an equivalence sweep over every syscall number. M32's per-argument direction then stops being a
+table and becomes a field. A semantic-coverage / mutation-testing framework was designed to police
+inert entries generally and then **abandoned deliberately**: it would have policed a symptom forever,
+needed its own positive control, and cost corpus runs indefinitely, while the cause is that the
+tables do not express what the code needs. Unification removes the symptom's source. If inert
+entries keep appearing *after* unification, that framework becomes worth revisiting, and this
+paragraph is the pointer back to it.
+
+### What Task 1 landed, and it stands
+
+- `Box_::band_len(avail, win)` hoisted out of `forward_and_diff` into a `pub`, pure function beside
+  `band_not_covered`, so exactly one copy of `GUARD_BAND.min(avail - win)` exists and a test can
+  call production rather than re-derive it. The bare, panicking subtraction was **preserved, not
+  softened to `saturating_sub`** — hoisting an invariant must not weaken it.
+- The structural proof (`crates/retrace-box/tests/machmsgband.rs`) that whenever a band exists it
+  begins at least `window_cap` (65,536) bytes into the buffer, while every `mach_msg2` call's
+  `send_size` is bounded at 4,096 — so a band can never land in a kernel-read region, at any
+  `avail`. Each step is asserted rather than stated, the sweep spans 65,535 / 65,536 / 65,537, and
+  all four production `Box_` constructors are checked against a live instance rather than cited.
+- That proof's premise is now **asserted as a relation between its two constants**, at compile time:
+  `const _: () = assert!(machmsg::SEND_SIZE_MAX < retrace_box::PTR_WINDOW_CAP, …)` at module scope in
+  `crates/retrace-core/tests/machmsgband_dyn.rs` — the only place in the repo where both operands are
+  visible, since `retrace-core` owns the ceiling and depends on the crate owning the cap, and
+  `retrace-box` can never see the second one. Module scope rather than a test body is deliberate:
+  the corpus test skips `jq` and CPython when they are absent, and its own runtime tripwire sits at
+  the end of that function, so on a machine without Homebrew nothing in that file's bodies would
+  evaluate the premise at all. A `const _` is checked whenever the crate compiles.
+  **It took two rounds, and the first one is this milestone's own failure class recurring inside its
+  own correction — a third time, caught by review rather than by any mechanism.** Round one turned
+  the ceiling into a shared `pub const` and had the test import it rather than redefine it. That was
+  a real improvement to the *per-landmark* checks, which now compare real captured sends against the
+  real production bound. It was **not** drift detection, and the round claimed it was: every use is
+  `send_size <= SEND_SIZE_MAX`, which a **widening** makes strictly more permissive, so setting the
+  bound to `0x20000` left everything green while the proof's conclusion turned false — and four
+  sites, one of them a failure message a future reader would meet mid-debugging, said it reds. The
+  mirror constant `retrace-box`'s proof carried was **deleted rather than renamed**, because nothing
+  compared it to the thing it mirrored: a second literal that nothing checks is what produced the
+  finding in the first place. The compile-time assertion was verified able to fail before it was
+  trusted (bound set to `0x20000`, crate stops compiling with its own message, reverted). The two
+  files now split the proof honestly — `machmsgband.rs` proves in-crate that a band starts at
+  `ipa + window_cap`; `machmsgband_dyn.rs` proves `window_cap` clears the read ceiling; neither
+  needs the other's number.
+- `dbg_window_len_for` returning `Option<usize>`, so "unmapped" and "zero-length window" stop
+  collapsing into the same `0`.
+- The 35-landmark corpus measurement itself, which is the evidence everything above rests on.
+
+### The rule this milestone is worth remembering for
+
+**Classify by calling the production router, never by a copy of its allow-list.** The same category
+error appeared at two scales and was caught by two different mechanisms: Task 1's original fixture
+measured msgh_id 4811, which `Route::ServiceVmMap` services and never forwards (caught by review, at
+n=1); and the corpus walk initially risked counting the refused message-queue send above (caught by
+the implementer, at corpus scale, by calling `route()` first). Both would have produced a confident
+wrong headline about a milestone's central number. The generalisation holds beyond this milestone:
+any test that decides "is this call on the path my change governs" is re-implementing a production
+decision, and the copy is where the drift lives.
+
+**And the class this milestone kept catching, it caught a third time inside its own correction.**
+"Right conclusion, unmeasured supporting fact" — M20's name for it — was found twice during the
+tasks, then once more in the fix wave dispatched to correct the second instance: the wave's own
+`const` assertion carried a failure message stating that a *different file* would red if the
+production bound moved, when nothing anywhere related the two constants. That is the worst place for
+a wrong supporting fact, because a reader meets it at the moment they are debugging and least likely
+to re-derive it. **Nothing mechanical caught any of the three.** All were caught by review, and this
+one only because the reviewer ran `grep -rn SEND_SIZE_MAX crates/` instead of reading the claim. The
+milestone has no instrument for this class and did not build one; the honest record is that its
+detection rate here is a property of how the reviews were done, not of the tree.
+
+And its process twin, learned expensively: **anything a successor must know belongs in
+`docs/status-log.md`, never in the SDD workspace.** `.superpowers/` is gitignored scratch. Two
+carried obligations lived only there and would have vanished at merge; the review's ledger triage is
+what caught them, and they are in "What stays owed" below because of it.
+
+### The gate
+
+**556 passed / 0 failed / 2 ignored across 121 test binaries**, every chunk exit code **0** captured
+before any pipe; clippy clean over `--workspace --all-targets` with `-D warnings`.
+
+Reconciled against M31's 552 / 0 / 2 over 119 **file-by-file rather than by sum**: exactly two files
+moved, `crates/retrace-box/tests/machmsgband.rs` 0 → **2** and
+`crates/retrace-core/tests/machmsgband_dyn.rs` 0 → **2**, both new binaries; every other file
+unchanged and `--bins` 11 → 11. That is +4 tests and +2 binaries, 119 → 121, fully accounted for.
+The tree holds **558** `#[test]` = 556 running + 2 ignored, against M31's 554 = 552 + 2. **The
+figure was derived twice and independently** — once predicted from the diff by the whole-branch
+reviewer, once taken from the run by the controller — and the two agreed, which is the first time
+this milestone's numbers were established from two directions. Both `retrace-box` and `retrace` ran
+as **whole packages** rather than per-target, so neither `retrace-box`'s `Doc-tests` harness nor the
+11 unit tests that live only in the `retrace` binary could be silently dropped — the two mouths of
+the same trap, one loud and one silent.
+
+The two ignored gates are unchanged: `stackoverflow_rust_e2e` (the M21 signal-model wall) and
+`cache_symbol_e2e` (the M19 shared-cache symbol wall). M32 parked nothing new and un-parked nothing;
+it adds no capability, bumps no magic, changes no recorded byte, and touches no code path that runs
+during a recording.
+
+### What stays owed
+
+* **Carried to the reader-syscall enumeration milestone (M33 as charted): for each syscall newly
+  added to `reads_guest_buffer`, check whether it has a destination argument whose backing can
+  exceed 64 KiB.** That check is what would make the per-argument entry M32 measured inert become
+  live, and it is a per-syscall question that only the milestone adding the syscalls can answer. It
+  existed only in the SDD ledger until this section; that is why it is here.
+* **Spec §6's Control 1 was reframed, and the reframing is a real weakening that must not be read
+  as satisfied.** As written it said: revert `is_known_dest_arg` to return `false` and the new
+  destination-side test must go RED. With no mechanism built, there is no such test and no such
+  revert. The control that would have replaced it targets the **mechanism** (reverting the predicate
+  reds a unit test proving `fills_band` consults the per-argument allow-list), **not restored
+  coverage** — and even that was not built, because the mechanism was not built. A successor picking
+  this up inherits an unexecuted control, not a discharged one.
+* **The corpus is three fixtures, and its bias is known.** Every governed call measured is
+  init-time. The cheapest way to change the *population* rather than merely the guest count is a
+  repo-owned threaded/GCD fixture (`thread_rust`, or the guest behind `dispatch_e2e`), because
+  libdispatch issues `semaphore_create` (3418) and the clock-service calls from **worker threads at
+  runtime** rather than from the main thread at initialisation. It is repo-owned, so unlike `jq` and
+  CPython it can never silently shrink the corpus to `hello_dyn` on another machine. `/bin/ps` was
+  considered and rejected: its mach traffic is the same init-time set through the same main-stack
+  geometry, so it would add shallow rows and gate time and settle nothing.
+* **The single-triple test measures the replay side while the decision governs the record side.**
+  That is argued benign at the top of `machmsgband_dyn.rs` — `Box_::restore` builds one backing per
+  snapshot region, the stack is one such region, and `buf + len` was observed to land exactly on
+  `DYN_STACK_TOP` — but it is an argument from one observed address, not a general proof that
+  record-side and replay-side `avail` agree for every call.
+* **The dropped tasks are still in the plan, behind a warning block, not deleted.** A reader of
+  `docs/superpowers/plans/2026-09-09-retrace-m32-dirtable.md` sees six tasks of which five never
+  ran. That is deliberate — the plan records what was intended and §9 records why it was dropped —
+  but it means the plan cannot be read as a description of the tree.
+* **Two process failures worth their own line, because neither is a code defect.** A background test
+  run finished successfully in 185s and was never read back, costing **8.5 idle hours**; every run
+  after it was foregrounded under a bounded timeout, and that is what caught the governed/ungoverned
+  classification bug above. And the milestone's pace was mis-assessed against a seven-milestone
+  overnight queue when the only available data — the M31 gate at ~40 minutes — contradicted it. Both
+  are recorded here rather than in the scratch ledger for the same reason the two carried obligations
+  are.

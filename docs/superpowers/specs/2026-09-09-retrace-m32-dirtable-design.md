@@ -75,7 +75,7 @@ one-line summary. It must appear in the plan's task text, not only here.**
 ### 4a. The `mach_msg2` send/receive boundary
 
 The argument layout is **already decoded** and need not be reverse-engineered
-(`crates/retrace-core/src/machmsg.rs:30-36`):
+(`crates/retrace-core/src/machmsg.rs:40-46`):
 
 | field | source |
 |---|---|
@@ -141,7 +141,10 @@ is restored.** The plan must make this an explicit assertion, not a reviewer's d
 
 Required by charter §9. Two, because there are two distinct ways to get this wrong.
 
-**Control 1 — the mechanism is wired up.**
+**Control 1 — the mechanism is wired up.** *(NEVER EXECUTED — see §9. No mechanism was built, so
+there is no `is_known_dest_arg` to revert and no destination-side test to red. The status log
+records it as an unexecuted control rather than a discharged one; it is left here as written so a
+successor can see what was promised.)*
 > Revert `is_known_dest_arg` to return `false` unconditionally (restoring per-syscall behaviour).
 > The new destination-side test must go **RED**.
 
@@ -180,3 +183,134 @@ shape is untouched.
 That is the claim to check first in review. If any part of this change causes a byte to differ in
 `Event::Syscall`'s recorded writes, the analysis above is wrong and the milestone has become a
 format-affecting one — a charter §5 halt condition.
+
+## 9. Outcome — the milestone measurement told us not to build
+
+**Status: CLOSED as a measurement milestone. Tasks 2–6 were not executed.** Recorded here rather
+than in a separate document because a spec whose conclusion contradicts its own plan must say so
+where the plan's reader will look.
+
+### What was measured
+
+Task 1, after two fix rounds, walked **35 real `mach_msg2` landmarks** across `hello_dyn`, `jq` and
+CPython — all three present, all three walked, none skipped. Each row was classified by calling the
+real `machmsg::route()`, never a hand-copied allow-list.
+
+| | |
+|---|---|
+| landmarks measured | 35 |
+| **governed** by this milestone (`Route::Forward`) | **13** |
+| max `avail` among governed calls | **24,672 bytes** |
+| `window_cap` — the threshold for a band to exist at all | **65,536** |
+| governed calls producing a nonzero band | **zero** |
+
+`band > 0` requires `avail > window_cap`. No governed call comes within 40 KiB of it. So
+`is_known_dest_arg(-47, 0)` — the entry §5a exists to add — **would have been inert on the day it
+shipped**, not by argument but by measurement, across the three fixtures walked.
+
+**That the 13 are shallow is one fact, not thirteen coincidences.** All five ids in
+`FORWARD_ALLOWLIST` (200, 206, 3418, 3405, 412) are MIG-generated kernel-RPC stubs, and a MIG stub
+builds `union { Request; Reply; } Mess;` as a **stack local** and passes `&Mess` as the message
+buffer. `avail` is the distance from a buffer to the end of its backing, so for a governed call
+`avail` *is* the stack depth measured from that stack's top — and the geometry holds for all three
+stacks retrace produces: the main stack is 256 KiB backed with the buffer below its top
+(`crates/retrace-box/src/lib.rs:94-95`), a pthread stack is the guest's own mmap and what
+libpthread hands `bsdthread_create` is the stack **TOP**, with SP starting there and growing down
+(`crates/retrace-box/src/lib.rs:4681-4683`), and a workqueue worker's stack
+puts the struct at the top and grows down into the region
+(`crates/retrace-box/src/lib.rs:4426-4441`). A shallow governed call is a shallow *frame*, and
+every governed call measured here was made during process initialisation.
+
+The same structure explains the outlier. The one landmark that DID carry a nonzero band — msgh_id
+`0x400000cf` at ~4.1 MB `avail` — is a **libxpc message-queue send with a heap buffer**, the only
+class in the corpus where `avail` is unrelated to stack depth at all, and exactly the class
+`route()` excludes as `Route::RefuseMqSend`.
+
+**What stays open, and this section will not pretend otherwise: nothing bounds the DEPTH at which a
+governed id can fire.** All 13 measured calls are process-initialisation calls, which are shallow by
+construction, so the population is **biased** — the sample size says less than it looks like it
+does. A `semaphore_create` (3418) from a dispatch semaphore built deep inside a call chain, or a
+`host_info` (200) behind a `sysconf`, are ordinary things for a program to do, and 64 KiB of frames
+sits well inside a 256 KiB stack. The inertness finding is **unlikely to reverse and mechanistically
+explained, but not proven**. `every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band`
+therefore asserts `governed_max_avail < PTR_WINDOW_CAP` rather than only printing it, so the day a
+fixture **in that test's own corpus** contradicts this section, this section reds instead of quietly
+rotting. That qualifier is the limit of the tripwire: a new e2e guest added elsewhere in the repo is
+not walked by this test and would not trip it.
+
+### Why that closes the whole milestone, not just the `mach_msg2` entry
+
+§2 already recorded that `sendfile` has no guest. `reads_guest_buffer` has exactly **two** members
+with a genuine kernel-written argument — `sendfile` (337) and `mach_msg2` (−47); every other member
+(`write`, `pwrite`, `writev`, `pwritev`, the `send*` family, `msync`) has none. Both candidates are
+now measured dead: one has no guest, the other has no band.
+
+**This milestone's coverage deliverable is therefore empty across every fixture it could walk —
+measured empty on hello_dyn, jq and CPython, not suspected empty.** The corpus is those three;
+`/bin/ps` and the threaded/GCD fixtures were not walked, and the paragraph above says what that
+costs the claim.
+
+### The finding that replaces it
+
+The per-argument defect §1 identifies is real, but it is not a defect in `reads_guest_buffer`. It is
+a defect in the **schema**. Four functions answer one question — *what does this syscall do with each
+of its arguments* — in four incompatible shapes, and two of them lost the argument index the other
+two keep:
+
+| function | shape | keyed by |
+|---|---|---|
+| `fd_operands` | `&'static [usize]` | argument indices |
+| `dest_buffer` | `Option<(usize, DestLen)>` | argument index + length source |
+| `reads_guest_buffer` | `bool` | whole syscall |
+| `writes_via_nested_pointer` | `bool` | whole syscall |
+
+§5a's fix would have added a **fifth** view, to recover per-argument information that `dest_buffer`
+already stores eight lines away. That is the M26–M32 lineage's recurring shape: each milestone adds
+a view and reconciles it against the others, and each new view is a fresh chance to ship inert.
+
+**The successor is a unification** — one `arg_kinds(num) -> &'static [ArgKind]` table from which all
+four current functions derive, proven by an equivalence sweep over every syscall number. M32's
+per-argument direction then stops being a table and becomes a field.
+
+### What Task 1 did land, and it stands
+
+- `Box_::band_len(avail, win)` hoisted out of `forward_and_diff` into a `pub`, pure function beside
+  `band_not_covered`, so exactly one copy of the expression exists and a test can call production
+  rather than re-derive it.
+- The structural proof that whenever a band exists it begins at least `window_cap` (65536) bytes
+  into the buffer, while `retrace-core` asserts `send_size <= 0x1000` — so a band can never land in
+  a kernel-read region, at any `avail`.
+- That proof's external premise is now **asserted as a relation between the two constants**, at
+  compile time, in the only crate where both are visible:
+  `const _: () = assert!(machmsg::SEND_SIZE_MAX < retrace_box::PTR_WINDOW_CAP, …)` at module scope
+  in `crates/retrace-core/tests/machmsgband_dyn.rs`. Module scope rather than a test body, because
+  the corpus test skips `jq`/CPython when they are absent and its runtime tripwire sits at the end
+  of that body — a `const _` is checked whenever the crate compiles, on any machine and in any gate
+  chunk. **This took two rounds and the first one looked right.** Round one made
+  `machmsg::SEND_SIZE_MAX` a shared `pub const` and had the test import it instead of redefining
+  it, which genuinely improved the *per-landmark* checks (real captured sends now compared against
+  the real bound) — but every one of those checks is `send_size <= SEND_SIZE_MAX`, which a
+  **widening** only loosens, so drift stayed undetectable while four sites, one of them a failure
+  message, stated that it reds. The mirror constant `retrace-box`'s proof had been carrying was
+  deleted rather than renamed: nothing compared it to what it mirrored, so it could not detect the
+  drift its name implied it caught. The compile-time assertion was verified able to fail — setting
+  the bound to `0x20000` stops the crate compiling with the message above.
+- `dbg_window_len_for` returning `Option<usize>`, so "unmapped" and "zero-length window" no longer
+  collapse.
+- The 35-landmark corpus measurement itself, which is the evidence this section rests on.
+
+### A category error caught twice, worth naming once
+
+The same mistake recurred at two scales and was caught by two different mechanisms: Task 1's
+original fixture measured msgh_id 4811, which `Route::ServiceVmMap` services and never forwards
+(caught by review); fix round 2's corpus walk initially risked counting a refused message-queue send
+with a genuine 64-byte band at ~4.1 MB `avail` (caught by the implementer, by classifying via the
+real `route()` before drawing a conclusion). Both would have produced a confident, wrong headline.
+(This heading said "three times" and listed two. Fix round 1's re-derivation of the band formula is
+a different class — calling production versus copying it — so it does not make the count up.)
+**The generalisable rule: classify by calling the production router, never by a copy of its
+allow-list.**
+
+Note the corollary, since it bears on the successor: **bands are not globally inert.** A 4.1 MB
+mmap-backed buffer got one. The inertness measured here is specific to `mach_msg2`'s governed calls,
+whose buffers are stack-resident and shallow.
