@@ -12,6 +12,17 @@ const MACH64_SEND_KOBJECT_CALL: u64 = 0x2_0000_0000;
 /// Everything retrace services is a kernel-object call; this bit marks the one thing it is not.
 const MACH64_SEND_MQ_CALL: u64 = 0x4_0000_0000;
 
+/// The ceiling `record_box`'s mach_msg2 arm asserts every `send_size` against, before `route()`
+/// even distinguishes a serviced id from a forwarded one (`crates/retrace-core/src/lib.rs`, the
+/// `MACH_MSG2` arm). A `pub const` rather than a literal at that assert because it is a load-bearing
+/// PREMISE elsewhere, not just a plausibility check: M32's structural proof that a guard band can
+/// never land inside the region the kernel reads out of a message buffer is exactly
+/// `PTR_WINDOW_CAP (65536) > SEND_SIZE_MAX (4096)`, so a test that pins the proof must be able to
+/// read the real bound rather than its own copy of the number. `crates/retrace-core/tests/
+/// machmsgband_dyn.rs` imports this and asserts every real forwarded send against it; widening the
+/// bound there reds that test instead of silently falsifying the proof's conclusion (M32 finding 2).
+pub const SEND_SIZE_MAX: usize = 0x1000;
+
 /// The eight mach_msg2_trap registers, unpacked (see the spec's ABI table).
 pub struct Msg2 {
     pub data: u64, pub options: u64,

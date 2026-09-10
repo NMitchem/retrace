@@ -22,7 +22,7 @@
 // SAME size, as record's, and `avail` (hence `win`, hence `band`) is identical on both sides for
 // this call. Recorded here so a later reader does not have to re-derive it.
 use retrace_box::Box_;
-use retrace_core::machmsg::{self, Msg2, Route};
+use retrace_core::machmsg::{self, Msg2, Route, SEND_SIZE_MAX};
 
 const MACH_MSG2: u64 = (-47i64) as u64;
 const TASK_INFO_MSGH_ID: u32 = 3405;
@@ -32,11 +32,15 @@ const TASK_INFO_MSGH_ID: u32 = 3405;
 // value out of the trace, not a re-derivation of any logic) so this file can call the REAL
 // `machmsg::route()` rather than hand-copy `FORWARD_ALLOWLIST`'s id list.
 const MACH_TASK_SELF: u64 = (-28i64) as u64;
-// crates/retrace-core/src/lib.rs:435's own bound, duplicated here (this crate owns that assert,
-// so this is the one file in the repo where duplicating it is *checking* it, not just citing it --
-// see the per-landmark assertion in `every_real_mach_msg2_in_the_corpus_has_a_bounded_send_size`
-// and the one added to the single-triple test below).
-const SEND_SIZE_MAX: usize = 0x1000;
+// `SEND_SIZE_MAX` is IMPORTED above, not redefined here (M32 finding 2). It was a local
+// `const SEND_SIZE_MAX: usize = 0x1000;` through fix round 2, which made every assertion below a
+// comparison against this file's OWN copy of the number: widening the production bound at
+// `crates/retrace-core/src/lib.rs:435` to anything at all would have left this file green while the
+// structural proof it exists to pin (`PTR_WINDOW_CAP > SEND_SIZE_MAX`) quietly became false. It is
+// now the same `pub const` that assert reads, so this file is the one place in the repo where the
+// premise is CHECKED against real captured values rather than cited -- see the per-landmark
+// assertion in `every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band` and the one in
+// the single-triple test below.
 
 /// Builds `(exe, dyld)` `Loaded` pairs exactly as `crates/retrace/src/main.rs`'s `record-dyn` CLI
 /// path does, and records into a fresh temp trace. Shared by every guest this file records, so the

@@ -432,7 +432,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // anything unrecognized fails loudly with its decoded name (spec §Mechanism).
             Stop::Syscall { num, args } if num == MACH_MSG2 => {
                 let m = machmsg::Msg2::unpack(&args);
-                assert!(m.send_size as usize <= 0x1000,
+                assert!(m.send_size as usize <= machmsg::SEND_SIZE_MAX,
                     "mach_msg2 send_size {:#x} implausibly large", m.send_size);
                 match machmsg::route(&m, guest_task_port) {
                     machmsg::Route::ServiceVmMap => {

@@ -244,8 +244,16 @@ per-argument direction then stops being a table and becomes a field.
 - The structural proof that whenever a band exists it begins at least `window_cap` (65536) bytes
   into the buffer, while `retrace-core` asserts `send_size <= 0x1000` — so a band can never land in
   a kernel-read region, at any `avail`.
-- That proof's external premise now **asserted** against real values in the crate that owns it,
-  rather than cited.
+- That proof's external premise is now a **shared `pub const`**, not a literal duplicated on both
+  sides of the argument. `machmsg::SEND_SIZE_MAX` is what `crates/retrace-core/src/lib.rs:435`
+  asserts against, and `crates/retrace-core/tests/machmsgband_dyn.rs` **imports that same constant**
+  and asserts every real forwarded `send_size` against it. Until the closing fix wave it did not:
+  the production site asserted a bare `0x1000` while both test files defined their own copy of the
+  number, so widening the production bound would have left both green while the proof's conclusion
+  turned false. `crates/retrace-box/tests/machmsgband.rs` still holds a copy — `retrace-box` cannot
+  depend on `retrace-core`, the dependency runs the other way — but it is now *named*
+  `SEND_SIZE_MAX_MIRROR`, and the assertion consuming it says in its own failure message that this
+  crate cannot detect drift and names the file that can.
 - `dbg_window_len_for` returning `Option<usize>`, so "unmapped" and "zero-length window" no longer
   collapse.
 - The 35-landmark corpus measurement itself, which is the evidence this section rests on.
