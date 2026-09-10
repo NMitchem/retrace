@@ -312,4 +312,24 @@ fn every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band() {
                     not a manufactured one: this test does not shrink window_cap to force a \
                     nonzero band.", retrace_box::PTR_WINDOW_CAP);
     }
+
+    // THE TRIPWIRE (M32 finding 10). Everything above is `eprintln!` -- a green-by-construction
+    // report of a number nobody re-checks. But M32 CLOSED on that number: spec §9 drops the
+    // milestone's whole coverage deliverable because no governed call comes within 40 KiB of the
+    // threshold, and M33's scoping rests on that. A measurement a milestone closed on owes an
+    // assertion, or the close silently rots the first time a fixture contradicts it -- the same
+    // discipline as M28's "prove the instrument can fire" and M29's "gate the channel that reports
+    // it".
+    //
+    // Deliberately stricter than "no governed band was nonzero": a band needs `avail > win`, and
+    // `win` saturates AT `window_cap`, so `avail == window_cap` exactly still yields band 0. Firing
+    // on `avail >= window_cap` therefore warns one step BEFORE the finding is actually overturned,
+    // which is the useful moment. It reds on an improvement (a new fixture that finally reaches a
+    // deep governed call) -- and that red is the correct signal, not a false alarm, because what it
+    // says is "the closed milestone's premise moved, go re-read §9 before trusting it".
+    assert!(governed_max_avail < retrace_box::PTR_WINDOW_CAP,
+        "a governed mach_msg2 call now carries a nonzero band (max governed avail \
+         {governed_max_avail} >= window_cap {}) -- the inertness finding M32 closed on is \
+         OVERTURNED; reopen spec §9 before trusting it",
+        retrace_box::PTR_WINDOW_CAP);
 }
