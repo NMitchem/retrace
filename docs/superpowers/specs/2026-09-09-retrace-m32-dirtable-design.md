@@ -180,3 +180,86 @@ shape is untouched.
 That is the claim to check first in review. If any part of this change causes a byte to differ in
 `Event::Syscall`'s recorded writes, the analysis above is wrong and the milestone has become a
 format-affecting one — a charter §5 halt condition.
+
+## 9. Outcome — the milestone measurement told us not to build
+
+**Status: CLOSED as a measurement milestone. Tasks 2–6 were not executed.** Recorded here rather
+than in a separate document because a spec whose conclusion contradicts its own plan must say so
+where the plan's reader will look.
+
+### What was measured
+
+Task 1, after two fix rounds, walked **35 real `mach_msg2` landmarks** across `hello_dyn`, `jq` and
+CPython — all three present, all three walked, none skipped. Each row was classified by calling the
+real `machmsg::route()`, never a hand-copied allow-list.
+
+| | |
+|---|---|
+| landmarks measured | 35 |
+| **governed** by this milestone (`Route::Forward`) | **13** |
+| max `avail` among governed calls | **24,672 bytes** |
+| `window_cap` — the threshold for a band to exist at all | **65,536** |
+| governed calls producing a nonzero band | **zero** |
+
+`band > 0` requires `avail > window_cap`. No governed call comes within 40 KiB of it. So
+`is_known_dest_arg(-47, 0)` — the entry §5a exists to add — **would have been inert on the day it
+shipped**, not by argument but by measurement.
+
+### Why that closes the whole milestone, not just the `mach_msg2` entry
+
+§2 already recorded that `sendfile` has no guest. `reads_guest_buffer` has exactly **two** members
+with a genuine kernel-written argument — `sendfile` (337) and `mach_msg2` (−47); every other member
+(`write`, `pwrite`, `writev`, `pwritev`, the `send*` family, `msync`) has none. Both candidates are
+now measured dead: one has no guest, the other has no band.
+
+**This milestone's coverage deliverable is therefore empty — measured empty, not suspected empty.**
+
+### The finding that replaces it
+
+The per-argument defect §1 identifies is real, but it is not a defect in `reads_guest_buffer`. It is
+a defect in the **schema**. Four functions answer one question — *what does this syscall do with each
+of its arguments* — in four incompatible shapes, and two of them lost the argument index the other
+two keep:
+
+| function | shape | keyed by |
+|---|---|---|
+| `fd_operands` | `&'static [usize]` | argument indices |
+| `dest_buffer` | `Option<(usize, DestLen)>` | argument index + length source |
+| `reads_guest_buffer` | `bool` | whole syscall |
+| `writes_via_nested_pointer` | `bool` | whole syscall |
+
+§5a's fix would have added a **fifth** view, to recover per-argument information that `dest_buffer`
+already stores eight lines away. That is the M26–M32 lineage's recurring shape: each milestone adds
+a view and reconciles it against the others, and each new view is a fresh chance to ship inert.
+
+**The successor is a unification** — one `arg_kinds(num) -> &'static [ArgKind]` table from which all
+four current functions derive, proven by an equivalence sweep over every syscall number. M32's
+per-argument direction then stops being a table and becomes a field.
+
+### What Task 1 did land, and it stands
+
+- `Box_::band_len(avail, win)` hoisted out of `forward_and_diff` into a `pub`, pure function beside
+  `band_not_covered`, so exactly one copy of the expression exists and a test can call production
+  rather than re-derive it.
+- The structural proof that whenever a band exists it begins at least `window_cap` (65536) bytes
+  into the buffer, while `retrace-core` asserts `send_size <= 0x1000` — so a band can never land in
+  a kernel-read region, at any `avail`.
+- That proof's external premise now **asserted** against real values in the crate that owns it,
+  rather than cited.
+- `dbg_window_len_for` returning `Option<usize>`, so "unmapped" and "zero-length window" no longer
+  collapse.
+- The 35-landmark corpus measurement itself, which is the evidence this section rests on.
+
+### A category error caught three times, worth naming once
+
+The same mistake recurred at three scales and was caught by three different mechanisms: Task 1's
+original fixture measured msgh_id 4811, which `Route::ServiceVmMap` services and never forwards
+(caught by review); fix round 2's corpus walk initially risked counting a refused message-queue send
+with a genuine 64-byte band at ~4.1 MB `avail` (caught by the implementer, by classifying via the
+real `route()` before drawing a conclusion). Both would have produced a confident, wrong headline.
+**The generalisable rule: classify by calling the production router, never by a copy of its
+allow-list.**
+
+Note the corollary, since it bears on the successor: **bands are not globally inert.** A 4.1 MB
+mmap-backed buffer got one. The inertness measured here is specific to `mach_msg2`'s governed calls,
+whose buffers are stack-resident and shallow.

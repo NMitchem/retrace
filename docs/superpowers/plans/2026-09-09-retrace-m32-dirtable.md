@@ -16,6 +16,25 @@ syscall's ABI.
 
 **Spec:** `docs/superpowers/specs/2026-09-09-retrace-m32-dirtable-design.md`
 
+## ⚠ TASKS 2–6 WERE NOT EXECUTED — read this before the task list
+
+**Task 1 closed this milestone.** Its measurement showed that the entry Task 3 exists to add would
+have been **inert on the day it shipped**: across 35 real `mach_msg2` landmarks (hello_dyn, jq,
+CPython), 13 are governed by this milestone, their maximum `avail` is 24,672 bytes, and a band
+requires `avail > 65,536`. **Zero governed calls produce a band.** Combined with `sendfile` having no
+guest (spec §2), both of the milestone's only two candidate entries are measured dead.
+
+Tasks 2–6 below are therefore **not to be executed**, and are left standing rather than deleted so a
+later reader can see what was planned and why it was dropped. The full argument, including the
+schema defect that replaces it, is in **§9 of the spec**.
+
+The successor is a unification of the four argument tables into one `arg_kinds` table, of which
+Task 3's per-argument predicate becomes a field rather than a fifth view.
+
+**What Task 1 landed and kept:** `Box_::band_len` hoisted into production, the structural
+band-placement proof with its premise asserted rather than cited, `dbg_window_len_for` returning
+`Option<usize>`, and the 35-landmark corpus measurement.
+
 ## Global Constraints
 
 - **`--test-threads=1` is mandatory** on every `cargo test` invocation. HVF allows one VM per
