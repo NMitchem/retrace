@@ -76,29 +76,41 @@ explicitly so a refutation is a red test rather than a silent note.
 // If it does, the buffer's argument may be canary-filled without re-creating the M30 corruption.
 //
 // This test is expected to survive the milestone as a regression pin on the measured fact.
-use retrace_box::Box_;
+use retrace_arch::SYS_EXIT;
+use retrace_box::{Box_, Stop};
 
 const MACH_MSG2: u64 = (-47i64) as u64;
 
 #[test]
 fn the_band_for_mach_msg2s_buffer_lands_at_or_past_send_size() {
-    let mut b = Box_::load(retrace_guest::MACHMSG).expect("machmsg guest loads");
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::MACHMSG).unwrap());
+    let mut b = Box_::load(&loaded);
     let mut seen = 0usize;
     loop {
-        match b.run().expect("guest runs") {
-            retrace_box::Stop::Syscall { num, args, .. } if num == MACH_MSG2 => {
+        match b.run() {
+            Stop::Syscall { num, args } if num == MACH_MSG2 => {
                 let send_size = (args[2] >> 32) as usize;
-                // The window length forward_and_diff would use for args[0].
+                let rcv_size = (args[6] & 0xffff_ffff) as usize;
                 let len = b.dbg_window_len_for(args[0]);
+                // Printed so the triples land in the task report verbatim, per Step 3.
+                eprintln!("[M32 t1] buf={:#x} len={len} send_size={send_size} rcv_size={rcv_size}",
+                    args[0]);
                 assert!(len >= send_size,
                     "band would land INSIDE the kernel-read region: len {len} < send_size \
                      {send_size} for buffer {:#x}. The hypothesis is REFUTED — mach_msg2 must \
                      stay withheld (spec §7, last bullet).", args[0]);
                 seen += 1;
-                b.forward_and_diff(num, &args).expect("forward");
+                let (ret, err, _w) = b.forward_and_diff(num, args);
+                b.set_x0_err_and_return(ret, err);
             }
-            retrace_box::Stop::Exit { .. } => break,
-            _ => {}
+            Stop::Syscall { num, args: _ } if num == SYS_EXIT => break,
+            Stop::Syscall { num, args } => {
+                let (ret, err, _w) = b.forward_and_diff(num, args);
+                b.set_x0_err_and_return(ret, err);
+            }
+            Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
+            Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Step => unreachable!("run() does not single-step"),
         }
     }
     assert!(seen > 0,
@@ -107,10 +119,35 @@ fn the_band_for_mach_msg2s_buffer_lands_at_or_past_send_size() {
 }
 ```
 
-**Note on `dbg_window_len_for`:** if no such accessor exists, add it as a `#[doc(hidden)]`
-test-only method on `Box_` returning the same `len` `forward_and_diff` computes for a pointer
-argument, following the pattern of the existing `dbg_next_l3` / `dbg_backings` accessors
-(`crates/retrace-box/src/lib.rs:5349` and nearby). Adding it is part of this task.
+**Three API facts this code depends on, verified against the tree at `2b964da`** — do not "fix"
+them to something that looks more idiomatic:
+
+1. **`forward_and_diff` NEVER advances the vCPU.** That is `retrace-core`'s job in production. Every
+   arm must resume the guest with `b.set_x0_err_and_return(ret, err)` (or `set_x0_and_return(ret)`),
+   or `b.run()` re-traps the *same* un-advanced `svc` and the loop silently spins on one call.
+   `crates/retrace-box/tests/truncguard.rs:193-196` documents this; `failsys.rs` and `truncguard.rs`
+   both establish the pattern.
+2. **Signatures.** `Box_::load(&Loaded) -> Box_` (not a path, not a `Result`);
+   `Box_::run(&mut self) -> Stop` (not a `Result`);
+   `forward_and_diff(&mut self, num: u64, args: [u64;8]) -> (u64, bool, Vec<Region>)` — `args` by
+   **value**, returning a tuple.
+3. **`Stop` has four variants and none of them is `Exit`:**
+   `Stop::{Syscall{num,args}, Fault{pc,esr,far}, Other{esr}, Step}`
+   (`crates/retrace-box/src/lib.rs:662`). A guest exit is observed as
+   `Stop::Syscall { num, .. } if num == SYS_EXIT`.
+
+**On `dbg_window_len_for`:** no such accessor exists — adding it is part of this task. Read how `win`
+is computed in `forward_and_diff` at `crates/retrace-box/src/lib.rs:3170-3182` and expose **exactly
+that** computation as a `#[doc(hidden)] pub fn dbg_window_len_for(&self, ipa: u64) -> usize`,
+following the pattern of the existing `dbg_next_l3` / `dbg_backings` accessors near `:5349`. Do not
+re-derive the formula from the spec — read it from the code, so the measurement measures what
+production does rather than what the plan believes production does.
+
+**If `machmsg.s` turns out to dispatch no `mach_msg2` under a static `Box_::load`** (it is a
+freestanding asm guest, and the mach path may need the dynamic loader), that is a Task 1 finding,
+not a failure to work around: report it, and record `SEED_MACH_MSG2 = false` with the reason
+"unmeasurable from the available fixture" rather than inventing a fixture. The controller will rule
+on whether M32 proceeds mechanism-only.
 
 - [ ] **Step 2: Run it and read the result**
 
