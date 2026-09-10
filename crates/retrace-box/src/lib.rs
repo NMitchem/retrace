@@ -5349,6 +5349,27 @@ impl Box_ {
     #[doc(hidden)]
     pub fn dbg_next_l3(&self) -> u64 { self.next_l3 }
 
+    /// Test-only (M32 Task 1): the diff-window length `forward_and_diff` would compute for a
+    /// pointer argument at `ipa`, exposed so a measurement can ask "where does the window end"
+    /// without a syscall number or an argument index in hand.
+    ///
+    /// This is `diff_window`'s `base = avail.min(self.window_cap)` term ONLY — not a general
+    /// `diff_window` proxy. That reduction is exact here, not approximate: `dest_buffer` (which is
+    /// the only thing that can widen a window past `base`) has no entry for `mach_msg2_trap`
+    /// (`-47`) or any other mach trap — its match is keyed entirely on BSD syscall numbers — so for
+    /// every `num` this accessor is used against, `dest_len_bytes` returns `None` and `diff_window`
+    /// collapses to exactly this expression regardless of which `i`/`args` would have been passed.
+    /// Returns 0 for an `ipa` `host_span` cannot resolve, matching `diff_window`'s own behaviour
+    /// (never called on an unmapped pointer, since `forward_and_diff`'s loop only calls it inside
+    /// the `Some((hp, avail))` arm).
+    #[doc(hidden)]
+    pub fn dbg_window_len_for(&self, ipa: u64) -> usize {
+        match self.host_span(ipa) {
+            Some((_, avail)) => avail.min(self.window_cap),
+            None => 0,
+        }
+    }
+
     /// Test-only (M31): `from_checkpoint` RE-DERIVES this from the restored backings
     /// (`backings.iter().any(|b| b.ipa == TLBI_STUB_IPA)`) rather than carrying it, exactly as it
     /// re-derives `next_l3` above — so it is a second derivation of one fact, and the parity guard
