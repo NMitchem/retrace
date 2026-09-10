@@ -18,9 +18,16 @@ const MACH64_SEND_MQ_CALL: u64 = 0x4_0000_0000;
 /// PREMISE elsewhere, not just a plausibility check: M32's structural proof that a guard band can
 /// never land inside the region the kernel reads out of a message buffer is exactly
 /// `PTR_WINDOW_CAP (65536) > SEND_SIZE_MAX (4096)`, so a test that pins the proof must be able to
-/// read the real bound rather than its own copy of the number. `crates/retrace-core/tests/
-/// machmsgband_dyn.rs` imports this and asserts every real forwarded send against it; widening the
-/// bound there reds that test instead of silently falsifying the proof's conclusion (M32 finding 2).
+/// read the real bound rather than its own copy of the number.
+///
+/// **If you widen this, the thing that stops you is the module-scope
+/// `const _: () = assert!(machmsg::SEND_SIZE_MAX < retrace_box::PTR_WINDOW_CAP)` at the top of
+/// `crates/retrace-core/tests/machmsgband_dyn.rs`** — a COMPILE-TIME check, in the only crate where
+/// both operands are visible. That file's other uses of this constant are `send_size <=
+/// SEND_SIZE_MAX` per-landmark checks, which a widening only makes more permissive; they check that
+/// real traffic obeys the bound, never that the bound is still small enough for the proof. For one
+/// round this comment claimed they did the second job, which is the M32 finding-2 defect recurring
+/// inside its own fix.
 pub const SEND_SIZE_MAX: usize = 0x1000;
 
 /// The eight mach_msg2_trap registers, unpacked (see the spec's ABI table).
