@@ -225,6 +225,22 @@ Per milestone, in order:
 **Permitted unattended:** branch, commit, code review, fix rounds, run the gate, edit `README.md`
 and `docs/status-log.md`, merge to local `main`.
 
+**Also permitted, authorised by the operator 2026-09-09:** **writing each milestone's own spec and
+plan** from its charter entry, and **running the full queue through M38** without an inter-milestone
+check-in. Two obligations come with that authority and are not optional:
+
+1. **Every autonomously-written spec still owes §9's contract in full**, and its measurement step
+   runs *before* its first edit. M32's spec was re-scoped by a measurement taken while writing it
+   (`sendfile` proved to be a dead channel); an autonomous spec gets no operator to catch that, so
+   the measurement step is the only thing standing in its place.
+2. **A re-scope is not a halt, but it is a loud ledger entry.** When a measurement contradicts the
+   charter's premise for a milestone — the `sendfile` situation — record
+   `Ruling: re-scoped <milestone> — <premise> was contradicted by <measurement> — <new scope>` and
+   continue. The operator reads the ruling list at the end and reworks what they disagree with. Do
+   not silently narrow scope, and do not stop.
+
+The queue's own stopping point is the end of M38, or the first halt condition below.
+
 **Never unattended:** `git push`. Full stop. The operator reviews the whole run's history before
 anything becomes public.
 
