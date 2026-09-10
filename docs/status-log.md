@@ -6124,7 +6124,11 @@ nonzero", since `avail == window_cap` exactly still yields band 0, so the tripwi
 finding is actually overturned. It reds on an *improvement* (a fixture that finally reaches a deep
 governed call), and that red is the correct signal: it says the closed milestone's premise moved.
 The discipline is M28's "prove the instrument can fire" and M29's "gate the channel that reports it",
-applied to a conclusion instead of an instrument.
+applied to a conclusion instead of an instrument — including the part M28 taught the hard way: the
+assertion was **verified able to fail** before it was trusted, by temporarily lowering its threshold
+to 24,000 against the corpus's real 24,672 and watching the test go red with its own message. The
+mutation was reverted, the revert verified with an empty `git status --porcelain=v1`, and the suite
+re-run green. The control is recorded on the test itself, which is where its next reader will be.
 
 ### The finding that replaces the deliverable: four views of one question
 

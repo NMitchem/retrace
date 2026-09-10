@@ -347,6 +347,12 @@ fn every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band() {
     // which is the useful moment. It reds on an improvement (a new fixture that finally reaches a
     // deep governed call) -- and that red is the correct signal, not a false alarm, because what it
     // says is "the closed milestone's premise moved, go re-read §9 before trusting it".
+    //
+    // VERIFIED ABLE TO FAIL, per M28's rule that a tripwire nobody has watched fire is not known to
+    // be wired up: with the threshold temporarily lowered to `24_000` (below the 24,672 the corpus
+    // actually produces) this test went RED with the message below, at 171.99s; the mutation was
+    // reverted and the suite re-run green. The control is recorded here rather than only in a
+    // report, because this is where the next reader of the assertion will be.
     assert!(governed_max_avail < retrace_box::PTR_WINDOW_CAP,
         "a governed mach_msg2 call now carries a nonzero band (max governed avail \
          {governed_max_avail} >= window_cap {}) -- the inertness finding M32 closed on is \
