@@ -2999,6 +2999,20 @@ impl Box_ {
         (end - start) as usize
     }
 
+    /// M32 Task 1 fix round 2: the RAW guard-band length for one window, hoisted out of
+    /// `forward_and_diff` (where it used to be an inline `GUARD_BAND.min(avail - win)`) so a proof
+    /// can call the exact expression production runs instead of re-deriving it. `pub`, pure, no
+    /// `dbg_`/`_for_test` name — same posture as `band_not_covered` just above, which shrinks
+    /// this value; this is the value it shrinks (`band_not_covered`'s own `band` parameter is this
+    /// function's result).
+    ///
+    /// Panics on `avail < win`, exactly as the un-hoisted `avail - win` did: a window can never
+    /// exceed what `host_span` reported as available, so that underflow is a real invariant break,
+    /// not a condition to swallow. A hoist must move production's semantics, not soften them —
+    /// callers that want a forgiving comparison (e.g. a test sweeping hypothetical `avail`s) should
+    /// clamp or filter before calling this, not have it silently absorb the case here.
+    pub fn band_len(avail: usize, win: usize) -> usize { GUARD_BAND.min(avail - win) }
+
     /// Test seam (M28). Shrinks the diff-window cap so a syscall the `dest_buffer` table does not
     /// know can be made to overrun its window on purpose. **Production never calls this.**
     ///
@@ -3177,7 +3191,7 @@ impl Box_ {
                     // look at, and a kernel write reaching into it would be captured nowhere.
                     // Snapshot a band immediately past the window so an overrun is provable rather
                     // than inferred. Bounded by `avail`, so this never reads past the backing.
-                    let band = GUARD_BAND.min(avail - win);
+                    let band = Self::band_len(avail, win);
                     let pre_band = unsafe { std::slice::from_raw_parts(hp.add(win), band) }.to_vec();
                     windows.push((args[i], win, pre, pre_band, 0));
                     hargs[i] = hp as i64;
@@ -5385,8 +5399,9 @@ impl Box_ {
     #[doc(hidden)]
     pub fn dbg_tlbi_stub_ready(&self) -> bool { self.tlbi_stub_ready }
 
-    /// Test-only (M31): the four debugger fields — not the only `Box_` state with no accessor
-    /// (`window_cap` and `l2_host` also have none), but the ones `tests/checkpointparity.rs` needs
+    /// Test-only (M31): the four debugger fields — not the only `Box_` state that lacked an
+    /// accessor at the time this comment was written (`l2_host` still has none; `window_cap` got
+    /// one, `dbg_window_cap`, in M32 Task 1), but the ones `tests/checkpointparity.rs` needs
     /// to *observe* that `from_checkpoint` resets them — an assertion about a field nothing can
     /// read is an assertion about nothing. Kept out of `dbg_internal_state` deliberately: that
     /// string is compared by `restoreparity.rs` too, and adding fields to it changes an existing
