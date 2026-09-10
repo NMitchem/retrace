@@ -59,7 +59,7 @@ band-placement proof with its premise asserted rather than cited, `dbg_window_le
 
 **Files:**
 - Create: `crates/retrace-box/tests/machmsgband.rs`
-- Read only: `crates/retrace-core/src/machmsg.rs:30-36`, `crates/retrace-box/src/lib.rs:3160-3250`
+- Read only: `crates/retrace-core/src/machmsg.rs:40-46`, `crates/retrace-box/src/lib.rs:3160-3250`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -68,7 +68,7 @@ band-placement proof with its premise asserted rather than cited, `dbg_window_le
 
 **Background the implementer needs.** `mach_msg2_trap` is trap number −47, written throughout this
 repo as `0xffff_ffff_ffff_ffd1`. Its operands are already decoded in
-`crates/retrace-core/src/machmsg.rs:30-36`:
+`crates/retrace-core/src/machmsg.rs:40-46`:
 
 | field | where |
 |---|---|

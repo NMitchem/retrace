@@ -6,7 +6,7 @@
 // test that is now the PRIMARY evidence for the decision:
 //
 // - Critical 1: msgh_id 4811 (`_kernelrpc_mach_vm_map`, the only message `machmsg.s` sends) routes
-//   to `Route::ServiceVmMap` (`crates/retrace-core/src/machmsg.rs:102`) and is SERVICED, never
+//   to `Route::ServiceVmMap` (`crates/retrace-core/src/machmsg.rs:113`) and is SERVICED, never
 //   forwarded -- `forward_and_diff` (the only place `SEED_MACH_MSG2` can change anything) runs
 //   ONLY for `Route::Forward` ids (the `FORWARD_ALLOWLIST`: 200/206/3418/3405/412). The original
 //   test below measured a call this milestone's decision does not govern: n=0 for the governed
@@ -26,6 +26,16 @@
 // The original test is kept: it is still a true, useful regression pin on the ServiceVmMap path's
 // own (zero-length) band, and on `dbg_window_len_for`'s behavior on a real mapped buffer. It is
 // NOT evidence for `SEED_MACH_MSG2` -- see Critical 1/2 above.
+//
+// **`SEED_MACH_MSG2` NEVER BECAME A SYMBOL, AND NOW NEVER WILL** -- `grep` finds these comments and
+// no definition. It was the decision variable this measurement existed to settle: `true` would have
+// added `mach_msg2` argument 0 to a per-argument canary-fill allow-list. The measurement came back
+// INERT (13 governed calls across three guests, max `avail` 24,672 against a 65,536 threshold, zero
+// bands), so M32 closed as a measurement milestone, dropped the tasks that would have built that
+// allow-list, and there is no allow-list to withhold `mach_msg2` FROM: the exclusion is still
+// `retrace_arch::reads_guest_buffer`'s whole-syscall predicate, exactly as before M32. See
+// `docs/superpowers/specs/2026-09-09-retrace-m32-dirtable-design.md` §9. The name is kept in these
+// comments because it names the question every assertion below is scoped to.
 use retrace_arch::SYS_EXIT;
 use retrace_box::{Box_, Stop};
 
@@ -58,6 +68,18 @@ fn the_serviced_vm_map_calls_band_is_measured_zero_and_out_of_scope() {
                 assert!(len >= send_size,
                     "band would land INSIDE the kernel-read region: len {len} < send_size \
                      {send_size} for buffer {:#x}.", args[0]);
+                // The `_band_is_measured_zero_` half of this test's NAME, asserted rather than left
+                // to the comment above (M32 finding 6: through fix round 2 the body read only the
+                // window length and never `avail`, so the name claimed a measurement the test did
+                // not make -- the shape this repo has caught in itself repeatedly). `band_len` is
+                // the same hoisted function `forward_and_diff` calls, over the same `avail` the
+                // diff loop's own `host_span` reports.
+                let (_, avail) = b.host_span_for_test(args[0])
+                    .expect("machmsg.s's message buffer must be a mapped guest IPA");
+                assert_eq!(Box_::band_len(avail, len), 0,
+                    "this call's band is supposed to be measured ZERO (avail {avail} == win {len}, \
+                     so GUARD_BAND.min(avail - win) == 0) -- if it is not, the fixture's geometry \
+                     changed and this test's name no longer describes what it measures");
                 seen += 1;
                 // MEASURED (not in the original brief): resuming past this trap here would forward
                 // the raw svc to the REAL host kernel, bypassing retrace-core's Route::ServiceVmMap
@@ -103,7 +125,9 @@ fn the_serviced_vm_map_calls_band_is_measured_zero_and_out_of_scope() {
 ///
 /// 1. `retrace_arch::dest_buffer` has no match arm for `mach_msg2_trap` (`-47`) or any other mach
 ///    trap -- its whole table is keyed on BSD syscall constants -- so `diff_window`'s `None` arm
-///    (`crates/retrace-box/src/lib.rs:3069`: `base = avail.min(self.window_cap)`) fires for a
+///    (`crates/retrace-box/src/lib.rs:3083`: `base = avail.min(self.window_cap)` -- it moved from
+///    the `:3069` this comment cited through fix round 2, pushed down by `band_len`'s own hoist)
+///    fires for a
 ///    mach_msg2 buffer at EVERY `avail`, not just the one this fixture's guest happens to produce.
 /// 2. Every production `Box_` constructor (`load`, `load_dynamic`, `restore`, the `BoxState`
 ///    restore path) hard-codes `window_cap = PTR_WINDOW_CAP`; `set_window_cap_for_test` is the

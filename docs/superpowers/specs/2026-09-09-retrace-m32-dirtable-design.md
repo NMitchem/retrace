@@ -75,7 +75,7 @@ one-line summary. It must appear in the plan's task text, not only here.**
 ### 4a. The `mach_msg2` send/receive boundary
 
 The argument layout is **already decoded** and need not be reverse-engineered
-(`crates/retrace-core/src/machmsg.rs:30-36`):
+(`crates/retrace-core/src/machmsg.rs:40-46`):
 
 | field | source |
 |---|---|

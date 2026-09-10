@@ -3,11 +3,22 @@
 // INERT (every real mach_msg2 this repo can record produces a zero-length band, so
 // `SEED_MACH_MSG2` currently changes nothing observable) or governs a real nonzero band somewhere.
 //
+// **`SEED_MACH_MSG2` NEVER BECAME A SYMBOL, AND NOW NEVER WILL.** It was the decision variable this
+// measurement existed to settle: `true` would have added `mach_msg2` argument 0 to a per-argument
+// canary-fill allow-list. The measurement came back INERT (13 governed calls across three guests,
+// max `avail` 24,672 against a 65,536 threshold, zero bands), so M32 closed as a measurement
+// milestone and dropped the tasks that would have built the allow-list -- there is nothing to
+// `grep` for. Read `docs/superpowers/specs/2026-09-09-retrace-m32-dirtable-design.md` §9 before
+// concluding anything from the name's absence. It is kept in these comments because it names the
+// question every assertion below is scoped to, and renaming it would make this file's own history
+// unreadable against the report and spec that discuss it.
+//
 // `crates/retrace-box/tests/machmsgband.rs`'s structural proof establishes the invariant for every
 // POSSIBLE forwarded call; this file supplies the thing a pure proof cannot -- genuine samples
 // from real dynamically-linked guests, on calls that are actually forwarded (`Route::Forward`),
 // which is the only route `SEED_MACH_MSG2` can ever change anything for
-// (`crates/retrace-core/src/machmsg.rs:102`, `FORWARD_ALLOWLIST`).
+// (`crates/retrace-core/src/machmsg.rs:108-109` returns `Route::Forward`; the ids it returns it
+// for are `FORWARD_ALLOWLIST`, `machmsg.rs:64-81`).
 //
 // This lives in `retrace-core` (not `retrace-box`) because reaching a `Route::Forward` call at all
 // needs `retrace-core`'s own mach_msg2 routing -- exactly the routing a bare `Box_` harness in
@@ -266,10 +277,19 @@ fn every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band() {
              crates/retrace-core/src/lib.rs:435 is supposed to enforce on every mach_msg2 call",
             row.msgh_id, row.send_size);
         // The hypothesis itself, checked on every real GOVERNED row regardless of whether its
-        // band is nonzero -- a band == 0 row trivially satisfies this (win == avail >= send_size
-        // is not guaranteed in general, but IS guaranteed here because avail's own upper bound is
-        // what the structural proof's step 4/5 already covers whenever a band exists; this
-        // assertion is the real-world half of that proof, not a restatement of it).
+        // band is nonzero.
+        //
+        // What makes it hold on a `band == 0` row is NOT the structural proof: steps 4/5 cover only
+        // the band-EXISTS case, and these rows are by construction not that case. This comment used
+        // to cite them anyway -- the milestone's own named failure class ("right conclusion,
+        // unmeasured supporting fact", M20), committed by the fix round dispatched to correct it,
+        // so it is corrected here rather than deleted. The real reason is an ABI/empirical fact
+        // about the caller: the message buffer must have at least `send_size` bytes to the end of
+        // its backing, or the kernel would read past the backing on a call the guest itself
+        // constructed. With `band == 0` we have `win == avail`, and `avail` IS that
+        // buffer-to-end-of-backing distance, so `win >= send_size` follows from the buffer being
+        // well-formed -- which is exactly why this assertion is worth making: it is the check that
+        // the real calls are well-formed in that sense, not a corollary of the proof.
         assert!(row.win >= row.send_size,
             "[{guest}] msgh_id {} (governed): win {} < send_size {} -- the hypothesis is REFUTED \
              on a REAL call", row.msgh_id, row.win, row.send_size);
