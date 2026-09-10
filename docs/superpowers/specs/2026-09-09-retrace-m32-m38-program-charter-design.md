@@ -73,6 +73,20 @@ destination arguments regain canary coverage.
 **Plan certainty: high.** The wall is named, the two casualties are named, and the mechanism
 (`reads_guest_buffer` as a syscall-level predicate) is already in the tree.
 
+**RE-SCOPED after measurement, 2026-09-09.** This entry originally scoped M32 to `sendfile` alone,
+on the reasoning that `mach_msg2`'s overlapping send/receive buffer was too risky to touch. A
+measurement taken while writing M32's spec inverted that: **no guest in this repo issues
+`sendfile`** — syscall 337 appears only in `retrace-arch` comments and the `reads_guest_buffer`
+list — while `mach_msg2` is issued constantly by every dynamic guest and directly by
+`crates/retrace-guest/asm/machmsg.s`. Seeding from `sendfile` would have shipped a branch nothing
+executes, which is the dead-channel trap this charter's own §1 warns about. M32 therefore builds the
+mechanism and seeds it from a **measurement of `mach_msg2`'s send/receive boundary**, with
+`sendfile` entered as table-only and labelled unexercised. See
+`docs/superpowers/specs/2026-09-09-retrace-m32-dirtable-design.md` §2 and §4.
+
+**The generalisable lesson, which binds M33–M38:** before seeding any table entry, confirm a guest
+in this repo actually dispatches that syscall. The check is cheap and it has already paid once.
+
 ### M33 — `readerenum`: enumeration, and a loud failure
 
 **Discharges:** M30's owed-list, second entry (`ioctl` and any unlisted reader syscall), and the
@@ -113,9 +127,15 @@ unmeasured supporting fact" failure M20 named.
 2. The `if !err` gate that skips write capture — and band evaluation — on a **failing** syscall. The
    standing assumption is that a failed syscall writes nothing; M28 flagged it unmeasured.
 
-**Plan certainty: medium.** Half 2 needs a guest built to fail syscalls deliberately, which does not
-exist and must be written. **This is the queue's most likely halt point**, and it is placed last in
-the soundness phase for that reason: a halt here still banks M32–M34 as merged work.
+**Plan certainty: medium.** Half 2 needs a guest that fails syscalls deliberately.
+
+**CORRECTED 2026-09-09:** an earlier draft of this entry said that guest "does not exist and must be
+written." It does exist — `crates/retrace-guest/asm/failsys.s` opens `/no/such/retrace/path` and
+exits with the errno, and `failsysctl.s` is a second one. Whether either *reaches* the `if !err`
+gate with a pointer argument worth banding is a measurement M35 still owes, so the certainty stays
+medium; but the milestone starts from a fixture rather than from nothing, and it is no longer
+obviously the queue's most likely halt point. It stays last in the soundness phase regardless, since
+a halt there still banks M32–M34 as merged work.
 
 ### M36 — `sweepmeasure`: measurement only
 
@@ -166,15 +186,19 @@ the table does not classify is a halt (§5), not an invitation.
 
 Per milestone, in order:
 
-1. Branch from local `main`: `git worktree add` a fresh worktree, branch `m<NN>-<name>`.
-2. Write the milestone spec → `docs/superpowers/specs/YYYY-MM-DD-retrace-m<NN>-<name>-design.md`.
-3. Write the plan → `docs/superpowers/plans/YYYY-MM-DD-retrace-m<NN>-<name>.md`.
-4. Execute tasks TDD, one subagent per task, reports under `.superpowers/sdd/`.
-5. Code review the whole branch diff; fix rounds as needed.
-6. **Full chunked gate** (§7) + `#[test]` reconciliation file-by-file against the previous close.
-7. Edit `README.md` ("What works today" / "Known limits") **and** append a new section to
+1. Write the milestone spec → `docs/superpowers/specs/YYYY-MM-DD-retrace-m<NN>-<name>-design.md`
+   and the plan → `docs/superpowers/plans/YYYY-MM-DD-retrace-m<NN>-<name>.md`, and commit **both to
+   `main`** before branching. This matches the repo's existing convention rather than a new one:
+   M31's three doc commits (`a063833`, `58415d0`, `23abc74`) sit on `main` and precede its
+   implementation branch. An earlier draft of this charter had the spec written inside the milestone
+   worktree; that was wrong and is corrected here.
+2. Branch from local `main`: `git worktree add` a fresh worktree, branch `m<NN>-<name>`.
+3. Execute tasks TDD, one subagent per task, reports under `.superpowers/sdd/`.
+4. Code review the whole branch diff; fix rounds as needed.
+5. **Full chunked gate** (§7) + `#[test]` reconciliation file-by-file against the previous close.
+6. Edit `README.md` ("What works today" / "Known limits") **and** append a new section to
    `docs/status-log.md`. Both, never one — the README is edited in place, the log is append-only.
-8. Merge to local `main`. **Do not push.**
+7. Merge to local `main`. **Do not push.**
 
 ## 5. Autonomy envelope
 
@@ -233,8 +257,14 @@ record-and-replay end-to-end runs. Eight full gates would dominate the run's wal
 
 ## 8. Known risks
 
-- **M35 is the most likely halt** — it needs a guest that does not exist. Placed last in the
-  soundness phase so a halt there still banks M32–M34.
+- **M35's risk was overstated in the first draft** — `failsys.s` and `failsysctl.s` already exist,
+  so it starts from a fixture. What it still owes is a measurement that one of them reaches the
+  `if !err` gate with a pointer argument worth banding. Placed last in the soundness phase anyway,
+  so a halt there still banks M32–M34.
+- **Two of this charter's own claims were wrong within hours of writing it** (M32's scope, M35's
+  fixture), both caught by a cheap check against the tree rather than by review. That is the
+  charter's §1 argument turned on the charter itself, and it is the reason every milestone spec owes
+  a measurement step before its first edit.
 - **M33 may move the sweep tally downward** by making a silent failure loud. Expected; those
   binaries become M36 rows.
 - **M37–M38's scope is unknown until M36 runs.** Intended. The cost is that the run's tail cannot be
