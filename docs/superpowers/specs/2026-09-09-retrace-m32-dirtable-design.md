@@ -1,0 +1,182 @@
+# M32-dirtable — the canary decision belongs to the argument, not the syscall
+
+**Date:** 2026-09-09
+**Status:** design
+**Charter:** `docs/superpowers/specs/2026-09-09-retrace-m32-m38-program-charter-design.md` (§3, M32)
+**Discharges:** M30's owed-list, first entry — *"the largest single thing M30 gives up."*
+
+## 1. The wall, located
+
+Three symbols, by name and line, current as of `a33983d`:
+
+| symbol | file:line | role |
+|---|---|---|
+| `retrace_arch::reads_guest_buffer(num: u64) -> bool` | `crates/retrace-arch/src/lib.rs:308` | the syscall-level predicate |
+| `retrace_arch::dest_buffer(num: u64) -> Option<(usize, DestLen)>` | `crates/retrace-arch/src/lib.rs:176` | the (single) destination argument, for the clamp and window |
+| `Box_::forward_and_diff` | `crates/retrace-box/src/lib.rs:3233` | `let fill_canary = !retrace_arch::reads_guest_buffer(num);` |
+
+That last line is the defect in one statement: **a per-syscall boolean gating a per-argument
+decision.**
+
+M30 withholds the guard band from any syscall the kernel reads through, because a canary in such a
+buffer reaches the kernel as data and corrupts the guest's output while record and replay stay
+bit-identical (`bigwrite_e2e` is the regression test for exactly that). The withholding is correct.
+It is *over-broad*: it covers every register of the call, including arguments the kernel only
+**writes**.
+
+`reads_guest_buffer` lists `sendfile` (337) and `mach_msg2_trap` (−47). Both have genuine
+destination arguments that consequently receive no destination-side coverage.
+
+## 2. Scope — and the measurement that set it
+
+The charter scoped this milestone to `sendfile`. **A measurement taken before writing this spec
+changed that**, and the finding is recorded here rather than quietly acted on:
+
+> **No guest in this repo issues `sendfile`.** Syscall 337 appears in `retrace-arch`'s comments and
+> in the `reads_guest_buffer` list (`lib.rs:323`), and nowhere else in the tree. Nothing in
+> `crates/retrace-guest/` dispatches it.
+
+Seeding the new allow-list with `sendfile` alone would ship a branch no guest ever takes — the
+dead-channel trap M29 hit twice and M30 hit three more times. So the scope is:
+
+**Build the per-argument mechanism, and seed it from `mach_msg2`, which every dynamic guest issues
+constantly and which `crates/retrace-guest/asm/machmsg.s` exercises directly.** `sendfile` gets a
+table entry alongside it, explicitly marked *structurally covered but unexercised* — a table entry
+is cheap, and the honest label is what stops a later reader mistaking it for tested.
+
+## 3. The safety-critical detail: polarity
+
+The change is **default-deny with a destination allow-list**, never a source deny-list:
+
+```rust
+// CORRECT
+fill_canary(arg i)  :=  !reads_guest_buffer(num) || is_known_dest_arg(num, i)
+
+// WRONG — re-opens M30
+fill_canary(arg i)  :=  !arg_is_source(num, i)
+```
+
+The reason is recorded at `crates/retrace-box/src/lib.rs:3222`:
+
+> *"The decision is per-SYSCALL and covers all eight registers, because the reproduction's
+> corrupting entry was a stale register that was not an argument at all."*
+
+`forward_and_diff` snapshots a window for **every mapped-looking argument** — all eight registers,
+not merely the syscall's declared ones. In M30's reproduction the corrupting entry was a stale
+register that was not an argument at all. Under a source deny-list such a register is "not a
+source", falls through to `fill`, and the corruption returns. Under a destination allow-list it is
+not on the list, stays withheld, and M30's guarantee holds by construction.
+
+**This inversion is the single thing most likely to be gotten wrong by an implementer working from a
+one-line summary. It must appear in the plan's task text, not only here.**
+
+## 4. Measurement — task 1, before any edit
+
+### 4a. The `mach_msg2` send/receive boundary
+
+The argument layout is **already decoded** and need not be reverse-engineered
+(`crates/retrace-core/src/machmsg.rs:30-36`):
+
+| field | source |
+|---|---|
+| `data` — the buffer, send **and** receive | `args[0]` |
+| `send_size` | `hi(args[2])` |
+| `rcv_size` | `lo(args[6])` |
+
+A Mach reply overwrites the same buffer, so the send and receive regions **overlap by design**. The
+kernel *reads* `[data, data + send_size)` and *writes* the reply into the same buffer.
+
+**The hypothesis task 1 must confirm or refute**, stated as a hypothesis because nothing has
+measured it: the canary band is placed at `ipa + len` (`lib.rs:3240`, `let base = *ipa + *len`) —
+that is, **past** the window's length. If the window `len` for `args[0]` is always `>= send_size`,
+the band lands where the kernel never reads, and filling it is safe. If `len` can be shorter than
+`send_size`, it is not, and the entry must be withheld exactly as it is today.
+
+Measure against a real `machmsg.s` recording and against a dynamic guest (which issues far more
+varied messages), and record actual `(len, send_size, rcv_size)` triples. **Do not infer this from
+the ABI.** `retrace-core/src/lib.rs:435` asserts `send_size <= 0x1000`, which bounds one operand but
+says nothing about the band's placement relative to it.
+
+### 4b. The dead-channel check, generalised
+
+Before seeding **any** entry, confirm a guest in this repo actually dispatches that syscall. The
+`sendfile` finding in §2 is what this check is for; it is cheap and it has already paid once.
+
+## 5. What must change
+
+### 5a. `retrace-arch` — a new per-argument predicate
+
+Add beside `reads_guest_buffer`:
+
+```rust
+/// Arguments of a `reads_guest_buffer` syscall that the kernel WRITES rather than reads.
+/// Allow-list, not deny-list — see the polarity argument in the M32 design.
+pub fn is_known_dest_arg(num: u64, idx: usize) -> bool
+```
+
+Seeded from §4a's measurement. `reads_guest_buffer` is **kept unchanged** — it still gates
+`overran_window`'s live detector (`crates/retrace-box/src/lib.rs:2946`), which is a different
+question from whether a given band may be filled.
+
+### 5b. `retrace-box` — carry the argument index, and apply it at all four sites
+
+`windows` is pushed at `crates/retrace-box/src/lib.rs:3182` as
+`windows.push((args[i], win, pre, pre_band, 0))` — the index `i` is **dropped**. It must be carried
+so the fill can consult it.
+
+`fill_canary` gates **four** sites, and all four must move to the same per-window predicate
+together:
+
+| site | line | what breaks if it disagrees |
+|---|---|---|
+| the fill | 3234 | — |
+| `disturbed` check | 3447 | an unfilled band is asked whether its canary is intact |
+| `overran` check | 3485 | wrong detector chosen for the band |
+| the restore pass | 3541 | **a filled-but-unrestored canary is captured into the trace as a kernel write** |
+
+The fill/restore pair is the dangerous one. **The invariant is: a band is filled if and only if it
+is restored.** The plan must make this an explicit assertion, not a reviewer's diligence.
+
+## 6. Positive controls
+
+Required by charter §9. Two, because there are two distinct ways to get this wrong.
+
+**Control 1 — the mechanism is wired up.**
+> Revert `is_known_dest_arg` to return `false` unconditionally (restoring per-syscall behaviour).
+> The new destination-side test must go **RED**.
+
+**Control 2 — the polarity of §3 is load-bearing.**
+> Change the predicate to a source deny-list (`!arg_is_source(num, i)`). `bigwrite_e2e` must go
+> **RED**.
+
+If control 2 does **not** go red, the deny-list formulation is not caught by the existing regression
+test, and that is a finding worth more than this milestone — report it and halt rather than
+proceeding on a guard that cannot see its own inversion.
+
+Record each control's exact failure message, as M31 recorded `rich: signal dispositions` and M28
+recorded `let band = 0;`.
+
+## 7. What this milestone deliberately does not do
+
+- **`sendfile` is table-only.** Entered, and labelled unexercised. No socket guest is written; if a
+  later milestone wants that coverage it must write one, and §4b is why the label matters.
+- **`dest_buffer` still returns one destination per syscall.** A syscall with two genuine
+  destinations remains unexpressible. `getdirentries64` and `recvfrom` already document a second
+  destination dismissed on a number; this milestone does not change that shape.
+- **No new syscalls are added to `reads_guest_buffer`.** That is M33.
+- **The band is not widened.** M30's final owed entry stays unattempted, and M28's suppression count
+  stays the warning for whoever takes it up.
+- **If §4a refutes its hypothesis**, `mach_msg2` is withheld exactly as today, the mechanism still
+  lands, and the milestone reports a *negative* measurement as its result. That is a success, not a
+  failure — and it is the outcome that must not be quietly converted into shipping the entry anyway.
+
+## 8. Symmetry obligation
+
+Per CLAUDE.md rule 2 this change sits **below the trace**: `forward_and_diff` is record-side, and the
+canary is filled and restored *within one syscall's forwarding*, never surfacing to the
+record/replay loop. No replay arm changes, and **no `TRACE_MAGIC` bump is required** — the trace's
+shape is untouched.
+
+That is the claim to check first in review. If any part of this change causes a byte to differ in
+`Event::Syscall`'s recorded writes, the analysis above is wrong and the milestone has become a
+format-affecting one — a charter §5 halt condition.
