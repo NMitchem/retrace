@@ -1,36 +1,125 @@
-// M32 Task 1 fix round 1, Important 3 + "(b)" of the reviewer's two-halves requirement: a REAL
-// (len, send_size, rcv_size) triple captured on a call `SEED_MACH_MSG2` actually governs.
+// M32 Task 1 fix round 1 + 2, Important 3 / (b) / C: real (len, send_size, rcv_size) triples on
+// calls `SEED_MACH_MSG2` actually governs, plus a full corpus walk settling whether the seed is
+// INERT (every real mach_msg2 this repo can record produces a zero-length band, so
+// `SEED_MACH_MSG2` currently changes nothing observable) or governs a real nonzero band somewhere.
 //
 // `crates/retrace-box/tests/machmsgband.rs`'s structural proof establishes the invariant for every
-// POSSIBLE forwarded call; this test supplies the thing a pure proof cannot -- a genuine sample
-// from a real dynamically-linked guest, on a call that is actually forwarded (`Route::Forward`),
+// POSSIBLE forwarded call; this file supplies the thing a pure proof cannot -- genuine samples
+// from real dynamically-linked guests, on calls that are actually forwarded (`Route::Forward`),
 // which is the only route `SEED_MACH_MSG2` can ever change anything for
 // (`crates/retrace-core/src/machmsg.rs:102`, `FORWARD_ALLOWLIST`).
-//
-// msgh_id 3405 (task_info/TASK_AUDIT_TOKEN) is the id to use: every dynamically linked guest sends
-// it during libsecinit's app-sandbox check (see `crates/retrace/tests/hello_dyn_e2e.rs`'s M2-taskinfo
-// history comment, which measured its send as 40 bytes against a live run), and
-// `crates/retrace-core/src/machmsg.rs`'s `FORWARD_ALLOWLIST` genuinely routes it through
-// `forward_and_diff` on record.
 //
 // This lives in `retrace-core` (not `retrace-box`) because reaching a `Route::Forward` call at all
 // needs `retrace-core`'s own mach_msg2 routing -- exactly the routing a bare `Box_` harness in
 // `retrace-box`'s own tests does not have (see that crate's `machmsgband.rs` file comment).
-use retrace_core::machmsg::Msg2;
+//
+// **The REAL triple below is measured on the REPLAY side, while `SEED_MACH_MSG2` governs the
+// RECORD side (`forward_and_diff` runs only on record; replay applies recorded writes verbatim).**
+// This is benign, not a mismatch: `Box_::restore` (which `ReplaySession::open` uses) builds
+// exactly one backing per snapshot region (`crates/retrace-box/src/lib.rs:2680-2687`), the stack
+// is one such region, and the observed `buf + len == 0x27fbe38 + 16840 == 0x2800000 ==
+// DYN_STACK_TOP` (`lib.rs:94`) -- so replay's backing for the stack is the SAME region, with the
+// SAME size, as record's, and `avail` (hence `win`, hence `band`) is identical on both sides for
+// this call. Recorded here so a later reader does not have to re-derive it.
+use retrace_box::Box_;
+use retrace_core::machmsg::{self, Msg2, Route};
 
 const MACH_MSG2: u64 = (-47i64) as u64;
 const TASK_INFO_MSGH_ID: u32 = 3405;
+// task_self_trap: record_box/ReplaySession::advance both learn `guest_task_port` from this
+// call's recorded, unerrored return (crates/retrace-core/src/lib.rs:672, :1814) -- `route()`
+// needs it to recognize task-destined kernel RPCs. Replicated here (reading the SAME recorded
+// value out of the trace, not a re-derivation of any logic) so this file can call the REAL
+// `machmsg::route()` rather than hand-copy `FORWARD_ALLOWLIST`'s id list.
+const MACH_TASK_SELF: u64 = (-28i64) as u64;
+// crates/retrace-core/src/lib.rs:435's own bound, duplicated here (this crate owns that assert,
+// so this is the one file in the repo where duplicating it is *checking* it, not just citing it --
+// see the per-landmark assertion in `every_real_mach_msg2_in_the_corpus_has_a_bounded_send_size`
+// and the one added to the single-triple test below).
+const SEND_SIZE_MAX: usize = 0x1000;
 
-#[test]
-fn the_real_forwarded_task_info_calls_band_lands_at_or_past_send_size() {
-    let exe = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO_DYN).unwrap());
+/// Builds `(exe, dyld)` `Loaded` pairs exactly as `crates/retrace/src/main.rs`'s `record-dyn` CLI
+/// path does, and records into a fresh temp trace. Shared by every guest this file records, so the
+/// dyld-resolution logic (real Homebrew binaries carry their own `LC_LOAD_DYLINKER`; the repo's own
+/// fixtures fall back to `DYLD_PATH`) is written once.
+fn record_dynamic_guest(guest_path: &str, extra_argv: &[&str], label: &str) -> std::path::PathBuf {
+    let exe = retrace_guest::parse_macho(&std::fs::read(guest_path).unwrap());
     let dyld_path = exe.dylinker.clone().unwrap_or_else(|| retrace_guest::DYLD_PATH.to_string());
     let dyld_bytes = std::fs::read(&dyld_path).unwrap_or_else(|e| panic!("read dyld {dyld_path}: {e}"));
     let dyld = retrace_guest::parse_macho(retrace_guest::slice_arm64e(&dyld_bytes));
-    let argv = vec![retrace_guest::HELLO_DYN.to_string()];
+    let mut argv = vec![guest_path.to_string()];
+    argv.extend(extra_argv.iter().map(|s| s.to_string()));
     let trace = std::env::temp_dir()
-        .join(format!("retrace-m32t1-machmsgband-dyn-{}.bin", std::process::id()));
-    retrace_core::record_dynamic(&exe, &dyld, &argv, &trace).expect("record hello_dyn");
+        .join(format!("retrace-m32t1-corpus-{label}-{}.bin", std::process::id()));
+    retrace_core::record_dynamic(&exe, &dyld, &argv, &trace)
+        .unwrap_or_else(|e| panic!("record {guest_path}: {e}"));
+    trace
+}
+
+/// One row of the corpus walk: everything needed to judge whether this call's band could ever be
+/// nonzero, plus the numbers that answer it. `governed` is the field that matters most: it is
+/// `true` only for a call `machmsg::route()` (called for real, not re-implemented) actually
+/// resolves to `Route::Forward` -- the ONLY route `forward_and_diff`, and so `SEED_MACH_MSG2`,
+/// ever runs for. A landmark with `governed == false` still gets a `(avail, win, band)` computed
+/// (what `forward_and_diff` WOULD produce if this call ever reached it), but that number is
+/// informational only: production never calls `forward_and_diff` for it, so `SEED_MACH_MSG2`
+/// cannot affect it no matter what its band is.
+struct Row {
+    msgh_id: u32, governed: bool,
+    avail: usize, win: usize, band: usize, send_size: usize, rcv_size: usize,
+}
+
+/// `guest_task_port`, learned exactly as `record_box`/`ReplaySession::advance` learn it: the
+/// recorded, unerrored return of `task_self_trap` (`-28`). `route()` needs this to recognize
+/// task-destined kernel RPCs; without it every landmark would misclassify as ungoverned.
+fn learn_guest_task_port(events: &[retrace_trace::Event]) -> Option<u64> {
+    events.iter().find_map(|e| match e {
+        retrace_trace::Event::Syscall { num, ret, err, .. } if *num == MACH_TASK_SELF && !*err =>
+            Some(*ret),
+        _ => None,
+    })
+}
+
+/// Walks EVERY mach_msg2 landmark in `trace` (not just one), seeking a fresh `ReplaySession` to
+/// each in turn -- one at a time, per CLAUDE.md's one-VM-per-process rule, each dropped (at the end
+/// of its loop iteration's scope) before the next is built.
+fn walk_all_mach_msg2_landmarks(trace: &std::path::Path) -> Vec<Row> {
+    let events = retrace_trace::Reader::open(trace).unwrap();
+    let guest_task_port = learn_guest_task_port(&events);
+    let landmarks: Vec<usize> = events.iter().enumerate()
+        .filter_map(|(i, e)| match e {
+            retrace_trace::Event::Syscall { num, .. } if *num == MACH_MSG2 => Some(i),
+            _ => None,
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for n in landmarks {
+        let session = retrace_core::seek(trace, n, 0).expect("seek to a mach_msg2 landmark");
+        let (num, args) = session.peek_syscall().expect("landmark must be a Syscall event");
+        assert_eq!(num, MACH_MSG2);
+        let m = Msg2::unpack(&args);
+        // Calls the REAL router, not a hand-copied `FORWARD_ALLOWLIST` id list (Important A's
+        // lesson applied here too): this is the exact function `record_box`'s mach_msg2 dispatch
+        // calls to decide whether `forward_and_diff` ever runs for this landmark.
+        let governed = matches!(machmsg::route(&m, guest_task_port), Route::Forward(_));
+        let avail = session.dbg_avail_for(args[0])
+            .expect("a mach_msg2 message buffer must be a mapped guest IPA");
+        let win = session.dbg_window_len_for(args[0])
+            .expect("a mach_msg2 message buffer must be a mapped guest IPA");
+        // The SAME hoisted function forward_and_diff calls (Important A) -- not a re-derived
+        // formula. `win <= avail` always (win is `avail.min(window_cap)`), so this cannot underflow.
+        let band = Box_::band_len(avail, win);
+        rows.push(Row {
+            msgh_id: m.msgh_id, governed, avail, win, band,
+            send_size: m.send_size as usize, rcv_size: m.rcv_size as usize,
+        });
+    } // `session` dropped here each iteration, before the next `seek` builds a new one.
+    rows
+}
+
+#[test]
+fn the_real_forwarded_task_info_calls_band_lands_at_or_past_send_size() {
+    let trace = record_dynamic_guest(retrace_guest::HELLO_DYN, &[], "hello-dyn-single");
 
     // Find the landmark index of the REAL 3405 send. `Reader::open` yields the same `events`
     // vector `ReplaySession` walks internally, so this index is a valid `seek` coordinate.
@@ -53,11 +142,23 @@ fn the_real_forwarded_task_info_calls_band_lands_at_or_past_send_size() {
     let m = Msg2::unpack(&args);
     assert_eq!(m.msgh_id, TASK_INFO_MSGH_ID);
 
+    // Fix round 2, Important B: ASSERT the premise `crates/retrace-core/src/lib.rs:435` enforces,
+    // against the real captured value, rather than only citing that line in a comment. This crate
+    // owns that assert (retrace-box cannot depend on retrace-core, so it can only cite the number).
+    assert!(m.send_size as usize <= SEND_SIZE_MAX,
+        "real msgh_id {TASK_INFO_MSGH_ID} send_size {} exceeds the {SEND_SIZE_MAX} ceiling \
+         crates/retrace-core/src/lib.rs:435 is supposed to enforce on every mach_msg2 call -- if \
+         this fires, either that assert regressed or this constant drifted out of sync with it",
+        m.send_size);
+
     let len = session.dbg_window_len_for(args[0])
         .expect("task_info's message buffer must be a mapped guest IPA");
+    let avail = session.dbg_avail_for(args[0])
+        .expect("task_info's message buffer must be a mapped guest IPA");
+    let band = Box_::band_len(avail, len);
     // Printed so the triple lands in the fix-round report verbatim.
-    eprintln!("[M32 t1 fix] REAL msgh_id={} buf={:#x} len={len} send_size={} rcv_size={} \
-               (Route::Forward, genuinely governed by SEED_MACH_MSG2)",
+    eprintln!("[M32 t1 fix] REAL msgh_id={} buf={:#x} avail={avail} len={len} band={band} \
+               send_size={} rcv_size={} (Route::Forward, genuinely governed by SEED_MACH_MSG2)",
         m.msgh_id, args[0], m.send_size, m.rcv_size);
 
     assert!(len >= m.send_size as usize,
@@ -67,8 +168,11 @@ fn the_real_forwarded_task_info_calls_band_lands_at_or_past_send_size() {
         m.send_size, args[0]);
 
     // Cross-checks the `restore` production constructor's window_cap against a REAL instance --
-    // `ReplaySession::open` (which `seek` calls) builds `self.b` via `Box_::restore`, the one
-    // production constructor `machmsgband.rs`'s structural proof does not reach directly.
+    // `ReplaySession::open` (which `seek` calls) builds `self.b` via `Box_::restore`, one of the
+    // two production constructors `machmsgband.rs`'s structural proof cannot reach directly (fix
+    // round 2, Minor D: the box-side proof now reads `window_cap` through `diff_window` itself for
+    // the two constructors it CAN reach; this is the one `ReplaySession` delegator kept for the
+    // two it cannot).
     assert_eq!(session.dbg_window_cap(), retrace_box::PTR_WINDOW_CAP,
         "Box_::restore (the constructor every ReplaySession uses) must ALSO set window_cap == \
          PTR_WINDOW_CAP");
@@ -86,4 +190,122 @@ fn the_real_forwarded_task_info_calls_band_lands_at_or_past_send_size() {
         "Box_::from_checkpoint's BoxState restore path (the fourth production constructor) must \
          ALSO set window_cap == PTR_WINDOW_CAP -- all four production constructors now checked \
          against a live instance, none only cited");
+}
+
+/// Fix round 2, Important C: settle whether `SEED_MACH_MSG2` governs anything a real guest can
+/// produce, rather than leaving it as an open question after two single-call samples both landed
+/// on `band == 0`. Walks EVERY mach_msg2 landmark (not just one) across every dynamically-linked
+/// guest fixture available to this session, reports the full `(msgh_id, avail, win, band,
+/// send_size, rcv_size)` table, and states the conclusion plainly.
+///
+/// Per the dispatch instructions: a finding of "no real call ever produces a nonzero band" is a
+/// SUCCESS, reported as one. This test does NOT shrink `window_cap` (`set_window_cap_for_test`) to
+/// try to manufacture a nonzero band -- doing so would construct exactly the unsafe configuration
+/// (`win` pushed below `send_size`) the structural proof excludes, not a genuine observation.
+#[test]
+fn every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band() {
+    let mut all_rows: Vec<(&str, Row)> = Vec::new();
+
+    // hello_dyn: always available (a repo-owned fixture built by retrace-guest's build.rs).
+    let hello_trace = record_dynamic_guest(retrace_guest::HELLO_DYN, &[], "hello-dyn-corpus");
+    for row in walk_all_mach_msg2_landmarks(&hello_trace) { all_rows.push(("hello_dyn", row)); }
+
+    // jq: Homebrew-only, per jq_e2e.rs's own convention -- skip LOUDLY, never silently.
+    const JQ: &str = "/opt/homebrew/bin/jq";
+    if std::path::Path::new(JQ).exists() {
+        let trace = record_dynamic_guest(JQ, &["-n", "1+1"], "jq-corpus");
+        for row in walk_all_mach_msg2_landmarks(&trace) { all_rows.push(("jq", row)); }
+    } else {
+        eprintln!("[M32 t1 corpus] SKIPPED jq: {JQ} not installed (`brew install jq`). The \
+                    corpus walk below does NOT include jq's mach_msg2 calls -- this is a gap in \
+                    coverage, not evidence that jq has none.");
+    }
+
+    // CPython: Homebrew-only, per cpython_e2e.rs's own convention -- same loud-skip posture.
+    const CPYTHON: &str =
+        "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python";
+    if std::path::Path::new(CPYTHON).exists() {
+        let trace = record_dynamic_guest(CPYTHON, &["-c", "print(1)"], "cpython-corpus");
+        for row in walk_all_mach_msg2_landmarks(&trace) { all_rows.push(("cpython", row)); }
+    } else {
+        eprintln!("[M32 t1 corpus] SKIPPED cpython: {CPYTHON} not found (expected a Homebrew \
+                    python@3.14 install). The corpus walk below does NOT include CPython's \
+                    mach_msg2 calls -- this is a gap in coverage, not evidence that it has none.");
+    }
+
+    assert!(!all_rows.is_empty(), "the corpus walk found ZERO mach_msg2 landmarks across every \
+             guest it tried -- this measured nothing, which is the dead-channel trap the spec's \
+             §4b exists to catch");
+
+    // GOVERNED means `machmsg::route()` resolves this landmark to `Route::Forward` -- the only
+    // route `forward_and_diff`, and so `SEED_MACH_MSG2`, ever runs for. An UNGOVERNED row (a
+    // serviced address-space op, a stubbed MIG no-op, a refused message-queue send, ...) still
+    // gets an `(avail, win, band)` computed and printed for context, but `forward_and_diff` never
+    // runs for it in production, so its band -- zero or not -- cannot be something
+    // `SEED_MACH_MSG2` changes. Both the conclusion below and this test's own assertions are
+    // scoped to the GOVERNED subset for exactly that reason.
+    let mut governed_max_avail = 0usize;
+    let mut ungoverned_max_avail = 0usize;
+    let mut any_governed_nonzero_band = false;
+    for (guest, row) in &all_rows {
+        eprintln!("[M32 t1 corpus:{guest}] msgh_id={} governed={} avail={} win={} band={} \
+                    send_size={} rcv_size={}", row.msgh_id, row.governed, row.avail, row.win,
+                   row.band, row.send_size, row.rcv_size);
+        if !row.governed {
+            ungoverned_max_avail = ungoverned_max_avail.max(row.avail);
+            continue;
+        }
+        // Important B, folded into the corpus walk: the premise asserted against EVERY real
+        // GOVERNED send in the corpus, not just the one hand-picked 3405 call.
+        assert!(row.send_size <= SEND_SIZE_MAX,
+            "[{guest}] msgh_id {} (governed) send_size {} exceeds the {SEND_SIZE_MAX} ceiling \
+             crates/retrace-core/src/lib.rs:435 is supposed to enforce on every mach_msg2 call",
+            row.msgh_id, row.send_size);
+        // The hypothesis itself, checked on every real GOVERNED row regardless of whether its
+        // band is nonzero -- a band == 0 row trivially satisfies this (win == avail >= send_size
+        // is not guaranteed in general, but IS guaranteed here because avail's own upper bound is
+        // what the structural proof's step 4/5 already covers whenever a band exists; this
+        // assertion is the real-world half of that proof, not a restatement of it).
+        assert!(row.win >= row.send_size,
+            "[{guest}] msgh_id {} (governed): win {} < send_size {} -- the hypothesis is REFUTED \
+             on a REAL call", row.msgh_id, row.win, row.send_size);
+        governed_max_avail = governed_max_avail.max(row.avail);
+        if row.band > 0 { any_governed_nonzero_band = true; }
+    }
+
+    let governed_count = all_rows.iter().filter(|(_, r)| r.governed).count();
+    eprintln!("[M32 t1 corpus] {} real mach_msg2 landmark(s) walked across {} guest(s): {} \
+                GOVERNED (Route::Forward, subject to SEED_MACH_MSG2), {} not; maximum avail among \
+                GOVERNED calls = {governed_max_avail} bytes (window_cap = {}); maximum avail among \
+                UNGOVERNED calls = {ungoverned_max_avail} bytes (informational only -- \
+                forward_and_diff never runs for these); any nonzero band among GOVERNED calls = \
+                {any_governed_nonzero_band}",
+        all_rows.len(),
+        all_rows.iter().map(|(g, _)| *g).collect::<std::collections::HashSet<_>>().len(),
+        governed_count, all_rows.len() - governed_count,
+        retrace_box::PTR_WINDOW_CAP);
+
+    // THE CONCLUSION, stated plainly rather than left for a reader to infer from the table above.
+    // Scoped to GOVERNED calls only -- an ungoverned call's band, however large, is not a fact
+    // about SEED_MACH_MSG2 (see the comment on the loop above; this repo's corpus does contain
+    // exactly such a case: a refused message-queue send with `avail` in the millions of bytes and
+    // a genuinely nonzero band, which would wrongly read as "NOT inert" if counted here -- the
+    // same category error fix round 1's Critical 1 corrected for the single-call measurement).
+    if any_governed_nonzero_band {
+        eprintln!("[M32 t1 corpus] CONCLUSION: at least one real, GOVERNED mach_msg2 call in this \
+                    corpus DOES produce a nonzero band -- SEED_MACH_MSG2 is NOT inert for this \
+                    repo's fixtures.");
+    } else {
+        eprintln!("[M32 t1 corpus] CONCLUSION: NO real GOVERNED mach_msg2 call in this corpus \
+                    produces a nonzero band (every governed avail stayed under window_cap = {} \
+                    bytes; maximum governed avail observed was {governed_max_avail} bytes -- an \
+                    UNGOVERNED call did reach {ungoverned_max_avail} bytes and a nonzero band, but \
+                    forward_and_diff never runs for it, so it is not a fact about \
+                    SEED_MACH_MSG2). SEED_MACH_MSG2 currently governs zero observable canary \
+                    fills across every FORWARDED call in every guest fixture available to this \
+                    session -- the seed is structurally sound (per the proof in machmsgband.rs) \
+                    but, on this evidence, INERT in practice today. This is a reported finding, \
+                    not a manufactured one: this test does not shrink window_cap to force a \
+                    nonzero band.", retrace_box::PTR_WINDOW_CAP);
+    }
 }

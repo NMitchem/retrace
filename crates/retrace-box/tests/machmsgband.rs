@@ -94,10 +94,10 @@ fn the_serviced_vm_map_calls_band_is_measured_zero_and_out_of_scope() {
          which is the dead-channel trap the spec's §4b exists to catch");
 }
 
-/// PRIMARY EVIDENCE for `SEED_MACH_MSG2`, added in fix round 1. Proves the invariant structurally
-/// over every `avail` a real forwarded call's message buffer could have, rather than trusting the
-/// one 16384-byte sample the original test happened to exercise (which, per Critical 1, is not
-/// even a call this decision governs).
+/// PRIMARY EVIDENCE for `SEED_MACH_MSG2`, added in fix round 1, hardened in fix round 2. Proves
+/// the invariant structurally over every `avail` a real forwarded call's message buffer could
+/// have, rather than trusting the one 16384-byte sample the original test happened to exercise
+/// (which, per Critical 1, is not even a call this decision governs).
 ///
 /// The argument, each step asserted rather than only stated:
 ///
@@ -108,18 +108,34 @@ fn the_serviced_vm_map_calls_band_is_measured_zero_and_out_of_scope() {
 /// 2. Every production `Box_` constructor (`load`, `load_dynamic`, `restore`, the `BoxState`
 ///    restore path) hard-codes `window_cap = PTR_WINDOW_CAP`; `set_window_cap_for_test` is the
 ///    only setter and is called only from `truncguard.rs`. Checked here against two REAL
-///    production constructors rather than cited as a sentence; the other two are visually
-///    identical `window_cap: PTR_WINDOW_CAP` field literals (`lib.rs:2764`, `:5294`) not exercised
-///    by this test but cross-checked live from a real dynamic recording's `ReplaySession` in
-///    `crates/retrace-core/tests/machmsgband_dyn.rs` (the `restore` constructor).
-/// 3. `band = GUARD_BAND.min(avail - win)` (`lib.rs:3180`) is nonzero only when `avail > win`; with
-///    `win = avail.min(window_cap)`, `avail > win` forces the `min` to have saturated at
-///    `window_cap` -- so a band can exist AT ALL only when `win == window_cap == 65536`.
+///    production constructors by reading `window_cap` THROUGH `diff_window` itself --
+///    `diff_window_for_test(MACH_MSG2, 0, usize::MAX, &[0u64;8])` returns `usize::MAX.min(window_cap)
+///    == window_cap`, exercising the exact function `forward_and_diff` calls rather than a
+///    dedicated field-reading accessor (fix round 2, Minor D: strictly better evidence, and it
+///    reduces the accessor surface at the same time). The other two production constructors,
+///    `restore` and `from_checkpoint`'s `BoxState` path, are reachable only through a
+///    `ReplaySession`, not a bare `Box_`, and are cross-checked live in
+///    `crates/retrace-core/tests/machmsgband_dyn.rs`.
+/// 3. `band = Box_::band_len(avail, win)` -- `GUARD_BAND.min(avail - win)`, hoisted verbatim out of
+///    `forward_and_diff` (fix round 2, Important A: this test now calls the SAME function
+///    production runs, not a re-derived copy of its formula) -- is nonzero only when `avail > win`;
+///    with `win = avail.min(window_cap)`, `avail > win` forces the `min` to have saturated at
+///    `window_cap` -- so a band can exist AT ALL only when `win == window_cap`. This also depends
+///    on `band_not_covered` (`lib.rs:2992`) never being able to MOVE a band's start once
+///    `band_len` has fixed it: that function's signature returns a shrunk *length* only, and the
+///    start (`ipa + len`) is computed independently at both the fill and the restore sites, so no
+///    value it returns could relocate the start `band_len` establishes here. Not asserted
+///    separately (the reviewer's ruling: an assertion here would be theatre, since no test could
+///    fail the property without an API change first) -- recorded here as the reason this proof
+///    does not need to.
 /// 4. `crates/retrace-core/src/lib.rs:435` asserts `send_size <= 0x1000` (4096) for EVERY
 ///    mach_msg2 call, BEFORE `route()` even runs -- so this bound holds regardless of which id
-///    fires or whether it is forwarded.
-/// 5. `65536 > 4096`: whenever a band exists, it begins at least 61440 bytes past the last byte
-///    the kernel is permitted to read. The band can never land inside the kernel-read region.
+///    fires or whether it is forwarded. This crate cannot depend on `retrace-core` to check that
+///    assert's literal directly (the dependency runs the other way), so `SEND_SIZE_MAX` below is a
+///    duplicated constant; `crates/retrace-core/tests/machmsgband_dyn.rs` is the test that asserts
+///    the premise itself, against real captured `send_size`s, in the crate that owns it.
+/// 5. `window_cap > SEND_SIZE_MAX`: whenever a band exists, it begins comfortably past the last
+///    byte the kernel is permitted to read. The band can never land inside the kernel-read region.
 #[test]
 fn whenever_a_band_exists_it_starts_past_every_possible_send_size() {
     // Step 4's bound, named so the arithmetic below reads against the actual cited assert rather
@@ -133,25 +149,25 @@ fn whenever_a_band_exists_it_starts_past_every_possible_send_size() {
         "if mach_msg2 ever gained a dest_buffer entry, diff_window could widen its window past \
          window_cap for a KNOWN length, and this proof's `None => base` premise would be false");
 
-    // Step 2 (first of two production constructors), plus steps 1+3's sweep. One VM per process
-    // (CLAUDE.md) means the dynamic-constructor check below cannot start until this `Box_` is
-    // fully dropped, so this block does ALL of its work -- construct, check, sweep -- and lets
-    // `static_box` go out of scope before the second constructor is built.
+    // Step 2 (first of two production constructors reachable from a bare Box_), plus steps 1+3's
+    // sweep. One VM per process (CLAUDE.md) means the dynamic-constructor check below cannot start
+    // until this `Box_` is fully dropped, so this block does ALL of its work -- construct, check,
+    // sweep -- and lets `static_box` go out of scope before the second constructor is built.
     {
         let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::MACHMSG).unwrap());
         let static_box = Box_::load(&loaded);
-        assert_eq!(static_box.dbg_window_cap(), retrace_box::PTR_WINDOW_CAP,
-            "Box_::load (the static production constructor) must set window_cap == PTR_WINDOW_CAP");
-
-        // The concrete headroom this whole test exists to establish. Both operands are
-        // compile-time constants, so clippy's `assertions_on_constants` wants this evaluated at
-        // compile time rather than asserted at runtime -- which is exactly the point: if this
-        // headroom ever stopped holding, the build itself should refuse to produce a binary whose
-        // guard-band seed decision rests on it.
-        assert_eq!(retrace_box::PTR_WINDOW_CAP, 65536);
+        // Reads window_cap THROUGH diff_window (see step 2's doc comment) rather than through a
+        // field-reading accessor: `usize::MAX.min(window_cap)` can only equal `window_cap`.
+        let window_cap = static_box.diff_window_for_test(MACH_MSG2, 0, usize::MAX, &[0u64; 8]);
+        // The concrete headroom this whole test exists to establish -- checked as an inequality,
+        // not pinned to today's exact number (fix round 2, Minor F: a legitimate future cap change
+        // should not red this test for a reason unrelated to its conclusion).
         const { assert!(retrace_box::PTR_WINDOW_CAP > SEND_SIZE_MAX,
             "the seed's safety margin (this test's whole conclusion) is only as good as \
              window_cap staying above the kernel's own send_size ceiling") };
+        assert_eq!(window_cap, retrace_box::PTR_WINDOW_CAP,
+            "Box_::load (the static production constructor), read through diff_window itself, \
+             must report window_cap == PTR_WINDOW_CAP");
 
         // Steps 1+3, swept over a representative range rather than the one avail this fixture's
         // guest happens to produce -- including both sides of window_cap's saturation point and
@@ -165,16 +181,19 @@ fn whenever_a_band_exists_it_starts_past_every_possible_send_size() {
             // serve; `diff_window_for_test` is the SAME private `diff_window` `forward_and_diff`
             // calls.
             let win = static_box.diff_window_for_test(MACH_MSG2, 0, avail, &[0u64; 8]);
-            assert_eq!(win, avail.min(static_box.dbg_window_cap()),
+            assert_eq!(win, avail.min(window_cap),
                 "diff_window's None arm must reduce to avail.min(window_cap) for mach_msg2 at \
                  EVERY avail ({avail}), not only the one avail the original single-call test \
                  happened to hit");
-            let band = retrace_box::GUARD_BAND.min(avail.saturating_sub(win));
+            // `Box_::band_len` is the SAME hoisted function `forward_and_diff` calls (fix round 2,
+            // Important A) -- not a re-derivation of its formula. `win <= avail` always here (it
+            // is `avail.min(window_cap)`), so this can never hit `band_len`'s underflow panic.
+            let band = Box_::band_len(avail, win);
             if band > 0 {
                 // Step 3's conclusion, then step 5: whenever a band exists at all, its start
                 // (`win`) has saturated at window_cap, which step 4 already bounds send_size well
                 // under.
-                assert_eq!(win, static_box.dbg_window_cap(),
+                assert_eq!(win, window_cap,
                     "a nonzero band (avail={avail} win={win} band={band}) must mean win saturated \
                      at window_cap -- if this ever fails, the band could start before window_cap \
                      and this proof's headroom argument no longer holds");
@@ -192,16 +211,18 @@ fn whenever_a_band_exists_it_starts_past_every_possible_send_size() {
         }
     } // static_box dropped here -- its VM is destroyed before the dynamic constructor below runs.
 
-    // Step 2 (second production constructor): Box_::load_dynamic, live-checked independently.
-    // Only its `window_cap` field matters here, so it is dropped unexercised (no `run()` call) --
-    // constructing it is already enough to observe what its field initializer set.
+    // Step 2 (second production constructor reachable from a bare Box_): Box_::load_dynamic,
+    // live-checked independently, again through `diff_window_for_test` rather than a field-reading
+    // accessor. Only its `window_cap` matters here, so it is dropped unexercised (no `run()` call)
+    // -- constructing it is already enough to observe what its field initializer set.
     let exe = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO_DYN).unwrap());
     let dyld_path = exe.dylinker.clone().unwrap_or_else(|| retrace_guest::DYLD_PATH.to_string());
     let dyld_bytes = std::fs::read(&dyld_path).unwrap_or_else(|e| panic!("read dyld {dyld_path}: {e}"));
     let dyld = retrace_guest::parse_macho(retrace_guest::slice_arm64e(&dyld_bytes));
     let dynamic_box = Box_::load_dynamic(&exe, &dyld, &[retrace_guest::HELLO_DYN.to_string()]);
-    assert_eq!(dynamic_box.dbg_window_cap(), retrace_box::PTR_WINDOW_CAP,
-        "Box_::load_dynamic (the dynamic production constructor) must ALSO set window_cap == \
-         PTR_WINDOW_CAP -- a mismatch here would mean the two production entry points disagree, \
-         which this proof cannot assume away");
+    let dynamic_window_cap = dynamic_box.diff_window_for_test(MACH_MSG2, 0, usize::MAX, &[0u64; 8]);
+    assert_eq!(dynamic_window_cap, retrace_box::PTR_WINDOW_CAP,
+        "Box_::load_dynamic (the dynamic production constructor), read through diff_window itself, \
+         must ALSO report window_cap == PTR_WINDOW_CAP -- a mismatch here would mean the two \
+         production entry points disagree, which this proof cannot assume away");
 }
