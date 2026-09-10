@@ -152,29 +152,23 @@ fn the_serviced_vm_map_calls_band_is_measured_zero_and_out_of_scope() {
 ///    separately (the reviewer's ruling: an assertion here would be theatre, since no test could
 ///    fail the property without an API change first) -- recorded here as the reason this proof
 ///    does not need to.
-/// 4. `crates/retrace-core/src/lib.rs:435` asserts `send_size <= machmsg::SEND_SIZE_MAX` (4096) for
-///    EVERY mach_msg2 call, BEFORE `route()` even runs -- so this bound holds regardless of which id
-///    fires or whether it is forwarded. **This crate cannot read that constant**: `retrace-box`
-///    cannot depend on `retrace-core` (the dependency runs the other way), so
-///    `SEND_SIZE_MAX_MIRROR` below is a hand-copied MIRROR and every assertion in this file that
-///    uses it is comparing against this file's own number, not against the production bound. The
-///    file that checks the real bound is `crates/retrace-core/tests/machmsgband_dyn.rs`, which
-///    IMPORTS `machmsg::SEND_SIZE_MAX` and asserts every real forwarded `send_size` against it
-///    (M32 finding 2: through fix round 2 that file kept its own copy too, so widening the
-///    production bound would have left BOTH files green while this proof's conclusion turned
-///    false -- exactly the duplicated-literal shape the mirror's name now advertises).
-/// 5. `window_cap > SEND_SIZE_MAX_MIRROR`: whenever a band exists, it begins comfortably past the
-///    last byte the kernel is permitted to read. The band can never land inside the kernel-read
-///    region.
+/// 4. **Steps 4 and 5 are an EXTERNAL PREMISE this crate structurally cannot check.**
+///    `crates/retrace-core/src/lib.rs:435` asserts `send_size <= machmsg::SEND_SIZE_MAX` (4096) for
+///    EVERY mach_msg2 call, BEFORE `route()` even runs, so the bound holds regardless of which id
+///    fires or whether it is forwarded -- but `retrace-box` cannot depend on `retrace-core` (the
+///    dependency runs the other way), so `machmsg::SEND_SIZE_MAX` is INVISIBLE here and **no
+///    constant in this file stands in for it**. One did, briefly: a hand-copied
+///    `SEND_SIZE_MAX_MIRROR`, which nothing compared to the thing it mirrored, so it could not
+///    detect the drift its own name implied it caught. It is deleted rather than renamed.
+/// 5. The premise is asserted at COMPILE TIME in the crate that owns both operands, by the
+///    module-scope `const _: () = assert!(machmsg::SEND_SIZE_MAX < retrace_box::PTR_WINDOW_CAP)` in
+///    `crates/retrace-core/tests/machmsgband_dyn.rs`. **Steps 1-3 above are what THIS file proves**:
+///    a band, whenever one exists, starts at `ipa + window_cap`. Step 5's conclusion -- that the
+///    band therefore begins past the last byte the kernel may read, and can never land inside the
+///    kernel-read region -- follows from steps 1-3 TOGETHER WITH that assertion, and from nothing
+///    in this file alone.
 #[test]
 fn whenever_a_band_exists_it_starts_past_every_possible_send_size() {
-    // Step 4's bound, MIRRORED: `retrace-box` cannot depend on `retrace-core`, so this is a copy
-    // of `machmsg::SEND_SIZE_MAX`'s value, not a read of it. The name says so at every use site
-    // below, and the assertion that consumes it says so in its failure message, because nothing
-    // here can detect a drift -- `crates/retrace-core/tests/machmsgband_dyn.rs` is the file that
-    // can, and does (M32 finding 2).
-    const SEND_SIZE_MAX_MIRROR: usize = 0x1000;
-
     // Step 1, sanity: mach_msg2 is genuinely absent from the destination-length table (mirrors
     // retrace-arch's own `dest_buffer_omits_what_it_should`-style coverage, for THIS trap number
     // specifically, which that suite does not name).
@@ -192,24 +186,24 @@ fn whenever_a_band_exists_it_starts_past_every_possible_send_size() {
         // Reads window_cap THROUGH diff_window (see step 2's doc comment) rather than through a
         // field-reading accessor: `usize::MAX.min(window_cap)` can only equal `window_cap`.
         let window_cap = static_box.diff_window_for_test(MACH_MSG2, 0, usize::MAX, &[0u64; 8]);
-        // The concrete headroom this whole test exists to establish -- checked as an inequality,
-        // not pinned to today's exact number (fix round 2, Minor F: a legitimate future cap change
-        // should not red this test for a reason unrelated to its conclusion).
-        const { assert!(retrace_box::PTR_WINDOW_CAP > SEND_SIZE_MAX_MIRROR,
-            "the seed's safety margin (this test's whole conclusion) is only as good as \
-             window_cap staying above the kernel's own send_size ceiling -- and only as good as \
-             SEND_SIZE_MAX_MIRROR still matching machmsg::SEND_SIZE_MAX, which THIS crate cannot \
-             check (no dependency on retrace-core): if the production bound moved, the file that \
-             reds is crates/retrace-core/tests/machmsgband_dyn.rs, not this one") };
+        // The headroom half of the conclusion (`window_cap` above the kernel's send_size ceiling)
+        // is NOT asserted here and cannot be -- see steps 4-5: it lives in
+        // `crates/retrace-core/tests/machmsgband_dyn.rs`'s module-scope `const _: () = assert!(...)`,
+        // the one place both constants are visible. What IS checkable in this crate, and is the
+        // thing steps 1-3 rest on, is that a real production constructor's `window_cap` is
+        // `PTR_WINDOW_CAP`.
         assert_eq!(window_cap, retrace_box::PTR_WINDOW_CAP,
             "Box_::load (the static production constructor), read through diff_window itself, \
              must report window_cap == PTR_WINDOW_CAP");
 
         // Steps 1+3, swept over a representative range rather than the one avail this fixture's
-        // guest happens to produce -- including both sides of window_cap's saturation point and
-        // both sides of SEND_SIZE_MAX.
+        // guest happens to produce -- including both sides of window_cap's saturation point
+        // (65535/65536/65537) and, as bare literals, the neighbourhood of the kernel's send_size
+        // ceiling AS OF M32 (4095/4096/4097). Those three are sweep POINTS only: this file enforces
+        // nothing about that ceiling and cannot (steps 4-5), so they are written as numbers rather
+        // than through a named constant that would imply a correspondence nothing checks.
         const AVAILS: &[usize] = &[
-            0, 1, SEND_SIZE_MAX_MIRROR - 1, SEND_SIZE_MAX_MIRROR, SEND_SIZE_MAX_MIRROR + 1,
+            0, 1, 4095, 4096, 4097,
             65535, 65536, 65537, 100_000, 10_000_000,
         ];
         for &avail in AVAILS {
@@ -233,14 +227,14 @@ fn whenever_a_band_exists_it_starts_past_every_possible_send_size() {
                     "a nonzero band (avail={avail} win={win} band={band}) must mean win saturated \
                      at window_cap -- if this ever fails, the band could start before window_cap \
                      and this proof's headroom argument no longer holds");
-                assert!(win >= SEND_SIZE_MAX_MIRROR,
-                    "avail={avail}: a band exists here but win ({win}) does not clear the \
-                     kernel's own send_size ceiling ({SEND_SIZE_MAX_MIRROR}) -- the hypothesis is \
-                     REFUTED for this avail, and mach_msg2 must stay withheld from any \
-                     canary-fill allow-list (spec §9: no such allow-list was ever built)");
+                // Nothing further is asserted here about the kernel's send_size ceiling. A
+                // `win >= 4096` would be strictly implied by the `assert_eq!` above (which pins
+                // `win` to 65536) and would compare against a literal this file cannot relate to
+                // the production bound -- the mirror's whole defect, in one line. The ceiling is
+                // handled where it can be: steps 4-5.
             }
-            // avail == 0 and avail == SEND_SIZE_MAX_MIRROR - 1 (etc.) are the band == 0 cases: no canary
-            // is ever written there, so there is nothing for SEND_SIZE_MAX to be compared against
+            // avail == 0 and avail == 4095 (etc.) are the band == 0 cases: no canary
+            // is ever written there, so there is nothing for a send_size to be compared against
             // -- asserting `len >= send_size` on them (as the original single-call test did) would
             // be asserting about a risk that provably cannot occur, not about the one this test
             // proves does not occur.

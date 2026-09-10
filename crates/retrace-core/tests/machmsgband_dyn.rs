@@ -35,6 +35,25 @@
 use retrace_box::Box_;
 use retrace_core::machmsg::{self, Msg2, Route, SEND_SIZE_MAX};
 
+// THE PROOF'S PREMISE, CHECKED AT COMPILE TIME. This is the only place in the repo where the
+// comparison can be written at all: `retrace-core` owns `machmsg::SEND_SIZE_MAX` AND depends on
+// `retrace-box`, so both operands are visible here and nowhere else -- `retrace-box` can never see
+// the second one.
+//
+// It is at MODULE scope, not inside a test body, deliberately. The corpus test skips `jq` and
+// CPython when they are absent and its own runtime tripwire sits at the end of that function, so on
+// a machine without Homebrew nothing in this file's bodies would evaluate this at all. A
+// `const _: () = assert!(...)` is checked when the CRATE COMPILES: it holds on any machine, in any
+// gate chunk, whether or not a single guest was ever recorded.
+//
+// And it is the check that was missing. Through the first fix wave `SEND_SIZE_MAX` was merely
+// IMPORTED here rather than redefined, which fixed the per-landmark assertions (they now compare
+// real captured sends against the real bound) but did NOT make drift detectable: every use of it is
+// `send_size <= SEND_SIZE_MAX`, which a WIDENING only loosens. Nothing anywhere related the two
+// constants, while four sites claimed something did. This assertion is that relation.
+const _: () = assert!(machmsg::SEND_SIZE_MAX < retrace_box::PTR_WINDOW_CAP,
+    "M32's structural proof is FALSE: mach_msg2's send_size ceiling now reaches or exceeds window_cap, so a guard band could start INSIDE the region the kernel reads out of a message buffer -- the M30 corruption class. See crates/retrace-box/tests/machmsgband.rs steps 4-5 and docs/superpowers/specs/2026-09-09-retrace-m32-dirtable-design.md §9");
+
 const MACH_MSG2: u64 = (-47i64) as u64;
 const TASK_INFO_MSGH_ID: u32 = 3405;
 // task_self_trap: record_box/ReplaySession::advance both learn `guest_task_port` from this
@@ -44,14 +63,18 @@ const TASK_INFO_MSGH_ID: u32 = 3405;
 // `machmsg::route()` rather than hand-copy `FORWARD_ALLOWLIST`'s id list.
 const MACH_TASK_SELF: u64 = (-28i64) as u64;
 // `SEND_SIZE_MAX` is IMPORTED above, not redefined here (M32 finding 2). It was a local
-// `const SEND_SIZE_MAX: usize = 0x1000;` through fix round 2, which made every assertion below a
-// comparison against this file's OWN copy of the number: widening the production bound at
-// `crates/retrace-core/src/lib.rs:435` to anything at all would have left this file green while the
-// structural proof it exists to pin (`PTR_WINDOW_CAP > SEND_SIZE_MAX`) quietly became false. It is
-// now the same `pub const` that assert reads, so this file is the one place in the repo where the
-// premise is CHECKED against real captured values rather than cited -- see the per-landmark
-// assertion in `every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band` and the one in
-// the single-triple test below.
+// `const SEND_SIZE_MAX: usize = 0x1000;` through fix round 2, which made the per-landmark checks
+// below comparisons against this file's OWN copy of the number. Importing it makes those checks
+// compare REAL captured sends against the REAL production bound -- a genuine improvement, and all
+// this constant is responsible for. **It is NOT what detects drift**: every use of it here is
+// `send_size <= SEND_SIZE_MAX`, and widening the bound only makes that MORE permissive. The
+// cross-constant relation the proof actually rests on is the module-scope `const _: () =
+// assert!(...)` above, which is the thing that reds if the bound moves.
+//
+// So: the per-landmark assertions (in `every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band`
+// and in the single-triple test below) check that real traffic OBEYS the bound; the compile-time
+// assertion checks that the bound is still SMALL ENOUGH for the proof to hold. Two different jobs,
+// and for one round this file claimed the first was doing the second.
 
 /// Builds `(exe, dyld)` `Loaded` pairs exactly as `crates/retrace/src/main.rs`'s `record-dyn` CLI
 /// path does, and records into a fresh temp trace. Shared by every guest this file records, so the
@@ -354,8 +377,10 @@ fn every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band() {
     // reverted and the suite re-run green. The control is recorded here rather than only in a
     // report, because this is where the next reader of the assertion will be.
     assert!(governed_max_avail < retrace_box::PTR_WINDOW_CAP,
-        "a governed mach_msg2 call now carries a nonzero band (max governed avail \
+        "a governed mach_msg2 call now reaches the band threshold (max governed avail \
          {governed_max_avail} >= window_cap {}) -- the inertness finding M32 closed on is \
-         OVERTURNED; reopen spec §9 before trusting it",
+         OVERTURNED; reopen spec §9 before trusting it. NOTE the wording: this fires one step \
+         EARLY, at avail == window_cap, where the band is still ZERO -- see the comment above for \
+         why that is the useful moment rather than waiting for a nonzero band",
         retrace_box::PTR_WINDOW_CAP);
 }
