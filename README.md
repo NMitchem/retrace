@@ -278,30 +278,27 @@ design, and the reconstruction caveat in full.
   `jq --version` and the real CPython interpreter), and the Apple sweep (**392** control lines from
   **54** distinct guests, zero canary lines, tally unmoved at `pass=46 fail=8 skip=0`).
 
-**Gate:** 549 passed / 0 failed / 2 ignored across 118 test binaries, **measured at M30** over all
-118 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with
+**Gate:** 552 passed / 0 failed / 2 ignored across 119 test binaries, **measured at M31** over all
+119 targets, every chunk `EXIT=0`; clippy clean over `--workspace --all-targets` with
 `-D warnings`.
-See the testing note below for how that number is assembled. "118 test binaries" is 111 test
+See the testing note below for how that number is assembled. "119 test binaries" is 112 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
 nobody has to re-derive it. The ignored gates are unchanged at
 **two**: `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). Both
-are described under Known limits. M30 parked nothing new and un-parked nothing.
+are described under Known limits. M31 parked nothing new and un-parked nothing.
 
-Reconciled against the M29 fast-follow's 538 / 0 / 2 over 116 **file-by-file rather than by sum**:
+Reconciled against M30's 549 / 0 / 2 over 118 **file-by-file rather than by sum**:
 
-| file | M29 | M30 | delta |
+| file | M30 | M31 | delta |
 |---|---|---|---|
-| `retrace-arch/src/lib.rs` | 29 | 30 | **+1** — `reads_guest_buffer` pinned by number |
-| `retrace-box/tests/canary.rs` | 0 | 5 | **+5, a NEW binary** — the two canary predicates |
-| `retrace-box/tests/truncguard.rs` | 15 | 19 | **+4** — five added across the fill and its two measured restore defects, minus `canary_overran`'s unit test, deleted with the function once the flip left it uncalled |
-| `retrace/tests/bigwrite_e2e.rs` | 0 | 1 | **+1, a NEW binary** — the read-side corruption reproduction |
+| `retrace-box/tests/checkpointparity.rs` | 0 | 3 | **+3, a NEW binary** — the two tiers of the `from_checkpoint` structural guard, plus the accessor test that makes the deliberate-reset assertion observable |
 
-Every other file unchanged, and `--bins` **11 → 11**. **Two new test binaries**, which is what moves
-the count 116 → 118 — unlike M29, where the new work landed in files that already existed. The count
-closes at both ends: the tree held 540 `#[test]` at the M29 fast-follow = 538 running + 2 ignored,
-and **551** now = 549 + 2.
+Every other file unchanged, and `--bins` **11 → 11**. **One new test binary**, which is what moves
+the count 118 → 119. The count closes at both ends: the tree held 551 `#[test]` at M30 = 549 running
++ 2 ignored, and **554** now = 552 + 2 — and that total was **predicted from source before the gate
+ran**, then matched exactly by the run.
 
 The `retrace-box` chunk again ran as a **whole package** so its `Doc-tests` harness is not silently
 dropped (M24's lesson, now standing practice), and the `retrace` package was split into `--bins` plus
@@ -629,25 +626,54 @@ These are real and current, not aspirational gaps.
   **record and replay would agree on the duplicate, and the divergence oracle structurally cannot
   see it.** Closing it needs resume-side state, not a check at the exit. The stale-PC resume itself
   was never root-caused; M23 root-caused only the masking that hid it.
-- **Record-only box state is guarded on one replay path and not the other.** `Box_` has three
-  construction paths — `load`/`load_dynamic` (record only), `restore` and `from_checkpoint` (both
-  replay only) — and anything a load path establishes that a replay path does not re-establish is a
-  bug whose signature is *a passing record followed by a diverging replay*. The determinism oracle
-  cannot see it when both replay paths are wrong the same way, because the oracle compares replay
-  against record's **trace**, never against record's **box**. By this repo's own written record the
-  class has shipped seven times (M9 t3, M10, M11, M14, M18, M21, M23), each fixed individually and
-  none leaving behind anything that would catch the eighth. Since M24 the `load`↔`restore` pair is
-  pinned by a standing test — `retrace-box/tests/restoreparity.rs` diffs a load box against a
-  `restore` box built from that box's own snapshot, comparing 15 of `Box_`'s 27 state fields plus two
-  sysregs and the 0x800 vector table, and it states an obligation: a new field must be either covered
-  there and equal, or named in `normalise()` citing the mirrored replay mechanism by file and line.
-  **`from_checkpoint` has no such guard**, and that is the path with the documented *five*-instance
-  history — it restores far more state than `restore` does and runs mid-run where nothing is at a
-  default. So the class is **not closed**; it is closed on the path it has bitten twice and open on
-  the path it has bitten five times, which is the successor milestone. Two blind spots are structural
-  even where the guard runs: it compares construction at landmark 0 and not evolution after it, and
-  two boxes that are wrong in the *same* way (a static box's zeroed thread-0 context, identical on
-  both sides) are invisible to any test that only diffs the two against each other.
+- **Record-only box state now has a structural guard on both replay paths, and neither guard closes
+  the class.** `Box_` has three construction paths — `load`/`load_dynamic` (record only), `restore`
+  and `from_checkpoint` (both replay only) — and anything a load path establishes that a replay path
+  does not re-establish is a bug whose signature is *a passing record followed by a diverging
+  replay*. The determinism oracle cannot see it when both replay paths are wrong the same way,
+  because the oracle compares replay against record's **trace**, never against record's **box**.
+  Since M24 the `load`↔`restore` pair is pinned by `retrace-box/tests/restoreparity.rs`, which diffs
+  a load box against a `restore` box built from that box's own snapshot (15 of `Box_`'s 27 state
+  fields plus two sysregs and the 0x800 vector table). Since M31 the `load`↔`from_checkpoint` pair is
+  pinned the same way by `retrace-box/tests/checkpointparity.rs`, which drives a box to a **mid-run**
+  landmark, checkpoints it, rebuilds from that checkpoint and diffs the two — and it carries the same
+  written obligation: a new field must be compared there and equal, asserted as **deliberately
+  reset** with the mechanism that re-establishes it on the replay side cited by file and line, or
+  named as knowingly excluded citing the comment that documents the exclusion. There is no fourth
+  option that is safe.
+  **The count this entry published for seven milestones was too high by one, and M31 found the
+  error's provenance rather than merely the absence of evidence.** This entry used to say the class
+  had shipped **seven** times (M9 t3, M10, M11, M14, M18, M21, M23), with a documented *five*-instance
+  history on `from_checkpoint`. M18 is not an instance: commit `e93f8dc` adds `wq_thread_pc`'s `Box_`
+  field, its `BoxState` field, the `checkpoint()` carry **and** the `from_checkpoint` restore in one
+  commit, so no gap ever existed; all four M18 status-log sections mention neither `from_checkpoint`
+  nor `BoxState`, and M18 files its own recurring bug under a different class. The origin is a single
+  uncited line in M24's design spec — "**M18** — `wq_thread_pc`, same reason." — whose own named
+  source is the `BoxState` field comments, where `wq_thread_pc`'s comment reads "carried for the same
+  reason as `thread_start_pc` immediately above". **Same *reason* was read as same *instance*.** So
+  the corrected counts are **six** for the whole class and **four** on `from_checkpoint` (M9 t3, M10,
+  M11, M14), and the provenance is written down here because the comments that produced the seven are
+  still in the tree and would produce it again.
+  **The M31 guard found no `from_checkpoint` asymmetry** on anything its fixtures reach — a
+  two-thread table, fd slots (Open and Closed, distinct from Free), the signal table, all three
+  pthread/workqueue scalars, a `PROT_NONE` extent, the cache pager, a bootstrap port, an armed
+  breakpoint, an armed watchpoint and `tpidrro_el0` all came back equal, and the four debugger fields
+  came back correctly reset with the debugger's own re-arm cited. That is a measured statement about
+  the code's current state, not a milestone that did not look: two mutations prove the guard fails
+  when it should — resetting `sigtable` in `from_checkpoint` turns the rich tier red at `rich: signal
+  dispositions`, and zeroing every non-current thread's context turns the rich tier red while leaving
+  the static tier **green**, which is what makes the two-thread fixture load-bearing rather than
+  decorative.
+  Three limits remain, the first two carried over from M24 unchanged. The guard compares
+  **construction** at one landmark and not **evolution** after it (`retrace/tests/checkpoint_seek.rs`
+  is that axis). Two boxes wrong in the *same* way stay invisible to any test that only diffs them
+  against each other. And reach is bounded by what a fixture can stage from a static box: eight
+  fields the diff reaches are still `Default == Default` there — `synthetic_tsc`, `last_far`,
+  `cache_refault_ipa`, `cache_refault_count`, `pac_enabled`, `fall_throughs`, `tpidr_el0` and
+  `syscall_watch_hit`, each needing a guest that executes the instruction or takes the fault, not a
+  setter. `stack_top`/`stack_size` are a **different** class and not part of that eight: they are
+  always-identical non-trivial constants that no public API moves post-load, so the comparison cannot
+  tell a genuine carry-through from a hardcoded recomputation of the same constant.
 - **The trampoline page is padded for only 0x800 of its 16 KiB.** The rest is zero, which is
   `UDF #0` — the very encoding M23 removed from the vector slots. Nothing reaches it today, and a
   test pins the boundary, but the hazard is the one M23 exists to have eliminated.

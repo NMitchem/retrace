@@ -139,12 +139,22 @@ fn diff_backings(load: &[(u64, usize)], restore: &[(u64, usize)]) -> String {
 /// `dbg_backings` (the L2 table's `(ipa, len)`) and `dbg_next_l3` (the cursor derived from those
 /// same tables).
 ///
-/// And the largest gap, stated so it is not mistaken for coverage: `from_checkpoint` has NO parity
-/// guard at all. It is the path this class has bitten five times (M9 t3, M10, M11, M14, M18 — the
-/// `BoxState` field comments enumerate them by name), it carries far more state than `restore`, and
-/// it runs mid-run where nothing is at a default. That guard needs a mid-run fixture and a judgement
-/// about what *should* legitimately differ at a mid-run landmark; it is the successor milestone, not
-/// something this file quietly covers.
+/// And the largest gap when this file was written: `from_checkpoint` had NO parity guard at all,
+/// though it carries far more state than `restore` and runs mid-run where nothing is at a default.
+/// **That successor arrived: `checkpointparity.rs` (M31) is the guard**, so this paragraph no longer
+/// describes an open gap — only the difference in reach that keeps both files necessary.
+///
+/// This paragraph also used to claim the class had "bitten five times (M9 t3, M10, M11, M14, M18 —
+/// the `BoxState` field comments enumerate them by name)". **The cross-reference is withdrawn
+/// (M31 t5): the field comments do not enumerate that list.** M9 t3 is not a `BoxState` field at
+/// all — its fix was the opposite remedy, `from_checkpoint` DERIVING `tlbi_stub_ready` from the
+/// restored backings (`70629c4`) — while the field comments additionally name M7 t6, M8, M13 and
+/// M23 t1, which are carries rather than instances. The count of the class lives in ONE place, the
+/// `M24-restoreaudit` section of `docs/status-log.md` — read with its forward pointer, the
+/// `M31-checkpointparity` section, which supersedes M24's seven/five with six/four (the log is
+/// append-only, so M24's own text still reads seven). The note on `BoxState` explains why a field
+/// there is not evidence of an instance; the one entry (M18) the git record contradicts was flagged
+/// there and is now resolved by that M31 section.
 fn assert_load_restore_parity(b: Box_, label: &str) {
     let load_state = normalise(&b.dbg_internal_state());
     let (top, size) = (b.stack_top(), b.stack_size());

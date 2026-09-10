@@ -5850,3 +5850,200 @@ here rather than smoothed over.
 * **Widening the band itself** (sampling the whole remaining backing under a fixed byte budget rather
   than one contiguous 64-byte run) stays unblocked and unattempted. M28's suppression count is the
   warning for whoever takes it up: a naive wider sample is suppressed more often, not less.
+
+---
+
+## Status: M31-checkpointparity — a forcing function for field N+1, and a seven that was always a six
+
+M24 built the `load`↔`restore` parity guard and named its own successor in the same breath:
+*"`from_checkpoint` has no parity guard at all — this is the successor milestone."* M31 is that
+milestone. `crates/retrace-box/tests/checkpointparity.rs` drives a `Box_` to a **mid-run** landmark,
+checkpoints it, rebuilds a second box from that checkpoint, and diffs the two — `restoreparity.rs`'s
+shape, applied to the replay path that restores the most state and runs where nothing sits at a
+default. It carries the same written obligation: a new field must be compared there and **equal**,
+asserted as **deliberately reset** with the replay-side mechanism that re-establishes it cited by
+file and line, or **named as knowingly excluded** citing the comment that documents the exclusion.
+There is no fourth option that is safe. Two test-only accessors were added to make the guard able to
+see what it asserts: `Box_::dbg_debug_state()` and `Box_::dbg_tlbi_stub_ready()`.
+
+**The premise M24 handed down was too strong, and this milestone corrected it in the spec rather than
+inheriting it.** "No parity guard at all" is true of a *structural* guard and false of coverage.
+`tests/checkpoint.rs::checkpoint_round_trip_is_lossless_mid_run` already covered registers, FP/SIMD,
+the nine `dbg_internal_state` scalars and full memory, mid-run, with non-default state staged; six
+point tests (`pacposture.rs`, `sigcheckpoint.rs`, `threads.rs`, `protnone.rs`, `tlbi.rs`,
+`fdtable.rs`) each covered exactly one field — per-field carriage tests, written alongside or after
+the field each covers. They are **not** one test per historical bug, and this section will not say
+so: M7's `pac_enabled` and M13's `noaccess` were never dropped by `from_checkpoint` (M13's was
+planned staging, `2ebbb7b`, not a review-caught bug), while `fdtable.rs` — missing from the list this
+sentence originally carried — does cover a counted instance. Reading *same reason* as *same
+instance* is the precise slip this milestone exists to correct, so it is not reproduced here. What was
+missing was never coverage of the past. **It was a forcing function for the future**: one diff that
+sees every field at once, and an obligation that makes field N+1 somebody's problem *before* it ships
+rather than after it breaks. Stating that narrower claim is worth more than inheriting the wider one,
+because a milestone that advertises a gap it does not have cannot be checked.
+
+### The judgement a mid-run guard has to make
+
+Two things legitimately differ across `from_checkpoint`, and both are **asserted** rather than
+excused.
+
+**The debugger four** — `bps_armed`, `wps_armed`, `watch_ranges`, `syscall_watch_hit` — are not
+carried in `BoxState` and come back at their defaults. That is correct: the debugger owns the watch
+list and re-arms from its own stored copy after every seek (`crates/retrace/src/debug.rs:608`, `:641`
+and `:761`, each calling `ReplaySession::arm_watchpoints(&ws)`), so a box that restored them would be
+a second authority for the same state. The guard asserts the reset positively instead of stripping
+the fields in a `normalise()`, because **stripping excuses a difference invisibly and goes on passing
+when the field stops being reset**, whereas asserting states what is supposed to happen and fails if
+it stops happening. That assertion is only worth something if something was armed: the rich fixture
+arms **both** a watchpoint and a hardware breakpoint before capture, so both halves of the reset
+check observe a real reset rather than a field that was already at its default.
+
+**The current thread's table entry is stale in a live box** — only `switch_to_thread` refreshes it —
+and `Box_::checkpoint` folds the live vCPU into it before carrying it. So a restored table
+legitimately holds *more* current state than the live box's own table, and comparing the two directly
+asserts something that is false by design. **The guard's first run failed for exactly that reason**,
+which is how the judgement got made rather than assumed. The current thread is therefore compared
+against the live box's `save_ctx()` — making the fold itself the thing asserted — while every
+non-current entry is compared against the **live** box rather than merely against the captured state.
+Without that second rule the guard would be clone-fidelity only: a `checkpoint()` that folded into
+the wrong index, or corrupted another thread's context, would make restored == captured and pass.
+
+### The result: no asymmetry found, bounded by what the fixtures reach
+
+On its first clean run the diff found **no `from_checkpoint` asymmetry**. `from_checkpoint`
+reproduced every field both tiers reach — a two-thread table, fd slots (`Open` and `Closed`, the
+latter distinct from `Free`), the signal table, all three pthread/workqueue scalars, a `PROT_NONE`
+extent, the cache pager, a bootstrap port, an armed breakpoint, an armed watchpoint and
+`tpidrro_el0` — and reset the debugger four. Nothing was carried, nothing was asserted as a
+deliberate reset beyond the two judgements above, and nothing was parked.
+
+That is a finding about the code's current state, not an absence of effort, and it is written into
+the test's own module header in those words so that a reader meeting a green guard does not read it
+as a guard that did not look. The bound is stated in the same place: **it is exactly what the
+fixtures reach**, and the two tiers exist because a field left at its default is compared and the
+comparison proves nothing — `Default == Default` passes for a reason unrelated to the assertion's
+name. The static tier runs `HELLO` to its first syscall and moves only `pc`/`elr`/`spsr`; the rich
+tier stages a non-default value into every field it can reach through `Box_`'s own public methods and
+**asserts each one non-default before capturing**. The preconditions are what separate a guard that
+agrees from a guard that cannot see.
+
+### Two positive controls, because a guard nobody has watched fail is a guard nobody knows is wired up
+
+M28's `let band = 0;` passed a 523-test gate before its own positive control existed. So this guard
+was made to fail twice, on purpose, and both mutations are recorded on the test itself.
+
+| control | mutation in `from_checkpoint` | result |
+|---|---|---|
+| 1 | `sigtable: state.sigtable.clone()` → `SigTable::default()` | rich tier **RED** at `rich: signal dispositions`; static tier green |
+| 2 | `threads: state.threads.clone()` → a clone that zeroes every **non-current** thread's `ctx`, leaving thread count and `current` untouched | rich tier **RED** at `rich: the restored thread table must reproduce the CAPTURED table exactly`; static tier **GREEN** |
+
+**Control 2's asymmetry is the point, not a side effect.** With one thread `cur == 0`, there is no
+non-current entry to corrupt, so the mutation is invisible — on Task 2's single-thread fixture this
+exact bug would have passed. The second thread is what gives the guard reach, and the two threads
+carry deliberately *different* signal masks so that an index-swap in `checkpoint()`'s fold pass cannot
+hide behind two near-identical contexts. A cruder first attempt (replacing the whole table with
+`ThreadTable::new(ThreadCtx::zeroed())`) was discarded because it also changes the thread **count**
+and so fails on both tiers, isolating nothing.
+
+Both mutations were reverted and the revert verified (`git status --porcelain=v1` empty,
+`grep -rn 'MUTATION' crates/` exit 1) before the suite was re-run clean.
+
+### The enumeration, and a count that was always one too high
+
+Five sites in the tree were carrying ordinals for this class, and they were counting **three
+different quantities**: instances of the class on the `from_checkpoint` path (`restoreparity.rs`),
+fields carried in `BoxState` (the field comments, `fdtable.rs`, `sigcheckpoint.rs`), and sites inside
+`from_checkpoint` that stopped being re-derived from a constant. They were never in conflict; one
+**cross-reference** between them was false. `restoreparity.rs` claimed its five were the ones "the
+`BoxState` field comments enumerate by name" — wrong in both directions, since M9 t3 is not a
+`BoxState` field at all (its fix was the opposite remedy: `from_checkpoint` **derives**
+`tlbi_stub_ready` from the restored backings, commit `70629c4`) and the field comments additionally
+name M7 t6, M8, M13 and M23 t1, none of which is an instance. The five ordinals are retired and every
+site now points at one authority — the `M24-restoreaudit` section of this log.
+
+**And that authority is one too high.** M24 named M18's `wq_thread_pc` as an instance. It is not:
+
+- `e93f8dc` ("M18 t4: guest_bsdthread_register — the guest's registration is the guest's") adds the
+  `Box_` field, the `pub BoxState` field, the `checkpoint()` carry **and** the `from_checkpoint`
+  restore in one commit. There was never a window in which `from_checkpoint` dropped it.
+- All four M18 status-log sections contain **zero** mentions of `from_checkpoint` or `BoxState`, and
+  M18 files its own recurring bug under a different class entirely ("the guest's X is retrace's",
+  with M10 and M11 as its siblings). A search of `docs/`, `.superpowers/` and every commit body
+  (`--grep`, `-S`, `--all`) for `wq_thread_pc` turns up nothing recording such a drop.
+
+**The provenance is the part worth keeping**, because it is what stops the next milestone re-deriving
+the same seven from the same source. `docs/superpowers/specs/2026-08-31-retrace-m24-restoreaudit-design.md:32`
+reads, in full, "**M18** — `wq_thread_pc`, same reason." — uncited; and line 127 of that same spec
+names its source as the `BoxState` field comments, where `wq_thread_pc`'s comment says it is "carried
+for the same reason as `thread_start_pc` immediately above". **Same *reason* was read as same
+*instance*.** So the corrected counts are **four** on the `from_checkpoint` path (M9 t3, M10, M11,
+M14) and **six** for the whole class (those four plus M21 and M23 t1 on `restore`). M24's section
+stands as written; this one is its forward pointer, which is what the append-only rule is for.
+
+**One candidate was raised and withdrawn**, recorded so it is not raised a third time. M13's
+`noaccess` (introduced `2ebbb7b`, M13 t5; carried in `BoxState` at `86d3b30`, M13 t6) has the same
+*shape* as M14's counted instance but is not the same *kind*: `2ebbb7b` documented the gap in code as
+planned staging — "BoxState has no `noaccess` field yet (that's M13 t6's job) … safe today because
+nothing calls `protect_none` yet" — whereas M14's arrived in `3e3b023`, "t7 **fix round 1**", i.e.
+review-caught. Planned staging inside one milestone is not an instance of a bug class. (A Task 5
+report cited `f47936f` for `noaccess`'s introduction; git shows that commit only mentions the field
+in a `subtract_range` doc comment, and `2ebbb7b` is where the field is born.)
+
+### The gate
+
+**552 passed / 0 failed / 2 ignored across 119 test binaries**, every chunk `EXIT=0`; clippy clean
+over `--workspace --all-targets` with `-D warnings`.
+
+| chunk | passed | failed | ignored | binaries |
+|---|---|---|---|---|
+| workspace minus `retrace-box`/`retrace` | 137 | 0 | 0 | 23 |
+| `retrace-box`, **whole package** | 266 | 0 | 0 | 36 |
+| `retrace --bins` | 11 | 0 | 0 | 1 |
+| e2e group 1 | 31 | 0 | 0 | 11 |
+| e2e group 2 | 16 | 0 | 0 | 11 |
+| e2e group 3 | 16 | 0 | 0 | 11 |
+| e2e group 4 | 25 | 0 | 1 | 11 |
+| e2e group 5 | 37 | 0 | 1 | 11 |
+| e2e group 6 | 13 | 0 | 0 | 4 |
+| **total** | **552** | **0** | **2** | **119** |
+
+`retrace-box` ran as a **whole package** so its `Doc-tests` target was not silently dropped (M24's
+lesson, standing practice since), and `retrace --bins` ran so the 11 unit tests that live only in the
+binary were not silently lost. Reconciled against M30's 549 / 0 / 2 over 118 **file-by-file rather
+than by sum**: the entire delta is `crates/retrace-box/tests/checkpointparity.rs`, 0 → **3** tests
+and a **new binary**; every other file unchanged, `--bins` 11 → 11. The tree holds **554** `#[test]`
+= 552 running + 2 ignored, against M30's 551 = 549 + 2. **The count was predicted from source before
+the gate ran and the run matched it exactly**, which is the only way a chunked gate can tell a
+missing chunk from a missing test. The two ignored gates are unchanged — `stackoverflow_rust_e2e`
+(the M21 signal-model wall) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). M31 parked
+nothing new and un-parked nothing; it adds no capability, bumps no magic, and changes no recorded
+bytes.
+
+### What stays owed
+
+* **Construction, not evolution.** The guard compares two boxes at one landmark and says nothing
+  about their behaviour afterwards. `crates/retrace/tests/checkpoint_seek.rs` is that axis and this
+  milestone did not rebuild it.
+* **Symmetric-but-wrong stays invisible.** Two boxes wrong in the *same* way are invisible to any
+  test that only diffs them against each other — inherited from M24 unchanged, and unchanged for the
+  same structural reason the determinism oracle cannot see the class either.
+* **Eight fields are still `Default == Default` in the rich fixture**, so the guard's comparison of
+  them proves nothing: `synthetic_tsc`, `last_far`, `cache_refault_ipa`, `cache_refault_count`,
+  `pac_enabled`, `fall_throughs`, `tpidr_el0`, `syscall_watch_hit`. Each needs a guest that executes
+  the instruction or takes the fault rather than a setter — there is no public "bump the timebase" or
+  "stage a fault" method — and `pac_enabled` is deliberately not staged because forcing it on over a
+  non-arm64e guest would assert a posture the binary never claims (M7's finding).
+* **`stack_top` / `stack_size` are a different class, and conflating them with the eight is the
+  mistake to avoid.** They are not absent defaults but always-identical non-trivial constants
+  (`STACK_TOP_IPA` / `GRANULE`) that nothing in `Box_`'s public interface moves post-load. The
+  comparison therefore cannot distinguish a genuine carry-through of `state.stack_top` /
+  `state.stack_size` from a hardcoded recomputation of the same constant. The test file documents
+  both classes separately for this reason.
+* **Control 2 is recorded in prose, not as a literal snippet.** M28's precedent (`let band = 0;`) is
+  a mutation a reader can paste back in; the non-current-`ctx`-zeroing mutation is described in the
+  guard's doc comment in words, which is where a reader auditing it will look, and is therefore less
+  directly re-runnable than the control it is modelled on.
+* **The memory comparison is over the map, never the contents.** `from_checkpoint` populates every
+  backing's bytes with a `memcpy` straight from `state.mem`, so a byte-for-byte compare here would be
+  near-tautological — but `restoreparity.rs` *does* byte-compare the EL1 vector table, so a reader
+  must not assume the two files do the same thing.

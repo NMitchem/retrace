@@ -772,6 +772,36 @@ impl FdTable {
     }
 }
 
+/// A mid-run capture of `Box_`, restored by `from_checkpoint`.
+///
+/// **Most fields below exist for one reason** — a mid-run capture cannot re-derive them, so
+/// `from_checkpoint` must be handed them rather than recomputing them — and each says so where it
+/// is declared. Several of those comments used to number themselves ("the third/fourth/fifth field
+/// in this struct to exist for that reason"). **Those ordinals are retired (M31 t5)**, because they
+/// counted only ONE of two parallel chains — the `pac_enabled` chain, and not the `reservations` →
+/// `noaccess` → `threads` → `thread_start_pc` → `wq_thread_pc` chain, which gives the *same* reason
+/// — so the last ordinal was never a count of anything a reader would want. `restoreparity.rs` read
+/// it as a count of the CLASS and inherited a false cross-reference from doing so.
+///
+/// **Where the class IS counted: the `M24-restoreaudit` section of `docs/status-log.md`, and
+/// nowhere else.** That section counts something different from this struct — the times record-only
+/// box state reached a replay path un-re-established — and the two must not be conflated, because a
+/// field here is NOT evidence of an instance. Three of these carries landed in the very commit that
+/// introduced the field they carry (`pac_enabled` M7 t6 `78d884a`, `wq_thread_pc` M18 t4 `e93f8dc`,
+/// `fall_throughs` M23 t1 `1c4c74f`), so there was never a window in which `from_checkpoint`
+/// dropped them. Conversely M9 t3 is an instance with no field here at all: its fix was the
+/// opposite remedy — `from_checkpoint` DERIVES `tlbi_stub_ready` from the restored backings
+/// (`70629c4`) rather than carrying it.
+///
+/// One discrepancy this note records rather than resolves, since `docs/status-log.md` is
+/// append-only: M24's list attributes an instance to **M18 (`wq_thread_pc`)**, but that field was
+/// carried and restored in `e93f8dc` alongside its own introduction, and M18's own status-log
+/// section files its recurring bug under a *different* class ("the guest's X is retrace's", with
+/// M10 and M11 as its siblings). No M18 instance of THIS class appears in the log. That flag is now
+/// RESOLVED (M31 t5): the `M31-checkpointparity` section of `docs/status-log.md` is M24's forward
+/// pointer, and it drops the M18 entry — superseding M24's seven/five with six/four. M24's own
+/// section still reads seven because the log is append-only, so the authority for the class count is
+/// the M31 section, not the M24 one.
 #[derive(Clone)]
 pub struct BoxState {
     pub regs: Regs,
@@ -830,19 +860,20 @@ pub struct BoxState {
     // Defaulting this to a fresh table would make a seeked session believe every fd is Free, so a
     // post-seek guest pread returns EBADF and reverse execution silently diverges from the forward
     // run. That is the M9 t3 failure shape — from_checkpoint resetting a flag the restored state
-    // contradicts — and this is the third field in this struct to exist for that reason.
+    // contradicts.
     pub fd_slots: Vec<FdSlot>,
     // M11: carried for the same reason as `pac_enabled`, `stack_top`, and the fd slots — a mid-run
     // capture cannot re-derive it. Without this, a seek into a run that installed a disposition
     // restores a box that has forgotten it, and the next raise takes the wrong branch: an IGNORED
     // signal would terminate the guest. That divergence would read as a signal bug and actually be
-    // a checkpoint bug. The fourth field in this struct to exist for exactly this reason.
+    // a checkpoint bug.
     pub sigtable: SigTable,
     // M23 t1: carried for the same reason as `pac_enabled`, `stack_top`, the fd slots and the
     // sigtable — a mid-run capture cannot re-derive it, since the fall-throughs it counts happened
     // behind the checkpoint. Resetting it to 0 here would make a seeked session report "no
     // fall-throughs" no matter how many it had actually taken, which is the exact silent-zero this
-    // counter exists to prevent. The fifth field in this struct to exist for that reason.
+    // counter exists to prevent. Carried from the outset, in the same commit that introduced the
+    // counter (`1c4c74f`) — so this field is a carry, not one of the class's instances.
     pub fall_throughs: u64,
 }
 
@@ -5177,9 +5208,12 @@ impl Box_ {
         // checkpoint is taken while a child runs — it would hand that thread MAIN's TSD. The
         // captured table is the authority (`checkpoint` folds the live vCPU into `ctx_mut(current)`
         // before carrying it), and for a single-threaded guest that captured value IS `TSD_IPA`, so
-        // every M0–M13 restore is identical to what this line did before. That makes it the fourth
-        // field here to stop being re-derived for the reason the `BoxState` comments give (M9 t3,
-        // M10, M11): a restore that contradicts the state it just restored breaks quietly.
+        // every M0–M13 restore is identical to what this line did before. It joins `tlbi_stub_ready`
+        // (M9 t3), the fd slots (M10) and the sigtable (M11) in ceasing to be re-derived HERE, for
+        // the reason the `BoxState` comments give: a restore that contradicts the state it just
+        // restored breaks quietly. That is a list of these four sites and NOT a count of the class
+        // — M31 t5 retired the ordinal this comment used to carry, because it read as one; see the
+        // note on `BoxState` for where the class is counted.
         let cur_tid = state.threads.current();
         vcpu.set_sys(sysreg::TPIDRRO_EL0, state.threads.ctx_of(cur_tid).tpidrro_el0).unwrap();
         vcpu.set_sys(sysreg::TPIDR_EL0, state.tpidr_el0).unwrap(); // captured, NOT forced to 0
@@ -5314,6 +5348,25 @@ impl Box_ {
     /// silent until a runtime exec-mmap promotion on replay mints an L3 at an IPA record never used.
     #[doc(hidden)]
     pub fn dbg_next_l3(&self) -> u64 { self.next_l3 }
+
+    /// Test-only (M31): `from_checkpoint` RE-DERIVES this from the restored backings
+    /// (`backings.iter().any(|b| b.ipa == TLBI_STUB_IPA)`) rather than carrying it, exactly as it
+    /// re-derives `next_l3` above — so it is a second derivation of one fact, and the parity guard
+    /// compares both.
+    #[doc(hidden)]
+    pub fn dbg_tlbi_stub_ready(&self) -> bool { self.tlbi_stub_ready }
+
+    /// Test-only (M31): the four debugger fields — not the only `Box_` state with no accessor
+    /// (`window_cap` and `l2_host` also have none), but the ones `tests/checkpointparity.rs` needs
+    /// to *observe* that `from_checkpoint` resets them — an assertion about a field nothing can
+    /// read is an assertion about nothing. Kept out of `dbg_internal_state` deliberately: that
+    /// string is compared by `restoreparity.rs` too, and adding fields to it changes an existing
+    /// contract.
+    #[doc(hidden)]
+    pub fn dbg_debug_state(&self) -> String {
+        format!("bps_armed={} wps_armed={} watch_ranges={:?} syscall_watch_hit={:?}",
+            self.bps_armed, self.wps_armed, self.watch_ranges, self.syscall_watch_hit)
+    }
 
     /// Test-only: the guest's live PAC posture, read back from SCTLR_EL1 and cross-checked against
     /// the field the constructor derived. PANICS if they disagree — i.e. if some install site set
