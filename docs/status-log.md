@@ -6093,8 +6093,9 @@ stubs, and a MIG stub builds `union { Request; Reply; } Mess;` as a **stack loca
 `&Mess`. `avail` is the distance from a buffer to the end of its backing, so for a governed call
 `avail` **is** the stack depth measured from that stack's top. The geometry holds for all three
 stacks retrace produces: the main stack is 256 KiB backed with the buffer below its top
-(`crates/retrace-box/src/lib.rs:94-95`), a pthread stack is the guest's own mmap with the pthread
-struct at the high end (`crates/retrace-box/src/thread.rs:114-116`), and a workqueue worker's stack
+(`crates/retrace-box/src/lib.rs:94-95`), a pthread stack is the guest's own mmap and what
+libpthread hands `bsdthread_create` is the stack **TOP**, with SP starting there and growing down
+(`crates/retrace-box/src/lib.rs:4681-4683`), and a workqueue worker's stack
 puts the struct at the top and grows down (`crates/retrace-box/src/lib.rs:4426-4441`).
 
 The same structure explains the corpus's one outlier. Exactly one landmark carried a nonzero band —
@@ -6169,14 +6170,29 @@ paragraph is the pointer back to it.
   `send_size` is bounded at 4,096 — so a band can never land in a kernel-read region, at any
   `avail`. Each step is asserted rather than stated, the sweep spans 65,535 / 65,536 / 65,537, and
   all four production `Box_` constructors are checked against a live instance rather than cited.
-- That proof's premise is now a **shared `pub const`**, `machmsg::SEND_SIZE_MAX`, read by the
-  production assert and **imported** by the test that checks it against real captured values. It
-  was three copies of `0x1000` until the closing fix wave — the production literal and one private
-  constant in each test file — so widening the production bound would have left every test green
-  while the proof's conclusion turned false. `retrace-box` cannot import it (the dependency runs the
-  other way), so its copy stays, now named `SEND_SIZE_MAX_MIRROR`, with the assertion that consumes
-  it saying in its own failure message that this crate cannot detect drift and naming the file that
-  can.
+- That proof's premise is now **asserted as a relation between its two constants**, at compile time:
+  `const _: () = assert!(machmsg::SEND_SIZE_MAX < retrace_box::PTR_WINDOW_CAP, …)` at module scope in
+  `crates/retrace-core/tests/machmsgband_dyn.rs` — the only place in the repo where both operands are
+  visible, since `retrace-core` owns the ceiling and depends on the crate owning the cap, and
+  `retrace-box` can never see the second one. Module scope rather than a test body is deliberate:
+  the corpus test skips `jq` and CPython when they are absent, and its own runtime tripwire sits at
+  the end of that function, so on a machine without Homebrew nothing in that file's bodies would
+  evaluate the premise at all. A `const _` is checked whenever the crate compiles.
+  **It took two rounds, and the first one is this milestone's own failure class recurring inside its
+  own correction — a third time, caught by review rather than by any mechanism.** Round one turned
+  the ceiling into a shared `pub const` and had the test import it rather than redefine it. That was
+  a real improvement to the *per-landmark* checks, which now compare real captured sends against the
+  real production bound. It was **not** drift detection, and the round claimed it was: every use is
+  `send_size <= SEND_SIZE_MAX`, which a **widening** makes strictly more permissive, so setting the
+  bound to `0x20000` left everything green while the proof's conclusion turned false — and four
+  sites, one of them a failure message a future reader would meet mid-debugging, said it reds. The
+  mirror constant `retrace-box`'s proof carried was **deleted rather than renamed**, because nothing
+  compared it to the thing it mirrored: a second literal that nothing checks is what produced the
+  finding in the first place. The compile-time assertion was verified able to fail before it was
+  trusted (bound set to `0x20000`, crate stops compiling with its own message, reverted). The two
+  files now split the proof honestly — `machmsgband.rs` proves in-crate that a band starts at
+  `ipa + window_cap`; `machmsgband_dyn.rs` proves `window_cap` clears the read ceiling; neither
+  needs the other's number.
 - `dbg_window_len_for` returning `Option<usize>`, so "unmapped" and "zero-length window" stop
   collapsing into the same `0`.
 - The 35-landmark corpus measurement itself, which is the evidence everything above rests on.
@@ -6191,6 +6207,17 @@ the implementer, at corpus scale, by calling `route()` first). Both would have p
 wrong headline about a milestone's central number. The generalisation holds beyond this milestone:
 any test that decides "is this call on the path my change governs" is re-implementing a production
 decision, and the copy is where the drift lives.
+
+**And the class this milestone kept catching, it caught a third time inside its own correction.**
+"Right conclusion, unmeasured supporting fact" — M20's name for it — was found twice during the
+tasks, then once more in the fix wave dispatched to correct the second instance: the wave's own
+`const` assertion carried a failure message stating that a *different file* would red if the
+production bound moved, when nothing anywhere related the two constants. That is the worst place for
+a wrong supporting fact, because a reader meets it at the moment they are debugging and least likely
+to re-derive it. **Nothing mechanical caught any of the three.** All were caught by review, and this
+one only because the reviewer ran `grep -rn SEND_SIZE_MAX crates/` instead of reading the claim. The
+milestone has no instrument for this class and did not build one; the honest record is that its
+detection rate here is a property of how the reviews were done, not of the tree.
 
 And its process twin, learned expensively: **anything a successor must know belongs in
 `docs/status-log.md`, never in the SDD workspace.** `.superpowers/` is gitignored scratch. Two

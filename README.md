@@ -522,8 +522,9 @@ These are real and current, not aspirational gaps.
   call chain, or a `host_info` behind a `sysconf`, are ordinary, and 64 KiB of frames sits well
   inside a 256 KiB stack. So the finding is mechanistically explained and unlikely to reverse, **not
   proven** — which is why `machmsgband_dyn.rs` **asserts** the maximum governed `avail` stays under
-  the threshold rather than only printing it: the first fixture that contradicts this paragraph reds
-  the gate instead of silently ageing it. `sendfile`'s half of the gap cannot be measured at all
+  the threshold rather than only printing it: the first fixture **in that test's own corpus** that
+  contradicts this paragraph reds the gate instead of silently ageing it — a new e2e guest added
+  elsewhere in the repo is not walked by it and would not. `sendfile`'s half of the gap cannot be measured at all
   here, for the reason M32 re-confirmed by `grep`: nothing in this repo exercises it.
   **And the shape of the owed work changed.** M32's entry would have been a *fifth* function
   answering "what does this syscall do with each of its arguments" — after `fd_operands` (keyed by

@@ -141,7 +141,10 @@ is restored.** The plan must make this an explicit assertion, not a reviewer's d
 
 Required by charter §9. Two, because there are two distinct ways to get this wrong.
 
-**Control 1 — the mechanism is wired up.**
+**Control 1 — the mechanism is wired up.** *(NEVER EXECUTED — see §9. No mechanism was built, so
+there is no `is_known_dest_arg` to revert and no destination-side test to red. The status log
+records it as an unexecuted control rather than a discharged one; it is left here as written so a
+successor can see what was promised.)*
 > Revert `is_known_dest_arg` to return `false` unconditionally (restoring per-syscall behaviour).
 > The new destination-side test must go **RED**.
 
@@ -211,8 +214,9 @@ builds `union { Request; Reply; } Mess;` as a **stack local** and passes `&Mess`
 buffer. `avail` is the distance from a buffer to the end of its backing, so for a governed call
 `avail` *is* the stack depth measured from that stack's top — and the geometry holds for all three
 stacks retrace produces: the main stack is 256 KiB backed with the buffer below its top
-(`crates/retrace-box/src/lib.rs:94-95`), a pthread stack is the guest's own mmap with the pthread
-struct at the high end (`crates/retrace-box/src/thread.rs:114-116`), and a workqueue worker's stack
+(`crates/retrace-box/src/lib.rs:94-95`), a pthread stack is the guest's own mmap and what
+libpthread hands `bsdthread_create` is the stack **TOP**, with SP starting there and growing down
+(`crates/retrace-box/src/lib.rs:4681-4683`), and a workqueue worker's stack
 puts the struct at the top and grows down into the region
 (`crates/retrace-box/src/lib.rs:4426-4441`). A shallow governed call is a shallow *frame*, and
 every governed call measured here was made during process initialisation.
@@ -230,7 +234,9 @@ does. A `semaphore_create` (3418) from a dispatch semaphore built deep inside a 
 sits well inside a 256 KiB stack. The inertness finding is **unlikely to reverse and mechanistically
 explained, but not proven**. `every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band`
 therefore asserts `governed_max_avail < PTR_WINDOW_CAP` rather than only printing it, so the day a
-fixture contradicts this section, this section reds instead of quietly rotting.
+fixture **in that test's own corpus** contradicts this section, this section reds instead of quietly
+rotting. That qualifier is the limit of the tripwire: a new e2e guest added elsewhere in the repo is
+not walked by this test and would not trip it.
 
 ### Why that closes the whole milestone, not just the `mach_msg2` entry
 
@@ -274,16 +280,21 @@ per-argument direction then stops being a table and becomes a field.
 - The structural proof that whenever a band exists it begins at least `window_cap` (65536) bytes
   into the buffer, while `retrace-core` asserts `send_size <= 0x1000` — so a band can never land in
   a kernel-read region, at any `avail`.
-- That proof's external premise is now a **shared `pub const`**, not a literal duplicated on both
-  sides of the argument. `machmsg::SEND_SIZE_MAX` is what `crates/retrace-core/src/lib.rs:435`
-  asserts against, and `crates/retrace-core/tests/machmsgband_dyn.rs` **imports that same constant**
-  and asserts every real forwarded `send_size` against it. Until the closing fix wave it did not:
-  the production site asserted a bare `0x1000` while both test files defined their own copy of the
-  number, so widening the production bound would have left both green while the proof's conclusion
-  turned false. `crates/retrace-box/tests/machmsgband.rs` still holds a copy — `retrace-box` cannot
-  depend on `retrace-core`, the dependency runs the other way — but it is now *named*
-  `SEND_SIZE_MAX_MIRROR`, and the assertion consuming it says in its own failure message that this
-  crate cannot detect drift and names the file that can.
+- That proof's external premise is now **asserted as a relation between the two constants**, at
+  compile time, in the only crate where both are visible:
+  `const _: () = assert!(machmsg::SEND_SIZE_MAX < retrace_box::PTR_WINDOW_CAP, …)` at module scope
+  in `crates/retrace-core/tests/machmsgband_dyn.rs`. Module scope rather than a test body, because
+  the corpus test skips `jq`/CPython when they are absent and its runtime tripwire sits at the end
+  of that body — a `const _` is checked whenever the crate compiles, on any machine and in any gate
+  chunk. **This took two rounds and the first one looked right.** Round one made
+  `machmsg::SEND_SIZE_MAX` a shared `pub const` and had the test import it instead of redefining
+  it, which genuinely improved the *per-landmark* checks (real captured sends now compared against
+  the real bound) — but every one of those checks is `send_size <= SEND_SIZE_MAX`, which a
+  **widening** only loosens, so drift stayed undetectable while four sites, one of them a failure
+  message, stated that it reds. The mirror constant `retrace-box`'s proof had been carrying was
+  deleted rather than renamed: nothing compared it to what it mirrored, so it could not detect the
+  drift its name implied it caught. The compile-time assertion was verified able to fail — setting
+  the bound to `0x20000` stops the crate compiling with the message above.
 - `dbg_window_len_for` returning `Option<usize>`, so "unmapped" and "zero-length window" no longer
   collapse.
 - The 35-landmark corpus measurement itself, which is the evidence this section rests on.

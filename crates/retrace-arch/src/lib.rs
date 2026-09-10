@@ -334,9 +334,13 @@ pub fn reads_guest_buffer(num: u64) -> bool {
         // own extent." For argument 0 the two ARE related — the band's start is `ipa + window_cap`,
         // `window_cap` is 65536 on every production constructor, and the 4096 ceiling above holds
         // for every mach_msg2 call — so a band on this argument provably cannot land inside the
-        // region the kernel reads. The old sentence is left named rather than silently swapped,
-        // because it is cited by the proof that replaced it
-        // (`crates/retrace-box/tests/machmsgband.rs`).
+        // region the kernel reads. The old sentence is left NAMED rather than silently swapped,
+        // per CLAUDE.md's own rule: a superseded claim is left standing with a forward pointer
+        // rather than quietly corrected, so a reader who met it before can tell it was overturned
+        // rather than wonder whether they misremembered it. (An earlier draft of this comment said
+        // the sentence is kept "because it is cited by the proof that replaced it" — it is not
+        // cited anywhere; that was a wrong supporting fact bolted to a right decision, which is the
+        // class M32 spent the milestone catching.)
         //
         // **The entry stays anyway, and the reason is now the measurement, not the hazard.** M32
         // walked 35 real mach_msg2 landmarks across hello_dyn, jq and CPython: 13 were `Route::
