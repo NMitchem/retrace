@@ -30,8 +30,9 @@ Two orderings follow, and both matter:
   Apple-binary failure. The soundness phase (M32–M35) therefore plausibly retires some of the eight
   sweep failures as a side effect. Measuring the eight *before* that work would produce a table
   already stale by the time it was used.
-- **Measurement before breadth fixes.** M36 produces evidence and nothing else. Its output is the
-  input to M37–M38, so those milestones are specced by data rather than by an agent's guess.
+- **Measurement before breadth fixes.** M36 produces evidence, and the parked gates that evidence
+  owes — but no fixes. Its output is the input to M37–M38, so those milestones are specced by data
+  rather than by an agent's guess.
 
 ## 2. Precondition: the base commit
 
@@ -137,11 +138,30 @@ medium; but the milestone starts from a fixture rather than from nothing, and it
 obviously the queue's most likely halt point. It stays last in the soundness phase regardless, since
 a halt there still banks M32–M34 as merged work.
 
-### M36 — `sweepmeasure`: measurement only
+### M36 — `sweepmeasure`: measurement, and the gates the README already owes
 
-**Deliverable: a table. No fixes.** This milestone is forbidden from changing behaviour; its only
-production edits are to documentation. A behavioural change appearing in an M36 diff is a defect in
-the run, not a bonus.
+**Deliverable: a table, and a parked gate per measured wall. No fixes.** This milestone is forbidden
+from changing *behaviour*; its production edits are documentation and `#[ignore]`d gates. A
+behavioural change appearing in an M36 diff is a defect in the run, not a bonus.
+
+**Why gates, when an earlier draft of this charter said measurement-only.** That draft was
+under-scoped against the repo's own standard, and the README says so in its own voice. Of the four
+`replay diverged` binaries it records that their cause *"stands unmeasured to this day, with **no
+parked gate standing for it** — a gap in this repo's own discipline rather than a decision."* And
+CLAUDE.md blesses paying that debt: *"A milestone that parks a **new** gate for a capability it does
+not yet have has regressed nothing; that is the discipline working, not a backslide."* A table in a
+status log is not a gate. M36 measuring these walls and then leaving them ungated would close the
+excuse while leaving the gap.
+
+**Four conditions on that authority** (referenced by §5's exception). A gate M36 parks must:
+
+1. stand for a binary in the committed 54-entry corpus `tools/apple-sweep-binaries.txt`;
+2. carry the **measured evidence** in its `#[ignore]` reason — never the sweep's category string,
+   and never the inherited M23 `brk` belief (see the trap below);
+3. never retire or `#[ignore]` a test that currently **passes**;
+4. name what would un-park it, in the CLAUDE.md house style ("UN-IGNORE when that lands").
+
+Anything outside those four is a §5 halt, unchanged.
 
 Re-run `tools/apple-sweep.sh` on the post-M35 tree and produce one row per failing binary:
 
@@ -151,7 +171,7 @@ Re-run `tools/apple-sweep.sh` on the post-M35 tree and produce one row per faili
 | `sweep_reason` | the string the sweep itself prints |
 | `first_divergent_landmark` | landmark index, or `n/a` for a recorder panic / timeout |
 | `trap` | syscall number / trap kind at that landmark |
-| `root_cause_class` | one of the five in §6 |
+| `root_cause_class` | one of the six in §6 (A, B, C, D, E1, E2) |
 | `evidence` | path to a captured `RETRACE_TRACE=1` log or replay diff |
 
 The known population as of M31 is eight: `csh` and `tcsh` (`recorder panicked` — the M10 fd table's
@@ -213,9 +233,15 @@ anything becomes public.
 - a red gate that survives **one fix round** — where a fix round is one diagnose-edit-rerun cycle,
   not an open-ended loop;
 - any need to park a **new** `#[ignore]` gate — that is a judgment about whether something is a wall
-  or a bug, and it is the operator's (CLAUDE.md's honest-gate discipline);
+  or a bug, and it is the operator's (CLAUDE.md's honest-gate discipline). **One narrow exception,
+  authorised by the operator 2026-09-09: M36 may park gates for the walls it measures**, under the
+  four conditions in §3's M36 entry. The exception exists because for those binaries the README has
+  *already ruled* that gates are owed, so M36 discharges an acknowledged debt rather than making a
+  new judgment. It does not generalise to any other milestone;
 - any need to bump `TRACE_MAGIC` — a format break invalidates every existing recording;
-- a `root_cause_class` of **E** (§6) — halt immediately, do not continue the queue;
+- a `root_cause_class` of **E2** (§6) — halt immediately, do not continue the queue. An **E1** row
+  does not halt; an E row not yet disambiguated halts until M36 resolves it, and one that resists
+  resolution is treated as E2;
 - any task that would require inventing scope its spec does not cover.
 
 A halt is **a stop with the branch left intact and a written explanation**, never a best guess and
@@ -223,7 +249,7 @@ never a silent narrowing of scope.
 
 ## 6. The `root_cause_class` enum
 
-Defined here, in advance, so M37–M38's agents route rather than invent. Five classes, because the
+Defined here, in advance, so M37–M38's agents route rather than invent. Six classes. The
 three-class draft could not express two of the eight known failures.
 
 | class | meaning | routing |
@@ -232,12 +258,24 @@ three-class draft could not express two of the eight known failures.
 | **B** `known-unmodelled` | A named, already-understood gap. `csh`/`tcsh`'s `dup2` is the type specimen. | → M37/M38 fix milestone. |
 | **C** `new-subsystem` | Needs a capability that does not exist in the tree. | **Park + HALT.** Do not attempt. |
 | **D** `not-a-defect` | Fails by design; no fix possible or wanted. `/usr/bin/yes` never terminates and is failed on purpose — excluding it would raise the tally without changing anything about retrace. | Document; retire the row; do not count as a defect. |
-| **E** `nondeterministic` | The binary's own result varies between identical runs. `dddiagnose` moved 45/9 ↔ 46/8 across two runs of the same script on the same tree (M29 watched this happen). | **HALT the entire queue immediately.** |
+| **E1** `harness-nondeterministic` | The **sweep script** varies between identical runs — its own bug, not retrace's. | Fix or document; **continue the queue.** |
+| **E2** `retrace-nondeterministic` | **Retrace's own record/replay** varies between identical runs. | **HALT the entire queue.** This becomes the next milestone regardless of what the queue said. |
 
-Class E is not a severity ranking — it is a stop condition. An intermittent result inside a
-record/replay determinism tool is either a bug in the sweep harness or a hole in the determinism
-guarantee, and both outrank everything else in this queue. It is called out separately because M29
-*watched* `dddiagnose` move and the tree still carries **no parked gate** standing for it.
+**Class E is one observation with two opposite correct responses, so it halts only until
+disambiguated.** The symptom — a binary's result moving between identical runs, as `dddiagnose`
+moved 45/9 ↔ 46/8 while M29 watched — does not by itself say which. Telling E1 from E2 is a
+*measurement*, which is exactly what M36 is for; so an E row halts the queue **pending that
+disambiguation**, not permanently and not never.
+
+The asymmetry is the point. Halting for E1 wastes a night on a script bug, and the precedent for
+script bugs is strong: M30's own section records the sweep's stderr channel silently dropping
+`[M30 CANARY]` lines, and the script's first draft compared a variable against itself, reporting
+four binaries as passing when they were not. Continuing past **E2**, on the other hand, means every
+later milestone builds on a tool whose core guarantee is unproven — and CLAUDE.md puts that stake
+plainly: *"Determinism is the whole game. Nothing nondeterministic may enter the trace."*
+
+An E row that resists disambiguation — M36 cannot tell E1 from E2 — is treated as **E2**. The
+expensive error is assuming the harness.
 
 **A row that fits no class is itself a halt.** The enum is not to be extended by an agent.
 
