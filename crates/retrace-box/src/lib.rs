@@ -3101,7 +3101,10 @@ impl Box_ {
     /// `Err(EBADF)` means the guest named an fd it does not have open. The caller forwards NOTHING —
     /// the whole point is that the number may be a live descriptor of retrace's own.
     pub fn translate_fds(&self, num: u64, args: &mut [u64; 8]) -> Result<(), u64> {
-        for i in retrace_arch::fd_operands(num) {
+        // M33: a syscall with no arg_kinds row cannot be forwarded. This is the first statement
+        // forward_and_diff executes, so the panic sits upstream of every other view consulted
+        // there (diff_window's dest_buffer, the canary decision, bind_returned_fd).
+        for i in retrace_arch::forwarded_shape(num).fd_operands() {
             let v = args[i];
             // AT_FDCWD (-2) and friends are sentinels, not descriptors.
             if (v as i64) < 0 { continue; }

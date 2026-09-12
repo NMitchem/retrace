@@ -141,6 +141,9 @@ pub const MMAPGUEST: &str = concat!(env!("OUT_DIR"), "/mmapguest");
 pub const UNALIGNED: &str = concat!(env!("OUT_DIR"), "/unaligned");
 pub const PACGUEST: &str = concat!(env!("OUT_DIR"), "/pacguest");
 pub const FAILSYS: &str = concat!(env!("OUT_DIR"), "/failsys");
+/// M33: issues syscall 8 — the kernel's `nosys` slot — then exits 0. Proves the recorder refuses
+/// to forward a syscall with no `arg_kinds` row, by name, before it ever reaches the host kernel.
+pub const UNENUM: &str = concat!(env!("OUT_DIR"), "/unenum");
 pub const REMAP: &str = concat!(env!("OUT_DIR"), "/remap");
 pub const MMAPFILE: &str = concat!(env!("OUT_DIR"), "/mmapfile");
 pub const MMAPFILE_FIXTURE: &str = concat!(env!("OUT_DIR"), "/mmapfile_fixture.txt");
