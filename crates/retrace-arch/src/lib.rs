@@ -106,6 +106,16 @@ pub const MWL_MAX_REGION_COUNT: u64 = 5;
 /// translation must pass it through untouched rather than rejecting it as `EBADF`.
 pub const AT_FDCWD: i64 = -2;
 
+/// `ioctl` request-code decode, `sys/ioccom.h:74-85`: the parameter length lives in bits 16..29
+/// of the request (`IOCPARM_LEN`), capped by `IOCPARM_MASK` (0x1fff, 8191) — the cited bound on
+/// `ioctl`'s DIRECT parameter (see its `arg_kinds` row); `IOC_IN`/`IOC_OUT` say which way the
+/// kernel copies it.
+pub const IOCPARM_MASK: u64 = 0x1fff;
+pub const IOC_OUT: u64 = 0x4000_0000;
+pub const IOC_IN: u64 = 0x8000_0000;
+/// `IOCPARM_LEN(x)`: `((x) >> 16) & IOCPARM_MASK`.
+pub fn iocparm_len(request: u64) -> u64 { (request >> 16) & IOCPARM_MASK }
+
 /// Where a destination buffer's byte length lives for a given syscall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestLen {
@@ -268,6 +278,12 @@ pub enum Ret {
     /// asserts on it rather than modelling it wrong — a silently mis-modelled `dup2` aliases the
     /// wrong file.
     Fd,
+    /// Two new descriptors, in x0 and x1 — `pipe`. Unmodelled: `allocates_fd` is false for it
+    /// (binding one of two would alias), and retrace-core does not assert on it, so today the
+    /// guest receives retrace's own host descriptors unbound and every later use returns EBADF
+    /// (`/bin/zsh` issues it and never uses the pair). A return model for it is M10-successor
+    /// work, owed.
+    FdPair,
 }
 
 /// One syscall's argument kinds, in register order, plus its return kind.
@@ -348,12 +364,16 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // ---- sockets ------------------------------------------------------------------------
         // recvmsg(int s, struct msghdr *msg, int flags) / recvmsg_nocancel: msg_iov is nested.
         27 | 401 => row!(P, [Fd, NestedDest, Scalar]),
-        // recvmsg_x(int s, struct msghdr_x *msgp, u_int cnt, int flags)
+        // recvmsg_x(int s, struct msghdr_x *msgp, u_int cnt, int flags): the public SDK carries
+        // only the number (`SYS_recvmsg_x 480`, sys/syscall.h); the prototype and `struct
+        // msghdr_x` are xnu's private bsd/sys/socket.h (`PRIVATE` block) — the source named the
+        // way getdirentries64's measured shape is.
         480 => row!(P, [Fd, NestedDest, Scalar, Scalar]),
         // sendmsg(int s, const struct msghdr *msg, int flags) / sendmsg_nocancel: with sendto, the
         // socket-side spelling of the same two shapes — flat buffer and iovec vector.
         28 | 402 => row!(P, [Fd, NestedSource, Scalar]),
-        // sendmsg_x(int s, const struct msghdr_x *msgp, u_int cnt, int flags)
+        // sendmsg_x(int s, const struct msghdr_x *msgp, u_int cnt, int flags): prototype from
+        // xnu's private bsd/sys/socket.h, as for recvmsg_x — the SDK has only `SYS_sendmsg_x 481`.
         481 => row!(P, [Fd, NestedSource, Scalar, Scalar]),
         // sendto(int s, const void *buf, size_t len, int flags, const struct sockaddr *to,
         //        socklen_t tolen). `to`: the kernel rejects tolen > SOCK_MAXADDRLEN (255,
@@ -454,12 +474,24 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_LSEEK => row!(P, [Fd, Scalar, Scalar]),
         // ioctl(int fd, unsigned long request, void *arg): the kernel copies IOCPARM_LEN(request)
         // bytes in and/or out, at most IOCPARM_MASK = 0x1fff (sys/ioccom.h:74) — the cited bound
-        // on the DIRECT parameter. What no rule over `num` alone can size is a pointer INSIDE that
-        // parameter: a `_IOW` request hands the kernel a struct whose length is encoded in the
-        // request rather than in an argument, and whose own pointers the kernel may follow —
-        // M30's clearest admitted hole, now narrowed to that nested residual; no guest this repo
-        // runs is measured to issue a large one. Task 5 decides the residual from the census's
-        // request codes (spec §4b).
+        // on the DIRECT parameter, and `ioctl_request_codes_the_corpora_issue_are_bounded` pins it
+        // for every request the census measured (2026-09-12, four distinct codes):
+        //   0x4004667a FIODTYPE          _IOR('f', 122, int)          len 4, OUT
+        //   0x40087468 TIOCGWINSZ        _IOR('t', 104, winsize)      len 8, OUT
+        //   0x40487413 TIOCGETA          _IOR('t',  19, termios)      len 72, OUT
+        //   0x80086804 DTRACEHIOC_ADDDOF _IOW('h',   4, user_addr_t)  len 8, IN
+        // The fourth is the nested case §4b asked about: its 8-byte parameter IS a guest pointer
+        // to a `dof_ioctl_data_t`, which the kernel follows (bsd/dev/dtrace/dtrace.c
+        // `dtrace_ioctl_helper`, `copyin(user_address + offsetof(dof_ioctl_data_t,
+        // dofiod_count), …)`), and dyld issues it on nearly every dynamic guest to register DOF
+        // sections. MEASURED (M33 t5, 10 guests: jq, CPython, /bin/ps, ls, date, sh, zsh, sort,
+        // sleep, hostname): every one returns `ret=0xe err=true` — EFAULT — because that first
+        // nested copyin reads a GUEST address in retrace's process, so the later `copyout` of
+        // generation ids into the same struct is unreachable and no guest byte is written. It is
+        // a forwarded nested pointer, unrefused, and owed to a successor (the M27 class): the
+        // refuse-by-value assert §4b pre-authorised would make every dynamic guest unrecordable,
+        // which is the spec's own §9 halt clause (Ruling 4). Ptr on the direct bound; the nested
+        // residual is named here, not modelled.
         SYS_IOCTL => row!(P, [Fd, Scalar, Ptr]),
         // fgetattrlist(int fd, struct attrlist *alist, void *attrbuf, size_t bufsize, u_long opts):
         // alist is a fixed 24-byte struct (sys/attr.h, measured with sizeof); attrbuf is a
@@ -489,9 +521,18 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // name: namelen ints, and the kernel rejects namelen > CTL_MAXNAME (12, sys/sysctl.h).
         // oldp: the destination is x2 and its length is `*(size_t*)x3`, in guest memory rather
         // than a register — measured via /bin/ps, whose KERN_PROC_ALL buffer runs far past the
-        // 64 KiB window (M26). oldlenp: 8 bytes in-out. newp: read for newlen bytes —
-        // PROVISIONALLY Ptr; Task 5 cites xnu's per-handler newlen check or flips it to Source
-        // under rule 6 (spec §4c).
+        // 64 KiB window (M26). oldlenp: 8 bytes in-out. newp: read for newlen bytes, and the
+        // bound is the handler's (rule 5). Census 2026-09-12: 7 of 8 distinct (newp, newlen) rows
+        // passed a non-null newp, and M33 t5 measured every one of the 7 (jq, CPython, /bin/ps,
+        // ls, date, sh, zsh, sort, sleep, hostname): all are MIB `{0, 3}` — libc's `name2oid`
+        // idiom, the name string in newp — with newlen 10..=32, and that handler rejects
+        // `newlen >= MAXPATHLEN` with ENAMETOOLONG (bsd/kern/kern_newsysctl.c
+        // `sysctl_sysctl_name2oid`, "XXX arbitrary, undocumented"). For any other MIB the
+        // built-in handlers `sysctl_root` dispatches to read exactly the oid's own size
+        // (`sysctl_io_number`: `SYSCTL_IN(req, pValue, valueSize)`; `sysctl_io_opaque` likewise;
+        // `sysctl_io_string` rejects `newlen >= valueSize`) — the general bound. So Ptr, and the
+        // KERN_PROC_ALL `Dest` keeps its canary; the day a corpus guest passes newp to a custom
+        // handler with no such check is the day this flips to Source under rule 6 (spec §4c).
         SYS_SYSCTL => row!(P, [Ptr, Scalar, Dest(DerefU64(3)), Ptr, Ptr, Scalar]),
         // sysctlbyname — the RAW syscall's shape, not libc's 5-arg wrapper. `sysctlbyname(3)`'s C
         // signature is (name, oldp, oldlenp, newp, newlen), but the kernel entry point behind it
@@ -508,7 +549,11 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // `namelen` (`args[1]`) as the destination pointer — misdiagnosing a legal call as
         // `[M29 DEREFLEN-UNBACKED]` rather than measuring it. The two rows share one shape because
         // both use the same indices, not despite them differing by one. name: a string of namelen
-        // bytes — PROVISIONALLY Ptr, same Task 5 rule as newp.
+        // bytes, and the kernel rejects `namelen >= MAXPATHLEN` with ENAMETOOLONG before its
+        // copyin (bsd/kern/kern_newsysctl.c `sys_sysctlbyname`) — the cited bound, so Ptr. newp:
+        // the same per-handler bound as SYS_SYSCTL's, reached through the same `sysctl_root`.
+        // Census 2026-09-12: 274 is dispatched by no corpus guest (0 calls), so both are header
+        // truth.
         SYS_SYSCTLBYNAME => row!(P, [Ptr, Scalar, Dest(DerefU64(3)), Ptr, Ptr, Scalar]),
         // getfsstat64(struct statfs *buf, int bufsize, int flags): destination x0, length x1 in
         // BYTES rather than a mount count — the reason this entry is easy to get wrong, since a
@@ -519,6 +564,269 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // window. The row is here because the call is structurally able to cross that cap on a
         // machine with more mounts, not because it has been seen to.
         SYS_GETFSSTAT64 => row!(P, [Dest(Reg(1)), Scalar, Scalar]),
+        // ---- M33 census rows ------------------------------------------------------------------
+        // Every number below is in `tests/census.rs` and had no row before M33 Task 5. Prototypes
+        // are the KERNEL's, from xnu-12377.1.9 `bsd/kern/syscalls.master` (the SDK's `unistd.h` and
+        // friends describe libc's wrappers, which differ — `gettid` takes two out-pointers,
+        // `gettimeofday` a third, `bsdthread_register` seven arguments), so each comment names the
+        // xnu file its bound comes from. A row for a call serviced or emulated above the trace is
+        // documentation: it never reaches `forwarded_shape`.
+        //
+        // ---- process / identity ---------------------------------------------------------------
+        // exit(int rval): serviced above the trace (record's SYS_EXIT arm).
+        SYS_EXIT => row!(P, [Scalar]),
+        // getpid(void) / getuid(24) / geteuid(25) / getppid(39) / getegid(43) / getgid(47) /
+        // getpgrp(81) / issetugid(327) / thread_selfid(void) → uint64_t / sync(void)
+        SYS_GETPID | 24 | 25 | 39 | 43 | 47 | 81 | 327 | SYS_THREAD_SELFID | 36 => row!(P, []),
+        // gettid(uid_t *uidp, gid_t *gidp): the SDK declares no `gettid`; the kernel's prototype
+        // (syscalls.master) takes two out-pointers and writes 4 bytes through each (`suword`,
+        // bsd/kern/kern_prot.c `gettid`) — not the `(void)` the calibration list assumed.
+        286 => row!(P, [Ptr, Ptr]),
+        // umask(int newmask)
+        60 => row!(P, [Scalar]),
+        // crossarch_trap(uint32_t name): bsd/kern/kern_crossarch.c `sys_crossarch_trap` — returns
+        // EINVAL or ENOTSUP, touches no memory. Issued by every dynamic guest (libSystem init).
+        38 => row!(P, [Scalar]),
+        // getlogin(char *namebuf, u_int namelen): the kernel clamps namelen to MAXLOGNAME (255,
+        // sys/param.h) before its copyout — bsd/kern/kern_prot.c `getlogin`.
+        49 => row!(P, [Ptr, Scalar]),
+        // gettimeofday(struct timeval *tp, struct timezone *tzp, uint64_t *mach_absolute_time):
+        // the kernel prototype has the third, xnu-private out-pointer libsyscall passes; 16, 8
+        // and 8 bytes (bsd/kern/kern_time.c `gettimeofday`).
+        116 => row!(P, [Ptr, Ptr, Ptr]),
+        // getrusage(int who, struct rusage *rusage): a fixed 144-byte struct (sizeof, measured
+        // against the SDK; bsd/kern/kern_resource.c `getrusage` copies out `user64_rusage`).
+        117 => row!(P, [Scalar, Ptr]),
+        // getrlimit(u_int which, struct rlimit *rlp) / setrlimit: a fixed 16-byte struct, out for
+        // 194 and in for 195 (bsd/kern/kern_resource.c, `copyin(uap->rlp, …, sizeof(struct
+        // rlimit))`). getrlimit is serviced above the trace for RLIMIT_STACK (M8), forwarded
+        // otherwise.
+        SYS_GETRLIMIT | 195 => row!(P, [Scalar, Ptr]),
+        // getentropy(void *buffer, size_t size): the kernel rejects size > 256 with EINVAL
+        // (bsd/dev/random/randomdev.c `getentropy`, `char buffer[256]`) — the cited bound.
+        500 => row!(P, [Ptr, Scalar]),
+        // ---- signals (serviced above the trace, M11/M12/M16 — rows are documentation) -----------
+        // kill(int pid, int signum, int posix): the kernel's third argument, which libc's stub
+        // passes as 1. Serviced above the trace (M11).
+        SYS_KILL => row!(P, [Scalar, Scalar, Scalar]),
+        // sigaction(int signum, struct __sigaction *nsa, struct sigaction *osa): a 24-byte struct
+        // in (handler, trampoline, mask, flags) and a 16-byte struct out (sys/signal.h, sizeof).
+        // The handler and trampoline are code addresses the kernel records and never follows.
+        SYS_SIGACTION => row!(P, [Scalar, Ptr, Ptr]),
+        // sigprocmask(int how, sigset_t *mask, sigset_t *omask): 4 bytes each (sigset_t is a
+        // uint32_t on Darwin).
+        SYS_SIGPROCMASK => row!(P, [Scalar, Ptr, Ptr]),
+        // sigpending(sigset_t *osv): 4 bytes out.
+        SYS_SIGPENDING => row!(P, [Ptr]),
+        // sigaltstack(const stack_t *nss, stack_t *oss): a fixed 24-byte struct each (sizeof).
+        SYS_SIGALTSTACK => row!(P, [Ptr, Ptr]),
+        // sigreturn(struct ucontext *uctx, int infostyle, user_addr_t token): the kernel copies in
+        // the 56-byte ucontext and then FOLLOWS `uc_mcontext64` for the 816-byte mcontext
+        // (bsd/dev/arm/unix_signal.c `sigreturn_copyin_ctx64`) — rule 1, a nested read, so
+        // NestedSource even though both pieces are fixed-size. Serviced above the trace (M12) and
+        // asserted off the forward path by `is_signal_syscall`, so the view is documentation
+        // (EXPECTED_DIFFS). `token` is a value the kernel compares, not a pointer it follows.
+        SYS_SIGRETURN => row!(P, [NestedSource, Scalar, Scalar]),
+        // __pthread_kill(int thread_port, int sig): xnu-private, serviced above the trace (M16).
+        SYS_PTHREAD_KILL => row!(P, [Scalar, Scalar]),
+        // __pthread_sigmask(int how, sigset_t *set, sigset_t *oset): xnu-private, 4 bytes each;
+        // serviced above the trace (M16).
+        SYS_PTHREAD_SIGMASK => row!(P, [Scalar, Ptr, Ptr]),
+        // __disable_threadsignal(int value): xnu-private, one scalar. Forwarded today — it is
+        // not in `is_signal_syscall` — so the kernel applies it to RETRACE's thread rather than
+        // the guest's; the exiting guest thread that issues it never observes the difference.
+        // Noted here, not modelled.
+        331 => row!(P, [Scalar]),
+        // ---- threads / workqueue (emulated above the trace, M14/M18 — rows are documentation) ---
+        // bsdthread_create(func, func_arg, stack, pthread, flags): xnu-private, shape per
+        // SYS_BSDTHREAD_CREATE's doc. func/func_arg/stack are values handed to the new thread's
+        // registers; `pthread` is written at a fixed offset (the kernel port, 4 bytes, at
+        // pthread + tsd_offset + mach_thread_self_offset — libpthread kern/kern_support.c
+        // `_bsdthread_create`; measured at +0xf8, M14). Emulated (M14); forwarding is asserted
+        // against in retrace-core because it is whole-process fatal.
+        SYS_BSDTHREAD_CREATE => row!(P, [Scalar, Scalar, Scalar, Ptr, Scalar]),
+        // bsdthread_terminate(stackaddr, freesize, port, sema_or_ulock): xnu-private, shape per
+        // SYS_BSDTHREAD_TERMINATE's doc. stackaddr is a VM range to deallocate, not data;
+        // sema_or_ulock a port name or wait-queue key — no user memory is read or written
+        // (libpthread `_bsdthread_terminate`). Emulated (M14).
+        SYS_BSDTHREAD_TERMINATE => row!(P, [Scalar, Scalar, Scalar, Scalar]),
+        // bsdthread_register(threadstart, wqthread, flags, pthread_init_data, pthread_init_data_
+        // size, dispatchqueue_offset, tsd_offset): xnu-private; syscalls.master names SEVEN
+        // arguments, not the six of the older `(…, pthsize, dummy, targetconc, dispatchqueue_off)`
+        // reading. threadstart/wqthread are code addresses the kernel records and never follows;
+        // pthread_init_data is a `struct _pthread_registration_data` copied in AND out for
+        // MIN(sizeof(data), size) bytes (libpthread `_bsdthread_register`) — a fixed struct.
+        // Emulated since M18 Stage 1.
+        SYS_BSDTHREAD_REGISTER => row!(P, [Scalar, Scalar, Scalar, Ptr, Scalar, Scalar, Scalar]),
+        // workq_open(void): emulated (M18 Stage 2a).
+        SYS_WORKQ_OPEN => row!(P, []),
+        // workq_kernreturn(int options, user_addr_t item, int affinity, int prio): `item` is
+        // opcode-dependent — a count for REQTHREADS, a `struct workq_dispatch_config` copied in
+        // for MIN(sizeof(cfg), affinity) bytes for SETUP_DISPATCH (bsd/pthread/pthread_workqueue.c
+        // `workq_kernreturn`). Emulated (M18); the box refuses unmeasured opcodes by value.
+        SYS_WORKQ_KERNRETURN => row!(P, [Scalar, Ptr, Scalar, Scalar]),
+        // bsdthread_ctl(user_addr_t cmd, arg1, arg2, arg3): xnu-private, cmd-dependent
+        // (bsd/pthread/pthread_workqueue.c `bsdthread_ctl`). arg1/arg2 are port names, priorities
+        // or resource keys the kernel never dereferences; arg3 is, for QOS_OVERRIDE_START, a ulock
+        // address read with a 4-byte `copyin_atomic32` — the only memory access in the switch, so
+        // Ptr with that bound. Forwarded; the census saw it from one guest (`panicky`).
+        478 => row!(P, [Scalar, Scalar, Scalar, Ptr]),
+        // __ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout):
+        // xnu-private, shape per SYS_ULOCK_WAIT's doc. The kernel reads 4 or 8 bytes at addr
+        // (`copyin_atomic32`/`_atomic64`, bsd/kern/sys_ulock.c) to compare against `value`.
+        // Emulated (M14).
+        SYS_ULOCK_WAIT => row!(P, [Scalar, Ptr, Scalar, Scalar]),
+        // __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value): xnu-private, shape
+        // per SYS_ULOCK_WAKE's doc. addr is a wait-queue KEY (`ulock_wake`, bsd/kern/sys_ulock.c
+        // — no copyin), so Scalar. Emulated (M14).
+        SYS_ULOCK_WAKE => row!(P, [Scalar, Scalar, Scalar]),
+        // ---- paths (the kernel stops at PATH_MAX) ---------------------------------------------
+        // access(const char *path, int flags)
+        33 => row!(P, [Path, Scalar]),
+        // pathconf(const char *path, int name)
+        191 => row!(P, [Path, Scalar]),
+        // readlink(const char *path, char *buf, int count): buf is a destination of `count`
+        // bytes, but what the kernel writes is the link's stored target, which `symlink` itself
+        // capped at MAXPATHLEN (1024) on the way in (bsd/vfs/vfs_syscalls.c `symlinkat_internal`,
+        // `copyinstr(path_data, path, MAXPATHLEN, …)`) — the cited bound, far inside the window.
+        58 => row!(P, [Path, Ptr, Scalar]),
+        // stat64(const char *path, struct stat *ub) / lstat64: a fixed 144-byte struct (sys/stat.h).
+        338 | 340 => row!(P, [Path, Ptr]),
+        // getattrlist(const char *path, struct attrlist *alist, void *attributeBuffer, size_t
+        //             bufferSize, u_long options): alist is a fixed 24-byte struct (sys/attr.h,
+        // sizeof); attributeBuffer is a destination of bufferSize bytes — M34's row to widen
+        // (spec §7), Ptr until measured, exactly like its `fgetattrlist` sibling.
+        220 => row!(P, [Path, Ptr, Ptr, Scalar, Scalar]),
+        // fsgetpath(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid): the kernel rejects
+        // bufsize > MAXLONGPATHLEN (8192) with EINVAL before writing (bsd/vfs/vfs_syscalls.c
+        // `fsgetpath_extended`) — the cited bound; fsid is 8 bytes copied in (`sizeof(fsid_t)`),
+        // and names a VOLUME, not a descriptor.
+        427 => row!(P, [Ptr, Scalar, Ptr, Scalar]),
+        // execve(char *fname, char **argp, char **envp): the kernel reads every argv/envp string
+        // through the nested pointers — rule 1, NestedSource (EXPECTED_DIFFS; exercised by /bin/sh).
+        // Forwarded today, and it fails only because those guest pointers EFAULT in retrace's
+        // process: a forwarded exec that SUCCEEDED would replace retrace's own process image. The
+        // fail-loud assert that precedent (`bsdthread_create`) demands is owed to a successor —
+        // adding it re-parks cpython_e2e's launcher test, the operator's call, not this row's.
+        59 => row!(P, [Path, NestedSource, NestedSource]),
+        // ---- descriptors ----------------------------------------------------------------------
+        // fchdir(int fd): a descriptor the legacy fd table never translated (EXPECTED_DIFFS;
+        // exercised by /bin/ls).
+        13 => row!(P, [Fd]),
+        // pipe(void) → TWO new descriptors, in x0 and x1 (bsd/kern/sys_pipe.c `pipe`, `retval[0]`
+        // and `retval[1]`). See Ret::FdPair for why the return is unmodelled.
+        42 => row!(Ret::FdPair, []),
+        // kqueue(void) → a NEW descriptor (bsd/kern/kern_event.c `kqueue`). Bound like open's
+        // (EXPECTED_DIFFS; exercised by /bin/wait4path). No kevent spelling (363/369/374/375) is
+        // in the census, so nothing yet consumes the bound slot.
+        362 => row!(F, []),
+        // ---- memory ---------------------------------------------------------------------------
+        // munmap(void *addr, size_t len) / mprotect(addr, len, prot): emulated above the trace
+        // (record's SYS_MUNMAP / SYS_MPROTECT arms). addr is a VM range, not data.
+        SYS_MUNMAP => row!(P, [Scalar, Scalar]),
+        SYS_MPROTECT => row!(P, [Scalar, Scalar, Scalar]),
+        // madvise(void *addr, size_t len, int behav): addr is a VM range the kernel neither reads
+        // nor writes as data. Forwarded — `host_span` rebases it onto the guest backing.
+        75 => row!(P, [Scalar, Scalar, Scalar]),
+        // shared_region_check_np(uint64_t *start_address): 8 bytes out — serviced above the
+        // trace (forced to fail so dyld maps the cache itself).
+        SYS_SHARED_REGION_CHECK_NP => row!(P, [Ptr]),
+        // map_with_linking_np(const struct mwl_region regions[], uint32_t region_count,
+        //                     const struct mwl_info_hdr *link_info, uint32_t link_info_size)
+        // (mach/dyld_pager.h `__map_with_linking_np`). regions: read for region_count × 32 bytes,
+        // region_count > MWL_MAX_REGION_COUNT (5) rejected (bsd/vm/vm_unix.c
+        // `map_with_linking_np`) — Ptr on that bound; the descriptor INSIDE regions[i].mwlr_fd is
+        // translated by `translate_mwl_regions`, which no operand index can name. link_info: read
+        // for link_info_size bytes, and the only kernel cap is MWL_MAX_LINK_INFO_SIZE = 64 MiB
+        // (osfmk/vm/vm_dyld_pager.h, "just a guess for now") — a caller-chosen length with no cap
+        // below the window, so rule 4: Source (EXPECTED_DIFFS). The blob carries offsets, not
+        // pointers, so it is flat, not nested. MEASURED M33 t5 (jq, CPython, /bin/ps, ls, date,
+        // sh, zsh, sort, sleep, hostname): 11 calls, link_info_size 80..=2920 bytes — far inside
+        // the window today, so the canary this listing withholds could not have landed inside
+        // any measured blob; the kind is the contract, not the measurement, and the call has no
+        // destination, so withholding the canary costs nothing (EXPECTED_DIFFS).
+        SYS_MAP_WITH_LINKING_NP => row!(P, [Ptr, Scalar, Source, Scalar]),
+        // ---- code signing / policy -------------------------------------------------------------
+        // csops(pid_t pid, uint32_t ops, void *useraddr, size_t usersize) / csops_audittoken(…,
+        // audit_token_t *uaudittoken): useraddr is op-dependent — a 4-byte status word for
+        // CS_OPS_STATUS, a hash, or a blob copied out for usersize bytes (`csops_copy_token`,
+        // bsd/kern/kern_proc.c `csops_internal`) — M34's destination to widen; Ptr until measured.
+        // The audit token is a fixed 32-byte copyin.
+        169 => row!(P, [Scalar, Scalar, Ptr, Scalar]),
+        170 => row!(P, [Scalar, Scalar, Ptr, Scalar, Ptr]),
+        // csrctl(uint32_t op, void *useraddr, size_t usersize): both ops reject usersize !=
+        // sizeof(csr_config_t) (4) with EINVAL (bsd/kern/kern_csr.c `syscall_csr_check` /
+        // `syscall_csr_get_active_config`) — the cited bound.
+        483 => row!(P, [Scalar, Ptr, Scalar]),
+        // __mac_syscall(char *policy, int call, void *arg): policy is `copyinstr`'d into a
+        // MAC_MAX_POLICY_NAME (32) buffer (security/mac_base.c `__mac_syscall`) — NUL-terminated
+        // and kernel-stopped, so Path. arg: xnu itself never copies it — it hands the raw pointer
+        // to the policy's `mpo_policy_syscall(p, call, arg)`, and Sandbox.kext (closed) reads a
+        // per-`call` struct of ITS choosing. No argument carries a length, so rule 4's
+        // precondition (a caller-chosen length that can cross the window) is structurally
+        // absent; the size is the callee's, fixed per call — Ptr, on that reasoning rather than
+        // on a number nobody outside Apple can cite.
+        381 => row!(P, [Path, Scalar, Ptr]),
+        // MAC_SYSCALL_MAGIC (0x8000_0000): not a syscall number. dyld's inline
+        // `__mac_syscall("Sandbox", …)` loads this magic into x16 (`movz x16, #0x8000, lsl #16`);
+        // only a platform binary may issue it, so retrace-core synthesizes the reply and never
+        // forwards it (its `MAC_SYSCALL_MAGIC` arm). The argument shape is __mac_syscall's.
+        0x8000_0000 => row!(P, [Path, Scalar, Ptr]),
+        // proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg, void *buffer,
+        //           int32_t buffersize): buffer is M34's destination to widen; Ptr until measured.
+        336 => row!(P, [Scalar, Scalar, Scalar, Scalar, Ptr, Scalar]),
+        // task_read_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t): 4 bytes
+        // out (bsd/kern/kern_proc.c `task_read_for_pid`, `copyout(…, sizeof(mach_port_name_t))`).
+        539 => row!(P, [Scalar, Scalar, Ptr]),
+        // ---- spawn ----------------------------------------------------------------------------
+        // posix_spawn(pid_t *pid, const char *path, const struct _posix_spawn_args_desc *adesc,
+        //             char **argv, char **envp): pid is 4 bytes out. adesc is read as a fixed
+        // struct and then the kernel follows attrp, file_actions, port_actions, persona_info and
+        // more INSIDE it (bsd/kern/kern_exec.c `posix_spawn`, one `copyin` per member) — rule 1,
+        // NestedSource, like argv/envp's strings. Forwarded today — the launcher-shim gap
+        // cpython_e2e pins (EXPECTED_DIFFS) — and it fails only because those guest pointers
+        // EFAULT in retrace's process; a forwarded spawn that succeeded would start a real child
+        // of retrace. The fail-loud assert precedent demands is owed to a successor, since adding
+        // it re-parks cpython_e2e's launcher test — the operator's decision.
+        244 => row!(P, [Ptr, Path, NestedSource, NestedSource, NestedSource]),
+        // ---- mach traps (numbers per xnu osfmk/mach/syscall_sw.h; see the constants) ------------
+        // _kernelrpc_mach_vm_allocate_trap(target, mach_vm_offset_t *addr, size, flags): 8 bytes
+        // in-out (osfmk/ipc/mach_kernelrpc.c). Serviced above the trace (M2: acts on guest IPA).
+        MACH_VM_ALLOCATE_TRAP => row!(P, [Scalar, Ptr, Scalar, Scalar]),
+        // _kernelrpc_mach_vm_deallocate_trap(target, address, size): serviced above the trace (M2).
+        MACH_VM_DEALLOCATE_TRAP => row!(P, [Scalar, Scalar, Scalar]),
+        // _kernelrpc_mach_vm_protect_trap(target, address, size, set_maximum, new_protection):
+        // serviced above the trace (M2).
+        MACH_VM_PROTECT_TRAP => row!(P, [Scalar, Scalar, Scalar, Scalar, Scalar]),
+        // _kernelrpc_mach_vm_map_trap(target, mach_vm_offset_t *address, size, mask, flags, prot):
+        // 8 bytes in-out. Serviced above the trace (M2).
+        MACH_VM_MAP_TRAP => row!(P, [Scalar, Ptr, Scalar, Scalar, Scalar, Scalar]),
+        // _kernelrpc_mach_port_deallocate_trap(target, name) /
+        // _kernelrpc_mach_port_mod_refs_trap(target, name, right, delta): names and counts.
+        MACH_PORT_DEALLOCATE_TRAP => row!(P, [Scalar, Scalar]),
+        MACH_PORT_MOD_REFS_TRAP => row!(P, [Scalar, Scalar, Scalar, Scalar]),
+        // _kernelrpc_mach_port_construct_trap(target, mach_port_options_t *options, context,
+        //                                     mach_port_name_t *name): a fixed 24-byte options
+        // struct in, 4 bytes out (osfmk/ipc/mach_kernelrpc.c, `mach_copyin(…, sizeof(options))`).
+        MACH_PORT_CONSTRUCT_TRAP => row!(P, [Scalar, Ptr, Scalar, Ptr]),
+        // mach_reply_port() / thread_self_trap() / task_self_trap() / host_self_trap() /
+        // thread_get_special_reply_port(): the result is a port name in x0.
+        MACH_REPLY_PORT_TRAP | MACH_THREAD_SELF_TRAP | MACH_TASK_SELF_TRAP | MACH_HOST_SELF_TRAP
+        | MACH_THREAD_GET_SPECIAL_REPLY_PORT_TRAP => row!(P, []),
+        // semaphore_wait_trap(name) / semaphore_signal_trap(name): a port name. Serviced above the
+        // trace (M18 Stage 2b); forwarding either hangs the recorder (see their constants).
+        MACH_SEMAPHORE_WAIT | MACH_SEMAPHORE_SIGNAL => row!(P, [Scalar]),
+        // host_create_mach_voucher_trap(host, mach_voucher_attr_raw_recipe_array_t recipes,
+        //   int recipes_size, mach_port_name_t *voucher): recipes is read for recipes_size, which
+        // the kernel rejects above MACH_VOUCHER_ATTR_MAX_RAW_RECIPE_ARRAY_SIZE (5120,
+        // mach/mach_voucher_types.h; osfmk/ipc/mach_kernelrpc.c `host_create_mach_voucher_trap`)
+        // — the cited bound; voucher is 4 bytes out.
+        MACH_HOST_CREATE_MACH_VOUCHER_TRAP => row!(P, [Scalar, Ptr, Scalar, Ptr]),
+        // mach_timebase_info_trap(mach_timebase_info_t info): 8 bytes out (osfmk/kern/clock.c).
+        // Forwarded — retrace-core has no arm for it; the numer/denom pair is a constant of the
+        // machine and lands in the trace as `writes`. (The SYNTHETIC timebase is the CNTVCT read
+        // `Box_::run()` emulates, a different thing.)
+        MACH_TIMEBASE_INFO_TRAP => row!(P, [Ptr]),
         _ => None,
     }
 }
@@ -717,6 +1025,27 @@ pub const MACH_SEMAPHORE_WAIT: u64 = (-36i64) as u64;
 /// (`ldaddl` on `sem+0x30`, §3c), so a worker signalling a semaphore nobody is waiting on produces
 /// no landmark: the park/wake seam must not assume a signal trap always appears. Return `0`.
 pub const MACH_SEMAPHORE_SIGNAL: u64 = (-33i64) as u64;
+
+/// Mach traps the corpora dispatch (M33 census, `tests/census.rs`), keyed as the two's-complement
+/// `u64` the trap carries. Numbers per xnu `osfmk/mach/syscall_sw.h` (xnu-12377.1.9) — the SDK
+/// does not ship that header — cross-checked against retrace-core's private `MACH_VM_ALLOCATE`
+/// (-10) / `_DEALLOCATE` (-12) / `_PROTECT` (-14) / `_MAP` (-15) / `MACH_TASK_SELF` (-28). They
+/// exist so `arg_kinds` can match them by name: a cast is not a pattern (`(-10i64) as u64 => …`
+/// does not compile).
+pub const MACH_VM_ALLOCATE_TRAP: u64 = (-10i64) as u64;
+pub const MACH_VM_DEALLOCATE_TRAP: u64 = (-12i64) as u64;
+pub const MACH_VM_PROTECT_TRAP: u64 = (-14i64) as u64;
+pub const MACH_VM_MAP_TRAP: u64 = (-15i64) as u64;
+pub const MACH_PORT_DEALLOCATE_TRAP: u64 = (-18i64) as u64;
+pub const MACH_PORT_MOD_REFS_TRAP: u64 = (-19i64) as u64;
+pub const MACH_PORT_CONSTRUCT_TRAP: u64 = (-24i64) as u64;
+pub const MACH_REPLY_PORT_TRAP: u64 = (-26i64) as u64;
+pub const MACH_THREAD_SELF_TRAP: u64 = (-27i64) as u64;
+pub const MACH_TASK_SELF_TRAP: u64 = (-28i64) as u64;
+pub const MACH_HOST_SELF_TRAP: u64 = (-29i64) as u64;
+pub const MACH_THREAD_GET_SPECIAL_REPLY_PORT_TRAP: u64 = (-50i64) as u64;
+pub const MACH_HOST_CREATE_MACH_VOUCHER_TRAP: u64 = (-70i64) as u64;
+pub const MACH_TIMEBASE_INFO_TRAP: u64 = (-89i64) as u64;
 
 /// Is `num` any of the seven mach semaphore traps? Task 1 §3a read the whole contiguous family off
 /// libsystem_kernel's own stubs on this machine, so the bound is measured rather than assumed:
@@ -1117,13 +1446,63 @@ mod tests {
     // `Dest` arguments would silently pick the first. The schema forbids it.
     #[test]
     fn no_row_has_more_than_one_dest_argument_or_more_than_eight_arguments() {
-        for num in (0..=1023u64).chain((1..=128i64).map(|n| (-n) as u64)) {
+        // The same domain the equivalence sweep walks: BSD numbers, mach traps, and the
+        // MAC_SYSCALL_MAGIC band (0x8000_0000 has a row since M33 t5).
+        let domain = (0..=1023u64)
+            .chain((1..=128i64).map(|n| (-n) as u64))
+            .chain(0x8000_0000u64..=0x8000_000f);
+        for num in domain {
             if let Some(s) = arg_kinds(num) {
                 assert!(s.args.len() <= 8, "syscall {} has {} arguments", num as i64, s.args.len());
                 let dests = s.args.iter().filter(|k| matches!(k, ArgKind::Dest(_))).count();
                 assert!(dests <= 1, "syscall {} has {dests} Dest arguments", num as i64);
             }
         }
+    }
+
+    // M33 t5: the "bounded direct parameter" claim on ioctl's row is a checked fact, not prose.
+    // The four request codes are the census's (2026-09-12, `ioctl_requests.txt`), decoded per
+    // sys/ioccom.h; DTRACEHIOC_ADDDOF is the nested one (an 8-byte IN parameter that IS a
+    // pointer), and its decode is pinned separately so the row's story stays tied to a number.
+    #[test]
+    fn ioctl_request_codes_the_corpora_issue_are_bounded() {
+        const FIODTYPE: u64 = 0x4004_667a;
+        const TIOCGWINSZ: u64 = 0x4008_7468;
+        const TIOCGETA: u64 = 0x4048_7413;
+        const DTRACEHIOC_ADDDOF: u64 = 0x8008_6804;
+        // (len, IN, OUT) — the three facts the row's table states per request.
+        let decode = |req: u64| (iocparm_len(req), req & IOC_IN != 0, req & IOC_OUT != 0);
+        for req in [FIODTYPE, TIOCGWINSZ, TIOCGETA, DTRACEHIOC_ADDDOF] {
+            assert!(iocparm_len(req) <= IOCPARM_MASK, "ioctl request {req:#x} exceeds IOCPARM_MASK");
+        }
+        assert_eq!(decode(FIODTYPE), (4, false, true));
+        assert_eq!(decode(TIOCGWINSZ), (8, false, true));
+        assert_eq!(decode(TIOCGETA), (72, false, true));
+        // `_IOW('h', 4, user_addr_t)`: one 8-byte parameter copied IN, group 'h', number 4.
+        assert_eq!(decode(DTRACEHIOC_ADDDOF), (8, true, false), "the parameter is one user_addr_t");
+        assert_eq!(((DTRACEHIOC_ADDDOF >> 8) & 0xff, DTRACEHIOC_ADDDOF & 0xff), (b'h' as u64, 4));
+    }
+
+    // M33 t5: the mach-trap constants `arg_kinds` matches by name, pinned to the selectors xnu's
+    // osfmk/mach/syscall_sw.h assigns (read from the fetched header, not from memory) and to the
+    // two the retrace-core dispatch already carried privately (-28 task_self, -10 vm_allocate).
+    #[test]
+    fn mach_trap_constants_match_syscall_sw_h() {
+        let expect: [(u64, i64); 14] = [
+            (MACH_VM_ALLOCATE_TRAP, -10), (MACH_VM_DEALLOCATE_TRAP, -12), (MACH_VM_PROTECT_TRAP, -14),
+            (MACH_VM_MAP_TRAP, -15), (MACH_PORT_DEALLOCATE_TRAP, -18), (MACH_PORT_MOD_REFS_TRAP, -19),
+            (MACH_PORT_CONSTRUCT_TRAP, -24), (MACH_REPLY_PORT_TRAP, -26), (MACH_THREAD_SELF_TRAP, -27),
+            (MACH_TASK_SELF_TRAP, -28), (MACH_HOST_SELF_TRAP, -29),
+            (MACH_THREAD_GET_SPECIAL_REPLY_PORT_TRAP, -50), (MACH_HOST_CREATE_MACH_VOUCHER_TRAP, -70),
+            (MACH_TIMEBASE_INFO_TRAP, -89),
+        ];
+        for (k, n) in expect {
+            assert_eq!(k as i64, n);
+            assert!(arg_kinds(k).is_some(), "mach trap {n} has no row");
+        }
+        // pipe's two-descriptor return is expressed but deliberately not bound.
+        assert_eq!(arg_kinds(42).unwrap().ret, Ret::FdPair);
+        assert!(!allocates_fd(42), "binding one of pipe's two descriptors would alias");
     }
 
     #[test]
