@@ -318,3 +318,28 @@ The full chunked gate, `--bins` included, `cargo test -p retrace-arch --doc` bes
 split of a library crate, counts reconciled file-by-file against **556 / 0 / 2 over 121**. Expected
 binaries: +3 (`legacy_equivalence`, `census`, `unenum_e2e`) → 124. The two `#[ignore]`s are
 untouched.
+
+## 11. Outcome — where the rulings re-scoped this document
+
+**Status: CLOSED, delivered as written except at two points, both rulings recorded in
+`docs/status-log.md` under "M33-readerenum" and repeated here because a reader of §4b and §9 would
+otherwise expect an assert that does not exist.** Task 6's close: sweep `pass=46 fail=8 skip=0`
+unmoved; gate 570 / 0 / 2 over 124.
+
+- **§4b and §9 pre-authorised "a ruling plus an assert" for a corpus `ioctl` with a nested
+  pointer. The assert was not added (Ruling 4).** The nested request is `DTRACEHIOC_ADDDOF`, which
+  dyld issues on nearly every dynamic guest; a refuse-by-value assert on it would have made every
+  dynamic guest unrecordable — §9's own halt clause, one paragraph later. Ruled instead: the row
+  stays `[Fd, Scalar, Ptr]` with `IOCPARM_MASK` as the cited bound on the *direct* parameter, and
+  the forwarded outcome was **measured** (`ret=0xe err=true`, EFAULT, on all ten guests probed) to
+  ground the claim that the nested copyin fails before the copyout is reachable. The residual — a
+  nested pointer forwarded unrefused — is on the row, in the README's rewritten ioctl paragraph,
+  and in the status-log's owed list.
+- **The `execve`/`posix_spawn` fail-loud assert the `bsdthread_create` precedent demands was not
+  added (Ruling 7).** It would re-park `cpython_e2e`'s launcher test — a new `#[ignore]`, the
+  charter's §5 halt — and move `/bin/sh` and the launcher into the sweep's panicked set. Deferred
+  to the operator; recorded as owed.
+
+§7 held on every point. No new `Dest`, no per-argument fill, no nested-pointer translation, rows
+only for what is dispatched or tabled, `Scalar`/`Ptr` reviewer-verified only. §8 held: no
+`retrace-core` edit, no `TRACE_MAGIC` change, no recorded byte changed.
