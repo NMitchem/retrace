@@ -3093,22 +3093,28 @@ impl Box_ {
     /// kernel writes. On error (`err`) no writes are captured — a failed syscall wrote nothing.
     /// Rewrite every guest fd operand of `num` in `args` to its host fd, in place.
     ///
-    /// Called from the TWO places that consume a guest fd — here in `forward_and_diff` and in
-    /// `guest_mmap_file`. It is deliberately not "a single choke point inside forward_and_diff":
-    /// file-backed mmap is special-cased upstream in retrace-core and preads from its fd without
-    /// ever reaching forward_and_diff, so a one-site design would leak exactly that one.
+    /// `translate_fds` has exactly ONE caller, `forward_and_diff`, and is its first statement —
+    /// which is what makes it M33's one loud site. `guest_mmap_file` never calls it: file-backed
+    /// mmap is special-cased upstream in retrace-core and never reaches `forward_and_diff`, so it
+    /// translates its own fd via `self.fds.host` directly. That path does not pass through
+    /// `forwarded_shape` either, which is harmless because `mmap` (197) has a row and the mmap arm
+    /// is upstream of the generic forward — the row exists, it is simply never consulted there.
     ///
     /// `Err(EBADF)` means the guest named an fd it does not have open. The caller forwards NOTHING —
     /// the whole point is that the number may be a live descriptor of retrace's own.
     pub fn translate_fds(&self, num: u64, args: &mut [u64; 8]) -> Result<(), u64> {
-        for &i in retrace_arch::fd_operands(num) {
+        // M33: a syscall with no arg_kinds row cannot be forwarded. This is the first statement
+        // forward_and_diff executes, so the panic sits upstream of every other view consulted
+        // there (diff_window's dest_buffer, the canary decision, bind_returned_fd).
+        for i in retrace_arch::forwarded_shape(num).fd_operands() {
             let v = args[i];
             // AT_FDCWD (-2) and friends are sentinels, not descriptors.
             if (v as i64) < 0 { continue; }
             match self.fds.host(v) {
                 Some(h) => args[i] = h as u64,
-                // Console fds (0/1/2) have no host mapping and never reach here: retrace-core
-                // mirrors their writes and fakes their close before forwarding is considered.
+                // Console fds 0/1/2 DO have a host mapping (identity, `FdTable::new`); `None`
+                // here means a guest fd never opened or already closed. The write/close mirroring
+                // retrace-core does for the console happens upstream and is a separate mechanism.
                 None => return Err(EBADF),
             }
         }

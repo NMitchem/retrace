@@ -113,8 +113,10 @@ records and replays byte-identically, twice:
 **Apple's own binaries, measured — and, since M29, re-measurable.** `tools/apple-sweep.sh` points
 retrace straight at each file in a committed 54-entry corpus and prints a tally: **46 of 54 record
 and replay**, stdout byte-identical and exit codes equal. Among them `cat`, `ls`, `cp`, `mv`, `rm`,
-`chmod`, `mkdir`, `ln`, `df`, `grep`, `wc`, `uname`, `sh`, `dash`, `expr`, `bzip2`, and — since M27 —
-`ps`. Before M22 that number was **zero**, and not for the reason
+`chmod`, `mkdir`, `ln`, `df`, `sh`, `dash`, `bash`, `zsh`, `expr`, and — since M27 — `ps`. (This
+sentence named `grep`, `wc`, `uname` and `bzip2` from M22 through M32; none of the four is in the
+committed corpus, a leftover of the uncommitted sample the reconstruction caveat below describes,
+corrected at M33.) Before M22 that number was **zero**, and not for the reason
 it looked like: every macOS system binary is a *universal* file whose first four bytes are
 `0xcafebabe`, and the loader asserted `MH_MAGIC_64` against them. retrace could always run Apple's
 binaries; it could not open them. The figure moved from 47 to 46 when the sweep became a script
@@ -277,34 +279,86 @@ design, and the reconstruction caveat in full.
   `[M28 BANDSHRINK]` control lines off `/bin/ps`, then zero canary lines from `/bin/ps`,
   `jq --version` and the real CPython interpreter), and the Apple sweep (**392** control lines from
   **54** distinct guests, zero canary lines, tally unmoved at `pass=46 fail=8 skip=0`).
+- **One table, five views, and a syscall that cannot be forwarded unclassified.** Since M33,
+  `retrace_arch::arg_kinds(num) -> Option<&'static Shape>` is the one table that says what a
+  syscall does with each of its arguments — `Scalar`, `Fd`, `Path`, `Source`, `NestedSource`,
+  `Dest(DestLen)`, `NestedDest` or `Ptr` per register, plus a return kind (`Plain`, `Fd`,
+  `FdPair`) — and the five functions the M26–M32 lineage accreted (`fd_operands`, `allocates_fd`,
+  `dest_buffer`, `writes_via_nested_pointer`, `reads_guest_buffer`) are one-line **views** over it.
+  Every row opens with its kernel prototype (xnu `syscalls.master` / `syscall_sw.h`, or the SDK
+  header, and it says which) and every `Ptr` names the cited bound that keeps it out of `Source`
+  and `Dest` — all but one, `__mac_syscall`'s (381) policy-defined `arg`, whose row says it rests
+  on reasoning rather than on a number nobody outside Apple can cite. The refactor is proven rather
+  than asserted: `legacy_equivalence.rs` carries the five
+  M32 tables **verbatim** as a fixture and sweeps every syscall number in the domain (BSD
+  `0..=1023`, mach traps `-1..=-128`, the `MAC_SYSCALL_MAGIC` band) through every view **in both
+  directions** — a view that disagrees with its legacy table without an `EXPECTED_DIFFS` entry
+  fails, and a listed entry that no longer differs fails too. There are **22** such entries, each
+  with its reason. **Sixteen** are descriptors the legacy `fd_operands` never translated —
+  `pwrite`/`pwrite_nocancel`/`writev`/`writev_nocancel`/`pwritev`, `sendto_nocancel`/`sendmsg`/
+  `sendmsg_nocancel`/`sendmsg_x`/`sendfile`, and the six refused `readv`/`recvmsg` spellings (moot:
+  refused upstream, before translation runs) — the M10 class, in the tree since M30 tabled them as
+  readers from their prototypes, and hit by exactly one corpus guest (`/bin/ed`'s
+  `writev_nocancel`, on fd 2, which translates to itself). **Six** are census rows the legacy
+  tables had no opinion on: `fchdir` (13, `/bin/ls`), `kqueue` (362, `/bin/wait4path`), `execve`
+  (59, `/bin/sh`) and `posix_spawn` (244, the CPython launcher) as nested readers, `sigreturn`
+  (184, serviced above the trace), and `map_with_linking_np` (550), whose `link_info` is a
+  caller-sized `Source` capped only at 64 MiB. **The forward path is loud now.** `Box_::translate_fds`
+  — the first statement `forward_and_diff` executes — calls `forwarded_shape`, which panics by name
+  on a syscall with no row (`M33: syscall 8 (8) has no arg_kinds row in
+  crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified …`), and `unenum_e2e`
+  drives a guest that issues syscall 8 and asserts on that line, never on an exit code, since
+  before M33 the same guest recorded and exited 0. The rows come from a **census**: every syscall
+  number the corpora dispatch — 56 repo guests, `jq` twice, CPython twice (interpreter and
+  launcher), and all 54 Apple-sweep binaries — recorded under `RETRACE_TRACE=1` on 2026-09-12:
+  **108 distinct numbers over 114 invocations**, pinned by `census.rs`, which fails if any census
+  number lacks a row and checks every `unexercised` label against the census in both directions.
+  Two of the spec's open questions were settled by measurement rather than by rule. The corpora
+  issue **four** `ioctl` requests — `FIODTYPE`, `TIOCGWINSZ`, `TIOCGETA`, and dyld's
+  `DTRACEHIOC_ADDDOF`, whose 8-byte `_IOW` parameter *is* a guest pointer — and the last was
+  measured `ret=0xe err=true` (EFAULT) on all ten guests probed, so its nested copyout is
+  unreachable today; and all seven non-null `sysctl` `newp` calls are libc's `name2oid` idiom (MIB
+  `{0,3}`, `newlen` 10..=32, the name's own length), bounded by xnu's `newlen >= MAXPATHLEN`
+  rejection, so `newp` is `Ptr` and `sysctl`'s `KERN_PROC_ALL` `Dest` keeps its canary. The sweep
+  re-baseline after all of it: `TALLY pass=46 fail=8 skip=0`, same PASS set, same FAIL set,
+  **nothing moved** — and Known limits says what the four binaries the new classifications touch
+  actually did, because the sweep's PASS cannot. Nothing new is recorded and `TRACE_MAGIC` did not
+  move: the views are pure functions of `num`, the loud failure is record-only by construction, and
+  the one behavioural change — descriptors translated for sixteen more syscalls — changes what the
+  host kernel sees, never what is recorded.
 
-**Gate:** 556 passed / 0 failed / 2 ignored across 121 test binaries, **measured at M32** over all
-121 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
+**Gate:** 570 passed / 0 failed / 2 ignored across 124 test binaries, **measured at M33** over all
+124 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
 `--workspace --all-targets` with `-D warnings`.
-See the testing note below for how that number is assembled. "121 test binaries" is 114 test
+See the testing note below for how that number is assembled. "124 test binaries" is 117 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
 nobody has to re-derive it. The ignored gates are unchanged at
 **two**: `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). Both
-are described under Known limits. M32 parked nothing new and un-parked nothing.
+are described under Known limits. M33 parked nothing new and un-parked nothing.
 
-Reconciled against M31's 552 / 0 / 2 over 119 **file-by-file rather than by sum**:
+Reconciled against M32's 556 / 0 / 2 over 121 **file-by-file rather than by sum**:
 
-| file | M31 | M32 | delta |
+| file | M32 | M33 | delta |
 |---|---|---|---|
-| `retrace-box/tests/machmsgband.rs` | 0 | 2 | **+2, a NEW binary** — the serviced-call observation (whose band is asserted zero) and the structural proof that a guard band, whenever one exists, starts past every `send_size` the kernel is permitted to read |
-| `retrace-core/tests/machmsgband_dyn.rs` | 0 | 2 | **+2, a NEW binary** — one real forwarded `task_info` triple, and the 35-landmark corpus walk that measured the milestone's own coverage deliverable empty |
+| `retrace-arch/src/lib.rs` | 30 | 36 | **+6** — three `arg_kinds` unit tests (Task 3), the `ioctl` decode test and the mach-trap selector pin (Task 5), and `pipe`'s `FdPair` assertion split into its own named test (Task 6) |
+| `retrace-arch/tests/census.rs` | 0 | 2 | **+2, a NEW binary** — the census is sorted and deduplicated; every census number has a row |
+| `retrace-arch/tests/legacy_equivalence.rs` | 0 | 3 | **+3, a NEW binary** — the both-directions sweep, the in-domain check, and the `exercised`/`unexercised` labels checked against the census. It also `#[path]`-includes `census.rs`, so census's two tests **run a second time** inside this binary: 5 results from 3 attributes |
+| `retrace/tests/unenum_e2e.rs` | 0 | 1 | **+1, a NEW binary** — the guest that issues an unenumerated syscall and is refused by name |
 
-Every other file unchanged, and `--bins` **11 → 11**. **Two new test binaries**, which is what moves
-the count 119 → 121. The count closes at both ends: the tree held 554 `#[test]` at M31 = 552 running
-+ 2 ignored, and **558** now = 556 + 2. Both derivations were made independently — one predicted
-from the diff, one taken from the run — and they agreed.
+Every other file unchanged, and `--bins` **11 → 11**. **Three new test binaries**, 121 → 124. The
+count closes at both ends, and the two ends must be read separately this time: the tree holds
+**570** `#[test]` attributes = 568 runnable + 2 ignored (M32 held 558 = 556 + 2), while the run
+reports **570** passed = 568 + the 2 census tests that run twice. The two 570s are a coincidence of
+the same +2, not the same number. (A bare `grep -c '#\[test\]'` says 571, because a comment in
+`legacy_equivalence.rs` mentions the attribute in prose; the file has three.)
 
-Both `retrace-box` and `retrace` ran as **whole packages** rather than per-target, so neither
-`retrace-box`'s `Doc-tests` harness (M24's lesson, standing practice since) nor the 11 unit tests
-that live only in the `retrace` binary could be silently dropped — the two halves of the same trap,
-one of which fails loudly and one of which does not.
+`retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
+lesson). `retrace` ran **per-target** — sixty `--test <name>` invocations in three groups, because
+the whole package exceeds the tool ceiling — **plus the `--bins` chunk**, which is the only place
+the 11 unit tests in `crates/retrace/src/debug.rs` run; the 124 count includes it. The two mouths
+of the same trap, one loud and one silent, both closed by construction of the chunk list.
 
 One timing trap is worth knowing before it is mistaken for a hang: `bigread_e2e` took **536s** on its
 first run and **47s** on its second, with the recording process sitting at 0:00.00 CPU throughout the
@@ -366,6 +420,14 @@ These are real and current, not aspirational gaps.
   lives at `*(size_t*)x3`, and the window widens to cover the whole reply. Separately — and this is a
   different eight from the failures above — eight of the 54 report a **nonzero** fall-through count
   that record and replay agree on: the first binaries ever to exercise that invariant at all.
+  **Re-run at M33 after every row landed: identical.** `pass=46 fail=8 skip=0`, the same eight by
+  name and the same reason strings (`csh`/`tcsh` re-recorded by hand to read the panic text: still
+  `dup2 is not modelled by the M10 fd table`, not an `M33:` line), `dddiagnose` on a pass. **A PASS
+  here is record/replay agreement, not correctness**, and M33 measured what that hides: `/bin/ls`
+  PASSes while printing `ls: .: Bad file descriptor`, because its `fstatat64(AT_FDCWD, ".", …)`
+  returns EBADF on both runs — see the descriptor entry below for why. An M10-class wrong
+  descriptor is deterministic on both sides, so a translation fix can move a binary here only if
+  the untranslated descriptor had caused a *divergence* or a *panic*; none of the sixteen had.
 - **A guest must be arm64 or arm64e.** `slice_native` picks the slice this machine would execute —
   arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
   binary is refused by name. There is no emulation of another ISA and none is planned.
@@ -498,9 +560,13 @@ These are real and current, not aspirational gaps.
   `forward_and_diff` (`host_info` 200, `host_get_clock_service` 206, `semaphore_create` 3418,
   `task_info` 3405, `host_get_special_port` 412), and the last two exist *precisely* because the
   kernel writes a reply into guest memory — traffic every jq and CPython run exercises. Recovering it
-  needs a per-**argument** direction notion, a `dest_buffer`-shaped table of which arguments are
-  sources, which a predicate over the syscall number cannot express. That is **owed successor work**,
-  not something this milestone has.
+  needs a per-**argument** direction notion. Since M33 that notion **exists** — `arg_kinds` says,
+  per register, whether an argument is a `Source` — but nothing consults it per argument yet: the
+  fill decision is still the whole-syscall `reads_guest_buffer` view, because the stale-register
+  reproduction (a filled band reached through a *different* register's pointer into the same
+  buffer — `bigwrite_e2e` sets `x4 = buf + 128` deliberately to stand for the stale case) is what
+  forced the whole-syscall exclusion, and nothing has re-measured that against a
+  per-argument fill. The coverage is still **owed**; the table it needs is not.
   **M32 went to build that entry and measured it inert instead, so the gap above is still open and is
   now known to cost nothing observable today.** The exclusion is unchanged — `mach_msg2`'s band is
   still never filled — but what would change if it were filled has been measured rather than
@@ -526,19 +592,48 @@ These are real and current, not aspirational gaps.
   contradicts this paragraph reds the gate instead of silently ageing it — a new e2e guest added
   elsewhere in the repo is not walked by it and would not. `sendfile`'s half of the gap cannot be measured at all
   here, for the reason M32 re-confirmed by `grep`: nothing in this repo exercises it.
-  **And the shape of the owed work changed.** M32's entry would have been a *fifth* function
-  answering "what does this syscall do with each of its arguments" — after `fd_operands` (keyed by
-  argument index), `dest_buffer` (index plus length source), and `reads_guest_buffer` /
-  `writes_via_nested_pointer` (whole-syscall booleans that lost the index the other two keep). The
-  successor named by M32 is therefore a **unification**, `arg_kinds(num) -> &'static [ArgKind]` with
-  an equivalence sweep proving it reproduces all four, not another view to reconcile against them.
-  *(3)* `reads_guest_buffer` is a list, and a list is not a proof. **`ioctl` is the named hole**: a
-  `_IOW` request encodes its buffer length in the request code, so no rule over the syscall number
-  can size it. Path-taking calls are deliberately absent because a path is NUL-terminated and bounded
-  by `PATH_MAX` (1024), far inside the production window — the bound is the argument, not "paths are
-  short". `msync` is the single entry justified by inference rather than measurement, listed because
-  nothing is lost by listing and a silent corruption follows if the inference is wrong, and it says
-  so at its definition. An unlisted reader syscall corrupts exactly as silently as before.
+  **M33 built the unification M32 named** — `arg_kinds`, with the five old functions as views and
+  an equivalence sweep proving each reproduces its legacy table — so the shape of the owed work is
+  settled and the list is now concrete. Owed, each with its reason: **the per-argument canary fill
+  and M32's Control 1** (the mechanism that would consult `arg_kinds` per argument; still
+  unexecuted, and §4c of the M33 spec measured it **still inert**: the one corpus call that could
+  have made it live, a `Source` `newp` on the same `sysctl` whose `KERN_PROC_ALL` `Dest` exceeds
+  the window, turned out to be `Ptr`, so no call in the corpus carries both a `Source` and a
+  destination the whole-syscall exclusion would cost); **M34's three `Dest` rows** (`proc_info`,
+  `getattrlist`/`fgetattrlist`, `csops` — deliberately left `Ptr`, because each is a length
+  measurement the charter assigns to M34); **nested-pointer translation** (`NestedSource` rows are
+  forwarded exactly as before — `writev`'s `iov_base`s EFAULT in retrace's process, which is how
+  `/bin/ed`'s stderr message is lost — and `NestedDest` rows are refused exactly as before);
+  **`pipe`'s return** (`Ret::FdPair` is documentation: `host_svc` captures `x0` and the carry only,
+  so the guest gets the host read-end unbound in `x0` and its own stale `x1`, measured on `/bin/zsh`
+  as `ret=0x12`; capturing `x1` comes before any binding model); **the `execve`/`posix_spawn`
+  fail-loud assert** the `bsdthread_create` precedent demands (both are forwarded and fail only
+  because their nested `argv`/`envp` pointers EFAULT — a forwarded exec that ever *succeeded* would
+  replace retrace's own process; the assert is deferred to the operator because it re-parks the
+  CPython launcher test, a new `#[ignore]`); **console `writev` mirroring** (`is_console_write`
+  covers `write`/`write_nocancel` only, so a `writev` to fd 1/2 is forwarded, not mirrored — M9's
+  class in a new spelling); **`__disable_threadsignal` (331)**, forwarded and therefore applied to retrace's own
+  thread; and the fact that **`Scalar` versus `Ptr` is verified by nothing but the reviewer** — the
+  equivalence sweep proves the views, not the rows, so the row count is not a coverage claim.
+  *(3)* `reads_guest_buffer` is a view over rows, and a row is only as right as its prototype.
+  **`ioctl` is narrower than the hole this entry used to name, and what is left is a nested
+  pointer, not a length.** The *direct* parameter is bounded: the kernel copies
+  `IOCPARM_LEN(request)` bytes in or out, at most `IOCPARM_MASK` (0x1fff), so the row is
+  `[Fd, Scalar, Ptr]` with a cited bound. The corpora issue exactly four requests (`FIODTYPE`,
+  `TIOCGWINSZ`, `TIOCGETA`, `DTRACEHIOC_ADDDOF`), decoded and pinned by a unit test. The residual is
+  the fourth: `DTRACEHIOC_ADDDOF` is `_IOW('h', 4, user_addr_t)`, an 8-byte parameter that *is* a
+  guest pointer to a `dof_ioctl_data_t` the kernel follows, and dyld issues it on nearly every
+  dynamic guest. It is **forwarded, unrefused**, and fails today by EFAULT — measured
+  `ret=0xe err=true` on all ten guests probed — because that nested copyin reads a guest address in
+  retrace's process, so the later copyout of generation ids is unreachable. The refuse-by-value
+  assert the M33 spec pre-authorised would have made every dynamic guest unrecordable, so it was
+  ruled out; the hazard is the M27 nested-pointer class and stays with that owed item. Path-taking
+  calls are deliberately absent because a path is NUL-terminated and bounded by `PATH_MAX` (1024),
+  far inside the production window — the bound is the argument, not "paths are short". `msync` is
+  the single entry justified by inference rather than measurement, listed because nothing is lost
+  by listing and a silent corruption follows if the inference is wrong, and it says so at its
+  definition. An unlisted reader syscall no longer corrupts silently — it has no row, and a syscall
+  with no row is refused by name before it is forwarded; a *mis-rowed* one still does.
   *(4)* On a filled band, a kernel write that reproduces the canary pattern **exactly** is still
   undetectable in principle — 1/256 per byte, with the kernel having to hit it on every byte it
   writes. That is inherent to any canary, and it is the price of replacing a detector that was 100%
@@ -574,14 +669,28 @@ These are real and current, not aspirational gaps.
   the shim reporting a failure, not the program you meant to run. The behaviour is pinned by a test
   whose job is to hold the limitation visible, and which is to be **rewritten rather than defended**
   when exec-in-place lands.
-- **`fd_operands` fails quietly, not loudly, on a syscall it has never seen.** A syscall that takes a
-  file descriptor but is missing from `retrace_arch::fd_operands` has its guest fd forwarded to the
-  host **unchanged**, where the same integer names a different file. M25 hit precisely that:
-  `getdirentries64` (344) and `fstatfs64` (346) were absent, so `os.listdir` handed guest fd 4
-  straight to the host kernel, which returned `EINVAL` for a vnode that was not a directory. Both are
-  in the table now, but the **class** is still open — the default arm is `_ => &[]`, so the next
-  missing entry fails the same silent way, and unlike the fd table's `dup2` path it does not announce
-  itself. Making the default fail loud needs a blast-radius measurement nobody has taken.
+- **A syscall with no row cannot be forwarded — closed structurally at M33 — but a row's
+  descriptor positions are still only as right as the reviewer, and one sentinel is handled wrong
+  for every real guest.** Before M33, a syscall that took a descriptor but was missing from
+  `retrace_arch::fd_operands` had its guest fd forwarded to the host **unchanged**, where the same
+  integer names a different file — the class M25 hit with `getdirentries64`/`fstatfs64`, and the
+  default arm `_ => &[]` meant the next missing entry failed the same silent way. The blast-radius
+  measurement that entry said nobody had taken was the census: 108 numbers across every guest the
+  repo can run, each given a row, and `translate_fds` now consults `forwarded_shape`, which panics
+  by name on a number with no row before anything is forwarded. Sixteen already-tabled readers had
+  exactly that untranslated-fd defect and now translate. What stays open is one level down. **A
+  wrong position in a row is silent**: the equivalence sweep proves the views reproduce the legacy
+  tables, and `Scalar`-versus-`Fd` on a *new* row is checked by nothing but the prototype and the
+  reviewer. And **`AT_FDCWD` is rejected as EBADF in every instance a real guest was seen to pass
+  it** — measured at M33 on `/bin/ls`, whose `fstatat64(AT_FDCWD, ".", …)` returns EBADF twice and
+  whose output is `ls: .: Bad file descriptor` on both runs, and on `/bin/ed`, once: the sentinel
+  check in `translate_fds` is `(v as i64) < 0`, but the guest passes `-2` as a 32-bit `int` in
+  `w0`, so `x0` arrives as `0xfffffffe`, non-negative as an `i64`, and is looked up as a
+  descriptor. All three observed calls carried that form and none the 64-bit sign-extended one; the
+  `fdxlat` test for the sentinel passes `AT_FDCWD as u64`, the sign-extended form, so it is green
+  while the form guests actually use fails. Present since M10 t3 (`e67dd65`), deterministic on both sides, invisible
+  to the sweep, and **not fixed at M33**, whose spec forbids the behavioural change; it is a row for
+  the successor, with the test fixture corrected to the measured form alongside the fix.
 - **libdispatch runs only as far as it has been measured.** Rung 5 records and replays, but the
   workqueue emulation is a floor built from measurements rather than an implementation of the
   kernel's, and everything past that floor refuses **by value** instead of guessing. `workq_kernreturn`
