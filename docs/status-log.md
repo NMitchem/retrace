@@ -6284,3 +6284,418 @@ during a recording.
   overnight queue when the only available data — the M31 gate at ~40 minutes — contradicted it. Both
   are recorded here rather than in the scratch ledger for the same reason the two carried obligations
   are.
+
+## Status: M33-readerenum — one table, five views, and a syscall that cannot be forwarded unclassified
+
+M32 closed on a finding rather than a deliverable: four functions in `retrace-arch` answered one
+question — *what does this syscall do with each of its arguments* — in four incompatible shapes,
+two of them having thrown away the argument index the other two keep, and the successor it named
+was a unification rather than a fifth view. M33 is that unification. `arg_kinds(num) ->
+Option<&'static Shape>` is now the one table; `fd_operands`, `allocates_fd`, `dest_buffer`,
+`writes_via_nested_pointer` and `reads_guest_buffer` are one-line views over it; a verbatim copy of
+the five M32 tables is the fixture an equivalence sweep checks every view against in both
+directions; and `forward_and_diff` refuses by name any syscall the table has no row for, before it
+forwards anything. The rows came from a census of every syscall number the repo's four corpora
+dispatch, and two of the spec's open classification questions were settled by measuring the kernel
+rather than by applying a rule.
+
+The milestone's own numbers: **22** `EXPECTED_DIFFS` entries, of which **16** are descriptors the
+legacy `fd_operands` never translated (the M10 class, in the tree since M30) and **6** are
+classifications the legacy tables had no opinion on; **108** distinct syscall numbers over **114**
+recorded invocations; **129** numbers with a row (52 legacy + 77 census); the sweep tally **unmoved**
+at `pass=46 fail=8 skip=0`; the gate **570 / 0 / 2 over 124**. `TRACE_MAGIC` did not move and no
+recorded byte changed.
+
+### What was measured
+
+**The census (Task 1, 2026-09-12).** Every guest the repo can run, each invocation recorded under
+`RETRACE_TRACE=1` with its `[trap] num=` lines collected. Three of the 59 built repo guests
+(`crash`, `crashjmp`, `wildstore`) fault before their first syscall and contribute nothing, so 56
+count. `/bin/ps`, listed on its own in the plan, is one of the 54 sweep binaries and is counted once.
+
+| corpus | invocations | distinct numbers | only here |
+|---|---|---|---|
+| repo guests (`asm/*.s`, `c/*.c`, `rs/*.rs`) | 56 | 74 | 16: `-36`/`-33` (semaphores), 37, 52, 184, 189, 328, 329, 331, 360, 361, 367, 368, 478, 515, 516 — the thread and signal families only a purpose-built fixture exercises |
+| `jq` (`--version`; `. file.json`) | 2 | 59 | 1: `pathconf` (191) |
+| CPython (the interpreter; the launcher shim) | 2 | 75 | 1: `posix_spawn` (244) |
+| the Apple sweep (all 54) | 54 | 90 | 14: `fchdir` (13), `sync` (36), `getppid` (39), `pipe` (42), `getlogin` (49), `execve` (59), `umask` (60), `getpgrp` (81), `dup2` (90), `getrusage` (117), `setrlimit` (195), `kqueue` (362), `writev_nocancel` (412), `task_read_for_pid` (539) |
+| **all four** | **114** | **108** | 52 numbers appear in every corpus |
+
+The census's first chunk was run once with a `sed | while read` pipe that shared fd 0 with the
+guests inside the loop; `/bin/cat`, invoked with no argv, raced the loop's `read` for the same pipe
+and the run silently produced 6 of 27 lines with no error. It was caught by cross-checking file
+counts before trusting the aggregate, not by anything the run printed — the same trap M29's sweep
+script documents and closes with a dedicated fd 3 — and re-run clean.
+
+**`ioctl` (spec §4b).** Four distinct request codes in the whole census, decoded per
+`sys/ioccom.h`: `FIODTYPE` (`0x4004667a`, 4 bytes OUT), `TIOCGWINSZ` (`0x40087468`, 8 OUT),
+`TIOCGETA` (`0x40487413`, 72 OUT) and `DTRACEHIOC_ADDDOF` (`0x80086804`, `_IOW('h', 4,
+user_addr_t)`, 8 bytes IN) — and the fourth's 8-byte parameter *is* a guest pointer, to a
+`dof_ioctl_data_t` that xnu's `dtrace_ioctl_helper` follows with a nested `copyin`, issued by dyld
+on nearly every dynamic guest to register DOF sections. Task 5 measured what that forwarded call
+actually returns, with a temporary `eprintln!` (reverted, not committed) across ten guests — `jq`,
+the CPython interpreter, `/bin/ps`, `ls`, `date`, `sh`, `zsh`, `sort`, `sleep`, `hostname`:
+
+```
+  17 ioctl req=0x40487413 ret=0x19 err=true      TIOCGETA    → ENOTTY (stdout is a file)
+  17 ioctl req=0x4004667a ret=0x19 err=true      FIODTYPE    → ENOTTY
+  10 ioctl req=0x80086804 ret=0xe err=true       DTRACEHIOC_ADDDOF → EFAULT, every guest
+   5 ioctl req=0x4004667a ret=0x0 err=false      FIODTYPE on a real fd (CPython)
+   2 ioctl req=0x40087468 ret=0x19 err=true      TIOCGWINSZ → ENOTTY
+   1 ioctl req=0x40087468 ret=0x13 err=true      TIOCGWINSZ → ENODEV
+```
+
+`ret=0xe err=true` — EFAULT — on all ten. The nested copyin reads a guest address in retrace's
+process and fails, so the `copyout` of generation ids downstream of it is unreachable, and no guest
+byte is written. (`dtrace_dof_mode` defaults to `LAZY_ON` on macOS, so the early `KERN_SUCCESS`
+return for `MODE_NEVER` is not what was seen; the errno proves the copyin ran.)
+
+**`sysctl` `newp` (spec §4c).** Eight `num=202` rows in the census, seven with a non-null `newp`,
+`newlen` 10..=32. Task 5 measured the MIB and the bytes behind `newp` (temporary print, reverted):
+every one is MIB `{0, 3}` — libc's `name2oid` — with `newlen == strlen(name)`:
+`security.mac.lockdown_mode_state` (32), `kern.bootargs` (13), `kern.osproductversion` (21, twice),
+`kern.iossupportversion` (22), `kern.osvariant_status` (21) from `jq`; `hw.pagesize` (11) and
+`hw.memsize` (10) from the sweep guests. The cited bound is xnu `kern_newsysctl.c`
+`sysctl_sysctl_name2oid`: `newlen >= MAXPATHLEN → ENAMETOOLONG`. `sysctlbyname` (274) is dispatched
+by no corpus guest.
+
+**`map_with_linking_np` `link_info_size`**, measured because the only kernel cap is 64 MiB
+(`MWL_MAX_LINK_INFO_SIZE`, "just a guess for now"): 11 calls, `region_count` 1 or 2, sizes
+80..=2920 bytes.
+
+**The sweep, before and after.** Baseline `TALLY pass=46 fail=8 skip=0` (M29–M32). Re-run at Task 6
+on the fresh build with every row landed, in two halves of 27 (the script copied to the scratchpad
+with its `LIST` pointed at each half; its fd-3 loop left as written), tallies summed by hand:
+`pass=25 fail=2` + `pass=21 fail=6` = **`pass=46 fail=8 skip=0`**. The same eight by name and
+reason: `csh`, `tcsh` (`recorder panicked` — re-recorded by hand to read the text: still `dup2 is
+not modelled by the M10 fd table`, no `M33:` line); `automationmodetool`, `desdp`, `dyld_info`,
+`flex`, `/bin/launchctl` (`replay diverged`); `/usr/bin/yes` (timed out). `dddiagnose` on a pass.
+**Nothing moved.** The four binaries whose traps gained a load-bearing classification were then
+recorded by hand and their traces read back, because the sweep's PASS says nothing about what a
+guest received:
+
+| binary | trap | what the guest got at M33 | why the sweep could not move |
+|---|---|---|---|
+| `/bin/ed` | `writev_nocancel` (412) | `fd=2`, `ret=0xe err=true` (EFAULT) | the fd is a console fd, which `translate_fds` maps to itself — identical to the raw forward before M33; the EFAULT is the untranslated nested `iov_base`, pre-existing, and how `ed`'s stderr message is lost |
+| `/bin/ls` | `fchdir` (13) | `fd=4 → ret=0 err=false`, twice | now the guest's own directory; before M33 retrace's raw fd 4. Deterministic either way, so record and replay agreed both before and after |
+| `/bin/wait4path` | `kqueue` (362) | `ret=4 err=false`, bound to a guest slot | exits at its usage message before using it |
+| `/bin/zsh` | `pipe` (42) | `ret=0x12 err=false` | the host read-end in `x0`, the guest's own stale `x1` — `host_svc` captures `x0` and the carry only; `Ret::FdPair` is documentation of exactly this |
+
+**And one thing the sweep cannot see, found while reading those traces.** `/bin/ls` PASSes while
+its recorded stdout is `ls: .: Bad file descriptor`. Its `fstatat64(AT_FDCWD, ".", …)` returns
+EBADF twice; `/bin/ed` issues one and gets the same. Every one arrives with `x0 = 0xfffffffe` — the
+guest passes `-2` as a 32-bit `int` in `w0` — and `translate_fds`'s sentinel check is
+`(v as i64) < 0`, which that value fails, so `AT_FDCWD` is looked up as a descriptor and rejected.
+The `fdxlat` test for the sentinel passes `AT_FDCWD as u64`, the 64-bit sign-extended form, which
+no observed guest produces. Present since M10 t3 (`e67dd65`, 2026-08-04). See Ruling 10.
+
+### What was found
+
+1. **Sixteen descriptors the legacy `fd_operands` never translated** — the M10 class, in the tree
+   since M30 tabled the reader family from prototypes without asking which position held a
+   descriptor. The equivalence sweep's first red named exactly these sixteen pairs and no other
+   view: `pwrite` (154), `pwrite_nocancel` (415), `writev` (121), `writev_nocancel` (412), `pwritev`
+   (541), `sendto_nocancel` (413), `sendmsg` (28), `sendmsg_nocancel` (402), `sendmsg_x` (481),
+   `sendfile` (337, two descriptors), and the six the M27 assert refuses before translation could
+   run — `readv` (120), `readv_nocancel` (411), `recvmsg` (27), `recvmsg_nocancel` (401), `preadv`
+   (540), `recvmsg_x` (480) — moot but listed, because the sweep must not be taught to lie. One is
+   in the census: 412, from `/bin/ed`. It was labelled "a live M10-class fix" on the strength of
+   being exercised; measured at Task 6, the descriptor it carries is fd 2, which translated to
+   itself before and after, so the fix is real for the class and inert for the only guest that
+   reaches it.
+2. **Six classifications the legacy tables had no opinion on**, each from a kernel prototype and
+   each exercised by a named guest: `fchdir` (13) takes a descriptor; `kqueue` (362) returns one;
+   `execve` (59) and `posix_spawn` (244) read `argv`/`envp` — and `posix_spawn`'s `adesc` — through
+   nested pointers; `sigreturn` (184) follows `uctx->uc_mcontext64`, serviced above the trace so the
+   view is consulted for it by nothing; and `map_with_linking_np` (550)'s `link_info` is a
+   caller-sized read capped only at 64 MiB — `Source` under rule 4, the first `Source` row added
+   since M30 wrote the list, and the one row whose kind changes what the box does on a hot path (the
+   canary is now withheld for 550; measured sizes ≤ 2,920 bytes mean it could never have been
+   reached on this corpus, and the call has no destination, so the cost is nothing).
+3. **Seven prototype errors in the plan's starter rows, caught by the implementer at row level.**
+   The plan's Task 5 listed rows from memory of the SDK; checked against xnu `syscalls.master` and
+   `syscall_sw.h`, seven were wrong: `crossarch_trap` (38) was **absent** and is issued by nearly
+   every dynamic guest; `gettid` (286) has two out-pointers, not `(void)`; `gettimeofday` (116) has
+   three pointers (the kernel's `mach_absolute_time` third argument, not the SDK's two);
+   `bsdthread_register` (366) has seven arguments with `flags` at index 2, not six;
+   `map_with_linking_np` (550) is `(regions, region_count, link_info, link_info_size)`, not
+   `(regions, count, files, nfiles)` — wrong prototype **and** wrong classification;
+   `posix_spawn`'s `adesc` is a nested reader, not `Ptr`; and `mach_timebase_info_trap` (-89) is
+   **forwarded**, not answered from the synthetic timebase as the plan said (the synthetic timebase
+   is the CNTVCT MRS emulation in `Box_::run()`; `retrace-core` has no arm for -89). This is M20's
+   "right conclusion, unmeasured supporting fact" class, caught here at row-writing time rather
+   than by a review after it — because the spec's rule that every row carries its C prototype as
+   its comment, with the source cited when it is not the public SDK, makes a row written from
+   memory visibly incomplete before it is ever reviewed.
+4. **`0x80000000`** in the census is dyld's inline `__mac_syscall("Sandbox", …)`,
+   `MAC_SYSCALL_MAGIC` (`retrace-core/src/lib.rs:18-22`), synthesized and never forwarded. Task 1
+   could not identify it; the controller's cross-check did; its row is `[Path, Scalar, Ptr]` and the
+   "unidentified" sentence in `census.rs` is closed.
+5. **`AT_FDCWD` is rejected as EBADF** for the form real guests pass — above, and Ruling 10.
+6. **The README named four binaries the corpus does not contain.** "Among them … `grep`, `wc`,
+   `uname`, … `bzip2`" survived from M22's uncommitted sample through M32's close; none of the four
+   is in `tools/apple-sweep-binaries.txt`. Corrected in place at Task 6, with the correction noted
+   in the sentence.
+
+### What landed
+
+- **`crates/retrace-arch/src/lib.rs`** — `ArgKind` (`Scalar`, `Fd`, `Path`, `Source`,
+  `NestedSource`, `Dest(DestLen)`, `NestedDest`, `Ptr`), `Ret` (`Plain`, `Fd`, `FdPair`), `Shape`,
+  `arg_kinds`, `forwarded_shape`, and the five views as one-liners. 129 rows: the 52 legacy numbers
+  (Task 3, verified equal to the legacy union by set equality, not by count) and the 77 census
+  numbers (Task 5), grouped by family, every row opening with its prototype and its source, every
+  `Ptr` with its cited bound, no new `Dest`. The five old doc comments' 142 distinctive phrases —
+  every number, citation and quoted claim — were migrated onto the variant and row they belong to
+  and checked by grep; the `mach_msg2` reason M32 disproved is left *named* on its row, per
+  CLAUDE.md.
+  `IOCPARM_MASK`, `IOC_IN`, `IOC_OUT`, `iocparm_len` and fourteen `MACH_*_TRAP` selectors as arch
+  facts, the latter pinned to `syscall_sw.h`. Six documentation corrections from the Task 5 review
+  landed as Task 6's first commit — none changes a row's kinds; one splits `pipe`'s `FdPair`
+  assertion into a test named for it.
+- **`crates/retrace-arch/tests/legacy_equivalence.rs`** — the five M32 tables verbatim as
+  `legacy_*` fixtures (Task 2, before any production change, green by identity), the both-directions
+  sweep over the whole domain, `EXPECTED_DIFFS` (22), and the check that every `exercised` /
+  `unexercised` label agrees with the census.
+- **`crates/retrace-arch/tests/census.rs`** — `CENSUS: &[i64]` (108), sorted and deduplicated by
+  test, and `every_census_number_has_a_row`.
+- **`crates/retrace-box/src/lib.rs`** — one line: `translate_fds` iterates
+  `forwarded_shape(num).fd_operands()`, the first statement `forward_and_diff` executes, so the
+  panic sits upstream of every other view consulted there.
+- **`crates/retrace-guest/asm/unenum.s`** and **`crates/retrace/tests/unenum_e2e.rs`** — a guest
+  that issues syscall 8 (`nosys`) then exits 0, and the test that asserts on the `M33:` line and
+  never on an exit code.
+- No `retrace-core` edit. No `TRACE_MAGIC` bump. No recorded byte changed.
+
+**Four instruments were proven able to fail before they were trusted**, each red quoted from the
+run that produced it:
+
+- *The oracle itself (Task 2)*: `legacy_dest_buffer`'s `getfsstat64` arm changed from `Reg(1)` to
+  `Reg(2)` — `views disagree with the legacy tables and no EXPECTED_DIFFS entry says why:
+  [(347, DestBuffer)]`. Reverted.
+- *Control 1 (Task 3)*: (a) `dup2`'s row set to `[Fd, Scalar]` — `… no EXPECTED_DIFFS entry says
+  why: [(90, FdOperands)]`; (b) the `(154, FdOperands)` entry deleted — `… [(154, FdOperands)]`.
+  Both reverted; the revert confirmed from the commit, not the working tree.
+- *Control 2 (Task 4)*: `forwarded_shape` mutated to `unwrap_or(&Shape { args: &[], ret: Plain })`
+  — the unit test: `note: test did not panic as expected`; the e2e: `recorder did not refuse
+  syscall 8 by name; code=0 stderr=`. Reverted; `git diff` empty against `c12efc0`.
+- *Control 3 (Task 5)*: the `getentropy` (500) row deleted — `census numbers with no arg_kinds
+  row: [500]`, and both `cpython_e2e` tests red with `M33: syscall 500 (500) has no arg_kinds row
+  in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (…)`, because the
+  launcher issues 500 too. Restored from a saved copy.
+
+And the first red of the real sweep, the one the milestone exists for — `EXPECTED_DIFFS` still
+empty after the views were rewritten:
+
+```
+views disagree with the legacy tables and no EXPECTED_DIFFS entry says why: [(27, FdOperands),
+(28, FdOperands), (120, FdOperands), (121, FdOperands), (154, FdOperands), (337, FdOperands),
+(401, FdOperands), (402, FdOperands), (411, FdOperands), (412, FdOperands), (413, FdOperands),
+(415, FdOperands), (480, FdOperands), (481, FdOperands), (540, FdOperands), (541, FdOperands)]
+```
+
+Sixteen pairs, all `FdOperands`, none in any other view — so `AllocatesFd`, `DestBuffer`,
+`NestedPointer` and `ReadsGuestBuffer` reproduced their legacy tables entry for entry over the
+whole domain, and no legacy row had to be "fixed" against its prototype. Task 5's second sweep,
+run before its six entries were listed, named exactly those six and nothing else.
+
+### Rulings
+
+Every `Ruling:` line from the milestone's ledger, verbatim, followed by the two Task 6 made.
+
+Ruling 1: T4's loud forward lands before T5's census rows, so box/core tests that forward a
+non-legacy syscall are red for the span of one task — accepted: the plan runs only three targets in
+T4 and T5 Step 5 runs box+core in full; the gate is T6. Cost if wrong: one extra fix round in T5.
+
+Ruling 2: T2's `legacy_*` functions are verbatim copies of production logic — mandated by spec §5b
+as the equivalence oracle (a fixture, not production). A duplication finding against them is
+answered by this ruling; a finding that the copy is NOT verbatim is real. Cost if wrong: none (the
+sweep proves the copy).
+
+Ruling 3: Task 3 also makes the three one-line signature adaptations the plan gave Task 4
+(`retrace-box/src/lib.rs:3104` `for &i in`→`for i in`; `fdxlat.rs:13` same; `fdxlat.rs:106`
+`.count()`), because `fd_operands` becoming an iterator otherwise leaves the workspace uncompilable
+for one commit. Task 4 keeps only the `forwarded_shape` call and the unenum guest/e2e. Cost if
+wrong: none — Task 4 finds the edits already made.
+
+Ruling 4 (for Task 5, spec §4b ioctl): DTRACEHIOC_ADDDOF (_IOW('h',4,user_addr_t), nested read +
+copyout of dof_ioctl_data_t per xnu bsd/dev/dtrace/dtrace.c dtrace_ioctl_helper — Task 5 to cite the
+exact lines) is issued by nearly every dynamic guest via dyld. The spec's pre-authorised remedy — a
+refuse-by-value ASSERT — would make every dynamic guest unrecordable, which is the spec's own §9
+halt clause. Ruled instead: NO assert; row stays [Fd, Scalar, Ptr] with IOCPARM_MASK as the bound on
+the DIRECT parameter; Task 5 MEASURES the recorded (ret, err) of that ioctl on a dynamic guest
+(temporary eprintln, not committed) to ground "the nested copyin fails, so the copyout is
+unreachable"; the residual (a nested pointer forwarded unrefused) goes on the row comment, the
+README's rewritten ioctl paragraph, and the status-log's owed list. Cost if wrong: a latent
+nested-pointer hazard stays forwarded exactly as it has since M2 — today's state, not a regression.
+
+Ruling 5 (for Task 5, spec §4c sysctl newp): 7 measured non-null newp rows have newlen 10–32 =
+string lengths, consistent with libc's name2oid idiom (MIB {0,3}, name via newp/newlen). Task 5
+MEASURES the MIB (temporary print of the u32s at args[0], namelen args[1]; not committed). If
+name2oid: rule 5 applies BEFORE rule 6 — xnu kern_newsysctl.c sysctl_sysctl_name2oid rejects newlen
+>= MAXPATHLEN, a citable bound → Ptr (cite the line), and the general per-handler newlen check
+covers other MIBs. If NOT name2oid and no bound can be cited: rule 6 → Source + EXPECTED_DIFFS (202,
+ReadsGuestBuffer) + ledger the coverage cost on the KERN_PROC_ALL Dest. Cost if wrong: a
+caller-sized kernel read stays canary-filled (M30 class) — bounded by MAXPATHLEN, so no band can be
+reached.
+
+Ruling 6 (for Task 5, pipe 42): add `Ret::FdPair` (documentation; `allocates_fd` view unchanged =
+false, matching legacy) rather than binding one of two fds or asserting. Binding is a return model
+M33 does not own (M10 successor work); asserting would move /bin/zsh to `recorder panicked` for a
+gap M33 did not create. Owed item in status-log + README. Cost if wrong: zsh-class guests keep
+getting EBADF on pipe use, silently — today's state.
+
+Ruling 7 (for Task 5, execve 59 / posix_spawn 244): rows are header truth ([Path, NestedSource,
+NestedSource] and the brief's posix_spawn row) → EXPECTED_DIFFS ReadsGuestBuffer entries, 59
+"exercised (/bin/sh)". The fail-loud assert the bsdthread_create precedent demands is NOT added: it
+would re-park cpython_e2e's launcher test (a NEW #[ignore] = charter §5 halt condition, the
+operator's call) and move /bin/sh + the launcher into the sweep's panicked set. Surfaced to the
+operator in the finish message; recorded as owed. Cost if wrong: a forwarded exec that ever stops
+EFAULTing replaces retrace's process — the same exposure the tree has carried since M2.
+
+Ruling 8: Task 6 excludes its Step 5 (memory files — controller-owned, written at finish) and the
+merge half of Step 6 (done after the final whole-branch review via finishing-a-development-branch,
+per the SDD skill). Task 6 delivers: sweep re-run + §9 rulings, the full chunked gate +
+reconciliation, README, status-log section, the close commit on the branch. Cost if wrong: none —
+the merge is one command later.
+
+Ruling 9 (Task 6, spec §9, the sweep re-baseline): no binary moved — `pass=46 fail=8 skip=0`, the
+same PASS set and the same FAIL set with the same reason strings, `dddiagnose` on a pass — so no
+§9 clause fires and no M36 row is created by the sweep. The four candidates flagged for movement
+were recorded by hand and their traces read (table above): `/bin/ed`'s newly translated descriptor
+is fd 2, a console fd that translates to itself, so its outcome is byte-identical to the raw
+forward and its EFAULT is the pre-existing nested `iov_base`; `/bin/ls`'s `fchdir(4)` now succeeds
+where a raw fd 4 was forwarded before, deterministic on both sides both times; `/bin/wait4path`'s
+`kqueue` return is now bound and unused; `/bin/zsh`'s `pipe` returns the host read-end in `x0`
+with `x1` stale, the mechanism `Ret::FdPair`'s doc now states. The structural reason none could
+move: the sweep's PASS is record/replay agreement, and an M10-class wrong descriptor is
+deterministic on both sides, so a translation fix moves a binary only if the untranslated
+descriptor had caused a divergence or a panic. Cost if wrong: none — the sets were compared by
+name, not by count.
+
+Ruling 10 (Task 6, spec §9's "other" clause, applied to a finding rather than a movement):
+`translate_fds` rejects `AT_FDCWD` as EBADF in every instance a real guest was seen to pass it
+(`/bin/ls` twice, `/bin/ed` once — `x0 = 0xfffffffe`, the 32-bit `-2` the ABI puts in `w0`,
+non-negative under the `(v as i64) < 0` sentinel check), and the `fdxlat` test for the sentinel
+passes the 64-bit sign-extended form no guest produces, so it is green while the real form fails.
+Present since M10 t3 (`e67dd65`), deterministic on both sides, invisible to the sweep (`/bin/ls`
+PASSes printing `ls: .: Bad file descriptor`). **Not fixed at M33**: spec §7 and §8 allow no
+behavioural change beyond the sixteen translations, a fix changes what `ls` and every
+`openat`/`fstatat64`-relative guest records, and the sweep would have to be re-baselined against
+it — a successor's row, with the `fdxlat` fixture corrected to the measured form alongside the fix
+(`(v as i32) < 0` is the obvious shape; it is not measured). Recorded in the README's descriptor
+entry and in "What stays owed" below. Cost if wrong: today's state since M10 — a relative-path
+`openat`/`fstatat64` keeps failing EBADF on both runs, agreeing with itself.
+
+### What this milestone does not do
+
+Spec §7, verbatim:
+
+- **No new `Dest` rows.** `proc_info`, `getattrlist`/`fgetattrlist`, `csops` stay `Ptr` with a
+  comment naming them as M34's. `dest_buffer` widens the forwarded-count clamp *and* the diff
+  window; a wrong length is the M26 truncation class, and each of those three is a measurement
+  the charter assigns to M34, "the milestone most exposed to right-conclusion-unmeasured-fact".
+- **No per-argument canary fill.** The schema can now say "fill past argument 2, not argument 4"
+  — that is the field M32 wanted — but nothing consults it. M32's Control 1 stays unexecuted and
+  owed with the mechanism; §4c says when it stops being inert.
+- **No nested-pointer translation.** `NestedSource` rows are forwarded exactly as today (the
+  untranslated-read hazard M30 named and did not fix); `NestedDest` rows are refused exactly as
+  today.
+- **Rows only for what is dispatched or already tabled.** An unenumerated syscall is not a bug
+  in this table; it is the loud failure working. The sweep re-run (§9) is where that shows.
+- **`Scalar` vs `Ptr` is not verified by anything but the reviewer.** Stated in §3a; repeated here
+  so the row count is not mistaken for a coverage claim.
+
+Each held. No `Dest` row was added (the schema test's no-two-`Dest` rule now runs over the
+`0x8000_0000` band too). Nothing consults `arg_kinds` per argument for the fill. `NestedSource`
+rows are forwarded and `NestedDest` rows refused exactly as at M32. The sweep re-run showed no
+unenumerated number. And `Scalar` versus `Ptr` on the 77 new rows was checked by the prototype and
+the reviewer and by nothing else — the seven starter-row errors above are the measure of how much
+that check is worth, and of how much it is not.
+
+### The gate
+
+**570 passed / 0 failed / 2 ignored across 124 test binaries**, every chunk exit code **0**
+captured before any pipe; clippy clean over `--workspace --all-targets` with `-D warnings`. Four
+chunks, the third in three groups: `--workspace --exclude retrace-box --exclude retrace` (whole
+packages, so every library crate's `Doc-tests` harness ran — 7 of them, all zero tests);
+`-p retrace-box` as a whole package (52 lib + 35 integration targets + its `Doc-tests`, 268
+tests); `-p retrace --test <name>` for each of the sixty e2e targets, twenty per group (45 + 36 +
+58, the 2 ignored in the last group); and **`-p retrace --bins`** (11), which is the only place
+`crates/retrace/src/debug.rs`'s unit tests run and the chunk CLAUDE.md says not to omit. `jq_e2e`,
+`jq_file_e2e` and `cpython_e2e` ran rather than skipped — Homebrew `jq` and Python are both
+installed, and no skip line appears in any log.
+
+Reconciled against M32's 556 / 0 / 2 over 121 **file-by-file rather than by sum**, every `.rs`
+file in `crates/` diffed against `e13eb17`:
+
+| file | M32 | M33 | delta |
+|---|---|---|---|
+| `crates/retrace-arch/src/lib.rs` | 30 | 36 | **+6** — `arg_kinds_reproduces_the_read_family_shape`, `an_unenumerated_syscall_panics_by_name`, `no_row_has_more_than_one_dest_argument_or_more_than_eight_arguments` (Task 3); `ioctl_request_codes_the_corpora_issue_decode_as_the_row_states`, `mach_trap_constants_match_syscall_sw_h` (Task 5); `pipe_return_is_a_pair_and_is_not_bound` (Task 6) |
+| `crates/retrace-arch/tests/census.rs` | 0 | 2 | **+2, a NEW binary** — `census_is_sorted_and_deduplicated` (Task 1), `every_census_number_has_a_row` (Task 5) |
+| `crates/retrace-arch/tests/legacy_equivalence.rs` | 0 | 3 | **+3, a NEW binary** — `every_view_reproduces_its_legacy_table`, `expected_diffs_name_only_numbers_in_the_domain` (Task 2), `exercised_and_unexercised_match_the_census` (Task 5); and it `#[path]`-includes `census.rs`, so census's two tests run **a second time** here — 5 results from 3 attributes, said in the file's own header |
+| `crates/retrace/tests/unenum_e2e.rs` | 0 | 1 | **+1, a NEW binary** — `an_unenumerated_syscall_is_refused_by_name` (Task 4) |
+
+No other file's count moved; `--bins` **11 → 11**; `Doc-tests` 7 → 7. Three new binaries,
+121 → 124. **The two ends of the count must be read separately this time.** The tree holds **570**
+`#[test]` attributes = 568 runnable + 2 ignored (M32 held 558 = 556 + 2; +12 attributes). The run
+reports **570** passed = 568 + 2, because census's two tests execute in two binaries. The two 570s
+are a coincidence of the same "+2", not one number derived twice. A bare `grep -c '#\[test\]'` over
+the tree says 571, because a comment in `legacy_equivalence.rs` mentions the attribute in prose;
+the file has three, and the reconciliation above counts attributes, not mentions. The brief's
+prediction was 564 (+8); the +6 beyond it is the pipe split (+1), the two Task 5 unit tests it did
+not know about (+2), and census's second execution (+2) plus the enforcement test (+1) — each
+named above.
+
+The two ignored gates are unchanged: `stackoverflow_rust_e2e` (the M21 signal-model wall) and
+`cache_symbol_e2e` (the M19 shared-cache symbol wall), confirmed by their `#[ignore` attributes
+being the only two in the tree. M33 parked nothing new and un-parked nothing.
+
+### What stays owed
+
+* **The per-argument canary fill, and M32's Control 1 with it.** `arg_kinds` is the per-argument
+  direction notion M30 said the fill decision needed; nothing consults it per argument, because the
+  stale-register reproduction (`bigwrite_e2e`'s `x4 = buf + 128`) is a filled band reached through
+  a register the call does not declare, and no measurement has been taken of a per-argument fill
+  against it. Spec §4c measured the case still inert: the one corpus call that could have made it
+  live — a `Source` `newp` on the `sysctl` whose `KERN_PROC_ALL` `Dest` exceeds the window — is
+  `Ptr`. Control 1 is still an unexecuted control, not a discharged one.
+* **M34's three `Dest` rows** — `proc_info` (336), `getattrlist`/`fgetattrlist` (220/228), `csops`
+  (169/170) — left `Ptr` with a comment naming them as M34's, because each is a length measurement
+  the charter assigns there.
+* **Nested-pointer translation.** `NestedSource` rows are forwarded with their nested pointers
+  untranslated — `writev`'s `iov_base`s EFAULT in retrace's process, `execve`/`posix_spawn`'s
+  `argv`/`envp` likewise, `DTRACEHIOC_ADDDOF`'s `dof_ioctl_data_t` likewise (measured) — and
+  `NestedDest` rows are refused. The ioctl residual is a nested pointer forwarded unrefused; the
+  spec's refuse-by-value assert was ruled out because dyld issues it on nearly every dynamic guest
+  (Ruling 4).
+* **`pipe`'s return.** `Ret::FdPair` is documentation. `host_svc` captures `x0` and the carry;
+  `apply_and_return` sets `x0` alone. The guest gets the host read-end in `x0`, unbound, and its
+  own stale `x1`; both host descriptors leak in the recorder. Capturing `x1` is the successor item
+  ahead of any binding model (Ruling 6).
+* **The `execve`/`posix_spawn` fail-loud assert** the `bsdthread_create` precedent demands. Both
+  are forwarded and fail only because their nested pointers EFAULT; a forwarded exec that ever
+  succeeded would replace retrace's process. Deferred to the operator, because adding it re-parks
+  `cpython_e2e`'s launcher test — a new `#[ignore]`, charter §5 — and moves `/bin/sh` and the
+  launcher into the sweep's panicked set (Ruling 7).
+* **Console `writev` mirroring.** `is_console_write` covers `write`/`write_nocancel` only, so a
+  `writev` to fd 1/2 is forwarded rather than mirrored, and `/bin/ed`'s stderr message is lost to
+  the nested-pointer EFAULT. M9's class in a new spelling.
+* **`__disable_threadsignal` (331)** is forwarded and acts on retrace's own thread. Pre-existing,
+  documented on its row, not modelled.
+* **`AT_FDCWD` in the 32-bit form real guests pass** (Ruling 10) — the sentinel check, the `fdxlat`
+  fixture, and the sweep re-baseline the fix will cost.
+* **`Scalar` versus `Ptr` is reviewer-verified only**, on 129 rows. The equivalence sweep proves
+  the views, not the rows.
+* **The corpus bias M32 named is carried unchanged.** Every governed `mach_msg2` call in the
+  corpus is still init-time and shallow; the repo-owned threaded/GCD fixture that would change the
+  population was not added.
+* **The `unexercised` label is enforced against a census dated 2026-09-12.** `census.rs` pins the
+  numbers and `legacy_equivalence.rs` checks every label against them, so a label cannot rot
+  silently — but the census itself is a snapshot of the corpora on that day, and a guest added
+  later is not in it until someone re-runs the census script (`.superpowers/` is gitignored, so
+  the script lives only in the ledger; the procedure is in the M33 plan's Task 1).
+* **The README carried four binary names the corpus does not contain from M22 through M32**, and
+  nothing in the tree could have caught it: the sentence is prose and the corpus is a file. It is
+  corrected, and the correction is noted in the sentence itself, but the class — a current-state
+  claim with no instrument — is the same one the census closed for syscall numbers and did not
+  close for anything else.
