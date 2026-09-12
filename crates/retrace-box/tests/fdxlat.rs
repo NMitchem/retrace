@@ -10,7 +10,7 @@ use retrace_box::{EBADF, FdTable};
 
 /// The same walk `Box_::translate_fds` performs, over a bare table.
 fn translate(fds: &FdTable, num: u64, args: &mut [u64; 8]) -> Result<(), u64> {
-    for &i in fd_operands(num) {
+    for i in fd_operands(num) {
         let v = args[i];
         if (v as i64) < 0 { continue; }
         match fds.host(v) {
@@ -103,6 +103,6 @@ fn mwl_region_layout_matches_the_sdk_header() {
     assert_eq!(MWL_REGION_STRIDE, 32);
     assert_eq!(MWL_MAX_REGION_COUNT, 5);
     // 550 must NOT be in fd_operands: its fd is in guest memory, not a register.
-    assert_eq!(fd_operands(retrace_arch::SYS_MAP_WITH_LINKING_NP), &[] as &[usize]);
+    assert_eq!(fd_operands(retrace_arch::SYS_MAP_WITH_LINKING_NP).count(), 0);
     assert!(!allocates_fd(retrace_arch::SYS_MAP_WITH_LINKING_NP));
 }
