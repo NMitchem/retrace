@@ -143,6 +143,16 @@ fn main() {
         .status().expect("clang failsys");
     assert!(status.success(), "failsys guest build failed");
 
+    // unenum: issues syscall 8 — the kernel's `nosys` slot — then exits 0. M33's fail-loud e2e
+    // fixture: the recorder must refuse to forward a syscall with no arg_kinds row, BY NAME.
+    let src = format!("{}/asm/unenum.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/unenum");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang unenum");
+    assert!(status.success(), "unenum guest build failed");
+
     // remap: mmap A, store, munmap A, mmap B, store, load-back, exit x0=0 on match. Proves
     // honored munmap (debt #2) lets the guest go on to reuse address space afterward.
     let src = format!("{}/asm/remap.s", env!("CARGO_MANIFEST_DIR"));
