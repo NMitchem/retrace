@@ -279,10 +279,13 @@ pub enum Ret {
     /// wrong file.
     Fd,
     /// Two new descriptors, in x0 and x1 — `pipe`. Unmodelled: `allocates_fd` is false for it
-    /// (binding one of two would alias), and retrace-core does not assert on it, so today the
-    /// guest receives retrace's own host descriptors unbound and every later use returns EBADF
-    /// (`/bin/zsh` issues it and never uses the pair). A return model for it is M10-successor
-    /// work, owed.
+    /// (binding one of two would alias), and retrace-core does not assert on it. What the guest
+    /// actually gets today: `Box_::host_svc` captures only `x0` and the carry, and
+    /// `apply_and_return` sets `x0` alone, so the guest receives retrace's own host READ-end,
+    /// unbound, in `x0` and its own stale `x1` — the write-end never reaches the guest at all, and
+    /// both host descriptors leak in the recorder. Every later use returns EBADF via
+    /// `translate_fds` (`/bin/zsh` issues it and never uses the pair). Capturing `x1` is the
+    /// actual successor work item, ahead of any binding model — M10-successor work, owed.
     FdPair,
 }
 
@@ -474,8 +477,10 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_LSEEK => row!(P, [Fd, Scalar, Scalar]),
         // ioctl(int fd, unsigned long request, void *arg): the kernel copies IOCPARM_LEN(request)
         // bytes in and/or out, at most IOCPARM_MASK = 0x1fff (sys/ioccom.h:74) — the cited bound
-        // on the DIRECT parameter, and `ioctl_request_codes_the_corpora_issue_are_bounded` pins it
-        // for every request the census measured (2026-09-12, four distinct codes):
+        // on the DIRECT parameter (it is `iocparm_len`'s own mask, so the bound holds by
+        // definition), and `ioctl_request_codes_the_corpora_issue_decode_as_the_row_states` pins
+        // the decoded length and direction for every request the census measured (2026-09-12,
+        // four distinct codes):
         //   0x4004667a FIODTYPE          _IOR('f', 122, int)          len 4, OUT
         //   0x40087468 TIOCGWINSZ        _IOR('t', 104, winsize)      len 8, OUT
         //   0x40487413 TIOCGETA          _IOR('t',  19, termios)      len 72, OUT
@@ -667,9 +672,11 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_WORKQ_KERNRETURN => row!(P, [Scalar, Ptr, Scalar, Scalar]),
         // bsdthread_ctl(user_addr_t cmd, arg1, arg2, arg3): xnu-private, cmd-dependent
         // (bsd/pthread/pthread_workqueue.c `bsdthread_ctl`). arg1/arg2 are port names, priorities
-        // or resource keys the kernel never dereferences; arg3 is, for QOS_OVERRIDE_START, a ulock
-        // address read with a 4-byte `copyin_atomic32` — the only memory access in the switch, so
-        // Ptr with that bound. Forwarded; the census saw it from one guest (`panicky`).
+        // or resource keys the kernel never dereferences; arg3 is, for QOS_OVERRIDE_DISPATCH
+        // (`workq_thread_add_dispatch_override`), a ulock address read with a 4-byte
+        // `copyin_atomic32` — the only memory access in the switch, so Ptr with that bound. (For
+        // QOS_OVERRIDE_START arg3 is a `resource` key, never dereferenced.) Forwarded; the census
+        // saw it from one guest (`panicky`).
         478 => row!(P, [Scalar, Scalar, Scalar, Ptr]),
         // __ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout):
         // xnu-private, shape per SYS_ULOCK_WAIT's doc. The kernel reads 4 or 8 bytes at addr
@@ -711,7 +718,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         59 => row!(P, [Path, NestedSource, NestedSource]),
         // ---- descriptors ----------------------------------------------------------------------
         // fchdir(int fd): a descriptor the legacy fd table never translated (EXPECTED_DIFFS;
-        // exercised by /bin/ls).
+        // exercised by /bin/ls). Forwarded, and the descriptor now names the guest's file — but
+        // a forwarded fchdir changes retrace's OWN working directory, the same recorder-side
+        // effect the `__disable_threadsignal` (331) row above names. Noted, not modelled.
         13 => row!(P, [Fd]),
         // pipe(void) → TWO new descriptors, in x0 and x1 (bsd/kern/sys_pipe.c `pipe`, `retval[0]`
         // and `retval[1]`). See Ret::FdPair for why the return is unmodelled.
@@ -944,8 +953,11 @@ pub const SYS_SIGWAIT: u64 = 330;
 pub const SYS_BSDTHREAD_CREATE: u64 = 360;
 /// `bsdthread_terminate(stackaddr, freesize, port, sem)` — a guest thread's exit.
 pub const SYS_BSDTHREAD_TERMINATE: u64 = 361;
-/// `bsdthread_register(threadstart, wqthread, pthsize, …)`. Already fires on EVERY dynamic guest
-/// since M7, unremarked; `threadstart` is the address a new thread must be entered at.
+/// `bsdthread_register(threadstart, wqthread, flags, pthread_init_data, pthread_init_data_size,
+/// dispatchqueue_offset, tsd_offset)` — seven arguments per xnu `syscalls.master`, with `flags`
+/// at index 2 (not the older six-argument `(…, pthsize, dummy, targetconc, dispatchqueue_off)`
+/// reading; see its `arg_kinds` row). Already fires on EVERY dynamic guest since M7, unremarked;
+/// `threadstart` is the address a new thread must be entered at.
 pub const SYS_BSDTHREAD_REGISTER: u64 = 366;
 /// `workq_open()` — brings up the process's kernel workqueue. **Never forwarded** (M18 Stage 2a):
 /// the host would bring up a real workqueue for RETRACE's own process, and the `REQTHREADS` that
@@ -1460,21 +1472,20 @@ mod tests {
         }
     }
 
-    // M33 t5: the "bounded direct parameter" claim on ioctl's row is a checked fact, not prose.
-    // The four request codes are the census's (2026-09-12, `ioctl_requests.txt`), decoded per
-    // sys/ioccom.h; DTRACEHIOC_ADDDOF is the nested one (an 8-byte IN parameter that IS a
-    // pointer), and its decode is pinned separately so the row's story stays tied to a number.
+    // M33 t5: the decoded lengths and directions ioctl's row states for the four request codes
+    // the census saw (2026-09-12, `ioctl_requests.txt`) are checked facts, not prose — decoded
+    // per sys/ioccom.h. The `<= IOCPARM_MASK` bound itself is not asserted here because
+    // `iocparm_len` masks with it and the assertion would be tautological; the bound is the
+    // decoder's definition. DTRACEHIOC_ADDDOF is the nested one (an 8-byte IN parameter that IS
+    // a pointer), and its decode is pinned separately so the row's story stays tied to a number.
     #[test]
-    fn ioctl_request_codes_the_corpora_issue_are_bounded() {
+    fn ioctl_request_codes_the_corpora_issue_decode_as_the_row_states() {
         const FIODTYPE: u64 = 0x4004_667a;
         const TIOCGWINSZ: u64 = 0x4008_7468;
         const TIOCGETA: u64 = 0x4048_7413;
         const DTRACEHIOC_ADDDOF: u64 = 0x8008_6804;
         // (len, IN, OUT) — the three facts the row's table states per request.
         let decode = |req: u64| (iocparm_len(req), req & IOC_IN != 0, req & IOC_OUT != 0);
-        for req in [FIODTYPE, TIOCGWINSZ, TIOCGETA, DTRACEHIOC_ADDDOF] {
-            assert!(iocparm_len(req) <= IOCPARM_MASK, "ioctl request {req:#x} exceeds IOCPARM_MASK");
-        }
         assert_eq!(decode(FIODTYPE), (4, false, true));
         assert_eq!(decode(TIOCGWINSZ), (8, false, true));
         assert_eq!(decode(TIOCGETA), (72, false, true));
@@ -1500,7 +1511,13 @@ mod tests {
             assert_eq!(k as i64, n);
             assert!(arg_kinds(k).is_some(), "mach trap {n} has no row");
         }
-        // pipe's two-descriptor return is expressed but deliberately not bound.
+    }
+
+    // M33 t5/t6: pipe's two-descriptor return is expressed (`Ret::FdPair`) but deliberately not
+    // bound — `allocates_fd` stays false, matching the legacy table, because binding one of two
+    // would alias. Its own test, named for what it checks (Task 5 review, minor 6).
+    #[test]
+    fn pipe_return_is_a_pair_and_is_not_bound() {
         assert_eq!(arg_kinds(42).unwrap().ret, Ret::FdPair);
         assert!(!allocates_fd(42), "binding one of pipe's two descriptors would alias");
     }
