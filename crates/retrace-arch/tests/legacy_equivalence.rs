@@ -59,8 +59,36 @@ const ALL_VIEWS: [View; 5] =
     [View::FdOperands, View::AllocatesFd, View::DestBuffer, View::NestedPointer, View::ReadsGuestBuffer];
 
 /// Every `(num, view)` where the derived view is KNOWN to disagree with its legacy table, and why.
-/// Task 2 leaves this empty (the views ARE the legacy tables); Task 3 fills it.
-pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[];
+/// Task 2 left this empty (the views WERE the legacy tables); Task 3 filled it. `unexercised`
+/// means the number is absent from `tests/census.rs` — no corpus guest dispatches it, so the
+/// entry is header truth and not a measured fix. One entry says `exercised` instead.
+pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
+    // M33 finding 1: M30 tabled these as readers from their prototypes, and every one takes a
+    // descriptor in x0 that `fd_operands` never translated — the M10 class, present in the tree
+    // since M30 and never hit because no corpus guest issues them. The row is header truth; the
+    // legacy table was wrong.
+    (154, View::FdOperands, "pwrite(fd, …) — unexercised"),
+    (415, View::FdOperands, "pwrite_nocancel(fd, …) — unexercised"),
+    (121, View::FdOperands, "writev(fd, …) — unexercised"),
+    // The one exception to "never hit": 412 IS in the census, issued by `/bin/ed`, a binary in
+    // the Apple-sweep PASS set — so this row is a live untranslated-fd fix, not header truth alone.
+    (412, View::FdOperands, "writev_nocancel(fd, …) — exercised by the census (/bin/ed): a live M10-class fix"),
+    (541, View::FdOperands, "pwritev(fd, …) — unexercised"),
+    (413, View::FdOperands, "sendto_nocancel(s, …): the _nocancel trap a fourth time — unexercised"),
+    (28,  View::FdOperands, "sendmsg(s, …) — unexercised"),
+    (402, View::FdOperands, "sendmsg_nocancel(s, …) — unexercised"),
+    (481, View::FdOperands, "sendmsg_x(s, …) — unexercised"),
+    (337, View::FdOperands, "sendfile(fd, s, …): TWO descriptors — unexercised"),
+    // M33 finding 1, moot half: the refused family. retrace-core's writes_via_nested_pointer
+    // assert fires BEFORE translate_fds runs, so translation never happens; listed because the row
+    // is header truth and the sweep must not be taught to lie.
+    (120, View::FdOperands, "readv(fd, …) — refused upstream; moot"),
+    (411, View::FdOperands, "readv_nocancel(fd, …) — refused upstream; moot"),
+    (27,  View::FdOperands, "recvmsg(s, …) — refused upstream; moot"),
+    (401, View::FdOperands, "recvmsg_nocancel(s, …) — refused upstream; moot"),
+    (540, View::FdOperands, "preadv(fd, …) — refused upstream; moot"),
+    (480, View::FdOperands, "recvmsg_x(s, …) — refused upstream; moot"),
+];
 
 /// The BSD numbers, the mach traps (negative, as the two's-complement `u64` the trap carries), and
 /// the `MAC_SYSCALL_MAGIC` band retrace-core recognises.
@@ -72,7 +100,7 @@ fn domain() -> impl Iterator<Item = u64> {
 
 fn differs(num: u64, view: View) -> bool {
     match view {
-        View::FdOperands => fd_operands(num) != legacy_fd_operands(num),
+        View::FdOperands => fd_operands(num).collect::<Vec<_>>() != legacy_fd_operands(num),
         View::AllocatesFd => allocates_fd(num) != legacy_allocates_fd(num),
         View::DestBuffer => dest_buffer(num) != legacy_dest_buffer(num),
         View::NestedPointer => writes_via_nested_pointer(num) != legacy_writes_via_nested_pointer(num),

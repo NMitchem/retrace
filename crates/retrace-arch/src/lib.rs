@@ -106,49 +106,6 @@ pub const MWL_MAX_REGION_COUNT: u64 = 5;
 /// translation must pass it through untouched rather than rejecting it as `EBADF`.
 pub const AT_FDCWD: i64 = -2;
 
-/// Which operand indices of `num` hold a **guest** file descriptor.
-///
-/// The M10 analogue of `is_console_write`: one shared table rather than a condition spelled out at
-/// each call site, because a forgotten entry does not diverge loudly — it forwards a raw guest fd to
-/// the host kernel, which then acts on RETRACE's descriptor of that number. A syscall absent here is
-/// simply not translated, so absence must mean "provably takes no fd", never "not gotten to yet".
-///
-/// **`_nocancel` variants are listed beside their plain forms deliberately.** macOS libc routinely
-/// takes ONLY the `_nocancel` path — measured in one `jq` run: `read`(3) is called zero times and
-/// `read_nocancel`(396) twice; `fcntl_nocancel`(406) appears alongside `fcntl`(92). A plain-only
-/// table fails *silently*, which is exactly how M9's console bug survived until `jq`.
-pub fn fd_operands(num: u64) -> &'static [usize] {
-    match num {
-        SYS_CLOSE | SYS_CLOSE_NOCANCEL | SYS_READ | SYS_READ_NOCANCEL | SYS_PREAD
-        | SYS_PREAD_NOCANCEL
-        | SYS_WRITE | SYS_WRITE_NOCANCEL | SYS_FCNTL | SYS_FCNTL_NOCANCEL
-        | SYS_FSTAT | SYS_FSTAT64 | SYS_LSEEK | SYS_IOCTL | SYS_DUP
-        | SYS_CONNECT | SYS_SENDTO | SYS_RECVFROM | SYS_RECVFROM_NOCANCEL | SYS_FGETATTRLIST
-        // openat/fstatat64 take a *dirfd*; AT_FDCWD passes through translation untouched.
-        | SYS_OPENAT | SYS_FSTATAT64
-        // fstatfs64 and getdirentries64: M25-cpython Task 3. See their constants' doc comments
-        // for which of the two is header-derived and which is measured-from-a-trap.
-        | SYS_FSTATFS64 | SYS_GETDIRENTRIES64 => &[0],
-        SYS_DUP2 => &[0, 1],
-        // The exception that makes a single choke point insufficient: mmap's fd is consumed by
-        // guest_mmap_file, which never reaches forward_and_diff.
-        SYS_MMAP => &[4],
-        _ => &[],
-    }
-}
-
-/// Does `num`'s RETURN value need binding to a fresh guest fd slot?
-///
-/// `socket` and `shm_open` are here for the same reason `open` is: guest fds are not files-only.
-///
-/// **`dup2` is deliberately absent.** It names its own target descriptor instead of taking the
-/// lowest free one, so binding its return like the others would put the new mapping in the wrong
-/// slot. No guest in the gate calls it (measured: zero in the `jq` run), so retrace-core asserts on
-/// it rather than modelling it wrong — a silently mis-modelled `dup2` aliases the wrong file.
-pub fn allocates_fd(num: u64) -> bool {
-    matches!(num, SYS_OPEN | SYS_OPEN_NOCANCEL | SYS_OPENAT | SYS_DUP | SYS_SOCKET | SYS_SHM_OPEN)
-}
-
 /// Where a destination buffer's byte length lives for a given syscall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestLen {
@@ -158,176 +115,299 @@ pub enum DestLen {
     DerefU64(usize),
 }
 
-/// The destination buffer `num` fills, as `(argument index, where its length lives)`.
+/// What the kernel does with ONE register argument of a syscall.
 ///
-/// **The forwarded-count clamp and the diff window must both consult this**, which is why it is one
-/// table rather than a predicate per shape. The clamp decides how many bytes the host kernel may
-/// write into the guest buffer; the window decides how many are looked at afterwards and captured
-/// as `Event::Syscall` writes. A disagreement between them is the M26 defect: the kernel writes past
-/// what the diff inspects, the excess lands in guest memory on record and in no `Event`, and replay
-/// restores stale bytes there — invisibly, because `(num, args)` still match.
+/// M33's unification. Five functions used to answer "what does this syscall do with each of its
+/// arguments" in five incompatible shapes — `fd_operands` and `dest_buffer` keyed by argument
+/// index, `reads_guest_buffer` and `writes_via_nested_pointer` by whole syscall (so they lost the
+/// index), `allocates_fd` by return value — and nothing could check one against another. M30
+/// tabled `pwrite`, `writev`, `sendmsg` and `sendfile` as readers from their prototypes while
+/// `fd_operands` still said each "takes no fd". They are VIEWS over this table now
+/// (`Shape::fd_operands` etc.), and `tests/legacy_equivalence.rs` proves each still answers what
+/// it answered at `e13eb17`, entry for entry, except where its `EXPECTED_DIFFS` says why.
 ///
-/// **Seeded only with what is measured or SDK-verified.** M29 added `getdirentries64`, `recvfrom`
-/// (both spellings) and `getfsstat64`/`sysctlbyname` (sysctl's own shape). Other syscalls are still
-/// structurally capable of overrunning (`proc_info`, `getattrlist`, `csops`) and remain deliberately
-/// ABSENT: none has been measured to do so, and the M27 guard band exists precisely so they announce
-/// themselves instead of being guessed at. Absence means "not measured", and the guard band is what
-/// makes that safe.
-pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> {
-    match num {
-        SYS_READ | SYS_READ_NOCANCEL | SYS_PREAD | SYS_PREAD_NOCANCEL => Some((1, DestLen::Reg(2))),
-        // sysctl(name, namelen, oldp, oldlenp, newp, newlen): the destination is x2 and its length
-        // is `*(size_t*)x3`, in guest memory rather than a register. Measured via /bin/ps, whose
-        // KERN_PROC_ALL buffer runs far past the 64 KiB window (M26).
-        SYS_SYSCTL => Some((2, DestLen::DerefU64(3))),
-        // M29 additions. Each names its own second destination where it has one, so a later reader
-        // can see it was considered and dismissed on a number rather than overlooked.
-        //
-        // getdirentries64(fd, buf, bufsize, off_t *position): destination x1, length x2. It also
-        // writes 8 bytes at `*position` (x3) — unmodelled by decision: 8 bytes sits far inside the
-        // flat 64 KiB window every pointer argument already receives, so it cannot produce the
-        // truncation class this table exists to prevent.
-        SYS_GETDIRENTRIES64 => Some((1, DestLen::Reg(2))),
-        // getfsstat64(buf, bufsize, flags): destination x0, length x1 in BYTES rather than a mount
-        // count — the reason this entry is easy to get wrong, since a mount count would be small
-        // enough never to matter. It does NOT currently overrun on this machine, and the earlier
-        // version of this comment claimed it did. MEASURED at M29 (Task 7) against the live system:
-        // `sizeof(struct statfs)` is 2168 bytes and this machine reports 16 mounts, so a full reply
-        // is 34,688 bytes and it takes 31 mounts to cross a 65536-byte window. The entry is here
-        // because the call is structurally able to cross that cap on a machine with more mounts,
-        // not because it has been seen to.
-        SYS_GETFSSTAT64 => Some((0, DestLen::Reg(1))),
-        // recvfrom(s, buf, len, flags, from, fromlen): destination x1, length x2. It also writes
-        // `from` (x4) — unmodelled by decision: the kernel caps that write at the real address size
-        // (`sockaddr_storage` is 128 bytes), NOT at `*fromlen`, so it is self-bounding and already
-        // deep inside the flat window.
-        SYS_RECVFROM | SYS_RECVFROM_NOCANCEL => Some((1, DestLen::Reg(2))),
-        // sysctlbyname: the RAW syscall's shape, not libc's 5-arg wrapper. `sysctlbyname(3)`'s
-        // C signature is (name, oldp, oldlenp, newp, newlen), but the kernel entry point behind it
-        // takes an extra `namelen` first, exactly like `SYS_SYSCTL`: (name, namelen, oldp, oldlenp,
-        // newp, newlen). Measured directly against the live kernel (M29 fix round 1) with a raw
-        // `syscall(274, ...)` bypassing libc's wrapper: the 6-arg form on `"kern.ostype"` returns 0
-        // with `oldp` filled (`"Darwin"`, `*oldlenp` 7); the naive 5-arg reading of the libc
-        // prototype (`oldp` at index 1) returns -1. So `oldp` is index 2 and `oldlenp` index 3 —
-        // IDENTICAL to `SYS_SYSCTL`, not "one index lower" as this entry previously (and wrongly)
-        // claimed. That wrong claim was never caught here: nothing in the M29 measurement corpus
-        // ever dispatched syscall 274 (see the M29 report's Finding B), so a real `sysctlbyname`
-        // call would have computed `want` from the first 8 bytes of the destination buffer's own
-        // CONTENTS (reading `args[2]`, the actual `oldp`, as if it were `oldlenp`) and treated
-        // `namelen` (`args[1]`) as the destination pointer — misdiagnosing a legal call as
-        // `[M29 DEREFLEN-UNBACKED]` rather than measuring it. One `DerefU64` arm covers both
-        // syscalls because both now use the same indices, not despite them differing by one.
-        SYS_SYSCTLBYNAME => Some((2, DestLen::DerefU64(3))),
-        _ => None,
+/// **Load-bearing kinds:** `Fd`, `Source`, `NestedSource`, `Dest`, `NestedDest` and `Ret::Fd`
+/// each change what the box does. **`Scalar`, `Path` and `Ptr` change nothing at runtime** —
+/// `forward_and_diff` probes `host_span` on all eight registers regardless — and are
+/// documentation until a later milestone consults them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgKind {
+    /// Not a memory reference: a count, a flag word, an offset, a signal number, a port name.
+    Scalar,
+    /// A GUEST file descriptor — `translate_fds` rewrites it to the host's before forwarding.
+    ///
+    /// The M10 analogue of `is_console_write`: one shared table rather than a condition spelled
+    /// out at each call site, because a forgotten `Fd` does not diverge loudly — it forwards a raw
+    /// guest fd to the host kernel, which then acts on RETRACE's descriptor of that number. A
+    /// position that is not `Fd` is simply not translated, so a non-`Fd` position must mean
+    /// "provably not a descriptor", never "not gotten to yet". (Before M33 the same silence
+    /// covered a whole syscall absent from the table; an absent ROW is loud now — `forwarded_shape`
+    /// panics on it at the forward point — and only the per-position silence remains.)
+    ///
+    /// `dirfd` positions (`openat`, `fstatat64`) are `Fd` too; `AT_FDCWD` is negative and passes
+    /// through translation untouched.
+    Fd,
+    /// A NUL-terminated path. **Why every path-taking call is absent from the readers**, since
+    /// they plainly read guest memory: the kernel stops at `PATH_MAX` (1024), which sits far
+    /// inside the 64 KiB production window, so no band can be in reach. That bound is the
+    /// argument — not "paths are short" — and it is why a test that shrinks `window_cap` below
+    /// `PATH_MAX` can make the kernel read a canary as path bytes while production cannot.
+    Path,
+    /// The kernel READS a caller-sized buffer through it, and no kernel-side cap below the window
+    /// can be cited. (M30's membership rule — in full below.)
+    ///
+    /// The M30 guard-band canary is written into guest memory just past each argument's diff
+    /// window and restored before the vCPU resumes, so no *guest* can observe it. The kernel can.
+    /// When a syscall READS more than its diff window through a pointer, it consumes those canary
+    /// bytes as data: the guest's externally visible output is silently wrong on record, while
+    /// record and replay stay bit-identical (the bytes are restored, so nothing diverges) — the
+    /// one failure class a determinism oracle cannot see. `forward_and_diff` therefore skips the
+    /// fill entirely for a call with any `Source` or `NestedSource` argument, falling back to
+    /// M27's original before/after band comparison.
+    ///
+    /// **REPRODUCED** at M30 Task 4 fix round 1: a guest writing a 128 KiB buffer of `'A'`
+    /// produced 64 corrupt bytes at offset `0x10080`, matching `canary_byte` exactly. The
+    /// corrupting entry was a **stale register** holding `buf + 128`, whose own band therefore
+    /// landed 64 KiB downstream — inside the region the kernel read. So the trigger is not "an
+    /// input buffer bigger than the window": ANY register pointing into a large buffer plants a
+    /// canary 64 KiB past itself, and the band shrink cannot help (that same stale window had
+    /// shrunk the real buffer's band to zero). That is why the exclusion is per CALL, not per
+    /// declared argument: `reads_guest_buffer` answers for the whole syscall and the caller must
+    /// skip all eight registers, not just the arguments the call actually declares.
+    ///
+    /// **Membership rule**: the call's documented contract has the kernel read a caller-supplied
+    /// buffer whose length the CALLER chooses, and which no `Dest` entry widens the window to
+    /// cover. That is checkable against the man page and `sys/syscall.h`, not guessed. A bound
+    /// that cannot be cited is not a bound — then the argument is `Source`, not `Ptr`.
+    ///
+    /// **Deliberately asymmetric.** Under-including corrupts the guest's output silently, so
+    /// where the two errors compete, listing wins. Every `_nocancel` spelling shares its plain
+    /// form's row: that pairing is the trap M9, M10 and M27 each hit separately. Whatever is
+    /// listed still gets M27's before/after band comparison, which `forward_and_diff` runs
+    /// unchanged on an unfilled band, so nothing here is left weaker than it was before M30.
+    ///
+    /// **But over-including is NOT free.** The claim that a listed call "has no destination
+    /// buffer worth canarying" holds for `write`, `writev`, `sendto` and `msync`. It is FALSE for
+    /// `sendfile` (337) and `mach_msg2_trap` (-47) — each row says why — so for those two the
+    /// exclusion costs real destination-side canary coverage. They stay listed anyway: both
+    /// genuinely read guest memory, dropping either risks the reproduced Critical, and a decision
+    /// keyed on `num` alone has no way to say "fill past argument 3 but not argument 4".
+    /// Recovering that coverage needed a per-ARGUMENT direction notion the old predicate could not
+    /// express; this table IS that notion, but the stale-register reproduction above is why the
+    /// fill decision still cannot use it per argument — recovering the coverage stays owed.
+    ///
+    /// **The residual gap, stated plainly**: an unlisted syscall that reads past its window still
+    /// corrupts, in exactly the way the reproduction did and with exactly as little noise. The
+    /// rows are the contract-derived family of guest→kernel transfers, not a proof of
+    /// exhaustiveness; `ioctl`'s nested pointers are the clearest admitted hole (see its row).
+    Source,
+    /// The kernel reads through pointers INSIDE the pointed-to struct (`iovec.iov_base`,
+    /// `msghdr.msg_iov`, `sf_hdtr`, `posix_spawn`'s `argv`). The TOTAL across an iovec vector is
+    /// unbounded even though the iovec array itself is small. Not translated — a guest IPA reaches
+    /// the kernel as a host address, so the read returns wrong bytes or `EFAULT`. A fidelity
+    /// hazard, not a wild write; forwarded exactly as before M33, when `writes_via_nested_pointer`
+    /// covered the nested shape for the WRITE side only and this side was listed among the readers
+    /// as a separate hazard. Counts as a reader for the canary decision.
+    NestedSource,
+    /// The kernel WRITES through it and the length is where `DestLen` says.
+    ///
+    /// **The forwarded-count clamp and the diff window must both consult this**, which is why it
+    /// is one table rather than a predicate per shape. The clamp decides how many bytes the host
+    /// kernel may write into the guest buffer; the window decides how many are looked at
+    /// afterwards and captured as `Event::Syscall` writes. A disagreement between them is the M26
+    /// defect: the kernel writes past what the diff inspects, the excess lands in guest memory on
+    /// record and in no `Event`, and replay restores stale bytes there — invisibly, because
+    /// `(num, args)` still match. No row has more than one `Dest`: `dest_buffer` returns ONE and
+    /// the clamp/window consult it, so a second would be picked silently — the schema test forbids
+    /// it.
+    ///
+    /// **Seeded only with what is measured or SDK-verified.** M29 added `getdirentries64`,
+    /// `recvfrom` (both spellings) and `getfsstat64`/`sysctlbyname` (sysctl's own shape); each of
+    /// those rows names its own second destination where it has one, so a later reader can see it
+    /// was considered and dismissed on a number rather than overlooked. Other syscalls are still
+    /// structurally capable of overrunning (`proc_info`, `getattrlist`, `csops`) and remain
+    /// deliberately `Ptr`: none has been measured to do so, and the M27 guard band exists
+    /// precisely so they announce themselves instead of being guessed at. `Ptr` there means "not
+    /// measured", the guard band is what makes that safe, and M34 is to measure each (spec §7).
+    Dest(DestLen),
+    /// The kernel writes through pointers INSIDE the pointed-to struct (`iovec.iov_base`,
+    /// `msghdr.msg_iov`).
+    ///
+    /// M27: `forward_and_diff` translates only top-level register arguments, so a guest IPA would
+    /// reach the host kernel AS A HOST ADDRESS. That is not a fidelity gap like the truncation
+    /// class — it is a potential wild write into retrace's own process. The reading that they
+    /// would merely `EFAULT` (guest IPAs being unlikely to be mapped in retrace's process) is an
+    /// INFERENCE, and the downside of it being wrong is severe. So they are refused by value in
+    /// retrace-core rather than tested or translated, the way `guest_workq_kernreturn` refuses an
+    /// unenumerated opcode — never forwarded. Translating them properly needs the
+    /// `translate_mwl_regions` treatment plus its own measurement of the struct layout.
+    ///
+    /// The six rows are the MEASURED family, not a proof of exhaustiveness — all header-derived
+    /// from `sys/syscall.h`. `aio_read` (216, via `aiocb.aio_buf`) has the same nested-write shape
+    /// and no row, because no guest this repo runs is measured to call it (`forwarded_shape` names
+    /// it if one does); `sendfile` (337, via `sf_hdtr`'s iovecs) has the nested shape on the READ
+    /// side and is `NestedSource` on its row.
+    NestedDest,
+    /// A pointer modelled no further than the flat window and the guard band: a read the kernel
+    /// itself bounds far inside the window (a `sockaddr`, an `ioctl` parameter), a fixed struct it
+    /// writes (`struct stat`), or an in/out scalar. **The row comment names the bound and its
+    /// citation.** A bound that cannot be cited is not a bound — then the argument is `Source`.
+    Ptr,
+}
+
+/// What the return value is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ret {
+    Plain,
+    /// A NEW guest descriptor, bound to a fresh guest slot by `bind_returned_fd`. `socket` and
+    /// `shm_open` are here for the same reason `open` is: guest fds are not files-only.
+    ///
+    /// **`dup2` is deliberately `Plain`.** It names its own target descriptor instead of taking
+    /// the lowest free one, so binding its return like the others would put the new mapping in the
+    /// wrong slot. No guest in the gate calls it (measured: zero in the `jq` run), so retrace-core
+    /// asserts on it rather than modelling it wrong — a silently mis-modelled `dup2` aliases the
+    /// wrong file.
+    Fd,
+}
+
+/// One syscall's argument kinds, in register order, plus its return kind.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Shape {
+    pub args: &'static [ArgKind],
+    pub ret: Ret,
+}
+
+impl Shape {
+    /// Which operand indices hold a GUEST descriptor (view: the old `fd_operands`).
+    pub fn fd_operands(&self) -> impl Iterator<Item = usize> + '_ {
+        self.args.iter().enumerate().filter(|(_, k)| **k == ArgKind::Fd).map(|(i, _)| i)
     }
+    /// The destination buffer as `(argument index, where its length lives)` (view: `dest_buffer`).
+    pub fn dest_buffer(&self) -> Option<(usize, DestLen)> {
+        self.args.iter().enumerate().find_map(|(i, k)| match k {
+            ArgKind::Dest(len) => Some((i, *len)),
+            _ => None,
+        })
+    }
+    /// Does the kernel read guest memory through this call in an amount no window bounds?
+    pub fn reads_guest_buffer(&self) -> bool {
+        self.args.iter().any(|k| matches!(k, ArgKind::Source | ArgKind::NestedSource))
+    }
+    /// Does the kernel write through a pointer inside a guest struct? (Refused by value.)
+    pub fn writes_via_nested_pointer(&self) -> bool { self.args.contains(&ArgKind::NestedDest) }
+    /// Does the return value need binding to a fresh guest fd slot?
+    pub fn allocates_fd(&self) -> bool { self.ret == Ret::Fd }
 }
 
-/// `readv`(120) / `readv_nocancel`(411) / `recvmsg`(27) / `recvmsg_nocancel`(401) /
-/// `preadv`(540) / `recvmsg_x`(480). All header-derived from `sys/syscall.h`.
+/// The table. `None` means UNENUMERATED — no guest in this repo's corpora has been measured to
+/// dispatch `num` and no legacy table listed it. `forwarded_shape` turns that into a panic at the
+/// forward point; the views below turn it into their empty answer, because they are also consulted
+/// on replay for events of syscalls the box emulates above the trace.
 ///
-/// M27: these put their destination behind a pointer INSIDE a guest struct (iovec.iov_base,
-/// msghdr.msg_iov). `forward_and_diff` translates only top-level register arguments, so a guest
-/// IPA would reach the host kernel AS A HOST ADDRESS. That is not a fidelity gap like the
-/// truncation class — it is a potential wild write into retrace's own process.
-///
-/// The reading that they would merely EFAULT (guest IPAs being unlikely to be mapped in
-/// retrace's process) is an INFERENCE, and the downside of it being wrong is severe. So they are
-/// refused by value rather than tested or translated, the way `guest_workq_kernreturn` refuses an
-/// unenumerated opcode. Translating them properly needs the `translate_mwl_regions` treatment and
-/// its own measurement.
-///
-/// This is the MEASURED family, not a proof of exhaustiveness: `aio_read` (216, via
-/// `aiocb.aio_buf`) and `sendfile` (337, via `sf_hdtr`'s iovecs) have the same nested-pointer shape
-/// and are not covered here, because no guest this repo runs is measured to call either.
-pub fn writes_via_nested_pointer(num: u64) -> bool {
-    matches!(num, 120 | 411 | 27 | 401 | 540 | 480)
-}
-
-/// Does the host kernel READ guest memory through this call, in an amount no diff window bounds?
-/// (M30)
-///
-/// The M30 guard-band canary is written into guest memory just past each argument's diff window and
-/// restored before the vCPU resumes, so no *guest* can observe it. The kernel can. When a syscall
-/// READS more than its diff window through a pointer, it consumes those canary bytes as data: the
-/// guest's externally visible output is silently wrong on record, while record and replay stay
-/// bit-identical (the bytes are restored, so nothing diverges) — the one failure class a
-/// determinism oracle cannot see. `forward_and_diff` therefore skips the fill entirely for these
-/// calls, falling back to M27's original before/after band comparison.
-///
-/// **REPRODUCED** at M30 Task 4 fix round 1: a guest writing a 128 KiB buffer of `'A'` produced 64
-/// corrupt bytes at offset `0x10080`, matching `canary_byte` exactly. The corrupting entry was a
-/// **stale register** holding `buf + 128`, whose own band therefore landed 64 KiB downstream —
-/// inside the region the kernel read. So the trigger is not "an input buffer bigger than the
-/// window": ANY register pointing into a large buffer plants a canary 64 KiB past itself, and the
-/// band shrink cannot help (that same stale window had shrunk the real buffer's band to zero). That
-/// is why this predicate takes only `num` and the caller must skip all eight registers, not just
-/// the arguments the call actually declares.
-///
-/// **Membership rule**: the call's documented contract has the kernel read a caller-supplied buffer
-/// whose length the CALLER chooses, and which no `dest_buffer` entry widens the window to cover.
-/// That is checkable against the man page and `sys/syscall.h`, not guessed.
-///
-/// **Deliberately asymmetric.** Under-including corrupts the guest's output silently, so where the
-/// two errors compete, listing wins. Every `_nocancel` spelling is listed beside its plain one: that
-/// pairing is the trap M9, M10 and M27 each hit separately. Whatever is listed still gets M27's
-/// before/after band comparison, which `forward_and_diff` runs unchanged on an unfilled band, so
-/// nothing here is left weaker than it was before M30.
-///
-/// **But over-including is NOT free, and it is not free for two entries listed below.** The claim
-/// that a listed call "has no destination buffer worth canarying" holds for `write`, `writev`,
-/// `sendto` and `msync`. It is FALSE for:
-///
-/// - **`sendfile` (337)** — `int sendfile(int, int, off_t, off_t *, struct sf_hdtr *, int)`. Its
-///   4th argument is in-out: the kernel writes the transferred byte count back through it. That is
-///   a destination.
-/// - **`mach_msg2_trap`** — the receive buffer is a live destination. `machmsg.rs`'s
-///   `FORWARD_ALLOWLIST` sends five ids through `forward_and_diff`, and `3405 task_info` and
-///   `412 host_get_special_port` are there *precisely because* the kernel writes a reply into guest
-///   memory which is then captured as `writes`. This is a path the corpus exercises on every jq and
-///   CPython run, not a hypothetical.
-///
-/// So for those two the exclusion costs real destination-side canary coverage on live traffic. They
-/// stay listed anyway: both genuinely read guest memory, dropping either risks the reproduced
-/// Critical, and a predicate keyed on `num` alone has no way to say "fill past argument 3 but not
-/// argument 4". **Recovering that coverage needs a per-ARGUMENT direction notion this predicate
-/// cannot express** — a `dest_buffer`-shaped table of which arguments are sources — which is owed
-/// successor work rather than something this milestone quietly has.
-///
-/// **Why every path-taking call is absent**, since they plainly read guest memory: a path is
-/// NUL-terminated and the kernel stops at `PATH_MAX` (1024), which sits far inside the 64 KiB
-/// production window, so no band can be in reach. That bound is the argument — not "paths are
-/// short" — and it is why a test that shrinks `window_cap` below `PATH_MAX` can make the kernel read
-/// a canary as path bytes while production cannot.
-///
-/// **The residual gap, stated plainly**: an unlisted syscall that reads past its window still
-/// corrupts, in exactly the way the reproduction did and with exactly as little noise. This is the
-/// contract-derived family of guest→kernel transfers, not a proof of exhaustiveness. `ioctl` is the
-/// clearest admitted hole — a `_IOW` request code hands the kernel a buffer whose length is encoded
-/// in the request rather than in an argument, so no rule over `num` alone can size it; no guest this
-/// repo runs is measured to issue a large one.
-pub fn reads_guest_buffer(num: u64) -> bool {
-    matches!(num,
-        // write(fd, buf, nbyte) / pwrite(fd, buf, nbyte, offset): x1 is read for x2 bytes, and x2
-        // is the caller's. This is the reproduced case.
-        SYS_WRITE | SYS_WRITE_NOCANCEL | 154 | 415
-        // writev/pwritev(fd, iov, iovcnt): the kernel reads each `iov_base`, and the TOTAL across
-        // the vector is unbounded even though the iovec array itself is small. Those nested
-        // pointers are not translated either, which `writes_via_nested_pointer` covers for the
-        // read side only — a separate hazard, listed here for the one this predicate owns.
-        | 121 | 412 | 541
-        // sendto(s, buf, len, ...) / sendmsg(s, msghdr, ...) / sendmsg_x: the socket-side spelling
-        // of the same two shapes, flat buffer and iovec vector.
-        | SYS_SENDTO | 413 | 28 | 402 | 481
-        // sendfile(fd, s, offset, len, hdtr, flags): the bulk data comes from a FILE, but `hdtr`'s
-        // header and trailer iovecs are guest memory the kernel reads, with caller-chosen lengths.
-        | 337
-        // msync(addr, len, flags): `len` is the caller's and the kernel reads the range to flush
-        // it. All guest memory is anonymous (the SPTM rule), which probably makes the read moot —
-        // but "probably" is an inference about kernel internals, and the cost of being wrong is a
-        // silent corruption while the cost of listing it is nothing.
-        | 65 | 405
-        // mach_msg2_trap: the kernel reads the message buffer at x0. retrace-core bounds
+/// Every row's comment is its C prototype. Rows are written from the prototype and never bent to
+/// match a legacy table; `tests/legacy_equivalence.rs` lists each disagreement with its reason.
+/// Mach traps are keyed by the two's-complement `u64` the trap carries (`-47` is mach_msg2).
+pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
+    use ArgKind::*;
+    use DestLen::{DerefU64, Reg};
+    const P: Ret = Ret::Plain;
+    const F: Ret = Ret::Fd;
+    macro_rules! row {
+        ($ret:expr, [$($k:expr),* $(,)?]) => { Some(&Shape { args: &[$($k),*], ret: $ret }) };
+    }
+    match num {
+        // ---- the read/write families -------------------------------------------------------
+        // read(int fd, void *buf, size_t nbyte) / read_nocancel. **`_nocancel` variants share
+        // their plain form's row deliberately.** macOS libc routinely takes ONLY the `_nocancel`
+        // path — measured in one `jq` run: `read`(3) is called zero times and `read_nocancel`(396)
+        // twice; `fcntl_nocancel`(406) appears alongside `fcntl`(92). A plain-only table fails
+        // *silently*, which is exactly how M9's console bug survived until `jq`.
+        SYS_READ | SYS_READ_NOCANCEL => row!(P, [Fd, Dest(Reg(2)), Scalar]),
+        // pread(int fd, void *buf, size_t nbyte, off_t offset) / pread_nocancel. 414 was missing
+        // from THREE tables at once before M27 (fd, clamp, window), and the missing clamp was the
+        // serious one: an unclamped forward lets the host kernel write past the guest buffer's
+        // backing. One row cannot be missing from one view and not another.
+        SYS_PREAD | SYS_PREAD_NOCANCEL => row!(P, [Fd, Dest(Reg(2)), Scalar, Scalar]),
+        // write(int fd, const void *buf, size_t nbyte) / write_nocancel: x1 is read for x2 bytes,
+        // and x2 is the caller's. This is M30's reproduced canary case.
+        SYS_WRITE | SYS_WRITE_NOCANCEL => row!(P, [Fd, Source, Scalar]),
+        // pwrite(int fd, const void *buf, size_t nbyte, off_t offset) / pwrite_nocancel. M30
+        // tabled both as readers; fd_operands never had either (EXPECTED_DIFFS).
+        154 | 415 => row!(P, [Fd, Source, Scalar, Scalar]),
+        // writev(int fd, const struct iovec *iov, int iovcnt) / writev_nocancel: the kernel reads
+        // each iov_base for iov_len — nested, caller-sized, untranslated (M30). 412 is the one
+        // untranslated-fd row a corpus guest (/bin/ed) is measured to dispatch (tests/census.rs).
+        121 | 412 => row!(P, [Fd, NestedSource, Scalar]),
+        // pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset)
+        541 => row!(P, [Fd, NestedSource, Scalar, Scalar]),
+        // readv(int fd, struct iovec *iov, int iovcnt) / readv_nocancel: the kernel WRITES through
+        // iov_base — refused by value in retrace-core before translate_fds ever runs (M27).
+        120 | 411 => row!(P, [Fd, NestedDest, Scalar]),
+        // preadv(int fd, struct iovec *iov, int iovcnt, off_t offset)
+        540 => row!(P, [Fd, NestedDest, Scalar, Scalar]),
+        // ---- sockets ------------------------------------------------------------------------
+        // recvmsg(int s, struct msghdr *msg, int flags) / recvmsg_nocancel: msg_iov is nested.
+        27 | 401 => row!(P, [Fd, NestedDest, Scalar]),
+        // recvmsg_x(int s, struct msghdr_x *msgp, u_int cnt, int flags)
+        480 => row!(P, [Fd, NestedDest, Scalar, Scalar]),
+        // sendmsg(int s, const struct msghdr *msg, int flags) / sendmsg_nocancel: with sendto, the
+        // socket-side spelling of the same two shapes — flat buffer and iovec vector.
+        28 | 402 => row!(P, [Fd, NestedSource, Scalar]),
+        // sendmsg_x(int s, const struct msghdr_x *msgp, u_int cnt, int flags)
+        481 => row!(P, [Fd, NestedSource, Scalar, Scalar]),
+        // sendto(int s, const void *buf, size_t len, int flags, const struct sockaddr *to,
+        //        socklen_t tolen). `to`: the kernel rejects tolen > SOCK_MAXADDRLEN (255,
+        // sys/socket.h) — a cited bound, so Ptr. 413 is the _nocancel spelling: it was in
+        // reads_guest_buffer and not in fd_operands — the _nocancel trap a fourth time.
+        SYS_SENDTO | 413 => row!(P, [Fd, Source, Scalar, Scalar, Ptr, Scalar]),
+        // recvfrom(int s, void *buf, size_t len, int flags, struct sockaddr *from,
+        //          socklen_t *fromlen): destination x1, length x2 (M29). It also writes `from`
+        // (x4) — unmodelled by decision: the kernel caps that write at the real address size
+        // (`sockaddr_storage` is 128 bytes), NOT at `*fromlen`, so it is self-bounding and already
+        // deep inside the flat window; `*fromlen` (x5) is 4 bytes in-out. Its x0 is a socket fd:
+        // it was in neither the fd nor the dest table before M29, while its `sendto` counterpart
+        // was already in fd_operands — the M10 class, and the same both-tables-at-once asymmetry
+        // M27 found in pread_nocancel.
+        SYS_RECVFROM | SYS_RECVFROM_NOCANCEL => row!(P, [Fd, Dest(Reg(2)), Scalar, Scalar, Ptr, Ptr]),
+        // connect(int s, const struct sockaddr *name, socklen_t namelen): namelen > SOCK_MAXADDRLEN
+        // (255) is rejected — the cited bound.
+        SYS_CONNECT => row!(P, [Fd, Ptr, Scalar]),
+        // socket(int domain, int type, int protocol) → a NEW descriptor: guest fds are not
+        // files-only.
+        SYS_SOCKET => row!(F, [Scalar, Scalar, Scalar]),
+        // sendfile(int fd, int s, off_t offset, off_t *len, struct sf_hdtr *hdtr, int flags).
+        // No guest in this repo issues 337 (M32 §2, by grep) — every kind here is header truth,
+        // unexercised. The bulk data comes from a FILE, but `hdtr`'s header and trailer iovecs are
+        // guest memory the kernel reads with caller-chosen lengths: the nested read M30 listed.
+        // `*len` is in-out, 8 bytes: the kernel writes the transferred byte count back through it
+        // — a destination, which is why M30's "no destination worth canarying" claim is FALSE here
+        // and the reader listing costs real destination-side canary coverage on this call.
+        337 => row!(P, [Fd, Fd, Scalar, Ptr, NestedSource, Scalar]),
+        // ---- memory -------------------------------------------------------------------------
+        // msync(void *addr, size_t len, int flags) / msync_nocancel: `len` is the caller's and the
+        // kernel reads the range to flush it — listed by M30 on that INFERENCE. All guest memory
+        // is anonymous (the SPTM rule), which probably makes the read moot — but "probably" is an
+        // inference about kernel internals, and the cost of being wrong is a silent corruption
+        // while the cost of listing it is nothing.
+        65 | 405 => row!(P, [Source, Scalar, Scalar]),
+        // mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset): the fd is x4,
+        // consumed by guest_mmap_file, which translates for itself and never reaches
+        // forward_and_diff — the exception that makes a single choke point insufficient.
+        SYS_MMAP => row!(P, [Scalar, Scalar, Scalar, Scalar, Fd, Scalar]),
+        // ---- mach ---------------------------------------------------------------------------
+        // mach_msg2_trap(void *msg, u64 options, u64 bits_and_send_size, u64 remote_and_local,
+        //   u64 voucher_and_id, u64 desc_count_and_rcv_name, u64 rcv_size_and_priority, u64 timeout)
+        // — keyed as the two's-complement of -47, matching how the negative mach traps are
+        // compared everywhere else. The kernel reads the message buffer at x0; retrace-core bounds
         // `send_size` to `machmsg::SEND_SIZE_MAX` (4 KiB) by assert, before `route()` even runs.
+        //
+        // The receive buffer is the SAME pointer and a live destination: `machmsg.rs`'s
+        // `FORWARD_ALLOWLIST` sends five ids through `forward_and_diff`, and `3405 task_info` and
+        // `412 host_get_special_port` are there *precisely because* the kernel writes a reply into
+        // guest memory which is then captured as `writes` — a path the corpus exercises on every
+        // jq and CPython run, not a hypothetical. So M30's "no destination worth canarying" claim
+        // is FALSE here too, and the reader listing costs destination-side coverage on live
+        // traffic. It stays `Source`, unwidened, and the reason is now a measurement:
         //
         // **M32 measured the reason this entry used to give, and disproved it.** That reason was:
         // "a band lands wherever some register points, and nothing relates that to the message's
@@ -347,17 +427,134 @@ pub fn reads_guest_buffer(num: u64) -> bool {
         // Forward` (the only route `forward_and_diff`, and so any canary fill, ever runs for), and
         // their maximum `avail` was 24,672 bytes against the 65,536 a band needs to exist at all —
         // zero bands. Removing this entry would therefore change nothing observable today, while
-        // requiring a per-ARGUMENT direction notion this whole-syscall predicate cannot express.
-        // The residual is depth, not shape: nothing bounds the stack depth at which a governed id
-        // can fire, and all 13 measured calls are process-initialisation calls. See
+        // requiring a per-ARGUMENT direction notion the old whole-syscall predicate could not
+        // express. The residual is depth, not shape: nothing bounds the stack depth at which a
+        // governed id can fire, and all 13 measured calls are process-initialisation calls. See
         // `docs/superpowers/specs/2026-09-09-retrace-m32-dirtable-design.md` §9 and M32's section
         // of `docs/status-log.md`.
-        //
-        // Written as the two's-complement of the trap number, matching how the negative mach traps
-        // are compared everywhere else.
-        | 0xffff_ffff_ffff_ffd1 // -47
-    )
+        0xffff_ffff_ffff_ffd1 => row!(P, [Source, Scalar, Scalar, Scalar, Scalar, Scalar, Scalar, Scalar]),
+        // ---- descriptors --------------------------------------------------------------------
+        // close(int fd) / close_nocancel
+        SYS_CLOSE | SYS_CLOSE_NOCANCEL => row!(P, [Fd]),
+        // dup(int fd) → a NEW descriptor
+        SYS_DUP => row!(F, [Fd]),
+        // dup2(int fd, int fd2): both are descriptors; the return is NOT bound (see Ret::Fd).
+        SYS_DUP2 => row!(P, [Fd, Fd]),
+        // fcntl(int fd, int cmd, ...) / fcntl_nocancel (406 measured beside 92 in the jq run — see
+        // the read row). The third argument is cmd-dependent: an int for F_GETFL/F_SETFD/F_DUPFD, a
+        // pointer for F_GETPATH (writes ≤ MAXPATHLEN 1024) and F_PREALLOCATE (a 32-byte fstore_t,
+        // in-out) — every pointer case far inside the window.
+        SYS_FCNTL | SYS_FCNTL_NOCANCEL => row!(P, [Fd, Scalar, Ptr]),
+        // fstat(int fd, struct stat *buf) / fstat64: a fixed 144-byte struct (sys/stat.h).
+        SYS_FSTAT | SYS_FSTAT64 => row!(P, [Fd, Ptr]),
+        // fstatfs64(int fd, struct statfs *buf): a fixed 2168-byte struct (measured at M29 Task 7).
+        // M25-cpython Task 3, header-derived like its M10 siblings (see its constant).
+        SYS_FSTATFS64 => row!(P, [Fd, Ptr]),
+        // lseek(int fd, off_t offset, int whence)
+        SYS_LSEEK => row!(P, [Fd, Scalar, Scalar]),
+        // ioctl(int fd, unsigned long request, void *arg): the kernel copies IOCPARM_LEN(request)
+        // bytes in and/or out, at most IOCPARM_MASK = 0x1fff (sys/ioccom.h:74) — the cited bound
+        // on the DIRECT parameter. What no rule over `num` alone can size is a pointer INSIDE that
+        // parameter: a `_IOW` request hands the kernel a struct whose length is encoded in the
+        // request rather than in an argument, and whose own pointers the kernel may follow —
+        // M30's clearest admitted hole, now narrowed to that nested residual; no guest this repo
+        // runs is measured to issue a large one. Task 5 decides the residual from the census's
+        // request codes (spec §4b).
+        SYS_IOCTL => row!(P, [Fd, Scalar, Ptr]),
+        // fgetattrlist(int fd, struct attrlist *alist, void *attrbuf, size_t bufsize, u_long opts):
+        // alist is a fixed 24-byte struct (sys/attr.h, measured with sizeof); attrbuf is a
+        // destination of bufsize bytes — M34's row to widen (spec §7); Ptr until then.
+        SYS_FGETATTRLIST => row!(P, [Fd, Ptr, Ptr, Scalar, Scalar]),
+        // getdirentries64(int fd, char *buf, u_int bufsize, off_t *basep): destination x1, length
+        // x2 (M29). It also writes 8 bytes at `*basep` (x3) — unmodelled by decision: 8 bytes sits
+        // far inside the flat 64 KiB window every pointer argument already receives, so it cannot
+        // produce the truncation class `Dest` exists to prevent. Its fd position is MEASURED, not
+        // header-derived: the call is not in the SDK (M25-cpython Task 3, Finding 3 — see its
+        // constant).
+        SYS_GETDIRENTRIES64 => row!(P, [Fd, Dest(Reg(2)), Scalar, Ptr]),
+        // ---- paths --------------------------------------------------------------------------
+        // open(const char *path, int flags, mode_t mode) / open_nocancel → a NEW descriptor
+        SYS_OPEN | SYS_OPEN_NOCANCEL => row!(F, [Path, Scalar, Scalar]),
+        // openat(int dirfd, const char *path, int flags, mode_t mode) → a NEW descriptor. The
+        // dirfd is translated; AT_FDCWD passes through untouched.
+        SYS_OPENAT => row!(F, [Fd, Path, Scalar, Scalar]),
+        // fstatat64(int dirfd, const char *path, struct stat *buf, int flag): a dirfd like
+        // openat's; buf is the fixed 144-byte struct (sys/stat.h).
+        SYS_FSTATAT64 => row!(P, [Fd, Path, Ptr, Scalar]),
+        // shm_open(const char *name, int oflag, mode_t mode) → a NEW descriptor: guest fds are not
+        // files-only.
+        SYS_SHM_OPEN => row!(F, [Path, Scalar, Scalar]),
+        // ---- sysctl -------------------------------------------------------------------------
+        // sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+        // name: namelen ints, and the kernel rejects namelen > CTL_MAXNAME (12, sys/sysctl.h).
+        // oldp: the destination is x2 and its length is `*(size_t*)x3`, in guest memory rather
+        // than a register — measured via /bin/ps, whose KERN_PROC_ALL buffer runs far past the
+        // 64 KiB window (M26). oldlenp: 8 bytes in-out. newp: read for newlen bytes —
+        // PROVISIONALLY Ptr; Task 5 cites xnu's per-handler newlen check or flips it to Source
+        // under rule 6 (spec §4c).
+        SYS_SYSCTL => row!(P, [Ptr, Scalar, Dest(DerefU64(3)), Ptr, Ptr, Scalar]),
+        // sysctlbyname — the RAW syscall's shape, not libc's 5-arg wrapper. `sysctlbyname(3)`'s C
+        // signature is (name, oldp, oldlenp, newp, newlen), but the kernel entry point behind it
+        // takes an extra `namelen` first, exactly like `SYS_SYSCTL`: (name, namelen, oldp, oldlenp,
+        // newp, newlen). Measured directly against the live kernel (M29 fix round 1) with a raw
+        // `syscall(274, ...)` bypassing libc's wrapper: the 6-arg form on `"kern.ostype"` returns 0
+        // with `oldp` filled (`"Darwin"`, `*oldlenp` 7); the naive 5-arg reading of the libc
+        // prototype (`oldp` at index 1) returns -1. So `oldp` is index 2 and `oldlenp` index 3 —
+        // IDENTICAL to `SYS_SYSCTL`, not "one index lower" as this entry previously (and wrongly)
+        // claimed. That wrong claim was never caught here: nothing in the M29 measurement corpus
+        // ever dispatched syscall 274 (see the M29 report's Finding B), so a real `sysctlbyname`
+        // call would have computed `want` from the first 8 bytes of the destination buffer's own
+        // CONTENTS (reading `args[2]`, the actual `oldp`, as if it were `oldlenp`) and treated
+        // `namelen` (`args[1]`) as the destination pointer — misdiagnosing a legal call as
+        // `[M29 DEREFLEN-UNBACKED]` rather than measuring it. The two rows share one shape because
+        // both use the same indices, not despite them differing by one. name: a string of namelen
+        // bytes — PROVISIONALLY Ptr, same Task 5 rule as newp.
+        SYS_SYSCTLBYNAME => row!(P, [Ptr, Scalar, Dest(DerefU64(3)), Ptr, Ptr, Scalar]),
+        // getfsstat64(struct statfs *buf, int bufsize, int flags): destination x0, length x1 in
+        // BYTES rather than a mount count — the reason this entry is easy to get wrong, since a
+        // mount count would be small enough never to matter. It does NOT currently overrun on this
+        // machine, and an earlier version of this comment claimed it did. MEASURED at M29 (Task 7)
+        // against the live system: `sizeof(struct statfs)` is 2168 bytes and this machine reports
+        // 16 mounts, so a full reply is 34,688 bytes and it takes 31 mounts to cross a 65536-byte
+        // window. The row is here because the call is structurally able to cross that cap on a
+        // machine with more mounts, not because it has been seen to.
+        SYS_GETFSSTAT64 => row!(P, [Dest(Reg(1)), Scalar, Scalar]),
+        _ => None,
+    }
 }
+
+/// The shape of a syscall about to be FORWARDED — loud on an unenumerated one.
+///
+/// `translate_fds` calls this first, and `translate_fds` is the first statement of
+/// `forward_and_diff`, so no syscall reaches the host kernel through the generic forward path
+/// without a row: the M10 class ("a forgotten entry forwards a raw guest fd, silently") is
+/// structurally closed. Every other view consulted inside `forward_and_diff` is downstream of
+/// this check. Record-only by construction — replay never forwards.
+pub fn forwarded_shape(num: u64) -> &'static Shape {
+    arg_kinds(num).unwrap_or_else(|| panic!(
+        "M33: syscall {num} ({}) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it \
+         cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own \
+         descriptor of that number). Classify each argument from the SDK prototype under the \
+         rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the \
+         number to tests/census.rs too.", num as i64))
+}
+
+/// Which operand indices of `num` hold a GUEST file descriptor. View over `arg_kinds`; empty for
+/// an unenumerated syscall (the loud check is `forwarded_shape`, upstream of every caller in the
+/// forward path).
+pub fn fd_operands(num: u64) -> impl Iterator<Item = usize> {
+    arg_kinds(num).into_iter().flat_map(Shape::fd_operands)
+}
+/// Does `num`'s RETURN value need binding to a fresh guest fd slot? View over `arg_kinds`.
+pub fn allocates_fd(num: u64) -> bool { arg_kinds(num).is_some_and(Shape::allocates_fd) }
+/// The destination buffer `num` fills, as `(argument index, where its length lives)`. View.
+pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> { arg_kinds(num)?.dest_buffer() }
+/// Refused-by-value family: a destination behind a nested guest pointer. View.
+pub fn writes_via_nested_pointer(num: u64) -> bool {
+    arg_kinds(num).is_some_and(Shape::writes_via_nested_pointer)
+}
+/// Does the host kernel READ guest memory through this call, in an amount no window bounds? View.
+pub fn reads_guest_buffer(num: u64) -> bool { arg_kinds(num).is_some_and(Shape::reads_guest_buffer) }
 
 pub const SYS_SYSCTL: u64 = 202;
 pub const SYS_GETRLIMIT: u64 = 194;
@@ -751,22 +948,22 @@ mod tests {
                     SYS_FSTAT, SYS_FSTAT64, SYS_LSEEK, SYS_IOCTL, SYS_DUP,
                     SYS_CONNECT, SYS_SENDTO, SYS_FGETATTRLIST, SYS_OPENAT, SYS_FSTATAT64,
                     SYS_GETDIRENTRIES64, SYS_FSTATFS64] {
-            assert_eq!(fd_operands(num), &[0], "syscall {num} holds its fd in x0");
+            assert_eq!(fd_operands(num).collect::<Vec<_>>(), [0], "syscall {num} holds its fd in x0");
         }
-        assert_eq!(fd_operands(SYS_MMAP), &[4], "mmap's fd is x4, consumed by guest_mmap_file");
-        assert_eq!(fd_operands(SYS_DUP2), &[0, 1]);
+        assert_eq!(fd_operands(SYS_MMAP).collect::<Vec<_>>(), [4], "mmap's fd is x4, consumed by guest_mmap_file");
+        assert_eq!(fd_operands(SYS_DUP2).collect::<Vec<_>>(), [0, 1]);
         // Path-only, fd-free, and fd-RETURNING calls must not have an operand translated.
         for num in [SYS_OPEN, SYS_OPEN_NOCANCEL, SYS_SOCKET, SYS_SHM_OPEN,
                     SYS_EXIT, SYS_MUNMAP, SYS_SYSCTL] {
-            assert_eq!(fd_operands(num), &[] as &[usize], "syscall {num} has no fd operand");
+            assert_eq!(fd_operands(num).count(), 0, "syscall {num} has no fd operand");
         }
         // map_with_linking_np carries its fd INSIDE a guest struct, so it is deliberately absent
         // here — an arg index cannot name it. The box translates it separately.
-        assert_eq!(fd_operands(SYS_MAP_WITH_LINKING_NP), &[] as &[usize]);
+        assert_eq!(fd_operands(SYS_MAP_WITH_LINKING_NP).count(), 0);
         // fsgetpath(char*, size_t, fsid_t*, uint64_t) (SDK sys/fsgetpath.h:45) takes an fsid_t*
         // identifying a *volume*, not a file descriptor — 427 is deliberately absent from the
         // table (M25-cpython Task 3, Step 1 census).
-        assert_eq!(fd_operands(427), &[] as &[usize], "fsgetpath (427) takes no descriptor");
+        assert_eq!(fd_operands(427).count(), 0, "fsgetpath (427) takes no descriptor");
     }
 
     // M27: 414 was missing from THREE places at once — fd_operands, the forwarded-count clamp, and
@@ -776,7 +973,7 @@ mod tests {
     #[test]
     fn pread_nocancel_is_treated_exactly_like_pread() {
         assert_eq!(SYS_PREAD_NOCANCEL, 414);
-        assert_eq!(fd_operands(SYS_PREAD_NOCANCEL), fd_operands(SYS_PREAD));
+        assert_eq!(fd_operands(SYS_PREAD_NOCANCEL).collect::<Vec<_>>(), fd_operands(SYS_PREAD).collect::<Vec<_>>());
         assert_eq!(dest_buffer(SYS_PREAD_NOCANCEL), dest_buffer(SYS_PREAD));
     }
 
@@ -823,11 +1020,11 @@ mod tests {
         // sendto (133) has been in fd_operands since the fd table landed; recvfrom was not, so a
         // guest receiving on a socket handed the host kernel an untranslated guest fd — the M10
         // class, and the same both-tables-at-once asymmetry M27 found in pread_nocancel.
-        assert_eq!(fd_operands(SYS_RECVFROM), &[0]);
-        assert_eq!(fd_operands(SYS_RECVFROM_NOCANCEL), &[0]);
+        assert_eq!(fd_operands(SYS_RECVFROM).collect::<Vec<_>>(), [0]);
+        assert_eq!(fd_operands(SYS_RECVFROM_NOCANCEL).collect::<Vec<_>>(), [0]);
         // getfsstat64 and sysctlbyname take no fd, and must NOT have gained one.
-        assert_eq!(fd_operands(SYS_GETFSSTAT64), &[] as &[usize]);
-        assert_eq!(fd_operands(SYS_SYSCTLBYNAME), &[] as &[usize]);
+        assert_eq!(fd_operands(SYS_GETFSSTAT64).count(), 0);
+        assert_eq!(fd_operands(SYS_SYSCTLBYNAME).count(), 0);
     }
 
     // M27: these put their destination behind a pointer INSIDE a guest struct (iovec.iov_base,
@@ -891,11 +1088,42 @@ mod tests {
     /// through 3/4/5/6 for those operations — a plain-only table forwards a raw guest fd silently.
     #[test]
     fn nocancel_variants_are_tabled_beside_their_plain_forms() {
-        assert_eq!(fd_operands(SYS_READ), fd_operands(SYS_READ_NOCANCEL));
-        assert_eq!(fd_operands(SYS_WRITE), fd_operands(SYS_WRITE_NOCANCEL));
-        assert_eq!(fd_operands(SYS_CLOSE), fd_operands(SYS_CLOSE_NOCANCEL));
-        assert_eq!(fd_operands(SYS_FCNTL), fd_operands(SYS_FCNTL_NOCANCEL));
+        assert_eq!(fd_operands(SYS_READ).collect::<Vec<_>>(), fd_operands(SYS_READ_NOCANCEL).collect::<Vec<_>>());
+        assert_eq!(fd_operands(SYS_WRITE).collect::<Vec<_>>(), fd_operands(SYS_WRITE_NOCANCEL).collect::<Vec<_>>());
+        assert_eq!(fd_operands(SYS_CLOSE).collect::<Vec<_>>(), fd_operands(SYS_CLOSE_NOCANCEL).collect::<Vec<_>>());
+        assert_eq!(fd_operands(SYS_FCNTL).collect::<Vec<_>>(), fd_operands(SYS_FCNTL_NOCANCEL).collect::<Vec<_>>());
         assert_eq!(allocates_fd(SYS_OPEN), allocates_fd(SYS_OPEN_NOCANCEL));
+    }
+
+    // M33: the table behind the five views.
+    #[test]
+    fn arg_kinds_reproduces_the_read_family_shape() {
+        use ArgKind::*;
+        let s = arg_kinds(SYS_READ).expect("read has a row");
+        assert_eq!(s.args, &[Fd, Dest(DestLen::Reg(2)), Scalar]);
+        assert_eq!(s.ret, Ret::Plain);
+        assert_eq!(arg_kinds(SYS_READ), arg_kinds(SYS_READ_NOCANCEL), "the _nocancel spelling shares the row");
+        assert_eq!(arg_kinds(SYS_OPEN).unwrap().ret, Ret::Fd);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no arg_kinds row")]
+    fn an_unenumerated_syscall_panics_by_name() {
+        // 8 is the kernel's `nosys` slot (old creat): no syscall lives there, so no row ever will.
+        let _ = forwarded_shape(8);
+    }
+
+    // `dest_buffer` returns ONE destination and the clamp/window consult it — a row with two
+    // `Dest` arguments would silently pick the first. The schema forbids it.
+    #[test]
+    fn no_row_has_more_than_one_dest_argument_or_more_than_eight_arguments() {
+        for num in (0..=1023u64).chain((1..=128i64).map(|n| (-n) as u64)) {
+            if let Some(s) = arg_kinds(num) {
+                assert!(s.args.len() <= 8, "syscall {} has {} arguments", num as i64, s.args.len());
+                let dests = s.args.iter().filter(|k| matches!(k, ArgKind::Dest(_))).count();
+                assert!(dests <= 1, "syscall {} has {dests} Dest arguments", num as i64);
+            }
+        }
     }
 
     #[test]
