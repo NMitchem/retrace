@@ -6428,7 +6428,7 @@ no observed guest produces. Present since M10 t3 (`e67dd65`, 2026-08-04). See Ru
    its comment, with the source cited when it is not the public SDK, makes a row written from
    memory visibly incomplete before it is ever reviewed.
 4. **`0x80000000`** in the census is dyld's inline `__mac_syscall("Sandbox", …)`,
-   `MAC_SYSCALL_MAGIC` (`retrace-core/src/lib.rs:18-22`), synthesized and never forwarded. Task 1
+   `MAC_SYSCALL_MAGIC` (`retrace-core/src/lib.rs:19-22`), synthesized and never forwarded. Task 1
    could not identify it; the controller's cross-check did; its row is `[Path, Scalar, Ptr]` and the
    "unidentified" sentence in `census.rs` is closed.
 5. **`AT_FDCWD` is rejected as EBADF** for the form real guests pass — above, and Ruling 10.
@@ -6699,3 +6699,10 @@ being the only two in the tree. M33 parked nothing new and un-parked nothing.
   corrected, and the correction is noted in the sentence itself, but the class — a current-state
   claim with no instrument — is the same one the census closed for syscall numbers and did not
   close for anything else.
+* **An undeclared cross-version consequence, found by the final reviewer.** `kqueue` (362) gaining
+  `Ret::Fd` changes how `ReplaySession` (`crates/retrace-core/src/lib.rs:2340`, the `if !*err &&
+  retrace_arch::allocates_fd(num)` arm) interprets a recorded successful `ret` for 362, so a
+  PRE-M33 recording of `/bin/wait4path` now replays to the divergence "… trace predates M10's fd
+  table" — a wrong diagnosis, not a panic, and not a hole for any M33 recording, but the first
+  `allocates_fd` addition since M10 and the one thing "no recorded byte changed" does not cover.
+  M25 and M29 set the no-`TRACE_MAGIC`-bump precedent for this class.

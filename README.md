@@ -287,7 +287,9 @@ design, and the reconstruction caveat in full.
   `dest_buffer`, `writes_via_nested_pointer`, `reads_guest_buffer`) are one-line **views** over it.
   Every row opens with its kernel prototype (xnu `syscalls.master` / `syscall_sw.h`, or the SDK
   header, and it says which) and every `Ptr` names the cited bound that keeps it out of `Source`
-  and `Dest`. The refactor is proven rather than asserted: `legacy_equivalence.rs` carries the five
+  and `Dest` — all but one, `__mac_syscall`'s (381) policy-defined `arg`, whose row says it rests
+  on reasoning rather than on a number nobody outside Apple can cite. The refactor is proven rather
+  than asserted: `legacy_equivalence.rs` carries the five
   M32 tables **verbatim** as a fixture and sweeps every syscall number in the domain (BSD
   `0..=1023`, mach traps `-1..=-128`, the `MAC_SYSCALL_MAGIC` band) through every view **in both
   directions** — a view that disagrees with its legacy table without an `EXPECTED_DIFFS` entry

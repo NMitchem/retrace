@@ -321,10 +321,11 @@ untouched.
 
 ## 11. Outcome — where the rulings re-scoped this document
 
-**Status: CLOSED, delivered as written except at two points, both rulings recorded in
-`docs/status-log.md` under "M33-readerenum" and repeated here because a reader of §4b and §9 would
-otherwise expect an assert that does not exist.** Task 6's close: sweep `pass=46 fail=8 skip=0`
-unmoved; gate 570 / 0 / 2 over 124.
+**Status: CLOSED, delivered as written except at one point where a ruling departed from this spec
+(Ruling 4) and one point where a ruling departed from a CLAUDE.md precedent this spec never adopted
+(Ruling 7); both are recorded in `docs/status-log.md` under "M33-readerenum" and repeated here
+because a reader of §4b and §9 would otherwise expect an assert that does not exist.** Task 6's
+close: sweep `pass=46 fail=8 skip=0` unmoved; gate 570 / 0 / 2 over 124.
 
 - **§4b and §9 pre-authorised "a ruling plus an assert" for a corpus `ioctl` with a nested
   pointer. The assert was not added (Ruling 4).** The nested request is `DTRACEHIOC_ADDDOF`, which
