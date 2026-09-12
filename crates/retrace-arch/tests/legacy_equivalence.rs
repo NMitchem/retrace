@@ -80,9 +80,10 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     (154, View::FdOperands, "pwrite(fd, …) — unexercised"),
     (415, View::FdOperands, "pwrite_nocancel(fd, …) — unexercised"),
     (121, View::FdOperands, "writev(fd, …) — unexercised"),
-    // The one exception to "never hit": 412 IS in the census, issued by `/bin/ed`, a binary in
-    // the Apple-sweep PASS set — so this row is a live untranslated-fd fix, not header truth alone.
-    (412, View::FdOperands, "writev_nocancel(fd, …) — exercised by the census (/bin/ed): a live M10-class fix"),
+    // The one exception to "never hit": 412 IS in the census, issued by `/bin/ed` — but the
+    // descriptor it carries is fd 2, a console fd that `FdTable::new` maps to itself, so the fix
+    // is live for the class and inert for the one guest that reaches it.
+    (412, View::FdOperands, "writev_nocancel(fd, …) — exercised by the census (/bin/ed, on fd 2 — a console fd that translates to itself: live for the class, inert for that guest)"),
     (541, View::FdOperands, "pwritev(fd, …) — unexercised"),
     (413, View::FdOperands, "sendto_nocancel(s, …): the _nocancel trap a fourth time — unexercised"),
     (28,  View::FdOperands, "sendmsg(s, …) — unexercised"),
