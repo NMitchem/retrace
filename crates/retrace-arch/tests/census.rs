@@ -19,8 +19,12 @@
 //! it is a genuine `Stop::Syscall` (x16 read after `ec_of(esr1) == Ec::Svc` confirmed a real `svc`
 //! trap — `crates/retrace-box/src/lib.rs`, `run()`), not a decode artifact of this script, and the
 //! same value already appears independently in
-//! `docs/superpowers/specs/2026-09-02-retrace-m25-cpython-measurements.md`'s CPython census. What
-//! it names is unidentified; that identification is left to whichever task gives it a row.
+//! `docs/superpowers/specs/2026-09-02-retrace-m25-cpython-measurements.md`'s CPython census. Task 5
+//! identified it: it is retrace-core's `MAC_SYSCALL_MAGIC`, the value dyld's inline
+//! `__mac_syscall("Sandbox", …)` loads into x16, synthesized and never forwarded — see its
+//! `arg_kinds` row.
+use retrace_arch::arg_kinds;
+
 pub const CENSUS: &[i64] = &[
     -89, -70, -50, -47, -36, -33, -29, -28, -27, -26, -24, -19, -18, -15, -14, -12, -10, 1, 3, 4,
     5, 6, 13, 20, 24, 25, 33, 36, 37, 38, 39, 41, 42, 43, 46, 47, 48, 49, 52, 53, 54, 58, 59, 60,
@@ -34,4 +38,12 @@ pub const CENSUS: &[i64] = &[
 fn census_is_sorted_and_deduplicated() {
     assert!(CENSUS.windows(2).all(|w| w[0] < w[1]), "CENSUS must be strictly ascending");
     assert!(CENSUS.len() > 60, "a census this small means a corpus was skipped: {}", CENSUS.len());
+}
+
+/// The guard that keeps M33's loud failure from firing on anything the corpora dispatch. A number
+/// here with no row is a gate guest — or a sweep binary — that panics at its first forward.
+#[test]
+fn every_census_number_has_a_row() {
+    let missing: Vec<i64> = CENSUS.iter().copied().filter(|&n| arg_kinds(n as u64).is_none()).collect();
+    assert!(missing.is_empty(), "census numbers with no arg_kinds row: {missing:?}");
 }
