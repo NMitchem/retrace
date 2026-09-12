@@ -3101,7 +3101,7 @@ impl Box_ {
     /// `Err(EBADF)` means the guest named an fd it does not have open. The caller forwards NOTHING —
     /// the whole point is that the number may be a live descriptor of retrace's own.
     pub fn translate_fds(&self, num: u64, args: &mut [u64; 8]) -> Result<(), u64> {
-        for &i in retrace_arch::fd_operands(num) {
+        for i in retrace_arch::fd_operands(num) {
             let v = args[i];
             // AT_FDCWD (-2) and friends are sentinels, not descriptors.
             if (v as i64) < 0 { continue; }
