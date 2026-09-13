@@ -1363,6 +1363,13 @@ mod tests {
         assert_eq!(dest_buffer(SYS_PREAD),    Some((1, DestLen::Reg(2))));
         assert_eq!(dest_buffer(SYS_READ_NOCANCEL), Some((1, DestLen::Reg(2))));
         assert_eq!(dest_buffer(SYS_SYSCTL),   Some((2, DestLen::DerefU64(3))));
+        // M34: proc_info's buffer is x4 with `buffersize` in x5; csops and csops_audittoken share
+        // `useraddr` x2 with `usersize` in x3. Pinned as the whole view rather than through
+        // `diff_window` at one index (`truncguard.rs` does that), so a row that moved its `Dest`
+        // to another index fails here by name.
+        assert_eq!(dest_buffer(336), Some((4, DestLen::Reg(5))));
+        assert_eq!(dest_buffer(169), Some((2, DestLen::Reg(3))));
+        assert_eq!(dest_buffer(170), Some((2, DestLen::Reg(3))));
     }
 
     // Absence must mean "provably writes no buffer we can size", never "not gotten to yet".
@@ -1374,6 +1381,13 @@ mod tests {
         // there is no SYS_FSGETPATH constant in this crate and this test must not invent one.
         assert_eq!(dest_buffer(427), None, "fsgetpath takes an fsid_t*, not a sized buffer");
         assert_eq!(dest_buffer(SYS_WRITE), None, "write reads the buffer, it does not fill it");
+        // M34 Ruling 1: getattrlist/fgetattrlist are kernel-bounded at ATTR_MAX_BUFFER_LONGPATHS
+        // (15,360 bytes) and stay `Ptr`. `truncguard.rs` pins that through `diff_window` at
+        // index 2 only; this pins the whole view, so a `Dest` at ANY index of either row fails.
+        assert_eq!(dest_buffer(220), None,
+            "getattrlist is kernel-bounded at 15,360 bytes (ATTR_MAX_BUFFER_LONGPATHS) and stays Ptr");
+        assert_eq!(dest_buffer(SYS_FGETATTRLIST), None,
+            "fgetattrlist shares getattrlist's packers and their bound, and stays Ptr");
     }
 
     #[test]
