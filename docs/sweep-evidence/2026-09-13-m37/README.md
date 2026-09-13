@@ -52,7 +52,8 @@ The slab is where M36 said: in every kept §4b-row trace of all three runs the
 `mach_vm_map(size 0x8000, flags 0x49000001)` landmark returns `0x10000` (reader `slabmap`; `csh`
 #128, `dddiagnose` #182 — the same indices M36 measured), so run S's pids fall inside a backing the
 guest has mapped at the time of its pid-carrying calls, and run I's inside the trampoline page.
-Pre-M37 those regimes answered every self-pid call `ESRCH` (M36: 11–12 per trace); now 0 (below).
+Pre-M37 those regimes answered all but one self-pid call `ESRCH` (M36: 11 of 12 in run I, 12 of 13 in
+run O); now 0 (below).
 
 **The nine non-clean rows, three regimes.** Labels are the harness's structural ones (M36 §3a); `rc`
 = record exit, `rp` = replay exit, landmark = the replay's `DIVERGENCE at landmark N` (for a
@@ -78,9 +79,8 @@ audits below and then deleted, as ruled; their `rec.err` is kept. The landmark a
 stops varies by a few between runs of the same binary at the same regime (e.g. `launchctl` 338 / 330
 / 331) — that is run-to-run variation of the guest's own path (pairs of `sigprocmask` appear and
 vanish, allocation addresses shift), and two PRE-fix runs show the same spread (M36 run L
-`launchctl` 338 vs the Task 1 baseline 329; the M36-L-vs-baseline syscall sequences of `csh`,
-`tcsh` and `launchctl` differ in 18/23/34 lines over their first 260 events, all of that kind), so
-the landmark is not part of the label and no landmark difference is attributed to M37.
+`launchctl` 338 vs the Task 1 baseline 329, both non-colliding, both the RCV label), so the
+landmark is not part of the label and no landmark difference is attributed to M37.
 
 ## Counting rules
 
@@ -102,6 +102,10 @@ number of `Event::Syscall` with `err == true`; the `0x10000` map as there). Two 
   and are not counted. A hit means "the value in a `Scalar` register lies inside memory this
   landmark recorded as written"; it does NOT by itself mean the kernel wrote through it — see the
   adjudication under audit 2.
+- **`efaults`** (audit 3's `EFAULT` check with `ret` in view): the number of `Event::Syscall` with
+  `err == true`, `ret == 14`, and `arg_kinds(num)` carrying at least one `Scalar` position, per
+  number and in total; `--list` prints each with its index and `x0`/`x1` so two traces can be
+  compared landmark by landmark.
 
 ## The reader
 
@@ -145,6 +149,8 @@ retrace-arch = { path = "/Users/noahmitchem/Documents/GitHub/retrace/.claude/wor
 //   low <trace>              the final snapshot's regions below 0x200000
 //   writes <trace> <idx> <dir>  dump landmark <idx>'s write regions to <dir>
 //   slabmap <trace>          the os_alloc_once mach_vm_map (M36's 0x10000-map rule) and its result
+//   efaults <trace>… [--list]  err && ret == 14 (EFAULT) on rows with a Scalar position, per number
+//                            and in total; --list prints each with its index and x0/x1
 use retrace_arch::{arg_kinds, ArgKind};
 use retrace_trace::{Event, Reader};
 use std::collections::BTreeMap;
@@ -268,6 +274,32 @@ fn main() {
                     println!("  [{:#x}, {:#x}) len {:#x} -> {f}", r.ipa, r.ipa + r.bytes.len() as u64, r.bytes.len());
                 }
             } else { println!("#{idx}: not a Syscall"); }
+        }
+        Some("efaults") => {
+            // Audit 3's EFAULT check with `ret` in view (the `errs` mode counts `err` per number and
+            // cannot see an EINVAL→EFAULT swap at equal count): every Event::Syscall with
+            // `err && ret == 14` on a row that has at least one `Scalar` position, per number and
+            // in total; `--list` prints each one with its index and x0/x1 so two traces can be
+            // compared landmark by landmark.
+            let list = args.iter().any(|a| a == "--list");
+            let paths: Vec<&String> = args[1..].iter().filter(|a| *a != "--list").collect();
+            for path in paths {
+                let events = open(path);
+                let mut by_num: BTreeMap<i64, usize> = BTreeMap::new();
+                let mut total = 0usize;
+                for (idx, ev) in events.iter().enumerate() {
+                    if let Event::Syscall { num, args: a, ret, err: true, .. } = ev {
+                        if *ret != 14 { continue; }
+                        let Some(shape) = arg_kinds(*num) else { continue };
+                        if !shape.args.iter().any(|k| *k == ArgKind::Scalar) { continue; }
+                        total += 1;
+                        *by_num.entry(*num as i64).or_default() += 1;
+                        if list { println!("  #{idx} syscall {} x0={:#x} x1={:#x}", *num as i64, a[0], a[1]); }
+                    }
+                }
+                let parts: Vec<String> = by_num.iter().map(|(n, c)| format!("{n}:{c}")).collect();
+                println!("{path}: efaults_on_scalar_rows={total} by_num=[{}]", parts.join(" "));
+            }
         }
         Some("slabmap") => {
             // M36's "0x10000 map" rule: `_kernelrpc_mach_vm_map_trap` (-15) with size 0x8000 and
@@ -566,21 +598,24 @@ under host memory pressure is unchanged by M37 and unmeasured.
 
 ## Audit measurement 2 — `scalar-writes`
 
-Run over every kept trace named by the brief: the 54 Task 1 baseline traces, the 3 × 54 post-fix
-traces (N, I, S — `yes` included, read before deletion), M36's 27 kept traces (`keep-{O,L,I}`) and
-M35's 6 `dddiagnose` probes (`ddd-keep*/`). Outputs: `audit/scalar-writes-{base,N,I,S,m35m36}.log`.
+Run over every kept trace named by the brief: the 54 Task 1 baseline traces, the post-fix traces
+(N and I: the 53 that were still on disk when the logged pass ran — each run's `yes.bin` had been
+deleted first, so `yes`'s logged `scalar-writes` evidence is the baseline and S traces plus M36's
+`keep-I/yes.bin`; S: all 54, `yes` read before deletion), M36's 27 kept traces (`keep-{O,L,I}`)
+and M35's 13 `dddiagnose` probes (`ddd-keep/` 10, `ddd-keep-inrange/` 3). Outputs:
+`audit/scalar-writes-{base,N,I,S,m35m36}.log`, all from the reader as pasted above.
 
 | corpus | traces | hits | in which traces |
 |---|---|---|---|
 | baseline (pre-fix, non-colliding) | 54 | 9 | `desdp` 3, `dyld_info` 3, `flex` 3 |
-| N (post-fix, non-colliding) | 54 | 9 | `desdp` 3, `dyld_info` 3, `flex` 3 |
-| I (post-fix, `[0x4000,0x10000)`) | 54 | 9 | `desdp` 3, `dyld_info` 3, `flex` 3 |
+| N (post-fix, non-colliding) | 53 (`yes` gone) | 9 | `desdp` 3, `dyld_info` 3, `flex` 3 |
+| I (post-fix, `[0x4000,0x10000)`) | 53 (`yes` gone) | 9 | `desdp` 3, `dyld_info` 3, `flex` 3 |
 | S (post-fix, `[0x10000,0x18000)`) | 54 | 9 | `desdp` 3, `dyld_info` 3, `flex` 3 |
 | M36 O/L/I (pre-fix) | 27 | 27 | the same three binaries × 3 runs × 3 |
-| M35 `ddd-keep*` (pre-fix, `dddiagnose`) | 6 | 0 | — |
+| M35 `ddd-keep*` (pre-fix, `dddiagnose`) | 13 | 0 | — |
 
-(The `yes` traces alone carry ~3.3 million `Scalar` positions each — the `write` count register —
-and 0 hits; a typical trace has a few thousand.)
+(The three logged `yes` traces — baseline, S, M36 keep-I — carry ~3.3 million `Scalar` positions
+each, the `write` count register, and 0 hits; a typical trace has a few thousand.)
 
 **Every hit is one shape and it is not a probe.** All 63 hits are `mmap` (197) x0 with
 `flags = 0x40012` (`MAP_FIXED | MAP_PRIVATE | MAP_UNIX03`), `prot` 5 / 3 / 1 in that order, sizes
@@ -617,20 +652,32 @@ above (baseline / N: `launchctl` 329/338, `automationmodetool` 338/343, `desdp` 
 `dyld_info` 364/365, `flex` 366/362, `dddiagnose` 382/383).
 
 **`errs` per syscall number**, reader `errs` over the 53 baseline/N trace pairs (`yes` excluded as
-killed mid-run; outputs `audit/errs-{base,N}/<b>.txt`, diffed per binary): **identical for 49 of
-53**. The four differences, adjudicated by name:
+killed mid-run; outputs `audit/errs-{base,N}/<b>.txt`, diffed per binary): **identical for 48 of
+53**. The five binaries that differ (six rows — `ps` twice), adjudicated by name:
 
 | binary | baseline → N | adjudication |
 |---|---|---|
-| `csh` | `ioctl`(54) 3 → 7, `fcntl`(92) 0 → 2 | The N trace is longer (261 → 331 events): the baseline panicked at the `dup2` assert before recording it. Over N's first 261 events `errs` is **identical** to the baseline's (reader `errs <trace> 261`); every extra `err` is past the old stop (`ioctl` `FIODTYPE`/`TIOCGETA` on the new aliases 17 and 18 answered `ENOTTY` — the sweep's stdout/stderr are files, #271–#274; two `fcntl(F_SETFD)` `EBADF` at #329/#330). Not a probe delta. |
-| `tcsh` | `ioctl`(54) 3 → 7, `fcntl`(92) 0 → 2 | Same: identical over the baseline's 265 events; the rest is past the old `dup2` stop. |
+| `csh` | `ioctl`(54) 3 → 7, `fcntl`(92) 0 → 2 | The N trace is longer (261 → 331 events): the baseline panicked at the `dup2` assert before recording it. Over N's first 261 events `errs` is **identical** to the baseline's (reader `errs <trace> 261`); every extra `err` is past the old stop (`ioctl` `FIODTYPE`/`TIOCGETA` on the new aliases 17 and 18 answered `ENOTTY` — the sweep's stdout/stderr are files, #271–#274; two `fcntl(F_SETFD)` `EBADF` at #329/#330). The two `EBADF`s have a name: `pipe`(42) is **unmodelled** (`Ret::FdPair`, `crates/retrace-arch/src/lib.rs` — the `FdPair` rustdoc), so at #328 the guest received retrace's raw host read-end `0x17` in `x0` (not in the guest fd table → `translate_fds` answers `EBADF` without forwarding) and its own stale `x1` `0x27fe298` (the second argument of the `sigaction` at #327, which `pipe`'s second return never overwrote) as the write end, and `fcntl`'d both. Same shape in I (#327–#329) and S (#331–#333) and in `tcsh`. Class B known-unmodelled, one landmark before the class-C `fork` wall; it changes nothing about the wall (3403 follows regardless) and is owed to the M10-successor list. Not a probe delta. |
+| `tcsh` | `ioctl`(54) 3 → 7, `fcntl`(92) 0 → 2 | Same: identical over the baseline's 265 events; the rest is past the old `dup2` stop, the two `EBADF`s the same unmodelled `pipe` (N #326 `pipe` → `0x17`, stale `x1` `0x27fe288`; #327/#328 `fcntl` `EBADF`). |
 | `date` | `madvise`(75) 4 → 0 | Task 3's expected delta (a). The four baseline failures are `madvise(0xa00538000/0xa0052c000, len 0xc000, 7)` → `EINVAL`: `0xc000` is `PT_L1_IPA`'s backing (mapped in every guest, `[0xc000,0x10000)` in the final snapshot), so the pre-fix probe rewrote the LENGTH to a host pointer. Post-fix the same four calls return 0. |
 | `zsh` | `madvise`(75) 2 → 0 | Same, two calls with `len 0xc000`. |
-| `ps` | `madvise`(75) 32 → 0 | Same class, `len 0x100000`, inside the guest's `[0x4c000, 0x454000)` region (final snapshot). All 32 post-fix calls return 0. |
+| `ps` | `madvise`(75) 32 → 0 | Same class: 30 × `len 0x100000` plus one `0x40000` and one `0x7c000` (`calls keep-base/ps.bin 75`), all three mapped in that guest — `[0x40000, 0x44000)` and `[0x4c000, 0x454000)` in the final snapshot (`low`). All 32 post-fix calls return 0. |
 | `ps` | `sysctl`(202) 0 → 1 | **Not the fix.** The one `err` is `sysctl({CTL_KERN, KERN_PROCARGS2, pid}, 3, buf, &len)` → `EINVAL` at N #7916, the 5th of `ps`'s 15 per-process argument fetches; the same 15 calls succeed in the baseline, in I and in S (`errs` N-vs-I and N-vs-S differ in nothing else). The target had exited between `ps`'s `KERN_PROC` listing (#269) and this call — `ps`'s own stdout (`keep-N/ps.rp.out`, byte-identical on record and replay, so the row is `PASS`) prints that row as `35890 ttys001 0:00.00 (caffeinate)`, the parenthesised form `ps` uses when `KERN_PROCARGS2` fails, where the baseline printed `59315 ttys001 0:00.00 caffeinate -i -t 300`. `sysctl`'s `Scalar` positions are `namelen` (3) and `newlen` (0), neither a mapped IPA in any regime (nothing is backed below `0x4000`), so the probe never touched them pre-fix and forwarding them verbatim post-fix hands the kernel the same values; the host's process table is a forwarded input. |
 
-No `ret=14` (`EFAULT`) appeared on any row with a `Scalar` position in any post-fix trace; no
-table row was changed by this task and no binary was re-run.
+**The `EFAULT` check spec §3b.3 names, with `ret` in view.** The `errs` mode counts `err` per
+number without `ret`, so on its own it cannot see an `EINVAL`→`EFAULT` swap at equal count; the
+reader's `efaults` mode (every `err && ret == 14` on a row with at least one `Scalar` position;
+outputs `audit/efaults-{base,N,I,S}.log`) closes that gap. The count is **272 in the baseline less
+`yes`, 272 in N, 272 in I, 272 in S** — 218 × `__mac_syscall` (381), 53 × `ioctl(3, 0x80086804)`
+(54), 1 × `writev_nocancel` (412, `ed`) in every corpus: every dynamic guest carries five at dyld
+time (four `__mac_syscall` + the `ioctl`) and seven carry a sixth (`ed`'s `writev_nocancel`, a late
+`__mac_syscall(0x180231d05, 0x5a)` in the six §4b rows). With `--list`, the per-binary
+`(num, x0, x1)` sequence is identical between the baseline and each of N/I/S for all 53 binaries
+(159 pairs, 0 different); the index is identical except where the run-to-run landmark spread above
+shifts a late sixth by a few (the six §4b rows and `ed`). `yes` adds 5 in the baseline (4 + 1, the
+same dyld-time five). So none of the five adjudicated differences is an `EFAULT`, no `EFAULT`
+appears or disappears anywhere, and every one present is pre-existing and unrelated to the probe;
+no table row was changed by this task and no binary was re-run.
 
 **Regime independence (spec §2b's claim, extended to the whole corpus).** `errs` N-vs-I and N-vs-S,
 53 pairs each: identical for 52; the only difference is the `ps` `sysctl` above (present in N
