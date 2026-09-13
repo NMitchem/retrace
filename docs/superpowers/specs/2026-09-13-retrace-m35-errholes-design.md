@@ -335,8 +335,9 @@ with its reason and becomes an M36 row.
 
 Closed 2026-09-13 on branch `m35-errholes`, five code commits — `0beb06d` / `955d687` (Task 1
 and its fix round), `a11e398` / `8a53c53` (Task 2 and its fix round), `12ac4e7` (Task 3) — and
-three docs commits: `504753e`, `46b5dc0` (the Task 4 fix round) and the final-review fix wave,
-which cannot name itself. Everything §5 said would land, landed; three statements in this spec's
+docs commits `504753e`, `46b5dc0` (the Task 4 fix round), the final-review fix wave's `e527831`
+(comments and one assertion message in `crates/`, no code path) and `0708960`, and one
+comments-only commit after the scoped re-review, which cannot name itself. Everything §5 said would land, landed; three statements in this spec's
 own text were wrong on measurement and are corrected below rather than edited away, and the
 final review found two more — §4c's `csops_copy_token` condition, and this section's own first
 account of the `dddiagnose` cause — corrected the same way in the fix wave. The full record is

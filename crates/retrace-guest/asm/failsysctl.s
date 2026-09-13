@@ -9,8 +9,8 @@
 // failing path (`failsys_e2e`).
 //
 // This guest asks for kern.ostype ("Darwin") into a 2-byte buffer, then emits those 2 bytes. If the
-// kernel wrote despite failing, the recording shows them and a replay — which captured no writes —
-// shows zeros. Same shape as `bigread`: a silent truncation becomes visible OUTPUT rather than a
+// kernel wrote despite failing, the recording shows them and, on the pre-M35 tree, a replay —
+// which captured no writes — showed zeros. Same shape as `bigread`: a silent truncation becomes visible OUTPUT rather than a
 // divergence the oracle cannot see, because (num, args) are identical on both sides.
 .section __TEXT,__text
 .global _start

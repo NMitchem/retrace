@@ -7451,8 +7451,10 @@ line-multiset diff, 34/34, instead of a re-review), `a11e398` (Task 2, H2 and `f
 deletions, checked line by line against the review's three items instead of a re-review),
 `12ac4e7` (Task 3, the fixture and the e2e) — and three docs commits: `504753e` (this section,
 the README and spec §11), `46b5dc0` (the Task 4 fix round: the `dddiagnose` wall is the
-RCV-shaped `mach_msg2`, not the serviced refusal) and the final-review fix wave, which cannot
-name itself. Every citation below is at `12ac4e7`.
+RCV-shaped `mach_msg2`, not the serviced refusal) and the final-review fix wave's two —
+`e527831` (comments and one assertion message in `crates/`, no code path) and `0708960` (this
+section's dddiagnose correction) — plus one commit after the scoped re-review, comments and this
+sentence only, which cannot name itself. Every citation below is at `12ac4e7`.
 
 - **`crates/retrace-box/src/lib.rs`** — two functions, plus comments.
   - `diff_memory` (`:3933`): the clamp is gone; `if r.bytes.len() > avail` (`:3948`) returns
