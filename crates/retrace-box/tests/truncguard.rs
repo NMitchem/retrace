@@ -28,6 +28,40 @@ fn an_empty_guard_band_is_never_an_overrun() {
     assert!(!Box_::overran_window(&[], &[]));
 }
 
+// M35 Control 1: `diff_memory` used to compare a recorded region only up to its replay backing
+// (`.min(avail)`) and report the excess as nothing — the one place the terminal full-memory oracle
+// could return `None` on bytes it never looked at. A region built to overrun a 64-byte backing by
+// 64 bytes, whose first 64 bytes match the guest exactly, must now come back as a divergence
+// naming all three numbers. Under the old clamp this returned `None`: it compared the 64 that
+// match and never saw the 64 that have no backing to compare against.
+#[test]
+fn a_recorded_region_longer_than_its_replay_backing_is_a_divergence() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    match b.run() {
+        Stop::Syscall { .. } => {}
+        other => panic!("expected the guest's first syscall stop, got {other:?}"),
+    }
+
+    const AVAIL: u64 = 64;
+    let dest = retrace_box::STACK_TOP_IPA - AVAIL;
+    let (_, avail) = b.host_span_for_test(dest).expect("the static stack backing ends at STACK_TOP_IPA");
+    assert_eq!(avail as u64, AVAIL, "dest must sit exactly {AVAIL} bytes before the end of its backing");
+
+    // The first 64 bytes are the guest's own, so a compare that stops at the backing sees no
+    // mismatch; the next 64 have nothing behind them at all.
+    let mut bytes = b.read_bytes_for_test(dest, AVAIL as usize);
+    bytes.extend(std::iter::repeat_n(0u8, AVAIL as usize));
+    assert_eq!(bytes.len(), 128);
+    let region = retrace_trace::Region { ipa: dest, bytes };
+
+    let msg = b.diff_memory(&[region]).expect(
+        "a 128-byte recorded region over a 64-byte backing must be reported as a divergence, not \
+         compared up to the backing and passed — that silence is the M1 hole this test closes");
+    assert!(msg.contains("128 bytes") && msg.contains("holds only 64"),
+        "the divergence must name the recorded length and the backing; got: {msg}");
+}
+
 // M28: the POSITIVE control. Everything else touching the guard band is a NEGATIVE control —
 // `bigread_e2e` and `memdiff`'s M26 guard prove it does not FALSE-fire. Nothing proved it fires at
 // all. `overran_window`'s unit tests above cover `!pre.is_empty() && pre != post`, the one part
