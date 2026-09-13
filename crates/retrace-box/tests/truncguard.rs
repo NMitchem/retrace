@@ -183,6 +183,105 @@ fn the_window_widens_for_each_m29_reg_addition() {
     assert_eq!(b.diff_window_for_test(retrace_arch::SYS_WRITE, 1, AVAIL, &args), FLAT);
 }
 
+// M34: two rows join the M29 four, and one pair is pinned as NOT joining. Same seam and same
+// reasoning as the test above — `diff_window` is a pure function of the table and the args, so
+// it is tested at the seam rather than through a guest that would have to be built to call each
+// of these syscalls with a huge buffer.
+//
+// The negative half is the milestone's Ruling 1 made executable. `getattrlist` and
+// `fgetattrlist` are kernel-bounded: both reach `getattrlist_internal` → `getvolattrlist` /
+// `vfs_attr_pack_internal`, and each packer rejects with ENOMEM before any copyout when the
+// packed result exceeds `attr_max_buffer` (ATTR_MAX_BUFFER_LONGPATHS, 15,360 bytes;
+// bsd/vfs/vfs_attrlist.c). By the `ArgKind` doc's own rule that is a `Ptr` with a citation, not
+// a `Dest`. A later "completion" of M34 that makes them `Dest` fails here and is sent to the
+// citation. Corpus maximum for either, measured 2026-09-13: 1,052 bytes.
+#[test]
+fn the_window_widens_for_the_m34_rows_and_not_for_getattrlist() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO).unwrap());
+    let b = Box_::load(&loaded);
+    const AVAIL: usize = 1 << 20;
+    const FLAT: usize = 64 * 1024; // PTR_WINDOW_CAP
+
+    let mut args = [0u64; 8];
+
+    args[5] = 200_000; // proc_info buffersize (uint32_t, x5)
+    assert_eq!(b.diff_window_for_test(336, 4, AVAIL, &args), 200_000,
+        "proc_info's destination is x4 and its length x5");
+    assert_eq!(b.diff_window_for_test(336, 5, AVAIL, &args), FLAT,
+        "x5 is proc_info's length, not its buffer");
+
+    args[3] = 150_000; // csops usersize (x3)
+    assert_eq!(b.diff_window_for_test(169, 2, AVAIL, &args), 150_000,
+        "csops's destination is x2 and its length x3");
+    assert_eq!(b.diff_window_for_test(170, 2, AVAIL, &args), 150_000,
+        "csops_audittoken shares csops's destination and length");
+    assert_eq!(b.diff_window_for_test(170, 4, AVAIL, &args), FLAT,
+        "x4 is csops_audittoken's audit token — a 32-byte copyin, not a destination");
+
+    // Ruling 1: `args[3]` is now also a 150,000-byte `bufferSize`, and the window must NOT follow it.
+    assert_eq!(b.diff_window_for_test(220, 2, AVAIL, &args), FLAT,
+        "getattrlist is kernel-bounded at 15,360 bytes (ATTR_MAX_BUFFER_LONGPATHS) and stays Ptr");
+    assert_eq!(b.diff_window_for_test(retrace_arch::SYS_FGETATTRLIST, 2, AVAIL, &args), FLAT,
+        "fgetattrlist shares getattrlist's packers and their bound, and stays Ptr");
+}
+
+// M34 control 3: the forwarded-count clamp REACHES the new rows. `tests/clamp.rs` proves
+// `clamp_count` as a pure function; nothing before this proved the `DestLen::Reg` arm is taken
+// for a given row, and that arm is the half of `Dest` that is live on this corpus (every measured
+// destination already fits the flat window — M34 spec §4). `hargs` is local to `forward_and_diff`,
+// so the clamp is observed through the kernel's own return value, the way `memdiff.rs`'s
+// `forward_and_diff_captures_a_read_larger_than_the_window` observes the window through `ret`.
+//
+// The call is `proc_info(PROC_INFO_CALL_LISTPIDS, PROC_ALL_PIDS, …)` and not a PIDINFO flavor,
+// because LISTPIDS takes no pid: `forward_and_diff` rewrites ANY register whose value lands in a
+// backing to a host pointer (spec §4b — a pid in 16384..=65535 hits the trampoline/page-table
+// backings), and a control that could be failed by the recorder's pid would measure that defect
+// instead of this arm. `proc_listpids` copies out `min(nprocs + 20, buffersize / 4)` pids and
+// returns the byte count (bsd/kern/proc_info.c); every Mac runs far more than 16 processes, so
+//   clamp taken   -> the kernel is handed buffersize = 64 and returns exactly 64, no error;
+//   clamp skipped -> it is handed 4160 and either faults on the copyout (err, EFAULT) or writes
+//                    past the 64-byte backing and returns more than 64.
+// `(64, false)` is produced by the clamp and by nothing else.
+#[test]
+fn the_clamp_reaches_proc_info() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    // Run to the guest's first syscall stop. That call is not forwarded and the guest is never
+    // resumed; the box only needs to be in a state where `forward_and_diff` may be called.
+    match b.run() {
+        Stop::Syscall { .. } => {}
+        other => panic!("expected the guest's first syscall stop, got {other:?}"),
+    }
+
+    const AVAIL: u64 = 64;
+    // The static stack backing is [STACK_TOP_IPA - GRANULE, STACK_TOP_IPA), so this destination
+    // has exactly AVAIL bytes of backing behind it.
+    let dest = retrace_box::STACK_TOP_IPA - AVAIL;
+    let (_, avail) = b.host_span_for_test(dest).expect("the static stack backing ends at STACK_TOP_IPA");
+    assert_eq!(avail as u64, AVAIL, "dest must sit exactly {AVAIL} bytes before the end of its backing");
+
+    let args: [u64; 8] = [
+        1,            // PROC_INFO_CALL_LISTPIDS
+        1,            // PROC_ALL_PIDS
+        0, 0,
+        dest,         // buffer
+        AVAIL + 4096, // buffersize: past the backing, so only the clamp can bring it to AVAIL
+        0, 0,
+    ];
+    // The scalar arguments must not themselves land in a backing, or this test would be
+    // measuring spec §4b's probe defect rather than the clamp. Every register but the
+    // destination, so the precondition is complete by construction rather than by listing.
+    for i in (0..8).filter(|&i| i != 4) {
+        let a = args[i];
+        assert!(b.host_span_for_test(a).is_none(), "scalar {a:#x} collides with a guest backing");
+    }
+
+    let (ret, err, _writes) = b.forward_and_diff(336, args);
+    assert_eq!((ret, err), (AVAIL, false),
+        "proc_info(LISTPIDS) with buffersize {} into a {AVAIL}-byte backing: the clamp must hand \
+         the kernel {AVAIL} and get {AVAIL} back; got ret={ret} err={err}", AVAIL + 4096);
+}
+
 // M29 Phase B. Two tests over ONE guest, split because a panic ends a test: the first drives only
 // the legal call and must complete, the second drives both and must abort on the second.
 //

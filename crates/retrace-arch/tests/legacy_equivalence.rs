@@ -120,6 +120,13 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     // cap is 64 MiB (rule 4) — the first Source row that is not a write/send family member. It
     // has no destination, so the withheld canary costs nothing; measured sizes are ≤ 2920 bytes.
     (550, View::ReadsGuestBuffer, "map_with_linking_np(regions, count, link_info, link_info_size): link_info is caller-sized, capped only at 64 MiB — exercised (every dynamic guest)"),
+    // M34: the two `Dest` rows the charter's destgaps entry owed (its third, getattrlist, stayed
+    // Ptr on a cited kernel bound — Ruling 1 — and so does not differ). Both exercised by every
+    // dynamic guest in the census; both measured inert for the window on landing (corpus maximum
+    // 368 and 1032 bytes against a 64 KiB flat window) and live for the forwarded-count clamp.
+    (336, View::DestBuffer, "proc_info(callnum, pid, flavor, arg, buffer, buffersize): buffer is a Dest of x5 bytes — exercised (every dynamic guest; corpus max 368)"),
+    (169, View::DestBuffer, "csops(pid, ops, useraddr, usersize): useraddr is a Dest of x3 bytes (CS_OPS_BLOB is unbounded below the window) — exercised (every dynamic guest; corpus max 1032)"),
+    (170, View::DestBuffer, "csops_audittoken(…): csops's shape plus a 32-byte token copyin — exercised (every dynamic guest; corpus max 1032)"),
 ];
 
 /// The BSD numbers, the mach traps (negative, as the two's-complement `u64` the trap carries), and

@@ -327,7 +327,7 @@ design, and the reconstruction caveat in full.
   the one behavioural change — descriptors translated for sixteen more syscalls — changes what the
   host kernel sees, never what is recorded.
 
-**Gate:** 570 passed / 0 failed / 2 ignored across 124 test binaries, **measured at M33** over all
+**Gate:** 572 passed / 0 failed / 2 ignored across 124 test binaries, **measured at M34** over all
 124 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
 `--workspace --all-targets` with `-D warnings`.
 See the testing note below for how that number is assembled. "124 test binaries" is 117 test
@@ -336,23 +336,24 @@ convention every milestone since M14 has counted by, kept for comparability and 
 nobody has to re-derive it. The ignored gates are unchanged at
 **two**: `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). Both
-are described under Known limits. M33 parked nothing new and un-parked nothing.
+are described under Known limits. M34 parked nothing new and un-parked nothing.
 
-Reconciled against M32's 556 / 0 / 2 over 121 **file-by-file rather than by sum**:
+Reconciled against M33's 570 / 0 / 2 over 124 **file-by-file rather than by sum**:
 
-| file | M32 | M33 | delta |
+| file | M33 | M34 | delta |
 |---|---|---|---|
-| `retrace-arch/src/lib.rs` | 30 | 36 | **+6** — three `arg_kinds` unit tests (Task 3), the `ioctl` decode test and the mach-trap selector pin (Task 5), and `pipe`'s `FdPair` assertion split into its own named test (Task 6) |
-| `retrace-arch/tests/census.rs` | 0 | 2 | **+2, a NEW binary** — the census is sorted and deduplicated; every census number has a row |
-| `retrace-arch/tests/legacy_equivalence.rs` | 0 | 3 | **+3, a NEW binary** — the both-directions sweep, the in-domain check, and the `exercised`/`unexercised` labels checked against the census. It also `#[path]`-includes `census.rs`, so census's two tests **run a second time** inside this binary: 5 results from 3 attributes |
-| `retrace/tests/unenum_e2e.rs` | 0 | 1 | **+1, a NEW binary** — the guest that issues an unenumerated syscall and is refused by name |
+| `retrace-arch/src/lib.rs` | 36 | 36 | 0 — rows and comments only; the fix wave's five `dest_buffer` view pins went into two existing tests |
+| `retrace-arch/tests/legacy_equivalence.rs` | 3 | 3 | 0 — three `EXPECTED_DIFFS` entries, no test |
+| `retrace-box/tests/truncguard.rs` | 19 | 21 | **+2** — `the_window_widens_for_the_m34_rows_and_not_for_getattrlist` (Task 2) and `the_clamp_reaches_proc_info` (Task 3, control 3) |
 
-Every other file unchanged, and `--bins` **11 → 11**. **Three new test binaries**, 121 → 124. The
-count closes at both ends, and the two ends must be read separately this time: the tree holds
-**570** `#[test]` attributes = 568 runnable + 2 ignored (M32 held 558 = 556 + 2), while the run
-reports **570** passed = 568 + the 2 census tests that run twice. The two 570s are a coincidence of
-the same +2, not the same number. (A bare `grep -c '#\[test\]'` says 571, because a comment in
-`legacy_equivalence.rs` mentions the attribute in prose; the file has three.)
+Every other file unchanged, `--bins` **11 → 11**, and **no new test binary**, 124 → 124. The
+count closes at both ends, and the two ends must still be read separately: the tree holds
+**572** `#[test]` attributes = 570 runnable + 2 ignored (M33 held 570 = 568 + 2), while the run
+reports **572** passed = 570 + the 2 census tests that run twice (`census.rs` executes in its own
+binary and again inside `legacy_equivalence`'s `#[path]` include). The two 572s are, as the two
+570s were, a coincidence of the same +2, not the same number. (A bare `grep -c '#\[test\]'` says
+573, because a comment in `legacy_equivalence.rs` mentions the attribute in prose; the file has
+three.)
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
 lesson). `retrace` ran **per-target** — sixty `--test <name>` invocations in three groups, because
@@ -449,8 +450,25 @@ These are real and current, not aspirational gaps.
   — **identical** to `sysctl`'s, not one lower as this milestone's own plan and spec first said. That
   error survived a review that checked all five new entries against the SDK, because raw-versus-libc
   argument shape is invisible in a man page; it was caught only by calling `syscall(274, …)` against
-  the live kernel with libc's 5-arg wrapper bypassed. **Three still get a flat 64 KiB**: `proc_info`
-  (336); `getattrlist`/`fgetattrlist` (220/228); `csops` (169/170).
+  the live kernel with libc's 5-arg wrapper bypassed.
+  **M34 closes that list**, by two mechanisms: `proc_info` (336) and `csops`/`csops_audittoken`
+  (169/170) gained `Dest` rows — their blob and list callnums are bounded only by the caller's
+  length, so the window now follows it and the forwarded count is clamped to the backing; and
+  `getattrlist`/`fgetattrlist` (220/228) turned out not to belong on the list at all, because the
+  kernel rejects with `ENOMEM` before writing anything when the packed result exceeds
+  `ATTR_MAX_BUFFER_LONGPATHS` (15,360 bytes) — a cited bound four times inside the window, so they
+  stay `Ptr` and a test pins them there. The corpus maximum across all five, measured 2026-09-13
+  over 851 dispatches from 76 guests, is 1,052 bytes: both new rows are inert for the window today.
+  The clamp is **not** inert: on every dynamic guest (76 of 76) dyld's `proc_info(SET_DYLD_IMAGES)`
+  destination `0x1ec6f7f80` sits `0x3f80` into a shared-cache page whose backing is that one 16 KiB
+  page, so the forwarded `buffersize` is rewritten 368 → 128 — measured through the
+  `RETRACE_REGCLAMP=1` channel M34's fix wave added to the `Reg` arm (`[M34 REGCLAMP] syscall 336
+  count 368 avail 128 dest 0x1ec6f7f80 backing [0x1ec6f4000,0x1ec6f8000)`, once per run on
+  `hello_dyn` and `jq`). No recorded byte changes: that call transfers nothing, and from inside
+  retrace the kernel rejects it before reading the size (see the owed list later in this section).
+  Every `csops` destination and every other `proc_info` destination is on the dyn stack and fits.
+  Measuring that also found a defect outside M34's scope, recorded later in this section (the
+  pid-collision probe).
   **The clamp M27 and M28 both left owed is paid, and by refusing rather than clamping.** `sysctl`'s
   `*oldlenp` is an *in-out* length — the guest writes how much room it has, the kernel writes back
   how much it used — so silently clamping it would tell the kernel a smaller buffer than the guest
@@ -599,9 +617,30 @@ These are real and current, not aspirational gaps.
   unexecuted, and §4c of the M33 spec measured it **still inert**: the one corpus call that could
   have made it live, a `Source` `newp` on the same `sysctl` whose `KERN_PROC_ALL` `Dest` exceeds
   the window, turned out to be `Ptr`, so no call in the corpus carries both a `Source` and a
-  destination the whole-syscall exclusion would cost); **M34's three `Dest` rows** (`proc_info`,
-  `getattrlist`/`fgetattrlist`, `csops` — deliberately left `Ptr`, because each is a length
-  measurement the charter assigns to M34); **nested-pointer translation** (`NestedSource` rows are
+  destination the whole-syscall exclusion would cost);
+  **the pid-collision probe** (M34 §4b: `forward_and_diff` rewrites *any* register whose value
+  lands in a guest backing to a host pointer, and the trampoline/page-table backings occupy
+  `[0x4000, 0x10000)` on the dynamic path, so whenever the recorder's pid is in 16384..=65535 —
+  roughly half of them — every `csops` returns `ESRCH` and every `proc_info(PIDINFO)` returns
+  `ESRCH`; measured on `hello_dyn` at pid `0x6a30`. Record and replay agree, so the oracle cannot
+  see it; its fix is for `forward_and_diff` to skip `Scalar` positions, whose precondition is a
+  `Scalar` audit of the whole table — its own milestone, and a hypothesis for the sweep's
+  intermittent row that M36 is to test by recording the recorder's pid beside each row, knowing
+  the symptom is time-varying with the machine's pid counter, not merely per-run);
+  **`SET_DYLD_IMAGES` (336/15) serviced above the trace** (the same `hello_dyn` recording shows
+  it returning `EINVAL`, but that is *not* pid-caused — M34's first draft said it was: the
+  forwarded call names *retrace's* task, whose dyld info retrace's own dyld already finalised
+  (`task_set_dyld_info`'s three-call rule, xnu `osfmk/kern/task.c`), so it fails `EINVAL` with
+  any pid and any size, measured natively at pid `0x107dc`; and if it ever could succeed it would
+  point retrace's own dyld info at guest memory, so it should be synthesised `0` rather than
+  forwarded — the same family as every "on self" `proc_info`/`csops` being answered about
+  retrace's process rather than the guest's); **the per-page shared-cache backing** (any `Dest`
+  destination in cache DATA that straddles a 16 KiB boundary is clamped at the boundary, because
+  cache pages are individual backings — measured at `SET_DYLD_IMAGES` (368 → 128), harmless there
+  only because that call transfers nothing; the same geometry would truncate a `CS_OPS_BLOB`, a
+  `LISTPIDS` or a `read` into such a buffer — a fidelity hazard that pre-dates M34, whose fix is
+  contiguous host backing for the shared-region window, not a table change; no corpus guest does
+  it today); **nested-pointer translation** (`NestedSource` rows are
   forwarded exactly as before — `writev`'s `iov_base`s EFAULT in retrace's process, which is how
   `/bin/ed`'s stderr message is lost — and `NestedDest` rows are refused exactly as before);
   **`pipe`'s return** (`Ret::FdPair` is documentation: `host_svc` captures `x0` and the carry only,
