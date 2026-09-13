@@ -282,6 +282,40 @@ fn the_clamp_reaches_proc_info() {
          the kernel {AVAIL} and get {AVAIL} back; got ret={ret} err={err}", AVAIL + 4096);
 }
 
+// M35 Control 1: `diff_memory` used to compare a recorded region only up to its replay backing
+// (`.min(avail)`) and report the excess as nothing — the one place the terminal full-memory oracle
+// could return `None` on bytes it never looked at. A region built to overrun a 64-byte backing by
+// 64 bytes, whose first 64 bytes match the guest exactly, must now come back as a divergence
+// naming all three numbers. Under the old clamp this returned `None`: it compared the 64 that
+// match and never saw the 64 that have no backing to compare against.
+#[test]
+fn a_recorded_region_longer_than_its_replay_backing_is_a_divergence() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    match b.run() {
+        Stop::Syscall { .. } => {}
+        other => panic!("expected the guest's first syscall stop, got {other:?}"),
+    }
+
+    const AVAIL: u64 = 64;
+    let dest = retrace_box::STACK_TOP_IPA - AVAIL;
+    let (_, avail) = b.host_span_for_test(dest).expect("the static stack backing ends at STACK_TOP_IPA");
+    assert_eq!(avail as u64, AVAIL, "dest must sit exactly {AVAIL} bytes before the end of its backing");
+
+    // The first 64 bytes are the guest's own, so a compare that stops at the backing sees no
+    // mismatch; the next 64 have nothing behind them at all.
+    let mut bytes = b.read_bytes_for_test(dest, AVAIL as usize);
+    bytes.extend(std::iter::repeat_n(0u8, AVAIL as usize));
+    assert_eq!(bytes.len(), 128);
+    let region = retrace_trace::Region { ipa: dest, bytes };
+
+    let msg = b.diff_memory(&[region]).expect(
+        "a 128-byte recorded region over a 64-byte backing must be reported as a divergence, not \
+         compared up to the backing and passed — that silence is the M1 hole this test closes");
+    assert!(msg.contains("128 bytes") && msg.contains("holds only 64"),
+        "the divergence must name the recorded length and the backing; got: {msg}");
+}
+
 // M29 Phase B. Two tests over ONE guest, split because a panic ends a test: the first drives only
 // the legal call and must complete, the second drives both and must abort on the second.
 //
@@ -484,8 +518,9 @@ fn the_canary_catches_zeros_written_over_zeros() {
     }
 }
 
-// M30 fix round 1, defect (a): the fill is UNCONDITIONAL but the write-capture loop runs only when
-// the syscall succeeded, so a failing call used to leave the canary in guest memory permanently.
+// M30 fix round 1, defect (a): the fill is UNCONDITIONAL but the write-capture loop (until M35)
+// ran only when the syscall succeeded, so a failing call used to leave the canary in guest memory
+// permanently.
 // `forward_and_diff` is record-side only — replay applies recorded writes instead — so leaked bytes
 // are memory the recording has and the replay does not, i.e. a final full-memory divergence. 36
 // such restores were measured in one `jq -n '1+1'` recording, so this path is ordinary traffic
@@ -526,7 +561,11 @@ fn a_failing_syscall_still_restores_the_canary() {
                 let (_ret, err, writes) = b.forward_and_diff(retrace_arch::SYS_OPEN, a);
                 assert!(err, "precondition: opening {path:#x} as a relative path must FAIL, or this \
                               test drives the success path it is not about");
-                assert!(writes.is_empty(), "a failed syscall captures nothing");
+                assert!(writes.is_empty(),
+                    "a failing `open` of a nonexistent relative path writes nothing into its path \
+                     buffer — a per-syscall kernel fact, measured; NOT that the capture loop is \
+                     skipped on error, which since M35 it is not: a failing syscall that writes \
+                     (`failsysctl`, `failproc`) captures its writes");
 
                 assert_eq!(b.read_bytes_for_test(base, band), pre,
                     "the canary must be restored on the FAILING path too — a leak here is bytes \

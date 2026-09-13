@@ -84,7 +84,7 @@ fn main() {
     assert!(status.success(), "bigwrite guest build failed");
 
     // M28: a guest whose sysctl FAILS with an undersized buffer, to measure whether the kernel
-    // writes anyway — the `if !err` path, where write capture AND the guard band are both off.
+    // writes anyway — the failing-syscall path (capture and band skipped there until M35).
     let src = format!("{}/asm/failsysctl.s", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/failsysctl");
     println!("cargo:rerun-if-changed={src}");
@@ -92,6 +92,16 @@ fn main() {
         .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
         .status().expect("clang failsysctl");
     assert!(status.success(), "failsysctl guest build failed");
+
+    // M35: a guest whose sysctl(kern.proc.all) fails ENOMEM AFTER the kernel copied one full
+    // kinfo_proc into its 648-byte buffer — the data half of the `if !err` hole.
+    let src = format!("{}/asm/failproc.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/failproc");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang failproc");
+    assert!(status.success(), "failproc guest build failed");
 
     // M29: a guest issuing a legal NULL-oldp sysctl (size query) followed by one whose *oldlenp
     // (1 TiB) is far larger than any backing — the fixture for the DerefU64 refusal.
