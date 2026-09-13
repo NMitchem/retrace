@@ -443,8 +443,9 @@ These are real and current, not aspirational gaps.
   elr=0x1804af110`, rc/rp 4/3: a `brk #1` in libdispatch `_firehose_task_buffer_init+0x12c`, the
   `elr` libsystem_kernel `__proc_info+8`, taken right after the guest's own
   `proc_info(2, <recorder pid>, 17 = PROC_PIDUNIQIDENTIFIERINFO)` was answered `ESRCH` — M34 §4b's
-  pid mis-translation, 11–12 self-pid `ESRCH` answers in every colliding trace and 0 in every
-  non-colliding one. The **RCV shape** is `RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34:
+  pid mis-translation, 11–12 self-pid `ESRCH` answers in every colliding trace of the six §4b
+  rows (5 in `csh`/`tcsh`, whose wall is `dup2` in every regime) and 0 in every non-colliding one.
+  The **RCV shape** is `RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34:
   options 0x404000102: message-queue send without the send+rcv RPC shape`, rc/rp 4/3, the pc
   `mach_msg2_trap+8`: a *receive*-shaped message-queue call (`MACH64_SEND_MQ_CALL |
   MACH64_RCV_MSG`, no `MACH64_SEND_MSG`) that `Route::Unsupported` keeps fail-loud, first seen at
@@ -456,30 +457,23 @@ These are real and current, not aspirational gaps.
   and the RCV shape alike is M23's *serviced* refusal, survived by every guest that reaches it and
   the cause of neither. Evidence: `docs/sweep-evidence/2026-09-13-m36/<basename>.{O,L,I}.{rec,rp}.err`,
   verbatim, with the symbolication (a `dladdr` lookup and the instruction words at the pc — `lldb`
-  and `atos` both hung indexing the shared cache) and the counting rules in that directory's README.
+  printed nothing for ten minutes at `image list` and `atos -p` the same, both killed; the
+  reading: indexing the shared cache) and the counting rules in that directory's README.
   The old label "replay diverged" appears in no gate reason and in none of the table's cells: the
   replay of a recording that ended at a `RECORD ERROR` *always* reports a `DIVERGENCE` — it runs out
   of events one past the trace's last syscall, or re-reports the same exception at the same pc —
   and in every cell where a replay ran (the 17 `rc=4` traces and the identical crash) record and
   replay agreed, the replay re-reporting the recorder's own stop.
-  **The §4b collision window is `[0x4000, 0x18000)`, not `[0x4000, 0x10000)` — about 82 % of the
-  pid space, and guest-dependent.** Run O was designed as the non-colliding regime (pids above
-  `0x10000`) and was not one: every kept colliding trace (8 binaries × 2 runs, 16 of 16) has a
-  `mach_vm_map(0x8000, flags 0x49000001)` — tag 73, libSystem's `os_alloc_once` slab — that
-  `first_fit` places at IPA `0x10000`, in the gap after the L1 page table, *before* the guest's
-  first self-pid call. So at the pid-carrying calls the probe's backings are contiguous over
-  `[0x4000, 0x18000)` = pids 16384..=98303; the non-colliding pids are 1..16383 and 98304..99998.
-  M35's out-of-range probes reached the RCV wall because their pids (`0x257f`–`0x2662`) were
-  *below* `0x4000`, not because they were above `0x10000`. The set is whatever a guest has mapped
-  below `0x100000` before its own pid-carrying calls, so "outside one band" is not a regime; the
-  fix M34 §4b's own text names — a `Scalar` argument is never a pointer — is the only
-  regime-independent one, and its positive control must use a pid inside `[0x10000, 0x18000)` as
-  well as one inside `[0x4000, 0x10000)`.
+  **The §4b collision window is `[0x4000, 0x18000)`, not `[0x4000, 0x10000)`** — about 82 % of
+  the pid space, and guest-dependent; the mechanism (the guest's own `os_alloc_once` slab,
+  first-fit-mapped at `0x10000` before its first self-pid call), the two non-colliding pid bands,
+  which of M35's and M36's runs fell where, and the fix's two-band positive control are in the
+  pid-collision entry below.
   **The `brk` is libdispatch's, and it is a §4b consequence, not a post-refusal wall of its own.**
   From M23 to M35 the five `launchctl`-group rows were believed to reach a `brk` *because of* the
   serviced refusal (M23's "the other four `brk` regardless of which of seven refusal codes is
-  returned", `crates/retrace-core/src/machmsg.rs:97–99`), and the M36 spec's own first reading,
-  taken at pids `0x10806`–`0x10887` — inside the slab — called the five class C at that `brk`.
+  returned", `crates/retrace-core/src/machmsg.rs:97–99`), and the M36 spec's own first reading
+  called the five class C at that `brk`.
   Measured: the word at `0x18035f084` is `brk #1` on the outlined crash path after
   `_firehose_task_buffer_init`'s `retab`, the `elr` is `__proc_info+8`, and in every `brk` trace
   (6 rows × 2 colliding runs) the last landmark is `proc_info(2, <pid>, 17)` → `ESRCH`. With a
@@ -495,8 +489,8 @@ These are real and current, not aspirational gaps.
   malloc crash, 71 landmarks, 11 `ESRCH` — the trace ends 22 landmarks before L's wall, so it
   lacks three of L's other failures and the twelfth self-pid call, the `proc_info(2, pid, 17)` the
   `brk` path dies on. The O and I landmark sequences are identical through #248 and fork at #249,
-  inside a `gettimeofday` polling loop whose *recorded replies* differ (16 iterations against 9,
-  different `tv_sec`), and within each run record and replay agree bit-for-bit: the crash is a
+  inside a `gettimeofday` polling loop whose *recorded replies* differ, and within each run
+  record and replay agree bit-for-bit: the crash is a
   terminal `Event::Crash` with its final snapshot, reproduced by replay; the `far` varies between
   runs of the crash face (`0x2000050050` in run I, `0x6000050040` in the Task 3 control) while pc
   and esr do not, and replay reproduces each run's `far`. The reading is that a forwarded input
@@ -514,9 +508,10 @@ These are real and current, not aspirational gaps.
   changing anything about retrace. The `identical fault` rows are still counted in `pass` so the
   tally series 46/8 ↔ 45/9 stays comparable across M33–M36; the label on the line is the correction.
   M22's four named causes are all accounted for — the `pc=0x4204` group (13) and the `msgh_id` 412
-  group (4) were cleared at M23, the `brk` group is the §4b row above, and **`ps` was fixed at
-  M27**. It was published here from M22 through M26 as "the oracle catching nondeterminism", a claim
-  that could not have been true, since replay never *executes* a syscall, only applies recorded
+  group (4) were cleared at M23 (the 13-group's residue, the `brk`, is the §4b rows above), the
+  `dup2` pair is the `csh`/`tcsh` rows, and **`ps` was fixed at M27**. It was published here
+  from M22 through M26 as "the oracle catching nondeterminism", a claim that could not have been
+  true, since replay never *executes* a syscall, only applies recorded
   writes, so a process list cannot vary between the two runs; M26 corrected the *description* (the
   real cause is the truncating diff window) without closing it, and M27 closed it: `ps` sizes its
   `sysctl(KERN_PROC_ALL)` buffer at 205,416 bytes, `retrace_arch::dest_buffer` now knows that length
@@ -723,12 +718,14 @@ These are real and current, not aspirational gaps.
   `[0x4000, 0x10000)` on the dynamic path, and M36 measured that the guest's own `os_alloc_once`
   slab is first-fit-mapped at `0x10000` before its first self-pid call, so at the pid-carrying
   calls the collision window is `[0x4000, 0x18000)` — recorder pids 16384..=98303, about 82 % of
-  the pid space — and it is guest-dependent, being whatever the guest has mapped below `0x100000`
-  at the moment of the forward. Inside it every `csops` and every `proc_info(PIDINFO)` on the
-  guest's own pid returns `ESRCH`: measured on `hello_dyn` at pid `0x6a30`, and 11–12 self-pid
-  `ESRCH` in every colliding sweep trace against 0 in every non-colliding one. Record and replay
-  agree, so the oracle cannot see it. Downstream of it, on six corpus rows, are the two faces the
-  sweep table above shows — libdispatch's `brk` on the failed `proc_info(2, pid, 17)`, and
+  the pid space; the non-colliding pids are 1..16383 and 98304..99998, and M35's out-of-range
+  probes (`0x257f`–`0x2662`) were in the first band while M36's run O (`0x11EDD`–`0x126A8`) was
+  inside the slab — and it is guest-dependent, being whatever the guest has mapped below
+  `0x100000` at the moment of the forward, so "outside one band" is not a regime. Inside it
+  every `csops` and every `proc_info(PIDINFO)` on the guest's own pid returns `ESRCH`: measured on `hello_dyn` at pid `0x6a30`, and 11–12 self-pid
+  `ESRCH` in every colliding sweep trace of the six §4b rows (5 in `csh`/`tcsh`) against 0 in
+  every non-colliding one. Record and replay agree, so the oracle cannot see it. Downstream of
+  it, on six corpus rows, are the two faces the sweep table above shows — libdispatch's `brk` on the failed `proc_info(2, pid, 17)`, and
   `dddiagnose`'s identical malloc crash — so this one defect is what stands between those six and
   the RCV-shaped wall behind them; which of the two faces a colliding run takes is the open
   question attached here. Its fix is for `forward_and_diff` to skip `Scalar` positions — a

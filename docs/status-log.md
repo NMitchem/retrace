@@ -7902,13 +7902,13 @@ discipline rather than a decision". M36 is a measurement milestone. It changed n
 branch's `crates/` diff against `main` is one new test file of eight `#[ignore]`d gates and nothing
 under any `crates/*/src`; the only other edit is the sweep *harness*, `tools/apple-sweep.sh`, which
 is not retrace. It taught the harness to print why a row fails and to keep the evidence, ran the
-sweep three times with the recorder's pid steered into three regimes, symbolicated the `brk` every
-Apple-binary failure since M23 had been believed to reach, and read one class off the kept evidence
+sweep three times with the recorder's pid steered into three regimes, symbolicated the `brk` the five
+`launchctl`-group rows had been believed to reach since M23, and read one class off the kept evidence
 for each of the nine rows that are not clean. **What the evidence said was not what the spec
 expected.** The `brk` is not libxpc's and not a wall of its own: it is libdispatch's
 `_firehose_task_buffer_init+0x12c` crashing on a `proc_info` of the guest's own pid that M34 §4b's
 register probe had forwarded as a host pointer — the same defect M35 had found under `dddiagnose`,
-now under all six of the `launchctl`-group rows. And the pid window that defect covers is
+now under the five `launchctl`-group rows and `dddiagnose`. And the pid window that defect covers is
 `[0x4000, 0x18000)`, about 82 % of the pid space, not the `[0x4000, 0x10000)` M34 computed from the
 fixed layout, because the guest maps its own `os_alloc_once` slab into the gap at `0x10000` before
 it ever asks about its pid — which is why the run the brief designed as the non-colliding one was
@@ -7917,7 +7917,7 @@ forward pointers; M23's, M34's and M35's lines stand as written.
 
 The milestone's own numbers: **three** full sweep runs of the 54-entry corpus (O, L, I; tallies
 45/9, 45/9, 46/8; the same 45 PASS rows on every run); **nine** non-clean rows, **27** row-by-run
-cells, every one with its stderr kept and **46** evidence files (46,791 bytes) committed under
+cells, every one with its stderr kept and **46** evidence files (46,778 bytes) committed under
 `docs/sweep-evidence/2026-09-13-m36/`; **one** symbolication of **four** shared-cache addresses;
 **eight** parked gates in **one** new test binary (`crates/retrace/tests/apple_walls_e2e.rs`, 55
 lines), run once with `--ignored` and **8 of 8** red for the measured reason; **two** classes of the
@@ -8462,6 +8462,12 @@ The spec's three, and the run's, each with what it cost if wrong where the ledge
   one corrected reason stated as corrections with evidence, never as if always known; class B →
   M37, class C parked and not routed, class D retired; the gate figures copied from the measured
   section of the numbers file and never written from the prediction.
+- **At close — M37's acceptance criteria.** Two positive-control criteria in the routing and the
+  owed list follow from the measurement but are not themselves measured: `dddiagnose`'s twelve
+  self-pid `csops`/`proc_info` calls answer `0` after the §4b fix, from any pid; and all six
+  B-then-C rows then sit at the RCV wall on every run (0 self-pid `ESRCH` ⇒ the RCV wall — run L
+  6 of 6, M35 10 of 10). Ruled in as the routing's acceptance criteria. Cost if wrong: M37 chases
+  a criterion the measurement did not license — one sentence to retract.
 
 ### The parked gates, and Control 2
 
@@ -8566,8 +8572,9 @@ class B, in the order the table gives"):
    `Scalar` argument is never a pointer (consult M33's `arg_kinds`; the precondition is the `Scalar`
    audit of the whole table M34 named). The fix's positive control must use a pid inside
    `[0x10000, 0x18000)` as well as one inside `[0x4000, 0x10000)`, and `dddiagnose`'s twelve
-   self-pid calls must answer `0` after it, from any pid. After it lands, all six rows should sit
-   at the RCV wall on every run.
+   self-pid calls must answer `0` after it, from any pid; after it lands, all six rows should sit
+   at the RCV wall on every run (both ruled at close — the routing's acceptance criteria, not a
+   measurement; the Rulings subsection).
 
 Class **C** — the RCV-shaped message-queue `mach_msg2` behind the same six rows — is **parked, not
 routed** (Ruling 1); a decision is owed there (refuse it deterministically as the SEND|RCV shape
@@ -8639,7 +8646,8 @@ M35's list, item by item, with what this milestone discharged struck by name and
   message-queue shape, then "the `brk` M23 parked". This milestone measured the third to be a
   downstream face of the first, not a wall of its own (correction (b) above), and found the same
   two walls behind five more rows. So what is owed is **two** walls on six rows: **§4b** (class B,
-  routed to M37 — after it, all six should sit at the RCV wall on every run, from any pid); then
+  routed to M37 — after it, all six should sit at the RCV wall on every run, from any pid: ruled
+  at close as the routing's acceptance criterion, not a measurement); then
   the **RCV-shaped message-queue `mach_msg2`** (`MACH64_SEND_MQ_CALL | MACH64_RCV_MSG`, no
   `MACH64_SEND_MSG`), which `Route::Unsupported` keeps fail-loud because it "has never been
   observed" (`machmsg.rs:100–103`) — observed at M35 once and here 6 of 6 in run L, so a decision
@@ -8652,7 +8660,8 @@ M35's list, item by item, with what this milestone discharged struck by name and
   positions — a `Scalar` argument is never a pointer, whatever band it falls in — the `hello_dyn`
   table as its positive control (#145 returns 0 with 4 bytes captured), `dddiagnose` as a second
   (its twelve self-pid `csops`/`proc_info` calls, 75 `err = true` landmarks against 63, must answer
-  `0` after the fix from any pid), **and a third at a pid inside `[0x10000, 0x18000)`**, the band
+  `0` after the fix from any pid — ruled at close as an acceptance criterion, not a measurement),
+  **and a third at a pid inside `[0x10000, 0x18000)`**, the band
   M34's window did not include and this milestone's run O fell in. The part M34 asked of M36 — the
   recorder's pid beside each sweep row — is done. Two questions attach here, both open: why an
   in-range `dddiagnose` run takes the identical malloc crash rather than the `brk` (Finding 3: the

@@ -306,7 +306,7 @@ re-run or discarded. Tallies: O `pass=45 fail=9 skip=0`, L `45/9/0`, I (17209–
 range; each run about four minutes. The labels that differ between runs: O vs I on `dddiagnose`
 only (the `brk` → the identical fault); O vs L on exactly the six `rc=4` rows (the `brk` → the RCV
 shape). Every number in §3b's "the two runs" is superseded by these three; §5b's `.O.`/`.I.` file
-pairs are `{O,L,I}` — 46 files, 46,791 bytes, committed.
+pairs are `{O,L,I}` — 46 files, 46,778 bytes, committed.
 
 ### 11.3 Corrections — two beliefs retired by measurement, one reason corrected
 
@@ -399,8 +399,11 @@ three runs, class `dddiagnose` run I as B and never a pass, and correct M34 §4b
 pointer; the Task 3 pre-dispatch amendment retiring the plan's reason templates; the `far` ruling
 (record == replay within the run, forwarded-input dependence, one clause added to the `dddiagnose`
 reason); three scoped re-reviews replaced by the controller's own checks; the gate launched on
-`0766a76` with Task 4 docs-only; and Task 4's amendment (three runs everywhere; corrections stated
-as corrections; B → M37, C parked, D retired; gate figures only from the measured section).
+`0766a76` with Task 4 docs-only; Task 4's amendment (three runs everywhere; corrections stated
+as corrections; B → M37, C parked, D retired; gate figures only from the measured section); and,
+at close, M37's two acceptance criteria ruled in (`dddiagnose`'s twelve self-pid calls answer `0`
+after the §4b fix from any pid; all six rows then sit at the RCV wall) — they follow from the
+measurement but are not a measurement.
 
 ### 11.7 Routing
 
