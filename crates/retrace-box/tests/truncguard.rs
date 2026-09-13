@@ -269,8 +269,10 @@ fn the_clamp_reaches_proc_info() {
         0, 0,
     ];
     // The scalar arguments must not themselves land in a backing, or this test would be
-    // measuring spec §4b's probe defect rather than the clamp.
-    for &a in &[args[0], args[1], args[2], args[3], args[5]] {
+    // measuring spec §4b's probe defect rather than the clamp. Every register but the
+    // destination, so the precondition is complete by construction rather than by listing.
+    for i in (0..8).filter(|&i| i != 4) {
+        let a = args[i];
         assert!(b.host_span_for_test(a).is_none(), "scalar {a:#x} collides with a guest backing");
     }
 

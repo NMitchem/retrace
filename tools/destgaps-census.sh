@@ -20,11 +20,13 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 [ -x "$RAW" ] || { echo "no retrace binary at $RAW" >&2; exit 2; }
 BIN=$RAW-census-$$
+# The trap is installed BEFORE the copy, so a codesign failure cannot exit past it and leave
+# the `$BIN` copy behind in `target/` (M34 review minor, fixed in the fix wave).
+TMP=$(mktemp -d -t retrace-census)
+trap 'rm -rf "$TMP" "$BIN"' EXIT INT TERM
 cp "$RAW" "$BIN"
 codesign -s - -f --entitlements "$ROOT/retrace.entitlements" "$BIN" >/dev/null 2>&1 || {
     echo "codesign failed for $BIN" >&2; exit 2; }
-TMP=$(mktemp -d -t retrace-census)
-trap 'rm -rf "$TMP" "$BIN"' EXIT INT TERM
 : > "$OUT"
 
 TIMEOUT_SECS=${RETRACE_SWEEP_TIMEOUT:-30}
