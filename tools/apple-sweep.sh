@@ -10,20 +10,24 @@
 # machine-readable line. Labels, in evaluation order (spec §3a):
 #   FAIL … (timed out after Ns recording)              unchanged
 #   FAIL … (recorder panicked: <line>)                 <line> = rec.err's first `panicked at` line
+#       joined with the line after it (Rust prints the panic message on its own line)
 #   FAIL … (record error, rc=4: <line>)                new; <line> = rec.err's first `RECORD ERROR:`
 #       line. The CLI exits 4 on RECORD ERROR and leaves a trace with no terminal event, so its
 #       replay ALWAYS prints a DIVERGENCE line; replay is still run (that line is evidence, kept
 #       on the ROW line) but the label is the record error, not "replay diverged".
 #   FAIL … (timed out after Ns replaying)              unchanged
 #   FAIL … (replay diverged at landmark N)             the landmark added
-#   PASS … (identical fault, rc=N)                     new; rc = rp ≠ 0 with equal stdout is still
-#       counted in `pass` (TALLY stays comparable with M33–M35's) but it is said on the line
-#   PASS …                                             rc = rp = 0, stdout equal
+#   PASS … (identical fault, rc=N)                     new; rc = rp ≥ 128 (a signal death on both
+#       sides) with equal stdout is still counted in `pass` (TALLY stays comparable with
+#       M33–M35's) but it is said on the line
+#   PASS …                                             rc = rp < 128, stdout equal (/bin/false's 1 is
+#       the guest's own exit status, not a fault)
 #   FAIL … (record=rc replay=rp)                       unchanged
 #   ROW<TAB>path<TAB>result<TAB>rc<TAB>rp<TAB>recpid<TAB>landmark<TAB>rec_reason<TAB>rp_line
 #       rp/landmark are `n/a` when there was no replay/divergence; recpid is the recorder's own
-#       pid (see the record invocation); rec_reason/rp_line are the stderr lines the labels quote,
-#       empty when none. TALLY is unchanged in shape.
+#       pid (see the record invocation); rec_reason/rp_line are the stderr lines the labels quote
+#       (rec_reason: the `RECORD ERROR:` line, else the `panicked at` line joined with the message
+#       line after it, cut to 300 chars), empty when none. TALLY is unchanged in shape.
 #
 # Usage: tools/apple-sweep.sh [path-to-retrace-binary]
 #        defaults to target/aarch64-apple-darwin/debug/retrace
@@ -189,8 +193,15 @@ while IFS= read -r g <&3; do
     if [ -n "${RETRACE_BANDSHRINK:-}" ] && grep -qa "\[M28 BANDSHRINK\]" "$TMP/rec.err"; then
         grep -a "\[M28 BANDSHRINK\]" "$TMP/rec.err" | sed "s#^#$g: #"
     fi
-    # M36: derive what the old ladder threw away, before deciding anything.
-    rec_reason=$(grep -a -m1 -E 'RECORD ERROR:|panicked at' "$TMP/rec.err" | cut -c1-200)
+    # M36: derive what the old ladder threw away, before deciding anything. A RECORD ERROR is one
+    # line; a panic is two — Rust prints `thread 'main' … panicked at <file>:<line>:` and then the
+    # message on the next line, and the message (which assert, which syscall) is the part worth
+    # reading — so the panic case joins the pair with a space. Tried in that order because a
+    # recorder that hits a RECORD ERROR does not also panic, and vice versa.
+    rec_reason=$(grep -a -m1 'RECORD ERROR:' "$TMP/rec.err" | cut -c1-200)
+    if [ -z "$rec_reason" ]; then
+        rec_reason=$(grep -a -m1 -A1 'panicked at' "$TMP/rec.err" | tr '\n' ' ' | sed 's/ *$//' | cut -c1-300)
+    fi
     rp_line=""; landmark="n/a"; rp="n/a"
     if [ -e "$TMP/.timedout" ]; then
         echo "FAIL $g (timed out after ${TIMEOUT_SECS}s recording)"; fail=$((fail+1)); keep_row FAIL; continue
@@ -223,10 +234,13 @@ while IFS= read -r g <&3; do
         echo "FAIL $g (replay diverged at landmark $landmark)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     if [ "$rc" -eq "$rp" ] && cmp -s "$TMP/rec.out" "$TMP/rp.out"; then
-        if [ "$rc" -ne 0 ]; then
+        if [ "$rc" -ge 128 ]; then
             # M36: an identical FAULT on both sides is still counted a pass (the tally stays
             # comparable with M33–M35's), but it is said on the line: M35 found dddiagnose's
-            # rc=139 passes are retrace-induced crashes (M34 §4b), not the guest's own.
+            # rc=139 passes are retrace-induced crashes (M34 §4b), not the guest's own. "Fault"
+            # means signal death — the CLI exits 128+signo when the guest dies of one (139 =
+            # SIGSEGV) — so the threshold is 128: a designed non-zero exit (/bin/false's 1, a
+            # usage error's 64) is the guest's own status and stays a bare PASS, as before M36.
             echo "PASS $g (identical fault, rc=$rc)"; pass=$((pass+1)); keep_row PASS fault; continue
         fi
         echo "PASS $g"; pass=$((pass+1)); keep_row PASS; continue
