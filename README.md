@@ -350,8 +350,9 @@ nobody has to re-derive it. The ignored gates are **ten**: the two long-standing
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall) —
 plus the eight M36 parked in `apple_walls_e2e`, one per non-clean Apple-sweep row that is
 retrace's to fix or model, each reason the measurement that parks it. All ten are described under
-Known limits. M36 parked eight and un-parked nothing — the first milestone since M13 to add more
-than one ignored test — under the charter's authorised exception, and each of the eight was run
+Known limits. M36 parked eight and un-parked nothing — the first milestone to park more than one
+gate at once; every earlier step in the log's gate series moved the ignored count by at most
+one — under the charter's authorised exception, and each of the eight was run
 once with `--ignored` and failed for exactly the reason on it.
 
 Reconciled against M35's 575 / 0 / 2 over 125 **file-by-file rather than by sum** — one file

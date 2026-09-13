@@ -8613,8 +8613,8 @@ of M33–M35) and 10 ignored — the same 575 as M35's, because nothing runnable
 `grep -r '#\[test\]' crates | wc -l`: 576 → 584 (one non-attribute match, as at M34/M35). **The
 prediction made from source before the run was 575 / 0 / 10 over 126; the run matched it
 exactly.** Parked eight (the charter-authorised M36 exception, spec Ruling 3), un-parked nothing;
-the gate is the first since M13 to add more than one ignored test in a milestone, and each of the
-eight carries its measurement in its reason and was red under `--ignored` for it (Control 2).
+this is the first milestone to park more than one gate at once (every earlier step in this log's
+gate series moved the ignored count by at most one), and each of the eight carries its measurement in its reason and was red under `--ignored` for it (Control 2).
 
 ### What stays owed
 
