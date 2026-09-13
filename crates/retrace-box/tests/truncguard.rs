@@ -518,8 +518,9 @@ fn the_canary_catches_zeros_written_over_zeros() {
     }
 }
 
-// M30 fix round 1, defect (a): the fill is UNCONDITIONAL but the write-capture loop runs only when
-// the syscall succeeded, so a failing call used to leave the canary in guest memory permanently.
+// M30 fix round 1, defect (a): the fill is UNCONDITIONAL but the write-capture loop (until M35)
+// ran only when the syscall succeeded, so a failing call used to leave the canary in guest memory
+// permanently.
 // `forward_and_diff` is record-side only — replay applies recorded writes instead — so leaked bytes
 // are memory the recording has and the replay does not, i.e. a final full-memory divergence. 36
 // such restores were measured in one `jq -n '1+1'` recording, so this path is ordinary traffic
