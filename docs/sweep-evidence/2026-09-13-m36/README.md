@@ -45,7 +45,24 @@ gap after `PT_L1_IPA`'s backing. It precedes the first self-pid `csops` (#200), 
 pid-carrying calls the probe's backings are contiguous over `[0x4000, 0x18000)` = pids
 16384..=98303 — 82 % of the pid space, not "roughly half". Non-colliding pids: 1..16383 and
 98304..99998. M35's out-of-range probes were at `0x257f`–`0x2662`; the M36 spec §4 first reading
-was at `0x10806`–`0x10887` (inside the slab), which is why it saw five `brk`s.
+was at `0x10806`–`0x10887` (inside the slab), which is why it saw five `brk`s. The set is
+guest-dependent (it is whatever a guest maps below `0x100000` before its own pid-carrying calls),
+so "outside `[0x4000, 0x10000)`" is not a regime; the regime-independent fix M34 §4b names is to
+stop probing `Scalar` registers as pointers.
+
+**`dddiagnose` in three regimes** (`err` = `err=true` landmarks in the kept trace; self-pid
+`ESRCH` counted directly from the `csops`/`proc_info` landmarks carrying the recorder's pid):
+
+| run | recpid | result | `err` | self-pid `ESRCH` | last landmark before the stop |
+|---|---|---|---|---|---|
+| L | 2340 (`0x924`) | `RECORD ERROR: unsupported mach_msg2 … options 0x404000102` (RCV shape) | 63 | 0 | `mach_msg2` #378 |
+| O | 74909 (`0x1249d`) | `RECORD ERROR: … EC=0x3c … pc=0x18035f084` (the libdispatch `brk`) | 75 = 63 + 12 | 12 (169 ×7, 170 ×1, 336 ×4) | `proc_info(2, pid, 17)` → `ESRCH` #378 |
+| I | 18781 (`0x495d`) | `PASS (identical fault, rc=139)`: `guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045` both sides | 71 | 11 (169 ×7, 170 ×1, 336 ×3) | `csops(pid, 0, …)` → `ESRCH` #356 |
+
+The I row's label is the harness's retrace-induced-crash marker (spec §6 control 3), not a pass:
+record and replay agree, and the crash follows the mis-answered self-pid calls. Its 71 is not
+63 + 8: the I trace ends 22 landmarks before L's wall and lacks three of L's other `err`s and the
+twelfth self-pid call.
 
 ## Symbolication
 
