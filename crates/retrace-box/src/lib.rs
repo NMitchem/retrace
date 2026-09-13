@@ -3089,10 +3089,6 @@ impl Box_ {
         }
     }
 
-    /// Record-side memory-diff. For each arg that points into a mapped region, snapshot a
-    /// window (capped) and translate it to a host address; forward the real syscall via the
-    /// raw-svc shim; diff. Returns the full 64-bit x0, the BSD carry flag (`err`), and any
-    /// kernel writes. On error (`err`) no writes are captured — a failed syscall wrote nothing.
     /// Rewrite every guest fd operand of `num` in `args` to its host fd, in place.
     ///
     /// `translate_fds` has exactly ONE caller, `forward_and_diff`, and is its first statement —
@@ -3445,7 +3441,8 @@ impl Box_ {
         // `oldlen`. Nothing in this loop depends on `err`: the pre-image and the canary fill were
         // taken before `host_svc` on both paths, the restore below already ran on both, and
         // replay's generic arm has applied `writes` beside `err = true` since M0. What was
-        // skipped was the looking.
+        // skipped was the looking. (The bare block is the retired gate's braces, kept so the loop
+        // body keeps its history in `blame`.)
         let mut writes = Vec::new();
         {
             for (ipa, len, pre, pre_band, band) in windows.iter() {
@@ -3569,7 +3566,7 @@ impl Box_ {
             }
         }
         // M30: restore the canary bytes — a SEPARATE pass, after every band above has been checked,
-        // and outside the `if !err` so it runs on both paths. Two things force this shape, and both
+        // so it runs after the capture on both paths. Two things force this shape, and both
         // were measured on a `jq` recording rather than reasoned about:
         //
         // 1. **After all checks, never interleaved.** Two arguments of one call can hold the SAME
