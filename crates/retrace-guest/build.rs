@@ -84,7 +84,7 @@ fn main() {
     assert!(status.success(), "bigwrite guest build failed");
 
     // M28: a guest whose sysctl FAILS with an undersized buffer, to measure whether the kernel
-    // writes anyway — the `if !err` path, where write capture AND the guard band are both off.
+    // writes anyway — the failing-syscall path (capture and band skipped there until M35).
     let src = format!("{}/asm/failsysctl.s", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/failsysctl");
     println!("cargo:rerun-if-changed={src}");

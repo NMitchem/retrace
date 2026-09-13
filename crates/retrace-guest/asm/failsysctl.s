@@ -1,10 +1,12 @@
 // M28: a guest whose sysctl FAILS with a deliberately undersized buffer.
 //
-// `forward_and_diff` skips write capture entirely when the syscall sets the carry flag ("A failed
-// syscall wrote nothing to the guest's buffers"), and the M27 guard band lives INSIDE that same
-// `if !err` — so the detector is off on this path too. The README has named this hole since M27 and
-// named this exact suspect: sysctl with an undersized `oldp` returns ENOMEM and MAY copy out what
-// fits. Nothing has measured it.
+// Until M35, `forward_and_diff` skipped write capture entirely when the syscall set the carry flag
+// ("A failed syscall wrote nothing to the guest's buffers"), and the M27 guard band lived INSIDE
+// that same `if !err` — so the detector was off on this path too. The README had named this hole
+// since M27 and named this exact suspect: sysctl with an undersized `oldp` returns ENOMEM and MAY
+// copy out what fits. M35 measured it: the kernel writes `*oldlenp` (2 -> 0) on the ENOMEM path,
+// this guest's replay diverged at `oldlen` on the pre-M35 tree, and the capture now runs on the
+// failing path (`failsys_e2e`).
 //
 // This guest asks for kern.ostype ("Darwin") into a 2-byte buffer, then emits those 2 bytes. If the
 // kernel wrote despite failing, the recording shows them and a replay — which captured no writes —
