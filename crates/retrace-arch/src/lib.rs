@@ -143,12 +143,18 @@ pub enum DestLen {
 /// it answered at `e13eb17`, entry for entry, except where its `EXPECTED_DIFFS` says why.
 ///
 /// **Load-bearing kinds:** `Fd`, `Source`, `NestedSource`, `Dest`, `NestedDest` and `Ret::Fd`
-/// each change what the box does. **`Scalar`, `Path` and `Ptr` change nothing at runtime** —
-/// `forward_and_diff` probes `host_span` on all eight registers regardless — and are
-/// documentation until a later milestone consults them.
+/// each change what the box does. **`Scalar` is load-bearing since M37**: `forward_and_diff`
+/// forwards it verbatim and never probes it (M34 §4b). **`Path` and `Ptr` still change nothing
+/// at runtime** — they are probed like any register — and remain documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgKind {
     /// Not a memory reference: a count, a flag word, an offset, a signal number, a port name.
+    ///
+    /// Load-bearing since M37: `forward_and_diff` forwards a `Scalar` position verbatim and never
+    /// probes it with `host_span` (M34 §4b — a number that happened to equal a mapped guest IPA,
+    /// the recorder's own pid, used to reach the host kernel rewritten to a host pointer). So a
+    /// position marked `Scalar` must be provably NOT a pointer: one that is would now hand the
+    /// kernel a raw guest IPA, an `EFAULT` where there was none or a read of retrace's own memory.
     Scalar,
     /// A GUEST file descriptor — `translate_fds` rewrites it to the host's before forwarding.
     ///
@@ -757,8 +763,18 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_MUNMAP => row!(P, [Scalar, Scalar]),
         SYS_MPROTECT => row!(P, [Scalar, Scalar, Scalar]),
         // madvise(void *addr, size_t len, int behav): addr is a VM range the kernel neither reads
-        // nor writes as data. Forwarded — `host_span` rebases it onto the guest backing.
-        75 => row!(P, [Scalar, Scalar, Scalar]),
+        // nor writes as data (bsd/kern/kern_mman.c `madvise`: `madvise_sanitize` then
+        // `mach_vm_behavior_set(user_map, start, size, …)`, no copyin/copyout). FORWARDED, and the
+        // rebase is the load-bearing part: the host kernel applies `behav` to whatever lies at the
+        // forwarded address in RETRACE's address space, so `host_span` must rebase it onto the
+        // guest backing — which is why it is `Ptr` and not `Scalar`. M37's static audit found it
+        // `Scalar` (M33 wrote the row when every register was probed regardless, so the kind
+        // carried nothing); once `Scalar` means "never probed", a raw guest IPA would have reached
+        // the host as the range to `MADV_FREE_REUSABLE` — an `ENOMEM`/`EINVAL` where the guest
+        // had success, or retrace's own pages discarded if the IPA happened to be mapped there.
+        // Live on the corpus: CPython issues 44 `madvise(nano-band addr, ≤ 0x20000, 7)` per run.
+        // The `Ptr` bound is trivially citable — zero bytes of data cross.
+        75 => row!(P, [Ptr, Scalar, Scalar]),
         // shared_region_check_np(uint64_t *start_address): 8 bytes out — serviced above the
         // trace (forced to fail so dyld maps the cache itself).
         SYS_SHARED_REGION_CHECK_NP => row!(P, [Ptr]),

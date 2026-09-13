@@ -139,6 +139,11 @@ pub const FAILSYSCTL: &str = concat!(env!("OUT_DIR"), "/failsysctl");
 /// 648-byte `kinfo_proc` into its buffer, then writes that record's first 8 bytes to stdout —
 /// the data half of the failing-syscall capture, visible as output.
 pub const FAILPROC: &str = concat!(env!("OUT_DIR"), "/failproc");
+/// M37: opens `/etc/hosts` and `lseek`s to offset `0x4000` = `TRAMPOLINE_IPA`, a mapped guest IPA
+/// on every load path. The unit control for the §4b fix: `forward_and_diff` used to rewrite ANY
+/// register holding a mapped IPA to a host pointer, this offset included, and `lseek` returned
+/// the trampoline's host address; a `Scalar` position is forwarded verbatim now.
+pub const SCALARPROBE: &str = concat!(env!("OUT_DIR"), "/scalarprobe");
 /// A guest issuing a legal NULL-`oldp` `sysctl` and then one whose `*oldlenp` (1 TiB) is far
 /// larger than any backing — the fixture for M29's `DerefU64` refusal.
 pub const OLDLENSYSCTL: &str = concat!(env!("OUT_DIR"), "/oldlensysctl");
@@ -297,6 +302,14 @@ mod tests {
         // M37: proves the build.rs wiring and the path constant; behaviour is dup2_e2e's.
         let l = parse_macho(&std::fs::read(DUP2_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn scalarprobe_guest_parses() {
+        // M37: proves the build.rs wiring and the path constant; behaviour is scalarprobe.rs's.
+        let l = parse_macho(&std::fs::read(SCALARPROBE).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+        assert!(l.segments.iter().any(|s| s.data.windows(10).any(|w| w == b"/etc/hosts")));
     }
 
     #[test]
