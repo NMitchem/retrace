@@ -208,7 +208,7 @@ panic or timeout ends the row before replay).
 - `csh.I.rec.err` — run I, recorder panic at the M33 `dup2` assert (`lib.rs:1140:17`); no replay ran
 - `csh.L.rec.err` — run L, recorder panic at the M33 `dup2` assert (`lib.rs:1140:17`); no replay ran
 - `csh.O.rec.err` — run O, recorder panic at the M33 `dup2` assert (`lib.rs:1140:17`); no replay ran
-- `dddiagnose.I.rec.err` — run I, the identical malloc crash (`guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace in the trace
+- `dddiagnose.I.rec.err` — run I, the identical malloc crash (`guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `dddiagnose.I.rp.err` — run I, the replay's identical crash line (`rc=139` both sides)
 - `dddiagnose.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH` in the kept trace
 - `dddiagnose.L.rp.err` — run L, replay ran out of events at the same landmark (`expected recorded syscall, got None`)
