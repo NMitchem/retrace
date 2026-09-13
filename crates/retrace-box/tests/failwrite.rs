@@ -1,14 +1,18 @@
 use retrace_box::*;
 
-// M28: does a FAILING syscall write into the guest's buffer?
+// M28 asked whether a FAILING syscall writes into the guest's buffer, drove `sysctl(kern.ostype)`
+// into a 2-byte buffer (ENOMEM: "Darwin\0" needs seven), read `buf` before and after, found it
+// unchanged, and concluded "the kernel wrote nothing, before or after". That was true of `buf`
+// and false of the call: it read `args[2]` and never `args[3]`. xnu's `sysctl()` entry
+// (bsd/kern/kern_newsysctl.c, `sysctl`: `if (error && error != ENOMEM) return error;` then
+// `suulong(uap->oldlenp, oldlen)`) writes `*oldlenp` back on the ENOMEM path, with the `oldidx`
+// the handler left — 0 here, because `sysctl_old_user` refuses before copying. M35 measured it
+// end to end first: this fixture recorded cleanly and its replay DIVERGED at `oldlen`
+// (`ipa 0x100004010 replay=0x02 recorded=0x00`), because `forward_and_diff` skipped the capture
+// on `err` and replay had nothing to apply.
 //
-// `forward_and_diff` answers "no" by construction — it skips the whole post-diff block when the
-// carry flag is set, and the M27 guard band sits inside that same block, so neither the capture nor
-// the detector runs. The comment there states it as fact; nothing has measured it. This test drives
-// the one case the README already names as suspect.
-//
-// It asserts only what is already known (the call fails) and PRINTS the rest. Task 5 turns the
-// measured answer into an assertion — writing one now would be guessing at the result.
+// So this test now asserts the call, not the buffer: `buf` is still untouched (M28's datum
+// stands), and the eight bytes at `oldlenp` are captured as a write and read back as zero.
 #[test]
 fn a_failing_sysctl_is_measured_for_writes() {
     let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::FAILSYSCTL).unwrap());
@@ -16,27 +20,42 @@ fn a_failing_sysctl_is_measured_for_writes() {
     loop {
         match b.run() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL => {
-                // Snapshot the destination before, so the measurement does not depend on
-                // forward_and_diff's own (skipped) capture. `buf` is the full 64-byte backing
-                // (`.space 64` in failsysctl.s), read whole rather than just the 2 requested bytes
-                // so the contamination check covers everything the kernel could have touched.
-                let before = b.read_bytes_for_test(args[2], 64);
+                // `buf` is the full 64-byte backing (`.space 64` in failsysctl.s); `oldlen` is the
+                // 8 bytes the guest set to 2. Both read through the seam, independently of the
+                // capture, so the capture can be checked AGAINST them.
+                let buf_before = b.read_bytes_for_test(args[2], 64);
+                let oldlen_before = b.read_bytes_for_test(args[3], 8);
+                assert_eq!(oldlen_before, 2u64.to_le_bytes(), "precondition: the guest asked for 2 bytes");
+
                 let (ret, err, writes) = b.forward_and_diff(num, args);
-                let after = b.read_bytes_for_test(args[2], 64);
                 assert!(err, "the undersized sysctl should FAIL; got ret={ret} err={err}");
-                // The `if !err` skip means `forward_and_diff` never even LOOKS for writes on this
-                // path — pin that directly, not just its effect on `buf`.
-                assert!(writes.is_empty(),
-                    "forward_and_diff captured writes on a failing syscall; the `if !err` skip is \
-                     no longer skipping");
-                // MEASURED (M28 Task 4): this failing sysctl writes NOTHING into the guest buffer,
-                // so `forward_and_diff`'s `if !err` skip loses nothing HERE. That is a measurement
-                // of one case, not a proof about failing syscalls in general — the gate stays open,
-                // now with one datum in it instead of none.
-                assert_eq!(before, after,
-                    "a failing sysctl wrote into the guest buffer after all: the `if !err` skip is \
-                     dropping real kernel writes, and this test's premise has changed — see the \
-                     M28 spec's Component 3");
+                assert_eq!(ret, 12, "ENOMEM");
+
+                // MEASURED (M28 Task 4, still true): the data buffer is untouched — xnu's
+                // `sysctl_old_user` returns ENOMEM before its copyout.
+                assert_eq!(buf_before, b.read_bytes_for_test(args[2], 64),
+                    "a failing sysctl wrote into `buf` after all; xnu's sysctl_old_user must have \
+                     changed shape — re-read it before touching this test");
+
+                // MEASURED (M35): `*oldlenp` is written back as 0 on the ENOMEM path.
+                let oldlen_after = b.read_bytes_for_test(args[3], 8);
+                assert_eq!(oldlen_after, 0u64.to_le_bytes(),
+                    "the kernel writes *oldlenp back on ENOMEM (xnu sysctl(): suulong after the \
+                     ENOMEM pass-through); the seam sees it did not — re-read kern_newsysctl.c");
+
+                // And the capture must agree with the seam: some captured region covers the
+                // 8 bytes at args[3] and carries the zero. Until M35 `forward_and_diff` returned
+                // NO writes on `err` — the `if !err` skip — which is exactly the divergence this
+                // fixture's replay showed.
+                let captured = writes.iter().find_map(|r| {
+                    let end = r.ipa + r.bytes.len() as u64;
+                    (r.ipa <= args[3] && args[3] + 8 <= end)
+                        .then(|| r.bytes[(args[3] - r.ipa) as usize..][..8].to_vec())
+                });
+                assert_eq!(captured, Some(oldlen_after),
+                    "forward_and_diff captured no write covering *oldlenp on a failing syscall: \
+                     the `if !err` skip is dropping a real kernel write (writes captured: {})",
+                    writes.len());
                 return;
             }
             Stop::Syscall { num, args } => {

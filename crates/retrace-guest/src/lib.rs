@@ -130,10 +130,15 @@ pub const BIGREAD_FIXTURE: &str = concat!(env!("OUT_DIR"), "/bigread_fixture.bin
 pub const BIGWRITE: &str = concat!(env!("OUT_DIR"), "/bigwrite");
 /// The 128 KiB file `BIGWRITE` writes: every byte must come back `'A'`.
 pub const BIGWRITE_OUT: &str = concat!(env!("OUT_DIR"), "/bigwrite_out.bin");
-/// M28: a guest whose one `sysctl` fails (`ENOMEM`, undersized `oldp`). Measures whether the kernel
-/// writes into a guest buffer on a FAILING syscall — the path where `forward_and_diff` skips write
-/// capture and the guard band alike.
+/// M28: a guest whose one `sysctl` fails (`ENOMEM`, undersized `oldp`). Built to measure whether the
+/// kernel writes into a guest buffer on a FAILING syscall; M35 measured that it does (xnu writes
+/// `*oldlenp` back on `ENOMEM`) and that this guest's replay diverged there on the pre-M35 tree —
+/// `forward_and_diff`'s write capture and guard band now run on that path too.
 pub const FAILSYSCTL: &str = concat!(env!("OUT_DIR"), "/failsysctl");
+/// M35: a guest whose `sysctl(kern.proc.all)` fails `ENOMEM` after the kernel has copied one full
+/// 648-byte `kinfo_proc` into its buffer, then writes that record's first 8 bytes to stdout —
+/// the data half of the failing-syscall capture, visible as output.
+pub const FAILPROC: &str = concat!(env!("OUT_DIR"), "/failproc");
 /// A guest issuing a legal NULL-`oldp` `sysctl` and then one whose `*oldlenp` (1 TiB) is far
 /// larger than any backing — the fixture for M29's `DerefU64` refusal.
 pub const OLDLENSYSCTL: &str = concat!(env!("OUT_DIR"), "/oldlensysctl");
