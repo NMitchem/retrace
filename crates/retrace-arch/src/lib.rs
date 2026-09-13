@@ -303,8 +303,11 @@ pub enum Ret {
     /// `apply_and_return` sets `x0` alone, so the guest receives retrace's own host READ-end,
     /// unbound, in `x0` and its own stale `x1` — the write-end never reaches the guest at all, and
     /// both host descriptors leak in the recorder. Every later use returns EBADF via
-    /// `translate_fds` (`/bin/zsh` issues it and never uses the pair). Capturing `x1` is the
-    /// actual successor work item, ahead of any binding model — M10-successor work, owed.
+    /// `translate_fds`: `/bin/zsh` issues it and never uses the pair; `/bin/csh` and `/bin/tcsh`
+    /// use both ends (`fcntl(F_SETFD)` on the raw read-end and on the stale `x1`, EBADF twice) one
+    /// landmark before their `fork` wall — M37's sweep evidence
+    /// (docs/sweep-evidence/2026-09-13-m37/README.md, audit 3). Capturing `x1` is the actual
+    /// successor work item, ahead of any binding model — M10-successor work, owed.
     FdPair,
 }
 
