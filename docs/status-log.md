@@ -8771,7 +8771,8 @@ M35's list, item by item, with what this milestone discharged struck by name and
   five, both snapshots; and the `kqueue` cross-version note.
 * **Superseded, not owed — three statements and one reading, with this section as their forward
   pointer.** M34 §4b's `[0x4000, 0x10000)` and "roughly half" (`:6734`, `:7088–7089`, `:7152`,
-  `:7178–7181`); M23's `brk` as a post-refusal wall (`:4583–4585`, `machmsg.rs:97–99`) and M35's
+  `:7178–7181`); M23's `brk` as a post-refusal wall (`:4583–4585`; the router comment `machmsg.rs:97–99`
+  that carries the same reading is a code comment, not a log line, and is in the owed list above) and M35's
   carriage of it as the third `dddiagnose` wall (`:7713–7716`, `:7739–7743`, `:7846–7848`); M35's
   "all outside the range" reason for its 10-of-10 (`:7683`); and the M36 spec's §4 first reading
   ("C for the five", "the M23 belief confirmed by measurement"). All stand as written where they
