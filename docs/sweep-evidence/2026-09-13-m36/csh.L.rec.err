@@ -1,0 +1,11 @@
+recpid=1013
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace] forwarding mach_msg2 host_info (msgh_id 200) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_clock_service (msgh_id 206) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_create (msgh_id 3418) to host (decided allowlist)
+[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided allowlist)
+
+thread 'main' (31850265) panicked at crates/retrace-core/src/lib.rs:1140:17:
+dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

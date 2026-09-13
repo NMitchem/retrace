@@ -1,0 +1,10 @@
+recpid=74847
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace] forwarding mach_msg2 host_info (msgh_id 200) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_clock_service (msgh_id 206) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_create (msgh_id 3418) to host (decided allowlist)
+[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1303 send_size 248): the box hosts no message-queue receivers
+RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110
