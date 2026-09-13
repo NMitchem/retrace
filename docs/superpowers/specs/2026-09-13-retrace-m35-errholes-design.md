@@ -228,13 +228,16 @@ where a lost write is visible in stdout and not only at the terminal compare) �
 Two tests, both record-and-replay through the CLI via `util::record` / `util::replay`:
 
 - `a_failing_sysctl_replays_bit_for_bit` on `FAILSYSCTL`: record rc 0, replay rc 0, **and** the
-  trace's `Event::Syscall { num: 202, err: true, writes, .. }` carries a region at `oldlen`'s ipa
-  with bytes `[0; 8]` — assert on the write the milestone makes recordable, not on the exit code
+  trace's `Event::Syscall { num: 202, err: true, writes, .. }` carries a region **covering**
+  `oldlen`'s eight bytes with value 0 (a `Ptr` argument's window runs from the pointer to
+  `PTR_WINDOW_CAP.min(avail)`, so the covering region may start at `mib` or at `oldlen` and be
+  longer than 8) — assert on the write the milestone makes recordable, not on the exit code
   alone (CLAUDE.md: a weaker failure — a replay that never applies anything — also exits 0 on a
   guest whose divergence the compare cannot see).
 - `a_failing_proc_list_replays_bit_for_bit` on `FAILPROC`: record rc 0; stdout is 8 bytes; the
-  trace's landmark for `202` has `err: true` and a region at `buf` of at least 648 bytes plus the
-  8-byte `oldlen` region; replay rc 0. (The 648 bytes are nondeterministic host state — a
+  trace's landmark for `202` has `err: true`, a captured region covering the 648 bytes at `buf`
+  (the `DerefU64(3)` window is exactly `*oldlenp` = 648) whose first eight bytes equal the
+  guest's stdout, and one covering `oldlen` with value 0; replay rc 0. (The 648 bytes are nondeterministic host state — a
   `kinfo_proc` of whatever process the kernel iterates first — recorded and replayed as
   `task_info`'s audit token is: forwarded-and-recorded, never regenerated.)
 
