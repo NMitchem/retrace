@@ -183,6 +183,48 @@ fn the_window_widens_for_each_m29_reg_addition() {
     assert_eq!(b.diff_window_for_test(retrace_arch::SYS_WRITE, 1, AVAIL, &args), FLAT);
 }
 
+// M34: two rows join the M29 four, and one pair is pinned as NOT joining. Same seam and same
+// reasoning as the test above — `diff_window` is a pure function of the table and the args, so
+// it is tested at the seam rather than through a guest that would have to be built to call each
+// of these syscalls with a huge buffer.
+//
+// The negative half is the milestone's Ruling 1 made executable. `getattrlist` and
+// `fgetattrlist` are kernel-bounded: both reach `getattrlist_internal` → `getvolattrlist` /
+// `vfs_attr_pack_internal`, and each packer rejects with ENOMEM before any copyout when the
+// packed result exceeds `attr_max_buffer` (ATTR_MAX_BUFFER_LONGPATHS, 15,360 bytes;
+// bsd/vfs/vfs_attrlist.c). By the `ArgKind` doc's own rule that is a `Ptr` with a citation, not
+// a `Dest`. A later "completion" of M34 that makes them `Dest` fails here and is sent to the
+// citation. Corpus maximum for either, measured 2026-09-13: 1,052 bytes.
+#[test]
+fn the_window_widens_for_the_m34_rows_and_not_for_getattrlist() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO).unwrap());
+    let b = Box_::load(&loaded);
+    const AVAIL: usize = 1 << 20;
+    const FLAT: usize = 64 * 1024; // PTR_WINDOW_CAP
+
+    let mut args = [0u64; 8];
+
+    args[5] = 200_000; // proc_info buffersize (uint32_t, x5)
+    assert_eq!(b.diff_window_for_test(336, 4, AVAIL, &args), 200_000,
+        "proc_info's destination is x4 and its length x5");
+    assert_eq!(b.diff_window_for_test(336, 5, AVAIL, &args), FLAT,
+        "x5 is proc_info's length, not its buffer");
+
+    args[3] = 150_000; // csops usersize (x3)
+    assert_eq!(b.diff_window_for_test(169, 2, AVAIL, &args), 150_000,
+        "csops's destination is x2 and its length x3");
+    assert_eq!(b.diff_window_for_test(170, 2, AVAIL, &args), 150_000,
+        "csops_audittoken shares csops's destination and length");
+    assert_eq!(b.diff_window_for_test(170, 4, AVAIL, &args), FLAT,
+        "x4 is csops_audittoken's audit token — a 32-byte copyin, not a destination");
+
+    // Ruling 1: `args[3]` is now also a 150,000-byte `bufferSize`, and the window must NOT follow it.
+    assert_eq!(b.diff_window_for_test(220, 2, AVAIL, &args), FLAT,
+        "getattrlist is kernel-bounded at 15,360 bytes (ATTR_MAX_BUFFER_LONGPATHS) and stays Ptr");
+    assert_eq!(b.diff_window_for_test(retrace_arch::SYS_FGETATTRLIST, 2, AVAIL, &args), FLAT,
+        "fgetattrlist shares getattrlist's packers and their bound, and stays Ptr");
+}
+
 // M29 Phase B. Two tests over ONE guest, split because a panic ends a test: the first drives only
 // the legal call and must complete, the second drives both and must abort on the second.
 //
