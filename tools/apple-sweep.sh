@@ -6,13 +6,42 @@
 # exits 1 on both runs and is a pass. A recorder panic is a FAIL even if the codes
 # happen to match, so stderr is checked for it explicitly.
 #
+# M36: the human line says WHY a row failed, and every row that ran is followed by one
+# machine-readable line. Labels, in evaluation order (spec §3a):
+#   FAIL … (timed out after Ns recording)              unchanged
+#   FAIL … (recorder panicked: <line>)                 <line> = rec.err's first `panicked at` line
+#   FAIL … (record error, rc=4: <line>)                new; <line> = rec.err's first `RECORD ERROR:`
+#       line. The CLI exits 4 on RECORD ERROR and leaves a trace with no terminal event, so its
+#       replay ALWAYS prints a DIVERGENCE line; replay is still run (that line is evidence, kept
+#       on the ROW line) but the label is the record error, not "replay diverged".
+#   FAIL … (timed out after Ns replaying)              unchanged
+#   FAIL … (replay diverged at landmark N)             the landmark added
+#   PASS … (identical fault, rc=N)                     new; rc = rp ≠ 0 with equal stdout is still
+#       counted in `pass` (TALLY stays comparable with M33–M35's) but it is said on the line
+#   PASS …                                             rc = rp = 0, stdout equal
+#   FAIL … (record=rc replay=rp)                       unchanged
+#   ROW<TAB>path<TAB>result<TAB>rc<TAB>rp<TAB>recpid<TAB>landmark<TAB>rec_reason<TAB>rp_line
+#       rp/landmark are `n/a` when there was no replay/divergence; recpid is the recorder's own
+#       pid (see the record invocation); rec_reason/rp_line are the stderr lines the labels quote,
+#       empty when none. TALLY is unchanged in shape.
+#
 # Usage: tools/apple-sweep.sh [path-to-retrace-binary]
 #        defaults to target/aarch64-apple-darwin/debug/retrace
+#   RETRACE_SWEEP_LIST=<file>   sweep this list instead of tools/apple-sweep-binaries.txt
+#   RETRACE_SWEEP_KEEP=<dir>    copy every non-clean row's rec.err, rp.err and trace to
+#                               <dir>/<basename>.{rec.err,rp.err,bin} (identical faults included)
+#   RETRACE_SWEEP_TIMEOUT=<s>   per-phase watchdog, default 30
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RAW=${1:-$ROOT/target/aarch64-apple-darwin/debug/retrace}
 LIST=$ROOT/tools/apple-sweep-binaries.txt
+# M36: a caller may sweep a different list (a three-binary control, a single-row probe) and may
+# keep every non-clean row's evidence. Both opt-in; the defaults are the committed corpus and
+# nothing kept — the EXIT trap still destroys $TMP.
+LIST=${RETRACE_SWEEP_LIST:-$LIST}
+KEEP=${RETRACE_SWEEP_KEEP:-}
+if [ -n "$KEEP" ]; then mkdir -p "$KEEP" || { echo "TALLY ABORTED (cannot create $KEEP)"; exit 2; }; fi
 
 # A pre-loop setup failure below exits before any per-binary line or the closing TALLY
 # is ever printed. A consumer that only greps its captured output for "TALLY" would see
@@ -79,6 +108,23 @@ run_timeout() {
     return "$_tmo_status"
 }
 
+# M36: keep_row <result> [fault] — copy this row's evidence when asked, then emit the ROW line.
+# Evidence is kept for every result that is not a clean PASS; the optional second argument marks
+# an identical-fault PASS, whose evidence is kept too (its crash is the thing to read). Reads the
+# loop's own variables (g rc rp recpid landmark rec_reason rp_line) at call time; it is called
+# before the loop's next `rm -f`, so what it copies is this row's own, never a neighbour's. A cp
+# failure is left audible on stderr — silently missing evidence is the failure this milestone
+# exists to close.
+keep_row() {
+    if [ -n "$KEEP" ] && { [ "$1" != "PASS" ] || [ -n "${2:-}" ]; }; then
+        b=$(basename "$g")
+        cp "$TMP/rec.err" "$KEEP/$b.rec.err"
+        [ -f "$TMP/rp.err" ] && cp "$TMP/rp.err" "$KEEP/$b.rp.err"
+        [ -f "$TMP/t.bin" ] && cp "$TMP/t.bin" "$KEEP/$b.bin"
+    fi
+    printf 'ROW\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$g" "$1" "$rc" "$rp" "$recpid" "$landmark" "$rec_reason" "$rp_line"
+}
+
 pass=0; fail=0; skip=0
 # The list is read on fd 3, not fd 0: several sweep guests (bash, csh, dash, ksh, sh,
 # tcsh, zsh) run with no arguments and, non-interactively, read a *script* from stdin.
@@ -103,8 +149,18 @@ while IFS= read -r g <&3; do
     # leave no fresh t.bin (or an old one may still be sitting in $TMP), and replay would
     # then silently replay the PREVIOUS binary's recording — manufacturing both false
     # passes and false failures, exactly what this script exists to prevent.
-    rm -f "$TMP/t.bin"
-    run_timeout "$BIN" record-dyn "$g" -o "$TMP/t.bin" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+    # M36: rp.out/rp.err too — a row whose recorder timed out or panicked never runs replay, so
+    # without this the rp.err keep_row copies as that row's evidence would be the previous row's.
+    rm -f "$TMP/t.bin" "$TMP/rp.out" "$TMP/rp.err"
+    # M36: the recorder's pid decides what several Apple binaries do (M34 §4b: a pid inside
+    # [0x4000, 0x10000) is forwarded as a host pointer by forward_and_diff's per-register probe,
+    # so every self-pid csops/proc_info answers ESRCH; M35 measured dddiagnose taking a different
+    # wall on each side of that line). Print it into rec.err before the recorder prints anything,
+    # from the shell that becomes the recorder — M34's probe shape. run_timeout launches "$@"
+    # verbatim, so the `sh` it backgrounds is the process that `exec`s into the recorder: the pid
+    # it printed IS the recorder's, and the watchdog's kill still lands on the recorder.
+    run_timeout sh -c 'echo "recpid=$$" >&2; exec "$0" record-dyn "$1" -o "$2"' "$BIN" "$g" "$TMP/t.bin" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+    recpid=$(grep -a '^recpid=' "$TMP/rec.err" | head -1 | cut -d= -f2)
     # M29 fix round 1 (Critical): the recorder's stderr goes to $TMP/rec.err, grepped only
     # for "panicked at" below and destroyed by this script's own EXIT trap — so a caller
     # capturing only this script's OWN stdout/stderr (as the M29 measurement did) never sees
@@ -133,28 +189,49 @@ while IFS= read -r g <&3; do
     if [ -n "${RETRACE_BANDSHRINK:-}" ] && grep -qa "\[M28 BANDSHRINK\]" "$TMP/rec.err"; then
         grep -a "\[M28 BANDSHRINK\]" "$TMP/rec.err" | sed "s#^#$g: #"
     fi
+    # M36: derive what the old ladder threw away, before deciding anything.
+    rec_reason=$(grep -a -m1 -E 'RECORD ERROR:|panicked at' "$TMP/rec.err" | cut -c1-200)
+    rp_line=""; landmark="n/a"; rp="n/a"
     if [ -e "$TMP/.timedout" ]; then
-        echo "FAIL $g (timed out after ${TIMEOUT_SECS}s recording)"; fail=$((fail+1)); continue
+        echo "FAIL $g (timed out after ${TIMEOUT_SECS}s recording)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     if grep -qa "panicked at" "$TMP/rec.err"; then
-        echo "FAIL $g (recorder panicked)"; fail=$((fail+1)); continue
+        echo "FAIL $g (recorder panicked: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     run_timeout "$BIN" replay "$TMP/t.bin" >"$TMP/rp.out" 2>"$TMP/rp.err" </dev/null; rp=$?
+    rp_line=$(grep -a -m1 'DIVERGENCE at landmark' "$TMP/rp.err" | cut -c1-200)
+    case "$rp_line" in
+        'DIVERGENCE at landmark '*) landmark=$(printf '%s' "$rp_line" | sed 's/^DIVERGENCE at landmark \([0-9]*\).*/\1/') ;;
+    esac
+    # M36: a recorder that exited 4 printed `RECORD ERROR:` and wrote a trace with no terminal
+    # event, so its replay ALWAYS prints a DIVERGENCE line (it runs out of events, or reports the
+    # exception the recorder could not record). That line is evidence, not the label: M35 measured
+    # dddiagnose's "replay diverged" this way, and M36's first reading found all five of the
+    # long-standing "replay diverged" rows are the same recorder-side brk. Label the record error.
+    # Checked before the replay-timeout marker (spec §3a's evaluation order): the record error is
+    # the cause, whatever the replay of its truncated trace then did; the ROW line still carries rp.
+    if [ "$rc" -eq 4 ]; then
+        echo "FAIL $g (record error, rc=4: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue
+    fi
     if [ -e "$TMP/.timedout" ]; then
-        echo "FAIL $g (timed out after ${TIMEOUT_SECS}s replaying)"; fail=$((fail+1)); continue
+        echo "FAIL $g (timed out after ${TIMEOUT_SECS}s replaying)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     # Divergence detection is structural, not inferred from exit codes alone: retrace
     # always prints this on a divergence, so check for it directly rather than relying
     # on the exit-code compare below to happen to disagree.
-    if grep -qa "DIVERGENCE at landmark" "$TMP/rp.err"; then
-        echo "FAIL $g (replay diverged)"; fail=$((fail+1)); continue
+    if [ -n "$rp_line" ]; then
+        echo "FAIL $g (replay diverged at landmark $landmark)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
-
     if [ "$rc" -eq "$rp" ] && cmp -s "$TMP/rec.out" "$TMP/rp.out"; then
-        echo "PASS $g"; pass=$((pass+1))
-    else
-        echo "FAIL $g (record=$rc replay=$rp)"; fail=$((fail+1))
+        if [ "$rc" -ne 0 ]; then
+            # M36: an identical FAULT on both sides is still counted a pass (the tally stays
+            # comparable with M33–M35's), but it is said on the line: M35 found dddiagnose's
+            # rc=139 passes are retrace-induced crashes (M34 §4b), not the guest's own.
+            echo "PASS $g (identical fault, rc=$rc)"; pass=$((pass+1)); keep_row PASS fault; continue
+        fi
+        echo "PASS $g"; pass=$((pass+1)); keep_row PASS; continue
     fi
+    echo "FAIL $g (record=$rc replay=$rp)"; fail=$((fail+1)); keep_row FAIL
 done 3< "$LIST"
 
 echo "TALLY pass=$pass fail=$fail skip=$skip"
