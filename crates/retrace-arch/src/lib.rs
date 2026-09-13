@@ -234,11 +234,14 @@ pub enum ArgKind {
     /// **Seeded only with what is measured or SDK-verified.** M29 added `getdirentries64`,
     /// `recvfrom` (both spellings) and `getfsstat64`/`sysctlbyname` (sysctl's own shape); each of
     /// those rows names its own second destination where it has one, so a later reader can see it
-    /// was considered and dismissed on a number rather than overlooked. Other syscalls are still
-    /// structurally capable of overrunning (`proc_info`, `getattrlist`, `csops`) and remain
-    /// deliberately `Ptr`: none has been measured to do so, and the M27 guard band exists
-    /// precisely so they announce themselves instead of being guessed at. `Ptr` there means "not
-    /// measured", the guard band is what makes that safe, and M34 is to measure each (spec §7).
+    /// was considered and dismissed on a number rather than overlooked. M34 measured the three
+    /// M29 left as "structurally capable of overrunning": `proc_info` and `csops` joined (their
+    /// blob/list callnums are bounded only by the caller's length), and `getattrlist`/
+    /// `fgetattrlist` did NOT — the kernel caps them at 15,360 bytes before writing, which is the
+    /// `Ptr` rule's case, and their rows cite it. After M34 no `Ptr` in this table means "not
+    /// measured"; every one names its bound. The corpus maximum across all five, measured
+    /// 2026-09-13, is 1,052 bytes: both new rows are inert for the window today and live for the
+    /// clamp, which is the half that protects retrace's own process.
     Dest(DestLen),
     /// The kernel writes through pointers INSIDE the pointed-to struct (`iovec.iov_base`,
     /// `msghdr.msg_iov`).
@@ -499,8 +502,15 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // residual is named here, not modelled.
         SYS_IOCTL => row!(P, [Fd, Scalar, Ptr]),
         // fgetattrlist(int fd, struct attrlist *alist, void *attrbuf, size_t bufsize, u_long opts):
-        // alist is a fixed 24-byte struct (sys/attr.h, measured with sizeof); attrbuf is a
-        // destination of bufsize bytes — M34's row to widen (spec §7); Ptr until then.
+        // alist is a fixed 24-byte struct (sys/attr.h, sizeof). attrbuf is a destination the KERNEL
+        // bounds, not the caller: it reaches `getattrlist_internal` → `getvolattrlist` /
+        // `vfs_attr_pack_internal`, and each packer rejects with ENOMEM BEFORE any copyout when
+        // the packed result exceeds `attr_max_buffer` — ATTR_MAX_BUFFER_LONGPATHS = 8192 − 1024 +
+        // 8192 = 15,360 (sys/attr.h; bsd/vfs/vfs_attrlist.c, the `ab.allocated > attr_max_buffer`
+        // gates and the copy `lmin(buf_size, ab.allocated)`). The cited bound, four times inside
+        // the window, so Ptr by the rule above — M34 Ruling 1, pinned by
+        // `truncguard::the_window_widens_for_the_m34_rows_and_not_for_getattrlist`. Corpus
+        // maximum measured 2026-09-13: 40 bytes.
         SYS_FGETATTRLIST => row!(P, [Fd, Ptr, Ptr, Scalar, Scalar]),
         // getdirentries64(int fd, char *buf, u_int bufsize, off_t *basep): destination x1, length
         // x2 (M29). It also writes 8 bytes at `*basep` (x3) — unmodelled by decision: 8 bytes sits
@@ -701,8 +711,10 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         338 | 340 => row!(P, [Path, Ptr]),
         // getattrlist(const char *path, struct attrlist *alist, void *attributeBuffer, size_t
         //             bufferSize, u_long options): alist is a fixed 24-byte struct (sys/attr.h,
-        // sizeof); attributeBuffer is a destination of bufferSize bytes — M34's row to widen
-        // (spec §7), Ptr until measured, exactly like its `fgetattrlist` sibling.
+        // sizeof). attributeBuffer is kernel-bounded at ATTR_MAX_BUFFER_LONGPATHS (15,360) exactly
+        // as its `fgetattrlist` sibling — same `getattrlist_internal`, same two packers, same
+        // ENOMEM-before-copyout gate (bsd/vfs/vfs_attrlist.c) — so Ptr with the bound cited, not
+        // Dest: M34 Ruling 1. Corpus maximum measured 2026-09-13: 1,052 bytes (CPython).
         220 => row!(P, [Path, Ptr, Ptr, Scalar, Scalar]),
         // fsgetpath(char *buf, size_t bufsize, fsid_t *fsid, uint64_t objid): the kernel rejects
         // bufsize > MAXLONGPATHLEN (8192) with EINVAL before writing (bsd/vfs/vfs_syscalls.c
@@ -757,12 +769,25 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_MAP_WITH_LINKING_NP => row!(P, [Ptr, Scalar, Source, Scalar]),
         // ---- code signing / policy -------------------------------------------------------------
         // csops(pid_t pid, uint32_t ops, void *useraddr, size_t usersize) / csops_audittoken(…,
-        // audit_token_t *uaudittoken): useraddr is op-dependent — a 4-byte status word for
-        // CS_OPS_STATUS, a hash, or a blob copied out for usersize bytes (`csops_copy_token`,
-        // bsd/kern/kern_proc.c `csops_internal`) — M34's destination to widen; Ptr until measured.
-        // The audit token is a fixed 32-byte copyin.
-        169 => row!(P, [Scalar, Scalar, Ptr, Scalar]),
-        170 => row!(P, [Scalar, Scalar, Ptr, Scalar, Ptr]),
+        // audit_token_t *uaudittoken): `csops_internal` (bsd/kern/kern_proc.c) dispatches on ops
+        // (sys/codesign.h). The blob ops — CS_OPS_ENTITLEMENTS_BLOB (7), CS_OPS_BLOB (10),
+        // CS_OPS_DER_ENTITLEMENTS_BLOB (16), and IDENTITY/TEAMID (11/14) — copy out up to usersize
+        // via `csops_copy_token` (an 8-byte header and ERANGE if usersize is short), and
+        // CS_OPS_BLOB is the whole code-signing SuperBlob: one CodeDirectory hash per page of the
+        // binary, so hundreds of KiB for a large one. No citable bound below the window → Dest,
+        // length x3 (M34). The fixed-size ops write 4 bytes (CS_OPS_STATUS 0, with NO usersize
+        // check; VALIDATION_CATEGORY 17), 8 (PIDOFFSET 6) or a struct whose size usersize must
+        // equal (CDHASH 5, CDHASH_WITH_INFO 18) — all inside the 64 KiB floor `diff_window` keeps
+        // under every Dest (`base.max(…)`), which is what makes a STATUS with usersize 0 still
+        // fully captured; do not "fix" that floor away for Dest rows. Corpus, measured 2026-09-13:
+        // op 0 with usersize 4 from every dynamic guest, op 16 with 1032 (169: 11 guests, 22
+        // dispatches — nine Apple binaries and both CPython invocations; 170: every dynamic
+        // guest) — both rows inert for the window, and inert for the clamp too on this corpus:
+        // all 202 destinations are on the dyn stack (raw census) and `RETRACE_REGCLAMP=1`
+        // prints FIT for each on hello_dyn and jq (M34 fix wave). Contrast the 336 row below,
+        // where the clamp DOES fire. The audit token (170, x4) is a fixed 32-byte copyin.
+        169 => row!(P, [Scalar, Scalar, Dest(Reg(3)), Scalar]),
+        170 => row!(P, [Scalar, Scalar, Dest(Reg(3)), Scalar, Ptr]),
         // csrctl(uint32_t op, void *useraddr, size_t usersize): both ops reject usersize !=
         // sizeof(csr_config_t) (4) with EINVAL (bsd/kern/kern_csr.c `syscall_csr_check` /
         // `syscall_csr_get_active_config`) — the cited bound.
@@ -782,8 +807,35 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // forwards it (its `MAC_SYSCALL_MAGIC` arm). The argument shape is __mac_syscall's.
         0x8000_0000 => row!(P, [Path, Scalar, Ptr]),
         // proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg, void *buffer,
-        //           int32_t buffersize): buffer is M34's destination to widen; Ptr until measured.
-        336 => row!(P, [Scalar, Scalar, Scalar, Scalar, Ptr, Scalar]),
+        //           int32_t buffersize): `proc_info_internal` (bsd/kern/proc_info.c) dispatches on
+        // callnum (sys/proc_info_private.h). LISTPIDS (1) copies out min(nprocs+20, buffersize/4)
+        // pids; KERNMSGBUF (4) the message buffer up to buffersize; LISTCOALITIONS (11),
+        // PIDDYNKQUEUEINFO (13), UDATA_INFO (14) lists bounded by buffersize and a count the
+        // kernel owns — none with a citable constant below the window → Dest, length x5 (M34).
+        // PIDINFO (2) / PIDFDINFO (3) / PIDFILEPORTINFO (6) / PIDORIGINATORINFO (10) copy out a
+        // fixed struct after `if (buffersize < size) return ENOMEM`, so ≤ buffersize always. Two
+        // callnums ride under Dest as an over-approximation (M34 Ruling 2): SETCONTROL (5) with
+        // PROC_SELFSET_THREADNAME COPIES IN ≤ 63 bytes (MAXTHREADNAMESIZE − 1) — a Source shape
+        // bounded 1000× inside the window, so no canary coverage is lost; SET_DYLD_IMAGES (15)
+        // transfers nothing ("don't need to copyin the buffer. just setting the buffer range in
+        // the task struct" — `proc_set_dyld_images`). Corpus, measured 2026-09-13 (318
+        // dispatches, every dynamic guest): callnum 2 flavors 13/17 with 64/56, callnum 5 with 4
+        // (the Rust guests naming `main`), callnum 15 with 368 from dyld at pc 0x14000600c — all
+        // inside the window, so the row is inert for the window. NOT inert for the clamp: on
+        // every dynamic guest (76 of 76) the SET_DYLD_IMAGES destination 0x1ec6f7f80 sits 0x3f80
+        // into a shared-cache page whose backing is that one 16 KiB page (`page_in_cache`, one
+        // backing per fault), so `host_span` gives avail = 128 against buffersize 368 and the
+        // clamp rewrites the forwarded length 368 → 128 — measured, `RETRACE_REGCLAMP=1` on
+        // hello_dyn and jq (M34 fix wave): `[M34 REGCLAMP] syscall 336 count 368 avail 128 dest
+        // 0x1ec6f7f80 backing [0x1ec6f4000,0x1ec6f8000)`. That is M29's "R1" case (a buffer that
+        // legitimately continues into the next backing), the normal geometry for a cache-DATA
+        // destination rather than a pathology. No recorded byte changes: the call transfers
+        // nothing, and from inside retrace it is rejected before the size is read — retrace's own
+        // dyld already made the third and final `task_set_dyld_info` call on retrace's task
+        // (osfmk/kern/task.c, "called at most three times … any calls after that are ignored" →
+        // KERN_FAILURE → EINVAL in `proc_set_dyld_images`), regardless of pid or size. Owed: the
+        // call names RETRACE's task and should be serviced above the trace, not forwarded.
+        336 => row!(P, [Scalar, Scalar, Scalar, Scalar, Dest(Reg(5)), Scalar]),
         // task_read_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t): 4 bytes
         // out (bsd/kern/kern_proc.c `task_read_for_pid`, `copyout(…, sizeof(mach_port_name_t))`).
         539 => row!(P, [Scalar, Scalar, Ptr]),
@@ -1326,6 +1378,13 @@ mod tests {
         assert_eq!(dest_buffer(SYS_PREAD),    Some((1, DestLen::Reg(2))));
         assert_eq!(dest_buffer(SYS_READ_NOCANCEL), Some((1, DestLen::Reg(2))));
         assert_eq!(dest_buffer(SYS_SYSCTL),   Some((2, DestLen::DerefU64(3))));
+        // M34: proc_info's buffer is x4 with `buffersize` in x5; csops and csops_audittoken share
+        // `useraddr` x2 with `usersize` in x3. Pinned as the whole view rather than through
+        // `diff_window` at one index (`truncguard.rs` does that), so a row that moved its `Dest`
+        // to another index fails here by name.
+        assert_eq!(dest_buffer(336), Some((4, DestLen::Reg(5))));
+        assert_eq!(dest_buffer(169), Some((2, DestLen::Reg(3))));
+        assert_eq!(dest_buffer(170), Some((2, DestLen::Reg(3))));
     }
 
     // Absence must mean "provably writes no buffer we can size", never "not gotten to yet".
@@ -1337,6 +1396,13 @@ mod tests {
         // there is no SYS_FSGETPATH constant in this crate and this test must not invent one.
         assert_eq!(dest_buffer(427), None, "fsgetpath takes an fsid_t*, not a sized buffer");
         assert_eq!(dest_buffer(SYS_WRITE), None, "write reads the buffer, it does not fill it");
+        // M34 Ruling 1: getattrlist/fgetattrlist are kernel-bounded at ATTR_MAX_BUFFER_LONGPATHS
+        // (15,360 bytes) and stay `Ptr`. `truncguard.rs` pins that through `diff_window` at
+        // index 2 only; this pins the whole view, so a `Dest` at ANY index of either row fails.
+        assert_eq!(dest_buffer(220), None,
+            "getattrlist is kernel-bounded at 15,360 bytes (ATTR_MAX_BUFFER_LONGPATHS) and stays Ptr");
+        assert_eq!(dest_buffer(SYS_FGETATTRLIST), None,
+            "fgetattrlist shares getattrlist's packers and their bound, and stays Ptr");
     }
 
     #[test]
