@@ -30,15 +30,23 @@ for num, (name, di, li, ops) in SHAPE.items():
     print(f"== {name} ({num}): {len(rs)} dispatches, {len(guests)} guests, "
           f"len operand x{li}: max={max(lens) if lens else 0} (0x{max(lens) if lens else 0:x}) "
           f"{'EXCEEDS' if lens and max(lens) > WINDOW else 'fits'} 64 KiB")
+    # Count FULL labels. The first version of this script collapsed every non-`guest:` label to
+    # its family (`apple`, `cpython`, `jq`) before counting, so `csops` op 0x10 printed
+    # `[2 guests: apple, cpython]` and M34 published "2 guests (an Apple binary, CPython)" for
+    # what is 11 guests over 22 dispatches — the "right conclusion, unmeasured supporting fact"
+    # class, from the instrument's own comment. Only the display string is abbreviated now.
     combos = collections.defaultdict(set)
     for label, _, pc, args in rs:
         key = tuple(args[i] for i in ops) + (args[li],)
-        combos[key].add(label.split(':')[0] + (':' + label.split(':',1)[1] if label.startswith('guest') else ''))
+        combos[key].add(label)
     for key in sorted(combos):
         opstr = ' '.join(f"x{i}=0x{v:x}" for i, v in zip(ops, key[:-1]))
         who = sorted(combos[key])
+        n_disp = sum(1 for label, _, _, args in rs
+                     if tuple(args[i] for i in ops) + (args[li],) == key)
         who_s = ', '.join(who[:6]) + (f", … +{len(who)-6}" if len(who) > 6 else '')
-        print(f"   {opstr:<24} len=0x{key[-1]:<6x} ({key[-1]:>6})  [{len(who)} guests: {who_s}]")
+        print(f"   {opstr:<24} len=0x{key[-1]:<6x} ({key[-1]:>6})  "
+              f"[{len(who)} guests, {n_disp} dispatches: {who_s}]")
     # sanity: dest pointer non-null?
     nulls = sum(1 for r in rs if r[3][di] == 0)
     if nulls:

@@ -780,9 +780,12 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // equal (CDHASH 5, CDHASH_WITH_INFO 18) — all inside the 64 KiB floor `diff_window` keeps
         // under every Dest (`base.max(…)`), which is what makes a STATUS with usersize 0 still
         // fully captured; do not "fix" that floor away for Dest rows. Corpus, measured 2026-09-13:
-        // op 0 with usersize 4 from every dynamic guest, op 16 with 1032 (169: two guests;
-        // 170: every dynamic guest) — both rows inert for the window, live for the clamp. The
-        // audit token (170, x4) is a fixed 32-byte copyin.
+        // op 0 with usersize 4 from every dynamic guest, op 16 with 1032 (169: 11 guests, 22
+        // dispatches — nine Apple binaries and both CPython invocations; 170: every dynamic
+        // guest) — both rows inert for the window, and inert for the clamp too on this corpus:
+        // all 202 destinations are on the dyn stack (raw census) and `RETRACE_REGCLAMP=1`
+        // prints FIT for each on hello_dyn and jq (M34 fix wave). Contrast the 336 row below,
+        // where the clamp DOES fire. The audit token (170, x4) is a fixed 32-byte copyin.
         169 => row!(P, [Scalar, Scalar, Dest(Reg(3)), Scalar]),
         170 => row!(P, [Scalar, Scalar, Dest(Reg(3)), Scalar, Ptr]),
         // csrctl(uint32_t op, void *useraddr, size_t usersize): both ops reject usersize !=
@@ -815,11 +818,23 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // PROC_SELFSET_THREADNAME COPIES IN ≤ 63 bytes (MAXTHREADNAMESIZE − 1) — a Source shape
         // bounded 1000× inside the window, so no canary coverage is lost; SET_DYLD_IMAGES (15)
         // transfers nothing ("don't need to copyin the buffer. just setting the buffer range in
-        // the task struct" — `proc_set_dyld_images`). For both, the clamp min(avail, buffersize)
-        // fires only if the guest's buffer already overruns its own backing. Corpus, measured
-        // 2026-09-13 (318 dispatches, every dynamic guest): callnum 2 flavors 13/17 with 64/56,
-        // callnum 5 with 4 (the Rust guests naming `main`), callnum 15 with 368 from dyld at
-        // pc 0x14000600c — all inside the window; inert for the window, live for the clamp.
+        // the task struct" — `proc_set_dyld_images`). Corpus, measured 2026-09-13 (318
+        // dispatches, every dynamic guest): callnum 2 flavors 13/17 with 64/56, callnum 5 with 4
+        // (the Rust guests naming `main`), callnum 15 with 368 from dyld at pc 0x14000600c — all
+        // inside the window, so the row is inert for the window. NOT inert for the clamp: on
+        // every dynamic guest (76 of 76) the SET_DYLD_IMAGES destination 0x1ec6f7f80 sits 0x3f80
+        // into a shared-cache page whose backing is that one 16 KiB page (`page_in_cache`, one
+        // backing per fault), so `host_span` gives avail = 128 against buffersize 368 and the
+        // clamp rewrites the forwarded length 368 → 128 — measured, `RETRACE_REGCLAMP=1` on
+        // hello_dyn and jq (M34 fix wave): `[M34 REGCLAMP] syscall 336 count 368 avail 128 dest
+        // 0x1ec6f7f80 backing [0x1ec6f4000,0x1ec6f8000)`. That is M29's "R1" case (a buffer that
+        // legitimately continues into the next backing), the normal geometry for a cache-DATA
+        // destination rather than a pathology. No recorded byte changes: the call transfers
+        // nothing, and from inside retrace it is rejected before the size is read — retrace's own
+        // dyld already made the third and final `task_set_dyld_info` call on retrace's task
+        // (osfmk/kern/task.c, "called at most three times … any calls after that are ignored" →
+        // KERN_FAILURE → EINVAL in `proc_set_dyld_images`), regardless of pid or size. Owed: the
+        // call names RETRACE's task and should be serviced above the trace, not forwarded.
         336 => row!(P, [Scalar, Scalar, Scalar, Scalar, Dest(Reg(5)), Scalar]),
         // task_read_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t): 4 bytes
         // out (bsd/kern/kern_proc.c `task_read_for_pid`, `copyout(…, sizeof(mach_port_name_t))`).
