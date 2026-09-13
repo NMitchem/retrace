@@ -152,10 +152,11 @@ pub enum ArgKind {
     Scalar,
     /// A GUEST file descriptor — `translate_fds` rewrites it to the host's before forwarding.
     ///
-    /// The M10 analogue of `is_write_syscall`: one shared table rather than a condition spelled
-    /// out at each call site, because a forgotten `Fd` does not diverge loudly — it forwards a raw
-    /// guest fd to the host kernel, which then acts on RETRACE's descriptor of that number. A
-    /// position that is not `Fd` is simply not translated, so a non-`Fd` position must mean
+    /// The M10 analogue of `Box_::is_console_write` (the ONE shared console predicate): one shared
+    /// table rather than a condition spelled out at each call site, because a forgotten `Fd` does
+    /// not diverge loudly — it forwards a raw guest fd to the host kernel, which then acts on
+    /// RETRACE's descriptor of that number. A position that is not `Fd` is simply not translated,
+    /// so a non-`Fd` position must mean
     /// "provably not a descriptor", never "not gotten to yet". (Before M33 the same silence
     /// covered a whole syscall absent from the table; an absent ROW is loud now — `forwarded_shape`
     /// panics on it at the forward point — and only the per-position silence remains.)

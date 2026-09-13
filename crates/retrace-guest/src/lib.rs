@@ -189,6 +189,10 @@ pub const FDTABLE_DYN: &str = concat!(env!("OUT_DIR"), "/fdtable_dyn");
 /// so the e2e can assert that an alias of stdout is still mirrored and a displaced stdout is not.
 /// Takes the file path as `argv[1]`.
 pub const DUP2_DYN: &str = concat!(env!("OUT_DIR"), "/dup2_dyn");
+/// M37 (C1): closes fd 1 and fd 2, then writes to each — exits 0 only if both writes are EBADF,
+/// so the rung helper's exit-0 demand carries the "a closed console slot is closed on both sides"
+/// property and its stdout equality carries the mirror.
+pub const CLOSEWRITE_DYN: &str = concat!(env!("OUT_DIR"), "/closewrite_dyn");
 /// M11 headline: a full-std Rust binary that `panic!()`s into `abort()`/SIGABRT (`-C panic=abort`).
 pub const PANICKY: &str = concat!(env!("OUT_DIR"), "/panicky");
 /// M12 headline: a stock full-`std` Rust binary that faults on a wild pointer, so libstd's own

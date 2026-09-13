@@ -238,21 +238,29 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 w.append(&Event::Syscall { num, args, ret, err: false, writes: vec![], thread }).map_err(|e| format!("append write: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, false);
             }
-            // A guest close of fd 0/1/2 is FAKED, never forwarded: those descriptors are retrace's
-            // own (see `is_console_close`), so forwarding lets the guest close retrace's stdout out
-            // from under it — after which the CLI prints the mirrored recording into a closed fd and
-            // the run reports success having emitted nothing. Measured with jq, whose exit path does
+            // A guest close of its identity console slot (0/1/2 while still the console) has its
+            // HOST half FAKED, never forwarded: those descriptors are retrace's own (see
+            // `is_console_close`), so forwarding lets the guest close retrace's stdout out from
+            // under it — after which the CLI prints the mirrored recording into a closed fd and the
+            // run reports success having emitted nothing. Measured with jq, whose exit path does
             // exactly this. Reports success, which is what a real close(1) would do.
             //
-            // No replay mirror arm is needed (contrast the console write): this appends an ordinary
-            // recorded syscall whose (ret=0, err=false, no writes) replay reproduces through the
-            // generic `apply_and_return`, and whose (num, args) the divergence oracle still checks.
+            // The TABLE half is real (M37 fix round 1, review C1): the slot is retired through the
+            // same `FdTable::close` the generic path uses, so a later write to 1 is EBADF — the
+            // kernel's answer — rather than a mirrored success, and a later `dup2(1, n)` is EBADF
+            // too. `FdTable::close` only drops the host mapping; retrace's own fd 1 stays open.
             //
-            // Deferred: retrace does not model the fd as CLOSED afterwards, so a guest that wrote to
-            // fd 1 after closing it would see the write succeed instead of EBADF. No guest in the
-            // gate does; modeling it means giving the box a real fd table.
+            // No replay mirror ARM is needed (contrast the console write): this appends an ordinary
+            // recorded syscall whose (ret=0, err=false, no writes) replay reproduces through the
+            // generic arm, whose (num, args) the divergence oracle still checks — and whose slot the
+            // generic arm's M10 close mirror retires unconditionally. That mirror is what makes the
+            // retirement below load-bearing: until M37 this arm did NOT retire the slot while
+            // replay's mirror did, an asymmetry nothing observed until `is_console_write` became
+            // table-driven, whereupon a write after `close(1)` was mirrored on record and not on
+            // replay — two stdouts, rc 0 on both, no divergence (closewrite_e2e is the control).
             Stop::Syscall { num, args } if b.is_console_close(num, args[0]) => {
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append close: {e}"))?; count += 1;
+                b.fds_mut().close(args[0]);
                 b.set_x0_err_and_return(0, false);
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
@@ -1806,8 +1814,10 @@ impl ReplaySession {
                             }
                             // Learn the guest's task-port name (mirror of record) from the recorded −28 result.
                             if num == MACH_TASK_SELF && !*err { self.guest_task_port = Some(*ret); }
-                            // Mirror fd-1/2 write output (the buffer is already filled by prior applied reads).
-                            // Same predicate as record's arm — see `is_console_write`.
+                            // Mirror console-slot write output — fd 1/2 and every `dup2` alias of them,
+                            // until the guest `dup2`s or closes them away (the buffer is already
+                            // filled by prior applied reads). Same predicate as record's arm — see
+                            // `Box_::is_console_write`.
                             if self.b.is_console_write(num, args[0]) {
                                 self.stdout.extend_from_slice(&self.b.read_guest(args[1], args[2] as usize));
                             }
@@ -2358,9 +2368,12 @@ impl ReplaySession {
                             if !*err && (num == retrace_arch::SYS_CLOSE
                                       || num == retrace_arch::SYS_CLOSE_NOCANCEL) {
                                 // Mirror record's slot retirement so the two tables stay in step —
-                                // otherwise the next alloc diverges. A `Console(_)` slot never
-                                // reaches here (is_console_close handles it in the arm above); a
-                                // displaced one (`Open` after `dup2(f, 1)`, M37) does, on both sides.
+                                // otherwise the next alloc diverges. EVERY successful close lands
+                                // here, the faked console close included: record fakes only the
+                                // host half of that one and retires the slot in its own arm (M37
+                                // fix round 1, review C1), so this unconditional retirement is its
+                                // mirror. Before M37 the two sides disagreed on a closed console
+                                // slot and nothing could see it.
                                 self.b.fds_mut().close(args[0]);
                             }
                             // Apply recorded kernel writes + feed ret; NO real syscall executes.

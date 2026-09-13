@@ -193,3 +193,19 @@ fn dup2_self_is_a_no_op_and_a_closed_source_is_ebadf() {
     assert_eq!(r.slots()[18], FdSlot::Console(2));
     assert_eq!(r.host(18), None, "replay carries no host mapping for an alias");
 }
+
+// M37 fix round 1 (review I1). The target is bounded: a negative `int fd2` arrives zero-extended
+// as 0xffff_ffff, and unbounded it would have `grow_to` resize both vectors to 2^32 entries on
+// record and replay alike. xnu answers EBADF for `new < 0 || new >= maxfiles`.
+#[test]
+fn dup2_rejects_a_negative_or_out_of_range_target_with_ebadf() {
+    let mut t = FdTable::new();
+    assert_eq!(t.dup2(0, 0xffff_ffff, Some(41)), Err(retrace_box::EBADF), "dup2(0, -1) is EBADF");
+    assert_eq!(t.dup2(0, retrace_box::DUP2_MAX_FD, Some(41)), Err(retrace_box::EBADF),
+        "the bound is exclusive: dup2(0, OPEN_MAX) is EBADF");
+    assert_eq!(t.dup2(0, u64::MAX, Some(41)), Err(retrace_box::EBADF), "no overflow in grow_to");
+    assert!(t.slots().len() <= 3, "a rejected target grows nothing");
+    assert_eq!(t.dup2(0, retrace_box::DUP2_MAX_FD - 1, Some(41)).unwrap(), (retrace_box::DUP2_MAX_FD - 1, None),
+        "one below the bound is a legal target");
+    assert_eq!(t.slots()[(retrace_box::DUP2_MAX_FD - 1) as usize], FdSlot::Console(0));
+}
