@@ -3254,7 +3254,20 @@ impl Box_ {
         } else { None };
         let mut windows: Vec<Window> = Vec::new();
         let mut hargs = [0i64; 8];
+        // M37: a register the row marks `Scalar` carries a NUMBER — a pid, an offset, a flag word —
+        // and is forwarded verbatim. Probing it was M34 §4b: a scalar that happened to equal a
+        // mapped IPA (the recorder's own pid, on ~82 % of the pid space once the guest's
+        // os_alloc_once slab lands at 0x10000 — M36) reached the host kernel as a host pointer, and
+        // every self-pid csops/proc_info answered ESRCH. Only `Scalar` skips: positions past the
+        // row's arity keep the probe (M30's stale-register band measurement rests on it) and every
+        // memory kind needs it. The audit that licenses this is in
+        // docs/sweep-evidence/2026-09-13-m37/README.md.
+        let shape = retrace_arch::forwarded_shape(num);
         for i in 0..8 {
+            if shape.args.get(i) == Some(&retrace_arch::ArgKind::Scalar) {
+                hargs[i] = args[i] as i64;
+                continue;
+            }
             match self.host_span(args[i]) {
                 Some((hp, avail)) => {
                     // M26: not a flat cap. For a buffer-filling syscall the destination window

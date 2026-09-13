@@ -103,6 +103,16 @@ fn main() {
         .status().expect("clang failproc");
     assert!(status.success(), "failproc guest build failed");
 
+    // M37: a guest whose lseek offset is 0x4000 = TRAMPOLINE_IPA — a NUMBER that equals a mapped
+    // guest IPA. The unit control for the §4b probe skip: a Scalar position is forwarded verbatim.
+    let src = format!("{}/asm/scalarprobe.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/scalarprobe");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang scalarprobe");
+    assert!(status.success(), "scalarprobe guest build failed");
+
     // M29: a guest issuing a legal NULL-oldp sysctl (size query) followed by one whose *oldlenp
     // (1 TiB) is far larger than any backing — the fixture for the DerefU64 refusal.
     let src = format!("{}/asm/oldlensysctl.s", env!("CARGO_MANIFEST_DIR"));
