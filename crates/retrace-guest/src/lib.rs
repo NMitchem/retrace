@@ -134,6 +134,10 @@ pub const BIGWRITE_OUT: &str = concat!(env!("OUT_DIR"), "/bigwrite_out.bin");
 /// writes into a guest buffer on a FAILING syscall — the path where `forward_and_diff` skips write
 /// capture and the guard band alike.
 pub const FAILSYSCTL: &str = concat!(env!("OUT_DIR"), "/failsysctl");
+/// M35: a guest whose `sysctl(kern.proc.all)` fails `ENOMEM` after the kernel has copied one full
+/// 648-byte `kinfo_proc` into its buffer, then writes that record's first 8 bytes to stdout —
+/// the data half of the failing-syscall capture, visible as output.
+pub const FAILPROC: &str = concat!(env!("OUT_DIR"), "/failproc");
 /// A guest issuing a legal NULL-`oldp` `sysctl` and then one whose `*oldlenp` (1 TiB) is far
 /// larger than any backing — the fixture for M29's `DerefU64` refusal.
 pub const OLDLENSYSCTL: &str = concat!(env!("OUT_DIR"), "/oldlensysctl");
