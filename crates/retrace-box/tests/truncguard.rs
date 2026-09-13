@@ -560,7 +560,11 @@ fn a_failing_syscall_still_restores_the_canary() {
                 let (_ret, err, writes) = b.forward_and_diff(retrace_arch::SYS_OPEN, a);
                 assert!(err, "precondition: opening {path:#x} as a relative path must FAIL, or this \
                               test drives the success path it is not about");
-                assert!(writes.is_empty(), "a failed syscall captures nothing");
+                assert!(writes.is_empty(),
+                    "a failing `open` of a nonexistent relative path writes nothing into its path \
+                     buffer — a per-syscall kernel fact, measured; NOT that the capture loop is \
+                     skipped on error, which since M35 it is not: a failing syscall that writes \
+                     (`failsysctl`, `failproc`) captures its writes");
 
                 assert_eq!(b.read_bytes_for_test(base, band), pre,
                     "the canary must be restored on the FAILING path too — a leak here is bytes \
