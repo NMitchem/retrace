@@ -3927,7 +3927,23 @@ impl Box_ {
                 Some(s) => s,
                 None => return Some(format!("expected region at {:#x} is not mapped in replay", r.ipa)),
             };
-            let n = r.bytes.len().min(avail);
+            // M35 (H1): a recorded region longer than its replay backing is a divergence in its
+            // own right, not a prefix to compare. On a correct replay this never fires — every
+            // captured region lies inside one record-side backing, and replay rebuilds the same
+            // backings from the same snapshot — so the branch exists for the INCORRECT replay: a
+            // layout drift, a checkpoint restored against a different backing set, a future edit to
+            // the pager. Until M35 this was `.min(avail)`, which compared the part that fit and
+            // said nothing about the rest: flagged in M1's own review, deferred at M2, carried by
+            // M27, M28, M30, M33 and M34 as "still unpaid". `write_guest` (the apply side) has
+            // asserted the same bound since M0; this is the compare side catching up.
+            if r.bytes.len() > avail {
+                return Some(format!(
+                    "recorded region at ipa {:#x} is {} bytes but its replay backing holds only {} \
+                     from that address — the recording and the replay disagree about the guest's \
+                     memory layout, which no byte compare can settle",
+                    r.ipa, r.bytes.len(), avail));
+            }
+            let n = r.bytes.len();
             let cur = unsafe { std::slice::from_raw_parts(hp, n) };
             if let Some(off) = (0..n).find(|&i| cur[i] != r.bytes[i]) {
                 return Some(format!(
