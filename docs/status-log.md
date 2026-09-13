@@ -6706,3 +6706,430 @@ being the only two in the tree. M33 parked nothing new and un-parked nothing.
   table" — a wrong diagnosis, not a panic, and not a hole for any M33 recording, but the first
   `allocates_fd` addition since M10 and the one thing "no recorded byte changed" does not cover.
   M25 and M29 set the no-`TRACE_MAGIC`-bump precedent for this class.
+
+## Status: M34-destgaps — two `Dest` rows, one cited bound, and a corpus that reaches neither
+
+M33 closed with three syscalls still on the README's flat-window list, each carrying a row comment
+that named it as M34's: `proc_info` (336), `getattrlist`/`fgetattrlist` (220/228) and
+`csops`/`csops_audittoken` (169/170) — three length measurements the M32–M38 charter assigns to
+this milestone, "the milestone most exposed to the 'right conclusion, unmeasured supporting fact'
+failure M20 named". M34 took the three measurements and found two rows to add and one premise to
+retire. `proc_info` and `csops` gained `Dest` rows, because their blob and list callnums are
+bounded by nothing below the window except the caller's own length. `getattrlist`/`fgetattrlist`
+stay `Ptr`, because xnu rejects with `ENOMEM` before writing a byte whenever the packed result
+exceeds 15,360 bytes — a cited bound four times inside the window, which is the table's own `Ptr`
+rule applied rather than an exception to it (Ruling 1). Neither new row changes a captured byte on
+any guest the repo can run: the largest length operand across 851 dispatches of the five is 1,052
+bytes, so the window half of `Dest` is inert today, exactly as M32's per-argument fill was
+measured inert. The half that is not inert is the forwarded-count clamp, the half M27 called
+serious, and control 3 measured what it prevents: without it, the host kernel — handed a
+4,160-byte `buffersize` over a 64-byte backing — wrote 3,612 bytes into retrace's own process and
+reported no error. Taking the measurement also found a defect outside the milestone's scope,
+recorded and routed rather than fixed (§4b, Ruling 3): `forward_and_diff`'s register probe rewrites
+a *pid* that happens to land inside a guest backing, so for roughly half of all recorder pids every
+`csops` and `proc_info(PIDINFO)` in the corpus fails `ESRCH` — on both runs identically, which is
+why no oracle has ever seen it.
+
+The milestone's own numbers: **three** rows changed shape (336, 169, 170 — the two syscall
+families the title counts), **two** rows left `Ptr` with a citation (220, 228), **three**
+`EXPECTED_DIFFS` entries, **two** tests (`truncguard.rs` 19 → 21, the only file whose count
+moved), **one** committed instrument (`tools/destgaps-census.sh` and its summariser), **851**
+dispatches over **76** guests with a corpus maximum of **1,052** bytes, the sweep at
+`pass=46 fail=8 skip=0` on its second run (45/9 on its first — the documented intermittent, below),
+the gate **572 / 0 / 2 over 124**. `TRACE_MAGIC` did not move, no trap arm was touched, no
+`retrace-core` or `retrace-box/src` line changed, and no recorded byte changed.
+
+### What it set out to do
+
+The charter's entry, `docs/superpowers/specs/2026-09-09-retrace-m32-m38-program-charter-design.md`
+§3, "M34 — `destgaps`: the three uncovered `dest_buffer` syscalls", quoted:
+
+> **Discharges:** the README's "3 remain uncovered by `dest_buffer`" — `proc_info`,
+> `getattrlist`/`fgetattrlist`, `csops`.
+>
+> Each needs its reply-length operand located and added, as M27 did for `ps`'s
+> `sysctl(KERN_PROC_ALL)` (`*(size_t*)x3`, 205,416 bytes).
+>
+> **Plan certainty: high** for the mechanism, **medium** per operand — each location is a
+> measurement. The plan must make "measure the operand" an explicit task step with a recorded
+> result, never an assumption baked into an edit. This is the milestone most exposed to the "right
+> conclusion, unmeasured supporting fact" failure M20 named.
+
+What a `Ptr` costs at those rows is the two things `Dest` provides and nothing else does, both in
+`crates/retrace-box/src/lib.rs` and both record-side: the **diff window** — `Box_::diff_window`
+(`:3082`) takes `max(min(avail, window_cap), clamp_count(avail, len))` when `dest_len_bytes`
+(`:3062`) knows `len`, and the flat 64 KiB `window_cap` otherwise, so a kernel write past the flat
+window is the M26 truncation class, captured by no `Event`, restored stale on replay and invisible
+to the `(num, args)` oracle (the M27/M30 guard band *detects* that class; it does not prevent it) —
+and the **forwarded-count clamp**, the `DestLen::Reg(li)` arm (`:3286`) that rewrites `hargs[li]`
+to `clamp_count(avail, count)` so the host kernel is never told a length larger than the guest
+backing behind the destination. The README claims to discharge were the sentence at line 452
+("**Three still get a flat 64 KiB**: `proc_info` (336); `getattrlist`/`fgetattrlist` (220/228);
+`csops` (169/170)") and the owed-list entry at line 602. The entry's own "each location is a
+measurement" is what turned out to matter: one of the three measurements contradicted the entry's
+premise, and the milestone was re-scoped on it, loudly, as charter §5 requires.
+
+### Ruling 1 — re-scoped on xnu source
+
+The spec's ruling, verbatim:
+
+> **Ruling 1: re-scoped M34 — the premise that `getattrlist`/`fgetattrlist` (220/228) can overrun
+> the 64 KiB window was contradicted by xnu source: both entry points reach
+> `getattrlist_internal` → `getvolattrlist` / `vfs_attr_pack_internal`, each of which rejects
+> with `ENOMEM` before any copyout when the packed result exceeds `attr_max_buffer`
+> (`ATTR_MAX_BUFFER_LONGPATHS` = 8192 − 1024 + 8192 = 15,360; `bsd/vfs/vfs_attrlist.c`, the
+> `ab.allocated > attr_max_buffer` gates, and the copy `lmin(buf_size, ab.allocated)` /
+> `ulmin(bufferSize, ab.needed)`) — new scope for those two rows: stay `Ptr`, cite the bound,
+> pin the decision with a test.**
+
+The source, from xnu `main` as fetched 2026-09-13. `getattrlist` (`bsd/vfs/vfs_attrlist.c:3577`)
+and `fgetattrlist` (`:3486`) both call `getattrlist_internal` (`:3250`), which dispatches to
+`getvolattrlist` (`:992`) for volume attributes or `vfs_attr_pack_internal` (`:2817`) otherwise.
+Both packers compute `ab.allocated = fixedsize + varsize` and then `if (((size_t)ab.allocated) >
+attr_max_buffer) { error = ENOMEM; goto out; }` **before allocating or writing anything**, where
+`attr_max_buffer` is `ATTR_MAX_BUFFER` (8192, `bsd/sys/attr.h:134`) or, for a long-paths process,
+`ATTR_MAX_BUFFER_LONGPATHS` = `8192 − MAXPATHLEN + MAXLONGPATHLEN` = 8192 − 1024 + 8192 =
+**15,360** (`attr.h:140`; `MAXLONGPATHLEN` 8192 from `bsd/sys/syslimits.h:137`, the constant this
+table's `fsgetpath` row already cites). The user copy is then `ulmin(bufferSize, ab.needed)`
+(`getvolattrlist`, `:1686`) or `lmin(buf_size, ab.allocated)` (`vfs_attr_pack_internal`, `:3108`)
+— never more than `ab.allocated`. So whatever `bufferSize` says, the kernel never writes more than
+15,360 bytes through `attributeBuffer`. The `ArgKind` doc states the membership rule
+(`crates/retrace-arch/src/lib.rs:264–267`): `Ptr` is "a read the kernel itself bounds far inside
+the window (a `sockaddr`, an `ioctl` parameter), a fixed struct it writes (`struct stat`), or an
+in/out scalar. **The row comment names the bound and its citation.** A bound that cannot be cited
+is not a bound". A write the kernel itself caps at 15,360 against a 65,536-byte window is that
+case exactly.
+A `Dest` here would not have been wrong so much as false to the table's own vocabulary: a reader
+would take it to mean "the caller's length is the only bound", which is untrue, and which the
+measurement below shows no guest has ever needed (corpus maximum 1,052 bytes, 14× inside the
+kernel's own cap). The ruling is pinned by an assertion, not only by prose — control 2 below is
+the proof that the pin holds.
+
+### The measurement (spec §4)
+
+**The corpus** is the M33 census corpus, re-run 2026-09-13 because M33's raw per-guest outputs
+lived under a since-deleted worktree's gitignored `.superpowers/` and did not survive — the risk
+M33's own "what stays owed" named, and the reason the instrument is committed this time (§5e):
+every Mach-O in the `retrace-guest` `OUT_DIR` (static via `record`, dynamic via `record-dyn`,
+classified by `LC_LOAD_DYLINKER`), `jq --version`, `jq .name <rung-3 fixture>`, the CPython
+interpreter and its launcher with `-c 'print(1)'`, and all 54 of `tools/apple-sweep-binaries.txt`;
+bare argv, stdin `/dev/null`, 30 s watchdog. The instrument is `RETRACE_TRACE=1`'s `[trap] num=…
+args=[x0…x5]` line on the record side, filtered to the five numbers — `x5` and `x3` are printed, so
+no dedicated probe was needed. Script: `tools/destgaps-census.sh`; summary:
+`tools/destgaps-census-summary.py`.
+
+**Coverage:** 76 guests issued at least one of the five — every dynamic guest, because the calls
+are libSystem/dyld init-time — and 42 issued none: the static `-nostdlib` guests, among them the
+three (`crash`, `crashjmp`, `wildstore`) that fault before their first syscall. 851 matching
+dispatches. (The spec's §4 says "115 guests dispatched"; 76 + 42 is 118. The census ran in two
+passes — the first's progress log has 115 lines, and `/usr/bin/yes`, `/usr/bin/true` and
+`/usr/bin/printenv` came in a second — and 115 is the first pass's count. Checked against the raw
+TSVs: 821 + 30 = 851 rows over 76 distinct labels, the per-syscall figures below reproduced from
+them exactly. Recorded here because the log is where a wrong supporting fact is supposed to be
+left standing with its correction, and this one is the class the charter's entry warned about.)
+
+**Result — the largest length operand in the whole corpus is 1,052 bytes.** No dispatch comes
+within two orders of magnitude of the 64 KiB window:
+
+| syscall | dispatches | guests | op / flavor | length | who |
+|---|---|---|---|---|---|
+| `proc_info` 336 | 318 | 76 | callnum 2 `PIDINFO`, flavor 13 `PROC_PIDT_SHORTBSDINFO` | 64 = `sizeof(proc_bsdshortinfo)` | every dynamic guest |
+| | | | callnum 2, flavor 17 `PROC_PIDUNIQIDENTIFIERINFO` | 56 | every dynamic guest |
+| | | | callnum 5 `SETCONTROL`, flavor 2 `PROC_SELFSET_THREADNAME` | 4 (the name `main`, a copyin) | the 9 Rust guests |
+| | | | callnum 15 `SET_DYLD_IMAGES` | 368 (no transfer) | every dynamic guest, from dyld at `pc=0x14000600c` |
+| `getattrlist` 220 | 191 | 76 | — | 12, 64, 1036; **1052 max** (CPython) | every dynamic guest |
+| `fgetattrlist` 228 | 140 | 76 | — | 12, 40 | every dynamic guest |
+| `csops` 169 | 126 | 76 | op 0 `CS_OPS_STATUS` | 4 | every dynamic guest |
+| | | | op 16 `CS_OPS_DER_ENTITLEMENTS_BLOB` | 1032 | 2 (an Apple binary, CPython) |
+| `csops_audittoken` 170 | 76 | 76 | op 16 `CS_OPS_DER_ENTITLEMENTS_BLOB` | 1032 | every dynamic guest |
+
+**The raw-vs-libc check M29 taught** — the one that caught `sysctlbyname`'s indices being
+identical to `sysctl`'s rather than one lower — passes for all five: the register the row names
+carries a byte count, verified against the SDK by `sizeof`. `proc_bsdshortinfo` = 64 matches
+flavor 13's `x5`; `attrlist` = 24 is the `alist` copyin at `x1`, not the length at `x3`;
+`CS_OPS_STATUS`'s `x3` = 4 = `sizeof(uint32_t)`.
+
+**Stated plainly:** on this corpus neither new `Dest` row changes a single captured byte — every
+destination already fits the flat window, so the widening half is inert today. The half that is
+not inert is the **clamp**, and it is structural rather than corpus-dependent: after M34 a guest
+that passes `proc_info` or `csops` a `buffersize`/`usersize` larger than its buffer's backing has
+the forwarded length clamped to that backing, where before the host kernel would have been told
+the guest's number and written past it in retrace's own process. That is the M27 "serious half";
+the window half is the correctness-by-contract that makes the README's sentence true rather than
+an open item. Neither is a fix to a reproduced bug, and the ledger says so.
+
+### What changed
+
+Three code commits — `3e05664` (Task 1, the instrument), `e3ec90a` (Task 2, rows, window test,
+ledger), `486bab2` (Task 3, the clamp control) — and this docs commit.
+
+- **`crates/retrace-arch/src/lib.rs`** — `proc_info` 336 (`:823`) is
+  `[Scalar, Scalar, Scalar, Scalar, Dest(Reg(5)), Scalar]`, `x5` = `buffersize` (`uint32_t`);
+  `csops` 169 (`:786`) is `[Scalar, Scalar, Dest(Reg(3)), Scalar]` and `csops_audittoken` 170
+  (`:787`) is `[Scalar, Scalar, Dest(Reg(3)), Scalar, Ptr]`, `x3` = `usersize` (`user_size_t`),
+  `x4` the 32-byte audit-token copyin, still `Ptr`. `Reg`, not `DerefU64`, and clamp, not refuse:
+  every length here is a pure in-value the kernel reads and never writes back, so nothing of
+  M29's `sysctl` reasoning (an in-out `*oldlenp` that clamping would silently truncate) applies,
+  and the rows take `read`'s posture exactly as `getdirentries64`, `recvfrom` and `getfsstat64`
+  did in M29. Each row's comment now carries the kernel-source analysis in the M29 rows' shape.
+  For `proc_info` (`bsd/kern/proc_info.c` `proc_info_internal`, dispatching on `callnum`):
+  `LISTPIDS` (1), `KERNMSGBUF` (4), `LISTCOALITIONS` (11), `PIDDYNKQUEUEINFO` (13) and
+  `UDATA_INFO` (14) are bounded by `buffersize` and a count the kernel owns — a tunable
+  (`kern.maxproc`, `kern.msgbuf`), not a citable constant, hence `Dest`; `PIDINFO` (2),
+  `PIDFDINFO` (3), `PIDFILEPORTINFO` (6) and `PIDORIGINATORINFO` (10) copy out a fixed struct after
+  `if (buffersize < size) return ENOMEM`. Two callnums ride under `Dest` as an over-approximation,
+  **Ruling 2**: `SETCONTROL` (5) with `PROC_SELFSET_THREADNAME` is a *copyin* of at most 63 bytes
+  (`MAXTHREADNAMESIZE − 1`), a `Source` shape bounded 1000× inside the window, so no canary
+  coverage is lost; `SET_DYLD_IMAGES` (15) transfers nothing at all ("don't need to copyin the
+  buffer. just setting the buffer range in the task struct" — `proc_set_dyld_images`). For both,
+  the clamp `min(avail, buffersize)` can fire only when the guest's buffer already overruns its own
+  backing. Accepted because the alternative, a per-callnum kind, is a schema change the charter's
+  queue does not authorise and nothing measured needs. For `csops` (`bsd/kern/kern_proc.c`
+  `csops_internal`, dispatching on `ops`): `CS_OPS_ENTITLEMENTS_BLOB` (7), `CS_OPS_BLOB` (10),
+  `CS_OPS_DER_ENTITLEMENTS_BLOB` (16), `IDENTITY` (11) and `TEAMID` (14) copy out up to `usersize`
+  through `csops_copy_token` (an 8-byte header and `ERANGE` if `usersize` is short), and
+  `CS_OPS_BLOB` is the whole code-signing SuperBlob — one CodeDirectory hash per page of the
+  binary, hundreds of KiB for a large one — so no citable bound below the window; the fixed-size
+  ops write 4 bytes (`CS_OPS_STATUS` 0, with **no** `usersize` check; `VALIDATION_CATEGORY` 17),
+  8 (`PIDOFFSET` 6) or a struct whose size `usersize` must equal (`CDHASH` 5,
+  `CDHASH_WITH_INFO` 18), all inside the 64 KiB floor `diff_window` keeps under every `Dest`
+  (`base.max(…)`) — which is what keeps a `CS_OPS_STATUS` with `usersize = 0` fully captured, and
+  the row says so, so nobody later "fixes" the floor away for `Dest` rows and silently loses those
+  4 bytes. `getattrlist` 220 (`:718`) and `fgetattrlist` 228 (`:514`) are unchanged in shape,
+  `[Path, Ptr, Ptr, Scalar, Scalar]` and `[Fd, Ptr, Ptr, Scalar, Scalar]`; their comments now
+  carry Ruling 1's citation — the two packers, the `ENOMEM`-before-copyout gate,
+  `ATTR_MAX_BUFFER_LONGPATHS` = 15,360 — and the corpus maxima (1,052 and 40). The `ArgKind::Dest`
+  doc paragraph (`:234–244`) is rewritten: M34 measured the three M29 left as "structurally capable
+  of overrunning", two joined and one did not, and the sentence "`Ptr` there means 'not
+  measured'" is deleted, because after M34 no `Ptr` in the table means that — every one names its
+  bound.
+- **`crates/retrace-arch/tests/legacy_equivalence.rs:127–129`** — three `EXPECTED_DIFFS`
+  entries, `(336, View::DestBuffer, …)`, `(169, …)`, `(170, …)`, each "exercised (every dynamic
+  guest; corpus max 368 / 1032 / 1032)", so the ledger records that the widening was inert on
+  landing; the `exercised_and_unexercised_match_the_census` check would fail an entry that said
+  otherwise for a census number. No entry for 220/228 — their view is unchanged, and a spurious
+  entry fails as stale (control 1 shows the message).
+- **`crates/retrace-box/tests/truncguard.rs`** — two tests, the only `#[test]` count that moved.
+  `the_window_widens_for_the_m34_rows_and_not_for_getattrlist` (`:199`) goes through
+  `Box_::diff_window_for_test` on a real `Box_` with `AVAIL = 1 << 20`, the seam M29's
+  `the_window_widens_for_each_m29_reg_addition` used, so the production `diff_window` is exercised
+  without a guest per syscall: 336 at index 4 with `args[5] = 200_000` → 200,000, and at index 5
+  (the length, not the buffer) → the flat 65,536; 169 and 170 at index 2 with `args[3] = 150_000`
+  → 150,000; 170 at index 4 (the audit token) → flat; and — Ruling 1 as a red bar — 220 and 228
+  at index 2 with the same 150,000-byte `args[3]` → **flat**. A later reader who "finishes M34" by
+  making `getattrlist` a `Dest` fails here and is sent to the citation.
+  `the_clamp_reaches_proc_info` (`:246`) is control 3 (below): it loads the static `HELLO`, runs to
+  the guest's first `Stop::Syscall`, and instead of forwarding that call calls
+  `forward_and_diff(336, [1 /*LISTPIDS*/, 1 /*PROC_ALL_PIDS*/, 0, 0, dest, 4160, 0, 0])` with
+  `dest = STACK_TOP_IPA − 64`, having asserted that `host_span_for_test(dest)` gives exactly 64
+  bytes of backing and that the scalar arguments it checks (`x0`–`x3`, `x5`) land in no backing
+  (so the test measures the clamp and not §4b's probe). `LISTPIDS` is the callnum precisely
+  because it takes no pid.
+- **`tools/destgaps-census.sh`** (107 lines) and **`tools/destgaps-census-summary.py`** (46
+  lines) — the §4 instrument, committed so the next milestone re-runs it instead of rediscovering
+  it, as M33's lost outputs forced this one to. Smoke-run at Task 1 on `/bin/echo`, `/bin/ls` and
+  `/usr/bin/yes`: `matched=10` each, `yes` ending `CAPPED`, `DONE matched_total=30`, the
+  summariser's five `max=` lines all `fits 64 KiB`. The script's header carries one lesson from
+  its own first run: under `RETRACE_TRACE=1` a stdout-flooding guest floods *stderr* with the
+  trace of its own writes — **measured at 5 GB in the 30 s before the watchdog fired**, on
+  `/usr/bin/yes`, after which the first run spent its time grepping that file rather than measuring
+  anything — so stderr is streamed through a line-capped filter (`head -n 400000`; `head` closes
+  the pipe at the cap and the recorder dies on `SIGPIPE` at its next trace line), and the watchdog
+  kills by command pattern because `$!` of a backgrounded pipeline is the filter, not the recorder.
+  Not a test; runs in no gate.
+- **`README.md`** — the line-452 sentence replaced with what is true (two rows widened and
+  clamped, two kernel-bounded at 15,360 and cited, corpus maximum 1,052, both new rows inert for
+  the window and live for the clamp); the owed-list entry "M34's three `Dest` rows" removed, and
+  the pid-collision probe entered in its place.
+- No `retrace-core` edit, no `retrace-box/src` edit, no `TRACE_MAGIC` bump, no new guest, no new
+  trap arm. Symmetry (spec §8) is by construction: `dest_buffer` is consulted only inside
+  `forward_and_diff`, which replay never calls; the two effects are how many bytes the record side
+  *looks at* after the syscall and the length the *host kernel* is handed, neither of which touches
+  a recorded byte on this corpus, and a call outside the corpus that does exceed the window is
+  captured more completely, which replay applies as it applies everything else.
+
+### Positive controls, run and recorded
+
+Each mutation was applied, its red quoted from the run that produced it, and reverted before the
+commit — the revert confirmed from `git diff` before staging, not by inspection.
+
+- **Control 1 — the rows are wired to the window** (Task 2 Step 7; 336 reverted to `Ptr`). Two
+  independent detectors, one through the box's production path and one through the table's own
+  ledger. The window test: `proc_info's destination is x4 and its length x5`, `left: 65536`,
+  `right: 200000`. The ledger's `every_view_reproduces_its_legacy_table`: `EXPECTED_DIFFS entries
+  that no longer differ (stale — delete or explain): [(336, DestBuffer)]`. Restored, both green.
+  One row proves the pair; the report names 336.
+- **Control 2 — the ruling is enforced, not just written** (Task 2 Step 8; 220 changed to
+  `[Path, Ptr, Dest(Reg(3)), Scalar, Scalar]`). The window test: `getattrlist is kernel-bounded at
+  15,360 bytes (ATTR_MAX_BUFFER_LONGPATHS) and stays Ptr`, `left: 150000`, `right: 65536`. The
+  sweep: `views disagree with the legacy tables and no EXPECTED_DIFFS entry says why: [(220,
+  DestBuffer)]`. Restored, both green.
+- **Control 3 — the clamp arm reaches the new rows** (Task 3 Step 3; 336 reverted to `Ptr`). No
+  seam exposes `hargs`, so the clamp is observed through the kernel's own return value, the way
+  `memdiff.rs`'s `forward_and_diff_captures_a_read_larger_than_the_window` observes the window
+  through `ret`: `proc_listpids` copies out `min(nprocs + 20, buffersize / 4)` pids and returns the
+  byte count, so with the clamp the kernel is handed `buffersize = 64` and returns exactly 64 with
+  no error, and `(64, false)` is produced by the clamp and by nothing else. With the row, green:
+  `(ret, err) == (64, false)`. Under the mutation, RED: `proc_info(LISTPIDS) with buffersize 4160
+  into a 64-byte backing: the clamp must hand the kernel 64 and get 64 back; got ret=3612
+  err=false`. Of the two outcomes the spec allowed the unclamped forward — `EFAULT` on the copyout,
+  or an over-long return — it was the second, **measured**: the host kernel, handed
+  `buffersize = 4160`, copied **3,612 bytes (903 pids) into a destination with 64 bytes of backing
+  — 3,548 bytes past the guest backing, into retrace's own process, with no error**. That is the
+  M27 "serious half" seen once. Restored, green; `git diff --stat crates/retrace-arch/src/lib.rs`
+  empty before commit.
+
+And the two reds the tests themselves owed before any control ran: the window test written first
+(Task 2 Step 2) failed on exactly the predicted first assertion, `left: 65536, right: 200000`;
+and with the rows landed but the ledger not yet written, the arch sweep went red naming
+`[(169, DestBuffer), (170, DestBuffer), (336, DestBuffer)]` and nothing else — no other view moved,
+so no legacy row had to be "fixed" against its prototype.
+
+### A finding outside scope: the pid-collision probe (spec §4b, Ruling 3)
+
+While designing control 3, reading what the recording says the kernel *returned* for these calls
+showed that on this machine every one of them fails. `hello_dyn`, recorded 2026-09-13 with retrace
+at pid `0x6a30` (27184), read back with a throwaway trace dumper (not committed):
+
+| landmark | call | `ret` | `err` | natively |
+|---|---|---|---|---|
+| #24 | `proc_info(15 SET_DYLD_IMAGES, pid, …, 368)` | 22 `EINVAL` | true | 0 |
+| #145 | `csops(pid, 0 STATUS, …, 4)` | 3 `ESRCH` | true | 0 |
+| #166, #226, #228 | `proc_info(2 PIDINFO, pid, 17/13, …)` | 3 `ESRCH` | true | 56 / 64 |
+| #233 | `csops_audittoken(pid, 16, …, 1032)` | 3 `ESRCH` | true | 0 |
+
+**Cause, located.** `forward_and_diff`'s per-register probe
+(`crates/retrace-box/src/lib.rs:3188–3189`, `for i in 0..8 { match self.host_span(args[i]) …
+hargs[i] = hp as i64 }`) treats *any* register whose value lands inside a backing as a pointer and
+hands the host kernel the host address in its place. The pid is `x0` of `csops` and `x1` of `proc_info`; on the dynamic path the backings
+at `TRAMPOLINE_IPA` `[0x4000, 0x8000)`, `PT_L2_IPA` `[0x8000, 0xC000)` and `PT_L1_IPA`
+`[0xC000, 0x10000)` are contiguous, so **every recorder pid in 16384..=65535 is rewritten to a
+host pointer before forwarding** — roughly half the pid space, a coin flip per record run. The
+kernel then sees a pid that is not this process (`ESRCH`), and `proc_set_dyld_images`'s
+`pid != proc_getpid(pself)` check fails (`EINVAL`), so dyld's `all_image_infos` is never
+registered. This is the "non-pointer whose value collides with a mapped IPA" hazard
+`truncguard.rs` names in the comment above `a_band_with_no_neighbours_keeps_its_full_length`, with
+"the dyld pread-count case" as its precedent; and M33's `ArgKind` doc says of exactly this:
+"`Scalar`, `Path` and `Ptr` change nothing at runtime — `forward_and_diff` probes `host_span` on
+all eight registers regardless — and are documentation until a later milestone consults them."
+
+**Why record and replay agree.** Replay never forwards, so the probe never runs there; it applies
+the recorded `ESRCH`, and the oracle compares the guest's own `(num, args)`, which are the same on
+both sides. It is not an E2 flake of the oracle but a record-vs-native fidelity defect whose
+*presence* depends on the recorder's pid — and nothing short of a native comparison can tell a
+guest that got `ESRCH` on both runs from one that got its pid info on both. It does not change
+§4's numbers: the `[trap]` line prints the guest's registers *before* translation, so every length
+above is what the guest asked for.
+
+**Why it is not fixed here.** The fix is for `forward_and_diff` to skip the probe for positions the
+row says are `Scalar`. Its blast radius is every `Scalar` in a 129-row table, and M33 §7 states
+that `Scalar`-versus-`Ptr` "is not verified by anything but the reviewer" — the seven starter-row
+prototype errors M33 caught are the measure of what that check is worth — so the fix's
+precondition is a `Scalar` audit with its own measurement: a milestone, not an edit inside this
+one. Under charter §5 that is scope this spec does not cover, so it is **recorded, not taken**.
+Its positive control is already in hand: the `hello_dyn` table above, with landmark #145 returning
+0 and 4 bytes captured after the fix.
+
+**Routed to M36.** A sweep row whose outcome depends on which half of the pid space the record
+run drew is exactly the kind of row M36's `root_cause_class` must be able to name, and this is a
+concrete, testable hypothesis for the README's one *intermittent* failure. The instruction is
+concrete: **M36's measurement records the recorder's pid beside each sweep row**, in the shape the
+controller's `ddd-probe.sh` already used for the probe below (`sh -c 'echo "recpid=$$" >&2; exec
+"$0" record-dyn …'`, then whether the pid is in `[0x4000, 0x10000)`). The probe's own result
+bounds the hypothesis before M36 starts: ten `dddiagnose` runs with every recorder pid in the
+collision range all passed, so a pid in range does not by itself produce that binary's divergence.
+
+### The sweep
+
+Spec §10 predicted the tally unmoved at `pass=46 fail=8 skip=0` — no corpus call is in the regime
+the rows change — and M33's baseline, the same tally, was the comparison. Run once at Task 4 Step
+4 on the `486bab2` binary and, after the gate, once more.
+
+**Run 1** (`sweep.log`): `TALLY pass=45 fail=9 skip=0`. The FAIL set: `/bin/csh` and `/bin/tcsh`
+(recorder panicked), `/bin/launchctl`, `/usr/bin/automationmodetool`, `/usr/bin/desdp`,
+`/usr/bin/dyld_info` and `/usr/bin/flex` (replay diverged), `/usr/bin/yes` (timed out after 30 s
+recording) — M33's eight — **plus `/usr/bin/dddiagnose` (replay diverged)**, the row the README
+already lists as the one intermittent failure and which M33's own section records "on a pass".
+
+**Probe** (`ddd-probe.sh`, `ddd-probe.log`): `/usr/bin/dddiagnose` recorded and replayed five
+times on the M34 binary and five times on the pre-M34 binary (the main checkout's build of
+`e194b68` plus docs), each run logging the recorder's pid. **10/10 PASS**: every run `rc=139
+rp=139` with byte-identical stdout (`dddiagnose` faults identically on both sides, which the sweep
+counts as a pass). Recorder pids 41691–42021 (`0xa2db`–`0xa425`), **all inside
+`[0x4000, 0x10000)`**, the §4b collision range.
+
+**Run 2** (`sweep2.log`, after the gate): `TALLY pass=46 fail=8 skip=0`, the FAIL set
+byte-identical to M33's eight, `dddiagnose` PASS.
+
+**Controller's ruling, ledgered:** the run-1 ninth failure is the documented intermittent, not an
+M34 regression. Evidence: not reproducible on either binary (10/10), and `dddiagnose`'s census
+rows — `proc_info` 64/56/368, `csops` 4 and 1032, the §4 table — all sit inside the flat window,
+so M34's rows change nothing it does. Not a charter halt: that is a regression surviving a
+diagnose-edit-rerun cycle, and this one did not survive the diagnose step. Cost if wrong: an
+M34-caused flake in `dddiagnose` enters `main` labelled pre-existing; M36's per-row pid recording
+is the check. The probe script is committed by nothing — it lives in the SDD workspace — and M36
+should adopt its pid-logging shape. Against the prediction: run 2 landed on it, run 1 did not.
+
+### Gate
+
+**572 passed / 0 failed / 2 ignored across 124 test binaries.** Every chunk's cargo exit code was
+captured to a file before any pipe (`gate/*.exit`): `ws=0 box=0 e2e1=0 e2e2=0 e2e3=0 bins=0
+clippy=0`. Logs were sanitised (`LC_ALL=C tr -cd '\11\12\15\40-\176' | sed 's/\x1b\[[0-9;]*m//g'`)
+before parsing. Wall clock 10:13:55 → 10:32:42 EDT, 2026-09-13. The chunks, in M33's shape, with
+the sum of each chunk's `test result:` lines:
+
+| chunk | invocation | binaries | passed | notes |
+|---|---|---|---|---|
+| `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | 26 | 152 | whole packages, so every library crate's `Doc-tests` harness ran (six: `hv_sys`, `retrace_arch`, `retrace_core`, `retrace_guest`, `retrace_sim`, `retrace_trace`) |
+| `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | 37 | **270** | 1 lib + 35 integration + `Doc-tests`; M33: 268 |
+| `e2e1`–`e2e3` | `cargo test -p retrace --test <20 names> --no-fail-fast -- --test-threads=1`, three groups of twenty, chunked index-free (`xargs -n20`) with the flattened membership `diff`ed against the sorted target list before anything ran | 20 + 20 + 20 | 45 + 36 + 58 | the 2 ignored are in `e2e3`: `stackoverflow_rust_e2e`'s `a_rust_stack_overflow_strikes_its_own_guard_page` (M21 wall) and `symbols_e2e`'s `cache_symbol_e2e` (M19 wall) — the same two as M33; nothing parked, nothing un-parked |
+| `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 1 | 11 | the `debug.rs` unit tests, the chunk CLAUDE.md says never to omit |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | — | — | clean |
+
+152 + 270 + 45 + 36 + 58 + 11 = 572. `jq_e2e`, `jq_file_e2e` and `cpython_e2e` ran — zero
+`SKIPPED` lines across the three e2e logs.
+
+**Reconciled against M33's 570 / 0 / 2 over 124, file-by-file**, every `.rs` under `crates/`
+diffed against `main`; only three files changed at all, and only one's count moved:
+
+| file | M33 | M34 | delta |
+|---|---|---|---|
+| `crates/retrace-arch/src/lib.rs` | 36 | 36 | 0 (rows and comments only) |
+| `crates/retrace-arch/tests/legacy_equivalence.rs` | 3 | 3 | 0 (three `EXPECTED_DIFFS` entries, no test) |
+| `crates/retrace-box/tests/truncguard.rs` | 19 | 21 | **+2** — `the_window_widens_for_the_m34_rows_and_not_for_getattrlist` (Task 2), `the_clamp_reaches_proc_info` (Task 3) |
+
+No other file's count moved; binaries 124 → 124; `--bins` 11 → 11. The tree holds **572**
+`#[test]` attributes = 570 runnable + 2 ignored (M33: 570 = 568 + 2). The run reports 572 passed
+= 570 + 2, because `census.rs`'s two tests execute in two binaries (its own and
+`legacy_equivalence`'s `#[path]` include) — the same "+2 twice" M33's section explains, so the two
+572s are, as the two 570s were, a coincidence of the same +2 rather than one number derived twice.
+The prediction made from source before the run was 572 / 0 / 2 over 124; the run matched it
+exactly.
+
+### What stays owed
+
+* **The §4b pid-collision probe** — a fix milestone with a `Scalar` audit of the whole table as
+  its task 1 (the audit is the precondition; M33's "reviewer-verified only" is why), the fix being
+  `forward_and_diff` skipping the probe at `Scalar` positions, and the `hello_dyn` table above as
+  its positive control (#145 returns 0 with 4 bytes captured). M36 to record the recorder's pid
+  beside each sweep row, in `ddd-probe.sh`'s shape, and to test the hypothesis that the
+  intermittent `dddiagnose` row is pid-shaped — knowing already that ten in-range pids all passed.
+* **A `bigcsops`-shaped guest**, only if a later milestone finds a real guest whose `CS_OPS_BLOB`
+  exceeds 64 KiB; none in the corpus does (a blob over 64 KiB needs a binary of more than 2,000
+  pages), and a fixture whose only content is its size is what §7 declined to add.
+* **Three review minors, deferred with the ledger's note on each:** `tools/destgaps-census.sh`
+  exits 2 on a codesign failure before its cleanup trap is installed, leaving the `$BIN` copy
+  behind (pre-existing in the scratchpad original); `the_clamp_reaches_proc_info`'s
+  scalar-collision precondition checks `args[0..4)` and `args[5]` but not `args[6]`/`args[7]`
+  (both 0, unread by `proc_info`); and that test leans on the host running more than 16 processes.
+* **Everything M33 left owed and M34 did not touch:** the per-argument canary fill and M32's
+  Control 1 (still unexecuted, still inert); nested-pointer translation (`NestedSource` forwarded
+  untranslated, `NestedDest` refused, the `DTRACEHIOC_ADDDOF` residual); `pipe`'s return
+  (`Ret::FdPair` is documentation, `x1` uncaptured); the `execve`/`posix_spawn` fail-loud assert
+  (M33 Ruling 7, the operator's call); console `writev` mirroring; `__disable_threadsignal` (331);
+  `AT_FDCWD` in the 32-bit form real guests pass (M33 Ruling 10); M35's two holes — the
+  replay-side `.min(avail)` and the `if !err` gate; the corpus bias (every governed `mach_msg2`
+  still init-time and shallow); the `unexercised` label enforced against a census dated
+  2026-09-12 for syscall numbers, and now a length census dated 2026-09-13 for these five, both
+  snapshots; and the `kqueue` cross-version note. `Scalar`-versus-`Ptr` is no longer a standalone
+  item: it is the pid fix's precondition, above.

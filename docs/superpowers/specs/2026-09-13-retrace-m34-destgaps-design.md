@@ -411,4 +411,40 @@ The Apple sweep is re-run once after the change and its tally recorded; §4 pred
 
 ## 11. Outcome
 
-*(Written at close.)*
+**Landed as designed.** The two `Dest` rows of §3a — `proc_info` 336 `Dest(Reg(5))`, `csops` 169
+and `csops_audittoken` 170 `Dest(Reg(3))` — with §3b's kernel-source analysis on each row;
+`getattrlist` 220 and `fgetattrlist` 228 unchanged in shape with Ruling 1's bound cited (15,360,
+`ATTR_MAX_BUFFER_LONGPATHS`) and their corpus maxima (1,052 and 40); the `ArgKind::Dest` doc
+paragraph rewritten with the "`Ptr` means 'not measured'" sentence gone; two tests in
+`crates/retrace-box/tests/truncguard.rs` —
+`the_window_widens_for_the_m34_rows_and_not_for_getattrlist`, which pins all four decisions
+including Ruling 1 through the production `diff_window`, and `the_clamp_reaches_proc_info`,
+control 3; three `EXPECTED_DIFFS` entries (336, 169, 170, each "exercised", none for 220/228); and
+the §4 instrument committed as `tools/destgaps-census.sh` and `tools/destgaps-census-summary.py`
+with the 5 GB stderr lesson in its header. Commits `3e05664`, `e3ec90a`, `486bab2`, plus the docs
+commit. No trap arm, no guest, no `TRACE_MAGIC` bump, no `retrace-core` or `retrace-box/src` edit
+— §8's symmetry argument held with nothing to mirror. §4b was recorded and routed, not fixed, per
+Ruling 3; the README's owed list now carries it.
+
+**What the controls showed.** All three fired as §6 predicted, each red quoted in its task report.
+Control 1 (336 → `Ptr`): the window test red at `left: 65536, right: 200000` and the ledger red
+naming `[(336, DestBuffer)]` as stale. Control 2 (220 → `Dest(Reg(3))`): the window test red at
+`left: 150000, right: 65536` on the `getattrlist … stays Ptr` assertion and the sweep red naming
+`[(220, DestBuffer)]` as unlisted — the ruling is enforced, not merely written. Control 3 (336 →
+`Ptr`) measured the unclamped outcome, and it was the over-long return rather than `EFAULT`: `got
+ret=3612 err=false` — the host kernel, handed `buffersize = 4160` over a 64-byte backing, copied
+3,612 bytes (903 pids) into that destination, 3,548 bytes past the guest backing into retrace's own
+process, and reported no error. With the row, `(64, false)`. That is the M27 "serious half" seen
+once, and it is the value this milestone delivers on a corpus where the window half is inert.
+
+**Gate and sweep.** Gate **572 / 0 / 2 over 124**, exactly the §10 prediction, every chunk's exit
+code 0 captured before any pipe, clippy clean, `jq`/CPython gates run rather than skipped;
+reconciled file-by-file against M33's 570 / 0 / 2 over 124 with `truncguard.rs` 19 → 21 the only
+count that moved. The sweep did not land on §10's prediction the first time: run 1 gave
+`pass=45 fail=9 skip=0`, M33's eight plus `/usr/bin/dddiagnose` (replay diverged), the README's
+documented intermittent; a ten-run probe (five on the M34 binary, five on the pre-M34 one, every
+recorder pid logged and every one inside the §4b collision range) passed 10/10, and run 2 after the
+gate gave `pass=46 fail=8 skip=0` with the FAIL set byte-identical to M33's. Ruled the intermittent,
+not a regression — `dddiagnose`'s own census rows all sit inside the flat window, so M34's rows
+change nothing it does — and the ten in-range pids bound the §4b hypothesis for M36: a pid in
+range does not by itself produce that divergence.

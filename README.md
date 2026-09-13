@@ -449,8 +449,17 @@ These are real and current, not aspirational gaps.
   — **identical** to `sysctl`'s, not one lower as this milestone's own plan and spec first said. That
   error survived a review that checked all five new entries against the SDK, because raw-versus-libc
   argument shape is invisible in a man page; it was caught only by calling `syscall(274, …)` against
-  the live kernel with libc's 5-arg wrapper bypassed. **Three still get a flat 64 KiB**: `proc_info`
-  (336); `getattrlist`/`fgetattrlist` (220/228); `csops` (169/170).
+  the live kernel with libc's 5-arg wrapper bypassed.
+  **M34 closes that list**, by two mechanisms: `proc_info` (336) and `csops`/`csops_audittoken`
+  (169/170) gained `Dest` rows — their blob and list callnums are bounded only by the caller's
+  length, so the window now follows it and the forwarded count is clamped to the backing; and
+  `getattrlist`/`fgetattrlist` (220/228) turned out not to belong on the list at all, because the
+  kernel rejects with `ENOMEM` before writing anything when the packed result exceeds
+  `ATTR_MAX_BUFFER_LONGPATHS` (15,360 bytes) — a cited bound four times inside the window, so they
+  stay `Ptr` and a test pins them there. The corpus maximum across all five, measured 2026-09-13
+  over 851 dispatches from 76 guests, is 1,052 bytes: both new rows are inert for the window today
+  and live for the clamp. Measuring that also found a defect outside M34's scope, recorded in
+  "Known limits" below (the pid-collision probe).
   **The clamp M27 and M28 both left owed is paid, and by refusing rather than clamping.** `sysctl`'s
   `*oldlenp` is an *in-out* length — the guest writes how much room it has, the kernel writes back
   how much it used — so silently clamping it would tell the kernel a smaller buffer than the guest
@@ -599,9 +608,16 @@ These are real and current, not aspirational gaps.
   unexecuted, and §4c of the M33 spec measured it **still inert**: the one corpus call that could
   have made it live, a `Source` `newp` on the same `sysctl` whose `KERN_PROC_ALL` `Dest` exceeds
   the window, turned out to be `Ptr`, so no call in the corpus carries both a `Source` and a
-  destination the whole-syscall exclusion would cost); **M34's three `Dest` rows** (`proc_info`,
-  `getattrlist`/`fgetattrlist`, `csops` — deliberately left `Ptr`, because each is a length
-  measurement the charter assigns to M34); **nested-pointer translation** (`NestedSource` rows are
+  destination the whole-syscall exclusion would cost);
+  **the pid-collision probe** (M34 §4b: `forward_and_diff` rewrites *any* register whose value
+  lands in a guest backing to a host pointer, and the trampoline/page-table backings occupy
+  `[0x4000, 0x10000)` on the dynamic path, so whenever the recorder's pid is in 16384..=65535 —
+  roughly half of them — every `csops` returns `ESRCH`, every `proc_info(PIDINFO)` returns `ESRCH`,
+  and dyld's `SET_DYLD_IMAGES` returns `EINVAL`; measured on `hello_dyn` at pid `0x6a30`. Record
+  and replay agree, so the oracle cannot see it; its fix is for `forward_and_diff` to skip
+  `Scalar` positions, whose precondition is a `Scalar` audit of the whole table — its own
+  milestone, and a hypothesis for the sweep's intermittent row that M36 is to test by recording
+  the recorder's pid); **nested-pointer translation** (`NestedSource` rows are
   forwarded exactly as before — `writev`'s `iov_base`s EFAULT in retrace's process, which is how
   `/bin/ed`'s stderr message is lost — and `NestedDest` rows are refused exactly as before);
   **`pipe`'s return** (`Ret::FdPair` is documentation: `host_svc` captures `x0` and the carry only,
