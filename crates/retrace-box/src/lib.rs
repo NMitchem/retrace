@@ -667,6 +667,15 @@ pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, 
 /// `EBADF` — answered for a guest fd that is `Free` or `Closed`, with nothing forwarded.
 pub const EBADF: u64 = 9;
 
+/// M37 (review I1): the exclusive upper bound on a `dup2` TARGET. xnu answers `EBADF` for
+/// `new < 0 || new >= maxfiles`; `dup2(int, int)` puts a negative `fd2` in `w1` zero-extended, so
+/// `dup2(f, -1)` arrives as `0xffff_ffff` and, unbounded, would have `grow_to` resize both table
+/// vectors to 2^32 entries on record and replay alike. A FIXED constant rather than the guest's
+/// `RLIMIT_NOFILE`, because that limit is forwarded and therefore recorder-dependent; `OPEN_MAX`
+/// (10240) is the platform ceiling and the only deterministic choice. No corpus guest targets
+/// above 19.
+pub const DUP2_MAX_FD: u64 = 10240;
+
 /// One entry in the guest's descriptor space.
 ///
 /// `Closed` is deliberately distinct from `Free`: both answer `EBADF`, but only `Free` is reusable
@@ -798,6 +807,9 @@ impl FdTable {
     /// and changes nothing (POSIX).
     pub fn dup2(&mut self, fd: u64, fd2: u64, host_fd2: Option<i32>) -> Result<(u64, Option<i32>), u64> {
         if !self.is_open(fd) { return Err(EBADF); }
+        // xnu's order: the source is checked first, then the target's range, then self-dup2.
+        // A negative `int fd2` arrives zero-extended (0xffff_ffff), hence the `as i32` test.
+        if (fd2 as i32) < 0 || fd2 >= DUP2_MAX_FD { return Err(EBADF); }
         if fd == fd2 { return Ok((fd2, None)); }
         self.grow_to(fd2 as usize);
         let kind = self.slots[fd as usize];
@@ -3173,10 +3185,16 @@ impl Box_ {
     pub fn is_console_write(&self, num: u64, gfd: u64) -> bool {
         retrace_arch::is_write_syscall(num) && matches!(self.fds.console_of(gfd), Some(1 | 2))
     }
-    /// M37: a close of a `Console(_)` slot is faked (M9); a displaced console slot is a real
-    /// descriptor and closes through the generic path.
+    /// M37: a close of an IDENTITY console slot — 0/1/2 while its slot is still `Console(n)` at
+    /// index n — has its host half faked (M9: that host descriptor is retrace's own) and its
+    /// slot retired by record's arm. Everything else closes through the generic path on both
+    /// sides: a displaced console slot (`Open` at 1 after `dup2(f, 1)`) and an ALIAS
+    /// (`Console(1)` at 17 after `dup2(1, 17)`) alike, because each one's host mapping is a `dup`
+    /// or a guest-opened descriptor, never retrace's 0/1/2 — so forwarding the close cannot touch
+    /// retrace's console, and faking it would leak the host dup and leave the slot open forever
+    /// (review I2; spec §3a's worked example, `close(16)` after `dup2(0, 16)` goes the generic way).
     pub fn is_console_close(&self, num: u64, gfd: u64) -> bool {
-        retrace_arch::is_close_syscall(num) && self.fds.console_of(gfd).is_some()
+        retrace_arch::is_close_syscall(num) && gfd < 3 && self.fds.console_of(gfd) == Some(gfd as u8)
     }
     pub fn sigtable(&self) -> &SigTable { &self.sigtable }
     pub fn sigtable_mut(&mut self) -> &mut SigTable { &mut self.sigtable }
@@ -3662,10 +3680,11 @@ impl Box_ {
             self.bind_returned_fd(num, ret)
         } else { ret };
         // A successful close retires the guest's slot, so a later use of that number is EBADF
-        // instead of reaching whatever retrace has open there. A `Console(_)` slot never arrives
-        // here — is_console_close fakes it upstream in retrace-core. A DISPLACED console slot
-        // (`Open` at 1 after `dup2(f, 1)`, M37) does, and closes for real: its host mapping is
-        // the `dup`, never retrace's own descriptor.
+        // instead of reaching whatever retrace has open there. An IDENTITY console slot never
+        // arrives here — is_console_close fakes its host half upstream in retrace-core (and
+        // retires its slot there). A DISPLACED console slot (`Open` at 1 after `dup2(f, 1)`) and
+        // an ALIAS (`Console(1)` at 17 after `dup2(1, 17)`) both do (M37), and close for real:
+        // each one's host mapping is a `dup`, never retrace's own descriptor.
         if !err && (num == retrace_arch::SYS_CLOSE || num == retrace_arch::SYS_CLOSE_NOCANCEL) {
             self.fds.close(gargs[0]);
         }
