@@ -144,8 +144,10 @@ pub enum DestLen {
 ///
 /// **Load-bearing kinds:** `Fd`, `Source`, `NestedSource`, `Dest`, `NestedDest` and `Ret::Fd`
 /// each change what the box does. **`Scalar` is load-bearing since M37**: `forward_and_diff`
-/// forwards it verbatim and never probes it (M34 §4b). **`Path` and `Ptr` still change nothing
-/// at runtime** — they are probed like any register — and remain documentation.
+/// forwards it verbatim and never probes it (M34 §4b). `Ptr`/`Path` are the probed DEFAULT (what
+/// a position past the row's arity gets), so against `Scalar` the choice is load-bearing —
+/// madvise's x0 is the measured instance (`Ptr` → 44 of 44 succeed, `Scalar` → 0) — and against
+/// no marking it is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgKind {
     /// Not a memory reference: a count, a flag word, an offset, a signal number, a port name.
@@ -772,7 +774,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // carried nothing); once `Scalar` means "never probed", a raw guest IPA would have reached
         // the host as the range to `MADV_FREE_REUSABLE` — an `ENOMEM`/`EINVAL` where the guest
         // had success, or retrace's own pages discarded if the IPA happened to be mapped there.
-        // Live on the corpus: CPython issues 44 `madvise(nano-band addr, ≤ 0x20000, 7)` per run.
+        // Live on the corpus: CPython issues 44 `madvise(nano-band or mmap-area addr, ≤ 0x20000,
+        // 7)` per run — 40 in the nano band, 4 at MMAP_BASE+0x20000/+0x2c000, the four that
+        // answered EPERM in the counterfactual.
         // The `Ptr` bound is trivially citable — zero bytes of data cross.
         75 => row!(P, [Ptr, Scalar, Scalar]),
         // shared_region_check_np(uint64_t *start_address): 8 bytes out — serviced above the

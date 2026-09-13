@@ -3350,11 +3350,11 @@ impl Box_ {
         }
         // Debt #1: for the `Reg` shape (read/pread/pread_nocancel) the destination's length is a
         // register; cap it at that buffer's backing so the host kernel can never write past it. The
-        // length is a COUNT, never a pointer, so use the ORIGINAL arg (the generic loop above may
-        // have mis-"translated" it to a host pointer if the count value happened to equal a mapped
-        // low IPA — e.g. dyld's pread count 0x4000 collides with the trampoline IPA). This both
-        // fixes that mis-forward and keeps the host kernel from writing past the destination
-        // backing.
+        // length is a COUNT, never a pointer, so the clamp reads the GUEST's count from `args[li]`
+        // rather than `hargs[li]`. (Until M37 that choice was also the only thing that stopped a
+        // probed count from reaching the kernel as a host pointer — dyld's pread count 0x4000 is
+        // the trampoline IPA; every `Dest(Reg(n))` length position is `Scalar` and the loop above
+        // never probes one now, so that hazard is history and the clamp is all this is.)
         //
         // M10: `read_nocancel` (396) belongs here too and was missing — the same plain-vs-_nocancel
         // trap as M9's console bug, in the clamp rather than in a predicate. `jq` reads through 396
