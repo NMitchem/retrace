@@ -9,10 +9,12 @@
 # M36: the human line says WHY a row failed, and every row that ran is followed by one
 # machine-readable line. Labels, in evaluation order (spec §3a):
 #   FAIL … (timed out after Ns recording)              unchanged
-#   FAIL … (recorder panicked: <line>)                 <line> = rec.err's first `panicked at` line
+#   FAIL … (recorder panicked: <line>)                 <line> = rec.err's first `panicked at crates/` line
 #       joined with the line after it (Rust prints the panic message on its own line)
-#   FAIL … (record error, rc=4: <line>)                new; <line> = rec.err's first `RECORD ERROR:`
-#       line. The CLI exits 4 on RECORD ERROR and leaves a trace with no terminal event, so its
+#   FAIL … (record error, rc=N: <line>)                new; <line> = rec.err's first `RECORD ERROR:`
+#       line, and that line is the test (fix wave: exit 4 is what the CLI exits after printing
+#       it, but the CLI also passes a guest's own exit status through, so rc is printed as
+#       corroboration, never tested). The recorder leaves a trace with no terminal event, so its
 #       replay ALWAYS prints a DIVERGENCE line; replay is still run (that line is evidence, kept
 #       on the ROW line) but the label is the record error, not "replay diverged".
 #   FAIL … (timed out after Ns replaying)              unchanged
@@ -26,8 +28,9 @@
 #   ROW<TAB>path<TAB>result<TAB>rc<TAB>rp<TAB>recpid<TAB>landmark<TAB>rec_reason<TAB>rp_line
 #       rp/landmark are `n/a` when there was no replay/divergence; recpid is the recorder's own
 #       pid (see the record invocation); rec_reason/rp_line are the stderr lines the labels quote
-#       (rec_reason: the `RECORD ERROR:` line, else the `panicked at` line joined with the message
-#       line after it, cut to 300 chars), empty when none. TALLY is unchanged in shape.
+#       (rec_reason: the `RECORD ERROR:` line, else the `panicked at crates/` line joined with the
+#       message line after it, cut to 200 chars for a RECORD ERROR line and 300 for a panic pair),
+#       empty when none. TALLY is unchanged in shape.
 #
 # Usage: tools/apple-sweep.sh [path-to-retrace-binary]
 #        defaults to target/aarch64-apple-darwin/debug/retrace
@@ -156,10 +159,13 @@ while IFS= read -r g <&3; do
     # M36: rp.out/rp.err too — a row whose recorder timed out or panicked never runs replay, so
     # without this the rp.err keep_row copies as that row's evidence would be the previous row's.
     rm -f "$TMP/t.bin" "$TMP/rp.out" "$TMP/rp.err"
-    # M36: the recorder's pid decides what several Apple binaries do (M34 §4b: a pid inside
-    # [0x4000, 0x10000) is forwarded as a host pointer by forward_and_diff's per-register probe,
-    # so every self-pid csops/proc_info answers ESRCH; M35 measured dddiagnose taking a different
-    # wall on each side of that line). Print it into rec.err before the recorder prints anything,
+    # M36: the recorder's pid decides what several Apple binaries do (M34 §4b: a pid that lands in
+    # a guest backing is forwarded as a host pointer by forward_and_diff's per-register probe, so
+    # every self-pid csops/proc_info answers ESRCH; the window is [0x4000, 0x18000) for the six
+    # guests measured — the fixed low backings plus the guest's own os_alloc_once slab at 0x10000,
+    # so guest-dependent; see docs/sweep-evidence/2026-09-13-m36/README.md. M36 measured three
+    # regimes, docs/sweep-evidence/2026-09-13-m36/). Print it into rec.err before the recorder
+    # prints anything,
     # from the shell that becomes the recorder — M34's probe shape. run_timeout launches "$@"
     # verbatim, so the `sh` it backgrounds is the process that `exec`s into the recorder: the pid
     # it printed IS the recorder's, and the watchdog's kill still lands on the recorder.
@@ -197,16 +203,20 @@ while IFS= read -r g <&3; do
     # line; a panic is two — Rust prints `thread 'main' … panicked at <file>:<line>:` and then the
     # message on the next line, and the message (which assert, which syscall) is the part worth
     # reading — so the panic case joins the pair with a space. Tried in that order because a
-    # recorder that hits a RECORD ERROR does not also panic, and vice versa.
+    # recorder that hits a RECORD ERROR does not also panic, and vice versa. Both panic greps
+    # (here and the label test below) anchor on `panicked at crates/` — the recorder's own source
+    # paths — because the guest's stderr shares rec.err, so a Rust guest's own panic must never be
+    # labelled a recorder panic (fix wave); a recorder panic located in a dependency would print a
+    # registry path and miss the anchor — unobserved on the corpus.
     rec_reason=$(grep -a -m1 'RECORD ERROR:' "$TMP/rec.err" | cut -c1-200)
     if [ -z "$rec_reason" ]; then
-        rec_reason=$(grep -a -m1 -A1 'panicked at' "$TMP/rec.err" | tr '\n' ' ' | sed 's/ *$//' | cut -c1-300)
+        rec_reason=$(grep -a -m1 -A1 'panicked at crates/' "$TMP/rec.err" | tr '\n' ' ' | sed 's/ *$//' | cut -c1-300)
     fi
     rp_line=""; landmark="n/a"; rp="n/a"
     if [ -e "$TMP/.timedout" ]; then
         echo "FAIL $g (timed out after ${TIMEOUT_SECS}s recording)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
-    if grep -qa "panicked at" "$TMP/rec.err"; then
+    if grep -qa "panicked at crates/" "$TMP/rec.err"; then
         echo "FAIL $g (recorder panicked: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     run_timeout "$BIN" replay "$TMP/t.bin" >"$TMP/rp.out" 2>"$TMP/rp.err" </dev/null; rp=$?
@@ -214,16 +224,23 @@ while IFS= read -r g <&3; do
     case "$rp_line" in
         'DIVERGENCE at landmark '*) landmark=$(printf '%s' "$rp_line" | sed 's/^DIVERGENCE at landmark \([0-9]*\).*/\1/') ;;
     esac
-    # M36: a recorder that exited 4 printed `RECORD ERROR:` and wrote a trace with no terminal
-    # event, so its replay ALWAYS prints a DIVERGENCE line (it runs out of events, or reports the
-    # exception the recorder could not record). That line is evidence, not the label: M35 measured
-    # dddiagnose's "replay diverged" this way, and M36's first reading found all five of the
-    # long-standing "replay diverged" rows are the same recorder-side brk. Label the record error.
+    # M36: a recorder that printed `RECORD ERROR:` wrote a trace with no terminal event, so its
+    # replay ALWAYS prints a DIVERGENCE line (it runs out of events, or reports the exception the
+    # recorder could not record). That line is evidence, not the label: M35 measured dddiagnose's
+    # "replay diverged" this way, and M36 measured all five long-standing "replay diverged" rows
+    # as recorder-side RECORD ERRORs of the same shape (the libdispatch brk with a colliding pid,
+    # the RCV-shaped mach_msg2 without). Label the record error.
+    # The test is the LINE, not the exit code (fix wave): the CLI exits 4 after printing it, but
+    # it also passes a guest's own exit status straight through (main.rs `Outcome::Exit { code }
+    # => exit(code)`), so exit 4 is not exclusively the CLI's, and a guest that exits 4 by design
+    # on both sides would otherwise be labelled a record error with an empty reason. Same
+    # structural shape as the DIVERGENCE check below; rc is printed as corroboration.
     # Checked before the replay-timeout marker (spec §3a's evaluation order): the record error is
     # the cause, whatever the replay of its truncated trace then did; the ROW line still carries rp.
-    if [ "$rc" -eq 4 ]; then
-        echo "FAIL $g (record error, rc=4: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue
-    fi
+    case "$rec_reason" in
+        'RECORD ERROR:'*)
+            echo "FAIL $g (record error, rc=$rc: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue ;;
+    esac
     if [ -e "$TMP/.timedout" ]; then
         echo "FAIL $g (timed out after ${TIMEOUT_SECS}s replaying)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
