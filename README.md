@@ -340,8 +340,11 @@ design, and the reconstruction caveat in full.
 **Gate:** 575 passed / 0 failed / 10 ignored across 126 test binaries, **measured at M36** over all
 126 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
 `--workspace --all-targets` with `-D warnings`. Measured on commit `0766a76`, the last commit that
-touches anything cargo compiles — M36's close after it changed README, status-log and spec text
-only.
+touches anything cargo compiles — M36's close after it changed README, status-log and spec text,
+plus label and comment text in `tools/apple-sweep.sh` (the final-review fix wave, the branch's
+last commit), which is not a cargo input and was `sh -n`'d and re-controlled (Control 1 re-run on
+the edited script, both labels firing); `git diff 0766a76..<merge> --stat -- crates` is empty, so
+the gate's figures stand.
 See the testing note below for how that number is assembled. "126 test binaries" is 119 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
@@ -406,8 +409,9 @@ These are real and current, not aspirational gaps.
   since M29 this figure is **reproducible instead of remembered**. Since M36 the sweep also prints
   *why*: every row carries the recorder's exit code, the replay's, the recorder's pid, the first
   `RECORD ERROR:` / `panicked at` line and the replay's `DIVERGENCE` line (one machine-readable
-  `ROW` line per binary beside the human one); a refused recording is labelled `FAIL … (record
-  error, rc=4: …)` rather than `replay diverged`; an identical crash on both sides is labelled
+  `ROW` line per binary beside the human one); a refused recording — the recorder's `RECORD
+  ERROR:` line is the test, its exit code printed beside it — is labelled `FAIL … (record error,
+  rc=4: …)` rather than `replay diverged`; an identical crash on both sides is labelled
   `PASS … (identical fault, rc=N)` rather than a bare PASS; and `RETRACE_SWEEP_KEEP=<dir>` keeps
   each non-clean row's stderr and trace. M36 ran it three times on 2026-09-13 on the M35-merge
   code, with the recorder's pid steered into three regimes — the measurement M34's §4b entry
@@ -454,8 +458,9 @@ These are real and current, not aspirational gaps.
   both sides, libsystem_malloc `mfm_alloc+0x230`, after 11 self-pid `ESRCH` — §4b's second
   downstream face. The **watchdog** is `timed out after 30s recording`: `yes` never terminates and
   is failed on purpose. The `refusing mach_msg2 message-queue send` line that precedes the `brk`
-  and the RCV shape alike is M23's *serviced* refusal, survived by every guest that reaches it and
-  the cause of neither. Evidence: `docs/sweep-evidence/2026-09-13-m36/<basename>.{O,L,I}.{rec,rp}.err`,
+  and the RCV shape alike is M23's *serviced* refusal, survived by every guest that reaches it: it
+  precedes both faces, is shown not to select the `brk` (absent with a non-colliding pid), and is
+  unseparated from the RCV shape (no run reaches that shape without it). Evidence: `docs/sweep-evidence/2026-09-13-m36/<basename>.{O,L,I}.{rec,rp}.err`,
   verbatim, with the symbolication (a `dladdr` lookup and the instruction words at the pc — `lldb`
   printed nothing for ten minutes at `image list` and `atos -p` the same, both killed; the
   reading: indexing the shared cache) and the counting rules in that directory's README.
@@ -472,11 +477,11 @@ These are real and current, not aspirational gaps.
   **The `brk` is libdispatch's, and it is a §4b consequence, not a post-refusal wall of its own.**
   From M23 to M35 the five `launchctl`-group rows were believed to reach a `brk` *because of* the
   serviced refusal (M23's "the other four `brk` regardless of which of seven refusal codes is
-  returned", `crates/retrace-core/src/machmsg.rs:97–99`), and the M36 spec's own first reading
-  called the five class C at that `brk`.
+  returned", `crates/retrace-core/src/machmsg.rs:97–99`).
   Measured: the word at `0x18035f084` is `brk #1` on the outlined crash path after
   `_firehose_task_buffer_init`'s `retab`, the `elr` is `__proc_info+8`, and in every `brk` trace
-  (6 rows × 2 colliding runs) the last landmark is `proc_info(2, <pid>, 17)` → `ESRCH`. With a
+  (11 of the 12 colliding traces; `dddiagnose` run I is the crash, not a `brk`) the last landmark
+  is `proc_info(2, <pid>, 17)` → `ESRCH`. With a
   non-colliding pid all six reach the RCV shape instead (run L 6 of 6; M35's `dddiagnose` 10 of 10);
   the `brk` has never been observed with a correctly-forwarded pid. So the five are **B then C** —
   `dddiagnose`'s shape — and each of the six has two walls in fix order: §4b (B, routed to M37),
@@ -718,9 +723,11 @@ These are real and current, not aspirational gaps.
   `[0x4000, 0x10000)` on the dynamic path, and M36 measured that the guest's own `os_alloc_once`
   slab is first-fit-mapped at `0x10000` before its first self-pid call, so at the pid-carrying
   calls the collision window is `[0x4000, 0x18000)` — recorder pids 16384..=98303, about 82 % of
-  the pid space; the non-colliding pids are 1..16383 and 98304..99998, and M35's out-of-range
-  probes (`0x257f`–`0x2662`) were in the first band while M36's run O (`0x11EDD`–`0x126A8`) was
-  inside the slab — and it is guest-dependent, being whatever the guest has mapped below
+  the pid space; the non-colliding pids are 1..16383 and 98304..99998 (the upper band inferred
+  from run I's final snapshot — nothing mapped in `[0x18000, 0x28000)`, and everything the guest
+  maps later sits at ≥ `0x40000`, above `PID_MAX`; no run used a pid ≥ `0x18000`), and M35's
+  out-of-range probes (`0x257f`–`0x2662`) were in the first band while M36's run O
+  (`0x11EDD`–`0x126A8`) was inside the slab — and it is guest-dependent, being whatever the guest has mapped below
   `0x100000` at the moment of the forward, so "outside one band" is not a regime. Inside it
   every `csops` and every `proc_info(PIDINFO)` on the guest's own pid returns `ESRCH`: measured on `hello_dyn` at pid `0x6a30`, and 11–12 self-pid
   `ESRCH` in every colliding sweep trace of the six §4b rows (5 in `csh`/`tcsh`) against 0 in

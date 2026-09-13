@@ -55,7 +55,9 @@ map is at the same index in the run-L traces, where no pid collides with it). So
 pid-carrying calls the probe's backings are contiguous over `[0x4000, 0x18000)` = pids
 16384..=98303 — 82 % of the pid space, not "roughly half". Non-colliding pids: 1..16383 and
 98304..99998 (xnu's `PID_MAX` is 99999 with `nextpid` reset at `>=`, so 99998 is the highest
-assignable pid). M35's out-of-range probes were at `0x257f`–`0x2662`; the M36 spec §4 first reading
+assignable pid; the upper band is inferred from run I's final snapshot — nothing mapped in
+`[0x18000, 0x28000)`, and everything the guest maps later sits at ≥ `0x40000`, above `PID_MAX` —
+no run used a pid ≥ `0x18000`). M35's out-of-range probes were at `0x257f`–`0x2662`; the M36 spec §4 first reading
 was at `0x10806`–`0x10887` (inside the slab), which is why it saw five `brk`s. The set is
 guest-dependent (it is whatever a guest maps below `0x100000` before its own pid-carrying calls),
 so "outside `[0x4000, 0x10000)`" is not a regime; the regime-independent fix M34 §4b names is to

@@ -321,7 +321,9 @@ the guest's first self-pid call (#182 → #200 in `dddiagnose`, #136 → #154 `l
 #144 → #162 `automationmodetool`, #128 → #146 the other five), on record and replay alike. So the
 window at the pid-carrying calls is **`[0x4000, 0x18000)` = pids 16384..=98303, about 82 % of the
 pid space**; the non-colliding pids are 1..16383 and 98304..99998 (`PID_MAX` 99999, `nextpid`
-reset at `>=`). It is guest-dependent — whatever the guest maps below `0x100000` before its own
+reset at `>=`; the upper band inferred from run I's final snapshot — nothing mapped in
+`[0x18000, 0x28000)`, everything the guest maps later at ≥ `0x40000`, above `PID_MAX` — no run
+used a pid ≥ `0x18000`). It is guest-dependent — whatever the guest maps below `0x100000` before its own
 pid-carrying calls — so "outside one band" is not a regime, and M37's §4b precondition is the one
 M34's own text names: a `Scalar` argument is never a pointer; its positive control must use a pid
 inside `[0x10000, 0x18000)` as well as one inside `[0x4000, 0x10000)`.
@@ -332,7 +334,8 @@ inside `[0x10000, 0x18000)` as well as one inside `[0x4000, 0x10000)`.
 0x12c`; the word at the pc is `0xd4200020` = `brk #1`, the last word of an outlined block after the
 function's `retab` that loads errno from the TSD's errno slot into a crash-reason store — the shape
 of a `DISPATCH_INTERNAL_CRASH(errno, …)`; the `elr` `0x1804af110` is libsystem_kernel
-`__proc_info + 8`; and in every `brk` trace (6 rows × 2 colliding runs) the last landmark is
+`__proc_info + 8`; and in every `brk` trace (11 of the 12 colliding traces; `dddiagnose` run I is
+the crash, not a `brk`) the last landmark is
 `proc_info(2, <recorder pid>, 17 = PROC_PIDUNIQIDENTIFIERINFO)` → `ESRCH`. With a non-colliding
 pid all six rows reach the RCV-shaped call instead (run L 6 of 6; M35's `dddiagnose` 10 of 10).
 **The `brk` has never been observed with a correctly-forwarded pid.** The serviced refusal precedes
@@ -369,7 +372,12 @@ the `brk` stays open, attached to the §4b row.
   labelled a fault (Task 1 ruling (a)). A panic's `rec_reason` is the `panicked at` line joined
   with the message line after it, not the location line alone (ruling (b)). `rc = 4` is
   evaluated before the replay-timeout marker, as §3a's table orders it, not as the plan's code
-  did. `RETRACE_SWEEP_LIST` was added beside `RETRACE_SWEEP_KEEP`.
+  did. `RETRACE_SWEEP_LIST` was added beside `RETRACE_SWEEP_KEEP`. In the final-review fix wave,
+  after the gate: the record-error label is structural — it fires on the `RECORD ERROR:` line,
+  not on `rc = 4`, which §3a wrote and which the CLI shares with a guest's own exit status — with
+  `rc` printed as corroboration; both panic greps anchor on `panicked at crates/`; the pid comment
+  states the measured window. `sh -n` clean, Control 1 re-run on the edited script (the log's
+  harness subsection has the lines); the harness is not a cargo input, so the gate stands.
 - **§6 Control 1.** Old script: `FAIL /bin/launchctl (replay diverged)`, `FAIL /bin/csh (recorder
   panicked)`. New: `FAIL /bin/launchctl (record error, rc=4: RECORD ERROR: non-syscall exit: …
   pc=0x18035f084 …)`, `FAIL /bin/csh (recorder panicked: … lib.rs:1140:17: …)`, three `ROW` lines
@@ -432,5 +440,10 @@ message); §3b the `lldb` command (`dladdr`); §3c's C test first clause (met by
 is B) and its B test's "twelve" (11 or 12, by whether the trace reaches the twelfth call); §4's
 "C for the five" and "the M23 belief confirmed by measurement" (retired: B then C, the reading
 was taken inside the slab); §5b "two runs' pid ranges" and `.O.`/`.I.` (three, `{O,L,I}`); §6
-Control 1 "six files" (five); §7 "the host's `lldb` is used once" (`dladdr`). §10's prediction
+Control 1 "six files" (five); §7 "the host's `lldb` is used once" (`dladdr`); §3a's "`rc = 4`
+(the CLI's `RECORD ERROR` exit)" as the label's condition (the CLI passes a guest's own exit
+status through, so the line is the test — fix wave); and §3c's E2 evidence test ("two recordings
+… at the same pid regime with different landmark sequences"), which any wall-clock-polling guest
+would meet across two runs — the test actually applied (§11.4) is the charter's, record versus
+replay varying within a run, and a successor spec should write the charter's. §10's prediction
 held.

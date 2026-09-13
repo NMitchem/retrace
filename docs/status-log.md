@@ -8019,6 +8019,47 @@ any gate guest); implement target-slot allocation before a guest uses it)` — a
 same `RECORD ERROR` at the same pc. **The landmark is not a stable identifier for a row; the
 `rec_reason` is.**
 
+**The fix wave (final review), after the gate.** Three edits to `tools/apple-sweep.sh` — comment
+and label text, and one condition — in the branch's last commit. (1) The `record error` label is
+structural: it fires when `rec_reason` begins `RECORD ERROR:` and prints `rc` as corroboration,
+no longer on `rc = 4` alone, because the CLI passes a guest's own exit status straight through
+(`crates/retrace/src/main.rs` `Outcome::Exit { code } => exit(code)`), so a guest exiting 4 by
+design on both sides would have been labelled a record error with an empty reason and counted a
+`fail` — the same structural shape the `DIVERGENCE` check already had. No M36 row was mislabelled
+by it: the final review checked that no `ROW` line in any run has `rc=4` with an empty
+`rec_reason`, and the PASS rows' non-zero codes are 1, 2 and 64 (plus 139 for the fault). Spec
+§3a wrote the condition as the exit code; the harness had been faithful to a spec defect. (2)
+Both panic greps anchor on `panicked at crates/`, the recorder's own source paths, so a Rust
+guest's own panic in the shared stderr is never labelled a recorder panic (a recorder panic
+located in a dependency would print a registry path and miss the anchor — unobserved on the
+corpus). (3) The pid comment states the measured window `[0x4000, 0x18000)` and points at the
+evidence README instead of the `[0x4000, 0x10000)` it was written with at Task 1, and the
+header's cut lengths are the code's (200 for a `RECORD ERROR:` line, 300 for a panic pair). The
+`≥ 128` clause of `identical fault` is left as it is (ruled: the direction is harmless — a
+designed exit ≥ 128 would be labelled a fault and still counted PASS; owed below). `sh -n` clean.
+Control 1 re-run on the edited script, the three-binary list, recorder pids 48221 / 48263 / 48285
+(`0xbc5d`–`0xbca5`, the page-table backing — colliding), verbatim:
+
+```
+PASS /usr/bin/true
+FAIL /bin/csh (recorder panicked: thread 'main' (32154372) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+FAIL /bin/launchctl (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+TALLY pass=1 fail=2 skip=0
+```
+
+and a fourth list of `/bin/launchctl` and `/bin/csh` (recorder pids 48359 / 48388), so that both
+new labels are shown firing on the edited condition and the anchored grep:
+
+```
+FAIL /bin/launchctl (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /bin/csh (recorder panicked: thread 'main' (32155020) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+TALLY pass=0 fail=2 skip=0
+```
+
+Five files kept per run (`csh.{bin,rec.err}`, `launchctl.{bin,rec.err,rp.err}`), nine fields on
+every `ROW` line, each `recpid` equal to line 1 of its kept `rec.err` (`fix-wave-control1/` in
+the SDD workspace).
+
 ### The three runs
 
 The spec asked for two: **O**, the recorder's pid outside M34 §4b's `[0x4000, 0x10000)`, and
@@ -8335,7 +8376,9 @@ collides with it) — and it is a pure function of the guest's syscall sequence,
 `0x10000` on record and replay alike. The backings `forward_and_diff`'s per-register probe sees at
 the pid-carrying calls are therefore contiguous over `[0x4000, 0x18000)` = pids 16384..=98303;
 the non-colliding pids are 1..16383 and 98304..99998 (xnu's `PID_MAX` is 99999 with `nextpid`
-reset at `>=`, so 99998 is the highest assignable pid). Measured on 6 binaries × 3 regimes: O
+reset at `>=`, so 99998 is the highest assignable pid; the upper band is inferred from run I's
+final snapshot — nothing mapped in `[0x18000, 0x28000)`, and everything the guest maps later sits
+at ≥ `0x40000`, above `PID_MAX` — no run used a pid ≥ `0x18000`). Measured on 6 binaries × 3 regimes: O
 (`0x11EDD`–`0x126A8`) 11–12 `ESRCH`, L (`0x32C`–`0xB23`) 0, I (`0x4339`–`0x4BD2`) 11–12. The
 window as stated here is what these six guests map before their first self-pid call; another
 guest may map more (or less) below `0x100000` before its own, so the set is guest-dependent and
@@ -8468,6 +8511,12 @@ The spec's three, and the run's, each with what it cost if wrong where the ledge
   B-then-C rows then sit at the RCV wall on every run (0 self-pid `ESRCH` ⇒ the RCV wall — run L
   6 of 6, M35 10 of 10). Ruled in as the routing's acceptance criteria. Cost if wrong: M37 chases
   a criterion the measurement did not license — one sentence to retract.
+- **Fix wave — the harness after the gate.** The final review's three harness items are label and
+  comment text and one condition in a script that is not a cargo input; they land after the gate
+  without a re-run, on the proof that `git diff 0766a76..<merge> --stat -- crates` is empty,
+  `sh -n` is clean, and Control 1 was re-run on the edited script with both labels firing. Cost if
+  wrong: a shell edit that changes a label the sweep prints goes unmeasured — the re-run Control 1
+  in the harness subsection is the measurement.
 
 ### The parked gates, and Control 2
 
@@ -8585,9 +8634,11 @@ Class **A** and **E2**: none. **E1**: the two harness defects, fixed by Task 1.
 
 **575 passed / 0 failed / 10 ignored across 126 test binaries**, on commit `0766a76` — Task 3's
 fix commit, the last commit that touches anything cargo compiles; the gate ran on that tree while
-Task 4 was written, and Task 4 changed README, status-log and spec text only, so the merged code
-and the gated code differ by nothing cargo reads (to be shown at merge by `git diff 0766a76..<merge>
---stat -- crates tools` being empty). Every chunk's cargo exit code was captured to a file before
+Task 4 was written, and Task 4 changed README, status-log and spec text, and the final-review fix
+wave after it changed label and comment text in `tools/apple-sweep.sh` — the harness, not a cargo
+input, `sh -n`'d and re-controlled (the harness subsection above) — so the merged code and the
+gated code differ by nothing cargo reads (to be shown at merge by `git diff 0766a76..<merge>
+--stat -- crates` being empty). Every chunk's cargo exit code was captured to a file before
 any pipe (`gate/*.exit`): `ws=0 box=0 e2e1=0 e2e2=0 e2e3=0 e2e4=0 bins=0 clippy=0`. Logs were
 sanitised (`LC_ALL=C tr -cd '\11\12\15\40-\176' | sed 's/\x1b\[[0-9;]*m//g'`) before parsing.
 Wall clock 15:53:23 → 16:11:58 EDT, 2026-09-13 (18.5 min). Zero `SKIPPED` lines: `jq_e2e`,
@@ -8676,6 +8727,25 @@ M35's list, item by item, with what this milestone discharged struck by name and
 * **The per-page cache backing clamps any `Dest` destination that straddles a 16 KiB
   shared-cache boundary** (M34). Unchanged.
 * **`getattrlistbulk` (461) and `getattrlistat` (468)** (M34). Unchanged.
+* **`crates/retrace-core/src/machmsg.rs:97–99`, one comment line, owed to M37.** The router
+  comment still says the four binaries "`brk` regardless of which of seven refusal codes is
+  returned, so they are parked at that wall" — the post-refusal-wall reading correction (b)
+  retires. M36 could not touch `crates/*/src` (a hunk there is a defect under the charter), so the
+  one-line correction is owed to the first milestone permitted to: M37. Unlike a log line, a code
+  comment is current-state text with no forward pointer, and the next reader of the router — the
+  milestone that owes the RCV-shape decision, or M37's §4b implementer reading how the refusal is
+  serviced — meets a parked "`brk` wall" the measurement says is a §4b consequence.
+* **The harness's `identical fault` label is exit-code-shaped.** It fires on `rc = rp ≥ 128`, a
+  signal death on both sides; a guest exiting ≥ 128 by design on both sides would be labelled a
+  fault with no `guest crashed:` line behind it — and still counted PASS, so the tally cannot
+  move. When next touched, anchor it on the recorder's `guest crashed:` / `guest terminated by
+  signal` line (`crates/retrace/src/main.rs:29`, `:33`), as the record-error label now anchors on
+  `RECORD ERROR:` (fix wave; ruled left as is because the direction is harmless).
+* **`crates/retrace-box/tests/truncguard.rs:237`** says "a pid in 16384..=65535 hits the
+  trampoline/page-table backings" — true of the fixed backings, now the narrower subset of the
+  measured `[0x4000, 0x18000)`. A `tests/` comment M36 was permitted to touch and left so the
+  gated tree is untouched; one parenthetical — "(and, M36: the guest's `os_alloc_once` slab at
+  `0x10000`)" — owed to M37.
 * **Review minors carried:** M34's `the_clamp_reaches_proc_info` leaning on the host running
   more than 16 processes; M35's `failwrite.rs:23` misnomer, the bare block in `forward_and_diff`,
   and `util::record` not scrubbing `RETRACE_TRACE`. From this milestone: `apple_walls_e2e.rs`'s
