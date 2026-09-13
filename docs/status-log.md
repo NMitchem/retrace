@@ -6828,7 +6828,8 @@ no dedicated probe was needed. Script: `tools/destgaps-census.sh`; summary:
 **Coverage:** 76 guests issued at least one of the five — every dynamic guest, because the calls
 are libSystem/dyld init-time — and 42 issued none: the static `-nostdlib` guests, among them the
 three (`crash`, `crashjmp`, `wildstore`) that fault before their first syscall. 851 matching
-dispatches. (The spec's §4 says "115 guests dispatched"; 76 + 42 is 118. The census ran in two
+dispatches. (The spec's §4 said "115 guests dispatched" until the fix wave corrected it; 76 + 42
+is 118. The census ran in two
 passes — the first's progress log has 115 lines, and `/usr/bin/yes`, `/usr/bin/true` and
 `/usr/bin/printenv` came in a second — and 115 is the first pass's count. Checked against the raw
 TSVs: 821 + 30 = 851 rows over 76 distinct labels, the per-syscall figures below reproduced from
@@ -6925,8 +6926,10 @@ the one `retrace-box/src` edit on the branch, a gated `eprintln!` with behaviour
 when unset), `6db8a27` (review minors M1–M3: the complete precondition loop, the census script's
 trap before its `cp`, and `dest_buffer` view pins for 336/169/170 and for 220/228's `None` inside
 the existing `dest_buffer_knows_where_each_length_lives` / `dest_buffer_omits_what_it_should`
-tests — no new `#[test]`), and `bbcc2c4` (the docs-and-instrument commit carrying the three
-corrected facts).
+tests — no new `#[test]`), `bbcc2c4` (the docs-and-instrument commit carrying the three
+corrected facts), `e31c1a6` and `67a97df` (citation and wording follow-ups), and one further
+docs-only commit after the scoped re-review, which adjudicated its four prose minors — this
+paragraph is in it, so it cannot name itself.
 
 - **`crates/retrace-arch/src/lib.rs`** — `proc_info` 336 (`:823` at `adb0402`; `:838` after the
   fix wave's comment corrections) is `[Scalar, Scalar, Scalar, Scalar, Dest(Reg(5)), Scalar]`,
@@ -6991,8 +6994,9 @@ corrected facts).
   the guest's first `Stop::Syscall`, and instead of forwarding that call calls
   `forward_and_diff(336, [1 /*LISTPIDS*/, 1 /*PROC_ALL_PIDS*/, 0, 0, dest, 4160, 0, 0])` with
   `dest = STACK_TOP_IPA − 64`, having asserted that `host_span_for_test(dest)` gives exactly 64
-  bytes of backing and that the scalar arguments it checks (`x0`–`x3`, `x5`) land in no backing
-  (so the test measures the clamp and not §4b's probe). `LISTPIDS` is the callnum precisely
+  bytes of backing and that every other register (`x0`–`x3`, `x5`–`x7`; the fix wave widened
+  the check from five to seven) lands in no backing (so the test measures the clamp and not
+  §4b's probe). `LISTPIDS` is the callnum precisely
   because it takes no pid.
 - **`tools/destgaps-census.sh`** (109 lines) and **`tools/destgaps-census-summary.py`** (54
   lines) — the §4 instrument, committed so the next milestone re-runs it instead of rediscovering
@@ -7010,8 +7014,11 @@ corrected facts).
   family-collapsed count is what produced the "2 guests" error above).
 - **`README.md`** — the line-452 sentence replaced with what is true (two rows widened and
   clamped, two kernel-bounded at 15,360 and cited, corpus maximum 1,052, both new rows inert for
-  the window and live for the clamp); the owed-list entry "M34's three `Dest` rows" removed, and
-  the pid-collision probe entered in its place.
+  the window and live for the clamp — and, since the fix wave, the 76-of-76 measurement of that
+  clamp); the owed-list entry "M34's three `Dest` rows" removed, and the pid-collision probe
+  entered in its place; the fix wave also moved the gate paragraph from M33's 570 to M34's 572
+  with the reconciliation table, and added the `SET_DYLD_IMAGES`-above-the-trace and cache-page
+  clamp entries to the owed list.
 - No `retrace-core` edit, no `TRACE_MAGIC` bump, no new guest, no new trap arm; the one
   `retrace-box/src` edit is the fix wave's gated diagnostic in the `Reg` arm, which forwards and
   records nothing differently. Symmetry (spec §8) is by construction: `dest_buffer` is consulted
@@ -7181,8 +7188,9 @@ M34 regression. Evidence: not reproducible on either binary (10/10), and `dddiag
 rows — `proc_info` 64/56/368, `csops` 4 and 1032, the §4 table — all sit inside the flat window,
 so M34's rows change nothing it records. (Strengthened by the fix wave's correction rather than
 weakened: M34's one corpus-visible mechanism change on `dddiagnose` is the 368 → 128 clamp at its
-#24, which the kernel rejects before reading the length, so it cannot produce a divergence.) Not a charter halt: that is a regression surviving a
-diagnose-edit-rerun cycle, and this one did not survive the diagnose step. Cost if wrong: an
+#24, which the kernel rejects before reading the length, so it cannot produce a divergence.)
+Not a charter halt: that is a regression surviving a diagnose-edit-rerun cycle, and this one did
+not survive the diagnose step. Cost if wrong: an
 M34-caused flake in `dddiagnose` enters `main` labelled pre-existing; M36's per-row pid recording
 is the check. The probe script is committed by nothing — it lives in the SDD workspace — and M36
 should adopt its pid-logging shape. Against the prediction: run 2 landed on it, run 1 did not.

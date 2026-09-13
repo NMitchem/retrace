@@ -191,9 +191,9 @@ fixture>`, the CPython interpreter and its launcher with `-c 'print(1)'`, and al
 `x5` and `x3` are printed, so no dedicated probe was needed. Script: `tools/destgaps-census.sh`
 (committed by this milestone, §5e), summarised by `tools/destgaps-census-summary.py`.
 
-**Coverage**: 118 guests dispatched (the first draft said 115 — the first pass's progress-log count;
-the three-binary rerun added `yes`/`true`/`printenv`); 76 issued at least one of the five (every dynamic guest —
-the calls are libSystem/dyld init-time), 42 issued none (the static `-nostdlib` asm guests, and
+**Coverage**: 118 guests dispatched (the first draft said 115 — the first pass's progress-log
+count; the three-binary rerun added `yes`/`true`/`printenv`); 76 issued at least one of the five
+(every dynamic guest — the calls are libSystem/dyld init-time), 42 issued none (the static `-nostdlib` asm guests, and
 three that fault before their first syscall). 851 matching dispatches.
 
 **Result — the largest length operand in the whole corpus is 1,052 bytes.** No dispatch comes
@@ -441,8 +441,9 @@ what the host kernel sees, not what is recorded — M10's contract, as M33 §8 s
   and nothing measured needs.
 - **Ruling 3:** the §4b pid-collision defect — every `csops`/`proc_info(PIDINFO)` in the corpus
   failing `ESRCH` whenever the recorder's pid is in 16384..=65535 (the `SET_DYLD_IMAGES` `EINVAL`
-  is a separate, pid-independent cause, §4b) — is recorded and routed, not fixed, because its fix's precondition (a `Scalar` audit of the whole table) is a milestone the
-  charter does not contain. Not a halt: record and replay agree, so it is not an E2 flake; it is
+  is a separate, pid-independent cause, §4b) — is recorded and routed, not fixed, because its
+  fix's precondition (a `Scalar` audit of the whole table) is a milestone the charter does not
+  contain. Not a halt: record and replay agree, so it is not an E2 flake; it is
   a fidelity defect with a pid-shaped trigger, which is M36's business to classify.
 
 ## 10. Gate
@@ -470,7 +471,8 @@ including Ruling 1 through the production `diff_window`, and `the_clamp_reaches_
 control 3; three `EXPECTED_DIFFS` entries (336, 169, 170, each "exercised", none for 220/228); and
 the §4 instrument committed as `tools/destgaps-census.sh` and `tools/destgaps-census-summary.py`
 with the 5 GB stderr lesson in its header. Commits `3e05664`, `e3ec90a`, `486bab2`, plus the docs
-commit `adb0402` and the fix wave (`cd92a7d`, `6db8a27`, `bbcc2c4`, below). No trap arm, no guest,
+commit `adb0402` and the fix wave (`cd92a7d`, `6db8a27`, `bbcc2c4`, `e31c1a6`, `67a97df`, below,
+plus one docs-only commit after the scoped re-review). No trap arm, no guest,
 no `TRACE_MAGIC` bump, no `retrace-core` edit; the one `retrace-box/src` edit is the fix wave's
 gated `RETRACE_REGCLAMP` diagnostic in the `Reg` arm, inert unless set — §8's symmetry argument
 held with nothing to mirror. §4b was recorded and routed, not fixed, per
