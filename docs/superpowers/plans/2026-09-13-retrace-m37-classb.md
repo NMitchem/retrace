@@ -108,8 +108,8 @@ freestanding arm64 asm + C guest fixtures via `crates/retrace-guest/build.rs`.
 - Consumes: `FdTable::{new, alloc, bind, host, is_open, close, slots, from_slots}`;
   `util::assert_rung_records_and_replays(guest, argv, expect_stdout) -> RungOut { trace, stdout }`.
 - Produces: `pub enum FdSlot { Free, Open, Closed, Console(u8) }`;
-  `FdTable::dup2(&mut self, fd: u64, fd2: u64, host_fd2: Option<i32>) -> Result<u64, (u64, Option<i32>)>`
-  — hmm, see Step 2 for the exact signature; `FdTable::console_of(gfd) -> Option<u8>`;
+  `FdTable::dup2(&mut self, fd: u64, fd2: u64, host_fd2: Option<i32>) -> Result<(u64, Option<i32>), u64>`
+  (Step 2 is the definition); `FdTable::console_of(gfd: u64) -> Option<u8>`;
   `Box_::is_console_write(num, gfd) -> bool`, `Box_::is_console_close(num, gfd) -> bool`;
   `retrace_arch::{is_write_syscall, is_close_syscall}`.
 
@@ -705,8 +705,7 @@ Task 5 Step 2's owed list; §8 rulings → carried into Task 5; §9 → Task 5 S
 go — filled from the run logs, checked by `grep -n '…'` finding nothing in the test file.
 
 **Type consistency.** `FdTable::dup2(fd: u64, fd2: u64, host_fd2: Option<i32>) ->
-Result<(u64, Option<i32>), u64>` is the one signature (Task 2 Steps 1, 2, 4, 5 all use it; the
-"Interfaces" line's first draft is superseded by Step 2). `console_of(gfd: u64) -> Option<u8>`.
+Result<(u64, Option<i32>), u64>` is the one signature (Task 2's Interfaces, Steps 1, 2, 4, 5). `console_of(gfd: u64) -> Option<u8>`.
 `Box_::is_console_write(&self, num: u64, gfd: u64) -> bool`, `is_console_close` likewise.
 `retrace_arch::{is_write_syscall, is_close_syscall}(num: u64) -> bool`. `SCALARPROBE`,
 `DUP2_DYN` follow their siblings' `concat!(env!("OUT_DIR"), …)` shape.
