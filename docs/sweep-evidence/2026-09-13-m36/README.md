@@ -3,7 +3,8 @@
 The decisive stderr of every non-clean row of `tools/apple-sweep.sh`, from three full runs of
 the 54-entry corpus, copied verbatim from `RETRACE_SWEEP_KEEP`. Traces (≈7–350 MB each) are not
 committed; they live in the SDD workspace (`.superpowers/sdd/2026-09-13-retrace-m36-sweepmeasure/
-keep-{O,L,I}/<basename>.bin`, git-ignored) and are named per row in that workspace's
+keep-{O,L,I}/<basename>.bin` — excluded from git locally via `.git/info/exclude`, so not in any
+clone) and are named per row in that workspace's
 `sweep-table.md`, the single source the gates and docs transcribe.
 
 **Binary commit:** `58fb0e7` (branch `m36-sweepmeasure`). Its `crates/` is byte-identical to the
@@ -27,7 +28,13 @@ are kept.
 
 Every `ROW` line's `recpid` is inside its run's range (0 rows outside, 0 empty, checked with
 `awk` over the `ROW` lines); no run crossed a boundary. The pid counter was read with
-`sh -c 'echo $$'` and advanced with a loop of `/usr/bin/true`.
+`sh -c 'echo $$'` and advanced with a loop of `/usr/bin/true`. Each run was one invocation of
+the committed script with evidence kept, launched detached and polled (`W` = the SDD workspace,
+`T` = the worktree; `<run>` ∈ O, L, I):
+
+```sh
+nohup sh -c "sh -c 'echo pidstart=\$\$' > $W/sweep-<run>.log; RETRACE_SWEEP_KEEP=$W/keep-<run> $T/tools/apple-sweep.sh >> $W/sweep-<run>.log 2>&1; echo SWEEP_EXIT=\$? >> $W/sweep-<run>.log" >/dev/null 2>&1 &
+```
 
 **What the three runs say, in one paragraph.** `csh`/`tcsh` panic at the M33 `dup2` assert
 (`crates/retrace-core/src/lib.rs:1140`) in every regime. `yes` is killed by the 30 s watchdog in
@@ -38,24 +45,38 @@ message-queue `mach_msg2` (`options 0x404000102 pc=0x1804adc34`, `Route::Unsuppo
 does not (L, 6 of 6). The kept traces show the difference is M34 §4b: 11–12 self-pid
 `csops`/`proc_info` calls answered `ESRCH` on O and I, 0 on L.
 
-**Why run O collided.** In every kept trace of the six rows, in every run, landmark #182 is a
-`mach_vm_map(size 0x8000, flags 0x49000001)` (tag 73 = `VM_MEMORY_OS_ALLOC_ONCE`) whose returned
-address — read back from that landmark's recorded write — is `0x10000`: `first_fit` fills the
-gap after `PT_L1_IPA`'s backing. It precedes the first self-pid `csops` (#200), so at the
+**Why run O collided.** In every kept colliding trace (8 binaries × runs O and I, 16 of 16),
+one landmark is a `mach_vm_map(size 0x8000, flags 0x49000001)` (tag 73 = `VM_MEMORY_OS_ALLOC_ONCE`)
+whose returned address — read back from that landmark's recorded write — is `0x10000`:
+`first_fit` fills the gap after `PT_L1_IPA`'s backing. It precedes the first self-pid `ESRCH`
+in every one: at #182 → #200 in `dddiagnose`, #136 → #154 in `launchctl`, #144 → #162 in
+`automationmodetool`, #128 → #146 in `desdp`, `dyld_info`, `flex`, `csh` and `tcsh` (the same
+map is at the same index in the run-L traces, where no pid collides with it). So at the
 pid-carrying calls the probe's backings are contiguous over `[0x4000, 0x18000)` = pids
 16384..=98303 — 82 % of the pid space, not "roughly half". Non-colliding pids: 1..16383 and
-98304..99998. M35's out-of-range probes were at `0x257f`–`0x2662`; the M36 spec §4 first reading
+98304..99998 (xnu's `PID_MAX` is 99999 with `nextpid` reset at `>=`, so 99998 is the highest
+assignable pid). M35's out-of-range probes were at `0x257f`–`0x2662`; the M36 spec §4 first reading
 was at `0x10806`–`0x10887` (inside the slab), which is why it saw five `brk`s. The set is
 guest-dependent (it is whatever a guest maps below `0x100000` before its own pid-carrying calls),
 so "outside `[0x4000, 0x10000)`" is not a regime; the regime-independent fix M34 §4b names is to
 stop probing `Scalar` registers as pointers.
 
-**`dddiagnose` in three regimes** (`err` = `err=true` landmarks in the kept trace; self-pid
-`ESRCH` counted directly from the `csops`/`proc_info` landmarks carrying the recorder's pid):
+**Counting rules** (so every number here is re-derivable from a kept trace with
+`retrace_trace::Reader::open_checked` and nothing else): a landmark's index is its position in
+the event vector (the initial `Snapshot` is #0). `err` = the number of `Event::Syscall` with
+`err == true`. Self-pid `ESRCH` = the number of `Event::Syscall` with `num ∈ {169, 170, 336}`,
+`ret == 3`, `err == true`, and the pid register equal to that run's `recpid` — `args[0]` for
+`csops` (169) / `csops_audittoken` (170), `args[1]` for `proc_info` (336). The `0x10000` map =
+an `Event::Syscall` with `num == -15` (`_kernelrpc_mach_vm_map_trap`), `args[2] == 0x8000`,
+`args[4] == 0x49000001`, whose `writes` cover `args[1]` (the out-pointer) with the 8 bytes
+`0x10000`.
+
+**`dddiagnose` in three regimes** (`err` and self-pid `ESRCH` per the rules above, from the
+kept trace):
 
 | run | recpid | result | `err` | self-pid `ESRCH` | last landmark before the stop |
 |---|---|---|---|---|---|
-| L | 2340 (`0x924`) | `RECORD ERROR: unsupported mach_msg2 … options 0x404000102` (RCV shape) | 63 | 0 | `mach_msg2` #378 |
+| L | 2340 (`0x924`) | `RECORD ERROR: unsupported mach_msg2 … options 0x404000102` (RCV shape) | 63 | 0 | `issetugid` (327) #378, `args=[0, 4, …]`, `ret=0` — the refused `mach_msg2` **is** the stop and was never recorded (`Route::Unsupported` → `RECORD ERROR` before any append), which is why replay reports landmark 379, one past the end |
 | O | 74909 (`0x1249d`) | `RECORD ERROR: … EC=0x3c … pc=0x18035f084` (the libdispatch `brk`) | 75 = 63 + 12 | 12 (169 ×7, 170 ×1, 336 ×4) | `proc_info(2, pid, 17)` → `ESRCH` #378 |
 | I | 18781 (`0x495d`) | `PASS (identical fault, rc=139)`: `guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045` both sides | 71 | 11 (169 ×7, 170 ×1, 336 ×3) | `csops(pid, 0, …)` → `ESRCH` #356 |
 
@@ -90,7 +111,9 @@ shares, plus a raw read of the instruction words at the pc. `dladdr` names the n
 *exported* symbol; a local symbol closer to the address would not be visible to it.
 
 `sym2.c` (compiled with `cc -o sym2 sym2.c`; the slide is the cache's mapped base minus its
-unslid base `0x180000000`):
+unslid base `0x180000000`). The run file has two extra lines, an `fflush(stdout)` and an
+`argv[1]`-gated `sleep` — the hook for the `atos -p` attempt — trimmed here because both are
+inert for the lookup; the pasted program compiles and reproduces the output below exactly:
 
 ```c
 #include <stdio.h>
@@ -176,44 +199,44 @@ the recorder's stderr (its first line is `recpid=<pid>`, printed by the wrapper 
 `exec`s into the recorder); `rp.err` is the replay's, absent when replay did not run (a recorder
 panic or timeout ends the row before replay).
 
-- `automationmodetool.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `automationmodetool.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `automationmodetool.I.rp.err` — run I, replay re-reports the same exception at the same pc as its `DIVERGENCE`
-- `automationmodetool.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH`
+- `automationmodetool.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH` in the kept trace
 - `automationmodetool.L.rp.err` — run L, replay ran out of events at the same landmark (`expected recorded syscall, got None`)
-- `automationmodetool.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `automationmodetool.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `automationmodetool.O.rp.err` — run O, replay re-reports the same exception at the same pc as its `DIVERGENCE`
 - `csh.I.rec.err` — run I, recorder panic at the M33 `dup2` assert (`lib.rs:1140:17`); no replay ran
 - `csh.L.rec.err` — run L, recorder panic at the M33 `dup2` assert (`lib.rs:1140:17`); no replay ran
 - `csh.O.rec.err` — run O, recorder panic at the M33 `dup2` assert (`lib.rs:1140:17`); no replay ran
-- `dddiagnose.I.rec.err` — run I, the identical malloc crash (`guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045`) after the serviced refusal; 11 self-pid `ESRCH` in the trace
+- `dddiagnose.I.rec.err` — run I, the identical malloc crash (`guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace in the trace
 - `dddiagnose.I.rp.err` — run I, the replay's identical crash line (`rc=139` both sides)
-- `dddiagnose.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH`
+- `dddiagnose.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH` in the kept trace
 - `dddiagnose.L.rp.err` — run L, replay ran out of events at the same landmark (`expected recorded syscall, got None`)
-- `dddiagnose.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 12 self-pid `ESRCH`
+- `dddiagnose.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 12 self-pid `ESRCH` in the kept trace
 - `dddiagnose.O.rp.err` — run O, replay re-reports the same exception at the same pc as its `DIVERGENCE`
-- `desdp.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `desdp.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `desdp.I.rp.err` — run I, replay re-reports the same exception at the same pc as its `DIVERGENCE`
-- `desdp.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH`
+- `desdp.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH` in the kept trace
 - `desdp.L.rp.err` — run L, replay ran out of events at the same landmark (`expected recorded syscall, got None`)
-- `desdp.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `desdp.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `desdp.O.rp.err` — run O, replay re-reports the same exception at the same pc as its `DIVERGENCE`
-- `dyld_info.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `dyld_info.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `dyld_info.I.rp.err` — run I, replay re-reports the same exception at the same pc as its `DIVERGENCE`
-- `dyld_info.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH`
+- `dyld_info.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH` in the kept trace
 - `dyld_info.L.rp.err` — run L, replay ran out of events at the same landmark (`expected recorded syscall, got None`)
-- `dyld_info.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `dyld_info.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `dyld_info.O.rp.err` — run O, replay re-reports the same exception at the same pc as its `DIVERGENCE`
-- `flex.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `flex.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `flex.I.rp.err` — run I, replay re-reports the same exception at the same pc as its `DIVERGENCE`
-- `flex.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH`
+- `flex.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH` in the kept trace
 - `flex.L.rp.err` — run L, replay ran out of events at the same landmark (`expected recorded syscall, got None`)
-- `flex.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `flex.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `flex.O.rp.err` — run O, replay re-reports the same exception at the same pc as its `DIVERGENCE`
-- `launchctl.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `launchctl.I.rec.err` — run I, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `launchctl.I.rp.err` — run I, replay re-reports the same exception at the same pc as its `DIVERGENCE`
-- `launchctl.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH`
+- `launchctl.L.rec.err` — run L, the RCV-shaped `mach_msg2` wall (`options 0x404000102`, `pc 0x1804adc34`) after the serviced refusal; 0 self-pid `ESRCH` in the kept trace
 - `launchctl.L.rp.err` — run L, replay ran out of events at the same landmark (`expected recorded syscall, got None`)
-- `launchctl.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH`
+- `launchctl.O.rec.err` — run O, the `brk` (`EC=0x3c pc=0x18035f084 elr=0x1804af110`) after the serviced refusal; 11 self-pid `ESRCH` in the kept trace
 - `launchctl.O.rp.err` — run O, replay re-reports the same exception at the same pc as its `DIVERGENCE`
 - `tcsh.I.rec.err` — run I, recorder panic at the M33 `dup2` assert (`lib.rs:1140:17`); no replay ran
 - `tcsh.L.rec.err` — run L, recorder panic at the M33 `dup2` assert (`lib.rs:1140:17`); no replay ran
