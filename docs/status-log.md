@@ -6924,12 +6924,14 @@ the one `retrace-box/src` edit on the branch, a gated `eprintln!` with behaviour
 when unset), `6db8a27` (review minors M1–M3: the complete precondition loop, the census script's
 trap before its `cp`, and `dest_buffer` view pins for 336/169/170 and for 220/228's `None` inside
 the existing `dest_buffer_knows_where_each_length_lives` / `dest_buffer_omits_what_it_should`
-tests — no new `#[test]`), and the docs-and-instrument commit carrying the three corrected facts.
+tests — no new `#[test]`), and `bbcc2c4` (the docs-and-instrument commit carrying the three
+corrected facts).
 
-- **`crates/retrace-arch/src/lib.rs`** — `proc_info` 336 (`:823`) is
-  `[Scalar, Scalar, Scalar, Scalar, Dest(Reg(5)), Scalar]`, `x5` = `buffersize` (`uint32_t`);
-  `csops` 169 (`:786`) is `[Scalar, Scalar, Dest(Reg(3)), Scalar]` and `csops_audittoken` 170
-  (`:787`) is `[Scalar, Scalar, Dest(Reg(3)), Scalar, Ptr]`, `x3` = `usersize` (`user_size_t`),
+- **`crates/retrace-arch/src/lib.rs`** — `proc_info` 336 (`:823` at `adb0402`; `:838` after the
+  fix wave's comment corrections) is `[Scalar, Scalar, Scalar, Scalar, Dest(Reg(5)), Scalar]`,
+  `x5` = `buffersize` (`uint32_t`); `csops` 169 (`:786`, now `:789`) is
+  `[Scalar, Scalar, Dest(Reg(3)), Scalar]` and `csops_audittoken` 170 (`:787`, now `:790`) is
+  `[Scalar, Scalar, Dest(Reg(3)), Scalar, Ptr]`, `x3` = `usersize` (`user_size_t`),
   `x4` the 32-byte audit-token copyin, still `Ptr`. `Reg`, not `DerefU64`, and clamp, not refuse:
   every length here is a pure in-value the kernel reads and never writes back, so nothing of
   M29's `sysctl` reasoning (an in-out `*oldlenp` that clamping would silently truncate) applies,
