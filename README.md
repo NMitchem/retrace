@@ -426,12 +426,23 @@ These are real and current, not aspirational gaps.
   message-queue send` line that precedes it is M23's *serviced* refusal described above; the
   guest survives it, and the in-range runs that failed went on to `brk` after it, M23's parked
   class.) Its PASS is an identical crash on both sides (`rc=139 rp=139`), which the sweep counts
-  with no note. Within every run record and replay agree; what moves between runs is the guest's
-  own path, and on 2026-09-13 recorder pids inside M34's collision range both passed and failed
-  it, so the pid hypothesis is neither confirmed nor refuted. The row is class B
-  (known-unmodelled) with an environment-driven appearance, not E2; the two sweep-labelling
-  defects are M36's E1 rows, and the M35 sweep itself landed on `pass=45 fail=9 skip=0` — M33's
-  eight plus `dddiagnose`, no binary moved in either direction.
+  with no note. Within every run record and replay agree; what moves *between* runs is retrace's
+  own M34 §4b defect (the pid-collision probe, below), and M35's thirteen kept traces say which
+  way. With the recorder's pid outside the collision range, the guest's twelve self-pid
+  `csops`/`proc_info` calls succeed and it runs on to the RCV-shaped wall — 10 of 10 runs, 63
+  `err = true` landmarks in every trace. With the pid inside it, the probe forwards the pid as a
+  host pointer and those twelve calls answer `ESRCH` — 75 = 63 + 12 landmarks in every trace —
+  after which the guest crashes identically or `brk`s: 0 of 15 in-range runs reached the RCV
+  wall. So the pid hypothesis is **confirmed as the driver of which wall** the guest reaches;
+  what stays open is only the crash-versus-`brk` split among in-range runs, and the PASS rows
+  are almost certainly retrace-*induced* crashes (a process told by `csops` that its own pid does
+  not exist), not merely a crash the sweep failed to label. The row is class B
+  (known-unmodelled), not E2 — and stronger for the measurement: three named walls behind one
+  row, the §4b `Scalar` fix first because it gates the other two, then the RCV-only
+  message-queue shape, then M23's post-refusal `brk`; after the §4b fix the row should go from
+  intermittent to always-FAIL at the RCV wall until that shape is modelled. The two
+  sweep-labelling defects are M36's E1 rows, and the M35 sweep itself landed on
+  `pass=45 fail=9 skip=0` — M33's eight plus `dddiagnose`, no binary moved in either direction.
   M22's four named causes are down to one plus that unmeasured tail — the `pc=0x4204` group (13) and
   the `msgh_id` 412 group (4) were both cleared at M23 — and **`ps` was fixed at M27**. It was
   published here from M22 through M26 as "the oracle catching nondeterminism", a claim that could not
@@ -645,9 +656,11 @@ These are real and current, not aspirational gaps.
   roughly half of them — every `csops` returns `ESRCH` and every `proc_info(PIDINFO)` returns
   `ESRCH`; measured on `hello_dyn` at pid `0x6a30`. Record and replay agree, so the oracle cannot
   see it; its fix is for `forward_and_diff` to skip `Scalar` positions, whose precondition is a
-  `Scalar` audit of the whole table — its own milestone, and a hypothesis for the sweep's
-  intermittent row that M36 is to test by recording the recorder's pid beside each row, knowing
-  the symptom is time-varying with the machine's pid counter, not merely per-run);
+  `Scalar` audit of the whole table — its own milestone, and since M35 the *confirmed* driver of
+  which wall the sweep's intermittent row reaches (the `dddiagnose` entry above: 0 of 15 in-range
+  runs reached the RCV wall, 10 of 10 out-of-range runs did); M36 still records the recorder's
+  pid beside each row, knowing the symptom is time-varying with the machine's pid counter, not
+  merely per-run);
   **`SET_DYLD_IMAGES` (336/15) serviced above the trace** (the same `hello_dyn` recording shows
   it returning `EINVAL`, but that is *not* pid-caused — M34's first draft said it was: the
   forwarded call names *retrace's* task, whose dyld info retrace's own dyld already finalised

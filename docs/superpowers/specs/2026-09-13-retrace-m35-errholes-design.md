@@ -176,8 +176,11 @@ tree captures neither write; with the hoist both are captured and replay applies
 
 A third family exists in source and is **not** measured here: `csops`' blob operations
 (`kern_proc.c` `csops_copy_token` `:3511–3535`) copy out an 8-byte length header and return
-`ERANGE` when `0 < usize < length`; a probe on an unsigned binary took the no-blob branch and
-wrote nothing, so no control is built on it. M36's sweep rows are where it would show.
+`ERANGE` — only when `8 <= usize < length`; a `usize` below 8 returns `ERANGE` with **no** write,
+so a probe sized that way shows nothing and could be mistaken for the no-blob branch (the final
+review's reading of the source; this spec first said `0 < usize < length`). A probe on an
+unsigned binary took the no-blob branch and wrote nothing, so no control is built on it. M36's
+sweep rows are where it would show.
 
 ### 4d. What the corpus does on the error path today
 
@@ -332,9 +335,13 @@ with its reason and becomes an M36 row.
 
 Closed 2026-09-13 on branch `m35-errholes`, five code commits — `0beb06d` / `955d687` (Task 1
 and its fix round), `a11e398` / `8a53c53` (Task 2 and its fix round), `12ac4e7` (Task 3) — and
-one docs commit. Everything §5 said would land, landed; three statements in this spec's own text
-were wrong on measurement and are corrected below rather than edited away. The full record is the
-M35 section of `docs/status-log.md`; this section is the spec's own reconciliation against it.
+three docs commits: `504753e`, `46b5dc0` (the Task 4 fix round) and the final-review fix wave,
+which cannot name itself. Everything §5 said would land, landed; three statements in this spec's
+own text were wrong on measurement and are corrected below rather than edited away, and the
+final review found two more — §4c's `csops_copy_token` condition, and this section's own first
+account of the `dddiagnose` cause — corrected the same way in the fix wave. The full record is
+the M35 section of `docs/status-log.md`; this section is the spec's own reconciliation against
+it.
 
 ### What landed against §5
 
@@ -353,7 +360,14 @@ M35 section of `docs/status-log.md`; this section is the spec's own reconciliati
   — deleted whole (it was `:3092–3095` before that commit); and the M30 comment's "outside the
   `if !err`" clause, which named a gate that no longer existed. After `8a53c53`,
   `grep -nE 'wrote nothing|if !err' lib.rs` hits only the retraction inside the new comment and
-  the two fd gates.
+  the two fd gates — but `lib.rs` was the wrong scope: the final review's tree-wide scan found
+  four more present-tense descriptions of the retired gate outside it — `FAILSYSCTL`'s rustdoc
+  in `retrace-guest/src/lib.rs`, the header comment of `asm/failsysctl.s`, a `build.rs` comment,
+  and the message on `truncguard.rs`'s `writes.is_empty()` assertion (the assertion itself still
+  holds, as a per-syscall kernel fact about a failing `open`, not as the structural fact it was
+  written to pin) — all four retired in the fix wave. After it,
+  `grep -rn -E 'skips write capture|capture AND the guard band|captures nothing' crates` hits
+  nothing at all.
 - **§5b** — `failwrite.rs` rewritten in place (1 `#[test]` → 1), asserting the call and not the
   buffer. **Correction to §5b's text:** "`writes` must contain exactly one region at `args[3]` of
   8 bytes" is not what the capture produces and never has been — regions are window-sized
@@ -440,17 +454,30 @@ replay correctly running out of events at the next syscall. With pids **inside**
 the gate advanced the counter), 2 PASS (`rc=139 rp=139`, an identical crash the sweep counts
 without a note) and 3 FAIL: the same serviced refusal, survived, then a `brk` at
 `pc=0x18035f084` — M23's "other four `brk`" class (`machmsg.rs:97–99`), a second post-refusal
-path. Ruling (controller, ledgered): not an M35 regression, **not class E2** — record and replay
-agree within every run; the guest's path varies with its inputs — but **class B,
-known-unmodelled** (two walls: the RCV-only message-queue shape, and the post-refusal `brk` M23
-parked) with an environment-driven appearance; the serviced refusal is not a wall. The numbers
-file first read the `refusing` line as the wall, "unmodelled since M2-mach" — wrong, caught by
-the Task 4 review against `machmsg.rs` and the kept traces, corrected in all three documents
-before merge. M34's "10/10 PASS" measured that morning's guest state, not a
-property of the binary; its "a pid in range does not by itself produce the divergence" stands,
-but the inverse is not established either — the pid hypothesis is neither confirmed nor refuted,
-and M36 records the pid beside each row. Two sweep-harness defects go to M36 as **E1** rows: a
-record exit of 4 reported as "replay diverged", and an identical crash on both sides counted PASS.
+path. Ruling (controller, ledgered; corrected once more by the final review): not an M35
+regression, **not class E2** — record and replay agree within every run — but **class B,
+known-unmodelled**, with **three** walls behind the row and the serviced refusal not among them.
+What varies *between* runs is retrace's own M34 §4b defect, not "the guest's path varying with
+its inputs" as this section first said: the final review read all thirteen kept traces, and
+every out-of-range trace has 63 `err = true` landmarks with `csops` failing 0 times and reaches
+the RCV wall (10 of 10), while every in-range trace has 75 = 63 + 12 — `csops` 169 ×7, 170 ×1,
+`proc_info` 336 ×4 more, the twelve self-pid calls §4b predicts the probe mis-translates into
+`ESRCH` — and then crashes identically (the PASS runs) or `brk`s; 0 of 15 in-range runs (M34's
+ten and today's five) reached the RCV wall. So the pid hypothesis is **confirmed as the driver
+of which wall**; open is only the crash-versus-`brk` split among in-range runs. The walls, in
+gating order: the §4b `Scalar` fix (it decides which of the other two a run reaches), the
+RCV-only message-queue shape, the post-refusal `brk` M23 parked. Consequences: the sweep's
+`rc=139 rp=139` PASS rows are almost certainly retrace-induced crashes; after the §4b fix the row
+should go always-FAIL at the RCV wall until the shape is modelled; M34's "a pid in range does not
+by itself produce the divergence" is true only of the RCV-wall divergence. The numbers file was
+wrong twice here — first reading the `refusing` line as the wall, "unmodelled since M2-mach"
+(caught by the Task 4 review against `machmsg.rs` and the kept traces), then calling the
+variation guest-path and the pid hypothesis "neither confirmed nor refuted" (caught by the final
+review counting the traces) — corrected in all three documents both times. M34's "10/10 PASS"
+measured that morning's guest state at ten in-range pids, not a property of the binary. Two
+sweep-harness defects go to M36 as **E1** rows: a record exit of 4 reported as "replay
+diverged", and an identical crash on both sides counted PASS — the latter, per the above, very
+likely retrace's own crash.
 
 ### Gate (§10)
 
