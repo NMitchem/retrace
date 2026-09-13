@@ -7335,7 +7335,8 @@ The charter's entry, `docs/superpowers/specs/2026-09-09-retrace-m32-m38-program-
 > `/no/such/retrace/path` and exits with the errno, and `failsysctl.s` is a second one. Whether
 > either *reaches* the `if !err` gate with a pointer argument worth banding is a measurement M35
 > still owes, so the certainty stays medium; but the milestone starts from a fixture rather than
-> from nothing, and it is no longer obviously the queue's most likely halt point.
+> from nothing, and it is no longer obviously the queue's most likely halt point. It stays last
+> in the soundness phase regardless, since a halt there still banks M32–M34 as merged work.
 
 What each hole cost, at the M34 merge (`8854146`; the spec's line numbers are at that commit and
 have since moved — the citations below are at `12ac4e7`, the final code commit):
@@ -7461,17 +7462,18 @@ itself. Every citation below is at `12ac4e7`.
     drift, a checkpoint restored against a different backing set, a future edit to
     `page_in_cache` — and Control 1 proves it fires; nothing in the corpus reaches it.
   - `forward_and_diff`: `if !err {` is now a bare block (`:3447`; formerly `:3439` on `main`),
-    the loop body untouched and not re-indented, so `blame` keeps its history — the comment says
-    so (`:3444–3445`). The new comment above it (`:3434–3445`) states what was measured (§4a, §4b,
-    §4c) and why the capture is unconditional: the pre-image and the canary fill are taken
-    before `host_svc` on both paths, the restore below already ran on both, and replay's generic
-    arm has applied `writes` beside `err = true` since M0 — "what was skipped was the looking."
-    The Task 2 review read `forward_and_diff` (`:3167`) end to end: the loop body references
-    `num`, the five window fields, `fill_canary`, `self.host_span` and
-    `self.canary_disturbances`, and never `ret` or `err`. The M30 restore comment's point 2 no longer says "wrote nothing", and its
-    opening clause (`:3569`) no longer names a gate that does not exist. `read_bytes_for_test`'s
-    doc (`:3042–3046`, the seam at `:3047`) now says why the seam still exists — the test wants a
-    view independent of the capture — rather than "that path captures nothing". And one edit
+    the loop body untouched and not re-indented, so `blame` keeps its history — the comment
+    says so (`:3444–3445`). The new comment above it (`:3434–3445`) states what was measured
+    (§4a, §4b, §4c) and why the capture is unconditional: the pre-image and the canary fill are
+    taken before `host_svc` on both paths, the restore below already ran on both, and replay's
+    generic arm has applied `writes` beside `err = true` since M0 — "what was skipped was the
+    looking." The Task 2 review read `forward_and_diff` (`:3167`) end to end: the loop body
+    references `num`, the five window fields, `fill_canary`, `self.host_span` and
+    `self.canary_disturbances`, and never `ret` or `err`. The M30 restore comment's point 2 no
+    longer says "wrote nothing", and its opening clause (`:3569`) no longer names a gate that
+    does not exist. `read_bytes_for_test`'s doc (`:3042–3046`, the seam at `:3047`) now says why
+    the seam still exists — the test wants a view independent of the capture — rather than
+    "that path captures nothing". And one edit
     neither spec nor plan listed, found by the Task 2 review: `forward_and_diff`'s M0-era rustdoc
     ("On error (`err`) no writes are captured — a failed syscall wrote nothing") had been glued
     onto the top of `translate_fds`'s doc block when M10 inserted `translate_fds` between them —
@@ -7592,14 +7594,14 @@ reproduced the four exits and the two zeros independently.
 **Landmark counts, per recording.** The debug CLI lists no landmarks, so a 30-line scratchpad
 reader over `retrace_trace::Reader::open` (committed by nothing) counted them: on that `jq`
 recording, **0 of 34** `err = true` landmarks carry writes (302 events, 299 syscalls; the failing
-calls are `open` 5, `access` 33, `crossarch_trap` 38, `ioctl` 54, `csops` 169,
-`csops_audittoken` 170, `shared_region_check_np` 294, `proc_info` 336, `stat64` 338,
-`__mac_syscall` 381, `csrctl` 483 and `map_with_linking_np` 550); on that `hello_dyn` recording,
-**0 of 32**. The counts are properties of the recordings, not the binaries: the reviewer's own
-recordings from another cwd gave 0 of 30 and 0 of 27 (environment-sensitive `stat64` / `access` /
-`csrctl` failures, not a determinism issue). The reproducible conclusion is the zero — the hoist
-recorded nothing new on either real guest, and the difference it makes is visible only on a guest
-whose failing syscall writes.
+calls, by syscall number, are `open` (5), `access` (33), `crossarch_trap` (38), `ioctl` (54),
+`csops` (169), `csops_audittoken` (170), `shared_region_check_np` (294), `proc_info` (336),
+`stat64` (338), `__mac_syscall` (381), `csrctl` (483) and `map_with_linking_np` (550)); on that
+`hello_dyn` recording, **0 of 32**. The counts are properties of the recordings, not the
+binaries: the reviewer's own recordings from another cwd gave 0 of 30 and 0 of 27
+(environment-sensitive `stat64` / `access` / `csrctl` failures, not a determinism issue). The
+reproducible conclusion is the zero — the hoist recorded nothing new on either real guest, and
+the difference it makes is visible only on a guest whose failing syscall writes.
 
 **That zero is a measured zero** — M29's lesson, applied: before trusting it, the `failsysctl`
 fixture was recorded through the *same* signed CLI. Replay rc **0** (spec §4a measured rc 3 before
@@ -7667,41 +7669,70 @@ divergence". What today's probes measured:
   the M35 binary), recorder pids `0x257f`–`0x2662`, all **outside** the range: **FAIL 10 of 10
   on both binaries**, every run `rc=4 rp=3`, the replay reporting `DIVERGENCE at landmark 3xx
   pc=0x1804adc34: expected recorded syscall, got None (truncated=false)` at landmarks 379–388.
-  The recorder's own stderr names the cause — the sweep discards it, the probe kept it:
+  The recorder's own stderr names the cause — the sweep discards it, the probe kept it. M35
+  run 1's two lines (the `dest` port name in the first varies per run — `0x1403`, `0x1203`,
+  `0x1203`, `0x1903`, `0xf03` on the M35 runs; `0x1603`, `0x1403`, `0x1703`, `0x1403`, `0x1203`
+  on the pre-M34 runs — the second line is identical on all ten):
 
     ```
     [retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1403 send_size 248): the box hosts no message-queue receivers
     RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the send+rcv RPC shape
     ```
 
-  So "replay diverged" is the sweep **mislabelling a refused recording**: the recorder exited 4
-  at a fail-loud wall (a message-queue `mach_msg2` send, unmodelled since M2-mach), the trace
-  ends there with no terminal event, and the replay — correctly — runs out of events at the next
-  syscall. Record and replay agree; the guest reached a capability retrace does not have.
+  Two lines, two routes, and only the second is a wall. The first is M23 t5's **serviced**
+  refusal, `Route::RefuseMqSend` (`crates/retrace-core/src/machmsg.rs:104–107`, dispatched at
+  `crates/retrace-core/src/lib.rs:508–525`): `MACH_SEND_INVALID_DEST` is returned, an
+  `Event::Syscall { err: false, writes: [] }` is appended, both sides recompute the identical
+  refusal, and the guest **continues** — the README's own sentence about the XPC pipe
+  (`README.md:174–175`). The exit 4 is the second line, `Route::Unsupported`
+  (`machmsg.rs:108–109`, `lib.rs:557–559`): `0x404000102` is `MACH64_SEND_MQ_CALL |
+  MACH64_RCV_MSG` with **no `MACH64_SEND_MSG`** — a message-queue *receive*-shaped call, the
+  shape M23's router comment (`machmsg.rs:100–103`) says "has never been observed" and leaves
+  at the fail-loud default. **This probe is that shape's first sighting.** So "replay diverged"
+  is the sweep **mislabelling a refused recording**: the recorder exited 4 at a fail-loud wall,
+  the trace ends there with no terminal event, and the replay — correctly — runs out of events
+  at the next syscall. Record and replay agree; the guest reached a shape retrace has never
+  modelled.
 - **Second probe** (logged 12:59, after the gate had advanced the machine's pid counter into
   the range; M35 binary only), pids `0x66bb`–`0x6723`, all **inside**: **2 PASS
-  (`rc=139 rp=139`), 3 FAIL**. The failing runs again refused the same message-queue send (dest
-  `0x1203` this time) and then hit a `brk`: `RECORD ERROR: non-syscall exit: exception (EC=0x3c
-  ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110`, the replay reporting
-  the same exception at the same pc as its divergence (landmarks 370–379).
+  (`rc=139 rp=139`), 3 FAIL**. The failing runs again took M23's serviced refusal (a port name
+  that varies per run: `0x1203`, `0x1403`, `0x1603`), survived it, and then hit a `brk` — M23's
+  "the other four `brk` regardless of which of seven refusal codes is returned" class
+  (`machmsg.rs:97–99`), a second, distinct post-refusal path: `RECORD ERROR: non-syscall exit:
+  exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110`,
+  the replay reporting the same exception at the same pc as its divergence (landmarks 370–379).
+  All three kept `rec.err`s show the `refusing` line followed by that `RECORD ERROR` — the proof
+  that the refusal is survived and is not the wall.
 
 **Controller's ruling, ledgered.** Not an M35 regression — the pre-M34 binary fails identically
 today — and **not a charter class-E2 row**: within every run, record and replay agree; what
 varies *between* runs is the guest's own path (whether and when `dddiagnose` issues the
 message-queue send, and whether it then crashes or continues), which depends on inputs the
-recorder forwards faithfully. The row's class is **B, known-unmodelled** (message-queue
-`mach_msg2` sends: "the box hosts no message-queue receivers"), with an environment-driven
-appearance. Two things this corrects in M34's record: **(1)** "recorded and replayed 10/10" was
-true that morning, and the probe was run *after* the sweep had failed the binary, so what it
-measured was `dddiagnose`'s state at 10:16, not a property of the binary; **(2)** M34's "a pid in
-range does not by itself produce the divergence" stands (in-range runs fail too), but the
-inverse — that the *pass* is the pid's doing — is not established either: in-range runs both
-pass and fail. The pid hypothesis is neither confirmed nor refuted; M36 records the pid beside each
-row and decides. Two sweep-harness defects go to M36 as **E1** rows: a record exit of 4 is
-reported as "replay diverged" (the record rc is the primary signal and is never printed), and an
-identical crash on both sides is counted PASS (`rc=139 rp=139`) with no note. Cost if wrong: a
-genuine retrace nondeterminism in `dddiagnose` enters `main` labelled as a guest-path variation;
-the kept traces in `ddd-keep*/` are the check — any of them can be replayed again.
+recorder forwards faithfully. The row's class is **B, known-unmodelled** — two walls behind one
+row: the RCV-only message-queue `mach_msg2` shape `Route::Unsupported` keeps fail-loud (first
+observed here), and the post-refusal `brk` class M23 parked — with an environment-driven
+appearance. The serviced `RefuseMqSend` line is not a wall, and its fix is not "message-queue
+receivers in the box". Two things this corrects in M34's record: **(1)** "recorded and replayed
+10/10" was true that morning, and the probe was run *after* the sweep had failed the binary, so
+what it measured was `dddiagnose`'s state at 10:16, not a property of the binary; **(2)** M34's
+"a pid in range does not by itself produce the divergence" stands (in-range runs fail too), but
+the inverse — that the *pass* is the pid's doing — is not established either: in-range runs
+both pass and fail. The pid hypothesis is neither confirmed nor refuted; M36 records the pid
+beside each row and decides. Two sweep-harness defects go to M36 as **E1** rows: a record exit
+of 4 is reported as "replay diverged" (the record rc is the primary signal and is never
+printed), and an identical crash on both sides is counted PASS (`rc=139 rp=139`) with no note.
+Cost if wrong: a genuine retrace nondeterminism in `dddiagnose` enters `main` labelled as a
+guest-path variation; the kept traces in `ddd-keep*/` are the check — any of them can be
+replayed again.
+
+And one thing it corrects in this milestone's own record, the charter's class inside the
+paragraph that names it: the controller's numbers file, from which this subsection was first
+transcribed, read the `refusing` line as the wall and called it "unmodelled since M2-mach" —
+wrong on both counts (the SEND|RCV message-queue shape has been serviced since M23; the RCV
+shape was unobserved until today) and in contradiction of the README's own `:174–175`. The
+Task 4 review caught it against `machmsg.rs` and the kept traces; the numbers file is corrected
+in place and this subsection was rewritten before it entered the log. The conclusion stood; the
+supporting fact did not.
 
 ### Gate
 
@@ -7756,9 +7787,14 @@ over 125; the run matched it exactly.
   "replay diverged" (the record rc is never printed and is the primary signal), and an identical
   crash on both sides is counted PASS with no note. The `dddiagnose` row has been read through
   both labels since M29; the kept traces in the SDD workspace are the evidence.
-* **The message-queue `mach_msg2` wall itself** — the class-B cause behind the `dddiagnose` row:
-  "the box hosts no message-queue receivers", unmodelled since M2-mach, refused loud. A fix is a
-  capability (message-queue receivers in the box), routed as the charter routes class B.
+* **The RCV-only message-queue `mach_msg2` shape, and the `brk` M23 parked** — the two class-B
+  walls behind the `dddiagnose` row. `Route::Unsupported` keeps the receive-shaped
+  message-queue call (`MACH64_SEND_MQ_CALL | MACH64_RCV_MSG`, no `MACH64_SEND_MSG`) fail-loud
+  because it "has never been observed" (`machmsg.rs:100–103`); it has now, so a decision is
+  owed — refuse it deterministically as the SEND|RCV shape is, or model it. The other path is a
+  guest that survives the serviced refusal and `brk`s (`machmsg.rs:97–99`, M23's "other four"),
+  parked there since M23. Neither fix is "message-queue receivers in the box": the serviced
+  refusal is not a wall. Routed as the charter routes class B.
 * **The §4b pid-collision probe** (M34), with M35's addendum: the `Scalar` audit as task 1, the
   fix being `forward_and_diff` skipping the probe at `Scalar` positions, the `hello_dyn` table as
   its positive control (#145 returns 0 with 4 bytes captured). M36 to record the recorder's pid

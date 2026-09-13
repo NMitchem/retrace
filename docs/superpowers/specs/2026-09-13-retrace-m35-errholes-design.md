@@ -426,16 +426,27 @@ above.
 "unchanged" case; no M36 row from the hoist, and the band assert reddened nothing. The
 `dddiagnose` row was probed twice with traces kept, and the result corrects M34's account: with
 recorder pids **outside** the collision range, **10 of 10 FAIL on both the pre-M34 and the M35
-binary**, every run `rc=4 rp=3`, the recorder's own stderr reading `refusing mach_msg2
-message-queue send (msgh_id 0x400000cf dest 0x1403 send_size 248): the box hosts no
-message-queue receivers` then `RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34` — a
-**refused recording** the sweep labels "replay diverged", the replay correctly running out of
-events at the next syscall; with pids **inside** the range (after the gate advanced the counter),
-2 PASS (`rc=139 rp=139`, an identical crash the sweep counts without a note) and 3 FAIL (the same
-refusal, then a `brk` at `pc=0x18035f084`). Ruling (controller, ledgered): not an M35 regression,
-**not class E2** — record and replay agree within every run; the guest's path varies with its
-inputs — but **class B, known-unmodelled** (message-queue `mach_msg2` sends) with an
-environment-driven appearance. M34's "10/10 PASS" measured that morning's guest state, not a
+binary**, every run `rc=4 rp=3`. The recorder's stderr shows two lines and only the second is a
+wall: first M23's *serviced* refusal `refusing mach_msg2 message-queue send (… dest <a port name
+that varies per run> …): the box hosts no message-queue receivers` (`Route::RefuseMqSend`,
+`crates/retrace-core/src/machmsg.rs:104–107`, `lib.rs:508–525` — `MACH_SEND_INVALID_DEST`
+returned, an `err: false` landmark appended, the guest continues), then `RECORD ERROR:
+unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the
+send+rcv RPC shape` (`Route::Unsupported`, `machmsg.rs:108–109`, `lib.rs:557–559`) — a
+*receive*-shaped message-queue call, `MACH64_SEND_MQ_CALL | MACH64_RCV_MSG` with no
+`MACH64_SEND_MSG`, which `machmsg.rs:100–103` leaves fail-loud as "never been observed"; this
+probe is its first sighting. A **refused recording** the sweep labels "replay diverged", the
+replay correctly running out of events at the next syscall. With pids **inside** the range (after
+the gate advanced the counter), 2 PASS (`rc=139 rp=139`, an identical crash the sweep counts
+without a note) and 3 FAIL: the same serviced refusal, survived, then a `brk` at
+`pc=0x18035f084` — M23's "other four `brk`" class (`machmsg.rs:97–99`), a second post-refusal
+path. Ruling (controller, ledgered): not an M35 regression, **not class E2** — record and replay
+agree within every run; the guest's path varies with its inputs — but **class B,
+known-unmodelled** (two walls: the RCV-only message-queue shape, and the post-refusal `brk` M23
+parked) with an environment-driven appearance; the serviced refusal is not a wall. The numbers
+file first read the `refusing` line as the wall, "unmodelled since M2-mach" — wrong, caught by
+the Task 4 review against `machmsg.rs` and the kept traces, corrected in all three documents
+before merge. M34's "10/10 PASS" measured that morning's guest state, not a
 property of the binary; its "a pid in range does not by itself produce the divergence" stands,
 but the inverse is not established either — the pid hypothesis is neither confirmed nor refuted,
 and M36 records the pid beside each row. Two sweep-harness defects go to M36 as **E1** rows: a
