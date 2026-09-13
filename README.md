@@ -416,17 +416,22 @@ These are real and current, not aspirational gaps.
   runs of the same script against the same tree gave 45/9 and 46/8, with `dddiagnose` the only mover.
   It is **not** among the eight above because the runs quoted here are ones it passed — which is
   exactly the point. The number is quoted as swept rather than as best-of, and a re-run that returns
-  45/9 has found nothing new. **M35 read both of that row's labels off kept traces, and neither
-  says what it means.** Its "replay diverged" is a recording the recorder *refused* — exit 4 at
-  the fail-loud message-queue `mach_msg2` wall (`refusing mach_msg2 message-queue send … the box
-  hosts no message-queue receivers`, unmodelled since M2-mach) — after which replay correctly
-  runs out of events at the next syscall; and its PASS is an identical crash on both sides
-  (`rc=139 rp=139`), which the sweep counts with no note. Within every run record and replay
-  agree; what moves between runs is the guest's own path, and on 2026-09-13 recorder pids inside
-  M34's collision range both passed and failed it, so the pid hypothesis is neither confirmed
-  nor refuted. The row is class B (known-unmodelled) with an environment-driven appearance, not
-  E2; the two sweep-labelling defects are M36's E1 rows, and the M35 sweep itself landed on
-  `pass=45 fail=9 skip=0` — M33's eight plus `dddiagnose`, no binary moved in either direction.
+  45/9 has found nothing new. **M35 read the FAIL label off kept traces and confirmed M34's
+  reading of the PASS label, and neither label says what it means.** Its "replay diverged" is a
+  recording the recorder *refused* — exit 4 at `RECORD ERROR: unsupported mach_msg2 … options
+  0x404000102: message-queue send without the send+rcv RPC shape`, a *receive*-shaped
+  message-queue call (`MACH64_SEND_MQ_CALL | MACH64_RCV_MSG`, no `MACH64_SEND_MSG`) that M23's
+  router leaves fail-loud as "never observed", now observed for the first time — after which
+  replay correctly runs out of events at the next syscall. (The `refusing mach_msg2
+  message-queue send` line that precedes it is M23's *serviced* refusal described above; the
+  guest survives it, and the in-range runs that failed went on to `brk` after it, M23's parked
+  class.) Its PASS is an identical crash on both sides (`rc=139 rp=139`), which the sweep counts
+  with no note. Within every run record and replay agree; what moves between runs is the guest's
+  own path, and on 2026-09-13 recorder pids inside M34's collision range both passed and failed
+  it, so the pid hypothesis is neither confirmed nor refuted. The row is class B
+  (known-unmodelled) with an environment-driven appearance, not E2; the two sweep-labelling
+  defects are M36's E1 rows, and the M35 sweep itself landed on `pass=45 fail=9 skip=0` — M33's
+  eight plus `dddiagnose`, no binary moved in either direction.
   M22's four named causes are down to one plus that unmeasured tail — the `pc=0x4204` group (13) and
   the `msgh_id` 412 group (4) were both cleared at M23 — and **`ps` was fixed at M27**. It was
   published here from M22 through M26 as "the oracle catching nondeterminism", a claim that could not
