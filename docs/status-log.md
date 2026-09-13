@@ -7891,3 +7891,890 @@ over 125; the run matched it exactly.
   false of the call, `failwrite.rs` now asserts the call, and Branch A is taken. No census of the
   corpus's failing syscalls is owed either (spec §7): the hoist records what the kernel wrote,
   and on the two real guests measured it wrote nothing.
+
+## Status: M36-sweepmeasure — nine rows read off kept evidence, and a parked gate for every wall
+
+M35 closed owing M36 two harness defects by name — the sweep reported a record exit of 4 as
+"replay diverged", and counted an identical crash on both sides as a bare PASS — and the charter
+owed it something older: the README's own sentence that the five `replay diverged` rows' cause
+"stands unmeasured to this day, with **no parked gate standing for it** — a gap in this repo's own
+discipline rather than a decision". M36 is a measurement milestone. It changed no behaviour: the
+branch's `crates/` diff against `main` is one new test file of eight `#[ignore]`d gates and nothing
+under any `crates/*/src`; the only other edit is the sweep *harness*, `tools/apple-sweep.sh`, which
+is not retrace. It taught the harness to print why a row fails and to keep the evidence, ran the
+sweep three times with the recorder's pid steered into three regimes, symbolicated the `brk` the five
+`launchctl`-group rows had been believed to reach since M23, and read one class off the kept evidence
+for each of the nine rows that are not clean. **What the evidence said was not what the spec
+expected.** The `brk` is not libxpc's and not a wall of its own: it is libdispatch's
+`_firehose_task_buffer_init+0x12c` crashing on a `proc_info` of the guest's own pid that M34 §4b's
+register probe had forwarded as a host pointer — the same defect M35 had found under `dddiagnose`,
+now under the five `launchctl`-group rows and `dddiagnose`. And the pid window that defect covers is
+`[0x4000, 0x18000)`, about 82 % of the pid space, not the `[0x4000, 0x10000)` M34 computed from the
+fixed layout, because the guest maps its own `os_alloc_once` slab into the gap at `0x10000` before
+it ever asks about its pid — which is why the run the brief designed as the non-colliding one was
+colliding, and why a third run had to be made. Two beliefs are retired below as corrections with
+forward pointers; M23's, M34's and M35's lines stand as written.
+
+The milestone's own numbers: **three** full sweep runs of the 54-entry corpus (O, L, I; tallies
+45/9, 45/9, 46/8; the same 45 PASS rows on every run); **nine** non-clean rows, **27** row-by-run
+cells, every one with its stderr kept and **46** evidence files (46,778 bytes) committed under
+`docs/sweep-evidence/2026-09-13-m36/`; **one** symbolication of **four** shared-cache addresses;
+**eight** parked gates in **one** new test binary (`crates/retrace/tests/apple_walls_e2e.rs`, 55
+lines), run once with `--ignored` and **8 of 8** red for the measured reason; **two** classes of the
+charter's six occupied by nine rows (B ×2, B-then-C ×6, D ×1), and A, E1 and E2 empty — E1's two
+items fixed in the harness; **two** beliefs retired by measurement and **one** M35 statement
+corrected as right-for-the-wrong-reason; **zero** lines under `crates/*/src` (charter §3). The gate
+figures are in their own subsection, measured on the code as of the last code commit, `0766a76`.
+
+### What it set out to do
+
+The charter's entry, `docs/superpowers/specs/2026-09-09-retrace-m32-m38-program-charter-design.md`
+§3, "M36 — `sweepmeasure`: measurement, and the gates the README already owes", in its own words:
+
+> **Deliverable: a table, and a parked gate per measured wall. No fixes.** This milestone is
+> forbidden from changing *behaviour*; its production edits are documentation and `#[ignore]`d
+> gates. A behavioural change appearing in an M36 diff is a defect in the run, not a bonus.
+>
+> […] **One trap this milestone must not fall into.** The README already warns that *"what the
+> sweep reports is not why they fail"* — the four `replay diverged` binaries have been *believed*
+> since M23 to reach a `brk`, and the sweep corroborates nothing about that. M36's
+> `root_cause_class` must be derived from evidence it captures, never from the sweep's category
+> string or from the inherited belief.
+
+Its four conditions on a parked gate (a binary in the committed corpus; the measured evidence in
+the reason, never the category string or the M23 belief; never park a passing test; name what
+un-parks it) and its six-class `root_cause_class` enum (§6: A retired-by-soundness, B
+known-unmodelled, C new-subsystem, D not-a-defect, E1 harness-nondeterministic, E2
+retrace-nondeterministic) are what the spec
+(`docs/superpowers/specs/2026-09-13-retrace-m36-sweepmeasure-design.md`) turned into evidence
+tests (§3c) and a gate template (§3d). The wall the spec located (§1) is the harness's blindness:
+at the M35 merge `tools/apple-sweep.sh` used `rc` only as a number to compare with `rp`, never
+printed a `RECORD ERROR` exit, printed `recorder panicked` without the panic's message, printed
+`replay diverged` for every replay of a refused recording (which *always* prints a `DIVERGENCE`
+line, because the trace has no terminal event), counted `rc = rp = 139` as PASS with no note,
+destroyed every trace and stderr file in its `EXIT` trap, and never recorded the recorder's pid —
+the one input M34 §4b and M35 had shown decides what several of these binaries do.
+
+### The harness, and Control 1
+
+Two commits, both to `tools/apple-sweep.sh` only: `fc53853` (88 insertions, 11 deletions) and its
+fix round `58fb0e7`. Per binary the script now derives the recorder's pid (`recpid`, printed by a
+wrapper shell that `exec`s into the recorder — `sh -c 'echo "recpid=$$" >&2; exec "$0" record-dyn
+…'`, M34's probe shape, so the pid is line 1 of `rec.err`), `rec_reason` (the first `RECORD
+ERROR:` line, else the first `panicked at` line joined with the message line after it), `rp_line`
+(the first `DIVERGENCE at landmark` line) and `landmark`; it prints the human line with a reason
+and one tab-separated `ROW` line of nine fields beside it; `RETRACE_SWEEP_LIST` sweeps another
+list and `RETRACE_SWEEP_KEEP=<dir>` copies every non-clean row's `rec.err`, `rp.err` and trace to
+`<dir>/<basename>.{rec.err,rp.err,bin}`. The labels, in evaluation order, are the spec §3a table
+with two rulings applied in the fix round: `identical fault` fires only for `rc = rp ≥ 128` — a
+signal death on both sides — not the spec's `rc = rp ≠ 0`, because `/usr/bin/false` exits 1 on
+both sides by design and was being labelled a fault (measured: `PASS /usr/bin/false (identical
+fault, rc=1)` before the ruling, a bare `PASS /usr/bin/false` after); and a panic's `rec_reason`
+carries the assert's message, not only its location line (Rust ≥ 1.73 prints the message on the
+next line). `TALLY` is unchanged in shape so the series stays comparable with M33–M35.
+
+Four defects in the plan's own code were found by measurement and fixed rather than transcribed
+(the Task 1 report): the plan's `keep_row` condition parsed in `sh` as `KEEP && has-2nd-arg`, so a
+plain `keep_row FAIL` kept nothing (the control's file count would have been zero); a row whose
+recorder panicked or timed out `continue`s before replay, so the plan's `[ -f rp.err ] && cp`
+would have copied the *previous* row's replay stderr under this row's name (`rp.out`/`rp.err` are
+now removed per iteration with `t.bin`, and the control keeps **five** files, not the spec's
+"six" — `csh.rp.err` cannot exist because `csh`'s replay never ran); `rc = 4` is checked before
+the replay-timeout marker, in the spec's order rather than the plan's; and `keep_row`'s `cp`s
+are not silenced, because a failed copy is missing evidence.
+
+**Control 1 (spec §6.1), verbatim.** The new script over a three-binary list, after
+`cargo build -p retrace` in the worktree:
+
+```
+PASS /usr/bin/true
+ROW	/usr/bin/true	PASS	0	0	71425	n/a		
+FAIL /bin/csh (recorder panicked: thread 'main' (31749357) panicked at crates/retrace-core/src/lib.rs:1140:17:)
+ROW	/bin/csh	FAIL	101	n/a	71464	n/a	thread 'main' (31749357) panicked at crates/retrace-core/src/lib.rs:1140:17:	
+FAIL /bin/launchctl (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+ROW	/bin/launchctl	FAIL	4	3	71485	324	RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110	DIVERGENCE at landmark 324 pc=0x18035f084: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110
+TALLY pass=1 fail=2 skip=0
+```
+
+with five kept files (`csh.bin`, `csh.rec.err`, `launchctl.bin`, `launchctl.rec.err`,
+`launchctl.rp.err`), nine fields on every `ROW` line (`awk -F'\t' '/^ROW/{print NF}'` → 9 9 9),
+and each `recpid` equal to line 1 of its kept `rec.err`. The **mutation** — the M35-merge script
+(`git show main:tools/apple-sweep.sh`) over the same list:
+
+```
+PASS /usr/bin/true
+FAIL /bin/csh (recorder panicked)
+FAIL /bin/launchctl (replay diverged)
+TALLY pass=1 fail=2 skip=0
+```
+
+`FAIL /bin/launchctl (replay diverged)` is the label this milestone retires; `FAIL /bin/csh
+(recorder panicked)` the reason it discarded. After the fix round the four-binary re-run
+(`/usr/bin/false` added) printed the panic with its message —
+`FAIL /bin/csh (recorder panicked: thread 'main' (31768166) panicked at
+crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by
+any gate guest); implement target-slot allocation before a guest uses it)` — and a bare
+`PASS /usr/bin/false`. One observation from those two runs, for whoever reads the table:
+`launchctl`'s divergence landmark moved from 324 (recpid 71485) to 326 (recpid 72940) with the
+same `RECORD ERROR` at the same pc. **The landmark is not a stable identifier for a row; the
+`rec_reason` is.**
+
+**The fix wave (final review), after the gate.** Three edits to `tools/apple-sweep.sh` — comment
+and label text, and one condition — in the branch's last commit. (1) The `record error` label is
+structural: it fires when `rec_reason` begins `RECORD ERROR:` and prints `rc` as corroboration,
+no longer on `rc = 4` alone, because the CLI passes a guest's own exit status straight through
+(`crates/retrace/src/main.rs` `Outcome::Exit { code } => exit(code)`), so a guest exiting 4 by
+design on both sides would have been labelled a record error with an empty reason and counted a
+`fail` — the same structural shape the `DIVERGENCE` check already had. No M36 row was mislabelled
+by it: the final review checked that no `ROW` line in any run has `rc=4` with an empty
+`rec_reason`, and the PASS rows' non-zero codes are 1, 2 and 64 (plus 139 for the fault). Spec
+§3a wrote the condition as the exit code; the harness had been faithful to a spec defect. (2)
+Both panic greps anchor on `panicked at crates/`, the recorder's own source paths, so a Rust
+guest's own panic in the shared stderr is never labelled a recorder panic (a recorder panic
+located in a dependency would print a registry path and miss the anchor — unobserved on the
+corpus). (3) The pid comment states the measured window `[0x4000, 0x18000)` and points at the
+evidence README instead of the `[0x4000, 0x10000)` it was written with at Task 1, and the
+header's cut lengths are the code's (200 for a `RECORD ERROR:` line, 300 for a panic pair). The
+`≥ 128` clause of `identical fault` is left as it is (ruled: the direction is harmless — a
+designed exit ≥ 128 would be labelled a fault and still counted PASS; owed below). `sh -n` clean.
+Control 1 re-run on the edited script, the three-binary list, recorder pids 48221 / 48263 / 48285
+(`0xbc5d`–`0xbca5`, the page-table backing — colliding), verbatim:
+
+```
+PASS /usr/bin/true
+FAIL /bin/csh (recorder panicked: thread 'main' (32154372) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+FAIL /bin/launchctl (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+TALLY pass=1 fail=2 skip=0
+```
+
+and a fourth list of `/bin/launchctl` and `/bin/csh` (recorder pids 48359 / 48388), so that both
+new labels are shown firing on the edited condition and the anchored grep:
+
+```
+FAIL /bin/launchctl (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /bin/csh (recorder panicked: thread 'main' (32155020) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+TALLY pass=0 fail=2 skip=0
+```
+
+Five files kept per run (`csh.{bin,rec.err}`, `launchctl.{bin,rec.err,rp.err}`), nine fields on
+every `ROW` line, each `recpid` equal to line 1 of its kept `rec.err` (`fix-wave-control1/` in
+the SDD workspace).
+
+### The three runs
+
+The spec asked for two: **O**, the recorder's pid outside M34 §4b's `[0x4000, 0x10000)`, and
+**I**, inside. Run O was made exactly so — every pid above `0x10000` — and its `dddiagnose` row
+came out with the *in-range* signature (the `brk`, 12 self-pid `ESRCH` in the kept trace). The kept
+trace explained it (correction (a), below): the collision window is wider than M34 stated, and run O's
+pids were inside the wider window. A third run, **L**, at pids below `0x4000` — the regime M35's
+own out-of-range probes had used — was added as the genuinely non-colliding run. Nothing was
+re-run or discarded; all three are kept and tabled. Each was one invocation of the committed
+script at binary commit `58fb0e7` (whose `crates/` is byte-identical to the M35 merge `44d302a`:
+`git diff 44d302a..58fb0e7 --stat -- crates/` is empty), launched detached with
+`RETRACE_SWEEP_KEEP` and polled; the pid counter was read with `sh -c 'echo $$'` and advanced
+with loops of `/usr/bin/true` (about 24k spawns to wrap past `PID_MAX`, about 13.4k to reach
+17,000); run order O → wrap → L → I, strictly sequential; each run about four minutes, not the
+10–14 the plan budgeted.
+
+| run | `pidstart` | recpid min–max (dec) | recpid min–max (hex) | intended regime | **measured** regime | `TALLY` |
+|---|---|---|---|---|---|---|
+| **O** | 73426 | 73437–75432 | `0x11EDD`–`0x126A8` | outside `[0x4000,0x10000)` — true | **colliding**: every pid inside `[0x10000, 0x18000)`, the guest's own `os_alloc_once` slab (Finding 1) | `pass=45 fail=9 skip=0` |
+| **L** | 800 | 812–2851 | `0x32C`–`0xB23` | (added) below `0x4000` | **non-colliding**: below every backing; 0 self-pid `ESRCH` in every kept trace | `pass=45 fail=9 skip=0` |
+| **I** | 17198 | 17209–19410 | `0x4339`–`0x4BD2` | inside `[0x4000,0x10000)` — true | **colliding**: inside `[0x4000, 0x8000)`, the trampoline page | `pass=46 fail=8 skip=0` |
+
+Every `recpid` on every `ROW` line of each run is inside its stated range (`awk` over the `ROW`
+lines: 0 rows outside, 0 rows with an empty pid); no run crossed a boundary. Every human line that
+is not a bare `PASS`, verbatim from `sweep-{O,L,I}.log`:
+
+Run O:
+
+```
+pidstart=73426
+FAIL /bin/csh (recorder panicked: thread 'main' (31774615) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+FAIL /bin/launchctl (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /bin/tcsh (recorder panicked: thread 'main' (31780397) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+FAIL /usr/bin/automationmodetool (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /usr/bin/desdp (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /usr/bin/dyld_info (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /usr/bin/flex (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /usr/bin/yes (timed out after 30s recording)
+TALLY pass=45 fail=9 skip=0
+SWEEP_EXIT=0
+```
+
+Run L:
+
+```
+pidstart=800
+FAIL /bin/csh (recorder panicked: thread 'main' (31850265) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+FAIL /bin/launchctl (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the send+rcv RPC shape)
+FAIL /bin/tcsh (recorder panicked: thread 'main' (31856621) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+FAIL /usr/bin/automationmodetool (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the send+rcv RPC shape)
+FAIL /usr/bin/desdp (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the send+rcv RPC shape)
+FAIL /usr/bin/dyld_info (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the send+rcv RPC shape)
+FAIL /usr/bin/flex (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the send+rcv RPC shape)
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the send+rcv RPC shape)
+FAIL /usr/bin/yes (timed out after 30s recording)
+TALLY pass=45 fail=9 skip=0
+SWEEP_EXIT=0
+```
+
+Run I:
+
+```
+pidstart=17198
+FAIL /bin/csh (recorder panicked: thread 'main' (31894566) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+FAIL /bin/launchctl (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /bin/tcsh (recorder panicked: thread 'main' (31900825) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it)
+FAIL /usr/bin/automationmodetool (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /usr/bin/desdp (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /usr/bin/dyld_info (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+FAIL /usr/bin/flex (record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110)
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+FAIL /usr/bin/yes (timed out after 30s recording)
+TALLY pass=46 fail=8 skip=0
+SWEEP_EXIT=0
+```
+
+**Every label that differs between runs.** O against I: `dddiagnose` only (`FAIL … record error,
+rc=4`, the `brk` → `PASS … (identical fault, rc=139)`). O against L: exactly the six `rc=4` rows,
+the `brk` → the RCV-shaped `mach_msg2`, `dddiagnose` among them. `csh`, `tcsh` and `yes` are
+identical across all three (the panic's thread id is the only varying token). The
+`PASS /usr/bin/dddiagnose (identical fault, rc=139)` line is spec §6's Control 3 — the row the old
+script printed as a bare `PASS`, now labelled — and under Ruling 2 it is still counted in `pass`,
+which is why run I tallies 46/8 while O and L tally 45/9 with the same 45 clean rows.
+
+### The symbolication
+
+The four addresses — the `brk` pc `0x18035f084`, its `elr` `0x1804af110`, the RCV-wall pc
+`0x1804adc34`, and run I's `dddiagnose` crash pc `0x180302eb0` — are unslid shared-cache
+addresses (the guest maps the cache at slide 0, `crates/retrace-box/src/lib.rs:1387`), so the
+lookup is at `unslid + host slide`. The spec's `lldb` command could not be used: on `/usr/bin/true`
+SIP refused the attach (`error: process exited with status -1 (attach failed (Not allowed to
+attach to process. …`), and on a scratchpad-compiled no-op C program it attached and then printed
+nothing for ten minutes at `image list` and was killed; `atos -p` on a live copy hung the same way.
+The lookup was done with `dladdr(3)` from a process of my own (`sym2.c`, pasted in full in
+`docs/sweep-evidence/2026-09-13-m36/README.md` § Symbolication), which resolves against the same
+cache mapping every process shares, plus a raw read of the instruction words at the pc (`dis.c`).
+`dladdr` names the nearest *exported* symbol; a local symbol closer to the address would not be
+visible to it — the instruction words and the `elr` are what tie the `brk` to `proc_info`. Output,
+2026-09-13, this machine:
+
+```
+shared cache base=0x18ecdc000 len=0x165170000 slide=0xecdc000
+unslid 0x18035f084 -> slid 0x18f03b084: dladdr=1 fname=/usr/lib/system/libdispatch.dylib fbase=0x18f011000 sname=_firehose_task_buffer_init saddr=0x18f03af58 (+0x12c)
+unslid 0x1804af110 -> slid 0x18f18b110: dladdr=1 fname=/usr/lib/system/libsystem_kernel.dylib fbase=0x18f189000 sname=__proc_info saddr=0x18f18b108 (+0x8)
+unslid 0x1804adc34 -> slid 0x18f189c34: dladdr=1 fname=/usr/lib/system/libsystem_kernel.dylib fbase=0x18f189000 sname=mach_msg2_trap saddr=0x18f189c2c (+0x8)
+unslid 0x180302eb0 -> slid 0x18efdeeb0: dladdr=1 fname=/usr/lib/system/libsystem_malloc.dylib fbase=0x18efc0000 sname=mfm_alloc saddr=0x18efdec80 (+0x230)
+```
+
+The instruction words around the `brk` pc, read from the live cache mapping (`pc-0x40` to `pc+8`):
+
+```
+0x18035f044: a9457bfd
+0x18035f048: a9444ff4
+0x18035f04c: 910183ff
+0x18035f050: d65f0fff
+0x18035f054: 350001a0
+0x18035f058: d53bd068
+0x18035f05c: f9400508
+0x18035f060: b9800108
+0x18035f064: a9bf57f4
+0x18035f068: d00000d4
+0x18035f06c: 911fce94
+0x18035f070: f034c6d5
+0x18035f074: 9128e2b5
+0x18035f078: f90006b4
+0x18035f07c: f9001ea8
+0x18035f080: a8c157f4
+0x18035f084: d4200020   <-- pc
+0x18035f088: 93407c08
+0x18035f08c: a9bf57f4
+```
+
+Read: `0xd65f0fff` at `0x18035f050` is `retab`, the end of `_firehose_task_buffer_init`
+(`saddr + 0xf8`). The block from `0x18035f054` (`+0xfc`) is an outlined path: `cbnz w0`, then
+`mrs x8, TPIDRRO_EL0` / `ldr x8, [x8, #8]` / `ldrsw x8, [x8]` — errno, read from the TSD's errno
+slot — two `adrp`/`add` pairs and two `str`s into a global (a crash-reason store), then
+`0xd4200020` = **`brk #1`** at the recorded pc: `EC=0x3c ISS=0x1` exactly, the shape of a
+`DISPATCH_INTERNAL_CRASH(errno, …)`. The `elr` is `__proc_info + 8`, the return address of the last
+`proc_info`; in every `brk` trace that last landmark is `proc_info(2 PIDINFO, <recorder pid>, 17)`
+answered `ESRCH`. Flavor 17 is not in the public SDK header (`sys/proc_info.h` jumps from 16 to
+19); xnu's `bsd/sys/proc_info_private.h` defines `PROC_PIDUNIQIDENTIFIERINFO 17`. So the `brk` is
+libdispatch's firehose task-buffer init crashing on a failed
+`proc_pidinfo(getpid(), PROC_PIDUNIQIDENTIFIERINFO, …)` — the `ESRCH` §4b manufactures. The RCV-wall
+pc is `mach_msg2_trap + 8`, the trap's return address. The crash pc is libsystem_malloc
+`mfm_alloc + 0x230`, a data abort (`esr=0x92000045`, DFSC `0x05`, translation fault at level 1),
+identical on record and replay.
+
+### The table
+
+`sweep-table.md` in the SDD workspace is the single source; its Tables A and B and the per-row
+justification are transcribed here verbatim. `lm` = the landmark on the replay's `DIVERGENCE`
+line (`n/a` when replay did not run or did not print one). `err` = `err=true` landmarks in the
+kept trace. `ESRCH` = self-pid `csops` (169/170) / `proc_info` (336) calls answered `ESRCH` in the
+kept trace, counted with a `retrace_trace::Reader::open_checked` reader in the scratchpad (the
+counting rules — index, `err`, self-pid `ESRCH` by `args[0]` for 169/170 and `args[1]` for 336
+equal to that run's `recpid`, and the `0x10000` map by `num == -15`, `args[2] == 0x8000`,
+`args[4] == 0x49000001` — are written out in the evidence README so every number is
+re-derivable from a kept trace and nothing else). The table's own cross-references `Finding 1`–`4`
+are `sweep-table.md`'s findings: 1 = the collision window (correction (a) below), 2 = the `brk`
+(correction (b)), 3 = the crash/`brk` split (the `dddiagnose` subsection), 4 = `csh`/`tcsh`
+§4b-touched but not §4b-walled.
+
+**Table A — per-row facts (from the `ROW` lines and the kept files)**
+
+| binary | run | label | rc/rp | recpid | lm | `rec_reason` (first line) | `err` | `ESRCH` |
+|---|---|---|---|---|---|---|---|---|
+| `/bin/csh` | O | `recorder panicked: … lib.rs:1140:17: dup2 is not modelled by the M10 fd table …` | 101/n/a | 73617 | n/a | `thread 'main' (31774615) panicked at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it` | 38 | 5 |
+| | L | same | 101/n/a | 1013 | n/a | same (thread id 31850265) | 33 | 0 |
+| | I | same | 101/n/a | 17386 | n/a | same (thread id 31894566) | 38 | 5 |
+| `/bin/tcsh` | O | same as `csh` | 101/n/a | 74616 | n/a | same (thread id 31780397) | 38 | 5 |
+| | L | same | 101/n/a | 2044 | n/a | same (thread id 31856621) | 33 | 0 |
+| | I | same | 101/n/a | 18480 | n/a | same (thread id 31900825) | 38 | 5 |
+| `/bin/launchctl` | O | `record error, rc=4: RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110` | 4/3 | 74012 | 331 | the `brk` line | 52 | 11 |
+| | L | `record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the send+rcv RPC shape` | 4/3 | 1415 | 338 | the RCV-shape line | 41 | 0 |
+| | I | the `brk` line | 4/3 | 17867 | 325 | the `brk` line | 52 | 11 |
+| `/usr/bin/automationmodetool` | O | the `brk` line | 4/3 | 74786 | 334 | the `brk` line | 56 | 11 |
+| | L | the RCV-shape line | 4/3 | 2223 | 339 | the RCV-shape line | 45 | 0 |
+| | I | the `brk` line | 4/3 | 18664 | 334 | the `brk` line | 56 | 11 |
+| `/usr/bin/desdp` | O | the `brk` line | 4/3 | 74818 | 361 | the `brk` line | 50 | 11 |
+| | L | the RCV-shape line | 4/3 | 2252 | 367 | the RCV-shape line | 39 | 0 |
+| | I | the `brk` line | 4/3 | 18693 | 361 | the `brk` line | 50 | 11 |
+| `/usr/bin/dyld_info` | O | the `brk` line | 4/3 | 74847 | 371 | the `brk` line | 50 | 11 |
+| | L | the RCV-shape line | 4/3 | 2281 | 368 | the RCV-shape line | 39 | 0 |
+| | I | the `brk` line | 4/3 | 18724 | 356 | the `brk` line | 50 | 11 |
+| `/usr/bin/flex` | O | the `brk` line | 4/3 | 74877 | 359 | the `brk` line | 50 | 11 |
+| | L | the RCV-shape line | 4/3 | 2310 | 370 | the RCV-shape line | 39 | 0 |
+| | I | the `brk` line | 4/3 | 18752 | 362 | the `brk` line | 50 | 11 |
+| `/usr/bin/dddiagnose` | O | the `brk` line | 4/3 | 74909 | 379 | the `brk` line | 75 | 12 |
+| | L | the RCV-shape line | 4/3 | 2340 | 379 | the RCV-shape line | 63 | 0 |
+| | I | `PASS … (identical fault, rc=139)` | 139/139 | 18781 | n/a | (none — `guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045` on both sides; terminal `Event::Crash` + final snapshot, trace complete) | 71 | 11 |
+| `/usr/bin/yes` | O | `timed out after 30s recording` | 137/n/a | 75271 | n/a | (none) | — | — |
+| | L | same | 137/n/a | 2722 | n/a | (none) | — | — |
+| | I | same | 137/n/a | 19283 | n/a | (none) | — | — |
+
+`dddiagnose`'s three regimes, `errcount` (the scratchpad reader) verbatim — `syscall N: err=K`
+lines that are absent from a run are absent from its trace:
+
+```
+keep-L/dddiagnose.bin: events=379 syscalls=378 err=true landmarks=63 of which with writes=0 (bytes=0)
+  5: 2   33: 1   38: 6   54: 7   286: 1   294: 1   336: 1   338: 30   381: 5   483: 8   550: 1
+keep-O/dddiagnose.bin: events=379 syscalls=378 err=true landmarks=75 of which with writes=0 (bytes=0)
+  5: 2   33: 1   38: 6   54: 7   169: 7   170: 1   286: 1   294: 1   336: 5   338: 30   381: 5   483: 8   550: 1
+keep-I/dddiagnose.bin: events=359 syscalls=356 err=true landmarks=71 of which with writes=0 (bytes=0)
+  5: 1   33: 1   38: 6   54: 7   169: 7   170: 1   286: 1   294: 1   336: 4   338: 30   381: 4   483: 7   550: 1
+```
+
+Read: L has no `csops` (169/170) failure and one `proc_info` (336) failure — the pid-independent
+`SET_DYLD_IMAGES` `EINVAL` (M34 #24). O adds 169 ×7, 170 ×1, 336 ×4 = **12** self-pid `ESRCH`
+(75 = 63 + 12, M35's signature exactly). I adds 169 ×7, 170 ×1, 336 ×3 = **11** self-pid
+`ESRCH` — not 71 − 63 = 8: the I trace ends at the crash 22 landmarks before L's wall and so
+lacks three of L's *other* `err`s (one each of 5, 381, 483) and the twelfth self-pid call
+(`proc_info(2, pid, 17)`, the one the `brk` path dies on). The `ESRCH` column is counted
+directly from the pid-carrying calls, never inferred from the totals.
+
+Every replay `rp_line` for a `rc=4` row is the replay running out of events at (the RCV shape:
+`expected recorded syscall, got None (truncated=false)`) or re-reporting (the `brk`: the same
+`EC=0x3c` exception at the same pc) the recorder's stop — never a divergence of record from
+replay. For the RCV shape the refused call **is** the stop and is never recorded
+(`Route::Unsupported` → `RECORD ERROR` before any append), so the replay's landmark is one past
+the trace's last syscall: run L's `dddiagnose` trace ends on `issetugid` (327) #378 (`args=[0, 4,
+…]`, `ret=0`) and replay reports 379. For the `brk` the last recorded landmark is the failed
+`proc_info(2, pid, 17)` and the exception follows it, so replay's landmark is that landmark + 1
+as well. Checked on all 17 `rc=4` traces (six rows × three runs, less `dddiagnose` I): replay's
+landmark equals the trace's event count in every one; every run-L trace ends on `issetugid`
+(327), every `brk` trace on the failed `proc_info(2, pid, 17)`. The `dest` port name on the
+`refusing mach_msg2 message-queue send` line varies per run (`0xe03`–`0x1803`), as M35
+documented (M2-xpcport's minted-port asymmetry); nothing else in the kept stderr varies between
+runs of the same regime except the panic's thread id.
+
+**Table B — trap, symbol, class, evidence, gate, route**
+
+| binary | trap (O/I regime) | trap (L regime) | symbol | `root_cause_class` | evidence | gate | route |
+|---|---|---|---|---|---|---|---|
+| `/bin/csh` | panic: `crates/retrace-core/src/lib.rs:1140:17` (M33 `dup2` assert) | same | — (retrace assert) | **B** known-unmodelled (`dup2`) | `docs/sweep-evidence/2026-09-13-m36/csh.{O,L,I}.rec.err`; traces `keep-{O,L,I}/csh.bin` | `csh_records_and_replays` | M37 |
+| `/bin/tcsh` | same | same | — | **B** (`dup2`) | `…/tcsh.{O,L,I}.rec.err`; `keep-{O,L,I}/tcsh.bin` | `tcsh_records_and_replays` | M37 |
+| `/bin/launchctl` | `EC=0x3c` `brk #1` at `pc=0x18035f084`, `elr=0x1804af110` | `mach_msg2` options `0x404000102` at `pc=0x1804adc34`, `Route::Unsupported` | libdispatch `_firehose_task_buffer_init+0x12c` (`brk #1`); elr = libsystem_kernel `__proc_info+8`; RCV pc = `mach_msg2_trap+8` | **B then C**: B = M34 §4b (the eleven self-pid `ESRCH` answers, then libdispatch's own crash on the failed `proc_info(PIDUNIQIDENTIFIERINFO)`); C = the RCV-shaped message-queue `mach_msg2` | `…/launchctl.{O,L,I}.{rec,rp}.err`; `keep-{O,L,I}/launchctl.bin` | `launchctl_records_and_replays` | M37 for the B wall (§4b); the gate then stands parked at C, not routed |
+| `/usr/bin/automationmodetool` | same `brk` | same RCV shape | same | **B then C** | `…/automationmodetool.{O,L,I}.{rec,rp}.err` | `automationmodetool_records_and_replays` | as `launchctl` |
+| `/usr/bin/desdp` | same `brk` | same RCV shape | same | **B then C** | `…/desdp.{O,L,I}.{rec,rp}.err` | `desdp_records_and_replays` | as `launchctl` |
+| `/usr/bin/dyld_info` | same `brk` | same RCV shape | same | **B then C** | `…/dyld_info.{O,L,I}.{rec,rp}.err` | `dyld_info_records_and_replays` | as `launchctl` |
+| `/usr/bin/flex` | same `brk` | same RCV shape | same | **B then C** | `…/flex.{O,L,I}.{rec,rp}.err` | `flex_records_and_replays` | as `launchctl` |
+| `/usr/bin/dddiagnose` | O: same `brk` (12 `ESRCH`); I: data abort `esr=0x92000045` (DFSC 0x05, translation level 1) at `pc=0x180302eb0`, `far=0x2000050050`, identical on both sides (11 `ESRCH`) | same RCV shape | `brk` as above; crash pc = libsystem_malloc `mfm_alloc+0x230` | **B then C** (B = §4b, with two downstream faces — the `brk` and the identical malloc crash; C = RCV shape) | `…/dddiagnose.{O,L,I}.{rec,rp}.err` | `dddiagnose_records_and_replays` | as `launchctl` |
+| `/usr/bin/yes` | SIGKILL by the sweep's 30 s watchdog, no stdout captured | same | — | **D** not-a-defect | `…/yes.{O,L,I}.rec.err` (the recorder's stderr up to the kill) | `none (class D)` | retired |
+
+Class A rows: **none** (no row that failed at M35 passes with `rc = rp = 0` on any run).
+Class E2 rows: **none** (Finding 3 — the `dddiagnose` crash/`brk` split is between runs
+whose forwarded inputs differ, and record and replay agree bit-for-bit within every run).
+Class E1 items (the harness): the two M35 routed to M36 — `rc=4` reported as "replay diverged",
+and an identical fault counted PASS without a note — are **fixed in harness** by Task 1
+(`fc53853`, `58fb0e7`); both fixes are visible in these logs (`record error, rc=4: …` on the six
+rows; `PASS /usr/bin/dddiagnose (identical fault, rc=139)` on run I — spec §6 control 3).
+
+### The classes — which §3c evidence test each row met
+
+The spec's §3c gives one evidence test per class; each row is placed by the test it met, quoted
+from the table's per-row justification:
+
+- **`csh`, `tcsh` → B.** `rec_reason` names a retrace fail-loud that a table entry closes:
+  `crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table` — in all
+  three runs, at the same assert (`keep-{O,L,I}/csh.rec.err` lines 9–10, `tcsh` likewise). The
+  pid regime changes the `ESRCH` count (5 → 0) but not the wall: the trace reaches `dup2` either
+  way (Finding 4: §4b-touched but not §4b-walled). Route M37.
+- **`launchctl`, `automationmodetool`, `desdp`, `dyld_info`, `flex` → B then C.** The `brk`
+  M23 believed was these rows' wall is not their wall. Runs O and I (colliding pids): the kept
+  trace has 11 self-pid `csops`/`proc_info` calls answered `ESRCH` (0 in run L), the last landmark
+  before the exception is `proc_info(2 PIDINFO, pid, 17)` → `ESRCH`, `elr` is `__proc_info+8`,
+  and the `brk #1` is on the outlined crash path after libdispatch `_firehose_task_buffer_init`
+  — the flavor-17 (`PROC_PIDUNIQIDENTIFIERINFO`, xnu `proc_info_private.h:145`) lookup that
+  init makes of its own pid, failing because §4b forwarded the pid as a host pointer. That is
+  the B test ("M34 §4b's pid mis-translation, the self-pid `ESRCH` answers"), and it is the same
+  evidence M35 read for `dddiagnose`. Run L (non-colliding pids): `rec_reason` is literally
+  `unsupported mach_msg2 … options 0x404000102: message-queue send without the send+rcv RPC
+  shape` — the C test's second clause, `Route::Unsupported` on the RCV-shaped message-queue call
+  (`keep-L/<b>.rec.err` last line, preceded by M23 t5's serviced `refusing … message-queue send`
+  line, which is survived). Fix order as M35 wrote for `dddiagnose`: §4b first (it decides which
+  wall a run reaches), then the RCV shape. Gate parked at the first; route the B wall to M37; the
+  C wall is parked, not routed (Ruling 1). The C test's *first* clause — "the post-refusal `brk`
+  in libxpc after the serviced `RefuseMqSend`" — was met by no row: the only `brk` observed is the
+  §4b consequence above.
+- **`dddiagnose` → B then C**, as M35 classified it; this measurement adds the non-colliding run
+  (L: the RCV shape, 0 `ESRCH`, landmark 379 — M35's 10/10) and one more in-range crash
+  (I: `pc=0x180302eb0 far=0x2000050050`, libsystem_malloc `mfm_alloc+0x230`, after 11 `ESRCH`).
+  Both the crash and the `brk` are downstream of §4b (run L and M35's out-of-range runs reach
+  neither: 16 of 16); why an in-range run takes one or the other stays open (Finding 3) and is
+  retired with §4b or becomes a new row after it.
+- **`yes` → D.** `rc=137`, no `rec_reason`, the watchdog's `.timedout` marker: killed at 30 s on
+  the record side by design, on every run. No gate.
+- **A: none. E2: none.** No row that failed at M35 passes now; within every run record and replay
+  agree (the E2 test — same pid regime, different landmark sequences, or a complete recording
+  replaying to different landmarks — is met by nothing; Finding 3 locates the one between-run
+  split at a forwarded input). **E1: the two M35 items**, both fixed in the harness and both
+  visible in the logs above.
+
+### Two beliefs retired by measurement, and one M35 reason corrected — with forward pointers
+
+The log is append-only. The three earlier statements below stand as written where they are; this
+subsection is their forward pointer, and the README is edited in place.
+
+**(a) M34 §4b's collision window is `[0x4000, 0x18000)`, not `[0x4000, 0x10000)` — about 82 % of
+the pid space, and guest-dependent.** M34's section says (`docs/status-log.md:6734`, `:7088–7089`)
+that "for roughly half of all recorder pids" — "every recorder pid in 16384..=65535 … roughly half
+the pid space, a coin flip per record run" — the probe rewrites the pid, computed from the fixed
+trampoline/page-table backings at `[0x4000, 0x10000)`; the same section's probe paragraphs
+(`:7152`, `:7178–7181`) and M35 (`:7678`) call that range "the §4b collision range". That is the *static* picture, and it is
+wrong at runtime for every dynamic guest measured (6 of 6 rows, three regimes). Measured: every
+kept colliding trace (8 binaries × runs O and I, 16 of 16) has a `mach_vm_map(size 0x8000, flags
+0x49000001)` — tag 73 = `VM_MEMORY_OS_ALLOC_ONCE`, libSystem's `os_alloc_once` slab — whose
+out-pointer, read back from the landmark's recorded write, is **`0x10000`**: `first_fit` placed it
+in the gap between `PT_L1_IPA`'s backing end (`0x10000`) and the TSD region (`0x28000`). It
+precedes the first self-pid `ESRCH` in every one — at #182 → #200 in `dddiagnose`, #136 → #154
+in `launchctl`, #144 → #162 in `automationmodetool`, #128 → #146 in `desdp`, `dyld_info`,
+`flex`, `csh` and `tcsh` (the same map sits at the same index in the run-L traces, where no pid
+collides with it) — and it is a pure function of the guest's syscall sequence, so it is at
+`0x10000` on record and replay alike. The backings `forward_and_diff`'s per-register probe sees at
+the pid-carrying calls are therefore contiguous over `[0x4000, 0x18000)` = pids 16384..=98303;
+the non-colliding pids are 1..16383 and 98304..99998 (xnu's `PID_MAX` is 99999 with `nextpid`
+reset at `>=`, so 99998 is the highest assignable pid; the upper band is inferred from run I's
+final snapshot — nothing mapped in `[0x18000, 0x28000)`, and everything the guest maps later sits
+at ≥ `0x40000`, above `PID_MAX` — no run used a pid ≥ `0x18000`). Measured on 6 binaries × 3 regimes: O
+(`0x11EDD`–`0x126A8`) 11–12 `ESRCH`, L (`0x32C`–`0xB23`) 0, I (`0x4339`–`0x4BD2`) 11–12. The
+window as stated here is what these six guests map before their first self-pid call; another
+guest may map more (or less) below `0x100000` before its own, so the set is guest-dependent and
+"outside `[0x4000, 0x10000)`" is not a regime. The only regime-independent fix is the one M34
+§4b's own text names: stop probing `Scalar` registers as pointers — and M37's positive control
+must use a pid inside `[0x10000, 0x18000)` as well as one inside `[0x4000, 0x10000)`.
+
+**(b) The `brk` is libdispatch's, and it is a §4b consequence — not a post-refusal wall.** M23
+found the `brk` on four binaries and recorded its cause as unmeasured (`:4583–4585`); its router
+comment attributes the `brk` to the refusal it precedes ("the other four `brk` regardless of which
+of seven refusal codes is returned", `crates/retrace-core/src/machmsg.rs:97–99`); M35 carried it
+as "M23's post-refusal `brk` class" and as the third of `dddiagnose`'s three walls (`:7713–7716`,
+`:7739–7743`, `:7846–7848`); the M36 spec's §3c wrote the C test as "the post-refusal `brk` in
+libxpc after the serviced `RefuseMqSend`", and its §4 first reading — taken at recorder pids
+`0x10806`–`0x10887`, which are inside the slab — saw the `brk` on all five `launchctl`-group rows
+and called it "the M23 belief confirmed by measurement", class C. Retired on both counts by the
+symbolication above and the kept traces: the image is libdispatch and the cause is the pid. The
+serviced refusal merely precedes the `brk` in time, as it precedes the RCV wall in run L just the
+same. With a non-colliding pid all five rows — and `dddiagnose` — reach the RCV-shaped
+message-queue `mach_msg2` (options `0x404000102`, `Route::Unsupported`, pc `mach_msg2_trap+8`)
+instead: run L 6 of 6, M35 10 of 10. **The `brk` has never been observed with a
+correctly-forwarded pid.** So the five rows are class **B then C**, `dddiagnose`'s shape, and
+the spec §4 first reading is contradicted. What is *not* claimed: whether a `brk` of M23's kind
+lies behind the RCV shape is unmeasured, and cannot be measured until that shape is modelled.
+`dladdr` sees exported symbols only, so a closer local symbol is possible; the instruction words
+and the `elr` are what tie the `brk` to `proc_info`.
+
+**(c) M35's "out-of-range → RCV wall" statement was right for the wrong reason.** M35's first
+probe (`:7683`) called its recorder pids `0x257f`–`0x2662` "all **outside** the range" and drew
+the 10-of-10 RCV-wall result from that: those pids were below `0x4000`, not above `0x10000`, which
+is why they were non-colliding — the same reason run L's are — and a run above `0x10000` (this
+milestone's run O) is not.
+
+### `dddiagnose`'s three faces, and Finding 3
+
+`dddiagnose` alone shows three faces across the three runs, and the row carries all three:
+
+| run | recpid | result | `err` | self-pid `ESRCH` | last landmark before the stop |
+|---|---|---|---|---|---|
+| L | 2340 (`0x924`) | `RECORD ERROR: unsupported mach_msg2 … options 0x404000102` (RCV shape) | 63 | 0 | `issetugid` (327) #378, `args=[0, 4, …]`, `ret=0` — the refused `mach_msg2` **is** the stop and was never recorded, which is why replay reports landmark 379, one past the end |
+| O | 74909 (`0x1249d`) | `RECORD ERROR: … EC=0x3c … pc=0x18035f084` (the libdispatch `brk`) | 75 = 63 + 12 | 12 (169 ×7, 170 ×1, 336 ×4) | `proc_info(2, pid, 17)` → `ESRCH` #378 |
+| I | 18781 (`0x495d`) | `PASS (identical fault, rc=139)`: `guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045` both sides | 71 | 11 (169 ×7, 170 ×1, 336 ×3) | `csops(pid, 0, …)` → `ESRCH` #356 |
+
+The I row's label is the harness's retrace-induced-crash marker (spec §6 control 3), not a pass:
+record and replay agree, and the crash follows the mis-answered self-pid calls. Class B, never a
+pass (the mid-run ruling below).
+
+**Finding 3 — the in-range crash/`brk` split is not E2.** Run I (pid `0x495d`) crashed in
+libsystem_malloc `mfm_alloc+0x230` after its 11th `ESRCH`; run O (pid `0x1249d`) took the 12th
+`ESRCH` and the `brk`. Measured: the two landmark sequences are identical (by `num`, `err`, write
+count) through #248 and fork at #249, inside a `gettimeofday` (116) polling loop — run O runs it
+16 times (#240–#255, recorded `tv_usec` 327863 → 384503, 56.6 ms), run I 9 times (#240–#248,
+271784 → 301139, 29.4 ms), with different recorded `tv_sec` (1789325229 vs 1789326331). Nothing
+traps between iterations, so the loop's exit condition is not syscall-visible; the only recorded
+input inside the loop is the kernel's `gettimeofday` reply, and it differs between the runs before
+the fork. (The `read_nocancel` (396) regions also differ, `w=1` vs `w=2` on the same reads — but
+that post-dates the fork and adds nothing.) Within each run, record and replay agree bit-for-bit:
+the crash is a terminal `Event::Crash` with its final snapshot, reproduced by replay; the O replay
+re-reports the `brk` at the same landmark; the sweep's `identical fault` label is correct. That is
+M35's ruling on the same row, now with the fork located. The spec's E2 test ("same pid regime,
+different landmark sequences") is not met, because a forwarded input demonstrably differs between
+the runs before the fork; the charter's ("retrace's own record/replay varies between identical
+runs") is not met, because record and replay agree. **Why an in-range run then takes the crash
+rather than the `brk` stays open**, attached to the §4b row. Task 3's control added one more
+datum: its `dddiagnose` (pid `0x6d61`) crashed at the same pc and esr with `far=0x6000050040`,
+where run I had `far=0x2000050050`; the controller replayed that trace with the signed CLI —
+rc 139, `guest crashed: pc=0x180302eb0 far=0x6000050040 esr=0x92000045`, bit-identical to its
+record — so the `far` varies between runs of the crash face while pc and esr do not, and replay
+reproduces each run's `far`: the same forwarded-input dependence, not nondeterminism of retrace's
+own. Cost if wrong: a retrace defect in the malloc crash path enters `main` under a B label; the
+traces `keep-I/dddiagnose.bin` (crash) and `keep-O/dddiagnose.bin` (`brk`) are the check.
+
+### Rulings
+
+The spec's three, and the run's, each with what it cost if wrong where the ledger recorded one.
+
+- **Spec Ruling 1** (§3c): class C rows are parked and not routed; the run continues on the B
+  rows. What halts is any attempt to *fix* a C row, not the run. Cost if wrong: the operator wanted
+  the run to stop at the first C row; instead M37 runs on B rows only, and the C parks are exactly
+  what a stop would have left behind.
+- **Spec Ruling 2:** `identical fault` rows count as `pass` in the tally so the 46/8 ↔ 45/9 series
+  stays comparable across M33–M36; the note on the line is the correction, and this section says
+  which PASS row is a fault (`dddiagnose`, run I). Cost if wrong: a reader of the bare tally still
+  over-counts passes by the number of identical faults — the same over-count every earlier
+  milestone made, now labelled.
+- **Spec Ruling 3:** M36 parks gates under the charter's §5 exception and its four conditions; the
+  "any need to park a NEW `#[ignore]`" halt rule is not triggered by them (recorded again at
+  pre-flight so the halt list was not misread mid-run). Any gate failing a condition is a halt;
+  none did.
+- **Task 1, (a):** "identical fault" means signal death — the threshold is `rc ≥ 128`; a clean
+  equal non-zero exit stays a bare PASS (spec §3a's `rc = rp ≠ 0` corrected in §11). Cost if wrong:
+  a guest that exits non-zero by design on both sides for a retrace-caused reason is unlabelled, as
+  before M36. **(b):** the panic's message line is joined into `rec_reason` so the label and the
+  gate reasons carry the assert's text.
+- **Task 2, mid-run** (after run O came out colliding): (1) keep all three runs — L is the
+  no-collision regime, I and O are two collision bands; the table carries three column groups and
+  the `dddiagnose` row states all three regimes with pid and `err` count (63 / 71 / 75). (2)
+  `dddiagnose` in run I is `PASS (identical fault, rc=139)` after the same serviced refusal — the
+  spec's retrace-induced-crash marker — so its class is B (§4b), never a pass; in L it reaches the
+  RCV-shaped call (class C, parked/unrouted per Ruling 1); in O the `brk` (class B via §4b). (3)
+  M36's docs correct M34 §4b's `[0x4000, 0x10000)` with a forward pointer (log, never a rewrite),
+  and M37's §4b precondition becomes "a `Scalar` arg is never a pointer", not "avoid one band".
+  Cost if wrong: if the low first-fit region is not what `0x1249D` collided with, the mechanism
+  paragraph is wrong but every row's measured label/pid/count stands — the table is evidence, the
+  mechanism is one paragraph.
+- **Task 3, pre-dispatch:** the plan's reason templates were the spec's first reading and are
+  retired by Task 2 — the five "replay diverged" rows are B-then-C, three runs, the window
+  `[0x4000, 0x18000)`, and `dddiagnose`'s run-I crash is §4b's second face; written as an
+  amendment that wins over the brief. Cost if wrong: the reasons are re-cut in the fix round.
+- **Task 3, the `far`:** record == replay within the run (the controller's replay of the control's
+  trace), so the varying `far` is the same forwarded-input dependence as Finding 3's fork, not E2;
+  the `dddiagnose` reason gains one clause naming both `far`s and that replay reproduces each.
+  Cost if wrong: none to the class or the gate.
+- **Three scoped re-reviews replaced** by the controller's own check — Task 1's fix round by a read
+  of the 40-line diff against the two rulings and the control log; Task 2's by a mechanical check
+  (`cmp` of the 45 evidence files against `keep-{O,L,I}`, 0 mismatches; `crates/` and `tools/`
+  untouched since `58fb0e7`; the corrected L cell against `errcount`'s event count); Task 3's by a
+  read of the one-line diff. Cost if wrong: a prose slip survives to the final review.
+- **The gate was launched on `0766a76`**, the last code commit, before Task 4 was dispatched:
+  Task 4 is docs-only and changes no test, so the gate's tree and the merged code differ only by
+  README, status-log and spec text — to be proven at merge by
+  `git diff 0766a76..<merge> --stat -- crates tools` being empty.
+- **Task 4:** three runs, not two, everywhere the brief said two; the two retired beliefs and the
+  one corrected reason stated as corrections with evidence, never as if always known; class B →
+  M37, class C parked and not routed, class D retired; the gate figures copied from the measured
+  section of the numbers file and never written from the prediction.
+- **At close — M37's acceptance criteria.** Two positive-control criteria in the routing and the
+  owed list follow from the measurement but are not themselves measured: `dddiagnose`'s twelve
+  self-pid `csops`/`proc_info` calls answer `0` after the §4b fix, from any pid; and all six
+  B-then-C rows then sit at the RCV wall on every run (0 self-pid `ESRCH` ⇒ the RCV wall — run L
+  6 of 6, M35 10 of 10). Ruled in as the routing's acceptance criteria. Cost if wrong: M37 chases
+  a criterion the measurement did not license — one sentence to retract.
+- **Fix wave — the harness after the gate.** The final review's three harness items are label and
+  comment text and one condition in a script that is not a cargo input; they land after the gate
+  without a re-run, on the proof that `git diff 0766a76..<merge> --stat -- crates` is empty,
+  `sh -n` is clean, and Control 1 was re-run on the edited script with both labels firing. Cost if
+  wrong: a shell edit that changes a label the sweep prints goes unmeasured — the re-run Control 1
+  in the harness subsection is the measurement.
+
+### The parked gates, and Control 2
+
+`crates/retrace/tests/apple_walls_e2e.rs` (Task 3, `c702bfa` + its fix round `0766a76`; 55
+lines): eight `#[test]`s, every one `#[ignore = "…"]`, each body the same shape —
+`util::record_dynamic(<path>)` then `util::replay`, asserting record exit 0, replay exit 0 and
+byte-equal stdout, the statement that becomes true when the wall falls; a binary absent from the
+machine is announced with an `eprintln!` (`SKIPPED: … is not present on this machine`) and the
+test returns, the same loud-skip shape as the `jq` gates. The assertion message prints the
+recorder's stderr tail so a run with `--ignored` shows the wall by name. Each reason carries the
+charter's condition-2 evidence — the sweep's label, `rc`/`rp` per face, the three recorder pids
+and their regimes, the recorder's own `RECORD ERROR` / panic line with the symbol, the landmark,
+the evidence file, the class, and `UN-IGNORE when …`: for `csh`/`tcsh`, when the fd table models
+`dup2`; for the six B-then-C rows, when §4b is fixed (M37) **and** the box services the RCV-shaped
+message-queue call. The `dddiagnose` reason names all three faces, both `far`s, and which question
+stays open. The old category string "replay diverged" appears in no reason. `cargo test -p
+retrace --test apple_walls_e2e -- --test-threads=1` → `0 passed; 0 failed; 8 ignored`; `cargo
+clippy -p retrace --all-targets -- -D warnings` clean.
+
+**Control 2 (spec §6.2) — every parked gate fails for its measured reason.**
+`cargo test -p retrace --test apple_walls_e2e -- --ignored --test-threads=1`, cargo's exit
+captured inside the braces before the `tee` (`task-3-control2.log`, excerpted: cargo's
+`Finished`/`Running` lines, the eight per-test failure bodies and the `failures:` list between
+the `running` block and the `test result` line are omitted here; three of the bodies are quoted
+below):
+
+```
+pid just before the run: 27976 (0x6d48)
+running 8 tests
+test automationmodetool_records_and_replays ... FAILED
+test csh_records_and_replays ... FAILED
+test dddiagnose_records_and_replays ... FAILED
+test desdp_records_and_replays ... FAILED
+test dyld_info_records_and_replays ... FAILED
+test flex_records_and_replays ... FAILED
+test launchctl_records_and_replays ... FAILED
+test tcsh_records_and_replays ... FAILED
+test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.80s
+CARGO_EXIT=101
+pid just after the run: 28031 (0x6d7f)
+```
+
+Every spawned recorder's pid was inside `[0x4000, 0x8000)` — the trampoline page, run I's regime,
+colliding — so every face is run I's face: `csh`/`tcsh` `record exited 101` at the `dup2` assert;
+`launchctl`, `automationmodetool`, `desdp`, `dyld_info`, `flex` `record exited 4` with the `brk`
+line; `dddiagnose` `record exited 139` with the identical-fault face. One assertion message per
+class, verbatim:
+
+```
+---- csh_records_and_replays stdout ----
+
+thread 'csh_records_and_replays' (31988841) panicked at crates/retrace/tests/apple_walls_e2e.rs:19:5:
+assertion `left == right` failed: /bin/csh: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (31988842) panicked at crates/retrace-core/src/lib.rs:1140:17:
+dup2 is not modelled by the M10 fd table (unexercised by any gate guest); implement target-slot allocation before a guest uses it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+```
+
+```
+---- launchctl_records_and_replays stdout ----
+
+thread 'launchctl_records_and_replays' (31989173) panicked at crates/retrace/tests/apple_walls_e2e.rs:19:5:
+assertion `left == right` failed: /bin/launchctl: record exited 4 — the wall this gate is parked at, in the recorder's own words:
+[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1103 send_size 248): the box hosts no message-queue receivers
+RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084 elr=0x1804af110
+  left: 4
+ right: 0
+```
+
+```
+---- dddiagnose_records_and_replays stdout ----
+
+thread 'dddiagnose_records_and_replays' (31988878) panicked at crates/retrace/tests/apple_walls_e2e.rs:19:5:
+assertion `left == right` failed: /usr/bin/dddiagnose: record exited 139 — the wall this gate is parked at, in the recorder's own words:
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1203 send_size 248): the box hosts no message-queue receivers
+[retrace] fall-throughs: 7
+guest crashed: pc=0x180302eb0 far=0x6000050040 esr=0x92000045
+  left: 139
+ right: 0
+```
+
+No test passed under `--ignored` (charter condition 3). Two limits of this control, stated: the
+helper asserts on the record exit first, so for every gate the control stopped at record and no
+replay ran — the reasons' `rp` values are the sweep's measurements, not this run's; and the helper
+does not print the recorder's own pid the way the sweep's wrapper shell does, so the pid bracket
+above is the measurement of the regime.
+
+### The M37 routing
+
+Class **B**, in the table's order, is M37's scope (charter §3: "whatever M36's table routes to
+class B, in the order the table gives"):
+
+1. `csh`, `tcsh` — `dup2` in the M10 fd table (target-slot allocation; the assert at
+   `crates/retrace-core/src/lib.rs:1140`).
+2. `launchctl`, `automationmodetool`, `desdp`, `dyld_info`, `flex`, `dddiagnose` — M34 §4b: a
+   `Scalar` argument is never a pointer (consult M33's `arg_kinds`; the precondition is the `Scalar`
+   audit of the whole table M34 named). The fix's positive control must use a pid inside
+   `[0x10000, 0x18000)` as well as one inside `[0x4000, 0x10000)`, and `dddiagnose`'s twelve
+   self-pid calls must answer `0` after it, from any pid; after it lands, all six rows should sit
+   at the RCV wall on every run (both ruled at close — the routing's acceptance criteria, not a
+   measurement; the Rulings subsection).
+
+Class **C** — the RCV-shaped message-queue `mach_msg2` behind the same six rows — is **parked, not
+routed** (Ruling 1); a decision is owed there (refuse it deterministically as the SEND|RCV shape
+is, or model it), by a milestone that is not M37. Class **D** (`yes`) is retired with no gate.
+Class **A** and **E2**: none. **E1**: the two harness defects, fixed by Task 1.
+
+### Gate
+
+**575 passed / 0 failed / 10 ignored across 126 test binaries**, on commit `0766a76` — Task 3's
+fix commit, the last commit that touches anything cargo compiles; the gate ran on that tree while
+Task 4 was written, and Task 4 changed README, status-log and spec text, and the final-review fix
+wave after it changed label and comment text in `tools/apple-sweep.sh` — the harness, not a cargo
+input, `sh -n`'d and re-controlled (the harness subsection above) — so the merged code and the
+gated code differ by nothing cargo reads (to be shown at merge by `git diff 0766a76..<merge>
+--stat -- crates` being empty). Every chunk's cargo exit code was captured to a file before
+any pipe (`gate/*.exit`): `ws=0 box=0 e2e1=0 e2e2=0 e2e3=0 e2e4=0 bins=0 clippy=0`. Logs were
+sanitised (`LC_ALL=C tr -cd '\11\12\15\40-\176' | sed 's/\x1b\[[0-9;]*m//g'`) before parsing.
+Wall clock 15:53:23 → 16:11:58 EDT, 2026-09-13 (18.5 min). Zero `SKIPPED` lines: `jq_e2e`,
+`jq_file_e2e` and `cpython_e2e` all ran. Script: the M35 `gate.sh` with only its two paths changed
+(`.superpowers/sdd/2026-09-13-retrace-m36-sweepmeasure/gate.sh`). The chunks, in M35's shape, with
+the sum of each chunk's `test result:` lines:
+
+| chunk | invocation | binaries | passed | ignored | notes |
+|---|---|---|---|---|---|
+| `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | 26 | 152 | 0 | unchanged from M35 |
+| `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | 37 | 271 | 0 | unchanged from M35 |
+| `e2e1`–`e2e4` | `cargo test -p retrace --test <names> --no-fail-fast -- --test-threads=1`, chunked index-free (`xargs -n20`) over the sorted target list, flattened membership `diff`ed against it before anything ran | 20 + 20 + 20 + 2 | 43 + 32 + 63 + 3 = 141 | **8** + 0 + 2 + 0 | **62 targets** (M35: 61), so the groups re-cut: the sum 141 equals M35's 46 + 30 + 64 + 1. The 8 new ignored are `apple_walls_e2e`'s eight gates (in `e2e1`: `automationmodetool_`, `csh_`, `dddiagnose_`, `desdp_`, `dyld_info_`, `flex_`, `launchctl_`, `tcsh_records_and_replays`); the 2 old ones are unchanged, in `e2e3`: `stackoverflow_rust_e2e`'s `a_rust_stack_overflow_strikes_its_own_guard_page` (M21 wall) and `symbols_e2e`'s `cache_symbol_e2e` (M19 wall) |
+| `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 1 | 11 | 0 | the 11 `debug.rs` unit tests, the chunk CLAUDE.md says never to omit |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | — | — | — | clean |
+
+152 + 271 + 141 + 11 = 575. Ignored 8 + 2 = 10. Binaries 26 + 37 + 62 + 1 = 126.
+
+**Reconciled against M35's 575 / 0 / 2 over 125, file-by-file**: one `.rs` file differs from
+`main` under `crates/` — `crates/retrace/tests/apple_walls_e2e.rs`, new, 8 `#[test]`, 8
+`#[ignore]` — and every other count is byte-for-byte M35's:
+
+| file | M35 | M36 | delta |
+|---|---|---|---|
+| `crates/retrace/tests/apple_walls_e2e.rs` | — | 8 | **+8**, all `#[ignore]`d — new binary (Task 3) |
+| every other `.rs` under `crates/` | unchanged | unchanged | 0 (`git diff --name-only b12af1b..HEAD -- crates` lists only the new file) |
+
+Binaries 125 → 126; `--bins` 11 → 11. The tree holds **583** `#[test]` attributes = 573 runnable
++ 10 ignored (M35: 575 = 573 + 2); the run reports 575 passed = 573 + census's 2 (the "+2 twice"
+of M33–M35) and 10 ignored — the same 575 as M35's, because nothing runnable moved. Bare
+`grep -r '#\[test\]' crates | wc -l`: 576 → 584 (one non-attribute match, as at M34/M35). **The
+prediction made from source before the run was 575 / 0 / 10 over 126; the run matched it
+exactly.** Parked eight (the charter-authorised M36 exception, spec Ruling 3), un-parked nothing;
+this is the first milestone to park more than one gate at once (every earlier step in this log's
+gate series moved the ignored count by at most one), and each of the eight carries its measurement in its reason and was red under `--ignored` for it (Control 2).
+
+### What stays owed
+
+M35's list, item by item, with what this milestone discharged struck by name and what it added.
+
+* **Discharged — the sweep's two labelling defects (M35's third entry, M36's E1 rows).** A record
+  exit of 4 is now `FAIL … (record error, rc=4: <line>)`, and an identical signal death on both
+  sides is `PASS … (identical fault, rc=N)`; both labels are in the three logs above, and the
+  harness keeps its evidence. Fixed in `tools/apple-sweep.sh` (`fc53853`, `58fb0e7`), not in
+  retrace.
+* **Discharged — the "no parked gate" debt.** M23's "the new `brk` wall has no parked gate"
+  (`:4583–4585`) and the README's "no parked gate standing for it", quoted by the charter as the
+  reason M36 may park: eight gates stand in `apple_walls_e2e.rs`, one per non-clean row that is
+  retrace's, each reason measured evidence, each red under `--ignored` for that reason.
+* **`csops`' `ERANGE` header write, unmeasured** (M35's first entry, unchanged). Reaching the
+  branch needs a signed binary with a blob and a pid that survives §4b — the pid is now known to be
+  any pid outside `[0x4000, 0x18000)` for the six guests measured, and M37's fix removes the
+  condition. The hoist would capture it; nothing has shown it does.
+* **The band's width, still** (M27 → M35). Unchanged; not attempted.
+* **The walls behind the six B-then-C rows, restated by this measurement.** M35 named three walls
+  behind the `dddiagnose` row in the order they gate each other — §4b, then the RCV-only
+  message-queue shape, then "the `brk` M23 parked". This milestone measured the third to be a
+  downstream face of the first, not a wall of its own (correction (b) above), and found the same
+  two walls behind five more rows. So what is owed is **two** walls on six rows: **§4b** (class B,
+  routed to M37 — after it, all six should sit at the RCV wall on every run, from any pid: ruled
+  at close as the routing's acceptance criterion, not a measurement); then
+  the **RCV-shaped message-queue `mach_msg2`** (`MACH64_SEND_MQ_CALL | MACH64_RCV_MSG`, no
+  `MACH64_SEND_MSG`), which `Route::Unsupported` keeps fail-loud because it "has never been
+  observed" (`machmsg.rs:100–103`) — observed at M35 once and here 6 of 6 in run L, so a decision
+  is owed: refuse it deterministically as the SEND|RCV shape is, or model it; class C, parked, not
+  routed (Ruling 1). Neither is "message-queue receivers in the box": the serviced refusal is not
+  a wall. What is *not* known is whether a `brk` of M23's kind lies behind the RCV shape; that
+  cannot be measured until the shape is modelled.
+* **The §4b pid-collision probe** (M34, with M35's addendum and now this milestone's): the
+  `Scalar` audit as task 1, the fix being `forward_and_diff` skipping the probe at `Scalar`
+  positions — a `Scalar` argument is never a pointer, whatever band it falls in — the `hello_dyn`
+  table as its positive control (#145 returns 0 with 4 bytes captured), `dddiagnose` as a second
+  (its twelve self-pid `csops`/`proc_info` calls, 75 `err = true` landmarks against 63, must answer
+  `0` after the fix from any pid — ruled at close as an acceptance criterion, not a measurement),
+  **and a third at a pid inside `[0x10000, 0x18000)`**, the band
+  M34's window did not include and this milestone's run O fell in. The part M34 asked of M36 — the
+  recorder's pid beside each sweep row — is done. Two questions attach here, both open: why an
+  in-range `dddiagnose` run takes the identical malloc crash rather than the `brk` (Finding 3: the
+  fork is located inside a `gettimeofday` loop whose recorded replies differ; the cause of the
+  branch is not), and the `far` that varies between runs of the crash face (`0x2000050050`,
+  `0x6000050040`) while pc and esr do not. Both are retired with §4b or become a new row after it.
+* **A `bigcsops`-shaped guest**, only if a later milestone finds a real guest whose `CS_OPS_BLOB`
+  exceeds 64 KiB; none in the corpus does (M34).
+* **`SET_DYLD_IMAGES` (336/15) serviced above the trace, not forwarded** (M34). Unchanged, and
+  re-confirmed pid-independent on the one trace whose `err` breakdown is shown above: it is the
+  single `proc_info` failure in run L's `dddiagnose` trace (`336: 1`, 0 self-pid `ESRCH`).
+* **The per-page cache backing clamps any `Dest` destination that straddles a 16 KiB
+  shared-cache boundary** (M34). Unchanged.
+* **`getattrlistbulk` (461) and `getattrlistat` (468)** (M34). Unchanged.
+* **`crates/retrace-core/src/machmsg.rs:97–99`, one comment line, owed to M37.** The router
+  comment still says the four binaries "`brk` regardless of which of seven refusal codes is
+  returned, so they are parked at that wall" — the post-refusal-wall reading correction (b)
+  retires. M36 could not touch `crates/*/src` (a hunk there is a defect under the charter), so the
+  one-line correction is owed to the first milestone permitted to: M37. Unlike a log line, a code
+  comment is current-state text with no forward pointer, and the next reader of the router — the
+  milestone that owes the RCV-shape decision, or M37's §4b implementer reading how the refusal is
+  serviced — meets a parked "`brk` wall" the measurement says is a §4b consequence.
+* **The harness's `identical fault` label is exit-code-shaped.** It fires on `rc = rp ≥ 128`, a
+  signal death on both sides; a guest exiting ≥ 128 by design on both sides would be labelled a
+  fault with no `guest crashed:` line behind it — and still counted PASS, so the tally cannot
+  move. When next touched, anchor it on the recorder's `guest crashed:` / `guest terminated by
+  signal` line (`crates/retrace/src/main.rs:29`, `:33`), as the record-error label now anchors on
+  `RECORD ERROR:` (fix wave; ruled left as is because the direction is harmless).
+* **`crates/retrace-box/tests/truncguard.rs:237`** says "a pid in 16384..=65535 hits the
+  trampoline/page-table backings" — true of the fixed backings, now the narrower subset of the
+  measured `[0x4000, 0x18000)`. A `tests/` comment M36 was permitted to touch and left so the
+  gated tree is untouched; one parenthetical — "(and, M36: the guest's `os_alloc_once` slab at
+  `0x10000`)" — owed to M37.
+* **Review minors carried:** M34's `the_clamp_reaches_proc_info` leaning on the host running
+  more than 16 processes; M35's `failwrite.rs:23` misnomer, the bare block in `forward_and_diff`,
+  and `util::record` not scrubbing `RETRACE_TRACE`. From this milestone: `apple_walls_e2e.rs`'s
+  helper asserts on the record exit first, so under `--ignored` no replay ever runs for a gate
+  whose record fails (the reasons' `rp` values are the sweep's, and the `139/139` face's replay
+  was exercised only by the controller's hand replay of the control's trace); the helper does not
+  print the recorder's pid, so a future `--ignored` run must bracket the pid counter itself to
+  know its regime; the control's trace files were left in the system tempdir as every sibling
+  e2e leaves its own; the sweep's `rec_reason` is cut to 200 characters for a `RECORD ERROR:` line and 300 for a
+  panic pair (`rp_line` to 200); a skipped corpus binary
+  emits no `ROW` line (all 54 are present on this machine, so it never fired); `dladdr` names the
+  nearest exported symbol only; and the divergence landmark of a `brk` row moves between runs
+  (324 → 326 on `launchctl` at two pids) while the `rec_reason` does not, so the reasons quote the
+  line and give the landmark as a datum.
+* **Everything M33 left owed and M34, M35 and M36 did not touch:** the per-argument canary fill
+  and M32's Control 1 (still unexecuted, still inert); nested-pointer translation (`NestedSource`
+  forwarded untranslated, `NestedDest` refused, the `DTRACEHIOC_ADDDOF` residual); `pipe`'s
+  return (`Ret::FdPair` is documentation, `x1` uncaptured); the `execve`/`posix_spawn` fail-loud
+  assert (M33 Ruling 7, the operator's call); console `writev` mirroring; `__disable_threadsignal`
+  (331); `AT_FDCWD` in the 32-bit form real guests pass (M33 Ruling 10); the corpus bias (every
+  governed `mach_msg2` still init-time and shallow); the `unexercised` label enforced against a
+  census dated 2026-09-12 for syscall numbers and a length census dated 2026-09-13 for M34's
+  five, both snapshots; and the `kqueue` cross-version note.
+* **Superseded, not owed — three statements and one reading, with this section as their forward
+  pointer.** M34 §4b's `[0x4000, 0x10000)` and "roughly half" (`:6734`, `:7088–7089`, `:7152`,
+  `:7178–7181`); M23's `brk` as a post-refusal wall (`:4583–4585`; the router comment `machmsg.rs:97–99`
+  that carries the same reading is a code comment, not a log line, and is in the owed list above) and M35's
+  carriage of it as the third `dddiagnose` wall (`:7713–7716`, `:7739–7743`, `:7846–7848`); M35's
+  "all outside the range" reason for its 10-of-10 (`:7683`); and the M36 spec's §4 first reading
+  ("C for the five", "the M23 belief confirmed by measurement"). All stand as written where they
+  are; corrections (a), (b) and (c) above and spec §11 say what was measured instead. The M28
+  `failwrite` datum M35 listed here stays superseded as M35 left it.
