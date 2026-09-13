@@ -470,8 +470,10 @@ including Ruling 1 through the production `diff_window`, and `the_clamp_reaches_
 control 3; three `EXPECTED_DIFFS` entries (336, 169, 170, each "exercised", none for 220/228); and
 the §4 instrument committed as `tools/destgaps-census.sh` and `tools/destgaps-census-summary.py`
 with the 5 GB stderr lesson in its header. Commits `3e05664`, `e3ec90a`, `486bab2`, plus the docs
-commit. No trap arm, no guest, no `TRACE_MAGIC` bump, no `retrace-core` or `retrace-box/src` edit
-— §8's symmetry argument held with nothing to mirror. §4b was recorded and routed, not fixed, per
+commit `adb0402` and the fix wave (`cd92a7d`, `6db8a27`, `bbcc2c4`, below). No trap arm, no guest,
+no `TRACE_MAGIC` bump, no `retrace-core` edit; the one `retrace-box/src` edit is the fix wave's
+gated `RETRACE_REGCLAMP` diagnostic in the `Reg` arm, inert unless set — §8's symmetry argument
+held with nothing to mirror. §4b was recorded and routed, not fixed, per
 Ruling 3; the README's owed list now carries it.
 
 **What the controls showed.** All three fired as §6 predicted, each red quoted in its task report.

@@ -6742,7 +6742,8 @@ moved), **one** committed instrument (`tools/destgaps-census.sh` and its summari
 dispatches over **76** guests with a corpus maximum of **1,052** bytes, the sweep at
 `pass=46 fail=8 skip=0` on its second run (45/9 on its first — the documented intermittent, below),
 the gate **572 / 0 / 2 over 124**. `TRACE_MAGIC` did not move, no trap arm was touched, no
-`retrace-core` or `retrace-box/src` line changed, and no recorded byte changed.
+`retrace-core` line changed, the one `retrace-box/src` change is the fix wave's gated diagnostic
+(`RETRACE_REGCLAMP`, inert unless set), and no recorded byte changed.
 
 ### What it set out to do
 
