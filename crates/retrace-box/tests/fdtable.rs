@@ -139,3 +139,57 @@ fn from_slots_carries_no_host_mapping() {
     assert!(restored.is_open(g), "guest-visible state survives");
     assert_eq!(restored.host(g), None, "host mapping does NOT survive");
 }
+
+// M37. dup2: the target slot is the guest's own number, and the console is a slot KIND so an
+// alias of stdout stays a console write (spec §3a).
+#[test]
+fn dup2_propagates_the_console_kind_to_the_target_slot() {
+    let mut t = FdTable::new();
+    let (ret, displaced) = t.dup2(1, 17, Some(41)).expect("dup2(1, 17) succeeds");
+    assert_eq!(ret, 17);
+    assert_eq!(displaced, None, "17 was free: nothing displaced");
+    assert_eq!(t.slots()[17], FdSlot::Console(1), "17 is an alias of stdout");
+    assert_eq!(t.console_of(17), Some(1));
+    assert_eq!(t.host(17), Some(41));
+    assert!(t.is_open(17));
+    assert_eq!(t.alloc(), 3, "alloc still takes the lowest free slot; 17 is open, not in the way");
+}
+
+#[test]
+fn dup2_onto_an_open_slot_displaces_it_and_hands_back_its_host_fd() {
+    let mut t = FdTable::new();
+    let a = t.alloc(); t.bind(a, 30);            // guest 3 -> host 30
+    let (ret, displaced) = t.dup2(0, a, Some(31)).unwrap();
+    assert_eq!(ret, a);
+    assert_eq!(displaced, Some(30), "the caller closes the displaced host fd");
+    assert_eq!(t.slots()[a as usize], FdSlot::Console(0));
+    assert_eq!(t.host(a), Some(31));
+}
+
+#[test]
+fn dup2_onto_a_console_slot_makes_it_a_plain_open_descriptor() {
+    let mut t = FdTable::new();
+    let f = t.alloc(); t.bind(f, 30);
+    let (ret, displaced) = t.dup2(f, 1, Some(32)).unwrap();
+    assert_eq!(ret, 1);
+    assert_eq!(displaced, Some(1), "the identity mapping is handed back; the CALLER must not close it (<= 2)");
+    assert_eq!(t.slots()[1], FdSlot::Open, "stdout's slot is now a plain descriptor of f's file");
+    assert_eq!(t.console_of(1), None, "a write to 1 is no longer a console write");
+    assert_eq!(t.host(1), Some(32));
+}
+
+#[test]
+fn dup2_self_is_a_no_op_and_a_closed_source_is_ebadf() {
+    let mut t = FdTable::new();
+    let f = t.alloc(); t.bind(f, 30);
+    assert_eq!(t.dup2(f, f, None).unwrap(), (f, None), "dup2(fd, fd) returns fd and changes nothing");
+    assert_eq!(t.host(f), Some(30));
+    assert!(t.close(f));
+    assert_eq!(t.dup2(f, 9, Some(33)), Err(retrace_box::EBADF));
+    assert!(!t.is_open(9), "a failed dup2 opens nothing");
+    // replay's shape: no host fd, same guest-visible result
+    let mut r = FdTable::from_slots(&t.slots());
+    assert_eq!(r.dup2(2, 18, None).unwrap(), (18, None));
+    assert_eq!(r.slots()[18], FdSlot::Console(2));
+    assert_eq!(r.host(18), None, "replay carries no host mapping for an alias");
+}

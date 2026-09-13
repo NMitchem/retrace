@@ -317,6 +317,16 @@ fn main() {
         .status().expect("clang fdtable_dyn");
     assert!(status.success(), "fdtable_dyn guest build failed");
 
+    // dup2_dyn: the M37 dup2 fixture — an alias of stdout stays a console write, a console slot
+    // displaced by a file becomes a file write. Same recipe as hello_dyn.
+    let src = format!("{}/c/dup2_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/dup2_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang dup2_dyn");
+    assert!(status.success(), "dup2_dyn guest build failed");
+
     // strip47: signs a pointer with pacda then strips it with objc's 47-bit ISA_MASK; the result
     // equals the original ONLY if the PAC signature lands above bit 46 — i.e. only under a 47-bit
     // guest VA. The M2-va47 property test. -arch arm64e (Task 7, M7): with PAC posture now DERIVED

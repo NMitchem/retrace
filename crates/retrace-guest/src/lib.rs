@@ -185,6 +185,10 @@ pub const CLOSEFD_DYN: &str = concat!(env!("OUT_DIR"), "/closefd_dyn");
 /// M10: opens, dups, closes and re-opens, printing each descriptor it is given — so the e2e can
 /// assert the guest sees ITS OWN fd numbers (3, 4, …) rather than retrace's host ones (17+).
 pub const FDTABLE_DYN: &str = concat!(env!("OUT_DIR"), "/fdtable_dyn");
+/// M37: `dup2`s the console onto a high slot and a file onto the console, writing through each —
+/// so the e2e can assert that an alias of stdout is still mirrored and a displaced stdout is not.
+/// Takes the file path as `argv[1]`.
+pub const DUP2_DYN: &str = concat!(env!("OUT_DIR"), "/dup2_dyn");
 /// M11 headline: a full-std Rust binary that `panic!()`s into `abort()`/SIGABRT (`-C panic=abort`).
 pub const PANICKY: &str = concat!(env!("OUT_DIR"), "/panicky");
 /// M12 headline: a stock full-`std` Rust binary that faults on a wild pointer, so libstd's own
@@ -281,6 +285,13 @@ mod tests {
     #[test]
     fn watchloop_guest_parses() {
         let l = parse_macho(&std::fs::read(WATCHLOOP).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn dup2_guest_parses() {
+        // M37: proves the build.rs wiring and the path constant; behaviour is dup2_e2e's.
+        let l = parse_macho(&std::fs::read(DUP2_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 

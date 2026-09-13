@@ -672,7 +672,13 @@ pub const EBADF: u64 = 9;
 /// `Closed` is deliberately distinct from `Free`: both answer `EBADF`, but only `Free` is reusable
 /// by `alloc`, and a checkpoint restore must be able to tell them apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FdSlot { Free, Open, Closed }
+pub enum FdSlot {
+    Free, Open, Closed,
+    /// M37: this slot is (an alias of) console descriptor `n` (0, 1 or 2). The console is a slot
+    /// KIND, not a number: `dup2(1, 17)` makes 17 a console write that M9's mirror must catch, and
+    /// `dup2(f, 1)` makes 1 a plain descriptor it must not. `FdTable::new` seeds 0/1/2 with it.
+    Console(u8),
+}
 
 /// The guest's file-descriptor table.
 ///
@@ -704,7 +710,7 @@ impl FdTable {
     /// crashed `watch_dyn`'s guest — the identity mapping restores exactly the pre-M10 behaviour for
     /// the operations M9 does not intercept, while the dangerous two stay intercepted upstream.
     pub fn new() -> FdTable {
-        FdTable { slots: vec![FdSlot::Open; 3], host: vec![Some(0), Some(1), Some(2)] }
+        FdTable { slots: vec![FdSlot::Console(0), FdSlot::Console(1), FdSlot::Console(2)], host: vec![Some(0), Some(1), Some(2)] }
     }
 
     fn grow_to(&mut self, gfd: usize) {
@@ -724,7 +730,7 @@ impl FdTable {
     /// the distinction does not gate reuse.
     pub fn alloc(&mut self) -> u64 {
         let gfd = (3..self.slots.len())
-            .find(|&i| self.slots[i] != FdSlot::Open)
+            .find(|&i| !matches!(self.slots[i], FdSlot::Open | FdSlot::Console(_)))
             .unwrap_or_else(|| self.slots.len().max(3));
         self.grow_to(gfd);
         self.slots[gfd] = FdSlot::Open;
@@ -741,7 +747,7 @@ impl FdTable {
     }
 
     pub fn is_open(&self, gfd: u64) -> bool {
-        self.slots.get(gfd as usize) == Some(&FdSlot::Open)
+        matches!(self.slots.get(gfd as usize), Some(FdSlot::Open | FdSlot::Console(_)))
     }
 
     /// Mark closed and drop the host mapping. `false` means the guest closed something it did not
@@ -759,16 +765,46 @@ impl FdTable {
     ///
     /// Deliberately carries no host mapping for guest-opened fds: those are record-only, and a
     /// restored box has none (replay executes no syscall). The console identity mapping IS rebuilt
-    /// for whichever of 0/1/2 are still open, because it is a **constant**, not captured state —
+    /// for whichever of 0/1/2 are still the console, because it is a **constant**, not captured state —
     /// the M9 t3 lesson in the other direction: carry what cannot be derived, derive what can.
     /// Without this a restored box answers EBADF to `fstat(1)`, the same defect that crashed
     /// `watch_dyn` before the identity mapping existed.
     pub fn from_slots(slots: &[FdSlot]) -> FdTable {
         let mut host = vec![None; slots.len()];
+        // M37: only a `Console(n)` slot AT index n is the identity mapping. An alias slot elsewhere
+        // (`dup2(1, 17)` made 17 a `Console(1)`) had a host `dup` on record and has nothing on a
+        // restored box — replay forwards nothing, so it needs none. A displaced console slot
+        // (`Open` at index 1 after `dup2(f, 1)`) is a guest-opened descriptor and stays `None`.
         for (gfd, h) in host.iter_mut().enumerate().take(3) {
-            if slots[gfd] == FdSlot::Open { *h = Some(gfd as i32); }
+            if slots[gfd] == FdSlot::Console(gfd as u8) { *h = Some(gfd as i32); }
         }
         FdTable { slots: slots.to_vec(), host }
+    }
+
+    /// M37: which console descriptor this slot stands for, if any — the fd-number test M9 made
+    /// by `fd == 1 || fd == 2`, now a table lookup so `dup2` aliases and displacements are seen.
+    pub fn console_of(&self, gfd: u64) -> Option<u8> {
+        match self.slots.get(gfd as usize) { Some(FdSlot::Console(n)) => Some(*n), _ => None }
+    }
+
+    /// M37: `dup2(fd, fd2)` on the guest-visible table — identical on record and replay.
+    ///
+    /// `Err(EBADF)` if `fd` is not open. `Ok((fd2, displaced))`: `fd2` becomes a duplicate of `fd`
+    /// — it takes `fd`'s KIND (a `Console(n)` source makes `fd2` a console alias; an `Open` source
+    /// makes `fd2` plain, even when `fd2` was a console slot) and the host mapping `host_fd2`
+    /// (record: the `dup`; replay: `None`). `displaced` is whatever host mapping `fd2` held before,
+    /// for the CALLER to close — and the caller must close it only when it is > 2: a displaced
+    /// identity mapping is retrace's own stdin/stdout/stderr. `dup2(fd, fd)` returns `(fd, None)`
+    /// and changes nothing (POSIX).
+    pub fn dup2(&mut self, fd: u64, fd2: u64, host_fd2: Option<i32>) -> Result<(u64, Option<i32>), u64> {
+        if !self.is_open(fd) { return Err(EBADF); }
+        if fd == fd2 { return Ok((fd2, None)); }
+        self.grow_to(fd2 as usize);
+        let kind = self.slots[fd as usize];
+        let displaced = self.host[fd2 as usize];
+        self.slots[fd2 as usize] = kind;
+        self.host[fd2 as usize] = host_fd2;
+        Ok((fd2, displaced))
     }
 }
 
@@ -3130,6 +3166,18 @@ impl Box_ {
 
     pub fn fds(&self) -> &FdTable { &self.fds }
     pub fn fds_mut(&mut self) -> &mut FdTable { &mut self.fds }
+
+    /// M37: the ONE console-write predicate, shared by record's mirror arm, replay's mirror and
+    /// the trace-log echo. A write to any slot the table marks `Console(1|2)` — fd 1/2 themselves
+    /// until the guest `dup2`s over them, and every alias `dup2` created — is mirrored and faked.
+    pub fn is_console_write(&self, num: u64, gfd: u64) -> bool {
+        retrace_arch::is_write_syscall(num) && matches!(self.fds.console_of(gfd), Some(1 | 2))
+    }
+    /// M37: a close of a `Console(_)` slot is faked (M9); a displaced console slot is a real
+    /// descriptor and closes through the generic path.
+    pub fn is_console_close(&self, num: u64, gfd: u64) -> bool {
+        retrace_arch::is_close_syscall(num) && self.fds.console_of(gfd).is_some()
+    }
     pub fn sigtable(&self) -> &SigTable { &self.sigtable }
     pub fn sigtable_mut(&mut self) -> &mut SigTable { &mut self.sigtable }
 
@@ -3165,6 +3213,11 @@ impl Box_ {
     /// guest's `open` returned an unbound host fd and its `read` came back EBADF. One function owns
     /// both halves now; a caller cannot hold it wrong.
     pub fn forward_and_diff(&mut self, num: u64, args: [u64;8]) -> (u64, bool, Vec<Region>) {
+        // M37: dup2 names its own target slot; it is a TABLE operation with a host `dup` behind
+        // it, never a forwarded dup2 — `dup2(h, fd2)` on the host would overwrite retrace's own
+        // descriptor `fd2`. Kept inside this function so it still owns both halves of the fd
+        // contract (M10). Replay mirrors the table half in `ReplaySession::advance`.
+        if num == retrace_arch::SYS_DUP2 { return self.guest_dup2(args); }
         // The guest's own view of the operands, kept for the fd bookkeeping below: `args` is about
         // to be rewritten to host descriptors, and `close` must retire the GUEST slot.
         let gargs = args;
@@ -3609,12 +3662,41 @@ impl Box_ {
             self.bind_returned_fd(num, ret)
         } else { ret };
         // A successful close retires the guest's slot, so a later use of that number is EBADF
-        // instead of reaching whatever retrace has open there. fd 0/1/2 never arrive here —
-        // is_console_close fakes them upstream in retrace-core.
+        // instead of reaching whatever retrace has open there. A `Console(_)` slot never arrives
+        // here — is_console_close fakes it upstream in retrace-core. A DISPLACED console slot
+        // (`Open` at 1 after `dup2(f, 1)`, M37) does, and closes for real: its host mapping is
+        // the `dup`, never retrace's own descriptor.
         if !err && (num == retrace_arch::SYS_CLOSE || num == retrace_arch::SYS_CLOSE_NOCANCEL) {
             self.fds.close(gargs[0]);
         }
         (ret, err, writes)
+    }
+
+    /// M37: `dup2(fd, fd2)` on record — `FdTable::dup2` with a host `dup` of `fd`'s mapping as
+    /// the new host mapping for `fd2`. Returns in `forward_and_diff`'s shape; writes nothing.
+    ///
+    /// `EBADF` when `fd` has no host mapping (never opened, or closed — the table's own answer),
+    /// the host's errno when the `dup` itself fails, and otherwise `fd2`. A displaced host mapping
+    /// is closed here ONLY when it is > 2: an identity mapping displaced by `dup2(f, 1)` is
+    /// retrace's own stdout, and closing it is the M9 defect in a new coat. Self-`dup2` does no
+    /// host work at all, matching the table's no-op.
+    fn guest_dup2(&mut self, args: [u64; 8]) -> (u64, bool, Vec<Region>) {
+        let (fd, fd2) = (args[0], args[1]);
+        let Some(h) = self.fds.host(fd) else { return (EBADF, true, Vec::new()); };
+        if fd == fd2 { return (fd2, false, Vec::new()); }
+        let dup = unsafe { libc::dup(h) };
+        if dup < 0 {
+            let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(EBADF as i32) as u64;
+            return (e, true, Vec::new());
+        }
+        match self.fds.dup2(fd, fd2, Some(dup)) {
+            Ok((ret, displaced)) => {
+                // A displaced identity mapping (<= 2) is retrace's own console; never closed.
+                if let Some(d) = displaced { if d > 2 { unsafe { libc::close(d); } } }
+                (ret, false, Vec::new())
+            }
+            Err(e) => { unsafe { libc::close(dup); } (e, true, Vec::new()) }
+        }
     }
 
     /// Replay-side: apply recorded writes to guest memory, then resume. Never executes a syscall.
