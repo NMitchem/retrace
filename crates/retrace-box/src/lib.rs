@@ -3283,10 +3283,36 @@ impl Box_ {
         // skipped the way this clamp itself once could have been.
         if let Some((di, dest_len)) = retrace_arch::dest_buffer(num) {
             match dest_len {
+                // M34 fix wave: this arm had no channel. The `DerefU64` arm below has had
+                // `RETRACE_DEREFLEN` since M29, so M29 could state on measurement that its refusal
+                // never fired on the corpus; this arm had nothing, so M34 measured every length
+                // operand and never `avail`, and inferred from lengths alone that no corpus call
+                // was in the regime the clamp changes. Wrong on 76 of 76 dynamic guests: dyld's
+                // `proc_info(SET_DYLD_IMAGES)` destination sits 0x3f80 into a shared-cache page
+                // whose backing is that one 16 KiB page, so `avail` is 128 against a count of
+                // 368 and the clamp rewrites the forwarded length on every dynamic guest. Same
+                // shape as `RETRACE_DEREFLEN`: one line per dispatch that reaches this arm with a
+                // mapped destination, FIT or not, so a zero-fire result can be told from an arm
+                // that never ran (M28's lesson, written out above the `DerefU64` arm). Behaviour
+                // with the variable unset is byte-identical.
                 retrace_arch::DestLen::Reg(li) => {
                     let count = args[li] as usize;
+                    let gated = std::env::var_os("RETRACE_REGCLAMP").is_some();
                     hargs[li] = match self.host_span(args[di]) {
-                        Some((_, avail)) => Self::clamp_count(avail, count) as i64,
+                        Some((_, avail)) => {
+                            if gated {
+                                if count > avail {
+                                    let (bi, bl) = self.backing_of(args[di]).unwrap();
+                                    eprintln!("[M34 REGCLAMP] syscall {} count {} avail {} dest {:#x} \
+                                               backing [{:#x},{:#x})",
+                                        num as i64, count, avail, args[di], bi, bi + bl as u64);
+                                } else {
+                                    eprintln!("[M34 REGCLAMP-FIT] syscall {} count {} avail {}",
+                                        num as i64, count, avail);
+                                }
+                            }
+                            Self::clamp_count(avail, count) as i64
+                        }
                         None => count as i64,
                     };
                 }
