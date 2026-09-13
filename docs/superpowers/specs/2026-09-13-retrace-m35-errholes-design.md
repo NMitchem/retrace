@@ -330,4 +330,141 @@ with its reason and becomes an M36 row.
 
 ## 11. Outcome
 
-*(Written at close.)*
+Closed 2026-09-13 on branch `m35-errholes`, five code commits — `0beb06d` / `955d687` (Task 1
+and its fix round), `a11e398` / `8a53c53` (Task 2 and its fix round), `12ac4e7` (Task 3) — and
+one docs commit. Everything §5 said would land, landed; three statements in this spec's own text
+were wrong on measurement and are corrected below rather than edited away. The full record is the
+M35 section of `docs/status-log.md`; this section is the spec's own reconciliation against it.
+
+### What landed against §5
+
+- **§5a** — both changes, in `crates/retrace-box/src/lib.rs`. This spec's line numbers are at
+  the M34 merge (`8854146`) and have moved; at `12ac4e7`: `diff_memory` is `:3933` and the §3a
+  branch `if r.bytes.len() > avail` is `:3948` (was `:3924` / `:3930`); `forward_and_diff` is
+  `:3167` (was `:3169`), the `if !err {` is a bare `{` at `:3447` (was `:3439`) under a new
+  comment at `:3434–3445`, the loop body untouched and not re-indented; the M30 restore comment's
+  rewritten opening clause is `:3569` (was `:3572–3577`); `read_bytes_for_test`'s doc is
+  `:3042–3046` with the seam at `:3047` (was `:3042–3044`); the §3c fd gates are `:3608` and
+  `:3614` (were `:3599` / `:3605`); `write_guest`'s "overruns backing" assert is `:3648–3652`
+  (was `:3639–3643`). Two comment edits §5a did not list were found by the Task 2 review and
+  made in `8a53c53`: `forward_and_diff`'s M0-era rustdoc ("On error (`err`) no writes are
+  captured — a failed syscall wrote nothing"), which M10 had left glued onto the top of
+  `translate_fds`'s doc block — a false contract on the wrong function, rendered by `cargo doc`
+  — deleted whole (it was `:3092–3095` before that commit); and the M30 comment's "outside the
+  `if !err`" clause, which named a gate that no longer existed. After `8a53c53`,
+  `grep -nE 'wrote nothing|if !err' lib.rs` hits only the retraction inside the new comment and
+  the two fd gates.
+- **§5b** — `failwrite.rs` rewritten in place (1 `#[test]` → 1), asserting the call and not the
+  buffer. **Correction to §5b's text:** "`writes` must contain exactly one region at `args[3]` of
+  8 bytes" is not what the capture produces and never has been — regions are window-sized
+  post-images, and on this fixture the landmark carries **two**: `mib`'s `Ptr` window at
+  `0x100004000` (16,384 bytes, the whole `__DATA` page, so it also covers `oldlen`) and
+  `oldlenp`'s at `0x100004010` (16,368). The plan relaxed the assertion to "some captured region
+  covers `args[3]..+8` and carries the seam's bytes", which is what the test asserts. Its two
+  measurement assertions (`buf` unchanged; `*oldlenp == 0` through the seam) **passed on the
+  unmodified tree** — §4b confirmed in-process before the edit — and only the capture assertion
+  was red.
+- **§5c** — `crates/retrace-guest/asm/failproc.s` (60 lines), `build.rs:96–104`, `FAILPROC` at
+  `src/lib.rs:140`, exactly as specified. **Plan defect, recorded by Task 2:** the plan's Step 5
+  smoke script exits 126 on every line as written, because `mktemp -t` pre-creates the file
+  `0600` and `cp` onto it keeps that mode; one `chmod +x "$BIN"` between the `cp` and the
+  `codesign` fixes it (`tools/apple-sweep.sh` copies to a path `mktemp -d` did not pre-create,
+  which is why its pattern works). The reviewer's independent re-run needed the same.
+- **§5d** — `crates/retrace/tests/failsys_e2e.rs` (86 lines): `captured` `:23`, `the_sysctl`
+  `:32`, `a_failing_sysctl_replays_bit_for_bit` `:46`, `a_failing_proc_list_replays_bit_for_bit`
+  `:65`; both passed on the first run. **Correction to §5d's text:** "the `DerefU64(3)` window is
+  exactly `*oldlenp` = 648" is **wrong**. `Box_::diff_window` (`:3084–3090`) computes
+  `base = avail.min(window_cap)` and then, for a `Dest`, `base.max(clamp_count(avail, len))` — a
+  table length only *widens* a window past the flat cap and never narrows it, and here `base` =
+  16,360 already exceeds 648. The `failproc` landmark carries three regions, all ending at
+  `0x100008000`: `0x100004000` / 16,384 (`args[0]`, `mib`, `Ptr`); `0x100004018` / 16,360
+  (`args[2]`, `buf`, the `Dest(DerefU64(3))` window itself); `0x100004010` / 16,368 (`args[3]`,
+  `oldlenp`, `Ptr`). The conclusion — the region covers the 648 bytes — holds; the supporting
+  fact did not, the charter's class inside the spec that cites the charter's warning. (Task 3's
+  report labelled the `0x100004018` region "a third `Ptr` window"; it is `args[2]`'s own — the
+  review corrected it.)
+- **§5e** — README (the two-holes paragraph replaced; the gate paragraph moved to M35's figures;
+  the `dddiagnose` entry under Known limits carries the sweep finding below), the status-log
+  section (append-only; M28's section untouched, superseded by pointer), and this §11.
+
+### The controls (§6), run red then green
+
+- **Control 1** (Task 1 Step 2, the `.min(avail)` clamp in place): RED at the `expect` —
+  `diff_memory` returned `None`, "a 128-byte recorded region over a 64-byte backing must be
+  reported as a divergence, not compared up to the backing and passed — that silence is the M1
+  hole this test closes". Green after §3a: `truncguard` 22 passed, `checkpoint` 1 passed.
+- **Control 2, unit half** (Task 2 Step 2, gate in place): `failwrite.rs` RED at the capture
+  assertion **only** — "forward_and_diff captured no write covering *oldlenp on a failing
+  syscall: the `if !err` skip is dropping a real kernel write (writes captured: 0)", `left: None`,
+  `right: Some([0, 0, 0, 0, 0, 0, 0, 0])`. Green after the hoist; the whole `retrace-box` chunk
+  beside it `binaries=37 passed=271 failed=0 ignored=0`.
+- **Controls 2 (e2e half) and 3** (Task 3 Step 5, gate reinstated by hand, then reverted with
+  `git checkout`): `a_failing_sysctl_replays_bit_for_bit` RED at "the landmark must carry the
+  kernel's write-back of *oldlenp; without it replay keeps the guest's 2 and diverges at ipa
+  0x100004010 — the pre-M35 measurement. writes: 0"; `a_failing_proc_list_replays_bit_for_bit`
+  RED at "the landmark must carry the 648-byte record the kernel copied out on its way to
+  ENOMEM"; `failwrite` RED as above; and a hand-run replay of a `failsysctl` recording made under
+  the mutation: `DIVERGENCE at landmark 4 pc=0x1000003ec: memory divergence at ipa 0x100004010:
+  replay=0x02 recorded=0x00`, exit 3 — §4a's line, byte for byte. Green after the revert
+  (2 passed; 1 passed).
+
+### What the hoist recorded (§4d, measured by the fix rather than censused)
+
+`hello_dyn` and `jq --version` through a signed copy of the Task 2 CLI, the band live on the
+error path for the first time: all four exits 0, `[M30 CANARY]` 0 and 0 (Ruling 3's assert did
+not fire), reproduced independently by the reviewer. On those recordings **0 of 34** (`jq`) and
+**0 of 32** (`hello_dyn`) `err = true` landmarks carry writes — per-recording counts, not
+properties of the binaries (the reviewer's recordings from another cwd: 0 of 30 and 0 of 27); the
+zero is the reproducible conclusion, and it was proven a measured zero by `failsysctl` through
+the same CLI: replay rc **0** (§4a measured 3), one `err = true` landmark with the two regions
+above.
+
+### Sweep (§10)
+
+`TALLY pass=45 fail=9 skip=0` on the `12ac4e7` binary: M33's eight plus `/usr/bin/dddiagnose`
+("replay diverged"), exactly M34's run 1. **No binary moved in either direction** — §10's
+"unchanged" case; no M36 row from the hoist, and the band assert reddened nothing. The
+`dddiagnose` row was probed twice with traces kept, and the result corrects M34's account: with
+recorder pids **outside** the collision range, **10 of 10 FAIL on both the pre-M34 and the M35
+binary**, every run `rc=4 rp=3`, the recorder's own stderr reading `refusing mach_msg2
+message-queue send (msgh_id 0x400000cf dest 0x1403 send_size 248): the box hosts no
+message-queue receivers` then `RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34` — a
+**refused recording** the sweep labels "replay diverged", the replay correctly running out of
+events at the next syscall; with pids **inside** the range (after the gate advanced the counter),
+2 PASS (`rc=139 rp=139`, an identical crash the sweep counts without a note) and 3 FAIL (the same
+refusal, then a `brk` at `pc=0x18035f084`). Ruling (controller, ledgered): not an M35 regression,
+**not class E2** — record and replay agree within every run; the guest's path varies with its
+inputs — but **class B, known-unmodelled** (message-queue `mach_msg2` sends) with an
+environment-driven appearance. M34's "10/10 PASS" measured that morning's guest state, not a
+property of the binary; its "a pid in range does not by itself produce the divergence" stands,
+but the inverse is not established either — the pid hypothesis is neither confirmed nor refuted,
+and M36 records the pid beside each row. Two sweep-harness defects go to M36 as **E1** rows: a
+record exit of 4 reported as "replay diverged", and an identical crash on both sides counted PASS.
+
+### Gate (§10)
+
+**575 passed / 0 failed / 2 ignored across 125 test binaries** — the prediction, matched exactly.
+Chunks `ws` 152/26, `box` 271/37 (M34: 270), `e2e1`–`e2e4` 46 + 30 + 64 + 1 over 20 + 20 + 20 + 1
+(61 targets, so a fourth group of one; `failsys_e2e` in `e2e1`, both `ok`), `bins` 11/1, clippy
+clean; every exit code 0, captured before any pipe; zero `SKIPPED` lines; 12:39:28 → 12:58:12
+EDT. Reconciled file-by-file against M34's 572 / 0 / 2 over 124: `truncguard.rs` 21 → 22,
+`failsys_e2e.rs` new at 2, `failwrite.rs` 1 → 1, `lib.rs` 13 → 13, `build.rs` 0 → 0,
+`retrace-guest/src/lib.rs` 9 → 9; binaries 124 → 125, `--bins` 11 → 11; the tree holds 575
+attributes = 573 + 2 ignored, the run reports 575 = 573 + the 2 census tests that run twice; bare
+`grep -r '#\[test\]' crates | wc -l` 573 → 576. The two ignored are the M21 and M19 walls, as at
+M34; nothing parked, nothing un-parked.
+
+### Rulings the run added (all in `progress.md`)
+
+- Task 1's and Task 2's fix-round re-reviews were each replaced by a mechanical check by the
+  controller: the Task 1 fix was a pure relocation (removed lines = added lines as multisets,
+  34/34, one file), and the Task 2 fix a 9-line comment diff checked line by line against the
+  review's three items. Cost if wrong: none identified; the final whole-branch review saw both.
+- The `dddiagnose` ruling above (class B, not E2; two E1 rows to M36).
+
+### Rulings 1–3, as they held
+
+Ruling 1 held: the fix was mandatory and three lines of control flow. Ruling 2 held: the Task 1
+review checked all seven `diff_memory` callers and none treats `Some` as anything but divergence.
+Ruling 3 held with nothing to exempt: the band assert, live on the error path across the whole
+gate, the two real-guest recordings and the 54-binary sweep, fired zero times.
