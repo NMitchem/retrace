@@ -3040,8 +3040,10 @@ impl Box_ {
     pub fn canary_disturbances_for_test(&self) -> u64 { self.canary_disturbances }
 
     /// Test seam (M28). Reads `len` bytes of guest memory at `ipa`, for tests that must observe
-    /// memory independently of `forward_and_diff`'s own capture — which is exactly what the
-    /// `if !err` measurement needs, since that path captures nothing. Production never calls this.
+    /// memory independently of `forward_and_diff`'s own capture, so the capture can be checked
+    /// against the memory rather than against itself — M28's failing-syscall measurement, and
+    /// M35's proof that the capture now sees what that measurement missed. Production never calls
+    /// this.
     pub fn read_bytes_for_test(&self, ipa: u64, len: usize) -> Vec<u8> {
         let (hp, avail) = self.host_span(ipa).expect("read_bytes_for_test: ipa not mapped");
         unsafe { std::slice::from_raw_parts(hp, len.min(avail)) }.to_vec()
@@ -3433,10 +3435,19 @@ impl Box_ {
         let mut sa = [0u64; 8];
         for i in 0..8 { sa[i] = hargs[i] as u64; }
         let (ret, err) = unsafe { host_svc(num, sa) };
-        // A failed syscall (carry set) wrote nothing to the guest's buffers, so skip the
-        // post-diff write capture entirely.
+        // M35 (H2): the capture — and the guard band inside it — runs on the FAILING path too.
+        // Until M35 this loop sat under `if !err` on the stated assumption that a failed syscall
+        // wrote nothing; M27 narrowed it (`ps`'s 83 sysctls all succeeded), M28 measured one case
+        // and found the data buffer untouched, and M35 measured the call: xnu's `sysctl()` writes
+        // `*oldlenp` back on ENOMEM (`suulong` after the `error != ENOMEM` pass-through), and the
+        // `kern.proc` handlers copy out every record that fits BEFORE returning ENOMEM — 648 bytes
+        // of data on a failing call. The M28 fixture recorded cleanly and its replay diverged at
+        // `oldlen`. Nothing in this loop depends on `err`: the pre-image and the canary fill were
+        // taken before `host_svc` on both paths, the restore below already ran on both, and
+        // replay's generic arm has applied `writes` beside `err = true` since M0. What was
+        // skipped was the looking.
         let mut writes = Vec::new();
-        if !err {
+        {
             for (ipa, len, pre, pre_band, band) in windows.iter() {
                 let (ipa, len, band) = (*ipa, *len, *band);
                 // Take `avail` rather than discarding it: the guard-band read below is `unsafe` and
@@ -3569,12 +3580,13 @@ impl Box_ {
         //    made the first entry erase the canary the second was about to check, reporting a
         //    disturbance no kernel caused — 2 of them on one jq run. A pass that runs after every
         //    check makes the result independent of entry order.
-        // 2. **On the error path too.** The fill is unconditional, so the restore must be. A failed
-        //    syscall wrote nothing — which is exactly why the capture loop skips it — so the band
-        //    still holds the canary retrace itself wrote, and leaving it there would hand the guest
-        //    bytes no kernel ever produced, on the ordinary path every EINTR/ENOENT/EAGAIN takes.
-        //    Measured: 36 error-path restores in that same jq recording, so this is load-bearing,
-        //    not defensive. Nothing is CHECKED there for the same reason nothing is captured.
+        // 2. **On the error path too.** The fill is unconditional, so the restore must be: a band
+        //    the kernel did not touch still holds the canary retrace itself wrote, and leaving it
+        //    there would hand the guest bytes no kernel ever produced, on the ordinary path every
+        //    EINTR/ENOENT/EAGAIN takes. Measured: 36 error-path restores in that same jq recording,
+        //    so this is load-bearing, not defensive. Since M35 the band is also CHECKED on that
+        //    path before it is restored, because a failing syscall can write (the capture loop
+        //    above says where that was measured).
         //
         // Only `band` bytes are restored — exactly what was filled. The window [0,len) and the band
         // [len,len+band) are disjoint, so neither the fill nor this restore can touch the window
