@@ -327,39 +327,45 @@ design, and the reconstruction caveat in full.
   the one behavioural change — descriptors translated for sixteen more syscalls — changes what the
   host kernel sees, never what is recorded.
 
-**Gate:** 572 passed / 0 failed / 2 ignored across 124 test binaries, **measured at M34** over all
-124 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
+**Gate:** 575 passed / 0 failed / 2 ignored across 125 test binaries, **measured at M35** over all
+125 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
 `--workspace --all-targets` with `-D warnings`.
-See the testing note below for how that number is assembled. "124 test binaries" is 117 test
+See the testing note below for how that number is assembled. "125 test binaries" is 118 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
 nobody has to re-derive it. The ignored gates are unchanged at
 **two**: `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall). Both
-are described under Known limits. M34 parked nothing new and un-parked nothing.
+are described under Known limits. M35 parked nothing new and un-parked nothing.
 
-Reconciled against M33's 570 / 0 / 2 over 124 **file-by-file rather than by sum**:
+Reconciled against M34's 572 / 0 / 2 over 124 **file-by-file rather than by sum** — six files
+changed, two counts moved:
 
-| file | M33 | M34 | delta |
+| file | M34 | M35 | delta |
 |---|---|---|---|
-| `retrace-arch/src/lib.rs` | 36 | 36 | 0 — rows and comments only; the fix wave's five `dest_buffer` view pins went into two existing tests |
-| `retrace-arch/tests/legacy_equivalence.rs` | 3 | 3 | 0 — three `EXPECTED_DIFFS` entries, no test |
-| `retrace-box/tests/truncguard.rs` | 19 | 21 | **+2** — `the_window_widens_for_the_m34_rows_and_not_for_getattrlist` (Task 2) and `the_clamp_reaches_proc_info` (Task 3, control 3) |
+| `retrace-box/src/lib.rs` | 13 | 13 | 0 — two functions (`diff_memory`, `forward_and_diff`) and comments |
+| `retrace-box/tests/failwrite.rs` | 1 | 1 | 0 — `a_failing_sysctl_is_measured_for_writes` rewritten in place, its assertion inverted |
+| `retrace-box/tests/truncguard.rs` | 21 | 22 | **+1** — `a_recorded_region_longer_than_its_replay_backing_is_a_divergence` (Task 1, control 1) |
+| `retrace-guest/build.rs` | 0 | 0 | 0 — builds `failproc` |
+| `retrace-guest/src/lib.rs` | 9 | 9 | 0 — the `FAILPROC` constant |
+| `retrace/tests/failsys_e2e.rs` | — | 2 | **+2** — new binary (Task 3, controls 2 and 3) |
 
-Every other file unchanged, `--bins` **11 → 11**, and **no new test binary**, 124 → 124. The
+Every other file unchanged, `--bins` **11 → 11**, and **one new test binary**, 124 → 125. The
 count closes at both ends, and the two ends must still be read separately: the tree holds
-**572** `#[test]` attributes = 570 runnable + 2 ignored (M33 held 570 = 568 + 2), while the run
-reports **572** passed = 570 + the 2 census tests that run twice (`census.rs` executes in its own
-binary and again inside `legacy_equivalence`'s `#[path]` include). The two 572s are, as the two
-570s were, a coincidence of the same +2, not the same number. (A bare `grep -c '#\[test\]'` says
-573, because a comment in `legacy_equivalence.rs` mentions the attribute in prose; the file has
-three.)
+**575** `#[test]` attributes = 573 runnable + 2 ignored (M34 held 572 = 570 + 2), while the run
+reports **575** passed = 573 + the 2 census tests that run twice (`census.rs` executes in its own
+binary and again inside `legacy_equivalence`'s `#[path]` include). The two 575s are, as the two
+572s were, a coincidence of the same +2, not the same number. (A bare `grep -c '#\[test\]'` says
+576, because a comment in `legacy_equivalence.rs` mentions the attribute in prose; the file has
+three.) The prediction made from source before the run was 575 / 0 / 2 over 125; the run matched
+it exactly.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson). `retrace` ran **per-target** — sixty `--test <name>` invocations in three groups, because
-the whole package exceeds the tool ceiling — **plus the `--bins` chunk**, which is the only place
-the 11 unit tests in `crates/retrace/src/debug.rs` run; the 124 count includes it. The two mouths
-of the same trap, one loud and one silent, both closed by construction of the chunk list.
+lesson). `retrace` ran **per-target** — sixty-one `--test <name>` invocations in four groups
+(three of twenty and one of one), because the whole package exceeds the tool ceiling — **plus the
+`--bins` chunk**, which is the only place the 11 unit tests in `crates/retrace/src/debug.rs` run;
+the 125 count includes it. The two mouths of the same trap, one loud and one silent, both closed
+by construction of the chunk list.
 
 One timing trap is worth knowing before it is mistaken for a hang: `bigread_e2e` took **536s** on its
 first run and **47s** on its second, with the recording process sitting at 0:00.00 CPU throughout the
@@ -410,7 +416,17 @@ These are real and current, not aspirational gaps.
   runs of the same script against the same tree gave 45/9 and 46/8, with `dddiagnose` the only mover.
   It is **not** among the eight above because the runs quoted here are ones it passed — which is
   exactly the point. The number is quoted as swept rather than as best-of, and a re-run that returns
-  45/9 has found nothing new.
+  45/9 has found nothing new. **M35 read both of that row's labels off kept traces, and neither
+  says what it means.** Its "replay diverged" is a recording the recorder *refused* — exit 4 at
+  the fail-loud message-queue `mach_msg2` wall (`refusing mach_msg2 message-queue send … the box
+  hosts no message-queue receivers`, unmodelled since M2-mach) — after which replay correctly
+  runs out of events at the next syscall; and its PASS is an identical crash on both sides
+  (`rc=139 rp=139`), which the sweep counts with no note. Within every run record and replay
+  agree; what moves between runs is the guest's own path, and on 2026-09-13 recorder pids inside
+  M34's collision range both passed and failed it, so the pid hypothesis is neither confirmed
+  nor refuted. The row is class B (known-unmodelled) with an environment-driven appearance, not
+  E2; the two sweep-labelling defects are M36's E1 rows, and the M35 sweep itself landed on
+  `pass=45 fail=9 skip=0` — M33's eight plus `dddiagnose`, no binary moved in either direction.
   M22's four named causes are down to one plus that unmeasured tail — the `pc=0x4204` group (13) and
   the `msgh_id` 412 group (4) were both cleared at M23 — and **`ps` was fixed at M27**. It was
   published here from M22 through M26 as "the oracle catching nondeterminism", a claim that could not
@@ -681,23 +697,27 @@ These are real and current, not aspirational gaps.
   every recorded region at exit and all three terminal replay arms fail on mismatch, so a truncation
   the band misses can still surface there, unless the guest acts on the stale bytes first or drops
   their backing before then — a read into a mapping that is then `munmap`'d would evade both, and no
-  gate does that today. Two holes stay open and unmeasured: `Box_::diff_memory`'s own `.min(avail)`
-  clamp on the replay side (flagged in M1's own branch review, deferred at M2, still unpaid), and the
-  `if !err` gate, which skips write capture entirely on a failed syscall — and the band is not
-  evaluated on that path either, so a failing syscall is neither diffed nor guarded. M27 measured
-  that this is *not* what `ps` hit (`err=false` on all 83 of its `sysctl` calls), which narrows the
-  question without closing it. **M28 measured one further, purpose-built case**: a guest whose
-  `sysctl(KERN_OSTYPE)` deliberately fails on a 2-byte buffer (`"Darwin\0"` needs seven) came back
-  `err=true ret=12 (ENOMEM) writes_captured=0 buf_changed=false` — the kernel wrote nothing into the
-  guest's buffer either before or after the call, independently reproduced by disassembling the
-  committed guest and replaying the identical syscall twice against the live host kernel. So the
-  `if !err` skip loses nothing on this case, but this is one measured datum, not a general proof about
-  failing syscalls — the gate stays open, now with a data point in it instead of none. Strengthening
-  the band itself — sampling across the whole remaining backing under a fixed byte budget, rather
+  gate does that today. Both holes M27 and M28 left are closed at M35. `Box_::diff_memory` now
+  returns a divergence naming the recorded length and the backing when a region is longer than
+  what replay has behind
+  it, instead of comparing the part that fits (flagged in M1's own review, unpaid until now; a
+  correct replay never takes the branch, and `truncguard.rs` proves it fires). And
+  `forward_and_diff` captures — and bands — on a **failing** syscall too, because the assumption
+  that a failed syscall writes nothing was **measured false**: the M28 fixture `failsysctl`
+  recorded cleanly on the pre-M35 tree and its replay diverged (`ipa 0x100004010 replay=0x02
+  recorded=0x00` — the `oldlen` cell), since xnu's `sysctl()` writes `*oldlenp` back on the
+  `ENOMEM` path and the `if !err` skip threw that write away. M28's datum stands as far as it went
+  — the *data* buffer is untouched, `sysctl_old_user` refuses before copying — but its test read
+  `buf` and never `oldlenp`. The data half is real too: `kern.proc.all` into one record's worth of
+  buffer fails `ENOMEM` *after* copying 648 bytes out (`failproc`, `failsys_e2e`). No format
+  change: replay's generic arm has applied `writes` beside `err = true` since M0 and simply never
+  received one. Strengthening the band itself — sampling across the whole remaining backing under
+  a fixed byte budget, rather
   than one contiguous 64-byte run immediately past the window — is now *unblocked*, since the "not
   covered by another window of this call" precondition Task 2 needed exists in code as
-  `band_not_covered`, but was deliberately not attempted in M28 and not in M30 either — M30 changed
-  what the band asks, not how much of the backing it looks at. The suppression count above is a
+  `band_not_covered`, but was deliberately not attempted in M28, not in M30 — M30 changed
+  what the band asks, not how much of the backing it looks at — and not in M35, which made the
+  band run on the failing path without widening it. The suppression count above is a
   warning to whoever takes it up, since a naive wider sample would be suppressed even more often,
   not less.
 - **Exec-in-place is unmodelled — point retrace at the real binary, not the shim.** A launcher that
