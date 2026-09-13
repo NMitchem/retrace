@@ -225,6 +225,61 @@ fn the_window_widens_for_the_m34_rows_and_not_for_getattrlist() {
         "fgetattrlist shares getattrlist's packers and their bound, and stays Ptr");
 }
 
+// M34 control 3: the forwarded-count clamp REACHES the new rows. `tests/clamp.rs` proves
+// `clamp_count` as a pure function; nothing before this proved the `DestLen::Reg` arm is taken
+// for a given row, and that arm is the half of `Dest` that is live on this corpus (every measured
+// destination already fits the flat window — M34 spec §4). `hargs` is local to `forward_and_diff`,
+// so the clamp is observed through the kernel's own return value, the way `memdiff.rs`'s
+// `forward_and_diff_captures_a_read_larger_than_the_window` observes the window through `ret`.
+//
+// The call is `proc_info(PROC_INFO_CALL_LISTPIDS, PROC_ALL_PIDS, …)` and not a PIDINFO flavor,
+// because LISTPIDS takes no pid: `forward_and_diff` rewrites ANY register whose value lands in a
+// backing to a host pointer (spec §4b — a pid in 16384..=65535 hits the trampoline/page-table
+// backings), and a control that could be failed by the recorder's pid would measure that defect
+// instead of this arm. `proc_listpids` copies out `min(nprocs + 20, buffersize / 4)` pids and
+// returns the byte count (bsd/kern/proc_info.c); every Mac runs far more than 16 processes, so
+//   clamp taken   -> the kernel is handed buffersize = 64 and returns exactly 64, no error;
+//   clamp skipped -> it is handed 4160 and either faults on the copyout (err, EFAULT) or writes
+//                    past the 64-byte backing and returns more than 64.
+// `(64, false)` is produced by the clamp and by nothing else.
+#[test]
+fn the_clamp_reaches_proc_info() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    // Run to the guest's first syscall stop. That call is not forwarded and the guest is never
+    // resumed; the box only needs to be in a state where `forward_and_diff` may be called.
+    match b.run() {
+        Stop::Syscall { .. } => {}
+        other => panic!("expected the guest's first syscall stop, got {other:?}"),
+    }
+
+    const AVAIL: u64 = 64;
+    // The static stack backing is [STACK_TOP_IPA - GRANULE, STACK_TOP_IPA), so this destination
+    // has exactly AVAIL bytes of backing behind it.
+    let dest = retrace_box::STACK_TOP_IPA - AVAIL;
+    let (_, avail) = b.host_span_for_test(dest).expect("the static stack backing ends at STACK_TOP_IPA");
+    assert_eq!(avail as u64, AVAIL, "dest must sit exactly {AVAIL} bytes before the end of its backing");
+
+    let args: [u64; 8] = [
+        1,            // PROC_INFO_CALL_LISTPIDS
+        1,            // PROC_ALL_PIDS
+        0, 0,
+        dest,         // buffer
+        AVAIL + 4096, // buffersize: past the backing, so only the clamp can bring it to AVAIL
+        0, 0,
+    ];
+    // The scalar arguments must not themselves land in a backing, or this test would be
+    // measuring spec §4b's probe defect rather than the clamp.
+    for &a in &[args[0], args[1], args[2], args[3], args[5]] {
+        assert!(b.host_span_for_test(a).is_none(), "scalar {a:#x} collides with a guest backing");
+    }
+
+    let (ret, err, _writes) = b.forward_and_diff(336, args);
+    assert_eq!((ret, err), (AVAIL, false),
+        "proc_info(LISTPIDS) with buffersize {} into a {AVAIL}-byte backing: the clamp must hand \
+         the kernel {AVAIL} and get {AVAIL} back; got ret={ret} err={err}", AVAIL + 4096);
+}
+
 // M29 Phase B. Two tests over ONE guest, split because a panic ends a test: the first drives only
 // the legal call and must complete, the second drives both and must abort on the second.
 //
