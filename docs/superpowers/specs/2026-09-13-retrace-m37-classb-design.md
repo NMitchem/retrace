@@ -324,4 +324,111 @@ status log says so at close.
 
 ## 11. Outcome
 
-*(Written at close.)*
+Written 2026-09-13 at the close. Every number below is copied from the task reports, the reviews,
+the committed `docs/sweep-evidence/2026-09-13-m37/README.md` and the controller's numbers file;
+none is recomputed here. The status-log section (`docs/status-log.md`, "Status: M37-classb")
+carries the measurements, the controls, the sweep lines and the rulings verbatim; this section is
+the outcome against what the spec expected, and the corrections to the spec's own text.
+
+### 11.1 The outcome against §9's prediction
+
+§9 predicted **582 passed / 0 failed / 10 ignored over 128 binaries** (575 + 7: four `FdTable::dup2`
+unit tests, `scalarprobe` one in a new binary, `dup2_e2e` two in a new binary). Measured on
+`09b6bdb`: **590 passed / 0 failed / 10 ignored over 130 binaries**, every chunk's cargo exit 0,
+zero `SKIPPED` lines, clippy clean (19:55–20:15 EDT). The prediction under-counted by eight tests
+and two binaries, all of them work the run added after the spec was written:
+
+| addition | tests | binary | when |
+|---|---|---|---|
+| `fdtable.rs` `dup2_rejects_a_negative_or_out_of_range_target_with_ebadf` (the `DUP2_MAX_FD` bound) | +1 | existing | Task 2 fix round, review I1 |
+| `crates/retrace-box/tests/consoleclose.rs` (the narrowed `is_console_close`, C1's shape) | +3 | **new** | Task 2 fix round, review I2 |
+| `dup2_e2e.rs` `a_tampered_dup2_return_is_caught_as_divergence` (the mirror's compare, watched) | +1 | existing (new at §9) | Task 2 fix round, review I3 |
+| `crates/retrace/tests/closewrite_e2e.rs` (ruling C1's control) | +1 | **new** | Task 2 fix round, ruling C1 |
+| `retrace-guest/src/lib.rs` `dup2_guest_parses`, `scalarprobe_guest_parses` | +2 | existing | Tasks 2 and 3 |
+
+582 + 8 = 590; 128 + 2 = 130. The reconciliation file by file against M36's 575 / 0 / 10 over 126
+is in the status-log section; `#[ignore]` stayed at 10 (the eight moved in place, nothing parked
+or un-parked).
+
+### 11.2 What the audit found
+
+- **Static (§3b.1).** 129 rows, 94 with a `Scalar`, **190 `Scalar` positions**, each checked
+  against `syscalls.master` / `mach_traps.h`. **One finding, fixed:** `madvise` (75) x0 was
+  `Scalar` and the call is *forwarded* — with the skip, the raw IPA would reach the host as the
+  range to `MADV_FREE_REUSABLE` in retrace's own map; measured on CPython's 44 `madvise`s, the
+  counterfactual (skip + old row) answered `EPERM` four times at `0xa00020000`/`0xa0002c000`,
+  guest IPAs that are mapped in retrace's own process. Row now `[Ptr, Scalar, Scalar]`, 44 of 44
+  succeed where the pre-fix tree managed 26: the 18 pre-fix `EINVAL`s were the **length**
+  register (`0x4000`/`0xc000`/`0x10000`/`0x14000`, all mapped IPAs) being probed — §4b on a
+  length, which §1 did not anticipate. Seventeen pointer-*typed* positions were kept `Scalar` with
+  xnu citations because the kernel never dereferences them (all but `bsdthread_ctl` x0–x2 and
+  `csrctl` x2 are emulated above the trace); the reviewer overturned none. §3b.1's rule "a
+  position whose prototype says pointer is a table defect" was applied as the spec's own hazard
+  statement — "hand the host kernel a guest IPA as a pointer" — not syntactically: marking
+  `bsdthread_register` x4 (`pthread_init_data_size`, a size under a stale master name) `Ptr`
+  would have re-created §4b on a length.
+- **Dynamic, pre-fix (§3b.2).** The literal rule — no `writes` region contains a `Scalar`
+  position's value — is **not** met: 9 hits per 54-trace corpus, 27 over M36's, 0 over M35's,
+  identical pre- and post-fix. Every hit is one shape: the emulated `SYS_MMAP` arm's own staging of
+  a `MAP_FIXED` file segment (`place_fixed` `pread`s the bytes into the anon backing at the
+  address the guest fixed and records them as the landmark's write), x0 the [K1] position, never
+  through `forward_and_diff`. **Ruled (audit 2):** the number the audit owes is hits on a
+  *forwarded* syscall or on any position other than [K1] — **0** in every corpus. The rule's text
+  in §3b.2 should have said "forwarded"; it is corrected here, not in §3b.
+- **Dynamic, post-fix (§3b.3).** Labels identical baseline-vs-N except csh/tcsh's expected move;
+  `errs` per syscall number identical for **48 of 53** binaries; five differ (six rows), each
+  adjudicated by name: `csh`/`tcsh` (traces longer past the old `dup2` stop — identical over the
+  baseline's length — and two `fcntl` `EBADF`s that are the unmodelled `pipe`, §11.3), `date`/
+  `zsh`/`ps` `madvise` errors → 0 (the length-probe class above), and `ps` `sysctl(KERN_PROCARGS2)`
+  `EINVAL` once — the host's process table changing under `ps`, absent in I and S. The `EFAULT`
+  check with `ret` in view: **272 = 272 = 272 = 272** (baseline less `yes`, N, I, S), every one
+  pre-existing (`__mac_syscall`, `ioctl(3, 0x80086804)`, `ed`'s `writev_nocancel`), the per-binary
+  `(num, x0, x1)` sequence identical over 159 pairs. No `EFAULT` appeared or vanished.
+- **§5's acceptance:** three sweeps, `TALLY pass=45 fail=9 skip=0` each, `SWEEP_EXIT=0`, every
+  recorder pid in band (N 765–3291, I 17124–20042, S 66163–68793); the nine labels identical across
+  regimes and exactly §5's; **0 self-pid `ESRCH`** in every kept trace (12–13 pid-carrying calls
+  per §4b row, all succeeding; positive control on M36's colliding traces: 11 of 12, 12 of 13). No
+  `identical fault` row anywhere.
+- **`pipe` is exercised.** `csh`/`tcsh` `pipe` one landmark before the `fork` wall and use both
+  ends — the raw host read-end `0x17` and a stale `x1` — which §7's "no corpus guest issues it"
+  never claimed about `pipe` but §2a did not see either: it was past the `dup2` assert.
+
+### 11.3 Corrections to this spec's own text
+
+- **§4 item 1 describes control 1b, not control 1.** With the by-number predicate the gate fails
+  first at the *record* stdout compare (`util/mod.rs:159`) with `via1\n` present — the displaced
+  half, because `printf` after `dup2(f, 1)` is mirrored by number — not at the replay compare with
+  `alias\n` absent. The alias half was shown separately (control 1b: kind-correct for the
+  displaced slot, blind to aliases → replay lacks `alias\n` at `:165`). Both halves are guarded;
+  §4's prose predicted 1b's output.
+- **§7's "`close(1)`/`close(2)` on a `Console` slot does not retire the slot — M9's deferral
+  stands" is RETIRED (ruling C1, Option B).** The review measured that the deferral was one-sided
+  since M10: record's faked console close never touched the table, replay's generic close mirror
+  always did, and M37's table-driven predicate made the asymmetry a silent stdout divergence
+  (`write(1)` after `close(1)` mirrored on record, not on replay, rc 0 both sides). Both sides now
+  retire the slot through `FdTable::close`; a write after `close(1)` is `EBADF` on both, the
+  kernel's answer; `closewrite_e2e` is the control.
+- **§3a's worked example wins over its own bullet (ruling I2).** The bullet said `is_console_close`
+  fakes the close of every `Console(_)` slot; the example said `close(16)` on an alias goes the
+  generic way. The example is what shipped: the predicate is `gfd < 3 && console_of(gfd) ==
+  Some(gfd)`, identity slots only; an alias's host mapping is a `dup`, never retrace's own 0/1/2,
+  and faking its close would leak the dup and leave the slot open forever.
+- **§3a's `FdTable::dup2` has no bound on `fd2` (ruling I1).** `dup2(f, -1)` arrives as
+  `0xffff_ffff` and would resize both vectors to ~40 GiB. Bounded at `DUP2_MAX_FD = 10240`
+  (`OPEN_MAX`), a fixed constant because `RLIMIT_NOFILE` is forwarded and therefore
+  recorder-dependent; the signature became `Result<(u64, Option<i32>), u64>` (plan fix `5737f3a`).
+- **§3b.2's rule should read "on a forwarded position"** (11.2, audit 2).
+- **§9 under-counted** (11.1).
+- **§1's "M33's table documents `Scalar` as documentation until a later milestone consults it"** is
+  now past tense: `Scalar` is load-bearing, the rustdoc says so, and `Ptr`/`Path` are the probed
+  default rather than "documentation" too — against `Scalar` the choice is load-bearing (the
+  `madvise` row is the measured instance), against no marking it is not.
+- **Two claims outside this spec measured false in passing**: the M33 `SYS_BSDTHREAD_CREATE` row
+  comment and CLAUDE.md's "Guest threads" paragraph both said forwarding `bsdthread_create` "is
+  asserted against"; no such assert exists — the emulating arm's position before the generic forward
+  arm is the only guard. CLAUDE.md is corrected at this close; the row comment is owed.
+
+### 11.4 M38
+
+Class B was two walls and this milestone took both; **M38 does not exist** (charter §3, §10). The
+M32–M38 run ends here. The status log says so and carries the owed list.
