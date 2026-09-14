@@ -211,9 +211,12 @@ address→thread-index mapping is needed; the mach semaphore pair `semaphore_wai
 (`-33`) is correlated by **port name**, since what that trap carries is a name in retrace's own IPC
 space and never a guest address (M18 Stage 2b); and a workqueue worker parked at `workq_kernreturn`
 opcode `0x4` (`BlockReason::Parked`) has **no waker at all** — libpthread `brk`s if that call ever
-returns. Forwarding `bsdthread_create` is not merely wrong but whole-process fatal (the host starts
-a real thread on retrace's own `_pthread_start`, which PAC-fails on the guest's pthread struct), so
-it asserts.
+returns. Forwarding `bsdthread_create` would be not merely wrong but whole-process fatal (the host
+would start a real thread on retrace's own `_pthread_start`, which PAC-fails on the guest's pthread
+struct) — and **nothing asserts against it**: the emulating arm (`crates/retrace-core/src/lib.rs:1006`)
+sits before the generic forward arm and that ordering is the only guard. The generic arm's asserts
+are `is_signal_syscall`, the workq pair and `writes_via_nested_pointer` only; the claim that it
+"asserts" stood here from M14 to M37 and was measured false at M37.
 
 **Emulating a syscall's entry contract is not the same as emulating the syscall.** Besides the new
 thread's registers, `guest_bsdthread_create` must reproduce what the *kernel* writes on the way

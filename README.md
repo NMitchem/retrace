@@ -111,16 +111,20 @@ records and replays byte-identically, twice:
 | 7 | the real **CPython** interpreter | `-c 'print(1)'` — the 2026-07-05 vision spec's headline target |
 
 **Apple's own binaries, measured — and, since M29, re-measurable; since M36, with the reason each
-failing row fails and a parked gate for every one that is retrace's.** `tools/apple-sweep.sh` points
+failing row fails and a parked gate for every one that is retrace's; since M37, the same nine
+reasons from any recorder pid.** `tools/apple-sweep.sh` points
 retrace straight at each file in a committed 54-entry corpus and prints a tally: **45 of 54 record
-and replay** on every run, stdout byte-identical and exit codes equal — the same 45 each time — and
-a 46th, `dddiagnose`, is counted a pass on the runs where it crashes *identically* on both sides,
-which the sweep now says on the line (`identical fault, rc=139`) rather than leaving as a bare PASS.
-M36 ran the sweep three times on 2026-09-13 with the recorder's pid steered into three regimes
-and tallied 45/9, 45/9 and 46/8; the nine rows that are not clean are read off kept evidence, one
-class each, and **eight parked gates** (`crates/retrace/tests/apple_walls_e2e.rs`, one per binary
-that is retrace's to fix or model) stand for them, each `#[ignore]` reason the measurement that
-parks it. Among the 45: `cat`, `ls`, `cp`, `mv`, `rm`,
+and replay** on every run, stdout byte-identical and exit codes equal — the same 45 each time.
+M37 ran the sweep three times on 2026-09-13 on the fixed binary, with the recorder's pid steered
+into the three regimes M36 had measured (below `0x4000`; inside `[0x4000, 0x10000)`; inside
+`[0x10000, 0x18000)`), every row's trace kept, and tallied 45/9 in all three: the nine rows that
+are not clean carry the **same** label in every regime — `csh`/`tcsh` at `fork`, six at the
+RCV-shaped `mach_msg2`, `yes` at the watchdog — and the 46th "pass" M36 had counted on one run
+(`dddiagnose` crashing *identically* on both sides, labelled `identical fault, rc=139`) did not
+recur, because the pid-collision defect that produced it is gone. The nine are read off kept
+evidence, one class each, and **eight parked gates** (`crates/retrace/tests/apple_walls_e2e.rs`,
+one per binary that is retrace's to fix or model) stand for them, each `#[ignore]` reason the
+measurement that parks it. Among the 45: `cat`, `ls`, `cp`, `mv`, `rm`,
 `chmod`, `mkdir`, `ln`, `df`, `sh`, `dash`, `bash`, `zsh`, `expr`, and — since M27 — `ps`. (This
 sentence named `grep`, `wc`, `uname` and `bzip2` from M22 through M32; none of the four is in the
 committed corpus, a leftover of the uncommitted sample the reconstruction caveat below describes,
@@ -336,53 +340,95 @@ design, and the reconstruction caveat in full.
   move: the views are pure functions of `num`, the loud failure is record-only by construction, and
   the one behavioural change — descriptors translated for sixteen more syscalls — changes what the
   host kernel sees, never what is recorded.
+- **`dup2` is modelled, and a `Scalar` register is never probed.** Since M37 — the two class-B
+  walls M36's table routed, and the last milestone of the M32–M38 run. `FdTable` gained a slot
+  kind, `FdSlot::Console(u8)` — "this slot is (an alias of) console descriptor `n`" — so the M9
+  console mirror is decided by the slot's *kind* through one shared predicate per question
+  (`Box_::is_console_write`, `Box_::is_console_close`) rather than by the number 1 or 2: after
+  `dup2(1, 17)` a write to 17 is mirrored into the trace and faked, and after `dup2(f, 1)` a write
+  to 1 reaches `f`'s file. `FdTable::dup2` is the pure table operation both sides run (record
+  with a host `dup`, replay with none); replay recomputes the `(ret, err)` pair inside the generic
+  arm and byte-compares it against the recording — the M10 fd mirror's own posture, no new
+  returning arm, `verify_thread`'s seven sites unchanged, and a test that tampers with a recorded
+  `dup2` return watches the compare fire. **`dup` copies the slot's kind too** (the M37 fix wave,
+  from the final review): `FdTable::dup` gives `dup(1)`'s new slot its source's kind rather than a
+  plain `Open`, on both sides through the same method — so a write through a `dup` alias is
+  mirrored like one through a `dup2` alias, and the shell's save/restore-stdout idiom
+  (`saved = dup(1); dup2(file, 1); …; dup2(saved, 1)`) hands slot 1 its console kind back
+  (`dupkind_e2e`). Until that fix the idiom was the M9 class in a new coat: every stdout write
+  after the restore was forwarded to a host dup of retrace's own stdout, on the terminal and in
+  neither the trace nor the replay, rc 0/0, no divergence — and `main` had been *loud* on it (the
+  `dup2` assert), so the branch had turned a loud failure silent. A faked console close now
+  retires its slot on **both** sides (a write after `close(1)` is `EBADF` on both, the kernel's
+  own answer — M9's deferral retired), an alias closes the generic way — as does an identity slot
+  re-aliased by `dup2(saved, 1)`, whose host mapping is a dup — and the target is bounded at
+  `DUP2_MAX_FD = 10240`.
+  Nothing is forwarded as `dup2`: forwarding it would overwrite retrace's own descriptor. And
+  `forward_and_diff` forwards a register whose `arg_kinds` row marks it `Scalar` **verbatim** —
+  never probed against the guest's backings — which is the fix M34 §4b named: a pid, a length or
+  an offset that happened to equal a mapped guest IPA was being rewritten to a host pointer
+  (`scalarprobe` pins it — `lseek(fd, 0x4000, SEEK_SET)` returned the trampoline backing's host
+  address before, `0x4000` after). The precondition was an audit of every `Scalar` position (190,
+  over 129 rows) against its kernel prototype, statically and over every kept corpus trace; it
+  found one wrong row (`madvise`'s `addr`, now `Ptr` — 44 of 44 CPython `madvise`s succeed where
+  26 did, because the pre-fix probe had been rewriting the *length* `0x4000`/`0xc000`/`0x10000`)
+  and seventeen pointer-*typed* positions correctly kept `Scalar` because the kernel never
+  dereferences them. Measured: 0 self-pid `ESRCH` in every kept trace of three full sweeps at
+  three pid regimes, where M36 had measured 11–12 per colliding trace. Nothing new is recorded and
+  `TRACE_MAGIC` did not move: `FdSlot` is box state, never traced, and the skip changes what the
+  host kernel is *asked*, never what is recorded or compared.
 
-**Gate:** 575 passed / 0 failed / 10 ignored across 126 test binaries, **measured at M36** over all
-126 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
-`--workspace --all-targets` with `-D warnings`. Measured on commit `0766a76`, the last commit that
-touches anything cargo compiles — M36's close after it changed README, status-log and spec text,
-plus label and comment text in `tools/apple-sweep.sh` (the final-review fix wave, the branch's
-last commit), which is not a cargo input and was `sh -n`'d and re-controlled (Control 1 re-run on
-the edited script, both labels firing); `git diff 0766a76..<merge> --stat -- crates` is empty, so
-the gate's figures stand.
-See the testing note below for how that number is assembled. "126 test binaries" is 119 test
+**Gate:** 596 passed / 0 failed / 10 ignored across 131 test binaries, **measured at M37** over all
+131 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
+`--workspace --all-targets` with `-D warnings`. Measured on commit `0f15f2b`, the fix-wave commit and
+the last one that touches anything cargo compiles (the gate had first run on `09b6bdb`, 590 / 0 / 10
+over 130, before the final review's fix wave added six tests and one binary; it was re-run in full
+after it); `git diff 0f15f2b..<merge> --stat -- crates tools` is empty, so the gate's figures stand.
+See the testing note below for how that number is assembled. "131 test binaries" is 124 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
 nobody has to re-derive it. The ignored gates are **ten**: the two long-standing —
 `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3
 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall) —
-plus the eight M36 parked in `apple_walls_e2e`, one per non-clean Apple-sweep row that is
-retrace's to fix or model, each reason the measurement that parks it. All ten are described under
-Known limits. M36 parked eight and un-parked nothing — the first milestone to park more than one
-gate at once; every earlier step in the log's gate series moved the ignored count by at most
-one — under the charter's authorised exception, and each of the eight was run
-once with `--ignored` and failed for exactly the reason on it.
+plus the eight M36 parked in `apple_walls_e2e` and M37 moved in place to the walls it measured, one
+per non-clean Apple-sweep row that is retrace's to fix or model, each reason the measurement that
+parks it. All ten are described under Known limits. M37 parked nothing and un-parked nothing —
+the eight moved forward (`csh`/`tcsh` from the `dup2` assert to `fork`; the six from a wall the
+recorder's pid selected to the RCV-shaped `mach_msg2` on every pid), and each was run once with
+`--ignored` and failed for exactly the reason now on it.
 
-Reconciled against M35's 575 / 0 / 2 over 125 **file-by-file rather than by sum** — one file
-changed, one count moved:
+Reconciled against M36's 575 / 0 / 10 over 126 **file-by-file rather than by sum** — seven files
+changed their count, everything else is byte-for-byte M36's:
 
-| file | M35 | M36 | delta |
+| file | M36 | M37 | delta |
 |---|---|---|---|
-| `retrace/tests/apple_walls_e2e.rs` | — | 8 | **+8**, all `#[ignore]`d — new binary (Task 3) |
+| `retrace-box/tests/fdtable.rs` | 10 | 18 | **+8** (four `dup2` table tests; the `DUP2_MAX_FD` bound; three `FdTable::dup` tests from the fix wave) |
+| `retrace-box/tests/consoleclose.rs` | — | 4 | **+4**, new binary (the narrowed console-close predicate; the re-aliased identity slot) |
+| `retrace-box/tests/scalarprobe.rs` | — | 1 | **+1**, new binary (the `Scalar` skip's unit control) |
+| `retrace-guest/src/lib.rs` | 9 | 12 | **+3** (`dup2_guest_parses`, `scalarprobe_guest_parses`, `dupkind_guest_parses`) |
+| `retrace/tests/dup2_e2e.rs` | — | 3 | **+3**, new binary (incl. the tampered-return control) |
+| `retrace/tests/closewrite_e2e.rs` | — | 1 | **+1**, new binary (a write after `close(1)` is `EBADF` on both sides) |
+| `retrace/tests/dupkind_e2e.rs` | — | 1 | **+1**, new binary (a `dup(1)` alias is a console; a saved-and-restored stdout stays one — the fix wave's control) |
 
-Every other `.rs` under `crates/` is byte-for-byte M35's (`git diff --name-only b12af1b..HEAD --
-crates` lists only the new file), `--bins` **11 → 11**, and **one new test binary**, 125 → 126. The
-count closes at both ends, and the two ends must still be read separately: the tree holds
-**583** `#[test]` attributes = 573 runnable + 10 ignored (M35 held 575 = 573 + 2), while the run
-reports **575** passed = 573 + the 2 census tests that run twice (`census.rs` executes in its own
-binary and again inside `legacy_equivalence`'s `#[path]` include) — the same 575 as M35's because
-nothing runnable moved. (A bare `grep -c '#\[test\]'` says 584, because a comment in
-`legacy_equivalence.rs` mentions the attribute in prose; the file has three.) The prediction made
-from source before the run was 575 / 0 / 10 over 126; the run matched it exactly.
++21 runnable, `#[ignore]` **10 → 10**, `--bins` **11 → 11**, and **five new test binaries**,
+126 → 131. The count closes at both ends, and the two ends must still be read separately: the tree
+holds **604** `#[test]` attributes = 594 runnable + 10 ignored (M36 held 583 = 573 + 10), while the
+run reports **596** passed = 594 + the 2 census tests that run twice (`census.rs` executes in its
+own binary and again inside `legacy_equivalence`'s `#[path]` include). (A bare `grep -c
+'#\[test\]'` says 605, because a comment in `legacy_equivalence.rs` mentions the attribute in
+prose; the file has three.) The prediction made from source before each run was met exactly:
+590 / 0 / 10 over 130 (per chunk 154 / 280 / 145 / 11) on `09b6bdb`, then 596 / 0 / 10 over 131
+(155 / 284 / 146 / 11) on `0f15f2b`. The spec's own §9 had said 582 over 128 — it could not count
+the tests and binaries its review rounds and the final fix wave added.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson). `retrace` ran **per-target** — sixty-two `--test <name>` invocations in four groups
-(three of twenty and one of two; `apple_walls_e2e` sorts first, so it landed in the first group and
-the groups re-cut against M35's, their sum unchanged), because the whole package exceeds the tool
-ceiling — **plus the
-`--bins` chunk**, which is the only place the 11 unit tests in `crates/retrace/src/debug.rs` run;
-the 126 count includes it. The two mouths of the same trap, one loud and one silent, both closed
-by construction of the chunk list.
+lesson). `retrace` ran **per-target** — sixty-five `--test <name>` invocations in four groups
+(three of twenty and one of five; `closewrite_e2e`, `dup2_e2e` and `dupkind_e2e` all sort before
+`faultlog`, so all three landed in the first group and every later boundary moved by three against
+M36's, their sum unchanged), because the whole package exceeds the tool ceiling — **plus the `--bins` chunk**,
+which is the only place the 11 unit tests in `crates/retrace/src/debug.rs` run; the 131 count
+includes it. The two mouths of the same trap, one loud and one silent, both closed by
+construction of the chunk list.
 
 One timing trap is worth knowing before it is mistaken for a hang: `bigread_e2e` took **536s** on its
 first run and **47s** on its second, with the recording process sitting at 0:00.00 CPU throughout the
@@ -404,105 +450,85 @@ the magic.
 These are real and current, not aspirational gaps.
 
 - **Nine rows of 54 sampled Apple system binaries are not clean, and since M36 the sweep says
-  why each one is not.** `tools/apple-sweep.sh`, over the committed 54-entry corpus
-  `tools/apple-sweep-binaries.txt`, records and replays each binary and prints a `TALLY` line, so
+  why each one is not — since M37, the same why from any recorder pid.** `tools/apple-sweep.sh`,
+  over the committed 54-entry corpus `tools/apple-sweep-binaries.txt`, records and replays each binary and prints a `TALLY` line, so
   since M29 this figure is **reproducible instead of remembered**. Since M36 the sweep also prints
   *why*: every row carries the recorder's exit code, the replay's, the recorder's pid, the first
   `RECORD ERROR:` / `panicked at` line and the replay's `DIVERGENCE` line (one machine-readable
   `ROW` line per binary beside the human one); a refused recording — the recorder's `RECORD
   ERROR:` line is the test, its exit code printed beside it — is labelled `FAIL … (record error,
   rc=4: …)` rather than `replay diverged`; an identical crash on both sides is labelled
-  `PASS … (identical fault, rc=N)` rather than a bare PASS; and `RETRACE_SWEEP_KEEP=<dir>` keeps
-  each non-clean row's stderr and trace. M36 ran it three times on 2026-09-13 on the M35-merge
-  code, with the recorder's pid steered into three regimes — the measurement M34's §4b entry
-  (below) had been owed since M34:
+  `PASS … (identical fault, rc=N)` rather than a bare PASS; `RETRACE_SWEEP_KEEP=<dir>` keeps
+  each non-clean row's stderr and trace, and since M37 `RETRACE_SWEEP_KEEP_ALL=1` keeps every
+  row's, PASS rows included — what the M37 audits were run over. M37 ran it three times on
+  2026-09-13 on the fixed binary (branch commit `aa8d7b8`), every trace kept, with the recorder's
+  pid steered into the three regimes M36 had measured — the acceptance measurement the §4b fix
+  owed:
 
-  | run | recorder pids | regime, as measured | `TALLY` |
+  | run | recorder pids | regime | `TALLY` |
   |---|---|---|---|
-  | O | 73437–75432 (`0x11EDD`–`0x126A8`) | **colliding** — inside `[0x10000, 0x18000)`, the guest's own `os_alloc_once` slab | `pass=45 fail=9 skip=0` |
-  | L | 812–2851 (`0x32C`–`0xB23`) | **non-colliding** — below every backing; 0 self-pid `ESRCH` in every kept trace | `pass=45 fail=9 skip=0` |
-  | I | 17209–19410 (`0x4339`–`0x4BD2`) | **colliding** — inside `[0x4000, 0x8000)`, the trampoline page | `pass=46 fail=8 skip=0` |
+  | N | 765–3291 (`0x2fd`–`0xcdb`) | below `0x4000` — non-colliding before M37 too | `pass=45 fail=9 skip=0` |
+  | I | 17124–20042 (`0x42e4`–`0x4e4a`) | inside `[0x4000, 0x10000)`, the trampoline page — colliding before M37 | `pass=45 fail=9 skip=0` |
+  | S | 66163–68793 (`0x10273`–`0x10cb9`) | inside `[0x10000, 0x18000)`, the guest's own `os_alloc_once` slab — colliding before M37 | `pass=45 fail=9 skip=0` |
 
-  The 45 PASS rows are the same 45 on all three runs. The nine that are not clean, with the face
-  each shows per run, the class the M32–M38 charter's enum gives it — read off the kept evidence,
-  never off the sweep's label — the gate that stands for it and where it is routed:
+  The 45 PASS rows are the same 45 on all three runs, and the nine that are not clean show the
+  **same face in every regime** — the recorder's pid no longer selects a wall. Each with the class
+  the M32–M38 charter's enum gives it, read off the kept evidence and never off the sweep's label,
+  the gate that stands for it and where it is routed:
 
-  | binary | run O | run L | run I | class | gate (`crates/retrace/tests/apple_walls_e2e.rs`) | route |
-  |---|---|---|---|---|---|---|
-  | `/bin/csh` | `dup2` panic | same | same | **B** known-unmodelled | `csh_records_and_replays` | M37 |
-  | `/bin/tcsh` | `dup2` panic | same | same | **B** | `tcsh_records_and_replays` | M37 |
-  | `/bin/launchctl` | the `brk` | RCV shape | the `brk` | **B then C** | `launchctl_records_and_replays` | §4b → M37; the C wall parked, not routed |
-  | `/usr/bin/automationmodetool` | the `brk` | RCV shape | the `brk` | **B then C** | `automationmodetool_records_and_replays` | as `launchctl` |
-  | `/usr/bin/desdp` | the `brk` | RCV shape | the `brk` | **B then C** | `desdp_records_and_replays` | as `launchctl` |
-  | `/usr/bin/dyld_info` | the `brk` | RCV shape | the `brk` | **B then C** | `dyld_info_records_and_replays` | as `launchctl` |
-  | `/usr/bin/flex` | the `brk` | RCV shape | the `brk` | **B then C** | `flex_records_and_replays` | as `launchctl` |
-  | `/usr/bin/dddiagnose` | the `brk` | RCV shape | identical crash (`rc=139`, counted PASS) | **B then C** | `dddiagnose_records_and_replays` | as `launchctl` |
-  | `/usr/bin/yes` | 30 s watchdog | same | same | **D** not-a-defect | none | retired |
+  | binary | face (identical in N / I / S) | class | gate (`crates/retrace/tests/apple_walls_e2e.rs`) | route |
+  |---|---|---|---|---|
+  | `/bin/csh` | `fork` — `mach_ports_register` | **C** new subsystem: process creation | `csh_records_and_replays` | parked, not routed |
+  | `/bin/tcsh` | `fork` — `mach_ports_register` | **C** | `tcsh_records_and_replays` | parked, not routed |
+  | `/bin/launchctl` | RCV shape | **C** (its B half, M34 §4b, retired at M37) | `launchctl_records_and_replays` | parked, not routed |
+  | `/usr/bin/automationmodetool` | RCV shape | **C** (B half retired) | `automationmodetool_records_and_replays` | parked, not routed |
+  | `/usr/bin/desdp` | RCV shape | **C** (B half retired) | `desdp_records_and_replays` | parked, not routed |
+  | `/usr/bin/dyld_info` | RCV shape | **C** (B half retired) | `dyld_info_records_and_replays` | parked, not routed |
+  | `/usr/bin/flex` | RCV shape | **C** (B half retired) | `flex_records_and_replays` | parked, not routed |
+  | `/usr/bin/dddiagnose` | RCV shape | **C** (B half retired) | `dddiagnose_records_and_replays` | parked, not routed |
+  | `/usr/bin/yes` | 30 s watchdog | **D** not-a-defect | none | retired |
 
-  The faces, each in the recorder's own words. The **`dup2` panic** is `thread 'main' … panicked
-  at crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled by the M10 fd table`, rc 101, in
-  every regime: the M33 fail-loud assert working as designed; the pid regime changes the self-pid
-  `ESRCH` count in the kept trace (5 / 0 / 5) but not the wall. The **`brk`** is `RECORD ERROR:
-  non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1) far/ipa=0x0 (UNMAPPED) pc=0x18035f084
-  elr=0x1804af110`, rc/rp 4/3: a `brk #1` in libdispatch `_firehose_task_buffer_init+0x12c`, the
-  `elr` libsystem_kernel `__proc_info+8`, taken right after the guest's own
-  `proc_info(2, <recorder pid>, 17 = PROC_PIDUNIQIDENTIFIERINFO)` was answered `ESRCH` — M34 §4b's
-  pid mis-translation, 11–12 self-pid `ESRCH` answers in every colliding trace of the six §4b
-  rows (5 in `csh`/`tcsh`, whose wall is `dup2` in every regime) and 0 in every non-colliding one.
-  The **RCV shape** is `RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34:
-  options 0x404000102: message-queue send without the send+rcv RPC shape`, rc/rp 4/3, the pc
-  `mach_msg2_trap+8`: a *receive*-shaped message-queue call (`MACH64_SEND_MQ_CALL |
-  MACH64_RCV_MSG`, no `MACH64_SEND_MSG`) that `Route::Unsupported` keeps fail-loud, first seen at
-  M35 on `dddiagnose` and reached by all six of these binaries whenever the pid does not collide.
-  The **identical crash** is `guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045` on
-  both sides, libsystem_malloc `mfm_alloc+0x230`, after 11 self-pid `ESRCH` — §4b's second
-  downstream face. The **watchdog** is `timed out after 30s recording`: `yes` never terminates and
-  is failed on purpose. The `refusing mach_msg2 message-queue send` line that precedes the `brk`
-  and the RCV shape alike is M23's *serviced* refusal, survived by every guest that reaches it: it
-  precedes both faces, is shown not to select the `brk` (absent with a non-colliding pid), and is
-  unseparated from the RCV shape (no run reaches that shape without it). Evidence: `docs/sweep-evidence/2026-09-13-m36/<basename>.{O,L,I}.{rec,rp}.err`,
-  verbatim, with the symbolication (a `dladdr` lookup and the instruction words at the pc — `lldb`
-  printed nothing for ten minutes at `image list` and `atos -p` the same, both killed; the
-  reading: indexing the shared cache) and the counting rules in that directory's README.
+  The faces, each in the recorder's own words. **`fork`** is `record error, rc=4: RECORD ERROR:
+  unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515))
+  send_size 64`, rc/rp 4/3: `mach_ports_register` (`task.defs` 3400+3, a complex message with
+  three port descriptors the router does not know) from libxpc `xpc_atfork_prepare` ←
+  `libSystem_atfork_prepare` ← libsystem_c `fork+0x24` — `fork`'s own pre-fork hook, and behind it
+  `fork`(2) itself, which has no `arg_kinds` row. Before M37 these two rows stopped ~60 landmarks
+  earlier at the M33 assert that refused `dup2` by name (rc 101); the fd table models `dup2` now —
+  both shells issue exactly four, `dup2(0,16)`, `(1,17)`, `(2,18)`, `(16,19)`, the C shell's
+  classic descriptor move, and all four record and succeed — and that is what moved the wall to
+  `fork`. One landmark before it both shells `pipe`, which is still
+  unmodelled (the descriptor entry below). The **RCV shape** is `record error, rc=4: RECORD ERROR:
+  unsupported mach_msg2 at pc 0x1804adc34: options 0x404000102: message-queue send without the
+  send+rcv RPC shape`, rc/rp 4/3, the pc `mach_msg2_trap+8`: a *receive*-shaped message-queue
+  call (`MACH64_SEND_MQ_CALL | MACH64_RCV_MSG`, no `MACH64_SEND_MSG`) that `Route::Unsupported`
+  keeps fail-loud, first seen at M35 on `dddiagnose`, reached by all six of these binaries from
+  non-colliding pids at M36 and from **every** pid since M37. Before M37 a colliding pid took one
+  of two other faces first — libdispatch's `brk #1` in `_firehose_task_buffer_init+0x12c` on a
+  `proc_info(2, <recorder pid>, 17)` answered `ESRCH`, or `dddiagnose`'s identical malloc crash
+  (`mfm_alloc+0x230`, `rc=139` both sides) — both downstream of M34 §4b's pid mis-translation;
+  neither recurred in any M37 run (0 `identical fault` rows in three sweeps; 0 self-pid `ESRCH` in
+  every kept trace, 12–13 pid-carrying calls per row all succeeding, where M36 had 11–12 `ESRCH`).
+  The **watchdog** is `timed out after 30s recording`: `yes` never terminates and is failed on
+  purpose. The `refusing mach_msg2 message-queue send` line that precedes the RCV shape is M23's
+  *serviced* refusal, survived by every guest that reaches it and unseparated from the RCV shape
+  (no run reaches that shape without it). Evidence:
+  `docs/sweep-evidence/2026-09-13-m37/<basename>.{N,I,S}.{rec,rp}.err`, verbatim, with the
+  counting rules, the reader and the three audits in that directory's README; the pre-fix faces,
+  the symbolication and the M36 counting rules are in `docs/sweep-evidence/2026-09-13-m36/`.
   The old label "replay diverged" appears in no gate reason and in none of the table's cells: the
   replay of a recording that ended at a `RECORD ERROR` *always* reports a `DIVERGENCE` — it runs out
-  of events one past the trace's last syscall, or re-reports the same exception at the same pc —
-  and in every cell where a replay ran (the 17 `rc=4` traces and the identical crash) record and
-  replay agreed, the replay re-reporting the recorder's own stop.
-  **The §4b collision window is `[0x4000, 0x18000)`, not `[0x4000, 0x10000)`** — about 82 % of
-  the pid space, and guest-dependent; the mechanism (the guest's own `os_alloc_once` slab,
-  first-fit-mapped at `0x10000` before its first self-pid call), the two non-colliding pid bands,
-  which of M35's and M36's runs fell where, and the fix's two-band positive control are in the
-  pid-collision entry below.
-  **The `brk` is libdispatch's, and it is a §4b consequence, not a post-refusal wall of its own.**
-  From M23 to M35 the five `launchctl`-group rows were believed to reach a `brk` *because of* the
-  serviced refusal (M23's "the other four `brk` regardless of which of seven refusal codes is
-  returned", `crates/retrace-core/src/machmsg.rs:97–99`).
-  Measured: the word at `0x18035f084` is `brk #1` on the outlined crash path after
-  `_firehose_task_buffer_init`'s `retab`, the `elr` is `__proc_info+8`, and in every `brk` trace
-  (11 of the 12 colliding traces; `dddiagnose` run I is the crash, not a `brk`) the last landmark
-  is `proc_info(2, <pid>, 17)` → `ESRCH`. With a
-  non-colliding pid all six reach the RCV shape instead (run L 6 of 6; M35's `dddiagnose` 10 of 10);
-  the `brk` has never been observed with a correctly-forwarded pid. So the five are **B then C** —
-  `dddiagnose`'s shape — and each of the six has two walls in fix order: §4b (B, routed to M37),
-  then the RCV-shaped call (C, parked and not routed — the M36 spec's Ruling 1). Whether a `brk`
-  of M23's kind lies *behind* the RCV shape is unmeasured, and cannot be measured until that shape
-  is modelled.
-  **`dddiagnose` has three measured faces, and the split between its two colliding faces is not
-  retrace nondeterminism.** Non-colliding (run L): the RCV shape, 63 `err = true` landmarks, 0
-  self-pid `ESRCH`. Colliding (run O): the `brk`, 75 = 63 + 12. Colliding (run I): the identical
-  malloc crash, 71 landmarks, 11 `ESRCH` — the trace ends 22 landmarks before L's wall, so it
-  lacks three of L's other failures and the twelfth self-pid call, the `proc_info(2, pid, 17)` the
-  `brk` path dies on. The O and I landmark sequences are identical through #248 and fork at #249,
-  inside a `gettimeofday` polling loop whose *recorded replies* differ, and within each run
-  record and replay agree bit-for-bit: the crash is a
-  terminal `Event::Crash` with its final snapshot, reproduced by replay; the `far` varies between
-  runs of the crash face (`0x2000050050` in run I, `0x6000050040` in the Task 3 control) while pc
-  and esr do not, and replay reproduces each run's `far`. The reading is that a forwarded input
-  differs between runs before the fork — not class E2, since record and replay never disagreed —
-  and why an in-range run takes the crash rather than the `brk` stays open, attached to the §4b
-  entry below. The row that "moved" 45/9 ↔ 46/8 since M29 was this: the identical crash the old
-  script counted as a bare PASS.
+  of events one past the trace's last syscall — and in every cell where a replay ran (24 of 24
+  `rc=4` traces, `events == landmark` in each) record and replay agreed, the replay re-reporting
+  the recorder's own stop.
+  **The pid-collision probe is retired: a `Scalar`-marked register is never probed — M37.** The
+  window `[0x4000, 0x18000)` and its 82 % of the pid space, the `brk`, the identical crash and its
+  varying `far`, and which of M35's and M36's runs fell where are history, in `docs/status-log.md`
+  (M34 §4b, M36's corrections (a)–(c), M37's acceptance); the two open questions M36 attached to
+  the probe (why a colliding run took the crash rather than the `brk`; the `far`) are retired with
+  it, since neither face can now be reached. What the retirement leaves is in the descriptor entry
+  below: positions past a row's arity keep the probe on purpose, and a `Ptr` that is sometimes a
+  number is the same class behind a different kind.
   **History, kept short.** The corpus is a **reconstruction**: the sample behind the 47 published
   at M27 (46 at M23, 34 at M22) was never committed, so today's figures are not strictly comparable
   to those; they are simply the first a later reader can re-derive. `/bin/launchctl` was always
@@ -511,10 +537,12 @@ These are real and current, not aspirational gaps.
   exposed `launchctl`. `/usr/bin/yes` cannot pass under any method that requires a bounded
   comparison and is counted a FAIL **on purpose**, since excluding it would raise the tally without
   changing anything about retrace. The `identical fault` rows are still counted in `pass` so the
-  tally series 46/8 ↔ 45/9 stays comparable across M33–M36; the label on the line is the correction.
+  tally series 46/8 ↔ 45/9 stays comparable across M33–M37 (none occurred at M37); the label on the
+  line is the correction.
   M22's four named causes are all accounted for — the `pc=0x4204` group (13) and the `msgh_id` 412
-  group (4) were cleared at M23 (the 13-group's residue, the `brk`, is the §4b rows above), the
-  `dup2` pair is the `csh`/`tcsh` rows, and **`ps` was fixed at M27**. It was published here
+  group (4) were cleared at M23 (the 13-group's residue, the `brk`, was M36's colliding-pid face of
+  the six RCV rows above, retired with §4b at M37), the `dup2` pair is the `csh`/`tcsh` rows
+  (`dup2` modelled at M37; their wall is `fork`), and **`ps` was fixed at M27**. It was published here
   from M22 through M26 as "the oracle catching nondeterminism", a claim that could not have been
   true, since replay never *executes* a syscall, only applies recorded
   writes, so a process list cannot vary between the two runs; M26 corrected the *description* (the
@@ -718,28 +746,20 @@ These are real and current, not aspirational gaps.
   have made it live, a `Source` `newp` on the same `sysctl` whose `KERN_PROC_ALL` `Dest` exceeds
   the window, turned out to be `Ptr`, so no call in the corpus carries both a `Source` and a
   destination the whole-syscall exclusion would cost);
-  **the pid-collision probe** (M34 §4b: `forward_and_diff` rewrites *any* register whose value
-  lands in a guest backing to a host pointer. The fixed trampoline/page-table backings occupy
-  `[0x4000, 0x10000)` on the dynamic path, and M36 measured that the guest's own `os_alloc_once`
-  slab is first-fit-mapped at `0x10000` before its first self-pid call, so at the pid-carrying
-  calls the collision window is `[0x4000, 0x18000)` — recorder pids 16384..=98303, about 82 % of
-  the pid space; the non-colliding pids are 1..16383 and 98304..99998 (the upper band inferred
-  from run I's final snapshot — nothing mapped in `[0x18000, 0x28000)`, and everything the guest
-  maps later sits at ≥ `0x40000`, above `PID_MAX`; no run used a pid ≥ `0x18000`), and M35's
-  out-of-range probes (`0x257f`–`0x2662`) were in the first band while M36's run O
-  (`0x11EDD`–`0x126A8`) was inside the slab — and it is guest-dependent, being whatever the guest has mapped below
-  `0x100000` at the moment of the forward, so "outside one band" is not a regime. Inside it
-  every `csops` and every `proc_info(PIDINFO)` on the guest's own pid returns `ESRCH`: measured on `hello_dyn` at pid `0x6a30`, and 11–12 self-pid
-  `ESRCH` in every colliding sweep trace of the six §4b rows (5 in `csh`/`tcsh`) against 0 in
-  every non-colliding one. Record and replay agree, so the oracle cannot see it. Downstream of
-  it, on six corpus rows, are the two faces the sweep table above shows — libdispatch's `brk` on the failed `proc_info(2, pid, 17)`, and
-  `dddiagnose`'s identical malloc crash — so this one defect is what stands between those six and
-  the RCV-shaped wall behind them; which of the two faces a colliding run takes is the open
-  question attached here. Its fix is for `forward_and_diff` to skip `Scalar` positions — a
-  `Scalar` argument is never a pointer, whatever band its value falls in — whose precondition is a
-  `Scalar` audit of the whole table; routed to M37, with a positive control at a pid inside
-  `[0x10000, 0x18000)` as well as one inside `[0x4000, 0x10000)`. M36 did the measurement M34
-  asked of it: the recorder's pid is on every sweep row);
+  **the pid-collision probe — retired at M37** (M34 §4b: `forward_and_diff` rewrote *any*
+  register whose value landed in a guest backing to a host pointer, a pid, a length or an offset
+  included, and record and replay agreed so the oracle could not see it. Since M37 a position the
+  `arg_kinds` row marks `Scalar` is forwarded verbatim, never probed; the measured window, its
+  two-band acceptance and the faces it produced are history in `docs/status-log.md`. What the
+  retirement leaves, on purpose: `Fd` positions and positions *past a row's arity* — `x6`/`x7` on
+  a six-argument row, every register on a zero-arity one — keep the probe, because M30 measured
+  that a stale register pointing into a live buffer plants a canary 64 KiB past itself and the
+  windows those registers open are part of what the band logic reasons about; narrowing the probe
+  there is a separate measurement nobody has taken. And a `Ptr` position that is sometimes a
+  number — `fcntl`/`ioctl` `x2` for argument-less commands such as `F_SETFD`/`F_SETFL` — is §4b's
+  class behind a different kind, measured inert on the corpus (CPython's `fcntl` commands are
+  `F_GETPATH`, `F_ADDFILESIGS_RETURN`, `F_CHECK_LV`, `F_SETFD 1`, `F_GETFL`, `F_GETFD`) and
+  unfixed);
   **`SET_DYLD_IMAGES` (336/15) serviced above the trace** (the same `hello_dyn` recording shows
   it returning `EINVAL`, but that is *not* pid-caused — M34's first draft said it was: the
   forwarded call names *retrace's* task, whose dyld info retrace's own dyld already finalised
@@ -758,15 +778,24 @@ These are real and current, not aspirational gaps.
   `/bin/ed`'s stderr message is lost — and `NestedDest` rows are refused exactly as before);
   **`pipe`'s return** (`Ret::FdPair` is documentation: `host_svc` captures `x0` and the carry only,
   so the guest gets the host read-end unbound in `x0` and its own stale `x1`, measured on `/bin/zsh`
-  as `ret=0x12`; capturing `x1` comes before any binding model); **the `execve`/`posix_spawn`
+  as `ret=0x12` — and since M37 **exercised**, not merely issued: `/bin/csh` and `/bin/tcsh` use
+  both ends one landmark before their `fork` wall, receiving retrace's raw host read-end `0x17`
+  in `x0` (not in the guest table, so `translate_fds` answers `EBADF` without forwarding) and the
+  preceding `sigaction`'s second argument as the write end, and `fcntl` both to `EBADF`; capturing
+  `x1` comes before any binding model); **the `execve`/`posix_spawn`
   fail-loud assert** the `bsdthread_create` precedent demands (both are forwarded and fail only
   because their nested `argv`/`envp` pointers EFAULT — a forwarded exec that ever *succeeded* would
   replace retrace's own process; the assert is deferred to the operator because it re-parks the
-  CPython launcher test, a new `#[ignore]`); **console `writev` mirroring** (`is_console_write`
-  covers `write`/`write_nocancel` only, so a `writev` to fd 1/2 is forwarded, not mirrored — M9's
-  class in a new spelling); **`__disable_threadsignal` (331)**, forwarded and therefore applied to retrace's own
-  thread; and the fact that **`Scalar` versus `Ptr` is verified by nothing but the reviewer** — the
+  CPython launcher test, a new `#[ignore]`); **console `writev` mirroring** (`Box_::is_console_write`
+  covers `write`/`write_nocancel` only, so a `writev` to fd 1/2 — or, since M37, to a `dup2` alias
+  of them — is forwarded, not mirrored — M9's class in a new spelling);
+  **`__disable_threadsignal` (331)**, forwarded and therefore applied to retrace's own thread; and the fact that **a row's memory kinds are verified by nothing but the reviewer** — the
   equivalence sweep proves the views, not the rows, so the row count is not a coverage claim.
+  `Scalar` is the exception since M37: every `Scalar` position (190, over 129 rows) was audited
+  against its prototype and over every kept corpus trace, one was wrong (`madvise`'s `addr`,
+  fixed) and seventeen pointer-*typed* ones were kept on the measured ground that the kernel
+  never dereferences them — but a *new* row's `Scalar` is still checked by nothing but its
+  prototype, and `Ptr` versus `Source`/`Dest` was never audited that way.
   *(3)* `reads_guest_buffer` is a view over rows, and a row is only as right as its prototype.
   **`ioctl` is narrower than the hole this entry used to name, and what is left is a nested
   pointer, not a length.** The *direct* parameter is bounded: the kernel copies
@@ -834,7 +863,19 @@ These are real and current, not aspirational gaps.
   measurement that entry said nobody had taken was the census: 108 numbers across every guest the
   repo can run, each given a row, and `translate_fds` now consults `forwarded_shape`, which panics
   by name on a number with no row before anything is forwarded. Sixteen already-tabled readers had
-  exactly that untranslated-fd defect and now translate. What stays open is one level down. **A
+  exactly that untranslated-fd defect and now translate. **`dup2` is modelled since M37**
+  (`FdSlot::Console(u8)`, `FdTable::dup2`; a displaced host mapping is closed iff it is > 2, so a
+  guest's `dup2` can never close retrace's own 0/1/2), **and `dup` copies the slot's kind since
+  the M37 fix wave** (`FdTable::dup`: before it, `dup(1)` bound its alias as a plain `Open` slot on
+  both sides, so a write through it — and every stdout write after `dup2(saved, 1)` — was forwarded
+  to the host and absent from the trace, rc 0/0, no divergence; the final review measured it and
+  `dupkind_e2e` guards it), which leaves two descriptor-producing calls
+  unmodelled and named: **`fcntl(F_DUPFD)`/`F_DUPFD_CLOEXEC`**, issued by no corpus guest, and
+  **`pipe`** (`Ret::FdPair`, the entry above), which `csh`/`tcsh` now exercise one landmark before
+  their wall. Two edges of the model are known and symmetric: a displaced-then-closed slot below 3
+  (`dup2(f, 1); close(1)`) is never re-allocated, because `alloc`'s floor is 3, where the kernel
+  would hand 1 back; and a host `dup` failure on record is recorded as `(errno, true)` and diverges
+  loudly on replay, which recomputes success. What stays open is one level down. **A
   wrong position in a row is silent**: the equivalence sweep proves the views reproduce the legacy
   tables, and `Scalar`-versus-`Fd` on a *new* row is checked by nothing but the prototype and the
   reviewer. And **`AT_FDCWD` is rejected as EBADF in every instance a real guest was seen to pass
@@ -909,11 +950,16 @@ These are real and current, not aspirational gaps.
   guard page at stage 1. It is re-parked one wall further on, at the blocked-signal limit below, and
   the progress it used to stand for is gated by a *running* test beside it so it cannot regress in
   silence. And `cache_symbol_e2e` since M19, at the shared-cache
-  symbol wall above. Eight are M36's, in `crates/retrace/tests/apple_walls_e2e.rs`: one per
-  non-clean sweep row that is retrace's to fix or model (the table above), each reason the
-  measurement that parks it — the label, `rc`/`rp`, the pid regime, the recorder's own line with
-  its symbol, the evidence file, the class, and what un-parks it — and each run once with
-  `--ignored` to show it fails for exactly that reason (8 of 8, at colliding pids). Before M36 the
+  symbol wall above. Eight were parked by M36 and **moved by M37** to the walls it measured, in
+  `crates/retrace/tests/apple_walls_e2e.rs`: one per non-clean sweep row that is retrace's to fix
+  or model (the table above) — `csh`/`tcsh` at `fork` (class C: `mach_ports_register` from
+  `xpc_atfork_prepare`, `fork`(2) behind it; un-parked when the box models process creation) and
+  the six at the RCV-shaped `mach_msg2` on every pid (class C; un-parked when the box services
+  it) — each reason the measurement that parks it — the label, `rc`/`rp`, the three recorder pids
+  and their regimes, the landmarks, the recorder's own line with its symbol, the evidence file,
+  the class, and what un-parks it — and each run once with `--ignored` to show it fails for
+  exactly that reason (8 of 8, at pids 72339–72381, the slab regime where the pre-M37 face was the
+  `brk`). Before M36 the
   two long-standing ones were the whole count, and the `brk` wall M23 found had **no** gate from
   M23 to M35 — a gap this README recorded in its own voice as a gap rather than a decision, now
   paid. It was **three** between M22 and M23 — M22 parked `sysbin_e2e`'s second gate at
@@ -1090,7 +1136,8 @@ real OS before they were committed to the architecture; see `spikes/README.md`.
 - `docs/superpowers/plans/` — per-milestone task plans.
 - `docs/sweep-evidence/<date>-<milestone>/` — the Apple sweep's kept evidence: the decisive stderr
   of every non-clean row per run, verbatim, with a README giving the binary commit, the pid
-  regimes, the symbolication and the counting rules (first at M36).
+  regimes, the symbolication and the counting rules (M36), and the audits and the reader that
+  re-derives every number (M37).
 - `CLAUDE.md` — architecture invariants and working rules for this repository.
 
 ## Contributing

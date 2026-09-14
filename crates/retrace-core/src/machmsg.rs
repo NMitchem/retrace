@@ -95,8 +95,12 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     // the refusal is not a stub standing in for something missing; the destination genuinely does
     // not exist, and saying so is the faithful answer. Deterministic, no host contact, and no guest
     // reply port handed to a real daemon. Measured survivable by 13 of the 17 (M23 S6); the other
-    // four `brk` regardless of which of seven refusal codes is returned, so they are parked at that
-    // wall rather than forcing a proxy design for a quarter of the set.
+    // four `brk`'d regardless of which of seven refusal codes was returned. M36 measured the `brk`
+    // those four binaries reach as libdispatch's own crash on a §4b-failed `proc_info`, not a
+    // consequence of this refusal — with a correctly-forwarded pid (M37) they reach the RCV-shaped
+    // message-queue call instead (docs/sweep-evidence/2026-09-13-m36/README.md,
+    // docs/sweep-evidence/2026-09-13-m37/README.md), and stay parked there rather than forcing a
+    // proxy design for a quarter of the set.
     //
     // Narrowed to the RPC shape the measurement actually saw (SEND|RCV together with the MQ bit).
     // An MQ send in any other shape — a one-way send, say — has never been observed and keeps the

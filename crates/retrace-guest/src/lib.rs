@@ -139,6 +139,11 @@ pub const FAILSYSCTL: &str = concat!(env!("OUT_DIR"), "/failsysctl");
 /// 648-byte `kinfo_proc` into its buffer, then writes that record's first 8 bytes to stdout —
 /// the data half of the failing-syscall capture, visible as output.
 pub const FAILPROC: &str = concat!(env!("OUT_DIR"), "/failproc");
+/// M37: opens `/etc/hosts` and `lseek`s to offset `0x4000` = `TRAMPOLINE_IPA`, a mapped guest IPA
+/// on every load path. The unit control for the §4b fix: `forward_and_diff` used to rewrite ANY
+/// register holding a mapped IPA to a host pointer, this offset included, and `lseek` returned
+/// the trampoline's host address; a `Scalar` position is forwarded verbatim now.
+pub const SCALARPROBE: &str = concat!(env!("OUT_DIR"), "/scalarprobe");
 /// A guest issuing a legal NULL-`oldp` `sysctl` and then one whose `*oldlenp` (1 TiB) is far
 /// larger than any backing — the fixture for M29's `DerefU64` refusal.
 pub const OLDLENSYSCTL: &str = concat!(env!("OUT_DIR"), "/oldlensysctl");
@@ -185,6 +190,18 @@ pub const CLOSEFD_DYN: &str = concat!(env!("OUT_DIR"), "/closefd_dyn");
 /// M10: opens, dups, closes and re-opens, printing each descriptor it is given — so the e2e can
 /// assert the guest sees ITS OWN fd numbers (3, 4, …) rather than retrace's host ones (17+).
 pub const FDTABLE_DYN: &str = concat!(env!("OUT_DIR"), "/fdtable_dyn");
+/// M37: `dup2`s the console onto a high slot and a file onto the console, writing through each —
+/// so the e2e can assert that an alias of stdout is still mirrored and a displaced stdout is not.
+/// Takes the file path as `argv[1]`.
+pub const DUP2_DYN: &str = concat!(env!("OUT_DIR"), "/dup2_dyn");
+/// M37 (C1): closes fd 1 and fd 2, then writes to each — exits 0 only if both writes are EBADF,
+/// so the rung helper's exit-0 demand carries the "a closed console slot is closed on both sides"
+/// property and its stdout equality carries the mirror.
+pub const CLOSEWRITE_DYN: &str = concat!(env!("OUT_DIR"), "/closewrite_dyn");
+/// M37 fix wave (final review C1): `dup`s stdout and writes through the alias, then runs the
+/// shell's save/restore-stdout idiom — so the e2e can assert that a `dup` alias is mirrored like a
+/// `dup2` one and that a saved-and-restored stdout is still the console.
+pub const DUPKIND_DYN: &str = concat!(env!("OUT_DIR"), "/dupkind_dyn");
 /// M11 headline: a full-std Rust binary that `panic!()`s into `abort()`/SIGABRT (`-C panic=abort`).
 pub const PANICKY: &str = concat!(env!("OUT_DIR"), "/panicky");
 /// M12 headline: a stock full-`std` Rust binary that faults on a wild pointer, so libstd's own
@@ -282,6 +299,29 @@ mod tests {
     fn watchloop_guest_parses() {
         let l = parse_macho(&std::fs::read(WATCHLOOP).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn dup2_guest_parses() {
+        // M37: proves the build.rs wiring and the path constant; behaviour is dup2_e2e's.
+        let l = parse_macho(&std::fs::read(DUP2_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn dupkind_guest_parses() {
+        // M37 fix wave: proves the build.rs wiring and the path constant; behaviour is dupkind_e2e's.
+        let l = parse_macho(&std::fs::read(DUPKIND_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+        assert!(l.segments.iter().any(|s| s.data.windows(9).any(|w| w == b"/dev/null")));
+    }
+
+    #[test]
+    fn scalarprobe_guest_parses() {
+        // M37: proves the build.rs wiring and the path constant; behaviour is scalarprobe.rs's.
+        let l = parse_macho(&std::fs::read(SCALARPROBE).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+        assert!(l.segments.iter().any(|s| s.data.windows(10).any(|w| w == b"/etc/hosts")));
     }
 
     #[test]

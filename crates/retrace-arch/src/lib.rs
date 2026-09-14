@@ -5,12 +5,12 @@ pub const SYS_WRITE: u64 = 4;
 /// `SYS_write_nocancel` (`sys/syscall.h:437`). Identical `(fd, buf, nbyte)` ABI to `write`; the
 /// `_nocancel` variants only skip the pthread cancellation point. libc's **stdio** flush takes this
 /// path, so any guest that uses `printf`/`fwrite` — `jq` among them — reaches the console through
-/// 397 and never through 4. See `is_console_write`.
+/// 397 and never through 4. See `is_write_syscall` and `Box_::is_console_write`.
 pub const SYS_WRITE_NOCANCEL: u64 = 397;
 pub const SYS_EXIT: u64 = 1;
 pub const SVC_IMM: u64 = 0x80;
 
-/// Is this syscall the guest writing to the console (fd 1/2)?
+/// Is this syscall a `write` — the number half of "is the guest writing to the console"?
 ///
 /// Console writes are mirrored into the trace and faked — never forwarded — so the guest's output
 /// belongs to the recording rather than to retrace's own stdout, and replay can reproduce it
@@ -19,14 +19,17 @@ pub const SVC_IMM: u64 = 0x80;
 /// variant does not diverge loudly, it silently forwards the write to the HOST — which still prints,
 /// so a recording looks correct on a terminal while the trace holds no console bytes at all and
 /// replay prints nothing. That is exactly how 397 stayed invisible until `jq` (M9).
-pub fn is_console_write(num: u64, fd: u64) -> bool {
-    (num == SYS_WRITE || num == SYS_WRITE_NOCANCEL) && (fd == 1 || fd == 2)
+///
+/// M37: the fd half of the test moved into the box (`Box_::is_console_write`), because after
+/// `dup2` the console is a slot kind, not a number.
+pub fn is_write_syscall(num: u64) -> bool {
+    num == SYS_WRITE || num == SYS_WRITE_NOCANCEL
 }
 
 /// `SYS_close_nocancel` (`sys/syscall.h:439`).
 pub const SYS_CLOSE_NOCANCEL: u64 = 399;
 
-/// Is this the guest closing one of the three standard fds?
+/// Is this syscall a `close` — the number half of "is the guest closing a standard fd"?
 ///
 /// The guest's fd 0/1/2 ARE retrace's own — retrace never virtualized them, it just mirrors writes
 /// to them. So forwarding this close hands the guest a live handle on RETRACE's descriptors and it
@@ -34,8 +37,11 @@ pub const SYS_CLOSE_NOCANCEL: u64 = 399;
 /// retrace itself tried to print — including the mirrored recording — went nowhere, silently and
 /// with a 0 exit status. Faked instead (see the record arm). fd > 2 is an ordinary file and still
 /// forwards.
-pub fn is_console_close(num: u64, fd: u64) -> bool {
-    (num == SYS_CLOSE || num == SYS_CLOSE_NOCANCEL) && fd <= 2
+///
+/// M37: the fd half of the test moved into the box (`Box_::is_console_close`), because after
+/// `dup2` the console is a slot kind, not a number.
+pub fn is_close_syscall(num: u64) -> bool {
+    num == SYS_CLOSE || num == SYS_CLOSE_NOCANCEL
 }
 
 pub const SYS_READ: u64 = 3;
@@ -137,19 +143,28 @@ pub enum DestLen {
 /// it answered at `e13eb17`, entry for entry, except where its `EXPECTED_DIFFS` says why.
 ///
 /// **Load-bearing kinds:** `Fd`, `Source`, `NestedSource`, `Dest`, `NestedDest` and `Ret::Fd`
-/// each change what the box does. **`Scalar`, `Path` and `Ptr` change nothing at runtime** —
-/// `forward_and_diff` probes `host_span` on all eight registers regardless — and are
-/// documentation until a later milestone consults them.
+/// each change what the box does. **`Scalar` is load-bearing since M37**: `forward_and_diff`
+/// forwards it verbatim and never probes it (M34 §4b). `Ptr`/`Path` are the probed DEFAULT (what
+/// a position past the row's arity gets), so against `Scalar` the choice is load-bearing —
+/// madvise's x0 is the measured instance (`Ptr` → 44 of 44 succeed, `Scalar` → 0) — and against
+/// no marking it is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgKind {
     /// Not a memory reference: a count, a flag word, an offset, a signal number, a port name.
+    ///
+    /// Load-bearing since M37: `forward_and_diff` forwards a `Scalar` position verbatim and never
+    /// probes it with `host_span` (M34 §4b — a number that happened to equal a mapped guest IPA,
+    /// the recorder's own pid, used to reach the host kernel rewritten to a host pointer). So a
+    /// position marked `Scalar` must be provably NOT a pointer: one that is would now hand the
+    /// kernel a raw guest IPA, an `EFAULT` where there was none or a read of retrace's own memory.
     Scalar,
     /// A GUEST file descriptor — `translate_fds` rewrites it to the host's before forwarding.
     ///
-    /// The M10 analogue of `is_console_write`: one shared table rather than a condition spelled
-    /// out at each call site, because a forgotten `Fd` does not diverge loudly — it forwards a raw
-    /// guest fd to the host kernel, which then acts on RETRACE's descriptor of that number. A
-    /// position that is not `Fd` is simply not translated, so a non-`Fd` position must mean
+    /// The M10 analogue of `Box_::is_console_write` (the ONE shared console predicate): one shared
+    /// table rather than a condition spelled out at each call site, because a forgotten `Fd` does
+    /// not diverge loudly — it forwards a raw guest fd to the host kernel, which then acts on
+    /// RETRACE's descriptor of that number. A position that is not `Fd` is simply not translated,
+    /// so a non-`Fd` position must mean
     /// "provably not a descriptor", never "not gotten to yet". (Before M33 the same silence
     /// covered a whole syscall absent from the table; an absent ROW is loud now — `forwarded_shape`
     /// panics on it at the forward point — and only the per-position silence remains.)
@@ -277,9 +292,10 @@ pub enum Ret {
     ///
     /// **`dup2` is deliberately `Plain`.** It names its own target descriptor instead of taking
     /// the lowest free one, so binding its return like the others would put the new mapping in the
-    /// wrong slot. No guest in the gate calls it (measured: zero in the `jq` run), so retrace-core
-    /// asserts on it rather than modelling it wrong — a silently mis-modelled `dup2` aliases the
-    /// wrong file.
+    /// wrong slot. Until M37 no guest in the gate called it (measured: zero in the `jq` run) and
+    /// retrace-core asserted on it rather than modelling it wrong — a silently mis-modelled `dup2`
+    /// aliases the wrong file. M37 models it: `Box_::guest_dup2` writes the guest's own target slot
+    /// and returns it, so the return is a slot the guest named, not a fresh allocation.
     Fd,
     /// Two new descriptors, in x0 and x1 — `pipe`. Unmodelled: `allocates_fd` is false for it
     /// (binding one of two would alias), and retrace-core does not assert on it. What the guest
@@ -287,8 +303,11 @@ pub enum Ret {
     /// `apply_and_return` sets `x0` alone, so the guest receives retrace's own host READ-end,
     /// unbound, in `x0` and its own stale `x1` — the write-end never reaches the guest at all, and
     /// both host descriptors leak in the recorder. Every later use returns EBADF via
-    /// `translate_fds` (`/bin/zsh` issues it and never uses the pair). Capturing `x1` is the
-    /// actual successor work item, ahead of any binding model — M10-successor work, owed.
+    /// `translate_fds`: `/bin/zsh` issues it and never uses the pair; `/bin/csh` and `/bin/tcsh`
+    /// use both ends (`fcntl(F_SETFD)` on the raw read-end and on the stale `x1`, EBADF twice) one
+    /// landmark before their `fork` wall — M37's sweep evidence
+    /// (docs/sweep-evidence/2026-09-13-m37/README.md, audit 3). Capturing `x1` is the actual
+    /// successor work item, ahead of any binding model — M10-successor work, owed.
     FdPair,
 }
 
@@ -464,8 +483,10 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_CLOSE | SYS_CLOSE_NOCANCEL => row!(P, [Fd]),
         // dup(int fd) → a NEW descriptor
         SYS_DUP => row!(F, [Fd]),
-        // dup2(int fd, int fd2): both are descriptors; the return is NOT bound (see Ret::Fd).
-        SYS_DUP2 => row!(P, [Fd, Fd]),
+        // dup2(int fd, int fd2): fd2 is the guest's own TARGET slot, never translated (M37 models
+        // it in `forward_and_diff::guest_dup2`); the return is the slot, not a fresh allocation
+        // (Ret::Plain).
+        SYS_DUP2 => row!(P, [Fd, Scalar]),
         // fcntl(int fd, int cmd, ...) / fcntl_nocancel (406 measured beside 92 in the jq run — see
         // the read row). The third argument is cmd-dependent: an int for F_GETFL/F_SETFD/F_DUPFD, a
         // pointer for F_GETPATH (writes ≤ MAXPATHLEN 1024) and F_PREALLOCATE (a 32-byte fstore_t,
@@ -657,8 +678,10 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // SYS_BSDTHREAD_CREATE's doc. func/func_arg/stack are values handed to the new thread's
         // registers; `pthread` is written at a fixed offset (the kernel port, 4 bytes, at
         // pthread + tsd_offset + mach_thread_self_offset — libpthread kern/kern_support.c
-        // `_bsdthread_create`; measured at +0xf8, M14). Emulated (M14); forwarding is asserted
-        // against in retrace-core because it is whole-process fatal.
+        // `_bsdthread_create`; measured at +0xf8, M14). Emulated (M14) at retrace-core's
+        // `bsdthread_create` arm, which sits before the generic forward arm — that ordering is
+        // the only guard; nothing asserts against forwarding it (measured false at M37), and
+        // forwarding it would be whole-process fatal.
         SYS_BSDTHREAD_CREATE => row!(P, [Scalar, Scalar, Scalar, Ptr, Scalar]),
         // bsdthread_terminate(stackaddr, freesize, port, sema_or_ulock): xnu-private, shape per
         // SYS_BSDTHREAD_TERMINATE's doc. stackaddr is a VM range to deallocate, not data;
@@ -747,8 +770,20 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_MUNMAP => row!(P, [Scalar, Scalar]),
         SYS_MPROTECT => row!(P, [Scalar, Scalar, Scalar]),
         // madvise(void *addr, size_t len, int behav): addr is a VM range the kernel neither reads
-        // nor writes as data. Forwarded — `host_span` rebases it onto the guest backing.
-        75 => row!(P, [Scalar, Scalar, Scalar]),
+        // nor writes as data (bsd/kern/kern_mman.c `madvise`: `madvise_sanitize` then
+        // `mach_vm_behavior_set(user_map, start, size, …)`, no copyin/copyout). FORWARDED, and the
+        // rebase is the load-bearing part: the host kernel applies `behav` to whatever lies at the
+        // forwarded address in RETRACE's address space, so `host_span` must rebase it onto the
+        // guest backing — which is why it is `Ptr` and not `Scalar`. M37's static audit found it
+        // `Scalar` (M33 wrote the row when every register was probed regardless, so the kind
+        // carried nothing); once `Scalar` means "never probed", a raw guest IPA would have reached
+        // the host as the range to `MADV_FREE_REUSABLE` — an `ENOMEM`/`EINVAL` where the guest
+        // had success, or retrace's own pages discarded if the IPA happened to be mapped there.
+        // Live on the corpus: CPython issues 44 `madvise(nano-band or mmap-area addr, ≤ 0x20000,
+        // 7)` per run — 40 in the nano band, 4 at MMAP_BASE+0x20000/+0x2c000, the four that
+        // answered EPERM in the counterfactual.
+        // The `Ptr` bound is trivially citable — zero bytes of data cross.
+        75 => row!(P, [Ptr, Scalar, Scalar]),
         // shared_region_check_np(uint64_t *start_address): 8 bytes out — serviced above the
         // trace (forced to fail so dyld maps the cache itself).
         SYS_SHARED_REGION_CHECK_NP => row!(P, [Ptr]),
@@ -1344,7 +1379,7 @@ mod tests {
             assert_eq!(fd_operands(num).collect::<Vec<_>>(), [0], "syscall {num} holds its fd in x0");
         }
         assert_eq!(fd_operands(SYS_MMAP).collect::<Vec<_>>(), [4], "mmap's fd is x4, consumed by guest_mmap_file");
-        assert_eq!(fd_operands(SYS_DUP2).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(fd_operands(SYS_DUP2).collect::<Vec<_>>(), [0], "dup2's fd2 is the guest's target slot, not a descriptor to translate (M37)");
         // Path-only, fd-free, and fd-RETURNING calls must not have an operand translated.
         for num in [SYS_OPEN, SYS_OPEN_NOCANCEL, SYS_SOCKET, SYS_SHM_OPEN,
                     SYS_EXIT, SYS_MUNMAP, SYS_SYSCTL] {
@@ -1486,9 +1521,9 @@ mod tests {
         for num in [SYS_CLOSE, SYS_READ, SYS_PREAD, SYS_MMAP, SYS_FCNTL, SYS_EXIT, SYS_IOCTL] {
             assert!(!allocates_fd(num), "syscall {num} does not return a new fd");
         }
-        // dup2 names its own target slot, so it is NOT bound like the others — retrace-core
-        // asserts on it instead of modelling it wrong. See allocates_fd's doc comment.
-        assert!(!allocates_fd(SYS_DUP2), "dup2 is deliberately unmodelled, not silently bound");
+        // dup2 names its own target slot, so it is NOT bound like the others — M37 models it in
+        // the box (`guest_dup2`) and the return IS the target. See allocates_fd's doc comment.
+        assert!(!allocates_fd(SYS_DUP2), "dup2 returns its own target slot (M37), not a fresh allocation");
     }
 
     /// The M9 defect generalized. `jq` reaches the kernel through 396/397/398/399/406 and never
@@ -1603,28 +1638,26 @@ mod tests {
         assert_eq!((SYS_GETDIRENTRIES64, SYS_FSTATFS64), (344, 346));
     }
 
+    // M37: the fd half of both predicates lives in the box (`Box_::is_console_write` /
+    // `is_console_close`, table-driven — see `retrace-box/tests/fdtable.rs`); what stays here is
+    // the NUMBER half, and the M9 trap it guards is the _nocancel variant.
     #[test]
-    fn console_close_covers_both_close_variants_on_the_standard_fds() {
+    fn close_syscall_covers_both_close_variants() {
         for num in [SYS_CLOSE, SYS_CLOSE_NOCANCEL] {
-            for fd in 0..=2 {
-                assert!(is_console_close(num, fd), "fd {fd} is retrace's own descriptor");
-            }
-            assert!(!is_console_close(num, 3), "an ordinary file fd is forwarded, not faked");
+            assert!(is_close_syscall(num), "{num} is a close");
         }
-        assert!(!is_console_close(SYS_WRITE, 1), "only close is faked; write is mirrored");
+        assert!(!is_close_syscall(SYS_WRITE), "only close is faked; write is mirrored");
+        assert!(!is_close_syscall(SYS_DUP2), "dup2 displaces a slot; it is not a close");
     }
 
     #[test]
-    fn console_write_covers_both_write_variants_on_fd_1_and_2() {
+    fn write_syscall_covers_both_write_variants() {
         for num in [SYS_WRITE, SYS_WRITE_NOCANCEL] {
-            assert!(is_console_write(num, 1), "fd 1 is the console");
-            assert!(is_console_write(num, 2), "fd 2 is the console");
-            assert!(!is_console_write(num, 0), "fd 0 is stdin, not a console write");
-            assert!(!is_console_write(num, 3), "an ordinary file fd is forwarded, not mirrored");
+            assert!(is_write_syscall(num), "{num} is a write");
         }
         // Anything else is a normal syscall even on fd 1 — only the write family is mirrored.
-        assert!(!is_console_write(SYS_READ, 1));
-        assert!(!is_console_write(SYS_CLOSE, 1));
+        assert!(!is_write_syscall(SYS_READ));
+        assert!(!is_write_syscall(SYS_CLOSE));
     }
 
     #[test]

@@ -37,6 +37,7 @@
 #   RETRACE_SWEEP_LIST=<file>   sweep this list instead of tools/apple-sweep-binaries.txt
 #   RETRACE_SWEEP_KEEP=<dir>    copy every non-clean row's rec.err, rp.err and trace to
 #                               <dir>/<basename>.{rec.err,rp.err,bin} (identical faults included)
+#   RETRACE_SWEEP_KEEP_ALL=1   with KEEP: keep PASS rows too (the M37 audit's full-corpus baseline)
 #   RETRACE_SWEEP_TIMEOUT=<s>   per-phase watchdog, default 30
 set -u
 
@@ -48,6 +49,7 @@ LIST=$ROOT/tools/apple-sweep-binaries.txt
 # nothing kept — the EXIT trap still destroys $TMP.
 LIST=${RETRACE_SWEEP_LIST:-$LIST}
 KEEP=${RETRACE_SWEEP_KEEP:-}
+KEEP_ALL=${RETRACE_SWEEP_KEEP_ALL:-}
 if [ -n "$KEEP" ]; then mkdir -p "$KEEP" || { echo "TALLY ABORTED (cannot create $KEEP)"; exit 2; }; fi
 
 # A pre-loop setup failure below exits before any per-binary line or the closing TALLY
@@ -122,11 +124,14 @@ run_timeout() {
 # before the loop's next `rm -f`, so what it copies is this row's own, never a neighbour's. A cp
 # failure is left audible on stderr — silently missing evidence is the failure this milestone
 # exists to close.
+# M37: RETRACE_SWEEP_KEEP_ALL=1 (with KEEP) keeps clean PASS rows too — the full-corpus baseline
+# a later fix is diffed against needs every trace, not just the ones that were already interesting.
 keep_row() {
-    if [ -n "$KEEP" ] && { [ "$1" != "PASS" ] || [ -n "${2:-}" ]; }; then
+    if [ -n "$KEEP" ] && { [ -n "$KEEP_ALL" ] || [ "$1" != "PASS" ] || [ -n "${2:-}" ]; }; then
         b=$(basename "$g")
         cp "$TMP/rec.err" "$KEEP/$b.rec.err"
         [ -f "$TMP/rp.err" ] && cp "$TMP/rp.err" "$KEEP/$b.rp.err"
+        [ -e "$TMP/rp.out" ] && cp "$TMP/rp.out" "$KEEP/$b.rp.out"
         [ -f "$TMP/t.bin" ] && cp "$TMP/t.bin" "$KEEP/$b.bin"
     fi
     printf 'ROW\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$g" "$1" "$rc" "$rp" "$recpid" "$landmark" "$rec_reason" "$rp_line"

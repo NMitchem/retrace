@@ -84,8 +84,8 @@ fn the_launcher_records_and_replays_its_own_posix_spawn_failure() {
     //
     // This text is on `rec.stdout`, not `rec.stderr`. retrace mirrors guest writes to BOTH fd 1
     // and fd 2 into one buffer and prints it on retrace's own stdout (the `is_console_write` arm
-    // of `record_box` in crates/retrace-core/src/lib.rs; the predicate at
-    // crates/retrace-arch/src/lib.rs:22 covers both fds). retrace's own `[retrace]` diagnostics go
+    // of `record_box` in crates/retrace-core/src/lib.rs; the predicate, `Box_::is_console_write`
+    // in crates/retrace-box/src/lib.rs, covers both fds). retrace's own `[retrace]` diagnostics go
     // to retrace's stderr, so `rec.stderr` never carries guest text — asserting on it here would
     // fail for a reason unrelated to the guest.
     assert!(
