@@ -9612,7 +9612,12 @@ targets; `dupkind_e2e` sorts between `dup2_e2e` and `faultlog`, so it lands in `
 later `xargs -n20` boundary moves by one, the last group 4 → 5). The tree holds **604** `#[test]`
 attributes = 594 runnable + 10 ignored (bare grep 605, the one prose match as before); the run
 should report **596 passed / 0 failed / 10 ignored over 131 binaries** (596 = 594 + census's 2),
-per chunk `ws` 155, `box` 284, e2e 146, `bins` 11. The re-run: `<controller fills>`.
+per chunk `ws` 155, `box` 284, e2e 146, `bins` 11. The re-run, on `0f15f2b` (the fix-wave commit,
+now the last commit touching anything cargo compiles), 20:58:30 → 21:18:36 EDT: **596 passed /
+0 failed / 10 ignored over 131 binaries**, every chunk's cargo exit 0 (`ws=0 box=0 e2e1=0 e2e2=0
+e2e3=0 e2e4=0 bins=0 clippy=0`), zero `SKIPPED`; per chunk `ws` 26 / 155, `box` 39 / 284, `e2e1`–`e2e4`
+20 + 20 + 20 + 5 binaries / 44 + 30 + 52 + 20 = 146 with ignored 8 + 0 + 2 + 0, `bins` 1 / 11 —
+the prediction matched exactly. The first run's logs are kept beside it (`gate-09b6bdb/`).
 
 ### M38 does not exist
 

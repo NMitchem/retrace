@@ -444,8 +444,10 @@ or un-parked).
   `pipe` — but `dup` was missing from that count as "modelled and wrong", and from the owed list.
   **The gate prediction is corrected by +6 tests and +1 binary** against 11.1's 590 / 0 / 10 over
   130: `fdtable.rs` +3, `consoleclose.rs` +1, `retrace-guest/src/lib.rs` +1, `dupkind_e2e.rs` +1
-  in a new binary — **596 / 0 / 10 over 131**, `#[ignore]` 10 → 10; the controller's numbers file
-  carries the per-chunk cut and the measured re-run.
+  in a new binary — **596 / 0 / 10 over 131**, `#[ignore]` 10 → 10. Measured on `0f15f2b`
+  (20:58–21:18 EDT): **596 passed / 0 failed / 10 ignored over 131 binaries**, every chunk's cargo
+  exit 0, zero `SKIPPED`, clippy clean — the corrected prediction met exactly; the controller's
+  numbers file carries the per-chunk cut.
 
 ### 11.4 M38
 

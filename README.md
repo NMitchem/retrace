@@ -378,13 +378,13 @@ design, and the reconstruction caveat in full.
   `TRACE_MAGIC` did not move: `FdSlot` is box state, never traced, and the skip changes what the
   host kernel is *asked*, never what is recorded or compared.
 
-**Gate:** 590 passed / 0 failed / 10 ignored across 130 test binaries, **measured at M37** over all
-130 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
-`--workspace --all-targets` with `-D warnings`. Measured on commit `09b6bdb`, the last commit that
-touches anything cargo compiles — M37's close after it changed README, status-log, spec and
-CLAUDE.md text only; `git diff 09b6bdb..<merge> --stat -- crates tools` is empty, so the gate's
-figures stand.
-See the testing note below for how that number is assembled. "130 test binaries" is 123 test
+**Gate:** 596 passed / 0 failed / 10 ignored across 131 test binaries, **measured at M37** over all
+131 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
+`--workspace --all-targets` with `-D warnings`. Measured on commit `0f15f2b`, the fix-wave commit and
+the last one that touches anything cargo compiles (the gate had first run on `09b6bdb`, 590 / 0 / 10
+over 130, before the final review's fix wave added six tests and one binary; it was re-run in full
+after it); `git diff 0f15f2b..<merge> --stat -- crates tools` is empty, so the gate's figures stand.
+See the testing note below for how that number is assembled. "131 test binaries" is 124 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs zero tests — the
 convention every milestone since M14 has counted by, kept for comparability and written out here so
 nobody has to re-derive it. The ignored gates are **ten**: the two long-standing —
@@ -397,35 +397,36 @@ the eight moved forward (`csh`/`tcsh` from the `dup2` assert to `fork`; the six 
 recorder's pid selected to the RCV-shaped `mach_msg2` on every pid), and each was run once with
 `--ignored` and failed for exactly the reason now on it.
 
-Reconciled against M36's 575 / 0 / 10 over 126 **file-by-file rather than by sum** — six files
+Reconciled against M36's 575 / 0 / 10 over 126 **file-by-file rather than by sum** — seven files
 changed their count, everything else is byte-for-byte M36's:
 
 | file | M36 | M37 | delta |
 |---|---|---|---|
-| `retrace-box/tests/fdtable.rs` | 10 | 15 | **+5** (four `dup2` table tests; the `DUP2_MAX_FD` bound) |
-| `retrace-box/tests/consoleclose.rs` | — | 3 | **+3**, new binary (the narrowed console-close predicate) |
+| `retrace-box/tests/fdtable.rs` | 10 | 18 | **+8** (four `dup2` table tests; the `DUP2_MAX_FD` bound; three `FdTable::dup` tests from the fix wave) |
+| `retrace-box/tests/consoleclose.rs` | — | 4 | **+4**, new binary (the narrowed console-close predicate; the re-aliased identity slot) |
 | `retrace-box/tests/scalarprobe.rs` | — | 1 | **+1**, new binary (the `Scalar` skip's unit control) |
-| `retrace-guest/src/lib.rs` | 9 | 11 | **+2** (`dup2_guest_parses`, `scalarprobe_guest_parses`) |
+| `retrace-guest/src/lib.rs` | 9 | 12 | **+3** (`dup2_guest_parses`, `scalarprobe_guest_parses`, `dupkind_guest_parses`) |
 | `retrace/tests/dup2_e2e.rs` | — | 3 | **+3**, new binary (incl. the tampered-return control) |
 | `retrace/tests/closewrite_e2e.rs` | — | 1 | **+1**, new binary (a write after `close(1)` is `EBADF` on both sides) |
+| `retrace/tests/dupkind_e2e.rs` | — | 1 | **+1**, new binary (a `dup(1)` alias is a console; a saved-and-restored stdout stays one — the fix wave's control) |
 
-+15 runnable, `#[ignore]` **10 → 10**, `--bins` **11 → 11**, and **four new test binaries**,
-126 → 130. The count closes at both ends, and the two ends must still be read separately: the tree
-holds **598** `#[test]` attributes = 588 runnable + 10 ignored (M36 held 583 = 573 + 10), while the
-run reports **590** passed = 588 + the 2 census tests that run twice (`census.rs` executes in its
++21 runnable, `#[ignore]` **10 → 10**, `--bins` **11 → 11**, and **five new test binaries**,
+126 → 131. The count closes at both ends, and the two ends must still be read separately: the tree
+holds **604** `#[test]` attributes = 594 runnable + 10 ignored (M36 held 583 = 573 + 10), while the
+run reports **596** passed = 594 + the 2 census tests that run twice (`census.rs` executes in its
 own binary and again inside `legacy_equivalence`'s `#[path]` include). (A bare `grep -c
-'#\[test\]'` says 599, because a comment in `legacy_equivalence.rs` mentions the attribute in
-prose; the file has three.) The prediction made from source before the run was 590 / 0 / 10 over
-130, with per-chunk expectations of 154 / 280 / 145 / 11; the run matched it exactly. The spec's
-own §9 had said 582 over 128 — it could not count the eight tests and two binaries its review
-rounds added.
+'#\[test\]'` says 605, because a comment in `legacy_equivalence.rs` mentions the attribute in
+prose; the file has three.) The prediction made from source before each run was met exactly:
+590 / 0 / 10 over 130 (per chunk 154 / 280 / 145 / 11) on `09b6bdb`, then 596 / 0 / 10 over 131
+(155 / 284 / 146 / 11) on `0f15f2b`. The spec's own §9 had said 582 over 128 — it could not count
+the tests and binaries its review rounds and the final fix wave added.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson). `retrace` ran **per-target** — sixty-four `--test <name>` invocations in four groups
-(three of twenty and one of four; `closewrite_e2e` and `dup2_e2e` both sort before `faultlog`, so
-both landed in the first group and every later boundary moved by two against M36's, their sum
-unchanged), because the whole package exceeds the tool ceiling — **plus the `--bins` chunk**,
-which is the only place the 11 unit tests in `crates/retrace/src/debug.rs` run; the 130 count
+lesson). `retrace` ran **per-target** — sixty-five `--test <name>` invocations in four groups
+(three of twenty and one of five; `closewrite_e2e`, `dup2_e2e` and `dupkind_e2e` all sort before
+`faultlog`, so all three landed in the first group and every later boundary moved by three against
+M36's, their sum unchanged), because the whole package exceeds the tool ceiling — **plus the `--bins` chunk**,
+which is the only place the 11 unit tests in `crates/retrace/src/debug.rs` run; the 131 count
 includes it. The two mouths of the same trap, one loud and one silent, both closed by
 construction of the chunk list.
 
