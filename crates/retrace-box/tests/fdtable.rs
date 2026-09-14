@@ -209,3 +209,57 @@ fn dup2_rejects_a_negative_or_out_of_range_target_with_ebadf() {
         "one below the bound is a legal target");
     assert_eq!(t.slots()[(retrace_box::DUP2_MAX_FD - 1) as usize], FdSlot::Console(0));
 }
+
+// M37 fix wave (final review C1). dup: the other alias producer. The new slot is `alloc`'s number
+// and takes the SOURCE's kind — so `dup(1)` is a console alias like `dup2(1, n)`, and `dup2` of
+// that alias back onto 1 (the shell's save/restore-stdout idiom) hands stdout its kind back.
+#[test]
+fn dup_of_a_console_slot_is_a_console_alias_at_the_alloc_floor() {
+    let mut t = FdTable::new();
+    let d = t.dup(1).expect("dup(1) succeeds");
+    assert_eq!(d, 3, "the alias takes alloc's number: the lowest free slot >= 3, never a host fd");
+    assert_eq!(t.slots()[d as usize], FdSlot::Console(1), "the alias is stdout's KIND");
+    assert_eq!(t.console_of(d), Some(1), "a write through it is a console write");
+    assert_eq!(t.host(d), None, "the host mapping is the caller's (record binds, replay does not)");
+    assert!(t.is_open(d));
+    assert_eq!(t.dup(2).unwrap(), 4, "dup(2) takes the next slot and stderr's kind");
+    assert_eq!(t.slots()[4], FdSlot::Console(2));
+    // The save/restore idiom: dup2 copies the alias's console kind back onto a displaced stdout.
+    let f = t.alloc(); t.bind(f, 30);
+    assert_eq!(t.dup2(f, 1, Some(32)).unwrap(), (1, Some(1)));
+    assert_eq!(t.console_of(1), None, "redirected: stdout is the file");
+    assert_eq!(t.dup2(d, 1, Some(33)).unwrap(), (1, Some(32)));
+    assert_eq!(t.slots()[1], FdSlot::Console(1), "restored: stdout is the console again");
+}
+
+#[test]
+fn dup_of_a_closed_or_never_opened_fd_is_ebadf_and_opens_nothing() {
+    let mut t = FdTable::new();
+    assert_eq!(t.dup(3), Err(retrace_box::EBADF), "never opened");
+    let f = t.alloc();
+    assert!(t.close(f));
+    assert_eq!(t.dup(f), Err(retrace_box::EBADF), "closed");
+    assert_eq!(t.dup(99), Err(retrace_box::EBADF), "past the table");
+    assert_eq!(t.dup(u64::MAX), Err(retrace_box::EBADF), "a negative int fd, zero-extended");
+    assert_eq!(t.slots()[f as usize], FdSlot::Closed, "a failed dup opens nothing");
+    assert_eq!(t.alloc(), f, "and the closed slot is still the lowest free");
+}
+
+#[test]
+fn dup_of_an_open_slot_is_a_plain_open_duplicate() {
+    let mut t = FdTable::new();
+    let f = t.alloc(); t.bind(f, 30);
+    let d = t.dup(f).unwrap();
+    assert_eq!(d, 4);
+    assert_eq!(t.slots()[d as usize], FdSlot::Open, "a plain descriptor's dup is plain");
+    assert_eq!(t.console_of(d), None);
+    t.bind(d, 31); // record: the host dup's return
+    assert_eq!(t.host(f), Some(30), "the source's mapping is untouched");
+    assert!(t.close(d));
+    assert_eq!(t.host(f), Some(30), "closing the duplicate does not disturb the original");
+    // replay's shape: no host fd, same guest-visible result
+    let mut r = FdTable::from_slots(&t.slots());
+    assert_eq!(r.dup(f).unwrap(), d, "the same number on the replay table");
+    assert_eq!(r.slots()[d as usize], FdSlot::Open);
+    assert_eq!(r.host(d), None, "replay carries no host mapping for a dup");
+}

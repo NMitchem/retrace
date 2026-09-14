@@ -350,9 +350,19 @@ design, and the reconstruction caveat in full.
   with a host `dup`, replay with none); replay recomputes the `(ret, err)` pair inside the generic
   arm and byte-compares it against the recording — the M10 fd mirror's own posture, no new
   returning arm, `verify_thread`'s seven sites unchanged, and a test that tampers with a recorded
-  `dup2` return watches the compare fire. A faked console close now retires its slot on **both**
-  sides (a write after `close(1)` is `EBADF` on both, the kernel's own answer — M9's deferral
-  retired), an alias closes the generic way, and the target is bounded at `DUP2_MAX_FD = 10240`.
+  `dup2` return watches the compare fire. **`dup` copies the slot's kind too** (the M37 fix wave,
+  from the final review): `FdTable::dup` gives `dup(1)`'s new slot its source's kind rather than a
+  plain `Open`, on both sides through the same method — so a write through a `dup` alias is
+  mirrored like one through a `dup2` alias, and the shell's save/restore-stdout idiom
+  (`saved = dup(1); dup2(file, 1); …; dup2(saved, 1)`) hands slot 1 its console kind back
+  (`dupkind_e2e`). Until that fix the idiom was the M9 class in a new coat: every stdout write
+  after the restore was forwarded to a host dup of retrace's own stdout, on the terminal and in
+  neither the trace nor the replay, rc 0/0, no divergence — and `main` had been *loud* on it (the
+  `dup2` assert), so the branch had turned a loud failure silent. A faked console close now
+  retires its slot on **both** sides (a write after `close(1)` is `EBADF` on both, the kernel's
+  own answer — M9's deferral retired), an alias closes the generic way — as does an identity slot
+  re-aliased by `dup2(saved, 1)`, whose host mapping is a dup — and the target is bounded at
+  `DUP2_MAX_FD = 10240`.
   Nothing is forwarded as `dup2`: forwarding it would overwrite retrace's own descriptor. And
   `forward_and_diff` forwards a register whose `arg_kinds` row marks it `Scalar` **verbatim** —
   never probed against the guest's backings — which is the fix M34 §4b named: a pid, a length or
@@ -854,7 +864,11 @@ These are real and current, not aspirational gaps.
   by name on a number with no row before anything is forwarded. Sixteen already-tabled readers had
   exactly that untranslated-fd defect and now translate. **`dup2` is modelled since M37**
   (`FdSlot::Console(u8)`, `FdTable::dup2`; a displaced host mapping is closed iff it is > 2, so a
-  guest's `dup2` can never close retrace's own 0/1/2), which leaves two descriptor-producing calls
+  guest's `dup2` can never close retrace's own 0/1/2), **and `dup` copies the slot's kind since
+  the M37 fix wave** (`FdTable::dup`: before it, `dup(1)` bound its alias as a plain `Open` slot on
+  both sides, so a write through it — and every stdout write after `dup2(saved, 1)` — was forwarded
+  to the host and absent from the trace, rc 0/0, no divergence; the final review measured it and
+  `dupkind_e2e` guards it), which leaves two descriptor-producing calls
   unmodelled and named: **`fcntl(F_DUPFD)`/`F_DUPFD_CLOEXEC`**, issued by no corpus guest, and
   **`pipe`** (`Ret::FdPair`, the entry above), which `csh`/`tcsh` now exercise one landmark before
   their wall. Two edges of the model are known and symmetric: a displaced-then-closed slot below 3

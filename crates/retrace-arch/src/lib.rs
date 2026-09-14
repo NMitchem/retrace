@@ -678,8 +678,10 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // SYS_BSDTHREAD_CREATE's doc. func/func_arg/stack are values handed to the new thread's
         // registers; `pthread` is written at a fixed offset (the kernel port, 4 bytes, at
         // pthread + tsd_offset + mach_thread_self_offset — libpthread kern/kern_support.c
-        // `_bsdthread_create`; measured at +0xf8, M14). Emulated (M14); forwarding is asserted
-        // against in retrace-core because it is whole-process fatal.
+        // `_bsdthread_create`; measured at +0xf8, M14). Emulated (M14) at retrace-core's
+        // `bsdthread_create` arm, which sits before the generic forward arm — that ordering is
+        // the only guard; nothing asserts against forwarding it (measured false at M37), and
+        // forwarding it would be whole-process fatal.
         SYS_BSDTHREAD_CREATE => row!(P, [Scalar, Scalar, Scalar, Ptr, Scalar]),
         // bsdthread_terminate(stackaddr, freesize, port, sema_or_ulock): xnu-private, shape per
         // SYS_BSDTHREAD_TERMINATE's doc. stackaddr is a VM range to deallocate, not data;
