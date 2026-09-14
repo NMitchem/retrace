@@ -127,6 +127,9 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     (336, View::DestBuffer, "proc_info(callnum, pid, flavor, arg, buffer, buffersize): buffer is a Dest of x5 bytes — exercised (every dynamic guest; corpus max 368)"),
     (169, View::DestBuffer, "csops(pid, ops, useraddr, usersize): useraddr is a Dest of x3 bytes (CS_OPS_BLOB is unbounded below the window) — exercised (every dynamic guest; corpus max 1032)"),
     (170, View::DestBuffer, "csops_audittoken(…): csops's shape plus a 32-byte token copyin — exercised (every dynamic guest; corpus max 1032)"),
+    // M37: dup2 is modelled in the box. Its second operand is the guest's own target slot number
+    // — translating it would forward a HOST descriptor as the target and overwrite retrace's own.
+    (90, View::FdOperands, "dup2(fd, fd2): fd2 is the guest's target slot, not a descriptor to translate — M37; exercised (/bin/csh, /bin/tcsh: dup2(0,16) (1,17) (2,18) (16,19))"),
 ];
 
 /// The BSD numbers, the mach traps (negative, as the two's-complement `u64` the trap carries), and

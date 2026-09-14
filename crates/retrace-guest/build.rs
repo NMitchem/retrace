@@ -103,6 +103,16 @@ fn main() {
         .status().expect("clang failproc");
     assert!(status.success(), "failproc guest build failed");
 
+    // M37: a guest whose lseek offset is 0x4000 = TRAMPOLINE_IPA — a NUMBER that equals a mapped
+    // guest IPA. The unit control for the §4b probe skip: a Scalar position is forwarded verbatim.
+    let src = format!("{}/asm/scalarprobe.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/scalarprobe");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang scalarprobe");
+    assert!(status.success(), "scalarprobe guest build failed");
+
     // M29: a guest issuing a legal NULL-oldp sysctl (size query) followed by one whose *oldlenp
     // (1 TiB) is far larger than any backing — the fixture for the DerefU64 refusal.
     let src = format!("{}/asm/oldlensysctl.s", env!("CARGO_MANIFEST_DIR"));
@@ -316,6 +326,36 @@ fn main() {
         .args(["-arch","arm64","-o",&bin,&src])
         .status().expect("clang fdtable_dyn");
     assert!(status.success(), "fdtable_dyn guest build failed");
+
+    // dup2_dyn: the M37 dup2 fixture — an alias of stdout stays a console write, a console slot
+    // displaced by a file becomes a file write. Same recipe as hello_dyn.
+    let src = format!("{}/c/dup2_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/dup2_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang dup2_dyn");
+    assert!(status.success(), "dup2_dyn guest build failed");
+
+    // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
+    // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
+    let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/closewrite_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang closewrite_dyn");
+    assert!(status.success(), "closewrite_dyn guest build failed");
+
+    // dupkind_dyn: the M37 fix-wave fixture — a dup alias of stdout is a console write, and the
+    // shell's save/restore-stdout idiom hands slot 1 its console kind back. Same recipe as hello_dyn.
+    let src = format!("{}/c/dupkind_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/dupkind_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang dupkind_dyn");
+    assert!(status.success(), "dupkind_dyn guest build failed");
 
     // strip47: signs a pointer with pacda then strips it with objc's 47-bit ISA_MASK; the result
     // equals the original ONLY if the PAC signature lands above bit 46 — i.e. only under a 47-bit

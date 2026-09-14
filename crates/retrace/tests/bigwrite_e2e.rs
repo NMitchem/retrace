@@ -17,7 +17,7 @@
 // witness is what the kernel actually wrote out.
 //
 // **The guest writes to a FILE for a reason that also cost this test its first version.**
-// `retrace_arch::is_console_write` makes fd 0/1/2 mirrored-and-faked in retrace-core — read out of
+// `Box_::is_console_write` makes fd 0/1/2 mirrored-and-faked in retrace-core — read out of
 // guest memory and never forwarded — so a guest writing to stdout never reaches `forward_and_diff`
 // at all. The stdout version of this fixture was measured VACUOUS: green with the fix reverted.
 //

@@ -149,10 +149,15 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             if let Stop::Syscall { num, args } = &stop {
                 eprintln!("[trap] num={} (0x{:x}) pc={:#x} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
                     *num as i64, num, b.position(), args[0], args[1], args[2], args[3], args[4], args[5]);
-                // Echo dyld's fd-1/2 diagnostics so a fatal error message is visible.
-                if retrace_arch::is_console_write(*num, args[0]) {
+                // Echo dyld's fd-1/2 diagnostics so a fatal error message is visible. Names the
+                // console the slot STANDS FOR beside the number the guest used (M37 fix wave,
+                // final review M5): `[fd17 (console 1)]` for a write through a `dup2(1, 17)`
+                // alias, `[fd1 (console 2)]` after `dup2(2, 1)` — what the mirror decided, not
+                // just the alias.
+                if b.is_console_write(*num, args[0]) {
                     let bytes = b.read_guest(args[1], args[2] as usize);
-                    eprintln!("[fd{}] {}", args[0], String::from_utf8_lossy(&bytes));
+                    let console = b.fds().console_of(args[0]).expect("is_console_write implies a Console slot");
+                    eprintln!("[fd{} (console {console})] {}", args[0], String::from_utf8_lossy(&bytes));
                 }
                 // M2-mach diagnostic: decode + hexdump mach_msg2 sends (golden capture for the codec).
                 if *num == MACH_MSG2 {
@@ -232,27 +237,35 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // record process's real stdout AND double the mirror; replay reproduces from the mirror.
             // `is_console_write` covers write AND write_nocancel — the shared predicate is what
             // keeps this arm and replay's mirror from drifting (M9; see its doc comment).
-            Stop::Syscall { num, args } if retrace_arch::is_console_write(num, args[0]) => {
+            Stop::Syscall { num, args } if b.is_console_write(num, args[0]) => {
                 stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
                 let ret = args[2];
                 w.append(&Event::Syscall { num, args, ret, err: false, writes: vec![], thread }).map_err(|e| format!("append write: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, false);
             }
-            // A guest close of fd 0/1/2 is FAKED, never forwarded: those descriptors are retrace's
-            // own (see `is_console_close`), so forwarding lets the guest close retrace's stdout out
-            // from under it — after which the CLI prints the mirrored recording into a closed fd and
-            // the run reports success having emitted nothing. Measured with jq, whose exit path does
+            // A guest close of its identity console slot (0/1/2 while still the console) has its
+            // HOST half FAKED, never forwarded: those descriptors are retrace's own (see
+            // `is_console_close`), so forwarding lets the guest close retrace's stdout out from
+            // under it — after which the CLI prints the mirrored recording into a closed fd and the
+            // run reports success having emitted nothing. Measured with jq, whose exit path does
             // exactly this. Reports success, which is what a real close(1) would do.
             //
-            // No replay mirror arm is needed (contrast the console write): this appends an ordinary
-            // recorded syscall whose (ret=0, err=false, no writes) replay reproduces through the
-            // generic `apply_and_return`, and whose (num, args) the divergence oracle still checks.
+            // The TABLE half is real (M37 fix round 1, review C1): the slot is retired through the
+            // same `FdTable::close` the generic path uses, so a later write to 1 is EBADF — the
+            // kernel's answer — rather than a mirrored success, and a later `dup2(1, n)` is EBADF
+            // too. `FdTable::close` only drops the host mapping; retrace's own fd 1 stays open.
             //
-            // Deferred: retrace does not model the fd as CLOSED afterwards, so a guest that wrote to
-            // fd 1 after closing it would see the write succeed instead of EBADF. No guest in the
-            // gate does; modeling it means giving the box a real fd table.
-            Stop::Syscall { num, args } if retrace_arch::is_console_close(num, args[0]) => {
+            // No replay mirror ARM is needed (contrast the console write): this appends an ordinary
+            // recorded syscall whose (ret=0, err=false, no writes) replay reproduces through the
+            // generic arm, whose (num, args) the divergence oracle still checks — and whose slot the
+            // generic arm's M10 close mirror retires unconditionally. That mirror is what makes the
+            // retirement below load-bearing: until M37 this arm did NOT retire the slot while
+            // replay's mirror did, an asymmetry nothing observed until `is_console_write` became
+            // table-driven, whereupon a write after `close(1)` was mirrored on record and not on
+            // replay — two stdouts, rc 0 on both, no divergence (closewrite_e2e is the control).
+            Stop::Syscall { num, args } if b.is_console_close(num, args[0]) => {
                 w.append(&Event::Syscall { num, args, ret: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append close: {e}"))?; count += 1;
+                b.fds_mut().close(args[0]);
                 b.set_x0_err_and_return(0, false);
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
@@ -622,7 +635,8 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // equivalent for a thread parked in `semaphore_wait_trap`, and no fixture in this
                 // tree pends a signal on one. Copying M17's correction here would be guessing at
                 // unmeasured saved state — the thing this file refuses BY VALUE everywhere else
-                // (`guest_workq_kernreturn`'s opcode refusal, the dup2 guard, the
+                // (`guest_workq_kernreturn`'s opcode refusal, the `writes_via_nested_pointer`
+                // refusal — and the dup2 guard, until M37 modelled dup2 — the
                 // `deliver_to.len() <= 1` bound). So it fails loud the day a fixture produces it,
                 // naming the measurement that is owed first.
                 let deliverable: Vec<usize> = woken.iter().copied()
@@ -1133,13 +1147,6 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 assert!(!retrace_arch::is_signal_syscall(num),
                     "signal syscall {num} reached the generic forward arm — it must be serviced or \
                      asserted above (M11 correctness invariant)");
-                // M10: dup2 names its own target descriptor rather than taking the lowest free one,
-                // so the table would have to honour an arbitrary slot. No guest in the gate calls it
-                // (measured: zero in the jq run), so fail loudly rather than model it wrong — a
-                // silently mis-modelled dup2 aliases the wrong file.
-                assert!(num != retrace_arch::SYS_DUP2,
-                    "dup2 is not modelled by the M10 fd table (unexercised by any gate guest); \
-                     implement target-slot allocation before a guest uses it");
                 // M18 Stage 2a: the workqueue pair must never reach here. Forwarding them is not
                 // merely wrong but whole-process fatal for the RECORDER: the host kernel brings up
                 // a workqueue for retrace's own process and then creates a real worker thread in
@@ -1147,7 +1154,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // dispatch function pointer that is NULL in this process and dies at address 0.
                 // Measured in a crash report, M18 Task 6 (stage2-measurements.md §3). The arms
                 // above service both; this assert is what stops a later edit from removing one and
-                // silently restoring the hazard — the same shape as the dup2 guard above.
+                // silently restoring the hazard — the same shape as the signal guard above.
                 assert!(num != retrace_arch::SYS_WORKQ_OPEN && num != retrace_arch::SYS_WORKQ_KERNRETURN,
                     "workq syscall {num} reached the generic forward arm — it must be emulated \
                      above (M18 Stage 2a). Forwarding it creates a real host worker thread inside \
@@ -1812,9 +1819,11 @@ impl ReplaySession {
                             }
                             // Learn the guest's task-port name (mirror of record) from the recorded −28 result.
                             if num == MACH_TASK_SELF && !*err { self.guest_task_port = Some(*ret); }
-                            // Mirror fd-1/2 write output (the buffer is already filled by prior applied reads).
-                            // Same predicate as record's arm — see `is_console_write`.
-                            if retrace_arch::is_console_write(num, args[0]) {
+                            // Mirror console-slot write output — fd 1/2 and every `dup2` alias of them,
+                            // until the guest `dup2`s or closes them away (the buffer is already
+                            // filled by prior applied reads). Same predicate as record's arm — see
+                            // `Box_::is_console_write`.
+                            if self.b.is_console_write(num, args[0]) {
                                 self.stdout.extend_from_slice(&self.b.read_guest(args[1], args[2] as usize));
                             }
                             // mach_msg2: re-service (the mapping must exist on replay too), verify
@@ -2327,6 +2336,20 @@ impl ReplaySession {
                                 self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
+                            // M37 dup2 mirror: the table half is a pure function of the guest's
+                            // sequence, so recompute (ret, err) and byte-compare — the same posture
+                            // as the fd mirror below. No host fd on replay.
+                            if num == retrace_arch::SYS_DUP2 {
+                                let (rret, rerr) = match self.b.fds_mut().dup2(args[0], args[1], None) {
+                                    Ok((r, _)) => (r, false),
+                                    Err(e) => (e, true),
+                                };
+                                if (rret, rerr) != (*ret, *err) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "dup2 divergence: recording says dup2({}, {}) returned ({ret}, err={err}), \
+                                         the guest's own table yields ({rret}, err={rerr})", args[0], args[1]) });
+                                }
+                            }
                             // M10 fd mirror. Guest fd numbers are a pure function of the guest's own
                             // open/dup/close sequence, so replay can recompute what the allocator
                             // WOULD have produced and byte-compare it against the recording — that
@@ -2337,8 +2360,21 @@ impl ReplaySession {
                             //
                             // Replay keeps the guest-visible half of the table only; it opens no
                             // host fd, so there is nothing to bind.
+                            //
+                            // `dup` (M37 fix wave, final review C1) goes through `FdTable::dup`
+                            // rather than `alloc`, the same method record's bind step calls with
+                            // the same argument: the new slot takes the source's KIND, so a
+                            // `dup(1)` alias is mirrored by `is_console_write` above on both sides.
+                            // A source the replay table has closed while the recording says the
+                            // dup succeeded is a divergence, reported through the same channel.
                             if !*err && retrace_arch::allocates_fd(num) {
-                                let expect = self.b.fds_mut().alloc();
+                                let expect = if num == retrace_arch::SYS_DUP {
+                                    self.b.fds_mut().dup(args[0]).map_err(|e| Divergence { landmark: self.idx, pc, detail: format!(
+                                        "fd divergence: recording says dup({}) returned fd {ret}, but the guest's own \
+                                         open/close sequence has that source closed (errno {e})", args[0]) })?
+                                } else {
+                                    self.b.fds_mut().alloc()
+                                };
                                 if expect != *ret {
                                     return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                         "fd divergence: recording says syscall {num} returned fd {ret}, \
@@ -2350,8 +2386,12 @@ impl ReplaySession {
                             if !*err && (num == retrace_arch::SYS_CLOSE
                                       || num == retrace_arch::SYS_CLOSE_NOCANCEL) {
                                 // Mirror record's slot retirement so the two tables stay in step —
-                                // otherwise the next alloc diverges. fd 0/1/2 never reach here
-                                // (is_console_close handles them in the arm above).
+                                // otherwise the next alloc diverges. EVERY successful close lands
+                                // here, the faked console close included: record fakes only the
+                                // host half of that one and retires the slot in its own arm (M37
+                                // fix round 1, review C1), so this unconditional retirement is its
+                                // mirror. Before M37 the two sides disagreed on a closed console
+                                // slot and nothing could see it.
                                 self.b.fds_mut().close(args[0]);
                             }
                             // Apply recorded kernel writes + feed ret; NO real syscall executes.

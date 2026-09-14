@@ -36,7 +36,7 @@ fn a_guest_closing_its_stdout_does_not_close_retraces() {
         events.iter().any(|e| matches!(e,
             retrace_trace::Event::Syscall { num, args, ret: 0, err: false, .. }
                 // close (6) or close_nocancel (399) — spelled out rather than reusing
-                // retrace_arch::is_console_close so the test pins the numbers independently of the
+                // Box_::is_console_close so the test pins the numbers independently of the
                 // predicate under test, and so it holds whichever variant libc picks.
                 if (*num == 6 || *num == 399) && args[0] == 1)),
         "expected a recorded, faked close of fd 1 returning success");

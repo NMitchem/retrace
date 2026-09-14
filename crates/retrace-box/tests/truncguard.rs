@@ -233,10 +233,13 @@ fn the_window_widens_for_the_m34_rows_and_not_for_getattrlist() {
 // `forward_and_diff_captures_a_read_larger_than_the_window` observes the window through `ret`.
 //
 // The call is `proc_info(PROC_INFO_CALL_LISTPIDS, PROC_ALL_PIDS, …)` and not a PIDINFO flavor,
-// because LISTPIDS takes no pid: `forward_and_diff` rewrites ANY register whose value lands in a
-// backing to a host pointer (spec §4b — a pid in 16384..=65535 hits the trampoline/page-table
-// backings), and a control that could be failed by the recorder's pid would measure that defect
-// instead of this arm. `proc_listpids` copies out `min(nprocs + 20, buffersize / 4)` pids and
+// because LISTPIDS takes no pid: when this control was written, `forward_and_diff` rewrote ANY
+// register whose value landed in a backing to a host pointer (spec §4b — M36 measured the window
+// as [0x4000, 0x18000): the trampoline and page-table backings plus the guest's own os_alloc_once
+// slab at 0x10000), and a control that could be failed by the recorder's pid would have measured
+// that defect instead of this arm. Retired by M37: a `Scalar` is never probed, so the pid
+// register is forwarded verbatim in every regime; the LISTPIDS shape is kept because it still
+// isolates the clamp. `proc_listpids` copies out `min(nprocs + 20, buffersize / 4)` pids and
 // returns the byte count (bsd/kern/proc_info.c); every Mac runs far more than 16 processes, so
 //   clamp taken   -> the kernel is handed buffersize = 64 and returns exactly 64, no error;
 //   clamp skipped -> it is handed 4160 and either faults on the copyout (err, EFAULT) or writes
@@ -269,8 +272,9 @@ fn the_clamp_reaches_proc_info() {
         0, 0,
     ];
     // The scalar arguments must not themselves land in a backing, or this test would be
-    // measuring spec §4b's probe defect rather than the clamp. Every register but the
-    // destination, so the precondition is complete by construction rather than by listing.
+    // measuring spec §4b's probe defect rather than the clamp (since M37 only the two positions
+    // past the row's arity, x6/x7, are still probed; the precondition is kept whole). Every
+    // register but the destination, so it is complete by construction rather than by listing.
     for i in (0..8).filter(|&i| i != 4) {
         let a = args[i];
         assert!(b.host_span_for_test(a).is_none(), "scalar {a:#x} collides with a guest backing");
