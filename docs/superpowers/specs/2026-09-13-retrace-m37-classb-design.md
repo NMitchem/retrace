@@ -427,6 +427,25 @@ or un-parked).
   comment and CLAUDE.md's "Guest threads" paragraph both said forwarding `bsdthread_create` "is
   asserted against"; no such assert exists — the emulating arm's position before the generic forward
   arm is the only guard. CLAUDE.md is corrected at this close; the row comment is owed.
+- **The final review found the sibling alias producer (fix wave, after the close above).** §3a
+  made the console a slot *kind* and modelled `dup2` as the alias producer, but `dup` (41) — modelled
+  since M10 through `bind_returned_fd`, which types every new slot `Open` — still bound `dup(1)`'s
+  alias as `Open` on both sides, so a write through it was forwarded to a host dup of retrace's own
+  stdout and absent from the trace, and after the shell's `dup2(saved, 1)` the `Open` kind was
+  copied back onto slot 1: every later stdout write silent, rc 0/0, no divergence, where `main` had
+  panicked loudly on the `dup2` assert (measured on three probes; the status-log's "Final review"
+  subsection quotes them). Ruled fixed in code, not parked: `FdTable::dup(src)` copies the source
+  slot's kind onto `alloc`'s slot, record's bind step and replay's fd mirror both call it for
+  `SYS_DUP` with the same argument (symmetry rule 1, no new returning arm); `dupkind_dyn` +
+  `dupkind_e2e` are the control, red first at the record-stdout compare. Six minors rode along,
+  the M33 row comment above among them (now discharged), and `is_console_close` gained a
+  `host(gfd) == Some(gfd)` conjunct so a re-aliased identity slot closes the generic way. §7's
+  "leaves two descriptor-producing calls unmodelled and named" stays true — `fcntl(F_DUPFD)` and
+  `pipe` — but `dup` was missing from that count as "modelled and wrong", and from the owed list.
+  **The gate prediction is corrected by +6 tests and +1 binary** against 11.1's 590 / 0 / 10 over
+  130: `fdtable.rs` +3, `consoleclose.rs` +1, `retrace-guest/src/lib.rs` +1, `dupkind_e2e.rs` +1
+  in a new binary — **596 / 0 / 10 over 131**, `#[ignore]` 10 → 10; the controller's numbers file
+  carries the per-chunk cut and the measured re-run.
 
 ### 11.4 M38
 

@@ -8816,7 +8816,9 @@ new; **eight** parked gates moved in place to their measured walls, **8 of 8** r
 corrected; **52** evidence files committed under `docs/sweep-evidence/2026-09-13-m37/` (the README, 63,736
 bytes after its fix round, plus 27 `rec.err` and 24 `rp.err`, 29,280 bytes, verbatim from the kept
 runs); **seven** commits before this close, `crates/` and `tools/` byte-identical to the gated
-commit `09b6bdb`. The gate figures are in their own subsection.
+commit `09b6bdb`. The gate figures are in their own subsection. (That "byte-identical" was true
+at this close and is superseded one subsection later: the final review's fix wave touched
+`crates/` — see "Final review, and the fix wave" below.)
 
 ### What it set out to do
 
@@ -9439,8 +9441,10 @@ the ledger recorded one.
   compiles under `--doc`, 43/0/0); modelling `pipe` joins the owed list. Cost if wrong: a comment.
 - **The gate was launched on `09b6bdb`** — the last commit touching anything cargo compiles — with
   Task 5 dispatched concurrently and reading the tally at the end; `crates/` and `tools/` stay
-  byte-identical to it through the close.
-- **Task 5 corrects CLAUDE.md** (above); the M33 row comment stays owed.
+  byte-identical to it through the close. (Superseded by the final review's ruling below: the fix
+  wave touched `crates/` and the gate was re-run.)
+- **Task 5 corrects CLAUDE.md** (above); the M33 row comment stays owed. (Discharged by the fix
+  wave — it rode along once `crates/` was touched anyway.)
 
 ### Gate
 
@@ -9448,7 +9452,10 @@ the ledger recorded one.
 fix commit, the last commit that touches anything cargo compiles; the gate ran on that tree while
 Task 5 was written, and Task 5 changed README, status-log, spec and CLAUDE.md text only, so the
 merged code and the gated code differ by nothing cargo reads (to be shown at merge by `git diff
-09b6bdb..<merge> --stat -- crates tools` being empty). Every chunk's cargo exit code was captured
+09b6bdb..<merge> --stat -- crates tools` being empty — **no longer the case**: the final review's
+fix wave is one commit on top of this close that touches `crates/`, and the gate was re-run on it;
+the figures are in "Final review, and the fix wave" below, which supersedes this subsection's
+totals). Every chunk's cargo exit code was captured
 to a file before any pipe (`gate/*.exit`): `bins=0 box=0 clippy=0 e2e1=0 e2e2=0 e2e3=0 e2e4=0
 ws=0`. Logs were sanitised (`LC_ALL=C tr -cd '\11\12\15\40-\176' | sed 's/\x1b\[[0-9;]*m//g'`)
 before parsing; the script's own summary line reads `binaries=130 passed=590 failed=0
@@ -9496,6 +9503,116 @@ two binaries, and could not count the eight tests and two binaries the Task 2 fi
 guest `_parses` tests added afterwards (spec §11.1 corrects it). `retrace-box` ran as a whole
 package, so its `Doc-tests` harness could not be dropped (M24's lesson); `retrace` ran per-target
 in four groups plus `--bins`.
+
+### Final review, and the fix wave
+
+The whole-branch review (`648d4cf..9b013fd`, read-only, every "measured" below run by the
+reviewer on the branch binary and on Task 1's kept `baseline/retrace-648d4cf`) returned **Needs
+one fix wave — 1 Critical / 0 Important / 6 Minor**. The `dup2` model, the `Scalar` skip, the
+eight moved gates, the docs and the gate all checked out; the Critical was not in `dup2` but in
+the alias-producing syscall beside it.
+
+**C1 — `dup(1)`/`dup(2)` bind a console alias as `Open`.** `bind_returned_fd`
+(`retrace-box:3172–3177`: `alloc()` → `Open`, then `bind(gfd, host_ret)`) is called for every
+`allocates_fd` syscall, `SYS_DUP` included (`SYS_DUP => row!(F, [Fd])`), and replay's mirror at
+`retrace-core:2359` does the same `alloc()`. Neither side consults `console_of(args[0])`, so a
+`dup` of a `Console(n)` slot yields an `Open` slot on both sides — the tables agree,
+`is_console_write` answers `false` on both, and record forwards the write through the host `dup`
+of retrace's own stdout while the trace carries nothing. Measured through the CLI, three guests:
+
+1. `dup_dyn.c` — `write(1,"a")`; `d = dup(1)`; `write(d,"via-dup")`; `dup2(1,17)`;
+   `write(17,"via-dup2")`: **record rc 0, stdout `via-dup\na\nvia-dup2\n`** (`via-dup` printed
+   by the host, out of order, ahead of the mirror); **replay rc 0, stdout `a\nvia-dup2\n`**; no
+   `DIVERGENCE` line. The `dup2` alias is mirrored (M37 works); the `dup` alias is not.
+2. `dup_only.c` (the `dup(1)` half alone) on **main's** `baseline/retrace-648d4cf`: record
+   `via-dup\na\n`, replay `a\n`, rc 0/0 — the `dup`-alone leak is pre-existing (M10), not
+   introduced here.
+3. `saverestore.c` — the shell's `>` idiom: `write(1,"one")`; `saved = dup(1)`;
+   `dup2(open("/dev/null"), 1)`; `write(1,"to-devnull")`; `dup2(saved, 1)`; `write(1,"two")`:
+   native stdout `one\ntwo\n`; **main `648d4cf`: record rc 101**, `panicked at
+   crates/retrace-core/src/lib.rs:1140:17: dup2 is not modelled …` (**loud**); **branch
+   `9b013fd`: record rc 0, stdout `two\none\n`; replay rc 0, stdout `one\n`; 0 `DIVERGENCE`
+   lines** (**silent**). After `dup2(saved, 1)` slot 1 is `Open` — the kind `FdTable::dup2`
+   faithfully copies from the `dup`-made slot — so every later stdout write is forwarded to a host
+   dup-of-a-dup of retrace's stdout: on the recorder's terminal, never in the trace, never on
+   replay.
+
+Why Critical rather than pre-existing-and-out-of-scope: it is the M9 class verbatim and the one
+failure the determinism oracle cannot see (record and replay agree with each other); the branch's
+own Task 2 review rated exactly this shape Critical (its C1, also pre-existing since M10) and it
+was fixed in-branch; the branch turned a **loud** failure into a **silent** one for an idiom every
+shell uses; and `dup` — the other alias producer, modelled since M10 — was named nowhere: the
+README's new bullet read as complete for aliases, the rustdoc and the replay comment were careful
+to say `dup2`, and the owed list named `F_DUPFD` only. **`dup` was MISSING from the owed list** —
+there was nothing to remove from it; this milestone's own audit of "descriptor-producing calls
+left unmodelled" counted `fcntl(F_DUPFD)` and `pipe` and did not count the one that was modelled
+and wrong.
+
+**Ruling: fix in code, this fix wave, not park.** (1) The spec's claim — the console mirror is
+decided by the slot's *kind* — is exactly what `dup` breaks, so copying the kind on `dup`
+completes §3a rather than adding scope. (2) The alternative was a *new* `#[ignore]` gate, itself a
+charter halt condition, for a wall that is ~15 symmetric lines. (3) A loud→silent regression in
+failure mode is not mergeable. Minors M1–M6 ride along, since `crates/` is touched and the gate
+re-runs anyway. Cost if wrong: one gate re-run and ~40 lines.
+
+**The fix, symmetric by construction (symmetry rule 1).** `FdTable::dup(src) -> Result<u64, u64>`:
+`Err(EBADF)` if `src` is not open, else `alloc()` and copy `slots[src]` onto the new slot — a
+`Console(n)` source makes a console alias, an `Open` source a plain duplicate; the host mapping
+stays the caller's, as with `alloc` + `bind`. Record: `forward_and_diff`'s bind step calls
+`fds.dup(gargs[0])` for `SYS_DUP` and then `bind(g, host_ret)` (the host `dup` is still forwarded
+like any fd-producing call — `dup(h)` returns a fresh host descriptor and touches none of
+retrace's — so only the binding changed; the table cannot refuse there, since `translate_fds`
+already answered `EBADF` for a source with no host mapping, and it panics by name if it ever
+does). Replay: the M10 fd mirror at the `alloc()` site calls `fds.dup(args[0])` for `SYS_DUP` in
+its place, keeps the existing compare against the recorded return, and reports a source the
+replay table has closed as an `fd divergence` through the same channel. Same method, same
+argument, both sides; no new returning arm; `verify_thread` 7 → 7; `retrace-trace` untouched,
+`TRACE_MAGIC` still `RT\x00\x09`.
+
+**The control, red then green.** `dupkind_dyn.c` is probe 1 followed by probe 3 in one `main`,
+every string distinct; `dupkind_e2e` demands, through the rung helper, that the recording's
+stdout be the guest's own (`a\nvia-dup\nvia-dup2\none\ntwo\n`, computed natively and
+hard-coded), that replay's equal the recording's, and rc 0/0. Run before the fix it **failed at
+the record-stdout compare**: `got "via-dup\ntwo\na\nvia-dup2\none\n", want
+"a\nvia-dup\nvia-dup2\none\ntwo\n"` — the two `dup`-routed lines printed by the host ahead of the
+mirror — and through the CLI the same binary gave record rc 0 `via-dup\ntwo\na\nvia-dup2\none\n`,
+replay rc 0 `a\nvia-dup2\none\n`, 0 `DIVERGENCE` lines, the review's measurement reproduced.
+After the fix: 1 passed; record == replay == native, rc 0/0, 0 `DIVERGENCE` lines. Three
+`FdTable::dup` unit tests beside it (`fdtable.rs`: a `Console` source yields `Console(n)` at the
+alloc floor and `dup2` of that alias back onto 1 restores the kind; a closed or never-opened
+source is `EBADF` and opens nothing; an `Open` source yields `Open`, on the record and replay
+shapes). `fdtable_e2e` (M10's fixture, which `dup`s a file) still passes — the `Open` branch end
+to end.
+
+**The minors.** M1: `translate_fds`'s "first statement" is now "first statement of the forwarding
+path", since M37's `SYS_DUP2` short-circuit precedes it (both the rustdoc and the inner comment).
+M2: `guest_dup2` **keeps** its early self-return — dropping it is *not* a no-op, because the
+table's self case returns without storing `host_fd2`, so a host `dup` made for it would be neither
+kept nor handed back, one leaked descriptor per self-`dup2`; the rustdoc now states that, and why
+the two orders agree on every reachable state (an open `fd` is always inside `[0, DUP2_MAX_FD)`).
+M3: the conjunct **was** a one-liner and every existing test stayed green, so it is in:
+`is_console_close` now also requires `host(gfd) == Some(gfd)`, so an identity slot re-aliased by
+`dup2(17, 1)` or the shell's `dup2(saved, 1)` — `Console(1)` at 1 again, host mapping a dup —
+closes the generic way (host dup closed, slot retired) rather than being faked and leaking the
+dup; sound because the predicate is consulted only by `record_box`'s arm and replay's close mirror
+is unconditional. A fourth `consoleclose` test pins it and was red first (`close(1) on the
+re-aliased slot must NOT be faked`). M4: `is_console_write`'s rustdoc says "until the guest
+`dup2`s over them or closes them, and every alias `dup2` or `dup` created". M5: the
+`RETRACE_TRACE` echo prints `[fd17 (console 1)]` — the console the slot stands for beside the
+number the guest used (`[fd4 (console 1)] via-dup` on the fixture; the alias landed at 4, since
+dyld holds 3). M6: the M33 `SYS_BSDTHREAD_CREATE` row comment now says the arm's position before
+the generic forward arm is the only guard and nothing asserts against forwarding it (measured
+false at M37) — off the owed list.
+
+**The gate, re-predicted from source.** Four files change their `#[test]` count against the
+close above: `fdtable.rs` 15 → 18 (+3), `consoleclose.rs` 3 → 4 (+1), `retrace-guest/src/lib.rs`
+11 → 12 (+1, `dupkind_guest_parses`), `dupkind_e2e.rs` new, 1 (+1, a new binary). +6 runnable;
+`#[ignore]` attribute lines 10 → 10; `--bins` 11 → 11; binaries 130 → **131** (65 `retrace` e2e
+targets; `dupkind_e2e` sorts between `dup2_e2e` and `faultlog`, so it lands in `e2e1` and every
+later `xargs -n20` boundary moves by one, the last group 4 → 5). The tree holds **604** `#[test]`
+attributes = 594 runnable + 10 ignored (bare grep 605, the one prose match as before); the run
+should report **596 passed / 0 failed / 10 ignored over 131 binaries** (596 = 594 + census's 2),
+per chunk `ws` 155, `box` 284, e2e 146, `bins` 11. The re-run: `<controller fills>`.
 
 ### M38 does not exist
 
@@ -9545,10 +9662,14 @@ M36's list, item by item, with what this milestone discharged struck by name and
 * **The probe of positions past a row's arity** (`x6`/`x7` on a six-argument row, every register
   on a zero-arity one) and of `Fd` positions — kept on purpose for M30's band measurement;
   narrowing it is a separate measurement nobody has taken.
-* **The M33 `SYS_BSDTHREAD_CREATE` row comment** (`crates/retrace-arch/src/lib.rs`, "forwarding is
-  asserted against in retrace-core because it is whole-process fatal") — false; no such assert; the
-  arm's position is the only guard. CLAUDE.md is corrected; the row comment is owed to the next
-  milestone that touches `retrace-arch`.
+* **Discharged (fix wave) — the M33 `SYS_BSDTHREAD_CREATE` row comment** (`crates/retrace-arch/src/lib.rs`,
+  "forwarding is asserted against in retrace-core because it is whole-process fatal") — false; no
+  such assert; the arm's position is the only guard. CLAUDE.md was corrected at the close; the row
+  comment rode along with the final review's fix wave once `crates/` was touched anyway.
+* **Discharged (fix wave) — `dup` copying the slot's kind**, which was **missing from this list**
+  when it was first written: the close counted the descriptor-producing calls left unmodelled
+  (`F_DUPFD`, `pipe`) and not the one that was modelled and wrong. The final review measured it
+  (three probes, above) and the fix wave closed it with `FdTable::dup` and `dupkind_e2e`.
 * **§4b's residual class behind a `Ptr` that is sometimes a number**: `fcntl` x2 / `ioctl` x2 for
   argument-less commands (`F_SETFD`, `F_SETFL`, `F_NOCACHE`) are probed as pointers and would be
   rewritten if the number equalled a mapped IPA. Measured inert on the corpus (CPython's `fcntl`

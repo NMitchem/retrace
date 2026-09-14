@@ -818,6 +818,24 @@ impl FdTable {
         self.host[fd2 as usize] = host_fd2;
         Ok((fd2, displaced))
     }
+
+    /// M37 fix wave (final review C1): `dup(src)` on the guest-visible table — identical on
+    /// record and replay, the other alias producer beside `dup2`.
+    ///
+    /// `Err(EBADF)` if `src` is not open. Otherwise the lowest free slot >= 3 (`alloc`'s number,
+    /// so the guest sees its own descriptor) takes `src`'s KIND — a `Console(n)` source makes the
+    /// new slot a console alias that M9's mirror must catch, an `Open` source a plain duplicate —
+    /// and is returned. The host mapping is the caller's, as with `alloc` + `bind`: record binds
+    /// the host `dup`'s return, replay has none. Until this existed `dup` went through `alloc`
+    /// alone, which types every slot `Open`, so `dup(1)` made an alias the mirror could not see
+    /// and `dup2(saved, 1)` afterwards copied that `Open` back onto stdout — the shell's
+    /// save/restore idiom silently forwarding every later console write to the host.
+    pub fn dup(&mut self, src: u64) -> Result<u64, u64> {
+        if !self.is_open(src) { return Err(EBADF); }
+        let g = self.alloc();
+        self.slots[g as usize] = self.slots[src as usize];
+        Ok(g)
+    }
 }
 
 /// A mid-run capture of `Box_`, restored by `from_checkpoint`.
@@ -3139,8 +3157,10 @@ impl Box_ {
 
     /// Rewrite every guest fd operand of `num` in `args` to its host fd, in place.
     ///
-    /// `translate_fds` has exactly ONE caller, `forward_and_diff`, and is its first statement —
-    /// which is what makes it M33's one loud site. `guest_mmap_file` never calls it: file-backed
+    /// `translate_fds` has exactly ONE caller, `forward_and_diff`, and is the first statement of
+    /// its forwarding path — which is what makes it M33's one loud site. (Since M37 the function's
+    /// literal first statement is the `SYS_DUP2` short-circuit into `guest_dup2`, which forwards
+    /// nothing and consults no view; `dup2` has a row regardless.) `guest_mmap_file` never calls it: file-backed
     /// mmap is special-cased upstream in retrace-core and never reaches `forward_and_diff`, so it
     /// translates its own fd via `self.fds.host` directly. That path does not pass through
     /// `forwarded_shape` either, which is harmless because `mmap` (197) has a row and the mmap arm
@@ -3150,8 +3170,9 @@ impl Box_ {
     /// the whole point is that the number may be a live descriptor of retrace's own.
     pub fn translate_fds(&self, num: u64, args: &mut [u64; 8]) -> Result<(), u64> {
         // M33: a syscall with no arg_kinds row cannot be forwarded. This is the first statement
-        // forward_and_diff executes, so the panic sits upstream of every other view consulted
-        // there (diff_window's dest_buffer, the canary decision, bind_returned_fd).
+        // of forward_and_diff's forwarding path (M37's `SYS_DUP2` short-circuit precedes it and
+        // forwards nothing), so the panic sits upstream of every other view consulted there
+        // (diff_window's dest_buffer, the canary decision, bind_returned_fd, the dup bind).
         for i in retrace_arch::forwarded_shape(num).fd_operands() {
             let v = args[i];
             // AT_FDCWD (-2) and friends are sentinels, not descriptors.
@@ -3181,20 +3202,28 @@ impl Box_ {
 
     /// M37: the ONE console-write predicate, shared by record's mirror arm, replay's mirror and
     /// the trace-log echo. A write to any slot the table marks `Console(1|2)` — fd 1/2 themselves
-    /// until the guest `dup2`s over them, and every alias `dup2` created — is mirrored and faked.
+    /// until the guest `dup2`s over them or closes them, and every alias `dup2` or `dup` created
+    /// (the latter since the M37 fix wave) — is mirrored and faked.
     pub fn is_console_write(&self, num: u64, gfd: u64) -> bool {
         retrace_arch::is_write_syscall(num) && matches!(self.fds.console_of(gfd), Some(1 | 2))
     }
     /// M37: a close of an IDENTITY console slot — 0/1/2 while its slot is still `Console(n)` at
-    /// index n — has its host half faked (M9: that host descriptor is retrace's own) and its
-    /// slot retired by record's arm. Everything else closes through the generic path on both
-    /// sides: a displaced console slot (`Open` at 1 after `dup2(f, 1)`) and an ALIAS
-    /// (`Console(1)` at 17 after `dup2(1, 17)`) alike, because each one's host mapping is a `dup`
-    /// or a guest-opened descriptor, never retrace's 0/1/2 — so forwarding the close cannot touch
-    /// retrace's console, and faking it would leak the host dup and leave the slot open forever
-    /// (review I2; spec §3a's worked example, `close(16)` after `dup2(0, 16)` goes the generic way).
+    /// index n AND its host mapping is still retrace's own descriptor n — has its host half faked
+    /// (M9: that host descriptor is retrace's own) and its slot retired by record's arm.
+    /// Everything else closes through the generic path on both sides: a displaced console slot
+    /// (`Open` at 1 after `dup2(f, 1)`), an ALIAS (`Console(1)` at 17 after `dup2(1, 17)`) and a
+    /// RE-ALIASED identity slot (`Console(1)` at 1 again after `dup2(17, 1)`, or after the shell's
+    /// `dup2(saved, 1)`) alike, because each one's host mapping is a `dup` or a guest-opened
+    /// descriptor, never retrace's 0/1/2 — so forwarding the close cannot touch retrace's console,
+    /// and faking it would leak the host dup and leave the slot open forever (review I2; spec
+    /// §3a's worked example, `close(16)` after `dup2(0, 16)` goes the generic way). The host
+    /// conjunct is what excludes the re-aliased slot (final review M3): the kind alone cannot tell
+    /// it from a fresh table. Record-only by construction — this predicate is consulted only by
+    /// `record_box`'s arm, and replay's close mirror is unconditional — so reading the record-only
+    /// host half here is sound.
     pub fn is_console_close(&self, num: u64, gfd: u64) -> bool {
-        retrace_arch::is_close_syscall(num) && gfd < 3 && self.fds.console_of(gfd) == Some(gfd as u8)
+        retrace_arch::is_close_syscall(num) && gfd < 3
+            && self.fds.console_of(gfd) == Some(gfd as u8) && self.fds.host(gfd) == Some(gfd as i32)
     }
     pub fn sigtable(&self) -> &SigTable { &self.sigtable }
     pub fn sigtable_mut(&mut self) -> &mut SigTable { &mut self.sigtable }
@@ -3689,15 +3718,33 @@ impl Box_ {
         // An fd-producing syscall returned a HOST descriptor: bind it to a guest slot and hand back
         // the GUEST number, so what reaches both the guest and the trace is a function of the
         // guest's own open/close sequence rather than of how many files retrace holds open.
+        //
+        // `dup` is the exception (M37 fix wave, final review C1): its new slot must carry the
+        // SOURCE slot's kind, so a `dup(1)` is a console alias the M9 mirror catches, exactly as
+        // a `dup2(1, n)` is. `FdTable::dup` is the table half; replay's fd mirror calls the same
+        // method with the same argument. The host `dup` itself was forwarded above like any other
+        // fd-producing call — `dup(h)` on the host returns a fresh descriptor and touches none of
+        // retrace's own — so only the binding differs.
         let ret = if !err && retrace_arch::allocates_fd(num) {
-            self.bind_returned_fd(num, ret)
+            if num == retrace_arch::SYS_DUP {
+                // `translate_fds` already answered EBADF for a source with no host mapping, and on
+                // record a slot has a host mapping iff it is open, so the table cannot refuse here.
+                let g = self.fds.dup(gargs[0])
+                    .unwrap_or_else(|e| panic!("dup({}) forwarded to the host but the table says errno {e}: \
+                        host mapping and slot kind have drifted apart", gargs[0]));
+                self.fds.bind(g, ret as i32);
+                g
+            } else {
+                self.bind_returned_fd(num, ret)
+            }
         } else { ret };
         // A successful close retires the guest's slot, so a later use of that number is EBADF
         // instead of reaching whatever retrace has open there. An IDENTITY console slot never
         // arrives here — is_console_close fakes its host half upstream in retrace-core (and
-        // retires its slot there). A DISPLACED console slot (`Open` at 1 after `dup2(f, 1)`) and
-        // an ALIAS (`Console(1)` at 17 after `dup2(1, 17)`) both do (M37), and close for real:
-        // each one's host mapping is a `dup`, never retrace's own descriptor.
+        // retires its slot there). A DISPLACED console slot (`Open` at 1 after `dup2(f, 1)`), an
+        // ALIAS (`Console(1)` at 17 after `dup2(1, 17)`, or at `dup(1)`'s slot) and a RE-ALIASED
+        // identity slot (`Console(1)` at 1 again after `dup2(saved, 1)`) all do (M37), and close
+        // for real: each one's host mapping is a `dup`, never retrace's own descriptor.
         if !err && (num == retrace_arch::SYS_CLOSE || num == retrace_arch::SYS_CLOSE_NOCANCEL) {
             self.fds.close(gargs[0]);
         }
@@ -3712,9 +3759,22 @@ impl Box_ {
     /// is closed here ONLY when it is > 2: an identity mapping displaced by `dup2(f, 1)` is
     /// retrace's own stdout, and closing it is the M9 defect in a new coat. Self-`dup2` does no
     /// host work at all, matching the table's no-op.
+    ///
+    /// **The checks here and in `FdTable::dup2` are stated in different orders** (final review
+    /// M2): the table checks source, then target range, then self; this function checks source,
+    /// then self, and only then makes the host `dup` the table's range check can refuse. The self
+    /// case cannot be left to the table, because the table's self no-op returns without storing
+    /// `host_fd2`, so a host `dup` made for it would be neither kept nor handed back — a leaked
+    /// descriptor per self-`dup2`. The two orders answer identically on every reachable state:
+    /// an open `fd` is always inside `[0, DUP2_MAX_FD)`, since `slots` grows only through `alloc`
+    /// (one past the highest open slot, bounded by the host's own descriptor limit) and through
+    /// `dup2`'s bounded `grow_to`, so `fd == fd2` with `fd` open never reaches the range check
+    /// with an out-of-range `fd2`.
     fn guest_dup2(&mut self, args: [u64; 8]) -> (u64, bool, Vec<Region>) {
         let (fd, fd2) = (args[0], args[1]);
         let Some(h) = self.fds.host(fd) else { return (EBADF, true, Vec::new()); };
+        // Before the host dup, not after: see the doc comment — the table's self no-op would not
+        // keep it.
         if fd == fd2 { return (fd2, false, Vec::new()); }
         let dup = unsafe { libc::dup(h) };
         if dup < 0 {

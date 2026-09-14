@@ -347,6 +347,16 @@ fn main() {
         .status().expect("clang closewrite_dyn");
     assert!(status.success(), "closewrite_dyn guest build failed");
 
+    // dupkind_dyn: the M37 fix-wave fixture — a dup alias of stdout is a console write, and the
+    // shell's save/restore-stdout idiom hands slot 1 its console kind back. Same recipe as hello_dyn.
+    let src = format!("{}/c/dupkind_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/dupkind_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang dupkind_dyn");
+    assert!(status.success(), "dupkind_dyn guest build failed");
+
     // strip47: signs a pointer with pacda then strips it with objc's 47-bit ISA_MASK; the result
     // equals the original ONLY if the PAC signature lands above bit 46 — i.e. only under a 47-bit
     // guest VA. The M2-va47 property test. -arch arm64e (Task 7, M7): with PAC posture now DERIVED

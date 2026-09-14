@@ -198,6 +198,10 @@ pub const DUP2_DYN: &str = concat!(env!("OUT_DIR"), "/dup2_dyn");
 /// so the rung helper's exit-0 demand carries the "a closed console slot is closed on both sides"
 /// property and its stdout equality carries the mirror.
 pub const CLOSEWRITE_DYN: &str = concat!(env!("OUT_DIR"), "/closewrite_dyn");
+/// M37 fix wave (final review C1): `dup`s stdout and writes through the alias, then runs the
+/// shell's save/restore-stdout idiom — so the e2e can assert that a `dup` alias is mirrored like a
+/// `dup2` one and that a saved-and-restored stdout is still the console.
+pub const DUPKIND_DYN: &str = concat!(env!("OUT_DIR"), "/dupkind_dyn");
 /// M11 headline: a full-std Rust binary that `panic!()`s into `abort()`/SIGABRT (`-C panic=abort`).
 pub const PANICKY: &str = concat!(env!("OUT_DIR"), "/panicky");
 /// M12 headline: a stock full-`std` Rust binary that faults on a wild pointer, so libstd's own
@@ -302,6 +306,14 @@ mod tests {
         // M37: proves the build.rs wiring and the path constant; behaviour is dup2_e2e's.
         let l = parse_macho(&std::fs::read(DUP2_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn dupkind_guest_parses() {
+        // M37 fix wave: proves the build.rs wiring and the path constant; behaviour is dupkind_e2e's.
+        let l = parse_macho(&std::fs::read(DUPKIND_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+        assert!(l.segments.iter().any(|s| s.data.windows(9).any(|w| w == b"/dev/null")));
     }
 
     #[test]

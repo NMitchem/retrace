@@ -71,3 +71,29 @@ fn a_closed_identity_slot_is_no_longer_the_console_on_either_predicate() {
     assert_eq!(b.fds().host(1), None, "the host mapping is dropped; retrace's fd 1 itself is untouched");
     assert_eq!(b.fds_mut().dup2(1, 17, Some(41)), Err(retrace_box::EBADF), "dup2 from a closed console slot is EBADF");
 }
+
+// M37 fix wave (final review M3). An identity slot RE-ALIASED by dup2 — `dup2(1, 17); dup2(17, 1)`,
+// or the shell's `saved = dup(1); …; dup2(saved, 1)` — is `Console(1)` at index 1 again, but its
+// host mapping is now a dup, not retrace's own fd 1. Its close must go the generic way (host dup
+// closed, slot retired), not be faked: faking it would drop the mapping and leak the dup. The
+// guest sees the same either way; only the recorder's descriptor table differs.
+#[test]
+fn a_re_aliased_identity_slot_closes_the_generic_way() {
+    let mut b = fresh_box();
+    let saved = b.fds_mut().dup(1).unwrap();
+    b.fds_mut().bind(saved, 41);                    // record: the host dup of retrace's stdout
+    let f = b.fds_mut().alloc(); b.fds_mut().bind(f, 30);
+    assert_eq!(b.fds_mut().dup2(f, 1, Some(32)).unwrap(), (1, Some(1)), "redirect: the identity mapping is displaced");
+    assert!(!b.is_console_close(SYS_CLOSE, 1), "a displaced slot is not the console");
+    assert_eq!(b.fds_mut().dup2(saved, 1, Some(43)).unwrap(), (1, Some(32)), "restore: stdout's kind is back");
+    assert_eq!(b.fds().slots()[1], FdSlot::Console(1));
+    assert_eq!(b.fds().host(1), Some(43), "but its host mapping is the dup, not retrace's fd 1");
+    assert!(b.is_console_write(SYS_WRITE, 1), "a write to 1 is mirrored again");
+    for num in [SYS_CLOSE, SYS_CLOSE_NOCANCEL] {
+        assert!(!b.is_console_close(num, 1),
+            "close(1) on the re-aliased slot must NOT be faked: its host mapping is the dup (43), \
+             which the generic path closes — faking it would leak the dup (final review M3)");
+    }
+    assert!(b.is_console_close(SYS_CLOSE, 2), "stderr's identity slot is untouched");
+    assert!(b.is_console_close(SYS_CLOSE, 0), "and stdin's");
+}

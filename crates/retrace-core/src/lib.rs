@@ -149,10 +149,15 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             if let Stop::Syscall { num, args } = &stop {
                 eprintln!("[trap] num={} (0x{:x}) pc={:#x} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
                     *num as i64, num, b.position(), args[0], args[1], args[2], args[3], args[4], args[5]);
-                // Echo dyld's fd-1/2 diagnostics so a fatal error message is visible.
+                // Echo dyld's fd-1/2 diagnostics so a fatal error message is visible. Names the
+                // console the slot STANDS FOR beside the number the guest used (M37 fix wave,
+                // final review M5): `[fd17 (console 1)]` for a write through a `dup2(1, 17)`
+                // alias, `[fd1 (console 2)]` after `dup2(2, 1)` — what the mirror decided, not
+                // just the alias.
                 if b.is_console_write(*num, args[0]) {
                     let bytes = b.read_guest(args[1], args[2] as usize);
-                    eprintln!("[fd{}] {}", args[0], String::from_utf8_lossy(&bytes));
+                    let console = b.fds().console_of(args[0]).expect("is_console_write implies a Console slot");
+                    eprintln!("[fd{} (console {console})] {}", args[0], String::from_utf8_lossy(&bytes));
                 }
                 // M2-mach diagnostic: decode + hexdump mach_msg2 sends (golden capture for the codec).
                 if *num == MACH_MSG2 {
@@ -2355,8 +2360,21 @@ impl ReplaySession {
                             //
                             // Replay keeps the guest-visible half of the table only; it opens no
                             // host fd, so there is nothing to bind.
+                            //
+                            // `dup` (M37 fix wave, final review C1) goes through `FdTable::dup`
+                            // rather than `alloc`, the same method record's bind step calls with
+                            // the same argument: the new slot takes the source's KIND, so a
+                            // `dup(1)` alias is mirrored by `is_console_write` above on both sides.
+                            // A source the replay table has closed while the recording says the
+                            // dup succeeded is a divergence, reported through the same channel.
                             if !*err && retrace_arch::allocates_fd(num) {
-                                let expect = self.b.fds_mut().alloc();
+                                let expect = if num == retrace_arch::SYS_DUP {
+                                    self.b.fds_mut().dup(args[0]).map_err(|e| Divergence { landmark: self.idx, pc, detail: format!(
+                                        "fd divergence: recording says dup({}) returned fd {ret}, but the guest's own \
+                                         open/close sequence has that source closed (errno {e})", args[0]) })?
+                                } else {
+                                    self.b.fds_mut().alloc()
+                                };
                                 if expect != *ret {
                                     return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                         "fd divergence: recording says syscall {num} returned fd {ret}, \
