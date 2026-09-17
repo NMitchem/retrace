@@ -10372,8 +10372,9 @@ the first item is new and is the successor's measured scope.
 * **The missing-row set — 461, 468, 464, 345, 374 — with the corpus binaries each blocks.**
   `getattrlistbulk` 461 (`/bin/ls`, reached since the sentinel fix), `getattrlistat` 468 (M34's
   pair to it, reached by nothing yet), `openat_nocancel` 464 (`/bin/ed`, `/usr/bin/desdp`,
-  `/usr/bin/dyld_info`, `/usr/bin/flex` — the `_nocancel` twin of `openat` 463, precisely the
-  documented nocancel trap), `statfs64` 345 (`/usr/bin/dddiagnose` — the fixed-struct twin of
+  `/usr/bin/dyld_info`, `/usr/bin/flex` — **four corpus binaries behind that one row**, the
+  `_nocancel` twin of `openat` 463, precisely the documented nocancel trap; one line frees four
+  rows, which sharpens the successor's case), `statfs64` 345 (`/usr/bin/dddiagnose` — the fixed-struct twin of
   `fstatfs64`, M29), `kevent_qos` 374 (`/usr/bin/automationmodetool`; libdispatch's kevent
   workloop may be a subsystem of its own behind it). Each is the M33 fail-loud doing its job on
   a number the 2026-09-12 census never saw, because the guests that issue them never got that far

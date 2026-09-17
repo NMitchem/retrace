@@ -556,8 +556,9 @@ These are real and current, not aspirational gaps.
   chosen by measurement, the one code all six accepted) and they run 20–50 landmarks further, two
   (`ls`, `ed`) because their `fstatat64(AT_FDCWD, …)` succeeds now and they run on. The missing
   rows are **five numbers** — 461 `getattrlistbulk` (`ls`), 468 `getattrlistat` (M34's pair to
-  it), 464 `openat_nocancel` (`ed`, `desdp`, `dyld_info`, `flex` — the `_nocancel` twin of
-  `openat` 463, precisely the documented nocancel trap), 345 `statfs64` (`dddiagnose` — the
+  it), 464 `openat_nocancel` (`ed`, `desdp`, `dyld_info`, `flex` — **four corpus binaries behind
+  one row**, the `_nocancel` twin of `openat` 463, precisely the documented nocancel trap, which
+  is what sharpens the successor's case: one line frees four rows), 345 `statfs64` (`dddiagnose` — the
   fixed-struct twin of `fstatfs64`, M29), 374 `kevent_qos` (`automationmodetool`) — the successor's
   measured scope, at the top of the owed list. **`fork`** is `record error, rc=4: RECORD ERROR:
   unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515))
