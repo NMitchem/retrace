@@ -28,7 +28,7 @@ fn munmap_removes_the_backing() {
             // mmap and munmap; forward it (like the general dispatch path) so the vcpu actually
             // resumes instead of re-trapping the same SVC forever.
             Stop::Syscall { num, args } => {
-                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, _writes) = b.forward_and_diff(num, args);
                 b.set_x0_err_and_return(ret, err);
             }
             Stop::Other { esr } => panic!("faulted esr=0x{esr:x}"),

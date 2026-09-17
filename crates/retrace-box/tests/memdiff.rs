@@ -9,14 +9,14 @@ fn forward_and_diff_captures_read_bytes() {
     loop {
         match b.run() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_READ => {
-                let (ret, _err, writes) = b.forward_and_diff(num, args);
+                let (ret, _ret1, _err, writes) = b.forward_and_diff(num, args);
                 assert_eq!(ret, 19, "read should return the 19 fixture bytes");
                 // the write must land at the read buffer (args[1]) and contain the fixture
                 let w = writes.iter().find(|w| w.ipa == args[1]).expect("no write at read buf");
                 assert!(w.bytes.starts_with(b"retrace-m1-fixture\n"));
                 return;
             }
-            Stop::Syscall { num, args } => { let (ret, _err, _) = b.forward_and_diff(num, args); b.set_x0_and_return(ret); }
+            Stop::Syscall { num, args } => { let (ret, _ret1, _err, _) = b.forward_and_diff(num, args); b.set_x0_and_return(ret); }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
             Stop::Step => unreachable!("run() does not single-step"),
@@ -42,7 +42,7 @@ fn forward_and_diff_captures_a_read_larger_than_the_window() {
     loop {
         match b.run() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_READ => {
-                let (ret, err, writes) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, writes) = b.forward_and_diff(num, args);
                 assert!(!err, "the fixture read should succeed, got err with ret={ret}");
                 assert_eq!(ret, 0x18000, "the fixture is 96 KiB and should read whole");
                 // Every byte the kernel reported writing must be covered by some recorded write.
@@ -60,7 +60,7 @@ fn forward_and_diff_captures_a_read_larger_than_the_window() {
                     args[1], writes.len());
                 return;
             }
-            Stop::Syscall { num, args } => { let (ret, _err, _) = b.forward_and_diff(num, args); b.set_x0_and_return(ret); }
+            Stop::Syscall { num, args } => { let (ret, _ret1, _err, _) = b.forward_and_diff(num, args); b.set_x0_and_return(ret); }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
             Stop::Step => unreachable!("run() does not single-step"),

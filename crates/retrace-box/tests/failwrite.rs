@@ -27,7 +27,7 @@ fn a_failing_sysctl_is_measured_for_writes() {
                 let oldlen_before = b.read_bytes_for_test(args[3], 8);
                 assert_eq!(oldlen_before, 2u64.to_le_bytes(), "precondition: the guest asked for 2 bytes");
 
-                let (ret, err, writes) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, writes) = b.forward_and_diff(num, args);
                 assert!(err, "the undersized sysctl should FAIL; got ret={ret} err={err}");
                 assert_eq!(ret, 12, "ENOMEM");
 
@@ -59,7 +59,7 @@ fn a_failing_sysctl_is_measured_for_writes() {
                 return;
             }
             Stop::Syscall { num, args } => {
-                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                let (ret, _ret1, _e, _w) = b.forward_and_diff(num, args);
                 b.set_x0_and_return(ret);
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),

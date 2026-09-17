@@ -75,6 +75,8 @@ pub const SYS_OPEN_NOCANCEL: u64 = 398;
 pub const SYS_FCNTL_NOCANCEL: u64 = 406;
 pub const SYS_OPENAT: u64 = 463;
 pub const SYS_FSTATAT64: u64 = 470;
+pub const SYS_EXECVE: u64 = 59;
+pub const SYS_POSIX_SPAWN: u64 = 244;
 /// `fstatfs64(int, struct statfs64 *)` — SDK `sys/mount.h:444`, header-declared like its M10
 /// siblings.
 pub const SYS_FSTATFS64: u64 = 346;
@@ -109,7 +111,8 @@ pub const MWL_REGION_STRIDE: usize = 32;
 pub const MWL_MAX_REGION_COUNT: u64 = 5;
 
 /// `AT_FDCWD` — `openat`/`fstatat64`'s "relative to cwd" sentinel. Negative, and NOT a descriptor:
-/// translation must pass it through untouched rather than rejecting it as `EBADF`.
+/// translation must pass it through untouched rather than rejecting it as `EBADF`. The ABI
+/// delivers it as `0xffff_fffe` in `x0`; `translate_fds` tests the low 32 bits (M38).
 pub const AT_FDCWD: i64 = -2;
 
 /// `ioctl` request-code decode, `sys/ioccom.h:74-85`: the parameter length lives in bits 16..29
@@ -169,8 +172,8 @@ pub enum ArgKind {
     /// covered a whole syscall absent from the table; an absent ROW is loud now — `forwarded_shape`
     /// panics on it at the forward point — and only the per-position silence remains.)
     ///
-    /// `dirfd` positions (`openat`, `fstatat64`) are `Fd` too; `AT_FDCWD` is negative and passes
-    /// through translation untouched.
+    /// `dirfd` positions (`openat`, `fstatat64`) are `Fd` too; `AT_FDCWD` is negative *in its low
+    /// 32 bits* and passes through translation untouched.
     Fd,
     /// A NUL-terminated path. **Why every path-taking call is absent from the readers**, since
     /// they plainly read guest memory: the kernel stops at `PATH_MAX` (1024), which sits far
@@ -297,17 +300,13 @@ pub enum Ret {
     /// aliases the wrong file. M37 models it: `Box_::guest_dup2` writes the guest's own target slot
     /// and returns it, so the return is a slot the guest named, not a fresh allocation.
     Fd,
-    /// Two new descriptors, in x0 and x1 — `pipe`. Unmodelled: `allocates_fd` is false for it
-    /// (binding one of two would alias), and retrace-core does not assert on it. What the guest
-    /// actually gets today: `Box_::host_svc` captures only `x0` and the carry, and
-    /// `apply_and_return` sets `x0` alone, so the guest receives retrace's own host READ-end,
-    /// unbound, in `x0` and its own stale `x1` — the write-end never reaches the guest at all, and
-    /// both host descriptors leak in the recorder. Every later use returns EBADF via
-    /// `translate_fds`: `/bin/zsh` issues it and never uses the pair; `/bin/csh` and `/bin/tcsh`
-    /// use both ends (`fcntl(F_SETFD)` on the raw read-end and on the stale `x1`, EBADF twice) one
-    /// landmark before their `fork` wall — M37's sweep evidence
-    /// (docs/sweep-evidence/2026-09-13-m37/README.md, audit 3). Capturing `x1` is the actual
-    /// successor work item, ahead of any binding model — M10-successor work, owed.
+    /// Two new descriptors, in x0 and x1 — `pipe` (bsd/kern/sys_pipe.c, `retval[0]`/`retval[1]`).
+    /// `allocates_fd` is false for it (that view means "bind ONE return via `bind_returned_fd`");
+    /// `returns_fd_pair` is the view the pair path consults. M38 modelled it: `host_svc` returns
+    /// `x1`, `bind_returned_pair` allocates the read end first (xnu's order), and `set_ret1` writes
+    /// `x1` on both sides. Before M38 the guest received retrace's host read-end unbound in `x0`
+    /// and its own stale `x1` — `/bin/csh`/`/bin/tcsh` used both ends one landmark before their
+    /// `fork` wall and got EBADF twice (M37 evidence, audit 3).
     FdPair,
 }
 
@@ -490,7 +489,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // fcntl(int fd, int cmd, ...) / fcntl_nocancel (406 measured beside 92 in the jq run — see
         // the read row). The third argument is cmd-dependent: an int for F_GETFL/F_SETFD/F_DUPFD, a
         // pointer for F_GETPATH (writes ≤ MAXPATHLEN 1024) and F_PREALLOCATE (a 32-byte fstore_t,
-        // in-out) — every pointer case far inside the window.
+        // in-out) — every pointer case far inside the window. M38: the per-command refinement is
+        // `shape_of`; `F_DUPFD`/`F_DUPFD_CLOEXEC` are table operations (`guest_fcntl_dupfd`), never
+        // forwarded.
         SYS_FCNTL | SYS_FCNTL_NOCANCEL => row!(P, [Fd, Scalar, Ptr]),
         // fstat(int fd, struct stat *buf) / fstat64: a fixed 144-byte struct (sys/stat.h).
         SYS_FSTAT | SYS_FSTAT64 => row!(P, [Fd, Ptr]),
@@ -520,7 +521,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // a forwarded nested pointer, unrefused, and owed to a successor (the M27 class): the
         // refuse-by-value assert §4b pre-authorised would make every dynamic guest unrecordable,
         // which is the spec's own §9 halt clause (Ruling 4). Ptr on the direct bound; the nested
-        // residual is named here, not modelled.
+        // residual is named here, not modelled. M38: `FIOCLEX`/`FIONCLEX` are `Scalar` via
+        // `shape_of`.
         SYS_IOCTL => row!(P, [Fd, Scalar, Ptr]),
         // fgetattrlist(int fd, struct attrlist *alist, void *attrbuf, size_t bufsize, u_long opts):
         // alist is a fixed 24-byte struct (sys/attr.h, sizeof). attrbuf is a destination the KERNEL
@@ -746,10 +748,13 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         427 => row!(P, [Ptr, Scalar, Ptr, Scalar]),
         // execve(char *fname, char **argp, char **envp): the kernel reads every argv/envp string
         // through the nested pointers — rule 1, NestedSource (EXPECTED_DIFFS; exercised by /bin/sh).
-        // Forwarded today, and it fails only because those guest pointers EFAULT in retrace's
-        // process: a forwarded exec that SUCCEEDED would replace retrace's own process image. The
-        // fail-loud assert that precedent (`bsdthread_create`) demands is owed to a successor —
-        // adding it re-parks cpython_e2e's launcher test, the operator's call, not this row's.
+        // REFUSED since M38, never forwarded: the record arm ahead of the generic forward answers
+        // `exec_refusal_errno` (EFAULT, the value the forward measured) and writes nothing, on
+        // both sides. It was forwarded from M2 to M37 and failed only because those guest
+        // pointers EFAULT in retrace's process — a forwarded exec that SUCCEEDED would replace
+        // retrace's own process image, which is why the operator ruled it refused rather than
+        // waiting for nested-pointer translation to make the forward fatal. This row is
+        // documentation of the prototype only; nothing consults it for forwarding.
         59 => row!(P, [Path, NestedSource, NestedSource]),
         // ---- descriptors ----------------------------------------------------------------------
         // fchdir(int fd): a descriptor the legacy fd table never translated (EXPECTED_DIFFS;
@@ -758,7 +763,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // effect the `__disable_threadsignal` (331) row above names. Noted, not modelled.
         13 => row!(P, [Fd]),
         // pipe(void) → TWO new descriptors, in x0 and x1 (bsd/kern/sys_pipe.c `pipe`, `retval[0]`
-        // and `retval[1]`). See Ret::FdPair for why the return is unmodelled.
+        // and `retval[1]`). M38 models the pair: both descriptors are bound (`bind_returned_pair`,
+        // read end first) and `x1` is captured as the event's `ret1`; `Ret::FdPair`'s doc has it.
         42 => row!(Ret::FdPair, []),
         // kqueue(void) → a NEW descriptor (bsd/kern/kern_event.c `kqueue`). Bound like open's
         // (EXPECTED_DIFFS; exercised by /bin/wait4path). No kevent spelling (363/369/374/375) is
@@ -879,11 +885,13 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         //             char **argv, char **envp): pid is 4 bytes out. adesc is read as a fixed
         // struct and then the kernel follows attrp, file_actions, port_actions, persona_info and
         // more INSIDE it (bsd/kern/kern_exec.c `posix_spawn`, one `copyin` per member) — rule 1,
-        // NestedSource, like argv/envp's strings. Forwarded today — the launcher-shim gap
-        // cpython_e2e pins (EXPECTED_DIFFS) — and it fails only because those guest pointers
-        // EFAULT in retrace's process; a forwarded spawn that succeeded would start a real child
-        // of retrace. The fail-loud assert precedent demands is owed to a successor, since adding
-        // it re-parks cpython_e2e's launcher test — the operator's decision.
+        // NestedSource, like argv/envp's strings. REFUSED since M38, never forwarded: the record
+        // arm ahead of the generic forward answers `exec_refusal_errno` (EFAULT, the value the
+        // forward measured) and writes nothing, on both sides; cpython_e2e's launcher test pins
+        // the refusal line (EXPECTED_DIFFS). It was forwarded from M2 to M37 and failed only
+        // because those guest pointers EFAULT in retrace's process — a forwarded spawn that
+        // succeeded would start a real child of retrace. This row is documentation of the
+        // prototype only; nothing consults it for forwarding.
         244 => row!(P, [Ptr, Path, NestedSource, NestedSource, NestedSource]),
         // ---- mach traps (numbers per xnu osfmk/mach/syscall_sw.h; see the constants) ------------
         // _kernelrpc_mach_vm_allocate_trap(target, mach_vm_offset_t *addr, size, flags): 8 bytes
@@ -943,6 +951,60 @@ pub fn forwarded_shape(num: u64) -> &'static Shape {
          number to tests/census.rs too.", num as i64))
 }
 
+// fcntl(2) commands (sys/fcntl.h) and the two argument-less ioctl(2) requests (sys/ioctl.h,
+// `_IO('f', 1)` / `_IO('f', 2)`) whose third argument's KIND the row cannot state. Numbers from
+// the macOS 26 SDK headers; the fcntl set is the M33 census's (jq, CPython, the Apple sweep)
+// plus the two dup commands M38 models.
+pub const F_DUPFD: u64 = 0;
+pub const F_GETFD: u64 = 1;
+pub const F_SETFD: u64 = 2;
+pub const F_GETFL: u64 = 3;
+pub const F_SETFL: u64 = 4;
+pub const F_PREALLOCATE: u64 = 42;
+pub const F_NOCACHE: u64 = 48;
+pub const F_GETPATH: u64 = 50;
+pub const F_DUPFD_CLOEXEC: u64 = 67;
+pub const F_ADDFILESIGS_RETURN: u64 = 97;
+pub const F_CHECK_LV: u64 = 98;
+pub const FIOCLEX: u64 = 0x2000_6601;
+pub const FIONCLEX: u64 = 0x2000_6602;
+
+/// The shape of a syscall about to be forwarded, with the ONE refinement `forwarded_shape` cannot
+/// make: `fcntl`/`fcntl_nocancel`/`ioctl`'s third argument is an `int` for some commands and a
+/// pointer for others, and the row says `Ptr` for all of them. Under `Ptr` the M37 `Scalar`-skip
+/// does not apply, so a small integer is probed by `host_span` and would be rewritten if it equalled
+/// a mapped IPA (M37 measured that inert on every command seen; M38 closes the class rather than the
+/// instance). An UNLISTED command keeps the row's `Ptr` — the default is today's behaviour, not a
+/// panic, so a command outside the census cannot newly fail a guest (spec R5). Every other
+/// position, and every other syscall, is exactly `forwarded_shape(num)` — loud on an unenumerated
+/// number.
+pub fn shape_of(num: u64, args: &[u64; 8]) -> &'static Shape {
+    use ArgKind::*;
+    // `static`, not `const`: the function returns `&'static Shape`, and a static's address is
+    // stable (a `&CONST` would be a promoted temporary — fine today, but `ptr::eq` in the test
+    // and the row-identity argument want one address).
+    static FCNTL_INT: Shape = Shape { args: &[Fd, Scalar, Scalar], ret: Ret::Plain };
+    static IOCTL_INT: Shape = Shape { args: &[Fd, Scalar, Scalar], ret: Ret::Plain };
+    match num {
+        SYS_FCNTL | SYS_FCNTL_NOCANCEL => match args[1] {
+            F_DUPFD | F_GETFD | F_SETFD | F_GETFL | F_SETFL | F_NOCACHE | F_DUPFD_CLOEXEC => &FCNTL_INT,
+            _ => forwarded_shape(num),
+        },
+        SYS_IOCTL => match args[1] {
+            FIOCLEX | FIONCLEX => &IOCTL_INT,
+            _ => forwarded_shape(num),
+        },
+        _ => forwarded_shape(num),
+    }
+}
+
+/// `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)` — the descriptor-producing fcntl commands, which
+/// `forward_and_diff` short-circuits into `guest_fcntl_dupfd` and replay mirrors with
+/// `FdTable::dup_from` (M38). `min` is a GUEST minimum and never reaches the host.
+pub fn is_fcntl_dupfd(num: u64, args: &[u64; 8]) -> bool {
+    (num == SYS_FCNTL || num == SYS_FCNTL_NOCANCEL) && (args[1] == F_DUPFD || args[1] == F_DUPFD_CLOEXEC)
+}
+
 /// Which operand indices of `num` hold a GUEST file descriptor. View over `arg_kinds`; empty for
 /// an unenumerated syscall (the loud check is `forwarded_shape`, upstream of every caller in the
 /// forward path).
@@ -951,6 +1013,10 @@ pub fn fd_operands(num: u64) -> impl Iterator<Item = usize> {
 }
 /// Does `num`'s RETURN value need binding to a fresh guest fd slot? View over `arg_kinds`.
 pub fn allocates_fd(num: u64) -> bool { arg_kinds(num).is_some_and(Shape::allocates_fd) }
+/// Does `num` return TWO new descriptors in `x0`/`x1` (`pipe`)? View over `arg_kinds`. The pair
+/// is bound by `Box_::bind_returned_pair`, never by `bind_returned_fd`, and `x1` is written on
+/// both sides only for a row this answers true for (M38).
+pub fn returns_fd_pair(num: u64) -> bool { arg_kinds(num).is_some_and(|s| s.ret == Ret::FdPair) }
 /// The destination buffer `num` fills, as `(argument index, where its length lives)`. View.
 pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> { arg_kinds(num)?.dest_buffer() }
 /// Refused-by-value family: a destination behind a nested guest pointer. View.
@@ -1221,6 +1287,19 @@ pub fn is_signal_syscall(num: u64) -> bool {
     )
 }
 
+/// M38: `execve`(59) and `posix_spawn`(244) are REFUSED, never forwarded. Before M38 both were
+/// forwarded and failed only because their `argv`/`envp` are untranslated guest pointers (the
+/// host kernel read a guest address as a host address and returned EFAULT); if nested-pointer
+/// translation ever landed, a forwarded exec would replace retrace's own process. The value is
+/// what the forward RETURNED, measured on `exec_dyn` at M38 Task 4 — chosen for continuity (the
+/// CPython launcher's output, `/bin/sh`'s sweep row and every existing trace are unchanged), not
+/// fidelity; `ENOSYS` (78) is the one-constant change if a successor prefers "exec is unmodelled"
+/// to be what the guest reads (spec R4). `Some` doubles as the predicate the record arm and the
+/// replay mirror share.
+pub fn exec_refusal_errno(num: u64) -> Option<u64> {
+    match num { SYS_EXECVE | SYS_POSIX_SPAWN => Some(14), _ => None }
+}
+
 // ---- M12-signal-delivery ---------------------------------------------------------------------
 // Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here
 // was read out of the live SDK by spikes/sigabi.c, not from memory.
@@ -1367,6 +1446,16 @@ mod tests {
         for n in [20u64, 1, 3, 4, 5, 6, 197, 333] {
             assert!(!is_signal_syscall(n), "{n} must keep forwarding");
         }
+    }
+
+    // M38: exec is refused with the errno the FORWARD returned before M38 (measured, Task 4
+    // Step 2) — continuity, not fidelity (spec R4). Every other number is None.
+    #[test]
+    fn exec_refusal_covers_execve_and_posix_spawn_only() {
+        assert_eq!(exec_refusal_errno(SYS_EXECVE), Some(14));
+        assert_eq!(exec_refusal_errno(SYS_POSIX_SPAWN), Some(14));
+        assert_eq!(exec_refusal_errno(SYS_OPEN), None);
+        assert_eq!((SYS_EXECVE, SYS_POSIX_SPAWN), (59, 244));
     }
 
     #[test]
@@ -1614,13 +1703,46 @@ mod tests {
         }
     }
 
-    // M33 t5/t6: pipe's two-descriptor return is expressed (`Ret::FdPair`) but deliberately not
-    // bound — `allocates_fd` stays false, matching the legacy table, because binding one of two
-    // would alias. Its own test, named for what it checks (Task 5 review, minor 6).
+    // M38: pipe's two-descriptor return is bound as a PAIR — not through `allocates_fd` (that
+    // view binds one return and would alias) but through `returns_fd_pair`.
     #[test]
-    fn pipe_return_is_a_pair_and_is_not_bound() {
+    fn pipe_return_is_a_pair_and_both_are_bound() {
         assert_eq!(arg_kinds(42).unwrap().ret, Ret::FdPair);
         assert!(!allocates_fd(42), "binding one of pipe's two descriptors would alias");
+        assert!(returns_fd_pair(42));
+        assert!(!returns_fd_pair(SYS_OPEN) && !returns_fd_pair(SYS_DUP));
+    }
+
+    // M38: fcntl/ioctl's third argument is COMMAND-dependent. The per-command table answers for
+    // the commands the M33 census saw plus the two dup commands; anything else keeps the row's
+    // `Ptr` (spec R5 — an unchanged default, not a panic).
+    #[test]
+    fn fcntl_and_ioctl_third_argument_kind_follows_the_command() {
+        use ArgKind::*;
+        let args = |cmd: u64| { let mut a = [0u64; 8]; a[1] = cmd; a };
+        for cmd in [F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_NOCACHE, F_DUPFD_CLOEXEC] {
+            assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Scalar, "fcntl cmd {cmd}");
+            assert_eq!(shape_of(SYS_FCNTL_NOCANCEL, &args(cmd)).args[2], Scalar, "fcntl_nocancel cmd {cmd}");
+        }
+        for cmd in [F_PREALLOCATE, F_GETPATH, F_ADDFILESIGS_RETURN, F_CHECK_LV, 999] {
+            assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Ptr, "fcntl cmd {cmd}");
+        }
+        for cmd in [FIOCLEX, FIONCLEX] {
+            assert_eq!(shape_of(SYS_IOCTL, &args(cmd)).args[2], Scalar, "ioctl cmd {cmd:#x}");
+        }
+        assert_eq!(shape_of(SYS_IOCTL, &args(0x4004_667f)).args[2], Ptr, "FIONREAD stays Ptr");
+        // Every position but the third is the row's, and a non-fcntl number is the row itself.
+        assert_eq!(shape_of(SYS_FCNTL, &args(F_SETFD)).args[0], Fd);
+        assert!(std::ptr::eq(shape_of(SYS_READ, &args(0)), forwarded_shape(SYS_READ)));
+    }
+
+    #[test]
+    fn f_dupfd_is_recognised_by_number_and_command() {
+        let a = |n: u64, cmd: u64| { let mut a = [0u64; 8]; a[0] = n; a[1] = cmd; a };
+        assert!(is_fcntl_dupfd(SYS_FCNTL, &a(4, F_DUPFD)));
+        assert!(is_fcntl_dupfd(SYS_FCNTL_NOCANCEL, &a(4, F_DUPFD_CLOEXEC)));
+        assert!(!is_fcntl_dupfd(SYS_FCNTL, &a(4, F_SETFD)));
+        assert!(!is_fcntl_dupfd(SYS_DUP, &a(4, F_DUPFD)));
     }
 
     #[test]

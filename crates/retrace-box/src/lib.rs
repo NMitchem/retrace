@@ -666,6 +666,10 @@ pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, 
 /// Never persisted, never enters a trace file. See the M4 design spec for why each field is here.
 /// `EBADF` — answered for a guest fd that is `Free` or `Closed`, with nothing forwarded.
 pub const EBADF: u64 = 9;
+/// `EINVAL` — M38: answered by `FdTable::dup_from` (so on record and replay alike) for an
+/// `F_DUPFD` minimum outside `[0, DUP2_MAX_FD)`, as xnu's `finishdup` range check does, with
+/// nothing forwarded.
+pub const EINVAL: u64 = 22;
 
 /// M37 (review I1): the exclusive upper bound on a `dup2` TARGET. xnu answers `EBADF` for
 /// `new < 0 || new >= maxfiles`; `dup2(int, int)` puts a negative `fd2` in `w1` zero-extended, so
@@ -836,6 +840,31 @@ impl FdTable {
         self.slots[g as usize] = self.slots[src as usize];
         Ok(g)
     }
+
+    /// M38: `fcntl(src, F_DUPFD, min)` on the guest-visible table — identical on record and
+    /// replay. `Err(EBADF)` if `src` is not open; `Err(EINVAL)` for a `min` outside
+    /// `[0, DUP2_MAX_FD)`, checked after the source (xnu's order). Otherwise the lowest slot >=
+    /// `min` not currently open takes `src`'s KIND (`dup`'s rule: a `Console(n)` source makes an
+    /// alias M9's mirror must catch) and is returned. `min` is the GUEST's minimum — it never
+    /// reaches the host, whose `dup` picks any number; the binding is the caller's, as with
+    /// `alloc` + `bind`. A `min` below the table floor rounds up to 3, as `alloc` does (the M5
+    /// floor).
+    pub fn dup_from(&mut self, src: u64, min: u64) -> Result<u64, u64> {
+        if !self.is_open(src) { return Err(EBADF); }
+        // xnu's order (bsd/kern/kern_descrip.c `finishdup` via `fcntl_nocancel` F_DUPFD): the
+        // source is checked first, then the minimum's range. A negative `int` arrives
+        // zero-extended (0xffff_ffff), hence the `as i32` test — the same two-part check as
+        // `dup2` above, for the same reason. Here rather than in the record-only wrapper so that
+        // record and replay refuse identically (M38 final review, Important 1).
+        if (min as i32) < 0 || min >= DUP2_MAX_FD { return Err(EINVAL); }
+        let start = (min as usize).max(3);
+        let gfd = (start..self.slots.len())
+            .find(|&i| !matches!(self.slots[i], FdSlot::Open | FdSlot::Console(_)))
+            .unwrap_or_else(|| self.slots.len().max(start));
+        self.grow_to(gfd);
+        self.slots[gfd] = self.slots[src as usize];
+        Ok(gfd as u64)
+    }
 }
 
 /// A mid-run capture of `Box_`, restored by `from_checkpoint`.
@@ -955,28 +984,32 @@ fn alloc_pages(len: usize) -> (*mut u8, usize) {
     (p as *mut u8, len)
 }
 
-// Raw macOS BSD syscall: x16 = number, args in x0..x7, `svc #0x80`. Returns (x0, carry).
+// Raw macOS BSD syscall: x16 = number, args in x0..x7, `svc #0x80`. Returns (x0, x1, carry).
 // Carry set => error (x0 = errno); clear => success (x0 = full 64-bit result, e.g. an mmap ptr).
+// x1 is the kernel's retval[1] — meaningful for `pipe` (the write end) and captured for every
+// call; the CALLER decides whether the guest sees it (`returns_fd_pair`, M38).
 // The kernel may clobber the caller-saved scratch registers (x8-x15, x17); they are declared
 // clobbered so the compiler keeps no live value across the svc. x18 is platform-reserved — never
 // touch it. Flags are NOT preserved (we read the carry via `cset`), so no `preserves_flags`.
 // SAFETY: record-only; the caller has already translated guest pointers to host addresses.
-unsafe fn host_svc(num: u64, a: [u64; 8]) -> (u64, bool) {
+unsafe fn host_svc(num: u64, a: [u64; 8]) -> (u64, u64, bool) {
     let ret: u64;
+    let ret1: u64;
     let carry: u64;
     core::arch::asm!(
         "svc #0x80",
         "cset {c}, cs",
         in("x16") num,
         inout("x0") a[0] => ret,
-        in("x1") a[1], in("x2") a[2], in("x3") a[3],
+        inout("x1") a[1] => ret1,
+        in("x2") a[2], in("x3") a[3],
         in("x4") a[4], in("x5") a[5], in("x6") a[6], in("x7") a[7],
         c = out(reg) carry,
         out("x8") _, out("x9") _, out("x10") _, out("x11") _,
         out("x12") _, out("x13") _, out("x14") _, out("x15") _, out("x17") _,
         options(nostack),
     );
-    (ret, carry != 0)
+    (ret, ret1, carry != 0)
 }
 
 // --- M2-xpcport: mint a real bootstrap send right in retrace's own IPC space ---
@@ -2882,6 +2915,16 @@ impl Box_ {
         self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
     }
 
+    /// M38: the second return register. Written on BOTH sides, only for a `returns_fd_pair` row
+    /// — the two dispatch ARMS in `retrace-core` call this, record's generic BSD forward arm and
+    /// replay's generic `Syscall` mirror, each gated on `returns_fd_pair(num)` and each with the
+    /// same recorded value, just before its `set_x0_err_and_return`/`apply_and_return` (symmetry
+    /// rule 1). xnu writes x1 from retval[1] after every syscall; retrace leaves it stale for
+    /// every other row on purpose (spec R2: narrow, measured later if ever).
+    pub fn set_ret1(&mut self, ret1: u64) {
+        self.vcpu.set_reg(reg::x(1), ret1).unwrap();
+    }
+
     /// Complete a serviced syscall AND bring the saved trap state (SPSR_EL1) along, for the one
     /// caller that needs it: a signal delivered before the guest resumes from that syscall.
     ///
@@ -3160,7 +3203,8 @@ impl Box_ {
     /// `translate_fds` has exactly ONE caller, `forward_and_diff`, and is the first statement of
     /// its forwarding path — which is what makes it M33's one loud site. (Since M37 the function's
     /// literal first statement is the `SYS_DUP2` short-circuit into `guest_dup2`, which forwards
-    /// nothing and consults no view; `dup2` has a row regardless.) `guest_mmap_file` never calls it: file-backed
+    /// nothing and consults no view; `dup2` has a row regardless. M38 adds the `F_DUPFD`
+    /// short-circuit into `guest_fcntl_dupfd` beside it, on the same terms.) `guest_mmap_file` never calls it: file-backed
     /// mmap is special-cased upstream in retrace-core and never reaches `forward_and_diff`, so it
     /// translates its own fd via `self.fds.host` directly. That path does not pass through
     /// `forwarded_shape` either, which is harmless because `mmap` (197) has a row and the mmap arm
@@ -3170,13 +3214,19 @@ impl Box_ {
     /// the whole point is that the number may be a live descriptor of retrace's own.
     pub fn translate_fds(&self, num: u64, args: &mut [u64; 8]) -> Result<(), u64> {
         // M33: a syscall with no arg_kinds row cannot be forwarded. This is the first statement
-        // of forward_and_diff's forwarding path (M37's `SYS_DUP2` short-circuit precedes it and
-        // forwards nothing), so the panic sits upstream of every other view consulted there
-        // (diff_window's dest_buffer, the canary decision, bind_returned_fd, the dup bind).
-        for i in retrace_arch::forwarded_shape(num).fd_operands() {
+        // of forward_and_diff's forwarding path (M37's `SYS_DUP2` and M38's `F_DUPFD`
+        // short-circuits precede it and forward nothing), so the panic sits upstream of every
+        // other view consulted there (diff_window's dest_buffer, the canary decision,
+        // bind_returned_fd, the dup bind).
+        // M38: `shape_of` is `forwarded_shape` plus the fcntl/ioctl per-command refinement, and
+        // is exactly as loud on an unenumerated number.
+        for i in retrace_arch::shape_of(num, &*args).fd_operands() {
             let v = args[i];
-            // AT_FDCWD (-2) and friends are sentinels, not descriptors.
-            if (v as i64) < 0 { continue; }
+            // AT_FDCWD (-2) and friends are sentinels, not descriptors. `int fd` arrives in w0,
+            // so the sentinel is 0xffff_fffe in x0, not the sign-extended form — the low 32 bits
+            // are what carry the sign (M33 Ruling 10, fixed M38). A real descriptor never has
+            // bit 31 set.
+            if (v as i32) < 0 { continue; }
             match self.fds.host(v) {
                 Some(h) => args[i] = h as u64,
                 // Console fds 0/1/2 DO have a host mapping (identity, `FdTable::new`); `None`
@@ -3195,6 +3245,16 @@ impl Box_ {
         let gfd = self.fds.alloc();
         self.fds.bind(gfd, host_ret as i32);
         gfd
+    }
+
+    /// M38: bind `pipe`'s two host ends to two fresh guest slots, READ end first — the order xnu
+    /// fills `retval[0]`/`retval[1]`, so the guest's numbers come out as they would natively.
+    /// Returns the guest `(read, write)` pair; the write end is what `set_ret1` hands the guest.
+    /// Replay mirrors this with two `alloc()`s on its own table and compares.
+    pub fn bind_returned_pair(&mut self, host_r: i32, host_w: i32) -> (u64, u64) {
+        let g_r = self.fds.alloc(); self.fds.bind(g_r, host_r);
+        let g_w = self.fds.alloc(); self.fds.bind(g_w, host_w);
+        (g_r, g_w)
     }
 
     pub fn fds(&self) -> &FdTable { &self.fds }
@@ -3253,18 +3313,22 @@ impl Box_ {
     /// Forward one guest syscall to the host kernel and capture what it wrote into guest memory.
     ///
     /// **M10 makes this the whole fd contract, deliberately.** It takes GUEST descriptors, and the
-    /// `(u64, bool, Vec<Region>)` it returns already carries a GUEST descriptor when the syscall
-    /// produced one. Translation-in and binding-out used to live on opposite sides of a crate
+    /// `(ret, ret1, err, writes)` it returns already carries a GUEST descriptor when the syscall
+    /// produced one — or a GUEST pair in `(ret, ret1)` for `pipe` (M38; `ret1` is `0` for every
+    /// other row). Translation-in and binding-out used to live on opposite sides of a crate
     /// boundary (translation here, binding in retrace-core's dispatch), which meant every other
     /// caller had to remember the second half — and `memdiff`'s mini record loop did not, so its
     /// guest's `open` returned an unbound host fd and its `read` came back EBADF. One function owns
     /// both halves now; a caller cannot hold it wrong.
-    pub fn forward_and_diff(&mut self, num: u64, args: [u64;8]) -> (u64, bool, Vec<Region>) {
+    pub fn forward_and_diff(&mut self, num: u64, args: [u64;8]) -> (u64, u64, bool, Vec<Region>) {
         // M37: dup2 names its own target slot; it is a TABLE operation with a host `dup` behind
         // it, never a forwarded dup2 — `dup2(h, fd2)` on the host would overwrite retrace's own
         // descriptor `fd2`. Kept inside this function so it still owns both halves of the fd
         // contract (M10). Replay mirrors the table half in `ReplaySession::advance`.
         if num == retrace_arch::SYS_DUP2 { return self.guest_dup2(args); }
+        // M38: F_DUPFD names a GUEST minimum; like dup2 it is a table operation with a host `dup`
+        // behind it (never a host F_DUPFD, whose minimum would be a host number).
+        if retrace_arch::is_fcntl_dupfd(num, &args) { return self.guest_fcntl_dupfd(args); }
         // The guest's own view of the operands, kept for the fd bookkeeping below: `args` is about
         // to be rewritten to host descriptors, and `close` must retire the GUEST slot.
         let gargs = args;
@@ -3272,13 +3336,13 @@ impl Box_ {
         // host kernel untranslated acts on RETRACE's descriptor of that number.
         let mut args = args;
         if let Err(e) = self.translate_fds(num, &mut args) {
-            return (e, true, Vec::new());
+            return (e, 0, true, Vec::new());
         }
         // map_with_linking_np: fd inside a guest struct; forward a translated host-side copy.
         let mwl = if num == retrace_arch::SYS_MAP_WITH_LINKING_NP {
             match self.translate_mwl_regions(&args) {
                 Ok(b) => Some(b),
-                Err(e) => return (e, true, Vec::new()),
+                Err(e) => return (e, 0, true, Vec::new()),
             }
         } else { None };
         let mut windows: Vec<Window> = Vec::new();
@@ -3290,8 +3354,9 @@ impl Box_ {
         // every self-pid csops/proc_info answered ESRCH. Only `Scalar` skips: positions past the
         // row's arity keep the probe (M30's stale-register band measurement rests on it) and every
         // memory kind needs it. The audit that licenses this is in
-        // docs/sweep-evidence/2026-09-13-m37/README.md.
-        let shape = retrace_arch::forwarded_shape(num);
+        // docs/sweep-evidence/2026-09-13-m37/README.md. M38: the fcntl/ioctl third argument
+        // follows its command (`shape_of`), so an `int` argument is no longer probed under `Ptr`.
+        let shape = retrace_arch::shape_of(num, &args);
         for i in 0..8 {
             if shape.args.get(i) == Some(&retrace_arch::ArgKind::Scalar) {
                 hargs[i] = args[i] as i64;
@@ -3543,7 +3608,7 @@ impl Box_ {
         // padding.
         let mut sa = [0u64; 8];
         for i in 0..8 { sa[i] = hargs[i] as u64; }
-        let (ret, err) = unsafe { host_svc(num, sa) };
+        let (ret, ret1, err) = unsafe { host_svc(num, sa) };
         // M35 (H2): the capture — and the guard band inside it — runs on the FAILING path too.
         // Until M35 this loop sat under `if !err` on the stated assumption that a failed syscall
         // wrote nothing; M27 narrowed it (`ps`'s 83 sysctls all succeeded), M28 measured one case
@@ -3725,8 +3790,8 @@ impl Box_ {
         // method with the same argument. The host `dup` itself was forwarded above like any other
         // fd-producing call — `dup(h)` on the host returns a fresh descriptor and touches none of
         // retrace's own — so only the binding differs.
-        let ret = if !err && retrace_arch::allocates_fd(num) {
-            if num == retrace_arch::SYS_DUP {
+        let (ret, ret1) = if !err && retrace_arch::allocates_fd(num) {
+            let g = if num == retrace_arch::SYS_DUP {
                 // `translate_fds` already answered EBADF for a source with no host mapping, and on
                 // record a slot has a host mapping iff it is open, so the table cannot refuse here.
                 let g = self.fds.dup(gargs[0])
@@ -3736,8 +3801,14 @@ impl Box_ {
                 g
             } else {
                 self.bind_returned_fd(num, ret)
-            }
-        } else { ret };
+            };
+            (g, 0)
+        } else if !err && retrace_arch::returns_fd_pair(num) {
+            // M38: pipe. Both host ends are bound, so a guest `close` of either retires it through
+            // the ordinary path — before M38 both leaked in the recorder and the write end never
+            // reached the guest at all (`Ret::FdPair`'s doc).
+            self.bind_returned_pair(ret as i32, ret1 as i32)
+        } else { (ret, 0) };
         // A successful close retires the guest's slot, so a later use of that number is EBADF
         // instead of reaching whatever retrace has open there. An IDENTITY console slot never
         // arrives here — is_console_close fakes its host half upstream in retrace-core (and
@@ -3748,7 +3819,7 @@ impl Box_ {
         if !err && (num == retrace_arch::SYS_CLOSE || num == retrace_arch::SYS_CLOSE_NOCANCEL) {
             self.fds.close(gargs[0]);
         }
-        (ret, err, writes)
+        (ret, ret1, err, writes)
     }
 
     /// M37: `dup2(fd, fd2)` on record — `FdTable::dup2` with a host `dup` of `fd`'s mapping as
@@ -3770,24 +3841,48 @@ impl Box_ {
     /// (one past the highest open slot, bounded by the host's own descriptor limit) and through
     /// `dup2`'s bounded `grow_to`, so `fd == fd2` with `fd` open never reaches the range check
     /// with an out-of-range `fd2`.
-    fn guest_dup2(&mut self, args: [u64; 8]) -> (u64, bool, Vec<Region>) {
+    fn guest_dup2(&mut self, args: [u64; 8]) -> (u64, u64, bool, Vec<Region>) {
         let (fd, fd2) = (args[0], args[1]);
-        let Some(h) = self.fds.host(fd) else { return (EBADF, true, Vec::new()); };
+        let Some(h) = self.fds.host(fd) else { return (EBADF, 0, true, Vec::new()); };
         // Before the host dup, not after: see the doc comment — the table's self no-op would not
         // keep it.
-        if fd == fd2 { return (fd2, false, Vec::new()); }
+        if fd == fd2 { return (fd2, 0, false, Vec::new()); }
         let dup = unsafe { libc::dup(h) };
         if dup < 0 {
             let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(EBADF as i32) as u64;
-            return (e, true, Vec::new());
+            return (e, 0, true, Vec::new());
         }
         match self.fds.dup2(fd, fd2, Some(dup)) {
             Ok((ret, displaced)) => {
                 // A displaced identity mapping (<= 2) is retrace's own console; never closed.
                 if let Some(d) = displaced { if d > 2 { unsafe { libc::close(d); } } }
-                (ret, false, Vec::new())
+                (ret, 0, false, Vec::new())
             }
-            Err(e) => { unsafe { libc::close(dup); } (e, true, Vec::new()) }
+            Err(e) => { unsafe { libc::close(dup); } (e, 0, true, Vec::new()) }
+        }
+    }
+
+    /// M38: `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)`. The table half is `FdTable::dup_from`
+    /// (replay calls it with the same arguments); the host half is a plain `dup(h)`, because a
+    /// host `F_DUPFD` would apply the guest's minimum to retrace's own descriptor space. Both
+    /// commands share this path: the close-on-exec bit is not modelled — exec is refused (M38
+    /// t4), and its one observable is a forwarded `F_GETFD`, which reads the host `dup`'s CLEAR
+    /// flag, so a guest doing `F_DUPFD_CLOEXEC` then `F_GETFD` reads 0 where native reads 1
+    /// (deterministic across record and replay, since the recorded return carries it; a fidelity
+    /// gap, owed in the README). The range check is the table's (`dup_from` answers EINVAL after
+    /// the source check, xnu's order), so record and replay refuse identically; the wrapper's
+    /// only host work is the `dup` and its close on `Err`.
+    fn guest_fcntl_dupfd(&mut self, args: [u64; 8]) -> (u64, u64, bool, Vec<Region>) {
+        let (fd, min) = (args[0], args[2]);
+        let Some(h) = self.fds.host(fd) else { return (EBADF, 0, true, Vec::new()); };
+        let dup = unsafe { libc::dup(h) };
+        if dup < 0 {
+            let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(EBADF as i32) as u64;
+            return (e, 0, true, Vec::new());
+        }
+        match self.fds.dup_from(fd, min) {
+            Ok(g) => { self.fds.bind(g, dup); (g, 0, false, Vec::new()) }
+            Err(e) => { unsafe { libc::close(dup); } (e, 0, true, Vec::new()) }
         }
     }
 
