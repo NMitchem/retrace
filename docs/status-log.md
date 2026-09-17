@@ -9628,6 +9628,8 @@ owed is below, addressed to whichever milestone next takes it up. The charter's 
 class B is empty, the run ends at M36" — was not the case (M36's table had eight class-B rows
 across two walls), and its third — "if class B is large, M37 and M38 take two slices" — was not
 either.
+Forward pointer (2026-09-16): an M38 does exist after all, under a fresh charter, not this one's —
+see `## Status: M38-owed` below.
 
 ### What stays owed
 
@@ -9729,3 +9731,738 @@ M36's list, item by item, with what this milestone discharged struck by name and
   I2), its §3b.2 rule as literally written (audit 2), and its §9 prediction (582/0/10 over 128) —
   all stand as written in the spec, and §11 says what was measured instead. M34's, M35's and M36's
   superseded lists stay as M36 left them.
+
+## Status: M38-owed — five owed items closed: pipe's pair, F_DUPFD, AT_FDCWD, and two forwards refused
+
+**This is a fresh charter reusing the next number, not the M32–M38 run's M38.** That run ended
+at M37 under its own §3 rule and the section above says so ("M38 does not exist"); the number is
+reused because it is the next one, and the older section now carries a forward pointer here
+(spec R1). M38 took five items off M37's "What stays owed" — none a wall, none a new subsystem,
+each independently small, each testable by a repo-owned fixture asserting on the difference it
+makes — and re-baselined the sweep once. **Item 1:** `pipe`'s second descriptor never reached the
+guest (`Ret::FdPair` had been documentation since M33; `csh`/`tcsh` had been *using* the garbage
+pair since M37); now `Event::Syscall` carries `ret1`, `TRACE_MAGIC` is `RT\x00\x0a`, and both
+ends are bound as guest descriptors on both sides. **Item 2:** `fcntl`/`ioctl` third-argument
+kinds follow the command (`shape_of`) — M37's residual, a `Ptr` that is sometimes a number —
+and `F_DUPFD`/`F_DUPFD_CLOEXEC` is a table operation honouring the *guest* minimum. **Item 3:**
+`AT_FDCWD` is honoured in the 32-bit form real guests pass (`(v as i32) < 0`), the sentinel bug
+that had made `/bin/ls` print `ls: .: Bad file descriptor` since M10 t3 — and the measurement
+that followed is the shape of this milestone's sweep: with the sentinel fixed, `ls` *and* `ed`
+run on to syscalls the box has no `arg_kinds` row for and fail **loud**, so two rows that had
+"passed" by failing identically left the PASS column. **Item 4:** `execve`/`posix_spawn` are
+refused in a record arm ahead of the generic forward, with the errno the forward had been
+returning (measured `EFAULT` on both) — the operator's ruling of M33's "the operator's call".
+**Item 5:** the receive-shaped message-queue `mach_msg2` that had parked six sweep rows since
+M35 is refused deterministically with a code **chosen by measurement** (`MACH_RCV_INVALID_NAME`,
+the only one all six accept — *not* the spec's default, which was not a tie); `launchctl` runs
+to its own clean exit and is un-parked, the other five run 20–50 landmarks further to a missing
+row each and are re-parked there, class B.
+
+The milestone's own numbers: **five** items discharged; **one** trace field (`ret1`) and **one**
+format bump (`RT\x00\x09` → `RT\x00\x0a`, pre-authorised); **one** new `Box_` method per side
+of each model (`bind_returned_pair`, `set_ret1`, `guest_fcntl_dupfd`), **one** new table
+operation (`FdTable::dup_from`), **one** new view (`returns_fd_pair`), **one** command-keyed
+shape function (`shape_of`, thirteen command constants), **one** refusal predicate
+(`exec_refusal_errno`) and **one** router route (`Route::RefuseMqRecv`) with **three** receive
+codes named; **four** new fixtures (`pipe_dyn`, `dupfd_dyn`, `atfdcwd_dyn`, `exec_dyn`) and
+**four** new e2e binaries (+7 gate tests), each with a pre-fix red run kept in its task report;
+**one** tampered-trace control (`a_tampered_pipe_write_end_is_caught_as_divergence`); **18**
+measurement cells for the receive code (three codes × six binaries, every candidate's stderr
+kept); **one** gate un-parked, **five** re-parked in place, **zero** new `#[ignore]`;
+**one** sweep (`pass=44 fail=10 skip=0`), **46** rows unchanged against M37's run N, **8** moved
+and every one explained by name, **one** of them (`/bin/ed`) for a reason the plan had not
+predicted and the close measured; **no** new returning arm, `verify_thread` **7 → 7**;
+**eight** commits before this close (`423cfb1`/`d7a6ede` for the spec and plan; `673eefb`,
+`6a29b14`, `2f0883c`, `109af3d`, `b3fc694` for the five tasks; `911214e` for Task 5's fix
+round), `crates/` and `tools/` unchanged by
+the close except for code comments and seven `#[ignore]` reason strings. The gate figures are
+in their own subsection.
+
+### What it set out to do
+
+The spec (`docs/superpowers/specs/2026-09-16-retrace-m38-owed-design.md`) §1: "M37 closed the
+M32–M38 run with every remaining Apple-sweep wall classed C … and a long owed list of items that
+are not walls: descriptor-return gaps, one sentinel bug …, and two forwards that should never
+have been forwards. None needs a new subsystem. This milestone takes the five that are (a)
+independently small, (b) each testable by a repo-owned fixture asserting on the difference it
+makes, and (c) together worth one gate and one sweep re-baseline." The operator ruled item 4 on
+2026-09-16 (refuse deterministically) and pre-authorised the `TRACE_MAGIC` bump item 1 needs.
+§7 named what it would not do — no `fork`, no *modelling* of the receive, no uniform `x1`, no
+fail-loud default for unlisted `fcntl` commands, no nested-pointer translation — and §5 kept the
+M32–M38 halt conditions (a red gate surviving one fix round, any new `#[ignore]`, a class-E row,
+scope the spec lacks) with two changes: the bump is not a halt, and the close pushes once. §4
+ordered the tasks so the format bump landed first (every evidence trace this run keeps is
+`RT\x00\x0a`) and the two refusals last, with the sweep re-baselined once, at the close.
+
+### Item 1 — `pipe`: `ret1` in the trace, both ends bound (`673eefb`)
+
+**What was owed.** `host_svc`'s `asm!` block had `inout("x0") a[0] => ret` and `in("x1") a[1]`
+and returned `(ret, carry)`; `apply_and_return` set `x0` alone; `Event::Syscall` had no field
+for a second return register. So on a `pipe` the guest received retrace's host read-end,
+unbound, in `x0`, and its own stale `x1` as the write end; both host ends leaked in the recorder;
+every later use was `EBADF`. M37's audit 3 had measured `csh`/`tcsh` doing exactly that one
+landmark before their `fork` wall (`x0 = 0x17`, `x1` = the preceding `sigaction`'s second
+argument, two `fcntl(F_SETFD)` `EBADF`s).
+
+**Measured before the change** — the fixture `pipe_dyn.c` (`pipe(p)`; `write(p[1], "pipe\n",
+5)`; `read(p[0], …)`; print whether the pair is adjacent and guest-numbered, and the bytes) on
+the unmodified recorder, verbatim from the Task 1 report:
+
+```
+$ cargo run -p retrace -- record-dyn …/out/pipe_dyn -o /tmp/m38-pipe-pre.bin
+pair=0
+low=0
+write failed
+record exit=4
+```
+
+`pair=0` (the write end is not the read end + 1), `low=0` (`p[0]` is retrace's unbound host
+read-end, ≥ 16; `p[1]` is the stale `x1`), and exit 4 is the fixture's own "write failed" —
+the guest's `write` into its stale `x1` was `EBADF`. Natively the same binary prints
+`pair=1 / low=1 / bytes=pipe`, exit 0.
+
+**What was built.** `Event::Syscall { num, args, ret, ret1: u64, err, writes, thread }` (the
+field order is the wire order); `TRACE_MAGIC = *b"RT\x00\x0a"`, the M24 test renamed
+`magic_bumped_for_the_m38_second_return_register` and pinned to it, `rejects_prior_format_version`
+looping over `RT\x00\x02` and `RT\x00\x09`. `host_svc` returns `(x0, x1, carry)`
+(`inout("x1") a[1] => ret1`); `forward_and_diff` returns `(ret, ret1, err, writes)` with `ret1`
+`0` on every row except a `returns_fd_pair` one (a new view over `arg_kinds`, `ret ==
+Ret::FdPair`; `allocates_fd(42)` stays false — it means "binds ONE fd"), where `!err` calls
+`Box_::bind_returned_pair(host_r, host_w)`: two `alloc` + `bind`s, read end first, xnu's
+`retval[0]`/`retval[1]` order. `Box_::set_ret1(ret1)` writes `x1`, and **both** dispatch arms
+call it under the identical predicate `retrace_arch::returns_fd_pair(num)` — record before
+`set_x0_err_and_return`, replay before `apply_and_return`, neither of which touches `x1`. The
+replay mirror sits in the M10 fd block: two `alloc()`s compared to the recorded `(ret, ret1)`,
+a mismatch reported through the existing `fd divergence` channel naming both pairs. The capture
+is **narrow** (spec R2): 39 other `Event::Syscall` constructions in `retrace-core` carry
+`ret1: 0`, and the gate counts them. Fallout the compiler found: 21 three-tuple destructures of
+`forward_and_diff` across seven `retrace-box` test files now bind `_ret1`. `Ret::FdPair`'s
+rustdoc lost its "unmodelled" paragraph and keeps the M37 evidence as history.
+
+**Its control, red then green.** `pipe_e2e` — `both_ends_reach_the_guest_and_bytes_round_trip`
+(the rung helper's byte-equal stdout, `pair=1\nlow=1\nbytes=pipe\n`),
+`the_trace_carries_a_guest_numbered_write_end_in_ret1` (exactly one `pipe` landmark, `w == r + 1`,
+`r >= 3`, `w < 16` — adjacent *guest* numbers, which neither a host descriptor ≥ 16 nor an
+arbitrary stale register can be — and **no other landmark carries a non-zero `ret1`**, the R2
+assertion over hundreds of libSystem landmarks), and `a_tampered_pipe_write_end_is_caught_as_divergence`
+(rewrite the landmark's `ret1` to 99; replay must exit non-zero with `fd divergence` and `pair`
+in stderr — so the mirror's compare is verified able to fail, not merely present). Post-fix:
+
+```
+pair=1
+low=1
+bytes=pipe
+record exit=0      replay exit=0 (same three lines)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.28s
+```
+
+Task 1's covering runs: `retrace-trace` 14, `retrace-arch` 36 + 2 + 5, `retrace-core` 80 over
+10 targets (`machmsgband_dyn` alone 175 s), `retrace-guest` 13 + 1, `retrace-box` 285 over 39
+(38 targets + `Doc-tests`), the six fd gates green, clippy clean, `verify_thread` 7. The review
+approved it; one observation stands as a noted, unfixed edge: on a *failed* `pipe` both sides
+write `x1 = 0` where xnu leaves `x1` untouched — deterministic, symmetric, and libc never reads
+`x1` on failure.
+
+### Item 2 — `fcntl`/`ioctl` kinds by command; `F_DUPFD` modelled (`6a29b14`)
+
+**What was owed.** `SYS_FCNTL | SYS_FCNTL_NOCANCEL => row!(P, [Fd, Scalar, Ptr])` and `SYS_IOCTL
+=> row!(P, [Fd, Scalar, Ptr])` fixed the third argument's kind per syscall number when it is
+command-dependent — an `int` for `F_SETFD`/`F_SETFL`/`F_DUPFD`, a pointer for `F_GETPATH`/
+`F_PREALLOCATE`. Under `Ptr` the M37 `Scalar`-skip does not apply, so a small integer was probed
+by `host_span` and would have been rewritten had it equalled a mapped IPA (M37 measured it inert
+on the corpus: `F_SETFD 1` is `1`). And `F_DUPFD` returned a *new* descriptor that
+`allocates_fd(92)` (false) never bound; no corpus guest issued it (M33 census).
+
+**Measured before the change** — `dupfd_dyn.c` (`open` a temp file; `n = fcntl(fd, F_DUPFD,
+10)`; print `n`; `write(n, "dupfd\n", 6)`; `fcntl(n, F_SETFD, FD_CLOEXEC)`; then
+`a = fcntl(1, F_DUPFD_CLOEXEC, 12)` and `write(a, "alias\n", 6)` through the alias) on the
+unmodified recorder, verbatim:
+
+```
+$ cargo run -p retrace -- record-dyn …/out/dupfd_dyn -o /tmp/m38-dupfd-pre.bin -- /tmp/m38-dupfd-pre.txt
+n=19
+[retrace] fall-throughs: 0
+exit=5
+$ cat /tmp/m38-dupfd-pre.txt
+(empty)
+```
+
+`n=19` is a **host** descriptor (retrace holds 0–16 open; 17/18 were taken by the open and
+libSystem's extra), and exit 5 is the fixture's `write(n, …) != 6` branch — `translate_fds` has
+no guest slot 19, so the write was `EBADF` and the file stayed empty. Unit reds first:
+`E0425: cannot find value 'F_DUPFD'` (`retrace-arch`), `E0599: no method named 'dup_from'`
+(`fdtable.rs`).
+
+**What was built.** In `retrace-arch`: thirteen command constants (`F_DUPFD` 0, `F_GETFD` 1,
+`F_SETFD` 2, `F_GETFL` 3, `F_SETFL` 4, `F_NOCACHE` 48, `F_DUPFD_CLOEXEC` 67, `F_PREALLOCATE` 42,
+`F_GETPATH` 50, `F_ADDFILESIGS_RETURN` 97, `F_CHECK_LV` 98, `FIOCLEX` 0x20006601, `FIONCLEX`
+0x20006602 — checked against the SDK's `sys/fcntl.h`/`sys/filio.h`), `shape_of(num, args) ->
+&'static Shape` (two `static` shapes, `[Fd, Scalar, Scalar]`, for the scalar commands; an
+unlisted command falls through to `forwarded_shape(num)` and so keeps `Ptr` and stays loud on an
+unenumerated number — spec R5, the row comment naming the default and the census date), and
+`is_fcntl_dupfd(num, args)`. In the box: `EINVAL` beside `EBADF`; `FdTable::dup_from(src, min)
+-> Result<u64, u64>` — the lowest free slot ≥ `min` takes the **source slot's kind** (M37's
+`dup` rule, so `F_DUPFD` on a console fd stays a console alias the M9 mirror catches); a
+`guest_fcntl_dupfd` short-circuit directly after `guest_dup2`'s at the top of `forward_and_diff`
+— the source's host fd (`EBADF` if none), a range check → `EINVAL` (after the source check,
+xnu's order), `libc::dup(h)` on the host and **never a host `F_DUPFD`** (its minimum would be a
+host number), the table call, `(g, 0, false, [])`; and both shape consultations in
+`forward_and_diff` (`translate_fds` and the probe loop — the only two in the box) now call
+`shape_of`. The replay mirror, directly after the `dup2` mirror and before the M10
+`allocates_fd` block: `if !*err && is_fcntl_dupfd(num, &args)` → `fds_mut().dup_from(args[0],
+args[2])` compared to the recorded `ret`. `F_DUPFD_CLOEXEC`'s close-on-exec bit has no
+observable in the box (exec is refused, item 4), so both commands share the path.
+
+**Its control.** `dupfd_e2e` — `f_dupfd_honours_the_guest_minimum_and_writes_reach_the_file`
+(the recorded `F_DUPFD` returned exactly **10**, a guest number honouring the guest minimum that
+no host `dup` could produce; the file's bytes are `dupfd\n`, asserted on the file per
+`bigwrite_e2e`'s rule) and `the_trace_carries_f_dupfd_returning_the_guest_slot_and_f_setfd_forwarded_verbatim`
+(the `F_SETFD` event's `args[2] == 1` — the assertion documents the kind; it cannot prove the
+skip, since the probe's rewrite was inert on `1` anyway). Post-fix, verbatim:
+
+```
+n=10
+setfd=0
+alias
+record exit=0          $ cat /tmp/m38-dupfd-post.txt → dupfd
+replay exit=0 (same three lines)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.31s
+```
+
+plus `fdtable.rs`'s `dup_from_takes_the_lowest_free_slot_at_or_above_min_with_the_sources_kind`
+and `fdxlat.rs`'s `fcntl_translates_only_its_descriptor`; the census guests that issue `fcntl`
+re-run green through the new path (`cpython_e2e` 2/2 and `jq_e2e` 1/1 **ran**, no skip; `dup2`,
+`dupkind`, `fdtable` gates green). The review approved it and carried one minor to the final
+review: `guest_fcntl_dupfd`'s range guard (`EINVAL` for `min < 0` / `min >= DUP2_MAX_FD`) is
+record-side only, where `dup2`'s lives in the table method both sides share — replay's
+`dup_from` is guarded only by `!*err`, so a trace claiming success with a huge `min` would
+`grow_to` it instead of diverging (M37-I1's shape); the fix's shape is the check inside
+`FdTable::dup_from`, unit-tested.
+
+### Item 3 — `AT_FDCWD` in the form real guests pass (`2f0883c`), and the row it un-hid
+
+**What was owed.** `translate_fds`'s sentinel check was `(v as i64) < 0`. libc passes `-2` as a
+32-bit `int` in `w0`, so `x0 = 0xfffffffe`, which is positive as an `i64`; the lookup failed and
+the guest got `EBADF`. Measured at M33 on `/bin/ls` (twice) and `/bin/ed` (once); present since
+M10 t3 (`e67dd65`); and `fdxlat.rs`'s sentinel test passed `AT_FDCWD as u64` — the sign-extended
+form no guest produces — so the unit suite was green while the real form failed.
+
+**Measured before the change**, verbatim from the Task 3 report. The rewritten unit test:
+
+```
+test at_fdcwd_passes_through_untranslated_in_the_form_the_abi_delivers ... FAILED
+thread '...' panicked at crates/retrace-box/tests/fdxlat.rs:71:9:
+AT_FDCWD as 0xfffffffe is a sentinel, not a descriptor — it must not be rejected as EBADF
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+and the gate, `atfdcwd_dyn.c` (`fstatat(AT_FDCWD, ".", &st, 0)`; print `ok` or `errno=N`) on
+the unfixed tree:
+
+```
+test a_relative_fstatat_through_at_fdcwd_succeeds ... FAILED
+assertion `left == right` failed: rung guest stdout mismatch — did it reach main? got "errno=9\n", want "ok\n"
+```
+
+`errno=9` is `EBADF`. **A second red the plan did not predict:** with the fix applied to
+`lib.rs` alone the unit test was *still* red, because `fdxlat.rs`'s local `translate()` helper
+is a hand-maintained **mirror** of `Box_::translate_fds`'s walk (its own doc says so), still at
+`(v as i64) < 0`. The implementer fixed it identically — one line outside the brief's named
+range, inside a file the brief targeted, necessary for the brief's own "Step 1's test → pass" to
+hold — and the review noted the duplication as a standing risk now carried twice.
+
+**What was built.** `(v as i32) < 0` — a `u64 → i32` cast truncates to the low 32 bits, so
+both `0xfffffffe` and `0xffff_ffff_ffff_fffe` read as `-2`, and a real descriptor never has bit
+31 set; the comment says which form the ABI actually delivers and cites M33 Ruling 10. The
+`AT_FDCWD` and `ArgKind::Fd` rustdocs say the same. `fdxlat.rs` passes `0xfffffffe` first and
+keeps the sign-extended form as a second assertion. The review checked that no other 64-bit
+fd-sentinel site disagrees (`dup2`'s `fd2` and `F_DUPFD`'s `min` were already `as i32`;
+`mmap_file`/`mwl` operate on native `i32`).
+
+**Its control.** `atfdcwd_e2e` asserts the recorded `fstatat64` (470) has **both** `args[0] ==
+0xfffffffe` and `err == false` on the same landmark — the first half pins the form the guest
+passed, so the fixture cannot pass by accident with a 64-bit sentinel; the second is the fix.
+After both fixes: `fdxlat` 8 passed, `atfdcwd_e2e` 1 passed; neighbours (`fdtable_e2e`,
+`jq_file_e2e`, `sysbin_e2e`) 8/8; `retrace-box` 263/263 across every target; clippy clean.
+
+**The `/bin/ls` hand check, and what it changed.** The brief expected `ls` to "print a
+directory listing". It did not:
+
+```
+thread 'main' panicked at crates/retrace-arch/src/lib.rs:938:38:
+M33: syscall 461 (461) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be
+forwarded unclassified …
+```
+
+`RETRACE_TRACE=1` shows the real `/bin/ls` issuing `fstatat64(0xfffffffe, …)` — `AT_FDCWD` in
+exactly the 32-bit form — and it does **not** abort the run with `EBADF` any more; `Bad file
+descriptor` appears nowhere. What `ls` then reaches is `getattrlistbulk` (461), which modern `ls`
+uses to bulk-enumerate a directory and which has no `arg_kinds` row — a pre-existing owed item
+(M34: "`getattrlistbulk` (461) and `getattrlistat` (468). Unchanged."), previously *masked* by
+the `EBADF`. **Ruling (Task 3, the ledger's):** the 461/468 rows are NOT added in M38 — spec §5
+lists "scope the spec lacks" as a halt, and adding a `Dest` row unmeasured at the end of an
+unattended run is the "right conclusion, unmeasured fact" class this repo warns about. Instead
+the measurement re-scopes spec §3c and §6: `/bin/ls`'s sweep row moves from a **false PASS** (it
+printed an error and exited, identically on both sides) to a **loud** `recorder panicked: no
+arg_kinds row for 461` — the honest-gate discipline replacing a silent lie with a named wall —
+and §6's "PASS ≥ 45" becomes "≥ 44 with `ls`'s move explained by name (≥ 45 if any of the six
+RCV gates un-parks)". 461/468 move to the top of the owed list with the new fact that `/bin/ls`
+reaches them. Cost if wrong: the operator wanted `ls` green and must charter a two-row follow-up
+(both rows from the SDK prototypes: 461 `[Fd, Ptr, Dest(Reg(3)), Scalar, Scalar]`, 468 `[Fd,
+Path, Ptr, Dest(Reg(4)), Scalar, Scalar]`, bounds the caller's size register, `read`'s citation).
+
+### Item 4 — `execve`/`posix_spawn` refused, never forwarded (`109af3d`)
+
+**What was owed.** Rows 59 and 244 were forwarded by the generic arm and failed only because
+`NestedSource` is untranslated: the host kernel read `argv` at a guest address and returned
+`EFAULT`. Had nested-pointer translation ever landed, a forwarded exec would have **replaced
+retrace's own process**. M33 Ruling 7 had left the fail-loud "the operator's call" because
+adding it re-parks the CPython launcher test; the operator ruled on 2026-09-16: refuse
+deterministically, and keep the launcher test running by keeping the errno.
+
+**Measured before the change** (spec §3d, R4 — the errno is measured, not chosen).
+`exec_dyn.c` (`execve("/bin/echo", …)`, then `posix_spawn` of the same with
+`POSIX_SPAWN_SETEXEC` — the launcher shim's exact call; print each errno) on the unmodified
+recorder with `RETRACE_TRACE=1`, verbatim from the Task 4 report:
+
+```
+execve=14
+posix_spawn=14
+[trap] num=59 (0x3b) pc=0x1804badd0 args=[0x10000061c,0x27ff7f0,0x27ff7e8,0x27ffea8,0x1,0x20]
+[trap] num=244 (0xf4) pc=0x1804b50dc args=[0x27ff7d4,0x10000061c,0x27ff6b0,0x27ff7f0,0x27ff7e8,0x27ff7e8]
+landmark 245: num=59 ret=14 ret1=0 err=true writes=0 thread=0
+landmark 247: num=244 ret=14 ret1=0 err=true writes=0 thread=0
+grep -a -c refusing … → 0
+```
+
+**Both measure 14 (`EFAULT`), `err` set, no writes** — one value, so `exec_refusal_errno(num)
+-> Option<u64>` returns `Some(14)` for both and no per-number split was needed; R4 stands as
+written. The zero `refusing` lines are the red half of the gate.
+
+**What was built.** `SYS_EXECVE = 59`, `SYS_POSIX_SPAWN = 244`, `exec_refusal_errno` (with the
+measurement, the continuity-not-fidelity reason, and `ENOSYS` (78) named as the one-constant
+change if a successor prefers "exec is unmodelled" to be what the guest reads, in its rustdoc).
+The record arm `Stop::Syscall { num, args } if retrace_arch::exec_refusal_errno(num).is_some()`
+sits immediately **before** the generic BSD arm — symmetry rule 1's ordering, the only guard, as
+for `bsdthread_create` — prints `[retrace] refusing execve|posix_spawn (syscall N): exec-in-place
+is unmodelled; returning errno 14 without forwarding`, appends `Event::Syscall { ret: 14, ret1:
+0, err: true, writes: vec![], thread }` and `apply_and_return`s. The replay mirror sits inside
+the generic replay `Syscall` arm directly after that arm's `(num, args)` compare and its
+`verify_thread`, before the `SYS_SIGACTION` mirror: recompute the constant, `Divergence("exec
+refusal mismatch: …")` if `ret`/`err`/`writes` disagree, else `apply_and_return` + `finish_event`.
+**No new returning arm; `verify_thread` 7 → 7.** The two `arg_kinds` rows keep their kinds as
+documentation of the prototype; nothing consults them for forwarding (their comments were
+rewritten in place at this close — the appended "M38: refused" note under "Forwarded today …"
+was now-text, not history).
+
+**Its control — and why the obvious assertion is wrong.** Asserting the recorded event has
+`ret == 14` and `writes.is_empty()` is exactly what the *forwarded* call produced (an `EFAULT`
+with nothing written), so it cannot tell refusal from forward — honest-gate rule 1. The
+difference the arm makes that a forward cannot fake is its stderr line, which only the refusal
+prints: `exec_e2e`'s `exec_is_refused_and_says_so` asserts on it, and the CPython launcher test
+(`the_launcher_records_and_replays_its_own_posix_spawn_failure`) keeps every assertion it had
+(that *is* the continuity check — the guest saw the same errno) and gains the same stderr
+assertion; an arm that drifted below the generic forward would go red on it. Green: `exec_e2e`
+1 passed; `cpython_e2e` 2 passed (Homebrew Python present — the launcher test **ran**);
+`sysbin_e2e` 3; `retrace-arch` 39 (`exec_refusal_covers_execve_and_posix_spawn_only`); clippy
+clean. The `/bin/sh` hand check (the corpus's `execve` user, run exactly as the sweep does):
+rc/rp 1/1, guest text `Failed to exec /bin/bash as variant for /bin/sh (14: Bad address).`
+identical to M37's row, stderr now carrying the refusal line. One observation the report made
+and the close repeats so a shifted index is not misread: four recordings of `exec_dyn` had
+249/250/252/253 traps — `gettimeofday` fires 16 or 19 times during libSystem init, plus one
+`ioctl` that depends on whether retrace's stdout is a pipe — which moves the exec landmarks'
+indices (245/247 vs 248/250) but not their content, and each trace replays byte-identically.
+
+### Item 5 — the receive-shaped message-queue `mach_msg2`, refused by a measured code (`b3fc694`, fix `911214e`)
+
+**What was owed.** `route()`'s message-queue branch sent `SEND_MSG | RCV_MSG` with the MQ bit to
+`Route::RefuseMqSend` (M23's deterministic `MACH_SEND_INVALID_DEST`) and any other MQ shape to
+`Route::Unsupported("message-queue send without the send+rcv RPC shape")`, which aborted the
+record with rc 4. The six gates M37 parked all stopped at options `0x404000102` =
+`MACH64_SEND_MQ_CALL | MACH64_RCV_TIMEOUT (0x100) | MACH64_RCV_MSG (0x2)` — a **receive with a
+timeout**, not a send; the `Unsupported` string misnamed it. M36 had named the decision (refuse
+it as the SEND|RCV shape is, or model it) and M37 carried it.
+
+**What was built.** `Route::RefuseMqRecv` for `RCV_MSG` set and `SEND_MSG` clear under the MQ
+bit (`Msg2` already carried `options`; nothing new is read); a one-way send stays `Unsupported`
+with its string corrected to say what it is; `Route` gained `Debug`. The record arm beside
+`RefuseMqSend`'s: writes nothing, returns `MACH_RCV_REFUSAL`, `err: false`, `ret1: 0`, prints
+`[retrace] refusing mach_msg2 message-queue receive (rcv_name … rcv_size … options …): the box
+hosts no message-queue sender`; the replay mirror beside its twin recomputes and byte-compares —
+the standard symmetric posture, not the `ServiceGetSpecialPort` verbatim-apply exception, since
+the reply is a constant. No new returning arm; `verify_thread` 7 → 7. Three router tests, red
+first (`E0425 MACH_RCV_REFUSAL`, `E0599 RefuseMqRecv`, `E0277 Route: Debug`), then green.
+
+**The code, by measurement (spec §3e, R3).** Three candidates from `osfmk/mach/message.h`, each
+built into the recorder, ad-hoc signed, and run record-then-replay against all six binaries
+(`measure.sh`, 180 s alarm, stdin `/dev/null`; 18 cells, every cell's `rec.err`/`rp.err` kept
+under `docs/sweep-evidence/2026-09-16-m38/`). Every cell recorded **exactly one** receive
+refusal (`receive-refusals=1`, the positive control that the new arm and not another path is
+what the guest reached). "wall N" = the recorder panicked at the M33 fail-loud on an
+**unclassified** guest syscall N — the refusal was accepted and the guest ran on to a call the
+box has never had a row for; "brk" = the guest crashed downstream of the refusal:
+
+| binary | `MACH_RCV_TIMED_OUT` (…4003, the spec's default) | `MACH_RCV_INVALID_NAME` (…4002) | `MACH_RCV_PORT_DIED` (…4006) |
+|---|---|---|---|
+| `launchctl` | proceeds — its own `exit(1)` usage, rc/rp 1/1 | proceeds, 1/1 | proceeds, 1/1 |
+| `automationmodetool` | wall `kevent_qos` (374), 101/3 | wall 374 | wall 374 |
+| `desdp` | wall `openat_nocancel` (464), 101/3 | wall 464 | wall 464 |
+| `dyld_info` | wall 464 | wall 464 | wall 464 |
+| `flex` | wall 464 | wall 464 | wall 464 |
+| `dddiagnose` | **brk** `pc=0x180302eb0 far=0x2000050050 esr=0x92000045`, 139/139 | **wall** `statfs64` (345), 101/3 | **brk** `pc=0x193bbbca0 far=0xfffffffffffffff0 esr=0x92000004`, 139/139 |
+
+Accepted per code: `TIMED_OUT` **5** of 6, `INVALID_NAME` **6** of 6, `PORT_DIED` **5** of 6.
+**Ruling (R3, measured): `MACH_RCV_REFUSAL = MACH_RCV_INVALID_NAME` (0x1000_4002).** Not a tie,
+so the R3 default and tie-break did not apply: the semantically faithful "a queue no one can
+send to times out" lost on exactly one binary, `dddiagnose`, which data-aborts in the guest
+~10 landmarks after the receive under both losing codes and under the winner runs **50**
+landmarks further (receive #381 → wall 431) to a next wall of its own. The test
+`the_receive_refusal_is_a_receive_code` pins `MACH_RCV_REFUSAL == MACH_RCV_INVALID_NAME` and
+`!= MACH_RCV_TIMED_OUT`, so a change to the constant must change the test — the choice is a
+measurement, not a preference. The reviewer recounted the table from the 18 `.err` cells and
+got the same 5/6/5.
+
+**The six gates, each outcome one of spec §3e's three.** `/bin/launchctl` — record + replay
+clean → **un-parked**: it records to its own no-argument usage `exit(1)` (4,484 bytes on stdout,
+byte-identical to the host's native `/bin/launchctl` output measured 2026-09-16) and replays
+bit-for-bit; its gate body asserts on that outcome (rc 1, the usage prefix, exactly one refusal
+line, replay == recording) and **not** on the shared helper's `rc == 0` — a code a weaker
+failure would also produce is not a difference. `test launchctl_records_and_replays ... ok`.
+The other five — record stops at a **new** wall → **re-parked**, class B (an M33 fail-loud that
+an `arg_kinds` row closes), each reason rewritten in the M37 shape: the syscall, the pc, rc/rp
+101/3, the divergence landmark (replay's `expected recorded syscall, got None` on the trace with
+no terminal event the panic left — not a divergence of its own), the recorder pid and its regime,
+the same-wall-under-all-three-codes cross-check, the evidence files, and what un-parks it.
+`automationmodetool` → `kevent_qos` (374) at pc `0x1804afa48`, divergence landmark 363
+(libdispatch's kevent workloop may be a subsystem of its own behind the row);
+`desdp`/`dyld_info`/`flex` → `openat_nocancel` (464) at `0x1804b3954`, landmarks 392/393/398 —
+the three are one hard-linked Xcode `xcrun` stub that opens a random-named
+`/var/tmp/xcrun_db-XXXXXX`, so the *intervening* path shifts run-to-run while the wall number is
+stable across the measurement and the gate run, and a future un-park of any one un-parks all
+three; `dddiagnose` → `statfs64` (345) at `0x1804bd0cc`, landmark 431. **None is class E** —
+each recorder panics (rc 101) and writes no terminal event, so `rp = 3` is the expected read
+past the end, the M37 pattern. `gates.log` is the file's positive control under `--ignored`:
+each re-parked gate prints its wall by name (374 / 464 / 464 / 464 / 345). One pid regime (R6):
+§4b is retired, and **0 self-pid `ESRCH`** on every winner trace (M37's `selfpid` reader).
+
+**The fix round (`911214e`), two Importants, both factual corrections to permanent records the
+task's own evidence contradicted.** (1) `MACH_RCV_REFUSAL`'s rustdoc said `desdp`/`dyld_info`/
+`flex` reach `kevent_qos` (374) — the implementer's first cut of the reasons had cloned the
+`automationmodetool` template with 374 for all five, was caught and fixed in the gate file
+before commit, and had survived in the doc; it now names each binary's real wall, cross-checked
+against the 18 `.rec.err` cells, the README table and the reasons. (2) The README said the
+recorder pids 54954–55330 were "below `0x4000`, non-colliding" (run N): `0x4000` is 16384, so
+every pid was `0xd6aa`–`0xd822`, **inside** M36's old §4b window `[0x4000, 0x10000)` — M37's
+regime **I**. **Ruling:** the label is a measurement claim and the measurement says I; the
+README and the five reasons now say so, and say why it is irrelevant (§4b retired) and what the
+stronger fact is (0 self-pid `ESRCH` with every pid inside the window that pre-M37 answered all
+but one of those calls `ESRCH`); `csh`/`tcsh`'s "run N" (pids 1005/2342, genuinely N) untouched.
+Five minors deferred to the close were fixed there (below). Covering after the fix: `retrace-core
+--lib` 49, `apple_walls_e2e` 1 passed / 7 ignored, clippy clean in a fresh target dir.
+
+### The sweep re-baseline, and the row the plan did not predict
+
+One run (spec §4: once, at the close) of `tools/apple-sweep.sh` over the 54-entry corpus from
+the worktree, detached, on the close's binary — `911214e` copied to a scratch path and ad-hoc
+signed (sha256 `80daf5c5…39502`) so later `cargo` runs could not swap it under the sweep —
+with every non-clean row's stderr and trace kept (`RETRACE_SWEEP_KEEP`), the traces read and
+then deleted. `pidstart=87610`; recpids 87626–90026 (`0x1564a`–`0x15faa`), inside M36's old
+`[0x10000, 0x18000)` slab window — M37's regime S; one regime, because M37 had shown the pid
+selects nothing (R6). Verbatim, every human line that is not a bare `PASS`:
+
+```
+FAIL /bin/csh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+FAIL /bin/ed (recorder panicked: thread 'main' (35004702) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified …)
+FAIL /bin/ls (recorder panicked: thread 'main' (35007007) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 461 (461) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified …)
+FAIL /bin/tcsh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (35011346) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 374 (374) has no arg_kinds row …)
+FAIL /usr/bin/desdp (recorder panicked: thread 'main' (35011394) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row …)
+FAIL /usr/bin/dyld_info (recorder panicked: thread 'main' (35011456) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row …)
+FAIL /usr/bin/flex (recorder panicked: thread 'main' (35011736) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row …)
+FAIL /usr/bin/dddiagnose (recorder panicked: thread 'main' (35011793) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 345 (345) has no arg_kinds row …)
+FAIL /usr/bin/yes (timed out after 30s recording)
+TALLY pass=44 fail=10 skip=0
+SWEEP_EXIT=0
+```
+
+(The `…` above elide the tail of the M33 panic message, which is identical on every row; the
+log has it in full.) `awk` over the 54 `ROW` lines: `ROW lines=54 recpid min=87626 (0x1564a)
+max=90026 (0x15faa)`. No `identical fault` row, no `replay diverged` row, no class-E row.
+
+**Row by row against M37's run N** (label, `rc`, `rp`, `rec_reason` compared by binary path):
+**46 unchanged, 8 moved.** The plan named seven of the eight; the eighth is `/bin/ed`. The tally
+is 45/9 → 44/10 = **45 − `ls` − `ed` + `launchctl`**:
+
+- `/bin/launchctl`: `FAIL` 4/3 (the RCV line) → **`PASS` 1/1**. Moved by item 5. Un-parked.
+- `/usr/bin/automationmodetool`, `desdp`, `dyld_info`, `flex`, `dddiagnose`: `FAIL` 4/3 (the RCV
+  line) → `FAIL` 101/n/a at `kevent_qos` 374 / `openat_nocancel` 464 ×3 / `statfs64` 345, the
+  M33 fail-loud. Moved by item 5; re-parked, class B.
+- `/bin/ls`: `PASS` 1/1 (printing `ls: .: Bad file descriptor`) → `FAIL` 101/n/a at
+  `getattrlistbulk` 461 (kept trace, landmark #258: `fstatat64(0xfffffffe, …) ret=0 err=false
+  writes=1`). Moved by item 3; the Task 3 ruling.
+- `/bin/ed`: `PASS` 2/2 → `FAIL` 101/n/a at `openat_nocancel` 464. Moved by item 3 — **the row
+  the plan did not predict.** Spec §3c had said `ls` and `ed` "were PASS before … and stay PASS;
+  their recorded output changes". Measured at the close with two traced records of `/bin/ed`
+  (stdin `/dev/null`), one on the M37 baseline binary `retrace-aa8d7b8` and one on the M38
+  binary (`docs/sweep-evidence/2026-09-16-m38/sweep/ed.{m37-baseline.,}traced.rec.err`): on the
+  M37 binary, `[trap]` line 398 is `num=470 … args=[0xfffffffe,0x100010080,…]` —
+  `fstatat64(AT_FDCWD, "/tmp/ed.XXXXXX", …)`, `0x100010080` being `ed`'s scratch-buffer template
+  (`strings /bin/ed`), the call libc `mkstemp`'s `_gettemp` makes to check the directory; M33
+  measured it `EBADF` ("on `/bin/ed`, once"), and the trace shows what follows: `writev_nocancel(2,
+  …)` (its error message, lost to EFAULT), `umask`, `exit(2)`. The M37 `PASS 2/2` was `ed`
+  failing to create its scratch buffer on both sides — a determinism agreement about a failure,
+  never a run of `ed`. On the M38 binary the same landmark succeeds (sweep trace #258: `ret=0
+  err=false writes=1`) and the **next** trap is `num=464 args=[0xfffffffe,0x100010080,0xa02,
+  0x180,…]` = `openat_nocancel(AT_FDCWD, "/tmp/ed.XXXXXX", O_RDWR|O_CREAT|O_EXCL, 0600)`,
+  `mkstemp`'s open, the `_nocancel` twin of `openat` (463), no row → the M33 loud panic, rc 101,
+  no terminal event, no replay. **Ruling (Task 6, the ledger's):** `/bin/ed` is handled exactly
+  as `ls` — a silent lie replaced by a named wall; §6's floor is measured 44; the missing-row set
+  stays {461, 468, 464, 345, 374} with `ed` added to 464's blockers (now four binaries behind one
+  `_nocancel` row); no new `#[ignore]`, since `ed` never had a gate. Cost if wrong: the same as
+  the `ls` ruling — a two-row follow-up the operator may want immediately; 464 is one line,
+  `openat`'s row shared by its `_nocancel` twin.
+
+The rows the plan said would keep their label did. `/bin/sh` is `PASS` 1/1 with the same guest
+text, its stderr carrying the `execve` refusal line (`sweep/sh.rec.err`, a record taken beside
+the sweep since a PASS row's stderr is not kept). `/bin/csh` and `/bin/tcsh` are `FAIL` 4/3 at
+the same 3403 line (landmarks 336 / 344; M37 N: 331 / 329 — the guest's own spread, plus new
+`dup` landmarks), and their **`pipe` landmark moved**, read off the kept sweep traces with a
+scratch reader over `retrace-trace` (index = position in the event vector, `Snapshot` #0):
+
+```
+csh.bin (recpid 87861, 336 events)
+#327 syscall 42 args=[0x27ff300, 0x27fe298, 0x0, 0x5] ret=0x4 ret1=0x5 err=false     pipe → (4, 5)
+#328 dup(4) → 6   #329 close(4)   #330 fcntl(6, F_SETFD, 1) → 0
+#331 dup(5) → 4   #332 dup(4) → 7   #333 close(4)   #334 close(5)   #335 fcntl(7, F_SETFD, 1) → 0
+tcsh.bin (recpid 89125, 344 events): the same nine calls at #335–#343, pipe → (4, 5), both fcntls → 0
+```
+
+The guest receives guest fds `(4, 5)`, both bound, moves each end above the C shell's `FSAFE`
+with `dup`/`close`, and **both `fcntl(F_SETFD, 1)` succeed** where M37 had two `EBADF`s on a raw
+host descriptor and a stale register (spec §7's prediction, measured). The `dup`s are new
+landmarks — M37's guest skipped them, since `0x17` and `0x27fe298` were already above `FSAFE`.
+Traced runs the same day (`sweep/csh.traced.rec.err`, recpid 91162; `tcsh`, 91174) have the
+identical shape at #326/#329/#334 (stop 335) and #328/#331/#336 (stop 337), and the `[trap]`
+ordinal equals the landmark index (335 lines ↔ `DIVERGENCE at landmark 335`, the stop being the
+one unrecorded trap). The two gate reasons quote the sweep-run landmarks and name the traced
+runs; the wall is unchanged, class C. `/usr/bin/yes` is the watchdog as before.
+
+### The close's own edits (Task 6)
+
+Five doc-only minors the task reviews had deferred, in files the close edits anyway: the
+`arg_kinds` rows 59/244's comments rewritten in place (they had kept "Forwarded today … the
+fail-loud assert … is owed" above an appended "M38: refused" — a code comment is now-text, not
+the append-only log; the old forward is one history clause now); `machmsg.rs`'s `MQ_RCV` test
+comment says 50 landmarks (381 → 431), matching the constant's doc and the README, and names the
+trailer bit `0x0400_0000` in `0x4_0400_0102` that the router ignores; the five re-parked reasons
+say "the trace with no terminal event the panic left" rather than "the truncated trace" (the
+reader's `truncated` flag means a torn record, which a panic-killed recorder does not leave —
+`truncated=false` on every one); the evidence README's legend says `stdout-equal=y` is a real
+check only on `launchctl` (both `.out` files are empty on the wall and crash rows) and its
+"Files" names the committed `launchctl…rp.out`. Then the `csh`/`tcsh` reasons' `pipe` sentence
+(above), the README edited in place, spec §10, CLAUDE.md (`RT\x00\x0a` at both mentions; the
+four new e2e gates in the "Commands" list; the `verify_thread` paragraph untouched — still
+seven), and this section. Covering runs after the `.rs` edits: `retrace-arch` 39 + 2 + 5 (+ 0
+doc), `retrace-core --lib` 49, `apple_walls_e2e` 1 passed / 7 ignored, clippy clean over
+`--workspace --all-targets -- -D warnings`, every cargo exit 0.
+
+### Rulings
+
+The spec's six (§8) and every ruling the ledger recorded, each with what it cost if wrong where
+the ledger recorded one.
+
+- **R1 — the milestone is M38.** "M38 does not exist" was a statement about the M32–M38
+  charter's slot; this is a fresh charter reusing the next number. The old section carries a
+  forward pointer; this section's first paragraph says so.
+- **R2 — `x1` narrow, not uniform.** Held; `pipe_e2e` asserts no other row carries a non-zero
+  `ret1`. Cost if wrong: a guest that reads `x1` after some other two-register syscall (`fork`,
+  class C) still sees a stale value — today's state.
+- **R3 — the receive code is measured; default `MACH_RCV_TIMED_OUT`; ties to the default.** Held
+  in its procedure; the default did not apply (6/6 vs 5/6, not a tie). Cost if wrong: a binary
+  that would have proceeded under another code re-parks one wall early; the reasons name the
+  code tried and the cross-check under all three.
+- **R4 — the exec errno is the measured one, for continuity.** Held, one value (14). Cost if
+  wrong: the guest reads `EFAULT` for a call that was refused, not faulted — a wording lie the
+  rustdoc owns; `ENOSYS` is one constant away.
+- **R5 — unlisted `fcntl`/`ioctl` commands stay `Ptr`.** Held. Cost if wrong: a scalar command
+  outside the census that equals a mapped IPA is rewritten — the §4b class, measured inert on
+  every command seen.
+- **R6 — one pid regime for the re-run of the six.** Held; the label "N" was wrong (regime I)
+  and was corrected in the fix round; the sweep's single run was regime S. Cost if wrong: none —
+  §4b is retired and 0 self-pid `ESRCH` was measured on every kept trace.
+- **Pre-flight (a):** red evidence is taken by building each fixture first and recording it on
+  the not-yet-modified tree, instead of the plan's `git stash push -- paths` recipe — the
+  worktree shares the stash stack with other sessions. Cost if wrong: none (the evidence is the
+  same guest stdout either way). Every task's red is in its report.
+- **Pre-flight (b):** the SDD workspace lives inside the worktree (a harness constraint) and is
+  copied to the main repo's `.superpowers/sdd/` at the close before the worktree is removed.
+- **Task 3 — the 461/468 rows are not added; `ls` moves from a false PASS to a named wall; §6's
+  floor becomes ≥ 44 with `ls` explained (≥ 45 if a gate un-parks).** Above.
+- **Task 5 — the five new walls' rows (464, 345, 374) are not added; with 461/468 they are the
+  successor's measured scope: the missing-row set, with the corpus binaries each blocks.** Cost
+  if wrong: four binaries stay parked one milestone longer than two one-line rows would have
+  taken.
+- **Task 5 fix round — the reasons' "run N" is corrected to regime I along with the README** (the
+  label is a measurement claim); the stronger fact is stated. Cost if wrong: wording only.
+- **Task 6 — `/bin/ed` is handled exactly as `ls`; the floor is measured 44 = 45 − `ls` − `ed` +
+  `launchctl`; `ed` joins 464's blockers; no new `#[ignore]`.** Above.
+- **Task 1 (observation, no fix):** a failed `pipe` writes `x1 = 0` on both sides where xnu
+  leaves `x1` untouched — deterministic, symmetric, unread by libc on failure.
+- **Task 3 (accepted beyond the brief):** the `fdxlat.rs` local `translate()` mirror had to
+  take the same one-line fix, or the brief's own "Step 1's test → pass" was false.
+- **Task 4 (accepted beyond the brief):** one assertion-*message* phrase in `cpython_e2e.rs`
+  ("is forwarded" → "is refused (M38)") so the file carries no stale claim.
+
+### Gate
+
+**617 passed / 0 failed / 9 ignored across 135 test binaries**, on commit `911214e` — Task 5's
+fix commit, the last commit that touches anything cargo compiles; the close's edits to
+`crates/` are code comments and seven `#[ignore]` reason strings, and the covering runs above
+were taken after them. Run by the controller with the M37 `gate.sh` (paths changed), 2026-09-17,
+from the worktree; every chunk's cargo exit captured to a file before any pipe: `ws=0 box=0
+e2e1=0 e2e2=0 e2e3=0 e2e4=0 bins=0 clippy=0`; logs sanitised before parsing; the script's own
+summary `binaries=135 passed=617 failed=0 ignored=9`; zero `SKIPPED` lines (`jq_e2e`,
+`jq_file_e2e` and both `cpython_e2e` tests **ran** — Homebrew `jq` and `python@3.14` are
+present). The chunks, in M37's shape, with the sum of each chunk's `test result:` lines:
+
+| chunk | invocation | binaries | passed | ignored | notes |
+|---|---|---|---|---|---|
+| `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | 26 | 165 | 0 | M37's 155 + `retrace-arch` 3 + `machmsg` 3 + `retrace-guest` 4 |
+| `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | 39 | 287 | 0 | M37's 284 + `fdtable` 2 + `fdxlat` 1; `Doc-tests retrace_box` present |
+| `e2e1`–`e2e4` | `cargo test -p retrace --test <names> --no-fail-fast -- --test-threads=1`, `xargs -n20` over the sorted target list | 20 + 20 + 20 + 9 | 45 + 31 + 50 + 28 = 154 | **7** + 0 + 2 + 0 | **69 targets** (M37: 65 — `atfdcwd_e2e` and `dupfd_e2e` in the first group, `exec_e2e` opening the second, `pipe_e2e` in it; every boundary moved); 154 = M37's 146 + 3 + 2 + 1 + 1 + `launchctl` now passing. The 7 ignored are `apple_walls_e2e`'s seven; the 2 are `stackoverflow_rust_e2e`'s and `symbols_e2e`'s, in `e2e3` |
+| `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 1 | 11 | 0 | the 11 `debug.rs` unit tests, the chunk CLAUDE.md says never to omit |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | — | — | — | clean |
+
+165 + 287 + 154 + 11 = 617. Ignored 7 + 2 = 9. Binaries 26 + 39 + 69 + 1 = 135 (128 test
+executables plus the 7 `Doc-tests` harnesses, the convention since M14).
+
+**Reconciled against M37's 596 / 0 / 10 over 131, file-by-file** (`git diff a663051 911214e --
+crates`, `+` lines carrying `#[test]`, no `-` lines):
+
+| file | M37 | M38 | delta |
+|---|---|---|---|
+| `crates/retrace-arch/src/lib.rs` | 36 | 39 | **+3** (`fcntl_and_ioctl_third_argument_kind_follows_the_command`, `f_dupfd_is_recognised_by_number_and_command`, `exec_refusal_covers_execve_and_posix_spawn_only`; `pipe_return_is_a_pair_and_both_are_bound` is a rewrite) |
+| `crates/retrace-core/src/machmsg.rs` | 25 | 28 | **+3** (the three router tests) |
+| `crates/retrace-box/tests/fdtable.rs` | 18 | 20 | **+2** |
+| `crates/retrace-box/tests/fdxlat.rs` | 7 | 8 | **+1** (`fcntl_translates_only_its_descriptor`; the sentinel test is a rewrite) |
+| `crates/retrace-guest/src/lib.rs` | 12 | 16 | **+4** (one parse test per new fixture — the plan's §9 forgot these) |
+| `crates/retrace/tests/pipe_e2e.rs` | — | 3 | **+3**, new binary |
+| `crates/retrace/tests/dupfd_e2e.rs` | — | 2 | **+2**, new binary |
+| `crates/retrace/tests/atfdcwd_e2e.rs` | — | 1 | **+1**, new binary |
+| `crates/retrace/tests/exec_e2e.rs` | — | 1 | **+1**, new binary |
+| every other `.rs` under `crates/` | unchanged | unchanged | 0 |
+
++20 attributes; `#[ignore]` lines 10 → **9** (`launchctl_records_and_replays` un-parked; no new
+one); binaries 131 → **135**; `--bins` 11 → 11. The tree holds **624** `#[test]` attributes =
+615 runnable + 9 ignored (M37: 604 = 594 + 10); the run reports 617 = 615 + census's 2 (the
+"+2 twice" since M33: `census.rs` runs in its own binary and again inside `legacy_equivalence`'s
+`#[path]` include); bare `grep -c '#\[test\]'` 605 → 625 (the one prose match as before). So
+596 + 20 + 1 (the un-parked gate now counts as passed) = 617, 10 − 1 = 9, 131 + 4 = 135 — the
+tally the gate printed. **Spec §9 had predicted 613 / 0 / 9 over 134** (the plan's "612 + k / 0
+/ 10 − k over 135" with k = 1, and §9's own rougher "603+/0/≤10 over 134"): it forgot the four
+`retrace-guest` parse tests and counted the binaries as +3 where the four new e2e targets are +4
+— both recorded in spec §10. `retrace-box` ran as a whole package (its `Doc-tests` could not be
+dropped, M24's lesson); `retrace` ran per-target in four groups plus `--bins`.
+
+### What stays owed
+
+M37's list, item by item, with what this milestone discharged struck by name and what it added;
+the first item is new and is the successor's measured scope.
+
+* **The missing-row set — 461, 468, 464, 345, 374 — with the corpus binaries each blocks.**
+  `getattrlistbulk` 461 (`/bin/ls`, reached since the sentinel fix), `getattrlistat` 468 (M34's
+  pair to it, reached by nothing yet), `openat_nocancel` 464 (`/bin/ed`, `/usr/bin/desdp`,
+  `/usr/bin/dyld_info`, `/usr/bin/flex` — the `_nocancel` twin of `openat` 463, precisely the
+  documented nocancel trap), `statfs64` 345 (`/usr/bin/dddiagnose` — the fixed-struct twin of
+  `fstatfs64`, M29), `kevent_qos` 374 (`/usr/bin/automationmodetool`; libdispatch's kevent
+  workloop may be a subsystem of its own behind it). Each is the M33 fail-loud doing its job on
+  a number the 2026-09-12 census never saw, because the guests that issue them never got that far
+  before M38; each was ruled *not* added here (Tasks 3, 5, 6) as scope the spec lacks and as
+  unmeasured rows at the end of an unattended run. Seven sweep rows and five parked gates stand
+  behind these five numbers; two of the five are one-line copies of rows that exist.
+* **Discharged — `pipe`'s return** (M10 → M33 → M37): `ret1` in the trace, both ends bound,
+  `csh`/`tcsh`'s `fcntl`s succeed.
+* **Discharged — `fcntl(F_DUPFD)` / `F_DUPFD_CLOEXEC`** (M10): `FdTable::dup_from`, `dupfd_e2e`.
+  Still issued by no corpus guest (the census entry is the fixture).
+* **Discharged — §4b's residual class behind a `Ptr` that is sometimes a number** (M37):
+  `shape_of`. What replaces it, by ruling R5: an *unlisted* scalar command keeps `Ptr` and would
+  be probed — unreached on the corpus; a fail-loud default is the successor's decision, weighed
+  against turning every unseen command into a sweep failure.
+* **Discharged — `AT_FDCWD` in the 32-bit form real guests pass** (M10 t3 → M33 Ruling 10):
+  `(v as i32) < 0`, `atfdcwd_e2e`, the `fdxlat` test on the measured form. And the two rows it
+  un-hid are the first item.
+* **Discharged — the `execve`/`posix_spawn` fail-loud assert** (M2 → M33 Ruling 7): refused
+  with the measured errno; `ENOSYS` one constant away if fidelity is preferred to continuity.
+* **Discharged in half — the RCV-shaped `mach_msg2`** (M35 → M36 → M37): the decision M36 named
+  is taken — **refused**, deterministically, by a measured code. **Modelling** it stays class C:
+  a binary that needs a real reply on a port it actually holds would move one wall past the
+  refusal, and the reasons say so. Whether a `brk` of M23's kind lies behind it was answered for
+  these six (none; five reach a missing row, one exits clean) and for no other binary.
+* **Uniform `x1` capture** — new. `x1` is written for `pipe` only (R2); xnu writes it from
+  `retval[1]` after every syscall and retrace leaves it stale everywhere else. The field is in
+  the trace now, so the uniform version is a measurement a later milestone can take without a
+  format break. And the noted edge: a failed `pipe` writes `x1 = 0` where xnu leaves it.
+* **`fork` / process creation — class C, parked, not routed.** Unchanged behind `csh`/`tcsh`:
+  `mach_ports_register` (3403) then `fork`(2), which has no row. The `pipe` landmark before it
+  is clean now; the wall is not moved by that.
+* **The probe of positions past a row's arity** and of `Fd` positions — kept on purpose for
+  M30's band measurement; unchanged.
+* **`MADV_FREE_REUSABLE` on the guest backing** — unchanged, unmeasured.
+* **The `alloc` floor (M37 M5)** and **a host `dup` failure (M37 M6)** — unchanged; `dup_from`
+  inherits both edges.
+* **`guest_fcntl_dupfd`'s range guard is record-side only** — new (Task 2 review, carried to the
+  final review): replay's `dup_from` is guarded only by `!*err`, so a trace claiming success with
+  a huge `min` would `grow_to` it rather than diverge; the fix is the check inside
+  `FdTable::dup_from`, unit-tested. The `EINVAL` branch has no test.
+* **`csops`' `ERANGE` header write, unmeasured** (M35 → M37). Unchanged.
+* **The band's width, still** (M27 → M37). Unchanged.
+* **A `bigcsops`-shaped guest** (M34). None in the corpus.
+* **`SET_DYLD_IMAGES` (336/15) serviced above the trace, not forwarded** (M34). Unchanged.
+* **The per-page cache backing clamps any `Dest` destination that straddles a 16 KiB
+  shared-cache boundary** (M34). Unchanged.
+* **The harness's `identical fault` label is exit-code-shaped** (M36). Unchanged; fired on no
+  M38 row.
+* **Review minors carried:** everything M37 carried (M34's `the_clamp_reaches_proc_info` host
+  assumption; M35's `failwrite.rs:23` misnomer, the bare block in `forward_and_diff`,
+  `util::record` not scrubbing `RETRACE_TRACE`; M36's `apple_walls_e2e` helper asserting on the
+  record exit first and not printing the recorder's pid, the sweep's `rec_reason` cut at
+  200/300 characters, a skipped corpus binary emitting no `ROW` line, `dladdr` seeing exported
+  symbols only; M37's `dup2` landmarks quoted from run N, the evidence `repro:` tempdirs, the
+  Task 3 red not kept as a log, the reader postdating its logs, `dup2_e2e`'s restating
+  assertions). From this milestone: `retrace-trace`'s
+  `a_trace_written_with_the_previous_magic_is_rejected_whole` still tests `RT\x00\x08` and calls
+  it "immediately-prior (M16)" — stale since M24; `pipe_e2e`'s two `contains` asserts are
+  subsumed by the rung helper's exact-stdout equality; `set_ret1`'s rustdoc says the two `Box_`
+  methods call it where the two dispatch *arms* do; `(min as i32) < 0` is subsumed by `min >=
+  DUP2_MAX_FD` and the doc reads as two checks; `dupfd_e2e`'s "`F_SETFD` forwarded verbatim"
+  reads guest args (a fixture `F_GETFD` readback would observe the int reaching the kernel);
+  `fdxlat`'s `fcntl_translates_only_its_descriptor` walks `fd_operands`, not `shape_of`;
+  `dup_from` restates `alloc`'s free-slot search; `dupfd_dyn.c`'s unused `<errno.h>` and
+  unchecked `write`; `fdxlat.rs`'s local `translate()` is a hand-maintained mirror of
+  `Box_::translate_fds` — the duplication that let the `i64`/`i32` bug hide behind a green unit
+  suite, now carried twice; the exec refusal's stderr label is `if num == SYS_EXECVE {"execve"}
+  else {"posix_spawn"}` (a third refused number would print as `posix_spawn`); `exec_e2e` could
+  also assert `ret1 == 0`; `exec_refusal_errno`'s "read a guest IPA as a host address" (the args
+  are guest VAs); `cpython_e2e.rs`'s header nests two asides; the `RefuseMqRecv` mirror is a
+  near-clone of `RefuseMqSend`'s (plan-mandated); the receive/crash landmark numbers and
+  `selfpid` readings in the Task 5 evidence derive from uncommitted `.bin` traces (the `.err`
+  files carry the divergence landmarks); the sweep's `csh`/`tcsh` reasons now quote one run's
+  landmarks with the traced run's at ±1 stated beside them.
+* **Everything M33 left owed and M34–M38 did not touch:** the per-argument canary fill and M32's
+  Control 1 (still unexecuted, still inert); nested-pointer translation (`NestedSource` forwarded
+  untranslated, `NestedDest` refused — and exec's refusal is precisely what makes adding it safe
+  now); console `writev` mirroring; `__disable_threadsignal` (331); the corpus bias (every
+  governed `mach_msg2` still init-time and shallow — the receive refusal included); the
+  `unexercised` label enforced against a census dated 2026-09-12 (syscall numbers), 2026-09-13
+  (M34's lengths, `dup2`'s `EXPECTED_DIFFS`) and now 2026-09-16 (`F_DUPFD` by fixture only) —
+  snapshots; and the `kqueue` cross-version note.
+* **Superseded, not owed — with this section as their forward pointer.** The "M38 does not
+  exist" section's "nothing is owed to a milestone by that name" (R1); spec §3c's "both rows …
+  stay PASS" (measured false twice); §3e/R3's `TIMED_OUT` default (measured, not a tie); §6's
+  "PASS ≥ 45" (amended at Task 3, measured 44); §9's prediction (613/0/9 over 134); R6's "run N"
+  label (regime I for the six, S for the sweep); §3a's `apply_and_return_pair` and §3d's "eighth
+  `verify_thread` site" (corrected at plan time, recorded in §10 as history); the `MACH_RCV_REFUSAL`
+  rustdoc's first draft (374 for four binaries) and the evidence README's first draft ("below
+  `0x4000`") — both corrected in the Task 5 fix round; and the `Ret::FdPair`, fcntl-row, 59/244-row
+  and `AT_FDCWD` rustdocs as M37 left them, all rewritten in place. M34's, M35's, M36's and
+  M37's superseded lists stay as M37 left them.

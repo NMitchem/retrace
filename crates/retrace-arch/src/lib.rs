@@ -748,12 +748,13 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         427 => row!(P, [Ptr, Scalar, Ptr, Scalar]),
         // execve(char *fname, char **argp, char **envp): the kernel reads every argv/envp string
         // through the nested pointers — rule 1, NestedSource (EXPECTED_DIFFS; exercised by /bin/sh).
-        // Forwarded today, and it fails only because those guest pointers EFAULT in retrace's
-        // process: a forwarded exec that SUCCEEDED would replace retrace's own process image. The
-        // fail-loud assert that precedent (`bsdthread_create`) demands is owed to a successor —
-        // adding it re-parks cpython_e2e's launcher test, the operator's call, not this row's.
-        // M38: refused, never forwarded (`exec_refusal_errno`); the row is documentation of the
-        // prototype only.
+        // REFUSED since M38, never forwarded: the record arm ahead of the generic forward answers
+        // `exec_refusal_errno` (EFAULT, the value the forward measured) and writes nothing, on
+        // both sides. It was forwarded from M2 to M37 and failed only because those guest
+        // pointers EFAULT in retrace's process — a forwarded exec that SUCCEEDED would replace
+        // retrace's own process image, which is why the operator ruled it refused rather than
+        // waiting for nested-pointer translation to make the forward fatal. This row is
+        // documentation of the prototype only; nothing consults it for forwarding.
         59 => row!(P, [Path, NestedSource, NestedSource]),
         // ---- descriptors ----------------------------------------------------------------------
         // fchdir(int fd): a descriptor the legacy fd table never translated (EXPECTED_DIFFS;
@@ -883,13 +884,13 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         //             char **argv, char **envp): pid is 4 bytes out. adesc is read as a fixed
         // struct and then the kernel follows attrp, file_actions, port_actions, persona_info and
         // more INSIDE it (bsd/kern/kern_exec.c `posix_spawn`, one `copyin` per member) — rule 1,
-        // NestedSource, like argv/envp's strings. Forwarded today — the launcher-shim gap
-        // cpython_e2e pins (EXPECTED_DIFFS) — and it fails only because those guest pointers
-        // EFAULT in retrace's process; a forwarded spawn that succeeded would start a real child
-        // of retrace. The fail-loud assert precedent demands is owed to a successor, since adding
-        // it re-parks cpython_e2e's launcher test — the operator's decision.
-        // M38: refused, never forwarded (`exec_refusal_errno`); the row is documentation of the
-        // prototype only.
+        // NestedSource, like argv/envp's strings. REFUSED since M38, never forwarded: the record
+        // arm ahead of the generic forward answers `exec_refusal_errno` (EFAULT, the value the
+        // forward measured) and writes nothing, on both sides; cpython_e2e's launcher test pins
+        // the refusal line (EXPECTED_DIFFS). It was forwarded from M2 to M37 and failed only
+        // because those guest pointers EFAULT in retrace's process — a forwarded spawn that
+        // succeeded would start a real child of retrace. This row is documentation of the
+        // prototype only; nothing consults it for forwarding.
         244 => row!(P, [Ptr, Path, NestedSource, NestedSource, NestedSource]),
         // ---- mach traps (numbers per xnu osfmk/mach/syscall_sw.h; see the constants) ------------
         // _kernelrpc_mach_vm_allocate_trap(target, mach_vm_offset_t *addr, size, flags): 8 bytes

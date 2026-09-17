@@ -672,7 +672,8 @@ mod tests {
     // --- the message-queue RECEIVE (M38 t5) ---
 
     /// The RCV-only shape all six parked binaries reach (M36/M37 evidence): MQ_CALL | RCV_TIMEOUT
-    /// (0x100) | RCV_MSG (0x2) — a receive with a timeout, no SEND_MSG bit.
+    /// (0x100) | RCV_MSG (0x2) — a receive with a timeout, no SEND_MSG bit (plus a trailer bit,
+    /// 0x0400_0000, that the router ignores: it masks only SEND_MSG/RCV_MSG under MQ_CALL).
     const MQ_RCV: u64 = 0x4_0400_0102;
 
     #[test]
@@ -702,7 +703,7 @@ mod tests {
         // a measurement-driven change to the constant has to change this test too. Measured (M38
         // t5, docs/sweep-evidence/2026-09-16-m38/README.md): INVALID_NAME is the only candidate
         // all six binaries accept — TIMED_OUT (the spec's default) and PORT_DIED each crash
-        // /usr/bin/dddiagnose in the guest, INVALID_NAME carries it ~48 landmarks further.
+        // /usr/bin/dddiagnose in the guest, INVALID_NAME carries it 50 landmarks further (381→431).
         assert_eq!(MACH_RCV_REFUSAL & 0xffff_ff00, 0x1000_4000);
         assert_eq!(MACH_RCV_REFUSAL, MACH_RCV_INVALID_NAME);
         assert_ne!(MACH_RCV_REFUSAL, MACH_RCV_TIMED_OUT);

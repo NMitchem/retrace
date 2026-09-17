@@ -74,7 +74,13 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   mirror on the write side: a guest whose one `write` sends more than the diff window, guarding the
   M30 class where retrace's own guard-band canary reached the kernel as data and corrupted the
   guest's output — record and replay both exited 0 while the output file was wrong, so it asserts on
-  the written bytes and never on an exit code). Run one with
+  the written bytes and never on an exit code), `pipe_e2e` (a guest whose `pipe` pair must both be
+  guest-numbered — the trace's `ret1` is the assertion, since before M38 the write end was the
+  guest's own stale `x1`), `dupfd_e2e` (a guest whose `fcntl(F_DUPFD, 10)` must return exactly the
+  guest minimum, a number no host `dup` could produce), `atfdcwd_e2e` (a guest whose
+  `fstatat(AT_FDCWD, …)` must carry the 32-bit sentinel `0xfffffffe` in the trace AND succeed),
+  `exec_e2e` (a guest whose `execve`/`posix_spawn` are refused — asserted on the recorder's
+  refusal line, because the errno alone is what the old forward also returned). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -118,8 +124,9 @@ are gitignored); build/run recipes and findings are in `spikes/README.md`.
   `Writer`/`Reader` with a magic+version header and per-record CRC32. **Changing `Event`'s shape is a
   format break — bump `TRACE_MAGIC`.** **So is changing what a snapshot's bytes _mean_**: M23 changed
   the trampoline's vector padding without bumping, and a pre-M23 trace then restored its old padding
-  under code that assumed the new — M24 bumped for it (`RT\x00\x09`). `open_checked` drops a
-  torn/corrupt tail rather than panicking.
+  under code that assumed the new — M24 bumped for it (to `RT\x00\x09` then; moved again by M38
+  for `ret1`, so it is `RT\x00\x0a` now). `open_checked` drops a torn/corrupt tail rather than
+  panicking.
 - **`retrace-guest`** — the Mach-O loader (`parse_macho`, `slice_arm64e`) **and** the guest test
   programs. `asm/*.s` (freestanding, `-nostdlib -static`) and `c/hello_dyn.c` are compiled by
   `build.rs` into `OUT_DIR`; path constants (`HELLO`, `HELLO_DYN`, …) point at them.
@@ -254,8 +261,9 @@ does *not* materialise:
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (which bumped
-`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x09`, moved again by M24, so every pre-M23
-recording is unreadable) — and replay recomputes the current thread and compares it. `verify_thread` has **seven** call sites, one in each arm that consumes a landmark
+`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0a`, moved again by M24 and then by M38 for
+`ret1`, so every pre-M38 recording is unreadable) — and replay recomputes the current thread and
+compares it. `verify_thread` has **seven** call sites, one in each arm that consumes a landmark
 and `return`s, each placed *after* that arm's own field comparison so a genuine argument divergence
 still reports as itself; the `SignalDelivery` landmark is checked by an eighth, inline comparison in
 `mirror_delivery`, deliberately not `verify_thread`, because its tag is the **receiving** thread
