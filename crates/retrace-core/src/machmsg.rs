@@ -56,7 +56,8 @@ impl Msg2 {
     }
 }
 
-/// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; ServiceGetSpecialPort
+/// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; ServiceVmRemap likewise
+/// (a stage-1 alias, never forwarded — see the 4813 arm in `route()`); ServiceGetSpecialPort
 /// answers task_get_special_port(BOOTSTRAP) with a synthetic port right (complex reply);
 /// ServiceSetSpecialPort answers task_set_special_port(DEBUG_CONTROL_PORT) with a mig_reply_error
 /// KERN_SUCCESS (deterministic — standard symmetric posture); StubMigReply(retcode) answers an
@@ -67,7 +68,7 @@ impl Msg2 {
 /// RefuseMqRecv is a message-queue RECEIVE; the box hosts no senders, so nothing can ever arrive
 /// on it, and it is answered `MACH_RCV_REFUSAL` — deterministic, no host contact (M38 t5).
 #[derive(Debug)]
-pub enum Route { ServiceVmMap, ServiceGetSpecialPort, ServiceSetSpecialPort, StubMigReply(i32),
+pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceGetSpecialPort, ServiceSetSpecialPort, StubMigReply(i32),
                  RefuseMqSend, RefuseMqRecv, Forward(&'static str), Unsupported(String) }
 
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
@@ -133,6 +134,12 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     if guest_task_port == Some(m.dest as u64) {
         match m.msgh_id {
             4811 => return Route::ServiceVmMap,
+            // mach_vm_remap (4813): libffi's Apple trampoline table aliases the freshly-loaded
+            // libffi-trampolines.dylib __TEXT into a vm_allocate'd region, shared, on every
+            // `import ctypes` (M39 t0). Serviced as a stage-1 alias (Box_::guest_vm_remap) —
+            // never forwarded (that would remap retrace's own address space). Dispatch decodes
+            // the body and asserts the shapes the spec models (copy=FALSE, FIXED, own task).
+            4813 => return Route::ServiceVmRemap,
             // task_get_special_port (task subsystem base 3400, slot 9): libxpc's initializer
             // fetches TASK_BOOTSTRAP_PORT (which=4) at launch. Serviced synthetically with a
             // fixed synthetic port right (never forwarded — that would hand over the host's real
@@ -233,6 +240,29 @@ pub fn decode_vm_map(buf: &[u8]) -> Result<VmMapReq, String> {
         flags: u32_at(buf, 72), offset: u64_at(buf, 76), copy: u32_at(buf, 84),
         cur_protection: u32_at(buf, 88), max_protection: u32_at(buf, 92),
         inheritance: u32_at(buf, 96),
+    })
+}
+
+/// _kernelrpc_mach_vm_remap (4813) request body: header(24) + desc_count(4) + port
+/// descriptor(12: src_task name @28, pad, disposition @38) + NDR(8) + target(8) @48 + size(8)
+/// @56 + mask(8) @64 + flags(4) @72 + src(8) @76 + copy(4) @84 + inheritance(4) @88 = 92.
+/// Captured byte-for-byte in the M39 t0 probe (measurements Finding 2).
+pub struct VmRemapReq {
+    pub target: u64, pub size: u64, pub mask: u64, pub flags: u32,
+    pub src_task: u32, pub src: u64, pub copy: u32, pub inheritance: u32,
+}
+
+pub fn decode_vm_remap(buf: &[u8]) -> Result<VmRemapReq, String> {
+    if buf.len() < 92 { return Err(format!("vm_remap request short: {} < 92", buf.len())); }
+    let (bits, id, descs) = (u32_at(buf, 0), u32_at(buf, 20), u32_at(buf, 24));
+    if id != 4813 { return Err(format!("msgh_id {id} != 4813")); }
+    if bits & MACH_MSGH_BITS_COMPLEX == 0 { return Err("complex bit clear".into()); }
+    if descs != 1 { return Err(format!("descriptor count {descs} != 1")); }
+    Ok(VmRemapReq {
+        src_task: u32_at(buf, 28),
+        target: u64_at(buf, 48), size: u64_at(buf, 56), mask: u64_at(buf, 64),
+        flags: u32_at(buf, 72), src: u64_at(buf, 76), copy: u32_at(buf, 84),
+        inheritance: u32_at(buf, 88),
     })
 }
 
@@ -341,6 +371,22 @@ pub fn encode_vm_map_reply(reply_port: u32, address: u64) -> Vec<u8> {
     out.extend_from_slice(&NDR);
     out.extend_from_slice(&0i32.to_le_bytes());            // KERN_SUCCESS
     out.extend_from_slice(&address.to_le_bytes());
+    out.extend_from_slice(&TRAILER);
+    out
+}
+
+/// KERN_SUCCESS reply for 4813: header(24) + NDR(8) + RetCode(4) + target(8) + cur_protection(4) +
+/// max_protection(4) = 52, + trailer(8) = 60 (the rcv_size the probe saw). The protections are
+/// the kernel's measured answer, derived by `Box_::guest_vm_remap` (M39 t2 measured 5/5 for a
+/// kernel-placed image's text and 5/7 for a dlopen'd dylib's) and passed in by dispatch.
+pub fn encode_vm_remap_reply(reply_port: u32, target: u64, cur: u32, max: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(60);
+    reply_header(&mut out, 52, reply_port, 4913);
+    out.extend_from_slice(&NDR);
+    out.extend_from_slice(&0i32.to_le_bytes());            // KERN_SUCCESS
+    out.extend_from_slice(&target.to_le_bytes());
+    out.extend_from_slice(&cur.to_le_bytes());
+    out.extend_from_slice(&max.to_le_bytes());
     out.extend_from_slice(&TRAILER);
     out
 }
@@ -465,6 +511,60 @@ mod tests {
         assert!(decode_vm_map(&bad).is_err());
         let mut bad = FIXTURE_VM_MAP_REQ; bad[24] = 2;                       // desc_count
         assert!(decode_vm_map(&bad).is_err());
+    }
+    /// The 4813 request the t0 probe captured (measurements Finding 2): libffi remapping
+    /// libffi-trampolines.dylib's 2-page __TEXT (src 0xa0183c000) shared, FIXED|OVERWRITE, into
+    /// the region it vm_allocate'd (target 0xa017fc000).
+    const FIXTURE_VM_REMAP_REQ: [u8; 92] = [
+        0x13,0x15,0x00,0x80, 0x5c,0x00,0x00,0x00, 0x03,0x02,0x00,0x00, 0x03,0x14,0x00,0x00,
+        0x00,0x00,0x00,0x00, 0xcd,0x12,0x00,0x00, 0x01,0x00,0x00,0x00, 0x03,0x02,0x00,0x00,
+        0x00,0x00,0x00,0x00, 0x00,0x00,0x13,0x00, 0x00,0x00,0x00,0x00, 0x01,0x00,0x00,0x00,
+        0x00,0xc0,0x7f,0x01, 0x0a,0x00,0x00,0x00, 0x00,0x80,0x00,0x00, 0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x40,0x00,0x00, 0x00,0xc0,0x83,0x01,
+        0x0a,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+    ];
+    #[test]
+    fn decodes_the_captured_vm_remap_request() {
+        let r = decode_vm_remap(&FIXTURE_VM_REMAP_REQ).unwrap();
+        assert_eq!(r.target, 0xa_017f_c000);
+        assert_eq!(r.size, 0x8000);
+        assert_eq!(r.mask, 0);
+        assert_eq!(r.flags, 0x4000);               // VM_FLAGS_OVERWRITE; FIXED (ANYWHERE clear)
+        assert_eq!(r.src_task, 0x203);             // the guest's own task port
+        assert_eq!(r.src, 0xa_0183_c000);
+        assert_eq!(r.copy, 0);                     // shared
+        assert_eq!(r.inheritance, 0);              // VM_INHERIT_SHARE
+    }
+    #[test]
+    fn vm_remap_decode_rejects_malformed() {
+        assert!(decode_vm_remap(&FIXTURE_VM_REMAP_REQ[..88]).is_err());         // short
+        let mut bad = FIXTURE_VM_REMAP_REQ; bad[20] = 0xcc;                     // msgh_id byte
+        assert!(decode_vm_remap(&bad).is_err());
+        let mut bad = FIXTURE_VM_REMAP_REQ; bad[24] = 2;                        // desc_count
+        assert!(decode_vm_remap(&bad).is_err());
+        let mut bad = FIXTURE_VM_REMAP_REQ; bad[3] = 0x00;                      // complex bit clear
+        assert!(decode_vm_remap(&bad).is_err());
+    }
+    #[test]
+    fn vm_remap_reply_has_the_documented_shape() {
+        // header(24) + NDR(8) + RetCode(4) + target(8) + cur(4) + max(4) = 52 = msgh_size;
+        // + trailer(8) = 60 = the rcv_size the probe saw. Reply id = 4813 + 100.
+        let e = encode_vm_remap_reply(0x1403, 0xa_017f_c000, 5, 7);   // the measured FFI reply
+        assert_eq!(e.len(), 60);
+        assert_eq!(u32::from_le_bytes(e[4..8].try_into().unwrap()), 52);          // msgh_size
+        assert_eq!(u32::from_le_bytes(e[12..16].try_into().unwrap()), 0x1403);    // reply-local port
+        assert_eq!(i32::from_le_bytes(e[20..24].try_into().unwrap()), 4913);      // reply id
+        assert_eq!(i32::from_le_bytes(e[32..36].try_into().unwrap()), 0);         // KERN_SUCCESS
+        assert_eq!(u64::from_le_bytes(e[36..44].try_into().unwrap()), 0xa_017f_c000);
+        assert_eq!(u32::from_le_bytes(e[44..48].try_into().unwrap()), 5);         // cur_protection
+        assert_eq!(u32::from_le_bytes(e[48..52].try_into().unwrap()), 7);         // max_protection
+        assert_eq!(&e[52..60], &TRAILER);
+    }
+    #[test]
+    fn routes_vm_remap_to_service_only_on_the_guest_task_port() {
+        assert!(matches!(route(&msg(4813, 0x203, KOBJ), Some(0x203)), Route::ServiceVmRemap));
+        // Not the guest's task port: stays unsupported (fail loud), never serviced.
+        assert!(matches!(route(&msg(4813, 0x207, KOBJ), Some(0x203)), Route::Unsupported(_)));
     }
     #[test]
     fn encodes_a_byte_identical_success_reply() {
