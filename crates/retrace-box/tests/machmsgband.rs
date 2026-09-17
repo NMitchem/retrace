@@ -103,7 +103,7 @@ fn the_serviced_vm_map_calls_band_is_measured_zero_and_out_of_scope() {
             }
             Stop::Syscall { num, args: _ } if num == SYS_EXIT => break,
             Stop::Syscall { num, args } => {
-                let (ret, err, _w) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, _w) = b.forward_and_diff(num, args);
                 b.set_x0_err_and_return(ret, err);
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),

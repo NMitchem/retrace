@@ -297,17 +297,13 @@ pub enum Ret {
     /// aliases the wrong file. M37 models it: `Box_::guest_dup2` writes the guest's own target slot
     /// and returns it, so the return is a slot the guest named, not a fresh allocation.
     Fd,
-    /// Two new descriptors, in x0 and x1 — `pipe`. Unmodelled: `allocates_fd` is false for it
-    /// (binding one of two would alias), and retrace-core does not assert on it. What the guest
-    /// actually gets today: `Box_::host_svc` captures only `x0` and the carry, and
-    /// `apply_and_return` sets `x0` alone, so the guest receives retrace's own host READ-end,
-    /// unbound, in `x0` and its own stale `x1` — the write-end never reaches the guest at all, and
-    /// both host descriptors leak in the recorder. Every later use returns EBADF via
-    /// `translate_fds`: `/bin/zsh` issues it and never uses the pair; `/bin/csh` and `/bin/tcsh`
-    /// use both ends (`fcntl(F_SETFD)` on the raw read-end and on the stale `x1`, EBADF twice) one
-    /// landmark before their `fork` wall — M37's sweep evidence
-    /// (docs/sweep-evidence/2026-09-13-m37/README.md, audit 3). Capturing `x1` is the actual
-    /// successor work item, ahead of any binding model — M10-successor work, owed.
+    /// Two new descriptors, in x0 and x1 — `pipe` (bsd/kern/sys_pipe.c, `retval[0]`/`retval[1]`).
+    /// `allocates_fd` is false for it (that view means "bind ONE return via `bind_returned_fd`");
+    /// `returns_fd_pair` is the view the pair path consults. M38 modelled it: `host_svc` returns
+    /// `x1`, `bind_returned_pair` allocates the read end first (xnu's order), and `set_ret1` writes
+    /// `x1` on both sides. Before M38 the guest received retrace's host read-end unbound in `x0`
+    /// and its own stale `x1` — `/bin/csh`/`/bin/tcsh` used both ends one landmark before their
+    /// `fork` wall and got EBADF twice (M37 evidence, audit 3).
     FdPair,
 }
 
@@ -951,6 +947,10 @@ pub fn fd_operands(num: u64) -> impl Iterator<Item = usize> {
 }
 /// Does `num`'s RETURN value need binding to a fresh guest fd slot? View over `arg_kinds`.
 pub fn allocates_fd(num: u64) -> bool { arg_kinds(num).is_some_and(Shape::allocates_fd) }
+/// Does `num` return TWO new descriptors in `x0`/`x1` (`pipe`)? View over `arg_kinds`. The pair
+/// is bound by `Box_::bind_returned_pair`, never by `bind_returned_fd`, and `x1` is written on
+/// both sides only for a row this answers true for (M38).
+pub fn returns_fd_pair(num: u64) -> bool { arg_kinds(num).is_some_and(|s| s.ret == Ret::FdPair) }
 /// The destination buffer `num` fills, as `(argument index, where its length lives)`. View.
 pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> { arg_kinds(num)?.dest_buffer() }
 /// Refused-by-value family: a destination behind a nested guest pointer. View.
@@ -1614,13 +1614,14 @@ mod tests {
         }
     }
 
-    // M33 t5/t6: pipe's two-descriptor return is expressed (`Ret::FdPair`) but deliberately not
-    // bound — `allocates_fd` stays false, matching the legacy table, because binding one of two
-    // would alias. Its own test, named for what it checks (Task 5 review, minor 6).
+    // M38: pipe's two-descriptor return is bound as a PAIR — not through `allocates_fd` (that
+    // view binds one return and would alias) but through `returns_fd_pair`.
     #[test]
-    fn pipe_return_is_a_pair_and_is_not_bound() {
+    fn pipe_return_is_a_pair_and_both_are_bound() {
         assert_eq!(arg_kinds(42).unwrap().ret, Ret::FdPair);
         assert!(!allocates_fd(42), "binding one of pipe's two descriptors would alias");
+        assert!(returns_fd_pair(42));
+        assert!(!returns_fd_pair(SYS_OPEN) && !returns_fd_pair(SYS_DUP));
     }
 
     #[test]

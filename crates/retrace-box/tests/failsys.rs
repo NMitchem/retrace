@@ -12,7 +12,7 @@ fn failing_open_records_carry_and_errno() {
     loop {
         match b.run() {
             Stop::Syscall { num, args } if num == SYS_OPEN => {
-                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, _writes) = b.forward_and_diff(num, args);
                 assert!(err, "failing open must set carry");
                 assert_eq!(ret, 2, "errno should be ENOENT=2");
                 saw_err = true;
