@@ -75,6 +75,8 @@ pub const SYS_OPEN_NOCANCEL: u64 = 398;
 pub const SYS_FCNTL_NOCANCEL: u64 = 406;
 pub const SYS_OPENAT: u64 = 463;
 pub const SYS_FSTATAT64: u64 = 470;
+pub const SYS_EXECVE: u64 = 59;
+pub const SYS_POSIX_SPAWN: u64 = 244;
 /// `fstatfs64(int, struct statfs64 *)` — SDK `sys/mount.h:444`, header-declared like its M10
 /// siblings.
 pub const SYS_FSTATFS64: u64 = 346;
@@ -750,6 +752,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // process: a forwarded exec that SUCCEEDED would replace retrace's own process image. The
         // fail-loud assert that precedent (`bsdthread_create`) demands is owed to a successor —
         // adding it re-parks cpython_e2e's launcher test, the operator's call, not this row's.
+        // M38: refused, never forwarded (`exec_refusal_errno`); the row is documentation of the
+        // prototype only.
         59 => row!(P, [Path, NestedSource, NestedSource]),
         // ---- descriptors ----------------------------------------------------------------------
         // fchdir(int fd): a descriptor the legacy fd table never translated (EXPECTED_DIFFS;
@@ -884,6 +888,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // EFAULT in retrace's process; a forwarded spawn that succeeded would start a real child
         // of retrace. The fail-loud assert precedent demands is owed to a successor, since adding
         // it re-parks cpython_e2e's launcher test — the operator's decision.
+        // M38: refused, never forwarded (`exec_refusal_errno`); the row is documentation of the
+        // prototype only.
         244 => row!(P, [Ptr, Path, NestedSource, NestedSource, NestedSource]),
         // ---- mach traps (numbers per xnu osfmk/mach/syscall_sw.h; see the constants) ------------
         // _kernelrpc_mach_vm_allocate_trap(target, mach_vm_offset_t *addr, size, flags): 8 bytes
@@ -1279,6 +1285,19 @@ pub fn is_signal_syscall(num: u64) -> bool {
     )
 }
 
+/// M38: `execve`(59) and `posix_spawn`(244) are REFUSED, never forwarded. Before M38 both were
+/// forwarded and failed only because their `argv`/`envp` are untranslated guest pointers (the
+/// host kernel read a guest IPA as a host address and returned EFAULT); if nested-pointer
+/// translation ever landed, a forwarded exec would replace retrace's own process. The value is
+/// what the forward RETURNED, measured on `exec_dyn` at M38 Task 4 — chosen for continuity (the
+/// CPython launcher's output, `/bin/sh`'s sweep row and every existing trace are unchanged), not
+/// fidelity; `ENOSYS` (78) is the one-constant change if a successor prefers "exec is unmodelled"
+/// to be what the guest reads (spec R4). `Some` doubles as the predicate the record arm and the
+/// replay mirror share.
+pub fn exec_refusal_errno(num: u64) -> Option<u64> {
+    match num { SYS_EXECVE | SYS_POSIX_SPAWN => Some(14), _ => None }
+}
+
 // ---- M12-signal-delivery ---------------------------------------------------------------------
 // Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here
 // was read out of the live SDK by spikes/sigabi.c, not from memory.
@@ -1425,6 +1444,16 @@ mod tests {
         for n in [20u64, 1, 3, 4, 5, 6, 197, 333] {
             assert!(!is_signal_syscall(n), "{n} must keep forwarding");
         }
+    }
+
+    // M38: exec is refused with the errno the FORWARD returned before M38 (measured, Task 4
+    // Step 2) — continuity, not fidelity (spec R4). Every other number is None.
+    #[test]
+    fn exec_refusal_covers_execve_and_posix_spawn_only() {
+        assert_eq!(exec_refusal_errno(SYS_EXECVE), Some(14));
+        assert_eq!(exec_refusal_errno(SYS_POSIX_SPAWN), Some(14));
+        assert_eq!(exec_refusal_errno(SYS_OPEN), None);
+        assert_eq!((SYS_EXECVE, SYS_POSIX_SPAWN), (59, 244));
     }
 
     #[test]

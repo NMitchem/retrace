@@ -1140,6 +1140,19 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 }
             }
 
+            // M38: exec is refused, never forwarded — placed BEFORE the generic forward arm, which
+            // is the only guard (the bsdthread_create precedent). Constant return, no writes, so
+            // replay recomputes and byte-compares (symmetry rule 1, the standard posture). The
+            // errno is the one the forward produced before M38, for continuity (spec R4).
+            Stop::Syscall { num, args } if retrace_arch::exec_refusal_errno(num).is_some() => {
+                let e = retrace_arch::exec_refusal_errno(num).unwrap();
+                eprintln!("[retrace] refusing {} (syscall {num}): exec-in-place is unmodelled; returning errno {e} without forwarding",
+                    if num == retrace_arch::SYS_EXECVE { "execve" } else { "posix_spawn" });
+                w.append(&Event::Syscall { num, args, ret: e, ret1: 0, err: true, writes: vec![], thread })
+                    .map_err(|e| format!("append exec refusal: {e}"))?; count += 1;
+                b.apply_and_return(e, true, &[]);
+            }
+
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
                 // M11 correctness invariant: no signal syscall may reach forward_and_diff, which
@@ -1724,6 +1737,16 @@ impl ReplaySession {
                             // issue byte-identical (num, args), so without this, a replay that
                             // schedules the wrong thread onto identical code continues in silence.
                             self.verify_thread(*rthread, pc)?;
+                            // M38 mirror of record's exec refusal: recompute the constant, compare.
+                            if let Some(e) = retrace_arch::exec_refusal_errno(num) {
+                                if *ret != e || !*err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "exec refusal mismatch: recorded ret {ret} err {err} with {} write(s), \
+                                         expected errno {e}, err, no writes", writes.len()) });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
+                                return self.finish_event();
+                            }
                             // M11 mirror of record's serviced-signal arms. Recompute the SAME table
                             // transition and the SAME writeback bytes, then byte-compare against
                             // the recording — that comparison IS the divergence check (symmetry
