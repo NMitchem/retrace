@@ -358,6 +358,16 @@ fn main() {
         .status().expect("clang dupfd_dyn");
     assert!(status.success(), "dupfd_dyn guest build failed");
 
+    // atfdcwd_dyn: the M38 AT_FDCWD fixture — `fstatat(AT_FDCWD, ".")` prints `ok` when the
+    // sentinel passes through translation. Same recipe as hello_dyn.
+    let src = format!("{}/c/atfdcwd_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/atfdcwd_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang atfdcwd_dyn");
+    assert!(status.success(), "atfdcwd_dyn guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));

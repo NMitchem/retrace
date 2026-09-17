@@ -13,7 +13,8 @@ use retrace_box::{EBADF, FdTable};
 fn translate(fds: &FdTable, num: u64, args: &mut [u64; 8]) -> Result<(), u64> {
     for i in fd_operands(num) {
         let v = args[i];
-        if (v as i64) < 0 { continue; }
+        // AT_FDCWD arrives as 0xffff_fffe in x0 (a 32-bit -2), not sign-extended (M38).
+        if (v as i32) < 0 { continue; }
         match fds.host(v) {
             Some(h) => args[i] = h as u64,
             None => return Err(EBADF),
@@ -59,13 +60,19 @@ fn translate_uses_x4_for_mmap() {
 }
 
 #[test]
-fn at_fdcwd_passes_through_untranslated() {
+fn at_fdcwd_passes_through_untranslated_in_the_form_the_abi_delivers() {
+    // libc passes `int dirfd = -2` in w0, so x0 arrives as 0x0000_0000_ffff_fffe — MEASURED on
+    // /bin/ls (twice) and /bin/ed (once) at M33 (Ruling 10). The 64-bit sign-extended form is
+    // kept as a second case; it is what an earlier version of this test passed, which is how the
+    // test stayed green while every real guest got EBADF.
     let t = FdTable::new();
-    let mut args = [0u64; 8];
-    args[0] = AT_FDCWD as u64;
-    assert!(translate(&t, SYS_OPENAT, &mut args).is_ok(),
-        "AT_FDCWD is a sentinel, not a descriptor — it must not be rejected as EBADF");
-    assert_eq!(args[0], AT_FDCWD as u64);
+    for form in [0xffff_fffeu64, AT_FDCWD as u64] {
+        let mut args = [0u64; 8];
+        args[0] = form;
+        assert!(translate(&t, SYS_OPENAT, &mut args).is_ok(),
+            "AT_FDCWD as {form:#x} is a sentinel, not a descriptor — it must not be rejected as EBADF");
+        assert_eq!(args[0], form, "the sentinel must reach the kernel untouched");
+    }
 }
 
 #[test]
