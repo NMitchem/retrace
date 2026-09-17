@@ -465,7 +465,10 @@ there is none, both refusal mirrors sit inside existing generic arms after those
 measurement: §3c's "stay PASS" (above) and §3e/R3's default code (above). A third was measured
 at Task 1: §3a's "`(ret, ret1) == (3, 4)`" came out as **(4, 5)** — libSystem holds one extra
 descriptor under retrace — so the fixture asserts the invariants (`pair=1`, `low=1`) instead of
-the numbers (`pipe_dyn.c:1–5`). One was a label: R6's
+the numbers (`pipe_dyn.c:1–5`). One was found by the final review: §3b's "the close-on-exec
+bit has no observable in the box" was overstated — a forwarded `F_GETFD` observes the host
+dup's clear flag (0 where native reads 1; deterministic across record and replay, a fidelity
+gap, owed in the README). One was a label: R6's
 "run N" was regime I. §9's prediction is corrected above. §2's location line numbers are as of
 `a663051` and shifted under each task, as expected.
 
