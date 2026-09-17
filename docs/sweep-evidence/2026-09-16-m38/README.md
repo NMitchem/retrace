@@ -23,13 +23,17 @@ stash) before this file was written, and Steps 1–4 were committed first so tha
 queue with no sender is a queue whose receive times out), `MACH_RCV_INVALID_NAME 0x1000_4002`,
 `MACH_RCV_PORT_DIED 0x1000_4006`.
 
-**recorder-pid regime (spec R6): one, N.** §4b is retired since M37 — a `Scalar` position is never
+**recorder-pid regime (spec R6): one.** §4b is retired since M37 — a `Scalar` position is never
 probed, so a recorder pid landing in a guest backing no longer forwards as a host pointer, and the
-N/I/S regimes no longer distinguish anything on these rows. All 18 cells ran in one regime (recpids
-54954–55330, all below `0x4000`, non-colliding). Measured on the winner traces with the M37 README's
-`selfpid` reader: **0 self-pid `ESRCH`** in every kept trace — every self-pid `csops`/`proc_info`
-call (12 or 13 per trace) succeeded. So the pid regime is not a variable here and the gate reasons
-cite "run N" and say why.
+N/I/S regimes no longer distinguish anything on these rows. All 18 cells ran in one regime: recpids
+54954–55330 (`0xd6aa`–`0xd822`), which sit **inside** M36's old §4b window `[0x4000, 0x10000)` — the
+trampoline page, the regime M37 labelled **I**, not N. (The plan pre-labelled this run "N"; the
+measured pids say I, and the label here and in the gate reasons follows the measurement.) That is
+irrelevant to the ruling, and it is the stronger fact: measured on the winner traces with the M37
+README's `selfpid` reader, **0 self-pid `ESRCH`** in every kept trace — every self-pid
+`csops`/`proc_info` call (12 or 13 per trace) succeeded — with every pid inside the window that
+pre-M37 answered all but one of those calls `ESRCH`. So the pid regime is not a variable here and
+the gate reasons cite "run I" and say why.
 
 ## The table (18 cells)
 
