@@ -10198,21 +10198,24 @@ is 45/9 → 44/10 = **45 − `ls` − `ed` + `launchctl`**:
   line) → `FAIL` 101/n/a at `kevent_qos` 374 / `openat_nocancel` 464 ×3 / `statfs64` 345, the
   M33 fail-loud. Moved by item 5; re-parked, class B.
 - `/bin/ls`: `PASS` 1/1 (printing `ls: .: Bad file descriptor`) → `FAIL` 101/n/a at
-  `getattrlistbulk` 461 (kept trace, landmark #258: `fstatat64(0xfffffffe, …) ret=0 err=false
-  writes=1`). Moved by item 3; the Task 3 ruling.
+  `getattrlistbulk` 461 (landmark #258 of 263 events, read off the sweep's kept trace with a
+  scratch reader before the trace was removed — the `ROW` line's `landmark` is `n/a`, no replay
+  ran, and the trace is not committed: `fstatat64(0xfffffffe, …) ret=0 err=false writes=1`).
+  Moved by item 3; the Task 3 ruling.
 - `/bin/ed`: `PASS` 2/2 → `FAIL` 101/n/a at `openat_nocancel` 464. Moved by item 3 — **the row
   the plan did not predict.** Spec §3c had said `ls` and `ed` "were PASS before … and stay PASS;
   their recorded output changes". Measured at the close with two traced records of `/bin/ed`
   (stdin `/dev/null`), one on the M37 baseline binary `retrace-aa8d7b8` and one on the M38
   binary (`docs/sweep-evidence/2026-09-16-m38/sweep/ed.{m37-baseline.,}traced.rec.err`): on the
-  M37 binary, `[trap]` line 398 is `num=470 … args=[0xfffffffe,0x100010080,…]` —
+  M37 binary, trap #261 of 264 (log line 398) is `num=470 … args=[0xfffffffe,0x100010080,…]` —
   `fstatat64(AT_FDCWD, "/tmp/ed.XXXXXX", …)`, `0x100010080` being `ed`'s scratch-buffer template
   (`strings /bin/ed`), the call libc `mkstemp`'s `_gettemp` makes to check the directory; M33
   measured it `EBADF` ("on `/bin/ed`, once"), and the trace shows what follows: `writev_nocancel(2,
   …)` (its error message, lost to EFAULT), `umask`, `exit(2)`. The M37 `PASS 2/2` was `ed`
   failing to create its scratch buffer on both sides — a determinism agreement about a failure,
-  never a run of `ed`. On the M38 binary the same landmark succeeds (sweep trace #258: `ret=0
-  err=false writes=1`) and the **next** trap is `num=464 args=[0xfffffffe,0x100010080,0xa02,
+  never a run of `ed`. On the M38 binary the same landmark succeeds (trap #256 of 257 in the
+  traced run, `ret=0 err=false writes=1` in its trace; #258 of 259 in the sweep's kept trace —
+  run-to-run spread; neither trace committed) and the **next** trap is `num=464 args=[0xfffffffe,0x100010080,0xa02,
   0x180,…]` = `openat_nocancel(AT_FDCWD, "/tmp/ed.XXXXXX", O_RDWR|O_CREAT|O_EXCL, 0600)`,
   `mkstemp`'s open, the `_nocancel` twin of `openat` (463), no row → the M33 loud panic, rc 101,
   no terminal event, no replay. **Ruling (Task 6, the ledger's):** `/bin/ed` is handled exactly
@@ -10358,11 +10361,14 @@ one); binaries 131 → **135**; `--bins` 11 → 11. The tree holds **624** `#[te
 "+2 twice" since M33: `census.rs` runs in its own binary and again inside `legacy_equivalence`'s
 `#[path]` include); bare `grep -c '#\[test\]'` 605 → 625 (the one prose match as before). So
 596 + 20 + 1 (the un-parked gate now counts as passed) = 617, 10 − 1 = 9, 131 + 4 = 135 — the
-tally the gate printed. **Spec §9 had predicted 613 / 0 / 9 over 134** (the plan's "612 + k / 0
-/ 10 − k over 135" with k = 1, and §9's own rougher "603+/0/≤10 over 134"): it forgot the four
-`retrace-guest` parse tests and counted the binaries as +3 where the four new e2e targets are +4
-— both recorded in spec §10. `retrace-box` ran as a whole package (its `Doc-tests` could not be
-dropped, M24's lesson); `retrace` ran per-target in four groups plus `--bins`.
+tally the gate printed. **Two predictions preceded the run, attributed here to the document each
+came from.** Spec §9 had said "roughly 603+/0/≤10 over 134": it counted three new e2e gates
+where there are four (so its binaries were +3 where the four new targets are +4) and had no
+parse tests. The plan's Task 6 Step 7 had said "612 + k / 0 / 10 − k over 135", k = 1 → 613 / 0
+/ 9 over 135: it missed only the four `retrace-guest` parse tests. Measured 617 / 0 / 9 over 135
+— both recorded in spec §10 with that attribution (the numbers file's first draft had conflated
+them; the Task 6 review caught it). `retrace-box` ran as a whole package (its `Doc-tests` could
+not be dropped, M24's lesson); `retrace` ran per-target in four groups plus `--bins`.
 
 ### What stays owed
 
@@ -10451,8 +10457,9 @@ the first item is new and is the successor's measured scope.
   landmarks with the traced run's at ±1 stated beside them.
 * **Everything M33 left owed and M34–M38 did not touch:** the per-argument canary fill and M32's
   Control 1 (still unexecuted, still inert); nested-pointer translation (`NestedSource` forwarded
-  untranslated, `NestedDest` refused — and exec's refusal is precisely what makes adding it safe
-  now); console `writev` mirroring; `__disable_threadsignal` (331); the corpus bias (every
+  untranslated, `NestedDest` refused, the `DTRACEHIOC_ADDDOF` residual — and exec's refusal is
+  precisely what makes adding it safe now); console `writev` mirroring; `__disable_threadsignal`
+  (331); the corpus bias (every
   governed `mach_msg2` still init-time and shallow — the receive refusal included); the
   `unexercised` label enforced against a census dated 2026-09-12 (syscall numbers), 2026-09-13
   (M34's lengths, `dup2`'s `EXPECTED_DIFFS`) and now 2026-09-16 (`F_DUPFD` by fixture only) —
@@ -10460,7 +10467,8 @@ the first item is new and is the successor's measured scope.
 * **Superseded, not owed — with this section as their forward pointer.** The "M38 does not
   exist" section's "nothing is owed to a milestone by that name" (R1); spec §3c's "both rows …
   stay PASS" (measured false twice); §3e/R3's `TIMED_OUT` default (measured, not a tie); §6's
-  "PASS ≥ 45" (amended at Task 3, measured 44); §9's prediction (613/0/9 over 134); R6's "run N"
+  "PASS ≥ 45" (amended at Task 3, measured 44); §9's prediction (603+/0/≤10 over 134) and the
+  plan's (613/0/9 over 135), measured 617/0/9 over 135; R6's "run N"
   label (regime I for the six, S for the sweep); §3a's `apply_and_return_pair` and §3d's "eighth
   `verify_thread` site" (corrected at plan time, recorded in §10 as history); the `MACH_RCV_REFUSAL`
   rustdoc's first draft (374 for four binaries) and the evidence README's first draft ("below

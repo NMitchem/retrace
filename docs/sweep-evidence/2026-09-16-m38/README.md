@@ -155,7 +155,7 @@ comparison keys on the binary's path and compares label, `rc`, `rp` and the `rec
 | `/usr/bin/dyld_info` | `FAIL` 4/3, the RCV line | `FAIL` 101/n/a, `… syscall 464 (464) …` | same (one hard-linked xcrun stub with `desdp`/`flex`). Re-parked, class B. |
 | `/usr/bin/flex` | `FAIL` 4/3, the RCV line | `FAIL` 101/n/a, `… syscall 464 (464) …` | same. Re-parked, class B. |
 | `/usr/bin/dddiagnose` | `FAIL` 4/3, the RCV line | `FAIL` 101/n/a, `… syscall 345 (345) has no arg_kinds row` | same, on `statfs64` (345), 50 landmarks past the receive. Re-parked, class B. |
-| `/bin/ls` | `PASS` 1/1 — while printing `ls: .: Bad file descriptor` | `FAIL` 101/n/a, `… syscall 461 (461) has no arg_kinds row` | `AT_FDCWD` (Task 3): the sentinel is honoured, `fstatat64(0xfffffffe, …)` succeeds (kept trace `ls.bin`, landmark #258: `ret=0 err=false writes=1`), and `ls` runs on to `getattrlistbulk` (461), which has no row — the M33 fail-loud. A **false PASS became a named wall** (the Task 3 ruling). |
+| `/bin/ls` | `PASS` 1/1 — while printing `ls: .: Bad file descriptor` | `FAIL` 101/n/a, `… syscall 461 (461) has no arg_kinds row` | `AT_FDCWD` (Task 3): the sentinel is honoured, `fstatat64(0xfffffffe, …)` succeeds (landmark #258 of 263 events, read off the sweep's kept `ls.bin` with the scratch reader before the trace was removed from the tree — the `ROW` line's `landmark` field is `n/a` because no replay ran; the trace is not committed, so the number is uncorroborated by anything in the repo beyond this README), and `ls` runs on to `getattrlistbulk` (461), which has no row — the M33 fail-loud. A **false PASS became a named wall** (the Task 3 ruling). |
 | `/bin/ed` | `PASS` 2/2 — `ed`'s own error exit, its message lost | `FAIL` 101/n/a, `… syscall 464 (464) has no arg_kinds row` | `AT_FDCWD` (Task 3), the same mechanism on a row the plan had assumed would stay PASS — measured below and ruled at the close: a **false PASS became a named wall**. |
 
 The three rows the plan said would keep their label did: `/bin/sh` is `PASS` 1/1 with the same
@@ -179,7 +179,7 @@ sweep runs it), one on the **M37 baseline binary** (`retrace-aa8d7b8`, the M37 s
 copy) and one on the M38 sweep binary, `sweep/ed.m37-baseline.traced.rec.err` and
 `sweep/ed.traced.rec.err`:
 
-- **M37 binary, rc 2.** `[trap]` line 398 is `num=470 … args=[0xfffffffe,0x100010080,0x27ff2f0,0x0,…]`
+- **M37 binary, rc 2.** Trap #261 of 264 (log line 398) is `num=470 … args=[0xfffffffe,0x100010080,0x27ff2f0,0x0,…]`
   — `fstatat64(AT_FDCWD, "/tmp/ed.XXXXXX", …)`: `0x100010080` is `ed`'s scratch-buffer template
   (`strings /bin/ed` has `/tmp/ed.XXXXXX`; the call is libc `mkstemp`'s `_gettemp` checking the
   directory). M33 measured this call `EBADF` ("on `/bin/ed`, once"); the trace shows what follows
@@ -187,9 +187,12 @@ copy) and one on the M38 sweep binary, `sweep/ed.m37-baseline.traced.rec.err` an
   nested-pointer entry in the README), `num=60` `umask`, `num=1` `exit(2)`. So the M37 `PASS 2/2`
   was `ed` failing to create its scratch buffer on both sides and exiting 2 — a determinism
   agreement about a failure, never a run of `ed`.
-- **M38 binary, rc 101.** The same landmark (`[trap]` line 393, the same arguments) succeeds — in
-  the sweep's kept trace, `#258 syscall 470 args=[0xfffffffe, 0x100010080, …] ret=0 err=false
-  writes=1` — and the **next** trap is `num=464 … args=[0xfffffffe,0x100010080,0xa02,0x180,…]`:
+- **M38 binary, rc 101.** The same landmark (trap #256 of 257, log line 393, the same arguments)
+  succeeds — read off the traced run's own trace, `#256 syscall 470 args=[0xfffffffe,
+  0x100010080, …] ret=0 err=false writes=1` of 257 events, and off the sweep's kept `ed.bin` as
+  `#258` of 259 (the two-landmark difference is the run-to-run spread M37's audit 3 measured on
+  every row; neither trace is committed) — and the **next** trap is `num=464 …
+  args=[0xfffffffe,0x100010080,0xa02,0x180,…]`:
   `openat_nocancel(AT_FDCWD, "/tmp/ed.XXXXXX", O_RDWR|O_CREAT|O_EXCL, 0600)`, `mkstemp`'s open,
   the `_nocancel` twin of `openat` (463). 464 has no `arg_kinds` row, so `forwarded_shape` panics
   by name (the M33 fail-loud); the recorder exits 101 with no terminal event and the harness

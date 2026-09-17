@@ -378,13 +378,18 @@ added assertions (same test). Binaries: +3 (one per new e2e target). Ignored:
 
 **Against §9.** Measured: **617 passed / 0 failed / 9 ignored over 135 binaries** on `911214e`
 (the head after Tasks 1–5 and Task 5's fix round), every chunk's cargo exit 0, clippy clean, no
-`SKIPPED` line (Homebrew `jq` and `python@3.14` present). §9 said "roughly 603+/0/≤10 over 134"
-and the plan's sharper prediction said 612 + k / 0 / 10 − k over 135 with k = 1, i.e. 613/0/9 over
-134 — **two corrections**, both found by the per-file reconciliation (`task-6-numbers.md`, diffed
-against `a663051`'s 596/0/10 over 131): the prediction forgot the **four `retrace-guest` parse
-tests** (`pipe_guest_parses`, `dupfd_guest_parses`, `atfdcwd_guest_parses`, `exec_guest_parses`,
-one per new fixture, +4), and it counted the new binaries as +3 where the four new e2e targets
-are **+4** (135, not 134). The rest held: `retrace-arch` +3, `machmsg.rs` +3, `fdtable.rs` +2,
+`SKIPPED` line (Homebrew `jq` and `python@3.14` present). Two predictions preceded the run and
+each is corrected against the document it came from — the per-file reconciliation
+(`task-6-numbers.md`, diffed against `a663051`'s 596/0/10 over 131) found both, and its own
+first draft had conflated them (the Task 6 review caught that). **§9** said "roughly 603+/0/≤10
+over 134": it counted **three** new e2e gates (`pipe_e2e`, `dupfd_e2e`, `atfdcwd_e2e`) where
+there are four (`exec_e2e` is the plan's, added at Task 4 beside the launcher assertion §3d
+asked for; this spec never named it), so its
+binaries were +3 where the four new targets are **+4** (135, not 134); and it had no parse tests.
+**The plan's Task 6 Step 7** said "612 + k / 0 / 10 − k over 135", k = 1 → 613/0/9 over 135: it
+counted the binaries right and missed only the **four `retrace-guest` parse tests**
+(`pipe_guest_parses`, `dupfd_guest_parses`, `atfdcwd_guest_parses`, `exec_guest_parses`, one per
+new fixture, +4). The rest of the plan's per-file prediction held: `retrace-arch` +3, `machmsg.rs` +3, `fdtable.rs` +2,
 `fdxlat.rs` +1, `pipe_e2e` +3, `dupfd_e2e` +2, `atfdcwd_e2e` +1, `exec_e2e` +1; `#[ignore]`
 10 → 9; `--bins` 11 → 11. 596 + 20 + 1 (the un-parked gate now counts as passed) = 617.
 
