@@ -177,14 +177,16 @@ pub const MACH_SEND_INVALID_DEST: u64 = 0x1000_0003;
 /// (docs/sweep-evidence/2026-09-16-m38/README.md). Ties go to `MACH_RCV_TIMED_OUT`, because the
 /// options word carries `RCV_TIMEOUT` and a queue no one can send to is a queue whose receive
 /// times out — and it was NOT a tie. Measured 2026-09-16: `/bin/launchctl` proceeds to its own
-/// clean exit under every candidate, and `automationmodetool`/`desdp`/`dyld_info`/`flex` reach
-/// the same next wall (`kevent_qos` 374, no `arg_kinds` row) under every candidate; only
-/// `/usr/bin/dddiagnose` distinguishes them — it crashes in the guest under `MACH_RCV_TIMED_OUT`
-/// (data abort, pc 0x180302eb0, landmark 389) and under `MACH_RCV_PORT_DIED` (pc 0x193bbbca0,
-/// landmark 392), and under `MACH_RCV_INVALID_NAME` runs ~48 landmarks further to a next wall
-/// (`statfs64` 345, no `arg_kinds` row). So `INVALID_NAME` is accepted by 6 of 6 against 5 of 6
-/// for each of the others, and is the refusal. The semantically faithful default lost on exactly
-/// one binary; the test `the_receive_refusal_is_a_receive_code` pins the measured choice.
+/// clean exit under every candidate; `automationmodetool` reaches its next wall (`kevent_qos`
+/// 374, no `arg_kinds` row) under every candidate, and `desdp`/`dyld_info`/`flex` (one hard-linked
+/// xcrun stub) reach theirs (`openat_nocancel` 464, no `arg_kinds` row) under every candidate;
+/// only `/usr/bin/dddiagnose` distinguishes them — it crashes in the guest under
+/// `MACH_RCV_TIMED_OUT` (data abort, pc 0x180302eb0, landmark 389) and under `MACH_RCV_PORT_DIED`
+/// (pc 0x193bbbca0, landmark 392), and under `MACH_RCV_INVALID_NAME` runs 50 landmarks further to
+/// a next wall of its own (`statfs64` 345, no `arg_kinds` row). So `INVALID_NAME` is accepted by
+/// 6 of 6 against 5 of 6 for each of the others, and is the refusal. The semantically faithful
+/// default lost on exactly one binary; the test `the_receive_refusal_is_a_receive_code` pins the
+/// measured choice.
 pub const MACH_RCV_TIMED_OUT: u64 = 0x1000_4003;
 pub const MACH_RCV_INVALID_NAME: u64 = 0x1000_4002;
 pub const MACH_RCV_PORT_DIED: u64 = 0x1000_4006;
