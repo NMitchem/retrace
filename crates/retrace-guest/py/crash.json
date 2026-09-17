@@ -1,0 +1,8 @@
+{
+  "target": "scratch",
+  "rows": [
+    {"name": "heap",    "base": "0x100000000",   "offset": "0x1000"},
+    {"name": "stack",   "base": "0x16f000000",   "offset": "0x8000"},
+    {"name": "scratch", "base": "0x400000000000", "offset": "0xdead0000"}
+  ]
+}
