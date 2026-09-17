@@ -125,7 +125,9 @@ halt.
 One full run of `tools/apple-sweep.sh` over the committed 54-entry corpus, from the worktree,
 detached, on the close's binary: commit `911214e` (the head after Tasks 1–5 and Task 5's fix
 round; `crates/` and `tools/` unchanged by Task 6, which edits docs, comments and seven
-`#[ignore]` reasons only), `target/aarch64-apple-darwin/debug/retrace` copied to a scratch path
+`#[ignore]` reasons only; not re-run after the final review's fix `cbc75ff`, whose one
+behaviour change — where an out-of-range `F_DUPFD` minimum is refused — is a call no corpus
+binary makes), `target/aarch64-apple-darwin/debug/retrace` copied to a scratch path
 and ad-hoc signed (sha256 after signing `80daf5c5add64f5658fd7ea400e5794416a2f88582c2a0770665e9314ba39502`)
 so that later `cargo` runs could not swap the binary under the sweep. `RETRACE_SWEEP_KEEP=…/sweep`
 kept every non-clean row's `rec.err`/`rp.err`/`rp.out`/`bin`; the traces were read (below) and

@@ -10318,6 +10318,12 @@ the ledger recorded one.
 
 ### Gate
 
+*(Forward pointer, added by the final-review fix wave: the paragraph below is true of `911214e`
+and stays as written, but its "last commit that touches anything cargo compiles" clause is
+superseded by the re-run under "Final-review fix wave" at the end of this section — the final
+review's fix `cbc75ff` did touch `crates/`, and the gate was re-run over it: 618 / 0 / 9 over
+135.)*
+
 **617 passed / 0 failed / 9 ignored across 135 test binaries**, on commit `911214e` — Task 5's
 fix commit, the last commit that touches anything cargo compiles; the close's edits to
 `crates/` are code comments and seven `#[ignore]` reason strings, and the covering runs above
@@ -10475,3 +10481,88 @@ the first item is new and is the successor's measured scope.
   `0x4000`") — both corrected in the Task 5 fix round; and the `Ret::FdPair`, fcntl-row, 59/244-row
   and `AT_FDCWD` rustdocs as M37 left them, all rewritten in place. M34's, M35's, M36's and
   M37's superseded lists stay as M37 left them.
+
+### Final-review fix wave (`cbc75ff`)
+
+The final whole-branch review of `d7a6ede..7f089a7` (2026-09-17, read-only, every line of the
+`crates/` diff plus the docs) returned **0 Critical / 1 Important / 9 Minor** and "ready to merge
+with fixes". The fixes landed as two commits on top of the close: `cbc75ff` (the code and the
+comment items) and this one (the re-run's figures). What follows is the Important finding in
+the log's voice, what changed, and the gate measured over the change.
+
+**Important 1 — the `F_DUPFD` range guard lived in the record-only wrapper, not in the table.**
+`guest_fcntl_dupfd` did `if (min as i32) < 0 || min >= DUP2_MAX_FD { return (EINVAL, …) }`
+before calling `FdTable::dup_from`, and `dup_from` itself had no range check: it computed
+`start = min.max(3)`, found no free slot and called `grow_to(min)`. Replay's mirror is gated on
+`!*err` and trusts a recorded success, so a trace that claimed `err: false` for a `min` of
+`0xffff_ffff` would have had replay `resize` two `Vec`s to 2^32 entries — abort or OOM — where
+the repo's stated posture for a field some other build wrote is a named `Divergence`. It is the
+`dup2` precedent inverted: M37 put `dup2`'s bound in `FdTable::dup2` so both sides share it,
+and the plan's own Architecture sentence says every fd-table change is "a pure table operation
+on `FdTable`, identical on record and replay". Reachability is a foreign or hand-edited trace
+only — this recorder can never write such an event, every record-side error path returns before
+the table is touched — which is why it was Important and not Critical. **The plan defect is
+attributed to the plan**: Task 2 Steps 4 and 5 put the check in the wrapper, and Task 2
+implemented them faithfully; the Task 2 review had already carried the placement as a minor to
+this review, where it was raised. The `EINVAL` branch had no test on either side.
+
+**What `cbc75ff` changed.** `crates/`: 4 files, +63 −20 (`retrace-arch/src/lib.rs` +3 −2,
+`retrace-box/src/lib.rs` +29 −16, `retrace-box/tests/fdtable.rs` +22 −0,
+`retrace-core/src/lib.rs` +9 −2), plus the README and spec §10. The guard moved into
+`FdTable::dup_from` in `dup2`'s exact form and order — `EBADF` for a closed source first,
+then `(min as i32) < 0 || min >= DUP2_MAX_FD` → `Err(EINVAL)` (xnu's `finishdup` order; a
+negative `int` arrives zero-extended) — and the wrapper's line was deleted; its `Err(e)` arm
+already closes the host `dup`, exactly as `guest_dup2` does, so on an `EINVAL` the only change
+in what the host sees is a `dup` immediately closed. The replay mirror keeps its `!*err` gate,
+which is correct (on a recorded error both tables are untouched by construction, and only a
+recorded success obliges the table to agree), now says so, and its `map_err` message names
+both errnos instead of "has that source closed". TDD, with the assert order load-bearing on
+the RED run: the new `fdtable.rs` case
+`dup_from_refuses_a_minimum_outside_the_dup2_bound_and_leaves_the_table_unchanged` asserts the
+`DUP2_MAX_FD` (10 240) case **first** — unguarded, that allocates 10 240 slots and fails
+cleanly (`left: Ok(10240) / right: Err(22)` at `fdtable.rs:308`) — and the `0xffff_ffff` and
+`u64::MAX` minima after it, which an unguarded `grow_to` would have turned into a 2^32-slot
+allocation on the machine running the test. GREEN: `fdtable` 21/0, `fdxlat` 8/0,
+`dupfd_e2e` 2/0, clippy `-D warnings` exit 0, `verify_thread` 7 → 7.
+
+**The five comment items** (all in the same commit): Minor 1, the `42 => row!(Ret::FdPair, [])`
+comment still ended "See Ret::FdPair for why the return is unmodelled" — now says both
+descriptors are bound and `x1` is the event's `ret1`; Minor 3, `set_ret1`'s doc named two
+`Box_` paths where the two `retrace-core` dispatch arms are its callers, each gated on
+`returns_fd_pair(num)`; Minor 5, "guest IPA as a host address" → "guest address" (the registers
+hold guest VAs); Minor 7, spec §10 now records that §3a's `(ret, ret1) == (3, 4)` was measured
+as `(4, 5)` — libSystem holds one extra descriptor under retrace — so `pipe_dyn.c` asserts
+the invariants (`pair=1`, `low=1`), not the numbers; and Minor 2, **ruled doc-only**: "the
+close-on-exec bit has no observable in the box" was overstated, because `F_GETFD` is forwarded
+and reads the host `dup`'s clear flag, so a guest doing `F_DUPFD_CLOEXEC` then `F_GETFD` reads
+0 where native reads 1 — deterministic across record and replay (the recorded return carries
+it), a fidelity gap, not a divergence. The one-line `F_SETFD` on the host dup was **not** added:
+an unmeasured behaviour change at the close, routed to the README's owed list instead
+("`F_DUPFD_CLOEXEC`'s bit on the host dup; only `F_GETFD` observes it"). Minors 4, 6, 8 and 9
+were left as the review left them (a name accessor beside `exec_refusal_errno`; `fdxlat.rs`'s
+hand-maintained `translate()` mirror, structural; the `launchctl` gate as a platform pin; the
+cosmetic list). The "What stays owed" bullet above that names the range guard, and the Item 2
+paragraph that carried it, stay as written; this subsection is their forward pointer — the
+item is discharged.
+
+**Gate, re-run over `cbc75ff`.** **618 passed / 0 failed / 9 ignored across 135 test
+binaries.** Run by the controller with the same `gate.sh` (M37's, paths changed), 2026-09-17,
+from the worktree, detached; every chunk's cargo exit captured to a file before any pipe:
+`ws=0 box=0 e2e1=0 e2e2=0 e2e3=0 e2e4=0 bins=0 clippy=0`; logs sanitised before parsing; the
+script's own summary line `binaries=135 passed=618 failed=0 ignored=9`; zero `SKIPPED` lines in
+all eight logs (`jq_e2e`, `jq_file_e2e` and both `cpython_e2e` tests **ran**). Chunk sums of
+the `test result:` lines: `ws` 26 binaries / 165 passed / 0 ignored; `box` 39 / **288** / 0
+(287 at `911214e` → 288: the one new `fdtable.rs` case,
+`dup_from_refuses_a_minimum_outside_the_dup2_bound_and_leaves_the_table_unchanged ... ok`);
+`e2e1`–`e2e4` 20 + 20 + 20 + 9 = 69 binaries / 45 + 31 + 50 + 28 = 154 passed / 7 + 0 + 2 + 0
+= 9 ignored; `bins` 1 / 11 / 0. So 165 + 288 + 154 + 11 = 618; ignored 9; binaries 26 + 39 +
+69 + 1 = 135. **Reconciled against the `911214e` run:** +1 `#[test]` attribute
+(`crates/retrace-box/tests/fdtable.rs`, 20 → 21), 0 new binaries, 0 new `#[ignore]`; against
+M37's 596 / 0 / 10 over 131: **+21** attributes, **+4** binaries, **−1** ignored
+(596 + 21 + 1 = 618). The tree holds **625** `#[test]` attributes = 616 runnable + 9 ignored;
+bare `grep -c '#\[test\]'` 626 (the one prose match as before). The `911214e` logs are archived
+at `.superpowers/sdd/2026-09-16-retrace-m38-owed/gate-911214e/`, this run's at `…/gate/`, the
+run log at `…/gate-run-cbc75ff.log`. The sweep was **not** re-run: it ran on `911214e`
+(`pass=44 fail=10 skip=0`), and `cbc75ff`'s only behaviour change is where an out-of-range
+`F_DUPFD` minimum is refused — a call no corpus binary makes (no corpus guest targets a
+descriptor above 19) — so its evidence README's commit stays true as written.

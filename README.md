@@ -418,13 +418,17 @@ reconstruction caveat in full.
   five run on to a syscall with no `arg_kinds` row and are re-parked there, class B. Every mirror
   sits inside an existing arm — no new returning arm, `verify_thread`'s seven sites unchanged.
 
-**Gate:** 617 passed / 0 failed / 9 ignored across 135 test binaries, **measured at M38** over all
+**Gate:** 618 passed / 0 failed / 9 ignored across 135 test binaries, **measured at M38** over all
 135 targets, every chunk `EXIT=0` (captured before any pipe); clippy clean over
-`--workspace --all-targets` with `-D warnings`. Measured on commit `911214e`, the head after the
-five tasks and Task 5's fix round — the last commit that touches anything cargo compiles; the close
-(Task 6) edits docs, code comments and seven `#[ignore]` reason strings only, so `git diff
-911214e..<merge> --stat -- crates tools` shows nothing but comment and reason-string hunks and the
-gate's figures stand. See the testing note below for how that number is assembled. "135 test
+`--workspace --all-targets` with `-D warnings`. Measured on commit `cbc75ff`, the final review's
+fix commit. The close (Task 6) had edited docs, code comments and seven `#[ignore]` reason strings
+only, so the 617 / 0 / 9 measured on `911214e` (the head after the five tasks and Task 5's fix
+round) stood through it; the final whole-branch review then found the `F_DUPFD` range guard living
+in the record-only wrapper (its Important 1 — a plan defect, not a divergence any trace this
+recorder writes can reach) and the fix wave moved it into `FdTable::dup_from` with one new
+`fdtable.rs` case, which touches `crates/`, so the gate was **re-run** over `cbc75ff`: 618 / 0 / 9
+over 135, the +1 being that case, no new binary, no new `#[ignore]`, every chunk exit 0 again,
+zero `SKIPPED` lines. See the testing note below for how that number is assembled. "135 test
 binaries" is 128 test executables plus the 7 `Doc-tests` harnesses cargo reports, each of which runs
 zero tests — the convention every milestone since M14 has counted by, kept for comparability and
 written out here so nobody has to re-derive it. The ignored gates are **nine**: the two
@@ -440,13 +444,15 @@ call to the first syscall behind it that has no `arg_kinds` row, and each was ru
 reasons refreshed for the one landmark M38 changed (`pipe`'s pair).
 
 Reconciled against M37's 596 / 0 / 10 over 131 **file-by-file rather than by sum** — nine files
-changed their count, everything else is byte-for-byte M37's:
+changed their count (one of them twice: at Task 2 and again in the final-review fix wave),
+everything else is byte-for-byte M37's:
 
 | file | M37 | M38 | delta |
 |---|---|---|---|
 | `retrace-arch/src/lib.rs` | 36 | 39 | **+3** (`fcntl_and_ioctl_third_argument_kind_follows_the_command`, `f_dupfd_is_recognised_by_number_and_command`, `exec_refusal_covers_execve_and_posix_spawn_only`; `pipe_return_is_a_pair_and_both_are_bound` is a rewrite) |
 | `retrace-core/src/machmsg.rs` | 25 | 28 | **+3** (the receive routes to refusal; a one-way send stays loud; the refusal is a receive code — the measured one) |
 | `retrace-box/tests/fdtable.rs` | 18 | 20 | **+2** (a pair takes the two lowest free slots read end first; `dup_from` honours the minimum with the source's kind) |
+| `retrace-box/tests/fdtable.rs` (final-review fix, `cbc75ff`) | 20 | 21 | **+1** (`dup_from_refuses_a_minimum_outside_the_dup2_bound_and_leaves_the_table_unchanged` — the range guard is the table's, so replay refuses what record refuses) |
 | `retrace-box/tests/fdxlat.rs` | 7 | 8 | **+1** (`fcntl_translates_only_its_descriptor`; the sentinel test is a rewrite to the form the ABI delivers) |
 | `retrace-guest/src/lib.rs` | 12 | 16 | **+4** (`pipe_guest_parses`, `dupfd_guest_parses`, `atfdcwd_guest_parses`, `exec_guest_parses`) |
 | `retrace/tests/pipe_e2e.rs` | — | 3 | **+3**, new binary (both ends reach the guest; `ret1` is a guest number; a tampered write end is a divergence) |
@@ -454,19 +460,21 @@ changed their count, everything else is byte-for-byte M37's:
 | `retrace/tests/atfdcwd_e2e.rs` | — | 1 | **+1**, new binary (`args[0] == 0xfffffffe` **and** `err == false` on the same landmark) |
 | `retrace/tests/exec_e2e.rs` | — | 1 | **+1**, new binary (the refusal line on stderr — the errno alone is what the forward also returned) |
 
-+20 attributes, `#[ignore]` **10 → 9**, `--bins` **11 → 11**, and **four new test binaries**,
-131 → 135. The count closes at both ends, and the two ends must still be read separately: the tree
-holds **624** `#[test]` attributes = 615 runnable + 9 ignored (M37 held 604 = 594 + 10), while the
-run reports **617** passed = 615 + the 2 census tests that run twice (`census.rs` executes in its
-own binary and again inside `legacy_equivalence`'s `#[path]` include). (A bare `grep -c
-'#\[test\]'` says 625, because a comment in `legacy_equivalence.rs` mentions the attribute in
-prose; the file has three.) Two predictions preceded the run, and each was short: the spec's
-own §9 had said "roughly 603+/0/≤10 over 134" — it counted three new e2e gates where there are
-four, so its binaries were +3 where the four new targets are +4, and it had no parse tests; the
-plan's Task 6 Step 7 said 612 + k / 0 / 10 − k over 135 (k = 1 → 613 / 0 / 9 over 135), and
-missed only the four `retrace-guest` parse tests (one per new fixture). Measured: 617 / 0 / 9
-over 135; M37's prediction-from-source pattern (`task-6-numbers.md`) reconciled the run per
-file before the README was written.
++21 attributes (+20 through Task 5, +1 in the final-review fix wave), `#[ignore]` **10 → 9**,
+`--bins` **11 → 11**, and **four new test binaries**, 131 → 135. The count closes at both ends,
+and the two ends must still be read separately: the tree holds **625** `#[test]` attributes = 616
+runnable + 9 ignored (M37 held 604 = 594 + 10), while the run reports **618** passed = 616 + the
+2 census tests that run twice (`census.rs` executes in its own binary and again inside
+`legacy_equivalence`'s `#[path]` include). (A bare `grep -c '#\[test\]'` says 626, because a
+comment in `legacy_equivalence.rs` mentions the attribute in prose; the file has three.) Two
+predictions preceded the first run, and each was short: the spec's own §9 had said "roughly
+603+/0/≤10 over 134" — it counted three new e2e gates where there are four, so its binaries were
++3 where the four new targets are +4, and it had no parse tests; the plan's Task 6 Step 7 said
+612 + k / 0 / 10 − k over 135 (k = 1 → 613 / 0 / 9 over 135), and missed only the four
+`retrace-guest` parse tests (one per new fixture). Measured: 617 / 0 / 9 over 135 on `911214e`,
+then 618 / 0 / 9 over 135 on `cbc75ff` after the final review's fix; M37's
+prediction-from-source pattern (`task-6-numbers.md`) reconciled the first run per file before
+the README was written, and the re-run's delta against it is exactly the one new case.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
 lesson). `retrace` ran **per-target** — sixty-nine `--test <name>` invocations in four groups
@@ -514,7 +522,9 @@ These are real and current, not aspirational gaps.
   row's, PASS rows included — what the M37 audits were run over. M38 ran it once on 2026-09-16
   on the close's binary (branch commit `911214e`, recorder pids 87626–90026 = `0x1564a`–`0x15faa`,
   inside M36's old slab window — one regime, because M37 had already shown the pid selects
-  nothing) and tallied **`pass=44 fail=10 skip=0`**; M37 had run it three times on 2026-09-13
+  nothing; not re-run after the final review's fix `cbc75ff`, whose only behaviour change is
+  where an out-of-range `F_DUPFD` minimum is refused, a call no corpus binary makes) and tallied
+  **`pass=44 fail=10 skip=0`**; M37 had run it three times on 2026-09-13
   with the recorder's pid steered into the three regimes M36 measured and tallied 45/9 in all
   three with the same nine labels in every regime — the acceptance measurement the §4b fix owed,
   and the reason one regime is enough now:
