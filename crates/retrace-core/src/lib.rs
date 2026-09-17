@@ -469,6 +469,33 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append mach_msg2 vm_map: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
+                    machmsg::Route::ServiceVmRemap => {
+                        // M39 wall 1: mach_vm_remap (4813). libffi's Apple trampoline table
+                        // aliases libffi-trampolines.dylib's freshly-loaded __TEXT into the region
+                        // it vm_allocate'd, shared, FIXED|OVERWRITE (measured on every `import
+                        // ctypes`). Serviced as a stage-1 alias — the vm_map posture: reply
+                        // synthesised here, recomputed and byte-compared on replay. The
+                        // protections are the kernel's measured answer, derived by the box from
+                        // the source's attribute and band, never chosen (spec R7, t2's two lines).
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let req = machmsg::decode_vm_remap(&buf)
+                            .unwrap_or_else(|e| panic!("mach_vm_remap (4813) decode: {e}"));
+                        assert_eq!(req.copy, 0, "mach_vm_remap: copy=TRUE is unmodelled (spec §3f)");
+                        assert_eq!(req.flags as u64 & VM_FLAGS_ANYWHERE, 0,
+                            "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled (spec §3f)");
+                        assert_eq!(Some(req.src_task as u64), guest_task_port,
+                            "mach_vm_remap: src_task {:#x} is not the guest's own task port", req.src_task);
+                        assert!(req.target + req.size <= req.src || req.src + req.size <= req.target,
+                            "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
+                            req.target, req.size, req.src);
+                        let (target, cur, max) = b.guest_vm_remap(req.target, req.size, req.src);
+                        let writes = vec![Region { ipa: m.data, bytes: machmsg::encode_vm_remap_reply(
+                            m.reply_port, target, cur, max) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 vm_remap: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
                     machmsg::Route::ServiceGetSpecialPort => {
                         // task_get_special_port(3409): libxpc's initializer fetches TASK_BOOTSTRAP_PORT.
                         // Answer with a REAL kernel-valid send right minted in retrace's OWN IPC space
@@ -1892,6 +1919,28 @@ impl ReplaySession {
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
                                                 detail: format!("mach_vm_map reply mismatch: replay ipa {ipa:#x}") });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::ServiceVmRemap => {
+                                        // Mirror of record's arm: same decode, same asserts, same
+                                        // Box_ call, then the byte-equality that IS the oracle.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        let req = machmsg::decode_vm_remap(&buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay vm_remap decode: {e}") })?;
+                                        assert_eq!(req.copy, 0, "mach_vm_remap: copy=TRUE is unmodelled (spec §3f)");
+                                        assert_eq!(req.flags as u64 & VM_FLAGS_ANYWHERE, 0,
+                                            "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled (spec §3f)");
+                                        assert_eq!(Some(req.src_task as u64), self.guest_task_port,
+                                            "mach_vm_remap: src_task {:#x} is not the guest's own task port", req.src_task);
+                                        assert!(req.target + req.size <= req.src || req.src + req.size <= req.target,
+                                            "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
+                                            req.target, req.size, req.src);
+                                        let (target, cur, max) = self.b.guest_vm_remap(req.target, req.size, req.src);
+                                        let reply = machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max);
+                                        if writes.len() != 1 || writes[0].bytes != reply {
+                                            return Err(Divergence { landmark: self.idx, pc,
+                                                detail: format!("mach_vm_remap reply mismatch: replay target {target:#x}") });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
