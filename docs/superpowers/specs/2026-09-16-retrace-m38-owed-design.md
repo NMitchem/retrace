@@ -458,7 +458,10 @@ dispatch arms under `returns_fd_pair`, and `apply_and_return`/`set_x0_err_and_re
 signatures; and §3d's first draft said the exec mirror was an "eighth `verify_thread` site" —
 there is none, both refusal mirrors sit inside existing generic arms after those arms' own
 `verify_thread`, and the count stayed **seven** through every task. Two were decided by
-measurement: §3c's "stay PASS" (above) and §3e/R3's default code (above). One was a label: R6's
+measurement: §3c's "stay PASS" (above) and §3e/R3's default code (above). A third was measured
+at Task 1: §3a's "`(ret, ret1) == (3, 4)`" came out as **(4, 5)** — libSystem holds one extra
+descriptor under retrace — so the fixture asserts the invariants (`pair=1`, `low=1`) instead of
+the numbers (`pipe_dyn.c:1–5`). One was a label: R6's
 "run N" was regime I. §9's prediction is corrected above. §2's location line numbers are as of
 `a663051` and shifted under each task, as expected.
 
@@ -472,5 +475,7 @@ measured — and its default did not apply. R6 held with its label corrected.
 capture (a measurement, with the field now in the trace); a fail-loud default for unlisted
 `fcntl`/`ioctl` commands (deliberately not taken, R5); modelling rather than refusing the RCV
 call (class C); the `guest_fcntl_dupfd` range guard living record-side only (a review minor,
-carried to the final review); and the review minors each task's report deferred.
+carried to the final review — which raised it to Important 1 and had it moved into
+`FdTable::dup_from` in the fix wave, so it is paid, not owed); and the review minors each
+task's report deferred.
 

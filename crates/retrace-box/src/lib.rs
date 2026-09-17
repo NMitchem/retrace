@@ -666,8 +666,9 @@ pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, 
 /// Never persisted, never enters a trace file. See the M4 design spec for why each field is here.
 /// `EBADF` — answered for a guest fd that is `Free` or `Closed`, with nothing forwarded.
 pub const EBADF: u64 = 9;
-/// `EINVAL` — M38: answered for an `F_DUPFD` minimum outside `[0, DUP2_MAX_FD)`, as xnu's
-/// `finishdup` range check does, with nothing forwarded.
+/// `EINVAL` — M38: answered by `FdTable::dup_from` (so on record and replay alike) for an
+/// `F_DUPFD` minimum outside `[0, DUP2_MAX_FD)`, as xnu's `finishdup` range check does, with
+/// nothing forwarded.
 pub const EINVAL: u64 = 22;
 
 /// M37 (review I1): the exclusive upper bound on a `dup2` TARGET. xnu answers `EBADF` for
@@ -841,13 +842,21 @@ impl FdTable {
     }
 
     /// M38: `fcntl(src, F_DUPFD, min)` on the guest-visible table — identical on record and
-    /// replay. `Err(EBADF)` if `src` is not open. Otherwise the lowest slot >= `min` not currently
-    /// open takes `src`'s KIND (`dup`'s rule: a `Console(n)` source makes an alias M9's mirror
-    /// must catch) and is returned. `min` is the GUEST's minimum — it never reaches the host,
-    /// whose `dup` picks any number; the binding is the caller's, as with `alloc` + `bind`.
-    /// A `min` below the table floor rounds up to 3, as `alloc` does (the M5 floor).
+    /// replay. `Err(EBADF)` if `src` is not open; `Err(EINVAL)` for a `min` outside
+    /// `[0, DUP2_MAX_FD)`, checked after the source (xnu's order). Otherwise the lowest slot >=
+    /// `min` not currently open takes `src`'s KIND (`dup`'s rule: a `Console(n)` source makes an
+    /// alias M9's mirror must catch) and is returned. `min` is the GUEST's minimum — it never
+    /// reaches the host, whose `dup` picks any number; the binding is the caller's, as with
+    /// `alloc` + `bind`. A `min` below the table floor rounds up to 3, as `alloc` does (the M5
+    /// floor).
     pub fn dup_from(&mut self, src: u64, min: u64) -> Result<u64, u64> {
         if !self.is_open(src) { return Err(EBADF); }
+        // xnu's order (bsd/kern/kern_descrip.c `finishdup` via `fcntl_nocancel` F_DUPFD): the
+        // source is checked first, then the minimum's range. A negative `int` arrives
+        // zero-extended (0xffff_ffff), hence the `as i32` test — the same two-part check as
+        // `dup2` above, for the same reason. Here rather than in the record-only wrapper so that
+        // record and replay refuse identically (M38 final review, Important 1).
+        if (min as i32) < 0 || min >= DUP2_MAX_FD { return Err(EINVAL); }
         let start = (min as usize).max(3);
         let gfd = (start..self.slots.len())
             .find(|&i| !matches!(self.slots[i], FdSlot::Open | FdSlot::Console(_)))
@@ -2907,10 +2916,11 @@ impl Box_ {
     }
 
     /// M38: the second return register. Written on BOTH sides, only for a `returns_fd_pair` row
-    /// — the caller gates it, so record's `set_x0_err_and_return` path and replay's
-    /// `apply_and_return` path each call this with the same recorded value (symmetry rule 1).
-    /// xnu writes x1 from retval[1] after every syscall; retrace leaves it stale for every other
-    /// row on purpose (spec R2: narrow, measured later if ever).
+    /// — the two dispatch ARMS in `retrace-core` call this, record's generic BSD forward arm and
+    /// replay's generic `Syscall` mirror, each gated on `returns_fd_pair(num)` and each with the
+    /// same recorded value, just before its `set_x0_err_and_return`/`apply_and_return` (symmetry
+    /// rule 1). xnu writes x1 from retval[1] after every syscall; retrace leaves it stale for
+    /// every other row on purpose (spec R2: narrow, measured later if ever).
     pub fn set_ret1(&mut self, ret1: u64) {
         self.vcpu.set_reg(reg::x(1), ret1).unwrap();
     }
@@ -3854,14 +3864,17 @@ impl Box_ {
 
     /// M38: `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)`. The table half is `FdTable::dup_from`
     /// (replay calls it with the same arguments); the host half is a plain `dup(h)`, because a
-    /// host `F_DUPFD` would apply the guest's minimum to retrace's own descriptor space. The
-    /// close-on-exec bit has no observable in the box (exec is refused, M38 t4), so both commands
-    /// share this path. Range check as xnu's `finishdup`: a negative or too-large minimum is
-    /// EINVAL, checked after the source (bsd/kern/kern_descrip.c order).
+    /// host `F_DUPFD` would apply the guest's minimum to retrace's own descriptor space. Both
+    /// commands share this path: the close-on-exec bit is not modelled — exec is refused (M38
+    /// t4), and its one observable is a forwarded `F_GETFD`, which reads the host `dup`'s CLEAR
+    /// flag, so a guest doing `F_DUPFD_CLOEXEC` then `F_GETFD` reads 0 where native reads 1
+    /// (deterministic across record and replay, since the recorded return carries it; a fidelity
+    /// gap, owed in the README). The range check is the table's (`dup_from` answers EINVAL after
+    /// the source check, xnu's order), so record and replay refuse identically; the wrapper's
+    /// only host work is the `dup` and its close on `Err`.
     fn guest_fcntl_dupfd(&mut self, args: [u64; 8]) -> (u64, u64, bool, Vec<Region>) {
         let (fd, min) = (args[0], args[2]);
         let Some(h) = self.fds.host(fd) else { return (EBADF, 0, true, Vec::new()); };
-        if (min as i32) < 0 || min >= DUP2_MAX_FD { return (EINVAL, 0, true, Vec::new()); }
         let dup = unsafe { libc::dup(h) };
         if dup < 0 {
             let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(EBADF as i32) as u64;
