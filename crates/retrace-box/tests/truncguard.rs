@@ -68,7 +68,7 @@ fn the_band_fires_when_the_kernel_writes_past_the_window() {
                 panic!("NOT-THE-GUARD-BAND: fstat wrote past a {CAP}-byte window and nothing fired");
             }
             Stop::Syscall { num, args } => {
-                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                let (ret, _ret1, _e, _w) = b.forward_and_diff(num, args);
                 b.set_x0_and_return(ret);
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
@@ -280,7 +280,7 @@ fn the_clamp_reaches_proc_info() {
         assert!(b.host_span_for_test(a).is_none(), "scalar {a:#x} collides with a guest backing");
     }
 
-    let (ret, err, _writes) = b.forward_and_diff(336, args);
+    let (ret, _ret1, err, _writes) = b.forward_and_diff(336, args);
     assert_eq!((ret, err), (AVAIL, false),
         "proc_info(LISTPIDS) with buffersize {} into a {AVAIL}-byte backing: the clamp must hand \
          the kernel {AVAIL} and get {AVAIL} back; got ret={ret} err={err}", AVAIL + 4096);
@@ -341,13 +341,13 @@ fn an_oldlenp_past_its_backing_is_refused() {
         match b.run() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL => {
                 seen += 1;
-                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, _writes) = b.forward_and_diff(num, args);
                 assert!(seen < 2, "NOT-THE-REFUSAL: the second sysctl carries *oldlenp = 1 TiB and \
                                    forward_and_diff returned normally");
                 b.set_x0_err_and_return(ret, err);
             }
             Stop::Syscall { num, args } => {
-                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, _writes) = b.forward_and_diff(num, args);
                 b.set_x0_err_and_return(ret, err);
             }
             other => panic!("NOT-THE-REFUSAL: guest stopped with {other:?} before the second sysctl"),
@@ -370,7 +370,7 @@ fn a_null_oldp_sysctl_is_not_refused() {
                 return;
             }
             Stop::Syscall { num, args } => {
-                let (ret, err, _writes) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, _writes) = b.forward_and_diff(num, args);
                 b.set_x0_err_and_return(ret, err);
             }
             other => panic!("guest stopped with {other:?} before its first sysctl"),
@@ -453,7 +453,7 @@ fn the_same_fixture_and_cap_that_fooled_the_old_comparison_now_aborts() {
                 panic!("NOT-THE-CANARY: fstat put zeros over a zeroed band and nothing fired");
             }
             Stop::Syscall { num, args } => {
-                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                let (ret, _ret1, _e, _w) = b.forward_and_diff(num, args);
                 b.set_x0_and_return(ret);
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
@@ -512,7 +512,7 @@ fn the_canary_catches_zeros_written_over_zeros() {
                 panic!("NOT-THE-CANARY: fstat put zeros over a zeroed band and nothing fired");
             }
             Stop::Syscall { num, args } => {
-                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                let (ret, _ret1, _e, _w) = b.forward_and_diff(num, args);
                 b.set_x0_and_return(ret);
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
@@ -562,7 +562,7 @@ fn a_failing_syscall_still_restores_the_canary() {
 
                 let mut a = [0u64; 8];
                 a[0] = path;
-                let (_ret, err, writes) = b.forward_and_diff(retrace_arch::SYS_OPEN, a);
+                let (_ret, _ret1, err, writes) = b.forward_and_diff(retrace_arch::SYS_OPEN, a);
                 assert!(err, "precondition: opening {path:#x} as a relative path must FAIL, or this \
                               test drives the success path it is not about");
                 assert!(writes.is_empty(),
@@ -577,7 +577,7 @@ fn a_failing_syscall_still_restores_the_canary() {
                 return;
             }
             Stop::Syscall { num, args } => {
-                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                let (ret, _ret1, _e, _w) = b.forward_and_diff(num, args);
                 b.set_x0_and_return(ret);
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
@@ -621,7 +621,7 @@ fn a_duplicated_pointer_argument_does_not_manufacture_a_disturbance() {
                 return;
             }
             Stop::Syscall { num, args } => {
-                let (ret, _e, _w) = b.forward_and_diff(num, args);
+                let (ret, _ret1, _e, _w) = b.forward_and_diff(num, args);
                 b.set_x0_and_return(ret);
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),

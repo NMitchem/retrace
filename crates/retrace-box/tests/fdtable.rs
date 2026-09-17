@@ -263,3 +263,16 @@ fn dup_of_an_open_slot_is_a_plain_open_duplicate() {
     assert_eq!(r.slots()[d as usize], FdSlot::Open);
     assert_eq!(r.host(d), None, "replay carries no host mapping for a dup");
 }
+
+// M38: pipe binds TWO slots, read end first — the order xnu fills retval[0]/retval[1].
+#[test]
+fn a_pair_takes_the_two_lowest_free_slots_read_end_first() {
+    let mut t = FdTable::new();
+    let a = t.alloc(); t.bind(a, 40);           // something already open at 3
+    let (r, w) = { let r = t.alloc(); let w = t.alloc(); (r, w) };
+    assert_eq!((r, w), (4, 5));
+    assert!(t.is_open(r) && t.is_open(w));
+    assert!(t.close(r));
+    assert_eq!(t.alloc(), 4, "the read end's slot is reusable after close, the write end's is not");
+    assert!(t.is_open(w));
+}

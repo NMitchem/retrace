@@ -337,6 +337,16 @@ fn main() {
         .status().expect("clang dup2_dyn");
     assert!(status.success(), "dup2_dyn guest build failed");
 
+    // pipe_dyn: the M38 pipe fixture — both ends reach the guest as adjacent guest numbers and
+    // bytes round-trip. Same recipe as hello_dyn.
+    let src = format!("{}/c/pipe_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/pipe_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang pipe_dyn");
+    assert!(status.success(), "pipe_dyn guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));

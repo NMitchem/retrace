@@ -13,7 +13,9 @@ pub struct Region { pub ipa: u64, pub bytes: Vec<u8> }
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     Snapshot { regs: Regs, mem: Vec<Region> },
-    Syscall { num: u64, args: [u64;8], ret: u64, err: bool, writes: Vec<Region>, thread: u32 },
+    // M38: the field order is the wire order; `ret1` (x1, the second return register — `pipe`'s
+    // write end) sits beside `ret`. Zero on every row but a `returns_fd_pair` one.
+    Syscall { num: u64, args: [u64;8], ret: u64, ret1: u64, err: bool, writes: Vec<Region>, thread: u32 },
     /// M16: `thread` is the thread that called `exit`/`exit_group` — always the current thread;
     /// permanent, not a placeholder (`record_box`'s `SYS_EXIT` arm `break`s the record loop right
     /// after appending this event, so at most one `Event::Exit` can ever exist in a trace and its
@@ -66,7 +68,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x09"; // "RT" + format version 0x0009 (M24: trampoline vector padding is `hvc #1`, so pre-M23 snapshots must be refused whole)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0a"; // "RT" + format version 0x000a (M38: `Event::Syscall` gained `ret1`, the second return register — `pipe`'s write end; pre-M38 traces are refused whole)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -135,7 +137,7 @@ mod tests {
         vec![
             Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000000, sp_el0:0x2000_0000, cpsr:0 },
                               mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,4] }] },
-            Event::Syscall { num:3, args:[5,0x100000100,6,0,0,0,0,0], ret:6, err:false,
+            Event::Syscall { num:3, args:[5,0x100000100,6,0,0,0,0,0], ret:6, ret1: 0, err:false,
                              writes: vec![Region{ ipa:0x100000100, bytes: vec![9,9,9,9,9,9] }],
                              thread: 0 },
             Event::Exit { code:0, thread: 0 },
@@ -151,21 +153,23 @@ mod tests {
     }
     #[test]
     fn rejects_prior_format_version() {
-        // A genuine prior-version trace (RT\x00\x02) with an otherwise well-formed, correctly
-        // CRC'd record: proves rejection is by MAGIC, not by CRC/framing.
-        let f = tempfile();
-        let prior_magic = b"RT\x00\x02";
-        let body = b"plausible record body bytes";
-        let crc = crc32(body);
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(prior_magic);
-        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&crc.to_le_bytes());
-        bytes.extend_from_slice(body);
-        std::fs::write(&f, &bytes).unwrap();
-        let (got, truncated) = Reader::open_checked(&f).unwrap();
-        assert!(truncated);
-        assert!(got.is_empty());
+        // A genuine prior-version trace (RT\x00\x02, and the immediately-prior RT\x00\x09 that
+        // M38's `ret1` bump retired) with an otherwise well-formed, correctly CRC'd record: proves
+        // rejection is by MAGIC, not by CRC/framing.
+        for prior_magic in [b"RT\x00\x02", b"RT\x00\x09"] {
+            let f = tempfile();
+            let body = b"plausible record body bytes";
+            let crc = crc32(body);
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(prior_magic);
+            bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&crc.to_le_bytes());
+            bytes.extend_from_slice(body);
+            std::fs::write(&f, &bytes).unwrap();
+            let (got, truncated) = Reader::open_checked(&f).unwrap();
+            assert!(truncated, "magic {prior_magic:?} must be rejected");
+            assert!(got.is_empty(), "magic {prior_magic:?} must keep nothing");
+        }
     }
     #[test]
     fn roundtrip() {
@@ -295,12 +299,14 @@ mod tests {
     }
 
     #[test]
-    fn magic_bumped_for_the_m24_trampoline_vector_padding() {
+    fn magic_bumped_for_the_m38_second_return_register() {
         // M24: the trampoline page's vector padding changed from `UDF #0` to `hvc #1` (M23),
         // which is snapshot *content*, not `Event` shape — a pre-M24 snapshot is not merely
         // older, it means something different at the bytes `Box_::restore` re-applies. Two
         // tests, because "forgot to bump" and "bumped to the wrong value" are different mistakes.
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x09");
+        // M38: `Event::Syscall` gained `ret1`; a pre-M38 record deserialises with its fields
+        // shifted, so the version, not the CRC, is what refuses it.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0a");
     }
 
     #[test]
