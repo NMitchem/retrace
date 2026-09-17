@@ -13,7 +13,7 @@ fn a_scalar_register_holding_a_mapped_ipa_is_forwarded_verbatim() {
             Stop::Syscall { num, args } if num == retrace_arch::SYS_LSEEK => {
                 assert_eq!(args[1], 0x4000, "precondition: the guest asked for offset 0x4000");
                 assert!(b.host_span_for_test(0x4000).is_some(), "precondition: 0x4000 is a mapped IPA (the trampoline)");
-                let (ret, err, _w) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, _w) = b.forward_and_diff(num, args);
                 assert!(!err, "lseek failed: errno {ret}");
                 assert_eq!(ret, 0x4000,
                     "lseek returned {ret:#x}: the offset register was rewritten to a host pointer — \
@@ -21,7 +21,7 @@ fn a_scalar_register_holding_a_mapped_ipa_is_forwarded_verbatim() {
                 return;
             }
             Stop::Syscall { num, args } => {
-                let (ret, err, _w) = b.forward_and_diff(num, args);
+                let (ret, _ret1, err, _w) = b.forward_and_diff(num, args);
                 b.set_x0_err_and_return(ret, err);
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),

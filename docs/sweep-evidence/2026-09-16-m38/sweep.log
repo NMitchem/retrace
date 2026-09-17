@@ -1,0 +1,112 @@
+pidstart=87610
+binary=/private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/28d5dbf4-f9d1-47b8-9547-98f07bf9e5c7/scratchpad/retrace-m38-sweep sha256=80daf5c5add64f5658fd7ea400e5794416a2f88582c2a0770665e9314ba39502 commit=911214e date=2026-09-16 23:44:00 EDT
+PASS /bin/[
+ROW	/bin/[	PASS	2	2	87626	n/a		
+PASS /bin/bash
+ROW	/bin/bash	PASS	0	0	87674	n/a		
+PASS /bin/cat
+ROW	/bin/cat	PASS	0	0	87725	n/a		
+PASS /bin/chmod
+ROW	/bin/chmod	PASS	1	1	87784	n/a		
+PASS /bin/cp
+ROW	/bin/cp	PASS	64	64	87821	n/a		
+FAIL /bin/csh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+ROW	/bin/csh	FAIL	4	3	87861	336	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 336 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+PASS /bin/dash
+ROW	/bin/dash	PASS	0	0	87891	n/a		
+PASS /bin/date
+ROW	/bin/date	PASS	0	0	87925	n/a		
+PASS /bin/dd
+ROW	/bin/dd	PASS	0	0	88000	n/a		
+PASS /bin/df
+ROW	/bin/df	PASS	0	0	88036	n/a		
+PASS /bin/echo
+ROW	/bin/echo	PASS	0	0	88080	n/a		
+FAIL /bin/ed (recorder panicked: thread 'main' (35004702) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from)
+ROW	/bin/ed	FAIL	101	n/a	88116	n/a	thread 'main' (35004702) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from	
+PASS /bin/expr
+ROW	/bin/expr	PASS	2	2	88137	n/a		
+PASS /bin/hostname
+ROW	/bin/hostname	PASS	0	0	88213	n/a		
+PASS /bin/kill
+ROW	/bin/kill	PASS	2	2	88244	n/a		
+PASS /bin/ksh
+ROW	/bin/ksh	PASS	0	0	88323	n/a		
+PASS /bin/launchctl
+ROW	/bin/launchctl	PASS	1	1	88372	n/a		
+PASS /bin/link
+ROW	/bin/link	PASS	1	1	88417	n/a		
+PASS /bin/ln
+ROW	/bin/ln	PASS	1	1	88480	n/a		
+FAIL /bin/ls (recorder panicked: thread 'main' (35007007) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 461 (461) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from)
+ROW	/bin/ls	FAIL	101	n/a	88529	n/a	thread 'main' (35007007) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 461 (461) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from	
+PASS /bin/mkdir
+ROW	/bin/mkdir	PASS	64	64	88550	n/a		
+PASS /bin/mv
+ROW	/bin/mv	PASS	64	64	88592	n/a		
+PASS /bin/pax
+ROW	/bin/pax	PASS	1	1	88627	n/a		
+PASS /bin/ps
+ROW	/bin/ps	PASS	0	0	88664	n/a		
+PASS /bin/pwd
+ROW	/bin/pwd	PASS	0	0	88775	n/a		
+PASS /bin/realpath
+ROW	/bin/realpath	PASS	0	0	88818	n/a		
+PASS /bin/rm
+ROW	/bin/rm	PASS	64	64	88854	n/a		
+PASS /bin/rmdir
+ROW	/bin/rmdir	PASS	1	1	88907	n/a		
+PASS /bin/sh
+ROW	/bin/sh	PASS	1	1	88951	n/a		
+PASS /bin/sleep
+ROW	/bin/sleep	PASS	1	1	88994	n/a		
+PASS /bin/stty
+ROW	/bin/stty	PASS	1	1	89039	n/a		
+PASS /bin/sync
+ROW	/bin/sync	PASS	0	0	89084	n/a		
+FAIL /bin/tcsh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+ROW	/bin/tcsh	FAIL	4	3	89125	344	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 344 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+PASS /bin/test
+ROW	/bin/test	PASS	1	1	89157	n/a		
+PASS /bin/unlink
+ROW	/bin/unlink	PASS	64	64	89195	n/a		
+PASS /bin/wait4path
+ROW	/bin/wait4path	PASS	1	1	89273	n/a		
+PASS /bin/zsh
+ROW	/bin/zsh	PASS	0	0	89304	n/a		
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (35011346) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 374 (374) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from)
+ROW	/usr/bin/automationmodetool	FAIL	101	n/a	89346	n/a	thread 'main' (35011346) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 374 (374) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from	
+FAIL /usr/bin/desdp (recorder panicked: thread 'main' (35011394) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from)
+ROW	/usr/bin/desdp	FAIL	101	n/a	89368	n/a	thread 'main' (35011394) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from	
+FAIL /usr/bin/dyld_info (recorder panicked: thread 'main' (35011456) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from)
+ROW	/usr/bin/dyld_info	FAIL	101	n/a	89390	n/a	thread 'main' (35011456) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from	
+FAIL /usr/bin/flex (recorder panicked: thread 'main' (35011736) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from)
+ROW	/usr/bin/flex	FAIL	101	n/a	89448	n/a	thread 'main' (35011736) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from	
+FAIL /usr/bin/dddiagnose (recorder panicked: thread 'main' (35011793) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 345 (345) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from)
+ROW	/usr/bin/dddiagnose	FAIL	101	n/a	89470	n/a	thread 'main' (35011793) panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall 345 (345) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from	
+PASS /usr/bin/basename
+ROW	/usr/bin/basename	PASS	1	1	89491	n/a		
+PASS /usr/bin/dirname
+ROW	/usr/bin/dirname	PASS	1	1	89533	n/a		
+PASS /usr/bin/env
+ROW	/usr/bin/env	PASS	0	0	89567	n/a		
+PASS /usr/bin/head
+ROW	/usr/bin/head	PASS	0	0	89610	n/a		
+PASS /usr/bin/tail
+ROW	/usr/bin/tail	PASS	0	0	89655	n/a		
+PASS /usr/bin/sort
+ROW	/usr/bin/sort	PASS	0	0	89693	n/a		
+PASS /usr/bin/uniq
+ROW	/usr/bin/uniq	PASS	0	0	89735	n/a		
+PASS /usr/bin/cut
+ROW	/usr/bin/cut	PASS	1	1	89772	n/a		
+PASS /usr/bin/tr
+ROW	/usr/bin/tr	PASS	1	1	89811	n/a		
+FAIL /usr/bin/yes (timed out after 30s recording)
+ROW	/usr/bin/yes	FAIL	137	n/a	89847	n/a		
+PASS /usr/bin/true
+ROW	/usr/bin/true	PASS	0	0	89986	n/a		
+PASS /usr/bin/printenv
+ROW	/usr/bin/printenv	PASS	0	0	90026	n/a		
+TALLY pass=44 fail=10 skip=0
+SWEEP_EXIT=0

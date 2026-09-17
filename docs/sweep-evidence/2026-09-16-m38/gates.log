@@ -1,0 +1,106 @@
+   Compiling retrace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m38-owed/crates/retrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.99s
+     Running tests/apple_walls_e2e.rs (target/aarch64-apple-darwin/debug/deps/apple_walls_e2e-2f0a80379e350a84)
+
+running 7 tests
+test automationmodetool_records_and_replays ... FAILED
+test csh_records_and_replays ... FAILED
+test dddiagnose_records_and_replays ... FAILED
+test desdp_records_and_replays ... FAILED
+test dyld_info_records_and_replays ... FAILED
+test flex_records_and_replays ... FAILED
+test tcsh_records_and_replays ... FAILED
+
+failures:
+
+---- automationmodetool_records_and_replays stdout ----
+
+thread 'automationmodetool_records_and_replays' (34841849) panicked at crates/retrace/tests/apple_walls_e2e.rs:21:5:
+assertion `left == right` failed: /usr/bin/automationmodetool: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (34841865) panicked at crates/retrace-arch/src/lib.rs:944:38:
+M33: syscall 374 (374) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- csh_records_and_replays stdout ----
+
+thread 'csh_records_and_replays' (34841921) panicked at crates/retrace/tests/apple_walls_e2e.rs:21:5:
+assertion `left == right` failed: /bin/csh: record exited 4 — the wall this gate is parked at, in the recorder's own words:
+[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1203 send_size 248): the box hosts no message-queue receivers
+RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64
+  left: 4
+ right: 0
+
+---- dddiagnose_records_and_replays stdout ----
+
+thread 'dddiagnose_records_and_replays' (34841945) panicked at crates/retrace/tests/apple_walls_e2e.rs:21:5:
+assertion `left == right` failed: /usr/bin/dddiagnose: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (34841946) panicked at crates/retrace-arch/src/lib.rs:944:38:
+M33: syscall 345 (345) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+
+---- desdp_records_and_replays stdout ----
+
+thread 'desdp_records_and_replays' (34841989) panicked at crates/retrace/tests/apple_walls_e2e.rs:21:5:
+assertion `left == right` failed: /usr/bin/desdp: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (34841990) panicked at crates/retrace-arch/src/lib.rs:944:38:
+M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+
+---- dyld_info_records_and_replays stdout ----
+
+thread 'dyld_info_records_and_replays' (34841997) panicked at crates/retrace/tests/apple_walls_e2e.rs:21:5:
+assertion `left == right` failed: /usr/bin/dyld_info: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (34841998) panicked at crates/retrace-arch/src/lib.rs:944:38:
+M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+
+---- flex_records_and_replays stdout ----
+
+thread 'flex_records_and_replays' (34842022) panicked at crates/retrace/tests/apple_walls_e2e.rs:21:5:
+assertion `left == right` failed: /usr/bin/flex: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (34842023) panicked at crates/retrace-arch/src/lib.rs:944:38:
+M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+
+---- tcsh_records_and_replays stdout ----
+
+thread 'tcsh_records_and_replays' (34842041) panicked at crates/retrace/tests/apple_walls_e2e.rs:21:5:
+assertion `left == right` failed: /bin/tcsh: record exited 4 — the wall this gate is parked at, in the recorder's own words:
+[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1503 send_size 248): the box hosts no message-queue receivers
+RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64
+  left: 4
+ right: 0
+
+
+failures:
+    automationmodetool_records_and_replays
+    csh_records_and_replays
+    dddiagnose_records_and_replays
+    desdp_records_and_replays
+    dyld_info_records_and_replays
+    flex_records_and_replays
+    tcsh_records_and_replays
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 1 filtered out; finished in 4.93s
+
+error: test failed, to rerun pass `-p retrace --test apple_walls_e2e`

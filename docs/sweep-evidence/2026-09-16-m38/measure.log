@@ -1,0 +1,29 @@
+182:pub const MACH_RCV_REFUSAL: u64 = MACH_RCV_TIMED_OUT;
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.03s
+/tmp/m38-t5/retrace-MACH_RCV_TIMED_OUT: replacing existing signature
+ROW	launchctl	MACH_RCV_TIMED_OUT	rc=1	rp=1	receive-refusals=1	stdout-equal=y	
+ROW	automationmodetool	MACH_RCV_TIMED_OUT	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/automationmodetool.MACH_RCV_TIMED_OUT.rec.err:thread 'main' (34779649) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	desdp	MACH_RCV_TIMED_OUT	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/desdp.MACH_RCV_TIMED_OUT.rec.err:thread 'main' (34779750) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	dyld_info	MACH_RCV_TIMED_OUT	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/dyld_info.MACH_RCV_TIMED_OUT.rec.err:thread 'main' (34779836) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	flex	MACH_RCV_TIMED_OUT	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/flex.MACH_RCV_TIMED_OUT.rec.err:thread 'main' (34779905) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	dddiagnose	MACH_RCV_TIMED_OUT	rc=139	rp=139	receive-refusals=1	stdout-equal=y	
+182:pub const MACH_RCV_REFUSAL: u64 = MACH_RCV_INVALID_NAME;
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.88s
+/tmp/m38-t5/retrace-MACH_RCV_INVALID_NAME: replacing existing signature
+ROW	launchctl	MACH_RCV_INVALID_NAME	rc=1	rp=1	receive-refusals=1	stdout-equal=y	
+ROW	automationmodetool	MACH_RCV_INVALID_NAME	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/automationmodetool.MACH_RCV_INVALID_NAME.rec.err:thread 'main' (34781018) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	desdp	MACH_RCV_INVALID_NAME	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/desdp.MACH_RCV_INVALID_NAME.rec.err:thread 'main' (34781095) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	dyld_info	MACH_RCV_INVALID_NAME	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/dyld_info.MACH_RCV_INVALID_NAME.rec.err:thread 'main' (34781193) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	flex	MACH_RCV_INVALID_NAME	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/flex.MACH_RCV_INVALID_NAME.rec.err:thread 'main' (34781256) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	dddiagnose	MACH_RCV_INVALID_NAME	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/dddiagnose.MACH_RCV_INVALID_NAME.rec.err:thread 'main' (34781338) panicked at crates/retrace-arch/src/lib.rs:944:38:
+182:pub const MACH_RCV_REFUSAL: u64 = MACH_RCV_PORT_DIED;
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.40s
+/tmp/m38-t5/retrace-MACH_RCV_PORT_DIED: replacing existing signature
+ROW	launchctl	MACH_RCV_PORT_DIED	rc=1	rp=1	receive-refusals=1	stdout-equal=y	
+ROW	automationmodetool	MACH_RCV_PORT_DIED	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/automationmodetool.MACH_RCV_PORT_DIED.rec.err:thread 'main' (34782022) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	desdp	MACH_RCV_PORT_DIED	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/desdp.MACH_RCV_PORT_DIED.rec.err:thread 'main' (34782101) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	dyld_info	MACH_RCV_PORT_DIED	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/dyld_info.MACH_RCV_PORT_DIED.rec.err:thread 'main' (34782184) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	flex	MACH_RCV_PORT_DIED	rc=101	rp=3	receive-refusals=1	stdout-equal=y	docs/sweep-evidence/2026-09-16-m38/flex.MACH_RCV_PORT_DIED.rec.err:thread 'main' (34782250) panicked at crates/retrace-arch/src/lib.rs:944:38:
+ROW	dddiagnose	MACH_RCV_PORT_DIED	rc=139	rp=139	receive-refusals=1	stdout-equal=y	
+Updated 1 path from the index
+MEASURE_DONE

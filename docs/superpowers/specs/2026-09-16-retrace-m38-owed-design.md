@@ -374,5 +374,115 @@ added assertions (same test). Binaries: +3 (one per new e2e target). Ignored:
 
 ## 10. Outcome
 
-*Appended at the close, after the gate and the sweep: what was measured against §9, which rulings
-held, which of the six moved, and what this spec's own text got wrong.*
+*Appended at the close (Task 6, 2026-09-16/17), after the gate and the sweep.*
+
+**Against §9.** Measured: **618 passed / 0 failed / 9 ignored over 135 binaries** on `cbc75ff`
+(the final review's fix commit; 617 / 0 / 9 over 135 on `911214e`, the head after Tasks 1–5 and
+Task 5's fix round, before the fix wave added one `fdtable.rs` case), every chunk's cargo exit
+0, clippy clean, no `SKIPPED` line (Homebrew `jq` and `python@3.14` present). Two predictions
+preceded the first run and
+each is corrected against the document it came from — the per-file reconciliation
+(`task-6-numbers.md`, diffed against `a663051`'s 596/0/10 over 131) found both, and its own
+first draft had conflated them (the Task 6 review caught that). **§9** said "roughly 603+/0/≤10
+over 134": it counted **three** new e2e gates (`pipe_e2e`, `dupfd_e2e`, `atfdcwd_e2e`) where
+there are four (`exec_e2e` is the plan's, added at Task 4 beside the launcher assertion §3d
+asked for; this spec never named it), so its
+binaries were +3 where the four new targets are **+4** (135, not 134); and it had no parse tests.
+**The plan's Task 6 Step 7** said "612 + k / 0 / 10 − k over 135", k = 1 → 613/0/9 over 135: it
+counted the binaries right and missed only the **four `retrace-guest` parse tests**
+(`pipe_guest_parses`, `dupfd_guest_parses`, `atfdcwd_guest_parses`, `exec_guest_parses`, one per
+new fixture, +4). The rest of the plan's per-file prediction held: `retrace-arch` +3, `machmsg.rs` +3, `fdtable.rs` +2,
+`fdxlat.rs` +1, `pipe_e2e` +3, `dupfd_e2e` +2, `atfdcwd_e2e` +1, `exec_e2e` +1; `#[ignore]`
+10 → 9; `--bins` 11 → 11. 596 + 20 + 1 (the un-parked gate now counts as passed) = 617; the
+final-review fix wave then added +1 (`fdtable.rs` 20 → 21, the range-guard case) = 618, with
+0 new binaries and 0 new `#[ignore]`.
+
+**The exec errno (§3d, R4).** Both spellings measured **14 (`EFAULT`)** on the unmodified
+recorder — `exec_dyn`'s pre-fix trace: `num=59 ret=14 err=true writes=0`, `num=244 ret=14
+err=true writes=0`; guest stdout `execve=14` / `posix_spawn=14`; zero `refusing` lines — so
+`exec_refusal_errno` returns `Some(14)` for both and no per-number split was needed. R4 stands as
+written: continuity, not fidelity. `/bin/sh`'s sweep row is unchanged (`PASS` 1/1, the same
+guest text) and its stderr gains the refusal line; the CPython launcher test kept every assertion
+and gained the stderr one.
+
+**The RCV refusal code (§3e, R3).** Measured over the six, 18 cells (three codes × six binaries;
+the table is in `docs/sweep-evidence/2026-09-16-m38/README.md` and on `MACH_RCV_REFUSAL`'s doc):
+`MACH_RCV_TIMED_OUT` accepted by 5 of 6, `MACH_RCV_INVALID_NAME` by **6 of 6**,
+`MACH_RCV_PORT_DIED` by 5 of 6 — **not a tie**, so R3's default and tie-break did not apply and
+the constant is `MACH_RCV_INVALID_NAME` (0x1000_4002). The decider was `dddiagnose`, which
+data-aborts in the guest ~10 landmarks after the receive under both losing codes and under the
+winner runs 50 landmarks further (381 → 431) to a wall of its own. The semantically faithful
+default lost on one binary; the test `the_receive_refusal_is_a_receive_code` pins the measured
+choice. One pid regime (R6): all 18 cells at recpids 54954–55330 — which the plan pre-labelled
+"N" and which are in fact inside M36's old `[0x4000, 0x10000)` window, M37's regime **I** (a
+Task 5 review finding, corrected in the README and the five reasons); irrelevant to the ruling
+since §4b is retired, and 0 self-pid `ESRCH` was measured on every winner trace.
+
+**Which of the six moved.** One un-parked: **`/bin/launchctl`** records to its own no-argument
+usage `exit(1)` (4,484 bytes, byte-identical to the host's native output) and replays
+bit-for-bit; its gate asserts on that outcome, never on `rc == 0`. Five re-parked, class B, one
+syscall past the receive at a **missing `arg_kinds` row** (the M33 fail-loud, rc/rp 101/3):
+`automationmodetool` → `kevent_qos` (374); `desdp`/`dyld_info`/`flex` (hard links of one xcrun
+stub) → `openat_nocancel` (464); `dddiagnose` → `statfs64` (345). None class E; no new
+`#[ignore]`; no halt. **Ruling (Task 5):** those rows are not added in M38 — scope this spec
+lacks (§5) — and join 461/468 as the successor's *measured* scope: **the missing-row set — 461,
+468, 464, 345, 374 — with the corpus binaries each blocks**, at the top of the owed list; 464 is
+the `_nocancel` twin of `openat` (463), precisely the documented nocancel trap, and 345 the
+fixed-struct twin of `fstatfs64` (M29).
+
+**The sweep.** One run on the close's binary (`911214e`, recorder pids `0x1564a`–`0x15faa`):
+**`TALLY pass=44 fail=10 skip=0`**, 46 rows unchanged against M37's run N, **8 moved**, every one
+explained by name in the evidence README — the six above, and two this spec got wrong:
+
+- **§3c was wrong about `ls`, and about `ed`.** It said both "were PASS before … and stay PASS;
+  their recorded output changes". Task 3 measured `ls`: with the sentinel honoured its
+  `fstatat64(AT_FDCWD, …)` succeeds and it runs on to `getattrlistbulk` (461), which has no row —
+  its M37 `PASS` had been `ls` printing an error and exiting, identically on both sides.
+  **Ruling (Task 3):** the 461/468 rows are not added in M38 (an unmeasured `Dest` row at the end
+  of an unattended run is the "right conclusion, unmeasured fact" class); the row moves from a
+  false PASS to a loud named wall, and §6's "PASS ≥ 45" is amended to "≥ 44 with `ls`'s move
+  explained (≥ 45 if a gate un-parked)". The close's sweep then measured the same for **`ed`**,
+  which the plan had not predicted: on the M37 binary its `fstatat64(AT_FDCWD, "/tmp/ed.XXXXXX")`
+  — libc `mkstemp`'s directory check — was `EBADF`, `ed` wrote its error (lost to EFAULT) and
+  `exit(2)` on both sides; on the M38 binary the stat succeeds and the next trap is
+  `openat_nocancel(AT_FDCWD, …, O_RDWR|O_CREAT|O_EXCL, 0600)`, 464, no row. **Ruling (Task 6,
+  the ledger's):** `ed` is handled exactly as `ls`; the floor is measured **44 = 45 − `ls` − `ed`
+  + `launchctl`**; `ed` joins 464's blockers (four binaries behind one row); no gate is added
+  because `ed` never had one. §6's acceptance is met as amended.
+- `/bin/sh`'s label is unchanged and its stderr carries the refusal line (§6). `csh`/`tcsh` are
+  unchanged at 3403 with their `pipe` landmark moved: the guest receives `(4, 5)`, moves both
+  ends above `FSAFE` with `dup`/`close`, and both `fcntl(F_SETFD, 1)` succeed (M38 sweep `csh`
+  #327/#330/#335, `tcsh` #335/#338/#343) where M37 had two `EBADF`s on a raw host descriptor and
+  a stale register (§7's prediction, measured).
+
+**What this spec's own text got wrong, recorded as history.** Two corrections were applied when
+the plan was written from the code and are only recorded here: §3a's first draft named an
+`apply_and_return_pair` that never existed — the `x1` write is `Box_::set_ret1`, called by both
+dispatch arms under `returns_fd_pair`, and `apply_and_return`/`set_x0_err_and_return` kept their
+signatures; and §3d's first draft said the exec mirror was an "eighth `verify_thread` site" —
+there is none, both refusal mirrors sit inside existing generic arms after those arms' own
+`verify_thread`, and the count stayed **seven** through every task. Two were decided by
+measurement: §3c's "stay PASS" (above) and §3e/R3's default code (above). A third was measured
+at Task 1: §3a's "`(ret, ret1) == (3, 4)`" came out as **(4, 5)** — libSystem holds one extra
+descriptor under retrace — so the fixture asserts the invariants (`pair=1`, `low=1`) instead of
+the numbers (`pipe_dyn.c:1–5`). One was found by the final review: §3b's "the close-on-exec
+bit has no observable in the box" was overstated — a forwarded `F_GETFD` observes the host
+dup's clear flag (0 where native reads 1; deterministic across record and replay, a fidelity
+gap, owed in the README). One was a label: R6's
+"run N" was regime I. §9's prediction is corrected above. §2's location line numbers are as of
+`a663051` and shifted under each task, as expected.
+
+**Rulings that held.** R1 (the milestone is M38 under a fresh charter; the old "M38 does not
+exist" section carries a forward pointer), R2 (`x1` narrow — `pipe_e2e` asserts no other row
+carries a non-zero `ret1`), R4 (continuity errno, one value), R5 (unlisted commands keep `Ptr`;
+the row comment names the default and the census date). R3 held in its *procedure* — the code is
+measured — and its default did not apply. R6 held with its label corrected.
+
+**Owed by this milestone, beyond §7's list:** the missing-row set above (first); uniform `x1`
+capture (a measurement, with the field now in the trace); a fail-loud default for unlisted
+`fcntl`/`ioctl` commands (deliberately not taken, R5); modelling rather than refusing the RCV
+call (class C); the `guest_fcntl_dupfd` range guard living record-side only (a review minor,
+carried to the final review — which raised it to Important 1 and had it moved into
+`FdTable::dup_from` in the fix wave, so it is paid, not owed); and the review minors each
+task's report deferred.
+
