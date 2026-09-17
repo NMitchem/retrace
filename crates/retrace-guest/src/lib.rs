@@ -205,6 +205,10 @@ pub const ATFDCWD_DYN: &str = concat!(env!("OUT_DIR"), "/atfdcwd_dyn");
 /// M38: `execve` then `posix_spawn(SETEXEC)`; prints the errno each returns — both are refused,
 /// never forwarded.
 pub const EXEC_DYN: &str = concat!(env!("OUT_DIR"), "/exec_dyn");
+/// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
+/// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
+pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
+pub const CRASH_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.json");
 /// M37 (C1): closes fd 1 and fd 2, then writes to each — exits 0 only if both writes are EBADF,
 /// so the rung helper's exit-0 demand carries the "a closed console slot is closed on both sides"
 /// property and its stdout equality carries the mirror.
@@ -331,6 +335,19 @@ mod tests {
         // M38: proves the build.rs wiring and the path constant; behaviour is dupfd_e2e's.
         let l = parse_macho(&std::fs::read(DUPFD_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn crash_py_fixture_is_wired() {
+        // M39: proves the two path constants point at the repo files and that the data file
+        // carries the target the script computes (the tests assert 0x4000dead0000 by name).
+        let py = std::fs::read_to_string(CRASH_PY).unwrap();
+        assert!(py.contains("ctypes.cast(target"), "crash.py must cast the computed target");
+        assert!(py.contains("CRASHPY cell="), "crash.py must print the M6-style marker");
+        let json = std::fs::read_to_string(CRASH_JSON).unwrap();
+        assert!(json.contains("\"scratch\"") && json.contains("\"0x400000000000\"")
+                && json.contains("\"0xdead0000\""),
+                "crash.json must carry base 0x400000000000 + offset 0xdead0000 under `scratch`");
     }
 
     #[test]
