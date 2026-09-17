@@ -745,7 +745,7 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
         assert!(decode_vm_remap(&bad).is_err());
         let mut bad = FIXTURE_VM_REMAP_REQ; bad[24] = 2;                        // desc_count
         assert!(decode_vm_remap(&bad).is_err());
-        let mut bad = FIXTURE_VM_REMAP_REQ; bad[0] = 0x13;                      // complex bit clear
+        let mut bad = FIXTURE_VM_REMAP_REQ; bad[3] = 0x00;                      // complex bit (0x8000_0000, byte 3) clear
         assert!(decode_vm_remap(&bad).is_err());
     }
     #[test]
@@ -818,8 +818,8 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
   ```
   d. After `encode_vm_map_reply` (`:347`):
   ```rust
-  /// KERN_SUCCESS reply for 4813: header(24) + NDR(8) + RetCode(4) + target(8) + cur_protection(4)
-  /// + max_protection(4) = 52, + trailer(8) = 60 (the rcv_size the probe saw). The protections are
+  /// KERN_SUCCESS reply for 4813: header(24) + NDR(8) + RetCode(4) + target(8) +
+  /// cur_protection(4) + max_protection(4) = 52, + trailer(8) = 60 (the rcv_size the probe saw). The protections are
   /// the kernel's measured answer, derived by `Box_::guest_vm_remap` (M39 t2 measured 5/5 for a
   /// kernel-placed image's text and 5/7 for a dlopen'd dylib's) and passed in by dispatch.
   pub fn encode_vm_remap_reply(reply_port: u32, target: u64, cur: u32, max: u32) -> Vec<u8> {
