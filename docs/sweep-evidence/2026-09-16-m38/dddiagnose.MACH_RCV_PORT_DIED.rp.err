@@ -1,0 +1,2 @@
+[retrace] fall-throughs: 7
+guest crashed: pc=0x193bbbca0 far=0xfffffffffffffff0 esr=0x92000004

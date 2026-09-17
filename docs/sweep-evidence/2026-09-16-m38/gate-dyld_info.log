@@ -1,0 +1,27 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/apple_walls_e2e.rs (target/aarch64-apple-darwin/debug/deps/apple_walls_e2e-2f0a80379e350a84)
+
+running 1 test
+test dyld_info_records_and_replays ... FAILED
+
+failures:
+
+---- dyld_info_records_and_replays stdout ----
+
+thread 'dyld_info_records_and_replays' (34829310) panicked at crates/retrace/tests/apple_walls_e2e.rs:21:5:
+assertion `left == right` failed: /usr/bin/dyld_info: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (34829326) panicked at crates/retrace-arch/src/lib.rs:944:38:
+M33: syscall 464 (464) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    dyld_info_records_and_replays
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.84s
+
+error: test failed, to rerun pass `-p retrace --test apple_walls_e2e`

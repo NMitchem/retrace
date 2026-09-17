@@ -537,6 +537,23 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append mach_msg2 mq refusal: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_SEND_INVALID_DEST, false, &[]);
                     }
+                    machmsg::Route::RefuseMqRecv => {
+                        // M38. A receive on a message queue. No sender exists in the box, so
+                        // nothing can ever arrive; the code is `MACH_RCV_REFUSAL`, chosen by
+                        // measurement (its doc has the table — the options word's own timeout
+                        // was the semantic default and lost on one binary).
+                        // NEVER forwarded: a real receive would block retrace's own thread on a
+                        // queue only a daemon could fill. Writes NOTHING — the receive buffer is
+                        // untouched — so both the return and the empty write set are constants
+                        // replay recomputes (the RefuseMqSend posture).
+                        eprintln!("[retrace] refusing mach_msg2 message-queue receive (rcv_name {:#x} \
+                            rcv_size {} options {:#x}): the box hosts no message-queue senders",
+                            m.rcv_name, m.rcv_size, m.options);
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_RCV_REFUSAL, ret1: 0,
+                            err: false, writes: vec![], thread })
+                            .map_err(|e| format!("append mach_msg2 mq receive refusal: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_RCV_REFUSAL, false, &[]);
+                    }
                     machmsg::Route::Forward(name) => {
                         // Body-level guard. `route()` is handed only the packed register file — the
                         // message HEADER — so a check that depends on the request BODY runs here,
@@ -1930,6 +1947,15 @@ impl ReplaySession {
                                             || !writes.is_empty() {
                                             return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                                 "mach_msg2 message-queue refusal mismatch: recorded \
+                                                 ret {ret:#x} err {err} with {} write(s)", writes.len()) });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::RefuseMqRecv => {
+                                        // M38: standard symmetric posture, as RefuseMqSend.
+                                        if *ret != machmsg::MACH_RCV_REFUSAL || *err || !writes.is_empty() {
+                                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                                "mach_msg2 message-queue receive refusal mismatch: recorded \
                                                  ret {ret:#x} err {err} with {} write(s)", writes.len()) });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
