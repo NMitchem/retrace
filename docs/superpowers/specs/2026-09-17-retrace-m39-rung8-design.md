@@ -59,9 +59,9 @@ relative to `__file__`, and both exist at replay because they are repo files.
 
 `crash.py` does modest, real stdlib work and then faults:
 
-1. `import ctypes, json, os, sys` — `json` pulls `_json.cpython-314-darwin.so`, `ctypes` pulls
-   `_ctypes.cpython-314-darwin.so` and `_struct…so`; each is a runtime `dlopen` of a non-cache
-   dylib. `_ctypes` links only `/usr/lib/libffi.dylib` (shared cache) and libSystem — no
+1. `import ctypes, json, os, sys` — `json` pulls `_json.cpython-314-darwin.so` and `ctypes`
+   pulls `_ctypes.cpython-314-darwin.so`; each is a runtime `dlopen` of a non-cache dylib (the
+   measured count is exactly these two plus libffi's trampolines — no `_struct` load). `_ctypes` links only `/usr/lib/libffi.dylib` (shared cache) and libSystem — no
    Homebrew libffi (measured with `otool -L`).
 2. Opens `crash.json`, parses it, builds a table `name → int(base,16) + int(offset,16)`, and
    selects `target = table[cfg["target"]]`. The bad address is **computed from data**, never a
