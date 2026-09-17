@@ -763,7 +763,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // effect the `__disable_threadsignal` (331) row above names. Noted, not modelled.
         13 => row!(P, [Fd]),
         // pipe(void) → TWO new descriptors, in x0 and x1 (bsd/kern/sys_pipe.c `pipe`, `retval[0]`
-        // and `retval[1]`). See Ret::FdPair for why the return is unmodelled.
+        // and `retval[1]`). M38 models the pair: both descriptors are bound (`bind_returned_pair`,
+        // read end first) and `x1` is captured as the event's `ret1`; `Ret::FdPair`'s doc has it.
         42 => row!(Ret::FdPair, []),
         // kqueue(void) → a NEW descriptor (bsd/kern/kern_event.c `kqueue`). Bound like open's
         // (EXPECTED_DIFFS; exercised by /bin/wait4path). No kevent spelling (363/369/374/375) is
@@ -1288,7 +1289,7 @@ pub fn is_signal_syscall(num: u64) -> bool {
 
 /// M38: `execve`(59) and `posix_spawn`(244) are REFUSED, never forwarded. Before M38 both were
 /// forwarded and failed only because their `argv`/`envp` are untranslated guest pointers (the
-/// host kernel read a guest IPA as a host address and returned EFAULT); if nested-pointer
+/// host kernel read a guest address as a host address and returned EFAULT); if nested-pointer
 /// translation ever landed, a forwarded exec would replace retrace's own process. The value is
 /// what the forward RETURNED, measured on `exec_dyn` at M38 Task 4 — chosen for continuity (the
 /// CPython launcher's output, `/bin/sh`'s sweep row and every existing trace are unchanged), not

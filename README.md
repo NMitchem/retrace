@@ -968,8 +968,13 @@ These are real and current, not aspirational gaps.
   modelled since M38**: **`fcntl(F_DUPFD)`/`F_DUPFD_CLOEXEC`** is a table operation
   (`FdTable::dup_from(src, min)` — the lowest free *guest* slot ≥ `min`, the source's kind, both
   sides; a host `dup` behind it on record, never a host `F_DUPFD`, whose minimum would be a host
-  number; the close-on-exec bit has no observable in the box because exec is refused, so both
-  commands share the path), and **`pipe`** binds both ends (`Box_::bind_returned_pair`, read end
+  number; the range check is the table's too since the final-review fix, so a `min` outside
+  `[0, DUP2_MAX_FD)` is `EINVAL` on both sides rather than record-only; the close-on-exec bit is
+  not modelled — exec is refused, and its one observable is a forwarded `F_GETFD`, which reads
+  the host `dup`'s *clear* flag, so a guest doing `F_DUPFD_CLOEXEC` then `F_GETFD` reads 0 where
+  native reads 1, deterministic across record and replay because the recorded return carries it,
+  a fidelity gap and not a divergence — so both commands share the path), and **`pipe`** binds
+  both ends (`Box_::bind_returned_pair`, read end
   first; `Event::Syscall::ret1` carries the write end; `csh`/`tcsh` now receive `(4, 5)` and
   `fcntl` their moved ends successfully where they used to `EBADF` a raw host descriptor and a
   stale register). Two edges of the model are known and symmetric: a displaced-then-closed slot below 3
@@ -984,7 +989,10 @@ These are real and current, not aspirational gaps.
   reaches it (`ls`; `ed`/`desdp`/`dyld_info`/`flex`; `dddiagnose`; `automationmodetool`), left for
   the successor rather than added unmeasured at the end of an unattended run (the ledger's
   rulings at Tasks 3, 5 and 6); 464 is `openat`'s `_nocancel` twin and 345 is `fstatfs64`'s
-  fixed-struct twin, so two of the five are one-line copies of rows that exist. What stays open
+  fixed-struct twin, so two of the five are one-line copies of rows that exist. A third is the
+  final review's, ruled out of M38's scope as an unmeasured behaviour change at the close and
+  owed here instead: **`F_DUPFD_CLOEXEC`'s bit on the host dup** (one line in
+  `guest_fcntl_dupfd`; only `F_GETFD` observes it). What stays open
   is one level down. **A wrong position in a row is silent**: the equivalence sweep proves the
   views reproduce the legacy tables, and `Scalar`-versus-`Fd` on a *new* row is checked by nothing
   but the prototype and the reviewer. **`AT_FDCWD` is honoured in the 32-bit form since M38**:

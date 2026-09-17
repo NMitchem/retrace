@@ -292,3 +292,25 @@ fn dup_from_takes_the_lowest_free_slot_at_or_above_min_with_the_sources_kind() {
     assert_eq!(t.dup_from(f, 10).unwrap(), 10, "a closed slot is reusable");
     assert_eq!(t.dup_from(30, 3), Err(retrace_box::EBADF), "a closed source is EBADF");
 }
+
+// M38 final review (Important 1): the range guard belongs to the TABLE, so record and replay
+// share it by construction (the `dup2` precedent at `FdTable::dup2`). Before this, the guard
+// lived in the record-only wrapper `guest_fcntl_dupfd`, and replay's mirror — which trusts a
+// recorded success — would have grown the table to a foreign trace's `min` instead of
+// diverging. Assert order matters on a RED run: `DUP2_MAX_FD` first (10 240 slots, a clean
+// failure), the huge minima after (unguarded, `grow_to(0xffff_ffff)` would try to allocate
+// 2^32 slots).
+#[test]
+fn dup_from_refuses_a_minimum_outside_the_dup2_bound_and_leaves_the_table_unchanged() {
+    let mut t = FdTable::new();
+    let f = t.alloc(); t.bind(f, 40);                     // 3, an open source
+    let before = t.slots();
+    assert_eq!(t.dup_from(f, retrace_box::DUP2_MAX_FD), Err(retrace_box::EINVAL),
+        "the bound is exclusive: F_DUPFD with min = OPEN_MAX is EINVAL");
+    assert_eq!(t.dup_from(f, 0xffff_ffff), Err(retrace_box::EINVAL), "a negative int min arrives zero-extended: EINVAL");
+    assert_eq!(t.dup_from(f, u64::MAX), Err(retrace_box::EINVAL), "no overflow in grow_to");
+    assert_eq!(t.slots(), before, "a refused F_DUPFD leaves the table untouched");
+    assert_eq!(t.dup_from(f, retrace_box::DUP2_MAX_FD - 1).unwrap(), retrace_box::DUP2_MAX_FD - 1,
+        "the last in-range minimum is honoured");
+    assert_eq!(t.dup_from(9999, 10), Err(retrace_box::EBADF), "xnu's order: a closed source is EBADF before the range is looked at");
+}

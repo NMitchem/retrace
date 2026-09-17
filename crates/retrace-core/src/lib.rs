@@ -2403,11 +2403,18 @@ impl ReplaySession {
                                 }
                             }
                             // M38: F_DUPFD. The same table method record called, with the same
-                            // guest arguments; the compare is the divergence check.
+                            // guest arguments; the compare is the divergence check. The `!*err`
+                            // gate is correct: every record-side error path returns before the
+                            // table is touched (EBADF at `host(fd)`, EINVAL inside `dup_from`
+                            // itself since the final-review fix, a host `dup` failure), so on a
+                            // recorded error both tables are untouched by construction, and only
+                            // a recorded SUCCESS obliges the table to agree — which is exactly
+                            // when `dup_from`'s own refusal (below) is a divergence.
                             if !*err && retrace_arch::is_fcntl_dupfd(num, &args) {
                                 let expect = self.b.fds_mut().dup_from(args[0], args[2]).map_err(|e| Divergence { landmark: self.idx, pc, detail: format!(
                                     "fd divergence: recording says fcntl({}, F_DUPFD, {}) returned fd {ret}, but the guest's own \
-                                     open/close sequence has that source closed (errno {e})", args[0], args[2]) })?;
+                                     table refuses it (errno {e}: EBADF = the source is closed, EINVAL = the minimum is \
+                                     outside [0, DUP2_MAX_FD))", args[0], args[2]) })?;
                                 if expect != *ret {
                                     return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                         "fd divergence: recording says fcntl({}, F_DUPFD, {}) returned fd {ret}, but the guest's \
