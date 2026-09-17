@@ -15,9 +15,12 @@
 //   `python3` resolves to on PATH, and it RUNS from this commit onward — but it pins a KNOWN GAP,
 //   not a capability. The launcher's job is to `posix_spawn` (syscall 244, `POSIX_SPAWN_SETEXEC`)
 //   the real interpreter binary in its place so the process gets a proper bundle identity;
-//   exec-in-place is unmodelled in retrace today, so the forwarded `posix_spawn` returns an error
-//   to the guest instead of replacing the image, and the guest takes `pythonw.c`'s `err(1, …)`
-//   path and prints "posix_spawn: …: Undefined error: 0" before exiting 1. Record and replay
+//   exec-in-place is unmodelled in retrace today, so the `posix_spawn` is refused (M38) with the
+//   errno the forward used to return — before M38 it was forwarded and EFAULTed on its
+//   untranslated guest `argv`/`envp`; now `record_box`'s exec arm returns that same errno without
+//   forwarding (`retrace_arch::exec_refusal_errno`, spec R4 continuity) — instead of replacing
+//   the image, and the guest takes `pythonw.c`'s `err(1, …)` path and prints
+//   "posix_spawn: …: Undefined error: 0" before exiting 1. Record and replay
 //   agreeing byte-for-byte on THAT outcome is retrace working correctly — the divergence oracle
 //   has nothing to disagree about — not a bug to fix. A successor milestone that implements
 //   exec-in-place will change what the launcher guest actually does (it will exec into the real
@@ -74,7 +77,7 @@ fn the_launcher_records_and_replays_its_own_posix_spawn_failure() {
     assert_eq!(
         rec.code, 1,
         "launcher should exit 1 via pythonw.c's err(1, ...) path after its posix_spawn is \
-         forwarded and returns an error instead of replacing the image. stderr:\n{}",
+         refused (M38) and returns an error instead of replacing the image. stderr:\n{}",
         rec.stderr
     );
 
@@ -101,4 +104,9 @@ fn the_launcher_records_and_replays_its_own_posix_spawn_failure() {
     let rep = util::replay(&trace);
     assert_eq!(rep.code, rec.code, "replay exit code diverged from the recording");
     assert_eq!(rep.stdout, rec.stdout, "replay stdout diverged from the recording");
+
+    // M38: the posix_spawn is REFUSED now, not forwarded — the refusal line is the only thing
+    // that distinguishes the two, since the errno the guest reads was chosen to match (spec R4).
+    assert!(rec.stderr.contains("[retrace] refusing posix_spawn"),
+        "the launcher's posix_spawn must be refused by the M38 arm, not forwarded. stderr:\n{}", rec.stderr);
 }
