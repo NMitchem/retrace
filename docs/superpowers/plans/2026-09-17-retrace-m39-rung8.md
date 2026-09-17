@@ -431,12 +431,12 @@ and in `mod tests` after `crash_py_fixture_is_wired`:
   `cargo test -p retrace-guest vmremap_guest_parses -- --test-threads=1`. Expected: PASS
   (this also compiles the fixture).
 
-- [ ] **Step 5: THE MEASUREMENT — run the fixture natively** (no retrace; the binary is under
-  `target/…/build/retrace-guest-*/out/vmremap_dyn` — find it with
-  `ls target/debug/build/retrace-guest-*/out/vmremap_dyn`):
+- [ ] **Step 5: THE MEASUREMENT — run the fixture natively** (no retrace; `.cargo/config.toml`
+  sets `[build] target = "aarch64-apple-darwin"`, so the binary is under
+  `target/aarch64-apple-darwin/debug/build/retrace-guest-*/out/vmremap_dyn`):
 
 ```sh
-B=$(ls -t target/debug/build/retrace-guest-*/out/vmremap_dyn | head -1); "$B"; echo "exit=$?"
+B=$(ls -t target/aarch64-apple-darwin/debug/build/retrace-guest-*/out/vmremap_dyn | head -1); "$B"; echo "exit=$?"
 ```
 Expected shape: `SELF kr=0 cur=5 max=5 call=42`, `FFI kr=0 cur=5 max=5 same=1`, `exit=0`.
 **Record the two lines verbatim in the task report** — they are the measurement spec R7 owes.
