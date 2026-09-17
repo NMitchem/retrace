@@ -486,7 +486,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // fcntl(int fd, int cmd, ...) / fcntl_nocancel (406 measured beside 92 in the jq run — see
         // the read row). The third argument is cmd-dependent: an int for F_GETFL/F_SETFD/F_DUPFD, a
         // pointer for F_GETPATH (writes ≤ MAXPATHLEN 1024) and F_PREALLOCATE (a 32-byte fstore_t,
-        // in-out) — every pointer case far inside the window.
+        // in-out) — every pointer case far inside the window. M38: the per-command refinement is
+        // `shape_of`; `F_DUPFD`/`F_DUPFD_CLOEXEC` are table operations (`guest_fcntl_dupfd`), never
+        // forwarded.
         SYS_FCNTL | SYS_FCNTL_NOCANCEL => row!(P, [Fd, Scalar, Ptr]),
         // fstat(int fd, struct stat *buf) / fstat64: a fixed 144-byte struct (sys/stat.h).
         SYS_FSTAT | SYS_FSTAT64 => row!(P, [Fd, Ptr]),
@@ -516,7 +518,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // a forwarded nested pointer, unrefused, and owed to a successor (the M27 class): the
         // refuse-by-value assert §4b pre-authorised would make every dynamic guest unrecordable,
         // which is the spec's own §9 halt clause (Ruling 4). Ptr on the direct bound; the nested
-        // residual is named here, not modelled.
+        // residual is named here, not modelled. M38: `FIOCLEX`/`FIONCLEX` are `Scalar` via
+        // `shape_of`.
         SYS_IOCTL => row!(P, [Fd, Scalar, Ptr]),
         // fgetattrlist(int fd, struct attrlist *alist, void *attrbuf, size_t bufsize, u_long opts):
         // alist is a fixed 24-byte struct (sys/attr.h, sizeof). attrbuf is a destination the KERNEL
@@ -937,6 +940,60 @@ pub fn forwarded_shape(num: u64) -> &'static Shape {
          descriptor of that number). Classify each argument from the SDK prototype under the \
          rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the \
          number to tests/census.rs too.", num as i64))
+}
+
+// fcntl(2) commands (sys/fcntl.h) and the two argument-less ioctl(2) requests (sys/ioctl.h,
+// `_IO('f', 1)` / `_IO('f', 2)`) whose third argument's KIND the row cannot state. Numbers from
+// the macOS 26 SDK headers; the fcntl set is the M33 census's (jq, CPython, the Apple sweep)
+// plus the two dup commands M38 models.
+pub const F_DUPFD: u64 = 0;
+pub const F_GETFD: u64 = 1;
+pub const F_SETFD: u64 = 2;
+pub const F_GETFL: u64 = 3;
+pub const F_SETFL: u64 = 4;
+pub const F_PREALLOCATE: u64 = 42;
+pub const F_NOCACHE: u64 = 48;
+pub const F_GETPATH: u64 = 50;
+pub const F_DUPFD_CLOEXEC: u64 = 67;
+pub const F_ADDFILESIGS_RETURN: u64 = 97;
+pub const F_CHECK_LV: u64 = 98;
+pub const FIOCLEX: u64 = 0x2000_6601;
+pub const FIONCLEX: u64 = 0x2000_6602;
+
+/// The shape of a syscall about to be forwarded, with the ONE refinement `forwarded_shape` cannot
+/// make: `fcntl`/`fcntl_nocancel`/`ioctl`'s third argument is an `int` for some commands and a
+/// pointer for others, and the row says `Ptr` for all of them. Under `Ptr` the M37 `Scalar`-skip
+/// does not apply, so a small integer is probed by `host_span` and would be rewritten if it equalled
+/// a mapped IPA (M37 measured that inert on every command seen; M38 closes the class rather than the
+/// instance). An UNLISTED command keeps the row's `Ptr` — the default is today's behaviour, not a
+/// panic, so a command outside the census cannot newly fail a guest (spec R5). Every other
+/// position, and every other syscall, is exactly `forwarded_shape(num)` — loud on an unenumerated
+/// number.
+pub fn shape_of(num: u64, args: &[u64; 8]) -> &'static Shape {
+    use ArgKind::*;
+    // `static`, not `const`: the function returns `&'static Shape`, and a static's address is
+    // stable (a `&CONST` would be a promoted temporary — fine today, but `ptr::eq` in the test
+    // and the row-identity argument want one address).
+    static FCNTL_INT: Shape = Shape { args: &[Fd, Scalar, Scalar], ret: Ret::Plain };
+    static IOCTL_INT: Shape = Shape { args: &[Fd, Scalar, Scalar], ret: Ret::Plain };
+    match num {
+        SYS_FCNTL | SYS_FCNTL_NOCANCEL => match args[1] {
+            F_DUPFD | F_GETFD | F_SETFD | F_GETFL | F_SETFL | F_NOCACHE | F_DUPFD_CLOEXEC => &FCNTL_INT,
+            _ => forwarded_shape(num),
+        },
+        SYS_IOCTL => match args[1] {
+            FIOCLEX | FIONCLEX => &IOCTL_INT,
+            _ => forwarded_shape(num),
+        },
+        _ => forwarded_shape(num),
+    }
+}
+
+/// `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)` — the descriptor-producing fcntl commands, which
+/// `forward_and_diff` short-circuits into `guest_fcntl_dupfd` and replay mirrors with
+/// `FdTable::dup_from` (M38). `min` is a GUEST minimum and never reaches the host.
+pub fn is_fcntl_dupfd(num: u64, args: &[u64; 8]) -> bool {
+    (num == SYS_FCNTL || num == SYS_FCNTL_NOCANCEL) && (args[1] == F_DUPFD || args[1] == F_DUPFD_CLOEXEC)
 }
 
 /// Which operand indices of `num` hold a GUEST file descriptor. View over `arg_kinds`; empty for
@@ -1622,6 +1679,38 @@ mod tests {
         assert!(!allocates_fd(42), "binding one of pipe's two descriptors would alias");
         assert!(returns_fd_pair(42));
         assert!(!returns_fd_pair(SYS_OPEN) && !returns_fd_pair(SYS_DUP));
+    }
+
+    // M38: fcntl/ioctl's third argument is COMMAND-dependent. The per-command table answers for
+    // the commands the M33 census saw plus the two dup commands; anything else keeps the row's
+    // `Ptr` (spec R5 — an unchanged default, not a panic).
+    #[test]
+    fn fcntl_and_ioctl_third_argument_kind_follows_the_command() {
+        use ArgKind::*;
+        let args = |cmd: u64| { let mut a = [0u64; 8]; a[1] = cmd; a };
+        for cmd in [F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_NOCACHE, F_DUPFD_CLOEXEC] {
+            assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Scalar, "fcntl cmd {cmd}");
+            assert_eq!(shape_of(SYS_FCNTL_NOCANCEL, &args(cmd)).args[2], Scalar, "fcntl_nocancel cmd {cmd}");
+        }
+        for cmd in [F_PREALLOCATE, F_GETPATH, F_ADDFILESIGS_RETURN, F_CHECK_LV, 999] {
+            assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Ptr, "fcntl cmd {cmd}");
+        }
+        for cmd in [FIOCLEX, FIONCLEX] {
+            assert_eq!(shape_of(SYS_IOCTL, &args(cmd)).args[2], Scalar, "ioctl cmd {cmd:#x}");
+        }
+        assert_eq!(shape_of(SYS_IOCTL, &args(0x4004_667f)).args[2], Ptr, "FIONREAD stays Ptr");
+        // Every position but the third is the row's, and a non-fcntl number is the row itself.
+        assert_eq!(shape_of(SYS_FCNTL, &args(F_SETFD)).args[0], Fd);
+        assert!(std::ptr::eq(shape_of(SYS_READ, &args(0)), forwarded_shape(SYS_READ)));
+    }
+
+    #[test]
+    fn f_dupfd_is_recognised_by_number_and_command() {
+        let a = |n: u64, cmd: u64| { let mut a = [0u64; 8]; a[0] = n; a[1] = cmd; a };
+        assert!(is_fcntl_dupfd(SYS_FCNTL, &a(4, F_DUPFD)));
+        assert!(is_fcntl_dupfd(SYS_FCNTL_NOCANCEL, &a(4, F_DUPFD_CLOEXEC)));
+        assert!(!is_fcntl_dupfd(SYS_FCNTL, &a(4, F_SETFD)));
+        assert!(!is_fcntl_dupfd(SYS_DUP, &a(4, F_DUPFD)));
     }
 
     #[test]

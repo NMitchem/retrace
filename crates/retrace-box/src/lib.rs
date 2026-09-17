@@ -666,6 +666,9 @@ pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, 
 /// Never persisted, never enters a trace file. See the M4 design spec for why each field is here.
 /// `EBADF` — answered for a guest fd that is `Free` or `Closed`, with nothing forwarded.
 pub const EBADF: u64 = 9;
+/// `EINVAL` — M38: answered for an `F_DUPFD` minimum outside `[0, DUP2_MAX_FD)`, as xnu's
+/// `finishdup` range check does, with nothing forwarded.
+pub const EINVAL: u64 = 22;
 
 /// M37 (review I1): the exclusive upper bound on a `dup2` TARGET. xnu answers `EBADF` for
 /// `new < 0 || new >= maxfiles`; `dup2(int, int)` puts a negative `fd2` in `w1` zero-extended, so
@@ -835,6 +838,23 @@ impl FdTable {
         let g = self.alloc();
         self.slots[g as usize] = self.slots[src as usize];
         Ok(g)
+    }
+
+    /// M38: `fcntl(src, F_DUPFD, min)` on the guest-visible table — identical on record and
+    /// replay. `Err(EBADF)` if `src` is not open. Otherwise the lowest slot >= `min` not currently
+    /// open takes `src`'s KIND (`dup`'s rule: a `Console(n)` source makes an alias M9's mirror
+    /// must catch) and is returned. `min` is the GUEST's minimum — it never reaches the host,
+    /// whose `dup` picks any number; the binding is the caller's, as with `alloc` + `bind`.
+    /// A `min` below the table floor rounds up to 3, as `alloc` does (the M5 floor).
+    pub fn dup_from(&mut self, src: u64, min: u64) -> Result<u64, u64> {
+        if !self.is_open(src) { return Err(EBADF); }
+        let start = (min as usize).max(3);
+        let gfd = (start..self.slots.len())
+            .find(|&i| !matches!(self.slots[i], FdSlot::Open | FdSlot::Console(_)))
+            .unwrap_or_else(|| self.slots.len().max(start));
+        self.grow_to(gfd);
+        self.slots[gfd] = self.slots[src as usize];
+        Ok(gfd as u64)
     }
 }
 
@@ -3173,7 +3193,8 @@ impl Box_ {
     /// `translate_fds` has exactly ONE caller, `forward_and_diff`, and is the first statement of
     /// its forwarding path — which is what makes it M33's one loud site. (Since M37 the function's
     /// literal first statement is the `SYS_DUP2` short-circuit into `guest_dup2`, which forwards
-    /// nothing and consults no view; `dup2` has a row regardless.) `guest_mmap_file` never calls it: file-backed
+    /// nothing and consults no view; `dup2` has a row regardless. M38 adds the `F_DUPFD`
+    /// short-circuit into `guest_fcntl_dupfd` beside it, on the same terms.) `guest_mmap_file` never calls it: file-backed
     /// mmap is special-cased upstream in retrace-core and never reaches `forward_and_diff`, so it
     /// translates its own fd via `self.fds.host` directly. That path does not pass through
     /// `forwarded_shape` either, which is harmless because `mmap` (197) has a row and the mmap arm
@@ -3183,10 +3204,13 @@ impl Box_ {
     /// the whole point is that the number may be a live descriptor of retrace's own.
     pub fn translate_fds(&self, num: u64, args: &mut [u64; 8]) -> Result<(), u64> {
         // M33: a syscall with no arg_kinds row cannot be forwarded. This is the first statement
-        // of forward_and_diff's forwarding path (M37's `SYS_DUP2` short-circuit precedes it and
-        // forwards nothing), so the panic sits upstream of every other view consulted there
-        // (diff_window's dest_buffer, the canary decision, bind_returned_fd, the dup bind).
-        for i in retrace_arch::forwarded_shape(num).fd_operands() {
+        // of forward_and_diff's forwarding path (M37's `SYS_DUP2` and M38's `F_DUPFD`
+        // short-circuits precede it and forward nothing), so the panic sits upstream of every
+        // other view consulted there (diff_window's dest_buffer, the canary decision,
+        // bind_returned_fd, the dup bind).
+        // M38: `shape_of` is `forwarded_shape` plus the fcntl/ioctl per-command refinement, and
+        // is exactly as loud on an unenumerated number.
+        for i in retrace_arch::shape_of(num, &*args).fd_operands() {
             let v = args[i];
             // AT_FDCWD (-2) and friends are sentinels, not descriptors.
             if (v as i64) < 0 { continue; }
@@ -3289,6 +3313,9 @@ impl Box_ {
         // descriptor `fd2`. Kept inside this function so it still owns both halves of the fd
         // contract (M10). Replay mirrors the table half in `ReplaySession::advance`.
         if num == retrace_arch::SYS_DUP2 { return self.guest_dup2(args); }
+        // M38: F_DUPFD names a GUEST minimum; like dup2 it is a table operation with a host `dup`
+        // behind it (never a host F_DUPFD, whose minimum would be a host number).
+        if retrace_arch::is_fcntl_dupfd(num, &args) { return self.guest_fcntl_dupfd(args); }
         // The guest's own view of the operands, kept for the fd bookkeeping below: `args` is about
         // to be rewritten to host descriptors, and `close` must retire the GUEST slot.
         let gargs = args;
@@ -3314,8 +3341,9 @@ impl Box_ {
         // every self-pid csops/proc_info answered ESRCH. Only `Scalar` skips: positions past the
         // row's arity keep the probe (M30's stale-register band measurement rests on it) and every
         // memory kind needs it. The audit that licenses this is in
-        // docs/sweep-evidence/2026-09-13-m37/README.md.
-        let shape = retrace_arch::forwarded_shape(num);
+        // docs/sweep-evidence/2026-09-13-m37/README.md. M38: the fcntl/ioctl third argument
+        // follows its command (`shape_of`), so an `int` argument is no longer probed under `Ptr`.
+        let shape = retrace_arch::shape_of(num, &args);
         for i in 0..8 {
             if shape.args.get(i) == Some(&retrace_arch::ArgKind::Scalar) {
                 hargs[i] = args[i] as i64;
@@ -3817,6 +3845,27 @@ impl Box_ {
                 if let Some(d) = displaced { if d > 2 { unsafe { libc::close(d); } } }
                 (ret, 0, false, Vec::new())
             }
+            Err(e) => { unsafe { libc::close(dup); } (e, 0, true, Vec::new()) }
+        }
+    }
+
+    /// M38: `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)`. The table half is `FdTable::dup_from`
+    /// (replay calls it with the same arguments); the host half is a plain `dup(h)`, because a
+    /// host `F_DUPFD` would apply the guest's minimum to retrace's own descriptor space. The
+    /// close-on-exec bit has no observable in the box (exec is refused, M38 t4), so both commands
+    /// share this path. Range check as xnu's `finishdup`: a negative or too-large minimum is
+    /// EINVAL, checked after the source (bsd/kern/kern_descrip.c order).
+    fn guest_fcntl_dupfd(&mut self, args: [u64; 8]) -> (u64, u64, bool, Vec<Region>) {
+        let (fd, min) = (args[0], args[2]);
+        let Some(h) = self.fds.host(fd) else { return (EBADF, 0, true, Vec::new()); };
+        if (min as i32) < 0 || min >= DUP2_MAX_FD { return (EINVAL, 0, true, Vec::new()); }
+        let dup = unsafe { libc::dup(h) };
+        if dup < 0 {
+            let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(EBADF as i32) as u64;
+            return (e, 0, true, Vec::new());
+        }
+        match self.fds.dup_from(fd, min) {
+            Ok(g) => { self.fds.bind(g, dup); (g, 0, false, Vec::new()) }
             Err(e) => { unsafe { libc::close(dup); } (e, 0, true, Vec::new()) }
         }
     }

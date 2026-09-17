@@ -276,3 +276,19 @@ fn a_pair_takes_the_two_lowest_free_slots_read_end_first() {
     assert_eq!(t.alloc(), 4, "the read end's slot is reusable after close, the write end's is not");
     assert!(t.is_open(w));
 }
+
+// M38: F_DUPFD — the lowest free slot >= min, carrying the source's KIND (the M37 dup rule).
+#[test]
+fn dup_from_takes_the_lowest_free_slot_at_or_above_min_with_the_sources_kind() {
+    let mut t = FdTable::new();
+    let f = t.alloc(); t.bind(f, 40);                     // 3
+    assert_eq!(t.dup_from(f, 10).unwrap(), 10);
+    assert_eq!(t.dup_from(f, 10).unwrap(), 11, "10 is taken now");
+    assert_eq!(t.dup_from(f, 0).unwrap(), 4, "a minimum below the table floor rounds up to the lowest free slot");
+    assert_eq!(t.dup_from(1, 20).unwrap(), 20);
+    assert_eq!(t.console_of(20), Some(1), "F_DUPFD on stdout is a console alias the M9 mirror must catch");
+    assert_eq!(t.console_of(10), None, "a duplicate of a plain file is plain");
+    assert!(t.close(10));
+    assert_eq!(t.dup_from(f, 10).unwrap(), 10, "a closed slot is reusable");
+    assert_eq!(t.dup_from(30, 3), Err(retrace_box::EBADF), "a closed source is EBADF");
+}
