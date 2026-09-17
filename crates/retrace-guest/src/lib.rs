@@ -209,6 +209,11 @@ pub const EXEC_DYN: &str = concat!(env!("OUT_DIR"), "/exec_dyn");
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
 pub const CRASH_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.json");
+/// M39 wall-1 guard: two shared, `FIXED|OVERWRITE` `mach_vm_remap`s (own text page, called
+/// through the alias; `libffi-trampolines.dylib`'s `__TEXT`, compared through it) — the exact
+/// shape `import ctypes` triggers via libffi, minus CPython. Also the native protections probe
+/// (spec R7): run without retrace it prints the kernel's `cur`/`max` for the remap.
+pub const VMREMAP_DYN: &str = concat!(env!("OUT_DIR"), "/vmremap_dyn");
 /// M37 (C1): closes fd 1 and fd 2, then writes to each — exits 0 only if both writes are EBADF,
 /// so the rung helper's exit-0 demand carries the "a closed console slot is closed on both sides"
 /// property and its stdout equality carries the mirror.
@@ -348,6 +353,13 @@ mod tests {
         assert!(json.contains("\"scratch\"") && json.contains("\"0x400000000000\"")
                 && json.contains("\"0xdead0000\""),
                 "crash.json must carry base 0x400000000000 + offset 0xdead0000 under `scratch`");
+    }
+
+    #[test]
+    fn vmremap_guest_parses() {
+        // M39: proves the build.rs wiring and the path constant; behaviour is vmremap_e2e's.
+        let l = parse_macho(&std::fs::read(VMREMAP_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
     #[test]
