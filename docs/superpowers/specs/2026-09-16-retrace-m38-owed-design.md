@@ -91,11 +91,12 @@ record arm for `RefuseMqSend` is `crates/retrace-core/src/lib.rs:521`, its repla
 (`FdTable::alloc`, lowest free, matching xnu's `retval[0]` then `retval[1]` order), binds each to
 its host end, and returns the guest numbers, which go into `(ret, ret1)`.
 
-`apply_and_return` keeps its signature and its 27 call sites. A sibling
-`Box_::apply_and_return_pair(ret, ret1, err, writes)` also writes `x1`, and **both** generic
-dispatch arms (record's forward arm, replay's generic `Syscall` arm) call it **only when
-`returns_fd_pair(num)`**, the plain one otherwise — one method, same arguments, both sides
-(symmetry rule 1 by construction). This is the narrow choice, made deliberately: xnu writes `x1` from `retval[1]`
+`apply_and_return` and `set_x0_err_and_return` keep their signatures and call sites (the record
+arm finishes with the latter — the host already wrote into guest memory — and replay with the
+former; the plan measured this, correcting an earlier draft of this paragraph that named an
+`apply_and_return_pair`). The `x1` write is one new method, `Box_::set_ret1(ret1)`, and **both**
+generic dispatch arms call it **only when `returns_fd_pair(num)`** — one method, same argument,
+both sides (symmetry rule 1 by construction). This is the narrow choice, made deliberately: xnu writes `x1` from `retval[1]`
 after every syscall and retrace leaves the guest's `x1` stale, so a uniform capture would be more
 faithful — but it changes every guest's post-syscall `x1` with no corpus measurement behind it,
 and this run is unattended. Uniform capture is recorded as a later measurement (§7).
@@ -205,9 +206,13 @@ kinds with a comment that the row is documentation now — nothing consults it f
 ordering, the only guard, as for `bsdthread_create`): on `num == SYS_EXECVE || num ==
 SYS_POSIX_SPAWN`, `eprintln!` one refusal line naming the syscall, append
 `Event::Syscall { num, args, ret: EXEC_REFUSAL_ERRNO, ret1: 0, err: true, writes: vec![], thread }`,
-`apply_and_return`. **Replay mirror** in `advance`: recompute the same constant and empty write
-set, byte-compare against the recording, `verify_thread`, `apply_and_return`, return. This is the
-**eighth `verify_thread` site** (seven today, measured); CLAUDE.md's count moves with it.
+`apply_and_return`. **Replay mirror** inside the generic `Syscall` arm of `advance`, placed
+directly after that arm's existing `(num, args)` compare and `verify_thread` (the position the
+`SYS_SIGACTION` mirror occupies): recompute the same constant and empty write set, byte-compare
+against the recording, `apply_and_return`, `finish_event`. **No new `verify_thread` site**: the
+arm's own call already ran, so the count stays at seven (an earlier draft of this paragraph said
+"eighth site"; the plan corrected it from the code). The same is true of §3e's mirror, which
+sits inside the mach-trap arm beside `RefuseMqSend`'s.
 
 **Gate.** `the_launcher_records_and_replays_its_own_posix_spawn_failure` keeps every assertion it
 has (that *is* the continuity check) and gains one — and the obvious one is **wrong**: asserting
@@ -257,11 +262,14 @@ Re-parking an already-ignored gate is not a new `#[ignore]` and does not halt.
 | pipe | `bind_returned_pair` | two `alloc()`s in the fd block | `(ret, ret1)` vs recorded |
 | F_DUPFD | `FdTable::dup_from(src, min)` | same method, same args | `ret` vs recorded |
 | AT_FDCWD | `translate_fds` (record only — replay forwards nothing) | none needed: the sentinel never reaches the trace | `(num, args)` oracle unchanged |
-| exec | constant `(EXEC_REFUSAL_ERRNO, true, [])` | recompute + byte-compare | standard posture |
-| RCV mach_msg2 | constant `(MACH_RCV_REFUSAL, false, [])` | recompute + byte-compare | standard posture |
+| exec | constant `(exec_refusal_errno(num), true, [])`, an arm before the generic forward | recompute + byte-compare, inside the generic replay arm after its `verify_thread` | standard posture |
+| RCV mach_msg2 | constant `(MACH_RCV_REFUSAL, false, [])` | recompute + byte-compare, inside the mach-trap arm beside `RefuseMqSend`'s | standard posture |
 
 Neither refusal is the `ServiceGetSpecialPort` verbatim-apply exception: both replies are
-constants, so replay regenerates them.
+constants, so replay regenerates them. Neither adds a `verify_thread` site; the count stays
+seven. `EXEC_REFUSAL_ERRNO` is spelled `retrace_arch::exec_refusal_errno(num) -> Option<u64>`
+in the plan — `Some` doubles as the predicate, and it can carry two values if the two syscalls
+measure differently (R4).
 
 ## 4. Task order and why
 
