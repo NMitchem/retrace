@@ -301,12 +301,14 @@ reconstruction caveat in full.
   `[M28 BANDSHRINK]` control lines off `/bin/ps`, then zero canary lines from `/bin/ps`,
   `jq --version` and the real CPython interpreter), and the Apple sweep (**392** control lines from
   **54** distinct guests, zero canary lines, tally unmoved at `pass=46 fail=8 skip=0`).
-- **One table, five views, and a syscall that cannot be forwarded unclassified.** Since M33,
+- **One table, six views, and a syscall that cannot be forwarded unclassified.** Since M33,
   `retrace_arch::arg_kinds(num) -> Option<&'static Shape>` is the one table that says what a
   syscall does with each of its arguments — `Scalar`, `Fd`, `Path`, `Source`, `NestedSource`,
   `Dest(DestLen)`, `NestedDest` or `Ptr` per register, plus a return kind (`Plain`, `Fd`,
   `FdPair`) — and the five functions the M26–M32 lineage accreted (`fd_operands`, `allocates_fd`,
-  `dest_buffer`, `writes_via_nested_pointer`, `reads_guest_buffer`) are one-line **views** over it.
+  `dest_buffer`, `writes_via_nested_pointer`, `reads_guest_buffer`) are one-line **views** over
+  it, joined at M38 by a sixth, `returns_fd_pair` (`ret == Ret::FdPair` — the row `pipe`'s
+  two-descriptor binding consults on both sides).
   Every row opens with its kernel prototype (xnu `syscalls.master` / `syscall_sw.h`, or the SDK
   header, and it says which) and every `Ptr` names the cited bound that keeps it out of `Source`
   and `Dest` — all but one, `__mac_syscall`'s (381) policy-defined `arg`, whose row says it rests
@@ -458,10 +460,13 @@ holds **624** `#[test]` attributes = 615 runnable + 9 ignored (M37 held 604 = 59
 run reports **617** passed = 615 + the 2 census tests that run twice (`census.rs` executes in its
 own binary and again inside `legacy_equivalence`'s `#[path]` include). (A bare `grep -c
 '#\[test\]'` says 625, because a comment in `legacy_equivalence.rs` mentions the attribute in
-prose; the file has three.) The spec's own §9 had said 613 / 0 / 9 over 134 — it forgot the four
-`retrace-guest` parse tests (one per new fixture) and counted the binaries as +3 where the four
-new e2e targets are +4; M37's prediction-from-source pattern (`task-6-numbers.md`) reconciled the
-run per file before the README was written.
+prose; the file has three.) Two predictions preceded the run, and each was short: the spec's
+own §9 had said "roughly 603+/0/≤10 over 134" — it counted three new e2e gates where there are
+four, so its binaries were +3 where the four new targets are +4, and it had no parse tests; the
+plan's Task 6 Step 7 said 612 + k / 0 / 10 − k over 135 (k = 1 → 613 / 0 / 9 over 135), and
+missed only the four `retrace-guest` parse tests (one per new fixture). Measured: 617 / 0 / 9
+over 135; M37's prediction-from-source pattern (`task-6-numbers.md`) reconciled the run per
+file before the README was written.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
 lesson). `retrace` ran **per-target** — sixty-nine `--test <name>` invocations in four groups
@@ -634,8 +639,9 @@ These are real and current, not aspirational gaps.
   different eight from the rows above — eight of the 54 report a **nonzero** fall-through count
   that record and replay agree on: the first binaries ever to exercise that invariant at all.
   **A PASS here is record/replay agreement, not correctness**, and M33 measured what that hides
-  on two rows that M38 then un-hid: `ls` and `ed` "passed" from M22 through M37 by failing
-  identically on an `AT_FDCWD` the fd table rejected (the descriptor entry below); with the
+  on two rows that M38 then un-hid: `ls` and `ed` "passed" in every sweep of the committed
+  corpus from M33 through M37 by failing identically on an `AT_FDCWD` the fd table rejected
+  (the defect itself dates from M10 t3; the descriptor entry below); with the
   sentinel honoured each runs on to a missing row and fails loud, which is why the tally *fell*
   by two at a milestone that fixed a defect. An M10-class wrong descriptor is deterministic on
   both sides, so a translation fix moves a binary here only by letting it reach something else —
