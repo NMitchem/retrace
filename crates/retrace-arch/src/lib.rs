@@ -109,7 +109,8 @@ pub const MWL_REGION_STRIDE: usize = 32;
 pub const MWL_MAX_REGION_COUNT: u64 = 5;
 
 /// `AT_FDCWD` — `openat`/`fstatat64`'s "relative to cwd" sentinel. Negative, and NOT a descriptor:
-/// translation must pass it through untouched rather than rejecting it as `EBADF`.
+/// translation must pass it through untouched rather than rejecting it as `EBADF`. The ABI
+/// delivers it as `0xffff_fffe` in `x0`; `translate_fds` tests the low 32 bits (M38).
 pub const AT_FDCWD: i64 = -2;
 
 /// `ioctl` request-code decode, `sys/ioccom.h:74-85`: the parameter length lives in bits 16..29
@@ -169,8 +170,8 @@ pub enum ArgKind {
     /// covered a whole syscall absent from the table; an absent ROW is loud now — `forwarded_shape`
     /// panics on it at the forward point — and only the per-position silence remains.)
     ///
-    /// `dirfd` positions (`openat`, `fstatat64`) are `Fd` too; `AT_FDCWD` is negative and passes
-    /// through translation untouched.
+    /// `dirfd` positions (`openat`, `fstatat64`) are `Fd` too; `AT_FDCWD` is negative *in its low
+    /// 32 bits* and passes through translation untouched.
     Fd,
     /// A NUL-terminated path. **Why every path-taking call is absent from the readers**, since
     /// they plainly read guest memory: the kernel stops at `PATH_MAX` (1024), which sits far

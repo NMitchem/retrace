@@ -3212,8 +3212,11 @@ impl Box_ {
         // is exactly as loud on an unenumerated number.
         for i in retrace_arch::shape_of(num, &*args).fd_operands() {
             let v = args[i];
-            // AT_FDCWD (-2) and friends are sentinels, not descriptors.
-            if (v as i64) < 0 { continue; }
+            // AT_FDCWD (-2) and friends are sentinels, not descriptors. `int fd` arrives in w0,
+            // so the sentinel is 0xffff_fffe in x0, not the sign-extended form — the low 32 bits
+            // are what carry the sign (M33 Ruling 10, fixed M38). A real descriptor never has
+            // bit 31 set.
+            if (v as i32) < 0 { continue; }
             match self.fds.host(v) {
                 Some(h) => args[i] = h as u64,
                 // Console fds 0/1/2 DO have a host mapping (identity, `FdTable::new`); `None`
