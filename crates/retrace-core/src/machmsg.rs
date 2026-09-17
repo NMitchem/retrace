@@ -62,9 +62,13 @@ impl Msg2 {
 /// KERN_SUCCESS (deterministic — standard symmetric posture); StubMigReply(retcode) answers an
 /// optional/no-op kernel routine (no out-params) with a mig_reply_error carrying `retcode`; Forward
 /// is the decided read-only/create-once allowlist (memory-diff'd like any mach trap); Unsupported
-/// carries a decoded description for the fail-loud error.
+/// carries a decoded description for the fail-loud error. RefuseMqSend is a message-queue SEND
+/// (the SEND|RCV RPC shape) answered `MACH_SEND_INVALID_DEST`: the box hosts no receivers.
+/// RefuseMqRecv is a message-queue RECEIVE; the box hosts no senders, so nothing can ever arrive
+/// on it, and it is answered `MACH_RCV_REFUSAL` — deterministic, no host contact (M38 t5).
+#[derive(Debug)]
 pub enum Route { ServiceVmMap, ServiceGetSpecialPort, ServiceSetSpecialPort, StubMigReply(i32),
-                 RefuseMqSend, Forward(&'static str), Unsupported(String) }
+                 RefuseMqSend, RefuseMqRecv, Forward(&'static str), Unsupported(String) }
 
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
 /// msgh_id alone: these are kernel-subsystem ids, unambiguous under the KOBJECT options shape.
@@ -104,13 +108,20 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     //
     // Narrowed to the RPC shape the measurement actually saw (SEND|RCV together with the MQ bit).
     // An MQ send in any other shape — a one-way send, say — has never been observed and keeps the
-    // fail-loud default rather than being swept in here.
+    // fail-loud default rather than being swept in here. M38 narrowed the fallthrough again: a
+    // receive is `RefuseMqRecv`.
     if m.options & MACH64_SEND_MQ_CALL != 0 {
-        if m.options & (MACH64_SEND_MSG | MACH64_RCV_MSG) == MACH64_SEND_MSG | MACH64_RCV_MSG {
-            return Route::RefuseMqSend;
-        }
+        let sr = m.options & (MACH64_SEND_MSG | MACH64_RCV_MSG);
+        if sr == MACH64_SEND_MSG | MACH64_RCV_MSG { return Route::RefuseMqSend; }
+        // M38: a RECEIVE on a message queue (all six M37-parked Apple binaries reach it as
+        // options 0x4_0400_0102 — RCV_MSG | RCV_TIMEOUT, no SEND_MSG). The box has no senders,
+        // so nothing can ever arrive; `MACH_RCV_REFUSAL` is the answer, chosen by measurement
+        // against the six (docs/sweep-evidence/2026-09-16-m38/README.md).
+        if sr == MACH64_RCV_MSG { return Route::RefuseMqRecv; }
         return Route::Unsupported(format!(
-            "options {:#x}: message-queue send without the send+rcv RPC shape", m.options));
+            "options {:#x}: a message-queue call that is {}", m.options,
+            if sr == MACH64_SEND_MSG { "a one-way send (SEND without RCV), never observed" }
+            else { "neither a send nor a receive (no SEND_MSG, no RCV_MSG), never observed" }));
     }
     if m.options != MACH64_SEND_MSG | MACH64_RCV_MSG | MACH64_SEND_KOBJECT_CALL {
         return Route::Unsupported(format!(
@@ -160,6 +171,24 @@ pub const KERN_NO_SPACE: i32 = 3;
 /// under which the guest gives up after a single send instead of retrying three to five times,
 /// which is the behaviour a box containing no message-queue receivers ought to produce.
 pub const MACH_SEND_INVALID_DEST: u64 = 0x1000_0003;
+/// Receive-side codes (osfmk/mach/message.h). `MACH_RCV_REFUSAL` is what `Route::RefuseMqRecv`
+/// returns — **chosen by measurement** (M38 Task 5 Step 5): each candidate was built into the
+/// recorder and run against the six parked binaries; the table is in the evidence README
+/// (docs/sweep-evidence/2026-09-16-m38/README.md). Ties go to `MACH_RCV_TIMED_OUT`, because the
+/// options word carries `RCV_TIMEOUT` and a queue no one can send to is a queue whose receive
+/// times out — and it was NOT a tie. Measured 2026-09-16: `/bin/launchctl` proceeds to its own
+/// clean exit under every candidate, and `automationmodetool`/`desdp`/`dyld_info`/`flex` reach
+/// the same next wall (`kevent_qos` 374, no `arg_kinds` row) under every candidate; only
+/// `/usr/bin/dddiagnose` distinguishes them — it crashes in the guest under `MACH_RCV_TIMED_OUT`
+/// (data abort, pc 0x180302eb0, landmark 389) and under `MACH_RCV_PORT_DIED` (pc 0x193bbbca0,
+/// landmark 392), and under `MACH_RCV_INVALID_NAME` runs ~48 landmarks further to a next wall
+/// (`statfs64` 345, no `arg_kinds` row). So `INVALID_NAME` is accepted by 6 of 6 against 5 of 6
+/// for each of the others, and is the refusal. The semantically faithful default lost on exactly
+/// one binary; the test `the_receive_refusal_is_a_receive_code` pins the measured choice.
+pub const MACH_RCV_TIMED_OUT: u64 = 0x1000_4003;
+pub const MACH_RCV_INVALID_NAME: u64 = 0x1000_4002;
+pub const MACH_RCV_PORT_DIED: u64 = 0x1000_4006;
+pub const MACH_RCV_REFUSAL: u64 = MACH_RCV_INVALID_NAME;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 
 /// A fixed sample port name. NOTE (M2-xpcport): its runtime role is RETIRED — the 3409 handler now
@@ -636,5 +665,44 @@ mod tests {
         // preference, so it is asserted rather than left to a comment.
         assert_eq!(MACH_SEND_INVALID_DEST, 0x1000_0003);
         assert_ne!(MACH_SEND_INVALID_DEST, 0x1000_000a);
+    }
+
+    // --- the message-queue RECEIVE (M38 t5) ---
+
+    /// The RCV-only shape all six parked binaries reach (M36/M37 evidence): MQ_CALL | RCV_TIMEOUT
+    /// (0x100) | RCV_MSG (0x2) — a receive with a timeout, no SEND_MSG bit.
+    const MQ_RCV: u64 = 0x4_0400_0102;
+
+    #[test]
+    fn routes_a_message_queue_receive_to_refusal() {
+        // A receive on a queue nothing in the box can send to. Refusing it is the faithful
+        // answer, not a stub — the box contains no senders, exactly as it contains no receivers.
+        assert!(matches!(route(&msg(0, 0x1403, MQ_RCV), Some(0x203)), Route::RefuseMqRecv));
+        // Not keyed on rcv_name/dest: nondeterministic port names (as for RefuseMqSend).
+        assert!(matches!(route(&msg(0, 0x1103, MQ_RCV), Some(0x203)), Route::RefuseMqRecv));
+        // Without the timeout bit it is still a receive.
+        assert!(matches!(route(&msg(0, 0x1403, 0x4_0000_0002), Some(0x203)), Route::RefuseMqRecv));
+    }
+
+    #[test]
+    fn a_one_way_message_queue_send_still_fails_loud() {
+        // SEND without RCV: never observed; keeps the fail-loud default, and the string now says
+        // what it is (it used to call every non-RPC shape a "send").
+        match route(&msg(0, 0x1403, 0x4_0000_0001), Some(0x203)) {
+            Route::Unsupported(s) => assert!(s.contains("one-way"), "{s}"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_receive_refusal_is_a_receive_code() {
+        // Every candidate is in the MACH_RCV family (0x1000_40xx); the chosen one is asserted so
+        // a measurement-driven change to the constant has to change this test too. Measured (M38
+        // t5, docs/sweep-evidence/2026-09-16-m38/README.md): INVALID_NAME is the only candidate
+        // all six binaries accept — TIMED_OUT (the spec's default) and PORT_DIED each crash
+        // /usr/bin/dddiagnose in the guest, INVALID_NAME carries it ~48 landmarks further.
+        assert_eq!(MACH_RCV_REFUSAL & 0xffff_ff00, 0x1000_4000);
+        assert_eq!(MACH_RCV_REFUSAL, MACH_RCV_INVALID_NAME);
+        assert_ne!(MACH_RCV_REFUSAL, MACH_RCV_TIMED_OUT);
     }
 }
