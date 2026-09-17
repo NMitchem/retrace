@@ -647,8 +647,8 @@ fn a_non_page_multiple_size_is_refused() {
     /// differ in protection. `copy`, `ANYWHERE` and a foreign `src_task` are dispatch's asserts.
     pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64) -> (u64, u32, u32) {
         let g = GRANULE as u64;
-        assert!(size > 0 && size % g == 0, "vm_remap: size {size:#x} is not a page multiple");
-        assert!(target % g == 0 && src % g == 0, "vm_remap: unaligned target {target:#x} / src {src:#x}");
+        assert!(size > 0 && size.is_multiple_of(g), "vm_remap: size {size:#x} is not a page multiple");
+        assert!(target.is_multiple_of(g) && src.is_multiple_of(g), "vm_remap: unaligned target {target:#x} / src {src:#x}");
         // Ensure every target page has a page-granular entry (promotes an unpromoted block,
         // identity-filled with ATTR_DATA — what the block already meant), then alias.
         self.set_region_attr(target, size, ATTR_DATA);
