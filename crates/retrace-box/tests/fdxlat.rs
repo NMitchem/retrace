@@ -5,7 +5,8 @@
 // crate under --test-threads=1. The translation logic under test is pure, so the box's thin wrappers
 // (Box_::translate_fds / bind_returned_fd) are exercised end-to-end by fdtable_e2e instead.
 use retrace_arch::{AT_FDCWD, MWL_MAX_REGION_COUNT, MWL_REGION_STRIDE, fd_operands, allocates_fd,
-                   SYS_CLOSE, SYS_MMAP, SYS_OPENAT, SYS_PREAD, SYS_READ_NOCANCEL, SYS_FCNTL_NOCANCEL};
+                   SYS_CLOSE, SYS_MMAP, SYS_OPENAT, SYS_PREAD, SYS_READ_NOCANCEL, SYS_FCNTL_NOCANCEL,
+                   SYS_FCNTL, F_SETFD};
 use retrace_box::{EBADF, FdTable};
 
 /// The same walk `Box_::translate_fds` performs, over a bare table.
@@ -105,4 +106,16 @@ fn mwl_region_layout_matches_the_sdk_header() {
     // 550 must NOT be in fd_operands: its fd is in guest memory, not a register.
     assert_eq!(fd_operands(retrace_arch::SYS_MAP_WITH_LINKING_NP).count(), 0);
     assert!(!allocates_fd(retrace_arch::SYS_MAP_WITH_LINKING_NP));
+}
+
+// M38: fcntl's fd is translated whatever the command; the third argument is never an fd.
+#[test]
+fn fcntl_translates_only_its_descriptor() {
+    let mut t = FdTable::new();
+    let g = t.alloc(); t.bind(g, 17);
+    let mut args = [0u64; 8];
+    args[0] = g; args[1] = F_SETFD; args[2] = 1;
+    assert!(translate(&t, SYS_FCNTL, &mut args).is_ok());
+    assert_eq!(args[0], 17);
+    assert_eq!((args[1], args[2]), (F_SETFD, 1), "cmd and arg are forwarded verbatim");
 }

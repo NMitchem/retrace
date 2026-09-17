@@ -2353,6 +2353,18 @@ impl ReplaySession {
                                          the guest's own table yields ({rret}, err={rerr})", args[0], args[1]) });
                                 }
                             }
+                            // M38: F_DUPFD. The same table method record called, with the same
+                            // guest arguments; the compare is the divergence check.
+                            if !*err && retrace_arch::is_fcntl_dupfd(num, &args) {
+                                let expect = self.b.fds_mut().dup_from(args[0], args[2]).map_err(|e| Divergence { landmark: self.idx, pc, detail: format!(
+                                    "fd divergence: recording says fcntl({}, F_DUPFD, {}) returned fd {ret}, but the guest's own \
+                                     open/close sequence has that source closed (errno {e})", args[0], args[2]) })?;
+                                if expect != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "fd divergence: recording says fcntl({}, F_DUPFD, {}) returned fd {ret}, but the guest's \
+                                         own open/close sequence yields {expect}", args[0], args[2]) });
+                                }
+                            }
                             // M10 fd mirror. Guest fd numbers are a pure function of the guest's own
                             // open/dup/close sequence, so replay can recompute what the allocator
                             // WOULD have produced and byte-compare it against the recording — that

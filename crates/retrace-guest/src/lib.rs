@@ -197,6 +197,9 @@ pub const DUP2_DYN: &str = concat!(env!("OUT_DIR"), "/dup2_dyn");
 /// M38: `pipe()`, then a write into the write end and a read from the read end — prints
 /// `pair=1\nlow=1\nbytes=pipe\n` when both ends are the guest's own adjacent numbers.
 pub const PIPE_DYN: &str = concat!(env!("OUT_DIR"), "/pipe_dyn");
+/// M38: `fcntl(F_DUPFD, 10)` returns 10, writes through it reach the file, `F_DUPFD_CLOEXEC` on
+/// stdout is a console alias. Takes the file path as `argv[1]`.
+pub const DUPFD_DYN: &str = concat!(env!("OUT_DIR"), "/dupfd_dyn");
 /// M37 (C1): closes fd 1 and fd 2, then writes to each — exits 0 only if both writes are EBADF,
 /// so the rung helper's exit-0 demand carries the "a closed console slot is closed on both sides"
 /// property and its stdout equality carries the mirror.
@@ -315,6 +318,13 @@ mod tests {
     fn pipe_guest_parses() {
         // M38: proves the build.rs wiring and the path constant; behaviour is pipe_e2e's.
         let l = parse_macho(&std::fs::read(PIPE_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn dupfd_guest_parses() {
+        // M38: proves the build.rs wiring and the path constant; behaviour is dupfd_e2e's.
+        let l = parse_macho(&std::fs::read(DUPFD_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
