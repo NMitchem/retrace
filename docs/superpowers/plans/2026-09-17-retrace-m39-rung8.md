@@ -288,7 +288,7 @@ fn cpython_runs_a_real_script_crashes_on_the_computed_pointer_and_reverse_debugs
     let script = format!("continue; watch 0x{cell:x}; reverse-continue; x 0x{cell:x} 8; stepi; x 0x{cell:x} 8");
     let (code, out, err) = debug_run(ts, &script);
     assert_eq!(code, 0, "debug session failed. stderr:\n{err}\nstdout:\n{out}");
-    assert!(out.contains(&format!("guest crashed: pc=")), "continue must park at the crash:\n{out}");
+    assert!(out.contains("guest crashed: pc="), "continue must park at the crash:\n{out}");
     assert!(out.contains(&format!("hit watch 0x{cell:x} (write at ")), "reverse-continue must find a writer:\n{out}");
     let target_hex = TARGET.to_le_bytes().iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
     let xs: Vec<&str> = out.lines().filter(|l| l.starts_with(&format!("0x{cell:x}:"))).collect();
