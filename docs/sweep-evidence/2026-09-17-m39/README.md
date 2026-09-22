@@ -1,4 +1,8 @@
-# Sweep evidence — M39 Task 7, 2026-09-17
+# Sweep evidence — M39 Task 7, run 2026-09-21
+
+The directory is named for the milestone's date (`2026-09-17`, the spec and plan's), as M36–M38's
+are; **the run itself was taken 2026-09-21**, which is what `sweep.log`'s header line says
+(`commit=123cb97 date=2026-09-21 20:21:19 EDT`). The prose below states the run date.
 
 One measurement: the full 54-entry corpus swept once on the close's binary and diffed row by row
 against M38's run, per spec §6 ("PASS count ≥ 44, every moved row explained by name, no row moved

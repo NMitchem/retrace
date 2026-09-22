@@ -10604,9 +10604,11 @@ reply, id 4913) and **two** dispatch arms, each with **four** fail-loud asserts 
 dispatched; **zero** new `#[ignore]` and **zero** un-parked — the headline gate went green without
 ever being parked; **zero** trace-format change (`TRACE_MAGIC` stays `RT\x00\x0a`, its bump
 pre-authorised and unneeded); **no** new returning arm, `verify_thread` **7 → 7**;
-**one** sweep (`pass=44 fail=10 skip=0`, no row changed its label); **eight** commits before this
-close (`b8b09a7` and three `M39 plan:` alignment commits; `2980b9a`, `47ca0ee`, `a393edf`,
-`451d020` for Tasks 1–4), with Tasks 5 and 7a changing nothing under `crates/`. Gate: ⟨GATE⟩.
+**one** sweep (`pass=44 fail=10 skip=0`, no row changed its label); **nine** commits before this
+close — **five** `M39 plan:` commits (`b8b09a7` pre-flight, then `9f27e5f`, `2e5b4a2`, `2adc6ae`
+and `123cb97`, each aligning the plan with a deviation or a ruling as it landed) and **four** task
+commits (`2980b9a`, `47ca0ee`, `a393edf`, `451d020` for Tasks 1–4) — with Tasks 5 and 7a changing
+nothing under `crates/`. Gate: ⟨GATE⟩.
 
 ### What it set out to do
 
@@ -10642,7 +10644,9 @@ this; nothing about the fixture provokes it. Runtime `dlopen` itself was measure
 
 **Red, then green.** T1 landed `crash.py`, `crash.json`, the two path constants, a wiring test and
 the four-assertion gate, and kept the red: assertion 1 fails with `record exit 4` and that exact
-`RECORD ERROR` line (`task-1-red.log`). T2 landed `vmremap_dyn.c` — a freestanding C fixture that
+`RECORD ERROR` line (`task-1-red.log`). T2 landed `vmremap_dyn.c` — a dynamically-linked C fixture
+(plain `clang -arch arm64`, like `hello_dyn.c`; it `dlopen`s and `printf`s, so it is not one of the
+`-nostdlib -static` freestanding guests, whatever spec §3f's "freestanding" called it) that
 `vm_remap`s its own `forty_two()` text page into a `vm_allocate`d region and **calls through the
 alias**, then `dlopen`s the trampoline dylib, remaps its `__TEXT`, and `memcmp`s through that alias
 — plus `vmremap_e2e`, and kept its red at the same 4813 line (`task-2-red.log`). Both guards
@@ -10864,7 +10868,11 @@ what M39 **adds** to it.
   `VM_REMAP_CUR_PROT`/`VM_REMAP_MAX_PROT` constant pair and its "`cur = 5`, `max` unknown"
   prediction (replaced by Ruling 4's derivation, on a measurement that returned two answers); §3f's
   `guest_vm_remap(target, size, src, exec) -> u64` signature (landed as
-  `(target, size, src) -> (u64, u32, u32)`); §3b's walk procedure and R4's ceiling of six (one wall,
+  `(target, size, src) -> (u64, u32, u32)`); §3f's probe and guard paragraphs' **"freestanding"**
+  for `vmremap_dyn.c`, which is both (it is built with plain `clang -arch arm64` and it
+  `dlopen`s and `printf`s — in this repo "freestanding" means the `-nostdlib -static` `asm/*.s`
+  guests; it is a dynamically-linked C fixture, like `hello_dyn.c`, whose recipe `build.rs` copies);
+  §3b's walk procedure and R4's ceiling of six (one wall,
   no walk); §9's gate prediction (short by one binary — `retrace-box/tests/vmremap.rs`); and the
   plan's malformed-request mutation of byte 0 (a no-op; byte 3 carries the complex bit, corrected at
   Task 4's RED). M38's and earlier superseded lists stay as they were left.

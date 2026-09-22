@@ -85,8 +85,8 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   `Event::Crash` at the address the script computed from its data file, two byte-identical replays,
   and a scripted `reverse-continue` that reaches the store by its **effect** rather than by a
   symbol; skips loud without Homebrew Python), `vmremap_e2e` (the repo-owned guard for the M39
-  `mach_vm_remap` stage-1 alias — a freestanding C fixture that calls through an alias of its own
-  text and `memcmp`s through an alias of a dylib's, so the mechanism is guarded on a machine without
+  `mach_vm_remap` stage-1 alias — a dynamically-linked C fixture that calls through an alias of its
+  own text and `memcmp`s through an alias of a dylib's, so the mechanism is guarded on a machine without
   Python, where `cpython_crash_e2e` guards nothing). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
