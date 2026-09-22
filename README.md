@@ -463,11 +463,17 @@ reconstruction caveat in full.
   and guards nothing. The route sits inside the existing `mach_msg2` arm, after its oracle call, so
   `verify_thread`'s **seven** sites are unchanged and `TRACE_MAGIC` did not move.
 
-**Gate:** ⟨GATE⟩, **measured at M39**, every chunk `EXIT=0` (captured before any pipe); clippy
-clean over `--workspace --all-targets` with `-D warnings`. See the testing note below for how that
-number is assembled. The "test binaries" figure is test executables plus the `Doc-tests` harnesses
-cargo reports, each of which runs zero tests — the convention every milestone since M14 has counted
-by, kept for comparability and written out here so nobody has to re-derive it. The ignored gates are
+**Gate:** 629 passed / 0 failed / 9 ignored across 138 test binaries, **measured at M39** over the
+whole workspace, every chunk `EXIT=0` (captured before any pipe); clippy clean over
+`--workspace --all-targets` with `-D warnings`. Measured on commit `123cb97`, the head after the
+four implementing tasks; the three commits that follow it are this close's documentation, plus one
+comment-only hunk in `crates/retrace/tests/vmremap_e2e.rs` re-verified on its own
+(`cargo test -p retrace --test vmremap_e2e -- --test-threads=1` and
+`cargo clippy --workspace --all-targets -- -D warnings`, both exit 0). See the testing note below
+for how that number is assembled. The "test binaries" figure is test executables plus the
+`Doc-tests` harnesses cargo reports, each of which runs zero tests — the convention every
+milestone since M14 has counted by, kept for comparability and written out here so nobody has to
+re-derive it. The ignored gates are
 **nine**, and they are M38's nine unchanged: the two long-standing — `stackoverflow_rust_e2e`
 (re-parked by M21 at a signal-model wall, **not** the M8 risk R3 wall it stood at from M8 through
 M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall) — plus the seven in
@@ -1111,7 +1117,11 @@ These are real and current, not aspirational gaps.
   allocator plausibly reuses the crashing cell many times over a process lifetime, which would
   make that cost recur per intervening write. Nobody has profiled it. Rung 8 is reachable, not
   comfortable, and on the same inference the cost scales with the recording — which is why it went
-  unnoticed on the short guests every earlier rung uses.
+  unnoticed on the short guests every earlier rung uses. It is memory-hungry too, measured
+  during the M39 gate rather than in a clean standalone sample: one rung-8
+  `reverse-continue` took this 24 GB machine's swap from 36 GB to 47 GB while it had the machine to
+  itself, and two concurrent ones exhausted RAM and all 63 GB of swap, both falling to about 10 %
+  CPU in uninterruptible wait until one was killed.
 - **A bad debugger operand now fails later than it used to.** `where; break zzz` printed nothing and
   exited 5 before M20; it now runs the `where`, prints it, then fails — still exiting 5. That is the
   measured price of resolving at execution rather than at parse, it is deliberate, and a test pins it.
