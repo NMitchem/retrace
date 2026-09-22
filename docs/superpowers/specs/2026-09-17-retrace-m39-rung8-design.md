@@ -304,8 +304,8 @@ binary per further mechanism guard, +k `#[test]`s in `retrace-guest`'s parse/con
 
 ## 10. Outcome
 
-*Filled at the close, 2026-09-21. Written by Task 7a; the gate figures and the demo transcript are
-Task 7b's and are marked.*
+*Filled at the close. Written by Task 7a on 2026-09-21; the gate figures were measured and filled
+in by Task 7b on 2026-09-22, and the demo transcript is Task 7c's (ledger Ruling 16).*
 
 **Rung 8 reached, with one wall.** `cpython_crash_e2e` is green and was never `#[ignore]`d: the
 real interpreter runs `crash.py`, dies on the ctypes deref, records, replays byte-identically
@@ -325,7 +325,7 @@ four §3c assertions hold, measured on `123cb97` (Task 5's Step 3 run, 12,364.35
 | fault | `pc=0xa017e2e60 esr=0x92000005 far=0x4000dead0000 ec=0x24` |
 | record / replay / `debug --script "continue"` | 8.585 s / 8.822 s / 32.643 s |
 | the whole `cpython_crash_e2e` gate | 12,364.35 s |
-| gate totals | ⟨GATE⟩ *(Task 7b)* |
+| gate totals | 629 passed / 0 failed / 9 ignored over 138 test binaries, on `123cb97` |
 
 The three counts have three different endpoints — 1,146 runs to the crash, the two probe figures
 stop where the recorder aborted at 4813, and 834 is a different script — so they are a scale, not a
@@ -386,7 +386,8 @@ in between. The walk procedure §3b describes was never entered.
   mechanism guard §3f itself asked for at the box level, `crates/retrace-box/tests/vmremap.rs`, is a
   third new test target that §9 did not count. Measured: **+11 `#[test]` attributes over five files
   and +3 test binaries**, 135 → 138. Per-file deltas are in the status-log section; the measured
-  totals are ⟨GATE⟩ *(Task 7b)*.
+  totals are **629 / 0 / 9 over 138**, which is what the plan predicted once ledger Ruling 13
+  corrected +2 binaries to +3.
 - **`arg_kinds` rows (§6) — none added.** §2 measured that no row was missing on the path and §7
   forbade sweep-only rows; nothing on the rung-8 path reached an unclassified syscall, so the owed
   set {461, 468, 464, 345, 374} is untouched and still owed.
@@ -400,7 +401,7 @@ in between. The walk procedure §3b describes was never entered.
 | every `arg_kinds` row carries the landmark that reached it | **vacuous** — none added |
 | `cpython_e2e` (rung 7) still green, launcher test unchanged | **met** (Task 5 Step 2: 2 passed) |
 | sweep PASS ≥ 44, every moved row explained, no row moved by anything unnamed | **met** — `pass=44 fail=10 skip=0`, no row changed its label; nine rows differ only in a panic-string thread id, a source line number from M38's own post-sweep fix commit, and the `csh`/`tcsh` landmark spread M37 measured. `docs/sweep-evidence/2026-09-17-m39/README.md` |
-| gate chunked, `--no-fail-fast`, exit codes before any pipe, `--bins` run, reconciled file-by-file | ⟨GATE⟩ *(Task 7b)* |
+| gate chunked, `--no-fail-fast`, exit codes before any pipe, `--bins` run, reconciled file-by-file | **met** — 629 / 0 / 9 over 138 on `123cb97`, eight chunks all `exit=0`, zero `SKIPPED`; reconciled against M38's 618 / 0 / 9 over 135 file-by-file (five files, +11 `#[test]`, +3 binaries) in the status-log section |
 | README, CLAUDE.md, status-log section describe the new reality | **met** (this close) |
 
 ### What the milestone found that it did not set out to find

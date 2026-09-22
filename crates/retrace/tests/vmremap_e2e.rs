@@ -15,8 +15,12 @@ use retrace_trace::{Event, Reader};
 // kernel disagreed on the second: FFI's max is 7 (rwx), not 5 (r-x) — libffi-trampolines.dylib's
 // `__TEXT` is mapped with an elevated max protection (it hands out writable sub-mappings for
 // JIT'd closure thunks under W^X), so SELF and FFI genuinely differ. The kernel is right; this
-// line carries its numbers, not the prediction's. If a future OS returns different protections
-// this line is what changes, together with machmsg::VM_REMAP_{CUR,MAX}_PROT — by measurement, both.
+// line carries its numbers, not the prediction's. There is no constant pair to keep in step with
+// it — one could not serve both shapes, so `Box_::guest_vm_remap` DERIVES the reply's protections:
+// `cur` from the source page's stage-1 attribute (ATTR_CODE r-x = 5, ATTR_DATA rw- = 3, ATTR_NONE
+// = 0), `max` from the source's band (below NANO_BAND_START a kernel-placed image, 5; at or above
+// it guest-allocated, 7). Those two rules reproduce both measurements on this line. If a future OS
+// returns different protections, this line and that derivation change together — by measurement, both.
 const EXPECT: &[u8] = b"SELF kr=0 cur=5 max=5 call=42\nFFI kr=0 cur=5 max=7 same=1\n";
 
 #[test]

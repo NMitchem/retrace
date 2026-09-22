@@ -10607,8 +10607,10 @@ pre-authorised and unneeded); **no** new returning arm, `verify_thread` **7 → 
 **one** sweep (`pass=44 fail=10 skip=0`, no row changed its label); **nine** commits before this
 close — **five** `M39 plan:` commits (`b8b09a7` pre-flight, then `9f27e5f`, `2e5b4a2`, `2adc6ae`
 and `123cb97`, each aligning the plan with a deviation or a ruling as it landed) and **four** task
-commits (`2980b9a`, `47ca0ee`, `a393edf`, `451d020` for Tasks 1–4) — with Tasks 5 and 7a changing
-nothing under `crates/`. Gate: ⟨GATE⟩.
+commits (`2980b9a`, `47ca0ee`, `a393edf`, `451d020` for Tasks 1–4) — with Task 5 and the close's
+own commits changing nothing under `crates/` beyond one **comment-only** hunk in `vmremap_e2e.rs`
+(ledger Ruling 14, re-verified on its own). Gate: **629 passed / 0 failed / 9 ignored across 138
+test binaries**, measured on `123cb97`.
 
 ### What it set out to do
 
@@ -10698,28 +10700,105 @@ time because `set_region_attr` would re-stamp the overlapped source pages `ATTR_
 were read, a silent wrong answer rather than a loud one. All four assert on **both** sides, with
 the same wording.
 
-### The delta this milestone makes to the test count
+### The gate
 
-Predicted from source; **Task 7b reconciles it against the gate**. `git diff 832a1cb HEAD -- crates
-| grep -c '^+.*#\[test\]'` is **11**, and five files carry it:
+**629 passed / 0 failed / 9 ignored across 138 test binaries**, on commit `123cb97` — the head
+after the four implementing tasks, and the last commit that changes anything cargo compiles apart
+from the one comment-only hunk recorded at the end of this subsection. Run by the controller from
+the worktree with `.superpowers/sdd/2026-09-17-retrace-m39-rung8/gate.sh` (M38's script, paths
+changed), chunked as CLAUDE.md requires, every chunk `--no-fail-fast` with its cargo exit captured
+to a file **before any pipe**: `ws=0 box=0 e2e1=0 e2e2=0 e2e3=0 e2e4=0 bins=0 clippy=0`. Logs
+sanitised to ASCII before parsing; the script's own summary reads `binaries=138 passed=629
+failed=0 ignored=9`. **Zero `SKIPPED` lines** — `grep -ac SKIPPED` is 0 in all eight logs, and the
+only matches for `skip` are two test *names* (`debug::tests::empty_segments_are_skipped` and
+`pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one`). `jq_e2e`,
+`jq_file_e2e`, both `cpython_e2e` tests and `cpython_crash_e2e` all **ran**: Homebrew `jq` and
+`python@3.14` are installed on this machine, so nothing took the loud-skip path.
 
-| file | M38 | M39 | delta |
-|---|---|---|---|
-| `crates/retrace-core/src/machmsg.rs` | 28 | 32 | +4 — `decodes_the_captured_vm_remap_request`, `vm_remap_decode_rejects_malformed`, `vm_remap_reply_has_the_documented_shape`, `routes_vm_remap_to_service_only_on_the_guest_task_port` |
-| `crates/retrace-guest/src/lib.rs` | 16 | 18 | +2 — `crash_py_fixture_is_wired` (T1), `vmremap_guest_parses` (T2) |
-| `crates/retrace-box/tests/vmremap.rs` | — | 3 | +3, **new binary** — the alias resolves to the source IPA with identity neighbours; a guest-allocated source reports its band's protections; a non-page-multiple size is refused |
-| `crates/retrace/tests/vmremap_e2e.rs` | — | 1 | +1, **new binary** — the guard |
-| `crates/retrace/tests/cpython_crash_e2e.rs` | — | 1 | +1, **new binary** — the headline gate |
+| chunk | invocation | exit | binaries | passed | ignored | against M38 |
+|---|---|---|---|---|---|---|
+| `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | 0 | 26 | 171 | 0 | M38's 165 + `machmsg` 4 + `retrace-guest` 2 |
+| `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | 0 | 40 | 291 | 0 | M38's 288 + `tests/vmremap.rs` 3; whole package, so `Doc-tests retrace_box` is present (M24's lesson) |
+| `e2e1` | `cargo test -p retrace --test <20 targets> --no-fail-fast -- --test-threads=1` | 0 | 20 | 45 | **7** | holds `cpython_crash_e2e`; the 7 ignored are `apple_walls_e2e`'s |
+| `e2e2` | same, next 20 targets | 0 | 20 | 31 | 0 | — |
+| `e2e3` | same, next 20 targets | 0 | 20 | 50 | **2** | the 2 ignored are `stackoverflow_rust_e2e`'s and `symbols_e2e`'s |
+| `e2e4` | same, last 11 targets | 0 | 11 | 30 | 0 | holds `vmremap_e2e`, with five targets after it |
+| `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 0 | 1 | 11 | 0 | the 11 `debug.rs` unit tests, the chunk CLAUDE.md says never to omit |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | 0 | — | — | — | clean |
 
-Nothing else under `crates/` changed its count. So against M38's **618 / 0 / 9 over 135**: +11
-attributes, **+3** binaries (135 → 138), `#[ignore]` **9 → 9**, `--bins` **11 → 11** — a predicted
-**629 / 0 / 9 over 138**, where 629 = 627 runnable + the 2 census tests that run twice. The tree
-holds **636** `#[test]` attributes (bare `grep -c` says 637; the extra is the prose mention in
-`legacy_equivalence.rs`, as at M38). **The spec's §9 prediction was short by exactly one binary:**
-it named `cpython_crash_e2e` and `vmremap_e2e` and "one per further mechanism guard", and did not
-count `retrace-box`'s own `tests/vmremap.rs` — a guard §3f itself had asked for. `retrace-box` runs
-as a whole package in the gate script, so that target is picked up without a chunk-list change, and
-its `Doc-tests` harness cannot be dropped (M24's lesson).
+171 + 291 + (45 + 31 + 50 + 30) + 11 = **629**. Ignored 7 + 2 = **9**. Binaries 26 + 40 + 71 + 1 =
+**138** — 131 test executables plus the 7 `Doc-tests` harnesses cargo reports, the convention since
+M14. The e2e chunking is index-free (`xargs -n20` over the sorted target list, the flattened
+membership `diff`ed against the list before anything runs): **71 targets** in 20 / 20 / 20 / 11,
+where M38 had 69 in 20 / 20 / 20 / 9. **The four e2e groups are not comparable to M38's one by
+one** — inserting two targets into a sorted list moves every boundary after the first of them — so
+the e2e comparison is made on their total: **156 against M38's 154**, the +2 being the two new
+gates. The `against M38` column therefore carries no per-group figure; the reconciliation
+CLAUDE.md actually asks for is the per-file one below.
+
+**Why `123cb97` stands for the branch head.** The close's own commits are `0c45908` and `b7443dd`
+(Task 7a's docs and its review fixes) and this one. `git diff --stat 123cb97 b7443dd -- crates` is
+**empty** — both are docs-only, which is the condition ledger Ruling 10 attached to starting the
+gate in the background while the docs were written. Task 7b then made the single exception ledger
+Ruling 14 authorised: one **comment-only** hunk in `crates/retrace/tests/vmremap_e2e.rs`, rewriting
+an `EXPECT` comment that pointed a future reader at `machmsg::VM_REMAP_CUR_PROT` /
+`VM_REMAP_MAX_PROT` — constants Ruling 4 removed before they were ever written — to say what is
+actually true, that `Box_::guest_vm_remap` derives `cur` from the source page's stage-1 attribute
+and `max` from its band. `git diff 123cb97 HEAD -- crates` is exactly that one hunk with no
+non-comment line changed, and it was re-verified on its own rather than assumed:
+`cargo test -p retrace --test vmremap_e2e -- --test-threads=1` → **1 passed, 0 failed, 20.14 s,
+exit 0**, and `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**
+(`task-7b-vmremap.log`, `task-7b-clippy.log`).
+
+**Reconciled against M38's 618 / 0 / 9 over 135, file-by-file rather than by sum**
+(`git diff 832a1cb HEAD -- crates | grep -c '^+.*#\[test\]'` = **11**, with no `-` line carrying
+`#[test]`, so no test was deleted or renamed away):
+
+| file | M38 | M39 | delta | where the gate shows it |
+|---|---|---|---|---|
+| `crates/retrace-core/src/machmsg.rs` | 28 | 32 | **+4** — `decodes_the_captured_vm_remap_request`, `vm_remap_decode_rejects_malformed`, `vm_remap_reply_has_the_documented_shape`, `routes_vm_remap_to_service_only_on_the_guest_task_port` | `ws`: `retrace_core` unittests **53 passed** (M38: 49) |
+| `crates/retrace-guest/src/lib.rs` | 16 | 18 | **+2** — `crash_py_fixture_is_wired` (T1), `vmremap_guest_parses` (T2) | `ws`: `retrace_guest` unittests **18 passed** (M38: 16) |
+| `crates/retrace-box/tests/vmremap.rs` | — | 3 | **+3**, new binary — the alias resolves to the source IPA with identity neighbours; a guest-allocated source reports its band's protections; a non-page-multiple size is refused | `box`: `tests/vmremap.rs` **3 passed**, a binary M38 did not have |
+| `crates/retrace/tests/vmremap_e2e.rs` | — | 1 | **+1**, new binary — the repo-owned mechanism guard | `e2e4`: `tests/vmremap_e2e.rs` **1 passed** |
+| `crates/retrace/tests/cpython_crash_e2e.rs` | — | 1 | **+1**, new binary — the headline gate | `e2e1`: `tests/cpython_crash_e2e.rs` **1 passed** |
+| every other `.rs` under `crates/` | unchanged | unchanged | 0 | no other file in the diff carries a `#[test]`, so no other binary's count could have moved |
+
+Per-crate attribute counts confirm the same delta independently of the diff
+(`git grep -h '^[[:space:]]*#\[test\]' 832a1cb -- 'crates/<c>/*.rs'` against the worktree):
+`retrace-core` 83 → 87, `retrace-guest` 17 → 19, `retrace-box` 288 → 291, `retrace` 174 → 176; the
+other four crates unmoved. The tree holds **636** `#[test]` attributes (M38: 625), of which 9 are
+ignored, so 627 are runnable; the run reports 629 because `census.rs`'s two tests execute twice —
+once in their own binary and again inside `legacy_equivalence`'s `#[path]` include, the "+2 twice"
+since M33. A bare `grep -c '#\[test\]'` says 637, the extra being the comment in
+`legacy_equivalence.rs` that mentions the attribute in prose. So 618 + 11 = **629**, 9 = **9**, and
+135 + 3 = **138** — the tally the script printed.
+
+**The 9 ignored are M38's nine, unchanged and unrenamed**, checked by name in the logs rather than
+by count: `apple_walls_e2e`'s seven (`automationmodetool`, `csh`, `dddiagnose`, `desdp`,
+`dyld_info`, `flex`, `tcsh`), plus `a_rust_stack_overflow_strikes_its_own_guard_page` (M21's
+signal-model wall) and `cache_symbol_e2e` (M19's shared-cache symbol wall). That they are M38's by
+name and not merely by count is settled by the diff rather than by reading two logs side by side:
+none of the three files holding them appears in `git diff --stat 832a1cb HEAD -- crates`, so
+neither the tests nor their `#[ignore]` reason strings moved. M39 parked nothing new and un-parked
+nothing.
+
+**The spec's §9 prediction was short by exactly one binary:** it named `cpython_crash_e2e` and
+`vmremap_e2e` and "one per further mechanism guard", and did not count `retrace-box`'s own
+`tests/vmremap.rs` — a guard §3f itself had asked for. The plan's own prediction, corrected
+pre-gate by ledger Ruling 13 from +2 binaries to +3, was **629 / 0 / 9 over 138**, which the run
+matched exactly.
+
+**One number in the log needs its conditions stated.** `cpython_crash_e2e` reports
+`finished in 20740.23s` (5.76 h) inside `e2e1`, against the **12,364.35 s** the same test took
+standing alone in Task 5. The difference is not a regression in the test: for its first ~3 h 40 m
+it shared this machine with the milestone's demo run, itself a rung-8 `reverse-continue`. At 23:50
+both processes were in uninterruptible wait at about 10 % CPU with 63,174 MB of the machine's
+63,488 MB swap in use and its 24 GB of RAM at an 11 GB compressor — **two concurrent rung-8
+reverse-continues hold more checkpoint state than this machine has** (ledger Ruling 15, which
+corrects Ruling 10's assumption that the background overlap was free). The demo was killed at
+23:51 and the gate's run finished alone, its own swap use climbing from 36 GB to 47 GB. Both
+figures are measured under those conditions and are stated as such; the memory cost is now a README
+"Known limit" and an owed item, and a clean standalone sample is what the demo re-run is for.
 
 ### The sweep
 
@@ -10753,7 +10832,7 @@ No `identical fault` row, no `replay diverged` row, and **no class-E row** — t
 
 ### Rulings
 
-Eleven, in the ledger (`.superpowers/sdd/2026-09-17-retrace-m39-rung8/progress.md`). The ones that
+Sixteen, in the ledger (`.superpowers/sdd/2026-09-17-retrace-m39-rung8/progress.md`). The ones that
 changed what was built:
 
 * **R1 (ledger) — the gate asserts DFSC `== 0x05`, not the spec's class `0x04..=0x07`.** The basis
@@ -10777,11 +10856,45 @@ changed what was built:
   by subtraction (below) and Task 7 put it in the README's "Known limits" and on the owed list.
 * **R10 (ledger) — Tasks 5 and 7 change nothing under `crates/`**, so the close's gate and the demo
   transcript were started in the background on `123cb97` while the docs were written, valid iff
-  `git diff --stat 123cb97 HEAD -- crates` is empty at the close. It is.
+  `git diff --stat 123cb97 HEAD -- crates` is empty at the close. It was empty through Task 7a's
+  `b7443dd`, and **R14 then amended the clause rather than letting it quietly go false**: the one
+  permitted exception is this close's comment-only hunk in `vmremap_e2e.rs`, re-verified on its own,
+  so the gate's figures still stand for the head. R15 records where the ruling's *other* assumption
+  — that running the gate and the demo concurrently was free — turned out to be wrong.
 * **R11 (ledger) — Task 7 split into 7a and 7b.** The demo transcript (~3.4 h) and the gate (~4 h)
   are background jobs; a docs commit must not wait on them. 7a wrote everything that does not
-  depend on either and left a placeholder token where the gate figures go; 7b substitutes them and
-  adds the transcript. Two commits where the plan named one.
+  depend on either and left a placeholder token where the gate figures go. Refined by R16 below
+  into three commits, once R15 forced the demo to be re-run after the gate rather than beside it.
+* **R12 (ledger) — the seven moved `rec_reason` fields are not a §5 finding against M39.** The
+  sweep's row rule makes any row that moves for an unnamed reason a finding; these moved for a
+  reason that is named and measured, and it is **M38's**: a panic-string thread id that is fresh per
+  process, and `crates/retrace-arch/src/lib.rs:944` → `:946` from M38's own post-sweep fix commit,
+  which M38's evidence README records it never re-swept. `832a1cb..HEAD` on that crate is empty.
+  Named as such in the M39 evidence README. Cost if wrong: a sweep row misattributed to a milestone
+  that did not touch the file.
+* **R13 (ledger) — the binaries prediction corrected from +2 to +3 before the gate finished.**
+  `crates/retrace-box/tests/vmremap.rs` is a third new test target, picked up inside the
+  whole-package `retrace-box` chunk without a chunk-list change. Predicted **629 / 0 / 9 over 138**
+  with +11 `#[test]`; spec §9 recorded as short by one binary. The gate matched the corrected
+  prediction exactly — which is the check the ruling was made to allow.
+* **R14 (ledger) — the stale comment in the guard test is fixed here, not left owed.** A code
+  comment that names constants which do not exist is a lie inside the very test that guards the
+  mechanism, so `vmremap_e2e.rs`'s `EXPECT` comment was rewritten to state R4's derivation instead
+  of pointing at `machmsg::VM_REMAP_{CUR,MAX}_PROT`. It is the only `crates/` delta past the
+  gate's commit, comment-only, and re-verified by the two commands quoted under "The gate". The
+  item accordingly **leaves** the deferred-minors list below rather than being carried forward.
+* **R15 (ledger) — two concurrent rung-8 `reverse-continue`s do not fit on this machine.** R10 had
+  assumed the background overlap was free. Measured at 23:50: the demo's `retrace debug` and the
+  gate's `cpython_crash_e2e` child both in uninterruptible wait at about 10 % CPU, 63,174 MB of
+  63,488 MB swap in use, 24 GB of RAM at an 11 GB compressor. The **demo** was killed so the gate
+  finished alone, which is why the gate's crash test reads 20,740 s against Task 5's 12,364 s
+  standing alone, and why the demo re-runs standalone with a memory sampler. Cost: ~3.4 h of
+  wall-clock. Gain: a measured Known limit — the memory footprint of reverse execution, which
+  nothing had ever looked at.
+* **R16 (ledger, refines R11) — the close is three commits, not two.** 7b is the gate half (the
+  figures, "The gate" with its file-by-file reconciliation, R12–R16, and the R14 comment fix);
+  7c is the transcript half, after the standalone demo re-run finishes, and it also refines the
+  memory figures above from a clean sample. Three commits where the plan named one.
 
 Three more were the ordinary kind — a build-path correction made pre-flight (R2), and two
 `-D warnings` clippy deviations accepted and back-ported into the plan (R3 `useless_format`,
@@ -10822,7 +10935,14 @@ what M39 **adds** to it.
   3.42 h on rung 8; the attributing mechanism is a code read, unprofiled. Two candidate directions
   are visible from that read and neither is measured: not restarting a session per intervening watch
   hit, and not resolving a sub-landmark offset by single-stepping every instruction. A successor
-  that wants rung 8 to be *usable* rather than merely *reachable* starts by profiling it.
+  that wants rung 8 to be *usable* rather than merely *reachable* starts by profiling it. **Its
+  memory cost is the same item's other half**, and it was measured only by accident (R15): one such
+  run took this 24 GB machine's swap from 36 GB to 47 GB, and two at once exhausted RAM and all
+  63 GB of swap. **And the obvious explanation is measurably not the explanation:** the debugger's
+  `CheckpointCache` is byte-budgeted at 256 MiB with LRU eviction
+  (`crates/retrace/src/debug.rs:19`), so tens of gigabytes are not cached checkpoints. What does
+  hold them is unmeasured. A profile that looks only at time would miss the limit that actually
+  bit.
 * **A stage-1 alias is invisible to every reader that goes by address** — new.
   `Box_::read_guest`/`read_guest_checked` resolve against the box's backings list, not by walking
   the tables; every mapping before M39 was identity, so the two agreed by construction. The
@@ -10848,10 +10968,12 @@ what M39 **adds** to it.
   nothing to it: §2 measured that no `arg_kinds` row was missing on the rung-8 path, and §7 forbade
   sweep-only rows, so none was added. Seven sweep rows and five parked gates still stand behind
   those five numbers.
-* **Review minors, deferred** (the ledger carries each with its file and line): `vmremap_e2e.rs:19`
-  inlines `(-47i64) as u64` rather than naming the constant, and its `EXPECT` comment still points a
-  future reader at `machmsg::VM_REMAP_{CUR,MAX}_PROT` — **constants Ruling 4 removed before they
-  were ever written**, so the sentence names something that does not exist; `vmremap_dyn.c:64`'s
+* **Review minors, deferred** (the ledger carries each with its file and line). One item that
+  stood here is **no longer owed**: the `EXPECT` comment in `vmremap_e2e.rs` that pointed a future
+  reader at `machmsg::VM_REMAP_{CUR,MAX}_PROT` — constants Ruling 4 removed before they were ever
+  written — was rewritten in this close to state the derivation instead (Ruling 14, the one
+  comment-only `crates/` hunk past the gate's commit). What remains: `vmremap_e2e.rs:31`
+  inlines `(-47i64) as u64` rather than naming the constant; `vmremap_dyn.c:64`'s
   `dlopen`/`dlsym` failures share one message; `guest_vm_remap`'s doc still says "Returns `target`"
   (superseded by the Ruling 4 paragraph below it); `l3_desc` duplicates the existing `leaf_desc`
   and folds "table present but L3 backing untracked" into `None`, where `write_l3_desc` expects
