@@ -117,7 +117,7 @@ from any recorder pid; since M38, with two false passes turned into named walls.
 `tools/apple-sweep.sh` points
 retrace straight at each file in a committed 54-entry corpus and prints a tally: **44 of 54 record
 and replay**, stdout byte-identical and exit codes equal (`TALLY pass=44 fail=10 skip=0`, measured
-2026-09-17 on the M39 close's binary, one run at recorder pids `0x71d2`–`0x7dcf`; the same figure
+2026-09-21 on the M39 close's binary, one run at recorder pids `0x71d2`–`0x7dcf`; the same figure
 M38 measured 2026-09-16, and **no row changed its label** between the two runs — M39's one wall is
 reached by `import ctypes`, and no corpus binary loads `_ctypes.so`). The figure last
 moved at M38, from M37's 45/9, by **three rows, each explained by name**: `launchctl` is *clean* now (the
@@ -432,7 +432,8 @@ reconstruction caveat in full.
   too: the terminal `Event::Crash` carries the computed target as its `far`, DFSC `0x05` (a level-1
   translation fault — bit 46 of the VA selects an L1 slot that was never mapped, the same face
   `crashy.c` shows at the same address), and the thread tag of the landmark that wrote the marker.
-  Never on exit 139, which a guest that died inside dyld produces identically.
+  Never on exit 139 **alone**, which a guest that died inside dyld produces identically — the gate
+  does check the code, on the record and on each replay, but only beside those trace assertions.
   **Exactly one wall stood between rung 7 and rung 8** — the spec budgeted six — and the walk
   cleared it and met no second: `mach_vm_remap` (`msgh_id` 4813), which libffi's Apple trampoline
   table issues on every `import ctypes` to alias `libffi-trampolines.dylib`'s freshly-placed
@@ -456,8 +457,8 @@ reconstruction caveat in full.
   `FIXED` mmap below the nano band, and a read-only `MAP_SHARED` source above it. Neither is
   measured and no known caller issues either. `copy = TRUE`, `VM_FLAGS_ANYWHERE`, a `src_task` that
   is not the guest's own, and a target overlapping its source each **assert by name**, on both
-  sides. `vmremap_e2e` is the repo-owned guard — a freestanding C fixture that remaps its own text
-  page and *calls through* the alias, then remaps a dylib's text and `memcmp`s through it — so the
+  sides. `vmremap_e2e` is the repo-owned guard — a dynamically-linked C fixture that remaps its own
+  text page and *calls through* the alias, then remaps a dylib's text and `memcmp`s through it — so the
   mechanism is guarded on a machine without Homebrew Python, where `cpython_crash_e2e` skips loud
   and guards nothing. The route sits inside the existing `mach_msg2` arm, after its oracle call, so
   `verify_thread`'s **seven** sites are unchanged and `TRACE_MAGIC` did not move.
@@ -541,7 +542,7 @@ These are real and current, not aspirational gaps.
   rc=4: …)` rather than `replay diverged`; an identical crash on both sides is labelled
   `PASS … (identical fault, rc=N)` rather than a bare PASS; `RETRACE_SWEEP_KEEP=<dir>` keeps
   each non-clean row's stderr and trace, and since M37 `RETRACE_SWEEP_KEEP_ALL=1` keeps every
-  row's, PASS rows included — what the M37 audits were run over. **M39 ran it once on 2026-09-17**
+  row's, PASS rows included — what the M37 audits were run over. **M39 ran it once on 2026-09-21**
   on the close's binary (branch commit `123cb97`, recorder pids 29138–32207 = `0x71d2`–`0x7dcf`)
   and tallied **`pass=44 fail=10 skip=0`** with **no row changing its label** against M38's run;
   M38 had run it once on 2026-09-16 (branch commit `911214e`, recorder pids
