@@ -2,7 +2,7 @@
 //! `docs/superpowers/specs/2026-09-24-retrace-m42-llsc-design.md` §3). Everything here is pure:
 //! `Box_` reads the vCPU and guest memory and passes the values in, so that every fail-loud branch
 //! of the store-exclusive emulator has a unit test with no VM.
-use retrace_arch::ExclInsn;
+use retrace_arch::{decode_excl, is_fallthrough_barrier, ExclInsn};
 
 /// TBI: `TCR_EL1` sets TBI0, so a data VA may carry a tag in [63:56], and `va_to_ipa` does not
 /// strip it. Every address the shadow holds or compares is stripped with this mask first.
@@ -87,6 +87,36 @@ pub fn plan_stx(ex: &Excl, st: ExclInsn, base: u64, rt_val: u64, rt2_val: u64,
 pub fn base_aliases_dest(ld: ExclInsn) -> bool {
     let ExclInsn::Load { pair, rt, rt2, rn, .. } = ld else { return false };
     rn != 31 && (rn == rt || (pair && rn == rt2))
+}
+
+/// Spec §3d's backward scan.
+///
+/// `words[i]` is the instruction at `P - 4 * (i + 1)`, nearest first. The caller bounds the slice
+/// at 16 words and never goes past the start of P's page.
+///
+/// Returns the nearest load-exclusive and its index. Returns None if a store-exclusive, a `clrex` or
+/// a fall-through barrier comes first: past any of those, the monitor cannot still hold that load's
+/// mark on the path that falls through to P.
+pub fn scan_back(words: &[u32]) -> Option<(usize, ExclInsn)> {
+    for (i, &w) in words.iter().enumerate() {
+        match decode_excl(w) {
+            Some(ld @ ExclInsn::Load { .. }) => return Some((i, ld)),
+            Some(_) => return None,
+            None if is_fallthrough_barrier(w) => return None,
+            None => {}
+        }
+    }
+    None
+}
+
+/// Spec §3d condition 3: the load's destination registers still hold what is at its VA. A jump into
+/// the middle of a pair, or a rewritten register, almost always breaks this, and then nothing is
+/// inferred. A destination of 31 (XZR) loads nothing to compare.
+pub fn dests_match(ld: ExclInsn, rt_val: u64, rt2_val: u64, bytes: &[u8]) -> bool {
+    let ExclInsn::Load { size, pair, rt, rt2, .. } = ld else { return false };
+    let s = size as usize;
+    (rt == 31 || rt_val.to_le_bytes()[..s] == bytes[..s])
+        && (!pair || rt2 == 31 || rt2_val.to_le_bytes()[..s] == bytes[s..2 * s])
 }
 
 #[cfg(test)]
@@ -187,5 +217,39 @@ mod tests {
         assert!(base_aliases_dest(ExclInsn::Load { size: 8, pair: true, rt: 1, rt2: 0, rn: 0 }));
         assert!(!base_aliases_dest(ExclInsn::Load { size: 8, pair: false, rt: 31, rt2: 31, rn: 31 }));
         assert!(!base_aliases_dest(ExclInsn::Load { size: 4, pair: false, rt: 10, rt2: 31, rn: 9 }));
+    }
+
+    #[test]
+    fn the_scan_finds_the_nearest_load_across_neutral_instructions() {
+        // dyld's getpid, back from its stxr: cbnz, then ldxr.
+        assert_eq!(scan_back(&[0x3500_004a, 0x885f_7d2a]).map(|(i, _)| i), Some(1));
+        // (b), back from its stlxr: add x1, x1, #1, then ldaxr.
+        assert_eq!(scan_back(&[0x9100_0421, 0xc85f_fc01]).map(|(i, _)| i), Some(1));
+        // (f), back from its stxr: the mrs is not a barrier. The ENTRY check rejects this one, not
+        // the scan.
+        assert!(scan_back(&[0xd53b_e047, 0x885f_7c06]).is_some());
+    }
+
+    #[test]
+    fn the_scan_stops_at_a_store_exclusive_a_clrex_or_a_barrier() {
+        assert_eq!(scan_back(&[0x881f_7d20, 0x885f_7d2a]), None); // an stxr consumed the older load
+        assert_eq!(scan_back(&[0xd503_3f5f, 0x885f_7d2a]), None); // clrex
+        assert_eq!(scan_back(&[0xd400_1001, 0x885f_7d2a]), None); // svc
+        assert_eq!(scan_back(&[0x1400_0002, 0x885f_7d2a]), None); // b
+        assert_eq!(scan_back(&[0xd65f_03c0, 0x885f_7d2a]), None); // ret
+        assert_eq!(scan_back(&[0xd503_201f; 16]), None);          // sixteen nops, no load
+    }
+
+    #[test]
+    fn the_destination_check_compares_each_element_and_skips_xzr() {
+        let ldxr = ExclInsn::Load { size: 4, pair: false, rt: 10, rt2: 31, rn: 9 };
+        assert!(dests_match(ldxr, 0x4242, 0, &[0x42, 0x42, 0, 0]));
+        assert!(!dests_match(ldxr, 0x4343, 0, &[0x42, 0x42, 0, 0]));
+        let ldxp = ExclInsn::Load { size: 8, pair: true, rt: 1, rt2: 2, rn: 0 };
+        let b: Vec<u8> = [1u64.to_le_bytes(), 2u64.to_le_bytes()].concat();
+        assert!(dests_match(ldxp, 1, 2, &b));
+        assert!(!dests_match(ldxp, 1, 3, &b));
+        let xzr = ExclInsn::Load { size: 8, pair: false, rt: 31, rt2: 31, rn: 0 };
+        assert!(dests_match(xzr, 99, 0, &[7; 8]), "ldxr xzr loads nothing to compare");
     }
 }
