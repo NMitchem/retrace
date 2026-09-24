@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use retrace_core::{checkpointed_seek, Advance, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped};
+use retrace_core::{checkpointed_seek, Advance, Armed, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped};
 use retrace_core::symbols::Symbols;
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
@@ -248,7 +248,14 @@ fn resolve_nth(trace: &Path, cache: &mut CheckpointCache, n: usize, from_k: u64,
                 seen += 1;
                 if seen == ordinal { return found(&s, k); }
             }
-            s.step_insns(1).map_err(|e| format!("resolve breakpoint hit #{ordinal} in window {n}: {e}"))?;
+            // M41 R7: name what was searched. The step is one instruction per call, so its own
+            // "window N ends after 0 instruction(s)" read like a window length and was not one
+            // (M41 t0 M2).
+            s.step_insns(1).map_err(|e| if e.contains("ends after") {
+                format!("resolve breakpoint hit #{ordinal} in window {n}: the window ended after {seen} hit(s) at K={k}")
+            } else {
+                format!("resolve breakpoint hit #{ordinal} in window {n}: {e}")
+            })?;
             k += 1;
         },
         HitKind::Watch(ranges) => {
@@ -291,6 +298,21 @@ fn watched_of(ws: &[(u64, u64)], far: u64) -> u64 {
         .unwrap_or(far)
 }
 
+/// M41 §3b: where a hit sits within one coordinate (n, k), in the order the hardware produces them.
+/// Hits are totally ordered by `(n, k, Phase)`; the debugger's cursor is such a triple.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Phase {
+    /// A syscall's recorded write to a watched range. Only at k = 0: the event that ended window
+    /// n − 1 wrote it before the instruction at (n, 0) runs.
+    Sys,
+    /// The instruction at (n, k) is about to execute and its address is a breakpoint. Also every
+    /// ARRIVAL's phase (spec R4, gdb's rule): a breakpoint at the pc you stand on is reported in
+    /// neither direction, and a watched store you stepped up to still fires going forward.
+    Bp,
+    /// That instruction's store to a watched range, stopped pre-retire.
+    Watch,
+}
+
 /// The scripted-debugger executor. Holds the position coordinate P = (`n`, `k`) and at most ONE live
 /// `ReplaySession` parked exactly at P (one VM per process → every command that MOVES drops the old
 /// session before seeking a fresh one). `breakpoints` is kept sorted + deduped (≤ 6, enforced by
@@ -305,10 +327,12 @@ struct Exec<'a> {
     /// per DBGWVR slot). The thread scope (M15 Task 8) is a pure debugger-side filter — the
     /// hardware slot itself stays global — checked at each hit site via `watch_thread_matches`.
     watches: Vec<(u64, u64, Option<u32>)>,
-    /// The (n, k) at which the session is currently parked pre-retire on a hardware watch hit, be
-    /// it one reported to the user or one discarded by a thread scope — either way the store has
-    /// not retired, so `cmd_continue`'s progress rule must pre-step off it before resuming.
-    last_watch_hit: Option<(usize, u64)>,
+    /// M41: the cursor's phase at (n, k) — see `Phase`. `continue` answers the first hit after
+    /// (n, k, phase), `reverse-continue` the last one before it. Replaces M5's `last_watch_hit`,
+    /// which was `phase == Watch` in disguise. Every position at one (n, k) is the same machine
+    /// state (before the instruction at (n, k); a watch stop is pre-retire), so no session encodes
+    /// the phase.
+    phase: Phase,
     cache: CheckpointCache,
     /// M19: address → name, built ONCE per session from the recording's opening snapshot.
     ///
@@ -337,7 +361,7 @@ impl<'a> Exec<'a> {
             .unwrap_or_default();
         Ok(Exec {
             trace, session: Some(session), n: 1, k: 0,
-            breakpoints: Vec::new(), watches: Vec::new(), last_watch_hit: None, cache, syms,
+            breakpoints: Vec::new(), watches: Vec::new(), phase: Phase::Bp, cache, syms,
         })
     }
 
@@ -367,6 +391,7 @@ impl<'a> Exec<'a> {
         self.session = Some(checkpointed_seek(self.trace, &mut self.cache, n, k)?);
         self.n = n;
         self.k = k;
+        self.phase = Phase::Bp; // an arrival (R4); a caller that parks on a hit sets the hit's phase after
         Ok(())
     }
 
@@ -560,12 +585,15 @@ impl<'a> Exec<'a> {
     fn cmd_stepi<W: Write>(&mut self, count: u64, out: &mut W) -> Result<(), String> {
         let res = self.sess_mut().step_insns(count);
         match res {
-            Ok(()) => { self.k += count; Ok(()) }
+            Ok(()) => { self.k += count; self.phase = Phase::Bp; Ok(()) } // an arrival (R4)
             Err(msg) => {
                 let head = msg.split("; cannot step").next().unwrap_or(&msg);
                 line(out, format_args!("error: {head}"))?;
-                let (n0, k0) = (self.n, self.k);
-                self.reseek(n0, k0)
+                // The position did not change, so neither does the cursor.
+                let (n0, k0, p0) = (self.n, self.k, self.phase);
+                self.reseek(n0, k0)?;
+                self.phase = p0;
+                Ok(())
             }
         }
     }
@@ -629,159 +657,171 @@ impl<'a> Exec<'a> {
         }
     }
 
-    /// Run forward until a breakpoint is reached or the guest exits. Hardware breakpoints (one
-    /// DBGBVR slot each; ≤ 6, enforced by `break`) catch mid-window hits (`Advance::Break`),
-    /// resolved to an exact (N, K); the landmark-granular check catches a breakpoint that lands
-    /// exactly on a landmark boundary. With no breakpoints set, runs to exit.
+    /// Run forward to the first hit after the cursor (M41 §3c), or to the guest's end.
+    ///
+    /// **Finish** the current coordinate first:
+    /// - a breakpoint that a syscall hit left ahead of the cursor at (n, 0) is reported;
+    /// - if the cursor stands on a breakpoint or on a watched store, the instruction is executed,
+    ///   with the watches armed unless the cursor is ON its store. So a store under a breakpoint
+    ///   still reports (t0 M3), and one already reported is stepped over;
+    /// - a trap or a fault there is crossed with `advance()`, with the watches armed for that one
+    ///   event (R10).
+    ///
+    /// Then **scan** at native speed with hardware breakpoints (one DBGBVR slot each; ≤ 6) and
+    /// watchpoints armed. A mid-window hit resolves to an exact (N, K) from `kctx`, and the landmark
+    /// check catches a breakpoint exactly on a boundary. With nothing armed, runs to the end.
     fn cmd_continue<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
-        // Pre-step rule: if we are parked exactly ON a breakpoint, advance one instruction BEFORE
-        // arming BVRs, so the scan below does not immediately re-report the current position as a hit
-        // (which would otherwise re-fire at 0 progress and error, exit 5). Fixes back-to-back
-        // `continue` on a once-executed breakpoint and the boundary-bp K=0 edge. Re-seek to (N, K+1);
-        // if that walks off the window end, cross into the next window at (N+1, 0) via one advance();
-        // if THAT advance exits, print the exit and the command is over. The boundary check at the
-        // new position is left to the scan loop below (do NOT report a hit at the pre-step position).
-        // A boundary-cross advances with the WATCHES armed, so a syscall write to a watched range
-        // in the crossed event is reported, not skipped.
-        if self.last_watch_hit == Some((self.n, self.k)) || self.breakpoints.contains(&self.sess().pc()) {
-            let (n, k) = (self.n, self.k);
-            match self.reseek(n, k + 1) {
-                Ok(()) => {}
-                Err(e) if e.contains("ends after") => {
-                    self.reseek(n, k)?; // window end: re-establish (N, K), then advance to (N+1, 0)
-                    // Arm the watches for this one-event crossing: the consumed boundary event may
-                    // itself be a syscall write to a watched range — without arming, that writer
-                    // would be silently skipped (M5 final-review M-1). Breakpoints stay unarmed
-                    // (the pre-step must not re-report the parked position); no instruction
-                    // retires during the crossing (the guest is parked ON the trap), so only
-                    // Event, WatchSyscall, or Exited can come back — never Watch or Break.
-                    let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
-                    self.sess_mut().arm_watchpoints(&ws);
-                    match self.sess_mut().advance().map_err(|d|
-                        format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?
-                    {
-                        Advance::Exited(report) => return self.park_at_terminal(report, out),
-                        // Task 8: a scoped-out writer falls through to the `_` arm below — it is
-                        // treated exactly like a plain Event (boundary crossed, keep scanning).
-                        Advance::WatchSyscall { watched, thread } if self.watch_thread_matches(watched, thread) => {
-                            let n = self.sess().landmark();
-                            line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
-                            // Only watches were armed here — clear them; the session is kept.
-                            self.sess_mut().clear_watchpoints();
-                            self.n = n;
-                            self.k = 0;
+        let bps = self.breakpoints.clone();
+        let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
+        let diverged = |d: retrace_core::Divergence|
+            format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail);
+        'finish: loop {
+            // ---- Finish (n, k): its hits still ahead of the cursor ----
+            loop {
+                let pc = self.sess().pc();
+                let on_bp = bps.contains(&pc);
+                if self.phase == Phase::Sys && on_bp {
+                    // A breakpoint behind a syscall hit at (n, 0) is still ahead (t0 M5).
+                    let a = self.annot(pc);
+                    line(out, format_args!("hit {pc:#x} at ({}, 0){a}", self.n))?;
+                    self.phase = Phase::Bp;
+                    return Ok(());
+                }
+                if !on_bp && self.phase != Phase::Watch {
+                    break; // nothing here is behind the cursor: the scan reports whatever is next
+                }
+                // Execute the instruction at (n, k). Its store is still ahead of the cursor unless
+                // the cursor is ON it, so arm the watches exactly then.
+                let arm = self.phase != Phase::Watch;
+                if arm { self.sess_mut().arm_watchpoints(&ws); }
+                let stepped = self.sess_mut().step_armed();
+                if arm { self.sess_mut().clear_watchpoints(); } // the kept-session invariant
+                match stepped? {
+                    Armed::Retired => { self.k += 1; break; } // (n, k + 1): nothing there examined yet
+                    Armed::Watch => {
+                        let (n, k) = (self.n, self.k);
+                        let watched = watched_of(&ws, self.sess().far());
+                        let thread = self.sess().current_thread();
+                        self.phase = Phase::Watch; // parked pre-retire on the store
+                        if self.watch_thread_matches(watched, thread) {
+                            let a = self.annot(pc);
+                            line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k}){a}"))?;
                             return Ok(());
                         }
-                        _ => {
-                            // Plain Event, or a WatchSyscall scoped out by thread: disarm before
-                            // the main scan re-arms (a second arm_watchpoints without a clear
-                            // would duplicate watch_ranges).
-                            self.sess_mut().clear_watchpoints();
-                            self.n = self.sess().landmark();
-                            self.k = 0;
+                        // Scoped out (M15 Task 8): passed, not reported. The next turn steps over it.
+                    }
+                    Armed::AtTrap | Armed::Fault => {
+                        // The instruction ends the window (a trap) or faults (R10): nothing retired.
+                        // `advance()` consumes the trap, or delivers or ends the fault, from a fresh
+                        // session parked before it — the pre-M41 crossing's own move — with the
+                        // watches armed for that one event, so a syscall write to a watched range is
+                        // reported (M5 final-review M-1), and breakpoints off, so the parked
+                        // position is not re-reported. No instruction retires during it.
+                        let (n, k) = (self.n, self.k);
+                        self.reseek(n, k)?;
+                        self.sess_mut().arm_watchpoints(&ws);
+                        let adv = self.sess_mut().advance().map_err(diverged)?;
+                        match adv {
+                            Advance::Exited(report) => return self.park_at_terminal(report, out),
+                            Advance::WatchSyscall { watched, thread } if self.watch_thread_matches(watched, thread) => {
+                                self.sess_mut().clear_watchpoints();
+                                let n = self.sess().landmark();
+                                line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
+                                (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
+                                return Ok(());
+                            }
+                            Advance::Event | Advance::WatchSyscall { .. } => {
+                                // A plain event, or a syscall write scoped out by thread: at
+                                // (n + 1, 0) only the Sys phase is behind the cursor.
+                                self.sess_mut().clear_watchpoints();
+                                let n = self.sess().landmark();
+                                (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
+                            }
+                            Advance::Break | Advance::Watch { .. } => return Err(
+                                "continue: an instruction retired during a one-event crossing".into()),
                         }
                     }
+                    Armed::Break => return Err(
+                        "continue: a breakpoint stop with no breakpoint armed (the kept-session invariant)".into()),
                 }
-                Err(e) => return Err(e),
             }
-        }
-        let (start_n, start_k) = (self.n, self.k);
-        let bps = self.breakpoints.clone();
-        self.sess_mut().arm_breakpoints(&bps);
-        let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
-        self.sess_mut().arm_watchpoints(&ws);
-        loop {
-            let adv = self.sess_mut().advance()
-                .map_err(|d| format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?;
-            match adv {
-                Advance::Break => {
-                    let n = self.sess().landmark();
-                    let p_hit = self.sess().pc();
-                    let a = self.annot(p_hit);
-                    line(out, format_args!("hit {p_hit:#x} at ({n}, +?){a}"))?;
-                    // K_cur = the pre-continue step only if the hit is in that same window; else 0
-                    // (we entered window n via a landmark). Resolve the FIRST occurrence past it.
-                    let kctx = if n == start_n { start_k } else { 0 };
-                    self.session = None; // free the VM before the resolution seek
-                    let k = resolve_nth(self.trace, &mut self.cache, n, kctx + 1, HitKind::Break(&[p_hit]), 1, p_hit)?;
-                    line(out, format_args!("resolved ({n}, {k})"))?;
-                    return self.reseek(n, k);
-                }
-                Advance::Event => {
-                    let pc = self.sess().pc();
-                    if bps.contains(&pc) {
+            // ---- Scan from (n, k): the finish left nothing here behind the cursor ----
+            let (start_n, start_k) = (self.n, self.k);
+            self.sess_mut().arm_breakpoints(&bps);
+            self.sess_mut().arm_watchpoints(&ws);
+            loop {
+                match self.sess_mut().advance().map_err(diverged)? {
+                    Advance::Break => {
                         let n = self.sess().landmark();
-                        let a = self.annot(pc);
-                        line(out, format_args!("hit {pc:#x} at ({n}, 0){a}"))?;
-                        self.sess_mut().clear_breakpoints(); // keep this session, breakpoint-clean
-                        self.sess_mut().clear_watchpoints(); // invariant: never leave WPs armed on a kept session (stepi runs on it)
-                        self.n = n;
-                        self.k = 0;
-                        return Ok(());
-                    }
-                    // no boundary match; keep scanning (hardware breakpoints stay armed)
-                }
-                Advance::Exited(report) => return self.park_at_terminal(report, out),
-                // Both watch arms below name their `thread` field (not `..`): M15 Task 5 plumbs
-                // the writing thread through `Advance`, Task 7 is what teaches these lines to
-                // print it, and Task 8 is what filters on it. Naming the field keeps every site
-                // that drops it greppable; `..` is exactly how Task 4's oracle check went missing
-                // from two arms.
-                Advance::Watch { thread } => {
-                    let n = self.sess().landmark();
-                    let p_hit = self.sess().pc();
-                    let watched = watched_of(&ws, self.sess().far());
-                    let matched = self.watch_thread_matches(watched, thread);
-                    if matched {
+                        let p_hit = self.sess().pc();
                         let a = self.annot(p_hit);
-                        line(out, format_args!("hit watch {watched:#x} (write at {p_hit:#x}) at ({n}, +?){a}"))?;
-                    }
-                    // Resolve from kctx, NOT kctx+1: unlike a breakpoint (whose parked-on case the
-                    // pre-step already moved off), a watched store CAN legitimately fire at the
-                    // exact parked coordinate (the user stepi'd up to it). The FIRST watch stop from
-                    // kctx is this hit, found by the hardware BY ADDRESS (M40): matching the store's
-                    // pc instead named an earlier run of a loop store that wrote elsewhere (t0 M7).
-                    // This resolution runs whether or not the hit is scoped out: the vCPU is
-                    // physically parked pre-retire at the store either way.
-                    let kctx = if n == start_n { start_k } else { 0 };
-                    self.session = None; // free the VM before the resolution seek
-                    let k = resolve_nth(self.trace, &mut self.cache, n, kctx, HitKind::Watch(&ws), 1, p_hit)?;
-                    if matched {
+                        line(out, format_args!("hit {p_hit:#x} at ({n}, +?){a}"))?;
+                        // M40's R11, fixed: resolve FROM kctx, not kctx + 1. In the start window
+                        // kctx is the scan's start, where a breakpoint is still ahead (the finish
+                        // stepped off any it had passed); in a later window kctx is 0, and a hit at
+                        // (n, 0) is found rather than skipped.
+                        let kctx = if n == start_n { start_k } else { 0 };
+                        self.session = None; // free the VM before the resolution seek
+                        let k = resolve_nth(self.trace, &mut self.cache, n, kctx, HitKind::Break(&[p_hit]), 1, p_hit)?;
                         line(out, format_args!("resolved ({n}, {k})"))?;
+                        return self.reseek(n, k); // phase Bp
                     }
-                    self.last_watch_hit = Some((n, k));
-                    self.reseek(n, k)?;
-                    if matched {
-                        return Ok(());
+                    Advance::Event => {
+                        let pc = self.sess().pc(); // the INCOMING thread's after a block (§3a)
+                        if bps.contains(&pc) {
+                            let n = self.sess().landmark();
+                            let a = self.annot(pc);
+                            line(out, format_args!("hit {pc:#x} at ({n}, 0){a}"))?;
+                            self.sess_mut().clear_breakpoints(); // keep this session, hit-clean
+                            self.sess_mut().clear_watchpoints();
+                            (self.n, self.k, self.phase) = (n, 0, Phase::Bp);
+                            return Ok(());
+                        }
+                        // no boundary match; keep scanning (hardware breakpoints stay armed)
                     }
-                    // Task 8: scoped to a different thread — not a hit for this filter. Re-enter
-                    // this function rather than duplicating its own pre-step rule: `last_watch_hit
-                    // == (n, k)` now holds, so the top-of-function pre-step steps past the
-                    // un-retired store and the scan resumes from there. Recursion depth is bounded
-                    // by the number of scoped-out hits within this one `continue` (not by
-                    // instruction count), and the cost of each is NOT merely slowness: a discarded
-                    // hit pays a full `resolve_nth` seek AND one stack frame, so a guest with a
-                    // hot write loop on the scoped-out thread OVERFLOWS THE STACK and crashes the
-                    // debugger rather than degrading gracefully. Unexercised today (no guest writes
-                    // a watched address in a loop from a thread that isn't the watched one), and
-                    // the fix is mechanical when one does: everything a `loop` would need is
-                    // already on `self` — `self.n`, `self.k` and `last_watch_hit`, all set by the
-                    // `reseek` above.
-                    return self.cmd_continue(out);
-                }
-                Advance::WatchSyscall { watched, thread } => {
-                    if self.watch_thread_matches(watched, thread) {
+                    Advance::Exited(report) => return self.park_at_terminal(report, out),
+                    // Both watch arms name their `thread` field (not `..`): M15 Task 5 plumbs the
+                    // writing thread through `Advance`, and naming it keeps every site that drops
+                    // it greppable.
+                    Advance::Watch { thread } => {
                         let n = self.sess().landmark();
-                        line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
-                        self.sess_mut().clear_breakpoints();  // keep this session, hit-clean
-                        self.sess_mut().clear_watchpoints();
-                        self.n = n;
-                        self.k = 0;
-                        return Ok(());
+                        let p_hit = self.sess().pc();
+                        let watched = watched_of(&ws, self.sess().far());
+                        let matched = self.watch_thread_matches(watched, thread);
+                        if matched {
+                            let a = self.annot(p_hit);
+                            line(out, format_args!("hit watch {watched:#x} (write at {p_hit:#x}) at ({n}, +?){a}"))?;
+                        }
+                        // The FIRST watch stop from kctx is this hit, found by the hardware BY
+                        // ADDRESS (M40). This resolution runs whether or not the hit is scoped out:
+                        // the vCPU is physically parked pre-retire at the store either way.
+                        let kctx = if n == start_n { start_k } else { 0 };
+                        self.session = None; // free the VM before the resolution seek
+                        let k = resolve_nth(self.trace, &mut self.cache, n, kctx, HitKind::Watch(&ws), 1, p_hit)?;
+                        if matched {
+                            line(out, format_args!("resolved ({n}, {k})"))?;
+                        }
+                        self.reseek(n, k)?;
+                        self.phase = Phase::Watch;
+                        if matched {
+                            return Ok(());
+                        }
+                        // Scoped out (M15 Task 8): the finish steps over it. R8: a loop where M15
+                        // recursed into this function, which could overflow the stack on a hot
+                        // scoped-out write loop.
+                        continue 'finish;
                     }
-                    // Task 8: scoped out. The writing event is already consumed (no pre-retire
-                    // issue for a syscall write), so just keep scanning — breakpoints/watches
-                    // stay armed and the loop's next `advance()` moves past it on its own.
+                    Advance::WatchSyscall { watched, thread } => {
+                        if self.watch_thread_matches(watched, thread) {
+                            let n = self.sess().landmark();
+                            line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
+                            self.sess_mut().clear_breakpoints(); // keep this session, hit-clean
+                            self.sess_mut().clear_watchpoints();
+                            (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
+                            return Ok(());
+                        }
+                        // Scoped out: the writing event is already consumed, so keep scanning.
+                    }
                 }
             }
         }
@@ -803,7 +843,7 @@ impl<'a> Exec<'a> {
     /// watched store yields both hits, breakpoint first (R3): its step-off keeps the watches armed.
     fn cmd_reverse_continue<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
         enum RHit { Bp { pc: u64, ord: u64 }, Watch { watched: u64, pc: u64, ord: u64 }, WatchSys { watched: u64 } }
-        let (pn, pk) = (self.n, self.k);
+        let (pn, pk, pphase) = (self.n, self.k, self.phase);
         let bps = self.breakpoints.clone();
         let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
         self.session = None; // the scan and the resolution use their own transient sessions
@@ -932,21 +972,30 @@ impl<'a> Exec<'a> {
                 before_p(n, k)?;
                 let a = self.annot(pc);
                 line(out, format_args!("hit {pc:#x} at ({n}, {k}){a}"))?;
-                self.reseek(n, k)
+                self.reseek(n, k) // phase Bp
             }
             Some((n, RHit::Watch { watched, pc, ord })) => {
                 let k = resolve_nth(self.trace, &mut self.cache, n, 0, HitKind::Watch(&ws), ord, pc)?;
                 before_p(n, k)?;
                 let a = self.annot(pc);
                 line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k}){a}"))?;
-                self.last_watch_hit = Some((n, k));
-                self.reseek(n, k)
+                self.reseek(n, k)?;
+                self.phase = Phase::Watch;
+                Ok(())
             }
             Some((n, RHit::WatchSys { watched })) => {
                 line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
-                self.reseek(n, 0)
+                self.reseek(n, 0)?;
+                self.phase = Phase::Sys;
+                Ok(())
             }
-            None => { line(out, format_args!("no earlier hit"))?; self.reseek(pn, pk) }
+            None => {
+                line(out, format_args!("no earlier hit"))?;
+                // The cursor stays where it was (Review Focus 5).
+                self.reseek(pn, pk)?;
+                self.phase = pphase;
+                Ok(())
+            }
         }
     }
 }
@@ -1127,5 +1176,37 @@ mod tests {
         // Spec §3e: every session the debugger opens, and M19's symbol table, share one decode.
         assert_eq!(decodes, 1, "a debug session decoded its trace {decodes} times:\n{}",
                    String::from_utf8_lossy(&sink));
+    }
+
+    #[test] fn hits_order_syscall_write_then_breakpoint_then_watch() {
+        // M41 §3b: the hardware's own order at one coordinate, and the tuple order the cursor
+        // compares with.
+        assert!(Phase::Sys < Phase::Bp && Phase::Bp < Phase::Watch);
+        assert!((4usize, 0u64, Phase::Watch) < (4, 1, Phase::Sys), "K dominates the phase");
+        assert!((3usize, 9u64, Phase::Watch) < (4, 0, Phase::Sys), "N dominates K");
+    }
+
+    #[test] fn a_breakpoint_you_stepped_onto_is_reported_in_neither_direction() {
+        // M41 R4 (gdb's rule): arriving by `stepi` puts the cursor AT the breakpoint phase, so
+        // `continue` goes to the next pass and `reverse-continue` finds nothing earlier.
+        let trace = record_watchsweep("arrival");
+        let mut ex = Exec::new(&trace).unwrap();
+        let mut sink = Vec::new();
+        run_cmds(&mut ex, "stepi 8", &mut sink);
+        let store = ex.sess().pc(); // the sweeping store's first pass
+        run_cmds(&mut ex, &format!("break 0x{store:x}"), &mut sink);
+        assert_eq!((ex.n, ex.k, ex.phase), (1, 8, Phase::Bp));
+        run_cmds(&mut ex, "continue", &mut sink);
+        let text = String::from_utf8_lossy(&sink).into_owned();
+        // The loop body is five instructions, so the next pass is K = 13.
+        assert!(text.contains("resolved (1, 13)"), "continue skips the breakpoint it stands on:\n{text}");
+
+        drop(ex); // one VM per process: free the first session's VM before opening the second
+        let mut ex = Exec::new(&trace).unwrap();
+        let mut sink = Vec::new();
+        run_cmds(&mut ex, &format!("stepi 8; break 0x{store:x}; reverse-continue"), &mut sink);
+        let text = String::from_utf8_lossy(&sink).into_owned();
+        assert!(text.contains("no earlier hit"), "…and so does reverse-continue:\n{text}");
+        assert_eq!((ex.n, ex.k, ex.phase), (1, 8, Phase::Bp), "the cursor is where it was");
     }
 }

@@ -354,3 +354,74 @@ fn oracle_threadrust_breakpoints_at_both_switches() {
         "the child's first instruction on the child at main's block, then main resuming: {hits:?}");
     hits::check_chains(ts(tp), &format!("break 0x{:x}; break 0x{:x}", t.resume, t.child), &hits);
 }
+
+// ---- Review Focus (plan) ------------------------------------------------------------------------
+
+/// Review Focus 1 / R10: `continue` from a breakpoint on the crashing instruction reports the
+/// crash, as `continue` without it does. Measured at plan time on c68ba6d: exit 5,
+/// "DEBUG ERROR: guest crashed at step 0/1".
+#[test]
+fn rf1_continue_from_a_breakpoint_on_the_crashing_instruction_reports_the_crash() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
+    assert_eq!(rec.code, 139, "crashy records its crash: {}", rec.stderr);
+    let pc = retrace_trace::Reader::open(&trace).unwrap().iter().find_map(|e| match e {
+        retrace_trace::Event::Crash { pc, .. } => Some(*pc),
+        _ => None,
+    }).expect("a recorded Crash");
+    let (code, out, err) = hits::debug(ts(&trace), &format!("break 0x{pc:x}; continue; continue; continue"));
+    assert_eq!(code, 0, "stderr: {err}\n{out}");
+    assert!(out.contains(&format!("hit 0x{pc:x} at (")), "the breakpoint first:\n{out}");
+    assert_eq!(out.matches(&format!("guest crashed: pc=0x{pc:x}")).count(), 2,
+        "then the crash, and the crash again:\n{out}");
+}
+
+/// Review Focus 2 / R8: a watch scoped to a thread that never writes it. Every hit is scoped out,
+/// so `continue` runs to the end without reporting one, and goes through the loop that replaced
+/// M15 Task 8's recursion.
+#[test]
+fn rf2_a_watch_scoped_to_a_thread_that_never_writes_it_runs_to_the_end() {
+    let tp = ws_trace();
+    let w = discover_ws(tp);
+    let (code, out, err) = hits::debug(ts(tp), &format!("watch 0x{:x} thread 1; continue; where", w.t));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(!out.contains("hit watch"), "{out}");
+    assert!(out.contains("exited (code 0)"), "{out}");
+}
+
+/// Review Focus 3: `unwatch` while parked on a breakpoint whose instruction is a watched store. What
+/// is armed now decides, so the store is not reported.
+#[test]
+fn rf3_unwatch_while_parked_on_a_watched_store_is_not_reported_after() {
+    let tp = ws_trace();
+    let w = discover_ws(tp);
+    let (code, out, err) = hits::debug(ts(tp), &format!(
+        "watch 0x{:x}; break 0x{:x}; continue; continue; unwatch 0x{:x}; continue", w.t, w.second, w.t));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.matches("hit watch").count(), 1, "the sweep's write only:\n{out}");
+    assert!(out.trim_end().ends_with("exited (code 0)"), "{out}");
+}
+
+/// Review Focus 4: `continue` after the end repeats the end, and is never an error.
+#[test]
+fn rf4_continue_after_the_guest_exited_repeats_the_exit() {
+    let tp = ws_trace();
+    let (code, out, err) = hits::debug(ts(tp), "continue; continue");
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.matches("exited (code 0)").count(), 2, "{out}");
+}
+
+/// Review Focus 5: "no earlier hit" leaves the cursor where it was. From a watch-phase park, the
+/// next `continue` steps over the store rather than reporting it a second time.
+#[test]
+fn rf5_no_earlier_hit_keeps_the_cursor_on_the_store() {
+    let tp = ws_trace();
+    let w = discover_ws(tp);
+    let buf0 = w.t - 320; // buf[0]: written once, by the sweep's first pass
+    let (code, out, err) = hits::debug(ts(tp),
+        &format!("watch 0x{buf0:x}; continue; reverse-continue; continue"));
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains(&format!("resolved (1, {})", w.first_run)), "{out}");
+    assert!(out.contains("no earlier hit"), "{out}");
+    assert_eq!(out.matches("hit watch").count(), 1, "the store is not reported twice:\n{out}");
+    assert!(out.trim_end().ends_with("exited (code 0)"), "{out}");
+}
