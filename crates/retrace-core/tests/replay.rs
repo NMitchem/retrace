@@ -221,3 +221,42 @@ fn seeking_between_a_caught_raise_and_its_delivery_is_a_named_error() {
     retrace_core::seek(&p, d + 1, 0).expect("the landmark after the pair must remain reachable");
     std::fs::remove_file(&p).ok();
 }
+
+// M41: `step_armed`, the hit oracle's primitive. Spec §3e owes this measurement: a breakpoint armed
+// at the CURRENT pc stops before anything retires (and stops again while armed); a watched store
+// stops pre-retire, its memory unwritten; one disarmed step then retires it; the window-ending trap
+// is reported and left for `advance()` to consume.
+#[test]
+fn step_armed_reports_each_stop_class_without_retiring() {
+    let trace = record_guest(retrace_guest::WATCHSWEEP, "m41-steparmed");
+    // &buf[40] from the recorded write(1, &buf[40], 8); buf[0] is 320 bytes below it.
+    let buf0 = {
+        let mut s = retrace_core::ReplaySession::open(&trace).unwrap();
+        loop {
+            if let Some((4, a)) = s.peek_syscall() { if a[0] == 1 { break a[1] - 320; } }
+            s.advance().unwrap();
+        }
+    };
+    // K = 8 is watchsweep's sweeping `str`, first pass: it writes buf[0].
+    let mut s = retrace_core::seek(&trace, 1, 8).unwrap();
+    let store = s.pc();
+    s.arm_breakpoints(&[store]);
+    assert_eq!(s.step_armed().unwrap(), retrace_core::Armed::Break);
+    assert_eq!(s.pc(), store, "a breakpoint stop retires nothing");
+    assert_eq!(s.step_armed().unwrap(), retrace_core::Armed::Break, "and stops again while armed");
+    s.clear_breakpoints();
+    s.arm_watchpoints(&[(buf0, 8)]);
+    assert_eq!(s.step_armed().unwrap(), retrace_core::Armed::Watch);
+    assert_eq!(s.pc(), store, "a watch stop is pre-retire");
+    assert_eq!(s.read_mem(buf0, 8).unwrap(), vec![0u8; 8], "the store has not written");
+    s.clear_watchpoints();
+    assert_eq!(s.step_armed().unwrap(), retrace_core::Armed::Retired);
+    assert_eq!(s.pc(), store + 4);
+    assert_ne!(s.read_mem(buf0, 8).unwrap(), vec![0u8; 8], "the disarmed step retired the store");
+    // Run on to the window-ending trap (the write's svc): reported, not consumed.
+    let mut steps = 0;
+    while s.step_armed().unwrap() == retrace_core::Armed::Retired { steps += 1; }
+    assert!(steps > 0 && s.landmark() == 1, "the trap is window 1's end, unconsumed");
+    assert!(!matches!(s.advance().unwrap(), retrace_core::Advance::Exited(_)));
+    assert_eq!(s.landmark(), 2, "advance() consumed it");
+}

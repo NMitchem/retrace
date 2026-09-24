@@ -11490,3 +11490,499 @@ the dispatch corrected it to **639 / 0 / 9 over 140**, and the fix wave's R4 gua
   `git diff 786bf2b -- crates/retrace-trace/src/lib.rs | grep -c TRACE_MAGIC`, which prints **1**,
   not 0, because an unchanged context line in the `open_checked` hunk contains the name — the
   changed-lines form prints 0 (see the gate).
+
+## Status: M41-hitorder — every hit counted once, in one order, on the thread that runs it
+
+M40 closed with two silent wrong answers on its owed list: R11 (a forward `continue` skips a
+breakpoint its own pre-step lands on) and T3 (breakpoint counting is blind at a thread switch).
+Measuring them for M41's spec found they were two instances of one defect: **the debugger had no
+defined order for hits, and no single definition of where it stood.** t0 found four more skips of
+the same kind and showed T3 reached forward `continue` too. M41 defines both things, the order and
+the position, makes `continue` and `reverse-continue` obey them, and gives the debugger a
+brute-force hit oracle that each command's answers are checked against. Every bug on M40's list had
+been found by review, not by a test; the oracle is how the next one is meant to be found by a test.
+It is also the lldb seam's precondition: lldb is meant to go in front of this debugger, and its
+answers had to be right first.
+
+The milestone's numbers: **eight** t0 measurements (M1–M8), each now a named regression that was RED
+on M40's debugger and is green; **one** new test binary (`hitorder_e2e`, 22 tests) and one new
+test-util module (`tests/util/hits.rs`, the oracle), for **+26** `#[test]` attributes over three
+files; **one** new `ReplaySession` primitive (`step_armed`, with its result enum `Armed`), **one**
+idempotent `Box_` method (`settle_schedule`), called from `ReplaySession::finish_event`, and a
+`(n, k, phase)` cursor in the debugger that replaces M5's `last_watch_hit`; **zero** dispatch arms
+changed (two comment-only hunks inside `ReplaySession::advance`'s arms, from Task 2's fix round),
+`verify_thread` **7 → 7**, `TRACE_MAGIC` unmoved at `RT\x00\x0a` (`crates/retrace-trace` has no diff
+at all), `record_box` untouched (`run()`'s entry check became a call to the same logic); **zero**
+new `#[ignore]` and **zero** un-parked; **nine** execution rulings (R12–R20) after the spec's
+eight and the plan's two, plus three pre-flight findings (F1–F3); **eight** commits before this
+close — the spec with its t0 companion (`0a6bbae`), the plan (`910c652`), and six task commits
+(`174cbbd`, `1ee88d0` + `8ea1ff7`, `2219274` + `dce77f3`, `d16fa97`), two of them review fix
+rounds — then the close (`91d19a4`) and the final review's fix wave. Gate: **666 passed /
+0 failed / 9 ignored across 141 test binaries**, measured after the fix wave (the close's own run
+read 665 / 0 / 9), each count predicted from source, chunk by chunk, before it ran.
+
+### What t0 measured
+
+The companion (`docs/superpowers/specs/2026-09-24-retrace-m41-hitorder-measurements.md`) is the
+record: `retrace debug --script` transcripts of `c68ba6d`, copied verbatim, on three fresh
+recordings (`watchsweep`, `fileio`, `threadrust`). In summary:
+
+- **M1, R11 silent.** `break 0x1000003a0; break 0x1000003a4; continue; continue` on `watchsweep`
+  resolved `(1, 14)`, exit 0; the right answer is `(1, 9)`. The pre-step from `(1, 8)` lands on
+  `(1, 9)`, the hardware fires there, and the resolver started at `kctx + 1`.
+- **M2, R11 loud.** Two breakpoints across `fileio`'s `read` exited 5 with "window 4 ends after 0
+  instruction(s)". Window 4 has **6** instructions; the `0` counted within `resolve_nth`'s
+  one-instruction `step_insns(1)` call, and three controls ruled out a poisoned seek.
+- **M3, M4.** A breakpoint on a watched store: forward lost the watch half (the pre-step re-seeked
+  with nothing armed), backward lost the breakpoint half ("strictly before (1, 328)" excluded the
+  breakpoint *at* (1, 328), which precedes the store).
+- **M5, M6.** A syscall write plus a breakpoint at `(4, 0)`: forward lost the breakpoint (the
+  pre-step stepped off it unreported), backward lost the syscall hit (`no earlier hit`). M6 was not
+  in the design discussion's list; t0 found it.
+- **M7.** After a `reverse-stepi` to `(4, 0)`, `reverse-continue` did not find the `read`'s write
+  just behind it — M40's deliberate exclusion (its Ruling 2), measured as the answer a user gets.
+- **M8, T3 on `threadrust`.** At the landmark after main's blocking `__ulock_wait`, `continue`
+  reported a **phantom** hit on main's resume pc, which nothing executes there; the **real** hit
+  at the landmark after the child's `bsdthread_terminate` was reachable in neither direction
+  (exit 5 both ways), and a breakpoint on the child's first instruction also exited 5. Forward
+  `continue` was affected, which M40's Known limit had not said.
+
+Three premises were left owed to a Task 0, which the plan folded into the steps that need each
+(R9): `step_armed`'s premise, the `threadrust` oracle's cost, and `blockedctx` under approach A.
+
+### The REDs and the oracle (Task 1, `174cbbd`)
+
+`ReplaySession::step_armed()` is one single step with breakpoints **and** watchpoints armed,
+reporting `Retired`, `Break`, `Watch`, `AtTrap` or `Fault` and checking the exception class before
+any demand-paging fallback. Its premise test, `step_armed_reports_each_stop_class_without_retiring`
+(`retrace-core/tests/replay.rs`), passed first time: a breakpoint armed at the current pc stops
+pre-retire, and one disarmed step then retires. `tests/util/hits.rs` is the oracle:
+`enumerate_hits` seeks to `(from_n, 0)`, arms everything and single-steps to the end, recording
+every hardware stop as a `Hit { n, k, phase, pc, thread }` read **after** the stop, and
+`check_chains` compares three `retrace debug --script` chains against that list — `continue` until
+the guest ends, `reverse-continue` until `no earlier hit`, and a zig-zag in which each hit reached in
+one direction must give its neighbour in the other. It shares none of the debugger's machinery,
+and because `Box_::step()` switches threads on entry, it sees the running thread whether or not
+§3a's settle is in place.
+
+The first RED run found two defects in the plan's own code, neither a t0 reason (the implementer
+stopped and reported, per the brief):
+
+- **Finding A (R12):** `discover_ws` and `discover_fio` kept their outer session alive while the
+  tail struct literal's `k_of_pc` opened a second — `HV_BUSY` in 11 of 16 tests, before the
+  debugger was ever invoked. Fixed by one `drop(s);` in each.
+- **Finding B (R13, R14):** `oracle_threadrust` from landmark 1 died inside `advance()` with
+  `Divergence { landmark: 22, … live (num=20 …) != recorded (num=-12 …) }` — a real replay
+  divergence, not a hit-accounting disagreement. An opus investigator measured it (the ledger's
+  `t1-diverge-diag.md`, ~150 s CPU, no `src/` change): **any VM exit between an `ldxr` and its
+  paired `stxr` fails the store-exclusive** — a single-step (`step_armed` and `step_insns(1)` both
+  reproduce it with nothing armed) or a hardware breakpoint stop on the `stxr`. The pair is
+  Libsyscall's `getpid` pid cache in dyld (`ldxr w10, [x9]` at `(16, 1)`, pc `0x140004f68`; `cbnz`;
+  `stxr wzr, w0, [x9]`, status discarded), so `__current_pid` stays 0, and dyld's next `getpid()`
+  issues a real syscall at landmark 22 that the recording does not hold. Bisecting `seek(16, j)` +
+  `advance()`: j = 0 and 1 exit 0, and every probed j ≥ 2 (2, 5, 11, 22, … up to the window's full
+  370,429) diverges. The diagnosis recording holds exactly **three** such pairs, windows **16, 41
+  and 134**, the first `getpid()` of each of three images; windows 260–269 (after
+  `bsdthread_create`) hold **0** LDXR/STXR among 27,336 instructions. Which of the exception return
+  and the host kernel clears the monitor is inferred, not isolated; that a retry loop would livelock
+  under single-step is inferred, never seen. R13 starts the `threadrust` oracle at `n_create`, the
+  spec's own declared fallback landmark, reached here for a different reason than the budget.
+
+After R12/R13 all **16** Task 1 tests failed for their t0 reason (`t1-red2.log`): the invariant
+test `left: 0, right: 1`; `m1` showing `resolved (1, 14)`; `m2` exit 5 with `window 4 ends after
+0 instruction(s)`; `m3`/`m5` `exited (code 0)` where the hit belonged; `m4` only the watch at
+(1, 328); `m6` `no earlier hit`; `m7` `left: 1, right: 2`; the three `m8` tests exit 5. **Every
+oracle arming's self-check passed and then its chain failed** — the positive control spec §4
+asked for: `watchsweep {0x3a0, 0x3a4}` answer #1 `(1, 14)` against the oracle's `(1, 9)`; the
+bp-on-store arming `exited` where the oracle has the watch at (1, 328); `fileio`'s boundary pair
+exit 5; the syscall+bp arming `exited` where the oracle has the breakpoint at (4, 0); and
+`threadrust` answer #0 on **thread 0** where the oracle has thread 1 — the phantom. The self-checks
+pin each list before any chain runs: 128 hits for `watchsweep {0x3a0, 0x3a4}` (64 passes of the
+loop × 2, from the fixture's source), and for the other four an exact `(n, k, phase)` list built
+from the discovered coordinates. `oracle_threadrust` from `n_create` cost
+**8.56 s user + 0.11 s sys** red, against the spec's 120 s budget.
+
+### §3a — the thread switch happens when the event finishes (Task 2, `1ee88d0` + `8ea1ff7`)
+
+`Box_::settle_schedule()` is `if needs_reschedule() { schedule_after_block() }`, idempotent;
+`run()` and `step()` call it on entry as before (a no-op on replay now), and
+`ReplaySession::finish_event` calls it **after** it takes the `WatchSyscall` tag, so a syscall's
+write stays attributed to the thread that issued it. The invariant it buys, now in `pc()`'s and
+`current_thread()`'s docs in place of M15's paragraph: at every position `(n, k)`, `pc()` and
+`current_thread()` name the instruction the next step retires and the thread that retires it.
+`verify_thread` runs inside each dispatch arm, before `finish_event`, so the divergence oracle
+still compares the issuing thread. F1's grep: `Advance::Event` and `Advance::WatchSyscall` are
+constructed only inside `finish_event`. **RED → green:** exactly the predicted five — the
+invariant test, the three `m8` tests and `oracle_threadrust` — with the other eleven still red at
+their Task 1 sites (`t2-hitorder.log`); `oracle_threadrust` green cost **16.20 s user + 0.27 s sys**.
+The halt rule's suites all exited 0, among them **`blockedctx` 2/2** — the premise spec §5 owed,
+and §3a's prediction that its two assertions hold because the saved context is the same bytes,
+saved one call earlier. The review (opus) approved with five
+minors; R15 fixed four as prose (`8ea1ff7`: `position()`'s doc overclaimed, since a caught
+`SignalDelivery` breaks `pc() == position()` at its `(n, 0)` too; two replay-arm comments and M15
+R1's comment named `run()` as the replay switch point; `finish_event`'s doc overstated its reach).
+Minor 5 is owed (below).
+
+### The cursor, and `continue` under it (Task 3, `2219274` + `dce77f3`)
+
+`enum Phase { Sys, Bp, Watch }` orders the hits at one coordinate as the hardware produces them,
+and `Exec` holds the cursor `(n, k, phase)`. `continue` became **finish this coordinate, then
+scan**: a breakpoint a syscall hit left ahead at `(n, 0)` is reported (M5); a breakpoint or a
+watched store under the cursor is executed with `step_armed`, the watches armed unless the cursor
+is ON the store (M3), a trap or a fault there crossed with `advance()` (R10); then the scan runs as
+before, with `Break` and `Watch` resolved from `kctx` — M40's R11 fixed (M1, M2). A scoped-out
+watch hit loops back to the finish rather than recursing (R8), and `resolve_nth`'s breakpoint-loop
+error names the K it reached (R7). **RED → green:** the Review Focus tests went in first —
+`rf1` red with exit 5 and `DEBUG ERROR: guest crashed at step 0/1` (R10's plan-time measurement),
+`rf2`–`rf5` green as they had to stay (`t3-rf-before.log`); after the rewrite `m1`, `m2`, `m3`,
+`m5`, `rf1` and two oracle armings went green, and the two remaining red armings moved from a
+forward-chain failure to backward answer #2, M4's and M6's shapes. Two `debug.rs` unit tests
+landed. R16: the brief's arrival test held two `Exec` VMs (a shadowed `ex`) and hit `HV_BUSY` —
+`drop(ex);`, R12's class.
+
+**The review found two Importants in the plan's own code (R17).** I1: the arrival test could not
+fail — `Exec::new` already parks at `Bp`, so the old code printed the same. It now arrives from a
+**Watch** park and asserts the phase, shown red with each reset deleted (`left: (1, 9, Watch)` for
+`stepi`, `left: (1, 7, Watch)` for `reverse-stepi`). I2: `stepi 0` and `reverse-stepi 0` reset a
+Watch park without moving, so the next `continue` re-reported the store. The cursor now resets
+only when the position moves, and `a_zero_count_step_is_not_an_arrival` was red before the fix
+(`"stepi 0" re-armed the store`, `left: 2, right: 1`; then the same for `reverse-stepi 0` with only
+the `stepi` half fixed). That is the one test more than the plan predicted: `--bins` **17**, not
+16.
+
+### `reverse-continue` under the cursor (Task 4, `d16fa97`)
+
+What "before P" means changed, with P the triple `(pn, pk, pphase)`: phase 1's `WatchSyscall`
+counts when `(n, 0, Sys) < P` — so at an arrival `(pn, 0, Bp)` the write behind it counts (M6, M7;
+R5) while at the hit itself `(pn, 0, Sys)` it does not, and M40's stuck-loop guard still holds;
+phase 2, at `K = pk` with `pphase == Watch`, counts the breakpoint on that store (M4); `before_p`
+compares triples. **RED → green:** `m4`, `m6`, `m7` and the last two oracle armings —
+`hitorder_e2e` **21 / 21**, all five armings through all three chains (`t4-hitorder.log`).
+`cpython_crash_e2e` ran, and passed: **40.40 s user + 0.46 s sys**, 423.8 MB max RSS. The review
+(sonnet) approved with no findings.
+
+### The comment sweep and the audit (this close)
+
+Task 3's review Minor 2, carried here: four comments in two pre-existing test files still
+described `continue`'s removed pre-step — `debug_cli.rs` (`continue_from_a_breakpoint_steps_over_it`,
+`continue_after_reverse_stepi_onto_boundary_bp`) and `watch_cli.rs`
+(`watch_continue_hits_first_store_and_progress_rule_advances`,
+`pre_step_boundary_cross_reports_a_watched_syscall_write`). They now describe the finish. **Comments
+only**: no assertion, no code line and no test name changed (the last test keeps its name, and its
+comment now says the name is the pre-M41 word). The sweep landed before the gate's per-target loop
+started, so the gate ran on it.
+
+The audit (the ledger's `audit.md`) lists every test file that asserts on `continue` or
+`reverse-continue` output — the brief's thirteen (`debug_cli`, `watch_cli`, `watch`, `watch_dyn`,
+`watchsweep_e2e`, `thread_watch_e2e`, `crashy_cli`, `crashy_e2e`, `reverse_debug_e2e`,
+`checkpoint_seek`, `cpython_crash_e2e`, `sigcatch_dyn_e2e`, and `debug.rs`'s unit tests), plus two
+a grep found that the list did not name (`symbols_e2e`, `symbolops_e2e`). **Every one passes in
+this close's gate, and no pre-existing assertion moved**: `git diff c68ba6d -- crates/retrace/tests
+crates/retrace/src/debug.rs` touches `blockedctx.rs` (its header comment, Task 2), `util/mod.rs`
+(`pub mod hits;`), the two new files, the sweep's comments, and in `debug.rs` only code outside
+`mod tests` plus one pure-addition hunk inside it (the three new unit tests). Spec §4 predicted no
+moved assertion; none moved, so there is nothing to classify.
+
+### The gate
+
+**665 passed / 0 failed / 9 ignored across 141 test binaries.** Before anything ran, the count was
+predicted from source (the ledger's `gate/prediction.md`): `git archive c68ba6d crates`, then
+`grep -rcE '^[[:space:]]*#\[test\]'` per file at both ends, diffed per file — three files moved,
+647 → 672 attributes, `#[ignore]` 9 → 9, so 663 runnable + 2 for `census.rs` running twice =
+**665 over 141**, chunk by chunk 173 / 292 / 183 + 9 / 17. The gate then matched it in every chunk.
+
+It ran from the worktree as one background script (the ledger's `gate/run-gate.sh`), chunked as
+CLAUDE.md requires, every chunk `--no-fail-fast` with its cargo exit written to a file **before any
+pipe**. Before the per-target loop the script asserted that its target list equals
+`ls crates/retrace/tests/*.rs` (73), and afterwards the exit files were checked against the same
+list: **77** exit files — `ws`, `box`, `bins`, the 73 per-target `e2e-*` and `clippy` — all `0`.
+Logs were sanitized (`tr` to printable ASCII, ANSI stripped) before any `awk`, and read with
+`grep -a`. Every one of the 73 e2e logs holds exactly one `Running` line and one `test result:`
+line, and in every one passed + ignored equals that file's `#[test]` count. **Zero skips**: the
+only case-insensitive `skip` matches in the 76 test logs are the two test *names* M39 and M40 also
+found (`debug::tests::empty_segments_are_skipped`,
+`pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one`); `jq_e2e`,
+`jq_file_e2e`, both `cpython_e2e` tests and `cpython_crash_e2e` all **ran**. Wall-clock
+12:57:53 → 13:16:01, **18 min 8 s**, for the record only; by `/usr/bin/time -p` around each chunk,
+998.67 s user + 20.75 s sys across the 77 invocations (cargo, rustc, the test binaries and what
+they spawn; whether HVF guest time is charged there is not established). `hitorder_e2e` finished in
+**46.30 s**, `cpython_crash_e2e` in **41.12 s**. The comment sweep was made before the per-target
+loop began (13:01:11), so the gate ran on the tree this close commits.
+
+| chunk | invocation | exit | binaries | passed | ignored | against M40 |
+|---|---|---|---|---|---|---|
+| `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | 0 | 26 | 173 | 0 | M40's 172 + `retrace-core/tests/replay.rs` 1 |
+| `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | 0 | 41 | 292 | 0 | unchanged; whole package, so `Doc-tests retrace_box` is present (M24's lesson) |
+| `e2e` | `cargo test -p retrace --test <name> --no-fail-fast -- --test-threads=1`, once per target, 73 targets in sorted order | 0 × 73 | 73 | 183 | **9** | M40's 162 over 72 + `hitorder_e2e` 21 (a new binary); the 9 ignored are `apple_walls_e2e`'s 7, `stackoverflow_rust_e2e`'s 1 and `symbols_e2e`'s 1 |
+| `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 0 | 1 | 17 | 0 | M40's 14 + 3 — the `debug.rs` unit tests, the chunk CLAUDE.md says never to omit |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | 0 | — | — | — | clean |
+
+173 + 292 + 183 + 17 = **665**. Ignored **9**. Binaries 26 + 41 + 73 + 1 = **141** — 134 test
+executables plus the 7 `Doc-tests` harnesses cargo reports, the convention since M14.
+
+**Reconciled against M40's 640 / 0 / 9 over 140, file-by-file rather than by sum**
+(`git diff c68ba6d -- crates` adds **25** lines matching `^\+[[:space:]]*#\[test\]` and removes
+**0**, so no test was deleted or renamed away):
+
+| file | M40 | M41 | delta | where the gate shows it |
+|---|---|---|---|---|
+| `crates/retrace-core/tests/replay.rs` | 12 | 13 | **+1** — `step_armed_reports_each_stop_class_without_retiring` (T1) | `ws`: 173 against 172 |
+| `crates/retrace/src/debug.rs` | 14 | 17 | **+3** — `hits_order_syscall_write_then_breakpoint_then_watch`, `a_breakpoint_you_stepped_onto_is_reported_in_neither_direction` (T3), `a_zero_count_step_is_not_an_arrival` (T3 fix round, R17) | `bins`: **17 passed** |
+| `crates/retrace/tests/hitorder_e2e.rs` | — | 21 | **+21**, new binary — `m1_…` to `m7_…`, three `m8_…`, `at_a_blocking_boundary_the_position_shows_the_thread_that_runs_next`, five `oracle_…` (T1); `rf1_…` to `rf5_…` (T3) | `e2e`: **21 passed** |
+| every other `.rs` under `crates/` | unchanged | unchanged | 0 | the other changed files (`retrace-box/src/lib.rs` 13, `retrace-core/src/lib.rs` 0, `blockedctx.rs` 2, `debug_cli.rs` 10, `watch_cli.rs` 11, `util/mod.rs`, the new `util/hits.rs`) carry the same `#[test]` count as at `c68ba6d` |
+
+Per-crate attribute counts confirm it independently of the diff: `retrace-core` 87 → 88, `retrace`
+185 → 209; the other six crates unmoved. The tree holds **672** `#[test]` attributes (M40: 647), of
+which 9 are ignored, so 663 are runnable; the run reports 665 because `census.rs`'s two tests
+execute twice. A bare `grep -c '#\[test\]'` says 673, the extra being the comment in
+`legacy_equivalence.rs`. So 640 + 25 = **665**, 9 = **9**, and 140 + 1 = **141**.
+
+**The 9 ignored are M38's nine, by name**, read off the logs' `ignored` lines: `apple_walls_e2e`'s
+seven (`automationmodetool`, `csh`, `dddiagnose`, `desdp`, `dyld_info`, `flex`, `tcsh`),
+`a_rust_stack_overflow_strikes_its_own_guard_page` and `cache_symbol_e2e`. No `#[ignore]` line is
+added or removed in `git diff c68ba6d -- crates`. M41 parked nothing and un-parked nothing.
+
+**The invariants.** `git diff c68ba6d -- crates/retrace-trace` is empty, so `TRACE_MAGIC` did not
+move and `Event` did not change. `grep -c 'self.verify_thread(' crates/retrace-core/src/lib.rs` is
+**7** at `c68ba6d` and **7** now (8 and 8 unanchored, the extra being the definition); the two
+changed lines that name it are doc comments. No dispatch arm changed: of `retrace-core/src/lib.rs`'s
+seven hunks, none is in `record_box`; five are outside `ReplaySession::advance` (`Armed`,
+`finish_event`, `current_thread`'s doc, `position`/`pc`'s docs, `step_armed`), and the two inside
+its arms (the `bsdthread_terminate` and semaphore mirrors) change comments only — Task 2's R15.
+
+**The spec's §9 prediction, ≈ 663 / 0 / 9 over 141, was short by two tests; the plan's 664 by one.**
+§9 counted ~9 named regressions (+1: M8 is three tests), five oracle self-checks as tests of their
+own (−5: they are asserts inside each oracle test), and neither the plan's five Review Focus tests
+(+5) nor R17's `a_zero_count_step_is_not_an_arrival` (+1). The plan's Task 5 had all of that but
+R17's test, which its review added. The binary count, 141, was right both times. (Both figures
+are the close's; the final review's fix wave added one more test, below.)
+
+### The final review and its fix wave (R18)
+
+A whole-branch review of `c68ba6d..91d19a4` returned "with fixes": **0 Critical**,
+one Important, four Minors. One fix dispatch followed, before merge.
+
+**Important #1, measured: the exit terminal parked before its own window.** `park_at_terminal`'s
+`Exit` arm reseeked to `(E, 0)`, but `ReplaySession::advance`'s `Exit` arm reports `Exited`
+without bumping `idx`, so `E` is the exit's own window and every instruction in it was still ahead
+of the terminal. Re-measured on a fresh `watchsweep` recording with `break 0x1000003d0`, the
+`write`'s return + 4, which is `(2, 1)` (the ledger's `fr-probe-before.log`): `continue` resolves
+`(2, 1)`; the next `continue` prints `exited (code 0)` and `where` says `(2, 0)`;
+`reverse-continue` says `no earlier hit`; and `continue` reports `(2, 1)` again, as often as it is
+asked. It predates M41 (M3/M6); the crash and signal terminals already parked at `(C, K_f)`.
+**No oracle arming had a hit in the exit window, so the oracle could not see it. That is the
+lesson: the terminal is where reverse debugging starts, so every oracle fixture should arm a hit
+in the terminal window.**
+
+**R18** (the controller): fix it inside M41, since it is M41's own class and the README's new
+Hit-order paragraph claimed completeness. Park the exit like a crash, at
+`(E, probe_window_len(E))`, on the exit `svc`, and add one oracle arming with hits in the exit
+window.
+
+**One step past the ruling, measured, and accepted as R19.** Parking at `(E, K_f)` with
+an arrival's phase, `Bp`, was not enough. The new arming also breaks on the exit `svc` itself, and
+with only the ruled change its backward chain failed at answer #1: the debugger gave `(2, 1, Bp)`
+where the oracle has `(2, 2, Bp)`, the breakpoint AT the terminal's coordinate, which a forward
+`continue` reports (`fr-red-parkonly.log`). The crash terminal had the same hole: on `crashy`,
+`break 0x1000005c4; continue; continue; reverse-continue` reports the breakpoint at `(249, 83)`,
+then the crash, then `no earlier hit` (`fr-probe-before.log`). So every terminal now parks at phase
+**`Watch`**, the last phase at a coordinate, and the end of the recording sits after every hit, a
+breakpoint on its last instruction included. `park_at_terminal`'s three arms now share one parking
+block, so the exit arming guards the crash and signal arms by construction; the crash case was also
+re-probed (`fr-probe-after.log`: `reverse-continue` → `hit 0x1000005c4 at (249, 83)`). This
+supersedes spec §3b's listing of "a terminal park" among the arrivals that take `Bp`.
+
+**The sixth arming**, `oracle_watchsweep_hits_in_the_exit_window` (`hitorder_e2e.rs`), breaks on
+the second writer `(1, 328)`, the exit window's second instruction `(2, 1)` and the exit `svc`
+`(2, 2)`, each discovered (`discover_ws_exit` walks the window after the `write`, and checks that
+its event is the exit). Its self-check pins that shape; then the three chains. **Shown able to fail
+twice:** on `91d19a4`'s debugger the backward chain's answer #1 was `(1, 328, Bp)` where the
+oracle has `(2, 2, Bp)`, both exit-window hits lost (every answer given:
+`[None, (1, 328), None, None, None]`, `fr-red-prefix.log`); with only the exit park moved, it was
+`(2, 1, Bp)` for `(2, 2, Bp)` (above). Green with both (`fr-green-new.log`).
+
+**The Minors, all fixed:** #2, `reverse-continue`'s phase-2 comment "equal to the pre-step read
+except at a pending switch" now says that since §3a no switch is pending at an observed position;
+#3, `park_at_terminal`'s doc no longer says the exit syscall "is consumed"; #4, the oracle's `Key`
+doc says what it does not compare (which watch range a hit line named: sound while every arming
+watches one range); #5, the README's Hit-order paragraph no longer lists the terminal among
+arrivals.
+
+**Cost.** The exit park now single-steps the exit window once to measure it (memoized per session)
+and once more to seek to its end. The measured exit windows are short: `hello_dyn` **1,597**
+instructions, `threadrust` **4,038**, `watchthread` **4,018**, `sigcatch_dyn` **1,694** (each
+terminal's `where`, `fr-probe-dyn.log`); a whole `continue` to the exit costs **2.20–2.95 s user**
+on those four, cargo included. The dynamic debugger suites, re-run warm under `/usr/bin/time -l`
+against the close's gate logs (user + sys): `thread_watch_e2e` 11.27 s (was 12.53 s), `watch_dyn`
+7.10 s (6.02 s), `sigcatch_dyn_e2e` 7.59 s (7.40 s), `cpython_crash_e2e` 42.18 s (40.85 s; a crash,
+so its park position did not change), `hitorder_e2e` 46.39 s over 22 tests (45.97 s over 21),
+`debug_cli` 63.55 s (62.21 s, which included a compile), `crashy_cli` 14.78 s (13.31 s). Every
+difference is within ±1.5 s, both directions, on a shared machine, so no cost of the fix is
+visible at suite level; that it is small is inferred from the window lengths, not isolated.
+`continue` after the exit, which now steps the exit window and then crosses the exit `svc` into the
+final-memory comparison, diverged on none of the four dynamic guests, so no LL/SC pair (R14) that
+changes final memory sits in their exit windows.
+
+**Existing assertions: none moved.** `grep -rn "exited" crates/retrace/tests/*.rs | grep -a -i
+where` finds nothing, and every debugger suite passes unchanged in the re-run below.
+
+**The re-run gate.** The fix changed `crates/retrace` only (`git diff --stat 91d19a4` over the
+other seven crates is empty), so the fix wave re-ran that crate's chunks and clippy and reused the
+close's `ws` (173 over 26) and `box` (292 over 41). Predicted from source first (the ledger's
+`gate2/prediction.md`: 673 attributes, `hitorder_e2e` 21 → 22, so 666 over 141), then run by one
+background script with the same discipline and the same coverage assertion: 75 exit files — `bins`,
+the 73 `e2e-*` and `clippy` — all `0`; every e2e log one `Running` line and one `test result:`
+line, passed + ignored equal to its file's `#[test]` count; `e2e` **184** passed + 9 ignored over
+73, `bins` **17** over 1, clippy clean. 173 + 292 + 184 + 17 = **666**, ignored **9**, binaries
+26 + 41 + 73 + 1 = **141**. Wall-clock 13:49:45 → 14:08:57, 19 min 12 s, every test target
+recompiling because `tests/util/hits.rs` changed. Against M40, the reconciliation is the close's
+with one row moved: `hitorder_e2e` **+22** (was +21), so **+26** `#[test]` attributes and 640 + 26
+= **666**. §9's prediction was short by three, the plan's by two.
+
+**Parked-item triage:** every other item the controller parked for the review stays owed (below).
+F2 is plausibly closed by R11, since the review measured, through `oracle_fileio`'s backward chain,
+that the hardware fires at a window-entry pc under `run()`; the scoped-out `WatchSyscall` arm
+itself remains unverified.
+
+### Rulings
+
+The spec's R1–R8 stand, each now code or measurement:
+
+* **R1 — approach A** (switch when the event finishes), by the operator: Task 2, as above.
+* **R2 — scope is the fixes plus the hit oracle**, by the operator: held; nothing widened.
+* **R3 — the same-coordinate skips are in scope** (M3–M6, M6 found by t0): fixed at Tasks 3–4, and
+  M40's owed "R3 has no committed test" is discharged by `m3`, `m4` and the bp-on-store arming.
+* **R4 — an arrival's phase is `Bp`**, gdb's rule: Task 3, pinned by
+  `a_breakpoint_you_stepped_onto_is_reported_in_neither_direction` (sharpened by R17).
+* **R5 — `reverse-continue` from an arrival at `(n, 0)` finds a syscall write at `(n, 0)`**,
+  reversing M40's exclusion for arrivals only: Task 4, `m7`; M40's
+  `reverse_continue_from_the_syscall_hit_itself_finds_nothing_earlier` still passes.
+* **R6 — `threadrust` is the T3 fixture**: held; no asm threaded fixture was needed.
+* **R7 — `resolve_nth`'s breakpoint-loop error names the K it reached**: Task 3. No test asserts
+  on the new text (a grep finds it only in `debug.rs`); both measured routes to it, M2 and M8, now
+  succeed.
+* **R8 — the scoped-out watch recursion becomes a loop**: Task 3; `rf2` drives it (every hit
+  scoped out, run to the end).
+
+The plan's two:
+
+* **R9 — spec §5's Task 0 is folded into the steps that need each premise.** All three were
+  measured where they were needed: `step_armed`'s premise test passed (Task 1); the `threadrust`
+  cost was 8.56 s user red and 16.20 s user green, inside 120 s (Tasks 1–2); `blockedctx` 2/2
+  under approach A (Task 2).
+* **R10 — `continue` from a breakpoint on a faulting instruction crosses the fault the way it
+  crosses a trap**, replacing spec §3c's last paragraph. `rf1` was red at exit 5 and is green. A
+  *handled* fault is not verified (owed).
+
+Pre-flight (the controller's conflict scan, before Task 1):
+
+* **F1** — Task 2's check means "no event-consuming path constructs `Advance::Event` /
+  `Advance::WatchSyscall` outside `finish_event`"; after the rewrite the literal
+  `Ok(Advance::Event)` pattern no longer exists anywhere, so the check greps the constructors and
+  classifies each hit. Task 2 found constructions only in `finish_event`.
+* **F2** — the scan's scoped-out `WatchSyscall` arm does not do the boundary-breakpoint `pc()`
+  check the `Event` arm does. Pre-existing and preserved verbatim; out of scope (no oracle arming
+  is thread-scoped). Owed.
+* **F3** — Tasks 1–3 commit failing tests by design; a RED is a defect only if it fails for a
+  reason other than its t0 reason. All green by Task 4.
+
+Execution:
+
+* **R12 — the `discover_*` double VM.** Plan defect; `drop(s);` before each tail struct literal.
+  Cost if wrong: none (test-only lifetime).
+* **R13 — `oracle_threadrust` starts at `t.n_create`.** The hit list from `n_create` is complete on
+  principle (`t.child` needs the child; `t.resume` follows the trace's only 515, after
+  `n_create`); avoiding the LL/SC windows is a property of this guest, not of the landmark, and a
+  pair there would surface as a loud `oracle: advance: Divergence`, not a wrong list.
+  `tr_oracle_from`'s doc and `hits.rs`'s module doc name the limit. Cost if wrong: the `threadrust`
+  oracle covers `n_create` → end only, and every hit of that arming lies there.
+* **R14 — the LL/SC limit is outside hit accounting**, so under the plan's halt rule M41 does not
+  widen for it: it is a README Known limit and first on the owed list. Cost if wrong: the operator
+  wanted it fixed inside M41.
+* **R15 — Task 2's review Minors 1–4 are fixed** (prose only, one fix round); Minor 5 is parked.
+  Cost if wrong: a later cache change could unsettle a `k = 0` checkpoint silently.
+* **R16 — Task 3's deviations D1–D3 are accepted.** D1 placed `Phase` above `Exec`'s doc so `Exec`
+  keeps it; D2 is the arrival test's shadowed `ex` → `drop(ex);` (R12's class, no assertion
+  changed); D3 is a grep hit that is the brief's own doc text. Cost if wrong: none.
+* **R17 — Task 3's review I1 and I2 are fixed**: the arrival test arrives from a non-`Bp` park and
+  asserts the phase; the cursor resets only when the position moves, with the new
+  `a_zero_count_step_is_not_an_arrival` (+1 test, `--bins` 17, total 665). Minors 1 and 3 fixed in
+  the same round, Minor 2 carried to this close's sweep. Cost if wrong: one more `--bins` test than
+  the plan predicted, explained at the gate.
+* **R18 — the final review's Important #1 is fixed inside M41**: the exit terminal parks at
+  `(E, K_f)`, like a crash, and a sixth oracle arming has hits in the exit window (+1 test, total
+  666); Minors #2–#5 bundled; the `crates/retrace` chunks re-run, `ws`/`box` reused. The fix wave
+  also set every terminal's phase to `Watch` (above), measured as needed; accepted as R19. Cost if
+  wrong: every `continue` that reaches an exit single-steps the exit window (a probe and a seek,
+  memoized), measured small on the four dynamic guests, and unbounded in principle.
+* **R19 — a terminal is the end of the order, not an arrival.** Every terminal (exit, crash, fatal
+  signal) parks at phase `Watch`, the last phase at its coordinate, so it sits after every hit, a
+  breakpoint on the terminal instruction included. This supersedes spec R4's clause that a
+  terminal park is an arrival. `rf1` pins the crash half (`reverse-continue` from the crash finds
+  the breakpoint on the faulting instruction); the sixth arming pins the exit half. Cost if wrong:
+  `reverse-continue` from a crash now reports a breakpoint on the crashing instruction, which gdb
+  would not; the more useful answer, and the README says so.
+* **R20 — the successor order.** The controller proposed M42 = the LL/SC single-step limit and
+  M43 = the lldb seam, and the operator approved it on 2026-09-24. This section and spec §10 were
+  edited to match before merge. Cost if wrong: none.
+
+**R11 is unused**, deliberately: the plan and M40 both use "R11" as the name of the bug.
+
+### What stays owed
+
+* **The LL/SC exclusive-monitor limit (R14) — first in line**, because the debugger's own `seek`
+  is exposed, not only the oracle. A VM exit between an `LDX*` and its `STX*` fails the store; on
+  replay that is a path record never took. Measured on `threadrust` as a loud divergence six
+  landmarks later; a retry loop livelocking under single-step is inferred, never seen. The
+  investigator's sketch of a fix, not made: below the trace in `Box_::step()`/`run_one_for_step()`
+  and `run()`'s resume path, making the exit invisible to the guest (emulate the `STX*` as the
+  success it would natively be — sound for a single-vCPU, cooperatively scheduled guest — or run
+  the pair as one unit), with any new state carried in `BoxState`/`from_checkpoint`; and, cheaply,
+  a test-side guard that fails loud when `step_armed` retires an LL/SC half. Also inferred and
+  unmeasured: an asynchronous exit landing between a pair during a native `run()` would do the same
+  on record or replay alone.
+* **A handled fault under a breakpoint** — unverified. R10 covers crashes only; M40's T3 minor
+  stands.
+* **F2** — the scan's scoped-out `WatchSyscall` arm skips the boundary-breakpoint `pc()` check.
+  After M41 a hardware `Break` at `(n, 0)` is resolved from `kctx = 0` rather than skipped, so it
+  plausibly reports. The final review measured the hardware firing at a window-entry pc under
+  `run()` (`oracle_fileio`'s backward chain), so R11 plausibly closes it; no test drives the
+  scoped-out arm itself.
+* **A crashing store that also writes a watched range** — `watch X; continue; continue` hits the
+  crossing's `Advance::Watch` Err (exit 5). Pre-M41 also exited 5; outside R10.
+* **Early `?` exits in `cmd_continue` can leave a kept session armed.** Latent today, because an
+  Err aborts the script; live if the lldb seam (M43) keeps an `Exec` alive after an error.
+* **No test pins checkpointed-seek parity at a blocking boundary** (Task 2 review, Minor 5). It
+  holds by construction: the checkpoint is captured after `advance()` settles, and the CLI's cost
+  gate never caches `k = 0`.
+* **The zero-count-step test covers a Watch park only**, not a Sys park (Task 3 re-review). The fix
+  keys on `(n, k)` moving, so it is phase-agnostic.
+* **Task 1 review minor** — `enumerate_hits`' Watch arm has a redundant `clear_breakpoints`
+  (brief-verbatim, harmless).
+* **Anything the oracle found outside hit accounting** — the LL/SC limit above, and nothing else:
+  every arming's enumeration (from landmark 1 on `watchsweep` and `fileio`, from `n_create` on
+  `threadrust`) completes without a divergence or a fault, at Task 1 as in this close's gate.
+* **M40's owed items:** a faster `crc32`; the forward-replay floor; `reverse-stepi`'s cost. None
+  touched.
+* **M40's review minors not discharged here:** `discover_target`/`watchsweep_target` duplication
+  (M41's `discover_ws` adds a third copy of the same loop); `decode_count()` is a call count;
+  `resolve_nth`'s seven parameters (spec §7 kept it at seven, so the phase lives in `Exec`); a
+  handled fault under a breakpoint (above); both removal sites ignoring `vm.unmap`'s result;
+  `backingfree`'s coverage; `place_fixed` case 3's panic leak; `CheckpointCache::decoded`'s exact
+  `Path` equality; no test drives the single-trace assert. **Discharged by M41:** R11 (forward
+  `continue`'s skip, M1/M2), T3's thread-switch blind spot and its phantom (M8), and "R3 has no
+  committed test" (`m3`, `m4`, the bp-on-store arming).
+* **M39's and M38's carried lists**, as M40 carried them — none touched.
+* **The lldb seam is M43's; M42 is the LL/SC single-step limit above.** The controller proposed
+  that order on 2026-09-24, after M41 found the limit, and the operator approved it (R20): lldb
+  steps far more than a script does, so stepping is made sound first. M41 is the seam's precondition, and the latent `?`-exit item above is the first
+  thing it will meet.
+
+**Superseded, not owed — with this section as their forward pointer.** Spec §3c's last paragraph
+("a fault … propagates as the same error it does today"; R10); spec §5's separate Task 0 (R9);
+spec §9's ≈ 663 / 0 / 9 over 141 and the plan's 664 (see the gate); the plan's `discover_ws` and
+`discover_fio` (R12); its `tr_oracle_from` returning 1 (R13); its arrival test's shadowed `ex`
+(R16) and the same test's assertions that could not fail (R17 I1); its `stepi` rule that reset the
+cursor on a zero-count step (R17 I2); its Task 5 "14 → 16" for `--bins` (17); spec §3b's
+"a terminal park" among the arrivals that take phase `Bp` (R18: a terminal takes `Watch`); and the
+close's own 665 / 0 / 9, which the fix wave's sixth arming made 666.

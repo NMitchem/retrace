@@ -36,11 +36,11 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
-  14 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in **none** of
+  17 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in **none** of
   the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
   with no `--test` filter, reaches them — which is why closes before M17 are not owed a
   correction. Leaving it out silently costs
-  14 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
+  17 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 
@@ -90,7 +90,10 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   Python, where `cpython_crash_e2e` guards nothing), `watchsweep_e2e` (M40: a guest whose one
   store instruction sweeps a buffer before reaching the watched element, so `continue` and
   `reverse-continue` must resolve a watch hit by address, not by pc — the class that put rung 8's
-  `continue` 1.7 M instructions early). Run one with
+  `continue` 1.7 M instructions early), `hitorder_e2e` (M41: named regressions for every hit the
+  debugger used to skip or invent, the thread-at-a-boundary invariant, and the hit oracle —
+  `tests/util/hits.rs` single-steps a recording with everything armed and checks
+  `continue`/`reverse-continue` chains against every hardware stop). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -219,10 +222,12 @@ A guest may be multi-threaded even though retrace's core is not. `bsdthread_crea
 the box, never forwarded**: `Box_` holds a thread table of register contexts, and a cooperative,
 block-driven scheduler switches only when a thread blocks or exits. That choice is a pure function
 of the guest's own syscall sequence, so record and replay produce identical schedules with **nothing
-recorded** and no trace-format change — symmetry rule 2 doing its job. The switch reuses the
-save/restore discipline the PAC signing oracle and `flush_guest_tlb` already established. A thread
-blocks for **three** reasons, and the correlation key is not the same for all of them:
-`__ulock_wait` (515) / `__ulock_wake` (516) are correlated by **address equality**
+recorded** and no trace-format change — symmetry rule 2 doing its job. Since M41 a replayed
+boundary shows the thread that runs next: `finish_event` settles the switch
+(`Box_::settle_schedule`) instead of leaving it to the next `run()`/`step()` entry. The switch
+reuses the save/restore discipline the PAC signing oracle and `flush_guest_tlb` already
+established. A thread blocks for **three** reasons, and the correlation key is not the same for
+all of them: `__ulock_wait` (515) / `__ulock_wake` (516) are correlated by **address equality**
 on `pthread + 0x34` — measured in both `__pthread_join` and `__pthread_joiner_wake`, so no
 address→thread-index mapping is needed; the mach semaphore pair `semaphore_wait_trap` (`-36`) / `semaphore_signal_trap`
 (`-33`) is correlated by **port name**, since what that trap carries is a name in retrace's own IPC
