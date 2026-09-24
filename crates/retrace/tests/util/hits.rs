@@ -7,10 +7,11 @@
 //! `Box_::step()` switches threads on entry, so the oracle sees the running thread whether or not
 //! M41 §3a's settle is in place: it is independent of the fix it checks.
 //!
-//! The oracle is exact only over windows with no load/store-exclusive pair. A VM exit between
-//! `ldxr` and its paired `stxr` — a step, or a breakpoint stop — fails the store-exclusive, so a
-//! caller must start past any such pair. One that is crossed anyway shows up as a replay
-//! divergence, not a silent miscount (M41 t1).
+//! Since M42 a pair no longer limits the oracle. Stepping an exclusive pair keeps its store
+//! (`Box_`'s shadow monitor), so every hit here is a HARDWARE stop, or the stop the emulator raises
+//! in its place at an emulated store-exclusive, in hardware order (`Box_::raise_debug_stop`). The
+//! llsc fixture's ground-truth lists (`llsc_e2e`) pin those raised stops against the fixture
+//! source, independently of the emulator.
 use retrace_core::{Advance, Armed, ReplaySession};
 use std::path::Path;
 

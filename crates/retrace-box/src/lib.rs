@@ -2707,6 +2707,9 @@ impl Box_ {
         }
         self.excl = None;
         loop {
+            // M42 §3d: where this entry resumes the guest. That entry's ERET cleared the monitor, so
+            // a native stop cannot infer a load-exclusive at or before a point after it.
+            let entry_pc = self.pc();
             let e = self.vcpu.run().expect("hv_vcpu_run");
             if e.reason != EXIT_EXCEPTION { self.note_exit(false); continue; } // vtimer/canceled: control-plane only
             match ec_of(e.syndrome) {
@@ -2796,8 +2799,13 @@ impl Box_ {
                     // faults are serviced by the record/replay dispatch via `page_in_cache` (file →
                     // walk → re-sign → map, identical on record and replay), so surface the fault IPA
                     // as `Stop::Other` for it to route.
-                    self.note_exit(matches!(ec_of(e.syndrome), Ec::Breakpoint | Ec::Watchpoint));
                     self.last_far = e.virtual_address;
+                    if matches!(ec_of(e.syndrome), Ec::Breakpoint | Ec::Watchpoint) {
+                        self.note_exit(true);
+                        self.infer_excl(entry_pc);
+                    } else {
+                        self.note_exit(false);
+                    }
                     return Stop::Other { esr: e.syndrome };
                 }
             }
@@ -2973,6 +2981,39 @@ impl Box_ {
         self.vcpu.set_reg(reg::PC, pc + 4).unwrap();
         self.excl = None;
         Stop::Step
+    }
+
+    /// M42 §3d: a breakpoint or watchpoint stop taken NATIVELY by `run()` at `P = pc()`.
+    ///
+    /// If a load-exclusive ran natively since the last entry, the ERET that resumes the guest breaks
+    /// its pair just as a step does, so the shadow is inferred here. This is M42's one heuristic.
+    /// Every condition below that fails infers nothing. That is the pre-M42 behaviour, never a wrong
+    /// emulation.
+    fn infer_excl(&mut self, entry_pc: u64) {
+        debug_assert!(self.excl.is_none(), "run()'s native loop runs only with the shadow clear (§3e)");
+        let p = self.pc();
+        let page = p & !(GRANULE as u64 - 1);
+        let mut words = Vec::with_capacity(16);
+        let mut a = p;
+        while words.len() < 16 && a > page {
+            a -= 4;
+            let Some(w) = self.insn_at(a) else { break };
+            words.push(w);
+        }
+        let Some((i, ld)) = excl::scan_back(&words) else { return };
+        let l = p - 4 * (i as u64 + 1);
+        // 1. The last entry came after the load, and that entry's ERET cleared the monitor.
+        if entry_pc > l && entry_pc <= p { return; }
+        // 2. A base overwritten by the load no longer names the marked address.
+        if excl::base_aliases_dest(ld) { return; }
+        let ExclInsn::Load { size, pair, rt, rt2, rn } = ld else { unreachable!() };
+        let va = self.base_reg(rn) & excl::TAG_MASK;
+        // 4. The target maps.
+        let Some(bytes) = self.va_to_ipa(va).and_then(|ipa| self.read_guest_checked(ipa, excl::access_len(size, pair)))
+            else { return };
+        // 3. The destinations still hold what is there.
+        if !excl::dests_match(ld, self.xreg(rt), self.xreg(rt2), &bytes) { return; }
+        self.excl = Some(Excl { va, size, pair, loaded: bytes, by: SetBy::Inferred });
     }
 
     /// One `hv_vcpu_run` classification for `step()`. Mirrors `run()`, but keyed on the DIRECT-EL2

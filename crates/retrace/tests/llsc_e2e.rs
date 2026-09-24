@@ -435,3 +435,121 @@ fn oracle_a3_lists_every_hit_the_source_implies() {
         (8, 0, Phase::Bp, sym("g_stx")), (10, 10, Phase::Bp, sym("i_svc")),
     ]);
 }
+
+// ---- Inference at a native debug stop (spec §3d) -----------------------------------------------
+
+/// Replay a session forward to the end: exit 0 with the recorded stdout. The session must come from
+/// `open` or `seek`, which replay from the snapshot and so collect every write; a `from_checkpoint`
+/// session starts with an empty stdout.
+fn finish(mut s: ReplaySession) {
+    loop {
+        if let Advance::Exited(r) = s.advance().unwrap_or_else(|d| panic!("diverged at landmark {}: {}", d.landmark, d.detail)) {
+            assert_eq!((r.outcome, r.stdout.as_slice()), (Outcome::Exit { code: 0 }, STDOUT));
+            return;
+        }
+    }
+}
+
+/// E2: a native breakpoint ON (a)'s stxr. The ldxr ran natively, and the resuming ERET would break
+/// the pair, so the shadow is inferred here and stepping off emulates the store (M41's
+/// `diag_q4_break_between`).
+#[test]
+fn a_native_breakpoint_on_the_store_infers_the_shadow_and_the_store_lands() {
+    let mut s = ReplaySession::open(trace()).unwrap();
+    s.arm_breakpoints(&[sym("a_stx")]);
+    assert!(matches!(s.advance().unwrap(), Advance::Break));
+    assert_eq!(s.pc(), sym("a_stx"));
+    let ex = s.dbg_excl().expect("inferred at the native stop");
+    assert_eq!((ex.va, ex.size, ex.pair, ex.by), (sym("cella"), 4, false, SetBy::Inferred));
+    s.clear_breakpoints();
+    s.step_insns(1).unwrap();
+    assert_eq!(s.read_mem(sym("cella"), 4), Some(vec![0x42, 0x42, 0, 0]));
+    assert_eq!(s.dbg_excl(), None);
+    finish(s);
+}
+
+/// E2 between the halves: a breakpoint on (a)'s cbnz. The inferred shadow survives the step off it,
+/// and run()'s prologue emulates the stxr.
+#[test]
+fn a_native_breakpoint_between_the_halves_infers_the_shadow() {
+    let mut s = ReplaySession::open(trace()).unwrap();
+    s.arm_breakpoints(&[sym("a_ldx") + 4]);
+    assert!(matches!(s.advance().unwrap(), Advance::Break));
+    assert!(s.dbg_excl().is_some());
+    s.clear_breakpoints();
+    finish(s);
+}
+
+/// E3: a native watch stop at (b)'s stlxr infers the shadow, and stepping over the store emulates it.
+/// Without inference the store failed and the loop re-entered: 4 entries against the recorded 3.
+#[test]
+fn a_native_watch_stop_on_the_retry_store_infers_the_shadow() {
+    let mut s = retrace_core::seek(trace(), 2, 0).unwrap(); // past window 1's write, which ends the first advance
+    assert_eq!(s.read_mem(sym("ctr"), 8), Some(vec![0; 8]));
+    s.arm_watchpoints(&[(sym("ctr"), 8)]);
+    assert!(matches!(s.advance().unwrap(), Advance::Watch { .. }));
+    assert_eq!(s.pc(), sym("b_stx"));
+    assert_eq!(s.dbg_excl().map(|e| (e.va, e.size, e.by)), Some((sym("ctr"), 8, SetBy::Inferred)));
+    s.clear_watchpoints();
+    s.step_insns(1).unwrap();
+    assert_eq!(s.read_mem(sym("ctr"), 8), Some(1u64.to_le_bytes().to_vec()));
+    finish(s);
+}
+
+/// Review Focus 4: a stop ON the load-exclusive infers nothing. It has not run yet, and the scan
+/// back from (b)'s ldaxr meets (a)'s write svc before any load.
+#[test]
+fn a_native_stop_on_the_load_itself_infers_nothing() {
+    let mut s = retrace_core::seek(trace(), 2, 0).unwrap();
+    s.arm_breakpoints(&[sym("b_ldx")]);
+    assert!(matches!(s.advance().unwrap(), Advance::Break));
+    assert_eq!(s.pc(), sym("b_ldx"));
+    assert_eq!(s.dbg_excl(), None);
+}
+
+/// (e): the scan meets the `clrex` first, so nothing is inferred, and the store fails as recorded.
+#[test]
+fn a_native_stop_after_clrex_infers_nothing() {
+    let mut s = retrace_core::seek(trace(), 5, 0).unwrap();
+    s.arm_breakpoints(&[sym("e_stx")]);
+    assert!(matches!(s.advance().unwrap(), Advance::Break));
+    assert_eq!(s.dbg_excl(), None);
+    s.clear_breakpoints();
+    finish(s);
+}
+
+/// (f): the emulated timebase read re-entered the guest AT f_stx. That entry's ERET cleared the
+/// monitor, so the entry check infers nothing, and the store fails as recorded (status 1).
+#[test]
+fn a_native_stop_after_a_reentry_inside_the_pair_infers_nothing() {
+    let mut s = retrace_core::seek(trace(), 6, 0).unwrap();
+    s.arm_breakpoints(&[sym("f_stx")]);
+    assert!(matches!(s.advance().unwrap(), Advance::Break));
+    assert_eq!(s.pc(), sym("f_stx"));
+    assert_eq!(s.dbg_excl(), None, "the last entry was at f_stx itself, inside (ldxr, stxr]");
+    s.clear_breakpoints();
+    finish(s);
+}
+
+// ---- The oracle's three chains on llsc (M41 §3e) -----------------------------------------------
+
+fn arming(bps: &[u64], ws: &[(u64, u64)]) -> String {
+    bps.iter().map(|b| format!("break {b:#x}")).chain(ws.iter().map(|(a, l)| format!("watch {a:#x} {l}")))
+        .collect::<Vec<_>>().join("; ")
+}
+
+#[test]
+fn oracle_a1_chains() {
+    let (bps, ws) = a1();
+    hits::check_chains(ts(), &arming(&bps, &ws), &hits::enumerate_hits(trace(), &bps, &ws, 1));
+}
+#[test]
+fn oracle_a2_chains() {
+    let (bps, ws) = a2();
+    hits::check_chains(ts(), &arming(&bps, &ws), &hits::enumerate_hits(trace(), &bps, &ws, 1));
+}
+#[test]
+fn oracle_a3_chains() {
+    let (bps, ws) = a3();
+    hits::check_chains(ts(), &arming(&bps, &ws), &hits::enumerate_hits(trace(), &bps, &ws, 1));
+}
