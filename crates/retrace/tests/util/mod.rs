@@ -5,6 +5,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
+/// M41: the debugger's hit oracle and the checks built on it (see `hits.rs`).
+pub mod hits;
+
 // `.cargo/config.toml`'s `runner` ad-hoc codesigns the binary cargo invokes
 // directly (the test harness) with the hypervisor entitlement, but CARGO_BIN_EXE_retrace
 // is a separate binary that this test spawns itself — it never passes through
