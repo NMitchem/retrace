@@ -79,7 +79,11 @@ it, cited as "t0 M1–M8". Read both before starting.
   - heredocs whose text mentions git.
 
   Keep shell commands simple: one command per line where you can. To capture cargo's exit code
-  before any pipe, write the log with `> file 2>&1`, then run `echo "exit=$?"` as the next command.
+  before any pipe, write the log with `> file 2>&1; echo "exit=$?"` in ONE shell call: each tool
+  call is a fresh shell, so an `echo` in a separate call reports 0. The guard also refuses
+  `/usr/bin/time -l cargo …`; put that line in a script under the session scratchpad and run the
+  script (Task 2 measured the baselines that way). `--no-fail-fast` is a cargo flag and goes
+  BEFORE `--`; libtest rejects it after.
 - **An implementer never dispatches subagents.**
 - **Execution rulings are numbered from R13.** R1–R8 are the spec's. R9–R12 are this plan's.
 
@@ -1035,8 +1039,7 @@ fn every_position_of_the_branch_out_and_exit_windows_replays() {
 - [ ] **Step 6: Run the file and ledger every RED**
 
 ```bash
-cargo test -p retrace --test llsc_e2e -- --test-threads=1 --no-fail-fast > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t2-red.log 2>&1
-echo "exit=$?"
+cargo test -p retrace --test llsc_e2e --no-fail-fast -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t2-red.log 2>&1; echo "exit=$?"
 grep -a -e '^test ' -e 'test result' .superpowers/sdd/2026-09-24-retrace-m42-llsc/t2-red.log
 ```
 
@@ -1776,12 +1779,9 @@ In `run()`, between the M15 `debug_assert!` and `loop {`:
 - [ ] **Step 7: Run everything this task touches**
 
 ```bash
-cargo test -p retrace-box --lib -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-box-lib.log 2>&1
-echo "exit=$?"
-cargo test -p retrace-box --test step --test checkpointparity --test checkpoint --test threads --test restoreparity -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-box.log 2>&1
-echo "exit=$?"
-cargo test -p retrace --test llsc_e2e -- --test-threads=1 --no-fail-fast > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-llsc.log 2>&1
-echo "exit=$?"
+cargo test -p retrace-box --lib -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-box-lib.log 2>&1; echo "exit=$?"
+cargo test -p retrace-box --test step --test checkpointparity --test checkpoint --test threads --test restoreparity -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-box.log 2>&1; echo "exit=$?"
+cargo test -p retrace --test llsc_e2e --no-fail-fast -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-llsc.log 2>&1; echo "exit=$?"
 grep -a -e '^test ' -e 'test result' .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-llsc.log
 ```
 
@@ -1809,12 +1809,9 @@ syscall exit that has already cleared the shadow. Say so in the report.
 - [ ] **Step 8b: No existing suite moved**
 
 ```bash
-cargo test -p retrace --test debug_cli --test watch_cli --test watch --test hitorder_e2e --test watchsweep_e2e --test reverse_debug_e2e --test checkpoint_seek --test crashy_cli --test thread_watch_e2e -- --test-threads=1 --no-fail-fast > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-stepping-suites.log 2>&1
-echo "exit=$?"
-cargo test -p retrace-core -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-core.log 2>&1
-echo "exit=$?"
-cargo test -p retrace --bins -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-bins.log 2>&1
-echo "exit=$?"
+cargo test -p retrace --test debug_cli --test watch_cli --test watch --test hitorder_e2e --test watchsweep_e2e --test reverse_debug_e2e --test checkpoint_seek --test crashy_cli --test thread_watch_e2e --no-fail-fast -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-stepping-suites.log 2>&1; echo "exit=$?"
+cargo test -p retrace-core -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-core.log 2>&1; echo "exit=$?"
+cargo test -p retrace --bins -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t3-bins.log 2>&1; echo "exit=$?"
 ```
 
 Expected: all green. A failure here is the halt rule "an existing test's output moved": stop and
@@ -1952,8 +1949,7 @@ only caller:
 - [ ] **Step 3: Run**
 
 ```bash
-cargo test -p retrace --test llsc_e2e -- --test-threads=1 --no-fail-fast > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t4-llsc.log 2>&1
-echo "exit=$?"
+cargo test -p retrace --test llsc_e2e --no-fail-fast -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t4-llsc.log 2>&1; echo "exit=$?"
 grep -a -e '^test ' -e 'test result' .superpowers/sdd/2026-09-24-retrace-m42-llsc/t4-llsc.log
 ```
 
@@ -2202,7 +2198,7 @@ fn oracle_a3_chains() {
 `seek(trace(), n, 0)` stops before window `n`, so each test's `advance()` runs natively only
 through window `n`.
 
-Run: `cargo test -p retrace --test llsc_e2e -- --test-threads=1 --no-fail-fast`
+Run: `cargo test -p retrace --test llsc_e2e --no-fail-fast -- --test-threads=1`
 Expected: the four inference tests that expect a shadow FAIL (`dbg_excl()` is None, or a divergence
 at `finish`). The three "infers nothing" tests PASS already. The backward (and any still-red forward) M4–M6 tests and the three
 `oracle_*_chains` fail: the chains die at the 600 s bound or with exit 5. **The chains can take up
@@ -2284,10 +2280,8 @@ exact only over windows with no load/store-exclusive pair" with:
 - [ ] **Step 4: Run, and show the entry check able to fail**
 
 ```bash
-cargo test -p retrace-box --lib -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t5-box-lib.log 2>&1
-echo "exit=$?"
-cargo test -p retrace --test llsc_e2e -- --test-threads=1 --no-fail-fast > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t5-llsc.log 2>&1
-echo "exit=$?"
+cargo test -p retrace-box --lib -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t5-box-lib.log 2>&1; echo "exit=$?"
+cargo test -p retrace --test llsc_e2e --no-fail-fast -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t5-llsc.log 2>&1; echo "exit=$?"
 grep -a -e '^test ' -e 'test result' .superpowers/sdd/2026-09-24-retrace-m42-llsc/t5-llsc.log
 ```
 
@@ -2376,8 +2370,7 @@ Temporarily change `tr_oracle_from`'s body to `1`. Then run:
 
 ```bash
 cargo test -p retrace --test hitorder_e2e --no-run
-/usr/bin/time -l cargo test -p retrace --test hitorder_e2e oracle_threadrust -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t6-oracle-from-1.log 2>&1
-echo "exit=$?"
+/usr/bin/time -l cargo test -p retrace --test hitorder_e2e oracle_threadrust -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/t6-oracle-from-1.log 2>&1; echo "exit=$?"
 grep -a -e 'user' -e 'sys' -e 'test result' .superpowers/sdd/2026-09-24-retrace-m42-llsc/t6-oracle-from-1.log
 ```
 
@@ -2432,12 +2425,9 @@ Write the predicted total before running anything.
 - [ ] **Step 2: Run the chunked gate** (CLAUDE.md: never one command, each chunk `--no-fail-fast`)
 
 ```bash
-cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/gate-ws.log 2>&1
-echo "exit=$?"
-cargo test -p retrace-box --no-fail-fast -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/gate-box.log 2>&1
-echo "exit=$?"
-cargo test -p retrace --bins -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/gate-bins.log 2>&1
-echo "exit=$?"
+cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/gate-ws.log 2>&1; echo "exit=$?"
+cargo test -p retrace-box --no-fail-fast -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/gate-box.log 2>&1; echo "exit=$?"
+cargo test -p retrace --bins -- --test-threads=1 > .superpowers/sdd/2026-09-24-retrace-m42-llsc/gate-bins.log 2>&1; echo "exit=$?"
 ```
 
 Then run one `cargo test -p retrace --test <name> -- --test-threads=1` per integration-test target
@@ -2445,8 +2435,7 @@ in `crates/retrace/tests/` (list them with `ls crates/retrace/tests/*.rs`), each
 `gate-e2e-<name>.log`, recording each `exit=`. Then:
 
 ```bash
-cargo clippy --workspace --all-targets -- -D warnings > .superpowers/sdd/2026-09-24-retrace-m42-llsc/gate-clippy.log 2>&1
-echo "exit=$?"
+cargo clippy --workspace --all-targets -- -D warnings > .superpowers/sdd/2026-09-24-retrace-m42-llsc/gate-clippy.log 2>&1; echo "exit=$?"
 ```
 
 Sum passed, failed, ignored and binaries from the `test result` lines (`grep -a`). Reconcile against
