@@ -330,6 +330,27 @@ fn a_syscall_between_the_halves_clears_the_shadow() {
     assert_eq!(s.pc(), sym("g_stx"));
 }
 
+/// (g), at the park: stepping the `svc` leaves the guest at EL1 on the unconsumed trap (the
+/// debugger's `Stepped::AtTrap`), and the shadow must already be clear THERE, before any
+/// `advance()`. The two tests above read the shadow only after `advance()`, where `run()`'s own
+/// post-prologue drop would clear it anyway, so neither can see this clear go missing. If a shadow
+/// survived this park, the next `run()` would single-step the guest at EL1.
+#[test]
+fn the_syscall_trap_clears_the_shadow_before_the_trap_is_consumed() {
+    let mut s = retrace_core::seek(trace(), 7, 4).unwrap(); // (g)'s ldxr has retired
+    assert!(s.dbg_excl().is_some(), "precondition: set by the stepped ldxr");
+    // The `mov x16` retires; stepping the `svc` then ends the window, unconsumed, parked at EL1.
+    let e = s.step_insns(2).unwrap_err();
+    assert!(e.contains("window 7 ends after"), "{e}");
+    assert_eq!(s.dbg_excl(), None, "the trapped svc's step exit clears the shadow at the park");
+    // The park is still usable: the trap is consumed and the run finishes as recorded.
+    let (outcome, out) = loop {
+        if let Advance::Exited(r) = s.advance().unwrap() { break (r.outcome, r.stdout); }
+    };
+    assert_eq!(outcome, Outcome::Exit { code: 0 });
+    assert_eq!(out, STDOUT);
+}
+
 // ---- Review Focus (plan) -----------------------------------------------------------------------
 
 /// Review Focus 1: step into the pair, step back, then continue. `reverse-stepi` re-seeks by
