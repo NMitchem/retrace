@@ -836,8 +836,9 @@ impl<'a> Exec<'a> {
         }
     }
 
-    /// Run backward to the latest hit — breakpoint, hardware watch, or syscall watch — strictly
-    /// before the current position P (M40, spec §3b). Replay only runs forward, so this makes ONE
+    /// Run backward to the last hit — breakpoint, hardware watch, or syscall watch — before the
+    /// cursor P = (n, k, phase) in M41's hit order (spec §3b, §3d; M40 §3b for the one pass).
+    /// Replay only runs forward, so this makes ONE
     /// forward pass from landmark 1 and remembers the last qualifying hit:
     /// - phase 1 runs every window before P's at native speed, stepping over each hit in place;
     /// - phase 2 single-steps P's own window up to P, so exactly the hits before P count.
@@ -918,12 +919,11 @@ impl<'a> Exec<'a> {
                         s.arm_watchpoints(&ws);
                     }
                     Advance::WatchSyscall { watched, thread } => {
-                        // A syscall write's coordinate is (n, 0) — the post-event boundary this
-                        // very advance() just crossed into. It counts only when that is strictly
-                        // before P (spec §3b): landing exactly ON P (pn == n, pk == 0) is not
-                        // "before" it, and this loop's own `while s.landmark() < pn` guard has
-                        // already let that landing through once, so it must be re-checked here.
-                        if (n, 0u64) < (pn, pk) && self.watch_thread_matches(watched, thread) {
+                        // M41 §3d: a syscall write sits at (n, 0, Sys). It is before P unless P is
+                        // that very hit (the cursor at (pn, 0, Sys)) — M40's stuck-loop guard (its
+                        // Ruling 2) is that one case of this comparison. An ARRIVAL at (n, 0) has
+                        // phase Bp, so the write just behind it counts (t0 M6, M7; spec R5).
+                        if (n, 0u64, Phase::Sys) < (pn, pk, pphase) && self.watch_thread_matches(watched, thread) {
                             last = Some((n, RHit::WatchSys { watched }));
                         }
                     }
@@ -965,27 +965,36 @@ impl<'a> Exec<'a> {
                             "reverse-continue: window {pn} ended after {k} instruction(s), before P's {pk}")),
                     }
                 }
+                // M41 §3d: at K = pk itself, a breakpoint comes before a cursor that is ON the
+                // store's watch (t0 M4). The pc is read before any step, as the loop above does.
+                if pphase == Phase::Watch {
+                    let pc = s.pc();
+                    if bps.contains(&pc) {
+                        bp_ord += 1;
+                        last = Some((pn, RHit::Bp { pc, ord: bp_ord }));
+                    }
+                }
             }
         } // the scan session drops here: one VM per process
         // Defence (M40 final review): the scan only records hits strictly before P, so a resolved
         // coordinate at or after P means scan and resolver disagree. Fail loud rather than reseek
         // FORWARD under a command whose whole contract is "backward".
-        let before_p = |n: usize, k: u64| -> Result<(), String> {
-            if (n, k) < (pn, pk) { Ok(()) } else {
-                Err(format!("reverse-continue: resolved ({n}, {k}) is not before P ({pn}, {pk})"))
+        let before_p = |n: usize, k: u64, ph: Phase| -> Result<(), String> {
+            if (n, k, ph) < (pn, pk, pphase) { Ok(()) } else {
+                Err(format!("reverse-continue: resolved ({n}, {k}, {ph:?}) is not before P ({pn}, {pk}, {pphase:?})"))
             }
         };
         match last {
             Some((n, RHit::Bp { pc, ord })) => {
                 let k = resolve_nth(self.trace, &mut self.cache, n, 0, HitKind::Break(&bps), ord, pc)?;
-                before_p(n, k)?;
+                before_p(n, k, Phase::Bp)?;
                 let a = self.annot(pc);
                 line(out, format_args!("hit {pc:#x} at ({n}, {k}){a}"))?;
                 self.reseek(n, k) // phase Bp
             }
             Some((n, RHit::Watch { watched, pc, ord })) => {
                 let k = resolve_nth(self.trace, &mut self.cache, n, 0, HitKind::Watch(&ws), ord, pc)?;
-                before_p(n, k)?;
+                before_p(n, k, Phase::Watch)?;
                 let a = self.annot(pc);
                 line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k}){a}"))?;
                 self.reseek(n, k)?;
@@ -993,6 +1002,7 @@ impl<'a> Exec<'a> {
                 Ok(())
             }
             Some((n, RHit::WatchSys { watched })) => {
+                before_p(n, 0, Phase::Sys)?;
                 line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
                 self.reseek(n, 0)?;
                 self.phase = Phase::Sys;
