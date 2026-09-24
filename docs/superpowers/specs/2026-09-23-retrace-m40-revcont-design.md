@@ -1,0 +1,239 @@
+# M40-revcont — `reverse-continue` in one pass, watch hits resolved by address, memory that is freed
+
+**Date:** 2026-09-23. **Branch:** `m40-revcont` from `main` at the M39 merge (`786bf2b`).
+**Companion:** `2026-09-23-retrace-m40-revcont-measurements.md` (t0, taken before this spec).
+§2 cites it, and nothing in this document claims a measurement the companion does not carry.
+**Approach:** option A of three, chosen by the operator on 2026-09-23 (R1).
+
+## 1. Purpose
+
+M39 reached rung 8: real CPython runs a script, crashes on a pointer it computed, and
+`reverse-continue` walks back to the store. But that walk took **3.42 hours**, and two of them at
+once exhausted 24 GB of RAM and 63 GB of swap. The headline demo is *reachable* but not *usable*,
+and M39's demo transcript (Task 7c) was deferred here because producing it meant re-measuring the
+defect (M39 R17). This milestone makes the demo usable. On the way it fixes a wrong answer the
+debugger has been giving since M5: forward `continue` with a watchpoint can name an instruction
+that never writes the watched memory.
+
+It changes only the debugger's positioning (`crates/retrace/src/debug.rs`,
+`crates/retrace-core`'s session and checkpoint layer) and `Box_`'s memory ownership. It adds no
+dispatch arm, does not change the trace format, and does not touch record.
+
+## 2. What was measured before this spec was written
+
+The companion is the record. In summary, for the rung-8 recording (1,146 landmarks, P = (1144, 2470)):
+
+- **There are 5 real writes to the watched cell** (M5). One native pass finds all 5, stepping over
+  each hit in place, in **11.55 s CPU**.
+- **`reverse-continue` pays ~20.8 s CPU per iteration and iterates over false hits** (M2). All 19
+  capped iterations were the same store pc in window 1126, mostly 6 instructions apart.
+  `resolve_hit_k` matches by **pc**, and that store ran **183 times** in window 1126 before
+  reaching the watched cell (M6).
+- **Forward `continue` resolves to the wrong instruction** (M7): it printed `resolved (1126, 29627)`,
+  but the real write is at (1126, 1,765,682), and `stepi` over the "hit" leaves the cell unchanged.
+- **Stepping with a watchpoint armed resolves exactly** (M6): a clean pre-retire `EC=0x34` stop at
+  the real write, a clean retire after disarming, and clean stepping after re-arming. The code's
+  "never armed while single-stepping" rule was an unmeasured analogy with breakpoints.
+- **Every session re-decodes the whole 97.6 MB trace** (M3): 64 % in a bit-at-a-time `crc32`,
+  36 % in bincode.
+- **Every dropped `Box_` leaks its guest memory** (M4): ~55 MB and ~1,580 mappings per session,
+  because `alloc_pages` `mmap`s and `Box_` has no `Drop`.
+
+## 3. Design
+
+### 3a. One exact resolver for every hit
+
+Replace `resolve_hit_k(trace, cache, n, pc, from_k)` with a resolver that takes a **hit kind and an
+ordinal**: "the position of the *m*-th hit of this kind in window `n`, counting from `from_k`":
+
+- **Watch hits:** single-step from `(n, from_k)` **with the watchpoints armed**. A step that stops
+  with the watchpoint exception class is a hit. The *m*-th is the answer (pre-retire, K = steps
+  retired so far). Each earlier hit is stepped over in place (disarm, one step, re-arm).
+- **Breakpoint hits:** single-step with breakpoints **disarmed** and compare the pc against the
+  armed addresses before each step. The *m*-th match is the answer. For a breakpoint, pc equality
+  *is* the definition of a hit, so this was never wrong. It only needs the ordinal so a breakpoint
+  in a loop costs one resolution rather than one per pass through the loop.
+
+This needs one new primitive on `ReplaySession`: a single step that **reports** a watchpoint stop
+instead of treating it as a fault. Today `step_insns` hands any `Stop::Other` to `page_in_cache` and
+`commit_reserved_page`, which read the FAR as an IPA. The new step must classify the exception
+first. A watchpoint stop is never handed to those two functions. `step_insns`, `window_len_here` and
+every other existing caller keep their contracts unchanged.
+
+`arm_hw_watchpoint`'s "NEVER while single-stepping" doc is **superseded for watchpoints**, citing
+M6 (R2). It **stands for breakpoints**, whose pre-retire fire at the current pc would repeat
+forever.
+
+### 3b. `reverse-continue` is one forward pass plus one resolution
+
+Today the loop opens two sessions per hit and resolves every hit it passes. The new command:
+
+1. **Scan.** One session from `(1, 0)` with the breakpoints and watchpoints armed. It `advance()`s
+   at native speed until it reaches landmark `pn`. At each hit it records a candidate
+   `(n, kind, ordinal-in-window, thread, watched/pc)` and steps over the hit in place. A syscall
+   write to a watched range (`Advance::WatchSyscall`) is a candidate at `(n, 0)`, as today.
+2. **The partial window.** From `(pn, 0)` it single-steps exactly `pk` instructions, with watches
+   armed and breakpoint pcs compared, so hits before P in P's own window are counted exactly and
+   hits at or after P are not. If P is a terminal position (parked at the exit or crash), the scan
+   simply runs to the end.
+3. **Choose.** The **last** candidate that passes the thread filter is the answer. Scoped-out hits
+   still occupy ordinals (R4). This preserves M15 Task 8's rule that the scan walks *through* a
+   scoped-out hit.
+4. **Resolve** only that candidate with §3a. Nothing needs resolving for a `WatchSyscall`, which is
+   `(n, 0)`.
+
+That is **at most three session opens per command**, however many hits there are: the scan, the
+resolution, and the park at the answer, which today is a `reseek(n, k)`. The resolution's session
+may be adopted as the parked session (with its watchpoints cleared, per the kept-session
+invariant), which makes it two. With no earlier hit, it is the scan plus the park. The command's
+output format does not change. When a breakpoint sits on a watched store, the breakpoint's step-over keeps the watches
+armed, so both hits are recorded in order (breakpoint, then watch). Today's loop loses the watch hit
+there, because its re-seek to `k + 1` steps over the store with nothing armed (R3).
+
+### 3c. Forward `continue` keeps its scan and gains the exact resolver
+
+The scan, the pre-step rule and the `kctx` rules (`kctx` for a watch, `kctx + 1` for a breakpoint)
+stay as they are. Each hit is resolved as ordinal 1 of its kind from `kctx`. The transcript's shape
+is unchanged. **Only K values change, and only where the old resolver was wrong.**
+
+### 3d. A `Box_` frees its guest memory
+
+`Backing` becomes the **owner** of its host allocation: dropping it `munmap`s. The two removal
+sites, `unmap_overlapping` and `guest_munmap`, stop calling `munmap` themselves and let the removed
+`Backing` drop after `vm.unmap`. `place_fixed`'s case-2 temporary, which never becomes a
+`Backing`, keeps its explicit `munmap`.
+
+`backings` is already declared after `vm`, so on a `Box_` drop the order is `hv_vcpu_destroy` →
+`hv_vm_destroy` → `munmap`. **Host memory is never released while the VM can still map it.** The
+field order becomes load-bearing a second time, and the comment above the struct must say so.
+
+A process-global count of live backing bytes is kept (mapped by `alloc_pages` minus released) and
+exposed read-only for the guard test (§4). It is a deterministic counter, not a measurement of RSS.
+
+### 3e. The debugger decodes its trace once
+
+`ReplaySession` holds its events behind a shared handle rather than an owned `Vec`. It gains
+constructors that take an already-decoded trace, and `from_checkpoint` takes the decoded trace
+instead of a path.
+
+`CheckpointCache` is already documented as single-trace. It decodes the trace on first use and
+holds it, so every `checkpointed_seek` and resolution opens its session without touching the file.
+It asserts that later calls name the same path. **`checkpointed_seek`'s signature does not change,**
+so the existing `checkpoint_seek.rs` tests compile as they are. M19's symbol table, which `Exec::new`
+builds today with a second full `Reader::open` of the same file, is built from the cache's decoded
+trace instead. `ReplaySession::open(path)`,
+`replay()` and `seek()` keep decoding per call, as today. Only the debugger's hot path changes.
+
+A process-global decode counter in `retrace-trace`, counted in `Reader::open_checked` (which
+`Reader::open` delegates to), makes "once" assertable (§4). Today a debug session decodes
+the file at least twice before its first command (the opening seek and the symbol read), plus once
+per later seek.
+
+### 3f. Name the watched address when a wider store covers it
+
+`watched_of` keeps its two existing rules: the range containing the FAR, then the range overlapping
+the FAR's aligned doubleword. When neither matches, it now picks **the first armed range, in slot
+order, that intersects `[align_down(FAR, 64), FAR + 64)`**. That window spans the widest single
+store, a 64-byte `DC ZVA` block, and a 32-byte `stp q`. Only if nothing intersects does it fall back
+to the FAR itself. Outputs that are right today are unchanged, because the new rule runs only where
+both old rules missed.
+
+## 4. Guards: each asserts the difference it makes
+
+- **A new repo-owned fixture, `watchsweep`** (C, `-O0`). One store instruction writes every element
+  of a buffer in a loop, and the watched element is well past the start. So the store pc runs on
+  other addresses first: M7's class, reduced. A second, **different** instruction then writes the
+  watched element again, and the program announces the element's address with a `write(1, …)`, as
+  `WATCHLOOP` does. The ground truth for store positions comes from `watch_cli`'s independent oracle
+  (step and read), which the watch machinery cannot influence. Tests:
+  - **`continue` lands on the real write:** `watch T; continue; stepi; x T 8` shows the new value,
+    and the resolved K equals the oracle's first K. **RED on today's tree.**
+  - **`reverse-continue` from the exit lands on the second writer**, at the oracle's last K.
+  - **`reverse-continue`'s cost does not grow with the hits it passes:** a unit test in `debug.rs`
+    drives `Exec` on the fixture and asserts that one `reverse-continue` makes **≤ 3** seeks. That
+    count comes from a new seek counter on `CheckpointCache`, a deterministic proxy like
+    `total_single_steps`. The test also asserts that the trace decode counter moved by exactly 1
+    across the whole script. **RED on today's tree**, which pays two seeks per run of the store
+    instruction between the resume point and each real hit.
+- **The leak:** a test opens and drops a session several times and asserts the live-backing count
+  returns to its starting value each time. RED on today's tree.
+- **`watched_of`:** unit cases for a FAR 8 bytes below the range (`stp`) and 40 bytes below it
+  (inside a `DC ZVA` block), plus the existing exact and doubleword cases unchanged.
+- **Rung 8** keeps `cpython_crash_e2e`'s assertions unchanged. Its cost is measured and reported
+  under the §6 acceptance, not asserted, because it skips without Homebrew Python and so guards
+  nothing on another machine.
+- **Every existing debugger transcript must stay byte-identical** (`debug_cli`, `watch_cli`,
+  `thread_watch_e2e`, `crashy_*`, `reverse_debug_e2e`, `checkpoint_seek`). If one moves, that is
+  either a fixture that had been silently misresolved, to be shown with the oracle and recorded as a
+  ruling, or a regression.
+
+## 5. Task order and why
+
+1. The `watchsweep` fixture and its RED tests: the continue position, the session count and the
+   decode count.
+2. The exact resolver (§3a) and forward `continue` on it (§3c). **This is the wrong-answer fix, so
+   it comes first.**
+3. The one-pass `reverse-continue` (§3b).
+4. `Backing` ownership and the live-bytes guard (§3d).
+5. Decode once (§3e).
+6. `watched_of` (§3f).
+7. Rung-8 measurement, and the close: the README's rung-8 demo transcript (M39 7c), the memory
+   figures, the status log and the `CLAUDE.md` test list.
+
+Tasks 4–6 are independent of one another, and each comes after 2–3 so the RED tests of Task 1 go
+green from the algorithm first. What remains after that is resource cost.
+
+## 6. Acceptance
+
+- The Task 1 tests are RED on `786bf2b` and green after, **measured both ways**.
+- **Rung 8, measured with `t0/prof.sh`** on the same recording shape:
+  - `reverse-continue` costs **≤ 120 s CPU** in the dev build (expected ≈ 25–35 s: one pass
+    ≈ 11.6 s per M5, plus one resolution);
+  - peak RSS stays **≤ 1 GB**;
+  - forward `continue` resolves to **(1126, 1,765,682)**;
+  - `cpython_crash_e2e` passes, and its wall time is reported alongside the machine's load at the
+    time.
+- The demo script from M39 (`continue; watch <cell> 8; reverse-continue; where; x <cell> 8; stepi;
+  x <cell> 8`) runs to completion standalone, and its transcript and memory figures go into the
+  README.
+- The gate is green, reconciled file-by-file against M39's 629 / 0 / 9 over 138. `TRACE_MAGIC` does
+  not move, and `verify_thread` stays at **seven** sites. No dispatch arm changes.
+
+## 7. What this milestone deliberately does not do
+
+- **A faster `crc32`.** It is 64 % of a decode (M3), and every `replay` and test would gain. But
+  after §3e the debugger decodes once, so it no longer bears on this milestone's goal. It is owed.
+- **A release or opt-level profile for tests.** That changes the whole gate's build, and it is out
+  of scope.
+- **A backward, checkpoint-segmented search** (option C, rr-style). One forward pass already costs
+  about one replay. That optimisation is for a recording where one pass itself is too slow, and none
+  is measured.
+- **The M39 owed items**: the stage-1 alias invisible to address readers, and symbols for
+  runtime-loaded dylibs. Also untouched: `reverse-stepi`'s cost beyond what §3e gives it for free,
+  lldb, async signals, exec-in-place, and the missing-row set.
+
+## 8. Rulings (made while writing this spec)
+
+- **R1 — option A**, by the operator on 2026-09-23, over B (resolver and leak only: cost stays
+  proportional to real hits) and C (backward segmented search: more machinery than one pass needs).
+- **R2 — watchpoints may be armed while single-stepping, for resolution,** on M6's measurement.
+  Breakpoints still may not.
+- **R3 — a breakpoint on a watched store yields both hits**, a deliberate improvement over the old
+  loop. No existing transcript covers it.
+- **R4 — ordinals count scoped-out hits**, because the hardware fires for them. The thread filter
+  applies only when choosing, as M15 Task 8 made it.
+- **R5 — acceptance is in CPU seconds and counts**, because the operator runs concurrent sessions
+  (t0 conditions).
+- **R6 — M39's Task 7c is carried here** (M39 R17). The transcript is taken after §6's numbers are
+  met, on a standalone run.
+
+## 9. Gate prediction
+
+M39 closed at **629 / 0 / 9 over 138**. This adds one e2e test file (`watchsweep_e2e`: +1 binary,
+~2 tests), ~3 unit tests in `debug.rs` (session count, decode count, `watched_of`), ~1 leak test and
+~1 resolver test in `retrace-core` or `retrace-box`, and no `#[ignore]`. Prediction: **≈ 636 / 0 / 9
+over 139**, to be reconciled file-by-file. The number is a prediction, not a target.
+
+## 10. Outcome
+
+*(Filled in at the close.)*
