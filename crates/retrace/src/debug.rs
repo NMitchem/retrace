@@ -272,16 +272,19 @@ fn resolve_nth(trace: &Path, cache: &mut CheckpointCache, n: usize, from_k: u64,
 
 /// The armed watch range containing `far` (exact byte); else the range overlapping `far`'s aligned
 /// doubleword (FAR may report the comparator base — spike F4b); else (M40) the first range
-/// intersecting `[align_down(far, 64), far + 64)`. That window spans the widest single store
-/// (a 64-byte `DC ZVA` block, which may report any FAR inside it) and a 32-byte `stp q` reporting
-/// its base below the range, which is what rung 8's writers do (t0 M5: FAR `…ac0` for a watched
-/// `…ac8`). Else `far` itself (honest fallback, never a wrong range). Deterministic: `ws` is sorted,
-/// first match wins. The third rule runs only where the first two missed, so no output they got
-/// right changes.
+/// intersecting `far`'s naturally aligned 64-byte block. The Arm ARM bounds a watchpoint's FAR: for
+/// `DC ZVA` it is any address in the zeroed block (64 bytes here), and for any other store it lies in
+/// a naturally aligned block, no larger than the `DC ZVA` block, that contains a watched address the
+/// store wrote. So a store that really wrote a watched range reports a FAR in that range's 64-byte
+/// block (rung 8: FAR `…ac0` for a watched `…ac8`, t0 M5), and a FAR in any other block cannot have
+/// come from one. With two armed ranges in one block this names the first, which may not be the one
+/// written. Else `far` itself (honest fallback). Deterministic: `ws` is sorted, first match wins. The
+/// third rule runs only where the first two missed, so no output they got right changes.
 fn watched_of(ws: &[(u64, u64)], far: u64) -> u64 {
+    let blk = far & !63;
     ws.iter().find(|&&(a, l)| far >= a && far < a + l)
         .or_else(|| ws.iter().find(|&&(a, l)| { let d = far & !7; d < a + l && a < d + 8 }))
-        .or_else(|| ws.iter().find(|&&(a, l)| { let lo = far & !63; a < far + 64 && lo < a + l }))
+        .or_else(|| ws.iter().find(|&&(a, l)| a < blk + 64 && blk < a + l))
         .map(|&(a, _)| a)
         .unwrap_or(far)
 }
@@ -489,11 +492,11 @@ impl<'a> Exec<'a> {
     /// Whether a hardware/syscall watch hit at `addr` by `thread` should be reported to the user:
     /// true when that watch has no scope, or the scope equals `thread`. The `_ => true` arm is a
     /// deliberate fail-OPEN, not merely a defensive default: `watched_of`'s own `far`-fallback
-    /// (`.unwrap_or(far)`, used when `far` lands outside every armed range's exact bytes AND its
-    /// aligned doubleword) CAN hand this function an address genuinely absent from `self.watches`
-    /// — a hit whose owning watch is unknown. Suppressing an unattributable hit would be a worse
-    /// failure than showing an unscoped one: this function chooses to report it rather than risk
-    /// silently hiding a real write.
+    /// (`.unwrap_or(far)`, used when `far` lands outside every armed range's exact bytes, its aligned
+    /// doubleword, AND its 64-byte block) CAN hand this function an address genuinely absent from
+    /// `self.watches` — a hit whose owning watch is unknown. Suppressing an unattributable hit would
+    /// be a worse failure than showing an unscoped one: this function chooses to report it rather than
+    /// risk silently hiding a real write.
     fn watch_thread_matches(&self, addr: u64, thread: u32) -> bool {
         match self.watches.iter().find(|&&(a, _, _)| a == addr) {
             Some(&(_, _, Some(scope))) => scope == thread,
@@ -1037,11 +1040,17 @@ mod tests {
         let ws = [(0xa01722ac8u64, 8u64)];
         assert_eq!(watched_of(&ws, 0xa01722ac8), 0xa01722ac8, "exact");
         assert_eq!(watched_of(&ws, 0xa01722acc), 0xa01722ac8, "inside the range");
-        // t0 M5/M7: rung 8's writers report FAR 0xa01722ac0, the base of a wider store that covers
-        // the watched qword. Each case is a FAR that a store REALLY covering the range could report.
+        // t0 M5/M7: rung 8's writers report FAR 0xa01722ac0, 8 below the watched qword. The Arm ARM
+        // puts a watchpoint's FAR in the same naturally aligned block (at most the 64-byte DC ZVA
+        // block) as a watched address the store wrote, so these FARs can come from a covering store:
         assert_eq!(watched_of(&ws, 0xa01722ac0), 0xa01722ac8, "16-byte stp, 8 below");
-        assert_eq!(watched_of(&ws, 0xa01722ab0), 0xa01722ac8, "32-byte stp q, 24 below");
         assert_eq!(watched_of(&ws, 0xa01722ae0), 0xa01722ac8, "DC ZVA, 24 above in the same 64-byte block");
+        assert_eq!(watched_of(&ws, 0xa01722aff), 0xa01722ac8, "DC ZVA, the block's last byte");
+        // ...and these cannot: each lies in the 64-byte block BELOW the range's. A 32-byte `stp q`
+        // based at 0xa01722ab0 does cover the range, but it reports a FAR inside the range's block,
+        // never its own base. Both keep the honest fallback.
+        assert_eq!(watched_of(&ws, 0xa01722ab0), 0xa01722ab0, "24 below, previous block: fallback");
+        assert_eq!(watched_of(&ws, 0xa01722a90), 0xa01722a90, "56 below, previous block: fallback");
         assert_eq!(watched_of(&ws, 0xa01722b40), 0xa01722b40, "out of reach: the honest fallback, unchanged");
     }
 
