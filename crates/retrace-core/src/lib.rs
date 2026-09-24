@@ -1277,6 +1277,24 @@ pub enum Stepped {
     AtTrap,
 }
 
+/// M41: what one fully armed single step did (`ReplaySession::step_armed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Armed {
+    /// One instruction retired.
+    Retired,
+    /// The next instruction's address is an armed breakpoint. Nothing retired, and while it stays
+    /// armed every further step stops here again.
+    Break,
+    /// The next instruction writes an armed watch range. Nothing retired (pre-retire, spike F4c).
+    Watch,
+    /// The next instruction is the window-ending trap. Nothing retired, and the trap is not
+    /// consumed: `advance()` consumes it.
+    AtTrap,
+    /// The next instruction takes a real guest fault (a demand-paging one is handled and
+    /// re-stepped instead). Nothing retired.
+    Fault,
+}
+
 /// M40 §3e: a decoded recording — every whole, CRC-valid record, and whether `open_checked` dropped
 /// a torn tail. Cheap to clone (the events are shared), so every session a debugger opens uses ONE
 /// decode of the file. Before this, each session re-read and re-checked it (t0 M3: seconds of CPU
@@ -2874,6 +2892,33 @@ impl ReplaySession {
                 Stop::Syscall { .. } => return Ok(Stepped::AtTrap),
                 Stop::Fault { pc, far, .. } => return Err(format!(
                     "guest crashed during a watch-aware step: pc={pc:#x} far={far:#x}")),
+            }
+        }
+    }
+
+    /// M41: single-step one instruction with whatever breakpoints AND watchpoints are armed, and
+    /// report which stop, if any, it made. `step_watched`'s contract makes a breakpoint stop a
+    /// caller bug; this is the step for callers that arm both — the M41 hit oracle (every hit is a
+    /// hardware stop taken while single-stepping) and `continue`'s finish of the current
+    /// coordinate. The exception class is checked FIRST, before any demand-paging fallback, because
+    /// a breakpoint's or watchpoint's FAR is not an IPA (M40 §3a). Deterministic replay faults are
+    /// handled and re-stepped exactly as in `step_insns`.
+    pub fn step_armed(&mut self) -> Result<Armed, String> {
+        loop {
+            match self.b.step() {
+                Stop::Step => return Ok(Armed::Retired),
+                Stop::Other { esr } => {
+                    match retrace_arch::ec_of(esr) {
+                        retrace_arch::Ec::Breakpoint => return Ok(Armed::Break),
+                        retrace_arch::Ec::Watchpoint => return Ok(Armed::Watch),
+                        _ => {}
+                    }
+                    if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
+                    if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
+                    return Err(format!("fault during an armed step: {}", self.b.describe_stop(esr)));
+                }
+                Stop::Syscall { .. } => return Ok(Armed::AtTrap),
+                Stop::Fault { .. } => return Ok(Armed::Fault),
             }
         }
     }
