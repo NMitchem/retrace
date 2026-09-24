@@ -355,6 +355,43 @@ fn oracle_threadrust_breakpoints_at_both_switches() {
     hits::check_chains(ts(tp), &format!("break 0x{:x}; break 0x{:x}", t.resume, t.child), &hits);
 }
 
+/// watchsweep's exit window, discovered: the landmark the `write` (4) leads to, whose trap is the
+/// `exit`, and the pc at each K of it. The last pc is the exit `svc`, which never retires.
+fn discover_ws_exit(tp: &Path) -> (usize, Vec<u64>) {
+    let mut s = ReplaySession::open(tp).unwrap();
+    loop {
+        let wrote = matches!(s.peek_syscall(), Some((4, _)));
+        s.advance().unwrap();
+        if wrote { break; }
+    }
+    let e = s.landmark();
+    let mut pcs = vec![s.pc()];
+    while s.step_insns(1).is_ok() { pcs.push(s.pc()); }
+    drop(s); // one VM per process
+    let mut s = retrace_core::seek(tp, e, 0).unwrap();
+    assert!(matches!(s.advance().unwrap(), Advance::Exited(_)), "window {e} is the exit's own");
+    (e, pcs)
+}
+
+/// R18 (M41 final review): hits in the EXIT window. No other arming has one, and the exit terminal
+/// used to park at the START of that window, so every hit in it was still ahead of the terminal:
+/// lost to `reverse-continue` ("no earlier hit") and re-reported by every `continue` after the
+/// exit. Armed: the second writer (window 1), the exit window's second instruction, and the exit
+/// `svc` itself — a hit AT the terminal's own coordinate, which the terminal must also sit after.
+#[test]
+fn oracle_watchsweep_hits_in_the_exit_window() {
+    let tp = ws_trace();
+    let w = discover_ws(tp);
+    let (e, pcs) = discover_ws_exit(tp);
+    let kf = (pcs.len() - 1) as u64; // the exit window's length: the svc sits at K = kf
+    let bps = [w.second, pcs[1], pcs[pcs.len() - 1]];
+    let hits = hits::enumerate_hits(tp, &bps, &[], 1);
+    let shape: Vec<(usize, u64, Phase)> = hits.iter().map(|h| (h.n, h.k, h.phase)).collect();
+    assert_eq!(shape, vec![(1, w.k_second, Phase::Bp), (e, 1, Phase::Bp), (e, kf, Phase::Bp)], "{hits:?}");
+    hits::check_chains(ts(tp), &format!("break 0x{:x}; break 0x{:x}; break 0x{:x}", bps[0], bps[1], bps[2]),
+                       &hits);
+}
+
 // ---- Review Focus (plan) ------------------------------------------------------------------------
 
 /// Review Focus 1 / R10: `continue` from a breakpoint on the crashing instruction reports the

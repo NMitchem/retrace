@@ -11505,20 +11505,21 @@ It is also M42's precondition: lldb is meant to go in front of this debugger, an
 to be right first.
 
 The milestone's numbers: **eight** t0 measurements (M1–M8), each now a named regression that was RED
-on M40's debugger and is green; **one** new test binary (`hitorder_e2e`, 21 tests) and one new
-test-util module (`tests/util/hits.rs`, the oracle), for **+25** `#[test]` attributes over three
+on M40's debugger and is green; **one** new test binary (`hitorder_e2e`, 22 tests) and one new
+test-util module (`tests/util/hits.rs`, the oracle), for **+26** `#[test]` attributes over three
 files; **one** new `ReplaySession` primitive (`step_armed`, with its result enum `Armed`), **one**
 idempotent `Box_` method (`settle_schedule`), called from `ReplaySession::finish_event`, and a
 `(n, k, phase)` cursor in the debugger that replaces M5's `last_watch_hit`; **zero** dispatch arms
 changed (two comment-only hunks inside `ReplaySession::advance`'s arms, from Task 2's fix round),
 `verify_thread` **7 → 7**, `TRACE_MAGIC` unmoved at `RT\x00\x0a` (`crates/retrace-trace` has no diff
 at all), `record_box` untouched (`run()`'s entry check became a call to the same logic); **zero**
-new `#[ignore]` and **zero** un-parked; **six** execution rulings (R12–R17) after the spec's eight
-and the plan's two, plus three pre-flight findings (F1–F3); **eight** commits before this close —
-the spec with its t0 companion (`0a6bbae`), the plan (`910c652`), and six task commits (`174cbbd`,
-`1ee88d0` + `8ea1ff7`, `2219274` + `dce77f3`, `d16fa97`), two of them review fix rounds. Gate:
-**665 passed / 0 failed / 9 ignored across 141 test binaries**, measured on `d16fa97` plus this
-close's comment-only sweep, and predicted from source, chunk by chunk, before it ran.
+new `#[ignore]` and **zero** un-parked; **seven** execution rulings (R12–R18) after the spec's
+eight and the plan's two, plus three pre-flight findings (F1–F3); **eight** commits before this
+close — the spec with its t0 companion (`0a6bbae`), the plan (`910c652`), and six task commits
+(`174cbbd`, `1ee88d0` + `8ea1ff7`, `2219274` + `dce77f3`, `d16fa97`), two of them review fix
+rounds — then the close (`91d19a4`) and the final review's fix wave. Gate: **666 passed /
+0 failed / 9 ignored across 141 test binaries**, measured after the fix wave (the close's own run
+read 665 / 0 / 9), each count predicted from source, chunk by chunk, before it ran.
 
 ### What t0 measured
 
@@ -11753,7 +11754,95 @@ its arms (the `bsdthread_terminate` and semaphore mirrors) change comments only 
 §9 counted ~9 named regressions (+1: M8 is three tests), five oracle self-checks as tests of their
 own (−5: they are asserts inside each oracle test), and neither the plan's five Review Focus tests
 (+5) nor R17's `a_zero_count_step_is_not_an_arrival` (+1). The plan's Task 5 had all of that but
-R17's test, which its review added. The binary count, 141, was right both times.
+R17's test, which its review added. The binary count, 141, was right both times. (Both figures
+are the close's; the final review's fix wave added one more test, below.)
+
+### The final review and its fix wave (R18)
+
+A whole-branch review of `c68ba6d..91d19a4` returned "with fixes": **0 Critical**,
+one Important, four Minors. One fix dispatch followed, before merge.
+
+**Important #1, measured: the exit terminal parked before its own window.** `park_at_terminal`'s
+`Exit` arm reseeked to `(E, 0)`, but `ReplaySession::advance`'s `Exit` arm reports `Exited`
+without bumping `idx`, so `E` is the exit's own window and every instruction in it was still ahead
+of the terminal. Re-measured on a fresh `watchsweep` recording with `break 0x1000003d0`, the
+`write`'s return + 4, which is `(2, 1)` (the ledger's `fr-probe-before.log`): `continue` resolves
+`(2, 1)`; the next `continue` prints `exited (code 0)` and `where` says `(2, 0)`;
+`reverse-continue` says `no earlier hit`; and `continue` reports `(2, 1)` again, as often as it is
+asked. It predates M41 (M3/M6); the crash and signal terminals already parked at `(C, K_f)`.
+**No oracle arming had a hit in the exit window, so the oracle could not see it. That is the
+lesson: the terminal is where reverse debugging starts, so every oracle fixture should arm a hit
+in the terminal window.**
+
+**R18** (the controller): fix it inside M41, since it is M41's own class and the README's new
+Hit-order paragraph claimed completeness. Park the exit like a crash, at
+`(E, probe_window_len(E))`, on the exit `svc`, and add one oracle arming with hits in the exit
+window.
+
+**One step past the ruling, measured, for the controller to confirm.** Parking at `(E, K_f)` with
+an arrival's phase, `Bp`, was not enough. The new arming also breaks on the exit `svc` itself, and
+with only the ruled change its backward chain failed at answer #1: the debugger gave `(2, 1, Bp)`
+where the oracle has `(2, 2, Bp)`, the breakpoint AT the terminal's coordinate, which a forward
+`continue` reports (`fr-red-parkonly.log`). The crash terminal had the same hole: on `crashy`,
+`break 0x1000005c4; continue; continue; reverse-continue` reports the breakpoint at `(249, 83)`,
+then the crash, then `no earlier hit` (`fr-probe-before.log`). So every terminal now parks at phase
+**`Watch`**, the last phase at a coordinate, and the end of the recording sits after every hit, a
+breakpoint on its last instruction included. `park_at_terminal`'s three arms now share one parking
+block, so the exit arming guards the crash and signal arms by construction; the crash case was also
+re-probed (`fr-probe-after.log`: `reverse-continue` → `hit 0x1000005c4 at (249, 83)`). This
+supersedes spec §3b's listing of "a terminal park" among the arrivals that take `Bp`.
+
+**The sixth arming**, `oracle_watchsweep_hits_in_the_exit_window` (`hitorder_e2e.rs`), breaks on
+the second writer `(1, 328)`, the exit window's second instruction `(2, 1)` and the exit `svc`
+`(2, 2)`, each discovered (`discover_ws_exit` walks the window after the `write`, and checks that
+its event is the exit). Its self-check pins that shape; then the three chains. **Shown able to fail
+twice:** on `91d19a4`'s debugger the backward chain's answer #1 was `(1, 328, Bp)` where the
+oracle has `(2, 2, Bp)`, both exit-window hits lost (every answer given:
+`[None, (1, 328), None, None, None]`, `fr-red-prefix.log`); with only the exit park moved, it was
+`(2, 1, Bp)` for `(2, 2, Bp)` (above). Green with both (`fr-green-new.log`).
+
+**The Minors, all fixed:** #2, `reverse-continue`'s phase-2 comment "equal to the pre-step read
+except at a pending switch" now says that since §3a no switch is pending at an observed position;
+#3, `park_at_terminal`'s doc no longer says the exit syscall "is consumed"; #4, the oracle's `Key`
+doc says what it does not compare (which watch range a hit line named: sound while every arming
+watches one range); #5, the README's Hit-order paragraph no longer lists the terminal among
+arrivals.
+
+**Cost.** The exit park now single-steps the exit window once to measure it (memoized per session)
+and once more to seek to its end. The measured exit windows are short: `hello_dyn` **1,597**
+instructions, `threadrust` **4,038**, `watchthread` **4,018**, `sigcatch_dyn` **1,694** (each
+terminal's `where`, `fr-probe-dyn.log`); a whole `continue` to the exit costs **2.20–2.95 s user**
+on those four, cargo included. The dynamic debugger suites, re-run warm under `/usr/bin/time -l`
+against the close's gate logs (user + sys): `thread_watch_e2e` 11.27 s (was 12.53 s), `watch_dyn`
+7.10 s (6.02 s), `sigcatch_dyn_e2e` 7.59 s (7.40 s), `cpython_crash_e2e` 42.18 s (40.85 s; a crash,
+so its park position did not change), `hitorder_e2e` 46.39 s over 22 tests (45.97 s over 21),
+`debug_cli` 63.55 s (62.21 s, which included a compile), `crashy_cli` 14.78 s (13.31 s). Every
+difference is within ±1.5 s, both directions, on a shared machine, so no cost of the fix is
+visible at suite level; that it is small is inferred from the window lengths, not isolated.
+`continue` after the exit, which now steps the exit window and then crosses the exit `svc` into the
+final-memory comparison, diverged on none of the four dynamic guests, so no LL/SC pair (R14) that
+changes final memory sits in their exit windows.
+
+**Existing assertions: none moved.** `grep -rn "exited" crates/retrace/tests/*.rs | grep -a -i
+where` finds nothing, and every debugger suite passes unchanged in the re-run below.
+
+**The re-run gate.** The fix changed `crates/retrace` only (`git diff --stat 91d19a4` over the
+other seven crates is empty), so the fix wave re-ran that crate's chunks and clippy and reused the
+close's `ws` (173 over 26) and `box` (292 over 41). Predicted from source first (the ledger's
+`gate2/prediction.md`: 673 attributes, `hitorder_e2e` 21 → 22, so 666 over 141), then run by one
+background script with the same discipline and the same coverage assertion: 75 exit files — `bins`,
+the 73 `e2e-*` and `clippy` — all `0`; every e2e log one `Running` line and one `test result:`
+line, passed + ignored equal to its file's `#[test]` count; `e2e` **184** passed + 9 ignored over
+73, `bins` **17** over 1, clippy clean. 173 + 292 + 184 + 17 = **666**, ignored **9**, binaries
+26 + 41 + 73 + 1 = **141**. Wall-clock 13:49:45 → 14:08:57, 19 min 12 s, every test target
+recompiling because `tests/util/hits.rs` changed. Against M40, the reconciliation is the close's
+with one row moved: `hitorder_e2e` **+22** (was +21), so **+26** `#[test]` attributes and 640 + 26
+= **666**. §9's prediction was short by three, the plan's by two.
+
+**Parked-item triage:** every other item the controller parked for the review stays owed (below).
+F2 is plausibly closed by R11, since the review measured, through `oracle_fileio`'s backward chain,
+that the hardware fires at a window-entry pc under `run()`; the scoped-out `WatchSyscall` arm
+itself remains unverified.
 
 ### Rulings
 
@@ -11820,6 +11909,12 @@ Execution:
   `a_zero_count_step_is_not_an_arrival` (+1 test, `--bins` 17, total 665). Minors 1 and 3 fixed in
   the same round, Minor 2 carried to this close's sweep. Cost if wrong: one more `--bins` test than
   the plan predicted, explained at the gate.
+* **R18 — the final review's Important #1 is fixed inside M41**: the exit terminal parks at
+  `(E, K_f)`, like a crash, and a sixth oracle arming has hits in the exit window (+1 test, total
+  666); Minors #2–#5 bundled; the `crates/retrace` chunks re-run, `ws`/`box` reused. The fix wave
+  also set every terminal's phase to `Watch` (above), measured as needed and flagged for the
+  controller. Cost if wrong: the exit window is single-stepped once per exit park (memoized),
+  measured small.
 
 **R11 is unused**, deliberately: the plan and M40 both use "R11" as the name of the bug.
 
@@ -11840,7 +11935,9 @@ Execution:
   stands.
 * **F2** — the scan's scoped-out `WatchSyscall` arm skips the boundary-breakpoint `pc()` check.
   After M41 a hardware `Break` at `(n, 0)` is resolved from `kctx = 0` rather than skipped, so it
-  plausibly reports; nothing verifies whether the hardware reports that breakpoint.
+  plausibly reports. The final review measured the hardware firing at a window-entry pc under
+  `run()` (`oracle_fileio`'s backward chain), so R11 plausibly closes it; no test drives the
+  scoped-out arm itself.
 * **A crashing store that also writes a watched range** — `watch X; continue; continue` hits the
   crossing's `Advance::Watch` Err (exit 5). Pre-M41 also exited 5; outside R10.
 * **Early `?` exits in `cmd_continue` can leave a kept session armed.** Latent today, because an
@@ -11874,4 +11971,6 @@ Execution:
 spec §9's ≈ 663 / 0 / 9 over 141 and the plan's 664 (see the gate); the plan's `discover_ws` and
 `discover_fio` (R12); its `tr_oracle_from` returning 1 (R13); its arrival test's shadowed `ex`
 (R16) and the same test's assertions that could not fail (R17 I1); its `stepi` rule that reset the
-cursor on a zero-count step (R17 I2); and its Task 5 "14 → 16" for `--bins` (17).
+cursor on a zero-count step (R17 I2); its Task 5 "14 → 16" for `--bins` (17); spec §3b's
+"a terminal park" among the arrivals that take phase `Bp` (R18: a terminal takes `Watch`); and the
+close's own 665 / 0 / 9, which the fix wave's sixth arming made 666.

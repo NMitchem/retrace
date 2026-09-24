@@ -361,6 +361,8 @@ Filled at the close (Task 5), on the tree of `d16fa97` plus the close's comment-
 `debug_cli.rs` and `watch_cli.rs`. `docs/status-log.md`'s M41 section is the full account; this
 records each §6 item against its measured figure, each prediction confirmed or corrected, and what
 was found without being sought. Every figure below traces to a ledger log or to the status log.
+Amended by the final review's fix wave (R18, after `91d19a4`): one defect fixed, a sixth oracle
+arming, and the `crates/retrace` chunks re-run, **666 / 0 / 9 over 141**.
 
 **§6, item by item.**
 
@@ -371,14 +373,17 @@ was found without being sought. Every figure below traces to a ledger log or to 
   `resolved (1, 14)`, `m2` exit 5, the three `m8` tests exit 5, each oracle arming failing in its
   chain after its self-check passed; Task 1 was purely additive, 660 insertions and no deletion).
   Green: 5 at Task 2, 6 at Task 3, the last 5 at Task 4; `hitorder_e2e` 21 / 21 at Task 4 and
-  21 / 21 in the gate (`finished in 46.30s`). The five Review Focus tests the plan added were not
+  21 / 21 in the gate (`finished in 46.30s`), then 22 / 22 in the fix wave's re-run
+  (`finished in 47.11s`). The five Review Focus tests the plan added were not
   all red by design: `rf1` was (exit 5, R10's plan-time reading), `rf2`–`rf5` pin behaviour the
   rewrite had to keep and were green before and after.
 - **All five oracle armings pass all three checks; `threadrust` within budget or in its fallback.**
   All five pass, forward, backward and zig-zag. `threadrust` is **both**: it starts at the declared
   fallback landmark (`bsdthread_create`'s, `n_create`), and it costs **16.20 s user + 0.27 s sys**
   green (Task 2), against the 120 s budget. The fallback was taken for a reason §5 did not foresee
-  (R13, below), not for the budget.
+  (R13, below), not for the budget. A **sixth** arming, added by the final review (R18,
+  `oracle_watchsweep_hits_in_the_exit_window`), passes all three as well; it was red on `91d19a4`'s
+  debugger (below).
 - **The gate green, reconciled file by file against 640 / 0 / 9 over 140.** **665 passed /
   0 failed / 9 ignored over 141 test binaries**, 77 exit files all `0`, clippy clean — predicted
   from source before the run and matched chunk by chunk (173 / 292 / 183 + 9 / 17 over
@@ -387,7 +392,11 @@ was found without being sought. Every figure below traces to a ledger log or to 
   reconciliation. `TRACE_MAGIC` unmoved
   (`crates/retrace-trace` has no diff), `self.verify_thread(` **7 → 7**, no dispatch arm changed (the
   two `retrace-core` hunks inside `ReplaySession::advance`'s arms are comment-only, Task 2's R15),
-  and no `#[ignore]` added or removed (9 → 9).
+  and no `#[ignore]` added or removed (9 → 9). **After the fix wave: 666 / 0 / 9 over 141** —
+  the fix touched `crates/retrace` only (no diff in the other seven crates since `91d19a4`), so
+  `ws` (173 / 26) and `box` (292 / 41) were reused and the rest re-run: `e2e` 184 + 9 over 73,
+  `bins` 17, clippy clean, 75 exit files all `0`; `hitorder_e2e` +22 instead of +21, so +26
+  attributes against M40.
 
 **Predictions, confirmed or corrected.**
 
@@ -398,7 +407,8 @@ was found without being sought. Every figure below traces to a ledger log or to 
   **inside** each oracle test, not tests of their own, so −5; the plan's five Review Focus tests
   (`rf1`–`rf5`), which §9 did not foresee, +5; and R17's `a_zero_count_step_is_not_an_arrival`, +1.
   663 + 1 − 5 + 5 + 1 = **665**. The plan's own Task 5 figure, 664, is this minus R17's test. The
-  binary count, 141, was right.
+  binary count, 141, was right. After R18's sixth arming, **666**: §9 short by three, the plan by
+  two.
 - **§3a: `blockedctx`'s two assertions should hold** — confirmed, 2 / 2 under approach A (Task 2).
 - **§3a: no existing debugger test parks at a blocking boundary** — confirmed by the audit: no
   pre-existing assertion moved.
@@ -422,6 +432,23 @@ was found without being sought. Every figure below traces to a ledger log or to 
 
 **Found, not sought.**
 
+- **The exit terminal parked before its own window (the final review's Important #1, R18).**
+  `park_at_terminal` reseeked an exit to `(E, 0)`, but `ReplaySession::advance`'s `Exit` arm does
+  not bump `idx`, so `E` is the exit's own window and every hit in it was still ahead: on
+  `watchsweep`, `break` at `(2, 1)` then `continue; continue; reverse-continue` gave `no earlier
+  hit`, and every further `continue` reported `(2, 1)` again. Pre-existing (M3/M6); the crash and
+  signal terminals already parked at `(C, K_f)`. **No oracle arming had a hit in the terminal
+  window**, which is why the oracle could not see it: every oracle fixture should arm one. The exit
+  now parks at `(E, K_f)`, on the exit `svc`.
+- **A terminal is after every hit, not an arrival (found while fixing R18).** Parked at `(E, K_f)`
+  with §3b's arrival phase `Bp`, a breakpoint ON the terminal instruction, which `continue`
+  reports, was lost backward; the crash terminal already had that hole (`crashy`, a `break` on the
+  faulting pc: `reverse-continue` from the crash said `no earlier hit`). Every terminal now parks
+  at phase `Watch`, which corrects §3b's listing of "a terminal park" among the arrivals. The sixth
+  arming breaks on the exit window's `(2, 1)` and on the exit `svc` `(2, 2)`, and was shown red
+  twice: on `91d19a4`'s debugger (backward answer #1 `(1, 328, Bp)` for `(2, 2, Bp)`) and with
+  only the exit park moved (`(2, 1, Bp)` for `(2, 2, Bp)`).
+
 - **The LL/SC exclusive-monitor limit (R13, R14).** Any VM exit between an `ldxr` and its paired
   `stxr`, a single-step or a hardware breakpoint stop, fails the store-exclusive. On `threadrust`
   that is Libsyscall's `getpid` pid cache, and stepping through it made the replay issue a
@@ -439,7 +466,9 @@ was found without being sought. Every figure below traces to a ledger log or to 
 - **`position()`'s doc overclaimed** (Task 2 review, fixed by R15): a caught `SignalDelivery` breaks
   `pc() == position()` at its `(n, 0)` too.
 - **F2**, at pre-flight: the scan's scoped-out `WatchSyscall` arm lacks the boundary-breakpoint
-  check the `Event` arm has. Pre-existing, preserved, owed.
+  check the `Event` arm has. Pre-existing, preserved, owed. The final review judged it plausibly
+  closed by R11 (the hardware fires at a window-entry pc under `run()`, per `oracle_fileio`'s
+  backward chain); the arm itself stays unverified.
 - **Two latent edges** (Task 3 review observations), both owed: a crashing store that also writes a
   watched range exits 5 through the crossing's `Advance::Watch` Err, as it did before M41; and an
   early `?` exit in `cmd_continue` can leave a kept session armed, harmless while an Err aborts the
