@@ -317,8 +317,9 @@ impl<'a> Exec<'a> {
         // which is what every pc in the session refers to. Any failure here — unreadable trace, no
         // Snapshot, stripped binary — yields an empty table and bare-hex output rather than an
         // error: symbolication is presentation, and must never be able to fail a debug session.
-        let syms = retrace_trace::Reader::open(trace).ok()
-            .and_then(|events| events.iter().find_map(|e| match e {
+        // M40: from the cache's one decode, not a second read of the file.
+        let syms = cache.decoded(trace).ok()
+            .and_then(|t| t.events().iter().find_map(|e| match e {
                 retrace_trace::Event::Snapshot { mem, .. } => Some(Symbols::from_snapshot(mem)),
                 _ => None,
             }))
