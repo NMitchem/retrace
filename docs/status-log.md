@@ -11011,3 +11011,412 @@ what M39 **adds** to it.
   no walk); §9's gate prediction (short by one binary — `retrace-box/tests/vmremap.rs`); and the
   plan's malformed-request mutation of byte 0 (a no-op; byte 3 carries the complex bit, corrected at
   Task 4's RED). M38's and earlier superseded lists stay as they were left.
+
+## Status: M40-revcont — reverse-continue in one pass, watch hits resolved by address
+
+M39 reached rung 8 and could not show it. `reverse-continue` from the crash reached the store, but
+it took **3.42 hours** of wall-clock, two such runs at once exhausted this machine's
+24 GB of RAM and 63 GB of swap, and M39's demo transcript was deferred here because producing it
+meant re-measuring the defect (M39 R17). M40 makes the demo usable. On t0's own rung-8 recording
+the command now costs **0.53 s of CPU**, measured by subtraction, at **≈ 403 MB** peak RSS; the
+`cpython_crash_e2e` gate that runs it finished in **40.02 s** against M39's 12,364 s. On the way it
+fixed a wrong answer the debugger had given since M5 — forward `continue` with a watchpoint named
+an instruction that never wrote the watched memory — and found, before any fix was written, that
+`reverse-continue` had been giving wrong answers too, not only slow ones (R7 below).
+
+The milestone's numbers: **four** fixes and one naming rule, each landed behind a guard that was
+RED first; **one** new fixture (`crates/retrace-guest/asm/watchsweep.s`) and **two** new test
+binaries (`watchsweep_e2e`, `retrace-box/tests/backingfree.rs`) for **+10** `#[test]` attributes
+over five files; **two** deterministic instruments (`retrace_trace::decode_count()`,
+`CheckpointCache::seeks()`) and one deterministic counter (`retrace_box::live_backing_bytes()`),
+each a count and never a timing; **one** new `ReplaySession` primitive (`step_watched`) and **one**
+resolver (`resolve_nth`) replacing `resolve_hit_k`; **zero** dispatch arms touched (every
+`retrace-core` hunk lies outside `record_box` and `ReplaySession::advance`), `verify_thread`
+**7 → 7**, and `TRACE_MAGIC` unmoved at `RT\x00\x0a`; **zero** new `#[ignore]` and
+**zero** un-parked; **four** execution rulings (R7–R10), three of which corrected the plan's or the
+spec's own text; **eleven** commits before this close — the spec with its t0 companion
+(`d02cbd8`), the plan (`52e99ca`), and nine task commits (`8cb075d`, `0eee264`, `f023f96` +
+`e4712b7`, `b5f1d64` + `a2f1ecc`, `87332fa`, `8368668` + `5cea9a8`), three of them review fix rounds. Gate: **639 passed / 0 failed /
+9 ignored across 140 test binaries**, measured on `5cea9a8`.
+
+### What t0 measured
+
+The companion (`docs/superpowers/specs/2026-09-23-retrace-m40-revcont-measurements.md`) is the
+record, and the spec cites nothing else for a measured claim. Taken on `786bf2b` plus throwaway
+instrumentation, on a 97,619,602-byte, 1,146-event recording of `crash.py` whose `continue` parks
+at P = (1144, 2470), under a shared machine (load average **40**), so every duration there is CPU
+seconds. What it found, in the order it mattered:
+
+- **There are five real writes to the watched cell** (M5): one native pass from landmark 1 found
+  all five, stepping over each in place, in **11.55 s user** including the trace decode.
+- **`reverse-continue` iterated over false hits** (M2): a capped run spent **448 s CPU** on
+  **19 iterations** and **41 seeks**, every iteration naming the same store pc in window 1126, K
+  values mostly **6 apart** — about **20.8 s CPU** per iteration.
+- **The resolver matched by pc** (M6): that store ran **183 times** in window 1126 before and at
+  the real write, and stepping with the watchpoint **armed** stopped cleanly, pre-retire, at
+  **K = 1,765,682** (`EC=0x34`). The "never armed while single-stepping" rule had been an
+  unmeasured analogy with breakpoints.
+- **Forward `continue` named the wrong instruction** (M7): `resolved (1126, 29627)`, 1,736,055
+  instructions before the real write, and a `stepi` over that "hit" left the cell unchanged.
+- **Every session re-decoded the whole trace** (M3): all 3,842 samples of a cold seek were in
+  `Reader::open_checked` — **64 %** in a bit-at-a-time `crc32`, **36 %** in bincode.
+- **Every dropped `Box_` leaked its guest memory** (M4): about **55 MB and 1,580 mappings per
+  session**, because `alloc_pages` `mmap`s and `Box_` had no `Drop` — 2.6 GB of footprint at the
+  capped run's kill. That is the answer to M39's "what does hold them is unmeasured": not the
+  256 MiB checkpoint cache, which was never where the memory was.
+
+### The fixture and the REDs (Task 1, `8cb075d`)
+
+`watchsweep.s` is freestanding asm (the spec's §4 said C at `-O0`; the plan wrote it as asm and
+nothing depended on the language): **one** `str x4, [x1, x3, lsl #3]` sweeps all 64 elements of a
+buffer with non-zero values, so it runs on 40 other addresses before it reaches the watched
+`buf[40]`; a **second, different** `str` then rewrites `buf[40]`; `write(1, &buf[40], 8)` publishes
+the address in the trace (the `WATCHLOOP` convention). Ground truth comes from a step-and-read
+oracle that nothing under test can influence. On the pre-fix debugger (`8cb075d` is `786bf2b`'s
+logic plus the fixture and the two counters), every guard was red for the predicted reason:
+
+- `continue` printed **`resolved (1, 8)`** — the sweeping store's first run — where the real write
+  is at **K = 208**.
+- `reverse_continue_walks_back_through_both_writers` passed its first two assertions ((1, 328), then
+  (1, 208)) and failed its **third**: from P = (1, 208) the old loop reported a false writer at
+  **(1, 203)**, the store's run on `buf[39]`, instead of `no earlier hit` (R7).
+- One `reverse-continue` made **86** seeks (the guard allows 3); one debug session decoded its
+  trace **90** times (the guard allows 1).
+
+The 11 existing `debug.rs` unit tests stayed green; clippy clean.
+
+### Fix 1 — a watch hit is resolved by address (Task 2, `0eee264`)
+
+`ReplaySession::step_watched() -> Result<Stepped, String>` is `step_insns(1)` that **reports** a
+watchpoint stop (`Stepped::Watch`) instead of handing it to `page_in_cache`/`commit_reserved_page`,
+which would read a watchpoint's FAR — a VA — as an IPA; it classifies the exception class first,
+and `Stepped::AtTrap` reports a window-ending trap. `resolve_nth(trace, cache, n, from_k, kind,
+ordinal, expect_pc)` replaces `resolve_hit_k`: a watch hit is the *m*-th `Stepped::Watch` with the
+watchpoints **armed**, each earlier one stepped over in place; a breakpoint hit is the *m*-th pc
+match with breakpoints disarmed, pc equality being what a breakpoint hit *is*. It asserts that the
+resolved pc is the one the scan saw, so a scan/resolver disagreement fails loud.
+`arm_hw_watchpoint`'s "NEVER while single-stepping" is superseded for watchpoints only (spec R2,
+on t0 M6); it stands for breakpoints. Forward `continue` resolves each hit as ordinal 1 of its kind
+from `kctx` (watch) or `kctx + 1` (breakpoint), as before. **RED → green:** Task 1's `continue`
+guard went green, and so did the walk-back guard's third assertion (from P = (1, 208) the first
+watch stop *is* K 208, so there is no earlier hit). The new primitive test
+(`a_watch_aware_step_stops_pre_retire_exactly_at_the_watched_writes`) was red as a compile error
+before the primitive existed. `watchsweep_e2e` 3/3; as side effects the seek count fell 86 → 6 and
+the decode count 90 → 10; seven transcript targets (`watch_cli` 9, `debug_cli` 10,
+`thread_watch_e2e` 1, `crashy_cli` 2, `crashy_e2e` 3, `reverse_debug_e2e` 1, `checkpoint_seek` 6)
+unchanged.
+
+### Fix 2 — `reverse-continue` is one forward pass plus one resolution (Task 3, `f023f96` + `e4712b7`)
+
+One session from landmark 1 `advance()`s at native speed with the breakpoints and watchpoints
+armed, tracking per-window ordinals for each kind and stepping over every hit in place; P's own
+window is then single-stepped from K 0 to `pk`, so only hits strictly before P count; the **last**
+candidate that passes the thread filter is resolved once by `resolve_nth`, and the session parks
+with one `reseek` — at most three seeks, however many hits the pass walked through. Scoped-out
+hits still take ordinals (spec R4), because the hardware fires for them. The four output formats
+are byte-identical to the old function's. **RED → green:** the seek guard, 6 seeks on Task 2's tree,
+went green (`≤ 3`).
+
+**The review found a Critical in the plan's own code (R8).** Its `WatchSyscall` arm recorded a
+syscall write at (n, 0) without comparing it to P, so with P = (pn, 0) — exactly where a forward
+`continue` to a syscall hit parks — `watch buf; continue; reverse-continue` re-reported the same
+hit and never moved; the pre-M40 loop had compared `(n, k) < (pn, pk)` and printed
+`no earlier hit`. Fix round 1 added the guard and
+`reverse_continue_from_the_syscall_hit_itself_finds_nothing_earlier` (`watch_cli.rs`), RED with the fix reverted (`forward hit only, not doubled`, `left: 2, right: 1`)
+and green with it. The same round added
+`reverse_continue_crosses_a_breakpointed_svc_and_resolves_ordinal_two`, which drives a breakpoint
+on a window-ending `svc` (the `AtTrap` crossing) and two breakpoints in one window (ordinal 2),
+every expected coordinate derived from a nothing-armed step oracle; it reproduced the reviewer's
+`(4, 6)`, `(3, 5)`, `(4, 0)` exactly. `watch_cli` 9 → **11**; `thread_watch_e2e` 1/1.
+
+### Fix 3 — a `Box_` frees its guest memory (Task 4, `b5f1d64` + `a2f1ecc`)
+
+`Backing` owns its host allocation: its `Drop` releases it through `free_pages`, and the two removal
+sites (`unmap_overlapping`, `guest_munmap`) now `drop` the removed `Backing` after `vm.unmap`
+instead of `munmap`ping themselves. `place_fixed` case 2 and `map_mmap_region`'s rejected-`FIXED`
+path, whose allocations never become a `Backing`, free explicitly. `backings` is declared after
+`vm`, so a `Box_` drop runs `hv_vcpu_destroy` → `hv_vm_destroy` → `munmap` — host memory is never
+released while the VM can still map it — and the comment above the struct now says the field order
+is load-bearing a second time. `LIVE_BACKING_BYTES` counts `alloc_pages` bytes minus released ones.
+**RED → green:** `a_dropped_box_releases_every_backing_byte` failed at exactly its drop assertion,
+round 0 (`left: 147456, right: 0`), with the mmap-counted and `guest_munmap`-releases assertions
+before it already passing; green after. `retrace-box` whole package: 41 targets, 292 passed. The
+implementer's audit found **17** `Backing` construction sites, not the plan's 18 (the controller's
+pre-flight grep had counted the struct line), every one carrying `alloc_pages`' own returned length.
+
+**The review found an Important the plan's audit list had missed.** All four constructors
+(`load_with_pac`, `load_dynamic`, `restore`, `from_checkpoint`) declared their locals `vm`, `vcpu`,
+`backings`, so a panic mid-construction — `restoreparity.rs:61` drives one inside `restore` after
+regions are mapped — unwound `backings` **first**, releasing host pages while their stage-2
+mapping was still live. Fix round 1 declares `backings` before `vm` in all four; it also made
+`Backing` `pub(crate)` (nothing outside the crate names it), made `free_pages` an `unsafe fn` with
+real `SAFETY` comments at its three call sites, and asserted the L3 allocation's length where it
+had been discarded. 292/0 again.
+
+### Fix 4 — the debugger decodes its trace once (Task 5, `87332fa`)
+
+`DecodedTrace` (`Rc<[Event]>` plus the truncation flag) is shared by every session:
+`ReplaySession::open_decoded` and `from_checkpoint_decoded` take it, `CheckpointCache::decoded`
+decodes on first use and asserts that later calls name the same path, and `Exec::new` builds M19's
+symbol table from the cache's decoded trace instead of a second `Reader::open`.
+`checkpointed_seek`'s signature did not change, and `ReplaySession::open`, `replay()` and `seek()`
+still decode per call; only the debugger's hot path moved. **RED → green:** the decode guard read
+**7** on Task 4's tree and reads **1** after (it asserts that the count moved by exactly 1 across
+`continue; watch; reverse-continue; stepi; reverse-stepi`). `retrace-core` 87/87 over 9 targets.
+The review's one Important was process — three transcript targets not run for this task — and was closed by a
+controller run on `87332fa` with no code change (`thread_watch_e2e` 1/1, `crashy_e2e` 3/3).
+
+### The naming rule — `watched_of` names the range a wider store covers (Task 6, `8368668` + `5cea9a8`)
+
+Rung 8's writers report FAR `0xa01722ac0` for a watched `0xa01722ac8` (t0 M5), and `continue`
+printed the FAR as the watched address. `watched_of` keeps its two rules (the range containing the
+FAR; the range overlapping its aligned doubleword) and adds a third that runs only where both
+missed: **the first armed range intersecting the FAR's naturally aligned 64-byte block** — R10's
+rule, not the spec's (below). **RED → green:** red on the 8-below case (`left: 42973932224`, i.e.
+`0xa01722ac0`, against `0xa01722ac8`), green after. The review found the plan's own formula wrong
+(a Critical, R10): its window `[align_down(FAR, 64), FAR + 64)` named a range for FARs in the block
+*below* the range's, which no covering store can report, and none of the plan's test cases fell in
+that band. Fix round 1 landed the block rule with eight assertions — red first on
+`24 below, previous block: fallback` (`left` `0xa01722ac8`, `right` `0xa01722ab0`) — and every
+non-rung-8 transcript target green (`watch_cli` 11, `thread_watch_e2e` 1, `crashy_cli` 2,
+`watchsweep_e2e` 3, `debug_cli` 10, `crashy_e2e` 3, `reverse_debug_e2e` 1, `checkpoint_seek` 6).
+
+**No existing debugger transcript assertion moved** across Tasks 2–6, which is what spec §4
+required: the transcript targets were re-run at every task (at Task 5 with a controller top-up),
+and every one of them passes unchanged in this close's gate.
+
+### Rung 8, measured (Task 7, no commit)
+
+On `5cea9a8`, the dev build (the gate's configuration), with evidence in the ledger's `t7/`. The
+machine was lightly loaded: load average **1.45** at setup and **1.92** after the gate test
+(`t7/load.txt`). CPU and RSS are `/usr/bin/time -l`'s, CPU being user + sys; the gate test's
+duration is its own `finished in`.
+
+| | M39 | M40 | evidence |
+|---|---|---|---|
+| forward `continue`, t0's recording | `resolved (1126, 29627)`, the wrong instruction (t0 M7) | **`resolved (1126, 1765682)`**; after one `stepi` the cell reads `00 80 23 01 07 00 00 00` = `0x701238000`; the hit line names `0xa01722ac8` | `t7/fwd.out` |
+| `reverse-continue`'s own CPU, by subtraction | 3.42 h of wall-clock, attributed by subtraction from the gate test's standalone run (M39 Task 5) | **0.53 s** = 8.64 s (run B: `continue; watch; reverse-continue`) − 8.11 s (run A: `continue; watch`), each under a 900 s cap that neither hit | `t7/runA.err`, `t7/runB.err` |
+| its answer | — | `hit watch 0xa01722ac8 (write at 0xa0182245c) at (1143, 125704)`: t0 M5's last writer, the store of `0x4000dead0000` | `t7/runB.out` |
+| peak RSS of that session | one run took swap 36 → 47 GB during the M39 gate | **422,379,520 B ≈ 403 MB** | `t7/runB.err` |
+| `cpython_crash_e2e` | 12,364 s standalone, 20,740 s contended | **40.02 s**, `1 passed` | `t7/crashe2e.log` |
+| the demo, standalone | stopped with no result (M39 R17) | `record exit=139`, `replay exit=139`, `debug exit=0` | `t7/demo.log` |
+
+**The transcript M39's R17 promised here has landed** — in the README's rung-8 entry, verbatim, and
+here for the record. It comes from a fresh recording (`t7/m40-demo.bin`), so its addresses and
+coordinates differ from t0's:
+
+```
+> continue
+guest crashed: pc=0xa017dee60 far=0x4000dead0000 esr=0x92000005
+> watch 0xa016daac8 8
+watch at 0xa016daac8 len 8
+> reverse-continue
+hit watch 0xa016daac8 (write at 0xa017da45c) at (1136, 127306)
+> where
+at (1136, 127306) pc=0xa017da45c thread=0
+> x 0xa016daac8 8
+0xa016daac8: 00 00 00 00 00 00 00 00
+> stepi
+> x 0xa016daac8 8
+0xa016daac8: 00 00 ad de 00 40 00 00
+```
+
+`demo-mem.log`, the demo's 10-second RSS sampler, is **empty**: the debug session finished before
+the sampler's first tick. Run B's RSS stands in for the memory figure, on the same script's t0
+recording.
+
+**The prediction was wrong by two orders of magnitude, and the measurement corrected it.** The plan
+and spec §6 expected ≈ 25–35 s, "one pass ≈ 11.6 s per M5, plus one resolution". But M5's 11.55 s
+included the trace decode, and M3 had put every sample of a cold seek inside the decode. After §3e
+a debug session decodes once, and runs A and B both pay that decode, so the subtraction removes it;
+what run B adds is the native forward pass, phase 2's single-steps and the resolution's. That
+attribution is **inference** from M3, M5 and the counters — the subtraction does not itself divide
+the 0.53 s — but it is the reading the evidence supports, and nothing was re-run to chase the
+predicted band.
+
+### The gate
+
+**639 passed / 0 failed / 9 ignored across 140 test binaries**, on commit `5cea9a8` — the head
+after the six implementing tasks and their three fix rounds, and the last commit that changes
+anything cargo compiles: this close changes only `README.md`, `CLAUDE.md`, this log and the spec.
+Run from the worktree by one background script (the ledger's `gate/run-gate.sh`), chunked as
+CLAUDE.md requires, every chunk `--no-fail-fast` with its cargo exit captured to a file **before any
+pipe**: **76** exit files — `ws`, `box`, `bins`, the 72 per-target `e2e-*` and `clippy` — and all 76
+read `0`. Logs parsed with `grep -a` and ANSI stripped. **Zero skips**: the only case-insensitive
+`skip` matches in all 75 test logs are the two test *names* M39 also found
+(`debug::tests::empty_segments_are_skipped`,
+`pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one`); `jq_e2e`,
+`jq_file_e2e`, both `cpython_e2e` tests and `cpython_crash_e2e` all **ran**. The whole run took
+**17 min 8 s** of wall-clock (00:28:45 → 00:45:53 in the script's progress file), where M39's took
+hours — `cpython_crash_e2e` finished in **41.28 s** inside it, against 20,740 s inside M39's.
+
+| chunk | invocation | exit | binaries | passed | ignored | against M39 |
+|---|---|---|---|---|---|---|
+| `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | 0 | 26 | 172 | 0 | M39's 171 + `retrace-guest` 1 |
+| `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | 0 | 41 | 292 | 0 | M39's 291 + `tests/backingfree.rs` 1, a new binary; whole package, so `Doc-tests retrace_box` is present (M24's lesson) |
+| `e2e` | `cargo test -p retrace --test <name> --no-fail-fast -- --test-threads=1`, once per target, 72 targets in sorted order | 0 × 72 | 72 | 161 | **9** | M39's 156 over 71 + `watchsweep_e2e` 3 (a new binary) + `watch_cli` 2; the 9 ignored are `apple_walls_e2e`'s 7, `stackoverflow_rust_e2e`'s 1 and `symbols_e2e`'s 1 |
+| `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 0 | 1 | 14 | 0 | M39's 11 + 3 — the `debug.rs` unit tests, the chunk CLAUDE.md says never to omit |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | 0 | — | — | — | clean |
+
+172 + 292 + 161 + 14 = **639**. Ignored **9**. Binaries 26 + 41 + 72 + 1 = **140** — 133 test
+executables plus the 7 `Doc-tests` harnesses cargo reports, the convention since M14. The e2e
+targets ran one invocation each rather than in M39's four groups, so the comparison is on the e2e
+total, 161 over 72 against M39's 156 over 71; every one of the 72 logs holds exactly one
+`Running` line and one `test result:` line.
+
+**Reconciled against M39's 629 / 0 / 9 over 138, file-by-file rather than by sum**
+(`git diff 786bf2b -- crates | grep -c '^+.*#\[test\]'` = **10**, and the same count over `^-` lines
+is **0**, so no test was deleted or renamed away):
+
+| file | M39 | M40 | delta | where the gate shows it |
+|---|---|---|---|---|
+| `crates/retrace-guest/src/lib.rs` | 18 | 19 | **+1** — `watchsweep_guest_parses` (T1) | `ws`: 172 against 171 |
+| `crates/retrace-box/tests/backingfree.rs` | — | 1 | **+1**, new binary — `a_dropped_box_releases_every_backing_byte` (T4) | `box`: `tests/backingfree.rs` **1 passed**, a binary M39 did not have |
+| `crates/retrace/src/debug.rs` | 11 | 14 | **+3** — `reverse_continue_makes_at_most_three_seeks_whatever_the_hits`, `a_debug_session_decodes_its_trace_once` (T1), `watched_of_names_the_range_a_wider_store_covers` (T6) | `bins`: **14 passed** |
+| `crates/retrace/tests/watchsweep_e2e.rs` | — | 3 | **+3**, new binary — `continue_resolves_a_watch_hit_to_the_write_not_an_earlier_run_of_the_store`, `reverse_continue_walks_back_through_both_writers` (T1), `a_watch_aware_step_stops_pre_retire_exactly_at_the_watched_writes` (T2) | `e2e`: **3 passed** |
+| `crates/retrace/tests/watch_cli.rs` | 9 | 11 | **+2** — `reverse_continue_from_the_syscall_hit_itself_finds_nothing_earlier`, `reverse_continue_crosses_a_breakpointed_svc_and_resolves_ordinal_two` (T3 fix round) | `e2e`: **11 passed** |
+| every other `.rs` under `crates/` | unchanged | unchanged | 0 | the other five changed files (`retrace-box/src/lib.rs` 13, `retrace-core/src/lib.rs` 0, `retrace-trace/src/lib.rs` 14, `watchsweep.s`, `build.rs`) carry the same `#[test]` count as at `786bf2b` |
+
+Per-crate attribute counts confirm the same delta independently of the diff
+(`git grep -h '^[[:space:]]*#\[test\]'` at `786bf2b` against the worktree): `retrace-guest`
+19 → 20, `retrace-box` 291 → 292, `retrace` 176 → 184; the other five crates unmoved. The tree
+holds **646** `#[test]` attributes (M39: 636), of which 9 are ignored, so 637 are runnable; the run
+reports 639 because `census.rs`'s two tests execute twice, the "+2 twice" since M33. A bare
+`grep -c '#\[test\]'` says 647, the extra being the comment in `legacy_equivalence.rs`. So
+629 + 10 = **639**, 9 = **9**, and 138 + 2 = **140** — the corrected prediction exactly.
+
+**The 9 ignored are M38's nine, by name**: `apple_walls_e2e`'s seven (`automationmodetool`, `csh`,
+`dddiagnose`, `desdp`, `dyld_info`, `flex`, `tcsh`), `a_rust_stack_overflow_strikes_its_own_guard_page`
+and `cache_symbol_e2e` — read off the logs' `ignored, …` lines, and settled by the diff too: none of
+the three files holding them appears in `git diff --stat 786bf2b -- crates`, and no `#[ignore]`
+line is added or removed. M40 parked nothing and un-parked nothing.
+
+**The invariants.** `TRACE_MAGIC` did not move: `git diff 786bf2b -- crates/retrace-trace/src/lib.rs
+| grep -c '^[-+].*TRACE_MAGIC'` is **0** and the `pub const TRACE_MAGIC` line is byte-identical at
+both ends. (The Task 8 brief's own command, the same `grep -c TRACE_MAGIC` without the `^[-+]`
+anchor, prints **1**: the unchanged context line
+`if buf.len() < 4 || buf[0..4] != TRACE_MAGIC {` sits inside the `open_checked` hunk that gained the
+decode counter. The anchored form is the invariant it meant.) `grep -c 'self.verify_thread('
+crates/retrace-core/src/lib.rs` is **7** at `786bf2b` and **7** now (8 and 8 unanchored, the extra
+being the definition), and no changed line names it. No dispatch arm changed: `retrace-core`'s
+seven hunks all sit outside `record_box` and `ReplaySession::advance` — `Stepped` and
+`DecodedTrace`, `ReplaySession`'s `events` field, `open` and `from_checkpoint`, `step_watched`, and
+`CheckpointCache` with `checkpointed_seek`.
+
+**The spec's §9 prediction was short by three tests and one binary.** It named `watchsweep_e2e`
+(+1 binary, ~2 tests), ~3 `debug.rs` unit tests, ~1 leak test and ~1 resolver test: ≈ 636 / 0 / 9
+over 139. It did not count `watchsweep_guest_parses`, the two `watch_cli` guards Task 3's review
+added, or the leak test's own binary; and the resolver test landed as `watchsweep_e2e`'s third test
+rather than in `retrace-core` or `retrace-box`.
+
+### Rulings
+
+The spec's R1–R6 stand as written; R2 (watchpoints armed while single-stepping) and R4 (ordinals
+count scoped-out hits) are now code, and R3 (a breakpoint on a watched store yields both hits) is
+implemented but has no committed test (owed, below). Execution made four more, numbered after them
+(ledger Rulings 1–4):
+
+* **R7 (ledger Ruling 1) — the walk-back guard is expected RED on the pre-fix tree, at its third
+  assertion.** What: the plan's Step 8 said `reverse_continue_walks_back_through_both_writers`
+  passes today; tracing the old loop said its third `reverse-continue`, from P = (1, 208), reports a
+  false writer (an earlier run of the sweeping store) rather than `no earlier hit`. The test was
+  kept as written. Why: its assertions are right and only the plan's prediction was wrong — and a
+  red there proves `reverse-continue` gave **wrong answers** before M40, not only slow ones, which
+  spec §1 had said only of `continue`. Measured at Task 1: **(1, 203)**. Cost if wrong: none to the
+  code; a pass on the old tree would itself have been the informative result.
+* **R8 (ledger Ruling 2) — the one-pass scan's `WatchSyscall` arm is guarded by
+  `(n, 0) < (pn, pk)`.** What: the plan's verbatim code counted a syscall-write hit *at* P, so
+  `watch buf; continue; reverse-continue` repeated the same hit forever (the opus reviewer
+  reproduced it on `FILEIO`). Why: spec §3b says "strictly before P" and "a candidate at (n, 0), as
+  today", and today's loop compared `(n, k) < (pn, pk)`; the spec outranks the plan's code. Cost if
+  wrong: none — the guard excludes only a hit at P itself.
+* **R9 (ledger Ruling 3) — `cpython_crash_e2e` is not run per task; it runs at Task 7.** What: the
+  one transcript target in the global list skipped by Tasks 2–6. Why: before Task 5 every session
+  re-decoded 97.6 MB, the machine was then at a load average near 70, and Task 7 is where the rung-8
+  run is capped and measured. Cost if wrong: a moved rung-8 transcript would have surfaced at Task 7
+  instead of Task 3, still before any merge. It did not move.
+* **R10 (ledger Ruling 4) — `watched_of`'s third rule is the FAR's naturally aligned 64-byte
+  block, not spec §3f's `[align_down(FAR, 64), FAR + 64)`.** What: the rule became "the first armed
+  range intersecting `[align_down(FAR, 64), +64)`", the "24 bytes below (32-byte `stp q`)" case
+  became a fallback case, and a 56-below fallback and the block's last byte (`DC ZVA`) were added.
+  Why: the Arm ARM bounds a watchpoint's FAR — for `DC ZVA` any address in the zeroed block (64 bytes
+  on this hardware, `DCZID_EL0` BS = 4), otherwise an address in a naturally aligned block no larger
+  than that which contains a watched address the store wrote — so a covering store's FAR always
+  shares the watched range's 64-byte block (rung 8's `…ac0`/`…ac8` does), and `FAR + 64` admitted 32
+  false-positive offsets from the block below (the sonnet reviewer's count, for an 8-byte range).
+  The reviewer's alternative, OR-ing in `[FAR, FAR + 32)`, was rejected: it models a FAR reporting a
+  store's own base below the block, which the bound forbids. The spec's §3f and §4 now carry a
+  marked correction note pointing here and at §10; their original text is left standing. Cost if
+  wrong: if Apple hardware ever reports a FAR outside the watched range's block, that hit prints the
+  raw FAR — the pre-M40 honest fallback — never a wrong range.
+
+Two corrections were made without a ruling, because each was a count, not a decision: Task 4's
+construction-site census (17, not 18), and this close's expected gate delta, which the plan put at
++8 over +2 binaries (637 / 0 / 9 over 140) before Task 3's fix round added two `watch_cli` tests;
+the dispatch corrected it to **639 / 0 / 9 over 140**.
+
+### What stays owed
+
+* **A faster `crc32`.** 64 % of a decode (t0 M3), still a bit-at-a-time loop. After §3e the debugger
+  decodes once per session, so it no longer bears on `reverse-continue`, but every `replay` and every
+  test that opens a trace pays it in full.
+* **The forward-replay floor.** The scan is a full forward replay from landmark 1, so
+  `reverse-continue` costs about one replay plus a window of single-steps: it scales with the
+  recording's length, not with the number of hits. A recording on which one replay is itself slow
+  needs a backward, checkpoint-segmented search (spec §7's option C), which is unbuilt and unneeded
+  by anything measured.
+* **`reverse-stepi`'s cost** beyond what §3e gives it for free — spec §7 left it untouched, and it
+  was not measured on rung 8.
+* **M39's carried items, all still open:** a stage-1 alias is invisible to every reader that goes by
+  address (`read_guest` resolves against the backings list, not the tables); `copy = TRUE`,
+  `VM_FLAGS_ANYWHERE`, foreign-task remaps and un-remapping, each asserting by name; the derived
+  `max` protection's two unmeasured shapes (a guest `FIXED` mmap below the nano band, a read-only
+  `MAP_SHARED` source above it); symbols for runtime-loaded dylibs (rung 8's store in `_ctypes.so`
+  is still nameless, which is why the transcript above has no symbol); the lldb seam and
+  async-signal injection, with exec-in-place pinned by the CPython launcher test; the missing-row
+  set {461, 468, 464, 345, 374}; and M39's eleven deferred review minors, none touched by M40. M38's
+  list stands behind them, carried by M39. **One M39 item is discharged**: `reverse-continue`'s cost
+  on a long recording, time and memory both.
+* **Review minors deferred from Tasks 1–6** (the ledger carries each with its reviewer):
+  * T1 — `discover_target` (`watchsweep_e2e.rs`) and `watchsweep_target` (`debug.rs` tests) are
+    near-identical; the unit-test module cannot reach `tests/util`.
+  * T1 — `decode_count()` counts every `open_checked` **call**, including I/O-error and bad-magic
+    returns; it is a call count, as its doc says, not a successful-decode count.
+  * T2 — `resolve_nth` has seven parameters, exactly clippy's `too_many_arguments` threshold; one
+    more and the lint fires.
+  * T3 — **breakpoint hit counting at a thread switch** (inherited, silent): at (n, 0) after a
+    blocking syscall `pc()` is the outgoing thread's resume pc, so the resolver and phase 2 miss the
+    incoming thread's first instruction, and `reverse-continue` to a breakpoint whose pc recurs
+    there can land one hit off. The pre-M40 resolver had the same blind spot. Needs a threaded
+    breakpoint fixture; a README Known limit.
+  * T3 — a breakpoint on the faulting instruction of a **handled** fault makes `step_watched` return
+    `Err("guest crashed")` rather than `AtTrap` (inherited: the old loop failed the same way on its
+    `(n, k + 1)` re-seek).
+  * T3 — R3 (a breakpoint on a watched store yields both hits) has no committed test.
+  * T4 — both removal sites ignore `vm.unmap`'s result (`let _ =`), so the `Drop` comment's "the
+    stage-2 mapping is gone" is unchecked; pre-existing, and enforcing it could newly panic.
+  * T4 — `backingfree` covers load, an anonymous mmap and `guest_munmap` only — not
+    `unmap_overlapping`, `place_fixed` case 2, `restore`, `from_checkpoint` or a runtime L3. Breadth
+    only; the drop-free path is uniform.
+  * T4 — `place_fixed` case 3 panics while holding a raw `host`: a leak on a panic path, never a
+    double free (pre-existing).
+  * T5 — `CheckpointCache::decoded` compares paths by exact `Path` equality, without
+    canonicalisation; unreachable by every current caller, latent for one that spells a trace two
+    ways.
+  * T5 — no test drives the single-trace assert firing.
+* **Discharged inside the milestone, not owed:** Task 2's "ordinal > 1 is unexercised" (Task 3's
+  walk-back and ordinal-2 tests drive it); Task 3's inaccurate `AtTrap` comment (fixed in round 1);
+  Task 4's two stale `SAFETY` comments over safe calls (fixed in round 1); Task 6's
+  `watch_thread_matches` doc (fixed in round 1).
+* **Superseded, not owed — with this section as their forward pointer.** Spec §3f's window
+  `[align_down(FAR, 64), FAR + 64)` and §4's "24 bytes below (32-byte `stp q`)" case (R10; each now
+  carries a correction note); §4's "C, `-O0`" for the fixture (it is asm, per the plan); §4's
+  "~1 resolver test in `retrace-core` or `retrace-box`" (it landed in `watchsweep_e2e`); §6's
+  "measured with `t0/prof.sh`" (Task 7 used the plan's subtraction under `/usr/bin/time -l` and a
+  `perl` alarm cap — the same CPU-seconds posture, R5, on t0's own recording rather than one of the
+  same shape); §6's ≈ 25–35 s expectation (0.53 s, above); §9's ≈ 636 / 0 / 9 over 139 (see the
+  gate); the plan's Step 8 "PASSES" (R7), its Task 3 `WatchSyscall` arm (R8), its Task 6 formula
+  (R10) and its Task 4 "18 construction sites" (17); and the Task 8 brief's invariant command
+  `git diff 786bf2b -- crates/retrace-trace/src/lib.rs | grep -c TRACE_MAGIC`, which prints **1**,
+  not 0, because an unchanged context line in the `open_checked` hunk contains the name — the
+  changed-lines form prints 0 (see the gate).

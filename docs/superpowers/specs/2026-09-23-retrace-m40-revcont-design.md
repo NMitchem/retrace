@@ -138,6 +138,16 @@ store, a 64-byte `DC ZVA` block, and a 32-byte `stp q`. Only if nothing intersec
 to the FAR itself. Outputs that are right today are unchanged, because the new rule runs only where
 both old rules missed.
 
+> **Correction at execution (R10, ledger Ruling 4; see §10).** The window above,
+> `[align_down(FAR, 64), FAR + 64)`, and the "32-byte `stp q`" reasoning were wrong, and the rule
+> landed differently. The Arm ARM bounds a watchpoint's FAR to the naturally aligned block (at most
+> the 64-byte `DC ZVA` block) that contains a watched address the store wrote, so a covering store's
+> FAR always shares the watched range's 64-byte block. The third rule is therefore **the first armed
+> range, in slot order, that intersects the FAR's naturally aligned 64-byte block
+> `[align_down(FAR, 64), align_down(FAR, 64) + 64)`**. `FAR + 64` admitted FARs from the block below,
+> which no covering store can report, and named a wrong range for them. The text above is left as
+> written; this note supersedes it.
+
 ## 4. Guards: each asserts the difference it makes
 
 - **A new repo-owned fixture, `watchsweep`** (C, `-O0`). One store instruction writes every element
@@ -161,6 +171,11 @@ both old rules missed.
   8 bytes below (a 16-byte `stp`, rung 8's `0xa01722ac0` case), 24 bytes below (a 32-byte
   `stp q`), and 24 bytes *above* within the same 64-byte block (`DC ZVA`). Also a FAR outside the
   window, which keeps the fallback, and the existing exact and doubleword cases, unchanged.
+  **Corrected at execution (R10; see §3f's note and §10):** the "24 bytes below (a 32-byte
+  `stp q`)" case was wrong. That FAR lies in the 64-byte block *below* the range's, and a 32-byte
+  `stp q` covering the range reports a FAR inside the range's own block, never its base. It landed
+  as a **fallback** case, beside a second one 56 bytes below. The block's last byte was added as a
+  match case (`DC ZVA`).
 - **Rung 8** keeps `cpython_crash_e2e`'s assertions unchanged. Its cost is measured and reported
   under the §6 acceptance, not asserted, because it skips without Homebrew Python and so guards
   nothing on another machine.
@@ -238,4 +253,83 @@ over 139**, to be reconciled file-by-file. The number is a prediction, not a tar
 
 ## 10. Outcome
 
-*(Filled in at the close.)*
+*(Filled in at the close, 2026-09-24, on branch `m40-revcont`. The status log's M40 section
+carries the full account: every RED → green, the rulings R7–R10, the owed list.)*
+
+**Delivered.** All four fixes and the naming rule landed as designed, except where R10 corrected
+§3f. `reverse-continue` on rung 8 went from 3.42 h of wall-clock to **0.53 s of CPU**. The gate is
+**639 / 0 / 9 over 140** on `5cea9a8`.
+
+**§6, item by item.**
+
+- *The Task 1 tests are RED on `786bf2b` and green after, measured both ways.* **Met.** Measured red
+  on `8cb075d`, which is `786bf2b`'s debugger plus the fixture and the two counters (the tests could
+  not exist on `786bf2b` itself). `continue` printed `resolved (1, 8)` where the real write is at
+  K 208, and went green at Task 2. The walk-back test failed at its third assertion with a false
+  writer at `(1, 203)` (R7), and went green at Task 2. The seek guard read **86** seeks (≤ 3
+  required); it fell to 6 at Task 2 and went green at Task 3. The decode guard read **90** decodes
+  (1 required); it fell to 10 at Task 2 and 7 at Task 3, and went green at Task 5.
+- *`reverse-continue` ≤ 120 s CPU in the dev build (expected ≈ 25–35 s).* **Met: 0.53 s**, which is
+  8.64 s (run B) − 8.11 s (run A) on t0's own recording (`t0/crash.bin`). The expectation was
+  **wrong**, and the correction is below. The method was the plan's subtraction under
+  `/usr/bin/time -l` and a 900 s `perl` alarm cap, not `t0/prof.sh`. It is the same CPU-seconds
+  posture (R5), on the very recording rather than one of the same shape.
+- *Peak RSS ≤ 1 GB.* **Met: 422,379,520 B ≈ 403 MB** (run B).
+- *Forward `continue` resolves to (1126, 1,765,682).* **Met exactly.** After one `stepi` the cell
+  reads `0x701238000`, t0 M5's value, and the hit line names the watched `0xa01722ac8`, not the FAR.
+- *`cpython_crash_e2e` passes; wall time reported with the load.* **Met:** `1 passed`,
+  `finished in 40.02s`. The load average was 1.36 before and 1.92 after. M39 measured 12,364 s
+  standalone and 20,740 s contended.
+- *The demo runs to completion standalone; its transcript and memory figures go into the README.*
+  **Met, with one substitution.** Record exited 139, replay 139, debug 0. The transcript is in the
+  README's rung-8 entry, verbatim. The demo's 10-second RSS sampler recorded nothing, because the
+  session finished before its first tick, so the README's memory figure is run B's RSS.
+- *The gate is green, reconciled file-by-file against 629 / 0 / 9 over 138; `TRACE_MAGIC` does not
+  move; `verify_thread` stays at seven; no dispatch arm changes.* **Met.** The gate is
+  639 / 0 / 9 over 140, every chunk exit 0 and clippy clean: +10 tests over five files and two new
+  binaries, reconciled file by file in the status log. No changed line names `TRACE_MAGIC`, and the constant is
+  byte-identical. `self.verify_thread(` still has **7** sites. Every `retrace-core` hunk lies outside
+  `record_box` and `ReplaySession::advance`.
+
+**Predictions, confirmed or corrected.**
+
+- **Confirmed:** M6's armed-stepping resolver (§3a) became `step_watched` + `resolve_nth` and
+  resolves rung 8 exactly. "At most three session opens" (§3b) is pinned by the seek guard. The
+  optional adoption of the resolution's session as the parked one was not taken: the command is
+  scan + resolve + `reseek`, or scan + `reseek` when nothing earlier is found. The memory fix (§3d)
+  and decode-once (§3e) did what they said. **No existing transcript assertion moved** (§4).
+- **Corrected — §6's ≈ 25–35 s.** It assumed one pass costs ≈ 11.6 s "per M5". But M5's 11.55 s
+  *included* the trace decode, and M3 had put every sample of a cold seek inside the decode. After
+  §3e the debug session decodes once. Runs A and B both pay that decode, so the subtraction removes
+  it, and what run B adds is the native forward pass, phase 2's single-steps and the resolution's.
+  That attribution is inference from M3, M5 and the counters; the subtraction does not itself
+  divide the 0.53 s.
+- **Corrected — §3f and §4 (R10).** The window `[align_down(FAR, 64), FAR + 64)` and the
+  "24 bytes below (32-byte `stp q`)" example were wrong. The rule that landed is the FAR's naturally
+  aligned 64-byte block, per the Arm ARM's FAR bound. §3f and §4 carry marked notes.
+- **Corrected — §4's fixture.** "C, `-O0`" landed as freestanding asm (`asm/watchsweep.s`), as the
+  plan wrote it. The "~1 resolver test in `retrace-core` or `retrace-box`" landed in
+  `watchsweep_e2e` as its third test.
+- **Corrected — §9.** It predicted ≈ 636 / 0 / 9 over 139, and the gate measured 639 / 0 / 9 over
+  140. It did not count `watchsweep_guest_parses` (+1), the two `watch_cli` guards Task 3's review
+  added (+2), or the leak test's own binary (`backingfree`, +1 binary).
+  `watchsweep_e2e` has three tests, not ~2.
+- **Corrected — §1.** §1 said only forward `continue` gave a wrong answer. On the pre-fix tree
+  `reverse-continue` did too (R7).
+
+**Found without being sought.**
+
+- **R8.** The plan's one-pass code counted a syscall-write hit *at* P, so `reverse-continue` right
+  after a forward `continue` to a syscall hit repeated it forever. It was caught at review, before
+  merge, and guarded by a test that was RED with the fix reverted.
+- **Task 4's review** found that all four `Box_` constructors unwound `backings` before `vm`, which
+  would release host pages under a live stage-2 mapping. The plan's own audit list had missed it.
+- **Two inherited, silent gaps**, now written down rather than fixed. First, breakpoint hit counting
+  at a thread switch: at (n, 0), `pc()` is the outgoing thread's, so a `reverse-continue` to a
+  breakpoint can land one hit off. It is a README Known limit. Second, a breakpoint on a handled
+  fault's instruction ends `step_watched` in `Err`. The pre-M40 loop had both.
+- **t0 M4 answered an open M39 question.** Rung 8's tens of gigabytes were never the 256 MiB
+  checkpoint cache. They were every dropped session's leaked guest memory, ~55 MB each.
+- **The close's own invariant command was wrong.** The Task 8 brief's
+  `git diff 786bf2b -- crates/retrace-trace/src/lib.rs | grep -c TRACE_MAGIC` prints 1, because an
+  unchanged context line in the diff names the constant. The changed-lines form prints 0.

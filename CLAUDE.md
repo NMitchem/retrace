@@ -36,11 +36,11 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
-  11 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in **none** of
+  14 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in **none** of
   the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
   with no `--test` filter, reaches them — which is why closes before M17 are not owed a
   correction. Leaving it out silently costs
-  11 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
+  14 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 
@@ -87,7 +87,10 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   symbol; skips loud without Homebrew Python), `vmremap_e2e` (the repo-owned guard for the M39
   `mach_vm_remap` stage-1 alias — a dynamically-linked C fixture that calls through an alias of its
   own text and `memcmp`s through an alias of a dylib's, so the mechanism is guarded on a machine without
-  Python, where `cpython_crash_e2e` guards nothing). Run one with
+  Python, where `cpython_crash_e2e` guards nothing), `watchsweep_e2e` (M40: a guest whose one
+  store instruction sweeps a buffer before reaching the watched element, so `continue` and
+  `reverse-continue` must resolve a watch hit by address, not by pc — the class that put rung 8's
+  `continue` 1.7 M instructions early). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
