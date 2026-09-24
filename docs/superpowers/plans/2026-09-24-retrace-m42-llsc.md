@@ -945,7 +945,10 @@ fn m3d_prime_reverse_stepi_measures_window_1_on_the_recorded_path() {
 fn m3e_reverse_continue_whose_phase_2_steps_the_loop() {
     let out = run_ok(&format!("break {0}; continue; delete {0}; stepi 30; where; break {1}; reverse-continue; where",
         h("b_start"), h("b_done")));
-    assert_eq!(wheres(&out)[1], format!("at (2, 30) pc={:#x} thread=0", sym("b_done") + 0x14), "{out}");
+    // [0] is the `where` after `stepi 30`; [1] is after `reverse-continue`, which re-seeks to the hit
+    // (corrected in Task 2's review: the plan first asserted (2, 30) on [1]).
+    assert_eq!(wheres(&out)[0], format!("at (2, 30) pc={:#x} thread=0", sym("b_done") + 0x14), "{out}");
+    assert_eq!(wheres(&out)[1], format!("at (2, 25) pc={} thread=0", h("b_done")), "{out}");
     assert!(has_line(&out, &format!("hit {} at (2, 25)", h("b_done"))), "{out}");
 }
 
