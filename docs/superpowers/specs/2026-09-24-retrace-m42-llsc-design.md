@@ -232,13 +232,42 @@ hold:
 loud". That was vacuous, because `decode_excl` recognises the whole load-exclusive class by mask, so
 there is no refused LDX shape.)
 
+**Amended in execution (Task 5, the plan's Ruling T5-a).** Condition 3 as first written rejects
+the dominant LL/SC shape by design. In an in-place retry loop (`ldaxr x1; add x1, x1, #1;
+stlxr w2, x1`), the destination holds the *new* value at the store, never the loaded bytes. So
+the fixture's (b) and (i) infer nothing, and neither do libsystem_kernel `__vfork`'s two sequences
+(census #3 and #4), which rewrite `w10` between the halves. The spec's own named regressions
+M4/M5 backward and E3 need that inference. Measured by a probe in `infer_excl`: condition 3 was
+the only condition failing at (b)'s `stlxr`. Conditions 3 and 5 now read:
+
+3. **Each destination that no instruction in `(L, P)` writes still equals its bytes at the VA**
+   (`Rt ≠ 31`). A destination the sequence itself rewrites cannot be checked this way, so it is
+   not checked.
+5. **Every instruction in `(L, P)` has known register effects, and none writes the base.** Each
+   one must be either:
+   - a data-processing instruction (immediate class `100x`, or register class `x101`), which
+     writes at most its `Rd` (bits 4:0; 31 is SP or XZR, and counts as a write of both); or
+   - a conditional branch (`B.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ`), which writes no register.
+
+   Any other instruction in `(L, P)` infers nothing: a load or store (which may write back its
+   base), a system instruction, or SIMD. So does an `Rd` that equals `Rn`. For an SP base, that is
+   any `Rd` of 31. Every census sequence passes: dyld `getpid`'s `cbnz`, and the `add`/`sub`/
+   `subs`/`cmp`/`mov`/`csel` of the others. The check is a pure function over the scanned words,
+   unit-tested beside `scan_back`.
+
+Condition 5 turns the assumption "the base is not rewritten between the halves" (below) into a
+check. What condition 3 no longer backstops is a sequence whose destinations are all rewritten:
+there, "nothing branches into `(L, P]`" is the only guard against a jump into the middle of the
+pair. That assumption was already a README residual. It remains one, and it now carries that
+weight.
+
 The inferred shadow's loaded bytes are the target bytes at the stop. The exit is classified first
 (a debug exit, so nothing is cleared), then the inference runs.
 
 **What the inference assumes, and has not measured:**
 - the pair is reached by fall-through;
 - nothing branches into `(L, P]` from outside;
-- the base is not rewritten between the halves;
+- the base is not rewritten between the halves (checked by condition 5 since Task 5);
 - no plain store of an *identical* value hits the marked bytes before the stop.
 
 The research's census found every LL/SC sequence in the corpus satisfies all four. These are
