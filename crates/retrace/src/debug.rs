@@ -313,10 +313,10 @@ enum Phase {
     Watch,
 }
 
-/// The scripted-debugger executor. Holds the position coordinate P = (`n`, `k`) and at most ONE live
-/// `ReplaySession` parked exactly at P (one VM per process → every command that MOVES drops the old
-/// session before seeking a fresh one). `breakpoints` is kept sorted + deduped (≤ 6, enforced by
-/// `break`) so the hardware-slot assignment and any iteration are deterministic.
+/// The scripted-debugger executor. Holds the cursor P = (`n`, `k`, `phase`) (M41 §3b) and at most ONE
+/// live `ReplaySession` parked exactly at (`n`, `k`) (one VM per process → every command that MOVES
+/// drops the old session before seeking a fresh one). `breakpoints` is kept sorted + deduped (≤ 6,
+/// enforced by `break`) so the hardware-slot assignment and any iteration are deterministic.
 struct Exec<'a> {
     trace: &'a Path,
     session: Option<ReplaySession>,
@@ -385,7 +385,8 @@ impl<'a> Exec<'a> {
     fn sess_mut(&mut self) -> &mut ReplaySession { self.session.as_mut().expect("live session") }
 
     /// Drop the current session (freeing its VM) and seek a fresh one parked at (n, k), which is
-    /// therefore breakpoint-clean. Updates the position coordinate.
+    /// therefore breakpoint-clean. Updates the position coordinate, and resets the cursor's phase to
+    /// `Bp`: an arrival (R4). A caller that parks on a hit, or that did not move, sets it after.
     fn reseek(&mut self, n: usize, k: u64) -> Result<(), String> {
         self.session = None; // free the old VM BEFORE opening a new one
         self.session = Some(checkpointed_seek(self.trace, &mut self.cache, n, k)?);
@@ -585,7 +586,8 @@ impl<'a> Exec<'a> {
     fn cmd_stepi<W: Write>(&mut self, count: u64, out: &mut W) -> Result<(), String> {
         let res = self.sess_mut().step_insns(count);
         match res {
-            Ok(()) => { self.k += count; self.phase = Phase::Bp; Ok(()) } // an arrival (R4)
+            // An arrival (R4) only if it moved: `stepi 0` stands still, so the cursor stays (§3b).
+            Ok(()) => { self.k += count; if count > 0 { self.phase = Phase::Bp; } Ok(()) }
             Err(msg) => {
                 let head = msg.split("; cannot step").next().unwrap_or(&msg);
                 line(out, format_args!("error: {head}"))?;
@@ -618,11 +620,17 @@ impl<'a> Exec<'a> {
         if at_start {
             line(out, format_args!("at start of recording"))?;
         }
-        self.reseek(n, k)
+        // An arrival (R4) only if it moved. `reverse-stepi 0`, or one at (1, 0), stands still, so
+        // the cursor keeps its phase (§3b).
+        let (moved, p0) = ((n, k) != (self.n, self.k), self.phase);
+        self.reseek(n, k)?;
+        if !moved { self.phase = p0; }
+        Ok(())
     }
 
     /// Report a terminal `Advance::Exited` and park the session on it. Both of `cmd_continue`'s
-    /// `Exited` arms (main scan and pre-step boundary cross) route here so the two stay identical.
+    /// `Exited` arms (the scan, and the finish's one-event crossing of a trap or a fault, R10) route
+    /// here so the two stay identical.
     ///
     /// An `exit` parks at the final landmark's window start `(E, 0)` — the exit syscall is consumed,
     /// so there is nothing further to reach. A CRASH instead parks AT the fault: `(C, K_f)`, where
@@ -738,7 +746,8 @@ impl<'a> Exec<'a> {
                                 (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
                             }
                             Advance::Break | Advance::Watch { .. } => return Err(
-                                "continue: an instruction retired during a one-event crossing".into()),
+                                "continue: a hardware stop during a one-event crossing (breakpoints are off \
+                                 and the guest is parked on the trap or fault)".into()),
                         }
                     }
                     Armed::Break => return Err(
@@ -1208,5 +1217,35 @@ mod tests {
         let text = String::from_utf8_lossy(&sink).into_owned();
         assert!(text.contains("no earlier hit"), "…and so does reverse-continue:\n{text}");
         assert_eq!((ex.n, ex.k, ex.phase), (1, 8, Phase::Bp), "the cursor is where it was");
+
+        // Both arrivals above start from `Exec::new`'s Bp, so they cannot tell an arrival from a
+        // cursor left alone (review I1). From a WATCH park they can: the step must reset it.
+        drop(ex);
+        let buf0 = watchsweep_target(&trace) - 320; // buf[0]: written once, by the store at K = 8
+        for (step, k) in [("stepi", 9u64), ("reverse-stepi", 7)] {
+            let mut ex = Exec::new(&trace).unwrap();
+            let mut sink = Vec::new();
+            run_cmds(&mut ex, &format!("watch 0x{buf0:x}; continue"), &mut sink);
+            assert_eq!((ex.n, ex.k, ex.phase), (1, 8, Phase::Watch), "parked on the store:\n{}",
+                       String::from_utf8_lossy(&sink));
+            run_cmds(&mut ex, step, &mut sink);
+            assert_eq!((ex.n, ex.k, ex.phase), (1, k, Phase::Bp), "`{step}` off a watch park is an arrival");
+        }
+    }
+
+    #[test] fn a_zero_count_step_is_not_an_arrival() {
+        // Review I2: `stepi 0` and `reverse-stepi 0` leave (n, k) where it was, so they are not
+        // arrivals (spec §3b: "arriving anywhere ELSE"). Resetting the phase would make the next
+        // `continue` report the store the cursor is already on a second time.
+        let trace = record_watchsweep("zerostep");
+        let buf0 = watchsweep_target(&trace) - 320; // buf[0]: written once, by the store at K = 8
+        for step in ["stepi 0", "reverse-stepi 0"] {
+            let mut ex = Exec::new(&trace).unwrap();
+            let mut sink = Vec::new();
+            run_cmds(&mut ex, &format!("watch 0x{buf0:x}; continue; {step}; continue"), &mut sink);
+            let text = String::from_utf8_lossy(&sink).into_owned();
+            assert_eq!(text.matches("hit watch").count(), 1, "`{step}` re-armed the store:\n{text}");
+            assert!(text.trim_end().ends_with("exited (code 0)"), "{text}");
+        }
     }
 }
