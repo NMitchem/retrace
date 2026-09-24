@@ -1,0 +1,360 @@
+# M41-hitorder — every hit counted once, in one order, on the thread that runs it
+
+**Date:** 2026-09-24. **Branch:** `m41-hitorder` from `main` at the M40 merge (`c68ba6d`).
+**Companion:** `2026-09-24-retrace-m41-hitorder-measurements.md` (t0, taken before this spec). §2
+cites it. Where this document states something from reading code rather than measurement, it says
+so and names the Task 0 measurement that owes it.
+**Approach:** A of two for the thread switch (R1), with scope "fixes plus a hit oracle" (R2), both
+chosen by the operator on 2026-09-24.
+
+## 1. Purpose
+
+M42 is meant to put lldb in front of this debugger. Before that, its answers have to be right. M40
+closed with two silent wrong answers on its owed list, R11 (forward `continue` skips a breakpoint
+its own pre-step lands on) and T3 (breakpoint counting is blind at a thread switch). Measuring them
+for this spec found that they are two instances of a wider defect: **the debugger has no defined
+order for hits, and no single definition of where it stands.** Four more skips follow from that
+(M3–M6), and T3 also reaches forward `continue`, not only `reverse-continue` (M8).
+
+This milestone defines both things, the order and the position, and makes `continue` and
+`reverse-continue` obey them. It then gives the debugger its own oracle: a brute-force enumeration of
+every hit, which each command's answers are checked against. Every bug on this list was found by
+review, not by a test. The oracle is how the next one gets found by a test.
+
+It changes the debugger (`crates/retrace/src/debug.rs`), `ReplaySession`'s event epilogue and one
+new stepping primitive (`crates/retrace-core`), and one idempotent `Box_` method. It adds no
+dispatch arm, does not change the trace format, and does not touch record.
+
+## 2. What was measured before this spec was written
+
+The companion is the record. In summary, on `c68ba6d`:
+
+- **R11, silent (M1):** `break 0x1000003a0; break 0x1000003a4; continue; continue` on `watchsweep`
+  resolves `(1, 14)`. The right answer is `(1, 9)`. Exit 0.
+- **R11, loud (M2):** two adjacent breakpoints across `fileio`'s `read` exit 5. Its message, "window 4
+  ends after 0 instruction(s)", is not a window length: window 4 has 6 instructions. The `0` counts
+  within `resolve_nth`'s one-instruction `step_insns(1)` call. Three controls rule out a poisoned
+  seek.
+- **A breakpoint on a watched store (M3, M4):** forward loses the watch half of the pair (the
+  pre-step re-seeks with nothing armed), and backward loses the breakpoint half ("strictly before
+  (1, 328)" excludes the breakpoint *at* (1, 328), which precedes the store).
+- **A syscall write plus a breakpoint at (n, 0) (M5, M6):** forward loses the breakpoint (the
+  pre-step steps off it unreported), and backward loses the syscall hit ("no earlier hit").
+- **Arriving at (n, 0) by stepping (M7):** `reverse-continue` does not find the syscall write that
+  happened just before it. This is M40's deliberate exclusion (its Ruling 2).
+- **T3 (M8), on the existing `threadrust`:** at (263, 0) main has just blocked. `continue` reports a
+  **phantom** hit on main's resume pc, which nothing executes there (the next retire is thread 1's).
+  The **real** hit at (269, 0) is reachable in neither direction (exit 5), and a breakpoint on the
+  child's first instruction at (263, 0) also exits 5. Forward `continue` is affected, which the
+  README's Known limit does not say.
+
+## 3. Design
+
+### 3a. The thread switch happens when the event finishes (approach A)
+
+Today `Box_::run()` and `step()` switch threads **on entry** (`retrace-box/src/lib.rs`, M14 Task 9).
+So between a blocking event and the next entry, `pc()`, `current_thread()` and the registers
+describe the thread that just blocked or exited. M15 wrote that down as a definition
+(`ReplaySession::current_thread`'s doc: "at (N, 0) this names the thread that ISSUED landmark N"). T3
+is that definition meeting code that counts breakpoints by `pc()`.
+
+- **New `Box_::settle_schedule()`:** `if self.threads.needs_reschedule() { self.schedule_after_block() }`.
+  It is idempotent and is what `run()` and `step()` already do on entry. Both keep their entry check
+  as a safety net, which becomes a no-op on replay.
+- **`ReplaySession::finish_event` calls it**, after computing `WatchSyscall`'s `thread`, so a
+  syscall write is still attributed to the thread that issued it. Every path that consumes an event
+  and returns `Event` or `WatchSyscall` goes through `finish_event`: grepped at spec time, where
+  `Ok(Advance::Event)` and `Advance::WatchSyscall { … }` are constructed only inside `finish_event`
+  (called from 29 sites), and re-grepped in Task 2. `Exited`, `Break` and `Watch` do not, and need not: an exit ends the run, and a
+  mid-window stop has no pending switch (M15 R1's `debug_assert`).
+- **The invariant it buys**, written into `pc()`'s and `current_thread()`'s docs in place of M15's
+  paragraph: **at every position (n, k), `pc()` and `current_thread()` name the instruction the next
+  step retires and the thread that retires it.**
+- **Determinism is unaffected.** `verify_thread` runs inside each dispatch arm, before
+  `finish_event`, so it still compares against the issuing thread, and it stays at **seven** sites.
+  Checkpoints already carry the thread table (`BoxState.threads`), so a checkpoint at (n, 0) now
+  captures the settled state, and a restore finds no pending switch. Record never calls
+  `finish_event` and is untouched. The schedule is the same pure function of the syscall sequence: it
+  is taken at the end of the event rather than on the next entry, and nothing on replay runs in
+  between except the debugger's own reads.
+- **Visible change:** at a **blocking** boundary (`__ulock_wait`, `bsdthread_terminate`,
+  `semaphore_wait_trap`, a workq park), `where`, `threads` and `regs` show the incoming thread. No
+  existing debugger test parks at a blocking boundary (`debug_cli`'s thread tests use `write` and
+  `bsdthread_create`, which do not switch). `blockedctx.rs`'s header comment ("the switch that saves
+  it happens on the next `run()`") is corrected. Its two assertions should hold, because the saved
+  context is the same bytes saved one call earlier. Task 0 measures that rather than assuming it.
+- **A deadlock panic** (`schedule_after_block` finding no runnable thread) now fires at the end of
+  the event that caused it rather than on the next entry. Same panic, one call earlier.
+
+### 3b. Hit order and the cursor
+
+**Order.** A hit is at `(n, k, phase)`, and hits are totally ordered by that triple. At one
+coordinate the phases are ordered as the hardware produces them:
+
+1. **`Sys`**: a syscall's recorded write to a watched range. Only at k = 0: the event that ended
+   window n−1 wrote it before the instruction at (n, 0) runs.
+2. **`Bp`**: the instruction at (n, k) is about to execute, and its address is a breakpoint.
+3. **`Watch`**: that instruction's store to a watched range, stopped before it retires.
+
+**Cursor.** `Exec` holds `(n, k, phase)`. `last_watch_hit` is removed (it was `phase == Watch` in
+disguise).
+
+- `continue` answers **the first hit greater than the cursor**. `reverse-continue` answers **the
+  last hit less than it**.
+- Reporting a hit sets the cursor to that hit.
+- Arriving anywhere else (the opening position, `stepi`, `reverse-stepi`, a terminal park) sets the
+  cursor to `(n, k, Bp)` (R4). This is gdb's rule: a breakpoint at the pc you stand on is reported
+  in neither direction, and a watched store you stepped up to still fires going forward. For every
+  arrival except (n, 0) with a syscall hit behind it, that is today's behavior. For that one, it is
+  M7's case, and `reverse-continue` now finds the write (R5).
+
+All positions at one (n, k) share one machine state: before the instruction at (n, k). A
+watchpoint stop is pre-retire, so a `Watch`-phase park is the same state as a `Bp`-phase one. Only
+the cursor differs, so no session has to encode the phase.
+
+### 3c. `continue` under the cursor, with R11
+
+The pre-step becomes **finish this coordinate, then scan**:
+
+1. If `phase == Sys` and `pc()` is a breakpoint: report `Bp` at (n, 0) and stop. **Fixes M5.**
+2. Else, if `pc()` is a breakpoint or `phase == Watch`: step the instruction at (n, k) with
+   `step_watched`, with the watches armed unless `phase == Watch`.
+   - `Stepped::Watch`: report `Watch` at (n, k) and stop. **Fixes M3.** A scoped-out watch hit sets
+     the cursor to (n, k, Watch) without a report and returns to step 2. That replaces today's
+     recursion into `cmd_continue` with a loop (R8), because this is the code that recursion lived
+     in.
+   - `Retired`: now at (n, k + 1), with nothing there examined yet.
+   - `AtTrap`: cross the boundary exactly as today, with the watches armed for the one event.
+     `WatchSyscall` reports `Sys` at (n + 1, 0), `Exited` parks at the terminal, and `Event` leaves
+     the cursor at (n + 1, 0) with only `Sys` consumed.
+3. Otherwise (no breakpoint at `pc()` and `phase < Watch`), there's nothing to finish, and the
+   hardware scan below would find a watch at (n, k) itself.
+4. **Scan** as today, with breakpoints and watches armed. `Break` and `Watch` both resolve from
+   **`kctx`** (R11: `debug.rs:707`'s `kctx + 1` becomes `kctx`). This is safe in every case:
+   - Scanning from a coordinate whose `Bp` phase is still ahead (after a step or a crossing), the
+     hit may be *at* `kctx`, and `kctx + 1` skipped it.
+   - Scanning from a coordinate whose `Bp` phase is passed (step 3), `pc()` there is not a
+     breakpoint, or step 2 would have run. So a breakpoint hit cannot resolve spuriously to `kctx`.
+   - In a later window, `kctx = 0` and a hit at (n, 0) is found instead of skipped.
+
+   A **scoped-out** `Watch` from the scan resolves as today, sets the cursor to (n, k, Watch)
+   without a report, reseeks there, and goes back to step 2, which steps over it. That's a loop,
+   not today's recursion (R8).
+
+   **Fixes M1, M2.** The `Event` arm's boundary check reads `pc()`, which §3a makes the incoming
+   thread's. **Fixes M8 forward.**
+
+A fault during step 2 (a breakpoint on a faulting instruction) propagates as the same error it does
+today. The handled-fault case stays owed (§7).
+
+### 3d. `reverse-continue` under the cursor
+
+The one-pass scan and the single resolution stay as M40 built them. What changes is what "before P"
+means, with P now the triple `(pn, pk, pphase)`:
+
+- Phase 1's `WatchSyscall` at window n counts when `(n, 0, Sys) < P`, replacing `(n, 0) < (pn, pk)`.
+  At P = (pn, 0, Bp) (an arrival) it counts. **Fixes M6, M7.** At P = (pn, 0, Sys) (the hit itself)
+  it does not, so M40's stuck-loop fix (Ruling 2, pinned by
+  `reverse_continue_from_the_syscall_hit_itself_finds_nothing_earlier`) still holds.
+- Phase 2 steps K < pk as today. **At K = pk, when `pphase == Watch`, the `Bp` at (pn, pk) counts**
+  if `pc()` is a breakpoint. **Fixes M4.**
+- The resolver's pc-before-step read at (n, 0) is the incoming thread's after §3a. **Fixes M8
+  backward.**
+- M40's defence `before_p` compares triples.
+- The answer sets the cursor: `Bp` → (n, k, Bp), `Watch` → (n, k, Watch), `WatchSys` → (n, 0, Sys).
+
+### 3e. The hit oracle
+
+The oracle is test code in `crates/retrace/tests/util/`:
+`enumerate_hits(trace, bps, watches, from_n) -> Vec<Hit>`, where
+`Hit { n, k, phase, pc, thread }`. It deliberately shares none of the debugger's machinery: no
+`resolve_nth`, no pre-step, no scan/resolve split, and no pc-based counting.
+
+- **New primitive:** `ReplaySession::step_armed()`, one single step with breakpoints **and**
+  watches armed. It reports `Retired`, `Break`, `Watch` or `AtTrap`, and handles
+  deterministic-replay faults exactly as `step_watched` does. `step_watched` keeps its M40
+  contract (a breakpoint stop is an error there). The premise, a breakpoint armed at the current pc
+  stops pre-retire and one disarmed step then retires, is owed to Task 0.
+- **Procedure:** seek to `(from_n, 0)` and arm everything, then for each step:
+  - `Break` → record `Bp`, disarm breakpoints, and step once with the watches still armed. `Watch`
+    there → record `Watch` at the same (n, k). Then re-arm.
+  - `Watch` → record `Watch`, then step over it with everything disarmed.
+  - `AtTrap` → cross with `advance()`, watches armed. `WatchSyscall` → record `Sys` at (n + 1, 0).
+    `Exited` ends the list.
+
+  Each record reads `pc()` and `current_thread()` **after** the stop. `step()` switches threads on
+  entry whatever §3a does, so the oracle sees the running thread even if §3a is reverted: it is
+  independent of the fix it checks.
+- **Three checks per armed fixture:**
+  1. **Forward chain:** from the opening position, `continue` until exit. The reported hits equal the
+     list.
+  2. **Backward chain:** from the terminal, `reverse-continue` until "no earlier hit". The hits
+     equal the list reversed.
+  3. **Zig-zag:** each hit reached by `reverse-continue` must give its successor on `continue`, and
+     each hit reached by `continue` must give its predecessor on `reverse-continue`. This catches
+     cursor state that depends on how you arrived.
+
+  They run through `retrace debug --script`, and the transcripts are parsed from the `hit …` /
+  `resolved (n, k)` lines, plus `where` for pc and thread.
+- **Watches are unscoped in the oracle checks.** The thread filter keeps its existing tests
+  (`thread_watch_e2e`, `watchsweep_e2e`'s scoped-ordinal test).
+
+## 4. Guards: each asserts the difference it makes
+
+**Named regressions**, one per measurement, each pinned to its exact coordinates and RED on
+`c68ba6d`:
+
+| Measurement | Assertion |
+|---|---|
+| M1 | `resolved (1, 9)` |
+| M2 | Exit 0, with the second hit at (4, 0) |
+| M3 | Third `continue` reports the watch at (1, 328) |
+| M4 | Second `reverse-continue` reports the breakpoint at (1, 328) |
+| M5 | Second `continue` reports the breakpoint at (4, 0) |
+| M6 | Second `reverse-continue` reports the syscall hit at (4, 0) |
+| M7 | `reverse-continue` after the `reverse-stepi` reports the syscall hit at (4, 0) |
+| M8 | Forward: exactly one hit on main's resume pc, at the landmark after the child's 361 (M8: 269), k = 0, thread 0, and no hit at the landmark after main's 515 (M8: 263). Backward from exit: the same single hit. The child's-first-instruction breakpoint resolves at (263, 0) on thread 1 |
+
+Addresses and landmarks are **discovered**, never hardcoded: `threadrust`'s are shared-cache
+addresses, found the way `debug_cli`'s `discover_*` helpers find theirs.
+
+**The new invariant (§3a):** at the landmark after main's blocking 515 in `threadrust`, `where`
+names thread 1 and thread 1's first pc, and `threads` marks thread 1 current. It is RED today (M8's
+`where` shows thread 0).
+
+**The oracle's three checks** run on five armings:
+
+| Fixture | Arming | Carries |
+|---|---|---|
+| `watchsweep` | `{0x3a0, 0x3a4}` | M1 |
+| `watchsweep` | `0x3b4` + watch `buf[40]` | M3, M4 |
+| `fileio` | `{read svc, next}` | M2 |
+| `fileio` | `0x3c8` + watch `buf` | M5–M7 |
+| `threadrust` | `{main resume, child first}` | M8 |
+
+**Every arming is RED on `c68ba6d`. That is the oracle's positive control**, proof it can fail,
+which M28 taught this project to demand of any tripwire. A self-check pins each list's length to a
+count derived from the fixture source (e.g. 128 hits for `watchsweep` `{0x3a0, 0x3a4}`: 64 passes
+× 2).
+
+**`stepi` arrival:** `stepi` onto a breakpoint, then `continue`, does not report it, and neither does
+`reverse-continue` (R4).
+
+**Unchanged by construction, and checked:**
+- `blockedctx.rs`'s two assertions.
+- `verify_thread` at seven sites.
+- `TRACE_MAGIC` at `RT\x00\x0a`.
+- No dispatch arm in the diff: every `retrace-core` hunk lies outside `record_box` and the arms of
+  `ReplaySession::advance`.
+
+**The audit.** Every existing test that asserts on `continue`/`reverse-continue` output is listed in
+the ledger:
+- `debug_cli`, `watch_cli`, `watch`, `watch_dyn`
+- `watchsweep_e2e`, `thread_watch_e2e`
+- `crashy_cli`, `reverse_debug_e2e`
+- `cpython_crash_e2e`, `sigcatch_dyn_e2e`
+- `debug.rs`'s unit tests
+
+Each moved assertion is classified: either it pinned a skip (show it with the oracle), or the cursor
+changed the answer on purpose (so far only R5's case, which no existing test pins, read not
+measured). Anything else is a regression.
+
+## 5. Task order and why
+
+0. **Measure the three owed premises**:
+   - `step_armed`'s premise.
+   - `threadrust`'s exhaustive-step cost against a budget of **≤ 120 s CPU** for all three checks,
+     dev build.
+   - `blockedctx` under approach A, prototyped and not committed.
+
+   If the budget fails, the `threadrust` oracle starts at a declared landmark (the `bsdthread_create`
+   one), with its breakpoints chosen on thread-only paths. If that fails too, a freestanding asm
+   threaded fixture is built (R6).
+1. **The REDs:** the named regressions, the invariant test, `step_armed`, the oracle, and its three
+   checks on the five armings. Every test that asks the debugger a question is RED. `step_armed`'s
+   own test and the oracle's self-checks are green, because they check the ground truth, not the
+   debugger.
+2. **§3a:** `settle_schedule` in `finish_event` and the rewritten docs. The M8 tests and the
+   `threadrust` oracle arming go green, forward and backward.
+3. **§3b + §3c:** the cursor and `continue`, with R11. M1, M2, M3 and M5 go green.
+4. **§3d:** `reverse-continue` under the cursor. M4, M6 and M7 go green, and so do all five oracle
+   armings.
+5. **The audit, and R7's diagnostic.** `resolve_nth`'s breakpoint loop names the K it reached
+   instead of a one-call step count.
+6. **Close:**
+   - The gate.
+   - README: the two Known limits are removed, and cursor semantics are added to "What works today".
+   - The status-log section.
+   - CLAUDE.md's gate list gains the new e2e file.
+
+§3a goes before §3c because R11's fix is only safe once `pc()` at (n, 0) is the running thread (§3c
+step 4's second case reads it).
+
+## 6. Acceptance
+
+- Every Task 1 test is RED on `c68ba6d` and green after, **measured both ways**, with the RED
+  transcripts in the ledger.
+- All five oracle armings pass all three checks. The `threadrust` arming is within Task 0's budget,
+  or in its declared fallback.
+- The gate is green, reconciled file by file against M40's **640 / 0 / 9 over 140**. `TRACE_MAGIC`
+  does not move, `verify_thread` stays at seven, no dispatch arm changes, and there is no new
+  `#[ignore]`.
+
+## 7. Halt rules, and what this milestone deliberately does not do
+
+**Halt rules:**
+- **If §3a breaks any existing gate other than by the boundary-thread change it predicts, stop and
+  report.** It would mean something depends on the lazy switch, and that is a design question, not
+  a patch.
+- **If the oracle finds a mismatch outside hit accounting** (a resolver/hardware disagreement, a
+  replay divergence, a fault), it becomes a README Known limit and an owed item. The milestone
+  doesn't widen for it.
+
+**Not done:**
+- **lldb** is M42.
+- **A breakpoint on the faulting instruction of a handled fault** still errors (M40 T3 minor),
+  unless an oracle fixture happens to reach it, in which case the halt rule applies.
+- **The `crc32` speedup and `reverse-stepi`'s cost**, both M40's owed items.
+- **`resolve_nth`'s parameter count stays at seven.** Clippy's `too_many_arguments` fires at eight,
+  so the phase is not passed to it: the cursor lives in `Exec`.
+- **M40's other deferred review minors**, except R8's loop, which falls out of §3c.
+- **Everything on M39's and M38's carried lists.**
+
+## 8. Rulings (made while writing this spec)
+
+- **R1 — approach A** (switch when the event finishes), by the operator, over B (lookahead
+  accessors `next_pc()`/`next_thread()`). B would leave M15's definition in place and make each
+  counting site remember the lookahead. That's the "nothing structural couples them" trap CLAUDE.md
+  records for `verify_thread`, and lldb's register reads would inherit it.
+- **R2 — scope is the fixes plus the hit oracle**, by the operator, over the fixes alone and over
+  the fixes plus M40's debugger minors.
+- **R3 — the same-coordinate skips are in scope**, by the operator on the design's second section.
+  M6 was found after that approval, by t0. It is the same class, fixed by the same §3d rule, so it
+  is included under R3.
+- **R4 — an arrival's phase is `Bp`.** gdb's rule. It keeps every arrival's forward behavior as
+  today (`continue_from_a_breakpoint_steps_over_it`,
+  `continue_after_reverse_stepi_onto_boundary_bp`).
+- **R5 — `reverse-continue` from an arrival at (n, 0) finds a syscall write at (n, 0).** This
+  deliberately reverses M40's exclusion (M7) for arrivals. It is kept for the hit itself, where the
+  cursor sits at `Sys`, so M40 Ruling 2's stuck loop cannot recur.
+- **R6 — `threadrust` is the T3 fixture.** It is measured (M8) and carries both shapes. A new asm
+  threaded fixture is built only if Task 0's budget and fallback both fail.
+- **R7 — `resolve_nth`'s breakpoint-loop error names the K it reached.** The resolver is touched
+  anyway, and M2 shows the current message misleads the reader of every loud failure in this class.
+- **R8 — the scoped-out watch recursion becomes a loop**, because §3c rewrites the code it lives in.
+  M40 recorded the recursion as able to overflow the stack on a hot scoped-out write loop.
+
+## 9. Gate prediction
+
+M40 closed at **640 / 0 / 9 over 140**. Expected additions:
+- One e2e file (`hitorder_e2e`: +1 binary), with ~9 named regressions, 1 invariant test, 5 oracle
+  armings and 5 self-checks.
+- ~2 unit tests in `debug.rs` (cursor order, `stepi` arrival).
+- ~1 `step_armed` test in `retrace-core`.
+- No `#[ignore]`.
+
+**Prediction: ≈ 663 / 0 / 9 over 141**, reconciled file by file. It's a prediction, not a target.
+
+## 10. Outcome
+
+*(Filled at the close.)*
