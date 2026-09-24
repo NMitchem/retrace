@@ -11501,8 +11501,8 @@ the same kind and showed T3 reached forward `continue` too. M41 defines both thi
 the position, makes `continue` and `reverse-continue` obey them, and gives the debugger a
 brute-force hit oracle that each command's answers are checked against. Every bug on M40's list had
 been found by review, not by a test; the oracle is how the next one is meant to be found by a test.
-It is also M42's precondition: lldb is meant to go in front of this debugger, and its answers had
-to be right first.
+It is also the lldb seam's precondition: lldb is meant to go in front of this debugger, and its
+answers had to be right first.
 
 The milestone's numbers: **eight** t0 measurements (M1–M8), each now a named regression that was RED
 on M40's debugger and is green; **one** new test binary (`hitorder_e2e`, 22 tests) and one new
@@ -11941,7 +11941,7 @@ Execution:
 * **A crashing store that also writes a watched range** — `watch X; continue; continue` hits the
   crossing's `Advance::Watch` Err (exit 5). Pre-M41 also exited 5; outside R10.
 * **Early `?` exits in `cmd_continue` can leave a kept session armed.** Latent today, because an
-  Err aborts the script; live if M42's lldb seam keeps an `Exec` alive after an error.
+  Err aborts the script; live if the lldb seam (M43) keeps an `Exec` alive after an error.
 * **No test pins checkpointed-seek parity at a blocking boundary** (Task 2 review, Minor 5). It
   holds by construction: the checkpoint is captured after `advance()` settles, and the CLI's cost
   gate never caches `k = 0`.
@@ -11963,8 +11963,10 @@ Execution:
   `continue`'s skip, M1/M2), T3's thread-switch blind spot and its phantom (M8), and "R3 has no
   committed test" (`m3`, `m4`, the bp-on-store arming).
 * **M39's and M38's carried lists**, as M40 carried them — none touched.
-* **The lldb seam is M42's.** M41 is its precondition, and the latent `?`-exit item above is the
-  first thing it will meet.
+* **The lldb seam is M43's; M42 is the LL/SC single-step limit above.** The operator ordered it so
+  on 2026-09-24, after M41 found the limit: lldb steps far more than a script does, so stepping is
+  made sound first. M41 is the seam's precondition, and the latent `?`-exit item above is the first
+  thing it will meet.
 
 **Superseded, not owed — with this section as their forward pointer.** Spec §3c's last paragraph
 ("a fault … propagates as the same error it does today"; R10); spec §5's separate Task 0 (R9);
