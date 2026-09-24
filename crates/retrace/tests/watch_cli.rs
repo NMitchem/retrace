@@ -57,8 +57,9 @@ fn watch_continue_hits_first_store_and_progress_rule_advances() {
     assert!(out.contains(&format!("hit watch 0x{t:x} (write at 0x{spc:x}) at (1, +?)")), "hit line:\n{out}");
     assert!(out.contains(&format!("resolved (1, {})", ks[0])), "first store K:\n{out}");
     assert!(out.contains(&format!("at (1, {}) pc=0x{spc:x}", ks[0])), "where after first hit:\n{out}");
-    // Progress rule: the second continue pre-steps off the un-retired store and lands on the NEXT
-    // execution of the same store pc — ks[1], not ks[0] again.
+    // Progress rule: the cursor is ON the un-retired store (phase Watch, M41 §3b), so the second
+    // continue finishes that coordinate — it executes the store with the watches disarmed — and
+    // the scan lands on the NEXT execution of the same store pc — ks[1], not ks[0] again.
     assert!(out.contains(&format!("resolved (1, {})", ks[1])), "second hit advances:\n{out}");
     // WATCHLOOP is single-threaded throughout, so thread=0 is the only truthful answer (M15).
     // M19 appends a symbol annotation to the position line. Strip it and keep `ends_with` — the
@@ -380,8 +381,9 @@ fn rewatch_without_unwatch_is_rejected_and_unwatch_then_rewatch_applies_the_new_
 #[test]
 fn pre_step_boundary_cross_reports_a_watched_syscall_write() {
     // Final-review M-1: park ON the read-svc via a breakpoint (resolves to k = window len),
-    // then `watch buf; continue`. The pre-step crosses the boundary by consuming the read
-    // event itself — the kernel write to buf must be reported, not silently skipped.
+    // then `watch buf; continue`. The finish (M41 §3c; this test's name keeps the pre-M41 word
+    // "pre-step") crosses the boundary by consuming the read event itself, with the watches
+    // armed for that one event — the kernel write to buf must be reported, not silently skipped.
     let (rec, trace) = util::record(retrace_guest::FILEIO);
     assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
     let tp = Path::new(&trace);
