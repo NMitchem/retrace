@@ -227,8 +227,7 @@ enum HitKind<'a> { Watch(&'a [(u64, u64)]), Break(&'a [u64]) }
 /// `kind`, checking that the instruction there is at `expect_pc` (the pc the scan saw). That check
 /// makes a scan/resolver disagreement fail loud only when the disagreement lands on a DIFFERENT
 /// instruction. An ordinal off by one among hits at the same pc — every hit of one breakpoint,
-/// every run of one loop store, e.g. README's Known-limits case of a breakpoint at a thread switch —
-/// passes it and names the wrong run silently. Replaces M3's
+/// every run of one loop store — passes it and names the wrong run silently. Replaces M3's
 /// `resolve_hit_k`, which matched a watch hit BY PC: a store that ran on other addresses first
 /// resolved to an earlier run that never wrote the watched range (t0 M6/M7: rung 8's `continue`
 /// landed 1.7 M instructions early). Deterministic; runs on its own transient session, so the
@@ -891,9 +890,7 @@ impl<'a> Exec<'a> {
                 let mut k = 0u64;
                 while k < pk {
                     // Read BEFORE the step: the breakpoint check compares the pc about to execute.
-                    // At (pn, 0) with a thread switch pending this is the OUTGOING thread's resume
-                    // pc (step() switches on entry) — the documented blind spot in README's Known
-                    // limits.
+                    // At (pn, 0) after a blocking event that is the INCOMING thread's (M41 §3a).
                     let pc = s.pc();
                     if bps.contains(&pc) {
                         bp_ord += 1;

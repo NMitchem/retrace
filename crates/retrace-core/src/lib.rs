@@ -1504,12 +1504,22 @@ impl ReplaySession {
     /// Finish consuming one trace event: bump idx and report it — as `WatchSyscall` if this event's
     /// applied writes overlapped an armed watch range (the event is consumed identically either
     /// way; only the report differs), else as plain `Event`.
+    ///
+    /// M41 §3a: then settle the schedule, so that at the position this event leads to, (n, 0),
+    /// `pc()` and `current_thread()` name the instruction the next step retires and the thread that
+    /// retires it — after a blocking event, the INCOMING thread. Ordered AFTER the `WatchSyscall`
+    /// tag is taken, because a syscall's write belongs to the thread that issued it. Every
+    /// event-consuming dispatch path returns through here (M41 spec §3a), and each arm's
+    /// `verify_thread` has already run, so the divergence oracle still compares the issuing
+    /// thread. Record never calls this; its `run()` makes the same switch on entry.
     fn finish_event(&mut self) -> Result<Advance, Divergence> {
         self.idx += 1;
-        if let Some((watched, _ipa)) = self.b.take_syscall_watch_hit() {
-            return Ok(Advance::WatchSyscall { watched, thread: self.current_thread() });
-        }
-        Ok(Advance::Event)
+        let adv = match self.b.take_syscall_watch_hit() {
+            Some((watched, _ipa)) => Advance::WatchSyscall { watched, thread: self.current_thread() },
+            None => Advance::Event,
+        };
+        self.b.settle_schedule();
+        Ok(adv)
     }
 
     /// Consume exactly ONE trace event (returning `Advance::Event`), or drive the guest to a
@@ -2704,16 +2714,15 @@ impl ReplaySession {
     /// Reads what the box already computes. The schedule is a pure function of the guest's own
     /// syscall sequence (M14), recomputed identically on replay, so this needs nothing recorded.
     ///
-    /// **At a landmark boundary `(N, 0)` this names the thread that ISSUED landmark `N`'s syscall,
-    /// which after a BLOCKING one (`__ulock_wait`, `bsdthread_terminate`) is the thread that just
-    /// blocked or exited — not the one that will retire the next instruction.** `Box_::run()` and
-    /// `step()` switch on ENTRY, after the dispatch arm has marked the thread `Blocked`/`Exited`,
-    /// which is exactly where M15's R1 invariant is pinned; so from `K >= 1` onward this names the
-    /// running thread, and only the `K == 0` boundary shows the outgoing one. That is a
-    /// definitional choice, not a lag: it keeps this in agreement with `Event::Syscall.thread` for
-    /// that same landmark, which is what the divergence oracle compares against. A caller
-    /// rendering it (`where`, `threads`) will therefore mark a `Blocked` thread as current at such
-    /// a boundary — correct, and surprising the first time you see it.
+    /// **M41 §3a: at every position, including a landmark boundary `(N, 0)`, this names the thread
+    /// that retires the next instruction.** `finish_event` settles a pending switch before a
+    /// boundary is ever observed, so after a BLOCKING syscall (`__ulock_wait`, `bsdthread_terminate`,
+    /// `semaphore_wait_trap`, a workq park) `(N, 0)` shows the INCOMING thread. Until M41 it showed
+    /// the thread that had just blocked (M15's definition), which left every breakpoint counted by
+    /// `pc()` at such a boundary blind: a phantom hit on the outgoing thread's resume pc and a missed
+    /// one on the incoming thread's first instruction (M41 t0 M8). The divergence oracle is
+    /// unaffected: each dispatch arm's `verify_thread` runs before `finish_event`, against the
+    /// thread that issued the syscall.
     pub fn current_thread(&self) -> u32 { self.b.threads().current() as u32 }
     /// M15: every thread the guest has created, in stable index order. Exited threads STAY in the
     /// table (a `join` may arrive after the exit), so they appear here too — that is information the
@@ -2780,12 +2789,16 @@ impl ReplaySession {
         }
     }
     /// The landmark anchor: ELR_EL1 at a syscall trap (the last trap's return address), matching
-    /// `Box_::position()`. Coincides with `pc()` only at a landmark boundary (K=0).
+    /// `Box_::position()`. Coincides with `pc()` at a landmark boundary (K=0) reached through a
+    /// non-blocking event; after a blocking one (M41 §3a) the vCPU holds the incoming thread, and
+    /// this is that thread's own saved ELR.
     pub fn position(&self) -> u64 { self.b.position() }
     /// The live instruction pointer (reg PC) — the true position at an arbitrary (N, K) coordinate,
     /// matching `Box_::pc()`. This differs from `position()` (ELR_EL1, a syscall's return address):
     /// they coincide only at a landmark boundary (K=0); mid-window, at the initial snapshot, and at a
     /// hardware breakpoint hit, only reg PC names where the guest actually is. The M3 debugger reports this.
+    /// M41 §3a: at a boundary after a blocking event this is the INCOMING thread's pc — the
+    /// instruction the next step retires.
     pub fn pc(&self) -> u64 { self.b.pc() }
     /// Arm one hardware instruction breakpoint per address (one DBGBVR slot each) so a mid-window PC
     /// match surfaces from `advance()` as `Advance::Break`. The 6-slot hardware limit is enforced
