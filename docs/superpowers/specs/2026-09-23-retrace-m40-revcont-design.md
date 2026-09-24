@@ -157,8 +157,10 @@ both old rules missed.
     instruction between the resume point and each real hit.
 - **The leak:** a test opens and drops a session several times and asserts the live-backing count
   returns to its starting value each time. RED on today's tree.
-- **`watched_of`:** unit cases for a FAR 8 bytes below the range (`stp`) and 40 bytes below it
-  (inside a `DC ZVA` block), plus the existing exact and doubleword cases unchanged.
+- **`watched_of`:** unit cases for FARs that a store which really covers the range could report:
+  8 bytes below (a 16-byte `stp`, rung 8's `0xa01722ac0` case), 24 bytes below (a 32-byte
+  `stp q`), and 24 bytes *above* within the same 64-byte block (`DC ZVA`). Also a FAR outside the
+  window, which keeps the fallback, and the existing exact and doubleword cases, unchanged.
 - **Rung 8** keeps `cpython_crash_e2e`'s assertions unchanged. Its cost is measured and reported
   under the §6 acceptance, not asserted, because it skips without Homebrew Python and so guards
   nothing on another machine.
