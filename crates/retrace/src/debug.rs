@@ -922,4 +922,62 @@ mod tests {
         assert!(parse_script("regs abc").is_err(), "a thread id must parse as u32");
         assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");
     }
+
+    // -------------------------------------------------------------------------------------------
+    // M40: VM-driving tests on the repo-owned WATCHSWEEP fixture. They live here, not in an e2e
+    // file, because what they assert (the checkpoint cache's seek count and the trace decode count)
+    // is internal to the debugger and invisible through the CLI.
+    // -------------------------------------------------------------------------------------------
+
+    fn record_watchsweep(tag: &str) -> std::path::PathBuf {
+        let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::WATCHSWEEP).unwrap());
+        let trace = std::env::temp_dir()
+            .join(format!("retrace-m40-{tag}-{}.bin", std::process::id()));
+        retrace_core::record(&loaded, &trace).expect("record watchsweep");
+        trace
+    }
+
+    /// `&buf[40]`, from the recorded write(1, target, 8).
+    fn watchsweep_target(trace: &Path) -> u64 {
+        let mut s = retrace_core::ReplaySession::open(trace).unwrap();
+        loop {
+            if let Some((4, args)) = s.peek_syscall() {
+                if args[0] == 1 { return args[1]; }
+            }
+            s.advance().unwrap();
+        }
+    }
+
+    fn run_cmds(ex: &mut Exec, script: &str, sink: &mut Vec<u8>) {
+        for cmd in parse_script(script).unwrap() { ex.exec(&cmd, sink).unwrap(); }
+    }
+
+    #[test] fn reverse_continue_makes_at_most_three_seeks_whatever_the_hits() {
+        let trace = record_watchsweep("seeks");
+        let t = watchsweep_target(&trace);
+        let mut ex = Exec::new(&trace).unwrap();
+        let mut sink = Vec::new();
+        run_cmds(&mut ex, &format!("continue; watch 0x{t:x}"), &mut sink);
+        let before = ex.cache.seeks();
+        ex.exec(&Cmd::ReverseContinue, &mut sink).unwrap();
+        let seeks = ex.cache.seeks() - before;
+        let text = String::from_utf8_lossy(&sink).into_owned();
+        assert!(text.contains(&format!("hit watch 0x{t:x} (write at ")), "{text}");
+        // Spec §3b: the scan, the resolution and the park. Pre-M40 this paid two seeks per run of
+        // the sweeping store between each resume point and each real hit.
+        assert!(seeks <= 3, "one reverse-continue made {seeks} seeks:\n{text}");
+    }
+
+    #[test] fn a_debug_session_decodes_its_trace_once() {
+        let trace = record_watchsweep("decodes");
+        let t = watchsweep_target(&trace); // decodes on its own; the baseline is taken after it
+        let d0 = retrace_trace::decode_count();
+        let mut ex = Exec::new(&trace).unwrap();
+        let mut sink = Vec::new();
+        run_cmds(&mut ex, &format!("continue; watch 0x{t:x}; reverse-continue; stepi; reverse-stepi"), &mut sink);
+        let decodes = retrace_trace::decode_count() - d0;
+        // Spec §3e: every session the debugger opens, and M19's symbol table, share one decode.
+        assert_eq!(decodes, 1, "a debug session decoded its trace {decodes} times:\n{}",
+                   String::from_utf8_lossy(&sink));
+    }
 }

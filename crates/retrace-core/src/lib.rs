@@ -2882,18 +2882,25 @@ pub struct CheckpointCache {
     total_single_steps: u64,
     window_lens: std::collections::BTreeMap<usize, u64>, // landmark N -> window length (fixed per trace)
     window_probe_steps: u64,
+    seeks: u64, // M40: sessions opened through `checkpointed_seek` — a debugger command's cost proxy
 }
 
 impl CheckpointCache {
     pub fn new(byte_budget: usize, cost_gate_steps: u64) -> Self {
         CheckpointCache { entries: std::collections::BTreeMap::new(), recency: Vec::new(),
                           byte_budget, used_bytes: 0, cost_gate_steps, total_single_steps: 0,
-                          window_lens: std::collections::BTreeMap::new(), window_probe_steps: 0 }
+                          window_lens: std::collections::BTreeMap::new(), window_probe_steps: 0,
+                          seeks: 0 }
     }
 
     /// Total single-steps ever paid across every `checkpointed_seek` call against this cache — the
     /// cost-gating input, and the deterministic proxy the test suite uses to prove acceleration.
     pub fn total_single_steps(&self) -> u64 { self.total_single_steps }
+
+    /// M40: sessions opened through `checkpointed_seek` against this cache. The deterministic cost
+    /// proxy for one debugger command: `reverse-continue` is bounded at 3 (spec §3b), however many
+    /// hits it passes.
+    pub fn seeks(&self) -> u64 { self.seeks }
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
     pub fn used_bytes(&self) -> usize { self.used_bytes }
@@ -2958,6 +2965,7 @@ impl CheckpointCache {
 /// position stored as a fresh checkpoint if that count clears `cache`'s cost gate.
 pub fn checkpointed_seek(trace_path: &Path, cache: &mut CheckpointCache, n: usize, k: u64)
     -> Result<ReplaySession, String> {
+    cache.seeks += 1;
     let hit = cache.best_at_or_before(n, k);
     let (s, steps_paid) = match hit {
         Some(((n0, k0), checkpoint)) if n0 == n => {
