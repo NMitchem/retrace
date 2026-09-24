@@ -84,6 +84,11 @@ it, cited as "t0 M1–M8". Read both before starting.
   `/usr/bin/time -l cargo …`; put that line in a script under the session scratchpad and run the
   script (Task 2 measured the baselines that way). `--no-fail-fast` is a cargo flag and goes
   BEFORE `--`; libtest rejects it after.
+- **Controls (deliberate breakages) run only on a COMMITTED tree.** Commit the task's
+  implementation first, then apply one control, run its test, and undo it with
+  `git checkout -- <file>`, which restores the committed version. Confirm `git status --short`
+  lists no modified tracked file before the next control. `git checkout -- <file>` on a file that
+  holds uncommitted work destroys that work. Never use `git stash` (it is shared across worktrees).
 - **An implementer never dispatches subagents.**
 - **Execution rulings are numbered from R13.** R1–R8 are the spec's. R9–R12 are this plan's.
 
@@ -1795,8 +1800,10 @@ Expected in `llsc_e2e`:
   (Task 4)" panic or a divergence, never with a hang. Ledger the symptoms. A forward `continue`
   stops NATIVELY at the store-exclusive, and the shadow exists there only from Task 5's inference.
 
-- [ ] **Step 8: Show each guard able to fail** (M28's lesson). Ledger each run's result, then revert
-it with `git checkout -- <file>` and confirm `git diff --stat` shows only this task's edits.
+- [ ] **Step 8: Show each guard able to fail** (M28's lesson). **Run this step after Step 9's
+commit**, on the committed tree (Global Constraints: controls). Ledger each run's result, then undo
+the control with `git checkout -- <file>` and confirm `git status --short` lists no modified
+tracked file.
 
 | # | Deletion | Test that must go RED |
 |---|---|---|
@@ -1964,7 +1971,8 @@ Expected:
   by the 60 s bound or a divergence: a native breakpoint or watch stop inside the pair infers no
   shadow before Task 5.
 
-- [ ] **Step 4: Show the order is load-bearing** (ledgered, then reverted). Swap the two checks in
+- [ ] **Step 4: Show the order is load-bearing** (after Step 5's commit, on the committed tree;
+ledgered, then undone with `git checkout -- <file>`). Swap the two checks in
 `raise_debug_stop`, raising the watch first. `oracle_a1_lists_every_hit_the_source_implies` must go
 RED, with Watch before Bp at `(2, 7)`.
 
@@ -2290,7 +2298,8 @@ grep -a -e '^test ' -e 'test result' .superpowers/sdd/2026-09-24-retrace-m42-lls
 
 Expected: **every** `llsc_e2e` test PASSES.
 
-Control C6 (ledgered, then reverted): delete the `entry_pc` check (condition 1).
+Control C6 (after Step 5's commit, on the committed tree; ledgered, then undone with
+`git checkout -- <file>`): delete the `entry_pc` check (condition 1).
 `a_native_stop_after_a_reentry_inside_the_pair_infers_nothing` must go RED. The shadow is inferred,
 the stxr is emulated, and status 0 then diverges from the recorded 1 at landmark 6.
 
@@ -2360,8 +2369,8 @@ fn a_seek_into_dylds_getpid_pair_replays_to_the_end() {
 ```
 
 Run: `cargo test -p retrace --test hitorder_e2e a_seek_into_dylds_getpid -- --test-threads=1`
-Expected: PASS on the Task 5 tree. Show it RED on `1d95a93`'s behaviour with a temporary revert of
-`step()`'s emulation hunk (`git stash` is shared across worktrees and forbidden, so edit and revert
+Expected: PASS on the Task 5 tree. After Step 3's commit, show it RED on `1d95a93`'s behaviour with a
+temporary revert of `step()`'s emulation hunk, undone with `git checkout -- <file>` (`git stash` is shared across worktrees and forbidden, so edit and revert
 by hand). The RED is a divergence at `(g+1, 2)`. Ledger both.
 
 If the word assertion fails, the OS moved dyld's getpid. Report the word found, then re-derive the
