@@ -254,11 +254,13 @@ over 139**, to be reconciled file-by-file. The number is a prediction, not a tar
 ## 10. Outcome
 
 *(Filled in at the close, 2026-09-24, on branch `m40-revcont`. The status log's M40 section
-carries the full account: every RED → green, the rulings R7–R10, the owed list.)*
+carries the full account: every RED → green, the rulings R7–R12, the final review and its fix
+wave, the owed list.)*
 
 **Delivered.** All four fixes and the naming rule landed as designed, except where R10 corrected
 §3f. `reverse-continue` on rung 8 went from 3.42 h of wall-clock to **0.53 s of CPU**. The gate is
-**639 / 0 / 9 over 140** on `5cea9a8`.
+**640 / 0 / 9 over 140** on the tree of the final-review fix commit (the close's first run, on
+`5cea9a8` before the fix wave's one added test, read 639 / 0 / 9 over 140).
 
 **§6, item by item.**
 
@@ -286,7 +288,7 @@ carries the full account: every RED → green, the rulings R7–R10, the owed li
   session finished before its first tick, so the README's memory figure is run B's RSS.
 - *The gate is green, reconciled file-by-file against 629 / 0 / 9 over 138; `TRACE_MAGIC` does not
   move; `verify_thread` stays at seven; no dispatch arm changes.* **Met.** The gate is
-  639 / 0 / 9 over 140, every chunk exit 0 and clippy clean: +10 tests over five files and two new
+  640 / 0 / 9 over 140, every chunk exit 0 and clippy clean: +11 tests over five files and two new
   binaries, reconciled file by file in the status log. No changed line names `TRACE_MAGIC`, and the constant is
   byte-identical. `self.verify_thread(` still has **7** sites. Every `retrace-core` hunk lies outside
   `record_box` and `ReplaySession::advance`.
@@ -310,10 +312,10 @@ carries the full account: every RED → green, the rulings R7–R10, the owed li
 - **Corrected — §4's fixture.** "C, `-O0`" landed as freestanding asm (`asm/watchsweep.s`), as the
   plan wrote it. The "~1 resolver test in `retrace-core` or `retrace-box`" landed in
   `watchsweep_e2e` as its third test.
-- **Corrected — §9.** It predicted ≈ 636 / 0 / 9 over 139, and the gate measured 639 / 0 / 9 over
+- **Corrected — §9.** It predicted ≈ 636 / 0 / 9 over 139, and the gate measured 640 / 0 / 9 over
   140. It did not count `watchsweep_guest_parses` (+1), the two `watch_cli` guards Task 3's review
-  added (+2), or the leak test's own binary (`backingfree`, +1 binary).
-  `watchsweep_e2e` has three tests, not ~2.
+  added (+2), the R4 guard the final review added (+1), or the leak test's own binary
+  (`backingfree`, +1 binary). `watchsweep_e2e` has four tests, not ~2.
 - **Corrected — §1.** §1 said only forward `continue` gave a wrong answer. On the pre-fix tree
   `reverse-continue` did too (R7).
 
@@ -333,3 +335,14 @@ carries the full account: every RED → green, the rulings R7–R10, the owed li
 - **The close's own invariant command was wrong.** The Task 8 brief's
   `git diff 786bf2b -- crates/retrace-trace/src/lib.rs | grep -c TRACE_MAGIC` prints 1, because an
   unchanged context line in the diff names the constant. The changed-lines form prints 0.
+- **Forward `continue` skips a breakpoint hit that its own pre-step lands on (R11, owed).** It
+  resolves from `kctx + 1`, so two adjacent breakpoints lose the second's hit: silently in a loop
+  (`watchsweep` resolves `(1, 14)` for a correct `(1, 9)`), loudly in straight-line code (`FILEIO`
+  exits 5). It is inherited from M3 (`e41aff8`), and §3c kept that path. The final review found it;
+  it is a README Known limit, and the fix (resolve from `kctx`) is owed.
+- **The final review's fix wave** added R4's missing guard, which was RED at `(1, 208)` for a
+  correct `(1, 213)` with scoped-out hits dropped from the ordinal. It also made `step_watched`
+  reject a breakpoint stop and made `reverse-continue` refuse to move forward. Two more changes
+  were corrections: phase 2 now reads a watch hit's pc after the step, and two comments that
+  claimed too much were narrowed. It also named the phantom direction of the thread-switch
+  limit.

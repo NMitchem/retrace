@@ -450,8 +450,11 @@ impl Drop for Backing {
         // SAFETY: `self.host`/`self.len` are exactly what the `alloc_pages` call that built this
         // Backing returned (audited above), and by the time a Backing drops its stage-2 mapping is
         // already gone: `vm.unmap` ran first at the two removal sites (`unmap_overlapping`,
-        // `guest_munmap`), or `hv_vm_destroy` already ran because `backings` is declared after `vm`
-        // in every constructor's locals (M40) and after `vm` in `Box_` itself.
+        // `guest_munmap`), or `hv_vm_destroy` already ran. That second case rests on two opposite
+        // declaration orders, each giving the same drop order: in `Box_` itself `backings` is
+        // declared AFTER `vm` (struct fields drop in declaration order), while every constructor
+        // declares its `backings` local BEFORE `vm` (locals drop in reverse, so a panic unwinding
+        // out of a constructor drops vcpu -> vm -> backings; M40 review, a2f1ecc).
         unsafe { free_pages(self.host, self.len); }
     }
 }

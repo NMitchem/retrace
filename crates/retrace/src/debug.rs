@@ -224,8 +224,11 @@ fn line<W: Write>(out: &mut W, args: std::fmt::Arguments) -> Result<(), String> 
 enum HitKind<'a> { Watch(&'a [(u64, u64)]), Break(&'a [u64]) }
 
 /// Replay window `n` from `(n, from_k)` and return the K of the `ordinal`-th (1-based) hit of
-/// `kind`, checking that the instruction there is at `expect_pc` (the pc the scan saw), so that a
-/// scan/resolver disagreement fails loud instead of naming the wrong instruction. Replaces M3's
+/// `kind`, checking that the instruction there is at `expect_pc` (the pc the scan saw). That check
+/// makes a scan/resolver disagreement fail loud only when the disagreement lands on a DIFFERENT
+/// instruction. An ordinal off by one among hits at the same pc — every hit of one breakpoint,
+/// every run of one loop store, e.g. README's Known-limits case of a breakpoint at a thread switch —
+/// passes it and names the wrong run silently. Replaces M3's
 /// `resolve_hit_k`, which matched a watch hit BY PC: a store that ran on other addresses first
 /// resolved to an earlier run that never wrote the watched range (t0 M6/M7: rung 8's `continue`
 /// landed 1.7 M instructions early). Deterministic; runs on its own transient session, so the
@@ -887,6 +890,10 @@ impl<'a> Exec<'a> {
                 s.clear_breakpoints(); // compared by pc below
                 let mut k = 0u64;
                 while k < pk {
+                    // Read BEFORE the step: the breakpoint check compares the pc about to execute.
+                    // At (pn, 0) with a thread switch pending this is the OUTGOING thread's resume
+                    // pc (step() switches on entry) — the documented blind spot in README's Known
+                    // limits.
                     let pc = s.pc();
                     if bps.contains(&pc) {
                         bp_ord += 1;
@@ -896,7 +903,10 @@ impl<'a> Exec<'a> {
                         Stepped::Retired => k += 1,
                         Stepped::Watch => {
                             w_ord += 1;
-                            let (watched, thread) = (watched_of(&ws, s.far()), s.current_thread());
+                            // The store's pc is read AFTER the step: the guest is parked pre-retire
+                            // on it, on whichever thread step() switched to. Equal to the pre-step
+                            // read except at a pending switch (M40 final review).
+                            let (watched, thread, pc) = (watched_of(&ws, s.far()), s.current_thread(), s.pc());
                             if self.watch_thread_matches(watched, thread) {
                                 last = Some((pn, RHit::Watch { watched, pc, ord: w_ord }));
                             }
@@ -911,15 +921,25 @@ impl<'a> Exec<'a> {
                 }
             }
         } // the scan session drops here: one VM per process
+        // Defence (M40 final review): the scan only records hits strictly before P, so a resolved
+        // coordinate at or after P means scan and resolver disagree. Fail loud rather than reseek
+        // FORWARD under a command whose whole contract is "backward".
+        let before_p = |n: usize, k: u64| -> Result<(), String> {
+            if (n, k) < (pn, pk) { Ok(()) } else {
+                Err(format!("reverse-continue: resolved ({n}, {k}) is not before P ({pn}, {pk})"))
+            }
+        };
         match last {
             Some((n, RHit::Bp { pc, ord })) => {
                 let k = resolve_nth(self.trace, &mut self.cache, n, 0, HitKind::Break(&bps), ord, pc)?;
+                before_p(n, k)?;
                 let a = self.annot(pc);
                 line(out, format_args!("hit {pc:#x} at ({n}, {k}){a}"))?;
                 self.reseek(n, k)
             }
             Some((n, RHit::Watch { watched, pc, ord })) => {
                 let k = resolve_nth(self.trace, &mut self.cache, n, 0, HitKind::Watch(&ws), ord, pc)?;
+                before_p(n, k)?;
                 let a = self.annot(pc);
                 line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k}){a}"))?;
                 self.last_watch_hit = Some((n, k));

@@ -11026,18 +11026,19 @@ an instruction that never wrote the watched memory — and found, before any fix
 
 The milestone's numbers: **four** fixes and one naming rule, each landed behind a guard that was
 RED first; **one** new fixture (`crates/retrace-guest/asm/watchsweep.s`) and **two** new test
-binaries (`watchsweep_e2e`, `retrace-box/tests/backingfree.rs`) for **+10** `#[test]` attributes
+binaries (`watchsweep_e2e`, `retrace-box/tests/backingfree.rs`) for **+11** `#[test]` attributes
 over five files; **two** deterministic instruments (`retrace_trace::decode_count()`,
 `CheckpointCache::seeks()`) and one deterministic counter (`retrace_box::live_backing_bytes()`),
 each a count and never a timing; **one** new `ReplaySession` primitive (`step_watched`) and **one**
 resolver (`resolve_nth`) replacing `resolve_hit_k`; **zero** dispatch arms touched (every
 `retrace-core` hunk lies outside `record_box` and `ReplaySession::advance`), `verify_thread`
 **7 → 7**, and `TRACE_MAGIC` unmoved at `RT\x00\x0a`; **zero** new `#[ignore]` and
-**zero** un-parked; **four** execution rulings (R7–R10), three of which corrected the plan's or the
+**zero** un-parked; **six** execution rulings (R7–R12), three of which corrected the plan's or the
 spec's own text; **eleven** commits before this close — the spec with its t0 companion
 (`d02cbd8`), the plan (`52e99ca`), and nine task commits (`8cb075d`, `0eee264`, `f023f96` +
-`e4712b7`, `b5f1d64` + `a2f1ecc`, `87332fa`, `8368668` + `5cea9a8`), three of them review fix rounds. Gate: **639 passed / 0 failed /
-9 ignored across 140 test binaries**, measured on `5cea9a8`.
+`e4712b7`, `b5f1d64` + `a2f1ecc`, `87332fa`, `8368668` + `5cea9a8`), three of them review fix rounds
+— then the close (`463ac81`) and the final review's fix wave. Gate: **640 passed / 0 failed /
+9 ignored across 140 test binaries**, measured on the fix wave's tree.
 
 ### What t0 measured
 
@@ -11094,7 +11095,9 @@ and `Stepped::AtTrap` reports a window-ending trap. `resolve_nth(trace, cache, n
 ordinal, expect_pc)` replaces `resolve_hit_k`: a watch hit is the *m*-th `Stepped::Watch` with the
 watchpoints **armed**, each earlier one stepped over in place; a breakpoint hit is the *m*-th pc
 match with breakpoints disarmed, pc equality being what a breakpoint hit *is*. It asserts that the
-resolved pc is the one the scan saw, so a scan/resolver disagreement fails loud.
+resolved pc is the one the scan saw, so a scan/resolver disagreement fails loud when it lands on a
+different instruction — and only then: one that lands on another run of the same instruction
+passes (the final review's narrowing, below).
 `arm_hw_watchpoint`'s "NEVER while single-stepping" is superseded for watchpoints only (spec R2,
 on t0 M6); it stands for breakpoints. Forward `continue` resolves each hit as ordinal 1 of its kind
 from `kctx` (watch) or `kctx + 1` (breakpoint), as before. **RED → green:** Task 1's `continue`
@@ -11113,7 +11116,8 @@ armed, tracking per-window ordinals for each kind and stepping over every hit in
 window is then single-stepped from K 0 to `pk`, so only hits strictly before P count; the **last**
 candidate that passes the thread filter is resolved once by `resolve_nth`, and the session parks
 with one `reseek` — at most three seeks, however many hits the pass walked through. Scoped-out
-hits still take ordinals (spec R4), because the hardware fires for them. The four output formats
+hits still take ordinals (spec R4), because the hardware fires for them; that had no guard until
+the final review's fix wave (below). The four output formats
 are byte-identical to the old function's. **RED → green:** the seek guard, 6 seeks on Task 2's tree,
 went green (`≤ 3`).
 
@@ -11234,38 +11238,72 @@ attribution is **inference** from M3, M5 and the counters — the subtraction do
 the 0.53 s — but it is the reading the evidence supports, and nothing was re-run to chase the
 predicted band.
 
+### The final review and its fix wave
+
+An opus review of the whole branch (`786bf2b..463ac81`) returned "ready, with small fixes":
+**0 Critical**, two Important, six Minor. Its probes found R3, R4, a 64-hit ordinal and chained
+commands correct. One fix dispatch followed, before merge:
+
+- **Important #2, fixed: R4 had no guard.** A scan that counted only *matched* watch hits would hand
+  the resolver too small an ordinal. Every run of a loop store shares one pc, so `resolve_nth`'s pc
+  check would pass the wrong run silently.
+  `reverse_continue_counts_a_scoped_out_watch_hit_in_the_ordinal` (`watchsweep_e2e.rs`) scripts
+  `continue; watch <buf[40]> 8 thread 1; watch <buf[41]> 8; reverse-continue`. The guest runs only
+  on thread 0, so buf[40]'s watch is scoped out. The test asserts the full hit line at buf[41]'s
+  write, with K derived by the memory-diff oracle (**213**). It went RED with the scan's
+  `w_ord += 1` moved inside the scope check: `hit watch 0x100004148 (write at 0x1000003a0) at
+  (1, 208)`, which is buf[40]'s store, printed silently (ledger `gate2/r4-red.txt`).
+- **Minors #3–#7, fixed.**
+  - `Drop for Backing`'s `SAFETY` comment had the constructors' order inverted. Since `a2f1ecc`
+    they declare `backings` before `vm`; the struct still declares it after.
+  - Phase 2 read a watch hit's pc before `step_watched`. At (pn, 0) with a thread switch pending,
+    that is the outgoing thread's pc. It now reads it after `Stepped::Watch`. The breakpoint
+    check keeps its pre-step read, which is the documented blind spot. The README's thread-switch
+    limit gained its phantom direction.
+  - `resolve_nth`'s doc now says the pc check catches only a disagreement that lands on a
+    different instruction.
+  - `step_watched` returns `Err` naming its contract on a breakpoint-class stop. It no longer
+    hands that stop to `page_in_cache`.
+  - `reverse-continue` fails with `resolved (n, k) is not before P (pn, pk)` rather than
+    reseeking forward.
+- **Important #1 is owed (R11); Minor #8 is left as is (R12).**
+
 ### The gate
 
-**639 passed / 0 failed / 9 ignored across 140 test binaries**, on commit `5cea9a8` — the head
-after the six implementing tasks and their three fix rounds, and the last commit that changes
-anything cargo compiles: this close changes only `README.md`, `CLAUDE.md`, this log and the spec.
-Run from the worktree by one background script (the ledger's `gate/run-gate.sh`), chunked as
-CLAUDE.md requires, every chunk `--no-fail-fast` with its cargo exit captured to a file **before any
-pipe**: **76** exit files — `ws`, `box`, `bins`, the 72 per-target `e2e-*` and `clippy` — and all 76
-read `0`. Logs parsed with `grep -a` and ANSI stripped. **Zero skips**: the only case-insensitive
-`skip` matches in all 75 test logs are the two test *names* M39 also found
+**640 passed / 0 failed / 9 ignored across 140 test binaries**, on the tree of the final-review
+fix commit — the last commit that changes anything cargo compiles; nothing under `crates/` changed
+between the run and that commit. The gate ran twice at this close. The first run was on `5cea9a8`,
+the head after the six implementing tasks and their three fix rounds, and read **639 / 0 / 9 over
+140**: 76 exit files all `0`, 17 min 8 s, `cpython_crash_e2e` 41.28 s (the ledger's `gate/`). The
+fix wave added one test, so the gate was re-run in full; the figures below are that second run's
+(the ledger's `gate2/`). It ran from the worktree by one background script (`gate2/run-gate.sh`,
+the first run's script with only its log directory changed), chunked as CLAUDE.md requires, every
+chunk `--no-fail-fast` with its cargo exit captured to a file **before any pipe**: **76** exit
+files — `ws`, `box`, `bins`, the 72 per-target `e2e-*` and `clippy` — and all 76 read `0`. Logs
+parsed with `grep -a` and ANSI stripped. **Zero skips**: the only case-insensitive `skip` matches
+in all 75 test logs are the two test *names* M39 also found
 (`debug::tests::empty_segments_are_skipped`,
 `pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one`); `jq_e2e`,
 `jq_file_e2e`, both `cpython_e2e` tests and `cpython_crash_e2e` all **ran**. The whole run took
-**17 min 8 s** of wall-clock (00:28:45 → 00:45:53 in the script's progress file), where M39's took
-hours — `cpython_crash_e2e` finished in **41.28 s** inside it, against 20,740 s inside M39's.
+**17 min 1 s** of wall-clock (01:11:09 → 01:28:10 in the script's progress file), where M39's took
+hours — `cpython_crash_e2e` finished in **41.03 s** inside it, against 20,740 s inside M39's.
 
 | chunk | invocation | exit | binaries | passed | ignored | against M39 |
 |---|---|---|---|---|---|---|
 | `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | 0 | 26 | 172 | 0 | M39's 171 + `retrace-guest` 1 |
 | `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | 0 | 41 | 292 | 0 | M39's 291 + `tests/backingfree.rs` 1, a new binary; whole package, so `Doc-tests retrace_box` is present (M24's lesson) |
-| `e2e` | `cargo test -p retrace --test <name> --no-fail-fast -- --test-threads=1`, once per target, 72 targets in sorted order | 0 × 72 | 72 | 161 | **9** | M39's 156 over 71 + `watchsweep_e2e` 3 (a new binary) + `watch_cli` 2; the 9 ignored are `apple_walls_e2e`'s 7, `stackoverflow_rust_e2e`'s 1 and `symbols_e2e`'s 1 |
+| `e2e` | `cargo test -p retrace --test <name> --no-fail-fast -- --test-threads=1`, once per target, 72 targets in sorted order | 0 × 72 | 72 | 162 | **9** | M39's 156 over 71 + `watchsweep_e2e` 4 (a new binary) + `watch_cli` 2; the 9 ignored are `apple_walls_e2e`'s 7, `stackoverflow_rust_e2e`'s 1 and `symbols_e2e`'s 1 |
 | `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 0 | 1 | 14 | 0 | M39's 11 + 3 — the `debug.rs` unit tests, the chunk CLAUDE.md says never to omit |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | 0 | — | — | — | clean |
 
-172 + 292 + 161 + 14 = **639**. Ignored **9**. Binaries 26 + 41 + 72 + 1 = **140** — 133 test
+172 + 292 + 162 + 14 = **640**. Ignored **9**. Binaries 26 + 41 + 72 + 1 = **140** — 133 test
 executables plus the 7 `Doc-tests` harnesses cargo reports, the convention since M14. The e2e
 targets ran one invocation each rather than in M39's four groups, so the comparison is on the e2e
-total, 161 over 72 against M39's 156 over 71; every one of the 72 logs holds exactly one
+total, 162 over 72 against M39's 156 over 71; every one of the 72 logs holds exactly one
 `Running` line and one `test result:` line.
 
 **Reconciled against M39's 629 / 0 / 9 over 138, file-by-file rather than by sum**
-(`git diff 786bf2b -- crates | grep -c '^+.*#\[test\]'` = **10**, and the same count over `^-` lines
+(`git diff 786bf2b -- crates | grep -c '^+.*#\[test\]'` = **11**, and the same count over `^-` lines
 is **0**, so no test was deleted or renamed away):
 
 | file | M39 | M40 | delta | where the gate shows it |
@@ -11273,17 +11311,18 @@ is **0**, so no test was deleted or renamed away):
 | `crates/retrace-guest/src/lib.rs` | 18 | 19 | **+1** — `watchsweep_guest_parses` (T1) | `ws`: 172 against 171 |
 | `crates/retrace-box/tests/backingfree.rs` | — | 1 | **+1**, new binary — `a_dropped_box_releases_every_backing_byte` (T4) | `box`: `tests/backingfree.rs` **1 passed**, a binary M39 did not have |
 | `crates/retrace/src/debug.rs` | 11 | 14 | **+3** — `reverse_continue_makes_at_most_three_seeks_whatever_the_hits`, `a_debug_session_decodes_its_trace_once` (T1), `watched_of_names_the_range_a_wider_store_covers` (T6) | `bins`: **14 passed** |
-| `crates/retrace/tests/watchsweep_e2e.rs` | — | 3 | **+3**, new binary — `continue_resolves_a_watch_hit_to_the_write_not_an_earlier_run_of_the_store`, `reverse_continue_walks_back_through_both_writers` (T1), `a_watch_aware_step_stops_pre_retire_exactly_at_the_watched_writes` (T2) | `e2e`: **3 passed** |
+| `crates/retrace/tests/watchsweep_e2e.rs` | — | 4 | **+4**, new binary — `continue_resolves_a_watch_hit_to_the_write_not_an_earlier_run_of_the_store`, `reverse_continue_walks_back_through_both_writers` (T1), `a_watch_aware_step_stops_pre_retire_exactly_at_the_watched_writes` (T2), `reverse_continue_counts_a_scoped_out_watch_hit_in_the_ordinal` (the final review's fix wave) | `e2e`: **4 passed** |
 | `crates/retrace/tests/watch_cli.rs` | 9 | 11 | **+2** — `reverse_continue_from_the_syscall_hit_itself_finds_nothing_earlier`, `reverse_continue_crosses_a_breakpointed_svc_and_resolves_ordinal_two` (T3 fix round) | `e2e`: **11 passed** |
 | every other `.rs` under `crates/` | unchanged | unchanged | 0 | the other five changed files (`retrace-box/src/lib.rs` 13, `retrace-core/src/lib.rs` 0, `retrace-trace/src/lib.rs` 14, `watchsweep.s`, `build.rs`) carry the same `#[test]` count as at `786bf2b` |
 
 Per-crate attribute counts confirm the same delta independently of the diff
 (`git grep -h '^[[:space:]]*#\[test\]'` at `786bf2b` against the worktree): `retrace-guest`
-19 → 20, `retrace-box` 291 → 292, `retrace` 176 → 184; the other five crates unmoved. The tree
-holds **646** `#[test]` attributes (M39: 636), of which 9 are ignored, so 637 are runnable; the run
-reports 639 because `census.rs`'s two tests execute twice, the "+2 twice" since M33. A bare
-`grep -c '#\[test\]'` says 647, the extra being the comment in `legacy_equivalence.rs`. So
-629 + 10 = **639**, 9 = **9**, and 138 + 2 = **140** — the corrected prediction exactly.
+19 → 20, `retrace-box` 291 → 292, `retrace` 176 → 185; the other five crates unmoved. The tree
+holds **647** `#[test]` attributes (M39: 636), of which 9 are ignored, so 638 are runnable; the run
+reports 640 because `census.rs`'s two tests execute twice, the "+2 twice" since M33. A bare
+`grep -c '#\[test\]'` says 648, the extra being the comment in `legacy_equivalence.rs`. So
+629 + 11 = **640**, 9 = **9**, and 138 + 2 = **140** — the fix wave's corrected prediction exactly
+(the first run's 639 plus the one R4 guard).
 
 **The 9 ignored are M38's nine, by name**: `apple_walls_e2e`'s seven (`automationmodetool`, `csh`,
 `dddiagnose`, `desdp`, `dyld_info`, `flex`, `tcsh`), `a_rust_stack_overflow_strikes_its_own_guard_page`
@@ -11301,20 +11340,22 @@ crates/retrace-core/src/lib.rs` is **7** at `786bf2b` and **7** now (8 and 8 una
 being the definition), and no changed line names it. No dispatch arm changed: `retrace-core`'s
 seven hunks all sit outside `record_box` and `ReplaySession::advance` — `Stepped` and
 `DecodedTrace`, `ReplaySession`'s `events` field, `open` and `from_checkpoint`, `step_watched`, and
-`CheckpointCache` with `checkpointed_seek`.
+`CheckpointCache` with `checkpointed_seek`. The fix wave's one `retrace-core` hunk is inside
+`step_watched` too (its breakpoint arm), and after it `TRACE_MAGIC`'s changed-line count is still
+**0** and `self.verify_thread(` still **7**.
 
-**The spec's §9 prediction was short by three tests and one binary.** It named `watchsweep_e2e`
+**The spec's §9 prediction was short by four tests and one binary.** It named `watchsweep_e2e`
 (+1 binary, ~2 tests), ~3 `debug.rs` unit tests, ~1 leak test and ~1 resolver test: ≈ 636 / 0 / 9
 over 139. It did not count `watchsweep_guest_parses`, the two `watch_cli` guards Task 3's review
-added, or the leak test's own binary; and the resolver test landed as `watchsweep_e2e`'s third test
-rather than in `retrace-core` or `retrace-box`.
+added, the R4 guard the final review added, or the leak test's own binary; and the resolver test
+landed as `watchsweep_e2e`'s third test rather than in `retrace-core` or `retrace-box`.
 
 ### Rulings
 
 The spec's R1–R6 stand as written; R2 (watchpoints armed while single-stepping) and R4 (ordinals
-count scoped-out hits) are now code, and R3 (a breakpoint on a watched store yields both hits) is
-implemented but has no committed test (owed, below). Execution made four more, numbered after them
-(ledger Rulings 1–4):
+count scoped-out hits) are now code — R4 guarded since the fix wave — and R3 (a breakpoint on a
+watched store yields both hits) is implemented but has no committed test (owed, below). Execution
+made six more, numbered after them (ledger Rulings 1–6):
 
 * **R7 (ledger Ruling 1) — the walk-back guard is expected RED on the pre-fix tree, at its third
   assertion.** What: the plan's Step 8 said `reverse_continue_walks_back_through_both_writers`
@@ -11349,11 +11390,25 @@ implemented but has no committed test (owed, below). Execution made four more, n
   marked correction note pointing here and at §10; their original text is left standing. Cost if
   wrong: if Apple hardware ever reports a FAR outside the watched range's block, that hit prints the
   raw FAR — the pre-M40 honest fallback — never a wrong range.
+* **R11 (ledger Ruling 5) — forward `continue`'s breakpoint skip after its pre-step is owed, not
+  fixed.** What: the final review's Important #1. `continue` resolves a breakpoint hit from
+  `kctx + 1` (`cmd_continue`), so when its pre-step lands on another breakpoint that hit is skipped —
+  silently in a loop (`watchsweep`: `resolved (1, 14)` where the answer is `(1, 9)`), loudly in
+  straight-line code (`FILEIO`: exit 5). Why: it predates M40 (M3 Task 5, `e41aff8`), spec §3c kept
+  `continue`'s breakpoint path, and changing M3's resume rule needs its own RED test and a
+  transcript audit; the reviewer recommended owing it. It is written down as a README Known limit
+  and under "What stays owed" with its reproduction. Cost if wrong: the silent skip stays live until
+  the next milestone, but it is documented where a user looks.
+* **R12 (ledger Ruling 6) — phase 2's `if win != pn` reset stays, though it can never fire.** What:
+  the final review's Minor #8. Why: it is harmless, and a `debug_assert!` would add nothing that the
+  scan's own overshoot check (`the scan overshot landmark …`) does not already give. Cost if wrong:
+  none.
 
 Two corrections were made without a ruling, because each was a count, not a decision: Task 4's
 construction-site census (17, not 18), and this close's expected gate delta, which the plan put at
 +8 over +2 binaries (637 / 0 / 9 over 140) before Task 3's fix round added two `watch_cli` tests;
-the dispatch corrected it to **639 / 0 / 9 over 140**.
+the dispatch corrected it to **639 / 0 / 9 over 140**, and the fix wave's R4 guard made it
+**640 / 0 / 9 over 140**.
 
 ### What stays owed
 
@@ -11377,6 +11432,17 @@ the dispatch corrected it to **639 / 0 / 9 over 140**.
   set {461, 468, 464, 345, 374}; and M39's eleven deferred review minors, none touched by M40. M38's
   list stands behind them, carried by M39. **One M39 item is discharged**: `reverse-continue`'s cost
   on a long recording, time and memory both.
+* **Forward `continue` skips a breakpoint hit that its pre-step lands on** (R11; inherited from M3,
+  `e41aff8`). `cmd_continue` resolves a breakpoint hit from `kctx + 1`, so when the pre-step off a
+  parked breakpoint lands on another breakpoint, that hit is never counted. Reproductions, the
+  final review's (the first re-run for this close, in the ledger's `gate2/ruling5-repro.txt`): on
+  the `watchsweep` recording, `break 0x1000003a0; break 0x1000003a4; continue; continue` prints
+  `resolved (1, 14)` and exits 0, where the correct answer is `(1, 9)` (`break 0x1000003a4;
+  continue` alone resolves `(1, 9)`) — silent, because the loop reruns the instruction and the pc
+  check agrees; `FILEIO` with two adjacent breakpoints, or one on the `read`'s `svc` and one on the
+  next instruction, exits 5 with `resolve breakpoint hit #1 in window 4: … ends after 0
+  instruction(s)` — loud. Suggested fix: resolve from `kctx`, behind its own RED test and an audit
+  of every `continue` transcript. A README Known limit.
 * **Review minors deferred from Tasks 1–6** (the ledger carries each with its reviewer):
   * T1 — `discover_target` (`watchsweep_e2e.rs`) and `watchsweep_target` (`debug.rs` tests) are
     near-identical; the unit-test module cannot reach `tests/util`.
@@ -11387,8 +11453,10 @@ the dispatch corrected it to **639 / 0 / 9 over 140**.
   * T3 — **breakpoint hit counting at a thread switch** (inherited, silent): at (n, 0) after a
     blocking syscall `pc()` is the outgoing thread's resume pc, so the resolver and phase 2 miss the
     incoming thread's first instruction, and `reverse-continue` to a breakpoint whose pc recurs
-    there can land one hit off. The pre-M40 resolver had the same blind spot. Needs a threaded
-    breakpoint fixture; a README Known limit.
+    there can land one hit off. The pre-M40 resolver had the same blind spot. The same cause also
+    produces a **phantom** hit: if the outgoing thread's resume pc is itself a breakpoint address,
+    the scan and the resolver both count a hit at (n, 0) that nothing executes there — also silent
+    (the final review). Needs a threaded breakpoint fixture; a README Known limit.
   * T3 — a breakpoint on the faulting instruction of a **handled** fault makes `step_watched` return
     `Err("guest crashed")` rather than `AtTrap` (inherited: the old loop failed the same way on its
     `(n, k + 1)` re-seek).
@@ -11407,7 +11475,8 @@ the dispatch corrected it to **639 / 0 / 9 over 140**.
 * **Discharged inside the milestone, not owed:** Task 2's "ordinal > 1 is unexercised" (Task 3's
   walk-back and ordinal-2 tests drive it); Task 3's inaccurate `AtTrap` comment (fixed in round 1);
   Task 4's two stale `SAFETY` comments over safe calls (fixed in round 1); Task 6's
-  `watch_thread_matches` doc (fixed in round 1).
+  `watch_thread_matches` doc (fixed in round 1); and the final review's Important #2 and Minors
+  #3–#7 (fixed in the fix wave, above).
 * **Superseded, not owed — with this section as their forward pointer.** Spec §3f's window
   `[align_down(FAR, 64), FAR + 64)` and §4's "24 bytes below (32-byte `stp q`)" case (R10; each now
   carries a correction note); §4's "C, `-O0`" for the fixture (it is asm, per the plan); §4's
