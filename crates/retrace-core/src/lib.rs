@@ -1264,6 +1264,19 @@ pub struct ReplayReport { pub stdout: Vec<u8>, pub outcome: Outcome, pub fall_th
 #[derive(Debug)]
 pub struct Divergence { pub landmark: usize, pub pc: u64, pub detail: String }
 
+/// M40: what one watch-aware single step did (`ReplaySession::step_watched`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stepped {
+    /// One instruction retired.
+    Retired,
+    /// The next instruction writes an armed watch range. It has NOT retired: the watchpoint is
+    /// pre-retire (spike F4c), so the guest is parked on the store.
+    Watch,
+    /// The next instruction is the window-ending trap. Nothing retired, and the trap is not
+    /// consumed.
+    AtTrap,
+}
+
 /// A resumable replay engine. `open` restores the guest from a trace's leading snapshot; `advance`
 /// consumes exactly one recorded landmark at a time — verifying each trap against the recording
 /// (the divergence oracle) and applying the recorded kernel writes, NEVER executing a syscall.
@@ -2807,6 +2820,33 @@ impl ReplaySession {
             }
         }
         Ok(())
+    }
+
+    /// M40: single-step one instruction with whatever watchpoints are armed, and REPORT a
+    /// watchpoint stop rather than treating it as a fault. `step_insns` hands every `Stop::Other`
+    /// to `page_in_cache`/`commit_reserved_page`, which read the FAR as an IPA; a watchpoint's FAR
+    /// is the watched VA, so the class is checked FIRST here. Measured clean at t0 M6: a
+    /// pre-retire `EC=0x34` stop at exactly the write, a clean retire once disarmed, and clean
+    /// stepping after re-arming. Breakpoints must NOT be armed (one fires before retire at the
+    /// current pc, forever). Deterministic replay faults are handled and re-stepped exactly as in
+    /// `step_insns`.
+    pub fn step_watched(&mut self) -> Result<Stepped, String> {
+        loop {
+            match self.b.step() {
+                Stop::Step => return Ok(Stepped::Retired),
+                Stop::Other { esr } => {
+                    if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Watchpoint) {
+                        return Ok(Stepped::Watch);
+                    }
+                    if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
+                    if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
+                    return Err(format!("fault during a watch-aware step: {}", self.b.describe_stop(esr)));
+                }
+                Stop::Syscall { .. } => return Ok(Stepped::AtTrap),
+                Stop::Fault { pc, far, .. } => return Err(format!(
+                    "guest crashed during a watch-aware step: pc={pc:#x} far={far:#x}")),
+            }
+        }
     }
 
     /// Single-step to the window-ending trap, returning the window length (instructions retired
