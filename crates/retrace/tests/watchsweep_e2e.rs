@@ -140,3 +140,43 @@ fn a_watch_aware_step_stops_pre_retire_exactly_at_the_watched_writes() {
     assert_eq!(at_stop[1], (0x1111_1111_1111_1111u64 + 40).to_le_bytes().to_vec(),
                "the second stop is before the second writer lands");
 }
+
+#[test]
+fn reverse_continue_counts_a_scoped_out_watch_hit_in_the_ordinal() {
+    // Spec R4's guard (M40 final review). The scan counts EVERY hardware watch stop in a window's
+    // ordinal, scoped out or not, because the resolver re-finds the hit by counting the same
+    // hardware stops; the thread filter applies only where `last` is decided. Here buf[40]'s watch
+    // is scoped to thread 1 while the guest runs only on main (thread 0), so the sweep's write to
+    // buf[40] is a scoped-out stop and its write to buf[41] — the NEXT run of the same store — is
+    // the one reported. A scan that counted only MATCHED hits would hand the resolver ordinal 1 for
+    // buf[41], and the resolver's first stop is buf[40]'s write. `resolve_nth`'s pc check cannot
+    // catch that: both are runs of ONE `str` instruction, so the pc agrees and the wrong coordinate
+    // (buf[40]'s store, K = first buf[40] write) is printed silently. Only the coordinate, derived
+    // by the independent memory-diff oracle, tells the two apart.
+    let (rec, trace) = util::record(retrace_guest::WATCHSWEEP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let (tp, ts) = (Path::new(&trace), trace.to_str().unwrap());
+    let b40 = discover_target(tp);
+    let b41 = b40 + 8;
+    let ks40 = discover_store_ks(tp, b40);
+    let ks41 = discover_store_ks(tp, b41);
+    assert_eq!(ks41.len(), 1, "only the sweep writes buf[41], once: {ks41:?}");
+    let k41 = ks41[0];
+    let spc = pc_at(tp, ks40[0]);
+    // The preconditions that make this a guard: buf[41]'s write is the SAME store instruction as
+    // buf[40]'s first write, and comes after it — so the regression's answer passes the pc check.
+    assert_eq!(pc_at(tp, k41), spc, "buf[41] is written by the sweeping store too");
+    assert!(ks40[0] < k41, "buf[40]'s scoped-out write precedes buf[41]'s: {ks40:?} vs {k41}");
+
+    let (code, out, err) = debug_run(ts,
+        &format!("continue; watch 0x{b40:x} 8 thread 1; watch 0x{b41:x} 8; reverse-continue"));
+    assert_eq!(code, 0, "stderr: {err}");
+    let hits: Vec<&str> = out.lines().filter(|l| l.starts_with("hit ")).collect();
+    assert_eq!(hits.len(), 1, "exactly one hit line:\n{out}");
+    let want = format!("hit watch 0x{b41:x} (write at 0x{spc:x}) at (1, {k41})");
+    // The line may carry M19's symbol suffix ("  in …"), never anything else.
+    let rest = hits[0].strip_prefix(want.as_str()).unwrap_or_else(|| panic!(
+        "reverse-continue must name buf[41]'s write at (1, {k41}); a scan that skipped the \
+         scoped-out hit's ordinal names buf[40]'s store at (1, {}):\n{out}", ks40[0]));
+    assert!(rest.is_empty() || rest.starts_with("  in "), "unexpected hit-line tail {rest:?}:\n{out}");
+}

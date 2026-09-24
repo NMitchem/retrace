@@ -502,12 +502,15 @@ reconstruction caveat in full.
   sets the cell to `0x701238000`, where M39's tree resolved `(1126, 29627)` — an earlier run of the
   same store on another address, 1,736,055 instructions early.
 
-**Gate:** 639 passed / 0 failed / 9 ignored across 140 test binaries, **measured at M40** over the
+**Gate:** 640 passed / 0 failed / 9 ignored across 140 test binaries, **measured at M40** over the
 whole workspace, every chunk `EXIT=0` (captured before any pipe); clippy clean over
-`--workspace --all-targets` with `-D warnings`. Measured on commit `5cea9a8`, the head after the
-six implementing tasks and their fix rounds; the commit that follows it is this close's
-documentation and changes nothing under `crates/`. The whole chunked run took 17 min 8 s of
-wall-clock, `cpython_crash_e2e` 41.28 s of it. See the testing note below for how that number is
+`--workspace --all-targets` with `-D warnings`. Measured on the tree of M40's final-review fix
+commit, which follows the close's documentation commit. That fix wave added one test (spec R4's
+guard), three small code changes to the debugger's positioning (phase 2's watch-hit pc,
+`step_watched` refusing a breakpoint stop, `reverse-continue` refusing to move forward) and two
+comment corrections; nothing under `crates/` changed after the gate ran. The whole chunked run took
+17 min 1 s of wall-clock, `cpython_crash_e2e` 41.03 s of it. (The close's first gate, on `5cea9a8`
+before the fix wave, read 639 / 0 / 9 over 140.) See the testing note below for how that number is
 assembled. The "test binaries" figure is test executables plus the `Doc-tests` harnesses cargo
 reports, each of which runs zero tests — the convention every milestone since M14 has counted by,
 kept for comparability and written out here so nobody has to re-derive it. The ignored gates are
@@ -527,18 +530,18 @@ changed their count, everything else is byte-for-byte M39's:
 | `retrace-guest/src/lib.rs` | 18 | 19 | **+1** (`watchsweep_guest_parses`) |
 | `retrace-box/tests/backingfree.rs` | — | 1 | **+1**, new binary (a dropped `Box_` releases every byte of guest backing it allocated, and `guest_munmap` releases exactly its region) |
 | `retrace/src/debug.rs` | 11 | 14 | **+3** (one `reverse-continue` makes at most three seeks whatever the hits; a debug session decodes its trace once; `watched_of` names the range a wider store covers) |
-| `retrace/tests/watchsweep_e2e.rs` | — | 3 | **+3**, new binary (`continue` resolves a watch hit to the write, not an earlier run of the store; `reverse-continue` walks back through both writers; a watch-aware step stops pre-retire exactly at the watched writes) |
+| `retrace/tests/watchsweep_e2e.rs` | — | 4 | **+4**, new binary (`continue` resolves a watch hit to the write, not an earlier run of the store; `reverse-continue` walks back through both writers; a watch-aware step stops pre-retire exactly at the watched writes; `reverse-continue` counts a scoped-out watch hit in the ordinal — spec R4's guard, added by the final review's fix wave) |
 | `retrace/tests/watch_cli.rs` | 9 | 11 | **+2** (a `reverse-continue` from a syscall hit finds nothing earlier; a `reverse-continue` crosses a breakpointed `svc` and resolves ordinal two) |
 
-+10 `#[test]` attributes, `#[ignore]` **9 → 9**, `--bins` **11 → 14**, and **two new test
++11 `#[test]` attributes, `#[ignore]` **9 → 9**, `--bins` **11 → 14**, and **two new test
 binaries**, 138 → 140. The count closes at both ends, and the two ends must still be read
-separately: the tree holds **646** `#[test]` attributes = 637 runnable + 9 ignored (M39 held 636 =
-627 + 9), while the run reports 637 + the 2 census tests that run twice (`census.rs` executes in its
+separately: the tree holds **647** `#[test]` attributes = 638 runnable + 9 ignored (M39 held 636 =
+627 + 9), while the run reports 638 + the 2 census tests that run twice (`census.rs` executes in its
 own binary and again inside `legacy_equivalence`'s `#[path]` include). (A bare
-`grep -c '#\[test\]'` says 647, because a comment in `legacy_equivalence.rs` mentions the attribute
-in prose; the file has three.) The spec's §9 prediction, ≈ 636 / 0 / 9 over 139, was short by three
+`grep -c '#\[test\]'` says 648, because a comment in `legacy_equivalence.rs` mentions the attribute
+in prose; the file has three.) The spec's §9 prediction, ≈ 636 / 0 / 9 over 139, was short by four
 tests and one binary: it did not count `watchsweep_guest_parses`, the two `watch_cli` guards Task 3's
-review added, or the leak test's own binary.
+review added, the R4 guard the final review added, or the leak test's own binary.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
 lesson), and that is also what picks up the new `tests/backingfree.rs` target without a per-target
@@ -1161,7 +1164,21 @@ These are real and current, not aspirational gaps.
   partial-window step miss the incoming thread's first instruction, and a breakpoint whose pc
   recurs in that window can be resolved one hit off. It is silent and inherited, not new: the
   pre-M40 resolver had the same blind spot. Nothing exercises it yet; closing it needs a threaded
-  breakpoint fixture.
+  breakpoint fixture. The same cause also produces a **phantom** hit: if the outgoing thread's
+  resume pc is itself a breakpoint address, the scan and the resolver both count a hit at `(n, 0)`
+  that nothing executes there — also silent.
+- **A forward `continue` can skip a breakpoint hit that its own pre-step lands on.** A `continue`
+  that starts parked on a breakpoint first steps one instruction, so as not to re-report where it
+  stands, and then resolves the next hit from `kctx + 1` — one past the position that pre-step
+  reached. So when the pre-step lands **on** another breakpoint (two adjacent breakpoints, or one on
+  a `svc` and one on the instruction after it), that hit is never counted. In a loop it is
+  **silent**: on the `watchsweep` fixture, `break 0x1000003a0; break 0x1000003a4; continue; continue`
+  prints `resolved (1, 14)` and exits 0, where the right answer is `(1, 9)` — the resolver finds a
+  later run of the same instruction, so the pc check agrees. In straight-line code it is **loud**,
+  because the instruction never recurs and the resolver walks off the window: `FILEIO` with two
+  adjacent breakpoints exits 5 with `resolve breakpoint hit #1 in window 4: … ends after 0
+  instruction(s)`. Inherited from M3 (`e41aff8`), not new — M40's spec §3c kept `continue`'s
+  breakpoint path as it was. The fix is to resolve from `kctx`; owed, with its own RED test.
 - **A bad debugger operand now fails later than it used to.** `where; break zzz` printed nothing and
   exited 5 before M20; it now runs the `where`, prints it, then fails — still exiting 5. That is the
   measured price of resolving at execution rather than at parse, it is deliberate, and a test pins it.

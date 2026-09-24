@@ -2859,6 +2859,14 @@ impl ReplaySession {
                     if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Watchpoint) {
                         return Ok(Stepped::Watch);
                     }
+                    // The contract above, enforced (M40 final review): an armed breakpoint fires
+                    // before retire, so this is a caller bug, not a fault — its FAR is no IPA, and
+                    // handing it to `page_in_cache` would misread it.
+                    if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Breakpoint) {
+                        return Err(format!(
+                            "breakpoint stop during a watch-aware step at pc {:#x}: breakpoints must \
+                             NOT be armed while calling step_watched", self.b.pc()));
+                    }
                     if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
                     if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
                     return Err(format!("fault during a watch-aware step: {}", self.b.describe_stop(esr)));
