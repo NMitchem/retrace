@@ -98,9 +98,18 @@ impl Writer {
     }
 }
 
+/// M40: how many times this process has decoded a trace file — every `Reader::open_checked` call,
+/// which `Reader::open` delegates to. The debugger's decode-once contract (spec §3e) is asserted
+/// against it; it is a count, never a timing.
+static DECODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// M40: see `DECODES`.
+pub fn decode_count() -> u64 { DECODES.load(std::sync::atomic::Ordering::Relaxed) }
+
 pub struct Reader;
 impl Reader {
     pub fn open_checked<P: AsRef<Path>>(path: P) -> io::Result<(Vec<Event>, bool)> {
+        DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut buf = Vec::new();
         File::open(path)?.read_to_end(&mut buf)?;
         if buf.len() < 4 || buf[0..4] != TRACE_MAGIC {
