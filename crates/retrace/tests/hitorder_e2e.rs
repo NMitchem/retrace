@@ -97,7 +97,13 @@ fn discover_fio(tp: &Path) -> Fio {
 /// blocking `__ulock_wait` (515); `n_exit` = after the child's `bsdthread_terminate` (361).
 /// `resume` = main's resume pc, `child` = the child's first pc — read from the thread table, never
 /// from `position()`: after M41 §3a the boundary holds the INCOMING thread, so ELR is not main's.
-struct Tr { n_create: usize, n_block: usize, n_exit: usize, resume: u64, child: u64 }
+struct Tr {
+    // M42 t6: the oracle starts from landmark 1 now (`tr_oracle_from`), so nothing reads this
+    // field any more; kept because `discover_tr`'s ordering assert still measures it.
+    #[allow(dead_code)]
+    n_create: usize,
+    n_block: usize, n_exit: usize, resume: u64, child: u64,
+}
 
 fn pc_of(s: &ReplaySession, tid: usize) -> u64 {
     let dump = s.dbg_regs_of(tid).expect("the thread exists");
@@ -128,13 +134,14 @@ fn discover_tr(tp: &Path) -> Tr {
     Tr { n_create, n_block, n_exit, resume, child }
 }
 
-/// The landmark the threadrust oracle starts from: `t.n_create` (R13). Neither armed address can
-/// execute before `n_create`: `t.child` is the new thread's first instruction, and `t.resume`
-/// follows the trace's only 515, which comes after `n_create`. So the hit list from `n_create` is
-/// the whole list. Starting at 1 single-steps through dyld's LL/SC pairs, which diverges (M41 t1,
-/// `t1-diverge-diag.md`): an exclusive pair at or after the start would surface as a loud
-/// `oracle: advance: Divergence`, never as a wrong hit list.
-fn tr_oracle_from(t: &Tr) -> usize { t.n_create }
+/// The landmark the threadrust oracle starts from: `1` (M41's R13, reverted). M41 started this at
+/// `t.n_create` because starting at 1 single-stepped through dyld's LL/SC pairs and diverged (M41
+/// t1, `t1-diverge-diag.md`). M42 made stepping through dyld's `getpid` pairs exact
+/// (`a_seek_into_dylds_getpid_pair_replays_to_the_end` guards it directly), so the list from
+/// landmark 1 is the whole list, and `oracle_threadrust_breakpoints_at_both_switches` now steps
+/// through all three of dyld's exclusive pairs on the way. Measured (M42 t6): 22.95 s CPU (21.14 s
+/// user + 1.81 s sys), against M41's 120 s budget.
+fn tr_oracle_from(_t: &Tr) -> usize { 1 }
 
 // ---- Named regressions (spec §4) ----------------------------------------------------------------
 
@@ -390,6 +397,45 @@ fn oracle_watchsweep_hits_in_the_exit_window() {
     assert_eq!(shape, vec![(1, w.k_second, Phase::Bp), (e, 1, Phase::Bp), (e, kf, Phase::Bp)], "{hits:?}");
     hits::check_chains(ts(tp), &format!("break 0x{:x}; break 0x{:x}; break 0x{:x}", bps[0], bps[1], bps[2]),
                        &hits);
+}
+
+// ---- M42 (the dynamic path) ----------------------------------------------------------------------
+
+/// M42 (spec §4, "the dynamic path"): M41's Q3, flipped.
+///
+/// dyld's `_getpid` fills its pid cache right after the first `getpid` (20) syscall, at
+/// (g+1, 1)..(g+1, 3): `ldxr w10, [x9]; cbnz w10, …; stxr wzr, w0, [x9]`. A seek that stepped the
+/// `ldxr` used to fail the `stxr`, and the next image's `getpid()` then issued a syscall the
+/// recording does not hold (M41 t1: a divergence six landmarks later).
+#[test]
+fn a_seek_into_dylds_getpid_pair_replays_to_the_end() {
+    let tp = tr_trace();
+    let g = {
+        let mut s = ReplaySession::open(tp).unwrap();
+        loop {
+            if let Some((20, _)) = s.peek_syscall() { break s.landmark(); }
+            s.advance().unwrap();
+        }
+    };
+    {
+        let s = retrace_core::seek(tp, g + 1, 1).unwrap();
+        let w = s.read_mem(s.pc(), 4).expect("the pc maps");
+        assert_eq!(u32::from_le_bytes(w.try_into().unwrap()), 0x885f_7d2a,
+            "(g+1, 1) must be dyld's getpid `ldxr w10, [x9]` (M41 t1); if the OS moved it, re-measure");
+    }
+    let want = retrace_core::replay(tp).expect("plain replay").outcome;
+    for j in [2u64, 3, 4] {
+        let mut s = retrace_core::seek(tp, g + 1, j).unwrap();
+        assert_eq!(s.dbg_excl().is_some(), j < 4,
+            "(g+1, {j}): the stepped ldxr sets the shadow, and the emulated stxr clears it");
+        loop {
+            let adv = s.advance().unwrap_or_else(|d| panic!("(g+1, {j}): diverged at landmark {}: {}", d.landmark, d.detail));
+            if let Advance::Exited(r) = adv {
+                assert_eq!(r.outcome, want, "(g+1, {j})");
+                break;
+            }
+        }
+    }
 }
 
 // ---- Review Focus (plan) ------------------------------------------------------------------------
