@@ -270,12 +270,18 @@ fn resolve_nth(trace: &Path, cache: &mut CheckpointCache, n: usize, from_k: u64,
     }
 }
 
-/// The armed watch range containing `far` (exact byte), else the range overlapping `far`'s aligned
-/// doubleword (FAR may report the comparator base — spike F4b), else `far` itself (honest fallback,
-/// never a wrong range). Deterministic: `ws` is sorted, first match wins.
+/// The armed watch range containing `far` (exact byte); else the range overlapping `far`'s aligned
+/// doubleword (FAR may report the comparator base — spike F4b); else (M40) the first range
+/// intersecting `[align_down(far, 64), far + 64)`. That window spans the widest single store
+/// (a 64-byte `DC ZVA` block, which may report any FAR inside it) and a 32-byte `stp q` reporting
+/// its base below the range, which is what rung 8's writers do (t0 M5: FAR `…ac0` for a watched
+/// `…ac8`). Else `far` itself (honest fallback, never a wrong range). Deterministic: `ws` is sorted,
+/// first match wins. The third rule runs only where the first two missed, so no output they got
+/// right changes.
 fn watched_of(ws: &[(u64, u64)], far: u64) -> u64 {
     ws.iter().find(|&&(a, l)| far >= a && far < a + l)
         .or_else(|| ws.iter().find(|&&(a, l)| { let d = far & !7; d < a + l && a < d + 8 }))
+        .or_else(|| ws.iter().find(|&&(a, l)| { let lo = far & !63; a < far + 64 && lo < a + l }))
         .map(|&(a, _)| a)
         .unwrap_or(far)
 }
@@ -1025,6 +1031,18 @@ mod tests {
         assert!(parse_script("regs 1 2").is_err(), "`regs` takes at most one operand");
         assert!(parse_script("regs abc").is_err(), "a thread id must parse as u32");
         assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");
+    }
+
+    #[test] fn watched_of_names_the_range_a_wider_store_covers() {
+        let ws = [(0xa01722ac8u64, 8u64)];
+        assert_eq!(watched_of(&ws, 0xa01722ac8), 0xa01722ac8, "exact");
+        assert_eq!(watched_of(&ws, 0xa01722acc), 0xa01722ac8, "inside the range");
+        // t0 M5/M7: rung 8's writers report FAR 0xa01722ac0, the base of a wider store that covers
+        // the watched qword. Each case is a FAR that a store REALLY covering the range could report.
+        assert_eq!(watched_of(&ws, 0xa01722ac0), 0xa01722ac8, "16-byte stp, 8 below");
+        assert_eq!(watched_of(&ws, 0xa01722ab0), 0xa01722ac8, "32-byte stp q, 24 below");
+        assert_eq!(watched_of(&ws, 0xa01722ae0), 0xa01722ac8, "DC ZVA, 24 above in the same 64-byte block");
+        assert_eq!(watched_of(&ws, 0xa01722b40), 0xa01722b40, "out of reach: the honest fallback, unchanged");
     }
 
     // -------------------------------------------------------------------------------------------
