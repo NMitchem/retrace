@@ -109,13 +109,11 @@ fn cross(s: &mut ReplaySession, hits: &mut Vec<Hit>) -> bool {
 }
 
 /// `retrace debug <trace> --script <script>` on the codesigned copy: (exit code, stdout, stderr).
+/// Bounded since M42 (`util::debug_bounded`, 600 s): a chain that hangs fails, naming the script.
 pub fn debug(trace: &str, script: &str) -> (i32, String, String) {
-    let out = std::process::Command::new(super::bin())
-        .args(["debug", trace, "--script", script])
-        .output().expect("spawn debug");
-    (out.status.code().unwrap_or(-1),
-     String::from_utf8(out.stdout).unwrap(),
-     String::from_utf8(out.stderr).unwrap())
+    let (code, out, err) = super::debug_bounded(trace, script, 600);
+    let code = code.unwrap_or_else(|| panic!("debug killed at the 600 s bound (a hang):\n{script}\n{out}"));
+    (code, out, err)
 }
 
 /// Parse a transcript in which every `continue` / `reverse-continue` is followed by `where` into
