@@ -296,6 +296,14 @@ const MDSCR_SS:  u64 = 1 << 0;  // MDSCR_EL1.SS
 /// both on the EL2 step exit: `0xcb000062` for a load-exclusive, `0xcb000022` for everything else.
 const SS_ISV_EX: u64 = (1 << 24) | (1 << 6);
 
+/// M42 §3c: the syndromes of the debug stops raised at an emulated store-exclusive:
+/// - EC 0x30 is a breakpoint from a lower EL, and EC 0x34 a watchpoint from a lower EL;
+/// - IL is set, and so is WnR for the watch.
+///
+/// Every consumer reads only `ec_of(esr)` (`advance`, `step_watched`, `step_armed`).
+const ESR_RAISED_BP: u64 = (0x30 << 26) | (1 << 25);
+const ESR_RAISED_WATCH: u64 = (0x34 << 26) | (1 << 25) | (1 << 6);
+
 /// M42 §3e (plan R10): the most instructions `run()` steps to finish a pair before resuming
 /// natively. It is the §3d scan bound, and gdb's.
 const PAIR_STEP_BOUND: usize = 16;
@@ -2918,20 +2926,30 @@ impl Box_ {
             self.vcpu.get_sys(bcr).unwrap() == DBGBCR_ARM && self.vcpu.get_sys(bvr).unwrap() == pc)
     }
 
-    /// Does an armed write-watch range overlap `[va, va + len)`? It is byte-exact, as the hardware's
-    /// BAS match is.
-    fn watch_overlaps(&self, va: u64, len: usize) -> bool {
-        self.wps_armed && self.watch_ranges.iter().any(|&(w, wl)| w < va + len as u64 && va < w + wl)
+    /// The lowest byte of `[va, va + len)` that an armed write-watch range covers, or None (plan
+    /// R11). That byte lies in both the access and the watch, so `watched_of` resolves it by exact
+    /// byte. It is byte-exact, as the hardware's BAS match is.
+    fn watch_hit(&self, va: u64, len: usize) -> Option<u64> {
+        if !self.wps_armed { return None; }
+        self.watch_ranges.iter()
+            .filter(|&&(w, wl)| w < va + len as u64 && va < w + wl)
+            .map(|&(w, _)| w.max(va))
+            .min()
     }
 
-    /// M42 §3c: the debug stop the hardware would raise at an emulated store-exclusive. Raising it
-    /// is Task 4. Until then, refuse loudly rather than emulate past a hit: skipping it would be
-    /// silent.
+    /// M42 §3c: the debug stop the hardware would raise at an emulated store-exclusive, in hardware
+    /// order: a breakpoint armed at `pc` first, then a watch the access overlaps. A watch fires even
+    /// on a store-exclusive that will fail (t0 M5), so raising it before emulating the store gives
+    /// the same answer the hardware gives. The caller clears what fired and steps again, so the
+    /// next call raises the next stop or emulates.
     fn raise_debug_stop(&mut self, pc: u64, va: u64, len: usize) -> Option<Stop> {
-        assert!(!self.bp_armed_at(pc) && !self.watch_overlaps(va, len),
-            "M42: a breakpoint or watch applies at the emulated store-exclusive at {pc:#x}, and it is \
-             not yet raised (Task 4)");
-        None
+        if self.bp_armed_at(pc) {
+            self.last_far = pc; // no consumer reads a breakpoint's FAR (spec R5)
+            return Some(Stop::Other { esr: ESR_RAISED_BP });
+        }
+        let far = self.watch_hit(va, len)?;
+        self.last_far = far;
+        Some(Stop::Other { esr: ESR_RAISED_WATCH })
     }
 
     /// M42 §3b: `step()` at a store-exclusive while the shadow is set. retrace's own exits lost the

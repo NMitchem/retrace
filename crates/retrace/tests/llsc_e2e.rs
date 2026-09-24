@@ -7,6 +7,7 @@ use retrace_core::{Advance, Outcome, ReplaySession, SetBy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use util::hits::{self, Phase};
 
 /// Seconds before a debugger run is killed. t0 killed its hangs at 60 s; a green run takes under one.
 const BOUND: u64 = 60;
@@ -387,4 +388,50 @@ fn x_shows_the_cell_before_and_after_the_emulated_store() {
     let out = run_ok(&format!("stepi 5; x {0} 4; stepi; x {0} 4", h("cella")));
     assert!(has_line(&out, &format!("{}: 00 00 00 00", h("cella"))), "before the stxr:\n{out}");
     assert!(has_line(&out, &format!("{}: 42 42 00 00", h("cella"))), "after the stxr:\n{out}");
+}
+
+// ---- The hit oracle's ground truth on llsc (spec §4) ------------------------------------------
+// `enumerate_hits` single-steps from (1, 0) with everything armed, so it steps every pair. Each
+// list below is derived from the fixture SOURCE, not from the emulator: a Bp comes before a Watch
+// at one coordinate (M41 §3b).
+
+fn keys(hs: &[hits::Hit]) -> Vec<(usize, u64, Phase, u64)> { hs.iter().map(|h| (h.n, h.k, h.phase, h.pc)).collect() }
+
+/// A1: {b_stx, i_stx} + watch ctr. (b)'s stlxr at K = 7, 14, 21 is a breakpoint, then a watched
+/// store, each time. (i)'s stlxr at (10, 6) is a breakpoint on an unwatched cell.
+fn a1() -> (Vec<u64>, Vec<(u64, u64)>) { (vec![sym("b_stx"), sym("i_stx")], vec![(sym("ctr"), 8)]) }
+/// A2: watch pair+8 + break i_svc. The stxp at (4, 7) covers pair[1]; the exit svc is (10, 10).
+fn a2() -> (Vec<u64>, Vec<(u64, u64)>) { (vec![sym("i_svc")], vec![(sym("pair") + 8, 8)]) }
+/// A3: {a_ldx, a_stx, g_stx, i_svc} + watch cella. The breakpoint on the LOAD itself comes first,
+/// then (a)'s stxr (a Bp and a Watch), then g_stx at (8, 0), where the syscall has cleared the
+/// shadow so the hardware breakpoint fires, then the exit svc. (h) stores nothing.
+fn a3() -> (Vec<u64>, Vec<(u64, u64)>) {
+    (vec![sym("a_ldx"), sym("a_stx"), sym("g_stx"), sym("i_svc")], vec![(sym("cella"), 4)])
+}
+
+#[test]
+fn oracle_a1_lists_every_hit_the_source_implies() {
+    let (bps, ws) = a1();
+    let b = sym("b_stx");
+    assert_eq!(keys(&hits::enumerate_hits(trace(), &bps, &ws, 1)), vec![
+        (2, 7, Phase::Bp, b), (2, 7, Phase::Watch, b), (2, 14, Phase::Bp, b), (2, 14, Phase::Watch, b),
+        (2, 21, Phase::Bp, b), (2, 21, Phase::Watch, b), (10, 6, Phase::Bp, sym("i_stx")),
+    ]);
+}
+
+#[test]
+fn oracle_a2_lists_every_hit_the_source_implies() {
+    let (bps, ws) = a2();
+    assert_eq!(keys(&hits::enumerate_hits(trace(), &bps, &ws, 1)),
+        vec![(4, 7, Phase::Watch, sym("d_stx")), (10, 10, Phase::Bp, sym("i_svc"))]);
+}
+
+#[test]
+fn oracle_a3_lists_every_hit_the_source_implies() {
+    let (bps, ws) = a3();
+    let a = sym("a_stx");
+    assert_eq!(keys(&hits::enumerate_hits(trace(), &bps, &ws, 1)), vec![
+        (1, 3, Phase::Bp, sym("a_ldx")), (1, 5, Phase::Bp, a), (1, 5, Phase::Watch, a),
+        (8, 0, Phase::Bp, sym("g_stx")), (10, 10, Phase::Bp, sym("i_svc")),
+    ]);
 }
