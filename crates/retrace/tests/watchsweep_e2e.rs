@@ -107,3 +107,36 @@ fn reverse_continue_walks_back_through_both_writers() {
         "second: the sweep's write to buf[40], not an earlier run of its store:\n{out}");
     assert!(out.contains("no earlier hit"), "third: nothing before the first write:\n{out}");
 }
+
+#[test]
+fn a_watch_aware_step_stops_pre_retire_exactly_at_the_watched_writes() {
+    // Spec R2, on t0 M6's measurement: single-stepping WITH a watchpoint armed stops at exactly the
+    // instructions that write the watched range, before they retire, and nowhere else. That is
+    // true even though the sweeping store runs 64 times.
+    let (rec, trace) = util::record(retrace_guest::WATCHSWEEP);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let tp = Path::new(&trace);
+    let t = discover_target(tp);
+    let ks = discover_store_ks(tp, t);
+    let mut s = retrace_core::seek(tp, 1, 0).unwrap();
+    s.arm_watchpoints(&[(t, 8)]);
+    let (mut k, mut stops, mut at_stop) = (0u64, Vec::new(), Vec::new());
+    loop {
+        match s.step_watched().expect("watch-aware step") {
+            retrace_core::Stepped::Retired => k += 1,
+            retrace_core::Stepped::Watch => {
+                stops.push(k);
+                at_stop.push(s.read_mem(t, 8).unwrap()); // pre-retire: still the OLD value
+                s.clear_watchpoints();
+                s.step_insns(1).unwrap();
+                s.arm_watchpoints(&[(t, 8)]);
+                k += 1;
+            }
+            retrace_core::Stepped::AtTrap => break, // the write(1, …) that ends window 1
+        }
+    }
+    assert_eq!(stops, ks, "stops at exactly the oracle's writes");
+    assert_eq!(at_stop[0], 0u64.to_le_bytes().to_vec(), "the first stop is before buf[40] is written");
+    assert_eq!(at_stop[1], (0x1111_1111_1111_1111u64 + 40).to_le_bytes().to_vec(),
+               "the second stop is before the second writer lands");
+}

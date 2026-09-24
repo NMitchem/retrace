@@ -2818,8 +2818,13 @@ impl Box_ {
     /// Arm hardware write-watchpoint slot `slot` (0..=3) over `[va, va+len)`, len ∈ {1,2,4,8},
     /// va len-aligned (so the range sits inside one BAS doubleword — one watch, one slot). A watched
     /// EL0 store surfaces from `run()` as `Stop::Other` with an ESR_EL2 watchpoint class (EC=0x34)
-    /// and FAR in `last_far`, before the store retires (spike F4). Armed only around
-    /// `advance()`/`run()` scans — NEVER while single-stepping (same discipline as breakpoints).
+    /// and FAR in `last_far`, before the store retires (spike F4). Armed around `advance()`/`run()`
+    /// scans, AND — since M40, on its t0 M6 measurement — while single-stepping through
+    /// `ReplaySession::step_watched`, which is how a watch hit is resolved by address: a watched
+    /// store then stops the step pre-retire (`EC=0x34`) and nothing else changes. The M3 rule
+    /// "never while single-stepping" still binds BREAKPOINTS, whose pre-retire fire at the current
+    /// pc would repeat forever; it was carried over to watchpoints by analogy and never measured
+    /// for them.
     pub fn arm_hw_watchpoint(&mut self, slot: usize, va: u64, len: u64) {
         assert!(matches!(len, 1 | 2 | 4 | 8), "watch len must be 1/2/4/8, got {len}");
         assert_eq!(va % len, 0, "watch va {va:#x} must be {len}-aligned");

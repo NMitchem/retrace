@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use retrace_core::{checkpointed_seek, Advance, CheckpointCache, Outcome, ReplayReport, ReplaySession};
+use retrace_core::{checkpointed_seek, Advance, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped};
 use retrace_core::symbols::Symbols;
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
@@ -217,17 +217,56 @@ fn line<W: Write>(out: &mut W, args: std::fmt::Arguments) -> Result<(), String> 
     out.write_all(b"\n").map_err(|e| format!("write error: {e}"))
 }
 
-/// Replay window `n` from step `from_k` and return the first K (>= `from_k`) at which the guest's
-/// live PC equals `pc`. Turns a mid-window hardware-breakpoint hit (which knows only the pc + its
-/// landmark) into an exact (N, K) coordinate. Deterministic; runs on its own transient session, so
-/// the caller must hold NO other live session (one VM per process).
-fn resolve_hit_k(trace: &Path, cache: &mut CheckpointCache, n: usize, pc: u64, from_k: u64) -> Result<u64, String> {
+/// What `resolve_nth` counts (M40 §3a). A watch hit is identified BY ADDRESS: the hardware's own
+/// watchpoint stop, while single-stepping with `Watch`'s ranges armed. A breakpoint hit is
+/// identified by pc membership in `Break`'s addresses, stepped with breakpoints DISARMED (armed,
+/// one fires before retire at the current pc, forever).
+enum HitKind<'a> { Watch(&'a [(u64, u64)]), Break(&'a [u64]) }
+
+/// Replay window `n` from `(n, from_k)` and return the K of the `ordinal`-th (1-based) hit of
+/// `kind`, checking that the instruction there is at `expect_pc` (the pc the scan saw), so that a
+/// scan/resolver disagreement fails loud instead of naming the wrong instruction. Replaces M3's
+/// `resolve_hit_k`, which matched a watch hit BY PC: a store that ran on other addresses first
+/// resolved to an earlier run that never wrote the watched range (t0 M6/M7: rung 8's `continue`
+/// landed 1.7 M instructions early). Deterministic; runs on its own transient session, so the
+/// caller must hold NO other live session (one VM per process).
+fn resolve_nth(trace: &Path, cache: &mut CheckpointCache, n: usize, from_k: u64, kind: HitKind,
+               ordinal: u64, expect_pc: u64) -> Result<u64, String> {
+    debug_assert!(ordinal >= 1, "ordinals are 1-based");
     let mut s = checkpointed_seek(trace, cache, n, from_k)?;
-    let mut k = from_k;
-    loop {
-        if s.pc() == pc { return Ok(k); }
-        s.step_insns(1).map_err(|e| format!("resolve K in window {n}: {e}"))?;
-        k += 1;
+    let (mut k, mut seen) = (from_k, 0u64);
+    let found = |s: &ReplaySession, k: u64| -> Result<u64, String> {
+        if s.pc() == expect_pc { Ok(k) } else { Err(format!(
+            "resolve hit #{ordinal} in window {n}: the scan saw pc {expect_pc:#x}, the resolver reached {:#x} at K={k}",
+            s.pc())) }
+    };
+    match kind {
+        HitKind::Break(addrs) => loop {
+            if addrs.contains(&s.pc()) {
+                seen += 1;
+                if seen == ordinal { return found(&s, k); }
+            }
+            s.step_insns(1).map_err(|e| format!("resolve breakpoint hit #{ordinal} in window {n}: {e}"))?;
+            k += 1;
+        },
+        HitKind::Watch(ranges) => {
+            s.arm_watchpoints(ranges);
+            loop {
+                match s.step_watched().map_err(|e| format!("resolve watch hit #{ordinal} in window {n}: {e}"))? {
+                    Stepped::Retired => k += 1,
+                    Stepped::Watch => {
+                        seen += 1;
+                        if seen == ordinal { return found(&s, k); }
+                        s.clear_watchpoints(); // step over this earlier hit in place, then re-arm
+                        s.step_insns(1).map_err(|e| format!("resolve watch hit #{ordinal} in window {n}: {e}"))?;
+                        s.arm_watchpoints(ranges);
+                        k += 1;
+                    }
+                    Stepped::AtTrap => return Err(format!(
+                        "resolve watch hit #{ordinal} in window {n}: the window ended after {seen} hit(s) at K={k}")),
+                }
+            }
+        }
     }
 }
 
@@ -652,7 +691,7 @@ impl<'a> Exec<'a> {
                     // (we entered window n via a landmark). Resolve the FIRST occurrence past it.
                     let kctx = if n == start_n { start_k } else { 0 };
                     self.session = None; // free the VM before the resolution seek
-                    let k = resolve_hit_k(self.trace, &mut self.cache, n, p_hit, kctx + 1)?;
+                    let k = resolve_nth(self.trace, &mut self.cache, n, kctx + 1, HitKind::Break(&[p_hit]), 1, p_hit)?;
                     line(out, format_args!("resolved ({n}, {k})"))?;
                     return self.reseek(n, k);
                 }
@@ -687,13 +726,14 @@ impl<'a> Exec<'a> {
                     }
                     // Resolve from kctx, NOT kctx+1: unlike a breakpoint (whose parked-on case the
                     // pre-step already moved off), a watched store CAN legitimately fire at the
-                    // exact parked coordinate (the user stepi'd up to it), and the store pc repeats
-                    // in loops — searching from kctx+1 would misresolve to the NEXT iteration. This
-                    // resolution runs whether or not the hit is scoped out: the vCPU is physically
-                    // parked pre-retire at the store either way.
+                    // exact parked coordinate (the user stepi'd up to it). The FIRST watch stop from
+                    // kctx is this hit, found by the hardware BY ADDRESS (M40): matching the store's
+                    // pc instead named an earlier run of a loop store that wrote elsewhere (t0 M7).
+                    // This resolution runs whether or not the hit is scoped out: the vCPU is
+                    // physically parked pre-retire at the store either way.
                     let kctx = if n == start_n { start_k } else { 0 };
                     self.session = None; // free the VM before the resolution seek
-                    let k = resolve_hit_k(self.trace, &mut self.cache, n, p_hit, kctx)?;
+                    let k = resolve_nth(self.trace, &mut self.cache, n, kctx, HitKind::Watch(&ws), 1, p_hit)?;
                     if matched {
                         line(out, format_args!("resolved ({n}, {k})"))?;
                     }
@@ -708,7 +748,7 @@ impl<'a> Exec<'a> {
                     // un-retired store and the scan resumes from there. Recursion depth is bounded
                     // by the number of scoped-out hits within this one `continue` (not by
                     // instruction count), and the cost of each is NOT merely slowness: a discarded
-                    // hit pays a full `resolve_hit_k` seek AND one stack frame, so a guest with a
+                    // hit pays a full `resolve_nth` seek AND one stack frame, so a guest with a
                     // hot write loop on the scoped-out thread OVERFLOWS THE STACK and crashes the
                     // debugger rather than degrading gracefully. Unexercised today (no guest writes
                     // a watched address in a loop from a thread that isn't the watched one), and
@@ -776,10 +816,15 @@ impl<'a> Exec<'a> {
             drop(s); // free the VM before resolving K
             let (n, rh) = match hit { Some(h) => h, None => break };
             let (k, resume) = match &rh {
-                RHit::Bp(pc) | RHit::Watch { pc, .. } => {
+                RHit::Bp(pc) => {
                     let from_k = if n == cur_n { cur_k } else { 0 };
-                    let k = resolve_hit_k(self.trace, &mut self.cache, n, *pc, from_k)?;
+                    let k = resolve_nth(self.trace, &mut self.cache, n, from_k, HitKind::Break(&[*pc]), 1, *pc)?;
                     (k, (n, k + 1)) // resume strictly past a resolved instruction hit
+                }
+                RHit::Watch { pc, .. } => {
+                    let from_k = if n == cur_n { cur_k } else { 0 };
+                    let k = resolve_nth(self.trace, &mut self.cache, n, from_k, HitKind::Watch(&ws), 1, *pc)?;
+                    (k, (n, k + 1))
                 }
                 RHit::WatchSys { .. } => (0u64, (n, 0u64)),
             };
