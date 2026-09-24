@@ -114,6 +114,13 @@ FPAC), a stage-2 abort, and a vtimer or cancel exit. The rule is exact, not a he
 - the debug exits exist only in a debugger session, and they are precisely the ones the shadow must
   survive.
 
+*Amended while planning (the plan's R12):* the first bullet does not hold for an **asynchronous**
+exit (vtimer or cancel), because record never takes one at the same instruction. Inside
+`run_one_for_step` such an exit is retrace's own, like the step exit, so it **leaves** the shadow:
+clearing there would make a stepped pair's outcome depend on host timing. In `run()` the shadow is
+always clear when that arm runs (§3e), so it calls the classifier with "not debug", as every other
+arm does.
+
 **One classifying function is called from every exit arm of both `run()` and `run_one_for_step()`**,
 including `run()`'s internal `continue` arms (2660, 2704, 2708, 2713). That is research risk #1's
 guard.
@@ -185,8 +192,7 @@ M5 measured that the watchpoint fires even on a store-exclusive that fails. So t
    - `last_far = pc`. No consumer reads a breakpoint's FAR (code facts §4).
 2. **Otherwise, a watchpoint stop, if an armed range in `watch_ranges` overlaps `[va, va + bytes)`.**
    - It returns `Stop::Other { esr }` with EC `0x34`, IL set and WnR set.
-   - `last_far = va`, the stripped access address. `watched_of` resolves it the way it resolves the
-     hardware's.
+   - `last_far` is the lowest overlapped byte (R5), which `watched_of` resolves by exact byte.
 
 Every consumer tests only `ec_of(esr)` (`advance`, `step_watched`, `step_armed`), so the ISS is not
 otherwise modelled.
@@ -220,7 +226,11 @@ hold:
 3. **The LDX's destination register(s) still equal the bytes at the VA**, for each `Rt ≠ 31`. This
    check converts most wrong inferences (a jump into the middle of the pair, a rewritten base) into
    *no* inference, which is today's behaviour, not into a wrong emulation.
-4. **The decode succeeds.** An LDX of a shape the decoder refuses fails loud.
+4. **The target is mapped.** An unmapped VA infers nothing.
+
+(Amended while planning: this condition used to read "an LDX of a shape the decoder refuses fails
+loud". That was vacuous, because `decode_excl` recognises the whole load-exclusive class by mask, so
+there is no refused LDX shape.)
 
 The inferred shadow's loaded bytes are the target bytes at the stop. The exit is classified first
 (a debug exit, so nothing is cleared), then the inference runs.
@@ -251,6 +261,19 @@ while the shadow is set:
   syscall is left unconsumed at EL1).
 
 `run()` never returns `Stop::Step` (its callers `unreachable!` it).
+
+**The prologue is bounded at 16 steps** (the §3d scan bound, and gdb's). If the shadow is still set
+after them, the prologue drops it and the native loop resumes.
+- The only way to get there is a load-exclusive whose sequence a branch left: (h), or dyld's
+  `getpid` when another thread filled the cache first.
+- Without the bound, `run()` would single-step all the way to the next syscall. That is correct,
+  but it costs a VM exit per instruction for as long as that takes.
+- Dropping the shadow is what resuming natively does to the hardware monitor anyway. A
+  store-exclusive to the marked bytes more than 16 instructions later, with no exit between, would
+  then fail under the debugger where it succeeded natively. No census shape does that. It is a
+  README residual, and it is loud if it ever matters, because the replay diverges.
+
+(Amended while planning, R10 of the plan.)
 
 ### 3f. Checkpoints, record and plain replay
 
@@ -299,12 +322,12 @@ after a fixed budget, so a regression fails the test instead of stalling the gat
 | M2 | `stepi` past (a)'s `ldxr`, `continue`: exit 0, output `a…` byte-identical to replay |
 | M3a | from `(2, 0)`, `stepi 25` lands on `b_done` at `(2, 25)`, and the counter reads 3 |
 | M3b, M3c | `break b_done`: `continue` from `(1, 0)`, and `reverse-continue` from `(3, 0)`, each answer `hit … at (2, 25)`, within the bound |
-| M3d | `reverse-stepi` from `(3, 0)` lands at `(2, 32)`: window 2's length is 33 |
+| M3d | `reverse-stepi` from `(3, 0)` lands at `(2, 33)`, on window 2's `svc`: window 2's length is 33 |
 | M3e | the phase-2 case answers `hit … at (2, 25)` |
 | M4 | `break a_stx`: both directions exit 0. `break b_stx`: exactly three hits forward (K = 7, 14, 21), then the next window; backward from exit, the last of them |
 | M5, M6 | `watch` on each of `ctr`, `cas`, `pair+8` and `cella`: exactly the recording's hit count (3, 1, 1, 1) forward, and the last one backward, all exit 0 |
 | M7 | at every K of every window, `seek(n, k)` then `advance()` to exit, at the session level: exit 0 with the recorded output. And the CLI form, `stepi K; continue`, at each pair's LDX+1 and STX+1 |
-| M3d′ | `reverse-stepi` from `(2, 0)` lands at `(1, 15)`, window 1's real length |
+| M3d′ | `reverse-stepi` from `(2, 0)` lands at `(1, 16)`, on window 1's `svc` (t0 parked at `(1, 9)` on a `getpid` the recording never ran) |
 
 **Clear-rule positive controls** (e, f, g). These are green before and after the change, because
 stepping them natively fails their stores just as record did. Each is shown **able to fail**: with
@@ -365,27 +388,32 @@ now "a hardware stop, or the stop the emulator raises in its place".
    The record outcomes are measured first: (e), (f) and (g) must fail natively. If one does not, the
    clear rule is wrong for that exit class: a Ruling and a re-scope (§7). The REDs are ledgered, and
    the controls are green.
-3. **The shadow and the stepped path (E1):**
+3. **The shadow, the stepped path (E1) and `run()` entered inside a pair (§3e):**
    - `Excl`;
    - the set, from the EX bit, with the decoder cross-check;
    - the one classifier at every exit arm;
    - the `clrex`, switch and emulation clears;
    - the pure validator with its unit tests, and the emulation;
    - `BoxState` carriage and the parity obligation;
-   - the record and plain-replay asserts.
+   - the record and plain-replay asserts;
+   - §3e's stepping prologue in `run()`.
+
+   §3e is here, not with §3d, because the debugger resumes native execution from a stepped
+   position (`stepi` inside a pair, then `continue`). Without the prologue, M2 stays red however
+   exact the stepping is. (Amended while planning; the first draft placed §3e with §3d.)
 
    M2, M3a–e, M3d′, M7, (h) and the control deletions pass: all of them reach a pair only by
    stepping. §3c is excluded, so a breakpoint or watch that applies at an emulated STX panics
    loudly ("not yet raised"), and never skips its hit silently. M4–M6 stay RED.
 4. **§3c, the raised stops.** The forward M4, M5 and M6 go green, and so do the oracle armings'
    forward chains and their self-checks (`enumerate_hits` steps every pair with everything armed).
-5. **§3d and §3e, inference and `run()` entry.** The backward M4–M6, the inference tests and every
-   oracle chain go green.
+5. **§3d, inference at native stops.** The backward M4–M6, the inference tests and every oracle
+   chain go green.
 6. **The dynamic path:** Q3 flipped, and the oracle-from-1 measurement (R7).
 7. **Close:**
    - the gate, reconciled;
    - the audit;
-   - `cpython_crash_e2e`'s and `hitorder_e2e`'s wall time, before and after (step throughput);
+   - `cpython_crash_e2e`'s and `hitorder_e2e`'s CPU time, before and after (step throughput);
    - README: the LL/SC Known limit is replaced by its residuals, and stepping across pairs goes into
      "What works today";
    - the status-log section;
@@ -395,8 +423,8 @@ now "a hardware stop, or the stop the emulator raises in its place".
 
 Why this order:
 - §3c comes after §3b because it needs an emulator to raise stops *before*.
-- §3d and §3e come last among the mechanisms because they build on a shadow that already works on
-  the exact path.
+- §3d comes last among the mechanisms because it builds on a shadow that already works on the exact
+  path. It is also the only heuristic, so it is reviewed on its own.
 - Each task flips a named subset, so a reviewer can reject one without the others.
 
 ## 6. Acceptance
@@ -410,8 +438,9 @@ Why this order:
   - `TRACE_MAGIC` does not move;
   - no dispatch arm changes;
   - no new `#[ignore]`.
-- `cpython_crash_e2e`'s wall time is within 10 % of its pre-M42 figure, or the difference is a
-  ledgered Ruling.
+- `cpython_crash_e2e`'s CPU time (`/usr/bin/time -l`, user + sys) is within 10 % of its pre-M42
+  figure, or the difference is a ledgered Ruling. It is CPU, not wall-clock, because the operator
+  runs concurrent sessions.
 
 ## 7. Halt rules, and what this milestone deliberately does not do
 
@@ -466,7 +495,12 @@ Why this order:
   - This is the box's convention, as in the `-33` arm.
   - The validator is a pure function, so every refusal branch has a unit test without a VM.
 - **R5: the raised breakpoint stop's FAR is its pc.** No consumer reads it (code facts §4). The
-  raised watch stop's FAR is the stripped access address, which `watched_of` resolves.
+  raised watch stop's FAR is **the lowest byte where the access overlaps an armed range**. That
+  address lies both in the access and in the watch, so `watched_of` resolves it by its first,
+  exact-byte rule.
+  - Amended while planning (the plan's R11). The first draft used the access's start address, which
+    resolves a watch on a pair's second element only through `watched_of`'s 64-byte-block fallback.
+  - The hardware's report for a pair is unmeasured.
 - **R6: the fixture keeps t0's four shapes verbatim** so t0's coordinates stay valid, and adds five.
   - (e), (f) and (g) are the clear rule's positive controls, one per class the rule names that a
     static fixture can reach: `clrex`, an emulated trap, a syscall.
