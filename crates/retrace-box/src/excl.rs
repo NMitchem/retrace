@@ -109,9 +109,37 @@ pub fn scan_back(words: &[u32]) -> Option<(usize, ExclInsn)> {
     None
 }
 
-/// Spec §3d condition 3: the load's destination registers still hold what is at its VA. A jump into
-/// the middle of a pair, or a rewritten register, almost always breaks this, and then nothing is
-/// inferred. A destination of 31 (XZR) loads nothing to compare.
+/// Spec §3d condition 5 (amended in execution, Ruling T5-a): the registers the instructions strictly
+/// between the load and the stop write, as a bitmask (bit 31 = SP or XZR), or None if any of them
+/// has register effects this does not know. Then nothing is inferred.
+///
+/// Known effects:
+/// - A data-processing instruction, immediate (op0 `100x`) or register (op0 `x101`), writes at
+///   most its Rd, bits 4:0. The field is counted as a write even where it is not one (`ccmp`'s
+///   nzcv), which is conservative.
+/// - A conditional branch (`B.cond`/`BC.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ`) writes no register.
+///
+/// Everything else is unknown: a load or store (which may write back its base), a system
+/// instruction such as `mrs`, SIMD and FP.
+pub fn regs_written(words: &[u32]) -> Option<u32> {
+    words.iter().try_fold(0u32, |acc, &w| {
+        if (w >> 26) & 7 == 0b100 || (w >> 25) & 7 == 0b101 {
+            Some(acc | (1 << (w & 0x1f)))
+        } else if w & 0xFF00_0000 == 0x5400_0000
+            || w & 0x7E00_0000 == 0x3400_0000
+            || w & 0x7E00_0000 == 0x3600_0000 {
+            Some(acc)
+        } else {
+            None
+        }
+    })
+}
+
+/// Spec §3d condition 3 (amended in execution, Ruling T5-a): the load's destination registers still
+/// hold what is at its VA. The caller passes 31 for a destination the sequence itself rewrites
+/// (condition 5's mask), so only the untouched ones are compared. A jump into the middle of a pair
+/// almost always breaks this for those, and then nothing is inferred. A destination of 31 (XZR, or
+/// rewritten) has nothing to compare.
 pub fn dests_match(ld: ExclInsn, rt_val: u64, rt2_val: u64, bytes: &[u8]) -> bool {
     let ExclInsn::Load { size, pair, rt, rt2, .. } = ld else { return false };
     let s = size as usize;
@@ -251,5 +279,47 @@ mod tests {
         assert!(!dests_match(ldxp, 1, 3, &b));
         let xzr = ExclInsn::Load { size: 8, pair: false, rt: 31, rt2: 31, rn: 0 };
         assert!(dests_match(xzr, 99, 0, &[7; 8]), "ldxr xzr loads nothing to compare");
+    }
+
+    // Condition 5's words below were assembled with `clang -arch arm64 -c` and read back with
+    // `otool -tvj`, never hand-encoded.
+
+    #[test]
+    fn a_data_processing_instruction_writes_its_rd() {
+        assert_eq!(regs_written(&[0x9100_0421]), Some(1 << 1)); // (b) and (i): add x1, x1, #1
+        // (d): add x4, x1, #10; add x5, x2, #20. The loaded x1 and x2 stay checkable.
+        assert_eq!(regs_written(&[0x9100_5045, 0x9100_2824]), Some(1 << 4 | 1 << 5));
+        // Census #3, libsystem_kernel __vfork, nearest first: csel w12, w11, w10, pl;
+        // subs w10, w10, #1; mov w11, #-1.
+        assert_eq!(regs_written(&[0x1a8a_516c, 0x7100_054a, 0x1280_000b]), Some(1 << 10 | 1 << 11 | 1 << 12));
+        // cmp x1, x3 is subs xzr, x1, x3: an Rd of 31 is a write of SP or XZR.
+        assert_eq!(regs_written(&[0xeb03_003f]), Some(1 << 31));
+        assert_eq!(regs_written(&[]), Some(0), "an adjacent pair has nothing between its halves");
+    }
+
+    #[test]
+    fn a_conditional_branch_writes_nothing() {
+        assert_eq!(regs_written(&[0x3500_004a]), Some(0)); // dyld getpid's cbnz w10
+        assert_eq!(regs_written(&[0x5400_0141]), Some(0)); // b.ne
+        assert_eq!(regs_written(&[0x3618_0122]), Some(0)); // tbz w2, #3
+    }
+
+    #[test]
+    fn an_instruction_with_unknown_register_effects_infers_nothing() {
+        assert_eq!(regs_written(&[0xb940_012b]), None); // ldr w11, [x9]
+        assert_eq!(regs_written(&[0xf800_8521]), None); // str x1, [x9], #8: writes back its base
+        assert_eq!(regs_written(&[0xd53b_e047]), None); // mrs x7, cntvct_el0
+        assert_eq!(regs_written(&[0x9e67_0020]), None); // fmov d0, x1
+        // One unknown poisons a sequence whose other instructions are all known.
+        assert_eq!(regs_written(&[0x9100_0421, 0xb940_012b, 0x3500_004a]), None);
+    }
+
+    #[test]
+    fn an_sp_base_is_refused_by_any_rd_of_31() {
+        // infer_excl refuses when `written & (1 << rn) != 0`; for an SP base, rn is 31.
+        let written = regs_written(&[0x9100_43ff]).unwrap(); // add sp, sp, #16
+        assert_ne!(written & (1 << 31), 0);
+        // cmp's XZR destination refuses an SP base too: 31 counts as a write of both.
+        assert_ne!(regs_written(&[0xeb03_003f]).unwrap() & (1 << 31), 0);
     }
 }

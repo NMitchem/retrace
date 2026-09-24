@@ -3007,12 +3007,21 @@ impl Box_ {
         // 2. A base overwritten by the load no longer names the marked address.
         if excl::base_aliases_dest(ld) { return; }
         let ExclInsn::Load { size, pair, rt, rt2, rn } = ld else { unreachable!() };
+        // 5 (amended in execution, Ruling T5-a). Every instruction in (L, P) has known register
+        // effects, and none writes the base: a rewritten base no longer names the marked address.
+        // Bit 31 is SP or XZR, so for an SP base any Rd of 31 refuses.
+        let Some(written) = excl::regs_written(&words[..i]) else { return };
+        if written & (1 << rn) != 0 { return; }
         let va = self.base_reg(rn) & excl::TAG_MASK;
         // 4. The target maps.
         let Some(bytes) = self.va_to_ipa(va).and_then(|ipa| self.read_guest_checked(ipa, excl::access_len(size, pair)))
             else { return };
-        // 3. The destinations still hold what is there.
-        if !excl::dests_match(ld, self.xreg(rt), self.xreg(rt2), &bytes) { return; }
+        // 3 (amended in execution, Ruling T5-a). Each destination that nothing in (L, P) writes still
+        // holds what is there. One the sequence rewrites (an in-place retry loop's `add x1, x1, #1`)
+        // cannot be checked this way, so it goes to dests_match as 31, which compares nothing.
+        let untouched = |r: u32| if written & (1 << r) != 0 { 31 } else { r };
+        let checked = ExclInsn::Load { size, pair, rt: untouched(rt), rt2: untouched(rt2), rn };
+        if !excl::dests_match(checked, self.xreg(rt), self.xreg(rt2), &bytes) { return; }
         self.excl = Some(Excl { va, size, pair, loaded: bytes, by: SetBy::Inferred });
     }
 

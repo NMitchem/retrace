@@ -496,6 +496,20 @@ fn a_native_watch_stop_on_the_retry_store_infers_the_shadow() {
     finish(s);
 }
 
+/// Spec §3d condition 5 (Ruling T5-a): (c)'s `cmp x1, x3` between the halves writes XZR, bit 31 of
+/// the written mask. That refuses only an SP base, so (c)'s x0 base still infers, and x1, which
+/// nothing rewrites, is still checked against the cell.
+#[test]
+fn an_xzr_write_between_the_halves_does_not_refuse_a_general_base() {
+    let mut s = retrace_core::seek(trace(), 3, 0).unwrap();
+    s.arm_breakpoints(&[sym("c_stx")]);
+    assert!(matches!(s.advance().unwrap(), Advance::Break));
+    assert_eq!(s.pc(), sym("c_stx"));
+    assert_eq!(s.dbg_excl().map(|e| (e.va, e.size, e.pair, e.by)), Some((sym("cas"), 8, false, SetBy::Inferred)));
+    s.clear_breakpoints();
+    finish(s);
+}
+
 /// Review Focus 4: a stop ON the load-exclusive infers nothing. It has not run yet, and the scan
 /// back from (b)'s ldaxr meets (a)'s write svc before any load.
 #[test]
