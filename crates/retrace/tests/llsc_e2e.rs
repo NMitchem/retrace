@@ -3,7 +3,7 @@
 //! `retrace-guest/asm/llsc.s`: t0's four shapes (a)-(d) verbatim, then (e)-(i). Every CLI run goes
 //! through `util::debug_bounded`, because t0 measured hangs on these scripts.
 mod util;
-use retrace_core::{Advance, Outcome, ReplaySession};
+use retrace_core::{Advance, Outcome, ReplaySession, SetBy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -291,4 +291,79 @@ fn control_g_every_position_across_the_syscall_replays() {
 fn every_position_of_the_branch_out_and_exit_windows_replays() {
     every_position_replays(9, 13);
     every_position_replays(10, 10);
+}
+
+// ---- The shadow's life cycle (spec §3a), at the session level ----------------------------------
+
+/// (e): the stepped `ldxr` sets the shadow, and `clrex` clears it.
+#[test]
+fn the_shadow_is_set_by_a_stepped_ldx_and_cleared_by_clrex() {
+    let mut s = retrace_core::seek(trace(), 5, 4).unwrap(); // (e)'s ldxr (K=3) has retired
+    assert_eq!(s.pc(), sym("e_clrex"));
+    let ex = s.dbg_excl().expect("set by the stepped ldxr");
+    assert_eq!((ex.va, ex.size, ex.pair, ex.by), (sym("celle"), 4, false, SetBy::Stepped));
+    s.step_insns(1).unwrap(); // clrex
+    assert_eq!(s.dbg_excl(), None, "clrex clears the shadow");
+}
+
+/// (h): a branch out of the sequence leaves the monitor set, and so the shadow too, until the next
+/// non-debug exit.
+#[test]
+fn the_shadow_outlives_a_branch_out_until_the_next_syscall() {
+    let mut s = retrace_core::seek(trace(), 9, 4).unwrap(); // (h)'s ldxr has retired
+    assert!(s.dbg_excl().is_some());
+    s.step_insns(1).unwrap(); // cbnz, taken: no stxr follows
+    assert_eq!(s.pc(), sym("h_after"));
+    assert!(s.dbg_excl().is_some(), "the hardware monitor stays set past a branch-out, and so does the shadow");
+    assert!(matches!(s.advance().unwrap(), Advance::Event)); // run() steps to the write svc and crosses it
+    assert_eq!(s.dbg_excl(), None, "the syscall exit clears it");
+}
+
+/// (g): a syscall between the halves clears the shadow, so the store in window 8 fails as it did
+/// natively.
+#[test]
+fn a_syscall_between_the_halves_clears_the_shadow() {
+    let mut s = retrace_core::seek(trace(), 7, 4).unwrap(); // (g)'s ldxr has retired
+    assert!(s.dbg_excl().is_some());
+    assert!(matches!(s.advance().unwrap(), Advance::Event)); // the getpid
+    assert_eq!(s.dbg_excl(), None, "the syscall exit clears the shadow");
+    assert_eq!(s.pc(), sym("g_stx"));
+}
+
+// ---- Review Focus (plan) -----------------------------------------------------------------------
+
+/// Review Focus 1: step into the pair, step back, then continue. `reverse-stepi` re-seeks by
+/// stepping, which recomputes the shadow from scratch.
+#[test]
+fn reverse_stepi_inside_a_pair_then_continue_replays_to_the_end() {
+    let out = run_ok("stepi 5; reverse-stepi; where; continue; where");
+    assert_eq!(wheres(&out)[0], format!("at (1, 4) pc={:#x} thread=0", sym("a_ldx") + 4), "{out}");
+    assert!(out.contains("exited (code 0)"), "{out}");
+}
+
+/// Review Focus 2: a checkpoint captured inside a pair carries the shadow, and a session restored
+/// from it finishes the pair's store. The research's §4c: without the shadow, every position after
+/// a stepped load-exclusive is poison.
+#[test]
+fn a_checkpoint_taken_inside_a_pair_restores_the_shadow() {
+    let s = retrace_core::seek(trace(), 2, 6).unwrap(); // (b)'s first ldaxr (K=5) has retired
+    let ex = s.dbg_excl().expect("set by the stepped ldaxr");
+    let cp = s.checkpoint();
+    drop(s); // one VM per process
+    let mut r = ReplaySession::from_checkpoint(trace(), &cp).unwrap();
+    assert_eq!(r.dbg_excl(), Some(ex));
+    loop {
+        if let Advance::Exited(rep) = r.advance().unwrap() {
+            assert_eq!(rep.outcome, Outcome::Exit { code: 0 });
+            break;
+        }
+    }
+}
+
+/// Review Focus 3: `x` shows the cell before and after the emulated store.
+#[test]
+fn x_shows_the_cell_before_and_after_the_emulated_store() {
+    let out = run_ok(&format!("stepi 5; x {0} 4; stepi; x {0} 4", h("cella")));
+    assert!(has_line(&out, &format!("{}: 00 00 00 00", h("cella"))), "before the stxr:\n{out}");
+    assert!(has_line(&out, &format!("{}: 42 42 00 00", h("cella"))), "after the stxr:\n{out}");
 }
