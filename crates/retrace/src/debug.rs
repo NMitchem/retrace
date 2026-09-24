@@ -833,9 +833,13 @@ impl<'a> Exec<'a> {
                                 s.arm_breakpoints(&bps);
                             }
                             // The breakpoint is ON the window-ending trap, so nothing retires
-                            // before it. The next advance() crosses the trap with breakpoints still
-                            // off (watches armed, so a syscall write is still seen) and re-arms
-                            // them. That is `continue`'s boundary crossing.
+                            // before it: step() left the guest parked at EL1 on the vector slot
+                            // head (the trap itself, unconsumed), not re-seeked to EL0 on the svc
+                            // the way `continue` is. The next advance() reaches that same
+                            // Stop::Syscall, consumes it, and lands at (n+1, 0) — breakpoints stay
+                            // off for exactly that one call (re-armed right after, above) so a
+                            // breakpoint address coinciding with (n+1, 0) cannot re-fire against
+                            // an instruction that never retires.
                             Stepped::AtTrap => bps_off_for_crossing = true,
                         }
                     }
@@ -853,7 +857,12 @@ impl<'a> Exec<'a> {
                         s.arm_watchpoints(&ws);
                     }
                     Advance::WatchSyscall { watched, thread } => {
-                        if self.watch_thread_matches(watched, thread) {
+                        // A syscall write's coordinate is (n, 0) — the post-event boundary this
+                        // very advance() just crossed into. It counts only when that is strictly
+                        // before P (spec §3b): landing exactly ON P (pn == n, pk == 0) is not
+                        // "before" it, and this loop's own `while s.landmark() < pn` guard has
+                        // already let that landing through once, so it must be re-checked here.
+                        if (n, 0u64) < (pn, pk) && self.watch_thread_matches(watched, thread) {
                             last = Some((n, RHit::WatchSys { watched }));
                         }
                     }
