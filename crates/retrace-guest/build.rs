@@ -358,6 +358,17 @@ fn main() {
         .status().expect("clang dupfd_dyn");
     assert!(status.success(), "dupfd_dyn guest build failed");
 
+    // vmremap_dyn: the M39 wall-1 guard — two shared mach_vm_remaps (own text page, called
+    // through the alias; libffi-trampolines.dylib's __TEXT, compared through it). Also the native
+    // protections probe. Same recipe as hello_dyn.
+    let src = format!("{}/c/vmremap_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/vmremap_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang vmremap_dyn");
+    assert!(status.success(), "vmremap_dyn guest build failed");
+
     // atfdcwd_dyn: the M38 AT_FDCWD fixture — `fstatat(AT_FDCWD, ".")` prints `ok` when the
     // sentinel passes through translation. Same recipe as hello_dyn.
     let src = format!("{}/c/atfdcwd_dyn.c", env!("CARGO_MANIFEST_DIR"));

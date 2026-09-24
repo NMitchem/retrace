@@ -10566,3 +10566,448 @@ run log at `…/gate-run-cbc75ff.log`. The sweep was **not** re-run: it ran on `
 (`pass=44 fail=10 skip=0`), and `cbc75ff`'s only behaviour change is where an out-of-range
 `F_DUPFD` minimum is refused — a call no corpus binary makes (no corpus guest targets a
 descriptor above 19) — so its evidence README's commit stays true as written.
+
+## Status: M39-rung8 — 🎉 rung 8: a real script, a real crash, and reverse-continue to the store
+
+The 2026-07-05 vision spec's headline was the real CPython interpreter. M25–M26 reached it with
+`-c 'print(1)'` (rung 7). M39 reaches the thing that headline was *for*: a real **script file**
+with ordinary stdlib use, a real crash inside a C extension, and the debugger walking backwards
+from the fault to the instruction that stored the bad pointer. `crates/retrace-guest/py/crash.py`
+imports `ctypes`, `json`, `os` and `sys`, `json.load`s `crash.json` beside it, builds a table from
+three `{name, base, offset}` rows, computes `target = 0x400000000000 + 0xdead0000` from hex
+**strings in the data file** — never a literal in the script, so "who stored this pointer?" has a
+real answer — `ctypes.cast`s it to a `POINTER(c_long)`, prints the address of the pointer object's
+own buffer on stdout (the M6 marker convention: the test **discovers** the cell, never hardcodes
+it), and derefs. The record exits 139, the replay is byte-identical twice, and
+`watch <cell>; reverse-continue` from the crash lands one instruction before the store inside
+`_ctypes.so`'s `cast()`.
+
+**One wall stood in the way, and there was no second.** The t0 probe had measured it before the
+spec was written: `import ctypes` reaches `mach_vm_remap` (msgh_id **4813**), which Apple's libffi
+issues to alias `libffi-trampolines.dylib`'s freshly-placed RX `__TEXT` into a region it
+`vm_allocate`d. The spec budgeted **six** walls and wrote a walk procedure (§3b) for finding the
+rest. Task 5's first run past the 4813 route went the whole way — `cast`, marker, deref,
+`Event::Crash`, two replays, `reverse-continue` — so **Task 6, the walk, is empty** and the
+procedure was never entered. That is the one number in this section worth remembering: ceiling six,
+measured one.
+
+The milestone's own numbers: **one** wall cleared; **one** new `Box_` method
+(`guest_vm_remap`) with **two** private helpers (`l3_desc`, `write_l3_desc`) and one module const
+lifted (`PT_ADDR`); **one** router route (`Route::ServiceVmRemap`), **one** decoder
+(`decode_vm_remap`, the 92-byte request), **one** encoder (`encode_vm_remap_reply`, the 60-byte
+reply, id 4913) and **two** dispatch arms, each with **four** fail-loud asserts (`copy`,
+`ANYWHERE`, `src_task`, and Ruling 6's target/src overlap); **two** new fixtures (`crash.py` +
+`crash.json`, `vmremap_dyn.c`) and **three** new test binaries (`cpython_crash_e2e`,
+`vmremap_e2e`, `retrace-box/tests/vmremap.rs`) for **+11** `#[test]` attributes over five files;
+**one** native protections probe run three times, whose **two** measured lines
+(`cur=5 max=5`, `cur=5 max=7`) killed the spec's single-constant-pair model before Tasks 3–4 were
+dispatched; **zero** new `#[ignore]` and **zero** un-parked — the headline gate went green without
+ever being parked; **zero** trace-format change (`TRACE_MAGIC` stays `RT\x00\x0a`, its bump
+pre-authorised and unneeded); **no** new returning arm, `verify_thread` **7 → 7**;
+**one** sweep (`pass=44 fail=10 skip=0`, no row changed its label); **nine** commits before this
+close — **five** `M39 plan:` commits (`b8b09a7` pre-flight, then `9f27e5f`, `2e5b4a2`, `2adc6ae`
+and `123cb97`, each aligning the plan with a deviation or a ruling as it landed) and **four** task
+commits (`2980b9a`, `47ca0ee`, `a393edf`, `451d020` for Tasks 1–4) — with Task 5 and the close's
+own commits changing nothing under `crates/` beyond one **comment-only** hunk in `vmremap_e2e.rs`
+(ledger Ruling 14, re-verified on its own). Gate: **629 passed / 0 failed / 9 ignored across 138
+test binaries**, measured on `123cb97`.
+
+### What it set out to do
+
+The spec (`docs/superpowers/specs/2026-09-17-retrace-m39-rung8-design.md`) §1 asked for rung 8 as
+a *user-visible* capability, not a new subsystem: a real script, a real crash, and the reverse-debug
+session in the README. §7 fenced it hard — no exec-in-place, no threads or `subprocess` in the
+script, no lldb-remote stub, no async-signal injection, no symbolication of runtime-loaded dylibs,
+no sweep-only `arg_kinds` rows, no `faulthandler`. §5 kept M38's halt conditions (a red gate
+surviving one fix round, any new `#[ignore]`, a class-E sweep row, scope the spec lacks) and added
+**the seventh wall** to them. §4 ordered the tasks so the fixture and the gate landed **red** first
+(T1), the mechanism guard and its native measurement second (T2), the box method third (T3), the
+codec and both arms fourth (T4), and the walk (T5–T6) only then — so every wall the walk found
+would be found against a gate that already said what "done" meant.
+
+Two of the spec's rulings did most of the work. **R2** — the store is asserted by its **effect**,
+never by a symbol — is what kept the gate from depending on M19's reach into a runtime-loaded
+dylib, which `cast()` being static inside `_ctypes.so` would otherwise have made a prerequisite.
+**R7** — the remap reply's protections come from a native measurement, not from the spec — is what
+caught the spec's own error before it could be implemented (below).
+
+### Wall 1 — `mach_vm_remap` (4813), serviced as a stage-1 alias
+
+**The measurement that named it** (t0, before the spec). With `RETRACE_TRACE=1`, the `ctypes`-first
+script aborts the record after **979** dispatched traps with
+`RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 4813 dest 0x203 … send_size 92`.
+The caller was established three ways in the measurements document, and it is **libffi's, not
+CPython's**: `PyInit__ctypes` allocates a closure, Apple's libffi `vm_allocate`s a 3-page region,
+`dlopen`s `/usr/lib/libffi-trampolines.dylib` (a fat x86_64+arm64e system dylib, which loads
+fine), and `vm_remap`s that dylib's 2-page RX `__TEXT` into the region — **shared** (`copy =
+FALSE`), `VM_FLAGS_OVERWRITE|FIXED`, `VM_INHERIT_SHARE`. Every `import ctypes` on this OS does
+this; nothing about the fixture provokes it. Runtime `dlopen` itself was measured **not** a wall
+(three runtime `__TEXT` loads beyond rung 7's one), and no `arg_kinds` row was missing on the path.
+
+**Red, then green.** T1 landed `crash.py`, `crash.json`, the two path constants, a wiring test and
+the four-assertion gate, and kept the red: assertion 1 fails with `record exit 4` and that exact
+`RECORD ERROR` line (`task-1-red.log`). T2 landed `vmremap_dyn.c` — a dynamically-linked C fixture
+(plain `clang -arch arm64`, like `hello_dyn.c`; it `dlopen`s and `printf`s, so it is not one of the
+`-nostdlib -static` freestanding guests, whatever spec §3f's "freestanding" called it) that
+`vm_remap`s its own `forty_two()` text page into a `vm_allocate`d region and **calls through the
+alias**, then `dlopen`s the trampoline dylib, remaps its `__TEXT`, and `memcmp`s through that alias
+— plus `vmremap_e2e`, and kept its red at the same 4813 line (`task-2-red.log`). Both guards
+existed and were failing before a line of the route was written.
+
+**The model.** `Box_::guest_vm_remap(target, size, src) -> (target, cur, max)` promotes the target
+range to page granularity (`set_region_attr(.., ATTR_DATA)` — identity-filling an unpromoted block
+with what it already meant), then for each 16 KiB page copies the **source's live L3 descriptor**
+verbatim into the target's L3 slot. Those are the first non-identity stage-1 entries the box has
+ever written. It ends with `flush_guest_tlb`, unconditionally (R6): the target sits inside a region
+the guest `vm_allocate`d and may already have translated RW/UXN, and M9's rule is that such a stale
+entry must be invalidated by the guest's own `tlbi` before the page is executed — cheaper than
+proving the guest never translated it. W^X holds by construction, because the alias inherits its
+source's attribute. `machmsg.rs` gained the route, a pure decoder golden-tested against the captured
+92 bytes, and a pure encoder; both dispatch arms decode, assert, call the **same** method with the
+**same** arguments, and encode — record appending the reply as the landmark's `writes`, replay
+recomputing it and returning a `Divergence` (not a panic) if the bytes disagree. That comparison is
+the oracle, so an asymmetry surfaces as a divergence rather than as silent corruption.
+
+**Ruling 4 — the spec was wrong, and R7's method is what caught it.** §3f predicted `cur =
+READ|EXECUTE (5)` with `max` unknown, and told T2 to pin the model to a native probe. The probe,
+run three times with identical output, measured **two different answers**:
+
+```
+SELF kr=0 cur=5 max=5 call=42
+FFI  kr=0 cur=5 max=7 same=1
+```
+
+`cur = 5` held for both. `max` did not: the `dlopen`'d `libffi-trampolines.dylib`'s `__TEXT` is
+mapped `max = rwx` — which is the whole point of a trampoline table, a shared r-x page from which
+writable JIT-closure sub-mappings are later carved under W^X — while the kernel-exec'd main image
+keeps its segment's `r-x` maxprot. The plan's singular `VM_REMAP_CUR_PROT`/`VM_REMAP_MAX_PROT`
+constants could serve one or the other, never both, and T2's implementer flagged exactly that
+rather than forcing the fixture to agree. **Ruling 4 replaced the constants with derivation** before
+Tasks 3–4 were dispatched: `cur` from the source page's live stage-1 attribute (`ATTR_CODE` → 5,
+`ATTR_DATA` → 3, `ATTR_NONE` → 0, anything else panics by name, and disagreeing source pages panic
+too), `max` from the source's band (`src < NANO_BAND_START` → 5 for kernel-placed images — the
+executable, dyld, the shared cache — else 7 for guest-allocated memory). That is a pure function of
+the address and the live tables, so it is identical on record, on replay-from-restore and after a
+checkpoint seek: **no new `Box_` field, and therefore none of the M24/M31 record-only-state class**.
+It reproduces both measured lines. Two shapes it would answer wrongly are named at the method and
+unmodelled — a guest `FIXED` mmap below the nano band (kernel 7, model 5) and a read-only
+`MAP_SHARED` source above it (kernel 5, model 7); neither measured, neither issued by any known
+caller.
+
+**What the route refuses.** `copy == TRUE`, `VM_FLAGS_ANYWHERE`, a `src_task` that is not the
+guest's own task port, and (Ruling 6) a target overlapping its source — the last added at review
+time because `set_region_attr` would re-stamp the overlapped source pages `ATTR_DATA` before they
+were read, a silent wrong answer rather than a loud one. All four assert on **both** sides, with
+the same wording.
+
+### The gate
+
+**629 passed / 0 failed / 9 ignored across 138 test binaries**, on commit `123cb97` — the head
+after the four implementing tasks, and the last commit that changes anything cargo compiles apart
+from the one comment-only hunk recorded at the end of this subsection. Run by the controller from
+the worktree with `.superpowers/sdd/2026-09-17-retrace-m39-rung8/gate.sh` (M38's script, paths
+changed), chunked as CLAUDE.md requires, every chunk `--no-fail-fast` with its cargo exit captured
+to a file **before any pipe**: `ws=0 box=0 e2e1=0 e2e2=0 e2e3=0 e2e4=0 bins=0 clippy=0`. Logs
+sanitised to ASCII before parsing; the script's own summary reads `binaries=138 passed=629
+failed=0 ignored=9`. **Zero `SKIPPED` lines** — `grep -ac SKIPPED` is 0 in all eight logs, and the
+only matches for `skip` are two test *names* (`debug::tests::empty_segments_are_skipped` and
+`pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one`). `jq_e2e`,
+`jq_file_e2e`, both `cpython_e2e` tests and `cpython_crash_e2e` all **ran**: Homebrew `jq` and
+`python@3.14` are installed on this machine, so nothing took the loud-skip path.
+
+| chunk | invocation | exit | binaries | passed | ignored | against M38 |
+|---|---|---|---|---|---|---|
+| `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | 0 | 26 | 171 | 0 | M38's 165 + `machmsg` 4 + `retrace-guest` 2 |
+| `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | 0 | 40 | 291 | 0 | M38's 288 + `tests/vmremap.rs` 3; whole package, so `Doc-tests retrace_box` is present (M24's lesson) |
+| `e2e1` | `cargo test -p retrace --test <20 targets> --no-fail-fast -- --test-threads=1` | 0 | 20 | 45 | **7** | holds `cpython_crash_e2e`; the 7 ignored are `apple_walls_e2e`'s |
+| `e2e2` | same, next 20 targets | 0 | 20 | 31 | 0 | — |
+| `e2e3` | same, next 20 targets | 0 | 20 | 50 | **2** | the 2 ignored are `stackoverflow_rust_e2e`'s and `symbols_e2e`'s |
+| `e2e4` | same, last 11 targets | 0 | 11 | 30 | 0 | holds `vmremap_e2e`, with five targets after it |
+| `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 0 | 1 | 11 | 0 | the 11 `debug.rs` unit tests, the chunk CLAUDE.md says never to omit |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | 0 | — | — | — | clean |
+
+171 + 291 + (45 + 31 + 50 + 30) + 11 = **629**. Ignored 7 + 2 = **9**. Binaries 26 + 40 + 71 + 1 =
+**138** — 131 test executables plus the 7 `Doc-tests` harnesses cargo reports, the convention since
+M14. The e2e chunking is index-free (`xargs -n20` over the sorted target list, the flattened
+membership `diff`ed against the list before anything runs): **71 targets** in 20 / 20 / 20 / 11,
+where M38 had 69 in 20 / 20 / 20 / 9. **The four e2e groups are not comparable to M38's one by
+one** — inserting two targets into a sorted list moves every boundary after the first of them — so
+the e2e comparison is made on their total: **156 against M38's 154**, the +2 being the two new
+gates. The `against M38` column therefore carries no per-group figure; the reconciliation
+CLAUDE.md actually asks for is the per-file one below.
+
+**Why `123cb97` stands for the branch head.** The close's own commits are `0c45908` and `b7443dd`
+(Task 7a's docs and its review fixes) and this one. `git diff --stat 123cb97 b7443dd -- crates` is
+**empty** — both are docs-only, which is the condition ledger Ruling 10 attached to starting the
+gate in the background while the docs were written. Task 7b then made the single exception ledger
+Ruling 14 authorised: one **comment-only** hunk in `crates/retrace/tests/vmremap_e2e.rs`, rewriting
+an `EXPECT` comment that pointed a future reader at `machmsg::VM_REMAP_CUR_PROT` /
+`VM_REMAP_MAX_PROT` — constants Ruling 4 removed before they were ever written — to say what is
+actually true, that `Box_::guest_vm_remap` derives `cur` from the source page's stage-1 attribute
+and `max` from its band. `git diff 123cb97 HEAD -- crates` is exactly that one hunk with no
+non-comment line changed, and it was re-verified on its own rather than assumed:
+`cargo test -p retrace --test vmremap_e2e -- --test-threads=1` → **1 passed, 0 failed, 20.14 s,
+exit 0**, and `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**
+(`task-7b-vmremap.log`, `task-7b-clippy.log`).
+
+**Reconciled against M38's 618 / 0 / 9 over 135, file-by-file rather than by sum**
+(`git diff 832a1cb HEAD -- crates | grep -c '^+.*#\[test\]'` = **11**, with no `-` line carrying
+`#[test]`, so no test was deleted or renamed away):
+
+| file | M38 | M39 | delta | where the gate shows it |
+|---|---|---|---|---|
+| `crates/retrace-core/src/machmsg.rs` | 28 | 32 | **+4** — `decodes_the_captured_vm_remap_request`, `vm_remap_decode_rejects_malformed`, `vm_remap_reply_has_the_documented_shape`, `routes_vm_remap_to_service_only_on_the_guest_task_port` | `ws`: `retrace_core` unittests **53 passed** (M38: 49) |
+| `crates/retrace-guest/src/lib.rs` | 16 | 18 | **+2** — `crash_py_fixture_is_wired` (T1), `vmremap_guest_parses` (T2) | `ws`: `retrace_guest` unittests **18 passed** (M38: 16) |
+| `crates/retrace-box/tests/vmremap.rs` | — | 3 | **+3**, new binary — the alias resolves to the source IPA with identity neighbours; a guest-allocated source reports its band's protections; a non-page-multiple size is refused | `box`: `tests/vmremap.rs` **3 passed**, a binary M38 did not have |
+| `crates/retrace/tests/vmremap_e2e.rs` | — | 1 | **+1**, new binary — the repo-owned mechanism guard | `e2e4`: `tests/vmremap_e2e.rs` **1 passed** |
+| `crates/retrace/tests/cpython_crash_e2e.rs` | — | 1 | **+1**, new binary — the headline gate | `e2e1`: `tests/cpython_crash_e2e.rs` **1 passed** |
+| every other `.rs` under `crates/` | unchanged | unchanged | 0 | no other file in the diff carries a `#[test]`, so no other binary's count could have moved |
+
+Per-crate attribute counts confirm the same delta independently of the diff
+(`git grep -h '^[[:space:]]*#\[test\]' 832a1cb -- 'crates/<c>/*.rs'` against the worktree):
+`retrace-core` 83 → 87, `retrace-guest` 17 → 19, `retrace-box` 288 → 291, `retrace` 174 → 176; the
+other four crates unmoved. The tree holds **636** `#[test]` attributes (M38: 625), of which 9 are
+ignored, so 627 are runnable; the run reports 629 because `census.rs`'s two tests execute twice —
+once in their own binary and again inside `legacy_equivalence`'s `#[path]` include, the "+2 twice"
+since M33. A bare `grep -c '#\[test\]'` says 637, the extra being the comment in
+`legacy_equivalence.rs` that mentions the attribute in prose. So 618 + 11 = **629**, 9 = **9**, and
+135 + 3 = **138** — the tally the script printed.
+
+**The 9 ignored are M38's nine, unchanged and unrenamed**, checked by name in the logs rather than
+by count: `apple_walls_e2e`'s seven (`automationmodetool`, `csh`, `dddiagnose`, `desdp`,
+`dyld_info`, `flex`, `tcsh`), plus `a_rust_stack_overflow_strikes_its_own_guard_page` (M21's
+signal-model wall) and `cache_symbol_e2e` (M19's shared-cache symbol wall). That they are M38's by
+name and not merely by count is settled by the diff rather than by reading two logs side by side:
+none of the three files holding them appears in `git diff --stat 832a1cb HEAD -- crates`, so
+neither the tests nor their `#[ignore]` reason strings moved. M39 parked nothing new and un-parked
+nothing.
+
+**The spec's §9 prediction was short by exactly one binary:** it named `cpython_crash_e2e` and
+`vmremap_e2e` and "one per further mechanism guard", and did not count `retrace-box`'s own
+`tests/vmremap.rs` — a guard §3f itself had asked for. The plan's own prediction, corrected
+pre-gate by ledger Ruling 13 from +2 binaries to +3, was **629 / 0 / 9 over 138**, which the run
+matched exactly.
+
+**One number in the log needs its conditions stated.** `cpython_crash_e2e` reports
+`finished in 20740.23s` (5.76 h) inside `e2e1`, against the **12,364.35 s** the same test took
+standing alone in Task 5. The difference is not a regression in the test: for its first ~3 h 40 m
+it shared this machine with the milestone's demo run, itself a rung-8 `reverse-continue`. At 23:50
+both processes were in uninterruptible wait at about 10 % CPU with 63,174 MB of the machine's
+63,488 MB swap in use and its 24 GB of RAM at an 11 GB compressor — **two concurrent rung-8
+reverse-continues hold more checkpoint state than this machine has** (ledger Ruling 15, which
+corrects Ruling 10's assumption that the background overlap was free). The demo was killed at
+23:51 and the gate's run finished alone, its own swap use climbing from 36 GB to 47 GB. Both
+figures are measured under those conditions and are stated as such; the memory cost is now a README
+"Known limit" and an owed item, and a clean standalone sample is what the demo re-run is for.
+
+### The sweep
+
+One full run of `tools/apple-sweep.sh` over the committed 54-entry corpus, detached from the
+worktree, on the close's binary (`123cb97`, copied to the session scratchpad and ad-hoc signed
+there so the background gate's `cargo test` could not swap it mid-run; sha256
+`7c514a7f…2636f`). `TALLY pass=44 fail=10 skip=0`, `SWEEP_EXIT=0`, recorder pids 29138–32207
+(`0x71d2`–`0x7dcf`, M37's regime I — irrelevant since §4b was retired).
+
+**No row changed its label, its result, its `rc` or its `rp`.** That was the expectation and it is
+worth saying why: M39's one wall is reached by `import ctypes`, and no binary in the corpus loads
+`_ctypes.so`. Nine rows differ in a non-label field, and both reasons are measured in
+`docs/sweep-evidence/2026-09-17-m39/README.md`:
+
+* **Seven** (`ed`, `ls`, `automationmodetool`, `desdp`, `dyld_info`, `flex`, `dddiagnose`) differ
+  only inside the panic string the harness quotes as `rec_reason`: the recorder's own thread id
+  (fresh per process — M38's own rows carry seven distinct ones), and
+  `crates/retrace-arch/src/lib.rs:944` → `:946`. **That line move is M38's, not M39's.**
+  `git diff --stat 832a1cb HEAD -- crates/retrace-arch` is empty; `git diff --stat 911214e
+  832a1cb -- crates/retrace-arch/src/lib.rs` is 17 insertions / 15 deletions, a net +2 — exactly
+  the shift. M38's sweep ran on `911214e` and its own README records that it was not re-run after
+  the final-review fix `cbc75ff`. This is the first sweep taken on the merged tree, so it is the
+  first to see the new line number. The panic **site**, the syscall number, the label, `rc` and
+  `rp` are identical on all seven.
+* **Two** (`csh` 336 → 346, `tcsh` 344 → 341 — one up, one down) moved their divergence landmark
+  inside the run-to-run spread M37's audit 3 measured on every row and M38's README recorded on
+  these two. Same wall (`mach_msg2` msgh_id 3403 at pc `0x1804adc34`), same 4/3.
+
+No `identical fault` row, no `replay diverged` row, and **no class-E row** — the halt condition
+§5 names. The ten FAIL rows are M38's ten, with M38's ten reasons.
+
+### Rulings
+
+Sixteen, in the ledger (`.superpowers/sdd/2026-09-17-retrace-m39-rung8/progress.md`). The ones that
+changed what was built:
+
+* **R1 (ledger) — the gate asserts DFSC `== 0x05`, not the spec's class `0x04..=0x07`.** The basis
+  was `crashy.c`'s measured `0x92000005` at the *same* VA (bit 46 → L1 index 0x400, never mapped),
+  so the strict form is the stronger assertion about the same fact. The rule attached to it was the
+  important half: if the first record that reached the crash measured otherwise, Task 6 would
+  correct it **with the measurement**, never loosen it silently. It measured `0x92000005`. The
+  strict form stands, untouched.
+* **R4 — the reply's protections are derived, not constants.** Above, in the wall's own section.
+  The plan's Tasks 3–5 were amended before dispatch, so no implementer ever wrote the wrong model.
+* **R6 — a target overlapping its source is asserted, on both sides.** Raised as a Task 3 review
+  minor about a *silent* shape and carried into Task 4's dispatch as a fourth assert. Cost if
+  wrong: an assert that never fires.
+* **R8 (spec) — a new `mach_msg2` route adds no `verify_thread` site.** The route match sits inside
+  the generic `Syscall` arm, after its oracle call. Predicted 7, **measured 7** at the close by
+  `grep -c 'self.verify_thread(' crates/retrace-core/src/lib.rs` — checked rather than assumed,
+  which is what the ruling asked for.
+* **R9 (ledger) — the 12,364 s gate is a finding to REPORT, not to fix.** §5's halt conditions are
+  red gates, new `#[ignore]`s, class-E rows, missing scope and the seventh wall. A slow green is
+  none of them, and making `reverse-continue` fast is scope this spec lacks. Task 5 attributed it
+  by subtraction (below) and Task 7 put it in the README's "Known limits" and on the owed list.
+* **R10 (ledger) — Tasks 5 and 7 change nothing under `crates/`**, so the close's gate and the demo
+  transcript were started in the background on `123cb97` while the docs were written, valid iff
+  `git diff --stat 123cb97 HEAD -- crates` is empty at the close. It was empty through Task 7a's
+  `b7443dd`, and **R14 then amended the clause rather than letting it quietly go false**: the one
+  permitted exception is this close's comment-only hunk in `vmremap_e2e.rs`, re-verified on its own,
+  so the gate's figures still stand for the head. R15 records where the ruling's *other* assumption
+  — that running the gate and the demo concurrently was free — turned out to be wrong.
+* **R11 (ledger) — Task 7 split into 7a and 7b.** The demo transcript (~3.4 h) and the gate (~4 h)
+  are background jobs; a docs commit must not wait on them. 7a wrote everything that does not
+  depend on either and left a placeholder token where the gate figures go. Refined by R16 below
+  into three commits, once R15 forced the demo to be re-run after the gate rather than beside it.
+* **R12 (ledger) — the seven moved `rec_reason` fields are not a §5 finding against M39.** The
+  sweep's row rule makes any row that moves for an unnamed reason a finding; these moved for a
+  reason that is named and measured, and it is **M38's**: a panic-string thread id that is fresh per
+  process, and `crates/retrace-arch/src/lib.rs:944` → `:946` from M38's own post-sweep fix commit,
+  which M38's evidence README records it never re-swept. `832a1cb..HEAD` on that crate is empty.
+  Named as such in the M39 evidence README. Cost if wrong: a sweep row misattributed to a milestone
+  that did not touch the file.
+* **R13 (ledger) — the binaries prediction corrected from +2 to +3 before the gate finished.**
+  `crates/retrace-box/tests/vmremap.rs` is a third new test target, picked up inside the
+  whole-package `retrace-box` chunk without a chunk-list change. Predicted **629 / 0 / 9 over 138**
+  with +11 `#[test]`; spec §9 recorded as short by one binary. The gate matched the corrected
+  prediction exactly — which is the check the ruling was made to allow.
+* **R14 (ledger) — the stale comment in the guard test is fixed here, not left owed.** A code
+  comment that names constants which do not exist is a lie inside the very test that guards the
+  mechanism, so `vmremap_e2e.rs`'s `EXPECT` comment was rewritten to state R4's derivation instead
+  of pointing at `machmsg::VM_REMAP_{CUR,MAX}_PROT`. It is the only `crates/` delta past the
+  gate's commit, comment-only, and re-verified by the two commands quoted under "The gate". The
+  item accordingly **leaves** the deferred-minors list below rather than being carried forward.
+* **R15 (ledger) — two concurrent rung-8 `reverse-continue`s do not fit on this machine.** R10 had
+  assumed the background overlap was free. Measured at 23:50: the demo's `retrace debug` and the
+  gate's `cpython_crash_e2e` child both in uninterruptible wait at about 10 % CPU, 63,174 MB of
+  63,488 MB swap in use, 24 GB of RAM at an 11 GB compressor. The **demo** was killed so the gate
+  finished alone, which is why the gate's crash test reads 20,740 s against Task 5's 12,364 s
+  standing alone, and why the demo re-runs standalone with a memory sampler. Cost: ~3.4 h of
+  wall-clock. Gain: a measured Known limit — the memory footprint of reverse execution, which
+  nothing had ever looked at.
+* **R16 (ledger, refines R11) — the close is three commits, not two.** 7b is the gate half (the
+  figures, "The gate" with its file-by-file reconciliation, R12–R16, and the R14 comment fix);
+  7c is the transcript half, after the standalone demo re-run finishes, and it also refines the
+  memory figures above from a clean sample. Three commits where the plan named one.
+* **R17 (operator, 2026-09-23, refines R16) — 7c is deferred to M40, and this commit stands in its
+  place.** The standalone demo re-run (`demo.sh`, on `b7443dd`, started 02:05 on 2026-09-22)
+  recorded, replayed, reached `> reverse-continue` at 02:06, and never printed a result: `demo.log`
+  stops there with no `debug exit=` line, and the sampler's last line in `demo-mem.log` is 06:34:10,
+  at 195:56 of the debugger's CPU time with 33,939 of 34,816 MB swap in use. A missing
+  `debug exit=` means the script itself was stopped rather than the debugger returning; what stopped
+  it is unrecorded (the machine was next booted at 20:16 on 2026-09-23). Its one usable measurement
+  is the curve: RSS 0.83 → 7.41 GB over the first ~29 min of CPU, then falling while swap in use grew
+  from 14.3 GB to 33.9 GB — consistent with the working set being paged out rather than shrinking,
+  which is inference, not measured. The transcript and the clean memory figures move to M40, whose
+  charter is to make the run that would produce them take minutes rather than hours: re-running a
+  3-plus-hour demo to fill a README subsection would only re-measure the defect M40 exists to remove.
+  Cost if wrong: the README's rung-8 entry ships without its transcript for one milestone.
+
+Three more were the ordinary kind — a build-path correction made pre-flight (R2), and two
+`-D warnings` clippy deviations accepted and back-ported into the plan (R3 `useless_format`,
+R5 `manual_is_multiple_of`) — plus R7, which accepted both of Task 4's deviations, one of which is
+worth its own line: **the plan's malformed-request test did not test anything.** Its "clear the
+complex bit" case mutated byte 0, which already held `0x13`; the complex bit `0x8000_0000` lives
+in byte 3. The implementer's mandatory RED run caught it (the `is_err()` assert failed because the
+"bad" buffer was byte-identical to the good one), and it landed as `bad[3] = 0x00`. A test that
+cannot fail is the failure mode this repo's history records most often, and the RED-first discipline
+is what found it here.
+
+### What Task 5 measured that nobody asked for
+
+**`reverse-continue` from a rung-8 crash costs about 3.42 hours on this machine.** The whole
+`cpython_crash_e2e` run is 12,364.35 s. Record, replay and `debug --script "continue"` were timed
+separately on a fresh recording of the same script (8.585 s, 8.822 s, 32.643 s — round 2, logged to
+`task-5-timing.log` after review round 1 found round 1's numbers had no evidence file), so 50.05 s
+is accounted for and **12,314.30 s ≈ 3.42 h** belongs to the `watch; reverse-continue; x; stepi; x`
+tail — essentially all of it to `reverse-continue`, since the other three are O(1) or
+single-instruction. The mechanism beyond that is a **code read, not a profile**, and is labelled as
+inference everywhere it appears: `cmd_reverse_continue` (`crates/retrace/src/debug.rs:746`) does not
+step backward — it rescans forward from landmark 1 and restarts a fresh `ReplaySession` via
+`checkpointed_seek` for each watch hit it finds short of the current position, and each restart
+resolves its sub-landmark offset through `step_insns`
+(`crates/retrace-core/src/lib.rs:2788-2807`), which pays one real Hypervisor.framework
+single-instruction trap per guest instruction. CPython executes very large instruction counts
+between landmarks and its allocator plausibly reuses the crashing cell many times over a process
+lifetime, which would make that cost recur once per intervening write. **Nobody profiled it.** It is
+on the owed list, not fixed here, per R9.
+
+### What stays owed
+
+M38's list, carried forward. Nothing on it was discharged by this milestone — M39 cleared a wall
+rather than taking items off the list — so the substance is M38's section above, and what follows is
+what M39 **adds** to it.
+
+* **`reverse-continue`'s cost on a long recording** — new, and the largest item here. Measured
+  3.42 h on rung 8; the attributing mechanism is a code read, unprofiled. Two candidate directions
+  are visible from that read and neither is measured: not restarting a session per intervening watch
+  hit, and not resolving a sub-landmark offset by single-stepping every instruction. A successor
+  that wants rung 8 to be *usable* rather than merely *reachable* starts by profiling it. **Its
+  memory cost is the same item's other half**, and it was measured only by accident (R15): one such
+  run took this 24 GB machine's swap from 36 GB to 47 GB, and two at once exhausted RAM and all
+  63 GB of swap. **And the obvious explanation is measurably not the explanation:** the debugger's
+  `CheckpointCache` is byte-budgeted at 256 MiB with LRU eviction
+  (`crates/retrace/src/debug.rs:19`), so tens of gigabytes are not cached checkpoints. What does
+  hold them is unmeasured. A profile that looks only at time would miss the limit that actually
+  bit. It is M40's charter (R17), and 7c's transcript and clean memory figures go with it.
+* **A stage-1 alias is invisible to every reader that goes by address** — new.
+  `Box_::read_guest`/`read_guest_checked` resolve against the box's backings list, not by walking
+  the tables; every mapping before M39 was identity, so the two agreed by construction. The
+  debugger's `x` and everything downstream of `ReplaySession::read_mem` therefore read an aliased
+  range's **old** backing rather than the source bytes the guest executes there. Documented at the
+  method, not fixed: nothing on rung 8's path reads a trampoline page by VA. Watchpoints are
+  unaffected (hardware `DBGW` on a VA).
+* **`copy = TRUE`, `VM_FLAGS_ANYWHERE`, and foreign-task remaps** — new, each asserting by name.
+  A copy needs new backing and a memcpy (a different operation); `ANYWHERE` needs the box to choose
+  the address, which `guest_vm_map`'s first-fit could serve but nothing measured asks for; a foreign
+  `src_task` is a different model entirely. Un-remapping is likewise unmodelled: `vm_deallocate` of
+  an alias would take the ordinary deallocate path, natively unreached before the crash.
+* **The derived `max` protection's two unmeasured shapes** — new: a guest `FIXED` mmap below the
+  nano band (kernel 7, model 5) and a read-only `MAP_SHARED` source above it (kernel 5, model 7).
+  Named at `guest_vm_remap`; no known caller issues either.
+* **Symbols for runtime-loaded dylibs** — carried and sharpened. M19 symbolicates the main image
+  and dyld; `cast()` is static inside `_ctypes.so`, so rung 8's store has no name. R2 made the gate
+  assert on the store's **effect** instead, which is why this is a gap in the *transcript* and not a
+  gap in the gate. It is the same seam `cache_symbol_e2e` is parked at, seen from the other side.
+* **The lldb seam and async-signal injection** — carried, untouched: the two remaining v1 gaps §7
+  fenced out. Exec-in-place is the third and stays pinned by the CPython launcher test.
+* **The missing-row set {461, 468, 464, 345, 374}** — carried from M38 unchanged, and M39 adds
+  nothing to it: §2 measured that no `arg_kinds` row was missing on the rung-8 path, and §7 forbade
+  sweep-only rows, so none was added. Seven sweep rows and five parked gates still stand behind
+  those five numbers.
+* **Review minors, deferred** (the ledger carries each with its file and line). One item that
+  stood here is **no longer owed**: the `EXPECT` comment in `vmremap_e2e.rs` that pointed a future
+  reader at `machmsg::VM_REMAP_{CUR,MAX}_PROT` — constants Ruling 4 removed before they were ever
+  written — was rewritten in this close to state the derivation instead (Ruling 14, the one
+  comment-only `crates/` hunk past the gate's commit). What remains: `vmremap_e2e.rs:31`
+  inlines `(-47i64) as u64` rather than naming the constant; `vmremap_dyn.c:64`'s
+  `dlopen`/`dlsym` failures share one message; `guest_vm_remap`'s doc still says "Returns `target`"
+  (superseded by the Ruling 4 paragraph below it); `l3_desc` duplicates the existing `leaf_desc`
+  and folds "table present but L3 backing untracked" into `None`, where `write_l3_desc` expects
+  instead; the box unit tests prove the alias's output address through `va_to_ipa` but not the
+  copied attribute bits (`ipa_is_exec(target)` would close it); the replay arm's mismatch
+  `Divergence` carries only `target`, not the derived `cur`/`max`; the overlap assert uses unchecked
+  `u64` adds; `route()`'s comment names three asserted shapes where the arms enforce four; neither
+  arm asserts `m.rcv_size >= 60` before writing the reply (the `vm_map` precedent); the replay-side
+  `assert!`s panic rather than returning `Divergence` (the 3409 precedent); and Task 5's report calls
+  `step_insns` "a literal for-loop" where the real body carries an inner fault-retry loop the quote
+  omits — the one-trap-per-instruction conclusion is unaffected.
+* **Superseded, not owed — with this section as their forward pointer.** Spec §3c.2's DFSC class
+  `0x04..=0x07` (narrowed to `== 0x05` by ledger Ruling 1 and measured); §3f's single
+  `VM_REMAP_CUR_PROT`/`VM_REMAP_MAX_PROT` constant pair and its "`cur = 5`, `max` unknown"
+  prediction (replaced by Ruling 4's derivation, on a measurement that returned two answers); §3f's
+  `guest_vm_remap(target, size, src, exec) -> u64` signature (landed as
+  `(target, size, src) -> (u64, u32, u32)`); §3f's probe and guard paragraphs' **"freestanding"**
+  for `vmremap_dyn.c`, which is both (it is built with plain `clang -arch arm64` and it
+  `dlopen`s and `printf`s — in this repo "freestanding" means the `-nostdlib -static` `asm/*.s`
+  guests; it is a dynamically-linked C fixture, like `hello_dyn.c`, whose recipe `build.rs` copies);
+  §3b's walk procedure and R4's ceiling of six (one wall,
+  no walk); §9's gate prediction (short by one binary — `retrace-box/tests/vmremap.rs`); and the
+  plan's malformed-request mutation of byte 0 (a no-op; byte 3 carries the complex bit, corrected at
+  Task 4's RED). M38's and earlier superseded lists stay as they were left.

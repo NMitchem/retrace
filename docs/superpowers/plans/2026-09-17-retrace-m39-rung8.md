@@ -43,10 +43,15 @@ them.
 - **Symmetry rule 1 by construction:** `Box_::guest_vm_remap` is called with the same decoded
   arguments on both sides; replay byte-compares the recomputed reply against the recorded
   `writes`. Any further wall's fix follows the same shape or goes below the trace (rule 2).
-- **The remap reply's protections are measured, not chosen** (spec R7): the constants
-  `VM_REMAP_CUR_PROT` / `VM_REMAP_MAX_PROT` are set from Task 2's native run and its output is
-  in Task 2's report. If the native run disagrees with the prediction (5/5), the constants follow
-  the run.
+- **The remap reply's protections are measured, not chosen** (spec R7). Task 2 measured
+  `SELF … cur=5 max=5` (source: the main image's text, kernel-placed) and `FFI … cur=5 max=7`
+  (source: a dlopen'd dylib's text, dyld's MAP_PRIVATE mmap), so one constant pair cannot be
+  right. **Ruling 4:** `Box_::guest_vm_remap` DERIVES both — `cur` from the source page's
+  stage-1 attribute (`ATTR_CODE` → 5, `ATTR_DATA` → 3, `ATTR_NONE` → 0, else panic by name),
+  `max` from the source's band (`src < NANO_BAND_START` → 5: kernel-placed images — exe, dyld,
+  shared cache; else → 7: guest-allocated — nano commits, every mmap bump ≥ `MMAP_BASE`). Pure
+  functions of the address and the live tables: identical on record, on replay's `restore`, and
+  after a checkpoint seek, with no new `Box_` state. There are no `VM_REMAP_*_PROT` constants.
 - **Every e2e gate asserts on the trace or on bytes** (CLAUDE.md honest-gate rule 1); the rung
   helper's exit-0 demand is the fixture-ran check, never the property. Exit 139 is never asserted
   alone.
@@ -288,7 +293,7 @@ fn cpython_runs_a_real_script_crashes_on_the_computed_pointer_and_reverse_debugs
     let script = format!("continue; watch 0x{cell:x}; reverse-continue; x 0x{cell:x} 8; stepi; x 0x{cell:x} 8");
     let (code, out, err) = debug_run(ts, &script);
     assert_eq!(code, 0, "debug session failed. stderr:\n{err}\nstdout:\n{out}");
-    assert!(out.contains(&format!("guest crashed: pc=")), "continue must park at the crash:\n{out}");
+    assert!(out.contains("guest crashed: pc="), "continue must park at the crash:\n{out}");
     assert!(out.contains(&format!("hit watch 0x{cell:x} (write at ")), "reverse-continue must find a writer:\n{out}");
     let target_hex = TARGET.to_le_bytes().iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
     let xs: Vec<&str> = out.lines().filter(|l| l.starts_with(&format!("0x{cell:x}:"))).collect();
@@ -327,8 +332,8 @@ git commit -m "M39 t1: crash.py fixture and the rung-8 gate, red at the measured
 
 **Interfaces:**
 - Produces: `retrace_guest::VMREMAP_DYN`; the measured `cur`/`max` protections (in the task
-  report, and as the two numbers in `vmremap_e2e`'s `EXPECT`) that Task 4 pins into
-  `machmsg::VM_REMAP_CUR_PROT` / `VM_REMAP_MAX_PROT`.
+  report, and as the four numbers in `vmremap_e2e`'s `EXPECT`: SELF 5/5, FFI 5/7) that Task 3's
+  derivation (Ruling 4) must reproduce and Task 5 checks.
 - Consumes: `util::assert_rung_records_and_replays`, `retrace_trace::{Reader, Event}`.
 
 - [ ] **Step 1: Write the fixture.** `crates/retrace-guest/c/vmremap_dyn.c`:
@@ -431,12 +436,12 @@ and in `mod tests` after `crash_py_fixture_is_wired`:
   `cargo test -p retrace-guest vmremap_guest_parses -- --test-threads=1`. Expected: PASS
   (this also compiles the fixture).
 
-- [ ] **Step 5: THE MEASUREMENT — run the fixture natively** (no retrace; the binary is under
-  `target/…/build/retrace-guest-*/out/vmremap_dyn` — find it with
-  `ls target/debug/build/retrace-guest-*/out/vmremap_dyn`):
+- [ ] **Step 5: THE MEASUREMENT — run the fixture natively** (no retrace; `.cargo/config.toml`
+  sets `[build] target = "aarch64-apple-darwin"`, so the binary is under
+  `target/aarch64-apple-darwin/debug/build/retrace-guest-*/out/vmremap_dyn`):
 
 ```sh
-B=$(ls -t target/debug/build/retrace-guest-*/out/vmremap_dyn | head -1); "$B"; echo "exit=$?"
+B=$(ls -t target/aarch64-apple-darwin/debug/build/retrace-guest-*/out/vmremap_dyn | head -1); "$B"; echo "exit=$?"
 ```
 Expected shape: `SELF kr=0 cur=5 max=5 call=42`, `FFI kr=0 cur=5 max=5 same=1`, `exit=0`.
 **Record the two lines verbatim in the task report** — they are the measurement spec R7 owes.
@@ -501,11 +506,13 @@ git commit -m "M39 t2: vmremap_dyn guard fixture (red at 4813) and the native pr
 - Create: `crates/retrace-box/tests/vmremap.rs`
 
 **Interfaces:**
-- Produces: `pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64) -> u64`
-  (returns `target`; panics on the unmodelled shapes named in spec §3f). Task 4 calls it from
-  both arms.
+- Produces: `pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64) -> (u64, u32, u32)`
+  — `(target, cur_protection, max_protection)`, the protections derived per Ruling 4 (Global
+  Constraints); panics on the unmodelled shapes named in spec §3f. Task 4 calls it from both
+  arms and encodes the three values.
 - Consumes: `set_region_attr`, `flush_guest_tlb`, `l2_host`, `backings`, `GRANULE`, `BLK`,
-  `DESC_TABLE`, `DESC_PAGE`, `ATTR_DATA` (all existing).
+  `DESC_TABLE`, `DESC_PAGE`, `ATTR_DATA`, `ATTR_CODE`, `ATTR_NONE`, `NANO_BAND_START` (all
+  existing).
 
 - [ ] **Step 1: Write the failing unit test.** `crates/retrace-box/tests/vmremap.rs`:
 
@@ -528,12 +535,27 @@ fn a_remapped_page_resolves_to_the_source_ipa_and_neighbours_stay_identity() {
     assert_eq!(b.va_to_ipa(target), Some(target), "identity before the alias");
     assert_eq!(b.va_to_ipa(text), Some(text), "the source is identity-mapped");
 
-    assert_eq!(b.guest_vm_remap(target, 0x4000, text), target);
+    // A kernel-placed image's RX text: cur r-x (5), max r-x (5) — Task 2's SELF measurement.
+    assert_eq!(b.guest_vm_remap(target, 0x4000, text), (target, 5, 5));
 
     assert_eq!(b.va_to_ipa(target), Some(text), "the target now walks to the source's IPA");
     assert_eq!(b.va_to_ipa(region), Some(region), "the page below is untouched");
     assert_eq!(b.va_to_ipa(region + 0x8000), Some(region + 0x8000), "the page above is untouched");
     assert_eq!(b.va_to_ipa(text), Some(text), "the source is untouched");
+}
+
+#[test]
+fn a_guest_allocated_source_reports_the_kernels_protections_for_its_band() {
+    // The other measured shape (Task 2's FFI line, max=7): a source the GUEST allocated lives at
+    // or above MMAP_BASE (> NANO_BAND_START) and the kernel gives such mappings max VM_PROT_ALL.
+    // Here the source is an anon RW page, so cur is rw- (3) — the attribute-derived half.
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    let src_region = b.guest_vm_map(0, 0x4000, true, false);    // one anon RW page, in the mmap band
+    let region = b.guest_vm_map(0, 0xc000, true, false);
+    let target = region + 0x4000;
+    assert_eq!(b.guest_vm_remap(target, 0x4000, src_region), (target, 3, 7));
+    assert_eq!(b.va_to_ipa(target), Some(src_region));
 }
 
 #[test]
@@ -605,27 +627,51 @@ fn a_non_page_multiple_size_is_refused() {
     /// the alias range read the old identity backing, not the source — callers that read guest
     /// memory by VA assume identity. Nothing on rung 8's path reads a trampoline page by VA.
     ///
+    /// Returns `(target, cur_protection, max_protection)` — the reply's three values, DERIVED so
+    /// they are the kernel's measured answer on both sides (M39 t2 measured two shapes and one
+    /// constant pair could not serve both): `cur` is the source page's stage-1 attribute read
+    /// back as a VM_PROT (ATTR_CODE r-x = 5, ATTR_DATA rw- = 3, ATTR_NONE = 0); `max` is the
+    /// source's BAND — below `NANO_BAND_START` every page is a kernel-placed image (the exe, dyld,
+    /// the shared cache) whose max is its segment's r-x (5); at or above it every page is
+    /// guest-allocated (nano commits, every mmap bump from `MMAP_BASE`) and the kernel's max is
+    /// VM_PROT_ALL (7) — measured 5 for the main image's text, 7 for a dlopen'd dylib's. A pure
+    /// function of the address and the live tables: no new state, so `restore` and a checkpoint
+    /// seek compute the same reply. Unmodelled and stated: a guest FIXED mmap below the band
+    /// (kernel 7, this says 5) and a MAP_SHARED read-only source above it (kernel 5, this says 7)
+    /// — neither measured, neither issued by any known caller.
+    ///
     /// Asserts (spec §3f — scope the spec lacks): page-multiple size and alignment; every source
     /// page mapped at page granularity (a source inside an unpromoted data block is not the kind
     /// of memory anything remaps as code, and copying a BLOCK descriptor into an L3 slot would
-    /// be silent garbage). `copy`, `ANYWHERE` and a foreign `src_task` are dispatch's asserts.
-    pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64) -> u64 {
+    /// be silent garbage); a source attribute that is none of the three named; source pages that
+    /// differ in protection. `copy`, `ANYWHERE` and a foreign `src_task` are dispatch's asserts.
+    pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64) -> (u64, u32, u32) {
         let g = GRANULE as u64;
-        assert!(size > 0 && size % g == 0, "vm_remap: size {size:#x} is not a page multiple");
-        assert!(target % g == 0 && src % g == 0, "vm_remap: unaligned target {target:#x} / src {src:#x}");
+        assert!(size > 0 && size.is_multiple_of(g), "vm_remap: size {size:#x} is not a page multiple");
+        assert!(target.is_multiple_of(g) && src.is_multiple_of(g), "vm_remap: unaligned target {target:#x} / src {src:#x}");
         // Ensure every target page has a page-granular entry (promotes an unpromoted block,
         // identity-filled with ATTR_DATA — what the block already meant), then alias.
         self.set_region_attr(target, size, ATTR_DATA);
+        let mut cur: Option<u32> = None;
         let mut off = 0;
         while off < size {
             let sdesc = self.l3_desc(src + off).unwrap_or_else(|| panic!(
                 "vm_remap: source page {:#x} has no page-granular stage-1 entry (unpromoted block)", src + off));
             assert!(sdesc & 0x3 == DESC_PAGE, "vm_remap: source page {:#x} descriptor {sdesc:#x} is not a page", src + off);
+            let attr = sdesc & !PT_ADDR & !0x3;
+            let prot = if attr == ATTR_CODE { 5 }        // r-x
+                       else if attr == ATTR_DATA { 3 }   // rw-
+                       else if attr == ATTR_NONE { 0 }   // ---
+                       else { panic!("vm_remap: source page {:#x} has an unmodelled attribute {attr:#x}", src + off) };
+            assert!(cur.is_none_or(|c| c == prot),
+                "vm_remap: source pages differ in protection ({cur:?} vs {prot}) — unmodelled");
+            cur = Some(prot);
             self.write_l3_desc(target + off, sdesc);
             off += g;
         }
         self.flush_guest_tlb();
-        target
+        let max = if src < NANO_BAND_START { 5 } else { 7 };
+        (target, cur.expect("size > 0 asserted above"), max)
     }
   ```
 
@@ -660,9 +706,10 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
   flags: u32, src_task: u32, src: u64, copy: u32, inheritance: u32 }`;
   `pub fn decode_vm_remap(buf: &[u8]) -> Result<VmRemapReq, String>`;
   `pub fn encode_vm_remap_reply(reply_port: u32, target: u64, cur: u32, max: u32) -> Vec<u8>`
-  (60 bytes with trailer); `VM_REMAP_CUR_PROT` / `VM_REMAP_MAX_PROT: u32`.
-- Consumes: `Box_::guest_vm_remap` (Task 3), `VM_FLAGS_ANYWHERE` (`lib.rs:36`), `Region`,
-  `Event::Syscall`, `guest_task_port: Option<u64>` (record's local at `:139`, replay's field).
+  (60 bytes with trailer). No protection constants (Ruling 4: the box derives them).
+- Consumes: `Box_::guest_vm_remap(...) -> (u64, u32, u32)` (Task 3), `VM_FLAGS_ANYWHERE`
+  (`lib.rs:36`), `Region`, `Event::Syscall`, `guest_task_port: Option<u64>` (record's local at
+  `:139`, replay's field).
 
 - [ ] **Step 1: Write the failing tests.** In `mod tests` of `machmsg.rs`, after
   `decode_rejects_malformed`:
@@ -698,14 +745,14 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
         assert!(decode_vm_remap(&bad).is_err());
         let mut bad = FIXTURE_VM_REMAP_REQ; bad[24] = 2;                        // desc_count
         assert!(decode_vm_remap(&bad).is_err());
-        let mut bad = FIXTURE_VM_REMAP_REQ; bad[0] = 0x13;                      // complex bit clear
+        let mut bad = FIXTURE_VM_REMAP_REQ; bad[3] = 0x00;                      // complex bit (0x8000_0000, byte 3) clear
         assert!(decode_vm_remap(&bad).is_err());
     }
     #[test]
     fn vm_remap_reply_has_the_documented_shape() {
         // header(24) + NDR(8) + RetCode(4) + target(8) + cur(4) + max(4) = 52 = msgh_size;
         // + trailer(8) = 60 = the rcv_size the probe saw. Reply id = 4813 + 100.
-        let e = encode_vm_remap_reply(0x1403, 0xa_017f_c000, 5, 5);
+        let e = encode_vm_remap_reply(0x1403, 0xa_017f_c000, 5, 7);   // the measured FFI reply
         assert_eq!(e.len(), 60);
         assert_eq!(u32::from_le_bytes(e[4..8].try_into().unwrap()), 52);          // msgh_size
         assert_eq!(u32::from_le_bytes(e[12..16].try_into().unwrap()), 0x1403);    // reply-local port
@@ -713,7 +760,7 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
         assert_eq!(i32::from_le_bytes(e[32..36].try_into().unwrap()), 0);         // KERN_SUCCESS
         assert_eq!(u64::from_le_bytes(e[36..44].try_into().unwrap()), 0xa_017f_c000);
         assert_eq!(u32::from_le_bytes(e[44..48].try_into().unwrap()), 5);         // cur_protection
-        assert_eq!(u32::from_le_bytes(e[48..52].try_into().unwrap()), 5);         // max_protection
+        assert_eq!(u32::from_le_bytes(e[48..52].try_into().unwrap()), 7);         // max_protection
         assert_eq!(&e[52..60], &TRAILER);
     }
     #[test]
@@ -771,9 +818,10 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
   ```
   d. After `encode_vm_map_reply` (`:347`):
   ```rust
-  /// KERN_SUCCESS reply for 4813: header(24) + NDR(8) + RetCode(4) + target(8) + cur_protection(4)
-  /// + max_protection(4) = 52, + trailer(8) = 60 (the rcv_size the probe saw). The protections are
-  /// the kernel's measured answer (VM_REMAP_CUR_PROT / VM_REMAP_MAX_PROT), passed in by dispatch.
+  /// KERN_SUCCESS reply for 4813: header(24) + NDR(8) + RetCode(4) + target(8) +
+  /// cur_protection(4) + max_protection(4) = 52, + trailer(8) = 60 (the rcv_size the probe saw). The protections are
+  /// the kernel's measured answer, derived by `Box_::guest_vm_remap` (M39 t2 measured 5/5 for a
+  /// kernel-placed image's text and 5/7 for a dlopen'd dylib's) and passed in by dispatch.
   pub fn encode_vm_remap_reply(reply_port: u32, target: u64, cur: u32, max: u32) -> Vec<u8> {
       let mut out = Vec::with_capacity(60);
       reply_header(&mut out, 52, reply_port, 4913);
@@ -785,15 +833,6 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
       out.extend_from_slice(&TRAILER);
       out
   }
-  ```
-  e. Next to `MACH_MSG_SUCCESS` (`:163`), the two constants Task 5's arms pass, pinned to
-  Task 2 Step 5's native output (edit the numbers if the measurement differed from 5/5):
-  ```rust
-  /// The protections the kernel returns for a shared remap of an r-x/r-x text segment —
-  /// MEASURED natively by vmremap_dyn (M39 Task 2 Step 5: `SELF … cur=5 max=5`, `FFI … cur=5
-  /// max=5`), not chosen (spec R7). vmremap_e2e asserts the box's answer matches the kernel's.
-  pub const VM_REMAP_CUR_PROT: u32 = 5;
-  pub const VM_REMAP_MAX_PROT: u32 = 5;
   ```
 
 - [ ] **Step 4: Confirm the build now fails only on the two exhaustive matches.**
@@ -811,7 +850,8 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
                         // it vm_allocate'd, shared, FIXED|OVERWRITE (measured on every `import
                         // ctypes`). Serviced as a stage-1 alias — the vm_map posture: reply
                         // synthesised here, recomputed and byte-compared on replay. The
-                        // protections are the kernel's measured answer, never chosen (spec R7).
+                        // protections are the kernel's measured answer, derived by the box from
+                        // the source's attribute and band, never chosen (spec R7, t2's two lines).
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let req = machmsg::decode_vm_remap(&buf)
                             .unwrap_or_else(|e| panic!("mach_vm_remap (4813) decode: {e}"));
@@ -820,9 +860,9 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
                             "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled (spec §3f)");
                         assert_eq!(Some(req.src_task as u64), guest_task_port,
                             "mach_vm_remap: src_task {:#x} is not the guest's own task port", req.src_task);
-                        let target = b.guest_vm_remap(req.target, req.size, req.src);
+                        let (target, cur, max) = b.guest_vm_remap(req.target, req.size, req.src);
                         let writes = vec![Region { ipa: m.data, bytes: machmsg::encode_vm_remap_reply(
-                            m.reply_port, target, machmsg::VM_REMAP_CUR_PROT, machmsg::VM_REMAP_MAX_PROT) }];
+                            m.reply_port, target, cur, max) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
                             err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 vm_remap: {e}"))?; count += 1;
@@ -845,9 +885,8 @@ git commit -m "M39 t3: Box_::guest_vm_remap — the stage-1 alias, flushed; PT_A
                                             "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled (spec §3f)");
                                         assert_eq!(Some(req.src_task as u64), self.guest_task_port,
                                             "mach_vm_remap: src_task {:#x} is not the guest's own task port", req.src_task);
-                                        let target = self.b.guest_vm_remap(req.target, req.size, req.src);
-                                        let reply = machmsg::encode_vm_remap_reply(
-                                            m.reply_port, target, machmsg::VM_REMAP_CUR_PROT, machmsg::VM_REMAP_MAX_PROT);
+                                        let (target, cur, max) = self.b.guest_vm_remap(req.target, req.size, req.src);
+                                        let reply = machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max);
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
                                                 detail: format!("mach_vm_remap reply mismatch: replay target {target:#x}") });
@@ -886,10 +925,11 @@ git commit -m "M39 t4: mach_vm_remap (4813) — route, codec, measured protectio
 
 - [ ] **Step 1: The guard goes green.**
   `cargo test -p retrace --test vmremap_e2e -- --test-threads=1`. Expected: PASS — stdout equals
-  `EXPECT` (the box's `cur`/`max` are the kernel's), two 60-byte replies in the trace, replayed
-  twice. If `SELF … call=` is not 42 under retrace while it was natively, the alias is not
-  executable: check `flush_guest_tlb` ran and the copied descriptor is `ATTR_CODE` — do not
-  loosen `EXPECT`.
+  `EXPECT` (the box's derived `cur`/`max` equal the kernel's measured 5/5 and 5/7), two 60-byte
+  replies in the trace, replayed twice. If `SELF … call=` is not 42 under retrace while it was
+  natively, the alias is not executable: check `flush_guest_tlb` ran and the copied descriptor is
+  `ATTR_CODE` — do not loosen `EXPECT`. If a protection differs, the derivation (Ruling 4) is
+  wrong for that source — report it, do not patch `EXPECT`.
 
 - [ ] **Step 2: The rung-7 gate still passes.**
   `cargo test -p retrace --test cpython_e2e -- --test-threads=1`. Expected: PASS (both tests
@@ -1077,7 +1117,7 @@ R7 → Task 2 Step 5 + Task 4 Step 3e; R8 → Task 4 Step 7.
 src, copy, inheritance }` (Task 4) is what its arms read (`req.copy`, `req.flags`, `req.src_task`,
 `req.target`, `req.size`, `req.src`). `encode_vm_remap_reply(reply_port: u32, target: u64, cur:
 u32, max: u32)` (Task 4) matches both arms and the shape test. `guest_vm_remap(&mut self, target:
-u64, size: u64, src: u64) -> u64` (Task 3) matches the unit test and both arms. Constants
-`VM_REMAP_CUR_PROT`/`VM_REMAP_MAX_PROT: u32` (Task 4) are passed where `u32` is expected.
+u64, size: u64, src: u64) -> (u64, u32, u32)` (Task 3) matches the unit tests and both arms,
+which destructure `(target, cur, max)` and pass the two `u32`s to the encoder.
 `CRASH_PY`/`CRASH_JSON`/`VMREMAP_DYN: &str` match their uses. `Event::Syscall`'s field set
 `{ num, args, ret, ret1, err, writes, thread }` is M38's wire order.
