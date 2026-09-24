@@ -217,8 +217,8 @@ Watchpoint exit at pc `P`, it scans backward from `P − 4`:
 - stopping with no candidate at a store-exclusive, a `clrex`, an unconditional branch (`B`, `BL`,
   `BR`, `BLR`, `RET`) or an exception-generating instruction (`SVC`, `HVC`, `BRK`, …).
 
-The first load-exclusive found, at `L`, is the candidate. The shadow is set from it only if all four
-hold:
+The first load-exclusive found, at `L`, is the candidate. The shadow is set from it only if all five
+hold (condition 5, and the current form of condition 3, are in the amendment block below):
 
 1. **`entry_pc ∉ (L, P]`.** The last entry, whose ERET cleared the monitor, came before the LDX.
 2. **The base is not aliased by a destination** (`Rn ∉ {Rt, Rt2}` unless `Rn = 31`, which is SP),
