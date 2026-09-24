@@ -945,14 +945,14 @@ fn m3e_reverse_continue_whose_phase_2_steps_the_loop() {
     assert!(has_line(&out, &format!("hit {} at (2, 25)", h("b_done"))), "{out}");
 }
 
-/// t0 M4: a breakpoint on (a)'s discard-status `stxr`. It diverged. Forward: green at Task 3 or 4.
+/// t0 M4: a breakpoint on (a)'s discard-status `stxr`. It diverged. Forward: green at Task 4 or 5.
 #[test]
 fn m4_break_on_the_discard_status_store_forward() { break_forward("a_stx", &[(1, 5)]); }
 /// Backward: green at Task 5.
 #[test]
 fn m4_break_on_the_discard_status_store_backward() { break_backward("a_stx", &[(1, 5)]); }
 /// t0 M4d/M4e: a breakpoint on (b)'s `stlxr`. Forward gave phantom hits at (2, 12), (2, 17)…;
-/// backward hung. Forward: green at Task 3 or 4.
+/// backward hung. Forward: green at Task 4 or 5.
 #[test]
 fn m4_break_on_the_retry_store_forward() { break_forward("b_stx", &[(2, 7), (2, 14), (2, 21)]); }
 /// Backward: green at Task 5.
@@ -960,25 +960,25 @@ fn m4_break_on_the_retry_store_forward() { break_forward("b_stx", &[(2, 7), (2, 
 fn m4_break_on_the_retry_store_backward() { break_backward("b_stx", &[(2, 7), (2, 14), (2, 21)]); }
 
 /// t0 M5: a watch on (b)'s counter. Forward gave phantom hits that never ended; backward hung.
-/// Forward: green at Task 4.
+/// Forward: green at Task 4 or 5.
 #[test]
 fn m5_watch_the_retry_counter_forward() { watch_forward("ctr", 0, 8, "b_stx", &[(2, 7), (2, 14), (2, 21)]); }
 /// Backward: green at Task 5.
 #[test]
 fn m5_watch_the_retry_counter_backward() { watch_backward("ctr", 0, 8, "b_stx", &[(2, 7), (2, 14), (2, 21)]); }
-/// t0 M6: the same on (c), (d)'s second element, and (a). Forward: green at Task 4.
+/// t0 M6: the same on (c), (d)'s second element, and (a). Forward: green at Task 4 or 5.
 #[test]
 fn m6_watch_the_cas_cell_forward() { watch_forward("cas", 0, 8, "c_stx", &[(3, 9)]); }
 /// Backward: green at Task 5.
 #[test]
 fn m6_watch_the_cas_cell_backward() { watch_backward("cas", 0, 8, "c_stx", &[(3, 9)]); }
-/// Forward: green at Task 4.
+/// Forward: green at Task 4 or 5.
 #[test]
 fn m6_watch_the_pairs_second_element_forward() { watch_forward("pair", 8, 8, "d_stx", &[(4, 7)]); }
 /// Backward: green at Task 5.
 #[test]
 fn m6_watch_the_pairs_second_element_backward() { watch_backward("pair", 8, 8, "d_stx", &[(4, 7)]); }
-/// Forward: green at Task 4.
+/// Forward: green at Task 4 or 5.
 #[test]
 fn m6_watch_the_discard_status_cell_forward() { watch_forward("cella", 0, 4, "a_stx", &[(1, 5)]); }
 /// Backward: green at Task 5.
@@ -1788,10 +1788,9 @@ grep -a -e '^test ' -e 'test result' .superpowers/sdd/2026-09-24-retrace-m42-lls
 Expected in `llsc_e2e`:
 - **Green:** the recording test, the three controls, M2, M3a–e, M3d′, both M7 tests, the
   branch-out/exit-window test, the three life-cycle tests and the three Review Focus tests.
-- **May be green:** `m4_break_on_the_discard_status_store_forward` and
-  `m4_break_on_the_retry_store_forward`. Record which.
-- **Red:** every other M4 test and every M5/M6 test. They fail with the "not yet raised (Task 4)"
-  panic or a divergence, never with a hang. Ledger the symptoms.
+- **Red:** every M4, M5 and M6 test, forward and backward. They fail with the "not yet raised
+  (Task 4)" panic or a divergence, never with a hang. Ledger the symptoms. A forward `continue`
+  stops NATIVELY at the store-exclusive, and the shadow exists there only from Task 5's inference.
 
 - [ ] **Step 8: Show each guard able to fail** (M28's lesson). Ledger each run's result, then revert
 it with `git checkout -- <file>` and confirm `git diff --stat` shows only this task's edits.
@@ -1959,10 +1958,12 @@ grep -a -e '^test ' -e 'test result' .superpowers/sdd/2026-09-24-retrace-m42-lls
 ```
 
 Expected:
-- **Green:** everything green after Task 3, plus the three oracle lists and every **forward** M4, M5
-  and M6 test.
-- **Red:** every **backward** M4, M5 and M6 test. They die by the 60 s bound or a divergence, because
-  phase 1 of `reverse-continue` stops natively inside the pair. That is Task 5.
+- **Green:** everything green after Task 3, plus the three oracle lists.
+- **May be green:** a **forward** M4, M5 or M6 test, if the debugger resolves the native hit's K by
+  stepping and continues from that stepped position. Record which.
+- **Red:** every **backward** M4, M5 and M6 test, and every forward one not green above. They die
+  by the 60 s bound or a divergence: a native breakpoint or watch stop inside the pair infers no
+  shadow before Task 5.
 
 - [ ] **Step 4: Show the order is load-bearing** (ledgered, then reverted). Swap the two checks in
 `raise_debug_stop`, raising the watch first. `oracle_a1_lists_every_hit_the_source_implies` must go
@@ -2203,7 +2204,7 @@ through window `n`.
 
 Run: `cargo test -p retrace --test llsc_e2e -- --test-threads=1 --no-fail-fast`
 Expected: the four inference tests that expect a shadow FAIL (`dbg_excl()` is None, or a divergence
-at `finish`). The three "infers nothing" tests PASS already. The backward M4–M6 tests and the three
+at `finish`). The three "infers nothing" tests PASS already. The backward (and any still-red forward) M4–M6 tests and the three
 `oracle_*_chains` fail: the chains die at the 600 s bound or with exit 5. **The chains can take up
 to 600 s each when red. To save the wait, it is acceptable to run only the inference tests red, and
 say so in the report.**
