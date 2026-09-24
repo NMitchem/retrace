@@ -147,6 +147,41 @@ pub fn dests_match(ld: ExclInsn, rt_val: u64, rt2_val: u64, bytes: &[u8]) -> boo
         && (!pair || rt2 == 31 || rt2_val.to_le_bytes()[..s] == bytes[s..2 * s])
 }
 
+/// Spec §3d, as amended (Rulings T5-a and T5-b): the shadow that a breakpoint or watchpoint stop
+/// taken NATIVELY at `p` infers, or None. This is M42's one heuristic. Every condition that fails
+/// infers nothing, which is the pre-M42 behaviour, never a wrong emulation.
+///
+/// - `words[j]` is the instruction at `p - 4 * (j + 1)`, as `scan_back` takes them. The caller
+///   bounds the slice at 16 words and never goes past the start of `p`'s page.
+/// - `entry_pc` is the pc of the last guest entry.
+/// - `data(r)` reads Xr as a data register (31 = XZR), and `base(r)` as a base register (31 = SP).
+/// - `read(va, len)` returns the bytes at a tag-stripped VA, or None if it is unmapped.
+pub fn infer(words: &[u32], p: u64, entry_pc: u64, data: impl Fn(u32) -> u64,
+             base: impl Fn(u32) -> u64, read: impl Fn(u64, usize) -> Option<Vec<u8>>) -> Option<Excl> {
+    let (i, ld) = scan_back(words)?;
+    let l = p - 4 * (i as u64 + 1);
+    // 1. The last entry came after the load, and that entry's ERET cleared the monitor.
+    if entry_pc > l && entry_pc <= p { return None; }
+    // 2. A base overwritten by the load no longer names the marked address.
+    if base_aliases_dest(ld) { return None; }
+    let ExclInsn::Load { size, pair, rt, rt2, rn } = ld else { unreachable!("scan_back returns a load") };
+    // 5 (amended, Ruling T5-a). Every instruction in (L, P) has known register effects, and none
+    // writes the base: a rewritten base no longer names the marked address. Bit 31 is SP or XZR, so
+    // for an SP base any Rd of 31 refuses.
+    let written = regs_written(&words[..i])?;
+    if written & (1 << rn) != 0 { return None; }
+    let va = base(rn) & TAG_MASK;
+    // 4. The target maps.
+    let bytes = read(va, access_len(size, pair))?;
+    // 3 (amended, Ruling T5-a). Each destination that nothing in (L, P) writes still holds what is
+    // there. One the sequence rewrites (an in-place retry loop's `add x1, x1, #1`) cannot be checked
+    // this way, so it goes to dests_match as 31, which compares nothing.
+    let untouched = |r: u32| if written & (1 << r) != 0 { 31 } else { r };
+    let checked = ExclInsn::Load { size, pair, rt: untouched(rt), rt2: untouched(rt2), rn };
+    if !dests_match(checked, data(rt), data(rt2), &bytes) { return None; }
+    Some(Excl { va, size, pair, loaded: bytes, by: SetBy::Inferred })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +356,151 @@ mod tests {
         assert_ne!(written & (1 << 31), 0);
         // cmp's XZR destination refuses an SP base too: 31 counts as a write of both.
         assert_ne!(regs_written(&[0xeb03_003f]).unwrap() & (1 << 31), 0);
+    }
+
+    // ---- `infer`, spec §3d per condition (Ruling T5-b) -----------------------------------------
+    //
+    // The words are the llsc fixture's own, read with `otool -tvj` from the built binary, at their
+    // real addresses (nearest first, as `scan_back` takes them). The synthetic words for conditions
+    // 2 and 5 were assembled with `clang -arch arm64 -c` and read back the same way. Each condition
+    // has a case that passes every OTHER condition, so deleting that one condition's line in `infer`
+    // turns its None into a Some (the ledgered deletion table).
+
+    /// A fake PE for `infer`: x0..x30, SP, and one mapped cell.
+    struct Pe { x: [u64; 31], sp: u64, cell: u64, mem: Vec<u8> }
+
+    impl Pe {
+        fn new(cell: u64, mem: &[u8]) -> Pe { Pe { x: [0; 31], sp: 0, cell, mem: mem.to_vec() } }
+        fn x(mut self, r: usize, v: u64) -> Pe { self.x[r] = v; self }
+        fn infer(&self, words: &[u32], p: u64, entry_pc: u64) -> Option<Excl> {
+            infer(words, p, entry_pc,
+                  |r| if r == 31 { 0 } else { self.x[r as usize] },
+                  |r| if r == 31 { self.sp } else { self.x[r as usize] },
+                  |va, len| (va == self.cell && len <= self.mem.len()).then(|| self.mem[..len].to_vec()))
+        }
+    }
+
+    fn inferred(va: u64, size: u8, pair: bool, loaded: &[u8]) -> Option<Excl> {
+        Some(Excl { va, size, pair, loaded: loaded.to_vec(), by: SetBy::Inferred })
+    }
+
+    const CELLA: u64 = 0x1_0000_4000;
+    const CTR: u64 = 0x1_0000_4040;
+    const CAS: u64 = 0x1_0000_4080;
+    const PAIR: u64 = 0x1_0000_40c0;
+    const CELLF: u64 = 0x1_0000_4180;
+    /// (a) at a_stx 0x1_0000_0394: cbnz w10; ldxr w10, [x9] (a_ldx); mov w0, #0x4242; add; adrp.
+    const A_P: u64 = 0x1_0000_0394;
+    const A_L: u64 = 0x1_0000_038c;
+    const A_WORDS: [u32; 5] = [0x3500_004a, 0x885f_7d2a, 0x5288_4840, 0x9100_0129, 0x9000_0029];
+    /// _start, where a native run of window 1 enters.
+    const A_ENTRY: u64 = 0x1_0000_0380;
+    /// (b) at b_stx 0x1_0000_03e8: add x1, x1, #1; ldaxr x1, [x0] (b_ldx); add x20, x20, #1; ...
+    const B_P: u64 = 0x1_0000_03e8;
+    const B_WORDS: [u32; 4] = [0x9100_0421, 0xc85f_fc01, 0x9100_0694, 0xd280_0014];
+    const B_ENTRY: u64 = 0x1_0000_03cc; // b_start (the probe measured this entry)
+    /// (c) at c_stx 0x1_0000_0440: b.ne c_out; cmp x1, x3; ldaxr x1, [x0] (c_ldx); ...
+    const C_P: u64 = 0x1_0000_0440;
+    const C_WORDS: [u32; 4] = [0x5400_0061, 0xeb03_003f, 0xc85f_fc01, 0x9100_0694];
+    const C_ENTRY: u64 = 0x1_0000_041c;
+    /// (d) at d_stx 0x1_0000_0488: add x5, x2, #20; add x4, x1, #10; ldxp x1, x2, [x0] (d_ldx); ...
+    const D_P: u64 = 0x1_0000_0488;
+    const D_WORDS: [u32; 4] = [0x9100_5045, 0x9100_2824, 0xc87f_0801, 0x9100_0694];
+    const D_ENTRY: u64 = 0x1_0000_046c;
+    /// (f) at f_stx 0x1_0000_0500: mrs x7, cntvct_el0 (f_mrs); ldxr w6, [x0] (f_ldx); ...
+    const F_P: u64 = 0x1_0000_0500;
+    const F_WORDS: [u32; 4] = [0xd53b_e047, 0x885f_7c06, 0x5280_00e1, 0x9106_0000];
+
+    fn pe_a() -> Pe { Pe::new(CELLA, &[0; 4]).x(9, CELLA).x(0, 0x4242) }
+    fn pe_b() -> Pe { Pe::new(CTR, &[0; 8]).x(0, CTR).x(1, 1) } // x1 = the loaded 0, plus 1
+
+    #[test]
+    fn infer_positive_the_fixtures_stores_infer_their_shadow() {
+        assert_eq!(pe_a().infer(&A_WORDS, A_P, A_ENTRY), inferred(CELLA, 4, false, &[0; 4]));
+        assert_eq!(pe_b().infer(&B_WORDS, B_P, B_ENTRY), inferred(CTR, 8, false, &[0; 8]));
+        let five = 5u64.to_le_bytes();
+        let c = Pe::new(CAS, &five).x(0, CAS).x(1, 5).x(3, 5).x(4, 9);
+        assert_eq!(c.infer(&C_WORDS, C_P, C_ENTRY), inferred(CAS, 8, false, &five));
+        let pair: Vec<u8> = [1u64.to_le_bytes(), 2u64.to_le_bytes()].concat();
+        let d = Pe::new(PAIR, &pair).x(0, PAIR).x(1, 1).x(2, 2).x(4, 11).x(5, 22);
+        assert_eq!(d.infer(&D_WORDS, D_P, D_ENTRY), inferred(PAIR, 8, true, &pair));
+    }
+
+    #[test]
+    fn infer_positive_a_tagged_base_is_stripped() {
+        let a = pe_a().x(9, 0x5a00_0000_0000_0000 | CELLA);
+        assert_eq!(a.infer(&A_WORDS, A_P, A_ENTRY), inferred(CELLA, 4, false, &[0; 4]));
+    }
+
+    #[test]
+    fn infer_condition_1_an_entry_inside_l_to_p_infers_nothing() {
+        assert_eq!(pe_a().infer(&A_WORDS, A_P, A_P), None, "entry at P itself");
+        assert_eq!(pe_a().infer(&A_WORDS, A_P, A_L + 4), None, "entry just after the load");
+        // An entry at or before L precedes the load: the monitor was marked after it.
+        assert!(pe_a().infer(&A_WORDS, A_P, A_L).is_some(), "entry AT the load");
+        assert!(pe_a().infer(&A_WORDS, A_P, A_ENTRY).is_some(), "entry before the load");
+    }
+
+    #[test]
+    fn infer_condition_1_and_5_each_refuse_the_fixtures_reentry_shape() {
+        let f = Pe::new(CELLF, &[0; 4]).x(0, CELLF).x(1, 7);
+        // The emulated timebase read re-entered at f_stx: condition 1.
+        assert_eq!(f.infer(&F_WORDS, F_P, F_P), None);
+        // Even with an entry before the load, the mrs has unknown register effects: condition 5.
+        assert_eq!(f.infer(&F_WORDS, F_P, 0x1_0000_04ec), None);
+    }
+
+    #[test]
+    fn infer_condition_2_a_base_that_the_load_overwrote_infers_nothing() {
+        // ldxr x9, [x9] at L = P - 4. The cell points at itself, so every OTHER condition holds: x9
+        // names a mapped VA whose bytes equal x9.
+        let e = Pe::new(CELLA, &CELLA.to_le_bytes()).x(9, CELLA);
+        assert_eq!(e.infer(&[0xc85f_7d29], A_P, A_ENTRY), None);
+    }
+
+    #[test]
+    fn infer_condition_3_an_untouched_destination_that_differs_infers_nothing() {
+        // (a): nothing between the halves writes w10, and it no longer holds the cell's bytes.
+        assert_eq!(pe_a().x(10, 0x4343).infer(&A_WORDS, A_P, A_ENTRY), None);
+        // (d): the second element x2 is untouched and checked too.
+        let pair: Vec<u8> = [1u64.to_le_bytes(), 2u64.to_le_bytes()].concat();
+        let d = Pe::new(PAIR, &pair).x(0, PAIR).x(1, 1).x(2, 3);
+        assert_eq!(d.infer(&D_WORDS, D_P, D_ENTRY), None);
+        // (b): a destination the sequence rewrites differs from the cell and still infers (the
+        // amendment): x1 = 1 against a cell of 0.
+        assert!(pe_b().infer(&B_WORDS, B_P, B_ENTRY).is_some());
+    }
+
+    #[test]
+    fn infer_condition_4_an_unmapped_target_infers_nothing() {
+        // (b)'s x1 is rewritten, so nothing else would refuse: only the mapping does.
+        let unmapped = Pe::new(0xdead_0000, &[0; 8]).x(0, CTR).x(1, 1);
+        assert_eq!(unmapped.infer(&B_WORDS, B_P, B_ENTRY), None);
+    }
+
+    #[test]
+    fn infer_condition_5_an_unknown_instruction_between_the_halves_infers_nothing() {
+        // ldr w11, [x9] between ldxr w10, [x9] and the stop.
+        let a = pe_a();
+        assert_eq!(a.infer(&[0xb940_012b, 0x885f_7d2a], A_P, A_ENTRY), None);
+    }
+
+    #[test]
+    fn infer_condition_5_an_instruction_that_writes_the_base_infers_nothing() {
+        // add x9, x9, #8 between ldxr w10, [x9] and the stop. x9 as it is NOW maps, and w10 equals
+        // it, so only the base check refuses.
+        assert_eq!(pe_a().infer(&[0x9100_2129, 0x885f_7d2a], A_P, A_ENTRY), None);
+    }
+
+    #[test]
+    fn infer_condition_5_an_sp_base_is_refused_by_any_rd_of_31() {
+        let sp_base = |mut pe: Pe| { pe.sp = CELLA; pe };
+        let pe = || sp_base(Pe::new(CELLA, &7u64.to_le_bytes()).x(1, 7));
+        // ldxr x1, [sp], then add sp, sp, #16.
+        assert_eq!(pe().infer(&[0x9100_43ff, 0xc85f_7fe1], A_P, A_ENTRY), None);
+        // ldxr x1, [sp], then cmp x1, x3: XZR is register 31 too.
+        assert_eq!(pe().infer(&[0xeb03_003f, 0xc85f_7fe1], A_P, A_ENTRY), None);
+        // ldxr x1, [sp], then cbnz x1: nothing writes 31, so an SP base infers.
+        assert_eq!(pe().infer(&[0xb500_0061, 0xc85f_7fe1], A_P, A_ENTRY), inferred(CELLA, 8, false, &7u64.to_le_bytes()));
     }
 }
