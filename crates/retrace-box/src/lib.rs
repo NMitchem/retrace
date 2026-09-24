@@ -437,13 +437,28 @@ const DESC_PAGE:  u64 = 0x3;                  // L3 page descriptor
 const BLK: u64 = 1 << 25;                     // 32 MiB per L2 entry
 const PT_ADDR: u64 = 0x0000_FFFF_FFFF_C000; // descriptor output-address bits 47:14
 
-// A page-aligned host allocation mapped 1:1 into the guest at `ipa`.
+// A page-aligned host allocation mapped 1:1 into the guest at `ipa`. M40: the Backing OWNS its host
+// pages. Dropping it releases them, so `backings` must never hold two Backings over one
+// allocation, and every Backing must carry exactly the length `alloc_pages` returned (audited at
+// M40: all 17 construction sites do).
 pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
+
+impl Drop for Backing {
+    fn drop(&mut self) {
+        // Released only once its stage-2 mapping is gone: by `vm.unmap` at the two removal sites
+        // (`unmap_overlapping`, `guest_munmap`), or by `hv_vm_destroy` when the owning `Box_` drops,
+        // because `backings` is declared after `vm`.
+        free_pages(self.host, self.len);
+    }
+}
 
 // Field order is load-bearing: Rust drops struct fields in declaration order, and HVF
 // requires `hv_vcpu_destroy` before `hv_vm_destroy` — reordering `vm` before `vcpu` would
 // silently reintroduce an HV_BUSY bug on the second in-process VM. `vcpu` MUST stay
 // declared before `vm`.
+// M40: `backings` MUST stay declared after `vm` for the same reason. Each Backing releases its host
+// pages on drop, and host memory must not be released while the VM can still map it, so the order
+// on drop is hv_vcpu_destroy -> hv_vm_destroy -> munmap.
 // M24-restoreaudit. Every field here is part of a record/replay contract: `load`/`load_dynamic` run
 // on the RECORD path only, and replay builds its box through `restore`. A field this struct gains
 // that `restore` does not re-establish is an asymmetry whose signature is a PASSING RECORD followed
@@ -973,6 +988,21 @@ pub struct BoxState {
     pub fall_throughs: u64,
 }
 
+/// M40: bytes of guest backing currently mapped by `alloc_pages` and not yet released — a
+/// deterministic count for the leak guard (`tests/backingfree.rs`), never a measurement of RSS.
+static LIVE_BACKING_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// M40: see `LIVE_BACKING_BYTES`.
+pub fn live_backing_bytes() -> usize { LIVE_BACKING_BYTES.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// M40: release an `alloc_pages` allocation. The caller guarantees `host` is a live `alloc_pages`
+/// result of exactly `len` bytes, no longer mapped into the guest, and never touched again.
+fn free_pages(host: *mut u8, len: usize) {
+    // SAFETY: the caller's guarantee above.
+    unsafe { libc::munmap(host as *mut _, len); }
+    LIVE_BACKING_BYTES.fetch_sub(len, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
     let len = (len + GRANULE - 1) & !(GRANULE - 1);
     // SAFETY: plain RW anon mapping; guest exec permission is governed by stage-1 W^X (stage-2
@@ -982,6 +1012,7 @@ fn alloc_pages(len: usize) -> (*mut u8, usize) {
                    libc::MAP_ANON|libc::MAP_PRIVATE, -1, 0)
     };
     assert!(p != libc::MAP_FAILED, "mmap backing failed");
+    LIVE_BACKING_BYTES.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
     (p as *mut u8, len)
 }
 
@@ -2272,7 +2303,7 @@ impl Box_ {
             // OVERWRITE commit would leak an allocation.
             unsafe {
                 std::ptr::copy_nonoverlapping(host, bhost.add((addr - bipa) as usize), rlen);
-                libc::munmap(host as *mut _, rlen);
+                free_pages(host, rlen);
             }
 
             // M9: an exec FIXED map contained in a LIVE backing is dyld's non-cache-dylib strategy
@@ -2335,7 +2366,7 @@ impl Box_ {
             if b.ipa < end && ipa < bend {
                 let bk = self.backings.remove(i);
                 let _ = self.vm.unmap(bk.ipa, bk.len);
-                unsafe { libc::munmap(bk.host as *mut _, bk.len); }
+                drop(bk); // M40: the Backing owns its pages; this releases them, after the stage-2 unmap above
             } else {
                 i += 1;
             }
@@ -2431,7 +2462,7 @@ impl Box_ {
             if !Self::fixed_fits(addr, rlen) {
                 // SAFETY: `host` is this function's freshly-allocated `rlen`-byte mapping, never
                 // published to `backings` or the guest, and unreachable after this return.
-                unsafe { libc::munmap(host as *mut _, rlen); }
+                free_pages(host, rlen);
                 return Err(retrace_arch::EINVAL);
             }
             // Classify the overlap (shared with guest_vm_map's FIXED branch). A contained request
@@ -2526,7 +2557,7 @@ impl Box_ {
             let bk = self.backings.remove(pos);
             let _ = self.vm.unmap(bk.ipa, bk.len);       // stage-1 identity block stays; stage-2 removed
             // SAFETY: the anon host backing is no longer mapped into the guest; release it.
-            unsafe { libc::munmap(bk.host as *mut _, bk.len); }
+            drop(bk); // M40: the Backing owns its pages; this releases them, after the stage-2 unmap above
             let _ = len; // whole-backing unmap for M2's page-granular guests
         }
     }
