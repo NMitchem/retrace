@@ -11434,14 +11434,15 @@ the dispatch corrected it to **639 / 0 / 9 over 140**, and the fix wave's R4 gua
   on a long recording, time and memory both.
 * **Forward `continue` skips a breakpoint hit that its pre-step lands on** (R11; inherited from M3,
   `e41aff8`). `cmd_continue` resolves a breakpoint hit from `kctx + 1`, so when the pre-step off a
-  parked breakpoint lands on another breakpoint, that hit is never counted. Reproductions, the
-  final review's (the first re-run for this close, in the ledger's `gate2/ruling5-repro.txt`): on
+  parked breakpoint lands on another breakpoint, that hit is never counted. Two reproductions, both
+  found by the final review. **Re-run for this close** (the ledger's `gate2/ruling5-repro.txt`): on
   the `watchsweep` recording, `break 0x1000003a0; break 0x1000003a4; continue; continue` prints
   `resolved (1, 14)` and exits 0, where the correct answer is `(1, 9)` (`break 0x1000003a4;
   continue` alone resolves `(1, 9)`) — silent, because the loop reruns the instruction and the pc
-  check agrees; `FILEIO` with two adjacent breakpoints, or one on the `read`'s `svc` and one on the
-  next instruction, exits 5 with `resolve breakpoint hit #1 in window 4: … ends after 0
-  instruction(s)` — loud. Suggested fix: resolve from `kctx`, behind its own RED test and an audit
+  check agrees. **Quoted from the final review, not re-run**: `FILEIO` with two adjacent
+  breakpoints, or one on the `read`'s `svc` and one on the next instruction, exits 5 with
+  `resolve breakpoint hit #1 in window 4: … ends after 0 instruction(s)` — loud. Suggested fix:
+  resolve from `kctx`, behind its own RED test and an audit
   of every `continue` transcript. A README Known limit.
 * **Review minors deferred from Tasks 1–6** (the ledger carries each with its reviewer):
   * T1 — `discover_target` (`watchsweep_e2e.rs`) and `watchsweep_target` (`debug.rs` tests) are
