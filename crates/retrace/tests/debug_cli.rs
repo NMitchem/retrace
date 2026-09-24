@@ -152,8 +152,9 @@ fn continue_from_a_breakpoint_steps_over_it() {
     let tp = Path::new(&trace);
     let (w, _) = discover_write(tp);
     let p_mid = discover_mid(tp, w);
-    // Back-to-back continue on a once-executed bp: second continue pre-steps off the
-    // bp and runs to exit — NOT exit 5 (the old documented limitation).
+    // Back-to-back continue on a once-executed bp: the second continue finishes the coordinate
+    // it stands on (M41 §3c: it executes the breakpointed instruction, then scans) and runs to
+    // exit — NOT exit 5 (the old documented limitation).
     let (code, out, err) = debug_run(trace.to_str().unwrap(),
         &format!("break 0x{p_mid:x}; continue; where; continue; where"));
     assert_eq!(code, 0, "stderr: {err}");
@@ -167,8 +168,10 @@ fn continue_after_reverse_stepi_onto_boundary_bp() {
     assert_eq!(rec.code, 0);
     let tp = Path::new(&trace);
     let (w, bpc) = discover_write(tp);
-    // Boundary bp: hit at (W,0); reverse-stepi off it; continue must pre-step/reland
-    // deterministically (the kctx+1 K=0 edge) — no loop, no misresolve.
+    // Boundary bp: hit at (W,0); reverse-stepi off it; continue must reland deterministically
+    // — no loop, no misresolve. Since M41 the reverse-stepi is an arrival at the window-ending
+    // svc (cursor phase Bp, and the svc is not a breakpoint), so there is nothing to finish: the
+    // scan consumes the trap and the `Event` arm's boundary check reports (W, 0).
     let (code, out, err) = debug_run(trace.to_str().unwrap(),
         &format!("break 0x{bpc:x}; continue; where; reverse-stepi; where; continue; where"));
     assert_eq!(code, 0, "stderr: {err}");

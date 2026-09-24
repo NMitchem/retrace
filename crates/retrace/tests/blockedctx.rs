@@ -10,7 +10,8 @@
 //
 // The reading this checks is `crates/retrace-core/src/lib.rs:874-879`: `guest_ulock_wait` marks the
 // thread Blocked, and only THEN does `set_x0_err_and_return` write x0 and advance the pc on the
-// live vCPU; the switch that saves it happens on the next `run()`.
+// live vCPU; the switch that saves it happens when that event finishes (M41 §3a — before M41, on
+// the next `run()`; nothing runs in between, so the saved bytes are the same).
 mod util;
 use retrace_core::{Advance, BlockReason, ReplaySession, ThreadState};
 use std::path::Path;

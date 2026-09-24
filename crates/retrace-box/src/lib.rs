@@ -2647,12 +2647,11 @@ impl Box_ {
         // the schedule fires identically on both sides and nothing about it is recorded. A
         // single-threaded guest has a one-entry table whose only thread is `Runnable`, so
         // `needs_reschedule()` is false and every M0–M13 path is untouched.
-        if self.threads.needs_reschedule() {
-            self.schedule_after_block();
-        }
+        self.settle_schedule();
         // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
         // already happened before the first instruction of this window retires. Pin it: after this
-        // point, no path may change `current` until the next run()/step() entry.
+        // point, no path may change `current` until this window's trap is consumed, where
+        // replay's `finish_event` (M41 §3a) or the next run()/step() entry settles it.
         debug_assert!(!self.threads.needs_reschedule(),
             "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
              would make position->thread ambiguous");
@@ -2776,12 +2775,11 @@ impl Box_ {
         // window that ends after 0 instructions. It looks like it works.
         // `step_reschedules_off_a_blocked_thread_before_arming_the_step_bit` asserts the retired PC
         // precisely so that variant fails.
-        if self.threads.needs_reschedule() {
-            self.schedule_after_block();
-        }
+        self.settle_schedule();
         // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
         // already happened before the first instruction of this window retires. Pin it: after this
-        // point, no path may change `current` until the next run()/step() entry.
+        // point, no path may change `current` until this window's trap is consumed, where
+        // replay's `finish_event` (M41 §3a) or the next run()/step() entry settles it.
         debug_assert!(!self.threads.needs_reschedule(),
             "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
              would make position->thread ambiguous");
@@ -5493,6 +5491,17 @@ impl Box_ {
              semaphore before modelling this.",
             args[0], woken.len());
         (0, woken)
+    }
+
+    /// M41 §3a: make a pending reschedule NOW — the switch `run()` and `step()` would otherwise
+    /// make on their next entry. Idempotent (a no-op while the current thread is runnable), and it
+    /// is the same switch at the same point in the guest's own syscall sequence, so the schedule
+    /// stays a pure function of it (symmetry rule 2). `ReplaySession::finish_event` calls it, so a
+    /// debugger position (n, 0) after a blocking event already shows the thread that runs next.
+    pub fn settle_schedule(&mut self) {
+        if self.threads.needs_reschedule() {
+            self.schedule_after_block();
+        }
     }
 
     /// Pick and switch after the running thread blocked or exited.
