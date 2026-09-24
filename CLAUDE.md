@@ -80,7 +80,14 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   guest minimum, a number no host `dup` could produce), `atfdcwd_e2e` (a guest whose
   `fstatat(AT_FDCWD, …)` must carry the 32-bit sentinel `0xfffffffe` in the trace AND succeed),
   `exec_e2e` (a guest whose `execve`/`posix_spawn` are refused — asserted on the recorder's
-  refusal line, because the errno alone is what the old forward also returned). Run one with
+  refusal line, because the errno alone is what the old forward also returned), `cpython_crash_e2e`
+  (rung 8 — the real interpreter on the repo's `crash.py`, asserting the marker line, the
+  `Event::Crash` at the address the script computed from its data file, two byte-identical replays,
+  and a scripted `reverse-continue` that reaches the store by its **effect** rather than by a
+  symbol; skips loud without Homebrew Python), `vmremap_e2e` (the repo-owned guard for the M39
+  `mach_vm_remap` stage-1 alias — a dynamically-linked C fixture that calls through an alias of its
+  own text and `memcmp`s through an alias of a dylib's, so the mechanism is guarded on a machine without
+  Python, where `cpython_crash_e2e` guards nothing). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary

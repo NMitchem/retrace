@@ -435,6 +435,7 @@ const DESC_BLOCK: u64 = 0x1;                  // L2 block descriptor
 const DESC_TABLE: u64 = 0x3;                  // L2 -> L3 table descriptor
 const DESC_PAGE:  u64 = 0x3;                  // L3 page descriptor
 const BLK: u64 = 1 << 25;                     // 32 MiB per L2 entry
+const PT_ADDR: u64 = 0x0000_FFFF_FFFF_C000; // descriptor output-address bits 47:14
 
 // A page-aligned host allocation mapped 1:1 into the guest at `ipa`.
 pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
@@ -2078,6 +2079,95 @@ impl Box_ {
         // Deterministic: the same call sequence records the same (base, rounded) on record & replay.
         self.reservations.push((base, rounded));
         base
+    }
+
+    /// The live L3 descriptor for `va`'s page, or None if its 32 MiB block is still an
+    /// unpromoted data BLOCK (no page-granular entry exists). Walks the live L2 like
+    /// `promote_and_set` does, by host pointer, not through guest memory.
+    fn l3_desc(&self, va: u64) -> Option<u64> {
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        let l2e = l2[(va / BLK) as usize];
+        if l2e & 0x3 != DESC_TABLE { return None; }
+        let l3_ipa = l2e & !(GRANULE as u64 - 1);
+        let host = self.backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host)?;
+        let l3 = unsafe { std::slice::from_raw_parts(host as *const u64, 2048) };
+        Some(l3[((va % BLK) / GRANULE as u64) as usize])
+    }
+
+    /// Overwrite the live L3 descriptor for `va`'s page. The block must already be promoted
+    /// (callers `set_region_attr` first).
+    fn write_l3_desc(&mut self, va: u64, desc: u64) {
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        let l2e = l2[(va / BLK) as usize];
+        assert!(l2e & 0x3 == DESC_TABLE, "write_l3_desc: {va:#x} is in an unpromoted block");
+        let l3_ipa = l2e & !(GRANULE as u64 - 1);
+        let host = self.backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host)
+            .expect("write_l3_desc: promoted L3 table backing not found");
+        let l3 = unsafe { std::slice::from_raw_parts_mut(host as *mut u64, 2048) };
+        l3[((va % BLK) / GRANULE as u64) as usize] = desc;
+    }
+
+    /// mach_vm_remap (4813), shared (`copy == FALSE`), at a FIXED target: alias `size` bytes at
+    /// `target` to the memory `src` maps, page by page — the first NON-identity stage-1 entries
+    /// the box writes. Each target page's L3 descriptor becomes a verbatim copy of the source
+    /// page's (its output address, the source's IPA, and its attribute bits — ATTR_CODE for
+    /// libffi's RX trampoline text), so the guest reads, and executes, the source through the
+    /// target VA. No new backing: an alias adds no memory, the IPA-indexed snapshot/diff never
+    /// counts it twice, and M4 checkpoints restore it with the page tables they already carry.
+    /// Ends with `flush_guest_tlb`: the target sits in a `vm_allocate`d region the guest may
+    /// already have translated as RW/UXN, and M9's rule is that a stale RW entry under a
+    /// now-executable page is invalidated by the guest's own `tlbi` before it is executed.
+    /// Deterministic — same call, same tables, on both sides. Returns `target`.
+    ///
+    /// Known consequence, documented not fixed: `read_guest(target)` and the debugger's `x` on
+    /// the alias range read the old identity backing, not the source — callers that read guest
+    /// memory by VA assume identity. Nothing on rung 8's path reads a trampoline page by VA.
+    ///
+    /// Returns `(target, cur_protection, max_protection)` — the reply's three values, DERIVED so
+    /// they are the kernel's measured answer on both sides (M39 t2 measured two shapes and one
+    /// constant pair could not serve both): `cur` is the source page's stage-1 attribute read
+    /// back as a VM_PROT (ATTR_CODE r-x = 5, ATTR_DATA rw- = 3, ATTR_NONE = 0); `max` is the
+    /// source's BAND — below `NANO_BAND_START` every page is a kernel-placed image (the exe, dyld,
+    /// the shared cache) whose max is its segment's r-x (5); at or above it every page is
+    /// guest-allocated (nano commits, every mmap bump from `MMAP_BASE`) and the kernel's max is
+    /// VM_PROT_ALL (7) — measured 5 for the main image's text, 7 for a dlopen'd dylib's. A pure
+    /// function of the address and the live tables: no new state, so `restore` and a checkpoint
+    /// seek compute the same reply. Unmodelled and stated: a guest FIXED mmap below the band
+    /// (kernel 7, this says 5) and a MAP_SHARED read-only source above it (kernel 5, this says 7)
+    /// — neither measured, neither issued by any known caller.
+    ///
+    /// Asserts (spec §3f — scope the spec lacks): page-multiple size and alignment; every source
+    /// page mapped at page granularity (a source inside an unpromoted data block is not the kind
+    /// of memory anything remaps as code, and copying a BLOCK descriptor into an L3 slot would
+    /// be silent garbage); a source attribute that is none of the three named; source pages that
+    /// differ in protection. `copy`, `ANYWHERE` and a foreign `src_task` are dispatch's asserts.
+    pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64) -> (u64, u32, u32) {
+        let g = GRANULE as u64;
+        assert!(size > 0 && size.is_multiple_of(g), "vm_remap: size {size:#x} is not a page multiple");
+        assert!(target.is_multiple_of(g) && src.is_multiple_of(g), "vm_remap: unaligned target {target:#x} / src {src:#x}");
+        // Ensure every target page has a page-granular entry (promotes an unpromoted block,
+        // identity-filled with ATTR_DATA — what the block already meant), then alias.
+        self.set_region_attr(target, size, ATTR_DATA);
+        let mut cur: Option<u32> = None;
+        let mut off = 0;
+        while off < size {
+            let sdesc = self.l3_desc(src + off).unwrap_or_else(|| panic!(
+                "vm_remap: source page {:#x} has no page-granular stage-1 entry (unpromoted block)", src + off));
+            assert!(sdesc & 0x3 == DESC_PAGE, "vm_remap: source page {:#x} descriptor {sdesc:#x} is not a page", src + off);
+            let attr = sdesc & !PT_ADDR & !0x3;
+            let prot = if attr == ATTR_CODE { 5 }        // r-x
+                       else if attr == ATTR_DATA { 3 }   // rw-
+                       else if attr == ATTR_NONE { 0 }   // ---
+                       else { panic!("vm_remap: source page {:#x} has an unmodelled attribute {attr:#x}", src + off) };
+            assert!(cur.is_none_or(|c| c == prot),
+                "vm_remap: source pages differ in protection ({cur:?} vs {prot}) — unmodelled");
+            cur = Some(prot);
+            self.write_l3_desc(target + off, sdesc);
+            off += g;
+        }
+        self.flush_guest_tlb();
+        let max = if src < NANO_BAND_START { 5 } else { 7 };
+        (target, cur.expect("size > 0 asserted above"), max)
     }
 
     /// Is `[ipa, ipa+len)` free of any tracked backing AND any PROT_NONE reservation, clear of the
@@ -4301,7 +4391,6 @@ impl Box_ {
     /// bits above 47 and returns None. Conservative (a spurious no-match, never a spurious match),
     /// and no caller produces one — the debugger's `watch` takes a plain address.
     pub fn va_to_ipa(&self, va: u64) -> Option<u64> {
-        const PT_ADDR: u64 = 0x0000_FFFF_FFFF_C000; // descriptor output-address bits 47:14
         let sctlr = self.vcpu.get_sys(sysreg::SCTLR_EL1).unwrap();
         if sctlr & 1 == 0 { return Some(va); }
         if va >> 47 != 0 { return None; }
