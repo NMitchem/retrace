@@ -466,7 +466,7 @@ reconstruction caveat in full.
 **Gate:** 629 passed / 0 failed / 9 ignored across 138 test binaries, **measured at M39** over the
 whole workspace, every chunk `EXIT=0` (captured before any pipe); clippy clean over
 `--workspace --all-targets` with `-D warnings`. Measured on commit `123cb97`, the head after the
-four implementing tasks; the three commits that follow it are this close's documentation, plus one
+four implementing tasks; the four commits that follow it are this close's documentation, plus one
 comment-only hunk in `crates/retrace/tests/vmremap_e2e.rs` re-verified on its own
 (`cargo test -p retrace --test vmremap_e2e -- --test-threads=1` and
 `cargo clippy --workspace --all-targets -- -D warnings`, both exit 0). See the testing note below

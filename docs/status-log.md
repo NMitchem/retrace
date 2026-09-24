@@ -10895,6 +10895,19 @@ changed what was built:
   figures, "The gate" with its file-by-file reconciliation, R12–R16, and the R14 comment fix);
   7c is the transcript half, after the standalone demo re-run finishes, and it also refines the
   memory figures above from a clean sample. Three commits where the plan named one.
+* **R17 (operator, 2026-09-23, refines R16) — 7c is deferred to M40, and this commit stands in its
+  place.** The standalone demo re-run (`demo.sh`, on `b7443dd`, started 02:05 on 2026-09-22)
+  recorded, replayed, reached `> reverse-continue` at 02:06, and never printed a result: `demo.log`
+  stops there with no `debug exit=` line, and the sampler's last line in `demo-mem.log` is 06:34:10,
+  at 195:56 of the debugger's CPU time with 33,939 of 34,816 MB swap in use. A missing
+  `debug exit=` means the script itself was stopped rather than the debugger returning; what stopped
+  it is unrecorded (the machine was next booted at 20:16 on 2026-09-23). Its one usable measurement
+  is the curve: RSS 0.83 → 7.41 GB over the first ~29 min of CPU, then falling while swap in use grew
+  from 14.3 GB to 33.9 GB — consistent with the working set being paged out rather than shrinking,
+  which is inference, not measured. The transcript and the clean memory figures move to M40, whose
+  charter is to make the run that would produce them take minutes rather than hours: re-running a
+  3-plus-hour demo to fill a README subsection would only re-measure the defect M40 exists to remove.
+  Cost if wrong: the README's rung-8 entry ships without its transcript for one milestone.
 
 Three more were the ordinary kind — a build-path correction made pre-flight (R2), and two
 `-D warnings` clippy deviations accepted and back-ported into the plan (R3 `useless_format`,
@@ -10942,7 +10955,7 @@ what M39 **adds** to it.
   `CheckpointCache` is byte-budgeted at 256 MiB with LRU eviction
   (`crates/retrace/src/debug.rs:19`), so tens of gigabytes are not cached checkpoints. What does
   hold them is unmeasured. A profile that looks only at time would miss the limit that actually
-  bit.
+  bit. It is M40's charter (R17), and 7c's transcript and clean memory figures go with it.
 * **A stage-1 alias is invisible to every reader that goes by address** — new.
   `Box_::read_guest`/`read_guest_checked` resolve against the box's backings list, not by walking
   the tables; every mapping before M39 was identity, so the two agreed by construction. The
