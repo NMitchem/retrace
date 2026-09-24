@@ -1964,9 +1964,11 @@ grep -a -e '^test ' -e 'test result' .superpowers/sdd/2026-09-24-retrace-m42-lls
 ```
 
 Expected:
-- **Green:** everything green after Task 3, plus the three oracle lists.
-- **May be green:** a **forward** M4, M5 or M6 test, if the debugger resolves the native hit's K by
-  stepping and continues from that stepped position. Record which.
+- **Green:** everything green after Task 3, plus the three oracle lists. Task 3 measured both
+  forward M4 tests green already (execution Ruling T3-a): the breakpoint resolver steps with no
+  breakpoint armed, and `continue` resumes from that stepped position.
+- **May be green:** a **forward** M5 or M6 test. A watch resolves by stepping with the watch armed,
+  so it now reaches the raised stop. Record which.
 - **Red:** every **backward** M4, M5 and M6 test, and every forward one not green above. They die
   by the 60 s bound or a divergence: a native breakpoint or watch stop inside the pair infers no
   shadow before Task 5.
