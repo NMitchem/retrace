@@ -169,6 +169,126 @@ fn syscall_writer_is_found_forward_and_backward() {
     assert!(out.contains(&format!("at ({after_read}, 0) pc=0x{bpc:x}")), "parked at boundary:\n{out}");
 }
 
+/// M40 fix round 1, CRITICAL: `reverse-continue` run FROM the exact coordinate of a syscall-watch
+/// hit (P = (after_read, 0), pk == 0) must not re-report that same hit as an earlier one. Before
+/// this fix, phase 1's `WatchSyscall` arm recorded `last` unconditionally: the crossing `advance()`
+/// that lands the scan cursor exactly ON P (`n == pn`, and a syscall hit's own coordinate is always
+/// (n, 0) == (pn, pk)) looked indistinguishable from a hit strictly earlier than P, so the second
+/// reverse-continue printed the identical hit line again and the session never moved. The pre-M40
+/// loop's own `(n, k) < (pn, pk)` comparison never had this gap; this closes it in the M40 scan.
+#[test]
+fn reverse_continue_from_the_syscall_hit_itself_finds_nothing_earlier() {
+    let (rec, trace) = util::record(retrace_guest::FILEIO);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let tp = Path::new(&trace);
+    let ts = trace.to_str().unwrap();
+    let (after_read, buf, bpc) = discover_read_cli(tp);
+    let hit_line = format!("hit watch 0x{buf:x} (syscall write) at ({after_read}, 0)");
+    let (code, out, err) = debug_run(ts,
+        &format!("watch 0x{buf:x}; continue; reverse-continue; where"));
+    assert_eq!(code, 0, "stderr: {err}");
+    // `continue` reports the hit once, landing exactly on it (P = (after_read, 0)); the
+    // reverse-continue run from there must NOT find it again as "earlier".
+    assert_eq!(out.matches(&hit_line).count(), 1, "forward hit only, not doubled:\n{out}");
+    assert!(out.contains("no earlier hit"), "nothing precedes P itself:\n{out}");
+    let last = util::strip_annot(out.trim_end().lines().last().unwrap_or(""));
+    assert!(last.ends_with(&format!("at ({after_read}, 0) pc=0x{bpc:x} thread=0")),
+        "parked unchanged at the boundary:\n{out}");
+}
+
+/// The K coordinate of `target_pc` within window `n`: seek to (n, 0) and single-step raw
+/// instructions, with NO breakpoints/watchpoints armed, until `pc()` reaches it. Ground truth
+/// independent of `reverse-continue`'s own breakpoint/ordinal-resolution machinery — the same
+/// seek-and-step pattern `discover_store_ks` uses for watched stores, adapted to a single target
+/// pc instead of a memory diff.
+fn discover_k_of_pc(trace: &Path, n: usize, target_pc: u64) -> u64 {
+    let mut s = retrace_core::seek(trace, n, 0).unwrap();
+    let mut k = 0u64;
+    while s.pc() != target_pc {
+        s.step_insns(1).unwrap();
+        k += 1;
+    }
+    k
+}
+
+/// The write()'s svc return address (ELR = svc_pc + 4), found the same way `discover_read_cli`
+/// finds the read's: peek the recorded event for SYS_write(4) to fd 1, then cross it.
+fn discover_write_ret_pc(trace: &Path) -> u64 {
+    let mut s = retrace_core::ReplaySession::open(trace).unwrap();
+    loop {
+        if let Some((4, args)) = s.peek_syscall() {
+            if args[0] == 1 { s.advance().unwrap(); return s.position(); }
+        }
+        s.advance().unwrap();
+    }
+}
+
+/// M40 fix round 1, MINOR: a breakpoint set exactly ON a window-ending `svc` (the `Stepped::AtTrap`
+/// path in phase 1's `Break` arm), and a SECOND breakpoint hit within the same window (ordinal ≥ 2
+/// in `HitKind::Break`'s "search from k=0, count occurrences" contract) — neither was exercised by
+/// any committed test before this fix round.
+///
+/// `read_svc_pc` and `write_svc_pc` are FILEIO's read and write syscalls' own `svc` instructions:
+/// each is the LAST instruction of its window (the window-ending trap itself), so a breakpoint
+/// there fires pre-retire on the trap — exactly the case `Stepped::AtTrap` exists for. `bpc` (from
+/// `discover_read_cli`) is the FIRST instruction (K=0) of the window the read OPENS, which is the
+/// SAME window `write_svc_pc` sits in — pairing them puts two breakpoints in one window, so the
+/// scan must resolve breakpoint ordinal 2 to land on the later one.
+///
+/// Every address and coordinate here is discovered (`discover_read_cli`, `discover_write_ret_pc`,
+/// `discover_k_of_pc`), never hardcoded.
+#[test]
+fn reverse_continue_crosses_a_breakpointed_svc_and_resolves_ordinal_two() {
+    let (rec, trace) = util::record(retrace_guest::FILEIO);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
+    let tp = Path::new(&trace);
+    let ts = trace.to_str().unwrap();
+    let (after_read, _buf, bpc) = discover_read_cli(tp);
+    let read_win = after_read - 1; // the window the read syscall itself closes
+    let read_svc_pc = bpc - 4;     // ELR = svc + 4 on arm64 syscalls
+    let write_svc_pc = discover_write_ret_pc(tp) - 4;
+    let k_read = discover_k_of_pc(tp, read_win, read_svc_pc);
+    let k_write = discover_k_of_pc(tp, after_read, write_svc_pc);
+
+    // Script 1: one breakpoint on EACH window-ending svc. The first reverse-continue crosses the
+    // read's own breakpointed trap (AtTrap) to reach the later, write one; the second finds the
+    // earlier read hit; the third finds nothing before it.
+    let (code1, out1, err1) = debug_run(ts, &format!(
+        "continue; break 0x{read_svc_pc:x}; break 0x{write_svc_pc:x}; \
+         reverse-continue; where; reverse-continue; where; reverse-continue"));
+    assert_eq!(code1, 0, "stderr: {err1}");
+    assert!(out1.contains("exited (code 0)"), "continue runs to exit before any breakpoint:\n{out1}");
+    assert!(out1.contains(&format!("hit 0x{write_svc_pc:x} at ({after_read}, {k_write})")),
+        "first reverse-continue finds the later (write) hit:\n{out1}");
+    assert!(out1.contains(&format!("at ({after_read}, {k_write}) pc=0x{write_svc_pc:x}")),
+        "parked pc IS the write breakpoint:\n{out1}");
+    assert!(out1.contains(&format!("hit 0x{read_svc_pc:x} at ({read_win}, {k_read})")),
+        "second reverse-continue finds the earlier (read) hit:\n{out1}");
+    assert!(out1.contains(&format!("at ({read_win}, {k_read}) pc=0x{read_svc_pc:x}")),
+        "parked pc IS the read breakpoint:\n{out1}");
+    assert!(out1.trim_end().ends_with("no earlier hit"),
+        "third reverse-continue: nothing precedes the read hit:\n{out1}");
+
+    // Script 2: the SAME write-svc breakpoint, paired with `bpc` (K=0 of the window the read
+    // OPENS) instead of the read's own svc — both breakpoints now sit inside window `after_read`,
+    // so the first reverse-continue must resolve breakpoint ORDINAL 2 (past the K=0 hit) to land
+    // on the write svc, at the identical coordinate script 1 found by a different route.
+    let (code2, out2, err2) = debug_run(ts, &format!(
+        "continue; break 0x{bpc:x}; break 0x{write_svc_pc:x}; \
+         reverse-continue; where; reverse-continue; where; reverse-continue"));
+    assert_eq!(code2, 0, "stderr: {err2}");
+    assert!(out2.contains(&format!("hit 0x{write_svc_pc:x} at ({after_read}, {k_write})")),
+        "ordinal 2 resolves to the write svc, same coordinate as script 1:\n{out2}");
+    assert!(out2.contains(&format!("at ({after_read}, {k_write}) pc=0x{write_svc_pc:x}")),
+        "parked pc IS the write breakpoint:\n{out2}");
+    assert!(out2.contains(&format!("hit 0x{bpc:x} at ({after_read}, 0)")),
+        "second reverse-continue finds the K=0 hit, ordinal 1:\n{out2}");
+    assert!(out2.contains(&format!("at ({after_read}, 0) pc=0x{bpc:x}")),
+        "parked pc IS the K=0 breakpoint:\n{out2}");
+    assert!(out2.trim_end().ends_with("no earlier hit"),
+        "third reverse-continue: nothing precedes the K=0 hit:\n{out2}");
+}
+
 /// Parse `"<label> cell 0x…"` out of the guest's own stdout — same convention as
 /// `thread_watch_e2e.rs`'s `parse_cell`, retaken independently here so this file does not depend
 /// on that one.

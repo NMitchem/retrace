@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use retrace_core::{checkpointed_seek, Advance, CheckpointCache, Outcome, ReplayReport, ReplaySession};
+use retrace_core::{checkpointed_seek, Advance, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped};
 use retrace_core::symbols::Symbols;
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
@@ -217,26 +217,77 @@ fn line<W: Write>(out: &mut W, args: std::fmt::Arguments) -> Result<(), String> 
     out.write_all(b"\n").map_err(|e| format!("write error: {e}"))
 }
 
-/// Replay window `n` from step `from_k` and return the first K (>= `from_k`) at which the guest's
-/// live PC equals `pc`. Turns a mid-window hardware-breakpoint hit (which knows only the pc + its
-/// landmark) into an exact (N, K) coordinate. Deterministic; runs on its own transient session, so
-/// the caller must hold NO other live session (one VM per process).
-fn resolve_hit_k(trace: &Path, cache: &mut CheckpointCache, n: usize, pc: u64, from_k: u64) -> Result<u64, String> {
+/// What `resolve_nth` counts (M40 §3a). A watch hit is identified BY ADDRESS: the hardware's own
+/// watchpoint stop, while single-stepping with `Watch`'s ranges armed. A breakpoint hit is
+/// identified by pc membership in `Break`'s addresses, stepped with breakpoints DISARMED (armed,
+/// one fires before retire at the current pc, forever).
+enum HitKind<'a> { Watch(&'a [(u64, u64)]), Break(&'a [u64]) }
+
+/// Replay window `n` from `(n, from_k)` and return the K of the `ordinal`-th (1-based) hit of
+/// `kind`, checking that the instruction there is at `expect_pc` (the pc the scan saw). That check
+/// makes a scan/resolver disagreement fail loud only when the disagreement lands on a DIFFERENT
+/// instruction. An ordinal off by one among hits at the same pc — every hit of one breakpoint,
+/// every run of one loop store, e.g. README's Known-limits case of a breakpoint at a thread switch —
+/// passes it and names the wrong run silently. Replaces M3's
+/// `resolve_hit_k`, which matched a watch hit BY PC: a store that ran on other addresses first
+/// resolved to an earlier run that never wrote the watched range (t0 M6/M7: rung 8's `continue`
+/// landed 1.7 M instructions early). Deterministic; runs on its own transient session, so the
+/// caller must hold NO other live session (one VM per process).
+fn resolve_nth(trace: &Path, cache: &mut CheckpointCache, n: usize, from_k: u64, kind: HitKind,
+               ordinal: u64, expect_pc: u64) -> Result<u64, String> {
+    debug_assert!(ordinal >= 1, "ordinals are 1-based");
     let mut s = checkpointed_seek(trace, cache, n, from_k)?;
-    let mut k = from_k;
-    loop {
-        if s.pc() == pc { return Ok(k); }
-        s.step_insns(1).map_err(|e| format!("resolve K in window {n}: {e}"))?;
-        k += 1;
+    let (mut k, mut seen) = (from_k, 0u64);
+    let found = |s: &ReplaySession, k: u64| -> Result<u64, String> {
+        if s.pc() == expect_pc { Ok(k) } else { Err(format!(
+            "resolve hit #{ordinal} in window {n}: the scan saw pc {expect_pc:#x}, the resolver reached {:#x} at K={k}",
+            s.pc())) }
+    };
+    match kind {
+        HitKind::Break(addrs) => loop {
+            if addrs.contains(&s.pc()) {
+                seen += 1;
+                if seen == ordinal { return found(&s, k); }
+            }
+            s.step_insns(1).map_err(|e| format!("resolve breakpoint hit #{ordinal} in window {n}: {e}"))?;
+            k += 1;
+        },
+        HitKind::Watch(ranges) => {
+            s.arm_watchpoints(ranges);
+            loop {
+                match s.step_watched().map_err(|e| format!("resolve watch hit #{ordinal} in window {n}: {e}"))? {
+                    Stepped::Retired => k += 1,
+                    Stepped::Watch => {
+                        seen += 1;
+                        if seen == ordinal { return found(&s, k); }
+                        s.clear_watchpoints(); // step over this earlier hit in place, then re-arm
+                        s.step_insns(1).map_err(|e| format!("resolve watch hit #{ordinal} in window {n}: {e}"))?;
+                        s.arm_watchpoints(ranges);
+                        k += 1;
+                    }
+                    Stepped::AtTrap => return Err(format!(
+                        "resolve watch hit #{ordinal} in window {n}: the window ended after {seen} hit(s) at K={k}")),
+                }
+            }
+        }
     }
 }
 
-/// The armed watch range containing `far` (exact byte), else the range overlapping `far`'s aligned
-/// doubleword (FAR may report the comparator base — spike F4b), else `far` itself (honest fallback,
-/// never a wrong range). Deterministic: `ws` is sorted, first match wins.
+/// The armed watch range containing `far` (exact byte); else the range overlapping `far`'s aligned
+/// doubleword (FAR may report the comparator base — spike F4b); else (M40) the first range
+/// intersecting `far`'s naturally aligned 64-byte block. The Arm ARM bounds a watchpoint's FAR: for
+/// `DC ZVA` it is any address in the zeroed block (64 bytes here), and for any other store it lies in
+/// a naturally aligned block, no larger than the `DC ZVA` block, that contains a watched address the
+/// store wrote. So a store that really wrote a watched range reports a FAR in that range's 64-byte
+/// block (rung 8: FAR `…ac0` for a watched `…ac8`, t0 M5), and a FAR in any other block cannot have
+/// come from one. With two armed ranges in one block this names the first, which may not be the one
+/// written. Else `far` itself (honest fallback). Deterministic: `ws` is sorted, first match wins. The
+/// third rule runs only where the first two missed, so no output they got right changes.
 fn watched_of(ws: &[(u64, u64)], far: u64) -> u64 {
+    let blk = far & !63;
     ws.iter().find(|&&(a, l)| far >= a && far < a + l)
         .or_else(|| ws.iter().find(|&&(a, l)| { let d = far & !7; d < a + l && a < d + 8 }))
+        .or_else(|| ws.iter().find(|&&(a, l)| a < blk + 64 && blk < a + l))
         .map(|&(a, _)| a)
         .unwrap_or(far)
 }
@@ -278,8 +329,9 @@ impl<'a> Exec<'a> {
         // which is what every pc in the session refers to. Any failure here — unreadable trace, no
         // Snapshot, stripped binary — yields an empty table and bare-hex output rather than an
         // error: symbolication is presentation, and must never be able to fail a debug session.
-        let syms = retrace_trace::Reader::open(trace).ok()
-            .and_then(|events| events.iter().find_map(|e| match e {
+        // M40: from the cache's one decode, not a second read of the file.
+        let syms = cache.decoded(trace).ok()
+            .and_then(|t| t.events().iter().find_map(|e| match e {
                 retrace_trace::Event::Snapshot { mem, .. } => Some(Symbols::from_snapshot(mem)),
                 _ => None,
             }))
@@ -443,11 +495,11 @@ impl<'a> Exec<'a> {
     /// Whether a hardware/syscall watch hit at `addr` by `thread` should be reported to the user:
     /// true when that watch has no scope, or the scope equals `thread`. The `_ => true` arm is a
     /// deliberate fail-OPEN, not merely a defensive default: `watched_of`'s own `far`-fallback
-    /// (`.unwrap_or(far)`, used when `far` lands outside every armed range's exact bytes AND its
-    /// aligned doubleword) CAN hand this function an address genuinely absent from `self.watches`
-    /// — a hit whose owning watch is unknown. Suppressing an unattributable hit would be a worse
-    /// failure than showing an unscoped one: this function chooses to report it rather than risk
-    /// silently hiding a real write.
+    /// (`.unwrap_or(far)`, used when `far` lands outside every armed range's exact bytes, its aligned
+    /// doubleword, AND its 64-byte block) CAN hand this function an address genuinely absent from
+    /// `self.watches` — a hit whose owning watch is unknown. Suppressing an unattributable hit would
+    /// be a worse failure than showing an unscoped one: this function chooses to report it rather than
+    /// risk silently hiding a real write.
     fn watch_thread_matches(&self, addr: u64, thread: u32) -> bool {
         match self.watches.iter().find(|&&(a, _, _)| a == addr) {
             Some(&(_, _, Some(scope))) => scope == thread,
@@ -652,7 +704,7 @@ impl<'a> Exec<'a> {
                     // (we entered window n via a landmark). Resolve the FIRST occurrence past it.
                     let kctx = if n == start_n { start_k } else { 0 };
                     self.session = None; // free the VM before the resolution seek
-                    let k = resolve_hit_k(self.trace, &mut self.cache, n, p_hit, kctx + 1)?;
+                    let k = resolve_nth(self.trace, &mut self.cache, n, kctx + 1, HitKind::Break(&[p_hit]), 1, p_hit)?;
                     line(out, format_args!("resolved ({n}, {k})"))?;
                     return self.reseek(n, k);
                 }
@@ -687,13 +739,14 @@ impl<'a> Exec<'a> {
                     }
                     // Resolve from kctx, NOT kctx+1: unlike a breakpoint (whose parked-on case the
                     // pre-step already moved off), a watched store CAN legitimately fire at the
-                    // exact parked coordinate (the user stepi'd up to it), and the store pc repeats
-                    // in loops — searching from kctx+1 would misresolve to the NEXT iteration. This
-                    // resolution runs whether or not the hit is scoped out: the vCPU is physically
-                    // parked pre-retire at the store either way.
+                    // exact parked coordinate (the user stepi'd up to it). The FIRST watch stop from
+                    // kctx is this hit, found by the hardware BY ADDRESS (M40): matching the store's
+                    // pc instead named an earlier run of a loop store that wrote elsewhere (t0 M7).
+                    // This resolution runs whether or not the hit is scoped out: the vCPU is
+                    // physically parked pre-retire at the store either way.
                     let kctx = if n == start_n { start_k } else { 0 };
                     self.session = None; // free the VM before the resolution seek
-                    let k = resolve_hit_k(self.trace, &mut self.cache, n, p_hit, kctx)?;
+                    let k = resolve_nth(self.trace, &mut self.cache, n, kctx, HitKind::Watch(&ws), 1, p_hit)?;
                     if matched {
                         line(out, format_args!("resolved ({n}, {k})"))?;
                     }
@@ -708,7 +761,7 @@ impl<'a> Exec<'a> {
                     // un-retired store and the scan resumes from there. Recursion depth is bounded
                     // by the number of scoped-out hits within this one `continue` (not by
                     // instruction count), and the cost of each is NOT merely slowness: a discarded
-                    // hit pays a full `resolve_hit_k` seek AND one stack frame, so a guest with a
+                    // hit pays a full `resolve_nth` seek AND one stack frame, so a guest with a
                     // hot write loop on the scoped-out thread OVERFLOWS THE STACK and crashes the
                     // debugger rather than degrading gracefully. Unexercised today (no guest writes
                     // a watched address in a loop from a thread that isn't the watched one), and
@@ -736,83 +789,163 @@ impl<'a> Exec<'a> {
     }
 
     /// Run backward to the latest hit — breakpoint, hardware watch, or syscall watch — strictly
-    /// before the current position P. Scans forward from the start (the only direction replay
-    /// runs), recording each hit's coordinate and stepping the cursor past it, until a hit at/after
-    /// P or exit. A hardware watch hit resolves K from the hit pc (searching from the scan cursor,
-    /// NOT cursor+1 — a store can fire at the cursor's own coordinate); a syscall hit's coordinate
-    /// is the post-event boundary (n, 0) and its cursor resumes AT (n, 0): the writing event is
-    /// already consumed by the (unarmed) seek, so it cannot re-fire, but a first-instruction store
-    /// in window n can still be caught.
+    /// before the current position P (M40, spec §3b). Replay only runs forward, so this makes ONE
+    /// forward pass from landmark 1 and remembers the last qualifying hit:
+    /// - phase 1 runs every window before P's at native speed, stepping over each hit in place;
+    /// - phase 2 single-steps P's own window up to P, so exactly the hits before P count.
+    ///
+    /// Then it resolves only that one hit (`resolve_nth`, by ordinal) and parks there: at most three
+    /// seeks, however many hits the pass went through. The pre-M40 loop re-seeked and resolved at
+    /// every hit it passed, by pc, so a store that ran on other addresses first cost a full
+    /// iteration per run (t0 M2/M6: 183 runs in one window of rung 8, ~20.8 s CPU each).
+    ///
+    /// A scoped-out watch hit still occupies an ordinal, because the hardware fired for it. The
+    /// thread FILTER applies only where `last` is decided (M15 Task 8; spec R4). A breakpoint on a
+    /// watched store yields both hits, breakpoint first (R3): its step-off keeps the watches armed.
     fn cmd_reverse_continue<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
-        // Watch/WatchSys carry the writing `thread` too (M15 Task 8): the scan below must still
-        // walk THROUGH a scoped-out hit (it is a real, earlier event that may hide an earlier
-        // matching one behind it), so the thread rides along on every candidate and the FILTER is
-        // applied only once, where `last` gets decided — never at the point of discovery.
-        enum RHit { Bp(u64), Watch { watched: u64, pc: u64, thread: u32 }, WatchSys { watched: u64, thread: u32 } }
+        enum RHit { Bp { pc: u64, ord: u64 }, Watch { watched: u64, pc: u64, ord: u64 }, WatchSys { watched: u64 } }
         let (pn, pk) = (self.n, self.k);
         let bps = self.breakpoints.clone();
         let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
-        self.session = None; // the scan uses its own transient sessions
-        let mut last: Option<(usize, u64, RHit)> = None; // (n, k, kind) of the latest hit < P
-        let (mut cur_n, mut cur_k) = (1usize, 0u64);     // scan cursor
-        loop {
-            let mut s = checkpointed_seek(self.trace, &mut self.cache, cur_n, cur_k)?;
+        self.session = None; // the scan and the resolution use their own transient sessions
+        let mut last: Option<(usize, RHit)> = None;
+        {
+            let mut s = checkpointed_seek(self.trace, &mut self.cache, 1, 0)?;
             s.arm_breakpoints(&bps);
             s.arm_watchpoints(&ws);
-            let hit = loop {
-                match s.advance().map_err(|d| format!("reverse-continue diverged: {}", d.detail))? {
-                    Advance::Break => break Some((s.landmark(), RHit::Bp(s.pc()))),
-                    Advance::Watch { thread } => {
-                        let watched = watched_of(&ws, s.far());
-                        break Some((s.landmark(), RHit::Watch { watched, pc: s.pc(), thread }));
-                    }
-                    Advance::WatchSyscall { watched, thread } =>
-                        break Some((s.landmark(), RHit::WatchSys { watched, thread })),
-                    Advance::Event => continue,
+            let mut win = s.landmark();
+            let (mut bp_ord, mut w_ord) = (0u64, 0u64); // hits so far in window `win`
+            let mut ended = false;
+            let mut bps_off_for_crossing = false;
+            // Phase 1: every window before P's, at native speed.
+            while s.landmark() < pn {
+                let adv = s.advance().map_err(|d| format!("reverse-continue diverged: {}", d.detail))?;
+                if bps_off_for_crossing { s.arm_breakpoints(&bps); bps_off_for_crossing = false; }
+                let n = s.landmark();
+                if n != win { win = n; bp_ord = 0; w_ord = 0; }
+                match adv {
+                    Advance::Event => {}
                     // Exited covers BOTH terminals (exit and crash): either way the scan is over.
-                    Advance::Exited(_) => break None,
+                    Advance::Exited(_) => { ended = true; break; }
+                    Advance::Break => {
+                        let pc = s.pc();
+                        bp_ord += 1;
+                        last = Some((n, RHit::Bp { pc, ord: bp_ord })); // breakpoints are never scoped
+                        s.clear_breakpoints(); // step off it with the watches still armed (R3)
+                        match s.step_watched()? {
+                            Stepped::Retired => s.arm_breakpoints(&bps),
+                            Stepped::Watch => {
+                                w_ord += 1;
+                                let (watched, thread) = (watched_of(&ws, s.far()), s.current_thread());
+                                if self.watch_thread_matches(watched, thread) {
+                                    last = Some((n, RHit::Watch { watched, pc, ord: w_ord }));
+                                }
+                                s.clear_watchpoints();
+                                s.step_insns(1)?;
+                                s.arm_watchpoints(&ws);
+                                s.arm_breakpoints(&bps);
+                            }
+                            // The breakpoint is ON the window-ending trap, so nothing retires
+                            // before it: step() left the guest parked at EL1 on the vector slot
+                            // head (the trap itself, unconsumed), not re-seeked to EL0 on the svc
+                            // the way `continue` is. The next advance() reaches that same
+                            // Stop::Syscall, consumes it, and lands at (n+1, 0) — breakpoints stay
+                            // off for exactly that one call (re-armed right after, above) so a
+                            // breakpoint address coinciding with (n+1, 0) cannot re-fire against
+                            // an instruction that never retires.
+                            Stepped::AtTrap => bps_off_for_crossing = true,
+                        }
+                    }
+                    Advance::Watch { thread } => {
+                        w_ord += 1;
+                        let (watched, pc) = (watched_of(&ws, s.far()), s.pc());
+                        if self.watch_thread_matches(watched, thread) {
+                            last = Some((n, RHit::Watch { watched, pc, ord: w_ord }));
+                        }
+                        // Step over the watched store in place: retire it with nothing armed, re-arm.
+                        s.clear_breakpoints();
+                        s.clear_watchpoints();
+                        s.step_insns(1)?;
+                        s.arm_breakpoints(&bps);
+                        s.arm_watchpoints(&ws);
+                    }
+                    Advance::WatchSyscall { watched, thread } => {
+                        // A syscall write's coordinate is (n, 0) — the post-event boundary this
+                        // very advance() just crossed into. It counts only when that is strictly
+                        // before P (spec §3b): landing exactly ON P (pn == n, pk == 0) is not
+                        // "before" it, and this loop's own `while s.landmark() < pn` guard has
+                        // already let that landing through once, so it must be re-checked here.
+                        if (n, 0u64) < (pn, pk) && self.watch_thread_matches(watched, thread) {
+                            last = Some((n, RHit::WatchSys { watched }));
+                        }
+                    }
                 }
-            };
-            drop(s); // free the VM before resolving K
-            let (n, rh) = match hit { Some(h) => h, None => break };
-            let (k, resume) = match &rh {
-                RHit::Bp(pc) | RHit::Watch { pc, .. } => {
-                    let from_k = if n == cur_n { cur_k } else { 0 };
-                    let k = resolve_hit_k(self.trace, &mut self.cache, n, *pc, from_k)?;
-                    (k, (n, k + 1)) // resume strictly past a resolved instruction hit
-                }
-                RHit::WatchSys { .. } => (0u64, (n, 0u64)),
-            };
-            if (n, k) < (pn, pk) {
-                // Task 8: a scoped-out watch hit is still a real event — the cursor advances past
-                // it exactly as if it counted, so scanning continues into whatever comes after —
-                // but it does NOT become a candidate for `last`. Breakpoints are never scoped.
-                let matches = match &rh {
-                    RHit::Bp(_) => true,
-                    RHit::Watch { watched, thread, .. } => self.watch_thread_matches(*watched, *thread),
-                    RHit::WatchSys { watched, thread } => self.watch_thread_matches(*watched, *thread),
-                };
-                if matches {
-                    last = Some((n, k, rh));
-                }
-                (cur_n, cur_k) = resume;
-            } else {
-                break; // reached P; earlier hits are already recorded
             }
-        }
+            // Phase 2: P's own window, instruction by instruction, so exactly the hits before P count.
+            if !ended {
+                if s.landmark() != pn {
+                    return Err(format!("reverse-continue: the scan overshot landmark {pn} (at {})", s.landmark()));
+                }
+                if win != pn { bp_ord = 0; w_ord = 0; }
+                s.clear_breakpoints(); // compared by pc below
+                let mut k = 0u64;
+                while k < pk {
+                    // Read BEFORE the step: the breakpoint check compares the pc about to execute.
+                    // At (pn, 0) with a thread switch pending this is the OUTGOING thread's resume
+                    // pc (step() switches on entry) — the documented blind spot in README's Known
+                    // limits.
+                    let pc = s.pc();
+                    if bps.contains(&pc) {
+                        bp_ord += 1;
+                        last = Some((pn, RHit::Bp { pc, ord: bp_ord }));
+                    }
+                    match s.step_watched()? {
+                        Stepped::Retired => k += 1,
+                        Stepped::Watch => {
+                            w_ord += 1;
+                            // The store's pc is read AFTER the step: the guest is parked pre-retire
+                            // on it, on whichever thread step() switched to. Equal to the pre-step
+                            // read except at a pending switch (M40 final review).
+                            let (watched, thread, pc) = (watched_of(&ws, s.far()), s.current_thread(), s.pc());
+                            if self.watch_thread_matches(watched, thread) {
+                                last = Some((pn, RHit::Watch { watched, pc, ord: w_ord }));
+                            }
+                            s.clear_watchpoints();
+                            s.step_insns(1)?;
+                            s.arm_watchpoints(&ws);
+                            k += 1;
+                        }
+                        Stepped::AtTrap => return Err(format!(
+                            "reverse-continue: window {pn} ended after {k} instruction(s), before P's {pk}")),
+                    }
+                }
+            }
+        } // the scan session drops here: one VM per process
+        // Defence (M40 final review): the scan only records hits strictly before P, so a resolved
+        // coordinate at or after P means scan and resolver disagree. Fail loud rather than reseek
+        // FORWARD under a command whose whole contract is "backward".
+        let before_p = |n: usize, k: u64| -> Result<(), String> {
+            if (n, k) < (pn, pk) { Ok(()) } else {
+                Err(format!("reverse-continue: resolved ({n}, {k}) is not before P ({pn}, {pk})"))
+            }
+        };
         match last {
-            Some((n, k, RHit::Bp(pc))) => {
+            Some((n, RHit::Bp { pc, ord })) => {
+                let k = resolve_nth(self.trace, &mut self.cache, n, 0, HitKind::Break(&bps), ord, pc)?;
+                before_p(n, k)?;
                 let a = self.annot(pc);
                 line(out, format_args!("hit {pc:#x} at ({n}, {k}){a}"))?;
                 self.reseek(n, k)
             }
-            Some((n, k, RHit::Watch { watched, pc, .. })) => {
+            Some((n, RHit::Watch { watched, pc, ord })) => {
+                let k = resolve_nth(self.trace, &mut self.cache, n, 0, HitKind::Watch(&ws), ord, pc)?;
+                before_p(n, k)?;
                 let a = self.annot(pc);
                 line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k}){a}"))?;
                 self.last_watch_hit = Some((n, k));
                 self.reseek(n, k)
             }
-            Some((n, _, RHit::WatchSys { watched, .. })) => {
+            Some((n, RHit::WatchSys { watched })) => {
                 line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
                 self.reseek(n, 0)
             }
@@ -921,5 +1054,81 @@ mod tests {
         assert!(parse_script("regs 1 2").is_err(), "`regs` takes at most one operand");
         assert!(parse_script("regs abc").is_err(), "a thread id must parse as u32");
         assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");
+    }
+
+    #[test] fn watched_of_names_the_range_a_wider_store_covers() {
+        let ws = [(0xa01722ac8u64, 8u64)];
+        assert_eq!(watched_of(&ws, 0xa01722ac8), 0xa01722ac8, "exact");
+        assert_eq!(watched_of(&ws, 0xa01722acc), 0xa01722ac8, "inside the range");
+        // t0 M5/M7: rung 8's writers report FAR 0xa01722ac0, 8 below the watched qword. The Arm ARM
+        // puts a watchpoint's FAR in the same naturally aligned block (at most the 64-byte DC ZVA
+        // block) as a watched address the store wrote, so these FARs can come from a covering store:
+        assert_eq!(watched_of(&ws, 0xa01722ac0), 0xa01722ac8, "16-byte stp, 8 below");
+        assert_eq!(watched_of(&ws, 0xa01722ae0), 0xa01722ac8, "DC ZVA, 24 above in the same 64-byte block");
+        assert_eq!(watched_of(&ws, 0xa01722aff), 0xa01722ac8, "DC ZVA, the block's last byte");
+        // ...and these cannot: each lies in the 64-byte block BELOW the range's. A 32-byte `stp q`
+        // based at 0xa01722ab0 does cover the range, but it reports a FAR inside the range's block,
+        // never its own base. Both keep the honest fallback.
+        assert_eq!(watched_of(&ws, 0xa01722ab0), 0xa01722ab0, "24 below, previous block: fallback");
+        assert_eq!(watched_of(&ws, 0xa01722a90), 0xa01722a90, "56 below, previous block: fallback");
+        assert_eq!(watched_of(&ws, 0xa01722b40), 0xa01722b40, "out of reach: the honest fallback, unchanged");
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // M40: VM-driving tests on the repo-owned WATCHSWEEP fixture. They live here, not in an e2e
+    // file, because what they assert (the checkpoint cache's seek count and the trace decode count)
+    // is internal to the debugger and invisible through the CLI.
+    // -------------------------------------------------------------------------------------------
+
+    fn record_watchsweep(tag: &str) -> std::path::PathBuf {
+        let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::WATCHSWEEP).unwrap());
+        let trace = std::env::temp_dir()
+            .join(format!("retrace-m40-{tag}-{}.bin", std::process::id()));
+        retrace_core::record(&loaded, &trace).expect("record watchsweep");
+        trace
+    }
+
+    /// `&buf[40]`, from the recorded write(1, target, 8).
+    fn watchsweep_target(trace: &Path) -> u64 {
+        let mut s = retrace_core::ReplaySession::open(trace).unwrap();
+        loop {
+            if let Some((4, args)) = s.peek_syscall() {
+                if args[0] == 1 { return args[1]; }
+            }
+            s.advance().unwrap();
+        }
+    }
+
+    fn run_cmds(ex: &mut Exec, script: &str, sink: &mut Vec<u8>) {
+        for cmd in parse_script(script).unwrap() { ex.exec(&cmd, sink).unwrap(); }
+    }
+
+    #[test] fn reverse_continue_makes_at_most_three_seeks_whatever_the_hits() {
+        let trace = record_watchsweep("seeks");
+        let t = watchsweep_target(&trace);
+        let mut ex = Exec::new(&trace).unwrap();
+        let mut sink = Vec::new();
+        run_cmds(&mut ex, &format!("continue; watch 0x{t:x}"), &mut sink);
+        let before = ex.cache.seeks();
+        ex.exec(&Cmd::ReverseContinue, &mut sink).unwrap();
+        let seeks = ex.cache.seeks() - before;
+        let text = String::from_utf8_lossy(&sink).into_owned();
+        assert!(text.contains(&format!("hit watch 0x{t:x} (write at ")), "{text}");
+        // Spec §3b: the scan, the resolution and the park. Pre-M40 this paid two seeks per run of
+        // the sweeping store between each resume point and each real hit.
+        assert!(seeks <= 3, "one reverse-continue made {seeks} seeks:\n{text}");
+    }
+
+    #[test] fn a_debug_session_decodes_its_trace_once() {
+        let trace = record_watchsweep("decodes");
+        let t = watchsweep_target(&trace); // decodes on its own; the baseline is taken after it
+        let d0 = retrace_trace::decode_count();
+        let mut ex = Exec::new(&trace).unwrap();
+        let mut sink = Vec::new();
+        run_cmds(&mut ex, &format!("continue; watch 0x{t:x}; reverse-continue; stepi; reverse-stepi"), &mut sink);
+        let decodes = retrace_trace::decode_count() - d0;
+        // Spec §3e: every session the debugger opens, and M19's symbol table, share one decode.
+        assert_eq!(decodes, 1, "a debug session decoded its trace {decodes} times:\n{}",
+                   String::from_utf8_lossy(&sink));
     }
 }

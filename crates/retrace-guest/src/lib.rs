@@ -178,6 +178,7 @@ pub const WILDSTORE: &str = concat!(env!("OUT_DIR"), "/wildstore");
 pub const CARVEOUT: &str = concat!(env!("OUT_DIR"), "/carveout");
 pub const SPINLOOP: &str = concat!(env!("OUT_DIR"), "/spinloop");
 pub const WATCHLOOP: &str = concat!(env!("OUT_DIR"), "/watchloop");
+pub const WATCHSWEEP: &str = concat!(env!("OUT_DIR"), "/watchsweep");
 pub const CRASH: &str = concat!(env!("OUT_DIR"), "/crash");
 pub const CRASHJMP: &str = concat!(env!("OUT_DIR"), "/crashjmp");
 pub const HELLO_RUST: &str = concat!(env!("OUT_DIR"), "/hello_rust");
@@ -318,6 +319,12 @@ mod tests {
     #[test]
     fn watchloop_guest_parses() {
         let l = parse_macho(&std::fs::read(WATCHLOOP).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn watchsweep_guest_parses() {
+        let l = parse_macho(&std::fs::read(WATCHSWEEP).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
