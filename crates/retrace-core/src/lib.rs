@@ -143,7 +143,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
         // M42 §3f: record never steps and never arms a debug register, so no debug exit reaches it
         // and the exclusive shadow can never be set here. A shadow would mean an exit path skipped
         // `note_exit`.
-        assert!(b.dbg_excl().is_none(), "M42: record set the exclusive shadow at pc {:#x}: {:?}",
+        assert!(b.dbg_excl().is_none(), "M42: record set the exclusive shadow at pc {:#x}, at the exit {stop:?}: {:?}",
             b.pc(), b.dbg_excl());
         // M15: the thread that produced this stop, captured ONCE and used by every append arm
         // below. Read here rather than at each append because this is the only point guaranteed to

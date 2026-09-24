@@ -2835,6 +2835,12 @@ impl Box_ {
         // the SS arming, because the emulation takes no exit.
         let mut clrex_next = false;
         if self.excl.is_some() {
+            // M42 §3a: every exception entry is a non-debug exit, and each one clears the shadow, so
+            // a set shadow means the guest is at EL0. Stepping at EL1 with one set would decode the
+            // vector code as if it were the pair's.
+            assert!((self.vcpu.get_reg(reg::CPSR).unwrap() >> 2) & 3 == 0,
+                "M42: the exclusive shadow is set with the guest at EL1 (pc {:#x}); every exception \
+                 entry must clear it", self.pc());
             match self.insn_at(self.pc()).and_then(decode_excl) {
                 Some(st @ ExclInsn::Store { .. }) => return self.emulate_stx(st),
                 Some(ExclInsn::Clrex) => clrex_next = true,
