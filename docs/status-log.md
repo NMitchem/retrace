@@ -11513,7 +11513,7 @@ idempotent `Box_` method (`settle_schedule`), called from `ReplaySession::finish
 changed (two comment-only hunks inside `ReplaySession::advance`'s arms, from Task 2's fix round),
 `verify_thread` **7 → 7**, `TRACE_MAGIC` unmoved at `RT\x00\x0a` (`crates/retrace-trace` has no diff
 at all), `record_box` untouched (`run()`'s entry check became a call to the same logic); **zero**
-new `#[ignore]` and **zero** un-parked; **seven** execution rulings (R12–R18) after the spec's
+new `#[ignore]` and **zero** un-parked; **nine** execution rulings (R12–R20) after the spec's
 eight and the plan's two, plus three pre-flight findings (F1–F3); **eight** commits before this
 close — the spec with its t0 companion (`0a6bbae`), the plan (`910c652`), and six task commits
 (`174cbbd`, `1ee88d0` + `8ea1ff7`, `2219274` + `dce77f3`, `d16fa97`), two of them review fix
@@ -11779,7 +11779,7 @@ Hit-order paragraph claimed completeness. Park the exit like a crash, at
 `(E, probe_window_len(E))`, on the exit `svc`, and add one oracle arming with hits in the exit
 window.
 
-**One step past the ruling, measured, for the controller to confirm.** Parking at `(E, K_f)` with
+**One step past the ruling, measured, and accepted as R19.** Parking at `(E, K_f)` with
 an arrival's phase, `Bp`, was not enough. The new arming also breaks on the exit `svc` itself, and
 with only the ruled change its backward chain failed at answer #1: the debugger gave `(2, 1, Bp)`
 where the oracle has `(2, 2, Bp)`, the breakpoint AT the terminal's coordinate, which a forward
@@ -11912,9 +11912,19 @@ Execution:
 * **R18 — the final review's Important #1 is fixed inside M41**: the exit terminal parks at
   `(E, K_f)`, like a crash, and a sixth oracle arming has hits in the exit window (+1 test, total
   666); Minors #2–#5 bundled; the `crates/retrace` chunks re-run, `ws`/`box` reused. The fix wave
-  also set every terminal's phase to `Watch` (above), measured as needed and flagged for the
-  controller. Cost if wrong: the exit window is single-stepped once per exit park (memoized),
-  measured small.
+  also set every terminal's phase to `Watch` (above), measured as needed; accepted as R19. Cost if
+  wrong: every `continue` that reaches an exit single-steps the exit window (a probe and a seek,
+  memoized), measured small on the four dynamic guests, and unbounded in principle.
+* **R19 — a terminal is the end of the order, not an arrival.** Every terminal (exit, crash, fatal
+  signal) parks at phase `Watch`, the last phase at its coordinate, so it sits after every hit, a
+  breakpoint on the terminal instruction included. This supersedes spec R4's clause that a
+  terminal park is an arrival. `rf1` pins the crash half (`reverse-continue` from the crash finds
+  the breakpoint on the faulting instruction); the sixth arming pins the exit half. Cost if wrong:
+  `reverse-continue` from a crash now reports a breakpoint on the crashing instruction, which gdb
+  would not; the more useful answer, and the README says so.
+* **R20 — the successor order.** The controller proposed M42 = the LL/SC single-step limit and
+  M43 = the lldb seam, and the operator approved it on 2026-09-24. This section and spec §10 were
+  edited to match before merge. Cost if wrong: none.
 
 **R11 is unused**, deliberately: the plan and M40 both use "R11" as the name of the bug.
 
@@ -11963,9 +11973,9 @@ Execution:
   `continue`'s skip, M1/M2), T3's thread-switch blind spot and its phantom (M8), and "R3 has no
   committed test" (`m3`, `m4`, the bp-on-store arming).
 * **M39's and M38's carried lists**, as M40 carried them — none touched.
-* **The lldb seam is M43's; M42 is the LL/SC single-step limit above.** The operator ordered it so
-  on 2026-09-24, after M41 found the limit: lldb steps far more than a script does, so stepping is
-  made sound first. M41 is the seam's precondition, and the latent `?`-exit item above is the first
+* **The lldb seam is M43's; M42 is the LL/SC single-step limit above.** The controller proposed
+  that order on 2026-09-24, after M41 found the limit, and the operator approved it (R20): lldb
+  steps far more than a script does, so stepping is made sound first. M41 is the seam's precondition, and the latent `?`-exit item above is the first
   thing it will meet.
 
 **Superseded, not owed — with this section as their forward pointer.** Spec §3c's last paragraph

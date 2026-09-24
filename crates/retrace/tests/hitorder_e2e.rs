@@ -4,7 +4,7 @@
 // - a NAMED REGRESSION for each t0 measurement (M1–M8 in the companion), pinned to exact
 //   coordinates;
 // - spec §3a's INVARIANT: at a blocking boundary the position shows the thread that runs next;
-// - the HIT ORACLE's three checks (util::hits::check_chains) on five armings.
+// - the HIT ORACLE's three checks (util::hits::check_chains) on six armings.
 //
 // Every address and landmark is DISCOVERED. threadrust's are shared-cache addresses, valid only for
 // this host's cache. Each fixture is recorded once per test process and shared: a debug session
@@ -405,11 +405,17 @@ fn rf1_continue_from_a_breakpoint_on_the_crashing_instruction_reports_the_crash(
         retrace_trace::Event::Crash { pc, .. } => Some(*pc),
         _ => None,
     }).expect("a recorded Crash");
-    let (code, out, err) = hits::debug(ts(&trace), &format!("break 0x{pc:x}; continue; continue; continue"));
+    let (code, out, err) = hits::debug(ts(&trace),
+        &format!("break 0x{pc:x}; continue; continue; continue; reverse-continue"));
     assert_eq!(code, 0, "stderr: {err}\n{out}");
     assert!(out.contains(&format!("hit 0x{pc:x} at (")), "the breakpoint first:\n{out}");
     assert_eq!(out.matches(&format!("guest crashed: pc=0x{pc:x}")).count(), 2,
         "then the crash, and the crash again:\n{out}");
+    // R19: the crash terminal sits AFTER the breakpoint on the faulting instruction, so
+    // `reverse-continue` from it finds that breakpoint (once forward, once backward).
+    assert_eq!(out.matches(&format!("hit 0x{pc:x} at (")).count(), 2,
+        "reverse-continue from the crash finds the breakpoint on the crashing instruction:\n{out}");
+    assert!(!out.contains("no earlier hit"), "{out}");
 }
 
 /// Review Focus 2 / R8: a watch scoped to a thread that never writes it. Every hit is scoped out,

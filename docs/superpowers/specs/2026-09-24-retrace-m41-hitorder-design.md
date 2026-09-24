@@ -473,6 +473,9 @@ arming, and the `crates/retrace` chunks re-run, **666 / 0 / 9 over 141**.
   watched range exits 5 through the crossing's `Advance::Watch` Err, as it did before M41; and an
   early `?` exit in `cmd_continue` can leave a kept session armed, harmless while an Err aborts the
   script and live once the lldb seam keeps an `Exec` after an error.
-- **The successor order changed.** §1 and §7 name lldb as M42. On 2026-09-24 the operator ordered
-  M42 = the LL/SC single-step limit (R14) and M43 = the lldb seam, so the seam is built on sound
-  stepping.
+
+**Decided after the close (R19, R20).** Every terminal parks at phase `Watch`, so it sits after
+every hit; this supersedes R4's clause that a terminal park is an arrival (`rf1` and the sixth
+arming pin it). And the successor order changed: §1 and §7 name lldb as M42, but on 2026-09-24 the
+controller proposed, and the operator approved, M42 = the LL/SC single-step limit (R14) and
+M43 = the lldb seam, so the seam is built on sound stepping.
