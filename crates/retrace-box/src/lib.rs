@@ -437,13 +437,35 @@ const DESC_PAGE:  u64 = 0x3;                  // L3 page descriptor
 const BLK: u64 = 1 << 25;                     // 32 MiB per L2 entry
 const PT_ADDR: u64 = 0x0000_FFFF_FFFF_C000; // descriptor output-address bits 47:14
 
-// A page-aligned host allocation mapped 1:1 into the guest at `ipa`.
-pub struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
+// A page-aligned host allocation mapped 1:1 into the guest at `ipa`. M40: the Backing OWNS its host
+// pages. Dropping it releases them, so `backings` must never hold two Backings over one
+// allocation, and every Backing must carry exactly the length `alloc_pages` returned (audited at
+// M40: all 17 construction sites do). `pub(crate)`: nothing outside this crate constructs or names
+// a Backing, and a public safe constructor/drop pair would let outside code munmap arbitrary host
+// memory (M40 review).
+pub(crate) struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
+
+impl Drop for Backing {
+    fn drop(&mut self) {
+        // SAFETY: `self.host`/`self.len` are exactly what the `alloc_pages` call that built this
+        // Backing returned (audited above), and by the time a Backing drops its stage-2 mapping is
+        // already gone: `vm.unmap` ran first at the two removal sites (`unmap_overlapping`,
+        // `guest_munmap`), or `hv_vm_destroy` already ran. That second case rests on two opposite
+        // declaration orders, each giving the same drop order: in `Box_` itself `backings` is
+        // declared AFTER `vm` (struct fields drop in declaration order), while every constructor
+        // declares its `backings` local BEFORE `vm` (locals drop in reverse, so a panic unwinding
+        // out of a constructor drops vcpu -> vm -> backings; M40 review, a2f1ecc).
+        unsafe { free_pages(self.host, self.len); }
+    }
+}
 
 // Field order is load-bearing: Rust drops struct fields in declaration order, and HVF
 // requires `hv_vcpu_destroy` before `hv_vm_destroy` — reordering `vm` before `vcpu` would
 // silently reintroduce an HV_BUSY bug on the second in-process VM. `vcpu` MUST stay
 // declared before `vm`.
+// M40: `backings` MUST stay declared after `vm` for the same reason. Each Backing releases its host
+// pages on drop, and host memory must not be released while the VM can still map it, so the order
+// on drop is hv_vcpu_destroy -> hv_vm_destroy -> munmap.
 // M24-restoreaudit. Every field here is part of a record/replay contract: `load`/`load_dynamic` run
 // on the RECORD path only, and replay builds its box through `restore`. A field this struct gains
 // that `restore` does not re-establish is an asymmetry whose signature is a PASSING RECORD followed
@@ -973,6 +995,25 @@ pub struct BoxState {
     pub fall_throughs: u64,
 }
 
+/// M40: bytes of guest backing currently mapped by `alloc_pages` and not yet released — a
+/// deterministic count for the leak guard (`tests/backingfree.rs`), never a measurement of RSS.
+static LIVE_BACKING_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// M40: see `LIVE_BACKING_BYTES`.
+pub fn live_backing_bytes() -> usize { LIVE_BACKING_BYTES.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// M40: release an `alloc_pages` allocation.
+///
+/// # Safety
+/// `host` must be a live `alloc_pages` result of exactly `len` bytes, no longer mapped into the
+/// guest (its stage-2 mapping, if any, must already be `vm.unmap`ped), and never touched again
+/// after this call.
+unsafe fn free_pages(host: *mut u8, len: usize) {
+    // SAFETY: the caller's guarantee above (this fn's own contract).
+    unsafe { libc::munmap(host as *mut _, len); }
+    LIVE_BACKING_BYTES.fetch_sub(len, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn alloc_pages(len: usize) -> (*mut u8, usize) {
     let len = (len + GRANULE - 1) & !(GRANULE - 1);
     // SAFETY: plain RW anon mapping; guest exec permission is governed by stage-1 W^X (stage-2
@@ -982,6 +1023,7 @@ fn alloc_pages(len: usize) -> (*mut u8, usize) {
                    libc::MAP_ANON|libc::MAP_PRIVATE, -1, 0)
     };
     assert!(p != libc::MAP_FAILED, "mmap backing failed");
+    LIVE_BACKING_BYTES.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
     (p as *mut u8, len)
 }
 
@@ -1094,6 +1136,8 @@ impl Box_ {
                     *e = (base + (j as u64) * GRANULE as u64) | ATTR_DATA | DESC_PAGE;
                 }
                 l2[bi as usize] = l3_ipa | DESC_TABLE;
+                // M40: `len: GRANULE` here is exactly what `alloc_l3` allocated — both callers'
+                // closures assert their own `alloc_pages(GRANULE)` returned GRANULE bytes.
                 created.push(Backing { host: l3_host, ipa: l3_ipa, len: GRANULE });
                 l3_host
             };
@@ -1139,7 +1183,10 @@ impl Box_ {
             let created = {
                 let mut alloc_l3 = || {
                     assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "build_tables: too many exec blocks; L3 window exhausted");
-                    let (h, _) = alloc_pages(GRANULE);
+                    let (h, hlen) = alloc_pages(GRANULE);
+                    // M40: promote_and_set's created Backing hardcodes `len: GRANULE` for this L3 —
+                    // true by construction only if alloc_pages actually returned GRANULE bytes here.
+                    assert_eq!(hlen, GRANULE, "alloc_pages(GRANULE) must return exactly GRANULE bytes");
                     let a = next_l3; next_l3 += GRANULE as u64; (a, h)
                 };
                 Self::promote_and_set(l2, backings, va, len, attr, &mut alloc_l3)
@@ -1177,7 +1224,10 @@ impl Box_ {
         let created = {
             let mut alloc_l3 = || {
                 assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "set_region_attr: too many exec blocks; L3 window exhausted");
-                let (h, _) = alloc_pages(GRANULE);
+                let (h, hlen) = alloc_pages(GRANULE);
+                // M40: promote_and_set's created Backing hardcodes `len: GRANULE` for this L3 —
+                // true by construction only if alloc_pages actually returned GRANULE bytes here.
+                assert_eq!(hlen, GRANULE, "alloc_pages(GRANULE) must return exactly GRANULE bytes");
                 let a = next_l3; next_l3 += GRANULE as u64; (a, h)
             };
             Self::promote_and_set(l2, &self.backings, ipa, len, attr, &mut alloc_l3)
@@ -1291,9 +1341,13 @@ impl Box_ {
     /// a derived replay run is a posture mismatch — which fails LATE (a divergence at the final
     /// memory compare), not loudly.
     pub fn load_with_pac(loaded: &Loaded, pac_enabled: bool) -> Box_ {
+        // M40: declared before `vm`/`vcpu` so an unwind mid-construction (a panic after some
+        // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
+        // backings, matching the field-order invariant on `pub struct Box_` above — never
+        // backings first, which would munmap host pages while their stage-2 mapping is still live.
+        let mut backings = Vec::new();
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
-        let mut backings = Vec::new();
         let map = |vm: &Vm, backings: &mut Vec<Backing>, ipa: u64, src: &[u8], memsz: usize| {
             let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
             unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), host, src.len()); }
@@ -1854,9 +1908,13 @@ impl Box_ {
     /// passes and what dyld's `executable_path=` is derived from). M9 widened this from a lone
     /// `argv0`; an empty slice yields `argc=0`, which no caller does but the layout handles.
     pub fn load_dynamic(exe: &Loaded, dyld: &Loaded, argv: &[String]) -> Box_ {
+        // M40: declared before `vm`/`vcpu` so an unwind mid-construction (a panic after some
+        // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
+        // backings, matching the field-order invariant on `pub struct Box_` above — never
+        // backings first, which would munmap host pages while their stage-2 mapping is still live.
+        let mut backings = Vec::new();
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
-        let mut backings = Vec::new();
         let map = |vm: &Vm, backings: &mut Vec<Backing>, ipa: u64, src: &[u8], memsz: usize| {
             let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
             unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), host, src.len()); }
@@ -2267,12 +2325,15 @@ impl Box_ {
             .map(|b| (b.host, b.ipa))
         {
             // Case 2. SAFETY: `[addr, end)` lies wholly inside the backing, so the destination is
-            // in-bounds; `host` is a distinct live allocation of `rlen` bytes (no overlap), and it is
-            // dead after the copy, so release it here — otherwise every guard-page install and every
-            // OVERWRITE commit would leak an allocation.
+            // in-bounds; `host` is a distinct live allocation of `rlen` bytes (no overlap) — this
+            // function's own caller-supplied `alloc_pages` result, per its doc — so the copy is
+            // sound. It is never published to `backings` or the guest and is dead after the copy
+            // (otherwise every guard-page install and every OVERWRITE commit would leak it), so
+            // `free_pages(host, rlen)` meets its own contract: exactly the bytes `alloc_pages`
+            // handed back, not yet mapped anywhere the guest can still reach, never touched again.
             unsafe {
                 std::ptr::copy_nonoverlapping(host, bhost.add((addr - bipa) as usize), rlen);
-                libc::munmap(host as *mut _, rlen);
+                free_pages(host, rlen);
             }
 
             // M9: an exec FIXED map contained in a LIVE backing is dyld's non-cache-dylib strategy
@@ -2335,7 +2396,7 @@ impl Box_ {
             if b.ipa < end && ipa < bend {
                 let bk = self.backings.remove(i);
                 let _ = self.vm.unmap(bk.ipa, bk.len);
-                unsafe { libc::munmap(bk.host as *mut _, bk.len); }
+                drop(bk); // M40: the Backing owns its pages; this releases them, after the stage-2 unmap above
             } else {
                 i += 1;
             }
@@ -2429,9 +2490,10 @@ impl Box_ {
             // function owns) is the whole of the cleanup: a rejected request is a no-op, leaving
             // `backings` and the `mmap_next` cursor untouched so later placements are unaffected.
             if !Self::fixed_fits(addr, rlen) {
-                // SAFETY: `host` is this function's freshly-allocated `rlen`-byte mapping, never
-                // published to `backings` or the guest, and unreachable after this return.
-                unsafe { libc::munmap(host as *mut _, rlen); }
+                // SAFETY: `host` is this function's freshly-allocated `rlen`-byte mapping (exactly
+                // the `alloc_pages` result the caller passed in), never published to `backings` or
+                // the guest, and unreachable after this return — meeting `free_pages`'s contract.
+                unsafe { free_pages(host, rlen); }
                 return Err(retrace_arch::EINVAL);
             }
             // Classify the overlap (shared with guest_vm_map's FIXED branch). A contained request
@@ -2525,8 +2587,10 @@ impl Box_ {
         if let Some(pos) = self.backings.iter().position(|b| ipa >= b.ipa && ipa < b.ipa + b.len as u64) {
             let bk = self.backings.remove(pos);
             let _ = self.vm.unmap(bk.ipa, bk.len);       // stage-1 identity block stays; stage-2 removed
-            // SAFETY: the anon host backing is no longer mapped into the guest; release it.
-            unsafe { libc::munmap(bk.host as *mut _, bk.len); }
+            // The anon host backing is no longer mapped into the guest; release it. M40: the Backing
+            // owns its pages (see `impl Drop for Backing`'s own SAFETY comment) — this is a safe
+            // call, not an unsafe block, because the unsafe munmap lives inside that Drop impl.
+            drop(bk);
             let _ = len; // whole-backing unmap for M2's page-granular guests
         }
     }
@@ -2818,8 +2882,13 @@ impl Box_ {
     /// Arm hardware write-watchpoint slot `slot` (0..=3) over `[va, va+len)`, len ∈ {1,2,4,8},
     /// va len-aligned (so the range sits inside one BAS doubleword — one watch, one slot). A watched
     /// EL0 store surfaces from `run()` as `Stop::Other` with an ESR_EL2 watchpoint class (EC=0x34)
-    /// and FAR in `last_far`, before the store retires (spike F4). Armed only around
-    /// `advance()`/`run()` scans — NEVER while single-stepping (same discipline as breakpoints).
+    /// and FAR in `last_far`, before the store retires (spike F4). Armed around `advance()`/`run()`
+    /// scans, AND — since M40, on its t0 M6 measurement — while single-stepping through
+    /// `ReplaySession::step_watched`, which is how a watch hit is resolved by address: a watched
+    /// store then stops the step pre-retire (`EC=0x34`) and nothing else changes. The M3 rule
+    /// "never while single-stepping" still binds BREAKPOINTS, whose pre-retire fire at the current
+    /// pc would repeat forever; it was carried over to watchpoints by analogy and never measured
+    /// for them.
     pub fn arm_hw_watchpoint(&mut self, slot: usize, va: u64, len: u64) {
         assert!(matches!(len, 1 | 2 | 4 | 8), "watch len must be 1/2/4/8, got {len}");
         assert_eq!(va % len, 0, "watch va {va:#x} must be {len}-aligned");
@@ -2867,9 +2936,13 @@ impl Box_ {
 
     /// Replay-only: rebuild the guest from a snapshot's exact regions (no extra stack/trampoline).
     pub fn restore(regions: &[Region], regs: &Regs) -> Box_ {
+        // M40: declared before `vm`/`vcpu` so an unwind mid-construction (a panic after some
+        // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
+        // backings, matching the field-order invariant on `pub struct Box_` above — never
+        // backings first, which would munmap host pages while their stage-2 mapping is still live.
+        let mut backings = Vec::new();
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
-        let mut backings = Vec::new();
         for r in regions {
             let (host, len) = alloc_pages(r.bytes.len().max(GRANULE));
             unsafe { std::ptr::copy_nonoverlapping(r.bytes.as_ptr(), host, r.bytes.len()); }
@@ -5620,9 +5693,13 @@ impl Box_ {
     /// never touched at all. `l2_host`/`next_l3` are recomputed from the freshly-allocated `backings`
     /// — never stored raw (they are host pointers, meaningless across VM instances).
     pub fn from_checkpoint(state: &BoxState) -> Box_ {
+        // M40: declared before `vm`/`vcpu` so an unwind mid-construction (a panic after some
+        // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
+        // backings, matching the field-order invariant on `pub struct Box_` above — never
+        // backings first, which would munmap host pages while their stage-2 mapping is still live.
+        let mut backings = Vec::new();
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
-        let mut backings = Vec::new();
         for r in &state.mem {
             let (host, len) = alloc_pages(r.bytes.len().max(GRANULE));
             unsafe { std::ptr::copy_nonoverlapping(r.bytes.as_ptr(), host, r.bytes.len()); }

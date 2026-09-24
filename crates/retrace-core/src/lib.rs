@@ -1264,6 +1264,35 @@ pub struct ReplayReport { pub stdout: Vec<u8>, pub outcome: Outcome, pub fall_th
 #[derive(Debug)]
 pub struct Divergence { pub landmark: usize, pub pc: u64, pub detail: String }
 
+/// M40: what one watch-aware single step did (`ReplaySession::step_watched`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stepped {
+    /// One instruction retired.
+    Retired,
+    /// The next instruction writes an armed watch range. It has NOT retired: the watchpoint is
+    /// pre-retire (spike F4c), so the guest is parked on the store.
+    Watch,
+    /// The next instruction is the window-ending trap. Nothing retired, and the trap is not
+    /// consumed.
+    AtTrap,
+}
+
+/// M40 §3e: a decoded recording — every whole, CRC-valid record, and whether `open_checked` dropped
+/// a torn tail. Cheap to clone (the events are shared), so every session a debugger opens uses ONE
+/// decode of the file. Before this, each session re-read and re-checked it (t0 M3: seconds of CPU
+/// per session on a 97.6 MB trace, 64 % of it CRC).
+#[derive(Clone)]
+pub struct DecodedTrace { events: Rc<[Event]>, truncated: bool }
+
+impl DecodedTrace {
+    pub fn load(trace_path: &Path) -> Result<Self, String> {
+        let (events, truncated) = retrace_trace::Reader::open_checked(trace_path)
+            .map_err(|e| format!("cannot open trace: {e}"))?;
+        Ok(DecodedTrace { events: events.into(), truncated })
+    }
+    pub fn events(&self) -> &[Event] { &self.events }
+}
+
 /// A resumable replay engine. `open` restores the guest from a trace's leading snapshot; `advance`
 /// consumes exactly one recorded landmark at a time — verifying each trap against the recording
 /// (the divergence oracle) and applying the recorded kernel writes, NEVER executing a syscall.
@@ -1271,7 +1300,7 @@ pub struct Divergence { pub landmark: usize, pub pc: u64, pub detail: String }
 /// dispatch is identical whether it runs to the end or is stepped, so both share one engine.
 pub struct ReplaySession {
     b: Box_,
-    events: Vec<Event>,
+    events: Rc<[Event]>,
     idx: usize,
     stdout: Vec<u8>,
     // Mirror of record's task-port learning (see record_box): learned from the RECORDED
@@ -1314,23 +1343,28 @@ pub enum Advance {
 
 impl ReplaySession {
     pub fn open(trace_path: &Path) -> Result<Self, String> {
-        // open_checked keeps every whole, CRC-valid record and drops a torn/corrupt tail; a
-        // missing/unreadable file, an empty/torn trace, or a lost leading Snapshot each become
-        // a named error (the caller turns it into a landmark-0 Divergence, exit 3) rather than a panic.
-        let (events, truncated) = retrace_trace::Reader::open_checked(trace_path)
-            .map_err(|e| format!("cannot open trace: {e}"))?;
+        Self::open_decoded(&DecodedTrace::load(trace_path)?)
+    }
+
+    /// M40: `open` over an already-decoded trace (the debugger's hot path). Same contract and the
+    /// same error strings; only the file read moved out.
+    pub fn open_decoded(trace: &DecodedTrace) -> Result<Self, String> {
+        // open_checked kept every whole, CRC-valid record and dropped a torn/corrupt tail; an
+        // empty/torn trace or a lost leading Snapshot each become a named error (the caller turns
+        // it into a landmark-0 Divergence, exit 3) rather than a panic.
+        let events = Rc::clone(&trace.events);
         if events.is_empty() {
             return Err("empty/torn trace: no readable records".into());
         }
-        let (regs, mem) = match events.first() {
-            Some(Event::Snapshot { regs, mem }) => (regs.clone(), mem.clone()),
-            _ => return Err("trace missing leading Snapshot".into()),
-        };
         // Rebuild the guest from the snapshot's exact regions (includes stack + trampoline);
         // restore maps only those regions and re-establishes fixed sysregs + captured registers.
-        let b = Box_::restore(&mem, &regs);
+        let b = match events.first() {
+            Some(Event::Snapshot { regs, mem }) => Box_::restore(mem, regs),
+            _ => return Err("trace missing leading Snapshot".into()),
+        };
         // events[0] is the initial snapshot; the first landmark to consume is events[1].
-        Ok(ReplaySession { b, events, idx: 1, stdout: Vec::new(), guest_task_port: None, truncated })
+        Ok(ReplaySession { b, events, idx: 1, stdout: Vec::new(), guest_task_port: None,
+                           truncated: trace.truncated })
     }
 
     /// M12: recompute a signal delivery and byte-compare the frame against the recorded landmark.
@@ -2809,6 +2843,41 @@ impl ReplaySession {
         Ok(())
     }
 
+    /// M40: single-step one instruction with whatever watchpoints are armed, and REPORT a
+    /// watchpoint stop rather than treating it as a fault. `step_insns` hands every `Stop::Other`
+    /// to `page_in_cache`/`commit_reserved_page`, which read the FAR as an IPA; a watchpoint's FAR
+    /// is the watched VA, so the class is checked FIRST here. Measured clean at t0 M6: a
+    /// pre-retire `EC=0x34` stop at exactly the write, a clean retire once disarmed, and clean
+    /// stepping after re-arming. Breakpoints must NOT be armed (one fires before retire at the
+    /// current pc, forever). Deterministic replay faults are handled and re-stepped exactly as in
+    /// `step_insns`.
+    pub fn step_watched(&mut self) -> Result<Stepped, String> {
+        loop {
+            match self.b.step() {
+                Stop::Step => return Ok(Stepped::Retired),
+                Stop::Other { esr } => {
+                    if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Watchpoint) {
+                        return Ok(Stepped::Watch);
+                    }
+                    // The contract above, enforced (M40 final review): an armed breakpoint fires
+                    // before retire, so this is a caller bug, not a fault — its FAR is no IPA, and
+                    // handing it to `page_in_cache` would misread it.
+                    if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Breakpoint) {
+                        return Err(format!(
+                            "breakpoint stop during a watch-aware step at pc {:#x}: breakpoints must \
+                             NOT be armed while calling step_watched", self.b.pc()));
+                    }
+                    if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
+                    if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
+                    return Err(format!("fault during a watch-aware step: {}", self.b.describe_stop(esr)));
+                }
+                Stop::Syscall { .. } => return Ok(Stepped::AtTrap),
+                Stop::Fault { pc, far, .. } => return Err(format!(
+                    "guest crashed during a watch-aware step: pc={pc:#x} far={far:#x}")),
+            }
+        }
+    }
+
     /// Single-step to the window-ending trap, returning the window length (instructions retired
     /// before the trap). Faults inside the window are paged in / committed and re-stepped, exactly
     /// as `step_insns` does. Deterministic per (trace, landmark). The session is spent (parked at
@@ -2835,11 +2904,14 @@ impl ReplaySession {
     /// position from a previously captured checkpoint, skipping the landmark-0 replay a cold `open`
     /// would pay. `stdout` starts empty — no checkpoint consumer reads it.
     pub fn from_checkpoint(trace_path: &Path, checkpoint: &SessionCheckpoint) -> Result<Self, String> {
-        let (events, truncated) = retrace_trace::Reader::open_checked(trace_path)
-            .map_err(|e| format!("cannot open trace: {e}"))?;
+        Self::from_checkpoint_decoded(&DecodedTrace::load(trace_path)?, checkpoint)
+    }
+
+    /// M40: `from_checkpoint` over an already-decoded trace.
+    pub fn from_checkpoint_decoded(trace: &DecodedTrace, checkpoint: &SessionCheckpoint) -> Result<Self, String> {
         let b = Box_::from_checkpoint(&checkpoint.box_state);
-        Ok(ReplaySession { b, events, idx: checkpoint.idx, stdout: Vec::new(),
-                            guest_task_port: checkpoint.guest_task_port, truncated })
+        Ok(ReplaySession { b, events: Rc::clone(&trace.events), idx: checkpoint.idx, stdout: Vec::new(),
+                            guest_task_port: checkpoint.guest_task_port, truncated: trace.truncated })
     }
 
     /// Capture this session's current position as a `SessionCheckpoint`.
@@ -2882,18 +2954,40 @@ pub struct CheckpointCache {
     total_single_steps: u64,
     window_lens: std::collections::BTreeMap<usize, u64>, // landmark N -> window length (fixed per trace)
     window_probe_steps: u64,
+    seeks: u64, // M40: sessions opened through `checkpointed_seek` — a debugger command's cost proxy
+    trace: Option<(std::path::PathBuf, DecodedTrace)>, // M40: decoded once, on first use
 }
 
 impl CheckpointCache {
     pub fn new(byte_budget: usize, cost_gate_steps: u64) -> Self {
         CheckpointCache { entries: std::collections::BTreeMap::new(), recency: Vec::new(),
                           byte_budget, used_bytes: 0, cost_gate_steps, total_single_steps: 0,
-                          window_lens: std::collections::BTreeMap::new(), window_probe_steps: 0 }
+                          window_lens: std::collections::BTreeMap::new(), window_probe_steps: 0,
+                          seeks: 0, trace: None }
+    }
+
+    /// M40: the decoded trace this cache serves, decoding it on first use. The cache is
+    /// single-trace by contract (see the struct doc), so a different path is a caller bug and
+    /// fails loud.
+    pub fn decoded(&mut self, trace_path: &Path) -> Result<DecodedTrace, String> {
+        if let Some((p, t)) = &self.trace {
+            assert_eq!(p.as_path(), trace_path, "CheckpointCache is single-trace: opened for {} but asked for {}",
+                       p.display(), trace_path.display());
+            return Ok(t.clone());
+        }
+        let t = DecodedTrace::load(trace_path)?;
+        self.trace = Some((trace_path.to_path_buf(), t.clone()));
+        Ok(t)
     }
 
     /// Total single-steps ever paid across every `checkpointed_seek` call against this cache — the
     /// cost-gating input, and the deterministic proxy the test suite uses to prove acceleration.
     pub fn total_single_steps(&self) -> u64 { self.total_single_steps }
+
+    /// M40: sessions opened through `checkpointed_seek` against this cache. The deterministic cost
+    /// proxy for one debugger command: `reverse-continue` is bounded at 3 (spec §3b), however many
+    /// hits it passes.
+    pub fn seeks(&self) -> u64 { self.seeks }
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
     pub fn used_bytes(&self) -> usize { self.used_bytes }
@@ -2958,21 +3052,23 @@ impl CheckpointCache {
 /// position stored as a fresh checkpoint if that count clears `cache`'s cost gate.
 pub fn checkpointed_seek(trace_path: &Path, cache: &mut CheckpointCache, n: usize, k: u64)
     -> Result<ReplaySession, String> {
+    cache.seeks += 1;
+    let trace = cache.decoded(trace_path)?;
     let hit = cache.best_at_or_before(n, k);
     let (s, steps_paid) = match hit {
         Some(((n0, k0), checkpoint)) if n0 == n => {
-            let mut s = ReplaySession::from_checkpoint(trace_path, &checkpoint)?;
+            let mut s = ReplaySession::from_checkpoint_decoded(&trace, &checkpoint)?;
             s.step_insns(k - k0)?;
             (s, k - k0)
         }
         Some((_, checkpoint)) => {
-            let mut s = ReplaySession::from_checkpoint(trace_path, &checkpoint)?;
+            let mut s = ReplaySession::from_checkpoint_decoded(&trace, &checkpoint)?;
             s.advance_to_landmark(n).map_err(|d| format!("seek to landmark {n}: {}", d.detail))?;
             s.step_insns(k)?;
             (s, k)
         }
         None => {
-            let mut s = ReplaySession::open(trace_path)?;
+            let mut s = ReplaySession::open_decoded(&trace)?;
             s.advance_to_landmark(n).map_err(|d| format!("seek to landmark {n}: {}", d.detail))?;
             s.step_insns(k)?;
             (s, k)

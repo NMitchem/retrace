@@ -156,7 +156,10 @@ reconstruction caveat in full.
 
 - **Reverse execution** — `(N,K)` landmark seeks, checkpointed for ~800× faster backward seeks.
 - **Watchpoints** — hardware `DBGW` (pre-retire) plus software detection, with
-  reverse-continue-to-last-writer, thread-attributed.
+  reverse-continue-to-last-writer, thread-attributed. Since M40 a hit is resolved by the
+  **address** it wrote, by single-stepping with the watchpoint armed, not by the store's pc: a
+  store instruction that ran on other addresses first — a `memset`-style loop — had made `continue`
+  name an earlier run of it that never wrote the watched memory. `watchsweep_e2e` is the guard.
 - **Crashes are first-class** — a faulting guest is recorded, replayed, and seekable;
   reverse-continue reaches the corrupting store.
 - **Symbolicated addresses** — since M19, pc-bearing debugger output names the function it is in:
@@ -463,54 +466,88 @@ reconstruction caveat in full.
   and guards nothing. The route sits inside the existing `mach_msg2` arm, after its oracle call, so
   `verify_thread`'s **seven** sites are unchanged and `TRACE_MAGIC` did not move.
 
-**Gate:** 629 passed / 0 failed / 9 ignored across 138 test binaries, **measured at M39** over the
+  **Reverse-debugging CPython.** Since M40 this is a session that takes seconds. M39's demo
+  script, run standalone on a fresh recording of `crash.py` (record and replay each exit 139),
+  prints, verbatim:
+
+  ```
+  > continue
+  guest crashed: pc=0xa017dee60 far=0x4000dead0000 esr=0x92000005
+  > watch 0xa016daac8 8
+  watch at 0xa016daac8 len 8
+  > reverse-continue
+  hit watch 0xa016daac8 (write at 0xa017da45c) at (1136, 127306)
+  > where
+  at (1136, 127306) pc=0xa017da45c thread=0
+  > x 0xa016daac8 8
+  0xa016daac8: 00 00 00 00 00 00 00 00
+  > stepi
+  > x 0xa016daac8 8
+  0xa016daac8: 00 00 ad de 00 40 00 00
+  ```
+
+  The watch stops on the store **pre-retire**, so the cell still reads zero; one `stepi` retires it,
+  and the cell then holds `0x4000dead0000` little-endian — the `far` the crash reported, which the
+  script computed from its data file. No symbol follows the pcs because `cast()` is static inside
+  `_ctypes.so` (Known limits). The addresses and coordinates are this recording's: M40's t0
+  recording of the same script put the cell at `0xa01722ac8` and its last writer at
+  `(1143, 125704)`. **CPU:** on that t0 recording (97.6 MB, 1,146 events), the same debug session
+  with and without `reverse-continue` took 8.64 s and 8.11 s of CPU, so the command itself costs
+  **0.53 s** — where M39 attributed 3.42 h of wall-clock to it — at a load average of 1.45–1.92.
+  **Memory:** that session peaked at **422,379,520 B (≈ 403 MB)** resident, where M39's standalone
+  attempt at this demo had peaked at 7.41 GB RSS, and swap in use had grown to 33.9 GB, before it
+  was stopped without a result (M39 R17). The demo run's own 10-second RSS sampler recorded
+  nothing, because the session finished before its first sample. Forward `continue` with the watch
+  armed names the real write too: on the t0 recording it resolves `(1126, 1765682)` and one `stepi`
+  sets the cell to `0x701238000`, where M39's tree resolved `(1126, 29627)` — an earlier run of the
+  same store on another address, 1,736,055 instructions early.
+
+**Gate:** 640 passed / 0 failed / 9 ignored across 140 test binaries, **measured at M40** over the
 whole workspace, every chunk `EXIT=0` (captured before any pipe); clippy clean over
-`--workspace --all-targets` with `-D warnings`. Measured on commit `123cb97`, the head after the
-four implementing tasks; the four commits that follow it are this close's documentation, plus one
-comment-only hunk in `crates/retrace/tests/vmremap_e2e.rs` re-verified on its own
-(`cargo test -p retrace --test vmremap_e2e -- --test-threads=1` and
-`cargo clippy --workspace --all-targets -- -D warnings`, both exit 0). See the testing note below
-for how that number is assembled. The "test binaries" figure is test executables plus the
-`Doc-tests` harnesses cargo reports, each of which runs zero tests — the convention every
-milestone since M14 has counted by, kept for comparability and written out here so nobody has to
-re-derive it. The ignored gates are
+`--workspace --all-targets` with `-D warnings`. Measured on the tree of M40's final-review fix
+commit, which follows the close's documentation commit. That fix wave added one test (spec R4's
+guard), three small code changes to the debugger's positioning (phase 2's watch-hit pc,
+`step_watched` refusing a breakpoint stop, `reverse-continue` refusing to move forward) and two
+comment corrections; nothing under `crates/` changed after the gate ran. The whole chunked run took
+17 min 1 s of wall-clock, `cpython_crash_e2e` 41.03 s of it. (The close's first gate, on `5cea9a8`
+before the fix wave, read 639 / 0 / 9 over 140.) See the testing note below for how that number is
+assembled. The "test binaries" figure is test executables plus the `Doc-tests` harnesses cargo
+reports, each of which runs zero tests — the convention every milestone since M14 has counted by,
+kept for comparability and written out here so nobody has to re-derive it. The ignored gates are
 **nine**, and they are M38's nine unchanged: the two long-standing — `stackoverflow_rust_e2e`
 (re-parked by M21 at a signal-model wall, **not** the M8 risk R3 wall it stood at from M8 through
 M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall) — plus the seven in
 `apple_walls_e2e`, one per non-clean Apple-sweep row that is retrace's to fix or model and has a
-gate, each reason the measurement that parks it. All nine are described under Known limits. **M39
-parked nothing new and un-parked nothing.** Its one wall was cleared inside the milestone, so the
-headline gate `cpython_crash_e2e` went green without ever being `#[ignore]`d, and the seven Apple
-rows stand exactly where M38 left them.
+gate, each reason the measurement that parks it. All nine are described under Known limits. **M40
+parked nothing new and un-parked nothing** — it changed the debugger's positioning and `Box_`'s
+memory ownership, not what records — so the seven Apple rows stand exactly where M38 left them.
 
-Reconciled against M38's 618 / 0 / 9 over 135 **file-by-file rather than by sum** — five files
-changed their count, everything else is byte-for-byte M38's:
+Reconciled against M39's 629 / 0 / 9 over 138 **file-by-file rather than by sum** — five files
+changed their count, everything else is byte-for-byte M39's:
 
-| file | M38 | M39 | delta |
+| file | M39 | M40 | delta |
 |---|---|---|---|
-| `retrace-core/src/machmsg.rs` | 28 | 32 | **+4** (the captured 4813 request decodes; a malformed one is refused; the reply has the documented shape; 4813 routes to service only on the guest's own task port) |
-| `retrace-guest/src/lib.rs` | 16 | 18 | **+2** (`crash_py_fixture_is_wired`, `vmremap_guest_parses`) |
-| `retrace-box/tests/vmremap.rs` | — | 3 | **+3**, new binary (a remapped page resolves to the source IPA while its neighbours stay identity; a guest-allocated source reports the kernel's protections for its band; a non-page-multiple size is refused) |
-| `retrace/tests/vmremap_e2e.rs` | — | 1 | **+1**, new binary (the alias is executable and byte-identical, carries the measured protections, and replays) |
-| `retrace/tests/cpython_crash_e2e.rs` | — | 1 | **+1**, new binary (the rung-8 gate's four assertions) |
+| `retrace-guest/src/lib.rs` | 18 | 19 | **+1** (`watchsweep_guest_parses`) |
+| `retrace-box/tests/backingfree.rs` | — | 1 | **+1**, new binary (a dropped `Box_` releases every byte of guest backing it allocated, and `guest_munmap` releases exactly its region) |
+| `retrace/src/debug.rs` | 11 | 14 | **+3** (one `reverse-continue` makes at most three seeks whatever the hits; a debug session decodes its trace once; `watched_of` names the range a wider store covers) |
+| `retrace/tests/watchsweep_e2e.rs` | — | 4 | **+4**, new binary (`continue` resolves a watch hit to the write, not an earlier run of the store; `reverse-continue` walks back through both writers; a watch-aware step stops pre-retire exactly at the watched writes; `reverse-continue` counts a scoped-out watch hit in the ordinal — spec R4's guard, added by the final review's fix wave) |
+| `retrace/tests/watch_cli.rs` | 9 | 11 | **+2** (a `reverse-continue` from a syscall hit finds nothing earlier; a `reverse-continue` crosses a breakpointed `svc` and resolves ordinal two) |
 
-+11 `#[test]` attributes, `#[ignore]` **9 → 9**, `--bins` **11 → 11**, and **three new test
-binaries**, 135 → 138. The count closes at both ends, and the two ends must still be read
-separately: the tree holds **636** `#[test]` attributes = 627 runnable + 9 ignored (M38 held 625 =
-616 + 9), while the run reports 627 + the 2 census tests that run twice (`census.rs` executes in its
++11 `#[test]` attributes, `#[ignore]` **9 → 9**, `--bins` **11 → 14**, and **two new test
+binaries**, 138 → 140. The count closes at both ends, and the two ends must still be read
+separately: the tree holds **647** `#[test]` attributes = 638 runnable + 9 ignored (M39 held 636 =
+627 + 9), while the run reports 638 + the 2 census tests that run twice (`census.rs` executes in its
 own binary and again inside `legacy_equivalence`'s `#[path]` include). (A bare
-`grep -c '#\[test\]'` says 637, because a comment in `legacy_equivalence.rs` mentions the attribute
-in prose; the file has three.) The spec's §9 prediction named one new binary for
-`cpython_crash_e2e`, one for `vmremap_e2e`, one more per further mechanism guard, and `+k` codec and
-parse tests. It was short by exactly one binary — `retrace-box`'s own `tests/vmremap.rs` unit-test
-target, which is a guard the spec asked for in §3f and did not count in §9.
+`grep -c '#\[test\]'` says 648, because a comment in `legacy_equivalence.rs` mentions the attribute
+in prose; the file has three.) The spec's §9 prediction, ≈ 636 / 0 / 9 over 139, was short by four
+tests and one binary: it did not count `watchsweep_guest_parses`, the two `watch_cli` guards Task 3's
+review added, the R4 guard the final review added, or the leak test's own binary.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson), and that is also what picks up the new `tests/vmremap.rs` target without a per-target
-entry. `retrace` ran **per-target** — seventy-one `--test <name>` invocations in four groups (three
-of twenty and one of eleven; `cpython_crash_e2e` lands in the first group beside `cpython_e2e`, and
-`vmremap_e2e` in the last), because the whole package exceeds the tool ceiling — **plus the
-`--bins` chunk**, which is the only place the 11 unit tests in `crates/retrace/src/debug.rs` run;
+lesson), and that is also what picks up the new `tests/backingfree.rs` target without a per-target
+entry. `retrace` ran **per-target** — seventy-two `--test <name>` invocations, one after another
+from a single background script, because the whole package exceeds the tool ceiling — **plus the
+`--bins` chunk**, which is the only place the 14 unit tests in `crates/retrace/src/debug.rs` run;
 the binaries count includes it. The two mouths of the same trap, one loud and one silent, both
 closed by construction of the chunk list.
 
@@ -1103,25 +1140,45 @@ These are real and current, not aspirational gaps.
   same reason. A symbol named in pure hex (`deadbeef`) is also unreachable by name, because the
   hex-wins rule is what preserves existing scripts; Mach-O's leading underscore means real C symbols
   never collide.
-- **`reverse-continue` on a long recording is slow enough to plan around — measured 3.42 h on
-  rung 8.** The whole `cpython_crash_e2e` gate takes 12,364 s, and record, replay and `continue`
-  to the crash account for 50 s of it (8.6 s, 8.8 s and 32.6 s, each timed separately on a fresh
-  recording of the same script). The remaining **12,314 s ≈ 3.42 h** is the
-  `watch; reverse-continue; x; stepi; x` tail, and essentially all of it is the
-  `reverse-continue`: `watch`, `x` and `stepi` are each O(1) or one instruction. The attribution
-  beyond that is a **code read, not a profile**, and is stated as inference: `cmd_reverse_continue`
-  does not step backward, it rescans forward from landmark 1 and restarts a fresh
-  `checkpointed_seek` for each watch hit it finds before the current position, and each restart
-  resolves its sub-landmark offset by `step_insns`, which takes one real single-instruction trap
-  per guest instruction. CPython executes very large instruction counts between landmarks and its
-  allocator plausibly reuses the crashing cell many times over a process lifetime, which would
-  make that cost recur per intervening write. Nobody has profiled it. Rung 8 is reachable, not
-  comfortable, and on the same inference the cost scales with the recording — which is why it went
-  unnoticed on the short guests every earlier rung uses. It is memory-hungry too, measured
-  during the M39 gate rather than in a clean standalone sample: one rung-8
-  `reverse-continue` took this 24 GB machine's swap from 36 GB to 47 GB while it had the machine to
-  itself, and two concurrent ones exhausted RAM and all 63 GB of swap, both falling to about 10 %
-  CPU in uninterruptible wait until one was killed.
+- **`reverse-continue` is one forward replay plus one resolution, so its cost scales with the
+  recording's length, not with the hits.** Since M40 it no longer restarts a session per hit: one
+  session scans from landmark 1 at native speed with the breakpoints and watchpoints armed,
+  stepping over each hit in place; the current window is single-stepped only up to the current
+  position; and only the last qualifying hit is then resolved — at most three session opens however
+  many hits lie between (`debug.rs`'s `reverse_continue_makes_at_most_three_seeks_whatever_the_hits`
+  pins `≤ 3`). That costs about one replay plus a window of single-steps. On rung 8's recording the
+  command itself measured **0.53 s CPU** by subtraction (8.64 s for
+  `continue; watch; reverse-continue` against 8.11 s for `continue; watch`, dev build) at
+  **≈ 403 MB** peak RSS, with the machine at a load average of 1.45–1.92; M39 had attributed 3.42 h
+  of wall-clock to the same command, and two concurrent runs exhausted this 24 GB machine's RAM and
+  all 63 GB of its swap. `cpython_crash_e2e`, which runs it, finished in 40.02 s against M39's
+  12,364 s. What remains is the floor: the scan is still a **full forward replay from landmark 1**,
+  so a recording long enough that one replay is slow makes every `reverse-continue` on it that
+  slow, and there is no backward, checkpoint-segmented search. A debug session now decodes its
+  trace once rather than per seek, but that decode is still dominated by a bit-at-a-time `crc32`
+  (64 % of a decode in M40's t0 profile), and every `replay` and test pays it in full; **a faster
+  `crc32` is owed.**
+- **A `reverse-continue` to a breakpoint can land one hit off across a thread switch.** Breakpoint
+  hits are counted by pc. At `(n, 0)` after a blocking syscall, `pc()` is still the **outgoing**
+  thread's resume pc — `run()` and `step()` switch threads on entry — so the resolver and the
+  partial-window step miss the incoming thread's first instruction, and a breakpoint whose pc
+  recurs in that window can be resolved one hit off. It is silent and inherited, not new: the
+  pre-M40 resolver had the same blind spot. Nothing exercises it yet; closing it needs a threaded
+  breakpoint fixture. The same cause also produces a **phantom** hit: if the outgoing thread's
+  resume pc is itself a breakpoint address, the scan and the resolver both count a hit at `(n, 0)`
+  that nothing executes there — also silent.
+- **A forward `continue` can skip a breakpoint hit that its own pre-step lands on.** A `continue`
+  that starts parked on a breakpoint first steps one instruction, so as not to re-report where it
+  stands, and then resolves the next hit from `kctx + 1` — one past the position that pre-step
+  reached. So when the pre-step lands **on** another breakpoint (two adjacent breakpoints, or one on
+  a `svc` and one on the instruction after it), that hit is never counted. In a loop it is
+  **silent**: on the `watchsweep` fixture, `break 0x1000003a0; break 0x1000003a4; continue; continue`
+  prints `resolved (1, 14)` and exits 0, where the right answer is `(1, 9)` — the resolver finds a
+  later run of the same instruction, so the pc check agrees. In straight-line code it is **loud**,
+  because the instruction never recurs and the resolver walks off the window: `FILEIO` with two
+  adjacent breakpoints exits 5 with `resolve breakpoint hit #1 in window 4: … ends after 0
+  instruction(s)`. Inherited from M3 (`e41aff8`), not new — M40's spec §3c kept `continue`'s
+  breakpoint path as it was. The fix is to resolve from `kctx`; owed, with its own RED test.
 - **A bad debugger operand now fails later than it used to.** `where; break zzz` printed nothing and
   exited 5 before M20; it now runs the `where`, prints it, then fails — still exiting 5. That is the
   measured price of resolving at execution rather than at parse, it is deliberate, and a test pins it.
@@ -1267,13 +1324,13 @@ cargo test -p retrace --test <name> -- --test-threads=1     # per-target for the
 cargo test -p retrace --bins -- --test-threads=1            # don't omit: see below
 ```
 
-**Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the 11
+**Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the 14
 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in none of the
 other chunks; **only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
-without a `--test` filter, reaches them.** Leaving it out silently costs 11 tests and one binary —
-at M29, 526 / 0 / 2 over 115 instead of 537 / 0 / 2 over 116 — and nothing fails to warn you. Contrast
-`cargo test -p retrace --lib`, which is invalid for this crate (there is no lib target) and fails the
-whole invocation loudly.
+without a `--test` filter, reaches them.** Leaving it out silently costs 14 tests and one binary —
+at M29, when there were 11, 526 / 0 / 2 over 115 instead of 537 / 0 / 2 over 116 — and nothing
+fails to warn you. Contrast `cargo test -p retrace --lib`, which is invalid for this crate (there is
+no lib target) and fails the whole invocation loudly.
 
 **The same trap has a second mouth: `Doc-tests`.** `--test <name>` skips those too, so splitting a
 *library* crate per-target — as M24's gate had to for `retrace-box` — drops that crate's `Doc-tests`
