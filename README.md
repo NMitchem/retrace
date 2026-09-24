@@ -166,9 +166,12 @@ reconstruction caveat in full.
   that instruction's store to a watched range, stopped pre-retire. The debugger's position is a
   cursor in the same terms: `continue` gives the first hit after it, `reverse-continue` the last one
   before it, and reporting a hit puts the cursor on that hit. A breakpoint you arrived at (by
-  stepping or seeking: `stepi`, `reverse-stepi`, the opening position, a terminal park) is reported
-  in neither direction, gdb's rule, while a watched store you stepped up to still fires going
-  forward; a step that does not move (`stepi 0`, `reverse-stepi 0`) is not an arrival. At a thread
+  stepping or seeking: `stepi`, `reverse-stepi`, the opening position) is reported in neither
+  direction, gdb's rule, while a watched store you stepped up to still fires going forward; a step
+  that does not move (`stepi 0`, `reverse-stepi 0`) is not an arrival. The end of the recording,
+  an exit or a crash alike, parks on its last instruction (the exit `svc` or the faulting one) and
+  sits after every hit, a breakpoint on that instruction included, so `reverse-continue` from the
+  end finds the last hit and `continue` reports the end again. At a thread
   switch the position shows the thread that runs next: after a blocking syscall, `where`,
   `threads` and `regs` at `(n, 0)` name the incoming thread, not the one that just blocked. Before
   M41 the debugger had no defined order. M41's t0 measured eight cases (M1–M8) where it skipped a
@@ -176,10 +179,12 @@ reconstruction caveat in full.
   forward-`continue` skip and its thread-switch blind spot among them; each is a named regression
   in `hitorder_e2e`. The same file checks the debugger against a **brute-force hit oracle**
   (`tests/util/hits.rs`), which single-steps a recording with every breakpoint and watch armed and
-  lists every hardware stop, sharing none of the debugger's resolution machinery. It runs five
+  lists every hardware stop, sharing none of the debugger's resolution machinery. It runs six
   armings on three fixtures, three chains each: `continue` until the guest ends, `reverse-continue`
   until there is no earlier hit, and a zig-zag that asks each hit for its neighbour in the other
-  direction. Every arming was red on M40's debugger, which is the oracle's proof that it can fail.
+  direction. Five were red on M40's debugger; the sixth, hits in the exit window, was added by
+  M41's final review and was red on M41's own debugger until the end of the recording moved to
+  after them. That is the oracle's proof that it can fail.
 - **Crashes are first-class** — a faulting guest is recorded, replayed, and seekable;
   reverse-continue reaches the corrupting store.
 - **Symbolicated addresses** — since M19, pc-bearing debugger output names the function it is in:
@@ -522,14 +527,17 @@ reconstruction caveat in full.
   sets the cell to `0x701238000`, where M39's tree resolved `(1126, 29627)` — an earlier run of the
   same store on another address, 1,736,055 instructions early.
 
-**Gate:** 665 passed / 0 failed / 9 ignored across 141 test binaries, **measured at M41's close**
-over the whole workspace, every chunk `EXIT=0` (captured before any pipe); clippy clean over
-`--workspace --all-targets` with `-D warnings`. Measured on M41's last task commit (`d16fa97`)
-plus the close's comment-only sweep of two test files (`debug_cli.rs`, `watch_cli.rs`), which
-landed before the gate's per-target loop started; nothing under `crates/` changed after the gate
-ran. The count was predicted from source before the run, chunk by chunk, and matched in every
-chunk. The whole chunked run took 18 min 8 s of wall-clock, `hitorder_e2e` 46.30 s and
-`cpython_crash_e2e` 41.12 s of it. See the testing note below for how that number is
+**Gate:** 666 passed / 0 failed / 9 ignored across 141 test binaries, **measured at M41's
+final-review fix wave** over the whole workspace, every chunk `EXIT=0` (captured before any pipe);
+clippy clean over `--workspace --all-targets` with `-D warnings`. It was measured in two runs. The
+close ran the full chunked gate on its own tree (`d16fa97` plus a comment-only sweep of two test
+files) and read 665 / 0 / 9 over 141 in 18 min 8 s of wall-clock. The final review's fix wave
+then changed `crates/retrace` only (the exit terminal's park, one oracle arming, comments), so it
+re-ran that crate's chunks, all seventy-three per-target e2e invocations plus `--bins`, and clippy
+on the fixed tree, and reused the `ws` and `box` chunks from the close's run, whose crates have no
+diff. That re-run took 19 min 12 s, `hitorder_e2e` 47.11 s and `cpython_crash_e2e` 44.09 s of it,
+and nothing under `crates/` changed after it. Both counts were predicted from source before they
+ran and matched in every chunk. See the testing note below for how that number is
 assembled. The "test binaries" figure is test executables plus the `Doc-tests` harnesses cargo
 reports, each of which runs zero tests — the convention every milestone since M14 has counted by,
 kept for comparability and written out here so nobody has to re-derive it. The ignored gates are
@@ -549,18 +557,19 @@ changed their count, everything else is byte-for-byte M40's:
 |---|---|---|---|
 | `retrace-core/tests/replay.rs` | 12 | 13 | **+1** (`step_armed` reports each stop class without retiring — the hit oracle's premise) |
 | `retrace/src/debug.rs` | 14 | 17 | **+3** (hits order a syscall write, then a breakpoint, then a watch; a breakpoint you arrived at by stepping is reported in neither direction; a zero-count step is not an arrival — the last added by Task 3's review) |
-| `retrace/tests/hitorder_e2e.rs` | — | 21 | **+21**, new binary (ten named regressions for t0's M1–M8, M8 as three; the thread-at-a-blocking-boundary invariant; the hit oracle's five armings, three chains each; five Review Focus tests — a breakpoint on the crashing instruction, a watch scoped to a thread that never writes it, `unwatch` while parked on a watched store, `continue` after the exit, and "no earlier hit" keeping the cursor) |
+| `retrace/tests/hitorder_e2e.rs` | — | 22 | **+22**, new binary (ten named regressions for t0's M1–M8, M8 as three; the thread-at-a-blocking-boundary invariant; the hit oracle's six armings, three chains each, the sixth with hits in the exit window, added by the final review; five Review Focus tests — a breakpoint on the crashing instruction, a watch scoped to a thread that never writes it, `unwatch` while parked on a watched store, `continue` after the exit, and "no earlier hit" keeping the cursor) |
 
-+25 `#[test]` attributes, `#[ignore]` **9 → 9**, `--bins` **14 → 17**, and **one new test
++26 `#[test]` attributes, `#[ignore]` **9 → 9**, `--bins` **14 → 17**, and **one new test
 binary**, 140 → 141. The count closes at both ends, and the two ends must still be read
-separately: the tree holds **672** `#[test]` attributes = 663 runnable + 9 ignored (M40 held 647 =
-638 + 9), while the run reports 663 + the 2 census tests that run twice (`census.rs` executes in its
+separately: the tree holds **673** `#[test]` attributes = 664 runnable + 9 ignored (M40 held 647 =
+638 + 9), while the run reports 664 + the 2 census tests that run twice (`census.rs` executes in its
 own binary and again inside `legacy_equivalence`'s `#[path]` include). (A bare
-`grep -c '#\[test\]'` says 673, because a comment in `legacy_equivalence.rs` mentions the attribute
-in prose; the file has three.) The spec's §9 prediction, ≈ 663 / 0 / 9 over 141, was short by two
-tests: it counted ~9 named regressions where M8 became three tests (ten), five oracle self-checks
-as tests of their own where they are asserts inside each oracle test, and neither the plan's five
-Review Focus tests nor the zero-count-step test Task 3's review added.
+`grep -c '#\[test\]'` says 674, because a comment in `legacy_equivalence.rs` mentions the attribute
+in prose; the file has three.) The spec's §9 prediction, ≈ 663 / 0 / 9 over 141, was short by
+three tests: it counted ~9 named regressions where M8 became three tests (ten), five oracle
+self-checks as tests of their own where they are asserts inside each oracle test, and neither the
+plan's five Review Focus tests, nor the zero-count-step test Task 3's review added, nor the sixth
+oracle arming the final review added.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
 lesson). `retrace` ran **per-target** — seventy-three `--test <name>` invocations, one after another

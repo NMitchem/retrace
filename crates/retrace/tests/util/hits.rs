@@ -24,7 +24,11 @@ pub enum Phase { Sys, Bp, Watch }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hit { pub n: usize, pub k: u64, pub phase: Phase, pub pc: u64, pub thread: u32 }
 
-/// What the checks compare: the coordinate and phase always; pc and thread for an instruction hit.
+/// What the checks compare: the coordinate and phase always; pc and thread for an instruction hit
+/// (both read from the `where` after the answer). NOT compared: which watch range a hit line named
+/// (`hit watch <addr> …`) or its `write at` pc. That is sound while every arming watches one
+/// range; an arming with two would need a `watched` field here, or a hit on the wrong range
+/// would pass.
 pub type Key = (usize, u64, Phase, Option<(u64, u32)>);
 
 impl Hit {

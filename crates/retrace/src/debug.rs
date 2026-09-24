@@ -309,7 +309,8 @@ enum Phase {
     /// ARRIVAL's phase (spec R4, gdb's rule): a breakpoint at the pc you stand on is reported in
     /// neither direction, and a watched store you stepped up to still fires going forward.
     Bp,
-    /// That instruction's store to a watched range, stopped pre-retire.
+    /// That instruction's store to a watched range, stopped pre-retire. Also a TERMINAL's phase
+    /// (R18, `park_at_terminal`): the end of the recording sits after every hit.
     Watch,
 }
 
@@ -386,13 +387,14 @@ impl<'a> Exec<'a> {
 
     /// Drop the current session (freeing its VM) and seek a fresh one parked at (n, k), which is
     /// therefore breakpoint-clean. Updates the position coordinate, and resets the cursor's phase to
-    /// `Bp`: an arrival (R4). A caller that parks on a hit, or that did not move, sets it after.
+    /// `Bp`: an arrival (R4). A caller that parks on a hit or a terminal, or that did not move, sets
+    /// it after.
     fn reseek(&mut self, n: usize, k: u64) -> Result<(), String> {
         self.session = None; // free the old VM BEFORE opening a new one
         self.session = Some(checkpointed_seek(self.trace, &mut self.cache, n, k)?);
         self.n = n;
         self.k = k;
-        self.phase = Phase::Bp; // an arrival (R4); a caller that parks on a hit sets the hit's phase after
+        self.phase = Phase::Bp; // an arrival (R4); a hit's or a terminal's park sets its phase after
         Ok(())
     }
 
@@ -632,37 +634,36 @@ impl<'a> Exec<'a> {
     /// `Exited` arms (the scan, and the finish's one-event crossing of a trap or a fault, R10) route
     /// here so the two stay identical.
     ///
-    /// An `exit` parks at the final landmark's window start `(E, 0)` — the exit syscall is consumed,
-    /// so there is nothing further to reach. A CRASH instead parks AT the fault: `(C, K_f)`, where
-    /// `K_f` is the crash window's full length (the count of instructions that DID retire before the
-    /// fault). Stepping that far leaves the guest immediately before the never-retiring faulting
-    /// instruction, so `pc()` IS the crash pc and a following `reverse-continue` orders after every
-    /// write in the recording — which is what makes "run backward from the crash to the corrupting
-    /// store" work.
+    /// Every terminal (an `exit`, a crash, a fatal signal) parks at `(T, K_f)`: `T` is the terminal
+    /// event's own window, which `landmark()` still names because `advance()` reports `Exited`
+    /// without consuming a landmark, and `K_f` is that window's full length, the count of its
+    /// instructions that DID retire. Stepping that far leaves the guest immediately before the one
+    /// instruction that never retires, the exit `svc` or the faulting instruction, so `pc()` IS
+    /// that instruction. The cursor's phase there is `Watch`, the last phase at a coordinate, so
+    /// the terminal sits AFTER every hit in the recording, a breakpoint on that last instruction
+    /// included: a following `reverse-continue` finds the last of them (which is what makes "run
+    /// backward from the crash to the corrupting store" work), and `continue` just reports the end
+    /// again. Until M41's final review (R18) an exit parked at `(E, 0)`, before its own window,
+    /// so a hit in the exit window was lost backward and re-reported by every `continue` after
+    /// the exit; and every terminal took phase `Bp`, so a breakpoint on the terminal instruction
+    /// itself was lost backward.
     fn park_at_terminal<W: Write>(&mut self, report: ReplayReport, out: &mut W) -> Result<(), String> {
         match report.outcome {
-            Outcome::Exit { code } => {
-                line(out, format_args!("exited (code {code})"))?;
-                let e = self.sess().landmark();
-                self.reseek(e, 0)
-            }
+            Outcome::Exit { code } => line(out, format_args!("exited (code {code})"))?,
             Outcome::Crash { pc, esr, far } => {
                 let a = self.annot(pc);
-                line(out, format_args!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}{a}"))?;
-                let c = self.sess().landmark();
-                let kf = self.probe_window_len(c)?; // drops the live session (one VM per process)
-                self.reseek(c, kf)
+                line(out, format_args!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}{a}"))?
             }
             // M11: terminal like a crash, and it inherits the same seek machinery — but it is NOT
             // presented as one. Calling a SIGABRT a fault is the same lie that got Event::Crash
             // reuse rejected in the spec, and the debug output would carry it forever.
-            Outcome::Signal { sig } => {
-                line(out, format_args!("guest terminated by signal {sig}"))?;
-                let c = self.sess().landmark();
-                let kf = self.probe_window_len(c)?; // drops the live session (one VM per process)
-                self.reseek(c, kf)
-            }
+            Outcome::Signal { sig } => line(out, format_args!("guest terminated by signal {sig}"))?,
         }
+        let t = self.sess().landmark();
+        let kf = self.probe_window_len(t)?; // drops the live session (one VM per process)
+        self.reseek(t, kf)?;
+        self.phase = Phase::Watch; // after every hit, the terminal instruction's breakpoint too
+        Ok(())
     }
 
     /// Run forward to the first hit after the cursor (M41 §3c), or to the guest's end.
@@ -950,8 +951,9 @@ impl<'a> Exec<'a> {
                         Stepped::Watch => {
                             w_ord += 1;
                             // The store's pc is read AFTER the step: the guest is parked pre-retire
-                            // on it, on whichever thread step() switched to. Equal to the pre-step
-                            // read except at a pending switch (M40 final review).
+                            // on it. Since M41 §3a no thread switch is pending at a position the
+                            // debugger observes, so this equals the pc read before the step; it is
+                            // read after anyway, where the stop is (M40 final review).
                             let (watched, thread, pc) = (watched_of(&ws, s.far()), s.current_thread(), s.pc());
                             if self.watch_thread_matches(watched, thread) {
                                 last = Some((pn, RHit::Watch { watched, pc, ord: w_ord }));
