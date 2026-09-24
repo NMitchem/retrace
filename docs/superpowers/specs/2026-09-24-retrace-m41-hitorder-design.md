@@ -357,4 +357,90 @@ M40 closed at **640 / 0 / 9 over 140**. Expected additions:
 
 ## 10. Outcome
 
-*(Filled at the close.)*
+Filled at the close (Task 5), on the tree of `d16fa97` plus the close's comment-only sweep of
+`debug_cli.rs` and `watch_cli.rs`. `docs/status-log.md`'s M41 section is the full account; this
+records each §6 item against its measured figure, each prediction confirmed or corrected, and what
+was found without being sought. Every figure below traces to a ledger log or to the status log.
+
+**§6, item by item.**
+
+- **Every Task 1 test RED on `c68ba6d` and green after, measured both ways.** RED was measured on
+  `174cbbd`, whose debugger is `c68ba6d`'s: Task 1 added `Armed`/`step_armed` (used only by the
+  oracle) and test code, and `debug.rs` has no Task 1 hunk. After R12 and R13 all **16** failed for
+  their t0 reason (ledger `t1-red2.log`: the invariant test `left: 0, right: 1`, `m1` showing
+  `resolved (1, 14)`, `m2` exit 5, the three `m8` tests exit 5, each oracle arming failing in its
+  chain after its self-check passed; Task 1 was purely additive, 660 insertions and no deletion).
+  Green: 5 at Task 2, 6 at Task 3, the last 5 at Task 4; `hitorder_e2e` 21 / 21 at Task 4 and
+  21 / 21 in the gate (`finished in 46.30s`). The five Review Focus tests the plan added were not
+  all red by design: `rf1` was (exit 5, R10's plan-time reading), `rf2`–`rf5` pin behaviour the
+  rewrite had to keep and were green before and after.
+- **All five oracle armings pass all three checks; `threadrust` within budget or in its fallback.**
+  All five pass, forward, backward and zig-zag. `threadrust` is **both**: it starts at the declared
+  fallback landmark (`bsdthread_create`'s, `n_create`), and it costs **16.20 s user + 0.27 s sys**
+  green (Task 2), against the 120 s budget. The fallback was taken for a reason §5 did not foresee
+  (R13, below), not for the budget.
+- **The gate green, reconciled file by file against 640 / 0 / 9 over 140.** **665 passed /
+  0 failed / 9 ignored over 141 test binaries**, 77 exit files all `0`, clippy clean — predicted
+  from source before the run and matched chunk by chunk (173 / 292 / 183 + 9 / 17 over
+  26 / 41 / 73 / 1). Three files moved: `retrace-core/tests/replay.rs` +1, `debug.rs` +3,
+  `hitorder_e2e.rs` +21 (new binary); the status log carries the chunk table and the per-file
+  reconciliation. `TRACE_MAGIC` unmoved
+  (`crates/retrace-trace` has no diff), `self.verify_thread(` **7 → 7**, no dispatch arm changed (the
+  two `retrace-core` hunks inside `ReplaySession::advance`'s arms are comment-only, Task 2's R15),
+  and no `#[ignore]` added or removed (9 → 9).
+
+**Predictions, confirmed or corrected.**
+
+- **§9's ≈ 663 / 0 / 9 over 141 — corrected to 665 / 0 / 9 over 141.** §9's figure is 640 + ~9
+  named regressions + 1 invariant + 5 oracle armings + 5 self-checks + ~2 `debug.rs` unit tests + ~1
+  `step_armed` test = 663. What landed: **10** named regressions, not ~9 (M8 is three tests:
+  forward, backward, and the child's first instruction), so +1; the five self-checks are asserts
+  **inside** each oracle test, not tests of their own, so −5; the plan's five Review Focus tests
+  (`rf1`–`rf5`), which §9 did not foresee, +5; and R17's `a_zero_count_step_is_not_an_arrival`, +1.
+  663 + 1 − 5 + 5 + 1 = **665**. The plan's own Task 5 figure, 664, is this minus R17's test. The
+  binary count, 141, was right.
+- **§3a: `blockedctx`'s two assertions should hold** — confirmed, 2 / 2 under approach A (Task 2).
+- **§3a: no existing debugger test parks at a blocking boundary** — confirmed by the audit: no
+  pre-existing assertion moved.
+- **§3a's visible change** (at a blocking boundary `where`, `threads` and `regs` show the incoming
+  thread) — confirmed, and pinned by
+  `at_a_blocking_boundary_the_position_shows_the_thread_that_runs_next`.
+- **§3e: the oracle is independent of §3a** — confirmed as a measurement, not only an argument: at
+  Task 1, before the settle existed, `oracle_threadrust`'s self-check already returned the child's
+  first instruction on thread 1.
+- **§3e / §5: `step_armed`'s premise** — confirmed by its own test at Task 1.
+- **§4: every arming RED on `c68ba6d`** (the oracle's positive control) — confirmed, all five, each
+  in its chain rather than in its self-check.
+- **§4's audit: no moved assertion (R5's case is pinned by no existing test)** — confirmed. The
+  audit's list also gained `crashy_e2e` and `checkpoint_seek` (the plan's) and `symbols_e2e` and
+  `symbolops_e2e` (a grep at the close); every one passes unchanged.
+- **§3c's last paragraph: a fault during the finish propagates as today's error** — superseded by
+  the plan's R10 before any code: the fault is crossed like a trap, and `rf1` pins it.
+- **§5: the `threadrust` oracle's cost against ≤ 120 s** — the budget held (8.56 s user red, 16.20 s
+  user green, both from `n_create`), but the premise under it did not: from landmark 1 the
+  recording could not be stepped at all (next item).
+
+**Found, not sought.**
+
+- **The LL/SC exclusive-monitor limit (R13, R14).** Any VM exit between an `ldxr` and its paired
+  `stxr`, a single-step or a hardware breakpoint stop, fails the store-exclusive. On `threadrust`
+  that is Libsyscall's `getpid` pid cache, and stepping through it made the replay issue a
+  syscall the recording does not hold, a loud divergence six landmarks later. The debugger's own
+  `seek` is exposed, not only the oracle. It lies outside hit accounting, so under §7's halt rule
+  it became a README Known limit and the first owed item rather than widening M41. That a retry
+  loop would livelock under single-step is inferred, not measured.
+- **Two plan defects caught in review (R17).** I1: the `stepi`-arrival unit test could not fail,
+  because `Exec::new` already parks at `Bp`; it now arrives from a Watch park and was shown red with
+  each reset deleted. I2: `stepi 0` / `reverse-stepi 0` reset a Watch park without moving, so the
+  store was reported twice; the cursor now resets only on a move, and
+  `a_zero_count_step_is_not_an_arrival` was red before the fix.
+- **Two more plan defects of one class (R12, R16):** test code that held two live VMs at once
+  (`HV_BUSY`), in `discover_ws`/`discover_fio` and in the arrival test.
+- **`position()`'s doc overclaimed** (Task 2 review, fixed by R15): a caught `SignalDelivery` breaks
+  `pc() == position()` at its `(n, 0)` too.
+- **F2**, at pre-flight: the scan's scoped-out `WatchSyscall` arm lacks the boundary-breakpoint
+  check the `Event` arm has. Pre-existing, preserved, owed.
+- **Two latent edges** (Task 3 review observations), both owed: a crashing store that also writes a
+  watched range exits 5 through the crossing's `Advance::Watch` Err, as it did before M41; and an
+  early `?` exit in `cmd_continue` can leave a kept session armed, harmless while an Err aborts the
+  script and live once M42 keeps an `Exec` after an error.
