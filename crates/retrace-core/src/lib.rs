@@ -1508,10 +1508,12 @@ impl ReplaySession {
     /// M41 §3a: then settle the schedule, so that at the position this event leads to, (n, 0),
     /// `pc()` and `current_thread()` name the instruction the next step retires and the thread that
     /// retires it — after a blocking event, the INCOMING thread. Ordered AFTER the `WatchSyscall`
-    /// tag is taken, because a syscall's write belongs to the thread that issued it. Every
-    /// event-consuming dispatch path returns through here (M41 spec §3a), and each arm's
-    /// `verify_thread` has already run, so the divergence oracle still compares the issuing
-    /// thread. Record never calls this; its `run()` makes the same switch on entry.
+    /// tag is taken, because a syscall's write belongs to the thread that issued it. Every dispatch
+    /// path that reports `Event` or `WatchSyscall` returns through here (M41 spec §3a) — the
+    /// terminal `Exit`/`Signal`/`Crash` arms consume an event too but report `Exited` directly,
+    /// never settling here — and each arm's `verify_thread` has already run, so the divergence
+    /// oracle still compares the issuing thread. Record never calls this; its `run()` makes the
+    /// same switch on entry.
     fn finish_event(&mut self) -> Result<Advance, Divergence> {
         self.idx += 1;
         let adv = match self.b.take_syscall_watch_hit() {
@@ -2241,10 +2243,10 @@ impl ReplaySession {
                                 }
                                 // M14 Task 9: same posture as record's mirror, and the same
                                 // deliberate ABSENCE — no `set_x0_err_and_return`. The thread is
-                                // `Exited`, so the next `Box_::run()` reschedules instead of
-                                // resuming it. Task 8's fail-loud panic stood here only until a
-                                // scheduler existed to switch away; it now does, below the trace,
-                                // where record and replay reach it identically.
+                                // `Exited`, so it is rescheduled instead of resumed: record's
+                                // `Box_::run()` does that on its next entry, but replay reaches
+                                // this arm through `finish_event` below (M41 §3a), which settles it
+                                // right here — both below the trace, record and replay identically.
                                 return self.finish_event();
                             }
                             // M14 Task 8: the record arm's mirror (symmetry rule 1). Record and
@@ -2393,8 +2395,10 @@ impl ReplaySession {
                             // chain, so every mirror in the chain inherits the thread oracle. A
                             // second call would re-ask an identical question about an identical
                             // landmark — neither `guest_sem_wait` nor `guest_sem_signal` switches
-                            // the vCPU (the switch happens below the trace, in `Box_::run()`), so
-                            // `current_thread()` is unchanged across both.
+                            // the vCPU (the switch happens below the trace: on record's next
+                            // `Box_::run()`, on replay in `finish_event`, M41 §3a — neither has run
+                            // yet at this point in the arm), so `current_thread()` is unchanged
+                            // across both.
                             if num == retrace_arch::MACH_SEMAPHORE_WAIT {
                                 let (rc, rerr) = (self.b.guest_sem_wait(args), false);
                                 // `err` is bound and compared, not skipped — the same shape as the
@@ -2789,9 +2793,11 @@ impl ReplaySession {
         }
     }
     /// The landmark anchor: ELR_EL1 at a syscall trap (the last trap's return address), matching
-    /// `Box_::position()`. Coincides with `pc()` at a landmark boundary (K=0) reached through a
-    /// non-blocking event; after a blocking one (M41 §3a) the vCPU holds the incoming thread, and
-    /// this is that thread's own saved ELR.
+    /// `Box_::position()`. Coincides with `pc()` only at a landmark boundary (K=0); after a
+    /// blocking event (M41 §3a) the vCPU holds the incoming thread, and this is that thread's own
+    /// saved ELR. Not sufficient on its own: a caught `SignalDelivery` is a non-blocking event that
+    /// also breaks the coincidence at its `(n, 0)` — `deliver_signal_to` moves `regs.pc` to the
+    /// handler but leaves the target thread's saved ELR at the interrupted pc.
     pub fn position(&self) -> u64 { self.b.position() }
     /// The live instruction pointer (reg PC) — the true position at an arbitrary (N, K) coordinate,
     /// matching `Box_::pc()`. This differs from `position()` (ELR_EL1, a syscall's return address):

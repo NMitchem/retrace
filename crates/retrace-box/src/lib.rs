@@ -2650,7 +2650,8 @@ impl Box_ {
         self.settle_schedule();
         // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
         // already happened before the first instruction of this window retires. Pin it: after this
-        // point, no path may change `current` until the next run()/step() entry.
+        // point, no path may change `current` until this window's trap is consumed, where
+        // replay's `finish_event` (M41 §3a) or the next run()/step() entry settles it.
         debug_assert!(!self.threads.needs_reschedule(),
             "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
              would make position->thread ambiguous");
@@ -2777,7 +2778,8 @@ impl Box_ {
         self.settle_schedule();
         // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
         // already happened before the first instruction of this window retires. Pin it: after this
-        // point, no path may change `current` until the next run()/step() entry.
+        // point, no path may change `current` until this window's trap is consumed, where
+        // replay's `finish_event` (M41 §3a) or the next run()/step() entry settles it.
         debug_assert!(!self.threads.needs_reschedule(),
             "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
              would make position->thread ambiguous");
