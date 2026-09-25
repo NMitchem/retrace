@@ -444,8 +444,8 @@ impl<'a> Exec<'a> {
         self.reseek(n - 1, len) // phase Bp: an arrival
     }
 
-    /// M43 §3f: the armed breakpoints and watches, for the server's slot accounting.
-    pub(crate) fn breakpoints(&self) -> &[u64] { &self.breakpoints }
+    /// M43 §3f: the armed watches, `(addr, len)`, so the server can tell a re-inserted `Z2` from a
+    /// conflicting one.
     pub(crate) fn watches(&self) -> impl Iterator<Item = (u64, u64)> + '_ { self.watches.iter().map(|&(a, l, _)| (a, l)) }
 
     /// Window length of landmark `n`, memoized in the checkpoint cache (measured on a transient
@@ -1359,6 +1359,7 @@ mod tests {
         assert!(err.contains("diverged"), "{err}");
         assert_ne!(ex.sess().pc(), pc0, "the failed scan left its session moved");
         ex.recover(at).unwrap();
+        // Cannot fail: a failed scan never assigns the cursor (t3 control C3b). The pc below carries it.
         assert_eq!(ex.cursor(), at);
         assert_eq!(ex.sess().pc(), pc0, "the session is back at the saved cursor");
         assert!(matches!(ex.cmd_stepi(1, &mut sink).unwrap(), Halt::Stepped));
