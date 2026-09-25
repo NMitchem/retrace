@@ -12819,7 +12819,9 @@ The close then re-ran, with `--nocapture`, every target that can skip:
 - `symbolops_e2e`
 - `sysbin_e2e`
 
-It used `skipcheck.sh` in the ledger directory, at the fix wave's tree. Every one exited 0, with the
+Seven ran through `skipcheck.sh` in the ledger directory, at the fix wave's tree. `fallthrough_e2e`,
+whose `SKIPPING` a first `SKIPPED` search missed, ran by the same invocation on its own
+(`skipcheck-fallthrough_e2e.log`). The script now lists all eight. Every one exited 0, with the
 same passed / failed / ignored as in the gate: 1/0/7, 1/0/0, 2/0/0, 1/0/0, 1/0/0, 2/0/0, 5/0/0 and
 3/0/0 respectively. **No log carries a `SKIPP` line.**
 
