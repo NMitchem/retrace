@@ -258,8 +258,14 @@ impl<'a> Server<'a> {
             let t = match pick { Some(r) => r - 1, None => s.ex.sess().current_thread() };
             match s.ex.step_thread(t, &mut std::io::sink())? {
                 Halt::Stepped => Ok(s.stop(StopKind::Trace, None)),
-                // Reported on the running thread, the measured-safe form (t0 L7).
-                Halt::Refused(why) => Ok(s.stop(StopKind::Exception { signal: 5, text: why }, None)),
+                // Reported on the thread lldb stepped, t0 L7's measured-safe form
+                // (`l7_stepfail3_desc`). Named on the running thread instead, lldb-2100 re-steps
+                // forever (Task 4's measurement: 80,103 × `vCont;s:2` in 60 s). A thread that does
+                // not exist, or has exited, cannot be named: the running one is.
+                Halt::Refused(why) => {
+                    let on = s.live_threads().iter().any(|&(r, _)| r == t + 1).then_some(t);
+                    Ok(s.stop(StopKind::Exception { signal: 5, text: why }, on))
+                }
                 Halt::WatchStepped { watched } => Ok(s.stop(StopKind::Watch(watched), None)),
                 other => s.reply_forward(other),
             }

@@ -430,6 +430,26 @@ fn a_step_over_a_blocking_syscall_ends_when_the_stepped_thread_runs_again() {
 }
 
 #[test]
+fn a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread() {
+    // Spec R7's fallback (Task 4 Step 8): lldb-2100 re-steps the stepped thread forever when the
+    // step is answered by another thread's `reason:breakpoint` (307,016 × `vCont;s:1` in 60 s). So
+    // the run until the stepped thread resumes arms nothing. The breakpoint sits where the other
+    // thread runs first, at (n + 1, 0); R7 as first written reported it there.
+    let (tr, n, t) = threadrust_block();
+    let svc = trap_pc(tr, n);
+    let b = retrace_core::seek(tr, n + 1, 0).unwrap().pc();
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    continue_to_window(&mut c, n);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    assert_eq!(c.send(&format!("Z0,{b:x},4")), "OK");
+    let s = c.send(&format!("vCont;s:{:x}", t + 1));
+    assert!(s.contains("reason:trace;"), "not another thread's breakpoint: {s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "{s}");
+    assert_eq!(pc_of(&s), svc + 4);
+}
+
+#[test]
 fn a_step_on_a_thread_that_is_not_running_is_refused_in_place() {
     // §3d rule 1: a non-moving exception stop, measured safe (t0 L7).
     let (tr, n, t) = threadrust_block();
@@ -442,6 +462,9 @@ fn a_step_on_a_thread_that_is_not_running_is_refused_in_place() {
     let s = c.send(&format!("vCont;s:{other:x}"));
     assert!(s.contains("reason:exception;"), "{s}");
     assert!(r::description(&s).unwrap().contains("cannot step thread"), "{s}");
+    // On the stepped thread (t0 L7). Named on the running one, lldb re-steps forever (Task 4's
+    // measurement).
+    assert_eq!(r::key(&s, "thread"), Some(format!("{other:x}").as_str()), "{s}");
     assert_eq!(c.where_(), before);
 }
 
