@@ -128,7 +128,7 @@ keeps always matches the position it reported:
 |---|---|---|---|---|
 | forward breakpoint | `(n, k, Bp)` | — | the breakpoint | `reason:breakpoint` |
 | forward store watch | `(n, k, Watch)` | steps it: `(n, k+1, Bp)` | past the store | `watch:<watched>` |
-| forward syscall watch | `(n, 0, Sys)` | — | `(n, 0)` | `watch:<watched>` on the writing thread |
+| forward syscall watch | `(n, 0, Sys)` | `(n, 0, Bp)` | `(n, 0)` | `watch:<watched>` on the writing thread |
 | reverse breakpoint | `(n, k, Bp)` | — | the breakpoint | `reason:breakpoint` |
 | reverse store watch | `(n, k, Watch)` | `(n, k, Bp)` | the store | `watch:<watched>` |
 | reverse syscall watch | `(n, 0, Sys)` | `(n−1, len(n−1), Bp)` | the trap | `watch:<watched>` |
@@ -144,6 +144,13 @@ Why each re-park is right, under M41's order `Sys < Bp < Watch`:
   store"), the reply is `reason:exception;description:<"the watched store at … did not retire: …">`
   at the store. The cursor stays `(n, k, Watch)`, so the next `c` crosses to the fault through
   `Exec`'s own finish.
+- **A forward syscall watch becomes `(n, 0, Bp)`:** the forward store watch's rule, for the same
+  reason. `Exec` parks it at `(n, 0, Sys)`, and a reverse `c -R` from there does not find the
+  write, because it is not strictly before the cursor: lldb would run past the write it just
+  reported. From `(n, 0, Bp)` the write at `(n, 0, Sys)` is behind the cursor. The cost: a
+  breakpoint at the pc that `(n, 0)` resumes is then not reported by the next forward `c`, which
+  is R4's rule for the pc you stand on. That pc belongs to the thread that runs next, which after
+  a blocking syscall is not the writer that lldb shows (plan pre-flight, 2026-09-25).
 - **A reverse store watch becomes `(n, k, Bp)`:** from there a forward `c` must report the same
   store again, because the thread is before it. `(n, k, Watch)` would step over it silently,
   `Exec`'s rule for a cursor ON a hit. A further `c -R` does not re-report it: `(n, k, Watch)` is
@@ -349,6 +356,17 @@ architecture, so Task 1 measures it first on a new fixture:
   asserts the divergence, naming (b), instead of the crash.
 
 Which of (a) or (b) holds is Task 1's first measurement, recorded in the ledger either way.
+
+**Measured at plan time (2026-09-25): (a).** The fixture (`llscedge.s`, as the plan gives it)
+records to `guest crashed: pc=0x1000003a0 far=0x1000003b0 esr=0x9200004f` (EC `0x24`, WnR, DFSC
+`0x0f`, a permission fault), exit 139. Unfixed, the debugger reproduces both M42 panics on it:
+`stepi 3` from the start panics at `lib.rs:2916` ("its base is also a destination"), and stepping
+the `stxr` from `(2, 3)` panics at `lib.rs:2976` ("is not EL0-writable"). A temporary patch of
+fix 3 alone (reverted) made that step fail with `guest crashed at step 0/1: pc=0x1000003a0
+far=0x1000003b0`, the recorded fault, and a `continue` from `(2, 3)` then reached
+`guest crashed: … esr=0x9200004f` with no divergence. The core raises the fault for a
+store-exclusive whose monitor is lost. The step test asserts the crash, and (b)'s branch is not
+built.
 
 **F-5:** the comment at `run()`'s prologue (retrace-box `lib.rs`, about lines 2700–2702) says "a
 shadow that outlives it belongs to a load whose sequence a branch left". F1 (M42) measured a
