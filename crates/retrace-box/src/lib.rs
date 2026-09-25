@@ -5851,6 +5851,37 @@ impl Box_ {
         Some(s)
     }
 
+    /// M43 §3g: thread `tid`'s full register context, FP included. The current thread's comes off
+    /// the live vCPU, because the table's slot is stale between switches (`dbg_regs_of`'s own split).
+    /// Any other thread's is the saved one. None for an id past the table.
+    pub fn thread_ctx(&self, tid: usize) -> Option<thread::ThreadCtx> {
+        if tid >= self.threads.len() { return None; }
+        if tid == self.threads.current() { return Some(self.save_ctx()); }
+        Some(self.threads.ctx_of(tid).clone())
+    }
+
+    /// M43 §3g: the readable prefix of `[va, va + len)`. Each 16 KiB page goes through the guest's
+    /// own stage-1 walk, as `insn_at` reads. It stops at the first byte that does not translate or
+    /// read, so lldb's 0x200-byte reads that straddle a mapping's end get the mapped part (t0 L8).
+    /// Never panics: an address past 47 bits translates to None, and the arithmetic saturates.
+    pub fn read_va_prefix(&self, va: u64, len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len.min(1 << 16));
+        let mut a = va;
+        while out.len() < len {
+            let Some(ipa) = self.va_to_ipa(a) else { break };
+            let page_end = (a | (GRANULE as u64 - 1)).saturating_add(1);
+            let n = ((page_end - a) as usize).min(len - out.len());
+            if ipa.checked_add(n as u64).is_none() { break; }
+            match self.read_guest_checked(ipa, n) {
+                Some(b) => out.extend_from_slice(&b),
+                None => break,
+            }
+            a = a.saturating_add(n as u64);
+            if a == u64::MAX { break; }
+        }
+        out
+    }
+
     /// Bring-up diagnostic: walk the guest AArch64 frame-pointer chain from x29, returning up to
     /// `max` return addresses (PAC bits stripped by masking to the 36-bit IPA space). Return
     /// addresses are `pacibsp`-signed on the stack; masking recovers the raw VA (dyld ~0x1_4000_0000).

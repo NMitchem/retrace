@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 
 /// M41: the debugger's hit oracle and the checks built on it (see `hits.rs`).
 pub mod hits;
+/// M43: a minimal gdb-remote client for `retrace gdbserver` (see `rsp.rs`).
+pub mod rsp;
 
 // `.cargo/config.toml`'s `runner` ad-hoc codesigns the binary cargo invokes
 // directly (the test harness) with the hypervisor entitlement, but CARGO_BIN_EXE_retrace

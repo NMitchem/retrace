@@ -2,6 +2,8 @@ use std::path::Path;
 use std::process::exit;
 
 mod debug;
+mod rsp;
+mod gdbserver;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -126,6 +128,19 @@ fn main() {
                 _ => { eprintln!("usage: retrace debug <trace> --script '<cmds>'"); exit(2); }
             }
         }
-        _ => { eprintln!("usage: retrace <record <guest> -o <trace> | record-dyn <exe> -o <trace> [-- <guest args…>] | replay <trace> | debug <trace> --script '…'>"); exit(2); }
+        Some("gdbserver") => {
+            // retrace gdbserver <trace> [--port <n>] [--exe <path>] (M43): a gdb-remote server for
+            // lldb over one recording. Usage errors exit 2 before any socket or VM work.
+            let opt = |name: &str| a.iter().position(|s| s == name).and_then(|i| a.get(i + 1));
+            let port = match opt("--port") { None => Some(0u16), Some(p) => p.parse::<u16>().ok() };
+            match (a.get(2).filter(|t| !t.starts_with("--")), port) {
+                (Some(trace), Some(port)) => match gdbserver::serve(Path::new(trace), port, opt("--exe").cloned()) {
+                    Ok(()) => exit(0),
+                    Err(e) => { eprintln!("GDBSERVER ERROR: {e}"); exit(5); }
+                },
+                _ => { eprintln!("usage: retrace gdbserver <trace> [--port <n>] [--exe <path>]"); exit(2); }
+            }
+        }
+        _ => { eprintln!("usage: retrace <record <guest> -o <trace> | record-dyn <exe> -o <trace> [-- <guest args…>] | replay <trace> | debug <trace> --script '…' | gdbserver <trace> [--port <n>] [--exe <path>]>"); exit(2); }
     }
 }
