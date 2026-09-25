@@ -557,4 +557,85 @@ M41 closed at **666 / 0 / 9 over 141**. Expected additions:
 
 ## 10. Outcome
 
-Filled at the close (Task 7).
+**Closed 2026-09-24, on branch `m42-llsc`.** Gate: **746 passed / 0 failed / 9 ignored across 142
+test binaries**, on `48f7f93`, chunked as CLAUDE.md requires, every chunk exit 0 and clippy clean.
+It was predicted from source, file by file, before it ran, and matched in every chunk: `ws` 178
+over 26, `box` 320 over 41, the 74 per-target e2e invocations 231 + 9 ignored over 74, `--bins` 17
+over 1. The status log's M42 section holds the per-file reconciliation against M41's 666 / 0 / 9
+over 141. `TRACE_MAGIC` did not move (`crates/retrace-trace` has no diff), no dispatch arm changed,
+`verify_thread` is still at seven call sites, and no `#[ignore]` was added or removed. Every named
+regression in §4's table was RED before any mechanism landed (Task 2's run, on a tree whose
+`retrace-box` and `retrace-core` were `1d95a93`'s) and is green, with the transcripts in the
+ledger. Every clear-rule control was shown able to fail. Every oracle chain on every llsc arming
+passes, and Q3 on `threadrust` passes. The audit found no existing test whose output moved.
+
+**What went green where.**
+
+| Task | Commits | `llsc_e2e` after it | What turned green |
+|---|---|---|---|
+| 1 | `898bf06` | — | the decoder, 5 tests |
+| 2 | `3f17d66`, `b7de462` | 4 of 26 | the recording test and the three controls; the 22 REDs each for its t0 reason |
+| 3 | `6bfa637`, `11d90be` | 23 of 33 | M2, M3a–e, M3d′, both M7s, the exit window, (h), the life-cycle tests, **and both forward M4s**; the terminal-park livelock cured |
+| 4 | `a2365bf` | 30 of 36 | the four forward M5/M6s and the three oracle ground-truth lists |
+| 5 | `0e0e651`, `74b83c3`, `e9e8460` | 41 of 45, then 46 of 46 | the backward M4–M6s, the inference tests and every oracle chain |
+| 6 | `48f7f93` | 46 of 46 | Q3 flipped on `threadrust`; the oracle starts at landmark 1 (22.95 s CPU, inside 120 s), so M41's R13 is reverted (R7) |
+
+**CPU (§6).** `cpython_crash_e2e` 40.47 s before (Task 2) and **41.23 s** after, user + sys:
+**+1.9 %**, inside the 10 %. `hitorder_e2e` 40.90 s over 22 tests before and **64.23 s** over 23
+after, +57 %, which is Task 6's two changes: its new Q3 test (18.26 s alone) and the
+`threadrust` oracle now enumerating from landmark 1 (23.79 s alone). The status log has the
+decomposition.
+
+**Rulings made in execution** (the ledger has each with its cost if wrong): P1 and P2 at pre-flight;
+T2-a (the terminal-park livelock is the named bug), T2-b (three plan command defects), T2-c (`m3e`'s
+impossible `where` index), T3-pre (controls run on a committed tree), T3-a (P1 corrected for
+breakpoints), T3-b (C1's row, and C1x), T3-c (the EL1-park clear test, the EL0 assert, the record
+assert naming the exit), T4-a (the order-swap control's shape), T5-a (condition 3 amended and
+condition 5 added; §3d above), T5-b (the decision made a pure function, one witness per
+condition) and T6-a (a commit trailer).
+
+**Predictions that were wrong, and by how much.**
+
+1. **Forward M4 went green at Task 3, not at Task 4 or 5.** §5 said M4–M6 stay RED after Task 3,
+   and pre-flight Ruling P1 put the forward M4–M6s at Task 4 or 5, because a forward `continue`
+   stops natively at the store. That holds for watches and not for breakpoints. The breakpoint
+   resolver reaches the stop's K by stepping with no breakpoint armed, and `continue` resumes from
+   that stepped position, so no native stop needs inferring (T3-a). Two of the six forward tests
+   went green one task early.
+2. **C1's row.** The plan predicted that deleting `note_exit`'s body turns both `control_f` and
+   `control_g` red. `control_g` stayed green, because §3e's prologue drops the shadow after its
+   loop: a third syscall-class clear, which the row did not count (T3-b). C1x, which deletes that
+   drop as well, turned it red at landmark 8. The same overlap meant two Task 3 life-cycle tests
+   could not fail. The review found that, and the EL1-park test fixed it (T3-c).
+3. **Condition 3.** §3d said the destination check "converts most wrong inferences into no
+   inference". It also converted the dominant right one. In an in-place retry loop the
+   destination holds the new value at the store, so the check rejects it by design. At `0e0e651`
+   that left 4 of 45 `llsc_e2e` tests red: backward M4 and M5 on (b), E3's watch-stop inference,
+   and `oracle_a1_chains`. And 2 of the census's 7 real sequences (libsystem_kernel `__vfork`, #3
+   and #4) would have inferred nothing. Amended by T5-a.
+4. **C6's witness moved to the pure test.** C6 (delete condition 1) was to turn the (f) re-entry
+   session test red. At `0e0e651` it did, though at its `dbg_excl()` assert, earlier than the
+   predicted divergence at landmark 6. After T5-a it stayed **green**, because (f)'s `mrs` also
+   fails the new condition 5, so the session test catches only both deletions together (C6c). The
+   sole witness is now `infer_condition_1_an_entry_inside_l_to_p_infers_nothing` (D1), on the pure
+   `excl::infer` that T5-b extracted.
+5. **The order-swap control's shape.** Predicted: the watch reported before the breakpoint at
+   `(2, 7)`. Measured: the breakpoint hits vanish, because the oracle clears breakpoints when it
+   consumes a watch stop. The control is still RED, so the order is shown load-bearing (T4-a).
+6. **Plan and brief text.** `m3e`'s second `where` could never go green (T2-c). Task 5's brief said
+   four inference tests expect a shadow where three did; a fourth came with T5-a's session test.
+7. **The gate.** §9 predicted ≈ 708 / 0 / 9 over 142. The binary count was right, and the test
+   count was **short by 38**:
+   - `llsc_e2e` holds 46 against ~22 (+24): t0's regressions are split by direction, the
+     life-cycle tests were not counted, and each oracle arming's list and chains are separate tests;
+   - `excl.rs` holds 26 against ~8 validator tests (+18): the inference's 3 + 4 + 10 unit tests came
+     with Task 5 and its rulings;
+   - the decoder has 5 tests against ~8 (−3), fewer tests over the same 30 words;
+   - the ~3 session-level box tests became two, `step` and the parity tier (−1), and the rest
+     landed in `llsc_e2e`;
+   - `hitorder_e2e` +1, as predicted.
+
+**Held as predicted.** No existing test's output moved (§4, §7). (e), (f) and (g) failed natively,
+and `cntvct_el0` trapped, so Task 2's fallback for (f) was unused and no halt rule fired. `switch_to_thread`'s clear
+is unobservable, belt and braces as §3a says, so it has no control. The oracle from landmark 1 fit
+the budget (R7). `cpython_crash_e2e`'s CPU stayed inside 10 % (§6).

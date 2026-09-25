@@ -11986,3 +11986,426 @@ spec §9's ≈ 663 / 0 / 9 over 141 and the plan's 664 (see the gate); the plan'
 cursor on a zero-count step (R17 I2); its Task 5 "14 → 16" for `--bins` (17); spec §3b's
 "a terminal park" among the arrivals that take phase `Bp` (R18: a terminal takes `Watch`); and the
 close's own 665 / 0 / 9, which the fix wave's sixth arming made 666.
+
+## Status: M42-llsc — a debugger stop inside an exclusive pair keeps the store the recording made
+
+M41 found, while building its hit oracle, that the debugger could not single-step or stop inside an
+AArch64 exclusive pair. Every VM exit between a load-exclusive (`ldxr`, `ldaxr`, `ldxp`, …) and its
+store-exclusive clears the core's exclusive monitor, so the store fails. Record never makes that
+exit, so record's store succeeded, and the replay under the debugger then runs a path the recording
+never ran. M41 measured it once, on `threadrust`, as a loud divergence; it started its oracle past
+the pairs (R13) and put the limit first on the owed list (R14). M42's t0 measured what it costs on a
+repo-shaped fixture, and most of it was not loud: hangs, phantom watch hits that exit 0, and a
+`reverse-continue` that answers `no earlier hit` when there is one. M42 gives `Box_` a **shadow of
+the exclusive monitor**, below the trace, and emulates the store-exclusive exactly when retrace's
+own exit lost the monitor. It is the lldb seam's precondition: lldb single-steps and plants
+breakpoints freely, and M43 puts it in front of this debugger.
+
+The milestone's numbers: **eight** t0 measurements (M1–M8), whose failures are now named
+regressions that were RED before the mechanism landed and are green; **one** new repo fixture
+(`crates/retrace-guest/asm/llsc.s`, nine LL/SC shapes (a)–(i)) and **one** new test binary
+(`llsc_e2e`, 46 tests); **+80** `#[test]` attributes over six files, none removed; **one** new
+`retrace-box` module (`excl.rs`: the pure store validator, the backward scan and the inference
+decision, 26 unit tests) and **one** `Box_` field (`excl`, declared last), which `BoxState` carries;
+**zero** dispatch arms changed (`record_box` gains one assert after `b.run()`, plain `replay()` one
+after each `advance()`), `verify_thread` **7 → 7**, `TRACE_MAGIC` unmoved at `RT\x00\x0a`
+(`crates/retrace-trace` has no diff); **zero** new `#[ignore]` and **zero** un-parked; the spec's
+eight rulings, the plan's four (R9–R12), two pre-flight rulings (P1, P2) and eleven execution
+rulings (T2-a/b/c, T3-pre, T3-a/b/c, T4-a, T5-a/b, T6-a); **nineteen** commits before this close:
+the spec with its t0 companion (`7ccae96`), the plan (`340e8ed`) and its pre-flight (`e86155a`),
+six plan or spec amendments made in execution (`6cc1397`, `c5b6d47`, `2f55fd6`, `7bb407e`,
+`2b8a7aa`, `7069147`), and ten task commits (`898bf06`; `3f17d66` + `b7de462`; `6bfa637` +
+`11d90be`; `a2365bf`; `0e0e651` + `74b83c3` + `e9e8460`; `48f7f93`), four of them review or
+ruling fix rounds. Gate: **746 passed / 0 failed / 9 ignored across 142 test binaries**, each
+chunk predicted from source before it ran, and each matched.
+
+### What t0 measured
+
+The companion (`docs/superpowers/specs/2026-09-24-retrace-m42-llsc-measurements.md`) is the
+record: `retrace debug --script` transcripts of `1d95a93` on a scratch fixture of four LL/SC shapes,
+each publishing its outcome in the arguments of the syscall that ends its window, so the divergence
+oracle sees a lost store. The shapes: (a) discard-status, dyld's `getpid` words exactly (`ldxr w10,
+[x9]; cbnz w10, …; stxr wzr, w0, [x9]`); (b) a retry loop, three increments; (c) a CAS; (d) an
+`ldxp`/`stxp` pair. Every CLI run was bounded at 60 s.
+
+- **M1.** Native record and replay ×2 are clean.
+- **M2.** `stepi` past (a)'s `ldxr`, then `continue`: **diverged**, an extra `getpid` at landmark 1.
+- **M3.** (b) under stepping: `stepi 1000000` **livelocks** (the counter never moves); `continue`
+  to a breakpoint after the loop, `reverse-continue` to it, and `reverse-stepi` into window 2 all
+  **hang**; and a `reverse-continue` whose phase 2 steps window 2 answers **`no earlier hit`** where
+  the answer is `(2, 25)` (M3e), a silent wrong answer.
+- **M4.** `break` on (a)'s `stxr`: diverged, both directions. `break` on (b)'s `stlxr`: **phantom
+  hits** forward, a hang backward.
+- **M5, M6.** `watch` on (b)'s, (c)'s or (d)'s cell: phantom hits forward, **exit 0**, and a hang
+  backward. (a)'s cell: diverged both ways.
+- **M7.** `stepi K; continue` at every K in each pair: every K from LDX+1 to STX+1 diverges; the
+  LDX's own K passes.
+- **M8, taken while writing the spec.** The step exit reports a stepped load-exclusive: the retire
+  of `ldxr`, `ldaxr` (twice) and `ldxp` reports `ESR = 0xcb000062`, every other retire
+  `0xcb000022`. ISS.ISV (bit 24) is always 1 and ISS.EX (bit 6) is 1 exactly on a load-exclusive,
+  the architecture's own syndrome for this problem, so the shadow can be set without decoding
+  every stepped instruction (spec R2).
+
+Also measured: a watchpoint fires even on a store-exclusive that will fail (M5, pre-retire at the
+`stlxr`); and window 1's length probes as 9, not 16, once stepping has broken (a)'s pair.
+
+### The decoder (Task 1, `898bf06`)
+
+`retrace_arch::decode_excl` returns `ExclInsn::{Load, Store, Clrex}` with their fields for every
+width of `LDXR`/`LDAXR`/`LDXP`/`LDAXP`/`STXR`/`STLXR`/`STXP`/`STLXP` and `CLREX` at any CRm, and
+`None` for its neighbours (`CASP` `08207c82`, `LDAR`/`STLR`, `CAS`, plain loads, `NOP`).
+`is_fallthrough_barrier` is true for the unconditional transfers (`B`/`BL`, branch-to-register with
+its PAC forms, exception generation). Five tests over 30 words, t0's among them, each hand-decoded
+against the masks in the controller's pre-flight; `retrace-arch` lib 39 → 44.
+
+### The fixture and the REDs (Task 2, `3f17d66` + `b7de462`)
+
+`llsc.s` keeps t0's four shapes verbatim, and `otool -tv` showed its first 76 instructions
+byte-identical to t0's scratch binary, so every t0 coordinate holds for windows 1–4. It appends
+(e) `ldxr; clrex; stxr`, (f) `ldxr; mrs x6, cntvct_el0; stxr`, (g) `ldxr; svc getpid; stxr` with
+the store in the next window, (h) (a)'s shape on the filled cell, so the `cbnz` leaves an LDX with no
+STX, and (i) a one-pass retry loop in the exit window, which puts a pair on the terminal park's
+single-stepped window. Window lengths 16/33/19/16/14/14/5/9/13/10. **The halt check was clear**:
+the recording shows (e), (f) and (g) each failing their store natively (`x3 = 1`), and
+`cntvct_el0` traps on this host, so (f) has an exit between its halves and its fallback was not
+needed. `util::debug_bounded` runs the CLI with a kill bound (it polls with `thread::sleep` and
+counts iterations, since clippy bans a clock, and writes to temp files, never pipes); `hits::debug`
+now goes through it at 600 s.
+
+**The RED run: 26 tests, 4 green (the recording test and the three controls), 22 red, each for an
+LL/SC reason** (`t2-red.log`): M2 exit 5 with t0's extra `getpid`; M3a parked on `b_ldx` with the
+counter at 0; M3b/M3c/M3d killed at the 60 s bound; M3d′ parked at t0's `(1, 9)`; M3e `no earlier
+hit`; M4 forward on (b) resolving `(2, 7), (2, 12), (2, 17), (2, 22)` where the recording has
+`(2, 7), (2, 14), (2, 21)`; M5 four phantom hits for three; M6 two for one; M7 diverging at
+`(1, 4)`, LDX+1; the exit window diverging at `(10, 5)` with `exit 1` against the recorded 0.
+CPU baselines, before any change: `cpython_crash_e2e` **40.47 s** (40.00 user + 0.47 sys),
+`hitorder_e2e` **40.90 s** (40.24 + 0.66).
+
+T2-a: every backward test and every `where` after an exit first **hung in the terminal park**,
+which single-steps window 10's retry loop, so (a)'s backward symptom changed from t0's divergence to
+a hang; ruled the named bug, Task 3's to fix. T2-b: the plan's commands put `--no-fail-fast` after
+`--` (libtest rejects it), echoed the exit code in a separate shell (always 0), and called
+`/usr/bin/time` directly (the worktree guard refuses it); corrected in the plan (`6cc1397`). T2-c
+(the review's one Important): `m3e` asserted `wheres[1] == (2, 30)`, but `wheres[1]` is the `where`
+after `reverse-continue`, which re-seeks to its hit, so the test could never go green; it now
+checks `wheres[0] == (2, 30)` and `wheres[1] == (2, 25)` (`b7de462`, plan `c5b6d47`).
+
+### The shadow, the emulated store, and `run()` inside a pair (Task 3, `6bfa637` + `11d90be`)
+
+`Box_::excl` holds the marked VA (top byte stripped: `TCR_EL1` sets TBI0 and `va_to_ipa` does not
+strip), the element size, pair-ness, the loaded bytes and how it was set (`Stepped` or
+`Inferred`). `run_one_for_step`'s EL0 retire sets it when the syndrome has ISV and EX, after a
+decoder cross-check that fails loud. One classifier, `note_exit(debug)`, is called from every exit
+arm of `run()` and `run_one_for_step()`: only the EL0 step retire, a breakpoint and a watchpoint
+leave the shadow; every other exit clears it, as its ERET clears the hardware monitor. `clrex`,
+the emulation and `switch_to_thread` also clear it. `step()` at a store-exclusive with the shadow
+set runs the pure validator `excl::plan_stx` (address, size and pair against the load, alignment,
+status-register aliasing, the target bytes unchanged since the load, an EL0-writable stage-1 leaf;
+each refusal a panic naming its check), then writes the bytes through the host mapping, sets
+`Ws = 0` unless it is WZR, advances pc and clears the shadow: one `Stop::Step`, so K is exact.
+`run()` entered with the shadow set steps the sequence to its end first, bounded at 16 steps (plan
+R10), and drops the shadow after. `BoxState` carries it and `from_checkpoint` restores it;
+`checkpointparity.rs` gains a mid-pair tier. `record_box` asserts the shadow clear after every
+`b.run()`, plain `replay()` after every `advance()`.
+
+**`llsc_e2e` 22 green of 32** (`t3-llsc-*.log`): M2, M3a–e, M3d′, both M7s, the exit window, and
+the life-cycle tests. **The terminal-park livelock was cured**: M2's final `where` at `(10, 10)`
+passes. The two **forward M4** tests went green too, which Ruling P1 had put at Task 4 or 5 (T3-a,
+below). The ten reds were the forward M5/M6 tests, on Task 3's deliberate "not yet raised (Task 4)"
+panic, and the backward M4–M6 tests, at a native stop with no shadow (Task 5's class).
+
+The controls, on the committed tree, each undone with `git checkout --`:
+
+| # | Deletion | Result |
+|---|---|---|
+| C1 | `note_exit`'s body | `control_f` **RED**: `(6, 4): diverged at landmark 6 … live (…, 0, 7, …) != recorded (…, 1, 0, …)`, the store landed. `control_g` stayed **green** (T3-b) |
+| C1x | C1 plus the prologue's drop after its loop | `control_g` **RED** at landmark 8: (g)'s store landed in window 8 |
+| C2 | the trapped-branch `note_exit(false)` in `run_one_for_step` | `control_f` **RED** at landmark 6; after the fix round, `the_syscall_trap_clears_the_shadow_before_the_trap_is_consumed` **RED** too (the shadow still set at the EL1 park) |
+| C3 | the `clrex` clear | `control_e` **RED** at landmark 5, and the life-cycle test (`clrex clears the shadow`) |
+| C4 | `from_checkpoint`'s `excl` restore | the box parity tier (`mid-pair: exclusive-monitor shadow (M42)`) and the session test both **RED** |
+| C5 | the §3e prologue loop | M2 **RED**: exit 5, `continue diverged at landmark 1`, t0's own M2 symptom |
+
+`switch_to_thread`'s clear has no control because it is unobservable: every switch follows a
+blocking syscall whose exit has already cleared the shadow. It is belt and braces, as §3a says.
+
+The review's one Important (T3-c): `a_syscall_between_the_halves_clears_the_shadow` and the
+branch-out test's last assert could not fail, since `run()`'s post-prologue drop clears the shadow
+first. The fix round (`11d90be`) added a test that observes the clear at the EL1 park, before any
+`advance()` (shown RED under C2, above), an assert in `step()` that a set shadow implies EL0, and
+the record assert now names the exit. T2-a's falsifier was met: after the park fix, four backward
+tests still hung, all at a native stop inside `reverse-continue`'s phase 1, Task 5's class.
+
+### The raised stops (Task 4, `a2365bf`)
+
+At an emulated store-exclusive, `raise_debug_stop` raises what the hardware would, in its order: a
+breakpoint armed at pc first (read back from the six `DBGBCR`/`DBGBVR` slots, since `Box_` keeps no
+breakpoint list; EC `0x30`), then a watch the access overlaps (EC `0x34`, `last_far` the lowest
+overlapped byte, plan R11). The shadow stays, nothing is written, and the caller clears what fired
+and steps again. **All four forward M5/M6 tests went green**, and so did the three oracle
+ground-truth lists (`oracle_a{1,2,3}_lists_every_hit_the_source_implies`), each pinned against the
+fixture source; `llsc_e2e` 30 of 36. **The order-swap control** (watch checked before breakpoint)
+turned `oracle_a1`'s list **RED**, though not in the predicted shape: the breakpoint hits at
+`(2, 7)`, `(2, 14)` and `(2, 21)` vanished rather than moving after the watch, because the oracle
+clears breakpoints when it consumes a watch stop (T4-a). The review found nothing.
+
+### Inference at native stops (Task 5, `0e0e651` + `74b83c3` + `e9e8460`)
+
+`run()` keeps `entry_pc`, the pc at each guest (re)entry. At a native breakpoint or watchpoint
+stop at `P` it scans back at most 16 instructions, never past `P`'s 16 KiB page, stopping at a
+store-exclusive, `clrex`, unconditional branch or exception-generating instruction; the first
+load-exclusive found, at `L`, sets the shadow (`Inferred`) only if every §3d condition holds.
+
+**`0e0e651`, as briefed: 41 of 45.** The four reds were all at the in-place retry store: backward
+M4 and M5 on (b), the watch-stop inference test, and `oracle_a1_chains` (which also arms `i_stx`),
+killed at its 600 s bound. A probe in `infer_excl` showed condition 3, "the destination registers still
+equal the bytes at the VA", failing alone at (b)'s `stlxr`: in `ldaxr x1; add x1, x1, #1; stlxr w2,
+x1`, x1 holds the new value at the store. It is not fixture-only: `dyld_info -disassemble` of
+libsystem_kernel's `__vfork` shows census sequences #3 and #4 rewriting `w10` between the halves.
+**Ruling T5-a** amended the spec (`2b8a7aa`): condition 3 checks only the destinations no
+instruction in `(L, P)` writes, and a new condition 5 requires every instruction in `(L, P)` to be
+a data-processing instruction (it writes at most its `Rd`) or a conditional branch, with no `Rd`
+equal to the base (any `Rd` of 31 for an SP base); anything else infers nothing. The implementer's
+measured experiment was not adopted as it stood, because it let instructions of unknown effect
+(a load with writeback, an `mrs`) through. `74b83c3`: **46 of 46**, the three chains finishing in
+about a second where `oracle_a1_chains` had hit the 600 s bound.
+Controls on it: C6 (delete condition 1) stayed **green**, because (f)'s `mrs` also fails condition
+5; C6b (condition 5's unknown-effect refusal disabled) green; C6c (both) **RED**; C7 (condition 3
+unamended) **RED**, the pre-ruling failure; C8 (the base-written refusal deleted) green, no witness.
+
+**Ruling T5-b** extracted the decision into a pure `excl::infer(words, p, entry_pc, data, base,
+read)` with ten unit tests on the fixture's own words (`e9e8460`). Each condition deleted alone
+turns a test **RED**:
+
+| # | Deletion in `excl::infer` | RED |
+|---|---|---|
+| D1 | condition 1, the entry inside `(L, P]` | `infer_condition_1_an_entry_inside_l_to_p_infers_nothing` |
+| D2 | condition 2, the base aliasing a destination | `infer_condition_2_…` |
+| D3 | condition 3 | `infer_condition_3_…` |
+| D3a | condition 3's amendment only | `infer_condition_3_…` and `infer_positive_the_fixtures_stores_infer_their_shadow` |
+| D4 | condition 4, an unmapped target | `infer_condition_4_…` |
+| D5a | condition 5, unknown effects | `infer_condition_5_an_unknown_instruction_…` and `infer_condition_1_and_5_each_refuse_the_fixtures_reentry_shape` |
+| D5b | condition 5, the base written | `infer_condition_5_an_instruction_that_writes_the_base_…` and `infer_condition_5_an_sp_base_is_refused_by_any_rd_of_31` |
+
+D1 is C6's sole witness. The review (opus) approved: no wrong-inference path beyond the declared
+residuals, and `entry_pc` sound, since every resume sets PC from the host.
+
+### The dynamic path (Task 6, `48f7f93`)
+
+On `threadrust`, the first `getpid` landmark is discovered from the trace (`g = 15`) and the word at
+`(g + 1, 1)` is pinned (`0x885f7d2a`, dyld's `ldxr w10, [x9]`). `seek(g + 1, j)` for `j` in 2, 3, 4,
+then forward to exit, gives the plain replay's outcome, and the shadow is set at `(g + 1, 2)` and
+clear at `(g + 1, 4)`: **M41's Q3, flipped**. With the emulation arm removed the test went **RED**,
+`(g+1, 2): diverged at landmark 22`, M41's divergence six landmarks later. **The oracle moved back to
+landmark 1** (spec R7): `oracle_threadrust` from landmark 1 cost **22.95 s CPU** (21.14 user + 1.81
+sys), inside M41's 120 s budget, so M41's R13 is reverted and the arming now steps through all three
+of dyld's pairs. `hitorder_e2e` 23 of 23. T6-a: the commit carries the implementer's harness
+trailer rather than the plan's; accepted, no history rewrite.
+
+### The audit (this close)
+
+The audit (the ledger's `audit.md`) lists every test file whose assertions touch stepping or
+`continue`/`reverse-continue`: the brief's thirteen (`debug_cli`, `watch_cli`, `watch`,
+`watch_dyn`, `watchsweep_e2e`, `thread_watch_e2e`, `hitorder_e2e`, `crashy_cli`, `crashy_e2e`,
+`reverse_debug_e2e`, `checkpoint_seek`, `cpython_crash_e2e`, `sigcatch_dyn_e2e`) and `debug.rs`'s
+unit tests, plus five a grep found (`symbolops_e2e`, `symbols_e2e`, `seek`, `segv_rust_e2e`,
+`protnone_rust_e2e`). **Every one passes in this close's gate with its M41 count, and no
+pre-existing assertion moved**, as §4 and §7 predicted: `git diff 1d95a93 --stat` over all of them
+is empty except `hitorder_e2e.rs`, whose Task 6 hunks add a test, move `tr_oracle_from` to `1`
+(the oracle's assertion text unchanged, and passing) and mark `Tr::n_create` dead. `crates/retrace/src`
+has no diff. `checkpointparity.rs`'s shared parity function gained one equality row, which its
+three pre-existing tiers pass as `None == None`. `cpython_crash_e2e` **ran** (no skip text,
+`finished in 42.22s`).
+
+### The gate
+
+**746 passed / 0 failed / 9 ignored across 142 test binaries.** Predicted from source before
+anything ran (the ledger's `t7-gate-prediction.md`): `git diff 1d95a93 --stat`, then
+`grep -c '#\[test\]'` on each changed file at both ends; six files moved, **+80**, so 666 + 80 =
+**746 over 142**, chunk by chunk 178 / 320 / 231 + 9 / 17. The gate matched it in every chunk.
+
+It ran from the worktree on `48f7f93`, chunked as CLAUDE.md requires, every chunk `--no-fail-fast`
+with cargo's exit captured before any pipe. The build came first (`cargo test --workspace
+--no-run`, 135 executables), so no per-target run compiled. The seventy-four per-target e2e
+invocations ran from one background script, which asserted before its loop that its target list
+equals `ls crates/retrace/tests/*.rs` (74) and wrote one exit file per target: **74 exit files, all
+`0`**. `ws`, `box`, `bins` and clippy each ran as its own command, exit code echoed in the same
+shell call: **all `exit=0`**. Every e2e log holds exactly one `Running` line and one `test result:`
+line, and in every one passed + ignored equals that file's `#[test]` count (the ledger's
+`gate-reconcile.txt`). **Zero skips**: the only case-insensitive `skip` matches in the logs are
+three test *names* (`debug::tests::empty_segments_are_skipped`,
+`pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one`, and the new
+`excl::tests::the_destination_check_compares_each_element_and_skips_xzr`); `jq_e2e`,
+`jq_file_e2e`, both `cpython_e2e` tests and `cpython_crash_e2e` all ran. The e2e loop took
+19:50:18 → 20:07:19, **17 min 1 s** of wall-clock, for the record only; by `/usr/bin/time -p`
+around each of its invocations, 848.37 s user + 16.71 s sys. `hitorder_e2e` finished in
+**74.12 s**, `cpython_crash_e2e` in **42.22 s**, `llsc_e2e` in **7.23 s**.
+
+| chunk | invocation | exit | binaries | passed | ignored | against M41 |
+|---|---|---|---|---|---|---|
+| `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | 0 | 26 | 178 | 0 | M41's 173 + `retrace-arch` lib 5 |
+| `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | 0 | 41 | 320 | 0 | M41's 292 + lib 26 (`excl.rs`) + `step` 1 + `checkpointparity` 1; whole package, so `Doc-tests retrace_box` is present (M24's lesson) |
+| `e2e` | `cargo test -p retrace --test <name> --no-fail-fast -- --test-threads=1`, once per target, 74 targets in sorted order | 0 × 74 | 74 | 231 | **9** | M41's 184 over 73 + `llsc_e2e` 46 (a new binary) + `hitorder_e2e` 1; the 9 ignored are `apple_walls_e2e`'s 7, `stackoverflow_rust_e2e`'s 1 and `symbols_e2e`'s 1 |
+| `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 0 | 1 | 17 | 0 | unchanged — the `debug.rs` unit tests, the chunk CLAUDE.md says never to omit |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | 0 | — | — | — | clean |
+
+178 + 320 + 231 + 17 = **746**. Ignored **9**. Binaries 26 + 41 + 74 + 1 = **142** — 135 test
+executables plus the 7 `Doc-tests` harnesses cargo reports, the convention since M14.
+
+**Reconciled against M41's 666 / 0 / 9 over 141, file-by-file rather than by sum**
+(`git diff 1d95a93 -- crates` adds **80** lines matching `^\+[[:space:]]*#\[test\]` and removes
+**0**, so no test was deleted or renamed away):
+
+| file | M41 | M42 | delta | where the gate shows it |
+|---|---|---|---|---|
+| `crates/retrace-arch/src/lib.rs` | 39 | 44 | **+5** — the decoder and barrier tests (T1) | `ws`: `retrace_arch` lib **44 passed** |
+| `crates/retrace-box/src/excl.rs` | — | 26 | **+26**, new module — 9 validator tests (T3), 3 scan and destination tests (T5), 4 `regs_written` tests (T5-a), 10 `infer` tests (T5-b) | `box`: `retrace_box` lib **78 passed** (M41 52) |
+| `crates/retrace-box/tests/step.rs` | 4 | 5 | **+1** — `stepping_a_load_exclusive_sets_the_shadow_and_its_store_lands` (T3) | `box`: **5 passed** |
+| `crates/retrace-box/tests/checkpointparity.rs` | 3 | 4 | **+1** — the mid-pair tier (T3) | `box`: **4 passed** |
+| `crates/retrace/tests/llsc_e2e.rs` | — | 46 | **+46**, new binary — 26 (T2), 6 + 1 (T3 and its fix round), 3 (T4), 9 + 1 (T5 and T5-a) | `e2e`: **46 passed** |
+| `crates/retrace/tests/hitorder_e2e.rs` | 22 | 23 | **+1** — `a_seek_into_dylds_getpid_pair_replays_to_the_end` (T6) | `e2e`: **23 passed** |
+| every other `.rs` under `crates/` | unchanged | unchanged | 0 | the other changed files (`retrace-box/src/lib.rs` 13, `retrace-core/src/lib.rs` 0, `retrace-guest/src/lib.rs` 19, `util/hits.rs`, `util/mod.rs`) carry the same `#[test]` count as at `1d95a93` |
+
+The tree holds **753** `#[test]` attributes (M41: 673), of which 9 are ignored, so 744 are
+runnable; the run reports 746 because `census.rs`'s two tests execute twice. A bare
+`grep -c '#\[test\]'` says 754, the extra being the comment in `legacy_equivalence.rs`. So
+666 + 80 = **746**, 9 = **9**, and 141 + 1 = **142**.
+
+**The 9 ignored are M38's nine, by name**, read off the logs' `ignored` lines: `apple_walls_e2e`'s
+seven (`automationmodetool`, `csh`, `dddiagnose`, `desdp`, `dyld_info`, `flex`, `tcsh`),
+`a_rust_stack_overflow_strikes_its_own_guard_page` and `cache_symbol_e2e`. No `#[ignore]` line is
+added or removed in `git diff 1d95a93 -- crates`. M42 parked nothing and un-parked nothing.
+
+**The invariants.** `git diff 1d95a93 -- crates/retrace-trace` is empty, so `TRACE_MAGIC` did not
+move and `Event` did not change. `grep -c 'self.verify_thread(' crates/retrace-core/src/lib.rs` is
+**7**. No dispatch arm changed: `retrace-core/src/lib.rs`'s four hunks are a `pub use`, the
+`record_box` assert after `b.run()`, the `ReplaySession::dbg_excl` accessor and plain `replay()`'s
+assert after each `advance()`. `Box_::excl` is declared last, after `canary_disturbances`.
+
+**The spec's §9 prediction, ≈ 708 / 0 / 9 over 142, had the binary count right and was short by
+38 tests.** Per file: `llsc_e2e` 46 against ~22 (+24: t0's regressions split by direction, the
+life-cycle tests, and each oracle arming's list and chains as separate tests, where §9 counted three
+armings "with their self-checks"); `excl.rs` 26 against ~8 validator tests (+18: the inference's
+3 + 4 + 10 unit tests came with Task 5 and its rulings); the decoder 5 against ~8 (−3: fewer tests
+over the same 30 words); the ~3 session-level box tests became two, `step` and the parity tier
+(−1: the (h) and other life-cycle tests landed in `llsc_e2e`); `hitorder_e2e` +1 as predicted.
++24 + 18 − 3 − 1 + 0 = **+38**.
+
+### CPU
+
+Task 2's two measurements, repeated on the gated tree by the same script (`/usr/bin/time -l cargo
+test -p retrace --test <name> -- --test-threads=1`, already built), user + sys:
+
+| target | before (Task 2, `898bf06`) | after (this close, `48f7f93`) | difference |
+|---|---|---|---|
+| `cpython_crash_e2e` | **40.47 s** (40.00 + 0.47) | **41.23 s** (40.51 + 0.72) | **+0.76 s, +1.9 %**, inside §6's 10 % |
+| `hitorder_e2e` | **40.90 s** over 22 tests (40.24 + 0.66) | **64.23 s** over 23 tests (61.79 + 2.44) | **+23.33 s, +57 %** |
+
+`cpython_crash_e2e` did not move beyond noise. By reading code, the ordinary step path pays one
+mask-and-compare on the step syndrome (spec R2) and one `is_some()` test, and the decode at pc runs
+only while the shadow is set. **`hitorder_e2e`'s rise is Task 6's two changes, by design.**
+Measured apart on the same tree, each as its own cargo invocation (so each records its own
+`threadrust` and pays its own cargo start-up): the 21 unchanged tests cost **30.11 s** (29.38 +
+0.73); `oracle_threadrust`, now from landmark 1, **23.79 s** (21.85 + 1.94; Task 6 measured
+22.95 s), where M41's Task 2 measured the same test from `n_create` at 16.20 + 0.27 s on its own
+tree; and the new Q3 test **18.26 s** (18.05 + 0.21). The three standalone runs sum to 72.16 s,
+more than the whole file's 64.23 s, because the whole file records `threadrust` and starts cargo
+once. The oracle's growth is the price of R7's revert: it now enumerates from landmark 1, through
+dyld's three `getpid` pairs, inside M41's 120 s budget. Nothing measured the 21 unchanged tests
+apart before this close, so their share of the rise is not isolated. For the record, the gate's own
+`/usr/bin/time -p` figures were 72.91 s for `hitorder_e2e` and 41.65 s for `cpython_crash_e2e`.
+
+### Rulings
+
+The spec's R1–R8 stand: design B over stepping a pair as a unit (R1); the shadow set from ISS.EX
+(R2); inference with a register check (R3, amended by T5-a); fail loud by panic from a pure
+validator (R4); the raised stops' FARs (R5, amended by R11); t0's shapes verbatim plus five (R6);
+the oracle's start decided by measurement (R7, measured by Task 6); no format change (R8).
+
+The plan's four:
+
+* **R9 — §3e lands in Task 3, not with §3d**, because the debugger resumes natively from a
+  stepped position. C5 shows it was needed there.
+* **R10 — `run()`'s prologue is bounded at 16 steps**, then drops the shadow. A README residual.
+* **R11 — a raised watch stop's FAR is the lowest overlapped byte**, which `watched_of` resolves
+  exactly. The pair-element watch (`pair+8`) passes on it.
+* **R12 — an asynchronous exit inside `run_one_for_step` leaves the shadow**; clearing there would
+  make a stepped pair's outcome depend on host timing. Retrace does not program the vtimer, and no
+  such exit was observed.
+
+Pre-flight (the controller's scan, before Task 1):
+
+* **P1** — forward M4–M6 green at Task 4 or 5, since a forward `continue`'s stop at the store is
+  native. Right for watches, wrong for breakpoints (T3-a).
+* **P2** — the plan's R12, and the spec's §3a amended to match. Cost if wrong: a vtimer exit mid-pair
+  would emulate a store record lost, a loud divergence.
+
+Execution:
+
+* **T2-a** — the terminal-park livelock on window 10 is the named bug, not a test defect; Task 3
+  cured it, and its falsifier (backward tests still hanging after the fix) was met and assigned to
+  Task 5, which greened them.
+* **T2-b** — three plan command defects (`--no-fail-fast` after `--`, the exit code echoed in a
+  separate shell, `/usr/bin/time` called directly), corrected in the plan text.
+* **T2-c** — `m3e`'s impossible `wheres[1]` check split into `[0] = (2, 30)` and `[1] = (2, 25)`.
+* **T3-pre** — the plan ordered the controls before the commit, with a `git checkout` revert that
+  would have destroyed the uncommitted implementation; controls run on a committed tree (`2f55fd6`).
+* **T3-a** — P1 corrected for breakpoints: the breakpoint resolver steps with no breakpoints armed,
+  and `continue` resumes from that stepped position, so forward M4 is green at Task 3; watches
+  resolve armed and needed Task 4 (plan `7bb407e`).
+* **T3-b** — C1's row was wrong for `control_g`: the syscall clear is doubly covered (the step
+  path's `note_exit` and `run()`'s post-prologue drop), and C1x shows the guard can fail.
+* **T3-c** — the fix round: the EL1-park clear test, the EL0 assert, the record assert naming the
+  exit.
+* **T4-a** — the order-swap control's RED shape (breakpoint hits vanish rather than reorder) still
+  shows the order load-bearing; accepted.
+* **T5-a** — condition 3 amended and condition 5 added (above). Cost if wrong: a sequence whose
+  destinations are all rewritten and which is entered by a branch into `(L, P]` would be wrongly
+  emulated. That is the pre-existing "no branch into the pair" residual, which now carries that
+  weight, and the README says so.
+* **T5-b** — the decision extracted into `excl::infer`, so every condition has a witness.
+* **T6-a** — `48f7f93`'s trailer, accepted as truthful authorship.
+
+### What stays owed
+
+From the spec's §7, not done by design:
+
+* **`wfe`** (EC `0x01`), including `ldxr; wfe` spin-waits, unhandled on every path, not only under
+  stepping.
+* **The asynchronous host-interrupt residual**: a host IRQ's ERET between the halves during record
+  or replay, estimated at about 10⁻⁶ per sequence; loud for a discard-status pair.
+* **Pairs straddling a page, and inference past 16 instructions**: no inference, the pre-M42
+  behaviour. None is in the census.
+* **Inference's unmeasured assumptions**: fall-through, no branch into `(L, P]` (the only guard
+  when every destination is rewritten), and no plain store of an identical value between the halves.
+  The fourth, the base not rewritten, is checked by condition 5 since T5-a.
+* **The 16-step prologue's drop** (R10), loud if it ever matters.
+* **Byte, halfword and `ldaxp` retires**, whose ISS.EX is unmeasured (spec R2).
+* **The stage-2 clear class has no static-fixture witness** (spec R6); it shares the classifier's
+  code.
+* **M41's owed items other than the terminal park** (F2, the crashing-watched-store exit 5, the
+  `?`-armed session, the blocking-boundary parity test, the Sys-park zero-step test, `where`'s
+  missing phase) and **M40's `crc32` and `reverse-stepi` cost items**; none touched.
+
+Deferred review minors, for the final review to triage:
+
+* **Task 1:** no PAC branch-register vector (`braaz`/`blraaz`) though the doc names them; no
+  `stxp w` or `stxrh` store vector.
+* **Task 2:** `debug_bounded` has no final `try_wait` before the kill, inherits stdin (the old
+  `hits::debug` nulled it), leaks its temp files if a create panics, and its callers' kill panics
+  drop stderr; `every_position_replays`' `unwrap_err` lacks the `(n, len + 1)` context.
+* **Task 3:** `run_one_for_step`'s vtimer arm skips the classifier (equivalent to
+  `note_exit(true)`, per R12); `step.rs`'s box test does not pin `ex.va` to the cell, and
+  `base_reg(31)` has no VM-level test.
+* **Task 5:** the brief miscounted the shadow-expecting inference tests (three, not four); a doc
+  in `excl.rs` calls a non-destination `Rd` "conservative", true for the base check only; `b.al`/
+  `b.nv` and `cbz xzr` pass as fall-through conditional branches (never compiler-emitted; covered by
+  the jump-in residual); the between-halves test asserts only `is_some()`; a test doc claims
+  (c)'s x1 is still checked with no unit test for it; a stale `infer_excl refuses when …` comment;
+  `hits.rs`'s module doc still says "Every hit is a HARDWARE stop" in its first paragraph, which the
+  new paragraph on raised stops contradicts; no test covers `infer_excl`'s page-start and 16-word
+  gathering.
+* **Task 6:** the Step 1 RED/GREEN evidence lives in the report, not a standalone log;
+  `Tr::n_create` is now dead, kept under `#[allow(dead_code)]`.
+
+**The lldb seam is M43's**, per the run charter, and M41's latent `?`-exit item is the first thing
+it will meet.
