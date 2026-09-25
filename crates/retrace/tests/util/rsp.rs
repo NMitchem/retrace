@@ -1,8 +1,8 @@
 //! M43: a minimal gdb-remote client for `gdbserver_e2e` and `lldb_e2e`. It spawns `retrace
 //! gdbserver` (the codesigned copy), learns the port from its one stderr line, and exchanges
 //! packets. The handshake uses ack mode; everything after `QStartNoAckMode` uses no-ack mode, as
-//! lldb does. It also holds the blocking-step fixture (`threadrust_block` and its two helpers),
-//! which both test files share.
+//! lldb does. It also holds the blocking-step fixture (`threadrust_block` and its two helpers) and
+//! the register oracle's parser (`dbg_field`), which both test files share.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -197,6 +197,16 @@ pub fn le_u64(h: &str) -> u64 {
     let mut a = [0u8; 8];
     a[..b.len().min(8)].copy_from_slice(&b[..b.len().min(8)]);
     u64::from_le_bytes(a)
+}
+
+/// One register out of `ReplaySession::dbg_regs_of`'s text (`x0 =0x…`, `sp=0x…`, `pc=0x…`): the
+/// in-process oracle for a thread's registers, the current one's live and any other's saved. The
+/// text pads single-digit names (`format_gprs`), so the gap is closed before splitting.
+pub fn dbg_field(text: &str, name: &str) -> u64 {
+    let t = text.replace(" =", "=");
+    t.split_whitespace().find_map(|w| w.strip_prefix(&format!("{name}=")))
+        .map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).unwrap())
+        .unwrap_or_else(|| panic!("no {name}= in dbg_regs_of:\n{text}"))
 }
 
 /// The threadrust recording, and the first `__ulock_wait` (515) whose NEXT landmark runs another

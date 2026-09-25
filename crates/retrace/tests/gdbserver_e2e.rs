@@ -242,6 +242,39 @@ fn a_syscall_write_is_reported_after_the_syscall_forward_and_at_its_trap_backwar
 }
 
 #[test]
+fn a_step_whose_crossing_writes_a_watched_cell_answers_watch_and_reverse_finds_the_write() {
+    // Final review Minor 2: §3d rule 3's crossing with a syscall write (`step_thread`'s
+    // `WatchSyscall` arm, then `reply_forward`'s `WatchSys`). `s` on crashy's fstat(1, &g.st) svc.
+    let (st, _ptr) = util::discover_crashy_addrs(crashy());
+    let ev = retrace_trace::Reader::open(crashy()).unwrap();
+    let n = ev.iter().position(|e| matches!(e, retrace_trace::Event::Syscall { num, args, .. }
+            if matches!(*num, retrace_arch::SYS_FSTAT | retrace_arch::SYS_FSTAT64) && args[1] == st))
+        .expect("crashy's fstat(1, &g.st)");
+    let svc = r::trap_pc(crashy(), n);
+    // Old and new by in-process seeks, either side of the syscall, before the server spawns.
+    let cell = |k: usize| u64::from_le_bytes(retrace_core::seek(crashy(), k, 0).unwrap()
+        .read_mem(st, 8).unwrap().try_into().unwrap());
+    let (old, new) = (cell(n), cell(n + 1));
+    assert_ne!(old, new, "the syscall writes the watched word");
+    let mut c = Rsp::spawn(crashy(), &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    let (_, at) = r::continue_to_window(&mut c, n);
+    assert_eq!(pc_of(&at), svc, "{at}");
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    assert_eq!(c.send(&format!("Z2,{st:x},8")), "OK");
+    assert_eq!(mem_u64(&mut c, st), old);
+    let s = c.send("s");
+    assert_eq!(r::key(&s, "watch"), Some(format!("{st:x}").as_str()), "not a plain trace: {s}");
+    assert_eq!(pc_of(&s), svc + 4, "the syscall returned");
+    assert_eq!(mem_u64(&mut c, st), new, "the new value");
+    assert!(c.where_().starts_with(&format!("at ({}, 0) phase=Bp", n + 1)), "{}", c.where_());
+    let b = c.send("bc");
+    assert_eq!(r::key(&b, "watch"), Some(format!("{st:x}").as_str()), "the same write: {b}");
+    assert_eq!(pc_of(&b), svc, "at its trap");
+    assert_eq!(mem_u64(&mut c, st), old, "before the syscall");
+}
+
+#[test]
 fn the_crash_is_exc_bad_access_and_reverse_reaches_the_corrupting_store() {
     // The headline, without lldb: §3c's terminal and row 5 on crashy.
     const GARBAGE_VA: u64 = 0x4000_DEAD_0000;
@@ -429,6 +462,65 @@ fn a_step_on_a_thread_that_is_not_running_is_refused_in_place() {
     // measurement).
     assert_eq!(r::key(&s, "thread"), Some(format!("{other:x}").as_str()), "{s}");
     assert_eq!(c.where_(), before);
+}
+
+#[test]
+fn every_thread_is_served_its_own_registers_at_a_blocked_stop() {
+    // Final review Important 1: lldb's `thread list`, `thread select N; register read` and a `bt` on
+    // another thread read a NOT-running thread's registers, by four routes: `thread-pcs` in the stop
+    // reply, `p…;thread:N;`, `Hg` + `g`, and `qThreadStopInfo`. At threadrust's blocked window n one
+    // thread is current and another is parked with a saved context.
+    let (tr, n, _) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
+    let to_window = |c: &mut Rsp| {
+        assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+        r::continue_to_window(c, n);
+        c.where_()
+    };
+    // The position, from the server's own `where`. That server is gone before the oracle opens.
+    let w = to_window(&mut Rsp::spawn(tr, &[]));
+    assert!(w.contains(" phase=Bp "), "an arrival, so a plain seek stands at the same point: {w}");
+    let (wn, wk) = w["at (".len()..].split_once(')').unwrap().0.split_once(", ").unwrap();
+    let (wn, wk): (usize, u64) = (wn.parse().unwrap(), wk.parse().unwrap());
+    // The oracle: `dbg_regs_of` in a fresh session at that position, the current thread's off the
+    // vCPU and any other's saved (M15). Read into plain values and dropped before the next server.
+    let (cur, oracle) = {
+        let s = retrace_core::seek(tr, wn, wk).unwrap();
+        let o: Vec<(u32, u64, u64)> = s.thread_summaries().into_iter()
+            .filter(|t| !matches!(t.state, retrace_core::ThreadState::Exited(_)))
+            .map(|t| {
+                let text = s.dbg_regs_of(t.tid as usize).unwrap();
+                (t.tid + 1, r::dbg_field(&text, "pc"), r::dbg_field(&text, "sp"))
+            }).collect();
+        (s.current_thread() + 1, o)
+    };
+    let cur_pc = oracle.iter().find(|o| o.0 == cur).expect("the current thread is live").1;
+    assert!(oracle.iter().any(|o| o.0 != cur), "a stop with a non-current thread, or this row proves nothing: {oracle:x?}");
+
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(to_window(&mut c), w, "the oracle's position");
+    let tids: Vec<u32> = c.send("qfThreadInfo")[1..].split(',').map(|t| u32::from_str_radix(t, 16).unwrap()).collect();
+    assert_eq!(tids, oracle.iter().map(|o| o.0).collect::<Vec<_>>(), "qfThreadInfo");
+    let stop = c.send("?");
+    let list = |k: &str| r::key(&stop, k).unwrap_or_else(|| panic!("no {k}: in {stop}")).split(',')
+        .map(|v| u64::from_str_radix(v, 16).unwrap()).collect::<Vec<_>>();
+    assert_eq!(list("threads"), tids.iter().map(|&t| u64::from(t)).collect::<Vec<_>>(), "{stop}");
+    assert_eq!(list("thread-pcs"), oracle.iter().map(|o| o.1).collect::<Vec<_>>(), "in threads: order: {stop}");
+    for &(tid, pc, sp) in &oracle {
+        assert_eq!(r::le_u64(&c.send(&format!("p20;thread:{tid:x};"))), pc, "tid {tid}'s pc");
+        assert_eq!(r::le_u64(&c.send(&format!("p1f;thread:{tid:x};"))), sp, "tid {tid}'s sp");
+        assert_eq!(c.send(&format!("Hg{tid:x}")), "OK");
+        let g = c.send("g");
+        assert_eq!(r::le_u64(&g[32 * 16..33 * 16]), pc, "Hg{tid:x} + g's pc slot");
+        assert_eq!(r::le_u64(&g[31 * 16..32 * 16]), sp, "Hg{tid:x} + g's sp slot");
+        if tid == cur { continue; }
+        // A server that served the running thread's registers for every tid would pass every
+        // assertion above only if the two pcs were equal. They are not.
+        assert_ne!(pc, cur_pc, "tid {tid} is parked away from the running thread's pc");
+        let q = c.send(&format!("qThreadStopInfo{tid:x}"));
+        assert!(q.starts_with(&format!("T00thread:{tid:x};")), "{q}");
+        assert!(!q.contains("reason:"), "a thread that did not stop has no reason: {q}");
+    }
 }
 
 #[test]
