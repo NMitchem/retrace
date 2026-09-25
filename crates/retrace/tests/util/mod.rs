@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 
 /// M41: the debugger's hit oracle and the checks built on it (see `hits.rs`).
 pub mod hits;
+/// M43: a minimal gdb-remote client for `retrace gdbserver` (see `rsp.rs`).
+pub mod rsp;
 
 // `.cargo/config.toml`'s `runner` ad-hoc codesigns the binary cargo invokes
 // directly (the test harness) with the hypervisor entitlement, but CARGO_BIN_EXE_retrace
@@ -174,6 +176,20 @@ pub fn discover_crashy_addrs(trace: &std::path::Path) -> (u64, u64) {
         }
     }
     panic!("CRASHY: marker write not found in trace");
+}
+
+/// M43: a copy of `trace` whose last `write` claims one byte more than was written, so replay's
+/// divergence oracle fails at that landmark. Every record is re-framed with a fresh CRC by
+/// `Writer`, so the trace is well-formed and only its content lies.
+pub fn tamper_last_write(trace: &std::path::Path) -> std::path::PathBuf {
+    let mut ev = retrace_trace::Reader::open(trace).unwrap();
+    let i = ev.iter().rposition(|e| matches!(e, retrace_trace::Event::Syscall { num: 4, .. }))
+        .expect("the trace has a write");
+    if let retrace_trace::Event::Syscall { args, .. } = &mut ev[i] { args[2] += 1; }
+    let out = trace.with_extension("tampered.bin");
+    let mut w = retrace_trace::Writer::create(&out).unwrap();
+    for e in &ev { w.append(e).unwrap(); }
+    out
 }
 
 /// What a breadth-ladder rung guest yielded once it PROVED IT RAN.

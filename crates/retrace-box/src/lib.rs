@@ -291,11 +291,6 @@ const CPACR_FP_ON: u64 = 0x3 << 20;
 const PSTATE_SS: u64 = 1 << 21; // PSTATE/SPSR software-step bit
 const MDSCR_SS:  u64 = 1 << 0;  // MDSCR_EL1.SS
 
-/// M42 (t0 M8): in a software-step exit's ESR, ISS.ISV (bit 24) says the EX bit is valid, and
-/// ISS.EX (bit 6) says the stepped instruction was a load-exclusive. Apple's cores and HVF deliver
-/// both on the EL2 step exit: `0xcb000062` for a load-exclusive, `0xcb000022` for everything else.
-const SS_ISV_EX: u64 = (1 << 24) | (1 << 6);
-
 /// M42 §3c: the syndromes of the debug stops raised at an emulated store-exclusive:
 /// - EC 0x30 is a breakpoint from a lower EL, and EC 0x34 a watchpoint from a lower EL;
 /// - IL is set, and so is WnR for the watch.
@@ -2696,9 +2691,12 @@ impl Box_ {
         // - A stop that came through the guest's EL1 vector (a syscall, an EL1 fault, an unemulated
         //   trap) leaves the guest parked at EL1. The native loop below re-enters there and delivers
         //   that same stop through run()'s own arms: the path M41's `AtTrap` -> `advance()` takes.
-        // - Bounded at PAIR_STEP_BOUND (plan R10). A shadow that outlives it belongs to a load whose
-        //   sequence a branch left (fixture shape (h)). It is dropped, which is what resuming
-        //   natively does to the hardware monitor anyway.
+        // - Bounded at PAIR_STEP_BOUND (plan R10). A shadow can outlive it in two ways: a branch left
+        //   its sequence (fixture shape (h), `llscbound.s`), or a straight-line store-exclusive sits
+        //   more than 16 instructions past this entry (M42 final review F2). It is dropped, which is
+        //   what resuming natively does to the hardware monitor anyway. That is loud only for a
+        //   discard-status pair. A retry loop retries the lost store, and any other shape depends on
+        //   its caller (README, Known limits).
         for _ in 0..PAIR_STEP_BOUND {
             if self.excl.is_none() { break; }
             let stop = self.step();
@@ -2863,11 +2861,21 @@ impl Box_ {
                 _ => {}
             }
         }
+        // M43 §3i: decode the instruction before it runs. A load-exclusive's base is read now,
+        // because the load may overwrite it (`ldxr x9, [x9]`), and the decode stands in for ISS.EX
+        // when the step exit does not carry it (ISV = 0). The match keeps only a load: any other
+        // exclusive, a store-exclusive with no shadow set included, gives None.
+        // Cost: one extra guest read (a page walk plus the word) on every step, measured at about
+        // +38% CPU on M41's step-bound hit oracle and +2% on rung 8's reverse demo (Ruling T1-c).
+        let pre = self.insn_at(self.pc()).and_then(decode_excl).and_then(|i| match i {
+            ExclInsn::Load { rn, .. } => Some((i, self.base_reg(rn) & excl::TAG_MASK)),
+            _ => None,
+        });
         let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_SS).unwrap();
         let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
         self.vcpu.set_reg(reg::CPSR, cpsr | PSTATE_SS).unwrap();
-        let stop = self.run_one_for_step();
+        let stop = self.run_one_for_step(pre);
         // Disarm: clear SS from both MDSCR_EL1 and the live PSTATE so nothing steps outside step().
         let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr & !MDSCR_SS).unwrap();
@@ -2903,24 +2911,17 @@ impl Box_ {
         if r == 31 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() } else { self.vcpu.get_reg(reg::x(r)).unwrap() }
     }
 
-    /// M42 §3a: the step exit reported a load-exclusive (t0 M8). Record the shadow from the
-    /// instruction at `pc - 4` (a load never branches) and the bytes now at its VA. There is one
-    /// vCPU, so memory now IS what the load returned, even when Rt is XZR.
-    fn set_excl_from_retire(&mut self) {
-        let at = self.pc() - 4;
-        let word = self.insn_at(at)
-            .unwrap_or_else(|| panic!("M42: ISS.EX retire at {at:#x}, whose word does not map"));
-        let ld = decode_excl(word).filter(|i| matches!(i, ExclInsn::Load { .. })).unwrap_or_else(|| panic!(
-            "M42: the step exit reported a load-exclusive (ISS.EX) at {at:#x}, but {word:#010x} does not \
-             decode as one: the hardware and retrace_arch::decode_excl disagree"));
-        assert!(!excl::base_aliases_dest(ld),
-            "M42: unmodelled load-exclusive at {at:#x} ({word:#010x}): its base is also a destination, \
-             so the marked address is gone");
-        let ExclInsn::Load { size, pair, rn, .. } = ld else { unreachable!() };
-        let va = self.base_reg(rn) & excl::TAG_MASK;
+    /// M42 §3a, M43 §3i: set the shadow for a load-exclusive that just retired under `step()`. `va`
+    /// is its base as read BEFORE the step (tag-stripped): after `ldxr x9, [x9]`, x9 holds the
+    /// loaded value, not the address. There is one vCPU, so memory at `va` right after the step IS
+    /// what the load returned, even when Rt is XZR. That is why `loaded` is read from memory, not Rt.
+    fn set_excl_from_retire(&mut self, ld: ExclInsn, va: u64) {
+        let ExclInsn::Load { size, pair, .. } = ld else {
+            unreachable!("classify_retire only returns loads: {ld:?}")
+        };
         let len = excl::access_len(size, pair);
         let loaded = self.va_to_ipa(va).and_then(|ipa| self.read_guest_checked(ipa, len))
-            .unwrap_or_else(|| panic!("M42: the load-exclusive at {at:#x} read {va:#x}, which does not map"));
+            .unwrap_or_else(|| panic!("M42: the load-exclusive read {va:#x}, which does not map"));
         self.excl = Some(Excl { va, size, pair, loaded, by: SetBy::Stepped });
     }
 
@@ -2972,8 +2973,22 @@ impl Box_ {
         let leaf = self.va_leaf(base & excl::TAG_MASK);
         let target = leaf.and_then(|(ipa, _)| self.read_guest_checked(ipa, len));
         let writable = match leaf { Some((_, None)) => true, Some((_, Some(d))) => excl::el0_writable(d), None => false };
-        let plan = excl::plan_stx(&ex, st, base, self.xreg(rt), self.xreg(rt2), target.as_deref(), writable)
-            .unwrap_or_else(|why| panic!("M42: unmodelled store-exclusive at pc {pc:#x}: {why} (shadow {ex:?})"));
+        let plan = match excl::plan_stx(&ex, st, base, self.xreg(rt), self.xreg(rt2), target.as_deref(), writable) {
+            Ok(plan) => plan,
+            // M43 §3i item 3: natively, with the monitor held, a store to a target EL0 cannot write
+            // faults, and the recording holds that crash. Emulating it would invent a write, so the
+            // shadow is dropped and the store stepped natively. The target decides, whatever
+            // plan_stx refused for, M42's deliberately loud refusals included (changed bytes, a
+            // mismatched address, an aliased status register); `target.is_none()` also covers a
+            // target with no backing. The native step runs with the monitor lost, and whether the
+            // core still faults then is IMPLEMENTATION DEFINED: measured (a) at plan time. Were it
+            // (b), replay's divergence oracle would fail loudly against the recorded Crash.
+            Err(_) if !writable || target.is_none() => {
+                self.excl = None;
+                return self.step();
+            }
+            Err(why) => panic!("M42: unmodelled store-exclusive at pc {pc:#x}: {why} (shadow {ex:?})"),
+        };
         if let Some(stop) = self.raise_debug_stop(pc, plan.va, len) { return stop; }
         let (ipa, _) = leaf.expect("plan_stx refuses an unmapped target");
         self.write_guest(ipa, &plan.bytes);
@@ -3012,7 +3027,7 @@ impl Box_ {
     /// EL1 and `ESR_EL1`/`ELR_EL1` holding the real trap — so dispatch off `ESR_EL1` exactly like
     /// `run()`'s inner match (an emulation stands in for the step and returns `Stop::Step`; the
     /// window-ending svc is returned unconsumed as `Stop::Syscall`).
-    fn run_one_for_step(&mut self) -> Stop {
+    fn run_one_for_step(&mut self, pre: Option<(ExclInsn, u64)>) -> Stop {
         loop {
             let e = self.vcpu.run().expect("hv_vcpu_run");
             // M42 (plan R12): a vtimer/cancel exit inside a step is retrace's own, like the step
@@ -3027,8 +3042,13 @@ impl Box_ {
                     let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
                     if (cpsr >> 2) & 3 == 0 {
                         self.note_exit(true);
-                        // M42 §3a (t0 M8): the step exit says whether a load-exclusive just retired.
-                        if e.syndrome & SS_ISV_EX == SS_ISV_EX { self.set_excl_from_retire(); }
+                        // M43 §3i: the syndrome, or where it is silent the pre-step decode, says
+                        // whether a load-exclusive retired (M42 §3a, t0 M8).
+                        match excl::classify_retire(e.syndrome, pre) {
+                            Ok(Some((ld, va))) => self.set_excl_from_retire(ld, va),
+                            Ok(None) => {}
+                            Err(why) => panic!("M42: at {:#x}: {why}", self.pc() - 4),
+                        }
                         return Stop::Step;
                     }
                     // M42: the stepped instruction trapped to EL1 (F2). That is an exception entry and,
@@ -5829,6 +5849,37 @@ impl Box_ {
         s += &format!("\nsp={:#x} pc={:#x} elr={:#x} far={:#x} spsr={:#x}",
             ctx.regs.sp_el0, ctx.regs.pc, ctx.elr, 0, ctx.spsr);
         Some(s)
+    }
+
+    /// M43 §3g: thread `tid`'s full register context, FP included. The current thread's comes off
+    /// the live vCPU, because the table's slot is stale between switches (`dbg_regs_of`'s own split).
+    /// Any other thread's is the saved one. None for an id past the table.
+    pub fn thread_ctx(&self, tid: usize) -> Option<thread::ThreadCtx> {
+        if tid >= self.threads.len() { return None; }
+        if tid == self.threads.current() { return Some(self.save_ctx()); }
+        Some(self.threads.ctx_of(tid).clone())
+    }
+
+    /// M43 §3g: the readable prefix of `[va, va + len)`. Each 16 KiB page goes through the guest's
+    /// own stage-1 walk, as `insn_at` reads. It stops at the first byte that does not translate or
+    /// read, so lldb's 0x200-byte reads that straddle a mapping's end get the mapped part (t0 L8).
+    /// Never panics: an address past 47 bits translates to None, and the arithmetic saturates.
+    pub fn read_va_prefix(&self, va: u64, len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len.min(1 << 16));
+        let mut a = va;
+        while out.len() < len {
+            let Some(ipa) = self.va_to_ipa(a) else { break };
+            let page_end = (a | (GRANULE as u64 - 1)).saturating_add(1);
+            let n = ((page_end - a) as usize).min(len - out.len());
+            if ipa.checked_add(n as u64).is_none() { break; }
+            match self.read_guest_checked(ipa, n) {
+                Some(b) => out.extend_from_slice(&b),
+                None => break,
+            }
+            a = a.saturating_add(n as u64);
+            if a == u64::MAX { break; }
+        }
+        out
     }
 
     /// Bring-up diagnostic: walk the guest AArch64 frame-pointer chain from x29, returning up to

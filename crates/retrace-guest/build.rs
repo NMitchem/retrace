@@ -518,6 +518,16 @@ fn main() {
         .status().expect("clang llscbound");
     assert!(status.success(), "llscbound guest build failed");
 
+    // llscedge (M43 §3i): two step-path shapes M42's final review left panicking — a
+    // base-aliasing load-exclusive, and a pair on a read-only word whose recording ends in the fault.
+    let src = format!("{}/asm/llscedge.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/llscedge");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang llscedge");
+    assert!(status.success(), "llscedge guest build failed");
+
     // crash: stores to VA 0x4000_DEAD_0000 (bit 46 set), which no stage-1 table entry covers => a
     // stage-1 translation fault delivered via the EL1 trampoline => Stop::Fault (a recordable crash,
     // not a retrace bug). The M6 data-abort crash guest. Contrast wildstore.s (stage-2, stays fatal).

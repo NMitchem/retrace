@@ -11,7 +11,8 @@ pub const TAG_MASK: u64 = 0x00FF_FFFF_FFFF_FFFF;
 /// How a shadow came to be set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetBy {
-    /// `step()` retired the load-exclusive (the step exit's ISS.EX, t0 M8).
+    /// `step()` retired the load-exclusive (the step exit's ISS.EX, t0 M8). Where the syndrome is
+    /// silent (ISV = 0), the pre-step decode decides (M43 §3i).
     Stepped,
     /// A native breakpoint or watchpoint stop, by spec §3d's backward scan.
     Inferred,
@@ -55,7 +56,8 @@ pub struct StxPlan {
 /// - `target` is the bytes now at the VA, None if unmapped;
 /// - `writable` says whether the stage-1 leaf grants EL0 write.
 ///
-/// Each refusal names its check, and the caller panics with it.
+/// Each refusal names its check, and the caller panics with it. The exception is a non-writable or
+/// unmapped target: `emulate_stx` steps that store natively instead (M43 §3i).
 pub fn plan_stx(ex: &Excl, st: ExclInsn, base: u64, rt_val: u64, rt2_val: u64,
                 target: Option<&[u8]>, writable: bool) -> Result<StxPlan, String> {
     let ExclInsn::Store { size, pair, rs, rt, rt2, rn } = st else {
@@ -80,6 +82,32 @@ pub fn plan_stx(ex: &Excl, st: ExclInsn, base: u64, rt_val: u64, rt2_val: u64,
     let mut bytes = rt_val.to_le_bytes()[..s].to_vec();
     if pair { bytes.extend_from_slice(&rt2_val.to_le_bytes()[..s]); }
     Ok(StxPlan { va, bytes, status: (rs != 31).then_some(rs) })
+}
+
+/// M43 §3i: what a clean step retire means for the shadow.
+///
+/// `pre` is the instruction at pc BEFORE the step, when it decoded as a load-exclusive, with its
+/// base VA read before the step too, because a load may overwrite its own base (`ldxr x9, [x9]`).
+/// `syndrome` is the step exit's ESR.
+/// - ISS.ISV = 1: ISS.EX says whether a load-exclusive retired (M42 t0 M8). It must agree with the
+///   decode in both directions, and a disagreement is an Err naming both.
+/// - ISS.ISV = 0: the syndrome does not say, so the decode decides. That is unmeasured on this core
+///   (M42 t0 saw ISV = 1 on every retire); it is the hardening M42's final review asked for.
+pub fn classify_retire(syndrome: u64, pre: Option<(ExclInsn, u64)>)
+                       -> Result<Option<(ExclInsn, u64)>, String> {
+    const ISV: u64 = 1 << 24;
+    const EX: u64 = 1 << 6;
+    if syndrome & ISV == 0 { return Ok(pre); }
+    match (syndrome & EX != 0, pre) {
+        (true, Some(p)) => Ok(Some(p)),
+        (false, None) => Ok(None),
+        (true, None) => Err(format!(
+            "the step exit reported a load-exclusive (ISS.EX, ESR {syndrome:#x}), but the instruction \
+             stepped does not decode as one: the hardware and retrace_arch::decode_excl disagree")),
+        (false, Some((ld, _))) => Err(format!(
+            "the instruction stepped decodes as a load-exclusive ({ld:?}), but the step exit's ISS.EX \
+             is 0 (ESR {syndrome:#x}): the hardware and retrace_arch::decode_excl disagree")),
+    }
 }
 
 /// Spec §3a: a base register that is also a destination was overwritten by the load, so the marked
@@ -274,6 +302,25 @@ mod tests {
         assert!(!el0_writable(crate::ATTR_CODE));
         assert!(!el0_writable(crate::ATTR_TRAMP));
         assert!(!el0_writable(crate::ATTR_NONE));
+    }
+
+    #[test]
+    fn a_retire_is_classified_by_iss_ex_when_isv_is_set_and_by_the_decode_otherwise() {
+        let ld = (ExclInsn::Load { size: 8, pair: false, rt: 9, rt2: 31, rn: 9 }, 0x1_0000_4000u64);
+        let (ldx_retire, plain_retire) = (0xcb00_0062u64, 0xcb00_0022u64); // M42 t0 M8
+        let no_isv = plain_retire & !(1 << 24);
+        assert_eq!(classify_retire(ldx_retire, Some(ld)), Ok(Some(ld)));
+        assert_eq!(classify_retire(plain_retire, None), Ok(None));
+        assert_eq!(classify_retire(no_isv, Some(ld)), Ok(Some(ld)), "ISV = 0: the decode decides");
+        assert_eq!(classify_retire(no_isv, None), Ok(None));
+        assert_eq!(classify_retire(0xca00_0062, None), Ok(None), "ISV = 0: EX is not read");
+    }
+
+    #[test]
+    fn a_retire_whose_syndrome_and_decode_disagree_is_an_error_both_ways() {
+        let ld = (ExclInsn::Load { size: 4, pair: false, rt: 10, rt2: 31, rn: 12 }, 0x1_0000_0400u64);
+        assert!(classify_retire(0xcb00_0062, None).unwrap_err().contains("does not decode as one"));
+        assert!(classify_retire(0xcb00_0022, Some(ld)).unwrap_err().contains("ISS.EX is 0"));
     }
 
     #[test]
