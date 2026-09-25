@@ -6,8 +6,9 @@ use std::rc::Rc;
 use retrace_box::{Box_, Stop};
 use retrace_trace::{Writer, Event, Region};
 use retrace_arch::SYS_EXIT;
-pub use retrace_box::thread::{BlockReason, ThreadState};
+pub use retrace_box::thread::{BlockReason, ThreadState, ThreadCtx};
 pub use retrace_box::{Excl, SetBy};
+pub use retrace_box::EXE_BASE;
 
 /// M15: one row of the debugger's thread listing.
 #[derive(Clone, Debug, PartialEq)]
@@ -2746,6 +2747,11 @@ impl ReplaySession {
     /// M15: a specific thread's registers, including a BLOCKED one — impossible before this
     /// milestone. `None` for an out-of-range id, which the CLI turns into a usage error.
     pub fn dbg_regs_of(&self, tid: usize) -> Option<String> { self.b.dbg_regs_of(tid) }
+    /// M43 §3g: a thread's full register context (`Box_::thread_ctx`), for the gdb-remote server.
+    pub fn thread_ctx(&self, tid: usize) -> Option<ThreadCtx> { self.b.thread_ctx(tid) }
+    /// M43 §3g: the readable prefix of `[va, va + len)`, by guest VA (`Box_::read_va_prefix`).
+    /// `read_mem` stays the debugger CLI's all-or-nothing read.
+    pub fn read_mem_prefix(&self, va: u64, len: usize) -> Vec<u8> { self.b.read_va_prefix(va, len) }
     /// M16 Task 1: `Box_::kport_of`, for the R1 measurement gate. Test-only, like `dbg_regs_of`.
     #[doc(hidden)]
     pub fn dbg_kport_of(&self, tid: usize) -> Option<u32> { self.b.kport_of(tid) }

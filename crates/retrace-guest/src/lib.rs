@@ -183,6 +183,9 @@ pub const LLSC: &str = concat!(env!("OUT_DIR"), "/llsc");
 /// M42 final-review F1: a load-exclusive left by a branch, then more than 16 instructions before a
 /// breakpoint target. The witness for `run()`'s 16-step pair prologue; behaviour is `llsc_e2e`'s.
 pub const LLSC_BOUND: &str = concat!(env!("OUT_DIR"), "/llscbound");
+/// M43 §3i: a base-aliasing load-exclusive (window 1), then a pair on a read-only `__TEXT` word
+/// whose recording ends in the store's permission fault (window 2). Behaviour is `llsc_e2e`'s.
+pub const LLSC_EDGE: &str = concat!(env!("OUT_DIR"), "/llscedge");
 pub const CRASH: &str = concat!(env!("OUT_DIR"), "/crash");
 pub const CRASHJMP: &str = concat!(env!("OUT_DIR"), "/crashjmp");
 pub const HELLO_RUST: &str = concat!(env!("OUT_DIR"), "/hello_rust");

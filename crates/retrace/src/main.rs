@@ -2,6 +2,8 @@ use std::path::Path;
 use std::process::exit;
 
 mod debug;
+mod rsp;
+mod gdbserver;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -126,6 +128,22 @@ fn main() {
                 _ => { eprintln!("usage: retrace debug <trace> --script '<cmds>'"); exit(2); }
             }
         }
-        _ => { eprintln!("usage: retrace <record <guest> -o <trace> | record-dyn <exe> -o <trace> [-- <guest args…>] | replay <trace> | debug <trace> --script '…'>"); exit(2); }
+        Some("gdbserver") => {
+            // retrace gdbserver <trace> [--port <n>] [--exe <path>] (M43): a gdb-remote server for
+            // lldb over one recording. Usage errors exit 2 before any socket or VM work.
+            // `opt` is None for an absent flag and Some(None) for one given last, with no value: that
+            // is a usage error, never the default.
+            let opt = |name: &str| a.iter().position(|s| s == name).map(|i| a.get(i + 1));
+            let port = match opt("--port") { None => Some(0u16), Some(p) => p.and_then(|p| p.parse::<u16>().ok()) };
+            let exe = match opt("--exe") { None => Some(None), Some(e) => e.map(|e| Some(e.clone())) };
+            match (a.get(2).filter(|t| !t.starts_with("--")), port, exe) {
+                (Some(trace), Some(port), Some(exe)) => match gdbserver::serve(Path::new(trace), port, exe) {
+                    Ok(()) => exit(0),
+                    Err(e) => { eprintln!("GDBSERVER ERROR: {e}"); exit(5); }
+                },
+                _ => { eprintln!("usage: retrace gdbserver <trace> [--port <n>] [--exe <path>]"); exit(2); }
+            }
+        }
+        _ => { eprintln!("usage: retrace <record <guest> -o <trace> | record-dyn <exe> -o <trace> [-- <guest args…>] | replay <trace> | debug <trace> --script '…' | gdbserver <trace> [--port <n>] [--exe <path>]>"); exit(2); }
     }
 }
