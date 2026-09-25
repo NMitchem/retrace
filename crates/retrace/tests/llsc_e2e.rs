@@ -1,7 +1,8 @@
 //! M42: stepping, seeking and debug stops inside AArch64 exclusive pairs (spec
 //! `docs/superpowers/specs/2026-09-24-retrace-m42-llsc-design.md`). The fixture is
 //! `retrace-guest/asm/llsc.s`: t0's four shapes (a)-(d) verbatim, then (e)-(i). One test uses a
-//! second fixture, `llscbound.s`, the witness for `run()`'s 16-step pair prologue. Every CLI run goes
+//! second fixture, `llscbound.s`, the witness for `run()`'s 16-step pair prologue, and three use a
+//! third, `llscedge.s` (M43 §3i), the step-path shapes M42 left panicking. Every CLI run goes
 //! through `util::debug_bounded`, because t0 measured hangs on these scripts.
 mod util;
 use retrace_core::{Advance, Outcome, ReplaySession, SetBy};
@@ -41,6 +42,31 @@ fn sym(name: &str) -> u64 {
     *M.get_or_init(|| nm(retrace_guest::LLSC)).get(name).unwrap_or_else(|| panic!("no symbol {name} in llsc"))
 }
 fn h(name: &str) -> String { format!("{:#x}", sym(name)) }
+
+/// M43 §3i: `llscedge`, recorded once. Its recording ends in the crash at `edge_ro_stx`.
+fn edge_trace() -> &'static Path {
+    static C: OnceLock<PathBuf> = OnceLock::new();
+    C.get_or_init(|| {
+        let (rec, t) = util::record(retrace_guest::LLSC_EDGE);
+        assert_eq!(rec.code, 139, "llscedge must record to the read-only store's fault: {}", rec.stderr);
+        t
+    })
+}
+fn edge_sym(name: &str) -> u64 {
+    static M: OnceLock<HashMap<String, u64>> = OnceLock::new();
+    *M.get_or_init(|| nm(retrace_guest::LLSC_EDGE)).get(name)
+        .unwrap_or_else(|| panic!("no symbol {name} in llscedge"))
+}
+/// Replay `s` forward to its end, panicking on a divergence.
+fn replay_to_end(mut s: ReplaySession) -> retrace_core::ReplayReport {
+    loop {
+        match s.advance() {
+            Ok(Advance::Exited(r)) => return r,
+            Ok(_) => {}
+            Err(d) => panic!("diverged at landmark {}: {}", d.landmark, d.detail),
+        }
+    }
+}
 
 /// A script's stdout. It must exit 0 inside the bound; anything else panics, naming the symptom.
 fn run_ok(script: &str) -> String {
@@ -395,6 +421,49 @@ fn a_shadow_outliving_its_sequence_is_dropped_at_the_step_bound() {
             return;
         }
     }
+}
+
+// ---- The step-path edges M42 left panicking (M43 §3i), on `llscedge` ---------------------------
+
+#[test]
+fn the_edge_fixture_records_and_replays_its_crash_natively() {
+    // Native record and replay take no step exit, so none of §3i's code runs here: this pins the
+    // fixture's own shape (window 2 ends in the store's fault) before the stepped tests lean on it.
+    let r = util::replay(edge_trace());
+    assert_eq!(r.code, 139, "replay: {}", r.stderr);
+    let end = replay_to_end(ReplaySession::open(edge_trace()).unwrap());
+    assert!(matches!(end.outcome, Outcome::Crash { pc, .. } if pc == edge_sym("edge_ro_stx")),
+        "{:?}", end.outcome);
+}
+
+#[test]
+fn a_load_exclusive_whose_base_is_its_destination_steps_without_panicking() {
+    // M43 §3i item 1: (1, 3) is just past `ldxr x9, [x9]`. The shadow must hold the cell's address
+    // as it was BEFORE the load overwrote x9. Before the fix, the retire panicked ("its base is also
+    // a destination").
+    let s = retrace_core::seek(edge_trace(), 1, 3).expect("seek past the aliasing load");
+    let ex = s.dbg_excl().expect("the stepped load-exclusive sets the shadow");
+    assert_eq!(ex.va, edge_sym("celledge"), "the marked address is the base before the load");
+    assert_eq!(ex.loaded, 0x5a5au64.to_le_bytes().to_vec());
+    assert_eq!(ex.by, SetBy::Stepped);
+    let end = replay_to_end(s);
+    assert!(matches!(end.outcome, Outcome::Crash { pc, .. } if pc == edge_sym("edge_ro_stx")),
+        "{:?}", end.outcome);
+}
+
+#[test]
+fn a_stepped_store_exclusive_to_a_read_only_word_ends_in_the_recorded_crash() {
+    // M43 §3i item 3: (2, 3) is just before `stxr`, with the shadow set by the stepped `ldxr`. The
+    // target is in __TEXT, so the emulation must not run: the store runs natively, and the core
+    // faults as it did in the recording (outcome (a), measured at plan time). Replay compares the
+    // crash field by field, so reaching Exited(Crash) at the store IS the proof. `advance()` gets
+    // there through run()'s pair prologue, which steps with the shadow set. Before the fix,
+    // emulate_stx panicked ("EL0-writable").
+    let s = retrace_core::seek(edge_trace(), 2, 3).expect("seek to the read-only store");
+    assert!(s.dbg_excl().is_some(), "the shadow is set before the store");
+    let end = replay_to_end(s);
+    assert!(matches!(end.outcome, Outcome::Crash { pc, .. } if pc == edge_sym("edge_ro_stx")),
+        "{:?}", end.outcome);
 }
 
 // ---- Review Focus (plan) -----------------------------------------------------------------------
