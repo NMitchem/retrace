@@ -3,8 +3,8 @@
 //! second debugger: every motion is one of `Exec`'s, so M41's hit order and M42's pair handling hold
 //! under lldb by construction. This file owns the socket, the dispatch, §3c's position mapping and
 //! §3d's step rule.
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use retrace_core::{ReplaySession, ThreadState, EXE_BASE};
 use crate::debug::Exec;
@@ -18,6 +18,9 @@ const QPROCESSINFO: &str = "pid:1;parent-pid:1;cputype:100000c;cpusubtype:0;osty
 const QSUPPORTED: &str = "PacketSize=20000;QStartNoAckMode+;qXfer:features:read+;QThreadSuffixSupported+;QListThreadsInStopReply+;ReverseContinue+;ReverseStep+";
 /// The largest `m` answered, in bytes: half the advertised PacketSize, in hex.
 const MAX_READ: usize = 0x10000;
+/// The most of the exe's header and load commands read. `sizeofcmds` comes from guest memory, so a
+/// corrupt header must not send the server walking a huge range.
+const MAX_HDR: usize = 1 << 20;
 
 /// Serve one lldb connection on `127.0.0.1:port` (0 picks a free port), then return. The one line
 /// on stderr is how a caller learns the port.
@@ -30,27 +33,44 @@ pub fn serve(trace: &Path, port: u16, exe: Option<String>) -> Result<(), String>
     let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind 127.0.0.1:{port}: {e}"))?;
     let port = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?.port();
     eprintln!("listening on 127.0.0.1:{port}");
-    let (mut sock, _) = listener.accept().map_err(|e| format!("accept: {e}"))?;
+    let (sock, _) = listener.accept().map_err(|e| format!("accept: {e}"))?;
+    // One connection per server (§3a): a second connect is refused, rather than queued unserved.
+    drop(listener);
     let _ = sock.set_nodelay(true);
+    match session(&mut srv, sock) {
+        Ok(()) => Ok(()),
+        // Ruling T2-a, §3a: the peer leaving ends the session with status 0, however it leaves. A
+        // peer killed with a reply still unread resets the connection instead of closing it
+        // (measured: ECONNRESET on the next read); a write after it has gone is a broken pipe.
+        Err(e) if matches!(e.kind(), ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                                     | ErrorKind::BrokenPipe) => Ok(()),
+        Err(e) => Err(format!("socket: {e}")),
+    }
+}
+
+/// The packet loop over one accepted connection, until `k`, `D` or the peer closes.
+fn session(srv: &mut Server<'_>, mut sock: TcpStream) -> std::io::Result<()> {
     let mut dec = Decoder::default();
     let mut buf = vec![0u8; 64 * 1024];
     let mut last_sent: Vec<u8> = Vec::new();
-    let io = |e: std::io::Error| format!("socket: {e}");
     loop {
-        let n = sock.read(&mut buf).map_err(io)?;
+        let n = match sock.read(&mut buf) {
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            r => r?,
+        };
         if n == 0 { return Ok(()); } // the peer closed without `k` or `D` (Review Focus 3)
         dec.push(&buf[..n]);
         while let Some(frame) = dec.next() {
             match frame {
                 Frame::Ack | Frame::Interrupt => {} // §3h: 0x03 outside a motion is ignored
-                Frame::Nak => { if !srv.no_ack { sock.write_all(&last_sent).map_err(io)?; } }
-                Frame::Bad => { if !srv.no_ack { sock.write_all(b"-").map_err(io)?; } }
+                Frame::Nak => { if !srv.no_ack { sock.write_all(&last_sent)?; } }
+                Frame::Bad => { if !srv.no_ack { sock.write_all(b"-")?; } }
                 Frame::Packet(p) => {
-                    if !srv.no_ack { sock.write_all(b"+").map_err(io)?; }
+                    if !srv.no_ack { sock.write_all(b"+")?; }
                     let (replies, close) = srv.handle(&p);
                     for r in replies {
                         last_sent = rsp::encode(r.as_bytes());
-                        sock.write_all(&last_sent).map_err(io)?;
+                        sock.write_all(&last_sent)?;
                     }
                     if p == "QStartNoAckMode" { srv.no_ack = true; } // after its OK went out acked
                     if close { return Ok(()); }
@@ -62,10 +82,11 @@ pub fn serve(trace: &Path, port: u16, exe: Option<String>) -> Result<(), String>
 
 pub(crate) struct Server<'a> {
     ex: Exec<'a>,
-    /// §3g: the exe's path when known. With it, lldb gets `os_version` and the image list.
-    exe: Option<String>,
-    /// §3g: the exe's `mach_header_64` and load commands, read once from the opening snapshot.
-    exe_hdr: Vec<u8>,
+    /// §3g: the exe's one-image JSON, built once from the opening snapshot's `mach_header_64` and
+    /// load commands. None when no path is known or that header does not parse, and then lldb gets
+    /// neither `os_version` nor an image list. Advertising `os_version` without an image to answer
+    /// with is t0 `l2_osver`: the new loader runs and unloads the exe.
+    exe_image: Option<String>,
     no_ack: bool,
     /// The reply to `?`: the last stop reported.
     last_stop: String,
@@ -81,9 +102,10 @@ impl<'a> Server<'a> {
         let s = ex.sess();
         let head = s.read_mem_prefix(EXE_BASE, 32);
         let sizeofcmds = head.get(20..24).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
-        let exe_hdr = s.read_mem_prefix(EXE_BASE, 32 + sizeofcmds);
-        let exe = exe_arg.or_else(|| argv0(s));
-        let mut srv = Server { ex, exe, exe_hdr, no_ack: false, last_stop: String::new(), last_tid: 0, hg: 0 };
+        let exe_hdr = s.read_mem_prefix(EXE_BASE, 32usize.saturating_add(sizeofcmds).min(MAX_HDR));
+        let exe_image = exe_arg.or_else(|| argv0(s))
+            .and_then(|path| rsp::image_json(&exe_hdr, EXE_BASE, &path).ok());
+        let mut srv = Server { ex, exe_image, no_ack: false, last_stop: String::new(), last_tid: 0, hg: 0 };
         srv.stop(StopKind::HistoryBegin("start of recording".into()), None); // the answer to `?`
         Ok(srv)
     }
@@ -126,7 +148,7 @@ impl<'a> Server<'a> {
         };
         match body {
             "QStartNoAckMode" | "QThreadSuffixSupported" | "QListThreadsInStopReply" | "QEnableErrorStrings" => one("OK"),
-            "qHostInfo" => one(&match self.exe { Some(_) => format!("{QHOSTINFO}{OS_VERSION}"), None => QHOSTINFO.into() }),
+            "qHostInfo" => one(&match self.exe_image { Some(_) => format!("{QHOSTINFO}{OS_VERSION}"), None => QHOSTINFO.into() }),
             "qProcessInfo" => one(QPROCESSINFO),
             "vCont?" => one("vCont;c;C;s;S"),
             "?" => (vec![self.last_stop.clone()], false),
@@ -187,18 +209,13 @@ impl<'a> Server<'a> {
             _ if body.starts_with("qRcmd,") => self.monitor(&body["qRcmd,".len()..]),
             _ if body.starts_with("jGetLoadedDynamicLibrariesInfos:") => {
                 let arg = &body["jGetLoadedDynamicLibrariesInfos:".len()..];
-                match &self.exe {
+                match &self.exe_image {
                     None => one(""),
                     Some(_) if arg.is_empty() => one("OK"), // the support probe (t0 L2)
-                    Some(path) => {
+                    Some(image) => {
                         let wants_exe = arg.contains("\"fetch_all_solibs\":true")
                             || arg.contains(&EXE_BASE.to_string());
-                        let json = if wants_exe {
-                            rsp::image_json(&self.exe_hdr, EXE_BASE, path).unwrap_or_else(|_| r#"{"images":[]}"#.into())
-                        } else {
-                            r#"{"images":[]}"#.into()
-                        };
-                        one(&json)
+                        one(if wants_exe { image.as_str() } else { r#"{"images":[]}"# })
                     }
                 }
             }

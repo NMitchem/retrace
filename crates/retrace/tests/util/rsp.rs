@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub struct Rsp { child: Child, stream: TcpStream, buf: Vec<u8> }
+/// `stream` is an Option only so `reset_connection` can close it while the child lives on.
+pub struct Rsp { child: Child, stream: Option<TcpStream>, buf: Vec<u8> }
 
 /// Seconds a reply may take before the test fails instead of hanging the gate.
 const REPLY_BOUND: u64 = 180;
@@ -40,6 +41,11 @@ pub fn spawn_server(trace: &Path, extra: &[&str]) -> (Child, u16, PathBuf) {
     panic!("gdbserver never printed its port");
 }
 
+/// Hex to bytes. The server's replies are trusted to be well-formed hex; a malformed one panics.
+fn unhex(h: &str) -> Vec<u8> {
+    (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect()
+}
+
 fn encode(p: &str) -> Vec<u8> {
     let mut body = Vec::new();
     for &c in p.as_bytes() {
@@ -60,18 +66,20 @@ impl Rsp {
         let _ = std::fs::remove_file(err_p);
         let stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         stream.set_read_timeout(Some(std::time::Duration::from_secs(REPLY_BOUND))).unwrap();
-        let mut r = Rsp { child, stream, buf: Vec::new() };
-        r.stream.write_all(&encode("QStartNoAckMode")).unwrap();
+        let mut r = Rsp { child, stream: Some(stream), buf: Vec::new() };
+        r.stream().write_all(&encode("QStartNoAckMode")).unwrap();
         assert_eq!(r.read_byte(), b'+', "the server acks in ack mode");
         assert_eq!(r.read_packet(), "OK");
-        r.stream.write_all(b"+").unwrap();
+        r.stream().write_all(b"+").unwrap();
         r
     }
+
+    fn stream(&mut self) -> &mut TcpStream { self.stream.as_mut().expect("the connection is open") }
 
     fn read_byte(&mut self) -> u8 {
         while self.buf.is_empty() {
             let mut b = [0u8; 65536];
-            let n = self.stream.read(&mut b).expect("read (a timeout here means the server hung)");
+            let n = self.stream().read(&mut b).expect("read (a timeout here means the server hung)");
             assert!(n > 0, "the server closed the connection");
             self.buf.extend_from_slice(&b[..n]);
         }
@@ -94,26 +102,25 @@ impl Rsp {
 
     /// Send one packet and return the one reply.
     pub fn send(&mut self, p: &str) -> String {
-        self.stream.write_all(&encode(p)).unwrap();
+        self.stream().write_all(&encode(p)).unwrap();
         self.read_packet()
     }
 
     /// Send one packet, collect `O` output packets (hex-decoded) until the final reply.
     pub fn send_collect(&mut self, p: &str) -> (String, String) {
-        self.stream.write_all(&encode(p)).unwrap();
+        self.stream().write_all(&encode(p)).unwrap();
         let mut out = String::new();
         loop {
             let r = self.read_packet();
             match r.strip_prefix('O') {
                 Some(h) if !h.is_empty() && h.len() % 2 == 0 && h.bytes().all(|c| c.is_ascii_hexdigit()) =>
-                    out += &String::from_utf8((0..h.len()).step_by(2)
-                        .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect()).unwrap(),
+                    out += &String::from_utf8(unhex(h)).unwrap(),
                 _ => return (out, r),
             }
         }
     }
 
-    pub fn send_raw(&mut self, bytes: &[u8]) { self.stream.write_all(bytes).unwrap(); }
+    pub fn send_raw(&mut self, bytes: &[u8]) { self.stream().write_all(bytes).unwrap(); }
 
     /// `qRcmd,where`'s text, trimmed: `at (n, k) phase=… pc=0x… thread=t`.
     pub fn where_(&mut self) -> String {
@@ -138,7 +145,21 @@ impl Rsp {
     pub fn detach(mut self) -> (String, i32) { let r = self.send("D"); (r, self.wait_exit()) }
     /// Close the socket without a word (Review Focus 3); the server's exit status.
     pub fn drop_connection(mut self) -> i32 {
-        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        let _ = self.stream().shutdown(std::net::Shutdown::Both);
+        self.wait_exit()
+    }
+
+    /// Vanish the way a killed lldb does (Ruling T2-a): send `g`, wait until its reply is in this
+    /// socket's receive buffer WITHOUT reading it, then close. Closing with received data unread
+    /// resets the connection rather than closing it (measured 5/5 on macOS 26: the server's next
+    /// read failed ECONNRESET). No `shutdown` first: measured, that flushes the unread data and the
+    /// close becomes an ordinary FIN. The server's exit status.
+    pub fn reset_connection(mut self) -> i32 {
+        self.stream().write_all(&encode("g")).unwrap();
+        let mut first = [0u8; 1];
+        assert_eq!(self.stream().peek(&mut first).expect("peek (a timeout means the server hung)"), 1,
+                   "the reply has started to arrive");
+        drop(self.stream.take());
         self.wait_exit()
     }
 }
@@ -150,7 +171,7 @@ impl Drop for Rsp {
 /// Decode a stop reply's `description:` (hex) field, if it has one.
 pub fn description(stop: &str) -> Option<String> {
     let h = stop.split("description:").nth(1)?.split(';').next()?;
-    String::from_utf8((0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect()).ok()
+    String::from_utf8(unhex(h)).ok()
 }
 
 /// A stop reply's `key:` value (the first one). The reply's first three bytes are `T<sig>`, so the
@@ -161,7 +182,7 @@ pub fn key<'a>(stop: &'a str, k: &str) -> Option<&'a str> {
 
 /// A register value out of `p`'s little-endian hex.
 pub fn le_u64(h: &str) -> u64 {
-    let b: Vec<u8> = (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect();
+    let b = unhex(h);
     let mut a = [0u8; 8];
     a[..b.len().min(8)].copy_from_slice(&b[..b.len().min(8)]);
     u64::from_le_bytes(a)
