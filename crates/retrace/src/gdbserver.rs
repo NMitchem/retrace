@@ -94,6 +94,10 @@ pub(crate) struct Server<'a> {
     last_tid: u32,
     /// `Hg`: the thread register reads without a thread suffix go to (an RSP tid; 0 means current).
     hg: u32,
+    /// `Hc`: the thread a step without a thread operand steps (an RSP tid; 0 means current).
+    hc: u32,
+    /// §3e: `qRcmd arm-rsi` makes the next `bc` a reverse step, and that `bc` spends it.
+    rsi_armed: bool,
     /// §3b: why the server has no session, once a failed motion's re-seek has failed too. From
     /// then on `handle_dead` answers every packet.
     dead: Option<String>,
@@ -108,7 +112,8 @@ impl<'a> Server<'a> {
         let exe_hdr = s.read_mem_prefix(EXE_BASE, 32usize.saturating_add(sizeofcmds).min(MAX_HDR));
         let exe_image = exe_arg.or_else(|| argv0(s))
             .and_then(|path| rsp::image_json(&exe_hdr, EXE_BASE, &path).ok());
-        let mut srv = Server { ex, exe_image, no_ack: false, last_stop: String::new(), last_tid: 0, hg: 0, dead: None };
+        let mut srv = Server { ex, exe_image, no_ack: false, last_stop: String::new(), last_tid: 0, hg: 0, hc: 0,
+                               rsi_armed: false, dead: None };
         srv.stop(StopKind::HistoryBegin("start of recording".into()), None); // the answer to `?`
         Ok(srv)
     }
@@ -185,10 +190,9 @@ impl<'a> Server<'a> {
                 }
             }
             _ if body.starts_with("Hg") || body.starts_with("Hc") => {
-                if let Some(t) = body.strip_prefix("Hg") {
-                    // `Hg-1` and `Hg0` both mean "any thread": the current one.
-                    self.hg = u32::from_str_radix(t, 16).unwrap_or(0);
-                }
+                // `H?-1` and `H?0` both mean "any thread": the current one.
+                let t = u32::from_str_radix(&body[2..], 16).unwrap_or(0);
+                if body.starts_with("Hg") { self.hg = t; } else { self.hc = t; }
                 one("OK")
             }
             _ if body.starts_with('p') => {
@@ -226,10 +230,49 @@ impl<'a> Server<'a> {
             // §3h: every continue form. A signal to deliver is ignored: a recording's signals are its own.
             _ if matches!(body, "c" | "vCont;c") || body.starts_with('C') || body.starts_with("vCont;C")
                 || body.starts_with("vCont;c:") => (vec![self.resume_forward()], false),
-            "bc" => (vec![self.motion(|s| { let h = s.ex.cmd_reverse_continue(&mut std::io::sink())?; s.reply_backward(h) })], false),
+            // §3d: every step form. A signal to deliver is ignored, as for continue.
+            "s" => (vec![self.step(None)], false),
+            _ if body.starts_with('S') => (vec![self.step(None)], false),
+            _ if body.starts_with("vCont;s") || body.starts_with("vCont;S") => {
+                // The first action names the thread (`s:<tid>`, `S05:<tid>`, or none). A trailing
+                // default for the other threads (`;c`) is moot: only the running thread can step
+                // (§3d rule 1).
+                let act = body["vCont;".len()..].split(';').next().unwrap_or("");
+                let tid = act.split_once(':').and_then(|(_, t)| u32::from_str_radix(t, 16).ok());
+                (vec![self.step(tid)], false)
+            }
+            "bs" => (vec![self.back_step()], false),
+            // §3e: an armed `bc` is `rsi`'s reverse step, and spends the arming.
+            "bc" => (vec![if std::mem::take(&mut self.rsi_armed) { self.back_step() } else {
+                self.motion(|s| { let h = s.ex.cmd_reverse_continue(&mut std::io::sink())?; s.reply_backward(h) })
+            }], false),
             _ if body.starts_with('Z') || body.starts_with('z') => one(&self.z_packet(body)),
-            _ => one(""), // §3h: every other packet is unsupported, stepping included until Task 4
+            _ => one(""), // §3h: every other packet is unsupported
         }
+    }
+
+    /// §3d: step thread `rsp_tid` (0 or none: the `Hc` thread, else the current one).
+    fn step(&mut self, rsp_tid: Option<u32>) -> String {
+        let pick = rsp_tid.filter(|&t| t != 0 && t != u32::MAX).or(Some(self.hc).filter(|&t| t != 0 && t != u32::MAX));
+        self.motion(|s| {
+            let t = match pick { Some(r) => r - 1, None => s.ex.sess().current_thread() };
+            match s.ex.step_thread(t, &mut std::io::sink())? {
+                Halt::Stepped => Ok(s.stop(StopKind::Trace, None)),
+                // Reported on the running thread, the measured-safe form (t0 L7).
+                Halt::Refused(why) => Ok(s.stop(StopKind::Exception { signal: 5, text: why }, None)),
+                Halt::WatchStepped { watched } => Ok(s.stop(StopKind::Watch(watched), None)),
+                other => s.reply_forward(other),
+            }
+        })
+    }
+
+    /// §3e: one instruction back, on whichever thread ran it.
+    fn back_step(&mut self) -> String {
+        self.motion(|s| match s.ex.cmd_reverse_stepi(1, &mut std::io::sink())? {
+            Halt::Stepped => Ok(s.stop(StopKind::Trace, None)),
+            Halt::AtStart => Ok(s.stop(StopKind::HistoryBegin("start of recording".into()), None)),
+            other => Err(format!("reverse-stepi reported {other:?}")),
+        })
     }
 
     /// §3b: one motion, bracketed. An `Err` re-seeks the saved cursor and becomes a non-moving
@@ -349,6 +392,8 @@ impl<'a> Server<'a> {
                 let text = format!("at ({n}, {k}) phase={phase:?} pc={:#x} thread={}\n", s.pc(), s.current_thread() + 1);
                 (vec![format!("O{}", rsp::hex(text.as_bytes())), "OK".into()], false)
             }
+            // §3e: what `rsi` sends before `process continue -R` (t0 L3, `l3_rsi`).
+            "arm-rsi" => { self.rsi_armed = true; (vec!["OK".into()], false) }
             _ => (vec!["E01".into()], false),
         }
     }

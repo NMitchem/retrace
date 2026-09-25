@@ -322,6 +322,8 @@ pub(crate) enum Halt {
     Break,
     /// A store to a watched range, parked pre-retire, (n, k, Watch).
     Watch { watched: u64 },
+    /// M43 §3d: `step_thread` stepped a store to a watched range; it retired, (n, k + 1, Bp).
+    WatchStepped { watched: u64 },
     /// A syscall's recorded write to a watched range, (n, 0, Sys); `thread` wrote it.
     WatchSys { watched: u64, thread: u32 },
     /// The recording's end (exit, crash, fatal signal), parked at (T, K_f, Watch) (M41 R18).
@@ -730,7 +732,13 @@ impl<'a> Exec<'a> {
     /// Then **scan** at native speed with hardware breakpoints (one DBGBVR slot each; ≤ 6) and
     /// watchpoints armed. A mid-window hit resolves to an exact (N, K) from `kctx`, and the landmark
     /// check catches a breakpoint exactly on a boundary. With nothing armed, runs to the end.
-    pub(crate) fn cmd_continue<W: Write>(&mut self, out: &mut W) -> Result<Halt, String> {
+    pub(crate) fn cmd_continue<W: Write>(&mut self, out: &mut W) -> Result<Halt, String> { self.continue_until(None, out) }
+
+    /// `cmd_continue`'s run, with one extra stop (M43 §3d): with `until: Some(t)`, arriving at a
+    /// boundary where thread `t` is current ends the run as `Halt::Stepped`, before anything at that
+    /// coordinate. `step_thread` uses it when the stepped thread blocked. With `None` it is
+    /// `continue` exactly.
+    pub(crate) fn continue_until<W: Write>(&mut self, until: Option<u32>, out: &mut W) -> Result<Halt, String> {
         let bps = self.breakpoints.clone();
         let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
         let diverged = |d: retrace_core::Divergence|
@@ -738,6 +746,16 @@ impl<'a> Exec<'a> {
         'finish: loop {
             // ---- Finish (n, k): its hits still ahead of the cursor ----
             loop {
+                // M43 §3d: a step whose thread blocked ends when that thread runs again, before
+                // anything at the coordinate it arrives at (an arrival, M41 R4). Only a crossing
+                // leaves k == 0 with the phase Sys. The step's own entry uses phase Sys too, but with
+                // another thread current, so this cannot fire before the run has moved.
+                if let Some(t) = until {
+                    if self.k == 0 && self.phase == Phase::Sys && self.sess().current_thread() == t {
+                        self.phase = Phase::Bp;
+                        return Ok(Halt::Stepped);
+                    }
+                }
                 let pc = self.sess().pc();
                 let on_bp = bps.contains(&pc);
                 if self.phase == Phase::Sys && on_bp {
@@ -829,6 +847,15 @@ impl<'a> Exec<'a> {
                         return Ok(Halt::Break);
                     }
                     Advance::Event => {
+                        if let Some(t) = until {
+                            if self.sess().current_thread() == t {
+                                let n = self.sess().landmark();
+                                self.sess_mut().clear_breakpoints(); // keep this session, hit-clean
+                                self.sess_mut().clear_watchpoints();
+                                (self.n, self.k, self.phase) = (n, 0, Phase::Bp);
+                                return Ok(Halt::Stepped);
+                            }
+                        }
                         let pc = self.sess().pc(); // the INCOMING thread's after a block (§3a)
                         if bps.contains(&pc) {
                             let n = self.sess().landmark();
@@ -886,6 +913,69 @@ impl<'a> Exec<'a> {
                     }
                 }
             }
+        }
+    }
+
+    /// M43 §3d: one instruction of thread `t` (retrace's id), as lldb's `s` needs it. It crosses a
+    /// trap, and a blocking syscall until `t` runs again. Nothing is ever `Stepped` without `t`'s pc
+    /// moving (t0 L4b, L7: lldb re-steps forever).
+    pub(crate) fn step_thread<W: Write>(&mut self, t: u32, out: &mut W) -> Result<Halt, String> {
+        let cur = self.sess().current_thread();
+        if t != cur {
+            return Ok(Halt::Refused(format!(
+                "cannot step thread {}: only the running thread ({}) can step", t + 1, cur + 1)));
+        }
+        let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
+        let pc0 = self.sess().pc();
+        self.sess_mut().arm_watchpoints(&ws);
+        let stepped = self.sess_mut().step_armed();
+        self.sess_mut().clear_watchpoints(); // the kept-session invariant
+        match stepped? {
+            Armed::Retired => { self.k += 1; self.phase = Phase::Bp; Ok(Halt::Stepped) }
+            Armed::Watch => {
+                let watched = watched_of(&ws, self.sess().far());
+                self.sess_mut().step_insns(1)?; // retire it with nothing armed
+                self.k += 1;
+                self.phase = Phase::Bp;
+                Ok(Halt::WatchStepped { watched })
+            }
+            Armed::AtTrap | Armed::Fault => {
+                // cmd_continue's own crossing (R10): a fresh session parked before the trap, the
+                // watches armed for this one event.
+                let (n, k) = (self.n, self.k);
+                self.reseek(n, k)?;
+                self.sess_mut().arm_watchpoints(&ws);
+                let adv = self.sess_mut().advance()
+                    .map_err(|d| format!("step diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail));
+                self.sess_mut().clear_watchpoints();
+                match adv? {
+                    Advance::Exited(report) => self.park_at_terminal(report, out),
+                    Advance::WatchSyscall { watched, thread } => {
+                        let n = self.sess().landmark();
+                        (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
+                        Ok(Halt::WatchSys { watched, thread })
+                    }
+                    Advance::Event => {
+                        let n = self.sess().landmark();
+                        if self.sess().current_thread() == t {
+                            (self.n, self.k, self.phase) = (n, 0, Phase::Bp);
+                            if self.sess().pc() == pc0 {
+                                return Ok(Halt::Refused("step did not move".into()));
+                            }
+                            return Ok(Halt::Stepped);
+                        }
+                        // `t` blocked. Run until it is current again, with the user's hits armed:
+                        // another thread's hit is reported as its own stop (spec R7). Phase Sys, so
+                        // a breakpoint at (n, 0) on the thread now running is still ahead.
+                        (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
+                        self.continue_until(Some(t), out)
+                    }
+                    Advance::Break | Advance::Watch { .. } => Err(
+                        "step: a hardware stop during a one-event crossing (breakpoints are off and the \
+                         guest is parked on the trap or fault)".into()),
+                }
+            }
+            Armed::Break => Err("step: a breakpoint stop with no breakpoint armed".into()),
         }
     }
 
@@ -1364,5 +1454,18 @@ mod tests {
         assert_eq!(ex.sess().pc(), pc0, "the session is back at the saved cursor");
         assert!(matches!(ex.cmd_stepi(1, &mut sink).unwrap(), Halt::Stepped));
         assert_eq!(ex.cursor(), (1, 1, Phase::Bp));
+    }
+
+    #[test] fn step_thread_steps_a_watched_store_and_reports_it_retired() {
+        // M43 §3d: stepping onto a watched store reports it post-retire (WatchStepped), cursor at
+        // (n, k + 1, Bp).
+        let trace = record_watchsweep("stepthread");
+        let buf0 = watchsweep_target(&trace) - 320;
+        let mut ex = Exec::new(&trace).unwrap();
+        let mut sink = Vec::new();
+        run_cmds(&mut ex, &format!("watch 0x{buf0:x}; stepi 8"), &mut sink);
+        let h = ex.step_thread(0, &mut sink).unwrap();
+        assert!(matches!(h, Halt::WatchStepped { watched } if watched == buf0), "{h:?}");
+        assert_eq!(ex.cursor(), (1, 9, Phase::Bp));
     }
 }
