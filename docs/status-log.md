@@ -12002,9 +12002,11 @@ own exit lost the monitor. It is the lldb seam's precondition: lldb single-steps
 breakpoints freely, and M43 puts it in front of this debugger.
 
 The milestone's numbers: **eight** t0 measurements (M1–M8), whose failures are now named
-regressions that were RED before the mechanism landed and are green; **one** new repo fixture
-(`crates/retrace-guest/asm/llsc.s`, nine LL/SC shapes (a)–(i)) and **one** new test binary
-(`llsc_e2e`, 46 tests); **+80** `#[test]` attributes over six files, none removed; **one** new
+regressions that were RED before the mechanism landed and are green; **two** new repo fixtures
+(`crates/retrace-guest/asm/llsc.s`, nine LL/SC shapes (a)–(i); and `llscbound.s`, the witness for
+`run()`'s 16-step bound, from the final review's fix wave) and **one** new test binary
+(`llsc_e2e`, 47 tests); **+81** `#[test]` attributes over six files (+80 at the close, +1 in the
+fix wave), none removed; **one** new
 `retrace-box` module (`excl.rs`: the pure store validator, the backward scan and the inference
 decision, 26 unit tests) and **one** `Box_` field (`excl`, declared last), which `BoxState` carries;
 **zero** dispatch arms changed (`record_box` gains one assert after `b.run()`, plain `replay()` one
@@ -12016,8 +12018,10 @@ the spec with its t0 companion (`7ccae96`), the plan (`340e8ed`) and its pre-fli
 six plan or spec amendments made in execution (`6cc1397`, `c5b6d47`, `2f55fd6`, `7bb407e`,
 `2b8a7aa`, `7069147`), and ten task commits (`898bf06`; `3f17d66` + `b7de462`; `6bfa637` +
 `11d90be`; `a2365bf`; `0e0e651` + `74b83c3` + `e9e8460`; `48f7f93`), four of them review or
-ruling fix rounds. Gate: **746 passed / 0 failed / 9 ignored across 142 test binaries**, each
-chunk predicted from source before it ran, and each matched.
+ruling fix rounds; then the close (`8231c31`) and the final review's fix wave (`00c76e3` and its
+docs commit), under the review's four rulings F-1 … F-4. Gate: **747 passed / 0 failed / 9
+ignored across 142 test binaries**: the close's full gate, 746, each chunk predicted from source
+before it ran and each matched, plus the fix wave's one test.
 
 ### What t0 measured
 
@@ -12062,7 +12066,7 @@ against the masks in the controller's pre-flight; `retrace-arch` lib 39 → 44.
 
 `llsc.s` keeps t0's four shapes verbatim, and `otool -tv` showed its first 76 instructions
 byte-identical to t0's scratch binary, so every t0 coordinate holds for windows 1–4. It appends
-(e) `ldxr; clrex; stxr`, (f) `ldxr; mrs x6, cntvct_el0; stxr`, (g) `ldxr; svc getpid; stxr` with
+(e) `ldxr; clrex; stxr`, (f) `ldxr; mrs x7, cntvct_el0; stxr`, (g) `ldxr; svc getpid; stxr` with
 the store in the next window, (h) (a)'s shape on the filled cell, so the `cbnz` leaves an LDX with no
 STX, and (i) a one-pass retry loop in the exit window, which puts a pair on the terminal park's
 single-stepped window. Window lengths 16/33/19/16/14/14/5/9/13/10. **The halt check was clear**:
@@ -12275,6 +12279,9 @@ seven (`automationmodetool`, `csh`, `dddiagnose`, `desdp`, `dyld_info`, `flex`, 
 `a_rust_stack_overflow_strikes_its_own_guard_page` and `cache_symbol_e2e`. No `#[ignore]` line is
 added or removed in `git diff 1d95a93 -- crates`. M42 parked nothing and un-parked nothing.
 
+**After the close, the final review's fix wave moved one count**: `llsc_e2e` 46 → 47 (below).
+Every other chunk it re-ran matched this table, so the gate is **747 / 0 / 9 over 142**.
+
 **The invariants.** `git diff 1d95a93 -- crates/retrace-trace` is empty, so `TRACE_MAGIC` did not
 move and `Event` did not change. `grep -c 'self.verify_thread(' crates/retrace-core/src/lib.rs` is
 **7**. No dispatch arm changed: `retrace-core/src/lib.rs`'s four hunks are a `pub use`, the
@@ -12326,6 +12333,7 @@ The plan's four:
 * **R9 — §3e lands in Task 3, not with §3d**, because the debugger resumes natively from a
   stepped position. C5 shows it was needed there.
 * **R10 — `run()`'s prologue is bounded at 16 steps**, then drops the shadow. A README residual.
+  Nothing reached the bound until the final review's fix wave added a witness (F1, below).
 * **R11 — a raised watch stop's FAR is the lowest overlapped byte**, which `watched_of` resolves
   exactly. The pair-element watch (`pair+8`) passes on it.
 * **R12 — an asynchronous exit inside `run_one_for_step` leaves the shadow**; clearing there would
@@ -12378,7 +12386,14 @@ From the spec's §7, not done by design:
 * **Inference's unmeasured assumptions**: fall-through, no branch into `(L, P]` (the only guard
   when every destination is rewritten), and no plain store of an identical value between the halves.
   The fourth, the base not rewritten, is checked by condition 5 since T5-a.
-* **The 16-step prologue's drop** (R10), loud if it ever matters.
+* **The 16-step prologue's drop** (R10). A branch-out reaches it, and so does a straight-line
+  sequence whose store-exclusive lies more than 16 instructions past `run()`'s entry. A store to
+  the marked bytes after the drop fails where it succeeded natively. That is loud for a
+  discard-status pair, because the replay diverges. A retry loop absorbs it and replay reaches
+  the recorded end, though a native scan's hit counts can drift, which `resolve_nth` usually turns
+  into a loud error. Anything else is shape-dependent: a one-shot CAS depends on what its caller
+  does with the failure. The bound itself is pinned since the fix wave (F1, below). (This entry
+  first read "loud if it ever matters"; corrected before merge, final-review F2.)
 * **Byte, halfword and `ldaxp` retires**, whose ISS.EX is unmeasured (spec R2).
 * **The stage-2 clear class has no static-fixture witness** (spec R6); it shares the classifier's
   code.
@@ -12407,5 +12422,73 @@ Deferred review minors, for the final review to triage:
 * **Task 6:** the Step 1 RED/GREEN evidence lives in the report, not a standalone log;
   `Tr::n_create` is now dead, kept under `#[allow(dead_code)]`.
 
+The final review ruled that the ledger's twenty deferred minors stay owed (Ruling F-4). Three of
+them are also the review's own Minors 5, 6 and 8, which its fix wave did fix (below): the vtimer
+arm (F4), `excl.rs`'s "conservative" (F7) and `hits.rs`'s module doc (F5). The review's Minors 2–4
+are owed to M43 (Ruling F-3): the read-only-target panic, the base-aliasing load's panic at retire,
+and ISV=0 hardening.
+
 **The lldb seam is M43's**, per the run charter, and M41's latent `?`-exit item is the first thing
 it will meet.
+
+### The final review and its fix wave
+
+The whole-branch review (`1d95a93..8231c31`) found no Critical issue and ruled "ready to merge
+with fixes". The controller ruled on each finding (F-1 … F-4). The one fix wave, `00c76e3` for
+code and its docs commit, did seven things:
+
+* **F1, the 16-step bound had no witness.** No test reached `PAIR_STEP_BOUND`: (h)'s branch-out
+  meets its `svc` in 9 steps. Deleting the post-loop drop alone turned nothing red, and neither did
+  raising the bound. A new fixture, `llscbound.s`, was added beside `llsc.s`, which it leaves
+  frozen. Its cell is nonzero, so `ldxr; cbnz` is taken past a never-run `stxr`, into 20 `add`s,
+  and then `bnd_bp`, 23 words after the load and 21 steps after the `cbnz`. The new test,
+  `a_shadow_outliving_its_sequence_is_dropped_at_the_step_bound`:
+  - seeks to `(1, 3)`, just after the `ldxr`, where the shadow is set;
+  - breaks at `bnd_bp` and advances, which must give `Break` at `bnd_bp` with no shadow;
+  - finishes at exit 0.
+
+  Its controls ran on the committed tree, each undone with `git checkout --`:
+  - **FB1**, the post-loop `self.excl = None;` deleted: **RED**, panicking at `infer_excl`'s
+    `debug_assert!` "run()'s native loop runs only with the shadow clear (§3e)". The other 46
+    passed, so the test is the drop's only witness.
+  - **FB2**, `PAIR_STEP_BOUND` set to 1000: **RED**. The `Break` and its pc held, and the shadow
+    was still set at the breakpoint (`Some(Excl { va: 0x100004000, size: 4, loaded: [1, 0, 0, 0],
+    by: Stepped })`), because the prologue had stepped into the hardware breakpoint.
+* **F2, the bound's residual was overclaimed.** It said only a branch-out reaches the bound, and
+  that the cost is always loud. A straight-line sequence whose store lies more than 16
+  instructions past `run()`'s entry reaches it too. The cost is loud only for a discard-status
+  pair. A retry loop absorbs it (hit counts can drift, which `resolve_nth` usually makes loud),
+  and anything else is shape-dependent. Reworded in the README, in spec §3e and in "What stays
+  owed" above.
+* **F3.** `CLAUDE.md` listed the store-exclusive emulation among symmetry rule 2's arms, which
+  live in `run()` and fire on both sides. It is debugger-only: it lives in `step()` and the pair
+  prologue, and record and plain replay assert it never engages. It is now a sentence of its own
+  after rule 2.
+* **F4.** `run_one_for_step`'s vtimer/cancel arm now calls `note_exit(true)`, a no-op, so that
+  "every exit arm classifies" (spec §3a) is literally true.
+* **F5.** `hits.rs`'s module doc no longer says the oracle shares none of the debugger's
+  machinery and sees only hardware stops. It shares `Box_::raise_debug_stop`, so what pins the
+  raised stops independently is `llsc_e2e`'s source-derived lists.
+* **F6.** Spec §4 said (f) reads `mrs x6` and that (i)'s count rides in `x4`. The fixture reads
+  `x7` and publishes the count in `exit(entries - 1)`. Both are corrected in the spec. The Task 2
+  entry above also said `x6`, and is corrected in place, since this section had not been merged.
+* **F7.** `excl.rs`'s `regs_written` doc now says that counting a non-register bits 4:0 field is
+  conservative for condition 5 only. For condition 3 it drops that register's comparison.
+
+**Re-verified on `00c76e3`**, each command's exit code captured in the same shell call, with logs
+in the ledger's `fixv/`:
+
+| command | exit | result |
+|---|---|---|
+| `ws` | 0 | 178 over 26, as at the close |
+| `box` (whole package) | 0 | 320 over 41, as at the close |
+| `--bins` | 0 | 17 over 1 |
+| `llsc_e2e` | 0 | **47** (46 + F1) |
+| the nine stepping suites | 0 each | every count as at the close |
+| clippy, `--workspace --all-targets -D warnings` | 0 | clean |
+
+The nine suites are `debug_cli` 10, `watch_cli` 11, `watch` 7, `hitorder_e2e` 23, `watchsweep_e2e`
+4, `reverse_debug_e2e` 1, `checkpoint_seek` 6, `crashy_cli` 2 and `thread_watch_e2e` 1.
+`git diff 8231c31 00c76e3 -- crates` adds one `#[test]` line and removes none, and touches no
+`#[ignore]`. No existing test's behaviour moved. So the gate is 746 + 1 = **747 / 0 / 9 over 142**.
+The tree holds 754 `#[test]` attributes: 745 runnable, 9 ignored, and the census pair runs twice.

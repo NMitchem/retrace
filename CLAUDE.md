@@ -183,10 +183,13 @@ and threads.
    recording — that comparison *is* the divergence check, so an asymmetry surfaces as a divergence,
    not silent corruption.
 2. Deterministic instruction emulation is better done **below the trace**, inside `Box_::run()`
-   (as with the timebase MRS, the Apple-IMPDEF undef-MRS, the B-family FPAC strip, and the M42
-   store-exclusive emulation under a shadow monitor): `run()` is shared by record and replay, so
-   such an arm fires identically on both sides and never surfaces to the record/replay loop —
-   determinism is then automatic.
+   (as with the timebase MRS, the Apple-IMPDEF undef-MRS, and the B-family FPAC strip): `run()` is
+   shared by record and replay, so such an arm fires identically on both sides and never surfaces
+   to the record/replay loop — determinism is then automatic.
+
+   M42's store-exclusive emulation is also below the trace, but it is debugger-only: it lives in
+   `step()` and `run()`'s pair prologue, engages only when single-stepping or at a debug stop, and
+   record and plain replay assert its shadow is never set.
 
 ### Hard platform invariants (encoded in the box; violating them hangs or panics the machine)
 

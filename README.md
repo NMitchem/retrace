@@ -100,7 +100,7 @@ records and replays byte-identically, twice:
 
 | Rung | Guest | Notes |
 |---|---|---|
-| 0 | freestanding `-nostdlib -static` arm64 | 45 `asm/*.s` fixtures |
+| 0 | freestanding `-nostdlib -static` arm64 | 46 `asm/*.s` fixtures |
 | 0 | `hello_dyn` (C) | real dynamic linking through `/usr/lib/dyld` |
 | 1 | `hello_rust` | full-`std` `rustc` binary |
 | 2 | `jq` | stock `brew` binary |
@@ -544,14 +544,18 @@ reconstruction caveat in full.
   sets the cell to `0x701238000`, where M39's tree resolved `(1126, 29627)` — an earlier run of the
   same store on another address, 1,736,055 instructions early.
 
-**Gate:** 746 passed / 0 failed / 9 ignored across 142 test binaries, **measured at M42's
-close** over the whole workspace, every chunk exit 0 (captured before any pipe); clippy clean over
-`--workspace --all-targets` with `-D warnings`. The close ran the full chunked gate on its own
-tree (`48f7f93`; nothing under `crates/` changed after it): `ws` 178 over 26 binaries, `box` 320
-over 41, the seventy-four per-target e2e invocations 231 passed and 9 ignored over 74, and
-`--bins` 17 over 1. The e2e loop took 17 min 1 s of wall-clock, `hitorder_e2e` 74.12 s and
-`cpython_crash_e2e` 42.22 s of it. Every chunk's count was predicted from source before it ran,
-and every one matched. See the testing note below for how that number is
+**Gate:** 747 passed / 0 failed / 9 ignored across 142 test binaries: **M42's close, 746, plus
+the one test its final-review fix wave added**. The close ran the full chunked gate on its own
+tree (`48f7f93`), every chunk exit 0 (captured before any pipe), with clippy clean over
+`--workspace --all-targets` with `-D warnings`: `ws` 178 over 26 binaries, `box` 320 over 41, the
+seventy-four per-target e2e invocations 231 passed and 9 ignored over 74, and `--bins` 17 over 1.
+The e2e loop took 17 min 1 s of wall-clock, `hitorder_e2e` 74.12 s and `cpython_crash_e2e`
+42.22 s of it. Every chunk's count was predicted from source before it ran, and every one
+matched. The fix wave then added one fixture (`llscbound.s`) and one test (`llsc_e2e`'s
+`a_shadow_outliving_its_sequence_is_dropped_at_the_step_bound`); its one code change is a no-op
+classifier call. It re-ran `ws` (178 over 26), `box` (320 over 41), `--bins` (17 over 1),
+`llsc_e2e` (**47**) and the nine stepping suites, every one exit 0 and clippy clean, so 746 + 1 =
+**747**. The other e2e targets were not re-run. See the testing note below for how that number is
 assembled. The "test binaries" figure is test executables plus the `Doc-tests` harnesses cargo
 reports, each of which runs zero tests — the convention every milestone since M14 has counted by,
 kept for comparability and written out here so nobody has to re-derive it. The ignored gates are
@@ -573,21 +577,22 @@ changed their count, everything else is byte-for-byte M41's:
 | `retrace-box/src/excl.rs` | — | 26 | **+26**, new module (the store validator's refusals, the backward scan, `regs_written`, and one test per inference condition, each shown able to fail) |
 | `retrace-box/tests/step.rs` | 4 | 5 | **+1** (a stepped load-exclusive sets the shadow and its store lands) |
 | `retrace-box/tests/checkpointparity.rs` | 3 | 4 | **+1** (the mid-pair tier: a checkpoint inside a pair carries the shadow) |
-| `retrace/tests/llsc_e2e.rs` | — | 46 | **+46**, new binary (t0's M2–M7 as named regressions, M4–M6 in both directions; the recording test and three clear-rule controls; the shadow's life cycle; seven inference tests; three hit-oracle armings, each a ground-truth list and three chains) |
+| `retrace/tests/llsc_e2e.rs` | — | 47 | **+47**, new binary (t0's M2–M7 as named regressions, M4–M6 in both directions; the recording test and three clear-rule controls; the shadow's life cycle; seven inference tests; three hit-oracle armings, each a ground-truth list and three chains; and, from the final-review fix wave, the witness for `run()`'s 16-step bound) |
 | `retrace/tests/hitorder_e2e.rs` | 22 | 23 | **+1** (a seek into dyld's `getpid` pair on `threadrust` replays to the end) |
 
-+80 `#[test]` attributes, `#[ignore]` **9 → 9**, `--bins` **17 → 17**, and **one new test
-binary**, 141 → 142. The count closes at both ends, and the two ends must still be read
-separately: the tree holds **753** `#[test]` attributes = 744 runnable + 9 ignored (M41 held 673 =
-664 + 9), while the run reports 744 + the 2 census tests that run twice (`census.rs` executes in its
-own binary and again inside `legacy_equivalence`'s `#[path]` include). (A bare
-`grep -c '#\[test\]'` says 754, because a comment in `legacy_equivalence.rs` mentions the attribute
-in prose; the file has three.) The spec's §9 prediction, ≈ 708 / 0 / 9 over 142, had the binary
-count right and was short by 38 tests: `llsc_e2e` holds 46 where it counted ~22 (+24: t0's
-regressions split by direction, the life-cycle tests, and each oracle arming's list and chains as
-separate tests), and `excl.rs` 26 where it counted ~8 validator tests (+18: the inference's pure
-decision and its per-condition tests came with Task 5's rulings); the decoder is 5 tests where it
-counted ~8 (−3), and its ~3 session-level box tests are two (−1: the rest landed in `llsc_e2e`).
++81 `#[test]` attributes (+80 at the close, +1 in the fix wave), `#[ignore]` **9 → 9**, `--bins`
+**17 → 17**, and **one new test binary**, 141 → 142. The count closes at both ends, and the two
+ends must still be read separately: the tree holds **754** `#[test]` attributes = 745 runnable + 9
+ignored (M41 held 673 = 664 + 9), while the run reports 745 + the 2 census tests that run twice
+(`census.rs` executes in its own binary and again inside `legacy_equivalence`'s `#[path]`
+include). (A bare `grep -c '#\[test\]'` says 755, because a comment in `legacy_equivalence.rs`
+mentions the attribute in prose; the file has three.) The spec's §9 prediction, ≈ 708 / 0 / 9 over
+142, had the binary count right and, at the close, was short by 38 tests: `llsc_e2e` held 46
+where it counted ~22 (+24: t0's regressions split by direction, the life-cycle tests, and each
+oracle arming's list and chains as separate tests), and `excl.rs` 26 where it counted ~8
+validator tests (+18: the inference's pure decision and its per-condition tests came with Task
+5's rulings); the decoder is 5 tests where it counted ~8 (−3), and its ~3 session-level box tests
+are two (−1: the rest landed in `llsc_e2e`).
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
 lesson). `retrace` ran **per-target** — seventy-four `--test <name>` invocations, one after another
@@ -1229,10 +1234,17 @@ These are real and current, not aspirational gaps.
     instructions before a native stop, or on another 16 KiB page, is not found. The stop infers
     nothing, which is the pre-M42 fallback above. No census sequence is that long or straddles a
     page.
-  - **`run()` drops a shadow it cannot finish in 16 steps** (plan R10). Only a load-exclusive whose
-    sequence a branch left can get there. A store-exclusive to the marked bytes more than 16
-    instructions later, with no exit between, would then fail under the debugger where it
-    succeeded natively. That is **loud**: the replay diverges. No census shape does it.
+  - **`run()` drops a shadow it cannot finish in 16 steps** (plan R10). Two shapes get there: a
+    load-exclusive whose sequence a branch left, and a straight-line sequence whose
+    store-exclusive lies more than 16 instructions past `run()`'s entry. A store-exclusive to the
+    marked bytes after the drop, with no exit between, would then fail under the debugger where it
+    succeeded natively. No census shape does it. What it costs depends on the shape. For a
+    discard-status pair it is **loud**: the replay diverges. A retry loop **absorbs** it: the loop
+    retries the lost store and replay reaches the recorded end, though a native scan's hit counts
+    can drift, which `resolve_nth` usually turns into a loud error. Anything else is
+    shape-dependent: a one-shot CAS depends on what its caller does with the failure. The bound
+    and the drop are pinned by `llsc_e2e`'s
+    `a_shadow_outliving_its_sequence_is_dropped_at_the_step_bound`, on its own fixture.
   - **`wfe`** (EC `0x01`), including `ldxr; wfe` spin-waits, is unhandled on every path, not only
     under stepping. What such a guest does under retrace is unmeasured.
   - **Byte, halfword and `ldaxp` load-exclusives are unmeasured.** The shadow is set from the step

@@ -293,16 +293,30 @@ while the shadow is set:
 
 **The prologue is bounded at 16 steps** (the §3d scan bound, and gdb's). If the shadow is still set
 after them, the prologue drops it and the native loop resumes.
-- The only way to get there is a load-exclusive whose sequence a branch left: (h), or dyld's
-  `getpid` when another thread filled the cache first.
+- Two shapes get there. One is a load-exclusive whose sequence a branch left: (h), or dyld's
+  `getpid` when another thread filled the cache first. The other is a straight-line sequence
+  whose store-exclusive lies more than 16 instructions past `run()`'s entry.
 - Without the bound, `run()` would single-step all the way to the next syscall. That is correct,
   but it costs a VM exit per instruction for as long as that takes.
 - Dropping the shadow is what resuming natively does to the hardware monitor anyway. A
-  store-exclusive to the marked bytes more than 16 instructions later, with no exit between, would
-  then fail under the debugger where it succeeded natively. No census shape does that. It is a
-  README residual, and it is loud if it ever matters, because the replay diverges.
+  store-exclusive to the marked bytes after the drop, with no exit between, would then fail under
+  the debugger where it succeeded natively. No census shape does that. It is a README residual,
+  and what it costs depends on the shape:
+  - **a discard-status pair** (dyld's `stxr wzr`): loud, because the lost store changes the path
+    and the replay diverges;
+  - **a retry loop:** absorbed. The loop retries the lost store, and replay reaches the recorded
+    end. A native scan's hit counts can drift by the extra pass, and `resolve_nth` usually turns
+    that drift into a loud error;
+  - **anything else:** shape-dependent. A one-shot CAS, for one, depends on what its caller does
+    with the failure.
+- The bound and the drop are pinned by `llsc_e2e`'s
+  `a_shadow_outliving_its_sequence_is_dropped_at_the_step_bound`, on its own fixture `llscbound.s`
+  (final review, F1). Deleting the drop turns it red at `infer_excl`'s clear-shadow assert.
+  Raising the bound to 1000 turns it red too, with the shadow still set at the breakpoint.
 
-(Amended while planning, R10 of the plan.)
+(Amended while planning, R10 of the plan. The residual's wording was corrected at the final
+review, F2: it had said that only a branch-out reaches the bound, and that the cost is always
+loud.)
 
 ### 3f. Checkpoints, record and plain replay
 
@@ -333,12 +347,13 @@ There is no dispatch arm and no trace change.
   coordinate in the companion holds for windows 1–4.
 - **Appended, each publishing its outcome in the arguments of the syscall that ends its window:**
   - (e) `ldxr; clrex; stxr`, which natively fails;
-  - (f) `ldxr; mrs x6, cntvct_el0; stxr`, where the emulated timebase is a non-debug exit, so it
+  - (f) `ldxr; mrs x7, cntvct_el0; stxr`, where the emulated timebase is a non-debug exit, so it
     natively fails;
   - (g) `ldxr; svc getpid; stxr`, which natively fails, with the store in the next window;
   - (h) (a)'s shape again on the filled cell: the `cbnz` is taken, so there is an LDX with no STX;
-  - (i) in the **exit window**, a one-pass retry loop whose entry count rides in `exit`'s `x4`. That
-    puts a pair on the terminal park's single-stepped window (M41's owed item).
+  - (i) in the **exit window**, a one-pass retry loop that publishes its entry count in the exit
+    status, `exit(entries - 1)`, because an `Exit` event records only its code. That puts a pair
+    on the terminal park's single-stepped window (M41's owed item).
 - **Addresses are the fixture's symbols** (`a_ldx`, `b_stx`, …), resolved through the debugger's
   symbol operands, never hardcoded.
 
@@ -557,13 +572,17 @@ M41 closed at **666 / 0 / 9 over 141**. Expected additions:
 
 ## 10. Outcome
 
-**Closed 2026-09-24, on branch `m42-llsc`.** Gate: **746 passed / 0 failed / 9 ignored across 142
-test binaries**, on `48f7f93`, chunked as CLAUDE.md requires, every chunk exit 0 and clippy clean.
-It was predicted from source, file by file, before it ran, and matched in every chunk: `ws` 178
-over 26, `box` 320 over 41, the 74 per-target e2e invocations 231 + 9 ignored over 74, `--bins` 17
-over 1. The status log's M42 section holds the per-file reconciliation against M41's 666 / 0 / 9
-over 141. `TRACE_MAGIC` did not move (`crates/retrace-trace` has no diff), no dispatch arm changed,
-`verify_thread` is still at seven call sites, and no `#[ignore]` was added or removed. Every named
+**Closed 2026-09-24, on branch `m42-llsc`.** Gate: **747 passed / 0 failed / 9 ignored across 142
+test binaries**. That is the close's full gate, 746 on `48f7f93`, plus the one test the final
+review's fix wave added. The close's gate was chunked as CLAUDE.md requires, every chunk exit 0 and
+clippy clean. It was predicted from source, file by file, before it ran, and matched in every
+chunk: `ws` 178 over 26, `box` 320 over 41, the 74 per-target e2e invocations 231 + 9 ignored over
+74, `--bins` 17 over 1. The fix wave added the fixture `llscbound.s` and one `llsc_e2e` test (F1,
+§3e), and re-ran `ws`, `box`, `--bins`, `llsc_e2e` (47) and the nine stepping suites, every one
+exit 0, with clippy clean. Only `llsc_e2e` moved, by +1. The status log's M42 section holds the
+per-file reconciliation against M41's 666 / 0 / 9 over 141. `TRACE_MAGIC` did not move
+(`crates/retrace-trace` has no diff), no dispatch arm changed, `verify_thread` is still at seven
+call sites, and no `#[ignore]` was added or removed. Every named
 regression in §4's table was RED before any mechanism landed (Task 2's run, on a tree whose
 `retrace-box` and `retrace-core` were `1d95a93`'s) and is green, with the transcripts in the
 ledger. Every clear-rule control was shown able to fail. Every oracle chain on every llsc arming
@@ -579,6 +598,7 @@ passes, and Q3 on `threadrust` passes. The audit found no existing test whose ou
 | 4 | `a2365bf` | 30 of 36 | the four forward M5/M6s and the three oracle ground-truth lists |
 | 5 | `0e0e651`, `74b83c3`, `e9e8460` | 41 of 45, then 46 of 46 | the backward M4–M6s, the inference tests and every oracle chain |
 | 6 | `48f7f93` | 46 of 46 | Q3 flipped on `threadrust`; the oracle starts at landmark 1 (22.95 s CPU, inside 120 s), so M41's R13 is reverted (R7) |
+| final-review fix wave | `00c76e3` | 47 of 47 | the witness for §3e's 16-step bound and its drop, on `llscbound.s`; each of its two controls turns it red (F1) |
 
 **CPU (§6).** `cpython_crash_e2e` 40.47 s before (Task 2) and **41.23 s** after, user + sys:
 **+1.9 %**, inside the 10 %. `hitorder_e2e` 40.90 s over 22 tests before and **64.23 s** over 23
@@ -624,9 +644,9 @@ condition) and T6-a (a commit trailer).
    consumes a watch stop. The control is still RED, so the order is shown load-bearing (T4-a).
 6. **Plan and brief text.** `m3e`'s second `where` could never go green (T2-c). Task 5's brief said
    four inference tests expect a shadow where three did; a fourth came with T5-a's session test.
-7. **The gate.** §9 predicted ≈ 708 / 0 / 9 over 142. The binary count was right, and the test
-   count was **short by 38**:
-   - `llsc_e2e` holds 46 against ~22 (+24): t0's regressions are split by direction, the
+7. **The gate.** §9 predicted ≈ 708 / 0 / 9 over 142. The binary count was right, and at the close
+   the test count was **short by 38** (39 after the fix wave's one test):
+   - `llsc_e2e` held 46 against ~22 (+24): t0's regressions are split by direction, the
      life-cycle tests were not counted, and each oracle arming's list and chains are separate tests;
    - `excl.rs` holds 26 against ~8 validator tests (+18): the inference's 3 + 4 + 10 unit tests came
      with Task 5 and its rulings;
