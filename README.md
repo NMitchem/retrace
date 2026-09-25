@@ -100,7 +100,7 @@ records and replays byte-identically, twice:
 
 | Rung | Guest | Notes |
 |---|---|---|
-| 0 | freestanding `-nostdlib -static` arm64 | 36 `asm/*.s` fixtures |
+| 0 | freestanding `-nostdlib -static` arm64 | 45 `asm/*.s` fixtures |
 | 0 | `hello_dyn` (C) | real dynamic linking through `/usr/lib/dyld` |
 | 1 | `hello_rust` | full-`std` `rustc` binary |
 | 2 | `jq` | stock `brew` binary |
@@ -185,6 +185,23 @@ reconstruction caveat in full.
   direction. Five were red on M40's debugger; the sixth, hits in the exit window, was added by
   M41's final review and was red on M41's own debugger until the end of the recording moved to
   after them. That is the oracle's proof that it can fail.
+- **Exclusive (LL/SC) pairs under the debugger** — since M42, stepping, seeking, `reverse-stepi`,
+  checkpoints and native breakpoint/watch stops keep an AArch64 exclusive pair's store-exclusive
+  exactly as the recording ran it. Any VM exit between an `ldxr` and its `stxr` clears the core's
+  exclusive monitor, so before M42 a debugger exit inside a pair failed a store the recording had
+  made: divergences, hangs on retry loops, phantom watch hits and a wrong `no earlier hit`, all
+  measured. `Box_` now keeps a **shadow of the exclusive monitor**, below the trace. A stepped
+  load-exclusive sets it (the step exit's syndrome reports one, ISS.EX), and every exit that is
+  not a debug exit clears it, as the hardware's exception return does. `step()` then **emulates**
+  the store-exclusive, once a pure validator has passed it (every refusal is a panic naming its
+  check) and any breakpoint or watch stop the hardware would take there has been raised. A native
+  breakpoint or watch stop inside a pair **infers** the shadow from the instructions behind it
+  (the one heuristic; Known limits has its assumptions), `run()` entered inside a pair steps it to
+  its end before resuming natively, and checkpoints carry the shadow. Record and plain replay never
+  engage it, and both assert so. Nothing new is recorded and `TRACE_MAGIC` did not move.
+  `llsc_e2e` is the guard: a fixture of nine LL/SC shapes, every t0 failure as a named regression,
+  controls for the clear rule, and three hit-oracle armings. On `threadrust` a seek into dyld's
+  `getpid` pair now replays to the end.
 - **Crashes are first-class** — a faulting guest is recorded, replayed, and seekable;
   reverse-continue reaches the corrupting store.
 - **Symbolicated addresses** — since M19, pc-bearing debugger output names the function it is in:
@@ -527,17 +544,14 @@ reconstruction caveat in full.
   sets the cell to `0x701238000`, where M39's tree resolved `(1126, 29627)` — an earlier run of the
   same store on another address, 1,736,055 instructions early.
 
-**Gate:** 666 passed / 0 failed / 9 ignored across 141 test binaries, **measured at M41's
-final-review fix wave** over the whole workspace, every chunk `EXIT=0` (captured before any pipe);
-clippy clean over `--workspace --all-targets` with `-D warnings`. It was measured in two runs. The
-close ran the full chunked gate on its own tree (`d16fa97` plus a comment-only sweep of two test
-files) and read 665 / 0 / 9 over 141 in 18 min 8 s of wall-clock. The final review's fix wave
-then changed `crates/retrace` only (the exit terminal's park, one oracle arming, comments), so it
-re-ran that crate's chunks, all seventy-three per-target e2e invocations plus `--bins`, and clippy
-on the fixed tree, and reused the `ws` and `box` chunks from the close's run, whose crates have no
-diff. That re-run took 19 min 12 s, `hitorder_e2e` 47.11 s and `cpython_crash_e2e` 44.09 s of it,
-and nothing under `crates/` changed after it. Both counts were predicted from source before they
-ran and matched in every chunk. See the testing note below for how that number is
+**Gate:** 746 passed / 0 failed / 9 ignored across 142 test binaries, **measured at M42's
+close** over the whole workspace, every chunk exit 0 (captured before any pipe); clippy clean over
+`--workspace --all-targets` with `-D warnings`. The close ran the full chunked gate on its own
+tree (`48f7f93`; nothing under `crates/` changed after it): `ws` 178 over 26 binaries, `box` 320
+over 41, the seventy-four per-target e2e invocations 231 passed and 9 ignored over 74, and
+`--bins` 17 over 1. The e2e loop took 17 min 1 s of wall-clock, `hitorder_e2e` 74.12 s and
+`cpython_crash_e2e` 42.22 s of it. Every chunk's count was predicted from source before it ran,
+and every one matched. See the testing note below for how that number is
 assembled. The "test binaries" figure is test executables plus the `Doc-tests` harnesses cargo
 reports, each of which runs zero tests — the convention every milestone since M14 has counted by,
 kept for comparability and written out here so nobody has to re-derive it. The ignored gates are
@@ -545,34 +559,38 @@ kept for comparability and written out here so nobody has to re-derive it. The i
 (re-parked by M21 at a signal-model wall, **not** the M8 risk R3 wall it stood at from M8 through
 M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall) — plus the seven in
 `apple_walls_e2e`, one per non-clean Apple-sweep row that is retrace's to fix or model and has a
-gate, each reason the measurement that parks it. All nine are described under Known limits. **M41
-parked nothing new and un-parked nothing** — it changed the debugger's hit order and position and
-where replay settles a thread switch, not what records — so the seven Apple rows stand exactly
-where M38 left them.
+gate, each reason the measurement that parks it. All nine are described under Known limits. **M42
+parked nothing new and un-parked nothing** — it changed what the debugger's stepping and stops do
+inside an exclusive pair, not what records — so the seven Apple rows stand exactly where M38 left
+them.
 
-Reconciled against M40's 640 / 0 / 9 over 140 **file-by-file rather than by sum** — three files
-changed their count, everything else is byte-for-byte M40's:
+Reconciled against M41's 666 / 0 / 9 over 141 **file-by-file rather than by sum** — six files
+changed their count, everything else is byte-for-byte M41's:
 
-| file | M40 | M41 | delta |
+| file | M41 | M42 | delta |
 |---|---|---|---|
-| `retrace-core/tests/replay.rs` | 12 | 13 | **+1** (`step_armed` reports each stop class without retiring — the hit oracle's premise) |
-| `retrace/src/debug.rs` | 14 | 17 | **+3** (hits order a syscall write, then a breakpoint, then a watch; a breakpoint you arrived at by stepping is reported in neither direction; a zero-count step is not an arrival — the last added by Task 3's review) |
-| `retrace/tests/hitorder_e2e.rs` | — | 22 | **+22**, new binary (ten named regressions for t0's M1–M8, M8 as three; the thread-at-a-blocking-boundary invariant; the hit oracle's six armings, three chains each, the sixth with hits in the exit window, added by the final review; five Review Focus tests — a breakpoint on the crashing instruction, a watch scoped to a thread that never writes it, `unwatch` while parked on a watched store, `continue` after the exit, and "no earlier hit" keeping the cursor) |
+| `retrace-arch/src/lib.rs` | 39 | 44 | **+5** (the exclusive-monitor decoder and the fall-through barriers) |
+| `retrace-box/src/excl.rs` | — | 26 | **+26**, new module (the store validator's refusals, the backward scan, `regs_written`, and one test per inference condition, each shown able to fail) |
+| `retrace-box/tests/step.rs` | 4 | 5 | **+1** (a stepped load-exclusive sets the shadow and its store lands) |
+| `retrace-box/tests/checkpointparity.rs` | 3 | 4 | **+1** (the mid-pair tier: a checkpoint inside a pair carries the shadow) |
+| `retrace/tests/llsc_e2e.rs` | — | 46 | **+46**, new binary (t0's M2–M7 as named regressions, M4–M6 in both directions; the recording test and three clear-rule controls; the shadow's life cycle; seven inference tests; three hit-oracle armings, each a ground-truth list and three chains) |
+| `retrace/tests/hitorder_e2e.rs` | 22 | 23 | **+1** (a seek into dyld's `getpid` pair on `threadrust` replays to the end) |
 
-+26 `#[test]` attributes, `#[ignore]` **9 → 9**, `--bins` **14 → 17**, and **one new test
-binary**, 140 → 141. The count closes at both ends, and the two ends must still be read
-separately: the tree holds **673** `#[test]` attributes = 664 runnable + 9 ignored (M40 held 647 =
-638 + 9), while the run reports 664 + the 2 census tests that run twice (`census.rs` executes in its
++80 `#[test]` attributes, `#[ignore]` **9 → 9**, `--bins` **17 → 17**, and **one new test
+binary**, 141 → 142. The count closes at both ends, and the two ends must still be read
+separately: the tree holds **753** `#[test]` attributes = 744 runnable + 9 ignored (M41 held 673 =
+664 + 9), while the run reports 744 + the 2 census tests that run twice (`census.rs` executes in its
 own binary and again inside `legacy_equivalence`'s `#[path]` include). (A bare
-`grep -c '#\[test\]'` says 674, because a comment in `legacy_equivalence.rs` mentions the attribute
-in prose; the file has three.) The spec's §9 prediction, ≈ 663 / 0 / 9 over 141, was short by
-three tests: it counted ~9 named regressions where M8 became three tests (ten), five oracle
-self-checks as tests of their own where they are asserts inside each oracle test, and neither the
-plan's five Review Focus tests, nor the zero-count-step test Task 3's review added, nor the sixth
-oracle arming the final review added.
+`grep -c '#\[test\]'` says 754, because a comment in `legacy_equivalence.rs` mentions the attribute
+in prose; the file has three.) The spec's §9 prediction, ≈ 708 / 0 / 9 over 142, had the binary
+count right and was short by 38 tests: `llsc_e2e` holds 46 where it counted ~22 (+24: t0's
+regressions split by direction, the life-cycle tests, and each oracle arming's list and chains as
+separate tests), and `excl.rs` 26 where it counted ~8 validator tests (+18: the inference's pure
+decision and its per-condition tests came with Task 5's rulings); the decoder is 5 tests where it
+counted ~8 (−3), and its ~3 session-level box tests are two (−1: the rest landed in `llsc_e2e`).
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson). `retrace` ran **per-target** — seventy-three `--test <name>` invocations, one after another
+lesson). `retrace` ran **per-target** — seventy-four `--test <name>` invocations, one after another
 from a single background script, because the whole package exceeds the tool ceiling, with the
 target list asserted equal to `ls crates/retrace/tests/*.rs` before the loop and to the exit files
 after it — **plus the `--bins` chunk**, which is the only place the 17 unit tests in
@@ -1186,28 +1204,49 @@ These are real and current, not aspirational gaps.
   trace once rather than per seek, but that decode is still dominated by a bit-at-a-time `crc32`
   (64 % of a decode in M40's t0 profile), and every `replay` and test pays it in full; **a faster
   `crc32` is owed.**
-- **A debugger stop between a load-exclusive and its store-exclusive makes the store fail, and
-  the replay that follows diverges.** A VM exit between an `ldxr` and its paired `stxr` fails the
-  `stxr`. A single-step makes that exit, and so does a hardware breakpoint stop between the two.
-  Both are measured: the step through `step_insns`, `step_armed` and `seek(n, k)` (which reaches
-  `k` by stepping), the breakpoint armed on the `stxr` itself. `stepi` and the debugger's seeks are
-  those primitives, and a `break` inside the pair is that stop; `reverse-continue`'s partial window
-  single-steps the same way, though no run of it into a pair was made. Record never steps, so its
-  `stxr` succeeded, and the replay then takes a path the recording never took. Where it bites is
-  Libsyscall's `getpid` pid cache (`ldxr w10, [x9]; cbnz w10, …; stxr wzr, w0, [x9]`), which
-  throws the status away: the cache stays 0, and that image's next `getpid()` issues a real
-  syscall the recording does not hold. On the `threadrust` recording M41 measured, a seek into
-  window 16 at any `k ≥ 2` followed by forward replay fails loud with a replay divergence at
-  landmark 22, six landmarks later; that recording holds three such windows, **16, 41 and 134**,
-  the first `getpid()` of each of three images. So far it is loud rather than silent: the
-  divergence oracle sees the extra syscall. What it could also do is **inferred, never measured**:
-  a retry loop (`ldxr; …; stxr; cbnz` back to the `ldxr`) would never make progress under
-  single-step, because every stepped `stxr` would fail. Which of the exception return and the host
-  kernel clears the exclusive monitor is inferred too, not isolated. The M41 hit oracle is safe
-  from it by where it starts: on `threadrust` it starts at the `bsdthread_create` landmark, past
-  every pair the measurement found (the windows after it hold none), and a pair crossed anyway
-  would surface as a loud divergence, never a wrong hit list. It lies outside hit accounting, so
-  M41 did not widen for it; it is owed, first in line, because the debugger's own seek is exposed.
+- **Exclusive (LL/SC) pairs: what M42's shadow monitor does not cover.** A debugger exit inside a
+  pair now keeps the store as recorded (What works today). These are its residuals. Where a
+  residual leaves a pair with no shadow, the debugger falls back to pre-M42 behaviour, which t0
+  measured as a divergence, a hang, phantom watch hits or a wrong `no earlier hit`: loud or not,
+  depending on the shape.
+  - **An asynchronous host interrupt between the halves**, during record or replay. A host IRQ's
+    exception return lands below anything retrace sees and clears the monitor. The spec estimates
+    about 10⁻⁶ per sequence; nothing has measured it. For a discard-status pair it is a **loud**
+    divergence, never a silent wrong recording.
+  - **Inference at a native stop rests on assumptions it has not measured**: the pair is reached by
+    fall-through, nothing branches into it from outside, and no plain store of an *identical*
+    value hits the marked bytes before the stop. A fourth, that the base register is not rewritten
+    between the halves, has been **checked** since M42 (spec §3d condition 5): every instruction
+    between them must be a data-processing instruction that does not write the base, or a
+    conditional branch, or nothing is inferred. When every destination register is rewritten
+    between the halves, as in an in-place retry loop (`ldaxr x1, [x0]; add x1, x1, #1;
+    stlxr w2, x1, [x0]`), the register-equality check has nothing left to compare, and "nothing
+    branches into the pair" is then the **only** guard against a jump into its middle. Every
+    LL/SC sequence the M42 census found satisfies all four. A violated one could emulate a store
+    the recording did not make. That is **not loud by construction**: the divergence oracle sees it
+    only if it changes a later syscall or the final memory.
+  - **No inference past 16 instructions or across a page.** A load-exclusive more than 16
+    instructions before a native stop, or on another 16 KiB page, is not found. The stop infers
+    nothing, which is the pre-M42 fallback above. No census sequence is that long or straddles a
+    page.
+  - **`run()` drops a shadow it cannot finish in 16 steps** (plan R10). Only a load-exclusive whose
+    sequence a branch left can get there. A store-exclusive to the marked bytes more than 16
+    instructions later, with no exit between, would then fail under the debugger where it
+    succeeded natively. That is **loud**: the replay diverges. No census shape does it.
+  - **`wfe`** (EC `0x01`), including `ldxr; wfe` spin-waits, is unhandled on every path, not only
+    under stepping. What such a guest does under retrace is unmeasured.
+  - **Byte, halfword and `ldaxp` load-exclusives are unmeasured.** The shadow is set from the step
+    exit's ISS.EX bit, which t0 measured on `ldxr`, `ldaxr` and `ldxp` only. A form that did not
+    report it would be stepped with no shadow: the pre-M42 fallback, never a wrong emulation.
+
+  Everything the shadow refuses is **loud**, a panic that names the check and the pc: a stepped
+  load-exclusive whose base is also its destination, or that the decoder does not recognise; a
+  store-exclusive that does not match its load (address, size, pair), is misaligned, aliases its
+  status register, finds the bytes changed since the load, or targets memory that is unmapped or
+  not EL0-writable. The hit oracle (`tests/util/hits.rs`) is no longer limited by pairs: on
+  `threadrust` it starts at landmark 1 again, where M41 had started it at the `bsdthread_create`
+  landmark to stay clear of dyld's three `getpid` pairs. It now steps through all three, at
+  22.95 s CPU for that test against M41's 120 s budget.
 - **A bad debugger operand now fails later than it used to.** `where; break zzz` printed nothing and
   exited 5 before M20; it now runs the `where`, prints it, then fails — still exiting 5. That is the
   measured price of resolving at execution rather than at parse, it is deliberate, and a test pins it.
