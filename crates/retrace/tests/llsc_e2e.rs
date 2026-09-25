@@ -1,6 +1,7 @@
 //! M42: stepping, seeking and debug stops inside AArch64 exclusive pairs (spec
 //! `docs/superpowers/specs/2026-09-24-retrace-m42-llsc-design.md`). The fixture is
-//! `retrace-guest/asm/llsc.s`: t0's four shapes (a)-(d) verbatim, then (e)-(i). Every CLI run goes
+//! `retrace-guest/asm/llsc.s`: t0's four shapes (a)-(d) verbatim, then (e)-(i). One test uses a
+//! second fixture, `llscbound.s`, the witness for `run()`'s 16-step pair prologue. Every CLI run goes
 //! through `util::debug_bounded`, because t0 measured hangs on these scripts.
 mod util;
 use retrace_core::{Advance, Outcome, ReplaySession, SetBy};
@@ -24,19 +25,20 @@ fn trace() -> &'static Path {
 }
 fn ts() -> &'static str { trace().to_str().unwrap() }
 
-/// A fixture label's address, from `nm`. The labels are local symbols in LC_SYMTAB.
+/// A fixture binary's labels, from `nm`. The labels are local symbols in LC_SYMTAB.
+fn nm(bin: &str) -> HashMap<String, u64> {
+    let out = std::process::Command::new("nm").arg(bin).output().expect("nm");
+    assert!(out.status.success(), "nm {bin}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().lines().filter_map(|l| {
+        let mut f = l.split_whitespace();
+        let (a, _kind, n) = (f.next()?, f.next()?, f.next()?);
+        Some((n.to_string(), u64::from_str_radix(a, 16).ok()?))
+    }).collect()
+}
+/// An `llsc` label's address.
 fn sym(name: &str) -> u64 {
     static M: OnceLock<HashMap<String, u64>> = OnceLock::new();
-    let m = M.get_or_init(|| {
-        let out = std::process::Command::new("nm").arg(retrace_guest::LLSC).output().expect("nm");
-        assert!(out.status.success(), "nm llsc: {}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8(out.stdout).unwrap().lines().filter_map(|l| {
-            let mut f = l.split_whitespace();
-            let (a, _kind, n) = (f.next()?, f.next()?, f.next()?);
-            Some((n.to_string(), u64::from_str_radix(a, 16).ok()?))
-        }).collect()
-    });
-    *m.get(name).unwrap_or_else(|| panic!("no symbol {name} in llsc"))
+    *M.get_or_init(|| nm(retrace_guest::LLSC)).get(name).unwrap_or_else(|| panic!("no symbol {name} in llsc"))
 }
 fn h(name: &str) -> String { format!("{:#x}", sym(name)) }
 
@@ -350,6 +352,49 @@ fn the_syscall_trap_clears_the_shadow_before_the_trap_is_consumed() {
     };
     assert_eq!(outcome, Outcome::Exit { code: 0 });
     assert_eq!(out, STDOUT);
+}
+
+// ---- run()'s 16-step pair prologue (spec §3e, plan R10), on `llscbound` ------------------------
+// A separate fixture (final-review F1), so llsc's window coordinates stay frozen.
+
+fn bound_trace() -> &'static Path {
+    static C: OnceLock<PathBuf> = OnceLock::new();
+    C.get_or_init(|| {
+        let (rec, t) = util::record(retrace_guest::LLSC_BOUND);
+        assert_eq!(rec.code, 0, "record llscbound: {}", rec.stderr);
+        t
+    })
+}
+/// An `llscbound` label's address.
+fn bound_sym(name: &str) -> u64 {
+    static M: OnceLock<HashMap<String, u64>> = OnceLock::new();
+    *M.get_or_init(|| nm(retrace_guest::LLSC_BOUND)).get(name)
+        .unwrap_or_else(|| panic!("no symbol {name} in llscbound"))
+}
+
+/// `run()` entered with the shadow set steps at most 16 instructions (`PAIR_STEP_BOUND`) to finish
+/// the pair, then drops the shadow and resumes natively. `llscbound`'s load-exclusive is left by a
+/// taken `cbnz`, so its shadow outlives the bound, and `bnd_bp` lies past both the 16 steps and
+/// §3d's 16-word scan back from the stop. So the stop there is native and infers nothing, and any
+/// shadow at it is a stale one. Without the drop, the native stop's `infer_excl` asserts on the
+/// stale shadow. With no bound, the prologue steps into the breakpoint with the shadow still set.
+#[test]
+fn a_shadow_outliving_its_sequence_is_dropped_at_the_step_bound() {
+    let mut s = retrace_core::seek(bound_trace(), 1, 3).unwrap(); // bnd_ldx (K = 2) has retired
+    assert_eq!(s.pc(), bound_sym("bnd_cbnz"));
+    assert!(s.dbg_excl().is_some(), "precondition: set by the stepped ldxr");
+    s.arm_breakpoints(&[bound_sym("bnd_bp")]);
+    assert!(matches!(s.advance().unwrap(), Advance::Break));
+    assert_eq!(s.pc(), bound_sym("bnd_bp"));
+    assert_eq!(s.dbg_excl(), None, "dropped at the 16-step bound; nothing inferred at the native stop");
+    s.clear_breakpoints();
+    loop {
+        let a = s.advance().unwrap_or_else(|d| panic!("diverged at landmark {}: {}", d.landmark, d.detail));
+        if let Advance::Exited(r) = a {
+            assert_eq!((r.outcome, r.stdout.as_slice()), (Outcome::Exit { code: 0 }, &b""[..]));
+            return;
+        }
+    }
 }
 
 // ---- Review Focus (plan) -----------------------------------------------------------------------

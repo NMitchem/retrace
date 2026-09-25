@@ -115,8 +115,10 @@ pub fn scan_back(words: &[u32]) -> Option<(usize, ExclInsn)> {
 ///
 /// Known effects:
 /// - A data-processing instruction, immediate (op0 `100x`) or register (op0 `x101`), writes at
-///   most its Rd, bits 4:0. The field is counted as a write even where it is not one (`ccmp`'s
-///   nzcv), which is conservative.
+///   most its Rd, bits 4:0. The field is counted as a write even where it is not a register
+///   (`ccmp`'s nzcv, `rmif`, `setf`). For the base check (condition 5) that is conservative: a
+///   phantom write can only refuse. For condition 3 it is not: `infer` skips a written
+///   destination, so a phantom write drops that register's comparison.
 /// - A conditional branch (`B.cond`/`BC.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ`) writes no register.
 ///
 /// Everything else is unknown: a load or store (which may write back its base), a system
