@@ -263,14 +263,52 @@ fn the_crash_is_exc_bad_access_and_reverse_reaches_the_corrupting_store() {
     assert_eq!(c.send("c"), crash, "then the crash again");
 }
 
+/// `name`'s address in the fixture binary (`nm`, as `llsc_e2e`'s `sym` does). A static guest loads
+/// at its link address, so this is the guest pc.
+fn sym(bin: &str, name: &str) -> u64 {
+    let out = std::process::Command::new("nm").arg(bin).output().expect("nm");
+    assert!(out.status.success(), "nm {bin}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().lines().find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        (f.len() == 3 && f[2] == name).then(|| u64::from_str_radix(f[0], 16).unwrap())
+    }).unwrap_or_else(|| panic!("no symbol {name} in {bin}"))
+}
+
 #[test]
-fn breakpoints_cap_at_five_and_reinsertion_is_idempotent() {
-    // §3f, spec R4, Review Focus 5.
+fn a_breakpoint_is_reported_at_its_pc_forward_and_backward() {
+    // Ruling T3-a: §3c rows 1 and 4 on the wire. watchsweep's sweeping store runs once per pass of
+    // its 64-pass loop, so one breakpoint on it hits again and again.
+    let (start, sweep) = (sym(retrace_guest::WATCHSWEEP, "_start"), sym(retrace_guest::WATCHSWEEP, "sweep"));
+    let store = sweep + 4; // `add x4, x2, x3`, then THE store
+    // Straight-line code from `_start` to the first pass, and a five-instruction loop body
+    // (watchsweep.s), so the cursor at each hit is known from the binary alone.
+    let at = |k: u64| format!("at (1, {k}) phase=Bp pc={store:#x} thread=1");
+    let first_k = (store - start) / 4;
+    let mut c = Rsp::spawn(watchsweep(), &[]);
+    assert_eq!(c.send(&format!("Z0,{store:x},4")), "OK");
+    let f1 = c.send("c");
+    assert!(f1.starts_with("T05") && f1.ends_with("reason:breakpoint;"), "{f1}");
+    assert_eq!(pc_of(&f1), store);
+    assert_eq!(c.where_(), at(first_k), "the first pass");
+    let f2 = c.send("c");
+    assert!(f2.ends_with("reason:breakpoint;"), "{f2}");
+    assert_eq!(pc_of(&f2), store);
+    assert_eq!(c.where_(), at(first_k + 5), "the next pass: the breakpoint it stood on is not re-reported");
+    let b = c.send("bc");
+    assert!(b.starts_with("T05") && b.ends_with("reason:breakpoint;"), "{b}");
+    assert_eq!(pc_of(&b), store);
+    assert_eq!(c.where_(), at(first_k), "back to the first pass");
+}
+
+#[test]
+fn breakpoints_cap_at_six_and_reinsertion_is_idempotent() {
+    // §3f, spec R4 as amended (Ruling T3-b), Review Focus 5. Six is the hardware's count
+    // (DBGBVR0-5) and `cmd_break`'s own limit. Seven distinct pcs: base..base+20, and base+40.
     let mut c = Rsp::spawn(watchsweep(), &[]);
     let base = retrace_core::seek(watchsweep(), 1, 0).unwrap().pc();
-    for i in 0..5u64 { assert_eq!(c.send(&format!("Z0,{:x},4", base + 4 * i)), "OK"); }
-    assert_eq!(c.send(&format!("Z0,{base:x},4")), "OK", "a duplicate is not a sixth");
-    assert_eq!(c.send(&format!("Z1,{:x},4", base + 40)), "E01", "the sixth is refused: lldb's step keeps a slot");
+    for i in 0..6u64 { assert_eq!(c.send(&format!("Z0,{:x},4", base + 4 * i)), "OK"); }
+    assert_eq!(c.send(&format!("Z0,{base:x},4")), "OK", "a duplicate is not a seventh");
+    assert_eq!(c.send(&format!("Z1,{:x},4", base + 40)), "E01", "the seventh is refused: all six slots are armed");
     assert_eq!(c.send(&format!("z0,{base:x},4")), "OK");
     assert_eq!(c.send(&format!("z0,{base:x},4")), "OK", "removing an absent one is OK");
     assert_eq!(c.send(&format!("Z0,{:x},4", base + 40)), "OK", "the slot is free again");
@@ -283,9 +321,11 @@ fn watchpoints_are_write_only_and_cap_at_four() {
     assert_eq!(c.send(&format!("Z3,{t:x},8")), "E01", "read");
     assert_eq!(c.send(&format!("Z4,{t:x},8")), "E01", "access");
     assert_eq!(c.send(&format!("Z2,{:x},8", t + 1)), "E01", "misaligned");
+    assert_eq!(c.send(&format!("Z2,{t:x},3")), "E01", "a size that is not 1, 2, 4 or 8");
     for i in 0..4u64 { assert_eq!(c.send(&format!("Z2,{:x},8", t + 8 * i)), "OK"); }
     assert_eq!(c.send(&format!("Z2,{t:x},8")), "OK", "a duplicate is not a fifth");
     assert_eq!(c.send(&format!("Z2,{:x},8", t + 64)), "E01", "the fifth");
+    assert_eq!(c.send(&format!("z2,{:x},8", t + 128)), "OK", "removing an absent watch is OK");
 }
 
 #[test]

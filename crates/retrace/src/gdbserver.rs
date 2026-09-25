@@ -224,9 +224,8 @@ impl<'a> Server<'a> {
                 }
             }
             // §3h: every continue form. A signal to deliver is ignored: a recording's signals are its own.
-            "c" | "vCont;c" => (vec![self.motion(|s| { let h = s.ex.cmd_continue(&mut std::io::sink())?; s.reply_forward(h) })], false),
-            _ if body.starts_with('C') || body.starts_with("vCont;C") || body.starts_with("vCont;c:") =>
-                (vec![self.motion(|s| { let h = s.ex.cmd_continue(&mut std::io::sink())?; s.reply_forward(h) })], false),
+            _ if matches!(body, "c" | "vCont;c") || body.starts_with('C') || body.starts_with("vCont;C")
+                || body.starts_with("vCont;c:") => (vec![self.resume_forward()], false),
             "bc" => (vec![self.motion(|s| { let h = s.ex.cmd_reverse_continue(&mut std::io::sink())?; s.reply_backward(h) })], false),
             _ if body.starts_with('Z') || body.starts_with('z') => one(&self.z_packet(body)),
             _ => one(""), // §3h: every other packet is unsupported, stepping included until Task 4
@@ -251,6 +250,11 @@ impl<'a> Server<'a> {
                 }
             },
         }
+    }
+
+    /// §3h: `continue`, forward, in any of its forms.
+    fn resume_forward(&mut self) -> String {
+        self.motion(|s| { let h = s.ex.cmd_continue(&mut std::io::sink())?; s.reply_forward(h) })
     }
 
     /// §3c: forward. A store watch is reported AFTER the store retires, so the server steps it.
@@ -299,26 +303,17 @@ impl<'a> Server<'a> {
         })
     }
 
-    /// §3c's terminal list (t0 L4d, L4e).
+    /// §3c's terminal list (t0 L4d, L4e), on the current thread.
     fn terminal(&mut self, o: &Outcome) -> String {
-        let kind = match *o {
-            Outcome::Exit { code } => StopKind::HistoryEnd(format!("exited (code {code})")),
-            Outcome::Crash { pc, esr, far } => match (esr >> 26) & 0x3f {
-                0x20 | 0x21 | 0x24 | 0x25 => StopKind::MachBadAccess {
-                    code: if (0x0c..=0x0f).contains(&(esr & 0x3f)) { 2 } else { 1 }, far },
-                _ => StopKind::Exception { signal: 0x0b,
-                    text: format!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}") },
-            },
-            Outcome::Signal { sig } => StopKind::Exception { signal: sig as u8,
-                text: format!("guest terminated by signal {sig}") },
-        };
-        self.stop(kind, None)
+        self.stop(rsp::terminal_kind(o), None)
     }
 
-    /// §3f. `Z<t>,<addr>,<kind|len>` / `z…`. 0 and 1 are hardware breakpoints, capped at 5 so lldb's
-    /// transient step breakpoint always has the sixth slot (spec R4, t0 L5). 2 is a write watch,
-    /// capped at 4. 3 and 4 (read, access) are refused. Re-inserting what is there, or removing what
-    /// is not, is `OK` (Review Focus 5).
+    /// §3f. `Z<t>,<addr>,<kind|len>` / `z…`. 0 and 1 are hardware breakpoints, capped at the
+    /// hardware's 6, which is `cmd_break`'s own limit (spec R4, amended at Task 3's review). lldb's
+    /// transient step breakpoint (t0 L5) is an ordinary `Z0` that cannot be told from a user's, so no
+    /// cap can keep it a slot: when all 6 are the user's, a step-over/out/in's transient is refused
+    /// and lldb runs on to the next stop. 2 is a write watch, capped at 4. 3 and 4 (read, access) are
+    /// refused. Re-inserting what is there, or removing what is not, is `OK` (Review Focus 5).
     fn z_packet(&mut self, body: &str) -> String {
         let insert = body.starts_with('Z');
         let mut f = body[1..].split(',');
@@ -326,9 +321,9 @@ impl<'a> Server<'a> {
         let (Ok(addr), Ok(len)) = (u64::from_str_radix(a, 16), u64::from_str_radix(l, 16)) else { return "E01".into() };
         let sink = &mut std::io::sink();
         match (t, insert) {
+            // `cmd_break` keeps an armed address once (a re-insert is `Ok` and takes no slot) and
+            // refuses a seventh.
             ("0" | "1", true) => {
-                if self.ex.breakpoints().contains(&addr) { return "OK".into(); }
-                if self.ex.breakpoints().len() >= 5 { return "E01".into(); }
                 if self.ex.cmd_break(addr, sink).is_ok() { "OK" } else { "E01" }.into()
             }
             ("0" | "1", false) => { let _ = self.ex.cmd_delete(addr, sink); "OK".into() }

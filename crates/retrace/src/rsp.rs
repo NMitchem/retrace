@@ -1,7 +1,7 @@
 //! M43: the gdb-remote serial protocol, pure: framing, hex, the register description, stop replies
 //! and the image list (spec `docs/superpowers/specs/2026-09-25-retrace-m43-lldb-design.md` §3a).
 //! No VM and no socket: `gdbserver.rs` owns those, so everything here is unit-tested without either.
-use retrace_core::ThreadCtx;
+use retrace_core::{Outcome, ThreadCtx};
 
 /// One unit off the wire.
 #[derive(Debug, PartialEq, Eq)]
@@ -197,6 +197,26 @@ impl StopKind {
             StopKind::MachBadAccess { code, far } => format!("metype:1;mecount:2;medata:{code:x};medata:{far:x};"),
             StopKind::Exception { text, .. } => format!("reason:exception;description:{};", hex(text.as_bytes())),
         }
+    }
+}
+
+/// §3c's terminal list (t0 L4d, L4e): how the recording's end is reported. Every one is reversible.
+/// - an exit is `replaylog:end`;
+/// - a crash from an abort (EC `0x20`, `0x21`, `0x24`, `0x25`) is a Mach `EXC_BAD_ACCESS`, code 2
+///   (`KERN_PROTECTION_FAILURE`) for a permission fault (FSC `0x0c..=0x0f`) and 1
+///   (`KERN_INVALID_ADDRESS`) otherwise;
+/// - any other crash, and a fatal signal, is `reason:exception` with the CLI's own line.
+pub(crate) fn terminal_kind(o: &Outcome) -> StopKind {
+    match *o {
+        Outcome::Exit { code } => StopKind::HistoryEnd(format!("exited (code {code})")),
+        Outcome::Crash { pc, esr, far } => match (esr >> 26) & 0x3f {
+            0x20 | 0x21 | 0x24 | 0x25 => StopKind::MachBadAccess {
+                code: if (0x0c..=0x0f).contains(&(esr & 0x3f)) { 2 } else { 1 }, far },
+            _ => StopKind::Exception { signal: 0x0b,
+                text: format!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}") },
+        },
+        Outcome::Signal { sig } => StopKind::Exception { signal: sig as u8,
+            text: format!("guest terminated by signal {sig}") },
     }
 }
 
@@ -417,6 +437,25 @@ mod tests {
         let exc = reply(StopKind::Exception { signal: 6, text: "guest terminated by signal 6".into() });
         assert!(exc.starts_with("T06")
             && exc.ends_with(&format!("reason:exception;description:{};", hex(b"guest terminated by signal 6"))), "{exc}");
+    }
+
+    #[test] fn each_terminal_outcome_maps_to_its_measured_stop() {
+        // §3c's terminal list. An ESR is EC << 26 | IL | ISS; the fault status code is ISS[5:0].
+        const IL: u64 = 1 << 25;
+        let crash = |ec: u64, fsc: u64| Outcome::Crash { pc: 0x1_0000_0400, esr: (ec << 26) | IL | fsc, far: 0x4000_dead_0000 };
+        let bad_access = |code| StopKind::MachBadAccess { code, far: 0x4000_dead_0000 };
+        assert_eq!(terminal_kind(&Outcome::Exit { code: 3 }), StopKind::HistoryEnd("exited (code 3)".into()));
+        assert_eq!(terminal_kind(&crash(0x24, 0x07)), bad_access(1), "translation fault, level 3");
+        assert_eq!(terminal_kind(&crash(0x24, 0x0c)), bad_access(2), "permission fault, level 0");
+        assert_eq!(terminal_kind(&crash(0x24, 0x0f)), bad_access(2), "permission fault, level 3");
+        assert_eq!(terminal_kind(&crash(0x24, 0x10)), bad_access(1), "external abort: not a permission fault");
+        assert_eq!(terminal_kind(&crash(0x20, 0x04)), bad_access(1), "an instruction abort is an abort too");
+        let brk = (0x3c << 26) | IL;
+        assert_eq!(terminal_kind(&Outcome::Crash { pc: 0x1_0000_0400, esr: brk, far: 0 }),
+                   StopKind::Exception { signal: 0x0b,
+                       text: format!("guest crashed: pc=0x100000400 far=0x0 esr={brk:#x}") });
+        assert_eq!(terminal_kind(&Outcome::Signal { sig: 6 }),
+                   StopKind::Exception { signal: 6, text: "guest terminated by signal 6".into() });
     }
 
     #[test] fn the_image_list_describes_a_real_binary_at_its_load_address() {
