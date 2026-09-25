@@ -738,9 +738,16 @@ impl<'a> Exec<'a> {
     /// boundary where thread `t` is current ends the run as `Halt::Stepped`, before anything at that
     /// coordinate. `step_thread` uses it when the stepped thread blocked. With `None` it is
     /// `continue` exactly.
+    ///
+    /// With `Some(t)` nothing is armed (spec R7's fallback): lldb-2100 re-steps its thread forever
+    /// when a step is answered by another thread's stop, a breakpoint's included (Task 4's
+    /// measurement: 307,016 × `vCont;s:1` in 60 s). So a hit by another thread during one blocked
+    /// step is not reported.
     pub(crate) fn continue_until<W: Write>(&mut self, until: Option<u32>, out: &mut W) -> Result<Halt, String> {
-        let bps = self.breakpoints.clone();
-        let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
+        let (bps, ws): (Vec<u64>, Vec<(u64, u64)>) = match until {
+            Some(_) => (Vec::new(), Vec::new()),
+            None => (self.breakpoints.clone(), self.watches.iter().map(|&(a, l, _)| (a, l)).collect()),
+        };
         let diverged = |d: retrace_core::Divergence|
             format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail);
         'finish: loop {
@@ -964,9 +971,9 @@ impl<'a> Exec<'a> {
                             }
                             return Ok(Halt::Stepped);
                         }
-                        // `t` blocked. Run until it is current again, with the user's hits armed:
-                        // another thread's hit is reported as its own stop (spec R7). Phase Sys, so
-                        // a breakpoint at (n, 0) on the thread now running is still ahead.
+                        // `t` blocked. Run until it is current again, with nothing armed (spec R7's
+                        // fallback, measured: lldb loops on another thread's stop). Phase Sys: the
+                        // crossing's own position, as `continue`'s finish leaves it.
                         (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
                         self.continue_until(Some(t), out)
                     }
