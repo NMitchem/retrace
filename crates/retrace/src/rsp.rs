@@ -158,24 +158,44 @@ pub(crate) fn xfer_chunk(doc: &[u8], off: usize, len: usize) -> String {
     format!("{tag}{}", String::from_utf8_lossy(&doc[start..end]))
 }
 
-/// §3c: what kind of stop a reply reports. Task 2 has the two its server sends. Tasks 3 and 4 add
-/// the rest, with their `signal()` and `keys()` arms.
+/// §3c: what kind of stop a reply reports. Task 4 adds the step's `trace`, with its `signal()` and
+/// `keys()` arms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StopKind {
     /// `replaylog:begin` with a description: lldb's reversible "history boundary" stop (t0 L4f).
     HistoryBegin(String),
     /// No reason: `qThreadStopInfo` for a thread that is not the one reporting (t0 L7).
     None,
+    /// `reason:breakpoint` (t0 L4a).
+    Breakpoint,
+    /// `watch:<addr>`: lldb then reads memory NOW, which §3c's positions make right (t0 L4c).
+    Watch(u64),
+    /// `replaylog:end` with a description: the recording's end, reversible (t0 L4e).
+    HistoryEnd(String),
+    /// A Mach `EXC_BAD_ACCESS` (`metype:1`): lldb's native crash display, reversible (t0 L4d).
+    MachBadAccess { code: u64, far: u64 },
+    /// `reason:exception` with a description. Reversible, unlike a plain signal stop (t0 L4d).
+    Exception { signal: u8, text: String },
 }
 
 impl StopKind {
     fn signal(&self) -> u8 {
-        match self { StopKind::HistoryBegin(_) => 5, StopKind::None => 0 }
+        match self {
+            StopKind::HistoryBegin(_) | StopKind::Breakpoint | StopKind::Watch(_) | StopKind::HistoryEnd(_) => 5,
+            StopKind::None => 0,
+            StopKind::MachBadAccess { .. } => 0x0b,
+            StopKind::Exception { signal, .. } => *signal,
+        }
     }
     fn keys(&self) -> String {
         match self {
             StopKind::HistoryBegin(d) => format!("replaylog:begin;description:{};", hex(d.as_bytes())),
             StopKind::None => String::new(),
+            StopKind::Breakpoint => "reason:breakpoint;".into(),
+            StopKind::Watch(a) => format!("watch:{a:x};"),
+            StopKind::HistoryEnd(d) => format!("replaylog:end;description:{};", hex(d.as_bytes())),
+            StopKind::MachBadAccess { code, far } => format!("metype:1;mecount:2;medata:{code:x};medata:{far:x};"),
+            StopKind::Exception { text, .. } => format!("reason:exception;description:{};", hex(text.as_bytes())),
         }
     }
 }
@@ -377,6 +397,26 @@ mod tests {
         assert!(s.contains("1f:00c0010000000000;20:8003000001000000;21:00000000;"), "{s}");
         assert!(s.ends_with(&format!("replaylog:begin;description:{};", hex(b"start of recording"))), "{s}");
         assert_eq!(stop_reply(2, &ctx, &[(1, 0), (2, 0)], &StopKind::None).get(..3), Some("T00"));
+    }
+
+    #[test] fn every_stop_kind_carries_its_measured_signal_and_keys() {
+        // The key shapes are t0's (L4a, L4c, L4d, L4e); lldb parses them, so they are pinned byte
+        // for byte.
+        let ctx = ThreadCtx::zeroed();
+        let reply = |k: StopKind| stop_reply(1, &ctx, &[(1, 0)], &k);
+        let bp = reply(StopKind::Breakpoint);
+        assert!(bp.starts_with("T05") && bp.ends_with("reason:breakpoint;"), "{bp}");
+        let w = reply(StopKind::Watch(0x1_0000_4140));
+        assert!(w.starts_with("T05") && w.ends_with("watch:100004140;"), "{w}");
+        let end = reply(StopKind::HistoryEnd("exited (code 0)".into()));
+        assert!(end.starts_with("T05")
+            && end.ends_with(&format!("replaylog:end;description:{};", hex(b"exited (code 0)"))), "{end}");
+        let crash = reply(StopKind::MachBadAccess { code: 1, far: 0x4000_dead_0000 });
+        assert!(crash.starts_with("T0b")
+            && crash.ends_with("metype:1;mecount:2;medata:1;medata:4000dead0000;"), "{crash}");
+        let exc = reply(StopKind::Exception { signal: 6, text: "guest terminated by signal 6".into() });
+        assert!(exc.starts_with("T06")
+            && exc.ends_with(&format!("reason:exception;description:{};", hex(b"guest terminated by signal 6"))), "{exc}");
     }
 
     #[test] fn the_image_list_describes_a_real_binary_at_its_load_address() {
