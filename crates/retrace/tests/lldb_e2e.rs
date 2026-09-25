@@ -3,21 +3,43 @@
 //! criterion, "reverse-step through a real crash in LLDB", on the repo-owned `crashy` fixture, and
 //! on CPython when Homebrew's is installed.
 //!
-//! lldb is not a repo artifact, so each test skips with a loud `eprintln!` when `lldb --version`
-//! does not run. A silent skip reads as a green it did not earn. The lldb invocation is
-//! `lldb -x -b -s <file> </dev/null`, never `-o`, which silently stops after a crash or boundary
-//! stop and exits 0 (t0 L10). The script's last command prints `END`, and every test asserts it.
+//! lldb is not a repo artifact, so each test skips with a loud `SKIPPED` line (`announce`) when
+//! `/usr/bin/lldb --version` does not run. A silent skip reads as a green it did not earn. The lldb
+//! invocation is `lldb -x -b -s <file> </dev/null`, never `-o`, which silently stops after a crash
+//! or boundary stop and exits 0 (t0 L10). The script's last command prints `END`, and every test
+//! asserts it.
 mod util;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 const GARBAGE_VA: u64 = 0x4000_DEAD_0000; // mirrors c/crashy.c
 /// Seconds one lldb session may run before it is killed, so that a loop fails rather than stalls
 /// (Ruling T5-d). The slowest session measured about 2 s (CPython's).
 const BOUND: u64 = 120;
+/// Spec §4's lldb, the one the server's behaviour was measured against (t0 L1–L10). Never the one
+/// on `PATH`: a Homebrew LLVM `lldb` earlier there would put this gate on a different lldb.
+const LLDB: &str = "/usr/bin/lldb";
 
+/// One line on the process's own stderr, past libtest's output capture. libtest captures
+/// `eprintln!` in a test that passes, and a skip passes, so an `eprintln!` line reaches a gate log
+/// only when its test fails. Measured in the final fix wave: with `eprintln!`, a passing run's log
+/// carried no version line.
+fn announce(line: &str) { let _ = writeln!(std::io::stderr(), "{line}"); }
+
+/// Whether `LLDB --version` runs. Its first line is announced once, so a gate log shows which lldb ran.
 fn lldb_runs() -> bool {
-    Command::new("lldb").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    static V: OnceLock<Option<String>> = OnceLock::new();
+    V.get_or_init(|| {
+        let v = Command::new(LLDB).arg("--version").output().ok().filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string());
+        match &v {
+            Some(line) => announce(&format!("lldb_e2e runs {LLDB}: {line}")),
+            None => announce(&format!("lldb_e2e: `{LLDB} --version` did not run")),
+        }
+        v
+    }).is_some()
 }
 
 fn retrace_py() -> String { concat!(env!("CARGO_MANIFEST_DIR"), "/lldb/retrace.py").to_string() }
@@ -35,7 +57,7 @@ fn session(trace: &Path, cmds: &[String]) -> (Option<i32>, String, String) {
     script.extend(cmds.iter().cloned());
     script.push(r#"script print("END")"#.into());
     std::fs::write(&cmd_p, script.join("\n") + "\n").unwrap();
-    let mut lldb = util::rsp::KillOnDrop(Command::new("lldb").args(["-x", "-b", "-s", cmd_p.to_str().unwrap()])
+    let mut lldb = util::rsp::KillOnDrop(Command::new(LLDB).args(["-x", "-b", "-s", cmd_p.to_str().unwrap()])
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&out_p).unwrap()).stderr(std::fs::File::create(&err_p).unwrap())
         .spawn().expect("spawn lldb"));
@@ -98,7 +120,7 @@ fn crashy_script(ptr: u64) -> Vec<String> {
 #[test]
 fn lldb_reverse_debugs_crashy_from_the_crash_to_its_corrupting_store() {
     if !lldb_runs() {
-        eprintln!("SKIPPED lldb_reverse_debugs_crashy…: `lldb --version` did not run. This gate did NOT run.");
+        announce("SKIPPED lldb_reverse_debugs_crashy…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let trace = crashy_trace();
@@ -130,7 +152,7 @@ fn lldb_reverse_debugs_crashy_from_the_crash_to_its_corrupting_store() {
 #[test]
 fn an_lldb_session_is_deterministic() {
     if !lldb_runs() {
-        eprintln!("SKIPPED an_lldb_session_is_deterministic: `lldb --version` did not run. This gate did NOT run.");
+        announce("SKIPPED an_lldb_session_is_deterministic: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let trace = crashy_trace();
@@ -159,7 +181,7 @@ fn lldb_reverse_debugs_cpython_from_the_crash_to_the_store_of_the_pointer() {
     const REAL: &str = "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python";
     const TARGET: u64 = 0x4000_DEAD_0000;
     if !lldb_runs() || !Path::new(REAL).exists() {
-        eprintln!("SKIPPED lldb_reverse_debugs_cpython…: needs lldb and {REAL}. This gate did NOT run.");
+        announce(&format!("SKIPPED lldb_reverse_debugs_cpython…: needs {LLDB} and {REAL}. This gate did NOT run."));
         return;
     }
     let (rec, trace) = util::record_dynamic_args(REAL, &[retrace_guest::CRASH_PY]);
@@ -219,7 +241,7 @@ fn lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_r
     // because rule 1 now ends lldb's re-step: session A stops refused on the stepped thread, with
     // the other thread at its breakpoint, which the `thread list` assertion catches.
     if !lldb_runs() {
-        eprintln!("SKIPPED lldb_steps_a_blocked_thread…: `lldb --version` did not run. This gate did NOT run.");
+        announce("SKIPPED lldb_steps_a_blocked_thread…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let (tr, n, t) = util::rsp::threadrust_block();
@@ -233,6 +255,14 @@ fn lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_r
         util::rsp::continue_to_window(&mut c, n).0
     };
     let (me, other) = (u64::from(t) + 1, if t == 0 { 2 } else { 1 }); // RSP tids
+    // Session B's pc oracle: `dbg_regs_of` at the refusal's own position, window n's trap, since a
+    // refusal moves nothing. Not `b`: that is (n + 1, 0), a later position, which agrees only if
+    // the switch resumes the thread at exactly its saved pc.
+    let other_pc = {
+        let len = retrace_core::seek(tr, n, 0).unwrap().window_len_here().unwrap();
+        let s = retrace_core::seek(tr, n, len).unwrap();
+        util::rsp::dbg_field(&s.dbg_regs_of(other as usize - 1).unwrap(), "pc")
+    };
     let where_ = || "process plugin packet monitor where".to_string();
 
     // Session A: the step blocks and ends on the stepped thread at svc + 4, not at the other
@@ -267,6 +297,7 @@ fn lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_r
     let refused = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tb}"));
     assert_eq!(refused.1, other, "{tb}");
     assert!(refused.3.starts_with(&format!("cannot step thread {other}: ")), "{refused:?}: {tb}");
+    assert_eq!(refused.2, other_pc, "the refused thread's own saved pc, not the running one's: {tb}");
 }
 
 #[test]
@@ -276,7 +307,7 @@ fn lldb_reverse_steps_back_onto_another_threads_trap() {
     // displays that stop instead of re-stepping. After the blocked step, window L begins on the
     // stepped thread, and window L - 1 ended at the other thread's svc.
     if !lldb_runs() {
-        eprintln!("SKIPPED lldb_reverse_steps_back…: `lldb --version` did not run. This gate did NOT run.");
+        announce("SKIPPED lldb_reverse_steps_back…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let (tr, n, t) = util::rsp::threadrust_block();
