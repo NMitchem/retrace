@@ -355,47 +355,10 @@ fn a_flag_given_last_without_its_value_is_a_usage_error() {
     }
 }
 
-/// The threadrust recording, and the first `__ulock_wait` (515) whose NEXT landmark runs another
-/// thread: a wait that really blocked. Returns (trace, landmark n of the wait, its thread).
-fn threadrust_block() -> (&'static Path, usize, u32) {
-    static C: OnceLock<(PathBuf, usize, u32)> = OnceLock::new();
-    let (p, n, t) = C.get_or_init(|| {
-        let (rec, tr) = util::record_dynamic(retrace_guest::THREADRUST);
-        assert_eq!(rec.code, 0, "record threadrust: {}", rec.stderr);
-        let ev = retrace_trace::Reader::open(&tr).unwrap();
-        let thread_of = |e: &retrace_trace::Event| match e {
-            retrace_trace::Event::Syscall { thread, .. } => Some(*thread), _ => None };
-        let n = (1..ev.len() - 1).find(|&i| matches!(ev[i], retrace_trace::Event::Syscall { num: 515, .. })
-            && thread_of(&ev[i + 1]).is_some() && thread_of(&ev[i + 1]) != thread_of(&ev[i]))
-            .expect("a __ulock_wait that blocked");
-        let t = thread_of(&ev[n]).unwrap();
-        (tr, n, t)
-    });
-    (p.as_path(), *n, *t)
-}
-
-/// The pc of the trap that ends window `n` (landmark n's svc): seek the window's full length.
-fn trap_pc(trace: &Path, n: usize) -> u64 {
-    let len = retrace_core::seek(trace, n, 0).unwrap().window_len_here().unwrap();
-    retrace_core::seek(trace, n, len).unwrap().pc()
-}
-
-/// With a breakpoint on landmark `n`'s svc, `c` until the cursor stands in window `n`, and return
-/// that stop. The svc is libsystem_kernel's, and every `__ulock_wait` runs it, so earlier waits stop
-/// there first.
-fn continue_to_window(c: &mut Rsp, n: usize) -> String {
-    for _ in 0..1000 {
-        let s = c.send("c");
-        if c.where_().starts_with(&format!("at ({n}, ")) { return s; }
-        assert!(!s.contains("replaylog:end;") && !s.starts_with("T0b"), "ran past landmark {n}: {s}");
-    }
-    panic!("landmark {n} not reached in 1000 stops");
-}
-
 #[test]
 fn a_step_crosses_a_syscall_and_lands_after_it() {
     // §3d rule 3, AtTrap: `si` on an `svc` is ordinary. watchsweep's window 1 ends at its write.
-    let svc = trap_pc(watchsweep(), 1);
+    let svc = r::trap_pc(watchsweep(), 1);
     let mut c = Rsp::spawn(watchsweep(), &[]);
     assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
     let at = c.send("c");
@@ -412,11 +375,11 @@ fn a_step_over_a_blocking_syscall_ends_when_the_stepped_thread_runs_again() {
     // §3d, the until-thread run (control C4). The wait blocks, other threads run, and the step
     // ends on the stepped thread at its svc + 4, some landmarks later. Answering on another thread
     // would loop lldb forever (t0 L7, 349,194 steps in 60 s).
-    let (tr, n, t) = threadrust_block();
-    let svc = trap_pc(tr, n);
+    let (tr, n, t) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
     let mut c = Rsp::spawn(tr, &[]);
     assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
-    let at = continue_to_window(&mut c, n);
+    let (_, at) = r::continue_to_window(&mut c, n);
     assert_eq!(r::key(&at, "thread"), Some(format!("{:x}", t + 1).as_str()), "{at}");
     assert_eq!(pc_of(&at), svc);
     assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
@@ -435,12 +398,12 @@ fn a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread() {
     // step is answered by another thread's `reason:breakpoint` (307,016 × `vCont;s:1` in 60 s). So
     // the run until the stepped thread resumes arms nothing. The breakpoint sits where the other
     // thread runs first, at (n + 1, 0); R7 as first written reported it there.
-    let (tr, n, t) = threadrust_block();
-    let svc = trap_pc(tr, n);
+    let (tr, n, t) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
     let b = retrace_core::seek(tr, n + 1, 0).unwrap().pc();
     let mut c = Rsp::spawn(tr, &[]);
     assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
-    continue_to_window(&mut c, n);
+    r::continue_to_window(&mut c, n);
     assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
     assert_eq!(c.send(&format!("Z0,{b:x},4")), "OK");
     let s = c.send(&format!("vCont;s:{:x}", t + 1));
@@ -452,11 +415,11 @@ fn a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread() {
 #[test]
 fn a_step_on_a_thread_that_is_not_running_is_refused_in_place() {
     // §3d rule 1: a non-moving exception stop, measured safe (t0 L7).
-    let (tr, n, t) = threadrust_block();
-    let svc = trap_pc(tr, n);
+    let (tr, n, t) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
     let mut c = Rsp::spawn(tr, &[]);
     assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
-    continue_to_window(&mut c, n);
+    r::continue_to_window(&mut c, n);
     let other = if t == 0 { 2 } else { 1 }; // an RSP tid that is not t + 1
     let before = c.where_();
     let s = c.send(&format!("vCont;s:{other:x}"));
