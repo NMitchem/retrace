@@ -496,6 +496,28 @@ fn main() {
         .status().expect("clang watchsweep");
     assert!(status.success(), "watchsweep guest build failed");
 
+    // llsc (M42): exclusive (LL/SC) pairs under stepping and debug stops. t0's four shapes verbatim,
+    // then clrex / a trapped timebase read / a syscall between the halves, a branch-out, and a
+    // retry loop in the exit window. Each shape publishes its outcome in the next syscall's args.
+    let src = format!("{}/asm/llsc.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/llsc");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang llsc");
+    assert!(status.success(), "llsc guest build failed");
+
+    // llscbound (M42 final-review F1): a load-exclusive whose sequence a taken cbnz leaves, then more
+    // than 16 non-exiting instructions before a breakpoint target. The witness for run()'s 16-step
+    // pair prologue and the shadow drop after it (spec §3e). Separate, so llsc's coordinates hold.
+    let src = format!("{}/asm/llscbound.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/llscbound");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang llscbound");
+    assert!(status.success(), "llscbound guest build failed");
+
     // crash: stores to VA 0x4000_DEAD_0000 (bit 46 set), which no stage-1 table entry covers => a
     // stage-1 translation fault delivered via the EL1 trampoline => Stop::Fault (a recordable crash,
     // not a retrace bug). The M6 data-abort crash guest. Contrast wildstore.s (stage-2, stays fatal).

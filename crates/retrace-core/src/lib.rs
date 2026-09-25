@@ -7,6 +7,7 @@ use retrace_box::{Box_, Stop};
 use retrace_trace::{Writer, Event, Region};
 use retrace_arch::SYS_EXIT;
 pub use retrace_box::thread::{BlockReason, ThreadState};
+pub use retrace_box::{Excl, SetBy};
 
 /// M15: one row of the debugger's thread listing.
 #[derive(Clone, Debug, PartialEq)]
@@ -139,6 +140,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
     let mut guest_task_port: Option<u64> = None;
     loop {
         let stop = b.run();
+        // M42 §3f: record never steps and never arms a debug register, so no debug exit reaches it
+        // and the exclusive shadow can never be set here. A shadow would mean an exit path skipped
+        // `note_exit`.
+        assert!(b.dbg_excl().is_none(), "M42: record set the exclusive shadow at pc {:#x}, at the exit {stop:?}: {:?}",
+            b.pc(), b.dbg_excl());
         // M15: the thread that produced this stop, captured ONCE and used by every append arm
         // below. Read here rather than at each append because this is the only point guaranteed to
         // be the trapping thread: `run()` reschedules at ENTRY, and no handler between here and the
@@ -2833,6 +2839,8 @@ impl ReplaySession {
     pub fn far(&self) -> u64 { self.b.fault_ipa() }
     /// Bring-up register dump (x0..x30, SP, PC, ELR, FAR).
     pub fn dbg_regs(&self) -> String { self.b.dbg_regs() }
+    /// M42: the box's exclusive-monitor shadow (spec §3a).
+    pub fn dbg_excl(&self) -> Option<Excl> { self.b.dbg_excl() }
     /// Read `len` bytes of guest memory at `va`, or None if the full `[va, va+len)` span is not
     /// mapped inside one backing (all-or-nothing — never a partial or clamped read).
     pub fn read_mem(&self, va: u64, len: usize) -> Option<Vec<u8>> {
@@ -3157,6 +3165,9 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
     let mut s = ReplaySession::open(trace_path)
         .map_err(|e| Divergence { landmark: 0, pc: 0, detail: e })?;
     loop {
-        if let Advance::Exited(report) = s.advance()? { return Ok(report); }
+        let adv = s.advance()?;
+        // M42 §3f: plain replay never arms a debug register either; see record_box's twin assert.
+        assert!(s.dbg_excl().is_none(), "M42: plain replay set the exclusive shadow at landmark {}", s.landmark());
+        if let Advance::Exited(report) = adv { return Ok(report); }
     }
 }

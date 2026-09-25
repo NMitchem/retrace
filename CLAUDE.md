@@ -90,8 +90,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   Python, where `cpython_crash_e2e` guards nothing), `watchsweep_e2e` (M40: a guest whose one
   store instruction sweeps a buffer before reaching the watched element, so `continue` and
   `reverse-continue` must resolve a watch hit by address, not by pc — the class that put rung 8's
-  `continue` 1.7 M instructions early), `hitorder_e2e` (M41: named regressions for every hit the
-  debugger used to skip or invent, the thread-at-a-boundary invariant, and the hit oracle —
+  `continue` 1.7 M instructions early), `llsc_e2e` (M42: exclusive (LL/SC) pairs under stepping,
+  seeking and native breakpoint/watch stops — the store-exclusive must land exactly as recorded;
+  t0 measured hangs, phantom watch hits and a silent `no earlier hit` before the shadow monitor, and
+  every CLI run is bounded so a regression fails rather than stalls), `hitorder_e2e` (M41: named
+  regressions for every hit the debugger used to skip or invent, the thread-at-a-boundary
+  invariant, and the hit oracle —
   `tests/util/hits.rs` single-steps a recording with everything armed and checks
   `continue`/`reverse-continue` chains against every hardware stop). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
@@ -180,8 +184,12 @@ and threads.
    not silent corruption.
 2. Deterministic instruction emulation is better done **below the trace**, inside `Box_::run()`
    (as with the timebase MRS, the Apple-IMPDEF undef-MRS, and the B-family FPAC strip): `run()` is
-   shared by record and replay, so such an arm fires identically on both sides and never surfaces to
-   the record/replay loop — determinism is then automatic.
+   shared by record and replay, so such an arm fires identically on both sides and never surfaces
+   to the record/replay loop — determinism is then automatic.
+
+   M42's store-exclusive emulation is also below the trace, but it is debugger-only: it lives in
+   `step()` and `run()`'s pair prologue, engages only when single-stepping or at a debug stop, and
+   record and plain replay assert its shadow is never set.
 
 ### Hard platform invariants (encoded in the box; violating them hangs or panics the machine)
 
