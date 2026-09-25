@@ -2863,8 +2863,10 @@ impl Box_ {
         }
         // M43 §3i: decode the instruction before it runs. A load-exclusive's base is read now,
         // because the load may overwrite it (`ldxr x9, [x9]`), and the decode stands in for ISS.EX
-        // when the step exit does not carry it (ISV = 0). Read after the M42 block above, which
-        // returns early for an emulated store, so `pre` is only ever a load.
+        // when the step exit does not carry it (ISV = 0). The match keeps only a load: any other
+        // exclusive, a store-exclusive with no shadow set included, gives None.
+        // Cost: one extra guest read (a page walk plus the word) on every step, measured at about
+        // +38% CPU on M41's step-bound hit oracle and +2% on rung 8's reverse demo (Ruling T1-c).
         let pre = self.insn_at(self.pc()).and_then(decode_excl).and_then(|i| match i {
             ExclInsn::Load { rn, .. } => Some((i, self.base_reg(rn) & excl::TAG_MASK)),
             _ => None,
@@ -2910,8 +2912,9 @@ impl Box_ {
     }
 
     /// M42 §3a, M43 §3i: set the shadow for a load-exclusive that just retired under `step()`. `va`
-    /// is its base as read BEFORE the step (tag-stripped), so a load that overwrote its own base
-    /// (`ldxr x9, [x9]`) still marks the address it read.
+    /// is its base as read BEFORE the step (tag-stripped): after `ldxr x9, [x9]`, x9 holds the
+    /// loaded value, not the address. There is one vCPU, so memory at `va` right after the step IS
+    /// what the load returned, even when Rt is XZR. That is why `loaded` is read from memory, not Rt.
     fn set_excl_from_retire(&mut self, ld: ExclInsn, va: u64) {
         let ExclInsn::Load { size, pair, .. } = ld else {
             unreachable!("classify_retire only returns loads: {ld:?}")
@@ -2973,8 +2976,13 @@ impl Box_ {
         let plan = match excl::plan_stx(&ex, st, base, self.xreg(rt), self.xreg(rt2), target.as_deref(), writable) {
             Ok(plan) => plan,
             // M43 §3i item 3: natively, with the monitor held, a store to a target EL0 cannot write
-            // faults, and the recording holds that crash. Emulating it would invent a write. Drop the
-            // shadow and step the store natively, so the core raises the fault as record's did.
+            // faults, and the recording holds that crash. Emulating it would invent a write, so the
+            // shadow is dropped and the store stepped natively. The target decides, whatever
+            // plan_stx refused for, M42's deliberately loud refusals included (changed bytes, a
+            // mismatched address, an aliased status register); `target.is_none()` also covers a
+            // target with no backing. The native step runs with the monitor lost, and whether the
+            // core still faults then is IMPLEMENTATION DEFINED: measured (a) at plan time. Were it
+            // (b), replay's divergence oracle would fail loudly against the recorded Crash.
             Err(_) if !writable || target.is_none() => {
                 self.excl = None;
                 return self.step();
