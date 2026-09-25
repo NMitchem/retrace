@@ -494,6 +494,12 @@ a ledger Ruling and a re-scope, not a halt.
 - **Expression evaluation that runs code.** It is refused by construction (`P`/`G`). Constant
   expressions still evaluate (L8).
 - **Stepping a thread that is not the running one** (§3d, rule 1).
+- **A breakpoint added while stopped, at a thread's pc when that thread is not the running one**
+  (Ruling T5-a, measured by Task 5's probe, `t5-probe-rsi-switch.log`): lldb steps that thread off
+  the breakpoint before it resumes, rule 1 refuses the step, and every forward `continue` stops in
+  place with the refusal. No loop. The workaround is to disable the breakpoint until its thread
+  runs. A successor could let such a step run until the thread is scheduled, as a blocked step
+  already does.
 - **A breakpoint or watchpoint hit by another thread while a step waits for its blocked thread**
   (§3d, R7's fallback, measured): the step ends on the stepped thread, and the other thread's hit
   goes unreported.
@@ -564,4 +570,41 @@ per-task counts.
 
 ## 10. Outcome
 
-*(Filled at the close.)*
+*(Filled at the close, 2026-09-25, on `b0b4492`.)* Gate: GATE_TOTALS_TBD, reconciled file by file
+against M42's 747 / 0 / 9 over 142: +51 `#[test]` attributes over six files (`excl.rs` +2,
+`debug.rs` +3, `rsp.rs` +12, `gdbserver_e2e` +26, `lldb_e2e` +5, `llsc_e2e` +3), no `#[ignore]`
+added or removed, and two new test binaries. `crates/retrace-trace` has no diff, so `TRACE_MAGIC`
+did not move, and no existing debug test changed an assertion.
+
+**Shipped:** `retrace gdbserver <trace> [--port <n>] [--exe <path>]` (`rsp.rs`, `gdbserver.rs`),
+`Exec`'s `Halt` and `recover` (§3b, which pays M41's `?`-exit item), §3c's re-parks, §3d's
+`step_thread` and `continue_until`, `bs`/`bc`/`arm-rsi`, and `crates/retrace/lldb/retrace.py`'s
+`rsi`. lldb-2100 debugs a recording forward and backward, and `lldb_e2e` pins §1's exit criterion on
+`crashy`: `c -R` to the corrupting store, `rsi` one instruction earlier, `c -F` after it. The M42
+hardening (§3i) landed first. Outcome **(a)** reproduced, so a store-exclusive to an unwritable or
+unmapped target steps natively into the recorded fault. The pre-decode retires the base-aliasing
+panic and classifies an ISV = 0 retire. The native-step guard is wider than §3i's wording (Ruling
+T1-a): the target decides, whatever `plan_stx` refused for. The controls behaved as follows:
+- C1, C2, C3 and C5 were RED as predicted, C1 and C2 with a second row each.
+- C4 was RED, but its step ran to the end of the recording rather than ending on another thread.
+  The row deletes its breakpoint before it steps, so nothing was armed to stop it.
+- C6 was RED with a different symptom. The aliased VA `0x5a5a` translates, through the trampoline
+  page, so the `ex.va` assertion caught it, not a "does not map" panic.
+
+**Amended:**
+- R4, at Task 3's review: the breakpoint cap is the hardware's 6, not 5, because the transient step
+  `Z0` cannot be told from a user's.
+- R7, measured by Task 4: lldb loops on a blocked step answered by another thread's breakpoint
+  (307,016 × `vCont;s:1` in 60 s), so the fallback is taken and the until-run arms nothing.
+- §3d rule 1, measured by Task 4: the refusal is named on the stepped thread, because named on the
+  running one it looped lldb (80,103 × `vCont;s:2` in 60 s).
+- §3c, Ruling P1 at plan time: a forward syscall-watch stop re-parks at `(n, 0, Bp)`, so that a
+  `c -R` finds the write it just reported.
+
+**Owed:**
+- an O(log n) backing index for `step()`'s pre-decode (T1-c: about +38 % CPU on step-bound tests);
+- `gdbserver_e2e`'s 48–125 s runtime, from its `threadrust` rows;
+- T5-a's successor, a non-running thread's step that runs until the thread is scheduled;
+- §7's list.
+
+The detail is in `docs/status-log.md`, "M43-lldb".

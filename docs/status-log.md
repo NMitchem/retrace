@@ -12492,3 +12492,411 @@ The nine suites are `debug_cli` 10, `watch_cli` 11, `watch` 7, `hitorder_e2e` 23
 `git diff 8231c31 00c76e3 -- crates` adds one `#[test]` line and removes none, and touches no
 `#[ignore]`. No existing test's behaviour moved. So the gate is 746 + 1 = **747 / 0 / 9 over 142**.
 The tree holds 754 `#[test]` attributes: 745 runnable, 9 ignored, and the census pair runs twice.
+
+## Status: M43-lldb — lldb debugs a recording forward and backward, over gdb-remote
+
+The original design (2026-07-05) promised a debugger people already know: "a gdb/lldb-remote server
+… *Exit:* reverse-step through a real crash in LLDB." Until M43, retrace's debugger was a script,
+`retrace debug <trace> --script '…'`. M41 made its answers right (one hit order, one cursor, a hit
+oracle) and M42 made stepping sound across exclusive pairs, both explicitly as this milestone's
+preconditions. M43 adds `retrace gdbserver <trace> [--port <n>] [--exe <path>]`, a gdb-remote (RSP)
+server over one recording, and lldb-2100 connects with `gdb-remote` and debugs the recording
+forward and backward. `process continue -R` goes backward (stock lldb, the `bc` packet), and `rsi`, a
+command retrace ships in `crates/retrace/lldb/retrace.py`, steps back one instruction. The server is a
+**translation layer, not a second debugger**: every motion is one of `Exec`'s
+(`crates/retrace/src/debug.rs`), so M41's hit order and M42's pair handling hold under lldb by
+construction. What the server adds is the mapping between `Exec`'s cursor and the position lldb
+believes it stands on (spec §3c), a stepping rule lldb can live with (§3d), and replies that never
+cost lldb its connection (§3b). It also paid the debts in the seam's path: M41's `?`-armed session
+(§3b's `recover`), M42's Ruling F-3 (three step-path hardening items, §3i) and F-5 (a stale comment).
+
+The milestone's numbers: **one** new fixture (`crates/retrace-guest/asm/llscedge.s`); **two** new
+modules in the `retrace` binary (`rsp.rs`, pure, 12 unit tests; `gdbserver.rs`, the socket and the
+dispatch) and **one** lldb script (`retrace.py`); **two** new test binaries (`gdbserver_e2e`, 26
+tests, and `lldb_e2e`, 5) and a shared RSP client (`tests/util/rsp.rs`); **+51** `#[test]`
+attributes over six files, none removed; **zero** `Box_` fields added and **zero** dispatch arms
+changed (`retrace-core`'s diff is two re-exports and two `ReplaySession` accessors), `verify_thread`
+**7 → 7**, `TRACE_MAGIC` unmoved at `RT\x00\x0a` (`crates/retrace-trace` has no diff); **zero** new
+`#[ignore]` and **zero** un-parked; the spec's ten rulings (R4 and R7 amended by measurement), five
+pre-flight rulings (P1–P5) and fifteen execution rulings (T1-a … T5-d); **eighteen** commits before
+this close: the spec with its t0 companion (`48073b4`) and its revision (`73a407c`), the plan
+(`5f29b4a`, which also amended spec §3c and recorded §3i's outcome) and its log-path amendment
+(`8c882b1`), two spec amendments made in execution (`8c47122`, `4a71c0c`), and twelve task commits
+(`917f4eb` + `423ed82`; `572c307` + `8e57429`; `6841c95` + `fe369a3`; `931a1be` + `dfca08c` +
+`db5fb3f`; `38b5d77` + `ddb43eb` + `b0b4492`), five of them review fix rounds. Gate:
+GATE_TOTALS_TBD.
+
+### What t0 measured
+
+The companion (`docs/superpowers/specs/2026-09-25-retrace-m43-lldb-measurements.md`) is the record:
+lldb-2100 against a throwaway Python stub (L1–L10), and retrace's code read on `c652cf1` (R1–R4).
+
+- **L1.** lldb needs `qSupported`, `?`, one register route (`qXfer:features:read:target.xml`),
+  `p`/`g` and `m`. Everything else may be answered empty.
+- **L2.** With `os_version` in `qHostInfo`, lldb's new macOS loader symbolicates the exe from
+  `jGetLoadedDynamicLibrariesInfos` with no `target create`. With `os_version` and no answer, it
+  **unloads** the exe. Listing dyld plants a persistent internal `Z0`.
+- **L3.** lldb never sends `bs`; only `process continue -R` reaches a server, as `bc`, and the
+  direction **sticks** for `continue` until `-F`. A server-armed `bc` answered `reason:trace` is a
+  working reverse step (`l3_rsi`).
+- **L4.** `reason:breakpoint` and `reason:trace` display both ways, but a `trace` reply that does not
+  move the stepped thread's pc makes lldb re-step forever (L4b). With the default watchpoint timing
+  lldb steps forward after every watch stop, reverse included, so a user can never get backward past
+  the most recent write; with `watchpoint_exceptions_received:after` it never steps (L4c). A plain
+  signal stop makes `c -R` fail; mach keys and `reason:exception` stops are reversible; `W`/`X` end
+  the session; `replaylog:end`/`begin` are reversible history boundaries (L4d–f).
+- **L5.** `breakpoint set` is a `Z0`, and an `E` reply has no fallback. Every step-over, step-out,
+  step-in and `ni` over a call inserts **one** transient `Z0`; refusing it makes lldb run away.
+- **L6.** `Z2` per watch, in aligned pieces of at most 8 bytes; `Z3`/`Z4` for read and access; `E`
+  is a clean creation error.
+- **L7.** tid 0 is unusable. A step of thread A answered by a stop on B with A's pc unchanged loops
+  forever. An `E` to any resume packet disconnects lldb. A non-moving `reason:exception` stop on the
+  stepped thread is safe.
+- **L8.** Expression evaluation tries an inferior `mmap` (`P` writes, then `c`); refusing `P`/`G` is
+  safe and constant expressions still evaluate.
+- **L9.** `0x03` arrives during a `c` or `bc`; resume packets wait indefinitely, others time out at
+  5 s.
+- **L10.** `lldb -x -b -s <file> </dev/null` is synchronous and deterministic once port, paths and
+  pid are normalised; `-o` silently stops after a crash or boundary stop and exits 0.
+- **R1–R4.** Registers existed only as text, but `ThreadCtx` holds every thread's, FP included; every
+  `Err` in `cmd_reverse_continue` left no session, and `cmd_continue`'s left hardware armed with the
+  session moved; the exe is at `0x1_0000_0000`, slide 0, and its path is not in the trace (a
+  `record-dyn` guest's `argv[0]` holds it); `Exec` reported outcomes only as printed text.
+
+**Pre-flight, before Task 1** (the controller): `llscedge.s` as the plan gives it records to
+`guest crashed: pc=0x1000003a0 far=0x1000003b0 esr=0x9200004f` (EC `0x24`, a permission fault),
+exit 139, and reproduces both M42 panics unfixed, at `lib.rs:2916` (the base aliases a destination)
+and `lib.rs:2976` (not EL0-writable). A temporary patch of §3i's fix 3 (reverted) gave **outcome
+(a)**: the stepped `stxr` faults natively with the recorded fault, and a `continue` from `(2, 3)`
+reaches the recorded crash with no divergence. Recorded in spec §3i; (b)'s branch was not built
+(Ruling P2).
+
+### The M42 hardening (Task 1, `917f4eb` + `423ed82`)
+
+`step()` now decodes the instruction at pc before it runs it. For a load-exclusive it captures the
+base VA (`base_reg(rn) & TAG_MASK`) then, before `ldxr x9, [x9]` can overwrite it, and the
+clean-retire branch of `run_one_for_step` hands the syndrome and the decode to a pure
+`excl::classify_retire`: with ISS.ISV = 1, ISS.EX must agree with the decode in both directions or
+it is an error naming both, and with ISV = 0 the decode decides. `set_excl_from_retire` takes the
+pre-step VA, and its aliasing assert is gone. `emulate_stx`, when `plan_stx` refuses and the target
+is not EL0-writable or has no backing (`!writable || target.is_none()`), drops the shadow and steps
+the store natively. `SS_ISV_EX` is deleted, and `run()`'s prologue comment (F-5) is reworded to
+M42's corrected README text.
+
+RED first (`t1-red.log`): the two new step tests panicked at `lib.rs:2916` and `lib.rs:2976`, the
+controller's pre-flight exactly, and the fixture test passed. GREEN: `llsc_e2e` **50** (47 + 3),
+`excl` 28, `step` 5, `checkpointparity` 4, `hitorder_e2e` 23, `reverse_debug_e2e` 1, `debug_cli`
+10, clippy clean. `a_stepped_store_exclusive_to_a_read_only_word_ends_in_the_recorded_crash`
+reaches `Exited(Crash)` with no divergence: outcome (a), reproduced.
+
+**C6** (the pre-decode undone: the marked address read from the base *after* the load) went
+**RED**, but not as predicted. The spec expected a panic, "read 0x5a5a, which does not map". The
+seek succeeded instead: VA `0x5a5a` lies in the 16 KiB stage-1 page at `TRAMPOLINE_IPA = 0x4000`,
+which `ATTR_TRAMP` maps, and `va_to_ipa` checks no permissions, so the shadow was set on
+`va = 0x5a5a` with trampoline bytes. The test's own `ex.va == celledge` assertion caught it (`left:
+0x5a5a, right: 0x100004000`), the assertion on the difference the fix makes.
+
+The review (opus) passed the spec. Its one Important was the pre-decode's cost: one extra guest read
+on **every** step, measured at about **+38 %** user CPU on step-bound tests (`hitorder_e2e`'s
+`oracle_threadrust`, 21.9 s → 30.5 s) and +2 % on `cpython_crash_e2e`. Ruling T1-c accepted it
+(below). The fix round (`423ed82`) made the comments honest (the guard's real reach, the cost line),
+restored the one-vCPU invariant to `set_excl_from_retire`'s doc, fixed two stale `excl.rs` docs, and
+added an assert that an ISV = 0 syndrome's EX bit is not read.
+
+### The wire (Task 2, `572c307` + `8e57429`)
+
+Everything that does not move. `rsp.rs` is pure: framing in ack and no-ack modes with `}` escapes,
+hex, the 68-register target.xml (`aarch64-core` plus `aarch64-fpu`), the stop reply with only the
+start-of-recording kind, and the image JSON built from the Mach-O header and load commands in the
+opening snapshot. `gdbserver.rs` owns the TCP loop and the dispatch: the handshake, `?`, registers,
+memory, threads, identity, images, `qRcmd where`, the refusals and `k`/`D`.
+`Box_::thread_ctx`/`read_va_prefix` and `ReplaySession::thread_ctx`/`read_mem_prefix` back it, the
+latter returning the readable prefix page by page through the guest's own stage-1 walk. RED: the
+bins build failed with 29 compile errors, and the seven e2e rows each saw the usage exit 2. GREEN:
+`--bins` 24, `gdbserver_e2e` 7.
+
+The implementer measured a concern the brief had not asked about: a peer that dies with a reply
+unread makes the kernel send RST, and the server exited **5**
+(`socket: Connection reset by peer`) where spec §3a says a peer leaving is status 0. **Ruling T2-a**
+made it 0. The review (opus) passed the spec, and its Important 1 was that the register row was
+vacuous, since x0–x30 are all zero at `(1, 0)`. The fix round (`8e57429`) mapped `ConnectionReset`,
+`ConnectionAborted` and `BrokenPipe` to exit 0 and dropped the listener after `accept`, so a second
+connect is refused. It added a unit test pinning every register at its target.xml offset, sent
+`os_version` only when an image list can be built, escaped JSON strings, and added checksum vectors
+and a decoder-resync test. It also made a flag given last with no value a usage error, and capped
+the header read. Three new rows: the RST exit, made deterministic by `TcpStream::peek` (5 of 5 exit 5
+before the fix), the refused second connect, and the dangling flag. `--bins` 27, `gdbserver_e2e` 10.
+Four mutations each turned their own row red, and one, `x[n] → x[30 − n]`, was caught **only** by
+the new unit test.
+
+### Continue, both ways (Task 3, `6841c95` + `fe369a3`)
+
+`Exec`'s four motions return `Result<Halt, String>`, printing exactly what they printed, so every
+script transcript is unchanged. `Exec::recover(at)` re-seeks a saved cursor with its phase. The
+server brackets each motion: an `Err` becomes `recover` plus the non-moving
+`reason:exception;description:<e>` stop, never an `E` (L7). If the re-seek fails as well, a `dead`
+state answers every later packet. It also adds §3c's re-parks, the terminal list, `Z0`–`Z4`, and the
+continue forms. RED: 7 of the 17 rows. GREEN: `--bins` 30, `gdbserver_e2e` 17, and the seven script
+suites unchanged. Controls on the committed tree: **C1** (no forward-watch step) RED at the
+post-retire value, **C2** (no reverse re-park to `Bp`) RED because the forward `c` skipped the store,
+and **C3** (`E01` for an `Err`) RED. C1 and C2 also turned the crash row red. An extra **C3b** (the
+exception stop without `recover`) went RED at the `where` pc: the session had moved to the EL1
+vector at `0x4404` while the cursor triple had not.
+
+The review's Important 1: a cap of 5 cannot reserve lldb's transient step `Z0`, because the server
+cannot tell it from a user's. With 5 user breakpoints the transient was the sixth and was refused,
+and lldb ran away. **Ruling T3-b** amended spec R4 (`8c47122`): cap at the hardware's **6**, which
+strictly dominates 5. **T3-a** added the missing wire row, a `Z0` hit forward and backward, and two
+mutations (`Break` answered as no reason, each direction alone) each turned it red. The fix round
+(`fe369a3`) delegated the cap and the idempotence to `cmd_break`'s own limit and dropped the
+server's copy of the constant. It pinned the terminal mapping as a unit test
+(`rsp::terminal_kind`), added the unsupported-size and absent-`z2` watch asserts, and merged the
+continue arms. `--bins` 31, `gdbserver_e2e` 18.
+
+### Stepping, and R7 measured (Task 4, `931a1be` + `dfca08c` + `db5fb3f`)
+
+`Exec::step_thread(t)` implements §3d:
+- rule 1 refuses a thread that is not running;
+- at a terminal, it re-reports the terminal;
+- otherwise one instruction with the watches armed, where a watched store is retired and reported
+  post-retire (`Halt::WatchStepped`), and a trap or fault is crossed with `advance()`;
+- when another thread is current after the crossing, `t` blocked, and `continue_until(Some(t))`
+  runs until `t` is current again.
+
+It also adds `StopKind::Trace`, `s`/`S`/`vCont;s`/`bs`, and `monitor arm-rsi`, which makes the next
+`bc` a reverse step. RED: 5 rows. GREEN (commit 1): `--bins` 32, `gdbserver_e2e` 23.
+
+**The R7 measurement** (brief Step 8, lldb-2100.0.17.203, a throwaway probe on `threadrust`): a
+breakpoint at the blocking `svc` (`0x1804afaf4`), then one at thread 2's first instruction
+(`0x1804ecc14`), then `thread step-inst`. As R7 was first built, the blocked step reported thread 2's
+breakpoint, and **lldb looped: 307,016 × `vCont;s:1` in 60 s**, never printing `END`. The packet log
+showed lldb ignoring the other thread's `reason:breakpoint` and re-stepping thread 1, although thread
+1's pc had moved. Every re-step was then refused by rule 1, **named on the running thread**, and lldb
+looped on that too. **Ruling T4-a** took R7's fallback: the until-run arms nothing, and a hit by
+another thread during one blocked step goes unreported. A pinning row was added
+(`a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread`), RED on commit 1
+with exactly the looped reply. With the fallback, lldb exited 0 in about 0.7 s after one
+`vCont;s`, showing `instruction step into` at `0x1804afaf8`, `svc + 4`.
+
+The same probe's session B (`thread select 2; thread step-inst`) found the **plan's** rule-1 form
+looping as well, **80,103 × `vCont;s:2` in 60 s**. The plan's comment had cited t0 L7 for a refusal
+on the running thread, but L7's measured-safe form is the exception **on the stepped thread**
+(`l7_stepfail3_desc`). The implementer fixed it unauthorised, and **Ruling T4-b** accepted it. Named on
+the stepped thread, session B exits 0 in about 0.45 s after one `vCont;s`. Spec §3d and R7 were
+amended (`4a71c0c`). `--bins` 32, `gdbserver_e2e` 24.
+
+**C4** (both until-checks deleted) went **RED**, with a symptom other than predicted. The spec said
+the step would end on another thread. It ran to the **end of the recording** instead
+(`replaylog:end … exited (code 0)`), because the row deletes its breakpoint before it steps, so
+nothing was armed to stop it. On the final commit the pinning row went red the same way.
+
+The review (opus) approved, with no Critical or Important findings. The fix round (`db5fb3f`)
+addressed six Minors:
+- the "arming is spent" check was vacuous, so an unarmed `bc` now follows the armed one and must
+  give the start stop;
+- a `vCont` with a step action anywhere steps (`vCont;c:2;s:1`);
+- the finish-loop until-check is now documented as defensive;
+- any resume other than `bc` clears `rsi_armed`;
+- two new rows, a step onto a watched store, and every step packet form;
+- two wordings.
+
+Minor 4, a terminal reached during a blocked step, went to the README (Ruling T4-c). Mutations
+removing the `take` and the clear each turned their assertion red. `gdbserver_e2e` 26.
+
+### lldb (Task 5, `38b5d77` + `ddb43eb` + `b0b4492`)
+
+`retrace.py`'s `rsi` runs `process plugin packet monitor arm-rsi`, then
+`ContinueInDirection(eRunReverse)`, then `process status`: L3's `l3_rsi`. `lldb_e2e` runs
+`lldb -x -b -s <file> </dev/null` against a spawned server, with a `script print("END")` sentinel, and
+each test skips loudly when `lldb --version` does not run. The blocking-step fixture moved from
+`gdbserver_e2e` into `util::rsp` (`38b5d77`), shared by both binaries. The tests are:
+- **the headline, on `crashy`**: connect (`start of recording`); `process continue`
+  (`EXC_BAD_ACCESS (code=1, address=0x4000dead0000)`, frame #0 in `crashy`main`); a watch on
+  `&g.ptr`; `c -R`, `rsi` and `c -F`. The pcs are asserted against an in-process step oracle as
+  `[store, prev, next]`, and lldb's old and new values as the garbage and `&g.buf[0]`;
+- **a determinism check**: the same session twice, with the port and the script path normalised;
+- **CPython on `crash.py`**, which skips without Homebrew Python: two watch stops, with the cell
+  read as not the target before the store and as the target after it;
+- **the R7 row**: session A, the blocked step, ends on the stepped thread at `svc + 4`, and session B
+  is the rule-1 refusal on the stepped thread.
+
+Two parsing adjustments, with no assertion changed. lldb-2100 prints a hit-shaped `new value:` when
+a watchpoint is *created*, so values are read from `c -R` on. lldb also echoes the script path,
+which carries the port, so the determinism check normalises it. **C5** (no
+`watchpoint_exceptions_received:after`) went **RED as predicted**: after `c -R` lldb stepped forward
+over the store, the first pc was `store + 4`, and old equalled new. Two mutations of the R7 row went
+red. With the fallback undone the row went red at the `thread list` assertion **without looping**,
+because rule 1 on the stepped thread now ends lldb's re-step. With rule 1 named on the running thread,
+session B was killed at the session bound.
+
+The probe also found **T5-a**. A breakpoint added while stopped, at a thread's pc when that thread
+is not running, makes each forward `process continue` stop in place. lldb steps that thread off the
+breakpoint first (`vCont;s:2`), rule 1 refuses, and `where` does not move
+(`t5-probe-rsi-switch.log`). There is no loop. It measured spec §3e's reverse step onto another
+thread's trap too: one `trace` stop, no loop, with lldb re-indexing tid 2 as `#3` because it had seen
+tid 2 exit (`t5-probe-rsi-switch2.log`). **T5-b** pinned that as a fifth test.
+
+The review (opus) found one Important: the determinism test never asserted `END` or exit 0, so two
+identically failing sessions would compare equal. The fix round (`b0b4492`):
+- every session now asserts `END` and exit 0, and the determinism check also asserts that the
+  transcript reached the watch;
+- session A's `monitor where` pins both ends of the step, so `m` is asserted rather than inferred;
+- the CPython test asserts its exit code;
+- `BOUND` is 120 s, where the sessions measured 0.2–1.75 s, CPython's the slowest;
+- `KillOnDrop` reaps the server and lldb on every path;
+- the fifth test, `lldb_reverse_steps_back_onto_another_threads_trap`, computes its oracle over the
+  wire first and finds lldb's row by tid, never by index. A no-cross mutation turned it red in 25 s.
+
+`lldb_e2e` 5 (72.8 s), `gdbserver_e2e` 26, `--bins` 32, clippy clean. No Task 5 run printed
+`SKIPPED`: lldb-2100.0.17.203 and Homebrew Python 3.14 were both present.
+
+### The audit (this close)
+
+`git diff c652cf1 -- crates/retrace-trace` is empty, so `TRACE_MAGIC` did not move and `Event` did
+not change. Under `crates/retrace/tests/` the diff adds two new binaries (`gdbserver_e2e.rs`,
+`lldb_e2e.rs`) and a new `util/rsp.rs`. `util/mod.rs` gains 16 lines, and `llsc_e2e.rs` gains 70
+lines and loses one, a module doc comment. **No existing assertion changed.** The script debugger's
+suites passed unchanged at Task 4's final tree (`t4-final-cli.log`): `crashy_cli` 2, `debug_cli` 10,
+`hitorder_e2e` 23, `llsc_e2e` 50, `reverse_debug_e2e` 1, `thread_watch_e2e` 1, `watch_cli` 11,
+`watchsweep_e2e` 4. Apart from `llsc_e2e.rs`'s additions, their test files have no diff.
+`grep -c 'self.verify_thread('
+crates/retrace-core/src/lib.rs` is **7**.
+
+### The gate
+
+**GATE_TOTALS_TBD.** It ran from the worktree on `b0b4492` as one background script (`gate.sh`
+in the ledger's directory), chunked as CLAUDE.md requires. Every test chunk ran `--no-fail-fast`,
+and each chunk's exit code went to `gate-summary.txt` before any pipe. GATE_TIME_TBD.
+
+| chunk | invocation | what M43 changed in it, by source |
+|---|---|---|
+| `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | no `#[test]` change |
+| `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | `excl.rs` +2. Whole package, so `Doc-tests retrace_box` is present (M24's lesson) |
+| `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 17 → **32**: `debug.rs` +3, and `rsp.rs` 12, a new module |
+| `e2e` | `cargo test -p retrace --test <name> --no-fail-fast -- --test-threads=1`, once per file of `ls crates/retrace/tests/*.rs` | 74 → **76** targets: `gdbserver_e2e` 26 and `lldb_e2e` 5, both new binaries, and `llsc_e2e` +3 |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | — |
+
+Results, chunk by chunk, and the skip check (`grep -a SKIPPED` over the e2e logs): GATE_TOTALS_TBD.
+
+**Reconciled against M42's 747 / 0 / 9 over 142, file-by-file rather than by sum.**
+`git diff c652cf1 -- crates` adds **51** lines matching `^\+[[:space:]]*#\[test\]`, removes none,
+and touches no `#[ignore]` line:
+
+| file | M42 | M43 | delta |
+|---|---|---|---|
+| `crates/retrace-box/src/excl.rs` | 26 | 28 | **+2**: `classify_retire` on both ISV values, and its disagreement in both directions (T1) |
+| `crates/retrace/src/debug.rs` | 17 | 20 | **+3**: each motion's `Halt`, and `recover` after a tampered trace's mid-scan divergence (T3); `step_thread` on a watched store (T4) |
+| `crates/retrace/src/rsp.rs` | — | 12 | **+12**, new module: 7 (T2), then checksum vectors, decoder resync and the register pin (T2 fix round); every stop kind's keys (T3) and the terminal mapping (T3 fix round) |
+| `crates/retrace/tests/gdbserver_e2e.rs` | — | 26 | **+26**, new binary: 7 + 3 (T2 and its fix round), 7 + 1 (T3 and T3-a), 5 + 1 + 2 (T4, the R7 pinning row, its fix round) |
+| `crates/retrace/tests/lldb_e2e.rs` | — | 5 | **+5**, new binary: 3 + the R7 row (T5), and T5-b's reverse step onto another thread's trap |
+| `crates/retrace/tests/llsc_e2e.rs` | 47 | 50 | **+3**: the `llscedge.s` recording, the base-aliasing step, and the read-only store-exclusive's crash (T1) |
+| every other `.rs` under `crates/` | unchanged | unchanged | 0: the other changed files (`retrace-box/src/lib.rs`, `retrace-core/src/lib.rs`, `retrace-guest/src/lib.rs`, `gdbserver.rs`, `main.rs`, `util/mod.rs`, `util/rsp.rs`) carry the same `#[test]` count as at `c652cf1` |
+
+The tree holds **805** `#[test]` attributes by `git grep -E '^[[:space:]]*#\[test\]'` over `crates/`
+(754 at `c652cf1` by the same pattern), so 754 + 51 = 805.
+
+**The spec's §9 estimate**, ≈ 791 / 0 / 9 over 144, came before the plan's per-task counts.
+Ruling P4 superseded it with the plan's figure, and the ledger's paper prediction then moved as
+each task's count landed. §9's binary count was right. Its per-task deltas summed to +44, and the
+source count is +51:
+- T1 is +5, as counted.
+- T2 is +20 against ~15: the fix round added three unit tests and three wire rows.
+- T3 is +12 against ~13.
+- T4 is +9 against ~8, with the R7 pinning row and the two review rows.
+- T5 is +5 against ~3, with the R7 row and T5-b's row.
+
++0 + 5 − 1 + 1 + 2 = **+7**.
+
+**The invariants.** `crates/retrace-trace` has no diff. `verify_thread` has **7** sites. No
+dispatch arm changed: `retrace-core/src/lib.rs`'s diff is `ThreadCtx` and `EXE_BASE` re-exported and
+`ReplaySession::thread_ctx`/`read_mem_prefix` added. No `Box_` field was added.
+
+### What measurement changed
+
+- **R7 as designed looped lldb.** A blocked step that reported another thread's breakpoint drew
+  **307,016 × `vCont;s:1` in 60 s**, so the fallback was taken: nothing is armed while the step waits
+  (T4-a).
+- **The plan's rule-1 refusal looped lldb too.** Named on the running thread it drew **80,103 ×
+  `vCont;s:2` in 60 s**. It is named on the stepped thread now, which is L7's measured-safe form
+  (T4-b).
+- **The breakpoint cap is 6, the hardware's count, not 5** (R4, amended by T3-b). No cap can
+  reserve the transient step `Z0`, so 5 only moved the runaway down by one.
+- **§3i's outcome (a) was measured**, at plan time and again by Task 1's test. A store-exclusive
+  whose monitor is lost still takes the permission fault, so the stepped native store reproduces
+  the recorded crash.
+- **C6 stayed RED, with a different symptom.** The aliased VA `0x5a5a` translates, through the
+  trampoline page, so the shadow was set on the wrong address. The `ex.va` assertion caught that,
+  not a "does not map" panic. **C4** also differed from its prediction: the step ran to the end of
+  the recording, not onto another thread.
+- **T5-a.** A breakpoint added at a non-running thread's pc stalls forward `continue` in place,
+  with no loop.
+- **An abortive peer close exited 5** (T2-a). It is 0 now, like any other peer leaving.
+
+### Rulings
+
+The spec's R1–R10 stand: an RSP server over `Exec` (R1); the re-parks in the server, not in `Exec`
+(R2); `watchpoint_exceptions_received:after` (R3); 6 breakpoints (R4, **amended**, was 5); the exe
+listed alone (R5); no interrupt (R6); R7's blocked step (**fallback taken**, measured); no `_M` side
+allocation (R8); the M42 hardening inside M43 (R9); pid 1 and a fixed `os_version` (R10).
+
+Pre-flight:
+
+* **P1** — a forward syscall-watch stop re-parks at `(n, 0, Bp)`, so `c` then `c -R` finds the write
+  just reported (spec §3c amended in `5f29b4a`). Cost: a breakpoint at `(n, 0)`'s resume pc goes
+  unreported by the next forward `c` (R4's rule).
+* **P2** — §3i outcome (a) measured at plan time; (b)'s branch not built.
+* **P3** — the duplicated `encode` and tamper logic accepted, for oracle independence.
+* **P4** — the plan's per-task counts supersede §9's ≈ 791.
+* **P5** — logs go to the worktree's SDD workspace.
+
+Execution:
+
+* **T1-a** — the native-step guard (`!writable || target.is_none()`) is wider than §3i's "refused
+  *because* unwritable or unmapped": the target decides, M42's deliberately loud refusals
+  included, since outcome (a) makes a native step reproduce the recording whatever `plan_stx`
+  refused for.
+* **T1-b** — the worktree guard refuses `export` lines too; later logs use worktree-relative paths.
+* **T1-c** — the pre-decode's per-step cost accepted (about +38 % on step-bound tests, +2 % on the
+  reverse demo); the fix, an O(log n) backing lookup, is core memory-path work and owed.
+* **T2-a** — a reset, aborted or broken connection is the peer leaving: exit 0.
+* **T2-b** — the module-header wording and a NAK's multi-packet resend parked.
+* **T3-a** — a `Z0` hit row, forward and backward, on the wire.
+* **T3-b** — spec R4 amended: cap at 6.
+* **T3-c** — parked: the `Refused` and dead paths have no fixture, `C<sig>;<addr>` ignores its
+  address, and a non-abort crash's description carries no symbol.
+* **T4-a** — R7 measured, fallback taken.
+* **T4-b** — rule 1 named on the stepped thread, the implementer's fix of a plan defect.
+* **T4-c** — a terminal reached during a blocked step goes to the README's Known limits.
+* **T5-a** — the non-running-thread breakpoint stall goes to Known limits and spec §7, with a
+  workaround and a successor candidate.
+* **T5-b** — the reverse step onto another thread's trap, which §3e said Task 5 would measure,
+  pinned as a fifth `lldb_e2e` test.
+* **T5-c** — session A's extra `monitor where` accepted, against a wrong `m`.
+* **T5-d** — the fix round's scope, and `BOUND` 120 s.
+
+### What stays owed
+
+* **An O(log n) backing-lookup index** for `step()`'s pre-decode (T1-c). `read_guest_checked` and
+  `va_leaf` scan linearly, and the pre-decode costs about **+38 %** CPU on stepping-heavy tests
+  (`oracle_threadrust` 21.9 s → 30.5 s user) and +2 % on `cpython_crash_e2e`.
+* **`gdbserver_e2e`'s runtime, 48–125 s** depending on machine load, driven by its `threadrust` rows,
+  each of which records once per process.
+* **T5-a's successor.** A step of a non-running thread could run until that thread is scheduled, as
+  a blocked step already does. That would retire the stall.
+* **Spec §7's list**, each on the README's Known limits: no interrupt during a motion; no read or
+  access watchpoints; no symbols for dyld or the shared cache; no expression that runs code; no step
+  of a non-running thread; other threads' hits unreported during a blocked step; at most 6
+  breakpoints and 4 watchpoints, and the step-over runaway with all 6 the user's; a reverse step
+  only through `rsi`, with lldb's sticky direction; the CLI's `where` phase.
+* **T4-c**: a terminal reached during a blocked step shows as rule 1's refusal. That is inferred,
+  not measured, since no fixture has the shape.
+* **Parked minors**: a NAK resends only the last packet of a multi-packet reply (T2-b); the
+  `Refused` and dead-server paths have no fixture, `C<sig>;<addr>` ignores its address, and a
+  non-abort crash's `description:` carries no symbol (T3-c); `KillOnDrop` kills and waits on an
+  already-reaped lldb, harmless (Task 5 re-review).
+* **M41's and M42's other owed items**, none in the seam's path: M41's F2, the CLI's
+  crashing-watched-store exit 5, the blocking-boundary parity test, the Sys-park zero-step test, and
+  `where`'s missing phase; M42's `wfe`, the asynchronous host-interrupt residual, inference's
+  unmeasured assumptions and 16-instruction reach, the 16-step prologue's drop, byte, halfword and
+  `ldaxp` retires, and its deferred review minors; M40's `crc32` and `reverse-stepi` cost. M41's
+  `?`-armed session is **paid** (§3b).
