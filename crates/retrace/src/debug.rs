@@ -301,7 +301,7 @@ fn watched_of(ws: &[(u64, u64)], far: u64) -> u64 {
 /// M41 §3b: where a hit sits within one coordinate (n, k), in the order the hardware produces them.
 /// Hits are totally ordered by `(n, k, Phase)`; the debugger's cursor is such a triple.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Phase {
+pub(crate) enum Phase {
     /// A syscall's recorded write to a watched range. Only at k = 0: the event that ended window
     /// n − 1 wrote it before the instruction at (n, 0) runs.
     Sys,
@@ -318,7 +318,7 @@ enum Phase {
 /// live `ReplaySession` parked exactly at (`n`, `k`) (one VM per process → every command that MOVES
 /// drops the old session before seeking a fresh one). `breakpoints` is kept sorted + deduped (≤ 6,
 /// enforced by `break`) so the hardware-slot assignment and any iteration are deterministic.
-struct Exec<'a> {
+pub(crate) struct Exec<'a> {
     trace: &'a Path,
     session: Option<ReplaySession>,
     n: usize,
@@ -346,7 +346,7 @@ struct Exec<'a> {
 
 impl<'a> Exec<'a> {
     /// Open at the recording start: P = (1, 0), the first landmark's window, step 0.
-    fn new(trace: &'a Path) -> Result<Self, String> {
+    pub(crate) fn new(trace: &'a Path) -> Result<Self, String> {
         let mut cache = CheckpointCache::new(CHECKPOINT_BYTE_BUDGET, CHECKPOINT_COST_GATE_STEPS);
         let session = checkpointed_seek(trace, &mut cache, 1, 0)?;
         // M19: build the symbol table from the OPENING snapshot, once. It is the image as loaded,
@@ -382,7 +382,9 @@ impl<'a> Exec<'a> {
         }
     }
 
-    fn sess(&self) -> &ReplaySession { self.session.as_ref().expect("live session") }
+    pub(crate) fn sess(&self) -> &ReplaySession { self.session.as_ref().expect("live session") }
+    /// M43: the cursor `(n, k, phase)` (M41 §3b), for the gdb-remote server.
+    pub(crate) fn cursor(&self) -> (usize, u64, Phase) { (self.n, self.k, self.phase) }
     fn sess_mut(&mut self) -> &mut ReplaySession { self.session.as_mut().expect("live session") }
 
     /// Drop the current session (freeing its VM) and seek a fresh one parked at (n, k), which is
