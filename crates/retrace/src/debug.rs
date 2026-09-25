@@ -334,7 +334,9 @@ pub(crate) enum Halt {
     Stepped,
     /// `reverse-stepi` stopped at (1, 0).
     AtStart,
-    /// Nothing moved: `stepi`'s window end or fault, with its text.
+    /// The step did not move the thread, with the reason. Nothing moved for `stepi`'s window end or
+    /// fault, or for `step_thread`'s wrong thread (M43 §3d rule 1). For `step_thread`'s trap that
+    /// returns to itself, the cursor crossed the event and only the pc stayed.
     Refused(String),
 }
 
@@ -753,10 +755,12 @@ impl<'a> Exec<'a> {
         'finish: loop {
             // ---- Finish (n, k): its hits still ahead of the cursor ----
             loop {
-                // M43 §3d: a step whose thread blocked ends when that thread runs again, before
-                // anything at the coordinate it arrives at (an arrival, M41 R4). Only a crossing
-                // leaves k == 0 with the phase Sys. The step's own entry uses phase Sys too, but with
-                // another thread current, so this cannot fire before the run has moved.
+                // M43 §3d, defensive: under R7's fallback nothing is armed while `until` is Some, so
+                // the finish never steps or crosses, and only the scan's `Event` check below fires.
+                // This one runs only at entry, where another thread is current, so it cannot fire
+                // there either. It keeps the arrival invariant (end when `t` runs again, before
+                // anything at that coordinate, M41 R4) should the until-run ever arm hits again, as
+                // R7 was first designed: then a crossing here leaves k == 0 with the phase Sys.
                 if let Some(t) = until {
                     if self.k == 0 && self.phase == Phase::Sys && self.sess().current_thread() == t {
                         self.phase = Phase::Bp;
@@ -924,8 +928,10 @@ impl<'a> Exec<'a> {
     }
 
     /// M43 §3d: one instruction of thread `t` (retrace's id), as lldb's `s` needs it. It crosses a
-    /// trap, and a blocking syscall until `t` runs again. Nothing is ever `Stepped` without `t`'s pc
-    /// moving (t0 L4b, L7: lldb re-steps forever).
+    /// trap, and a blocking syscall until `t` runs again. A trap that returns to itself is never
+    /// `Stepped`, because lldb re-steps a `trace` whose pc did not move forever (t0 L4b, L7). An
+    /// instruction that branches to itself (`b .`) does retire with its pc unchanged and is
+    /// `Stepped`: that is one real instruction, and lldb loops on it on a live target too.
     pub(crate) fn step_thread<W: Write>(&mut self, t: u32, out: &mut W) -> Result<Halt, String> {
         let cur = self.sess().current_thread();
         if t != cur {
@@ -967,7 +973,10 @@ impl<'a> Exec<'a> {
                         if self.sess().current_thread() == t {
                             (self.n, self.k, self.phase) = (n, 0, Phase::Bp);
                             if self.sess().pc() == pc0 {
-                                return Ok(Halt::Refused("step did not move".into()));
+                                // The cursor HAS crossed the event, to (n, 0). Only the pc stayed.
+                                return Ok(Halt::Refused(format!(
+                                    "the step crossed a trap that returns to itself: the replay moved \
+                                     on to landmark {n}, but thread {}'s pc {pc0:#x} did not move", t + 1)));
                             }
                             return Ok(Halt::Stepped);
                         }

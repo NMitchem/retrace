@@ -96,7 +96,8 @@ pub(crate) struct Server<'a> {
     hg: u32,
     /// `Hc`: the thread a step without a thread operand steps (an RSP tid; 0 means current).
     hc: u32,
-    /// §3e: `qRcmd arm-rsi` makes the next `bc` a reverse step, and that `bc` spends it.
+    /// §3e: `qRcmd arm-rsi` makes the next resume, if it is a `bc`, a reverse step. That `bc`
+    /// spends it, and any other resume clears it.
     rsi_armed: bool,
     /// §3b: why the server has no session, once a failed motion's re-seek has failed too. From
     /// then on `handle_dead` answers every packet.
@@ -155,6 +156,9 @@ impl<'a> Server<'a> {
             None => (p, None),
         };
         if let Some(why) = &self.dead { return self.handle_dead(body, why); }
+        // §3e: `arm-rsi` arms the NEXT resume only if it is a `bc`, which spends it. Any other resume
+        // clears it, so a later `c -R` is never turned into a step.
+        if is_resume(body) && body != "bc" { self.rsi_armed = false; }
         match body {
             "QStartNoAckMode" | "QThreadSuffixSupported" | "QListThreadsInStopReply" | "QEnableErrorStrings" => one("OK"),
             "qHostInfo" => one(&match self.exe_image { Some(_) => format!("{QHOSTINFO}{OS_VERSION}"), None => QHOSTINFO.into() }),
@@ -227,19 +231,25 @@ impl<'a> Server<'a> {
                     }
                 }
             }
-            // §3h: every continue form. A signal to deliver is ignored: a recording's signals are its own.
-            _ if matches!(body, "c" | "vCont;c") || body.starts_with('C') || body.starts_with("vCont;C")
-                || body.starts_with("vCont;c:") => (vec![self.resume_forward()], false),
-            // §3d: every step form. A signal to deliver is ignored, as for continue.
+            // §3h: the continue and step forms. A signal to deliver is ignored: a recording's signals
+            // are its own.
+            _ if body == "c" || body.starts_with('C') => (vec![self.resume_forward()], false),
             "s" => (vec![self.step(None)], false),
             _ if body.starts_with('S') => (vec![self.step(None)], false),
-            _ if body.starts_with("vCont;s") || body.starts_with("vCont;S") => {
-                // The first action names the thread (`s:<tid>`, `S05:<tid>`, or none). A trailing
-                // default for the other threads (`;c`) is moot: only the running thread can step
-                // (§3d rule 1).
-                let act = body["vCont;".len()..].split(';').next().unwrap_or("");
-                let tid = act.split_once(':').and_then(|(_, t)| u32::from_str_radix(t, 16).ok());
-                (vec![self.step(tid)], false)
+            _ if body.starts_with("vCont;") => {
+                // A step action ANYWHERE makes it a step (§3d), on the thread the first one names
+                // (`s:<tid>`, `S05:<tid>`, or none). lldb may list continue actions first
+                // (`vCont;c:2;s:1`). Those are moot, because only the running thread can step
+                // (§3d rule 1). Only a vCont of continue actions alone is a continue.
+                let acts: Vec<&str> = body["vCont;".len()..].split(';').collect();
+                if let Some(act) = acts.iter().find(|a| a.starts_with(['s', 'S'])) {
+                    let tid = act.split_once(':').and_then(|(_, t)| u32::from_str_radix(t, 16).ok());
+                    (vec![self.step(tid)], false)
+                } else if acts.iter().all(|a| a.starts_with(['c', 'C'])) {
+                    (vec![self.resume_forward()], false)
+                } else {
+                    one("") // an action `vCont?` does not offer
+                }
             }
             "bs" => (vec![self.back_step()], false),
             // §3e: an armed `bc` is `rsi`'s reverse step, and spends the arming.

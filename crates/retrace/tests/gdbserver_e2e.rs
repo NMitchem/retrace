@@ -482,10 +482,50 @@ fn a_reverse_step_moves_back_one_and_stops_at_the_start() {
     let a = c.send("bc");
     assert!(a.contains("reason:trace;"), "an armed bc is one step back: {a}");
     assert_eq!(pc_of(&a), entry + 4);
-    assert!(c.send("bs").contains("reason:trace;"));
-    let start = c.send("bs");
-    assert_eq!(r::description(&start).as_deref(), Some("start of recording"), "{start}");
-    assert_eq!(c.send("bc"), start, "unarmed again: bc with nothing armed runs to the start");
+    // The arming is spent: the very next `bc`, at (1, 1), is a reverse continue, which with nothing
+    // armed runs to the start. A still-armed server would answer `trace` at the entry instead.
+    let start = c.send("bc");
+    assert_eq!(r::description(&start).as_deref(), Some("start of recording"), "unarmed again: {start}");
+    assert_eq!(pc_of(&start), entry);
+    assert_eq!(c.send("bs"), start, "a reverse step at the start stops there again");
+    // Any other resume clears the arming (review Minor 5): `arm-rsi`, `s`, then `bc` is a reverse
+    // CONTINUE, to the start, not a step back to entry + 12.
+    for _ in 0..3 { assert!(c.send("s").contains("reason:trace;")); }
+    assert_eq!(c.send_collect(&format!("qRcmd,{hexcmd}")).1, "OK");
+    assert!(c.send("s").contains("reason:trace;"));
+    assert_eq!(c.send("bc"), start, "the `s` after `arm-rsi` cleared it");
+}
+
+#[test]
+fn a_step_onto_a_watched_store_reports_the_watch_after_it() {
+    // §3d rule 3's `Watch` arm, §3c row 2: the store retires, then `watch:`, with the new value in
+    // memory. buf[0] is written once, by the sweeping store's first pass at K = 8.
+    let buf0 = ws_target() - 320;
+    let mut c = Rsp::spawn(watchsweep(), &[]);
+    assert_eq!(c.send(&format!("Z2,{buf0:x},8")), "OK");
+    for k in 0..8 { let s = c.send("s"); assert!(s.contains("reason:trace;"), "step {k}: {s}"); }
+    let w = c.send("s");
+    assert_eq!(r::key(&w, "watch"), Some(format!("{buf0:x}").as_str()), "{w}");
+    assert_eq!(mem_u64(&mut c, buf0), 0x1111_1111_1111_1111, "post-retire: the new value");
+    assert!(c.where_().starts_with("at (1, 9) phase=Bp"), "{}", c.where_());
+}
+
+#[test]
+fn every_step_packet_form_steps_the_running_thread() {
+    // §3h: `S<sig>`, `vCont;S<sig>:<t>`, `Hc` + `s`, `vCont;s` with no thread, and a vCont whose
+    // step follows a continue action (lldb's DoResume can order them so, review Minor 2). Each
+    // moves the pc by 4, on watchsweep's straight-line start.
+    let mut c = Rsp::spawn(watchsweep(), &[]);
+    let entry = retrace_core::seek(watchsweep(), 1, 0).unwrap().pc();
+    let mut k = 0;
+    for p in ["S05", "vCont;S05:1", "Hc1", "s", "vCont;s", "vCont;c:2;s:1"] {
+        let r = c.send(p);
+        if p == "Hc1" { assert_eq!(r, "OK"); continue; }
+        k += 1;
+        assert!(r.contains("reason:trace;"), "{p}: {r}");
+        assert_eq!(pc_of(&r), entry + 4 * k, "{p}");
+    }
+    assert!(c.where_().starts_with("at (1, 5) phase=Bp"), "{}", c.where_());
 }
 
 #[test]
