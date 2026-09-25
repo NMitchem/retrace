@@ -166,6 +166,144 @@ fn a_second_connection_is_refused_while_the_first_is_served() {
     assert_eq!(second.err(), Some(std::io::ErrorKind::ConnectionRefused), "one connection per server (§3a)");
 }
 
+/// `&buf[40]`: the address watchsweep publishes in its write(1, …) (the watchsweep_e2e oracle).
+fn ws_target() -> u64 {
+    let mut s = retrace_core::ReplaySession::open(watchsweep()).unwrap();
+    loop {
+        if let Some((4, args)) = s.peek_syscall() { if args[0] == 1 { return args[1]; } }
+        s.advance().unwrap();
+    }
+}
+fn pc_of(stop: &str) -> u64 { r::le_u64(r::key(stop, "20").expect("an expedited pc")) }
+fn mem_u64(c: &mut Rsp, a: u64) -> u64 { r::le_u64(&c.send(&format!("m{a:x},8"))) }
+
+#[test]
+fn a_forward_watch_is_reported_after_its_store_and_a_reverse_one_before_it() {
+    // §3c rows 2 and 5. watchsweep writes buf[40] twice: the sweeping store (0x1111…+40), then
+    // a second store (0xbeef).
+    let t = ws_target();
+    let mut c = Rsp::spawn(watchsweep(), &[]);
+    assert_eq!(c.send(&format!("Z2,{t:x},8")), "OK");
+    let s1 = c.send("c");
+    assert_eq!(r::key(&s1, "watch"), Some(format!("{t:x}").as_str()), "{s1}");
+    assert_eq!(mem_u64(&mut c, t), 0x1111_1111_1111_1111 + 40, "post-retire: the new value");
+    let sweep_after = pc_of(&s1);
+    let s2 = c.send("c");
+    assert_eq!(mem_u64(&mut c, t), 0xbeef, "{s2}");
+    let second_after = pc_of(&s2);
+    // Backward: the second store, pre-retire, with the old value in memory.
+    let b1 = c.send("bc");
+    assert_eq!(r::key(&b1, "watch"), Some(format!("{t:x}").as_str()), "{b1}");
+    assert_eq!(pc_of(&b1), second_after - 4, "before the store");
+    assert_eq!(mem_u64(&mut c, t), 0x1111_1111_1111_1111 + 40);
+    // §3c row 5's point: from a reverse stop, forward reports that same store again (control C2).
+    let f = c.send("c");
+    assert_eq!(pc_of(&f), second_after, "{f}");
+    assert_eq!(mem_u64(&mut c, t), 0xbeef);
+    let b2 = c.send("bc");
+    assert_eq!(pc_of(&b2), second_after - 4);
+    let b3 = c.send("bc");
+    assert_eq!(pc_of(&b3), sweep_after - 4, "the sweeping store, before it wrote buf[40]");
+    assert_eq!(mem_u64(&mut c, t), 0);
+}
+
+#[test]
+fn no_earlier_hit_goes_to_the_start_and_the_end_of_recording_is_reversible() {
+    // §3c rows 7 and 8, and the exit terminal.
+    let mut c = Rsp::spawn(watchsweep(), &[]);
+    let entry = retrace_core::seek(watchsweep(), 1, 0).unwrap().pc();
+    let end = c.send("c");
+    assert!(end.starts_with("T05") && end.contains("replaylog:end;"), "{end}");
+    assert_eq!(r::description(&end).as_deref(), Some("exited (code 0)"));
+    assert_eq!(c.send("c"), end, "continue at the end reports the end again");
+    let back = c.send("bc");
+    assert_eq!(r::description(&back).as_deref(), Some("start of recording"), "{back}");
+    assert_eq!(pc_of(&back), entry);
+    assert!(c.where_().starts_with("at (1, 0) phase=Bp"));
+}
+
+#[test]
+fn a_syscall_write_is_reported_after_the_syscall_forward_and_at_its_trap_backward() {
+    // §3c rows 3 and 6, on crashy's fstat(1, &g.st).
+    let (st, _ptr) = util::discover_crashy_addrs(crashy());
+    let mut c = Rsp::spawn(crashy(), &[]);
+    assert_eq!(c.send(&format!("Z2,{st:x},8")), "OK");
+    let f = c.send("c");
+    assert_eq!(r::key(&f, "watch"), Some(format!("{st:x}").as_str()), "{f}");
+    let written = mem_u64(&mut c, st);
+    assert_ne!(written, 0, "after the syscall: its write is in memory");
+    let b = c.send("bc");
+    assert_eq!(r::key(&b, "watch"), Some(format!("{st:x}").as_str()), "{b}");
+    let pc = pc_of(&b);
+    assert_eq!(r::le_u64(&c.send(&format!("m{pc:x},4"))) as u32, 0xd400_1001, "parked at the svc #0x80");
+    assert_eq!(mem_u64(&mut c, st), 0, "before the syscall: g.st is still BSS");
+    let again = c.send("c");
+    assert_eq!(again, f, "forward from the trap crosses it and reports the same write");
+}
+
+#[test]
+fn the_crash_is_exc_bad_access_and_reverse_reaches_the_corrupting_store() {
+    // The headline, without lldb: §3c's terminal and row 5 on crashy.
+    const GARBAGE_VA: u64 = 0x4000_DEAD_0000;
+    let (_st, ptr) = util::discover_crashy_addrs(crashy());
+    let crash_pc = retrace_trace::Reader::open(crashy()).unwrap().iter().find_map(|e| match e {
+        retrace_trace::Event::Crash { pc, .. } => Some(*pc), _ => None }).unwrap();
+    let mut c = Rsp::spawn(crashy(), &[]);
+    let crash = c.send("c");
+    assert!(crash.starts_with("T0b"), "{crash}");
+    assert!(crash.contains(&format!("metype:1;mecount:2;medata:1;medata:{GARBAGE_VA:x};")), "{crash}");
+    assert_eq!(pc_of(&crash), crash_pc);
+    assert_eq!(c.send(&format!("Z2,{ptr:x},8")), "OK");
+    let b = c.send("bc");
+    assert_eq!(r::key(&b, "watch"), Some(format!("{ptr:x}").as_str()), "{b}");
+    assert_eq!(mem_u64(&mut c, ptr), ptr - 32, "before the store: g.ptr is still &g.buf[0]");
+    let f = c.send("c");
+    assert_eq!(mem_u64(&mut c, ptr), GARBAGE_VA, "after it: the garbage");
+    assert_eq!(pc_of(&f), pc_of(&b) + 4);
+    assert_eq!(c.send("c"), crash, "then the crash again");
+}
+
+#[test]
+fn breakpoints_cap_at_five_and_reinsertion_is_idempotent() {
+    // §3f, spec R4, Review Focus 5.
+    let mut c = Rsp::spawn(watchsweep(), &[]);
+    let base = retrace_core::seek(watchsweep(), 1, 0).unwrap().pc();
+    for i in 0..5u64 { assert_eq!(c.send(&format!("Z0,{:x},4", base + 4 * i)), "OK"); }
+    assert_eq!(c.send(&format!("Z0,{base:x},4")), "OK", "a duplicate is not a sixth");
+    assert_eq!(c.send(&format!("Z1,{:x},4", base + 40)), "E01", "the sixth is refused: lldb's step keeps a slot");
+    assert_eq!(c.send(&format!("z0,{base:x},4")), "OK");
+    assert_eq!(c.send(&format!("z0,{base:x},4")), "OK", "removing an absent one is OK");
+    assert_eq!(c.send(&format!("Z0,{:x},4", base + 40)), "OK", "the slot is free again");
+}
+
+#[test]
+fn watchpoints_are_write_only_and_cap_at_four() {
+    let t = ws_target();
+    let mut c = Rsp::spawn(watchsweep(), &[]);
+    assert_eq!(c.send(&format!("Z3,{t:x},8")), "E01", "read");
+    assert_eq!(c.send(&format!("Z4,{t:x},8")), "E01", "access");
+    assert_eq!(c.send(&format!("Z2,{:x},8", t + 1)), "E01", "misaligned");
+    for i in 0..4u64 { assert_eq!(c.send(&format!("Z2,{:x},8", t + 8 * i)), "OK"); }
+    assert_eq!(c.send(&format!("Z2,{t:x},8")), "OK", "a duplicate is not a fifth");
+    assert_eq!(c.send(&format!("Z2,{:x},8", t + 64)), "E01", "the fifth");
+}
+
+#[test]
+fn a_divergence_is_a_stop_at_the_saved_cursor_never_an_error_reply() {
+    // §3b and M41's owed `?`-armed session: the scan diverges mid-flight with a breakpoint armed. The
+    // reply is an exception stop (an `E` would drop lldb, t0 L7), and the cursor is where it was.
+    let bad = util::tamper_last_write(watchsweep());
+    let exit_svc = retrace_core::seek(watchsweep(), 2, 0).unwrap().pc() + 8; // mov x0; mov x16; svc
+    let mut c = Rsp::spawn(&bad, &[]);
+    assert_eq!(c.send(&format!("Z0,{exit_svc:x},4")), "OK");
+    let before = c.where_();
+    let s = c.send("c");
+    assert!(s.starts_with("T05") && s.contains("reason:exception;"), "{s}");
+    assert!(r::description(&s).unwrap().contains("diverged"), "{s}");
+    assert_eq!(c.where_(), before, "recovered to the saved cursor");
+    assert_eq!(c.send("c"), s, "deterministic: the same divergence again");
+}
+
 #[test]
 fn a_flag_given_last_without_its_value_is_a_usage_error() {
     // A trace that does not exist: before the fix, `--port` last meant port 0 and the server went on

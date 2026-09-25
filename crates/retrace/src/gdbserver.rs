@@ -6,8 +6,8 @@
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use retrace_core::{ReplaySession, ThreadState, EXE_BASE};
-use crate::debug::Exec;
+use retrace_core::{Outcome, ReplaySession, ThreadState, EXE_BASE};
+use crate::debug::{Exec, Halt, Phase};
 use crate::rsp::{self, Decoder, Frame, StopKind};
 
 /// §3g, spec R10: fixed, so lldb's transcripts are stable (t0 L10), and `os_version` only selects
@@ -94,6 +94,9 @@ pub(crate) struct Server<'a> {
     last_tid: u32,
     /// `Hg`: the thread register reads without a thread suffix go to (an RSP tid; 0 means current).
     hg: u32,
+    /// §3b: why the server has no session, once a failed motion's re-seek has failed too. From
+    /// then on `handle_dead` answers every packet.
+    dead: Option<String>,
 }
 
 impl<'a> Server<'a> {
@@ -105,7 +108,7 @@ impl<'a> Server<'a> {
         let exe_hdr = s.read_mem_prefix(EXE_BASE, 32usize.saturating_add(sizeofcmds).min(MAX_HDR));
         let exe_image = exe_arg.or_else(|| argv0(s))
             .and_then(|path| rsp::image_json(&exe_hdr, EXE_BASE, &path).ok());
-        let mut srv = Server { ex, exe_image, no_ack: false, last_stop: String::new(), last_tid: 0, hg: 0 };
+        let mut srv = Server { ex, exe_image, no_ack: false, last_stop: String::new(), last_tid: 0, hg: 0, dead: None };
         srv.stop(StopKind::HistoryBegin("start of recording".into()), None); // the answer to `?`
         Ok(srv)
     }
@@ -146,6 +149,7 @@ impl<'a> Server<'a> {
             Some((b, t)) => (b, Some(t.trim_end_matches(';'))),
             None => (p, None),
         };
+        if let Some(why) = &self.dead { return self.handle_dead(body, why); }
         match body {
             "QStartNoAckMode" | "QThreadSuffixSupported" | "QListThreadsInStopReply" | "QEnableErrorStrings" => one("OK"),
             "qHostInfo" => one(&match self.exe_image { Some(_) => format!("{QHOSTINFO}{OS_VERSION}"), None => QHOSTINFO.into() }),
@@ -219,7 +223,123 @@ impl<'a> Server<'a> {
                     }
                 }
             }
-            _ => one(""), // §3h: every other packet is unsupported, motion included until Task 3
+            // §3h: every continue form. A signal to deliver is ignored: a recording's signals are its own.
+            "c" | "vCont;c" => (vec![self.motion(|s| { let h = s.ex.cmd_continue(&mut std::io::sink())?; s.reply_forward(h) })], false),
+            _ if body.starts_with('C') || body.starts_with("vCont;C") || body.starts_with("vCont;c:") =>
+                (vec![self.motion(|s| { let h = s.ex.cmd_continue(&mut std::io::sink())?; s.reply_forward(h) })], false),
+            "bc" => (vec![self.motion(|s| { let h = s.ex.cmd_reverse_continue(&mut std::io::sink())?; s.reply_backward(h) })], false),
+            _ if body.starts_with('Z') || body.starts_with('z') => one(&self.z_packet(body)),
+            _ => one(""), // §3h: every other packet is unsupported, stepping included until Task 4
+        }
+    }
+
+    /// §3b: one motion, bracketed. An `Err` re-seeks the saved cursor and becomes a non-moving
+    /// exception stop: never an `E`, which drops lldb's connection (t0 L7). If the re-seek fails as
+    /// well, the server has no session left, and `handle_dead` answers from then on.
+    fn motion(&mut self, f: impl FnOnce(&mut Self) -> Result<String, String>) -> String {
+        let at = self.ex.cursor();
+        match f(self) {
+            Ok(reply) => reply,
+            Err(e) => match self.ex.recover(at) {
+                Ok(()) => self.stop(StopKind::Exception { signal: 5, text: e }, None),
+                Err(e2) => {
+                    let d = format!("{e}; and re-seeking the cursor failed: {e2}");
+                    let r = dead_stop(&d);
+                    self.dead = Some(d);
+                    self.last_stop = r.clone();
+                    r
+                }
+            },
+        }
+    }
+
+    /// §3c: forward. A store watch is reported AFTER the store retires, so the server steps it.
+    fn reply_forward(&mut self, h: Halt) -> Result<String, String> {
+        Ok(match h {
+            Halt::Break => self.stop(StopKind::Breakpoint, None),
+            Halt::Watch { watched } => match self.ex.cmd_stepi(1, &mut std::io::sink())? {
+                Halt::Stepped => self.stop(StopKind::Watch(watched), None),
+                // The store did not retire (it faults). Say so, at the store; the cursor stays ON its
+                // watch, so the next `c` crosses to the fault through Exec's own finish.
+                Halt::Refused(why) => self.stop(StopKind::Exception { signal: 5,
+                    text: format!("the watched store at {:#x} did not retire: {why}", self.ex.sess().pc()) }, None),
+                other => return Err(format!("stepping a watched store reported {other:?}")),
+            },
+            Halt::WatchSys { watched, thread } => {
+                // An arrival at (n, 0), so a reverse `c` finds this write again (§3c, the forward
+                // syscall-watch row).
+                self.ex.set_phase(Phase::Bp);
+                self.stop(StopKind::Watch(watched), Some(thread))
+            }
+            Halt::Terminal(r) => self.terminal(&r.outcome),
+            other => return Err(format!("a forward motion reported {other:?}")),
+        })
+    }
+
+    /// §3c: backward. Every stop is reported BEFORE its crossing.
+    fn reply_backward(&mut self, h: Halt) -> Result<String, String> {
+        Ok(match h {
+            Halt::Break => self.stop(StopKind::Breakpoint, None),
+            Halt::Watch { watched } => {
+                // Before the store, as an arrival: a forward `c` re-reports it.
+                self.ex.set_phase(Phase::Bp);
+                self.stop(StopKind::Watch(watched), None)
+            }
+            Halt::WatchSys { watched, .. } => {
+                // Before the syscall: its trap, with the old value in memory.
+                let (n, _, _) = self.ex.cursor();
+                self.ex.park_before_event(n)?;
+                self.stop(StopKind::Watch(watched), None)
+            }
+            Halt::NoEarlierHit => {
+                self.ex.recover((1, 0, Phase::Bp))?;
+                self.stop(StopKind::HistoryBegin("start of recording".into()), None)
+            }
+            other => return Err(format!("a backward motion reported {other:?}")),
+        })
+    }
+
+    /// §3c's terminal list (t0 L4d, L4e).
+    fn terminal(&mut self, o: &Outcome) -> String {
+        let kind = match *o {
+            Outcome::Exit { code } => StopKind::HistoryEnd(format!("exited (code {code})")),
+            Outcome::Crash { pc, esr, far } => match (esr >> 26) & 0x3f {
+                0x20 | 0x21 | 0x24 | 0x25 => StopKind::MachBadAccess {
+                    code: if (0x0c..=0x0f).contains(&(esr & 0x3f)) { 2 } else { 1 }, far },
+                _ => StopKind::Exception { signal: 0x0b,
+                    text: format!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}") },
+            },
+            Outcome::Signal { sig } => StopKind::Exception { signal: sig as u8,
+                text: format!("guest terminated by signal {sig}") },
+        };
+        self.stop(kind, None)
+    }
+
+    /// §3f. `Z<t>,<addr>,<kind|len>` / `z…`. 0 and 1 are hardware breakpoints, capped at 5 so lldb's
+    /// transient step breakpoint always has the sixth slot (spec R4, t0 L5). 2 is a write watch,
+    /// capped at 4. 3 and 4 (read, access) are refused. Re-inserting what is there, or removing what
+    /// is not, is `OK` (Review Focus 5).
+    fn z_packet(&mut self, body: &str) -> String {
+        let insert = body.starts_with('Z');
+        let mut f = body[1..].split(',');
+        let (Some(t), Some(a), Some(l)) = (f.next(), f.next(), f.next()) else { return "E01".into() };
+        let (Ok(addr), Ok(len)) = (u64::from_str_radix(a, 16), u64::from_str_radix(l, 16)) else { return "E01".into() };
+        let sink = &mut std::io::sink();
+        match (t, insert) {
+            ("0" | "1", true) => {
+                if self.ex.breakpoints().contains(&addr) { return "OK".into(); }
+                if self.ex.breakpoints().len() >= 5 { return "E01".into(); }
+                if self.ex.cmd_break(addr, sink).is_ok() { "OK" } else { "E01" }.into()
+            }
+            ("0" | "1", false) => { let _ = self.ex.cmd_delete(addr, sink); "OK".into() }
+            ("2", true) => {
+                if self.ex.watches().any(|(wa, wl)| wa == addr && wl == len) { return "OK".into(); }
+                if !matches!(len, 1 | 2 | 4 | 8) || addr % len != 0 { return "E01".into(); }
+                if self.ex.cmd_watch(addr, len, None, sink).is_ok() { "OK" } else { "E01" }.into()
+            }
+            ("2", false) => { let _ = self.ex.cmd_unwatch(addr, sink); "OK".into() }
+            (_, true) => "E01".into(),
+            (_, false) => "OK".into(),
         }
     }
 
@@ -234,6 +354,30 @@ impl<'a> Server<'a> {
                 let text = format!("at ({n}, {k}) phase={phase:?} pc={:#x} thread={}\n", s.pc(), s.current_thread() + 1);
                 (vec![format!("O{}", rsp::hex(text.as_bytes())), "OK".into()], false)
             }
+            _ => (vec!["E01".into()], false),
+        }
+    }
+}
+
+/// A stop that needs no session: `T05` on RSP thread 1, with the reason.
+fn dead_stop(d: &str) -> String {
+    format!("T05thread:1;reason:exception;description:{};", rsp::hex(d.as_bytes()))
+}
+
+/// Every packet that resumes the guest (§3h's resume forms).
+fn is_resume(body: &str) -> bool {
+    matches!(body, "c" | "s" | "bc" | "bs") || body.starts_with("vCont;") || body.starts_with('C') || body.starts_with('S')
+}
+
+impl Server<'_> {
+    /// §3b: after a failed re-seek there is no session. Every resume repeats why, `?` repeats the
+    /// last stop, `k` and `D` still end the session, and everything else is refused.
+    fn handle_dead(&self, body: &str, why: &str) -> (Vec<String>, bool) {
+        match body {
+            "k" => (vec!["X09".into()], true),
+            _ if body == "D" || body.starts_with("D;") => (vec!["OK".into()], true),
+            "?" => (vec![self.last_stop.clone()], false),
+            _ if is_resume(body) => (vec![dead_stop(why)], false),
             _ => (vec!["E01".into()], false),
         }
     }
