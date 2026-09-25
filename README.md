@@ -588,7 +588,9 @@ skipped test is counted as passed, as `jq_e2e`'s are, so grep its log for `SKIPP
 its count as lldb having run. Its log also names the lldb that ran, once
 (`lldb_e2e runs /usr/bin/lldb: lldb-2100.0.17.203`). Both lines are written past libtest's output
 capture, since the final fix wave: libtest captures `eprintln!` in a test that passes, and a skip
-passes, so an `eprintln!` line reaches a log only when its test fails.
+passes, so an `eprintln!` line reaches a log only when its test fails. The close therefore re-ran
+every other target that can skip with `--nocapture`, and none skipped; the status log's M43 section
+has the run and its control.
 
 Reconciled against M42's 747 / 0 / 9 over 142 **file-by-file rather than by sum** — six files
 changed their count, and every other file's count is M42's (`git diff c652cf1 -- crates` adds 53
@@ -1648,12 +1650,22 @@ or, as M25's gate did, run that crate as a whole package and let cargo include i
 inside the 10-minute ceiling above. It is no longer a codesigning requirement: `bin()` signs a
 pid-unique copy (see Codesigning above), so concurrent test processes do not contend for it.
 
-Some end-to-end gates depend on `/opt/homebrew/bin/jq`, which is not a repo artifact. They skip with
-a loud `eprintln!` rather than passing quietly — a silent skip would read as a green it did not earn.
-The same applies to the gates that record binaries out of `/bin` and `/usr/bin`: those are OS
-artifacts, present on any macOS 26 machine, but announced rather than skipped silently if absent.
-And to `lldb_e2e`, which needs the host's `lldb` (each test skips loudly when `lldb --version`
-does not run) and, for its CPython test, Homebrew Python.
+Some end-to-end gates depend on `/opt/homebrew/bin/jq`, which is not a repo artifact. They skip
+rather than fail when it is absent, and print a `SKIPPED` line, because a silent skip would read as a
+green it did not earn. **But a line printed with `eprintln!` does not reach a gate log.** libtest
+captures `eprintln!` in a test that passes, and a skip passes. This was measured at M43's close. So
+that line reaches a log only under `--nocapture`. The same applies to the Homebrew CPython gates and
+to the gates that record binaries out of `/bin` and `/usr/bin`: those are OS artifacts, present on
+any macOS 26 machine, but announced rather than skipped silently if absent.
+
+To tell a skip from a run, re-run the targets that can skip with `-- --test-threads=1 --nocapture`
+and grep for `SKIPP` (`fallthrough_e2e` says `SKIPPING`). The targets are `apple_walls_e2e`,
+`cpython_crash_e2e`, `cpython_e2e`, `fallthrough_e2e`, `jq_e2e`, `jq_file_e2e`, `symbolops_e2e` and
+`sysbin_e2e`.
+
+`lldb_e2e` is the exception. It needs `/usr/bin/lldb` and, for its CPython test, Homebrew Python, and
+it writes its `SKIPPED` lines to stderr directly, past the capture, so its ordinary gate log shows
+them.
 
 ### Continuous integration — there isn't any, and there can't be
 

@@ -349,8 +349,13 @@ Two rules these gates taught, which bind their successors:
   permission fault is the thing its milestone created. **Assert on the difference your work makes.**
   Per-test specifics belong in comments in the test file, next to the assertion they explain.
 - **A skipped test must announce itself.** `jq_e2e` / `jq_file_e2e` depend on
-  `/opt/homebrew/bin/jq`, which is not a repo artifact; they skip with a loud `eprintln!` rather than
-  passing quietly. A silent skip reads as a green it did not earn.
+  `/opt/homebrew/bin/jq`, which is not a repo artifact; they skip with a `SKIPPED` line rather than
+  passing quietly. A silent skip reads as a green it did not earn. **Where that line goes matters.**
+  libtest captures `eprintln!` in a *passing* test, and a skip passes, so an `eprintln!` skip line
+  never reaches a gate log. This was measured at M43's close. Only `lldb_e2e` writes its skip line to
+  stderr directly (`announce`); the other skippable targets still use `eprintln!`, which is owed.
+  Until they are fixed, check skips by re-running those targets with `--nocapture`; the README's
+  Testing section lists them. A new skip should write past the capture, as `lldb_e2e` does.
 
 One distinction that is easy to get backwards when writing such a test: a signal the guest **raises**
 is `Event::Signal`, while one derived from a **hardware fault** whose disposition is not a handler

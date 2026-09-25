@@ -12803,11 +12803,33 @@ Results, chunk by chunk, ANSI stripped and summed over every `test result:` line
 | `e2e` (76 logs) | 232 / 0 / 9 over 74 | 266 / 0 / 9 over 76 | **268** / 0 / 9 over 76 (`gdbserver_e2e` 28 and `lldb_e2e` 5 re-run) |
 | **total** | **747 / 0 / 9 over 142** | **798 / 0 / 9 over 144** | **800 / 0 / 9 over 144** |
 
-The skip check found nothing: no log carries a `SKIPPED` line (`grep -a SKIPPED` over every gate
-log), so `jq`, CPython and lldb all ran. The only log lines matching `skip` in any case are four test
-names. No log carries a `warning` line, and clippy finished clean. (The fix wave measured that a
-passing test's `eprintln!` never reaches its log, so this grep could not have seen a skip; see the
-last section.)
+**The skip check, measured through a channel that can carry it.** The first version of this check
+was a `grep -a SKIPPED` over the gate logs. It found nothing, and the close read that as "`jq`,
+CPython and lldb all ran". That inference was **unsupported**. The fix wave measured that libtest
+captures a passing test's `eprintln!`, and a skip passes, so the grep could not have seen a skip
+(see the last section).
+
+The close then re-ran, with `--nocapture`, every target that can skip:
+- `apple_walls_e2e`
+- `cpython_crash_e2e`
+- `cpython_e2e`
+- `fallthrough_e2e` (whose line says `SKIPPING`)
+- `jq_e2e`
+- `jq_file_e2e`
+- `symbolops_e2e`
+- `sysbin_e2e`
+
+It used `skipcheck.sh` in the ledger directory, at the fix wave's tree. Every one exited 0, with the
+same passed / failed / ignored as in the gate: 1/0/7, 1/0/0, 2/0/0, 1/0/0, 1/0/0, 2/0/0, 5/0/0 and
+3/0/0 respectively. **No log carries a `SKIPP` line.**
+
+**Control.** `sysbin_e2e` prints `ps_records_and_replays: 44 band suppressions observed` with an
+unconditional `eprintln!`. That line is in the `--nocapture` log and absent from the gate's (0
+matches), so the re-run's channel carries what the gate log drops.
+
+`lldb_e2e` writes its skip lines past the capture since the fix wave, and its fix-wave run carries
+none. The only gate-log lines matching `skip` in any case are four test names. No log carries a
+`warning` line, and clippy finished clean.
 
 **Reconciled against M42's 747 / 0 / 9 over 142, file-by-file rather than by sum.**
 `git diff c652cf1 -- crates` adds **53** lines matching `^\+[[:space:]]*#\[test\]` (51 at
@@ -12933,6 +12955,11 @@ Execution:
   and `ContinueInDirection` fails, the server stays armed, and the next `process continue -R` is one
   instruction back. Rare, since the server never sends the plain-signal stops that make a reverse
   resume fail (L4d).
+* **Skip lines past libtest's capture** (Ruling F-4). Eight targets announce a skip with
+  `eprintln!`, which a passing test's capture swallows: `jq_e2e`, `jq_file_e2e`, `cpython_e2e`,
+  `cpython_crash_e2e`, `symbolops_e2e`, `apple_walls_e2e`, `sysbin_e2e` and `fallthrough_e2e`. Their
+  ordinary gate logs cannot show a skip. They owe `lldb_e2e`'s `announce`, a `writeln!` to
+  `std::io::stderr()`. Until then a close checks skips with `--nocapture`, as M43's did.
 * **Spec §7's list**, each on the README's Known limits: no interrupt during a motion; no read or
   access watchpoints; no symbols for dyld or the shared cache; no expression that runs code; no step
   of a non-running thread; other threads' hits unreported during a blocked step, lldb's own step-off
@@ -13002,6 +13029,11 @@ commit, did this:
   all five SKIPPED lines and the "did not run" line, and the run passed 5 in 0.00 s. The other
   files' SKIPPED lines (`jq_e2e`, `jq_file_e2e`, `cpython_e2e`, `cpython_crash_e2e`,
   `symbolops_e2e`, `apple_walls_e2e`, `sysbin_e2e`, `fallthrough_e2e`) are still `eprintln!`.
+  Moving them past the capture is **owed**. For this close the controller measured all eight with
+  `--nocapture` instead: none skipped, with a control (the skip-check paragraph above). The claim
+  "they skip with a loud `eprintln!`" was corrected in CLAUDE.md's honest-gate rule and the README's
+  Testing section. Earlier milestones' skip checks by grep are left standing: this log is
+  append-only. Each was a grep over captured logs, so each is unsupported in the same way.
 * **Docs.** Important 2 names lldb's step-off under R7 (README Known limits, spec §7, and T4-a's
   costing corrected above). Important 3 fixes two stale README lines: `TRACE_MAGIC` also moved at
   M38, and "no unwinder" is the script debugger's alone, with frame #0 the only measured lldb
