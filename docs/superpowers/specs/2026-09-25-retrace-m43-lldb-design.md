@@ -84,14 +84,15 @@ retrace's code on `c652cf1`:
 
 ```rust
 pub(crate) enum Halt {
-    Break { pc: u64 },                 // parked on the breakpoint, (n, k, Bp)
-    Watch { watched: u64, pc: u64 },   // a store, parked pre-retire, (n, k, Watch)
+    Break,                             // parked on the breakpoint, (n, k, Bp); pc() is its address
+    Watch { watched: u64 },            // a store, parked pre-retire, (n, k, Watch)
+    WatchStepped { watched: u64 },     // step_thread only (§3d): the store retired, (n, k+1, Bp)
     WatchSys { watched: u64, thread: u32 }, // a syscall's write, (n, 0, Sys)
     Terminal(ReplayReport),            // exit / crash / fatal signal, (T, K_f, Watch)
     NoEarlierHit,                      // reverse only; the cursor did not move
-    Stepped,                           // stepi / reverse-stepi completed
+    Stepped,                           // a step (either direction) completed
     AtStart,                           // reverse-stepi stopped at (1, 0)
-    StepRefused(String),               // stepi's window-end / fault line; cursor unchanged
+    Refused(String),                   // nothing moved: stepi's window end, or §3d's rule 1
 }
 ```
 
@@ -139,6 +140,10 @@ Why each re-park is right, under M41's order `Sys < Bp < Watch`:
 - **A forward store watch is stepped:** lldb must see the new value. From `(n, k+1, Bp)` a
   reverse `c -R` finds that same store (it is before the cursor) and parks before it, with the old
   value in memory. That is L4c's measured-correct `ideal` run.
+  If the store does not retire when the server steps it (it faults: M41's owed "crashing watched
+  store"), the reply is `reason:exception;description:<"the watched store at … did not retire: …">`
+  at the store. The cursor stays `(n, k, Watch)`, so the next `c` crosses to the fault through
+  `Exec`'s own finish.
 - **A reverse store watch becomes `(n, k, Bp)`:** from there a forward `c` must report the same
   store again, because the thread is before it. `(n, k, Watch)` would step over it silently,
   `Exec`'s rule for a cursor ON a hit. A further `c -R` does not re-report it: `(n, k, Watch)` is
@@ -165,8 +170,9 @@ reply depends on the outcome (L4d/e):
 - **fatal signal:** `T<sig>…;reason:exception;description:<"guest terminated by signal N">;`.
 
 All four are reversible. `continue` from a terminal reports it again. `s` at a terminal replies the
-terminal stop again, never `trace` (L4b). The server tracks "at a terminal" itself, cleared by any
-motion that moves.
+terminal stop again, never `trace` (L4b). Neither needs server-side state. From `(T, K_f, Watch)` the
+terminal instruction never retires, so both motions cross it with `advance()` and re-reach
+`Exited` (M41 R18; §3d rule 3).
 
 **Start of recording.** The answer to `?` at connect is `(1, 0)` with
 `T05…;replaylog:begin;description:<"start of recording">;`. A reverse step at `(1, 0)` gets the same
@@ -189,7 +195,8 @@ server steps with a new `Exec::step_thread(t) -> Result<Halt, String>`:
 1. **Wrong thread:** `t` is not the current thread. Reply the non-moving
    `reason:exception;description:<"cannot step thread T: only the running thread (C) can step">`,
    L7's measured-safe form. A recording cannot run a thread the recording did not run.
-2. **At a terminal:** reply the terminal again.
+2. **At a terminal:** the terminal again. This is rule 3's own crossing: the terminal instruction
+   never retires, and `advance()` re-reaches `Exited`.
 3. **Otherwise, one instruction with the watches armed** (`step_armed`, as `cmd_continue`'s
    finish does):
    - `Retired`: the cursor is `(n, k+1, Bp)`. Reply `trace`.
@@ -261,9 +268,9 @@ thread is displayed, not re-stepped. That is inferred from L3/L7 and measured by
   `OK`.
 - **Memory:** `m<a>,<l>` returns the **readable prefix** from a new
   `ReplaySession::read_mem_prefix(va, len) -> Vec<u8>`. It walks page by page through the guest's
-  own translation (`va_to_ipa`), falling back to identity where there is none, as `insn_at` does
-  (read from code). It replies `E08` only when zero bytes are readable. The CLI's `x` keeps its
-  all-or-nothing `read_mem`.
+  own stage-1 translation (`va_to_ipa`), as `insn_at` does (read from code). It stops at the first
+  page that does not translate or read. It replies `E08` only when zero bytes are readable. The
+  CLI's `x` keeps its all-or-nothing `read_mem`, which treats the address as an IPA.
 - **Threads:**
   - `qfThreadInfo` lists `t+1` for each thread that has not exited, then `qsThreadInfo` → `l`.
   - `qC` → `QC<current+1>`.
@@ -335,12 +342,13 @@ fault for a store-exclusive **whose monitor is lost** is IMPLEMENTATION DEFINED 
 architecture, so Task 1 measures it first on a new fixture:
 - **(a)** the core raises the permission or translation fault: the native step reproduces the
   recording's crash, and the fix is complete;
-- **(b)** the store just fails with status 1: `step()` must not report it as a retire. It returns
-  `Stop::Error`-shaped failure text instead, a loud error the server shows as an exception stop and
-  the CLI prints, rather than a panic that kills either.
+- **(b)** the store just fails with status 1: the guest runs on past the instruction where the
+  recording crashed. At the next trap, replay's divergence oracle compares it against the recorded
+  `Event::Crash` and fails. That is loud, it goes through the ordinary `Divergence` path the server
+  already turns into an exception stop (§3b), and it adds no new `Stop` variant. The step test then
+  asserts the divergence, naming (b), instead of the crash.
 
-Which of (a) or (b) holds is Task 1's first measurement. (b) costs a new `Stop` variant or an
-`Err` path through `step_armed`. The plan owns the exact shape.
+Which of (a) or (b) holds is Task 1's first measurement, recorded in the ledger either way.
 
 **F-5:** the comment at `run()`'s prologue (retrace-box `lib.rs`, about lines 2700–2702) says "a
 shadow that outlives it belongs to a load whose sequence a branch left". F1 (M42) measured a
@@ -406,27 +414,31 @@ Three test surfaces, each owning what only it can see:
 ## 5. Task order and why
 
 The order puts the box hardening first, so every later task steps on a box that cannot panic
-on §3i's shapes. The pure layers come before the wire, and the wire before lldb.
+on §3i's shapes. The wire comes before motion, and motion before lldb.
 
 1. **§3i, the M42 hardening:** the `llscedge.s` fixture (a base-aliasing `ldxr` window; a
    `ldxr`/`stxr` pair on a read-only `__TEXT` word, whose recording holds a crash), the (a)/(b)
    measurement, the pre-decode, `classify_retire` and its unit tests, and F-5. `llsc.s` and
    `llscbound.s` stay frozen.
-2. **§3b, `Exec`'s `Halt` and `recover`:** a behaviour-neutral refactor, guarded by every existing
-   debug test. It adds `ReplaySession::thread_ctx` and `read_mem_prefix`, the tampered-trace
-   recovery unit test, and the `Halt` unit tests.
-3. **`rsp.rs`, pure:** framing, hex, target.xml, stop replies, image JSON. Unit tests only.
-4. **`gdbserver.rs`, everything that does not move:** the CLI, TCP, handshake, `?`, registers,
-   memory, threads, identity, images, `qRcmd where`, refusals, `k`/`D`. `tests/util/rsp.rs` and
-   `gdbserver_e2e`'s non-motion rows.
-5. **Motion:** `c`/`vCont;c`, `bc`, `s`/`vCont;s`, `bs`, `arm-rsi`, §3c's re-parks, §3d's
-   `step_thread` and `until_thread`, `Z*`/`z*`, terminals and error stops. First, the measurement
-   §3d owes: lldb's reaction to a step ending on another thread's breakpoint. Then `gdbserver_e2e`'s
-   motion rows and C1–C4.
-6. **lldb:** `retrace.py`, `lldb_e2e` (crashy, cpython, determinism) and C5.
-7. **Close:** the chunked gate, the audit, README ("What works today": a *Debugging with lldb*
+2. **The wire: everything that does not move.** `rsp.rs` (framing, hex, target.xml, image JSON,
+   the stop reply with only the start-of-recording kind), `gdbserver.rs` (the CLI, TCP, handshake,
+   `?`, registers, memory, threads, identity, images, `qRcmd where`, refusals, `k`/`D`),
+   `ReplaySession::thread_ctx` and `read_mem_prefix`, `tests/util/rsp.rs`, and `gdbserver_e2e`'s
+   non-motion rows.
+3. **Continue, both ways:** `Exec`'s `Halt` for all four motions and `recover` (§3b), `c`/`vCont;c`
+   and an unarmed `bc`, §3c's re-parks, `Z*`/`z*`, terminals and error stops. Also the
+   tampered-trace recovery unit test, `gdbserver_e2e`'s continue rows, and C1–C3.
+4. **Stepping:** §3d's `step_thread` and `until_thread`, `s`/`vCont;s`, `bs`, `arm-rsi`, then
+   `gdbserver_e2e`'s step rows and C4. Last, the measurement §3d owes: lldb's reaction to a step
+   ending on another thread's breakpoint (R7).
+5. **lldb:** `retrace.py`, `lldb_e2e` (crashy, cpython, determinism) and C5.
+6. **Close:** the chunked gate, the audit, README ("What works today": a *Debugging with lldb*
    section with the exact commands; "Known limits": §7's list), `docs/status-log.md`, CLAUDE.md's
    gate list (`gdbserver_e2e`, `lldb_e2e`).
+
+The split follows a toolchain fact. `clippy -D warnings` rejects a function, an enum variant or
+even a variant's field that the non-test build never uses. So each task introduces only what its own
+non-test code reads. Pure layers therefore cannot land ahead of the code that calls them.
 
 ## 6. Acceptance
 
@@ -506,9 +518,14 @@ a ledger Ruling and a re-scope, not a halt.
 ## 9. Gate prediction
 
 M42 closed at **747 / 0 / 9 over 142**. M43 adds two test binaries (`gdbserver_e2e`, `lldb_e2e`) →
-**144**. By task: T1 ≈ +6 (box unit + `llsc_e2e` rows for `llscedge`); T2 ≈ +4 (`--bins`); T3 ≈ +10
-(`--bins`); T4 ≈ +10 and T5 ≈ +14 (`gdbserver_e2e`); T6 ≈ +3 (`lldb_e2e`). **≈ 794 / 0 / 9 over
-144**, measured at the close and reconciled file by file. No new `#[ignore]`: the lldb and CPython
+**144**. By task:
+- T1 ≈ +5 (`excl.rs` units, plus `llsc_e2e` rows for `llscedge`);
+- T2 ≈ +15 (`rsp.rs` units in `--bins`, plus `gdbserver_e2e`'s non-motion rows);
+- T3 ≈ +13 (`debug.rs` units, plus continue rows);
+- T4 ≈ +8 (step rows);
+- T5 ≈ +3 (`lldb_e2e`).
+
+Total **≈ 791 / 0 / 9 over 144**, measured at the close and reconciled file by file. No new `#[ignore]`: the lldb and CPython
 tests skip loudly at run time and are counted as passes, as `jq_e2e` is. The plan fixes the exact
 per-task counts.
 
