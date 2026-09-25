@@ -16,8 +16,8 @@
 // current state, not an absence of effort, and it is bounded exactly by what the fixtures reach —
 // the bound is stated under "What this deliberately does NOT do" below, and the guard was proven
 // able to fail by the two M31 t4 mutations recorded there.
-use retrace_box::Box_;
-use retrace_guest::{parse_macho, HELLO};
+use retrace_box::{Box_, Stop};
+use retrace_guest::{parse_macho, HELLO, LLSC};
 
 /// The four debugger fields are not the only `Box_` state with no accessor — `window_cap` and
 /// `l2_host` also have none — but they are the ones this guard needs to observe being reset, and
@@ -177,6 +177,7 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     let psize = b.pthread_size();
     let noaccess = b.noaccess().to_vec();
     let fts = b.fall_throughs();
+    let excl = b.dbg_excl();
     let mut live_backings = b.dbg_backings();
     live_backings.sort_unstable();
     let next_l3 = b.dbg_next_l3();
@@ -211,6 +212,7 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     assert_eq!(r.pthread_size(), psize, "{label}: pthread struct size");
     assert_eq!(r.noaccess(), noaccess.as_slice(), "{label}: PROT_NONE map");
     assert_eq!(r.fall_throughs(), fts, "{label}: fall-through counter");
+    assert_eq!(r.dbg_excl(), excl, "{label}: exclusive-monitor shadow (M42)");
     let mut restored_backings = r.dbg_backings();
     restored_backings.sort_unstable();
     assert_eq!(restored_backings.len(), live_backings.len(), "{label}: backing count");
@@ -389,4 +391,16 @@ fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
     assert_eq!(b.tpidrro_el0(), 0xDEAD_0000, "precondition: tpidrro_el0 staged");
 
     assert_checkpoint_parity(b, "rich");
+}
+
+/// M42: the mid-pair tier. It steps (a)'s first four instructions, so the `ldxr` has retired and
+/// the exclusive shadow is set. No other tier can make that field non-default: without this one the
+/// `dbg_excl` row compares `None == None`, the trap `restoreparity.rs` names.
+#[test]
+fn a_checkpointed_box_inside_an_exclusive_pair_matches_the_box_it_came_from() {
+    let loaded = parse_macho(&std::fs::read(LLSC).unwrap());
+    let mut b = Box_::load(&loaded);
+    for i in 1..=4 { assert!(matches!(b.step(), Stop::Step), "step {i}"); }
+    assert!(b.dbg_excl().is_some(), "precondition: the stepped ldxr set the shadow");
+    assert_checkpoint_parity(b, "mid-pair");
 }

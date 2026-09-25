@@ -89,6 +89,44 @@ pub fn replay(trace: &std::path::Path) -> RunOut {
     run(&["replay", trace.to_str().unwrap()])
 }
 
+/// M42: `retrace debug <trace> --script <script>`, killed after `secs` seconds. `None` for the
+/// exit code means the bound fired. t0 measured hangs on exactly these scripts, and a hang must
+/// fail its test rather than stall the gate.
+///
+/// It polls with `thread::sleep` and counts iterations, because clippy bans reading a clock. The
+/// child writes to two temp files, never to pipes: a pipe nobody reads until exit blocks a child
+/// whose transcript outgrows the pipe buffer, which would turn a long passing chain into a kill.
+/// What was written before a kill is still returned.
+pub fn debug_bounded(trace: &str, script: &str, secs: u64) -> (Option<i32>, String, String) {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let base = std::env::temp_dir().join(format!("retrace-dbg-{}-{n}", std::process::id()));
+    let (out_p, err_p) = (base.with_extension("out"), base.with_extension("err"));
+    let mut child = Command::new(bin())
+        .args(["debug", trace, "--script", script])
+        .stdout(std::fs::File::create(&out_p).expect("create debug stdout file"))
+        .stderr(std::fs::File::create(&err_p).expect("create debug stderr file"))
+        .spawn().expect("spawn debug");
+    let mut code = None;
+    for _ in 0..secs * 20 {
+        if let Some(st) = child.try_wait().expect("try_wait debug") {
+            code = Some(st.code().unwrap_or(-1));
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if code.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let read = |p: &std::path::Path| {
+        let s = String::from_utf8_lossy(&std::fs::read(p).unwrap_or_default()).into_owned();
+        let _ = std::fs::remove_file(p);
+        s
+    };
+    (code, read(&out_p), read(&err_p))
+}
+
 // Record a dynamically-linked guest through real dyld via the CLI's `record-dyn` path.
 pub fn record_dynamic(guest: &str) -> (RunOut, std::path::PathBuf) {
     static NEXT: AtomicU64 = AtomicU64::new(1_000_000);

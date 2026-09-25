@@ -1,16 +1,19 @@
 //! M41: the debugger's ground truth — every hit a recording holds for one arming, found by brute
 //! force — and the three checks that compare the debugger's own answers against it (spec §3e).
 //!
-//! Deliberately shares NONE of the debugger's machinery: no `resolve_nth`, no pre-step, no
-//! scan/resolve split, no pc-based counting. Every hit is a HARDWARE stop taken while
-//! single-stepping with everything armed (`ReplaySession::step_armed`), read AFTER the stop.
+//! Deliberately shares none of the debugger's hit-finding machinery: no `resolve_nth`, no
+//! pre-step, no scan/resolve split, no pc-based counting. Every hit is a stop taken while
+//! single-stepping with everything armed (`ReplaySession::step_armed`), read AFTER the stop. It is
+//! a HARDWARE stop, except at an emulated store-exclusive (since M42), where it is the stop
+//! `Box_::raise_debug_stop` raises in the hardware's place. The debugger shares that function.
 //! `Box_::step()` switches threads on entry, so the oracle sees the running thread whether or not
 //! M41 §3a's settle is in place: it is independent of the fix it checks.
 //!
-//! The oracle is exact only over windows with no load/store-exclusive pair. A VM exit between
-//! `ldxr` and its paired `stxr` — a step, or a breakpoint stop — fails the store-exclusive, so a
-//! caller must start past any such pair. One that is crossed anyway shows up as a replay
-//! divergence, not a silent miscount (M41 t1).
+//! Since M42 a pair no longer limits the oracle. Stepping an exclusive pair keeps its store
+//! (`Box_`'s shadow monitor), and the raised stops come in hardware order. Because the oracle gets
+//! those stops from the same `raise_debug_stop` the debugger does, it cannot check them
+//! independently. What pins them independently is `llsc_e2e`'s ground-truth lists, derived from the
+//! fixture source.
 use retrace_core::{Advance, Armed, ReplaySession};
 use std::path::Path;
 
@@ -109,13 +112,11 @@ fn cross(s: &mut ReplaySession, hits: &mut Vec<Hit>) -> bool {
 }
 
 /// `retrace debug <trace> --script <script>` on the codesigned copy: (exit code, stdout, stderr).
+/// Bounded since M42 (`util::debug_bounded`, 600 s): a chain that hangs fails, naming the script.
 pub fn debug(trace: &str, script: &str) -> (i32, String, String) {
-    let out = std::process::Command::new(super::bin())
-        .args(["debug", trace, "--script", script])
-        .output().expect("spawn debug");
-    (out.status.code().unwrap_or(-1),
-     String::from_utf8(out.stdout).unwrap(),
-     String::from_utf8(out.stderr).unwrap())
+    let (code, out, err) = super::debug_bounded(trace, script, 600);
+    let code = code.unwrap_or_else(|| panic!("debug killed at the 600 s bound (a hang):\n{script}\n{out}"));
+    (code, out, err)
 }
 
 /// Parse a transcript in which every `continue` / `reverse-continue` is followed by `where` into

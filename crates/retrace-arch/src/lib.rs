@@ -1081,6 +1081,55 @@ pub fn decode_aut_rd(insn: u32) -> Option<u32> {
     }
 }
 
+// ---- M42-llsc --------------------------------------------------------------------------------
+
+/// M42: an AArch64 exclusive-monitor instruction. `size` is the bytes of ONE element (1, 2, 4 or 8);
+/// a pair moves two. Register fields are raw, so 31 means XZR/WZR in `rs`/`rt`/`rt2` and SP in `rn`,
+/// as the architecture reads them. `rt2` is 31 for the single forms, where the field is
+/// should-be-one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclInsn {
+    /// `LDXR`/`LDAXR` (B, H, W, X) and `LDXP`/`LDAXP` (W, X).
+    Load { size: u8, pair: bool, rt: u32, rt2: u32, rn: u32 },
+    /// `STXR`/`STLXR` (B, H, W, X) and `STXP`/`STLXP` (W, X). `rs` receives the status.
+    Store { size: u8, pair: bool, rs: u32, rt: u32, rt2: u32, rn: u32 },
+    /// `CLREX`, any CRm.
+    Clrex,
+}
+
+/// M42: decode `insn` as a load-exclusive, a store-exclusive or `CLREX`, or None.
+///
+/// The load/store-exclusive class is `size:2 001000 o2 L o1 Rs o0 Rt2 Rn Rt` with `o2 == 0`:
+/// - `o2 == 1` is `LDAR`/`STLR`/`LDLAR`/`STLLR` and the single-register CAS family, which never touch
+///   the monitor.
+/// - A pair (`o1 == 1`) exists only with `size<1> == 1`. `size<1> == 0` with `o1 == 1` is CASP, which
+///   the pair masks exclude by requiring bit 31.
+pub fn decode_excl(insn: u32) -> Option<ExclInsn> {
+    if insn & 0xFFFF_F0FF == 0xD503_305F { return Some(ExclInsn::Clrex); }
+    let (rt, rn, rt2, rs) = (insn & 0x1F, (insn >> 5) & 0x1F, (insn >> 10) & 0x1F, (insn >> 16) & 0x1F);
+    let single = 1u8 << (insn >> 30);                        // size<1:0>: 1, 2, 4, 8 bytes
+    let paired: u8 = if (insn >> 30) & 1 == 1 { 8 } else { 4 }; // size<0> is sz: X or W elements
+    if insn & 0x3FE0_0000 == 0x0840_0000 { return Some(ExclInsn::Load { size: single, pair: false, rt, rt2: 31, rn }); }
+    if insn & 0xBFE0_0000 == 0x8860_0000 { return Some(ExclInsn::Load { size: paired, pair: true, rt, rt2, rn }); }
+    if insn & 0x3FE0_0000 == 0x0800_0000 { return Some(ExclInsn::Store { size: single, pair: false, rs, rt, rt2: 31, rn }); }
+    if insn & 0xBFE0_0000 == 0x8820_0000 { return Some(ExclInsn::Store { size: paired, pair: true, rs, rt, rt2, rn }); }
+    None
+}
+
+/// M42: true if the instruction after `insn` cannot be reached from it by falling through. That
+/// covers three classes:
+/// - `B`/`BL`;
+/// - a branch to a register (`BR`/`BLR`/`RET`/`ERET` and their PAC forms);
+/// - an exception-generating instruction (`SVC`/`HVC`/`SMC`/`BRK`/`HLT`/`DCPS`).
+///
+/// A conditional branch (`B.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ`) falls through when not taken, so it is
+/// not a barrier. The §3d backward scan never infers across a barrier.
+pub fn is_fallthrough_barrier(insn: u32) -> bool {
+    insn & 0x7C00_0000 == 0x1400_0000       // B, BL
+        || insn & 0xFE00_0000 == 0xD600_0000 // branch to register, including the 0xD7 PAC forms
+        || insn & 0xFF00_0000 == 0xD400_0000 // exception generation
+}
+
 // ---- M11-signals ---------------------------------------------------------------------------
 // Numbers resolved from $(xcrun --show-sdk-path)/usr/include/sys/syscall.h, never from memory.
 // The `_nocancel` pairing rule (M10) was checked and yields nothing here: the only `_nocancel`
@@ -1392,6 +1441,63 @@ pub fn signal_of_esr(esr: u64) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_excl_reads_t0s_words() {
+        use ExclInsn::*;
+        // (a) and dyld's getpid: ldxr w10, [x9]; stxr wzr, w0, [x9]
+        assert_eq!(decode_excl(0x885f_7d2a), Some(Load { size: 4, pair: false, rt: 10, rt2: 31, rn: 9 }));
+        assert_eq!(decode_excl(0x881f_7d20), Some(Store { size: 4, pair: false, rs: 31, rt: 0, rt2: 31, rn: 9 }));
+        // (b): ldaxr x1, [x0]; stlxr w2, x1, [x0]. (c): stlxr w2, x4, [x0]
+        assert_eq!(decode_excl(0xc85f_fc01), Some(Load { size: 8, pair: false, rt: 1, rt2: 31, rn: 0 }));
+        assert_eq!(decode_excl(0xc802_fc01), Some(Store { size: 8, pair: false, rs: 2, rt: 1, rt2: 31, rn: 0 }));
+        assert_eq!(decode_excl(0xc802_fc04), Some(Store { size: 8, pair: false, rs: 2, rt: 4, rt2: 31, rn: 0 }));
+        // (d): ldxp x1, x2, [x0]; stxp w3, x4, x5, [x0]. And stlxp w9, x1, x2, [x3]
+        assert_eq!(decode_excl(0xc87f_0801), Some(Load { size: 8, pair: true, rt: 1, rt2: 2, rn: 0 }));
+        assert_eq!(decode_excl(0xc823_1404), Some(Store { size: 8, pair: true, rs: 3, rt: 4, rt2: 5, rn: 0 }));
+        assert_eq!(decode_excl(0xc829_8861), Some(Store { size: 8, pair: true, rs: 9, rt: 1, rt2: 2, rn: 3 }));
+    }
+
+    #[test]
+    fn decode_excl_covers_every_width_the_acquire_pair_and_an_sp_base() {
+        use ExclInsn::*;
+        assert_eq!(decode_excl(0x085f_7c01), Some(Load { size: 1, pair: false, rt: 1, rt2: 31, rn: 0 }));  // ldxrb w1, [x0]
+        assert_eq!(decode_excl(0x485f_7c01), Some(Load { size: 2, pair: false, rt: 1, rt2: 31, rn: 0 }));  // ldxrh w1, [x0]
+        assert_eq!(decode_excl(0x887f_0801), Some(Load { size: 4, pair: true, rt: 1, rt2: 2, rn: 0 }));    // ldxp w1, w2, [x0]
+        assert_eq!(decode_excl(0xc87f_8801), Some(Load { size: 8, pair: true, rt: 1, rt2: 2, rn: 0 }));    // ldaxp x1, x2, [x0]
+        assert_eq!(decode_excl(0x0802_7c01), Some(Store { size: 1, pair: false, rs: 2, rt: 1, rt2: 31, rn: 0 })); // stxrb w2, w1, [x0]
+        assert_eq!(decode_excl(0xc85f_7fe1), Some(Load { size: 8, pair: false, rt: 1, rt2: 31, rn: 31 })); // ldxr x1, [sp]
+    }
+
+    #[test]
+    fn decode_excl_rejects_every_neighbour_that_does_not_touch_the_monitor() {
+        assert_eq!(decode_excl(0x0820_7c82), None); // casp w0, w1, w2, w3, [x4]: o1 = 1 but size<1> = 0
+        assert_eq!(decode_excl(0x88df_fc01), None); // ldar w1, [x0]: o2 = 1
+        assert_eq!(decode_excl(0x889f_fc01), None); // stlr w1, [x0]
+        assert_eq!(decode_excl(0x88a0_7c41), None); // cas w0, w1, [x2]
+        assert_eq!(decode_excl(0xb940_0001), None); // ldr w1, [x0]
+        assert_eq!(decode_excl(0xd503_201f), None); // nop
+    }
+
+    #[test]
+    fn decode_excl_reads_clrex_with_any_crm() {
+        assert_eq!(decode_excl(0xd503_3f5f), Some(ExclInsn::Clrex)); // clrex (CRm = 15, the default)
+        assert_eq!(decode_excl(0xd503_305f), Some(ExclInsn::Clrex)); // clrex #0
+        assert_eq!(decode_excl(0xd503_3f9f), None);                   // dsb sy: same space, not clrex
+    }
+
+    #[test]
+    fn fallthrough_barriers_are_exactly_the_unconditional_transfers() {
+        // b, bl, ret, br x16, blr x16, retaa, svc #0x80, brk #0
+        for w in [0x1400_0002u32, 0x9400_0002, 0xd65f_03c0, 0xd61f_0200, 0xd63f_0200, 0xd65f_0bff, 0xd400_1001, 0xd420_0000] {
+            assert!(is_fallthrough_barrier(w), "{w:#010x} is a barrier");
+        }
+        // cbnz, b.lo, tbz, ldr, nop, ldxr, add: all fall through
+        for w in [0x3500_004au32, 0x5400_0103, 0x3600_0040, 0xb940_0001, 0xd503_201f, 0x885f_7d2a, 0x8b00_0020] {
+            assert!(!is_fallthrough_barrier(w), "{w:#010x} falls through");
+        }
+    }
+
     #[test]
     fn decode_hvc_and_svc() {
         // From the spike: ESR_EL2 = 0x5a000000 => EC = 0x16 (HVC).

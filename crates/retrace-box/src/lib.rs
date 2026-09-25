@@ -1,5 +1,5 @@
 use hv_sys::{Vm, Vcpu, reg, sysreg, simd, MemFlags, EXIT_EXCEPTION};
-use retrace_arch::{ec_of, Ec};
+use retrace_arch::{decode_excl, ec_of, Ec, ExclInsn};
 use retrace_guest::Loaded;
 use retrace_trace::{Regs, Region};
 
@@ -9,6 +9,8 @@ use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
 pub mod thread;
+mod excl;
+pub use excl::{Excl, SetBy};
 pub use sig::{
     build_frame, choose_frame_base, decode_act, decode_stack, encode_oldact, encode_oldstack,
     sigreturn_token, Disposition, EntryRegs, FrameInput, NeonState, SigAction, SigTable,
@@ -288,6 +290,23 @@ const CPACR_FP_ON: u64 = 0x3 << 20;
 // next instruction the one that completes before the step exception fires.
 const PSTATE_SS: u64 = 1 << 21; // PSTATE/SPSR software-step bit
 const MDSCR_SS:  u64 = 1 << 0;  // MDSCR_EL1.SS
+
+/// M42 (t0 M8): in a software-step exit's ESR, ISS.ISV (bit 24) says the EX bit is valid, and
+/// ISS.EX (bit 6) says the stepped instruction was a load-exclusive. Apple's cores and HVF deliver
+/// both on the EL2 step exit: `0xcb000062` for a load-exclusive, `0xcb000022` for everything else.
+const SS_ISV_EX: u64 = (1 << 24) | (1 << 6);
+
+/// M42 §3c: the syndromes of the debug stops raised at an emulated store-exclusive:
+/// - EC 0x30 is a breakpoint from a lower EL, and EC 0x34 a watchpoint from a lower EL;
+/// - IL is set, and so is WnR for the watch.
+///
+/// Every consumer reads only `ec_of(esr)` (`advance`, `step_watched`, `step_armed`).
+const ESR_RAISED_BP: u64 = (0x30 << 26) | (1 << 25);
+const ESR_RAISED_WATCH: u64 = (0x34 << 26) | (1 << 25) | (1 << 6);
+
+/// M42 §3e (plan R10): the most instructions `run()` steps to finish a pair before resuming
+/// natively. It is the §3d scan bound, and gdb's.
+const PAIR_STEP_BOUND: usize = 16;
 
 // Hardware instruction breakpoints (M3 debugger `continue`/reverse scans). MDSCR_EL1.MDE gates the
 // whole HW breakpoint/watchpoint machine; DBGBCRn = 0x1E5 arms slot n: E=1 (bit0), PMC=0b10 (EL0,
@@ -606,6 +625,17 @@ pub struct Box_ {
     /// unaffected. Deliberately NOT carried in `BoxState`, for the same reason as `window_cap`:
     /// production never reads it, so a restored session starting its own count at 0 is correct.
     canary_disturbances: u64,
+    /// M42: the shadow of this vCPU's local exclusive monitor (spec §3a).
+    /// - Set when `step()` retires a load-exclusive (and, from Task 5, inferred at a native debug
+    ///   stop).
+    /// - Cleared by every non-debug exit (`note_exit`), a `clrex`, the emulated store-exclusive and
+    ///   a thread switch.
+    /// - Carried in `BoxState`: a checkpoint is always taken at an exit, where the hardware monitor
+    ///   is open, so this is the whole monitor state.
+    ///
+    /// Declared last. It holds a `Vec`, so it has Drop, but it comes after `vcpu`/`vm`, so the
+    /// load-bearing vcpu-before-vm drop order is unaffected.
+    excl: Option<Excl>,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -993,6 +1023,11 @@ pub struct BoxState {
     // counter exists to prevent. Carried from the outset, in the same commit that introduced the
     // counter (`1c4c74f`) — so this field is a carry, not one of the class's instances.
     pub fall_throughs: u64,
+    // M42: carried because a mid-pair capture cannot re-derive it. The load-exclusive that set it
+    // retired behind the checkpoint, and the hardware monitor never survives an exit. Resetting it
+    // would make a seek past a stepped load-exclusive fail that pair's store, which is the bug M42
+    // exists to fix (spec §3f).
+    pub excl: Option<Excl>,
 }
 
 /// M40: bytes of guest backing currently mapped by `alloc_pages` and not yet released — a
@@ -1392,7 +1427,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0 }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, excl: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1994,7 +2029,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0 };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, excl: None };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -2655,11 +2690,32 @@ impl Box_ {
         debug_assert!(!self.threads.needs_reschedule(),
             "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
              would make position->thread ambiguous");
+        // M42 §3e: entering the guest is an ERET, which clears the hardware monitor, so native
+        // execution cannot resume inside a pair. Step until the shadow clears. What each stop does:
+        // - A debug stop or a stage-2 abort met on the way returns exactly as run() would return it.
+        // - A stop that came through the guest's EL1 vector (a syscall, an EL1 fault, an unemulated
+        //   trap) leaves the guest parked at EL1. The native loop below re-enters there and delivers
+        //   that same stop through run()'s own arms: the path M41's `AtTrap` -> `advance()` takes.
+        // - Bounded at PAIR_STEP_BOUND (plan R10). A shadow that outlives it belongs to a load whose
+        //   sequence a branch left (fixture shape (h)). It is dropped, which is what resuming
+        //   natively does to the hardware monitor anyway.
+        for _ in 0..PAIR_STEP_BOUND {
+            if self.excl.is_none() { break; }
+            let stop = self.step();
+            if (self.vcpu.get_reg(reg::CPSR).unwrap() >> 2) & 3 != 0 { break; }
+            if !matches!(stop, Stop::Step) { return stop; }
+        }
+        self.excl = None;
         loop {
+            // M42 §3d: where this entry resumes the guest. That entry's ERET cleared the monitor, so
+            // a native stop cannot infer a load-exclusive at or before a point after it.
+            let entry_pc = self.pc();
             let e = self.vcpu.run().expect("hv_vcpu_run");
-            if e.reason != EXIT_EXCEPTION { continue; }         // vtimer/canceled: control-plane only
+            if e.reason != EXIT_EXCEPTION { self.note_exit(false); continue; } // vtimer/canceled: control-plane only
             match ec_of(e.syndrome) {
                 Ec::Hvc => {
+                    // M42 §3a: every exception EL0 takes to EL1 comes here, and resumes by an ERET.
+                    self.note_exit(false);
                     // M23 t1: a fall-through past a slot head lands on the trapping padding
                     // (`hvc #1`, hence ISS == VECTOR_PAD_IMM). The padding does not touch
                     // ESR_EL1/ELR_EL1, so the still-valid exception is re-read and dispatched
@@ -2744,6 +2800,12 @@ impl Box_ {
                     // walk → re-sign → map, identical on record and replay), so surface the fault IPA
                     // as `Stop::Other` for it to route.
                     self.last_far = e.virtual_address;
+                    if matches!(ec_of(e.syndrome), Ec::Breakpoint | Ec::Watchpoint) {
+                        self.note_exit(true);
+                        self.infer_excl(entry_pc);
+                    } else {
+                        self.note_exit(false);
+                    }
                     return Stop::Other { esr: e.syndrome };
                 }
             }
@@ -2783,6 +2845,24 @@ impl Box_ {
         debug_assert!(!self.threads.needs_reschedule(),
             "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
              would make position->thread ambiguous");
+        // M42 §3b: inside a pair, retrace's own exits have cleared the hardware monitor, so a
+        // store-exclusive is emulated rather than stepped, and a `clrex` is stepped and then clears
+        // the shadow. This sits after the reschedule, because a switch clears the shadow, and before
+        // the SS arming, because the emulation takes no exit.
+        let mut clrex_next = false;
+        if self.excl.is_some() {
+            // M42 §3a: every exception entry is a non-debug exit, and each one clears the shadow, so
+            // a set shadow means the guest is at EL0. Stepping at EL1 with one set would decode the
+            // vector code as if it were the pair's.
+            assert!((self.vcpu.get_reg(reg::CPSR).unwrap() >> 2) & 3 == 0,
+                "M42: the exclusive shadow is set with the guest at EL1 (pc {:#x}); every exception \
+                 entry must clear it", self.pc());
+            match self.insn_at(self.pc()).and_then(decode_excl) {
+                Some(st @ ExclInsn::Store { .. }) => return self.emulate_stx(st),
+                Some(ExclInsn::Clrex) => clrex_next = true,
+                _ => {}
+            }
+        }
         let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr | MDSCR_SS).unwrap();
         let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
@@ -2793,7 +2873,136 @@ impl Box_ {
         self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr & !MDSCR_SS).unwrap();
         let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
         self.vcpu.set_reg(reg::CPSR, cpsr & !PSTATE_SS).unwrap();
+        if clrex_next && matches!(stop, Stop::Step) { self.excl = None; }
         stop
+    }
+
+    /// M42 §3a: every VM exit `run()` and `run_one_for_step()` take reports its class here.
+    ///
+    /// Only the three debug exits leave the shadow standing: the EL0 step retire, a breakpoint and
+    /// a watchpoint. They exist only in a debugger session. Every other exit ends in an ERET that
+    /// clears the hardware monitor (Sail `AArch64_ExceptionReturn`), and record takes that same exit
+    /// at the same instruction, so it clears the shadow.
+    fn note_exit(&mut self, debug: bool) {
+        if !debug { self.excl = None; }
+    }
+
+    /// The guest word at VA `va`, read as an instruction, or None if unmapped.
+    fn insn_at(&self, va: u64) -> Option<u32> {
+        let b = self.read_guest_checked(self.va_to_ipa(va)?, 4)?;
+        Some(u32::from_le_bytes(b.try_into().unwrap()))
+    }
+
+    /// Xn read as a DATA register, where 31 is XZR. Never `reg::x(31)`, which is the PC in hv-sys.
+    fn xreg(&self, r: u32) -> u64 {
+        if r == 31 { 0 } else { self.vcpu.get_reg(reg::x(r)).unwrap() }
+    }
+
+    /// Xn read as a BASE register, where 31 is SP. The guest runs at EL0, so that is SP_EL0.
+    fn base_reg(&self, r: u32) -> u64 {
+        if r == 31 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() } else { self.vcpu.get_reg(reg::x(r)).unwrap() }
+    }
+
+    /// M42 §3a: the step exit reported a load-exclusive (t0 M8). Record the shadow from the
+    /// instruction at `pc - 4` (a load never branches) and the bytes now at its VA. There is one
+    /// vCPU, so memory now IS what the load returned, even when Rt is XZR.
+    fn set_excl_from_retire(&mut self) {
+        let at = self.pc() - 4;
+        let word = self.insn_at(at)
+            .unwrap_or_else(|| panic!("M42: ISS.EX retire at {at:#x}, whose word does not map"));
+        let ld = decode_excl(word).filter(|i| matches!(i, ExclInsn::Load { .. })).unwrap_or_else(|| panic!(
+            "M42: the step exit reported a load-exclusive (ISS.EX) at {at:#x}, but {word:#010x} does not \
+             decode as one: the hardware and retrace_arch::decode_excl disagree"));
+        assert!(!excl::base_aliases_dest(ld),
+            "M42: unmodelled load-exclusive at {at:#x} ({word:#010x}): its base is also a destination, \
+             so the marked address is gone");
+        let ExclInsn::Load { size, pair, rn, .. } = ld else { unreachable!() };
+        let va = self.base_reg(rn) & excl::TAG_MASK;
+        let len = excl::access_len(size, pair);
+        let loaded = self.va_to_ipa(va).and_then(|ipa| self.read_guest_checked(ipa, len))
+            .unwrap_or_else(|| panic!("M42: the load-exclusive at {at:#x} read {va:#x}, which does not map"));
+        self.excl = Some(Excl { va, size, pair, loaded, by: SetBy::Stepped });
+    }
+
+    /// M42: the exclusive-monitor shadow (spec §3a), for tests and the record/replay asserts.
+    pub fn dbg_excl(&self) -> Option<Excl> { self.excl.clone() }
+
+    /// Is a hardware breakpoint armed at `pc`? `Box_` keeps no breakpoint list (`arm_hw_breakpoint`),
+    /// so read the six slots back: the registers are the ground truth.
+    fn bp_armed_at(&self, pc: u64) -> bool {
+        self.bps_armed && HW_BREAKPOINT_SLOTS.iter().any(|&(bvr, bcr)|
+            self.vcpu.get_sys(bcr).unwrap() == DBGBCR_ARM && self.vcpu.get_sys(bvr).unwrap() == pc)
+    }
+
+    /// The lowest byte of `[va, va + len)` that an armed write-watch range covers, or None (plan
+    /// R11). That byte lies in both the access and the watch, so `watched_of` resolves it by exact
+    /// byte. It is byte-exact, as the hardware's BAS match is.
+    fn watch_hit(&self, va: u64, len: usize) -> Option<u64> {
+        if !self.wps_armed { return None; }
+        self.watch_ranges.iter()
+            .filter(|&&(w, wl)| w < va + len as u64 && va < w + wl)
+            .map(|&(w, _)| w.max(va))
+            .min()
+    }
+
+    /// M42 §3c: the debug stop the hardware would raise at an emulated store-exclusive, in hardware
+    /// order: a breakpoint armed at `pc` first, then a watch the access overlaps. A watch fires even
+    /// on a store-exclusive that will fail (t0 M5), so raising it before emulating the store gives
+    /// the same answer the hardware gives. The caller clears what fired and steps again, so the
+    /// next call raises the next stop or emulates.
+    fn raise_debug_stop(&mut self, pc: u64, va: u64, len: usize) -> Option<Stop> {
+        if self.bp_armed_at(pc) {
+            self.last_far = pc; // no consumer reads a breakpoint's FAR (spec R5)
+            return Some(Stop::Other { esr: ESR_RAISED_BP });
+        }
+        let far = self.watch_hit(va, len)?;
+        self.last_far = far;
+        Some(Stop::Other { esr: ESR_RAISED_WATCH })
+    }
+
+    /// M42 §3b: `step()` at a store-exclusive while the shadow is set. retrace's own exits lost the
+    /// hardware monitor, so the store is performed here, as the native run performed it. The order
+    /// is: validate, then raise the stops the hardware would raise, then write.
+    fn emulate_stx(&mut self, st: ExclInsn) -> Stop {
+        let ExclInsn::Store { size, pair, rt, rt2, rn, .. } = st else { unreachable!("emulate_stx: {st:?}") };
+        let ex = self.excl.clone().expect("emulate_stx without a shadow");
+        let pc = self.pc();
+        let base = self.base_reg(rn);
+        let len = excl::access_len(size, pair);
+        let leaf = self.va_leaf(base & excl::TAG_MASK);
+        let target = leaf.and_then(|(ipa, _)| self.read_guest_checked(ipa, len));
+        let writable = match leaf { Some((_, None)) => true, Some((_, Some(d))) => excl::el0_writable(d), None => false };
+        let plan = excl::plan_stx(&ex, st, base, self.xreg(rt), self.xreg(rt2), target.as_deref(), writable)
+            .unwrap_or_else(|why| panic!("M42: unmodelled store-exclusive at pc {pc:#x}: {why} (shadow {ex:?})"));
+        if let Some(stop) = self.raise_debug_stop(pc, plan.va, len) { return stop; }
+        let (ipa, _) = leaf.expect("plan_stx refuses an unmapped target");
+        self.write_guest(ipa, &plan.bytes);
+        if let Some(s) = plan.status { self.vcpu.set_reg(reg::x(s), 0).unwrap(); }
+        self.vcpu.set_reg(reg::PC, pc + 4).unwrap();
+        self.excl = None;
+        Stop::Step
+    }
+
+    /// M42 §3d: a breakpoint or watchpoint stop taken NATIVELY by `run()` at `P = pc()`.
+    ///
+    /// If a load-exclusive ran natively since the last entry, the ERET that resumes the guest breaks
+    /// its pair just as a step does, so the shadow is inferred here. The decision, every §3d
+    /// condition, is the pure `excl::infer` (Ruling T5-b), unit-tested per condition. This gathers
+    /// its inputs: the scan's words, bounded at 16 and at P's page, and the vCPU and memory reads.
+    fn infer_excl(&mut self, entry_pc: u64) {
+        debug_assert!(self.excl.is_none(), "run()'s native loop runs only with the shadow clear (§3e)");
+        let p = self.pc();
+        let page = p & !(GRANULE as u64 - 1);
+        let mut words = Vec::with_capacity(16);
+        let mut a = p;
+        while words.len() < 16 && a > page {
+            a -= 4;
+            let Some(w) = self.insn_at(a) else { break };
+            words.push(w);
+        }
+        let inferred = excl::infer(&words, p, entry_pc, |r| self.xreg(r), |r| self.base_reg(r),
+            |va, len| self.va_to_ipa(va).and_then(|ipa| self.read_guest_checked(ipa, len)));
+        self.excl = inferred;
     }
 
     /// One `hv_vcpu_run` classification for `step()`. Mirrors `run()`, but keyed on the DIRECT-EL2
@@ -2806,13 +3015,25 @@ impl Box_ {
     fn run_one_for_step(&mut self) -> Stop {
         loop {
             let e = self.vcpu.run().expect("hv_vcpu_run");
-            if e.reason != EXIT_EXCEPTION { continue; }
+            // M42 (plan R12): a vtimer/cancel exit inside a step is retrace's own, like the step
+            // exit. Record never takes it at this instruction, so it leaves the shadow standing.
+            // `note_exit(true)` is a no-op; it is called so that "every exit arm classifies"
+            // (spec §3a) is literally true.
+            if e.reason != EXIT_EXCEPTION { self.note_exit(true); continue; }
             match ec_of(e.syndrome) {
                 Ec::SoftStep => {
                     // Guest still at EL0 => the instruction retired cleanly; PC is already at the
                     // next instruction (step() disarms SS). EL1 => it trapped without retiring.
                     let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
-                    if (cpsr >> 2) & 3 == 0 { return Stop::Step; }
+                    if (cpsr >> 2) & 3 == 0 {
+                        self.note_exit(true);
+                        // M42 §3a (t0 M8): the step exit says whether a load-exclusive just retired.
+                        if e.syndrome & SS_ISV_EX == SS_ISV_EX { self.set_excl_from_retire(); }
+                        return Stop::Step;
+                    }
+                    // M42: the stepped instruction trapped to EL1 (F2). That is an exception entry and,
+                    // below, an ERET: not a debug exit, whichever arm follows.
+                    self.note_exit(false);
                     let esr1 = self.vcpu.get_sys(sysreg::ESR_EL1).unwrap();
                     match ec_of(esr1) {
                         // The window-ending svc: return it unconsumed (PC still at the trap, exactly
@@ -2844,6 +3065,8 @@ impl Box_ {
                 // A stage-2 abort (e.g. a cache-window fault) taken direct to EL2 while stepping: the
                 // instruction did not retire. Surface it for the caller to page in and re-step.
                 _ => {
+                    // M42 §3a: a breakpoint or watchpoint is a debug exit; a stage-2 abort is not.
+                    self.note_exit(matches!(ec_of(e.syndrome), Ec::Breakpoint | Ec::Watchpoint));
                     self.last_far = e.virtual_address;
                     return Stop::Other { esr: e.syndrome };
                 }
@@ -3021,7 +3244,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0 };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, excl: None };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -4462,18 +4685,25 @@ impl Box_ {
     /// bits above 47 and returns None. Conservative (a spurious no-match, never a spurious match),
     /// and no caller produces one — the debugger's `watch` takes a plain address.
     pub fn va_to_ipa(&self, va: u64) -> Option<u64> {
+        self.va_leaf(va).map(|(ipa, _)| ipa)
+    }
+
+    /// M42: `va_to_ipa`'s walk, also returning the stage-1 leaf descriptor, whose AP bits say whether
+    /// EL0 may write (`excl::el0_writable`). With the MMU off there is no leaf, so it returns `None`
+    /// in that slot.
+    fn va_leaf(&self, va: u64) -> Option<(u64, Option<u64>)> {
         let sctlr = self.vcpu.get_sys(sysreg::SCTLR_EL1).unwrap();
-        if sctlr & 1 == 0 { return Some(va); }
+        if sctlr & 1 == 0 { return Some((va, None)); }
         if va >> 47 != 0 { return None; }
         let l1e = self.pt_entry(PT_L1_IPA, (va >> 36) & 0x7FF)?;
         if l1e & 0x3 != DESC_TABLE { return None; }
         let l2e = self.pt_entry(l1e & PT_ADDR, (va >> 25) & 0x7FF)?;
         match l2e & 0x3 {
-            DESC_BLOCK => Some((l2e & PT_ADDR & !(BLK - 1)) | (va & (BLK - 1))),
+            DESC_BLOCK => Some(((l2e & PT_ADDR & !(BLK - 1)) | (va & (BLK - 1)), Some(l2e))),
             DESC_TABLE => {
                 let l3e = self.pt_entry(l2e & PT_ADDR, (va >> 14) & 0x7FF)?;
                 if l3e & 0x3 != DESC_PAGE { return None; }
-                Some((l3e & PT_ADDR) | (va & (GRANULE as u64 - 1)))
+                Some(((l3e & PT_ADDR) | (va & (GRANULE as u64 - 1)), Some(l3e)))
             }
             _ => None,
         }
@@ -5527,6 +5757,9 @@ impl Box_ {
         if cur == tid {
             return;
         }
+        // M42 §3a: the monitor belongs to the PE. Every switch follows a syscall exit, which has
+        // already cleared the shadow; clearing it here states that a switch can never carry one.
+        self.excl = None;
         let saved = self.save_ctx();
         *self.threads.ctx_mut(cur) = saved;
         self.threads.switch_to(tid);
@@ -5691,6 +5924,7 @@ impl Box_ {
             fd_slots: self.fds.slots(),
             sigtable: self.sigtable.clone(),
             fall_throughs: self.fall_throughs,
+            excl: self.excl.clone(),
         }
     }
 
@@ -5811,6 +6045,8 @@ impl Box_ {
             // production reads, so a restored session counting its own disturbances from zero is
             // correct rather than lossy. Same argument as `window_cap` directly above.
             canary_disturbances: 0,
+            // M42: RESTORED from the capture, never reset (spec §3f); see the `BoxState` field.
+            excl: state.excl.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b

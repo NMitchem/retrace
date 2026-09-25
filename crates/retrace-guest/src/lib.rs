@@ -179,6 +179,10 @@ pub const CARVEOUT: &str = concat!(env!("OUT_DIR"), "/carveout");
 pub const SPINLOOP: &str = concat!(env!("OUT_DIR"), "/spinloop");
 pub const WATCHLOOP: &str = concat!(env!("OUT_DIR"), "/watchloop");
 pub const WATCHSWEEP: &str = concat!(env!("OUT_DIR"), "/watchsweep");
+pub const LLSC: &str = concat!(env!("OUT_DIR"), "/llsc");
+/// M42 final-review F1: a load-exclusive left by a branch, then more than 16 instructions before a
+/// breakpoint target. The witness for `run()`'s 16-step pair prologue; behaviour is `llsc_e2e`'s.
+pub const LLSC_BOUND: &str = concat!(env!("OUT_DIR"), "/llscbound");
 pub const CRASH: &str = concat!(env!("OUT_DIR"), "/crash");
 pub const CRASHJMP: &str = concat!(env!("OUT_DIR"), "/crashjmp");
 pub const HELLO_RUST: &str = concat!(env!("OUT_DIR"), "/hello_rust");

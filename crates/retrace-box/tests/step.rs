@@ -1,7 +1,7 @@
 // Box_::step(): one instruction per call — a hardware single-step, or one below-the-trace
 // emulation (the steppy MRS), each exactly one step; the window-ending svc is returned as
 // Stop::Syscall, unconsumed. HVF allows one VM per process, so --test-threads=1 is mandatory.
-use retrace_box::{Box_, Stop};
+use retrace_box::{Box_, SetBy, Stop};
 
 fn load_steppy() -> Box_ {
     Box_::load(&retrace_guest::parse_macho(&std::fs::read(retrace_guest::STEPPY).unwrap()))
@@ -51,4 +51,28 @@ fn unarmed_step_exception_fails_loud() {
     let mut b = load_steppy();
     b.dbg_leak_ss();
     b.run();
+}
+
+/// M42 §3a/§3b, on (a), at the box:
+/// - stepping the `ldxr` sets the shadow from the step exit's ISS.EX;
+/// - the `cbnz`, a debug exit, leaves it;
+/// - the `stxr` is emulated: the store lands, the shadow clears, and pc moves one instruction.
+///
+/// Before M42 the stepped `stxr` failed and the cell stayed 0 (t0 M2).
+#[test]
+fn stepping_a_load_exclusive_sets_the_shadow_and_its_store_lands() {
+    let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::LLSC).unwrap());
+    let mut b = Box_::load(&loaded);
+    for i in 1..=3 { assert!(matches!(b.step(), Stop::Step), "step {i}"); } // adrp, add, movz
+    assert_eq!(b.dbg_excl(), None, "nothing exclusive has retired yet");
+    assert!(matches!(b.step(), Stop::Step));                                 // ldxr w10, [x9]
+    let ex = b.dbg_excl().expect("the ldxr's retire sets the shadow");
+    assert_eq!((ex.size, ex.pair, ex.loaded.as_slice(), ex.by), (4, false, &[0u8; 4][..], SetBy::Stepped));
+    assert!(matches!(b.step(), Stop::Step));                                 // cbnz w10 (not taken)
+    assert_eq!(b.dbg_excl().map(|e| e.va), Some(ex.va), "a debug exit leaves the shadow standing");
+    let stx = b.pc();
+    assert!(matches!(b.step(), Stop::Step));                                 // stxr wzr, w0, [x9]
+    assert_eq!(b.dbg_excl(), None, "the emulated store clears the shadow");
+    assert_eq!(b.pc(), stx + 4);
+    assert_eq!(b.read_guest(b.va_to_ipa(ex.va).unwrap(), 4), vec![0x42, 0x42, 0, 0]);
 }
