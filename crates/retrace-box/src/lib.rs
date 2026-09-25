@@ -3017,7 +3017,9 @@ impl Box_ {
             let e = self.vcpu.run().expect("hv_vcpu_run");
             // M42 (plan R12): a vtimer/cancel exit inside a step is retrace's own, like the step
             // exit. Record never takes it at this instruction, so it leaves the shadow standing.
-            if e.reason != EXIT_EXCEPTION { continue; }
+            // `note_exit(true)` is a no-op; it is called so that "every exit arm classifies"
+            // (spec §3a) is literally true.
+            if e.reason != EXIT_EXCEPTION { self.note_exit(true); continue; }
             match ec_of(e.syndrome) {
                 Ec::SoftStep => {
                     // Guest still at EL0 => the instruction retired cleanly; PC is already at the
