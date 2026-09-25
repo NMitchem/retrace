@@ -44,6 +44,14 @@ pub fn spawn_server(trace: &Path, extra: &[&str]) -> (Child, u16, PathBuf) {
     panic!("gdbserver never printed its port");
 }
 
+/// A child process that is killed and reaped however its owner's scope ends, a panic included, so a
+/// failing test leaves no server (or lldb) running.
+pub struct KillOnDrop(pub Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+}
+
 /// Hex to bytes. The server's replies are trusted to be well-formed hex; a malformed one panics.
 fn unhex(h: &str) -> Vec<u8> {
     (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect()
