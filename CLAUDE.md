@@ -36,11 +36,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
-  17 unit tests inside the `retrace` binary itself (`crates/retrace/src/debug.rs`) run in **none** of
+  32 unit tests inside the `retrace` binary itself (20 in `crates/retrace/src/debug.rs`, 12 in
+  `crates/retrace/src/rsp.rs`) run in **none** of
   the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
   with no `--test` filter, reaches them — which is why closes before M17 are not owed a
   correction. Leaving it out silently costs
-  17 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
+  32 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 
@@ -97,7 +98,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   regressions for every hit the debugger used to skip or invent, the thread-at-a-boundary
   invariant, and the hit oracle —
   `tests/util/hits.rs` single-steps a recording with everything armed and checks
-  `continue`/`reverse-continue` chains against every hardware stop). Run one with
+  `continue`/`reverse-continue` chains against every hardware stop), `gdbserver_e2e` (M43: the
+  `retrace gdbserver` RSP server on the wire, through a Rust client in `tests/util/rsp.rs` and no
+  lldb — positions both ways, stepping, the refusals, the divergence recovery and R7's fallback),
+  `lldb_e2e` (M43: real lldb-2100 reverse-steps through `crashy`'s crash, plus the CPython demo, a
+  determinism check, and the blocked-step and cross-thread `rsi` rows; it skips loudly without
+  lldb, and its CPython test without Homebrew Python). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
