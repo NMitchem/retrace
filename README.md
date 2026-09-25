@@ -559,12 +559,14 @@ reconstruction caveat in full.
   sets the cell to `0x701238000`, where M39's tree resolved `(1126, 29627)` — an earlier run of the
   same store on another address, 1,736,055 instructions early.
 
-**Gate:** GATE_TOTALS_TBD. The close ran the full chunked gate on the M43 head (`b0b4492`), from
-one background script, every test chunk `--no-fail-fast` and every exit code captured before any
-pipe:
+**Gate:** 798 passed / 0 failed / 9 ignored across 144 test binaries: M42's 747 plus the 51
+`#[test]` M43 added, predicted exactly by source count. The close ran the full chunked gate on the
+M43 head (`b0b4492`), from one background script, every test chunk `--no-fail-fast` and every exit
+code captured before any pipe:
 `ws`, `box`, `--bins`, one `--test <name>` invocation for each of the seventy-six files in
-`crates/retrace/tests/`, and clippy over `--workspace --all-targets` with `-D warnings`.
-GATE_TIME_TBD. See the testing note below for how that number is assembled. The "test binaries"
+`crates/retrace/tests/`, and clippy over `--workspace --all-targets` with `-D warnings`. All 80
+chunks exited 0, in 33 min 27 s wall-clock (run alongside read-only review agents); the testing
+note below says how the chunks are assembled. The "test binaries"
 figure is test executables plus the `Doc-tests` harnesses cargo reports, each of which runs zero
 tests — the convention every milestone since M14 has counted by, kept for comparability and
 written out here so nobody has to re-derive it. No `#[ignore]` line was added or removed
