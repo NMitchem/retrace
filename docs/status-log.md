@@ -12512,8 +12512,8 @@ cost lldb its connection (§3b). It also paid the debts in the seam's path: M41'
 
 The milestone's numbers: **one** new fixture (`crates/retrace-guest/asm/llscedge.s`); **two** new
 modules in the `retrace` binary (`rsp.rs`, pure, 12 unit tests; `gdbserver.rs`, the socket and the
-dispatch) and **one** lldb script (`retrace.py`); **two** new test binaries (`gdbserver_e2e`, 26
-tests, and `lldb_e2e`, 5) and a shared RSP client (`tests/util/rsp.rs`); **+51** `#[test]`
+dispatch) and **one** lldb script (`retrace.py`); **two** new test binaries (`gdbserver_e2e`, 28
+tests, and `lldb_e2e`, 5) and a shared RSP client (`tests/util/rsp.rs`); **+53** `#[test]`
 attributes over six files, none removed; **zero** `Box_` fields added and **zero** dispatch arms
 changed (`retrace-core`'s diff is two re-exports and two `ReplaySession` accessors), `verify_thread`
 **7 → 7**, `TRACE_MAGIC` unmoved at `RT\x00\x0a` (`crates/retrace-trace` has no diff); **zero** new
@@ -12523,8 +12523,10 @@ this close: the spec with its t0 companion (`48073b4`) and its revision (`73a407
 (`5f29b4a`, which also amended spec §3c and recorded §3i's outcome) and its log-path amendment
 (`8c882b1`), two spec amendments made in execution (`8c47122`, `4a71c0c`), and twelve task commits
 (`917f4eb` + `423ed82`; `572c307` + `8e57429`; `6841c95` + `fe369a3`; `931a1be` + `dfca08c` +
-`db5fb3f`; `38b5d77` + `ddb43eb` + `b0b4492`), five of them review fix rounds. Gate:
-**798 passed / 0 failed / 9 ignored across 144 test binaries**.
+`db5fb3f`; `38b5d77` + `ddb43eb` + `b0b4492`), five of them review fix rounds; then the close
+(`5f0f17c` + `a1618d6`) and the final review's fix wave (`338fe9b` and its docs commit), under
+the controller's rulings F-1 … F-3. Gate: **800 passed / 0 failed / 9 ignored across 144 test
+binaries**: the close's full gate, 798 on `b0b4492`, plus the fix wave's two rows.
 
 ### What t0 measured
 
@@ -12673,7 +12675,18 @@ breakpoint, and **lldb looped: 307,016 × `vCont;s:1` in 60 s**, never printing 
 showed lldb ignoring the other thread's `reason:breakpoint` and re-stepping thread 1, although thread
 1's pc had moved. Every re-step was then refused by rule 1, **named on the running thread**, and lldb
 looped on that too. **Ruling T4-a** took R7's fallback: the until-run arms nothing, and a hit by
-another thread during one blocked step goes unreported. A pinning row was added
+another thread during a blocked step goes unreported. T4-a costed that as the hits during one step
+the user asks for, and the final review found the cost wider (corrected here, in M43's own
+section). lldb takes such steps on its own inside `process continue`: before a forward resume it
+steps a thread off a breakpoint at that thread's pc, and t0 L3 measured `z0`, `vCont;s:1`, `Z0`,
+`c` both from a breakpoint stop (`l3_frombp`) and for each hit an ignore count skips (stub.log
+323–335). So a forward `process continue` from a breakpoint on an `svc` that blocks begins with a
+blocked step, as does every ignored-count hit of such a breakpoint and, by the same rule though
+not separately measured, every false-condition one. Other threads' hits during that wait are
+skipped with no report, and the `continue` the user typed resumes after them; a reverse continue
+still finds them. The workaround is to break on the syscall stub's entry, not on its `svc`. This
+composition is read from the code and L3, not measured in an lldb session against the server. A
+pinning row was added
 (`a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread`), RED on commit 1
 with exactly the looped reply. With the fallback, lldb exited 0 in about 0.7 s after one
 `vCont;s`, showing `instruction step into` at `0x1804afaf8`, `svc + 4`.
@@ -12764,62 +12777,68 @@ crates/retrace-core/src/lib.rs` is **7**.
 
 ### The gate
 
-**798 passed / 0 failed / 9 ignored across 144 test binaries.** It ran from the worktree on `b0b4492` as one background script (`gate.sh`
-in the ledger's directory), chunked as CLAUDE.md requires. Every test chunk ran `--no-fail-fast`,
-and each chunk's exit code went to `gate-summary.txt` before any pipe. All 80 chunks exited 0.
-Wall-clock was 33 min 27 s (15:22:00 to 15:55:27), with the docs agent and the final review, both
-read-only on the code, running alongside.
+**800 passed / 0 failed / 9 ignored across 144 test binaries.** The full gate measured **798** on
+`b0b4492`, the last code commit before the fix wave, and the final review's fix wave added two rows
+(last section). The full gate ran from the worktree on `b0b4492` as one background script
+(`gate.sh` in the ledger's directory), chunked as CLAUDE.md requires. Every test chunk ran
+`--no-fail-fast`, and each chunk's exit code went to `gate-summary.txt` before any pipe. All 80
+chunks exited 0. Wall-clock was 33 min 27 s (15:22:00 to 15:55:27), with the docs agent and the
+final review, both read-only on the code, running alongside.
 
 | chunk | invocation | what M43 changed in it, by source |
 |---|---|---|
 | `ws` | `cargo test --workspace --exclude retrace-box --exclude retrace --no-fail-fast -- --test-threads=1` | no `#[test]` change |
 | `box` | `cargo test -p retrace-box --no-fail-fast -- --test-threads=1` | `excl.rs` +2. Whole package, so `Doc-tests retrace_box` is present (M24's lesson) |
 | `bins` | `cargo test -p retrace --bins --no-fail-fast -- --test-threads=1` | 17 → **32**: `debug.rs` +3, and `rsp.rs` 12, a new module |
-| `e2e` | `cargo test -p retrace --test <name> --no-fail-fast -- --test-threads=1`, once per file of `ls crates/retrace/tests/*.rs` | 74 → **76** targets: `gdbserver_e2e` 26 and `lldb_e2e` 5, both new binaries, and `llsc_e2e` +3 |
+| `e2e` | `cargo test -p retrace --test <name> --no-fail-fast -- --test-threads=1`, once per file of `ls crates/retrace/tests/*.rs` | 74 → **76** targets: `gdbserver_e2e` 26 at this run (28 with the fix wave's two rows) and `lldb_e2e` 5, both new binaries, and `llsc_e2e` +3 |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | — |
 
 Results, chunk by chunk, ANSI stripped and summed over every `test result:` line:
 
-| chunk | M42 | M43 |
-|---|---|---|
-| `ws` | 178 / 0 / 0 over 26 | 178 / 0 / 0 over 26 |
-| `box` | 320 / 0 / 0 over 41 | 322 / 0 / 0 over 41 |
-| `bins` | 17 / 0 / 0 over 1 | 32 / 0 / 0 over 1 |
-| `e2e` (76 logs) | 232 / 0 / 9 over 74 | 266 / 0 / 9 over 76 |
-| **total** | **747 / 0 / 9 over 142** | **798 / 0 / 9 over 144** |
+| chunk | M42 | M43 at `b0b4492` | M43 with the fix wave |
+|---|---|---|---|
+| `ws` | 178 / 0 / 0 over 26 | 178 / 0 / 0 over 26 | 178 / 0 / 0 over 26 (not re-run) |
+| `box` | 320 / 0 / 0 over 41 | 322 / 0 / 0 over 41 | 322 / 0 / 0 over 41 (not re-run) |
+| `bins` | 17 / 0 / 0 over 1 | 32 / 0 / 0 over 1 | 32 / 0 / 0 over 1 (not re-run) |
+| `e2e` (76 logs) | 232 / 0 / 9 over 74 | 266 / 0 / 9 over 76 | **268** / 0 / 9 over 76 (`gdbserver_e2e` 28 and `lldb_e2e` 5 re-run) |
+| **total** | **747 / 0 / 9 over 142** | **798 / 0 / 9 over 144** | **800 / 0 / 9 over 144** |
 
 The skip check found nothing: no log carries a `SKIPPED` line (`grep -a SKIPPED` over every gate
 log), so `jq`, CPython and lldb all ran. The only log lines matching `skip` in any case are four test
-names. No log carries a `warning` line, and clippy finished clean.
+names. No log carries a `warning` line, and clippy finished clean. (The fix wave measured that a
+passing test's `eprintln!` never reaches its log, so this grep could not have seen a skip; see the
+last section.)
 
 **Reconciled against M42's 747 / 0 / 9 over 142, file-by-file rather than by sum.**
-`git diff c652cf1 -- crates` adds **51** lines matching `^\+[[:space:]]*#\[test\]`, removes none,
-and touches no `#[ignore]` line:
+`git diff c652cf1 -- crates` adds **53** lines matching `^\+[[:space:]]*#\[test\]` (51 at
+`b0b4492`, and the fix wave's 2), removes none, and touches no `#[ignore]` line:
 
 | file | M42 | M43 | delta |
 |---|---|---|---|
 | `crates/retrace-box/src/excl.rs` | 26 | 28 | **+2**: `classify_retire` on both ISV values, and its disagreement in both directions (T1) |
 | `crates/retrace/src/debug.rs` | 17 | 20 | **+3**: each motion's `Halt`, and `recover` after a tampered trace's mid-scan divergence (T3); `step_thread` on a watched store (T4) |
 | `crates/retrace/src/rsp.rs` | — | 12 | **+12**, new module: 7 (T2), then checksum vectors, decoder resync and the register pin (T2 fix round); every stop kind's keys (T3) and the terminal mapping (T3 fix round) |
-| `crates/retrace/tests/gdbserver_e2e.rs` | — | 26 | **+26**, new binary: 7 + 3 (T2 and its fix round), 7 + 1 (T3 and T3-a), 5 + 1 + 2 (T4, the R7 pinning row, its fix round) |
+| `crates/retrace/tests/gdbserver_e2e.rs` | — | 28 | **+28**, new binary: 7 + 3 (T2 and its fix round), 7 + 1 (T3 and T3-a), 5 + 1 + 2 (T4, the R7 pinning row, its fix round), and 2 (the final fix wave) |
 | `crates/retrace/tests/lldb_e2e.rs` | — | 5 | **+5**, new binary: 3 + the R7 row (T5), and T5-b's reverse step onto another thread's trap |
 | `crates/retrace/tests/llsc_e2e.rs` | 47 | 50 | **+3**: the `llscedge.s` recording, the base-aliasing step, and the read-only store-exclusive's crash (T1) |
 | every other `.rs` under `crates/` | unchanged | unchanged | 0: the other changed files (`retrace-box/src/lib.rs`, `retrace-core/src/lib.rs`, `retrace-guest/src/lib.rs`, `gdbserver.rs`, `main.rs`, `util/mod.rs`, `util/rsp.rs`) carry the same `#[test]` count as at `c652cf1` |
 
-The tree holds **805** `#[test]` attributes by `git grep -E '^[[:space:]]*#\[test\]'` over `crates/`
-(754 at `c652cf1` by the same pattern), so 754 + 51 = 805.
+The tree holds **807** `#[test]` attributes by `git grep -E '^[[:space:]]*#\[test\]'` over `crates/`
+(754 at `c652cf1` by the same pattern), so 754 + 53 = 807.
 
 **The spec's §9 estimate**, ≈ 791 / 0 / 9 over 144, came before the plan's per-task counts.
 Ruling P4 superseded it with the plan's figure, and the ledger's paper prediction then moved as
 each task's count landed. §9's binary count was right. Its per-task deltas summed to +44, and the
-source count is +51:
+source count is +53:
 - T1 is +5, as counted.
 - T2 is +20 against ~15: the fix round added three unit tests and three wire rows.
 - T3 is +12 against ~13.
 - T4 is +9 against ~8, with the R7 pinning row and the two review rows.
 - T5 is +5 against ~3, with the R7 row and T5-b's row.
+- The final fix wave is +2, which §9 did not foresee.
 
-+0 + 5 − 1 + 1 + 2 = **+7**.
+The per-task differences from §9's estimate are +0, +5, −1, +1 and +2, which sum to **+7**:
+44 + 7 = 51 at the close, and the fix wave's +2 makes **53**.
 
 **The invariants.** `crates/retrace-trace` has no diff. `verify_thread` has **7** sites. No
 dispatch arm changed: `retrace-core/src/lib.rs`'s diff is `ThreadCtx` and `EXE_BASE` re-exported and
@@ -12829,7 +12848,8 @@ dispatch arm changed: `retrace-core/src/lib.rs`'s diff is `ThreadCtx` and `EXE_B
 
 - **R7 as designed looped lldb.** A blocked step that reported another thread's breakpoint drew
   **307,016 × `vCont;s:1` in 60 s**, so the fallback was taken: nothing is armed while the step waits
-  (T4-a).
+  (T4-a). That includes the step lldb itself takes off a breakpoint on a blocking `svc` before a
+  forward `process continue` (t0 L3; the final review's correction).
 - **The plan's rule-1 refusal looped lldb too.** Named on the running thread it drew **80,103 ×
   `vCont;s:2` in 60 s**. It is named on the stepped thread now, which is L7's measured-safe form
   (T4-b).
@@ -12878,7 +12898,9 @@ Execution:
 * **T3-b** — spec R4 amended: cap at 6.
 * **T3-c** — parked: the `Refused` and dead paths have no fixture, `C<sig>;<addr>` ignores its
   address, and a non-abort crash's description carries no symbol.
-* **T4-a** — R7 measured, fallback taken.
+* **T4-a** — R7 measured, fallback taken. Its cost was stated as the hits during one blocked step
+  the user asks for. It is wider: lldb's own step-off inside a forward `process continue` from a
+  breakpoint on a blocking `svc` is such a step (Task 4 above, corrected at the final review).
 * **T4-b** — rule 1 named on the stepped thread, the implementer's fix of a plan defect.
 * **T4-c** — a terminal reached during a blocked step goes to the README's Known limits.
 * **T5-a** — the non-running-thread breakpoint stall goes to Known limits and spec §7, with a
@@ -12897,20 +12919,107 @@ Execution:
   each of which records once per process.
 * **T5-a's successor.** A step of a non-running thread could run until that thread is scheduled, as
   a blocked step already does. That would retire the stall.
+* **Arm the user's hits during a blocked step** (final review Important 2, Ruling F-3). On a hit by
+  another thread, end the step with a `reason:exception` stop on the stepped thread that names the
+  other thread's hit: L7's measured-safe form, and the other thread's row would then show where it
+  stopped. Unmeasured. It would retire the silent skip in lldb's own step-off inside `continue`.
+* **End a step at the stepped thread's own exit** (Minor 1, F-3): if `t` has exited after the
+  crossing, stop at that boundary with a non-`trace` stop instead of running to the end.
+* **An lldb row for `thread step-out`, `finish` and `next` over a call** (F-3). t0 L5 measured the
+  one transient `Z0` each inserts, against t0's stub; no test drives them against the server.
+* **A `bt`-depth probe on an arm64e guest**, with and without `addressing_bits:47` in `qHostInfo`
+  (F-3). Only frame #0 is measured, on `crashy`; a PAC-signed saved LR may stop lldb's unwinder.
+* **A `disarm-rsi` monitor command for a failed `rsi`** (Ruling F-2: parked). If `arm-rsi` succeeds
+  and `ContinueInDirection` fails, the server stays armed, and the next `process continue -R` is one
+  instruction back. Rare, since the server never sends the plain-signal stops that make a reverse
+  resume fail (L4d).
 * **Spec §7's list**, each on the README's Known limits: no interrupt during a motion; no read or
   access watchpoints; no symbols for dyld or the shared cache; no expression that runs code; no step
-  of a non-running thread; other threads' hits unreported during a blocked step; at most 6
-  breakpoints and 4 watchpoints, and the step-over runaway with all 6 the user's; a reverse step
-  only through `rsi`, with lldb's sticky direction; the CLI's `where` phase.
+  of a non-running thread; other threads' hits unreported during a blocked step, lldb's own step-off
+  from a breakpoint on a blocking `svc` included; a step over the stepped thread's own exit; at
+  most 6 breakpoints and 4 watchpoints, and the step-over runaway with all 6 the user's; a reverse
+  step only through `rsi`, with lldb's sticky direction; the CLI's `where` phase.
 * **T4-c**: a terminal reached during a blocked step shows as rule 1's refusal. That is inferred,
   not measured, since no fixture has the shape.
 * **Parked minors**: a NAK resends only the last packet of a multi-packet reply (T2-b); the
   `Refused` and dead-server paths have no fixture, `C<sig>;<addr>` ignores its address, and a
   non-abort crash's `description:` carries no symbol (T3-c); `KillOnDrop` kills and waits on an
-  already-reaped lldb, harmless (Task 5 re-review).
+  already-reaped lldb, harmless (Task 5 re-review); §3d's trap that returns to itself has no
+  fixture (final review Minor 2).
 * **M41's and M42's other owed items**, none in the seam's path: M41's F2, the CLI's
   crashing-watched-store exit 5, the blocking-boundary parity test, the Sys-park zero-step test, and
   `where`'s missing phase; M42's `wfe`, the asynchronous host-interrupt residual, inference's
   unmeasured assumptions and 16-instruction reach, the 16-step prologue's drop, byte, halfword and
   `ldaxp` retires, and its deferred review minors; M40's `crc32` and `reverse-stepi` cost. M41's
   `?`-armed session is **paid** (§3b).
+
+### The final review and its fix wave
+
+The whole-branch review (`c652cf1..a1618d6`) ruled "ready to merge with fixes": no Critical issue,
+three Important, seven Minor, and no code defect. The controller ruled on scope: F-1 took Important
+1–3 and Minors 1–4, 6 and 7, Minor 1 as docs only; F-2 parked Minor 5 (`disarm-rsi`); F-3 added
+the successors above to the owed list. The one fix wave, `338fe9b` for the tests and its docs
+commit, did this:
+
+* **Important 1, no test read a non-running thread's registers.** Every register assertion was on
+  the current thread, so a server that served the running thread's registers for every tid would
+  have passed all 26 rows and all 5 lldb tests. The new row
+  `every_thread_is_served_its_own_registers_at_a_blocked_stop` stops `threadrust` at its blocked
+  window, measured at `(260, 312)`: tid 1 runs, at the `svc` (`0x1804afaf4`), and tid 2 is parked,
+  never started, at libpthread's `thread_start` (`0x1804ecc14`). For every tid in `qfThreadInfo` it
+  checks `p20;thread:N;` and `p1f;thread:N;`, the `?` reply's `threads:`/`thread-pcs:` in order, and
+  `Hg` + `g`'s pc and sp against `ReplaySession::dbg_regs_of` in a fresh session at the server's own
+  `where`, opened and dropped between two server runs. A non-current tid's `qThreadStopInfo` is
+  `T00thread:N;` with no `reason:`. It asserts a non-current tid exists and that its pc is not the
+  running thread's. **Control:** `reg_thread` ignoring `;thread:N;` went **RED** at `tid 2's pc`
+  (the running thread's `0x1804afaf4` served for tid 2's `0x1804ecc14`).
+* **Session B's refused pc.** `lldb_e2e`'s rule-1 session now also asserts the refused thread's pc
+  against `dbg_regs_of` at the refusal's own position, window n's trap. That position is the right
+  oracle, since a refusal moves nothing. The existing `b`, at `(n + 1, 0)`, measured equal
+  (`0x1804ecc14`), but agrees only because the switch resumes at the saved pc. **Control:** `stop()`
+  building its registers from the running thread while naming the refused one went **RED** at that
+  assertion alone. `END`, exit 0, the tid and the text all held, and lldb showed `0x1804afaf4` for
+  tid 2. Row A stayed green under that mutation (measured), because `?`, `p`, `g` and
+  `qThreadStopInfo` do not go through `stop()` for a non-current thread, so this assertion is its
+  only witness.
+* **Minor 2, a step whose crossing reports a syscall write.** The new row
+  `a_step_whose_crossing_writes_a_watched_cell_answers_watch_and_reverse_finds_the_write`: `Z2` on
+  crashy's `&g.st`, a breakpoint to reach `fstat`'s `svc` (landmark found in the recording by
+  `args[1] == &g.st`), then `s` must answer `watch:` with the value an in-process seek reads after
+  the syscall, at `svc + 4` and `(n + 1, 0, Bp)`, and `bc` must find the same write at the trap with
+  the old value back. **Control:** the crossing's `arm_watchpoints` deleted from `step_thread` went
+  **RED** at the `watch:` assertion (a plain `reason:trace` at `svc + 4`), while the existing crashy
+  `c` row stayed green, so the new row is that arm's only witness. §6's "every bullet of §3d" is
+  otherwise met except for one sub-case: the trap that returns to itself (`debug.rs`'s "the step
+  crossed a trap that returns to itself") has **no fixture**.
+* **Minor 3, `lldb_e2e` ran the `lldb` on `PATH`.** It runs `/usr/bin/lldb` now, spec §4's, and
+  its log names it once: `lldb_e2e runs /usr/bin/lldb: lldb-2100.0.17.203`. **Measured:** printed
+  with `eprintln!`, that line never reached a passing run's log. libtest captures `eprintln!` in a
+  test that passes, and a skip passes, so no `eprintln!` SKIPPED line in the tree has ever reached a
+  gate log unless its test failed. That includes the close's skip check above, which therefore
+  could not have seen a skip. `lldb_e2e` now writes its version and SKIPPED lines to the process's
+  stderr directly (`announce`). **Control:** with `LLDB` pointed at a missing file, the log carried
+  all five SKIPPED lines and the "did not run" line, and the run passed 5 in 0.00 s. The other
+  files' SKIPPED lines (`jq_e2e`, `jq_file_e2e`, `cpython_e2e`, `cpython_crash_e2e`,
+  `symbolops_e2e`, `apple_walls_e2e`, `sysbin_e2e`, `fallthrough_e2e`) are still `eprintln!`.
+* **Docs.** Important 2 names lldb's step-off under R7 (README Known limits, spec §7, and T4-a's
+  costing corrected above). Important 3 fixes two stale README lines: `TRACE_MAGIC` also moved at
+  M38, and "no unwinder" is the script debugger's alone, with frame #0 the only measured lldb
+  frame. Minor 1 is a Known-limits and §7 line: a step over the stepped thread's own exit runs to
+  the end. Minor 4 rewords T5-a: lldb decides by pc at resume, and the realistic triggers are a
+  breakpoint on `thread_start` or on `svc + 4`. Minor 6 is the gate's commit wording, and Minor 7
+  the sums and the rewrap above.
+
+**Re-verified on `338fe9b`**, each command's exit code captured in the same shell call, with logs
+in the ledger's `final-fix-*.log`:
+
+| command | exit | result |
+|---|---|---|
+| `cargo test -p retrace --test gdbserver_e2e --no-fail-fast -- --test-threads=1` | 0 | **28** (26 + 2) |
+| `cargo test -p retrace --test lldb_e2e --no-fail-fast -- --test-threads=1` | 0 | 5, the version line once, no SKIPPED line |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 | clean |
+
+No other chunk was re-run, because no `src/` changed: `git diff a1618d6 338fe9b -- crates` touches
+only `gdbserver_e2e.rs`, `lldb_e2e.rs` and `util/rsp.rs`. It adds two `#[test]` lines and removes
+none, touches no `#[ignore]`, and removes no assertion. So the gate is 798 + 2 = **800 / 0 / 9 over
+144**. The tree holds 807 `#[test]` attributes.

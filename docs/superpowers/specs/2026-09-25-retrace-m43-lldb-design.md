@@ -494,15 +494,29 @@ a ledger Ruling and a re-scope, not a halt.
 - **Expression evaluation that runs code.** It is refused by construction (`P`/`G`). Constant
   expressions still evaluate (L8).
 - **Stepping a thread that is not the running one** (§3d, rule 1).
-- **A breakpoint added while stopped, at a thread's pc when that thread is not the running one**
-  (Ruling T5-a, measured by Task 5's probe, `t5-probe-rsi-switch.log`): lldb steps that thread off
-  the breakpoint before it resumes, rule 1 refuses the step, and every forward `continue` stops in
-  place with the refusal. No loop. The workaround is to disable the breakpoint until its thread
-  runs. A successor could let such a step run until the thread is scheduled, as a blocked step
-  already does.
+- **A breakpoint at a thread's pc when that thread is not the running one** (Ruling T5-a, measured
+  by Task 5's probe; the evidence is in `docs/status-log.md`, "M43-lldb"): lldb decides by pc, at
+  each resume, whether to step a thread off a breakpoint first, rule 1 refuses the step, and every
+  forward `continue` stops in place with the refusal. No loop. The measured trigger is a breakpoint
+  added while stopped; one that already existed is unmeasured. An unstarted thread's saved pc is
+  libpthread's `thread_start`, not the user's thread function, so the realistic triggers are an
+  address breakpoint on `thread_start` or on a blocked thread's resume pc (`svc + 4`). The
+  workaround is to disable the breakpoint until its thread runs. A successor could let such a step
+  run until the thread is scheduled, as a blocked step already does.
 - **A breakpoint or watchpoint hit by another thread while a step waits for its blocked thread**
   (§3d, R7's fallback, measured): the step ends on the stepped thread, and the other thread's hit
-  goes unreported.
+  goes unreported. lldb takes such a step on its own: before a forward resume it steps a thread off
+  a breakpoint at its pc (L3: `z0`, `vCont;s:1`, `Z0`, `c`, measured from a breakpoint stop and for
+  an ignore count). So a forward `process continue` from a breakpoint on an `svc` that blocks
+  begins with a blocked step, as does every ignored-count hit of such a breakpoint and, by the same
+  rule though not separately measured, every false-condition one. Other threads' hits during that
+  wait are skipped with no report; a reverse continue still finds them. The workaround is not to
+  break on the `svc` itself, but on the syscall stub's entry. This composition is read from the
+  code, not measured against the server.
+- **A step over the stepped thread's own exit** (the `svc` of `__bsdthread_terminate`, final review
+  Minor 1, docs only by Ruling F-1): the run until that thread runs again can never find it, so it
+  runs to the end of the recording with nothing armed. What lldb does next is unmeasured. Read from
+  the code; no fixture has the shape.
 - **More than 6 breakpoints or 4 watchpoints at once,** and a step-over/out/in (or `ni` over a
   call) while all 6 breakpoints are the user's: its transient breakpoint is refused and lldb runs
   on to the next stop (L5).
@@ -570,11 +584,21 @@ per-task counts.
 
 ## 10. Outcome
 
-*(Filled at the close, 2026-09-25, on `b0b4492`.)* Gate: **798 passed / 0 failed / 9 ignored across 144 test binaries**, all 80 chunks exit 0, reconciled file by file
-against M42's 747 / 0 / 9 over 142: +51 `#[test]` attributes over six files (`excl.rs` +2,
-`debug.rs` +3, `rsp.rs` +12, `gdbserver_e2e` +26, `lldb_e2e` +5, `llsc_e2e` +3), no `#[ignore]`
+*(Filled at the close, 2026-09-25, on `b0b4492`, and moved by the final review's fix wave.)* Gate:
+**800 passed / 0 failed / 9 ignored across 144 test binaries**. The full chunked gate measured
+**798** on `b0b4492`, the last code commit before the fix wave, with all 80 chunks exiting 0. The
+fix wave added two `gdbserver_e2e` rows and changed no `src/`, so it re-ran `gdbserver_e2e` (28),
+`lldb_e2e` (5) and clippy, and did not re-run any other chunk: 798 + 2 = 800. Reconciled file by
+file against M42's 747 / 0 / 9 over 142: +53 `#[test]` attributes over six files (`excl.rs` +2,
+`debug.rs` +3, `rsp.rs` +12, `gdbserver_e2e` +28, `lldb_e2e` +5, `llsc_e2e` +3), no `#[ignore]`
 added or removed, and two new test binaries. `crates/retrace-trace` has no diff, so `TRACE_MAGIC`
 did not move, and no existing debug test changed an assertion.
+
+§6's "covers … every bullet of §3d" is met except for one sub-case. The trap that returns to itself
+(rule 3's `Event` arm, refused as "the step crossed a trap that returns to itself") has no fixture
+and no row. The other sub-case the final review found uncovered, a step whose crossing reports a
+syscall write (rule 3's `WatchSyscall`), is pinned since the fix wave by `gdbserver_e2e`'s
+`a_step_whose_crossing_writes_a_watched_cell_answers_watch_and_reverse_finds_the_write`.
 
 **Shipped:** `retrace gdbserver <trace> [--port <n>] [--exe <path>]` (`rsp.rs`, `gdbserver.rs`),
 `Exec`'s `Halt` and `recover` (§3b, which pays M41's `?`-exit item), §3c's re-parks, §3d's
