@@ -12524,7 +12524,7 @@ this close: the spec with its t0 companion (`48073b4`) and its revision (`73a407
 (`8c882b1`), two spec amendments made in execution (`8c47122`, `4a71c0c`), and twelve task commits
 (`917f4eb` + `423ed82`; `572c307` + `8e57429`; `6841c95` + `fe369a3`; `931a1be` + `dfca08c` +
 `db5fb3f`; `38b5d77` + `ddb43eb` + `b0b4492`), five of them review fix rounds. Gate:
-GATE_TOTALS_TBD.
+**798 passed / 0 failed / 9 ignored across 144 test binaries**.
 
 ### What t0 measured
 
@@ -12764,9 +12764,11 @@ crates/retrace-core/src/lib.rs` is **7**.
 
 ### The gate
 
-**GATE_TOTALS_TBD.** It ran from the worktree on `b0b4492` as one background script (`gate.sh`
+**798 passed / 0 failed / 9 ignored across 144 test binaries.** It ran from the worktree on `b0b4492` as one background script (`gate.sh`
 in the ledger's directory), chunked as CLAUDE.md requires. Every test chunk ran `--no-fail-fast`,
-and each chunk's exit code went to `gate-summary.txt` before any pipe. GATE_TIME_TBD.
+and each chunk's exit code went to `gate-summary.txt` before any pipe. All 80 chunks exited 0.
+Wall-clock was 33 min 27 s (15:22:00 to 15:55:27), with the docs agent and the final review, both
+read-only on the code, running alongside.
 
 | chunk | invocation | what M43 changed in it, by source |
 |---|---|---|
@@ -12776,7 +12778,19 @@ and each chunk's exit code went to `gate-summary.txt` before any pipe. GATE_TIME
 | `e2e` | `cargo test -p retrace --test <name> --no-fail-fast -- --test-threads=1`, once per file of `ls crates/retrace/tests/*.rs` | 74 → **76** targets: `gdbserver_e2e` 26 and `lldb_e2e` 5, both new binaries, and `llsc_e2e` +3 |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | — |
 
-Results, chunk by chunk, and the skip check (`grep -a SKIPPED` over the e2e logs): GATE_TOTALS_TBD.
+Results, chunk by chunk, ANSI stripped and summed over every `test result:` line:
+
+| chunk | M42 | M43 |
+|---|---|---|
+| `ws` | 178 / 0 / 0 over 26 | 178 / 0 / 0 over 26 |
+| `box` | 320 / 0 / 0 over 41 | 322 / 0 / 0 over 41 |
+| `bins` | 17 / 0 / 0 over 1 | 32 / 0 / 0 over 1 |
+| `e2e` (76 logs) | 232 / 0 / 9 over 74 | 266 / 0 / 9 over 76 |
+| **total** | **747 / 0 / 9 over 142** | **798 / 0 / 9 over 144** |
+
+The skip check found nothing: no log carries a `SKIPPED` line (`grep -a SKIPPED` over every gate
+log), so `jq`, CPython and lldb all ran. The only log lines matching `skip` in any case are four test
+names. No log carries a `warning` line, and clippy finished clean.
 
 **Reconciled against M42's 747 / 0 / 9 over 142, file-by-file rather than by sum.**
 `git diff c652cf1 -- crates` adds **51** lines matching `^\+[[:space:]]*#\[test\]`, removes none,

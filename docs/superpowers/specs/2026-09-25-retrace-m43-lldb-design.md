@@ -570,7 +570,7 @@ per-task counts.
 
 ## 10. Outcome
 
-*(Filled at the close, 2026-09-25, on `b0b4492`.)* Gate: GATE_TOTALS_TBD, reconciled file by file
+*(Filled at the close, 2026-09-25, on `b0b4492`.)* Gate: **798 passed / 0 failed / 9 ignored across 144 test binaries**, all 80 chunks exit 0, reconciled file by file
 against M42's 747 / 0 / 9 over 142: +51 `#[test]` attributes over six files (`excl.rs` +2,
 `debug.rs` +3, `rsp.rs` +12, `gdbserver_e2e` +26, `lldb_e2e` +5, `llsc_e2e` +3), no `#[ignore]`
 added or removed, and two new test binaries. `crates/retrace-trace` has no diff, so `TRACE_MAGIC`
