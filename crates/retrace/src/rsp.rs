@@ -158,8 +158,7 @@ pub(crate) fn xfer_chunk(doc: &[u8], off: usize, len: usize) -> String {
     format!("{tag}{}", String::from_utf8_lossy(&doc[start..end]))
 }
 
-/// §3c: what kind of stop a reply reports. Task 4 adds the step's `trace`, with its `signal()` and
-/// `keys()` arms.
+/// §3c: what kind of stop a reply reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StopKind {
     /// `replaylog:begin` with a description: lldb's reversible "history boundary" stop (t0 L4f).
@@ -170,6 +169,8 @@ pub(crate) enum StopKind {
     Breakpoint,
     /// `watch:<addr>`: lldb then reads memory NOW, which §3c's positions make right (t0 L4c).
     Watch(u64),
+    /// `reason:trace`: a step, either way, that moved the pc (§3d, §3e; t0 L4b).
+    Trace,
     /// `replaylog:end` with a description: the recording's end, reversible (t0 L4e).
     HistoryEnd(String),
     /// A Mach `EXC_BAD_ACCESS` (`metype:1`): lldb's native crash display, reversible (t0 L4d).
@@ -181,7 +182,8 @@ pub(crate) enum StopKind {
 impl StopKind {
     fn signal(&self) -> u8 {
         match self {
-            StopKind::HistoryBegin(_) | StopKind::Breakpoint | StopKind::Watch(_) | StopKind::HistoryEnd(_) => 5,
+            StopKind::HistoryBegin(_) | StopKind::Breakpoint | StopKind::Watch(_) | StopKind::Trace
+                | StopKind::HistoryEnd(_) => 5,
             StopKind::None => 0,
             StopKind::MachBadAccess { .. } => 0x0b,
             StopKind::Exception { signal, .. } => *signal,
@@ -193,6 +195,7 @@ impl StopKind {
             StopKind::None => String::new(),
             StopKind::Breakpoint => "reason:breakpoint;".into(),
             StopKind::Watch(a) => format!("watch:{a:x};"),
+            StopKind::Trace => "reason:trace;".into(),
             StopKind::HistoryEnd(d) => format!("replaylog:end;description:{};", hex(d.as_bytes())),
             StopKind::MachBadAccess { code, far } => format!("metype:1;mecount:2;medata:{code:x};medata:{far:x};"),
             StopKind::Exception { text, .. } => format!("reason:exception;description:{};", hex(text.as_bytes())),
@@ -420,12 +423,14 @@ mod tests {
     }
 
     #[test] fn every_stop_kind_carries_its_measured_signal_and_keys() {
-        // The key shapes are t0's (L4a, L4c, L4d, L4e); lldb parses them, so they are pinned byte
-        // for byte.
+        // The key shapes are t0's (L4a, L4b, L4c, L4d, L4e); lldb parses them, so they are pinned
+        // byte for byte.
         let ctx = ThreadCtx::zeroed();
         let reply = |k: StopKind| stop_reply(1, &ctx, &[(1, 0)], &k);
         let bp = reply(StopKind::Breakpoint);
         assert!(bp.starts_with("T05") && bp.ends_with("reason:breakpoint;"), "{bp}");
+        let tr = reply(StopKind::Trace);
+        assert!(tr.starts_with("T05") && tr.ends_with("reason:trace;"), "{tr}");
         let w = reply(StopKind::Watch(0x1_0000_4140));
         assert!(w.starts_with("T05") && w.ends_with("watch:100004140;"), "{w}");
         let end = reply(StopKind::HistoryEnd("exited (code 0)".into()));
