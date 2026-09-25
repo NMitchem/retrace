@@ -200,8 +200,10 @@ also must not fail at a window end: `si` on an `svc` is ordinary. `cmd_stepi` er
 server steps with a new `Exec::step_thread(t) -> Result<Halt, String>`:
 
 1. **Wrong thread:** `t` is not the current thread. Reply the non-moving
-   `reason:exception;description:<"cannot step thread T: only the running thread (C) can step">`,
-   L7's measured-safe form. A recording cannot run a thread the recording did not run.
+   `reason:exception;description:<"cannot step thread T: only the running thread (C) can step">`
+   **on thread `t`**, the stepped thread: L7's measured-safe form. Task 4 measured the same reply
+   on the running thread looping lldb (80,103 × `vCont;s:2` in 60 s), which is L7's
+   `stepswitch` loop. A recording cannot run a thread the recording did not run.
 2. **At a terminal:** the terminal again. This is rule 3's own crossing: the terminal instruction
    never retires, and `advance()` re-reaches `Exited`.
 3. **Otherwise, one instruction with the watches armed** (`step_armed`, as `cmd_continue`'s
@@ -227,9 +229,12 @@ another thread in the meantime is reported as that thread's own stop, all-stop s
 `cmd_continue` with `until_thread: None` is today's `continue` exactly, and the existing tests
 pin that.
 
-lldb's reaction to a step that ends on another thread's breakpoint is **unmeasured** (L7 measured
-only a `trace` on the other thread, which loops). Task 5 measures it first on a threaded
-fixture. If lldb loops, the fallback is Ruling R7's.
+lldb's reaction to a step that ends on another thread's breakpoint was **unmeasured** when this
+section was written (L7 measured only a `trace` on the other thread, which loops). **Task 4
+measured it: lldb loops** (307,016 × `vCont;s:1` in 60 s, on `threadrust` with a breakpoint where
+the other thread resumes). So R7's fallback holds: the run until `t` resumes arms **nothing**, and
+a hit by another thread during one blocked step is not reported. With the fallback, the same lldb
+session shows `instruction step into` on `t` at its `svc + 4` and sends one `vCont;s`.
 
 ### 3e. Reverse: `bc`, `bs`, and `rsi`
 
@@ -489,6 +494,9 @@ a ledger Ruling and a re-scope, not a halt.
 - **Expression evaluation that runs code.** It is refused by construction (`P`/`G`). Constant
   expressions still evaluate (L8).
 - **Stepping a thread that is not the running one** (§3d, rule 1).
+- **A breakpoint or watchpoint hit by another thread while a step waits for its blocked thread**
+  (§3d, R7's fallback, measured): the step ends on the stepped thread, and the other thread's hit
+  goes unreported.
 - **More than 6 breakpoints or 4 watchpoints at once,** and a step-over/out/in (or `ni` over a
   call) while all 6 breakpoints are the user's: its transient breakpoint is refused and lldb runs
   on to the next stop (L5).
@@ -526,9 +534,10 @@ a ledger Ruling and a re-scope, not a halt.
   continue, and waits for it.
 - **R7 — a step that blocks runs other threads with the user's hits armed** (§3d), and reports a
   hit on another thread as that thread's stop. This is all-stop semantics, and it never skips a hit
-  silently. **Fallback,** if Task 5 measures lldb looping on it: run with nothing armed until `t`
-  resumes, and document that hits by other threads during one blocked step are not reported. Cost
-  if wrong: one of the two, chosen by measurement.
+  silently. **Fallback,** if lldb loops on it: run with nothing armed until `t` resumes, and
+  document that hits by other threads during one blocked step are not reported. Cost if wrong: one
+  of the two, chosen by measurement. **Measured by Task 4: lldb loops, so the fallback is taken**
+  (§3d).
 - **R8 — no `_M` side allocation.** Refusing `P` already stops expression evaluation from resuming
   (L8). A debugger-side allocation map would quiet lldb's refused-write storm, at the price of
   choosing a VA range the guest provably never maps. Cost if wrong: about 70 refused packets per
