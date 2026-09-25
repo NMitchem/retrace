@@ -232,14 +232,28 @@ pub(crate) fn image_json(hdr: &[u8], load_address: u64, path: &str) -> Result<St
     let seg_json: Vec<String> = segs.iter().map(|s| {
         let vmaddr = if s.name == "__PAGEZERO" { s.vmaddr } else { s.vmaddr.wrapping_add(slide) };
         format!(r#"{{"name":"{}","vmaddr":{vmaddr},"vmsize":{},"fileoff":{},"filesize":{},"maxprot":{}}}"#,
-                s.name, s.vmsize, s.fileoff, s.filesize, s.maxprot)
+                json_str(&s.name), s.vmsize, s.fileoff, s.filesize, s.maxprot)
     }).collect();
-    let path = path.replace('\\', "\\\\").replace('"', "\\\"");
     Ok(format!(concat!(r#"{{"images":[{{"load_address":{},"mod_date":0,"pathname":"{}","uuid":"{}","#,
                        r#""min_version_os_name":"macosx","min_version_os_sdk":"26.0","#,
                        r#""mach_header":{{"magic":{},"cputype":{},"cpusubtype":{},"filetype":{},"flags":{}}},"#,
                        r#""segments":[{}]}}]}}"#),
-               load_address, path, uuid, magic, cputype as i32, cpusub, ftype, flags, seg_json.join(",")))
+               load_address, json_str(path), uuid, magic, cputype as i32, cpusub, ftype, flags, seg_json.join(",")))
+}
+
+/// The inside of a JSON string: `\`, `"` and every control character below 0x20 escaped. The path
+/// is the user's and a segment name is 16 bytes of the recording, so neither is trusted to be tame.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -278,6 +292,23 @@ mod tests {
         assert_eq!(d.next(), Some(Frame::Packet(tricky.into())));
     }
 
+    #[test] fn the_checksum_is_the_byte_sum_of_the_escaped_body() {
+        assert_eq!(encode(b"OK"), b"$OK#9a", "0x4f + 0x4b");
+        assert_eq!(encode(b"}"), b"$}]#da", "`}}` goes out as `}}` 0x5d, and 0x7d + 0x5d = 0xda");
+    }
+
+    #[test] fn garbage_before_a_packet_is_skipped_and_a_split_checksum_waits_for_its_second_digit() {
+        let mut d = Decoder::default();
+        d.push(b"xyz\r\n$g#67");
+        assert_eq!(d.next(), Some(Frame::Packet("g".into())));
+        assert_eq!(d.next(), None);
+        d.push(b"$g#6");
+        assert_eq!(d.next(), None, "one checksum digit is not a frame");
+        d.push(b"7");
+        assert_eq!(d.next(), Some(Frame::Packet("g".into())));
+        assert_eq!(d.next(), None);
+    }
+
     #[test] fn hex_round_trips_and_rejects_odd_input() {
         assert_eq!(hex(&[0x00, 0xab, 0xff]), "00abff");
         assert_eq!(unhex("00abff"), Some(vec![0x00, 0xab, 0xff]));
@@ -304,6 +335,39 @@ mod tests {
         assert_eq!(reg_bytes(&ctx, NREGS), None);
     }
 
+    /// Every register distinct, so a swapped, shifted or truncated slot cannot pass. The e2e row
+    /// compares against a real session, but at (1, 0) x0–x30 are all zero there.
+    #[test] fn every_register_lands_at_its_target_xml_offset_and_the_stop_reply_expedites_the_same_bytes() {
+        let mut ctx = ThreadCtx::zeroed();
+        for (i, x) in ctx.regs.x.iter_mut().enumerate() { *x = 0x1000 + i as u64; }
+        ctx.regs.sp_el0 = 0x0000_7ff0_0000_1f00;
+        ctx.regs.pc = 0x0000_0001_0000_4a40;
+        ctx.regs.cpsr = 0xf000_03c5; // N Z C V set: the top of the 32-bit word must survive `as u32`
+        for (i, v) in ctx.fp.iter_mut().enumerate() {
+            // Distinct halves, so a swapped half fails too.
+            *v = ((0xa0a0_0000_0000_0100u128 + i as u128) << 64) | (0x0b0b_0000_0000_0200u128 + i as u128);
+        }
+        ctx.fpsr = 0x0800_009f;
+        ctx.fpcr = 0x0340_0000;
+        let g = unhex(&all_regs_hex(&ctx)).unwrap();
+        assert_eq!(g.len(), 788);
+        let at = |off: usize, n: usize| g[off..off + n].to_vec();
+        for i in 0..29 { assert_eq!(at(i * 8, 8), (0x1000 + i as u64).to_le_bytes(), "x{i}"); }
+        assert_eq!(at(232, 8), 0x101du64.to_le_bytes(), "fp (x29)");
+        assert_eq!(at(240, 8), 0x101eu64.to_le_bytes(), "lr (x30)");
+        assert_eq!(at(248, 8), 0x0000_7ff0_0000_1f00u64.to_le_bytes(), "sp");
+        assert_eq!(at(256, 8), 0x0000_0001_0000_4a40u64.to_le_bytes(), "pc");
+        assert_eq!(at(264, 4), 0xf000_03c5u32.to_le_bytes(), "cpsr");
+        for (v, want) in ctx.fp.iter().enumerate() { assert_eq!(at(268 + 16 * v, 16), want.to_le_bytes(), "v{v}"); }
+        assert_eq!(at(780, 4), 0x0800_009fu32.to_le_bytes(), "fpsr");
+        assert_eq!(at(784, 4), 0x0340_0000u32.to_le_bytes(), "fpcr");
+        let s = stop_reply(1, &ctx, &[(1, ctx.regs.pc)], &StopKind::None);
+        for r in 29..=33usize {
+            let want = format!("{r:02x}:{};", hex(&reg_bytes(&ctx, r).unwrap()));
+            assert!(s.contains(&want), "{want} in {s}");
+        }
+    }
+
     #[test] fn a_start_stop_names_its_thread_every_thread_and_the_expedited_registers() {
         let mut ctx = ThreadCtx::zeroed();
         ctx.regs.pc = 0x1_0000_0380;
@@ -323,5 +387,7 @@ mod tests {
         let uuid = j.split(r#""uuid":""#).nth(1).and_then(|r| r.split('"').next()).unwrap();
         assert_eq!(uuid.len(), 36, "{uuid}");
         assert!(image_json(&file[..16], 0x1_0000_0000, "x").is_err(), "a truncated header is an Err, not a panic");
+        let j = image_json(&file, 0x1_0000_0000, "/t/a\"b\\c\nd\u{1f}e").unwrap();
+        assert!(j.contains(r#""pathname":"/t/a\"b\\c\u000ad\u001fe""#), "control characters are escaped: {j}");
     }
 }

@@ -142,3 +142,37 @@ fn k_and_d_end_the_server_cleanly_and_so_does_a_dropped_connection() {
     assert_eq!((reply.as_str(), code), ("OK", 0));
     assert_eq!(Rsp::spawn(watchsweep(), &[]).drop_connection(), 0, "EOF ends the session (Review Focus 3)");
 }
+
+#[test]
+fn a_peer_that_resets_the_connection_ends_the_server_cleanly() {
+    // Before Ruling T2-a this exited 5, `GDBSERVER ERROR: socket: Connection reset by peer`.
+    assert_eq!(Rsp::spawn(watchsweep(), &[]).reset_connection(), 0, "an RST is the peer leaving too (§3a)");
+}
+
+#[test]
+fn a_second_connection_is_refused_while_the_first_is_served() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    let (mut child, port, err_p) = r::spawn_server(watchsweep(), &[]);
+    let _ = std::fs::remove_file(err_p);
+    let mut first = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    first.set_read_timeout(Some(std::time::Duration::from_secs(180))).unwrap();
+    first.write_all(b"$?#3f").unwrap();
+    let mut ack = [0u8; 1];
+    assert_eq!(first.read(&mut ack).unwrap(), 1, "the first connection is served, so it was accepted");
+    let second = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.kind());
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(second.err(), Some(std::io::ErrorKind::ConnectionRefused), "one connection per server (§3a)");
+}
+
+#[test]
+fn a_flag_given_last_without_its_value_is_a_usage_error() {
+    // A trace that does not exist: before the fix, `--port` last meant port 0 and the server went on
+    // to fail opening it (exit 5). A usage error is found before any file is touched.
+    for flag in ["--port", "--exe"] {
+        let out = std::process::Command::new(util::bin()).args(["gdbserver", "no-such.trace", flag])
+            .output().expect("run retrace");
+        assert_eq!(out.status.code(), Some(2), "{flag}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
