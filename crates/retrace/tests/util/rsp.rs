@@ -1,11 +1,14 @@
-//! M43: a minimal gdb-remote client for `gdbserver_e2e`. It spawns `retrace gdbserver` (the
-//! codesigned copy), learns the port from its one stderr line, and exchanges packets. The
-//! handshake uses ack mode; everything after `QStartNoAckMode` uses no-ack mode, as lldb does.
+//! M43: a minimal gdb-remote client for `gdbserver_e2e` and `lldb_e2e`. It spawns `retrace
+//! gdbserver` (the codesigned copy), learns the port from its one stderr line, and exchanges
+//! packets. The handshake uses ack mode; everything after `QStartNoAckMode` uses no-ack mode, as
+//! lldb does. It also holds the blocking-step fixture (`threadrust_block` and its two helpers),
+//! which both test files share.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 /// `stream` is an Option only so `reset_connection` can close it while the child lives on.
 pub struct Rsp { child: Child, stream: Option<TcpStream>, buf: Vec<u8> }
@@ -186,4 +189,42 @@ pub fn le_u64(h: &str) -> u64 {
     let mut a = [0u8; 8];
     a[..b.len().min(8)].copy_from_slice(&b[..b.len().min(8)]);
     u64::from_le_bytes(a)
+}
+
+/// The threadrust recording, and the first `__ulock_wait` (515) whose NEXT landmark runs another
+/// thread: a wait that really blocked. Returns (trace, landmark n of the wait, its thread).
+pub fn threadrust_block() -> (&'static Path, usize, u32) {
+    static C: OnceLock<(PathBuf, usize, u32)> = OnceLock::new();
+    let (p, n, t) = C.get_or_init(|| {
+        let (rec, tr) = super::record_dynamic(retrace_guest::THREADRUST);
+        assert_eq!(rec.code, 0, "record threadrust: {}", rec.stderr);
+        let ev = retrace_trace::Reader::open(&tr).unwrap();
+        let thread_of = |e: &retrace_trace::Event| match e {
+            retrace_trace::Event::Syscall { thread, .. } => Some(*thread), _ => None };
+        let n = (1..ev.len() - 1).find(|&i| matches!(ev[i], retrace_trace::Event::Syscall { num: 515, .. })
+            && thread_of(&ev[i + 1]).is_some() && thread_of(&ev[i + 1]) != thread_of(&ev[i]))
+            .expect("a __ulock_wait that blocked");
+        let t = thread_of(&ev[n]).unwrap();
+        (tr, n, t)
+    });
+    (p.as_path(), *n, *t)
+}
+
+/// The pc of the trap that ends window `n` (landmark n's svc): seek the window's full length.
+pub fn trap_pc(trace: &Path, n: usize) -> u64 {
+    let len = retrace_core::seek(trace, n, 0).unwrap().window_len_here().unwrap();
+    retrace_core::seek(trace, n, len).unwrap().pc()
+}
+
+/// With a breakpoint on landmark `n`'s svc, `c` until the cursor stands in window `n`, and return
+/// how many stops came first, and that stop. The svc is libsystem_kernel's, and every
+/// `__ulock_wait` runs it, so earlier waits stop there first. The count is lldb's ignore count for
+/// the same breakpoint (`lldb_e2e`).
+pub fn continue_to_window(c: &mut Rsp, n: usize) -> (usize, String) {
+    for i in 0..1000 {
+        let s = c.send("c");
+        if c.where_().starts_with(&format!("at ({n}, ")) { return (i, s); }
+        assert!(!s.contains("replaylog:end;") && !s.starts_with("T0b"), "ran past landmark {n}: {s}");
+    }
+    panic!("landmark {n} not reached in 1000 stops");
 }
