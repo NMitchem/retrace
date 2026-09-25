@@ -11,7 +11,8 @@ pub const TAG_MASK: u64 = 0x00FF_FFFF_FFFF_FFFF;
 /// How a shadow came to be set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetBy {
-    /// `step()` retired the load-exclusive (the step exit's ISS.EX, t0 M8).
+    /// `step()` retired the load-exclusive (the step exit's ISS.EX, t0 M8). Where the syndrome is
+    /// silent (ISV = 0), the pre-step decode decides (M43 §3i).
     Stepped,
     /// A native breakpoint or watchpoint stop, by spec §3d's backward scan.
     Inferred,
@@ -55,7 +56,8 @@ pub struct StxPlan {
 /// - `target` is the bytes now at the VA, None if unmapped;
 /// - `writable` says whether the stage-1 leaf grants EL0 write.
 ///
-/// Each refusal names its check, and the caller panics with it.
+/// Each refusal names its check, and the caller panics with it. The exception is a non-writable or
+/// unmapped target: `emulate_stx` steps that store natively instead (M43 §3i).
 pub fn plan_stx(ex: &Excl, st: ExclInsn, base: u64, rt_val: u64, rt2_val: u64,
                 target: Option<&[u8]>, writable: bool) -> Result<StxPlan, String> {
     let ExclInsn::Store { size, pair, rs, rt, rt2, rn } = st else {
@@ -311,6 +313,7 @@ mod tests {
         assert_eq!(classify_retire(plain_retire, None), Ok(None));
         assert_eq!(classify_retire(no_isv, Some(ld)), Ok(Some(ld)), "ISV = 0: the decode decides");
         assert_eq!(classify_retire(no_isv, None), Ok(None));
+        assert_eq!(classify_retire(0xca00_0062, None), Ok(None), "ISV = 0: EX is not read");
     }
 
     #[test]
