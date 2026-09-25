@@ -53,8 +53,10 @@ spec section a task names before starting it. The spec binds; this plan argues f
   - record each control's actual symptom in the task report.
 
   A control that stays green is a finding, reported, never papered over.
-- **Logs:** write every log to `L=/Users/noahmitchem/Documents/GitHub/retrace/.superpowers/sdd/2026-09-25-retrace-m43-lldb/`
-  (`export L=…` on its own line), named `t<N>-<what>.log`.
+- **Logs:** write every log to `L=/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m43-lldb/.superpowers/sdd/2026-09-25-retrace-m43-lldb/`
+  (`export L=…` on its own line), named `t<N>-<what>.log`. Shell state does not persist between
+  tool calls, so every command that uses `$L` starts with its own `export L=…` line. Writing the
+  absolute path instead is equally fine.
 - **Style:** match the surrounding code's comment density and idiom. Comments cite the spec as
   `M43 §3x`, and t0's measurements as `(t0 L4c)`. Test names are sentences
   (`a_forward_watch_is_reported_after_the_store`).
@@ -245,7 +247,7 @@ to the `use retrace_core::{…}` list if it is not there.
 - [ ] **Step 3: See them fail.**
 
 ```sh
-export L=/Users/noahmitchem/Documents/GitHub/retrace/.superpowers/sdd/2026-09-25-retrace-m43-lldb
+export L=/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m43-lldb/.superpowers/sdd/2026-09-25-retrace-m43-lldb
 cargo test -p retrace --test llsc_e2e --no-fail-fast -- --test-threads=1 edge base_is_its read_only_word > $L/t1-red.log 2>&1; echo "exit=$?"
 grep -a -E "^test |panicked|EL0-writable|also a destination" $L/t1-red.log
 ```
