@@ -48,7 +48,7 @@ retrace's code on `c652cf1`:
 | L4a/b | `reason:breakpoint` and `reason:trace` display correctly both ways. A `trace` reply that does not move the stepped thread's pc makes lldb re-step **forever**. | §3d. |
 | L4c | With the default timing, lldb forward-steps after **every** watch stop, reverse included, so a user can never get backward past the most recent write. With `watchpoint_exceptions_received:after`, lldb never steps; hits reported post-retire forward and pre-retire backward give correct old/new values. | §3c's mapping. |
 | L4d/e/f | A plain signal stop makes `c -R` fail ("can't deliver signals while running in reverse"). Mach keys (`metype:1`) and `reason:exception;description:` stops are reversible. `W`/`X` end the session. `replaylog:end` / `replaylog:begin` with a `description:` are reversible "history boundary" stops. | §3c: never `W`, never a plain signal. |
-| L5 | `Z0` is used for `breakpoint set`. `Z0` answered `E` has no fallback. Every step-over/out/in and `ni` over a call inserts **one transient** `Z0`; refusing it makes lldb run away to the end. lldb enforces no count. | §3f: cap user breakpoints at 5, keep a slot. |
+| L5 | `Z0` is used for `breakpoint set`. `Z0` answered `E` has no fallback. Every step-over/out/in and `ni` over a call inserts **one transient** `Z0`; refusing it makes lldb run away to the end. lldb enforces no count. | §3f: cap at the hardware's 6 (R4, amended): the transient cannot be told from a user's `Z0`. |
 | L6 | `Z2` per watch, aligned pieces of ≤ 8 bytes; `Z3`/`Z4` for read/access; an `E` reply is a clean creation error. No count enforced. | §3f. |
 | L7 | tid 0 is unusable. A step request for thread A answered by a stop on B with A's pc unchanged loops forever. `E` to any resume packet (`c`, `s`, `bc`) disconnects lldb ("lost connection"). A non-moving `reason:exception` stop is safe. | §3b, §3d. |
 | L8 | No memory or register writes in ordinary operation. Expression evaluation tries an inferior `mmap` call (`P` writes, then `c`); refusing `P`/`G` is measured safe: no resume follows, and constant expressions still evaluate. Reads come in 0x200-byte lines that may straddle a mapping's end. | §3g, §3h. |
@@ -253,10 +253,12 @@ thread is displayed, not re-stepped. That is inferred from L3/L7 and measured by
 
 ### 3f. Breakpoints and watchpoints
 
-- **`Z0`/`Z1`** become `Exec` breakpoints (hardware, `DBGBVR`). The server caps them at **5**
-  (Ruling R4): lldb's transient step breakpoint (L5) always finds the sixth slot. The sixth
-  concurrent `Z0`/`Z1` gets `E01`, which is L5's clean creation failure for a user breakpoint. A
-  duplicate address is `OK` and idempotent. `z0`/`z1` delete it.
+- **`Z0`/`Z1`** become `Exec` breakpoints (hardware, `DBGBVR`). The server caps them at **6**, the
+  hardware's count (Ruling R4, amended at Task 3's review). lldb's transient step breakpoint (L5)
+  is an ordinary `Z0` that the server cannot tell from a user's, so no cap can reserve it a slot: a
+  cap of 5 only moved the runaway from 6 user breakpoints to 5. At 6 concurrent breakpoints a
+  seventh `Z0`/`Z1` gets `E01`, which is L5's clean creation failure for a user breakpoint and
+  L5's runaway for a transient one. A duplicate address is `OK` and idempotent. `z0`/`z1` delete it.
 - **`Z2`** becomes an `Exec` watch (`DBGWVR`, write). The length must be 1, 2, 4 or 8, and the
   address a multiple of it: the CLI's own rule, which fits lldb's aligned pieces (L6). The limit is
   4, else `E01`. `z2` deletes it.
@@ -397,7 +399,7 @@ Three test surfaces, each owning what only it can see:
   - §3d's step across an `svc`, and across a blocking syscall on `threadrust` (the stepped thread
     resumes; `t+1` numbering);
   - `bs` at `(1, 0)`;
-  - the `Z0` cap at 5; `Z3` refused; `P`/`G`/`M` refused with no motion;
+  - the `Z0` cap at 6; `Z3` refused; `P`/`G`/`M` refused with no motion;
   - an `Err` becoming an exception stop with the next `?` at the saved cursor;
   - `k`/`D`.
 - **`lldb_e2e`** (new; real lldb, `lldb -x -b -s <file> </dev/null`, with a `script print("END")`
@@ -487,7 +489,9 @@ a ledger Ruling and a re-scope, not a halt.
 - **Expression evaluation that runs code.** It is refused by construction (`P`/`G`). Constant
   expressions still evaluate (L8).
 - **Stepping a thread that is not the running one** (§3d, rule 1).
-- **More than 5 breakpoints or 4 watchpoints at once.**
+- **More than 6 breakpoints or 4 watchpoints at once,** and a step-over/out/in (or `ni` over a
+  call) while all 6 breakpoints are the user's: its transient breakpoint is refused and lldb runs
+  on to the next stop (L5).
 - **A reverse step in stock lldb.** It comes only from `rsi`, and lldb's sticky direction is
   documented, not fixed.
 - **The CLI's `where` phase** (M41's owed item) stays owed. The server's `monitor where` prints the
@@ -508,12 +512,14 @@ a ledger Ruling and a re-scope, not a halt.
   makes lldb step forward after every reverse watch stop, which L4c measured as a trap: the user
   can never get past the most recent write. Cost if wrong: none measured; `after` is also what
   lldb uses on x86.
-- **R4 — 5 breakpoints, not 6.** L5: lldb's step-over/out/in inserts one transient breakpoint and
-  runs away if it is refused. Keeping a slot free makes every step command safe at any user count.
-  A software fallback (single-step pc matching past 6) was rejected: correct, but it turns
-  `continue` into a single-step crawl with no bound. Cost if wrong: a user who needs a sixth
-  breakpoint gets a clean error.
-- **R5 — list the exe only.** dyld costs a persistent internal breakpoint (L2), one of the 5, and
+- **R4 — 6 breakpoints (amended; it was 5).** L5: lldb's step-over/out/in inserts one transient
+  breakpoint and runs away if it is refused. The first version capped at 5 to keep a slot free,
+  but Task 3's review showed the transient is an ordinary `Z0`: with 5 user breakpoints it was
+  the sixth and was refused. A cap of 6 is safe for steps at up to 5 user breakpoints, where 5
+  was safe only at up to 4, and it also admits a sixth user breakpoint. A software fallback
+  (single-step pc matching past 6) was rejected: correct, but it turns `continue` into a
+  single-step crawl with no bound. Cost if wrong: a user holding all 6 loses step-over.
+- **R5 — list the exe only.** dyld costs a persistent internal breakpoint (L2), one of the 6, and
   `jGetSharedCacheInfo` was never sent by lldb (L2, UNMEASURED what triggers it). Cost if wrong:
   frames in dyld and libsystem are unnamed.
 - **R6 — interrupt is out of scope** (§7). Cost if wrong: a user cannot abort a long reverse
