@@ -9,6 +9,8 @@ t0 measurement that owes it.
 
 **Approach:** chosen by the operator in brainstorming on 2026-09-27: a measurement task first, then
 two independent tracks — breadth (A) and debugger debts (B) — in one milestone, one gate, one close.
+**Corrected from the plan, 2026-09-27:** §3a M1 and M5, §3b A2, §3c B3 and B6, and R4. Writing
+executable steps against the code found five things the prose had wrong or missing; §11 lists each.
 
 ## 1. Purpose
 
@@ -138,11 +140,11 @@ to the operator (§7, halt 1).
 
 | # | Question | Method | Decides |
 |---|---|---|---|
-| **M1** | What is automationmodetool's `kevent_qos` call? | Widen `[trap]` to `x0`–`x7`; run `record-dyn /usr/bin/automationmodetool` under `RETRACE_TRACE=1`; decode `kq`, `flags` (flag values cited from xnu's `event_private.h`) and, from guest memory, every change-list entry's `ident` and `filter` (layout cited from the same header). | A row **only if all three hold**: no workqueue or workloop flag; `kq` is a guest slot bound by `kqueue` (362); no change-list `ident` is a descriptor (its filter says which). Otherwise the gate is re-parked with the measurement and 374 is routed to its own milestone (R4). |
+| **M1** | What is automationmodetool's `kevent_qos` call? | Widen `[trap]` to `x0`–`x7`; run `record-dyn /usr/bin/automationmodetool` under `RETRACE_TRACE=1`; decode `kq`, `flags` (flag values cited from xnu's `event_private.h`) and, from guest memory, every change-list entry's `ident` and `filter` (layout cited from the same header). | A row **only if all four hold**: no workqueue or workloop flag; `kq` is a guest slot bound by `kqueue` (362); no change-list `ident` is a descriptor (its filter says which); and `eventlist`'s extent, `nevents × sizeof(struct kevent_qos_s)`, is citable and inside the window, with `data_out`/`data_available` NULL (§11 item 5). Otherwise the gate is re-parked with the measurement and 374 is routed to its own milestone (R4). |
 | **M2** | Does the kernel cap `getattrlistbulk`'s write, and what size does `ls` pass? | Read xnu `bsd/vfs/vfs_attrlist.c` for a cap before copyout and cite it; read `x3` at `ls`'s call. | A cited cap inside the 64 KiB window → `Ptr` (the `getattrlist` precedent). No cap → `Dest(Reg(3))`. |
 | **M3** | Where does each target land once 464, 345 and 461 exist? | With the throwaway rows, record and replay `ed`, `ls`, `desdp`, `dyld_info`, `flex`, `dddiagnose` (no arguments, stdin closed, as the gate runs them); keep stderr and traces. | Per binary: un-ignore, or re-park at the measured wall with evidence. Confirms or refutes §2b's exec inference. |
 | **M4** | Which `_nocancel` twins does the table lack, and which intercepting arms miss a twin? | Pair all 32 SDK `SYS_*_nocancel` names with their plain names; check both against `arg_kinds`. Read every arm in `record_box` and `ReplaySession::advance` that matches a plain number, and check it matches the twin. | A1's exact expected set. Every arm mismatch is a named item: fixed in A2 if a corpus guest can reach it, listed in Known limits if not. |
-| **M5** | Debugger baselines and unknowns | (i) User CPU of `oracle_threadrust` and `cpython_crash_e2e` at `c652cf1` (M42 merge, before the pre-decode) and at `64e471e`, same machine, three runs each. (ii) Does an arm64e fixture with PAC-signed saved LRs and a ≥3-deep call chain exist; if not, what is the smallest one. (iii) On a scripted `threadrust` session: what lldb and the server do today when another thread hits a breakpoint during a blocked step, and when a step names a thread that is not running — packet counts over a bounded window. | (i) B1's pass bar. (ii) B5's fixture. (iii) Whether B6's two changes go ahead. |
+| **M5** | Debugger baselines and unknowns | (i) User CPU of `oracle_threadrust` and `cpython_crash_e2e` at `c652cf1` (M42 merge, before the pre-decode) and at `64e471e`, same machine, three runs each. (ii) Pre-answered while writing the plan: no arm64e fixture has a call chain (`strip47` and `bfamstrip` are single-function freestanding asm), so B5 builds one; t0 confirms. (iii) Today's lldb baseline on the three stepping shapes B3 and B6 change — a blocked step past another thread's breakpoint, a step naming a thread that is not running, a step across the stepped thread's own exit — as the server's `vCont` packet count per bounded session. (iv) What lldb-2100's `next` does at a `bl` in a function with no line table, against the server. | (i) B1's pass bar. (ii) B5's fixture. (iii) The baseline each new form in B3 and B6 is compared against, in-task (§3c). (iv) B4's `next` expectation. |
 
 ### 3b. Track A — breadth
 
@@ -159,8 +161,12 @@ Order is chosen so each task's test is red before its change.
   M4's set likewise; `345 => [Path, Ptr]`; `461` per M2. Each new row's comment carries its prototype
   and, for every `Ptr`, its cited bound — the table's existing rule. If 461 is `Dest`, the `truncguard`
   window test gains it. Any arm mismatch M4 found that a corpus guest can reach is fixed here, in
-  **both** `record_box` and `ReplaySession::advance` (symmetry rule 1). **Guard:** A1 green; the
-  census and `dest_buffer` unit tests extended for each new number.
+  **both** `record_box` and `ReplaySession::advance` (symmetry rule 1). Every new row whose views differ
+  from the pre-M33 tables gets an `EXPECTED_DIFFS` entry in
+  `crates/retrace-arch/tests/legacy_equivalence.rs`: that sweep covers 0..=1023 in both directions,
+  and each entry's `exercised`/`unexercised` word must agree with the census. `tests/census.rs` gains
+  345, 461 and 464, reached since M38 moved the walls (t0 M3 confirms each). **Guard:** A1 green;
+  the census and `dest_buffer` unit tests extended for each new number.
 - **A3 — `F_DUPFD_CLOEXEC`.** In `guest_fcntl_dupfd`, set `FD_CLOEXEC` on the host `dup` when the
   command is `F_DUPFD_CLOEXEC`. **Guard:** `dupfd_e2e` gains a case: `F_DUPFD_CLOEXEC` then `F_GETFD`
   returns **1**; it returns 0 before the change, which is the difference asserted.
@@ -205,6 +211,10 @@ Ordered safest first, so what is likeliest to be routed comes last.
   exited after the crossing, stop at that boundary with a non-`trace` stop that names the exit,
   rather than running to the end of the recording. **Guard:** a `gdbserver_e2e` row on `threadrust`:
   stepping the child across its exit stops at the exit's landmark with a reason other than `trace`.
+  The stop is reported on the thread now running: the exited thread has no context left to name
+  (`stop()` looks every named thread up in the table). M43 measured lldb looping on a step answered
+  on another thread, so the new form runs through a bounded lldb session before the commit is kept
+  (M5(iii) is the baseline); a loop reverts it and routes B3.
 - **B4 — lldb rows for `thread step-out`, `finish`, `ni` and `next`** over a `bl` on `crashy`.
   **Guard:** each row's expected pc is computed from `crashy`'s symbols (the `bl`'s pc + 4), never
   hard-coded. A server bug a row exposes is fixed if small, or routed with its measurement.
@@ -214,9 +224,15 @@ Ordered safest first, so what is likeliest to be routed comes last.
 - **B6 — the two unmeasured behaviour changes.** (a) During a blocked step, another thread's hit
   ends the step with a `reason:exception` stop on the stepped thread naming the other thread's hit
   (M43's L7 measured-safe form). (b) A step of a non-running thread runs until that thread is
-  scheduled, as a blocked step already does (M43 T5-a's successor). **Each proceeds only if** M5(iii)
-  shows its form does not drive lldb into a re-step loop (M43 measured 80,103 × `vCont;s:2` in 60 s
-  for the unsafe form) **and** every existing `gdbserver_e2e`/`lldb_e2e` row is unchanged.
+  scheduled, as a blocked step already does (M43 T5-a's successor). **Each proceeds only if** its new form, run
+  through a bounded lldb session before the task's commit is kept, does not drive lldb into a re-step
+  loop (M43 measured 80,103 × `vCont;s:2` in 60 s for the unsafe form; M5(iii) is the baseline),
+  **and** every existing `gdbserver_e2e`/`lldb_e2e` row is unchanged except the three that pin the
+  behaviour being changed — `gdbserver_e2e`'s
+  `a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread` and
+  `a_step_on_a_thread_that_is_not_running_is_refused_in_place`, and `lldb_e2e`'s
+  `lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_running` — each
+  rewritten to assert the new behaviour. A refusal row for a thread that does not exist stays.
   **Guard:** each new row is time-bounded (the `llsc_e2e` rule), so a loop fails rather than stalls.
 
 The README's "Debugging with lldb: what `retrace gdbserver` does not do" is edited in place to drop
@@ -299,7 +315,7 @@ lldb limits in M43 spec §7 that B2–B6 do not touch; M41's and M42's owed list
   against the controller's recommendation to split them into their own milestone. The tracks share
   no code, and "route, don't halt" (§7) keeps one track's surprise from holding the other hostage
   beyond the close.
-- **R4 — 374's three-condition rule** (M1). A row is the whole answer only for a plain guest-kqueue
+- **R4 — 374's four-condition rule** (M1; the fourth added from the plan, §11 item 5). A row is the whole answer only for a plain guest-kqueue
   call with no descriptor idents. Anything else is a subsystem, routed.
 - **R5 — A1 parses the SDK header at test time rather than committing a list.** A committed list
   cannot see a new SDK's twins, and the SDK is already required to build.
@@ -317,3 +333,27 @@ per-file expected counts once t0 has run.
 ## 10. Outcome
 
 *(Filled at the close.)*
+
+## 11. Corrections from the plan (2026-09-27)
+
+Writing the plan's steps against the code found five things this spec had wrong or missing. Each is
+corrected in place above; this section says what changed and why, so a reader who met the first
+version can tell it was overturned rather than misremembered.
+
+1. **B6's condition was unsatisfiable as written.** "Every existing row is unchanged" cannot hold:
+   three existing rows assert exactly the behaviour B6 changes (two in `gdbserver_e2e`, one in
+   `lldb_e2e`, whose session A runs past another thread's breakpoint and whose session B is a
+   refusal). They are named in §3c now and are rewritten, not preserved.
+2. **M5(iii) could not measure B3's or B6's new form in t0**, because the form does not exist
+   until the task writes it. t0 now measures today's baseline; each task measures its own form
+   against it before its commit is kept. B3 gained the same check: its stop must be named on the
+   running thread, which is the shape M43 measured lldb looping on.
+3. **A2 missed `legacy_equivalence`.** Its sweep compares every number in 0..=1023 against the
+   pre-M33 tables in both directions, so a new `Fd` or `Dest` row with no `EXPECTED_DIFFS` entry
+   fails it — and the entry's `exercised` word is checked against the census, which A2 now extends.
+4. **B4's `next` had no expectation.** lldb's `next` needs a line table and `crashy` has none, so
+   what it does there is lldb's behaviour, not the server's. M5(iv) measures it.
+5. **374's rule needed a fourth condition.** A row can describe `eventlist` only as a `Dest`, and
+   `DestLen` has no form for `nevents × sizeof(struct kevent_qos_s)` — a count times a size. So even
+   a plain guest-kqueue call is a row only if that extent is citable and inside the window, and the
+   two `data_*` pointers are NULL. Anything else routes, which was already the expected outcome.
