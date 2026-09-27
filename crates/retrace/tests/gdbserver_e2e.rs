@@ -552,6 +552,24 @@ fn a_reverse_step_moves_back_one_and_stops_at_the_start() {
 }
 
 #[test]
+fn disarm_rsi_makes_the_next_bc_a_reverse_continue_again() {
+    // M44 B2: what `rsi` sends when `ContinueInDirection` fails after `arm-rsi` succeeded. Armed, the
+    // next `bc` is one step back; disarmed, it is a reverse continue — here, to the start. Both
+    // monitor commands are idempotent: an `E` reply would make `rsi`'s own cleanup fail.
+    let mut c = Rsp::spawn(watchsweep(), &[]);
+    let entry = retrace_core::seek(watchsweep(), 1, 0).unwrap().pc();
+    let cmd = |s: &str| format!("qRcmd,{}", hexs(s.as_bytes()));
+    for _ in 0..3 { assert!(c.send("s").contains("reason:trace;")); }
+    assert_eq!(c.send_collect(&cmd("disarm-rsi")).1, "OK", "disarming an unarmed server is not an error");
+    assert_eq!(c.send_collect(&cmd("arm-rsi")).1, "OK");
+    assert_eq!(c.send_collect(&cmd("arm-rsi")).1, "OK", "arming an armed server is not an error");
+    assert_eq!(c.send_collect(&cmd("disarm-rsi")).1, "OK");
+    let b = c.send("bc");
+    assert_eq!(r::description(&b).as_deref(), Some("start of recording"), "disarmed: a reverse continue: {b}");
+    assert_eq!(pc_of(&b), entry, "not entry + 8, where an armed bc would have stopped");
+}
+
+#[test]
 fn a_step_onto_a_watched_store_reports_the_watch_after_it() {
     // §3d rule 3's `Watch` arm, §3c row 2: the store retires, then `watch:`, with the new value in
     // memory. buf[0] is written once, by the sweeping store's first pass at K = 8.

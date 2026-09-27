@@ -410,6 +410,10 @@ impl<'a> Server<'a> {
             }
             // §3e: what `rsi` sends before `process continue -R` (t0 L3, `l3_rsi`).
             "arm-rsi" => { self.rsi_armed = true; (vec!["OK".into()], false) }
+            // M44 B2: what `rsi` sends when `ContinueInDirection` fails after `arm-rsi` succeeded,
+            // so the next `process continue -R` is a reverse continue again, not one step back.
+            // Idempotent, like `arm-rsi`.
+            "disarm-rsi" => { self.rsi_armed = false; (vec!["OK".into()], false) }
             _ => (vec!["E01".into()], false),
         }
     }
