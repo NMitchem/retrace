@@ -1,10 +1,12 @@
-// M38 gate. F_DUPFD is modelled: the returned descriptor is a GUEST number honouring the guest
-// minimum (a host dup could never return 10 in a process holding 0-16 open), the file receives
-// the bytes written through it, F_DUPFD_CLOEXEC on stdout is a console alias the M9 mirror sees,
-// and F_SETFD's int argument is forwarded verbatim. Bytes and trace, never an exit code alone.
+// M38 gate, extended by M44 A3. F_DUPFD is modelled: the returned descriptor is a GUEST number
+// honouring the guest minimum (a host dup could never return 10 in a process holding 0-16 open),
+// the file receives the bytes written through it, F_DUPFD_CLOEXEC sets close-on-exec on the host
+// dup so a forwarded F_GETFD reads it back, F_DUPFD_CLOEXEC on stdout is a console alias the M9
+// mirror sees, and F_SETFD's int argument is forwarded verbatim. Bytes and trace, never an exit
+// code alone.
 mod util;
 
-const EXPECT_STDOUT: &[u8] = b"n=10\nsetfd=0\nalias\n";
+const EXPECT_STDOUT: &[u8] = b"n=10\nsetfd=0\ncloexec=1\nalias\n";
 const EXPECT_FILE: &[u8] = b"dupfd\n";
 
 // Per-test suffix (dup2_e2e's lesson): the CLI runs in subprocesses, which HVF's one-VM-per-process
@@ -47,11 +49,24 @@ fn the_trace_carries_f_dupfd_returning_the_guest_slot_and_f_setfd_forwarded_verb
             }
         }
     }
-    // (f, 10) -> 10 and (1, 12) -> 12: the return is the lowest free GUEST slot >= min.
-    assert_eq!(dupfds.len(), 2, "expected two F_DUPFD landmarks, saw {dupfds:?}");
+    // (f, 10) -> 10, (f, 14) -> 14 and (1, 12) -> 12: the return is the lowest free GUEST slot >= min.
+    assert_eq!(dupfds.len(), 3, "expected three F_DUPFD landmarks, saw {dupfds:?}");
     assert!(dupfds.iter().all(|(_, min, ret, err)| !*err && ret == min),
         "each F_DUPFD must return exactly its minimum (nothing that high is open): {dupfds:?}");
     assert!(setfds.iter().any(|(fd, arg, ret, err)| *fd == 10 && *arg == 1 && *ret == 0 && !*err),
         "fcntl(10, F_SETFD, 1) must be forwarded with its int argument verbatim and succeed: {setfds:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn f_dupfd_cloexec_sets_close_on_exec_as_native_does() {
+    // M44 A3: the one observable of F_DUPFD_CLOEXEC's bit is a forwarded F_GETFD, which reads the
+    // HOST descriptor's flag. Before M44 that was the host `dup`'s clear flag, so the guest read 0
+    // where native reads 1 — deterministic on both sides, a fidelity gap and not a divergence.
+    let path = scratch_file("cloexec");
+    let _ = std::fs::remove_file(&path);
+    let out = util::assert_rung_records_and_replays(retrace_guest::DUPFD_DYN, &[path.to_str().unwrap()], EXPECT_STDOUT);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("\ncloexec=1\n"), "F_GETFD after F_DUPFD_CLOEXEC must read FD_CLOEXEC (1). Got:\n{s}");
     let _ = std::fs::remove_file(&path);
 }
