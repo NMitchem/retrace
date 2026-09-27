@@ -66,6 +66,9 @@ pub const SYS_DUP2: u64 = 90;
 pub const SYS_FCNTL: u64 = 92;
 pub const SYS_SOCKET: u64 = 97;
 pub const SYS_CONNECT: u64 = 98;
+/// M44: `connect`'s `_nocancel` twin (SDK `SYS_connect_nocancel 409`). No corpus guest reaches it;
+/// the twin rule tables it (`tests/nocancel.rs`).
+pub const SYS_CONNECT_NOCANCEL: u64 = 409;
 pub const SYS_SENDTO: u64 = 133;
 pub const SYS_FGETATTRLIST: u64 = 228;
 pub const SYS_SHM_OPEN: u64 = 266;
@@ -74,6 +77,9 @@ pub const SYS_READ_NOCANCEL: u64 = 396;
 pub const SYS_OPEN_NOCANCEL: u64 = 398;
 pub const SYS_FCNTL_NOCANCEL: u64 = 406;
 pub const SYS_OPENAT: u64 = 463;
+/// M44: `openat`'s `_nocancel` twin (SDK `SYS_openat_nocancel 464`). Reached by `/bin/ed`, and the
+/// `xcrun` trio (`desdp`, `dyld_info`, `flex`) when xcrun rebuilds its cache.
+pub const SYS_OPENAT_NOCANCEL: u64 = 464;
 pub const SYS_FSTATAT64: u64 = 470;
 pub const SYS_EXECVE: u64 = 59;
 pub const SYS_POSIX_SPAWN: u64 = 244;
@@ -378,13 +384,18 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // each iov_base for iov_len — nested, caller-sized, untranslated (M30). 412 is the one
         // untranslated-fd row a corpus guest (/bin/ed) is measured to dispatch (tests/census.rs).
         121 | 412 => row!(P, [Fd, NestedSource, Scalar]),
-        // pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset)
-        541 => row!(P, [Fd, NestedSource, Scalar, Scalar]),
+        // pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset) / pwritev_nocancel:
+        // M44's twin set found 543 (`sys/syscall.h`) missing this row; joined the same way as
+        // every other pair — sharing 541's row means 543 is forwarded exactly as 541 is today.
+        541 | 543 => row!(P, [Fd, NestedSource, Scalar, Scalar]),
         // readv(int fd, struct iovec *iov, int iovcnt) / readv_nocancel: the kernel WRITES through
         // iov_base — refused by value in retrace-core before translate_fds ever runs (M27).
         120 | 411 => row!(P, [Fd, NestedDest, Scalar]),
-        // preadv(int fd, struct iovec *iov, int iovcnt, off_t offset)
-        540 => row!(P, [Fd, NestedDest, Scalar, Scalar]),
+        // preadv(int fd, struct iovec *iov, int iovcnt, off_t offset) / preadv_nocancel: M44's twin
+        // set found 542 (`sys/syscall.h`) missing this row; joined the same way. Sharing 540's row
+        // means 542 is refused by the generic forward arm's `writes_via_nested_pointer` assert
+        // exactly as 540 is.
+        540 | 542 => row!(P, [Fd, NestedDest, Scalar, Scalar]),
         // ---- sockets ------------------------------------------------------------------------
         // recvmsg(int s, struct msghdr *msg, int flags) / recvmsg_nocancel: msg_iov is nested.
         27 | 401 => row!(P, [Fd, NestedDest, Scalar]),
@@ -413,9 +424,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // was already in fd_operands — the M10 class, and the same both-tables-at-once asymmetry
         // M27 found in pread_nocancel.
         SYS_RECVFROM | SYS_RECVFROM_NOCANCEL => row!(P, [Fd, Dest(Reg(2)), Scalar, Scalar, Ptr, Ptr]),
-        // connect(int s, const struct sockaddr *name, socklen_t namelen): namelen > SOCK_MAXADDRLEN
-        // (255) is rejected — the cited bound.
-        SYS_CONNECT => row!(P, [Fd, Ptr, Scalar]),
+        // connect(int s, const struct sockaddr *name, socklen_t namelen) / connect_nocancel:
+        // namelen > SOCK_MAXADDRLEN (255) is rejected — the cited bound. M44: the twin joins.
+        SYS_CONNECT | SYS_CONNECT_NOCANCEL => row!(P, [Fd, Ptr, Scalar]),
         // socket(int domain, int type, int protocol) → a NEW descriptor: guest fds are not
         // files-only.
         SYS_SOCKET => row!(F, [Scalar, Scalar, Scalar]),
@@ -545,9 +556,10 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // ---- paths --------------------------------------------------------------------------
         // open(const char *path, int flags, mode_t mode) / open_nocancel → a NEW descriptor
         SYS_OPEN | SYS_OPEN_NOCANCEL => row!(F, [Path, Scalar, Scalar]),
-        // openat(int dirfd, const char *path, int flags, mode_t mode) → a NEW descriptor. The
-        // dirfd is translated; AT_FDCWD passes through untouched.
-        SYS_OPENAT => row!(F, [Fd, Path, Scalar, Scalar]),
+        // openat(int dirfd, const char *path, int flags, mode_t mode) / openat_nocancel → a NEW
+        // descriptor. The dirfd is translated; AT_FDCWD passes through untouched. M44: 464 was the
+        // `_nocancel` trap's fifth instance, and four corpus binaries stopped on it.
+        SYS_OPENAT | SYS_OPENAT_NOCANCEL => row!(F, [Fd, Path, Scalar, Scalar]),
         // fstatat64(int dirfd, const char *path, struct stat *buf, int flag): a dirfd like
         // openat's; buf is the fixed 144-byte struct (sys/stat.h).
         SYS_FSTATAT64 => row!(P, [Fd, Path, Ptr, Scalar]),
@@ -1569,7 +1581,8 @@ mod tests {
         for num in [SYS_CLOSE, SYS_CLOSE_NOCANCEL, SYS_READ, SYS_READ_NOCANCEL, SYS_PREAD,
                     SYS_WRITE, SYS_WRITE_NOCANCEL, SYS_FCNTL, SYS_FCNTL_NOCANCEL,
                     SYS_FSTAT, SYS_FSTAT64, SYS_LSEEK, SYS_IOCTL, SYS_DUP,
-                    SYS_CONNECT, SYS_SENDTO, SYS_FGETATTRLIST, SYS_OPENAT, SYS_FSTATAT64,
+                    SYS_CONNECT, SYS_CONNECT_NOCANCEL, SYS_SENDTO, SYS_FGETATTRLIST,
+                    SYS_OPENAT, SYS_OPENAT_NOCANCEL, SYS_FSTATAT64,
                     SYS_GETDIRENTRIES64, SYS_FSTATFS64] {
             assert_eq!(fd_operands(num).collect::<Vec<_>>(), [0], "syscall {num} holds its fd in x0");
         }
@@ -1864,6 +1877,11 @@ mod tests {
     #[test]
     fn m25_syscall_numbers() {
         assert_eq!((SYS_GETDIRENTRIES64, SYS_FSTATFS64), (344, 346));
+    }
+
+    #[test]
+    fn m44_syscall_numbers() {
+        assert_eq!((SYS_OPENAT_NOCANCEL, SYS_CONNECT_NOCANCEL), (464, 409));
     }
 
     // M37: the fd half of both predicates lives in the box (`Box_::is_console_write` /
