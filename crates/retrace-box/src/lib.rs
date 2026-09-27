@@ -4269,13 +4269,15 @@ impl Box_ {
     /// M38: `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)`. The table half is `FdTable::dup_from`
     /// (replay calls it with the same arguments); the host half is a plain `dup(h)`, because a
     /// host `F_DUPFD` would apply the guest's minimum to retrace's own descriptor space. Both
-    /// commands share this path: the close-on-exec bit is not modelled — exec is refused (M38
-    /// t4), and its one observable is a forwarded `F_GETFD`, which reads the host `dup`'s CLEAR
-    /// flag, so a guest doing `F_DUPFD_CLOEXEC` then `F_GETFD` reads 0 where native reads 1
-    /// (deterministic across record and replay, since the recorded return carries it; a fidelity
-    /// gap, owed in the README). The range check is the table's (`dup_from` answers EINVAL after
-    /// the source check, xnu's order), so record and replay refuse identically; the wrapper's
-    /// only host work is the `dup` and its close on `Err`.
+    /// commands share this path. M44 A3 sets close-on-exec on the fresh host dup for the
+    /// `F_DUPFD_CLOEXEC` command (exec is still refused, M38 t4, so it can never fire) — its one
+    /// observable is a forwarded `F_GETFD`, which now reads the host dup's SET flag, so a guest
+    /// doing `F_DUPFD_CLOEXEC` then `F_GETFD` reads 1 as native does. Record-side only, like the
+    /// `dup` itself: the recorded `F_GETFD` return carries the bit to replay, which never opens a
+    /// host fd for this path (the mirror above touches only the table). The range check is the
+    /// table's (`dup_from` answers EINVAL after the source check, xnu's order), so record and
+    /// replay refuse identically; the wrapper's only host work is the `dup`, the CLOEXEC `fcntl`,
+    /// and the `dup`'s close on `Err`.
     fn guest_fcntl_dupfd(&mut self, args: [u64; 8]) -> (u64, u64, bool, Vec<Region>) {
         let (fd, min) = (args[0], args[2]);
         let Some(h) = self.fds.host(fd) else { return (EBADF, 0, true, Vec::new()); };
@@ -4283,6 +4285,14 @@ impl Box_ {
         if dup < 0 {
             let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(EBADF as i32) as u64;
             return (e, 0, true, Vec::new());
+        }
+        // M44 A3: F_DUPFD_CLOEXEC's bit, on the host descriptor that stands for the guest's. Its one
+        // observable is a forwarded F_GETFD, which reads the host flag: without this the guest read
+        // 0 where native reads 1 (owed since M38's final review). Record-side only, like the `dup`
+        // itself — the recorded F_GETFD return carries the bit to replay.
+        if args[1] == retrace_arch::F_DUPFD_CLOEXEC {
+            let r = unsafe { libc::fcntl(dup, libc::F_SETFD, libc::FD_CLOEXEC) };
+            assert_eq!(r, 0, "F_SETFD(FD_CLOEXEC) on a fresh host dup failed: {}", std::io::Error::last_os_error());
         }
         match self.fds.dup_from(fd, min) {
             Ok(g) => { self.fds.bind(g, dup); (g, 0, false, Vec::new()) }
