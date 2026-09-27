@@ -277,6 +277,10 @@ impl<'a> Server<'a> {
                     Ok(s.stop(StopKind::Exception { signal: 5, text: why }, on))
                 }
                 Halt::WatchStepped { watched } => Ok(s.stop(StopKind::Watch(watched), None)),
+                // M44 B3: the stepped thread is gone, so the stop cannot name it (`stop` looks every
+                // named thread up in the table): named on the running thread, saying why.
+                Halt::ThreadExited { thread } => Ok(s.stop(StopKind::Exception { signal: 5,
+                    text: format!("thread {} exited during the step", thread + 1) }, None)),
                 other => s.reply_forward(other),
             }
         })

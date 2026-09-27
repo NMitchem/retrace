@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use retrace_core::{checkpointed_seek, Advance, Armed, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped};
+use retrace_core::{checkpointed_seek, Advance, Armed, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped, ThreadState};
 use retrace_core::symbols::Symbols;
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
@@ -338,6 +338,9 @@ pub(crate) enum Halt {
     /// fault, or for `step_thread`'s wrong thread (M43 §3d rule 1). For `step_thread`'s trap that
     /// returns to itself, the cursor crossed the event and only the pc stayed.
     Refused(String),
+    /// M44 B3: `step_thread`'s thread exited in the step's crossing, parked at (n, 0, Bp). Nothing
+    /// runs it again, so the step ends at that boundary instead of at the end of the recording.
+    ThreadExited { thread: u32 },
 }
 
 /// The scripted-debugger executor. Holds the cursor P = (`n`, `k`, `phase`) (M41 §3b) and at most ONE
@@ -979,6 +982,14 @@ impl<'a> Exec<'a> {
                                      on to landmark {n}, but thread {}'s pc {pc0:#x} did not move", t + 1)));
                             }
                             return Ok(Halt::Stepped);
+                        }
+                        // M44 B3: or `t` exited, crossing its own exit. Nothing will run it again, so
+                        // the until-run below would reach the end of the recording; stop here.
+                        let exited = self.sess().thread_summaries().iter()
+                            .any(|s| s.tid == t && matches!(s.state, ThreadState::Exited(_)));
+                        if exited {
+                            (self.n, self.k, self.phase) = (n, 0, Phase::Bp);
+                            return Ok(Halt::ThreadExited { thread: t });
                         }
                         // `t` blocked. Run until it is current again, with nothing armed (spec R7's
                         // fallback, measured: lldb loops on another thread's stop). Phase Sys: the
