@@ -1,0 +1,11 @@
+log enable -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t0-m5-next-abs.packets gdb-remote packets
+gdb-remote 127.0.0.1:61175
+command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+breakpoint set -a 0x100000530
+process continue
+register read pc
+next
+register read pc
+thread list
+process plugin packet monitor where
+script print("END")

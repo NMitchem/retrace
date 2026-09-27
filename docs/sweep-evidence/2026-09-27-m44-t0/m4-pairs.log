@@ -1,0 +1,77 @@
+   Compiling retrace-arch v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace-arch)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running tests/t0_m4_pairs.rs (target/aarch64-apple-darwin/debug/deps/t0_m4_pairs-6f654067c4d8fd73)
+
+running 1 test
+test t0_m4_pairs ... PAIR SYS_pselect 394 false | SYS_pselect_nocancel 395 false | BOTH-NONE
+PAIR SYS_read 3 true | SYS_read_nocancel 396 true | SAME
+  plain=Some(Shape { args: [Fd, Dest(Reg(2)), Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, Dest(Reg(2)), Scalar], ret: Plain })
+PAIR SYS_write 4 true | SYS_write_nocancel 397 true | SAME
+  plain=Some(Shape { args: [Fd, Source, Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, Source, Scalar], ret: Plain })
+PAIR SYS_open 5 true | SYS_open_nocancel 398 true | SAME
+  plain=Some(Shape { args: [Path, Scalar, Scalar], ret: Fd })
+  nocancel=Some(Shape { args: [Path, Scalar, Scalar], ret: Fd })
+PAIR SYS_close 6 true | SYS_close_nocancel 399 true | SAME
+  plain=Some(Shape { args: [Fd], ret: Plain })
+  nocancel=Some(Shape { args: [Fd], ret: Plain })
+PAIR SYS_wait4 7 false | SYS_wait4_nocancel 400 false | BOTH-NONE
+PAIR SYS_recvmsg 27 true | SYS_recvmsg_nocancel 401 true | SAME
+  plain=Some(Shape { args: [Fd, NestedDest, Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, NestedDest, Scalar], ret: Plain })
+PAIR SYS_sendmsg 28 true | SYS_sendmsg_nocancel 402 true | SAME
+  plain=Some(Shape { args: [Fd, NestedSource, Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, NestedSource, Scalar], ret: Plain })
+PAIR SYS_recvfrom 29 true | SYS_recvfrom_nocancel 403 true | SAME
+  plain=Some(Shape { args: [Fd, Dest(Reg(2)), Scalar, Scalar, Ptr, Ptr], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, Dest(Reg(2)), Scalar, Scalar, Ptr, Ptr], ret: Plain })
+PAIR SYS_accept 30 false | SYS_accept_nocancel 404 false | BOTH-NONE
+PAIR SYS_msync 65 true | SYS_msync_nocancel 405 true | SAME
+  plain=Some(Shape { args: [Source, Scalar, Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Source, Scalar, Scalar], ret: Plain })
+PAIR SYS_fcntl 92 true | SYS_fcntl_nocancel 406 true | SAME
+  plain=Some(Shape { args: [Fd, Scalar, Ptr], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, Scalar, Ptr], ret: Plain })
+PAIR SYS_select 93 false | SYS_select_nocancel 407 false | BOTH-NONE
+PAIR SYS_fsync 95 false | SYS_fsync_nocancel 408 false | BOTH-NONE
+PAIR SYS_connect 98 true | SYS_connect_nocancel 409 false | ONE-SIDED
+  plain=Some(Shape { args: [Fd, Ptr, Scalar], ret: Plain })
+  nocancel=None
+PAIR SYS_sigsuspend 111 false | SYS_sigsuspend_nocancel 410 false | BOTH-NONE
+PAIR SYS_readv 120 true | SYS_readv_nocancel 411 true | SAME
+  plain=Some(Shape { args: [Fd, NestedDest, Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, NestedDest, Scalar], ret: Plain })
+PAIR SYS_writev 121 true | SYS_writev_nocancel 412 true | SAME
+  plain=Some(Shape { args: [Fd, NestedSource, Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, NestedSource, Scalar], ret: Plain })
+PAIR SYS_sendto 133 true | SYS_sendto_nocancel 413 true | SAME
+  plain=Some(Shape { args: [Fd, Source, Scalar, Scalar, Ptr, Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, Source, Scalar, Scalar, Ptr, Scalar], ret: Plain })
+PAIR SYS_pread 153 true | SYS_pread_nocancel 414 true | SAME
+  plain=Some(Shape { args: [Fd, Dest(Reg(2)), Scalar, Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, Dest(Reg(2)), Scalar, Scalar], ret: Plain })
+PAIR SYS_pwrite 154 true | SYS_pwrite_nocancel 415 true | SAME
+  plain=Some(Shape { args: [Fd, Source, Scalar, Scalar], ret: Plain })
+  nocancel=Some(Shape { args: [Fd, Source, Scalar, Scalar], ret: Plain })
+PAIR SYS_waitid 173 false | SYS_waitid_nocancel 416 false | BOTH-NONE
+PAIR SYS_poll 230 false | SYS_poll_nocancel 417 false | BOTH-NONE
+PAIR SYS_msgsnd 260 false | SYS_msgsnd_nocancel 418 false | BOTH-NONE
+PAIR SYS_msgrcv 261 false | SYS_msgrcv_nocancel 419 false | BOTH-NONE
+PAIR SYS_sem_wait 271 false | SYS_sem_wait_nocancel 420 false | BOTH-NONE
+PAIR SYS_aio_suspend 315 false | SYS_aio_suspend_nocancel 421 false | BOTH-NONE
+PAIR SYS___sigwait 330 false | SYS___sigwait_nocancel 422 false | BOTH-NONE
+PAIR SYS___semwait_signal 334 false | SYS___semwait_signal_nocancel 423 false | BOTH-NONE
+PAIR SYS_openat 463 true | SYS_openat_nocancel 464 false | ONE-SIDED
+  plain=Some(Shape { args: [Fd, Path, Scalar, Scalar], ret: Fd })
+  nocancel=None
+PAIR SYS_preadv 540 true | SYS_preadv_nocancel 542 false | ONE-SIDED
+  plain=Some(Shape { args: [Fd, NestedDest, Scalar, Scalar], ret: Plain })
+  nocancel=None
+PAIR SYS_pwritev 541 true | SYS_pwritev_nocancel 543 false | ONE-SIDED
+  plain=Some(Shape { args: [Fd, NestedSource, Scalar, Scalar], ret: Plain })
+  nocancel=None
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
