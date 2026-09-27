@@ -29,8 +29,8 @@
 //   visible, not to define a requirement that exec-in-place must never happen.
 //
 // Neither guest path is a repo artifact (both come from a Homebrew `python@3.14` install), so both
-// tests skip with a loud `eprintln!` naming the missing path rather than passing quietly — a
-// silent skip reads as a green it did not earn.
+// tests skip with a loud `util::announce` line (writes past libtest's capture) naming the missing
+// path rather than passing quietly — a silent skip reads as a green it did not earn.
 //
 // These are the version-stable framework paths, not the `Cellar/python@3.14/3.14.6/…` forms the
 // M25 t0 measurements used: a `brew upgrade` moves the Cellar path but not this one, so the gate

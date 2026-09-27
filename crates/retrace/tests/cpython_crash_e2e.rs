@@ -15,9 +15,10 @@
 // `cell` and every coordinate are DISCOVERED from the recording (the M6 marker convention).
 //
 // Neither the interpreter nor its stdlib is a repo artifact, so the test skips with a loud
-// eprintln! naming the missing path rather than passing quietly — a silent skip reads as a green
-// it did not earn. That is also why every mechanism the walk fixes gets its own repo-owned guard
-// (vmremap_e2e is the first): this gate guards nothing on a machine without Homebrew Python.
+// `util::announce` line (writes past libtest's capture) naming the missing path rather than
+// passing quietly — a silent skip reads as a green it did not earn. That is also why every
+// mechanism the walk fixes gets its own repo-owned guard (vmremap_e2e is the first): this gate
+// guards nothing on a machine without Homebrew Python.
 mod util;
 use std::path::Path;
 use retrace_trace::{Event, Reader};
