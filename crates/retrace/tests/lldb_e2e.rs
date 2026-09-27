@@ -102,12 +102,12 @@ fn crashy_trace() -> PathBuf {
     t
 }
 
-/// The first `bl` in `crashy`'s `_main` (its `fstat` call) and its target, from the fixture's
-/// symbols and the recording's own bytes: `EXE_BASE` is `crashy`'s `__TEXT` vmaddr, so `nm`'s
-/// address is the guest pc. Never hard-coded. Returns `(the bl's pc, the bl's target)`, the target
-/// decoded from the instruction word itself: `imm26 = w & 0x03ff_ffff`, sign-extended from bit 25,
-/// times 4, added to the `bl`'s own pc.
-fn crashy_first_bl(trace: &Path) -> (u64, u64) {
+/// The first `bl` in `crashy`'s `_main` (its `fstat` call), from the fixture's symbols and the
+/// recording's own bytes: `EXE_BASE` is `crashy`'s `__TEXT` vmaddr, so `nm`'s address is the guest
+/// pc. Never hard-coded. The target is not decoded: every row below expects `bl + 4` (M44 Task 9b —
+/// with `__PAGEZERO` no longer in lldb's loader, lldb unwinds normally and every stepping command
+/// stops at the return address, never at the call's target).
+fn crashy_first_bl(trace: &Path) -> u64 {
     let out = Command::new("nm").arg(retrace_guest::CRASHY).output().expect("nm");
     let main = String::from_utf8(out.stdout).unwrap().lines().find_map(|l| {
         let f: Vec<&str> = l.split_whitespace().collect();
@@ -117,12 +117,7 @@ fn crashy_first_bl(trace: &Path) -> (u64, u64) {
     let code = s.read_mem(main, 256).expect("main's text is in the recording");
     let i = code.chunks(4).position(|w| u32::from_le_bytes(w.try_into().unwrap()) & 0xfc00_0000 == 0x9400_0000)
         .expect("a bl in main's first 64 instructions");
-    let bl = main + 4 * i as u64;
-    let w = u32::from_le_bytes(code[4 * i..4 * i + 4].try_into().unwrap());
-    let imm26 = i64::from(w & 0x03ff_ffff);
-    let signed = if imm26 & 0x0200_0000 != 0 { imm26 - 0x0400_0000 } else { imm26 };
-    let target = (bl as i64 + signed * 4) as u64;
-    (bl, target)
+    main + 4 * i as u64
 }
 
 fn crashy_script(ptr: u64) -> Vec<String> {
@@ -485,47 +480,40 @@ fn lldb_reverse_steps_back_onto_another_threads_trap() {
 
 #[test]
 fn lldb_steps_over_a_call_with_next() {
-    // M44 B4: `next` has no line table to work from, so lldb-2100 sends a single instruction step
-    // and stops at the `bl`'s own TARGET, not pc + 4 — lldb's behaviour, not the server's, measured
-    // at t0 M5(iv) (twice: with argv0 relative and absolute, both giving the same result). `next`
-    // never attempts the step-over-a-call machinery the `ni` row below found broken, so this row
-    // passes: a bare `vCont;s:1` needs nothing past it.
+    // M44 B4, corrected by Task 9b: `next` at a call stops at the return address, `bl` + 4, exactly
+    // like native lldb. t0 M5(iv)'s original "stops at the bl's TARGET" was measured under the
+    // `__PAGEZERO` bug (Task 9b): lldb could not unwind out of the dyld stub the call lands in, so
+    // it never inserted the transient Z0 the step-over needs and just reported the bare step's
+    // landing. With `__PAGEZERO` no longer in lldb's loader (`rsp::image_json`), it unwinds
+    // normally and behaves like the `ni` row below. See
+    // `docs/superpowers/specs/2026-09-27-retrace-m44-owed-measurements.md`'s M5(iv) correction.
     if !lldb_runs() {
         util::announce("SKIPPED lldb_steps_over_a_call_with_next: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let tr = crashy_trace();
-    let (bl, target) = crashy_first_bl(&tr);
+    let bl = crashy_first_bl(&tr);
     let cmds = vec![format!("breakpoint set -a {bl:#x}"), "process continue".into(), "next".into(), "register read pc".into()];
     let (code, out, err) = session(&tr, &cmds);
     let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
     assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
     assert_eq!(code, Some(0), "{t}");
-    assert_eq!(values(&out, "pc = ").last().copied(), Some(target), "{t}");
+    assert_eq!(values(&out, "pc = ").last().copied(), Some(bl + 4), "{t}");
 }
 
 #[test]
-#[ignore = "M44 wall (Task 9, measured 2026-09-27): lldb-2100's unwinder gets no frame past a \
-            dyld symbol stub with no CFI, over retrace's gdbserver specifically. `bt` from inside \
-            `crashy`fstat` (the stub `main`'s first `bl` calls) shows only frame #0 under retrace; \
-            native lldb on the identical binary, at the identical pc, shows frame #1 = \
-            `crashy`main + 60` and frame #2 = `dyld`start` — same module, same symbols, same \
-            missing CFI, different transport. `thread step-inst-over` (`ni`) never gets far enough \
-            to insert the transient Z0 at the return address (t0 L5): it silently accepts the bare \
-            `vCont;s:1`'s landing (the bl's own target) as the step's answer, with no Z0 attempt on \
-            the wire at all (packet-logged). Not root-caused past that; a server change may be \
-            owed but is not diagnosed to a line, so this is routed rather than guessed at."]
 fn lldb_steps_over_a_call_with_ni() {
-    // M44 B4 (M43 F-3): lldb's step-over is supposed to insert one transient Z0 at the return
-    // address (t0 L5) and continue there. See the ignore reason: measured broken over retrace's
-    // gdbserver specifically for a call into a dyld stub (every call in a dynamically-linked
-    // binary is one). Left runnable (`--ignored`) so a fix un-ignores it directly.
+    // M44 B4 (M43 F-3): lldb's step-over inserts one transient Z0 at the return address (t0 L5) and
+    // continues there. Task 9 measured this broken over retrace's gdbserver for a call into a dyld
+    // stub; Task 9b root-caused and fixed it (`rsp::image_json` no longer lists `__PAGEZERO`, so
+    // lldb's loader stops treating [0, 4 GiB) — where a retrace guest's stack lives — as invalid
+    // memory, and lldb's unwinder can read the saved return address off the stack again).
     if !lldb_runs() {
         util::announce("SKIPPED lldb_steps_over_a_call_with_ni: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let tr = crashy_trace();
-    let (bl, _) = crashy_first_bl(&tr);
+    let bl = crashy_first_bl(&tr);
     let cmds = vec![format!("breakpoint set -a {bl:#x}"), "process continue".into(), "thread step-inst-over".into(), "register read pc".into()];
     let (code, out, err) = session(&tr, &cmds);
     let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
@@ -535,23 +523,17 @@ fn lldb_steps_over_a_call_with_ni() {
 }
 
 #[test]
-#[ignore = "M44 wall (Task 9, measured 2026-09-27): the same unwinder gap as \
-            lldb_steps_over_a_call_with_ni — lldb-2100 cannot build frame #1 past `crashy`fstat`'s \
-            stub over retrace's gdbserver (native lldb on the identical binary does; see that \
-            test's reason). `thread step-out` and `finish` both need it to find the return \
-            address, and both fail client-side with `error: Could not create return address \
-            breakpoint.`, sent over NO wire packets at all (packet-logged) — lldb gives up before \
-            asking the server anything. Routed rather than guessed at; see that test's reason for \
-            the evidence."]
 fn lldb_steps_out_of_a_call_with_step_out_and_finish() {
-    // M44 B4: one `thread step-inst` into the `bl`'s stub, then out again: lldb is meant to unwind
-    // to the caller and stop at the return address, the `bl`'s pc + 4. See the ignore reason.
+    // M44 B4: one `thread step-inst` into the `bl`'s stub, then out again: lldb unwinds to the
+    // caller and stops at the return address, the `bl`'s pc + 4. Task 9 measured both `thread
+    // step-out` and `finish` failing here (`Could not create return address breakpoint`); Task 9b's
+    // `__PAGEZERO` fix (see `lldb_steps_over_a_call_with_ni`'s comment) is what makes both pass.
     if !lldb_runs() {
         util::announce("SKIPPED lldb_steps_out_of_a_call…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let tr = crashy_trace();
-    let (bl, _) = crashy_first_bl(&tr);
+    let bl = crashy_first_bl(&tr);
     for out_cmd in ["thread step-out", "finish"] {
         let cmds = vec![format!("breakpoint set -a {bl:#x}"), "process continue".into(),
                         "thread step-inst".into(), out_cmd.into(), "register read pc".into()];

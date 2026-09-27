@@ -1,0 +1,163 @@
+ history[1] tid=0x0103 <   1> send packet: +
+ history[2] tid=0x0103 <  19> send packet: $QStartNoAckMode#b0
+ history[3] tid=0x0103 <   1> read packet: +
+ history[4] tid=0x0103 <   6> read packet: $OK#9a
+ history[5] tid=0x0103 <   1> send packet: +
+ history[6] tid=0x0103 < 104> send packet: $qSupported:xmlRegisters=i386,arm,mips,arc;multiprocess+;fork-events+;vfork-events+;swbreak+;hwbreak+#cd
+ history[7] tid=0x0103 < 137> read packet: $PacketSize=20000;QStartNoAckMode+;qXfer:features:read+;QThreadSuffixSupported+;QListThreadsInStopReply+;ReverseContinue+;ReverseStep+#49
+ history[8] tid=0x0103 <  26> send packet: $QThreadSuffixSupported#e4
+ history[9] tid=0x0103 <   6> read packet: $OK#9a
+ history[10] tid=0x0103 <  27> send packet: $QListThreadsInStopReply#21
+ history[11] tid=0x0103 <   6> read packet: $OK#9a
+ history[12] tid=0x0103 <  13> send packet: $qHostInfo#9b
+ history[13] tid=0x0103 < 140> read packet: $cputype:16777228;cpusubtype:0;ostype:macosx;vendor:apple;endian:little;ptrsize:8;watchpoint_exceptions_received:after;os_version:26.0.0;#f8
+ history[14] tid=0x0103 <  10> send packet: $vCont?#49
+ history[15] tid=0x0103 <  17> read packet: $vCont;c;C;s;S#62
+ history[16] tid=0x0103 <  27> send packet: $qVAttachOrWaitSupported#38
+ history[17] tid=0x0103 <   4> read packet: $#00
+ history[18] tid=0x0103 <  23> send packet: $QEnableErrorStrings#8c
+ history[19] tid=0x0103 <   6> read packet: $OK#9a
+ history[20] tid=0x0103 <  16> send packet: $qProcessInfo#dc
+ history[21] tid=0x0103 < 103> read packet: $pid:1;parent-pid:1;cputype:100000c;cpusubtype:0;ostype:macosx;vendor:apple;endian:little;ptrsize:8;#62
+ history[22] tid=0x0103 <   5> send packet: $?#3f
+ history[23] tid=0x0103 < 204> read packet: $T05thread:1;threads:1;thread-pcs:1400049c0;1d:0000000000000000;1e:0000000000000000;1f:20fe7f0200000000;20:c049004001000000;21:00000000;replaylog:begin;description:7374617274206f66207265636f7264696e67;#5f
+ history[24] tid=0x0103 <  42> send packet: $qXfer:features:read:target.xml:0,1ffff#14
+ history[25] tid=0x0103 <6964> read packet: $l<?xml version="1.0"?>
+<!DOCTYPE target SYSTEM "gdb-target.dtd">
+<target version="1.0">
+<architecture>aarch64</architecture>
+<feature name="org.gnu.gdb.aarch64.core">
+<reg name="x0" bitsize="64" offset="0" regnum="0" type="int" group="general" generic="arg1"/>
+<reg name="x1" bitsize="64" offset="8" regnum="1" type="int" group="general" generic="arg2"/>
+<reg name="x2" bitsize="64" offset="16" regnum="2" type="int" group="general" generic="arg3"/>
+<reg name="x3" bitsize="64" offset="24" regnum="3" type="int" group="general" generic="arg4"/>
+<reg name="x4" bitsize="64" offset="32" regnum="4" type="int" group="general" generic="arg5"/>
+<reg name="x5" bitsize="64" offset="40" regnum="5" type="int" group="general" generic="arg6"/>
+<reg name="x6" bitsize="64" offset="48" regnum="6" type="int" group="general" generic="arg7"/>
+<reg name="x7" bitsize="64" offset="56" regnum="7" type="int" group="general" generic="arg8"/>
+<reg name="x8" bitsize="64" offset="64" regnum="8" type="int" group="general"/>
+<reg name="x9" bitsize="64" offset="72" regnum="9" type="int" group="general"/>
+<reg name="x10" bitsize="64" offset="80" regnum="10" type="int" group="general"/>
+<reg name="x11" bitsize="64" offset="88" regnum="11" type="int" group="general"/>
+<reg name="x12" bitsize="64" offset="96" regnum="12" type="int" group="general"/>
+<reg name="x13" bitsize="64" offset="104" regnum="13" type="int" group="general"/>
+<reg name="x14" bitsize="64" offset="112" regnum="14" type="int" group="general"/>
+<reg name="x15" bitsize="64" offset="120" regnum="15" type="int" group="general"/>
+<reg name="x16" bitsize="64" offset="128" regnum="16" type="int" group="general"/>
+<reg name="x17" bitsize="64" offset="136" regnum="17" type="int" group="general"/>
+<reg name="x18" bitsize="64" offset="144" regnum="18" type="int" group="general"/>
+<reg name="x19" bitsize="64" offset="152" regnum="19" type="int" group="general"/>
+<reg name="x20" bitsize="64" offset="160" regnum="20" type="int" group="general"/>
+<reg name="x21" bitsize="64" offset="168" regnum="21" type="int" group="general"/>
+<reg name="x22" bitsize="64" offset="176" regnum="22" type="int" group="general"/>
+<reg name="x23" bitsize="64" offset="184" regnum="23" type="int" group="general"/>
+<reg name="x24" bitsize="64" offset="192" regnum="24" type="int" group="general"/>
+<reg name="x25" bitsize="64" offset="200" regnum="25" type="int" group="general"/>
+<reg name="x26" bitsize="64" offset="208" regnum="26" type="int" group="general"/>
+<reg name="x27" bitsize="64" offset="216" regnum="27" type="int" group="general"/>
+<reg name="x28" bitsize="64" offset="224" regnum="28" type="int" group="general"/>
+<reg name="fp" altname="x29" bitsize="64" offset="232" regnum="29" type="data_ptr" group="general" generic="fp"/>
+<reg name="lr" altname="x30" bitsize="64" offset="240" regnum="30" type="int" group="general" generic="ra"/>
+<reg name="sp" bitsize="64" offset="248" regnum="31" type="data_ptr" group="general" generic="sp"/>
+<reg name="pc" bitsize="64" offset="256" regnum="32" type="code_ptr" group="general" generic="pc"/>
+<reg name="cpsr" bitsize="32" offset="264" regnum="33" type="int" group="general" generic="flags"/>
+</feature>
+<feature name="org.gnu.gdb.aarch64.fpu">
+<reg name="v0" bitsize="128" offset="268" regnum="34" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v1" bitsize="128" offset="284" regnum="35" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v2" bitsize="128" offset="300" regnum="36" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v3" bitsize="128" offset="316" regnum="37" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v4" bitsize="128" offset="332" regnum="38" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v5" bitsize="128" offset="348" regnum="39" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v6" bitsize="128" offset="364" regnum="40" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v7" bitsize="128" offset="380" regnum="41" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v8" bitsize="128" offset="396" regnum="42" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v9" bitsize="128" offset="412" regnum="43" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v10" bitsize="128" offset="428" regnum="44" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v11" bitsize="128" offset="444" regnum="45" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v12" bitsize="128" offset="460" regnum="46" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v13" bitsize="128" offset="476" regnum="47" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v14" bitsize="128" offset="492" regnum="48" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v15" bitsize="128" offset="508" regnum="49" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v16" bitsize="128" offset="524" regnum="50" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v17" bitsize="128" offset="540" regnum="51" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v18" bitsize="128" offset="556" regnum="52" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v19" bitsize="128" offset="572" regnum="53" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v20" bitsize="128" offset="588" regnum="54" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v21" bitsize="128" offset="604" regnum="55" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v22" bitsize="128" offset="620" regnum="56" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v23" bitsize="128" offset="636" regnum="57" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v24" bitsize="128" offset="652" regnum="58" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v25" bitsize="128" offset="668" regnum="59" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v26" bitsize="128" offset="684" regnum="60" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v27" bitsize="128" offset="700" regnum="61" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v28" bitsize="128" offset="716" regnum="62" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v29" bitsize="128" offset="732" regnum="63" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v30" bitsize="128" offset="748" regnum="64" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="v31" bitsize="128" offset="764" regnum="65" encoding="vector" format="vector-uint8" group="float"/>
+<reg name="fpsr" bitsize="32" offset="780" regnum="66" type="int" group="float"/>
+<reg name="fpcr" bitsize="32" offset="784" regnum="67" type="int" group="float"/>
+</feature>
+</target>#07
+ history[26] tid=0x0103 <  19> send packet: $p0;thread:0001;#89
+ history[27] tid=0x0103 <  20> read packet: $0000000000000000#00
+ history[28] tid=0x0103 <  26> send packet: $qStructuredDataPlugins#02
+ history[29] tid=0x0103 <   4> read packet: $#00
+ history[30] tid=0x0103 <  18> send packet: $qShlibInfoAddr#6a
+ history[31] tid=0x0103 <   4> read packet: $#00
+ history[32] tid=0x0103 < 104> send packet: $qSupported:xmlRegisters=i386,arm,mips,arc;multiprocess+;fork-events+;vfork-events+;swbreak+;hwbreak+#cd
+ history[33] tid=0x0103 < 137> read packet: $PacketSize=20000;QStartNoAckMode+;qXfer:features:read+;QThreadSuffixSupported+;QListThreadsInStopReply+;ReverseContinue+;ReverseStep+#49
+ history[34] tid=0x0103 <   8> send packet: $x0,0#04
+ history[35] tid=0x0103 <   4> read packet: $#00
+ history[36] tid=0x0103 <  23> send packet: $mfffffff000002010,8#4e
+ history[37] tid=0x0103 <   7> read packet: $E08#ad
+ history[38] tid=0x0103 <  23> send packet: $mfffffe0000004010,8#19
+ history[39] tid=0x0103 <   7> read packet: $E08#ad
+ history[40] tid=0x0103 <  23> send packet: $mfffffff000004010,8#50
+ history[41] tid=0x0103 <   7> read packet: $E08#ad
+ history[42] tid=0x0103 <  23> send packet: $mffffff8000004010,8#22
+ history[43] tid=0x0103 <   7> read packet: $E08#ad
+ history[44] tid=0x0103 <  23> send packet: $mffffff8000002010,8#20
+ history[45] tid=0x0103 <   7> read packet: $E08#ad
+ history[46] tid=0x0103 <  36> send packet: $jGetLoadedDynamicLibrariesInfos:#6e
+ history[47] tid=0x0103 <   6> read packet: $OK#9a
+ history[48] tid=0x0103 <  62> send packet: $jGetLoadedDynamicLibrariesInfos:{"fetch_all_solibs":true}]#8e
+ history[49] tid=0x0103 < 902> read packet: ${"images":[{"load_address":4294967296,"mod_date":0,"pathname":"/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/crashy","uuid":"985A701E-F174-33AE-AFF0-74151ABD3BDA","min_version_os_name":"macosx","min_version_os_sdk":"26.0","mach_header":{"magic":4277009103,"cputype":16777228,"cpusubtype":0,"filetype":2,"flags":2097285}],"segments":[{"name":"__PAGEZERO","vmaddr":0,"vmsize":4294967296,"fileoff":0,"filesize":0,"maxprot":0}],{"name":"__TEXT","vmaddr":4294967296,"vmsize":16384,"fileoff":0,"filesize":16384,"maxprot":5}],{"name":"__DATA_CONST","vmaddr":4294983680,"vmsize":16384,"fileoff":16384,"filesize":16384,"maxprot":3}],{"name":"__DATA","vmaddr":4295000064,"vmsize":16384,"fileoff":0,"filesize":0,"maxprot":3}],{"name":"__LINKEDIT","vmaddr":4295016448,"vmsize":16384,"fileoff":32768,"filesize":712,"maxprot":1}]]}]]}]#bb
+ history[50] tid=0x0103 <  13> send packet: $qSymbol::#5b
+ history[51] tid=0x0103 <   4> read packet: $#00
+ history[52] tid=0x0103 <  18> send packet: $qShlibInfoAddr#6a
+ history[53] tid=0x0103 <   4> read packet: $#00
+ history[54] tid=0x0103 <  18> send packet: $qShlibInfoAddr#6a
+ history[55] tid=0x0103 <   4> read packet: $#00
+ history[56] tid=0x0103 <  16> send packet: $jThreadsInfo#c1
+ history[57] tid=0x0103 <   4> read packet: $#00
+ history[58] tid=0x0103 <  31> send packet: $qMemoryRegionInfo:1400049c0#09
+ history[59] tid=0x0103 <   4> read packet: $#00
+ history[60] tid=0x0103 <  24> send packet: $jThreadExtendedInfo:#b9
+ history[61] tid=0x0103 <   4> read packet: $#00
+ history[62] tid=0x0103 <  18> send packet: $m140004800,200#ec
+ history[63] tid=0x0103 <1028> read packet: $080540f9091940b929050011091900b9e00315aaee230294c80640f90801008ba90301d1bf273ca96a0400f0403141fda0031dfcbf831d38ea2301919005009010a20d91f1030aaa315cedf2300ac1daf02700f96b0400f0603541fde02b00fd4a41009190020090109212915001c1da4a0500b04a412e91f0ab05a9e9a306a9881e40f9e83f00f9e1230191e00315aad5260294a8835cf80861403948060037801e40f9c1040090212426912d000014881640f9080540f9091940b929050011091900b9e00315aae10316aacd640194e00500b4a80301d1bf233ca9690400f0203141fda0031dfcbf831d38e92300919005009010a20d91f10309aa315cedf2300ac1daf00700f96a0400f0403541fde00b00fd2941009190020090105214913001c1da490500b029012f91f0a701a9e8d702a9881e40f9e0a303a9e1230091e00315aaa8260294a8835cf808614039a8000037801e40f9c104009021f427919b2a01942800805268020039a00301d10101805220f5ff97fd7b4ca9f44f4ba9f6574aa9ff430391ff0f5fd6941e40f9e00315aa3c620194e00300f9c104009021a82691e00314aa892a01942800805268020039f1ffff170000000000000000e00300911fec7c921d0080d21e0080d2386600141f00009160001fd67f2303d5f44fbea9fd7b01a9fd430091b30500b068e276392804003715f3ff97a80500f0#fe
+ <  18> send packet: $Z0,100000530,4#cf
+ <   6> read packet: $OK#9a
+<lldb.process.gdb-remote.async>  <   5> send packet: $c#63
+<lldb.process.gdb-remote.async>  < 157> read packet: $T05thread:1;threads:1;thread-pcs:100000530;1d:b0f77f0200000000;1e:003e138001000000;1f:70f77f0200000000;20:3005000001000000;21:00000060;reason:breakpoint;#82
+<lldb.process.internal-state(pid=1)>             <  18> send packet: $m100000400,200#e0
+<lldb.process.internal-state(pid=1)>             <1028> read packet: $2f6c69622f64796c64000000000000001b00000018000000985a701ef17433aeaff074151abd3bda32000000200000000100000000001a0000051a0001000000030000000000f3042a0000001000000000000000000000002800008018000000f80400000000000000000000000000000c00000038000000180000000200000000004c05000001002f7573722f6c69622f6c696253797374656d2e422e64796c6962000000000000260000001000000098800000080000002900000010000000a0800000000000001d0000001000000030810000980100000000000000000000000000000000000000000000000000000000000000000000ff4301d1fd7b04a9fd030191bfc31fb84100009021000091e10300f928c00291e80700f928400291e81300f9285800f920008052e01f00b92a000094e01f40b90100009021c01791e20080d228000094e10340f9e01f40b9020180d2e20b00f923000094e10740f9e20b40f9e01f40b91f000094e81340f9a8031ff8bfc31eb801000014a8c35eb8081100718c01005401000014a9035ff8aac39eb8a8d5bbd20800c8f228792af801000014a8c35eb808050011a8c31eb8f3ffff174800009008010091095940f9480580d2280100f900008052fd7b44a9ff430191c0035fd630000090100240f900021fd630000090100640f900021fd64352415348593a00010000001c000000#81
+<lldb.process.internal-state(pid=1)>             <  20> send packet: $p16;thread:0001;#c0
+<lldb.process.internal-state(pid=1)>             <  20> read packet: $0000000000000000#00
+ <  18> send packet: $m100000600,200#e2
+ <1028> read packet: $000000001c000000000000001c00000002000000f80400004000000040000000d80500000000000040000000000000000000000000000000030000000c00010010000100000000000000000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000#36
+ <  18> send packet: $z0,100000530,4#ef
+ <   6> read packet: $OK#9a
+<lldb.process.gdb-remote.async>  <  13> send packet: $vCont;s:1#23
+<lldb.process.gdb-remote.async>  < 152> read packet: $T05thread:1;threads:1;thread-pcs:1000005d8;1d:b0f77f0200000000;1e:3405000001000000;1f:70f77f0200000000;20:d805000001000000;21:00000060;reason:trace;#9c
+<lldb.process.internal-state(pid=1)>             <  18> send packet: $m100000400,200#e0
+<lldb.process.internal-state(pid=1)>             <1028> read packet: $2f6c69622f64796c64000000000000001b00000018000000985a701ef17433aeaff074151abd3bda32000000200000000100000000001a0000051a0001000000030000000000f3042a0000001000000000000000000000002800008018000000f80400000000000000000000000000000c00000038000000180000000200000000004c05000001002f7573722f6c69622f6c696253797374656d2e422e64796c6962000000000000260000001000000098800000080000002900000010000000a0800000000000001d0000001000000030810000980100000000000000000000000000000000000000000000000000000000000000000000ff4301d1fd7b04a9fd030191bfc31fb84100009021000091e10300f928c00291e80700f928400291e81300f9285800f920008052e01f00b92a000094e01f40b90100009021c01791e20080d228000094e10340f9e01f40b9020180d2e20b00f923000094e10740f9e20b40f9e01f40b91f000094e81340f9a8031ff8bfc31eb801000014a8c35eb8081100718c01005401000014a9035ff8aac39eb8a8d5bbd20800c8f228792af801000014a8c35eb808050011a8c31eb8f3ffff174800009008010091095940f9480580d2280100f900008052fd7b44a9ff430191c0035fd630000090100240f900021fd630000090100640f900021fd64352415348593a00010000001c000000#81
+<lldb.process.internal-state(pid=1)>             <  20> send packet: $p16;thread:0001;#c0
+<lldb.process.internal-state(pid=1)>             <  20> read packet: $0000000000000000#00
+<lldb.process.internal-state(pid=1)>             <  18> send packet: $Z0,100000530,4#cf
+<lldb.process.internal-state(pid=1)>             <   6> read packet: $OK#9a
+ <  18> send packet: $z0,100000530,4#ef
+ <   6> read packet: $OK#9a
+ <   5> send packet: $D#44
+ <   6> read packet: $OK#9a

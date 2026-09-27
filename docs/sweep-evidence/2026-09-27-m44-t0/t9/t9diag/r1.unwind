@@ -1,0 +1,104 @@
+ th1/fr1 looking for register saved location for reg 29
+th1/fr0 supplying caller's saved fp (29)'s location using EmulateInstructionARM64 UnwindPlan
+th1/fr0 supplying caller's register fp (29) from the stack, saved at CFA plus offset -16 [saved at 0x27ff7b0]
+ th1/fr1 looking for register saved location for reg 22
+th1/fr0 no save location for x22 (22) via 'EmulateInstructionARM64'
+th1/fr0 supplying caller's register x22 (22) from the live RegisterContext at frame 0
+ th1/fr1 looking for register saved location for reg 22
+th1/fr0 supplying caller's saved x22 (22)'s location, cached
+ th1/fr1 This is an async frame
+th1/fr0 supplying caller's saved pc (32)'s location, cached
+ th1/fr1 could not get pc value
+ Frame 1 invalid RegisterContext for this frame, stopping stack walk
+th1 Unwind of this thread is complete.
+(plugin = gdb-remote, state = running)
+(plugin = gdb-remote, state = stopped)
+(plugin = gdb-remote, state = stopped, stop_id = 3
+th1/fr0 looking for register saved location for reg 29
+th1/fr0 passing along to the live register context for reg 29
+th1/fr0 looking for register saved location for reg 32
+th1/fr0 passing along to the live register context for reg 32
+th1/fr0 with pc value of 0x1000005d8, symbol name is 'fstat'
+0x90000030   adrp   x16, 4
+0xf9400210   ldr    x16, [x16]
+UnwindAssemblyInstEmulation::ReadRegister  (name = "x16") => synthetic_value = 0, value = 0x0000000001000010
+UnwindAssemblyInstEmulation::ReadMemory    (addr = 0x0000000001000010, dst = 0x16ec39970, dst_len = 8, context = load register (address = 0x1000010)
+UnwindAssemblyInstEmulation::WriteRegister (name = "x16", value = 0x0000000000000000, context = load register (address = 0x1000010)
+0xd61f0200   br     x16
+Resulting unwind rows for [0x1000005d8 - 0x1000005e4):This UnwindPlan originally sourced from EmulateInstructionARM64
+This UnwindPlan is sourced from the compiler: no.
+This UnwindPlan is valid at all instruction locations: yes.
+This UnwindPlan is for a trap handler function: no.
+row[0]: 0x00000001000005d8: CFA=reg(31) +0 => reg(29)= <same> reg(30)= <same> 
+
+th1/fr0 frame uses EmulateInstructionARM64 for full UnwindPlan because this is the non-call site unwind plan and this is a zeroth frame
+th1/fr0 0x00000001000005d8: CFA=sp +0 => fp= <same> lr= <same> 
+th1/fr0 CFA value via register plus offset
+th1/fr0 CFA is 0x27ff770: Register sp (31) contents are 0x27ff770, offset is 0
+th1/fr0 initialized frame current pc is 0x1000005d8 cfa is 0x27ff770 afa is 0xffffffffffffffff using EmulateInstructionARM64 UnwindPlan
+ th1/fr1 looking for register saved location for reg 29
+th1/fr0 supplying caller's saved fp (29)'s location using EmulateInstructionARM64 UnwindPlan
+th1/fr0 supplying caller's register fp (29) from the live RegisterContext at frame 0
+ th1/fr1 looking for register saved location for reg 32
+th1/fr0 requested caller's saved PC but this UnwindPlan uses a RA reg; getting lr (30) instead
+th1/fr0 supplying caller's saved lr (30)'s location using EmulateInstructionARM64 UnwindPlan
+th1/fr0 supplying caller's register pc (32), saved in register lr (30)
+th1/fr0 looking for register saved location for reg 30
+th1/fr0 passing along to the live register context for reg 30
+th1/fr0 supplying caller's saved pc (32)'s location, cached
+th1/fr0 looking for register saved location for reg 30
+th1/fr0 passing along to the live register context for reg 30
+ th1/fr1 pc = 0x100000534
+th1/fr0 supplying caller's saved fp (29)'s location, cached
+ th1/fr1 fp = 0x27ff7b0
+th1/fr0 supplying caller's saved sp (31)'s location using ABI default
+th1/fr0 supplying caller's register sp (31), value is CFA plus offset 0 [value is 0x27ff770]
+ th1/fr1 sp = 0x27ff770
+ th1/fr1 with pc value of 0x100000534, symbol name is 'main'
+ th1/fr1 Backing up the pc value of 0x100000534 by 1 and re-doing symbol lookup; old symbol was main
+ th1/fr1 Symbol is now main
+ th1/fr1 frame uses compact unwind info for full UnwindPlan because this is the call-site unwind plan
+ th1/fr1 Using full unwind plan 'compact unwind info'
+ th1/fr1 active row: 0x00000001000004f8: CFA=fp+16 => fp=[CFA-16] sp=CFA+0 pc=[CFA-8] 
+ th1/fr1 CFA value via register plus offset
+th1/fr0 supplying caller's saved fp (29)'s location, cached
+ th1/fr1 CFA is 0x27ff7c0: Register fp (29) contents are 0x27ff7b0, offset is 16
+ th1/fr1 m_cfa = 0x27ff7c0 m_afa = 0xffffffffffffffff
+ th1/fr1 initialized frame current pc is 0x100000533 cfa is 0x27ff7c0 afa is 0xffffffffffffffff
+th1/fr0 supplying caller's saved pc (32)'s location, cached
+th1/fr0 looking for register saved location for reg 30
+th1/fr0 passing along to the live register context for reg 30
+  th1/fr2 looking for register saved location for reg 29
+ th1/fr1 supplying caller's saved fp (29)'s location using compact unwind info UnwindPlan
+ th1/fr1 supplying caller's register fp (29) from the stack, saved at CFA plus offset -16 [saved at 0x27ff7b0]
+  th1/fr2 looking for register saved location for reg 22
+ th1/fr1 no save location for x22 (22) via 'compact unwind info'
+ th1/fr1 supplying caller's register x22 (22) value is unmodified in this frame
+th1/fr0 no save location for x22 (22) via 'EmulateInstructionARM64'
+th1/fr0 supplying caller's register x22 (22) from the live RegisterContext at frame 0
+  th1/fr2 looking for register saved location for reg 22
+ th1/fr1 supplying caller's saved x22 (22)'s location, cached
+th1/fr0 supplying caller's saved x22 (22)'s location, cached
+  th1/fr2 This is an async frame
+ th1/fr1 supplying caller's saved pc (32)'s location using compact unwind info UnwindPlan
+ th1/fr1 supplying caller's register pc (32) from the stack, saved at CFA plus offset -8 [saved at 0x27ff7b8]
+  th1/fr2 could not get pc value
+  Frame 2 invalid RegisterContext for this frame, stopping stack walk
+th1/fr0 supplying caller's saved pc (32)'s location, cached
+th1/fr0 CFA value via register plus offset
+th1/fr0 CFA is 0x27ff7c0: Register fp (29) contents are 0x27ff7b0, offset is 16
+th1/fr0 supplying caller's saved pc (32)'s location using arm64 default unwind plan UnwindPlan
+th1/fr0 supplying caller's register pc (32) from the stack, saved at CFA plus offset -8 [saved at 0x27ff7b8]
+th1/fr0 failed to get a pc value for the caller frame with the fallback unwind plan
+ th1/fr1 looking for register saved location for reg 29
+th1/fr0 supplying caller's saved fp (29)'s location using EmulateInstructionARM64 UnwindPlan
+th1/fr0 supplying caller's register fp (29) from the live RegisterContext at frame 0
+ th1/fr1 looking for register saved location for reg 32
+th1/fr0 supplying caller's saved pc (32)'s location, cached
+th1/fr0 supplying caller's saved pc (32)'s location, cached
+ th1/fr1 could not get pc value
+ Frame 1 invalid RegisterContext for this frame, stopping stack walk
+th1 Unwind of this thread is complete.
+(plugin = gdb-remote, state = detached)
+(plugin = gdb-remote, state = exited)
+(plugin = gdb-remote, state = exited, stop_id = 4

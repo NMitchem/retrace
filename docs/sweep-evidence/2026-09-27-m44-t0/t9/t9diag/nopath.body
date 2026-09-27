@@ -1,0 +1,9 @@
+log enable -f @D@/@TAG@.packets gdb-remote packets
+target modules load --file crashy --slide 0
+breakpoint set -a 0x100000530
+process continue
+thread step-inst
+bt
+script err = lldb.SBError(); v = lldb.process.ReadUnsignedFromMemory(0x27ff7b8, 8, err); print("SB read [0x27ff7b8]:", hex(v), "error:", err.GetCString())
+thread step-out
+register read pc

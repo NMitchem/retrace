@@ -375,6 +375,18 @@ line table, lldb-2100's `next` is a single instruction step that follows the cal
 the server's: the server answered the one step it was asked for.) Evidence:
 `m5-next{,-abs}.{cmds,out,packets}`.
 
+**Corrected by M44 Task 9b.** This measurement was taken under a real server bug, not a description
+of lldb's own behaviour: `rsp::image_json`'s `jGetLoadedDynamicLibrariesInfos` answer listed the
+exe's `__PAGEZERO` segment (maxprot 0, `[0, 4 GiB)`), which makes lldb's Darwin loader mark that
+whole range invalid memory and refuse every read below 4 GiB locally, with no packet sent. A
+retrace guest's main stack lives inside `[0, 4 GiB)` (`DYN_STACK_TOP`), so lldb could never read the
+saved return address off the stack and dropped every frame past the one it was standing in — which
+is why `next`, unable to unwind out of the `fstat` stub, just reported the bare step's landing.
+Task 9b's diagnosis (`docs/sweep-evidence/2026-09-27-m44-t0/t9/t9-diagnosis.md`) measured this on a
+patched throwaway server that omits `__PAGEZERO`: `next` at the same `bl`, on the same recording,
+then stops at `pc = 0x100000534` (B + 4), matching native lldb exactly. With `__PAGEZERO` fixed in
+`rsp::image_json`, `lldb_e2e::lldb_steps_over_a_call_with_next` asserts B + 4, not the target.
+
 ---
 
 ## Step 7 halt conditions (spec §7 halt 1)

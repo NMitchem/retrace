@@ -1,0 +1,40 @@
+   Compiling retrace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/src/crates/retrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.81s
+     Running unittests src/main.rs (target/aarch64-apple-darwin/debug/deps/retrace-b3116f232d002477)
+
+running 32 tests
+test debug::tests::a_breakpoint_you_stepped_onto_is_reported_in_neither_direction ... ok
+test debug::tests::a_debug_session_decodes_its_trace_once ... ok
+test debug::tests::a_non_hex_operand_is_now_a_symbol_name ... ok
+test debug::tests::a_prefixed_or_bare_hex_operand_is_still_an_address ... ok
+test debug::tests::a_zero_count_step_is_not_an_arrival ... ok
+test debug::tests::an_all_hex_token_is_an_address_even_when_it_looks_like_a_name ... ok
+test debug::tests::each_motion_returns_what_it_printed ... ok
+test debug::tests::empty_segments_are_skipped ... ok
+test debug::tests::hits_order_syscall_write_then_breakpoint_then_watch ... ok
+test debug::tests::parses_commands ... ok
+test debug::tests::parses_threads_and_regs_of ... ok
+test debug::tests::parses_watch_and_unwatch ... ok
+test debug::tests::parses_watch_thread_scope ... ok
+test debug::tests::recover_leaves_a_usable_session_at_the_saved_cursor ... ok
+test debug::tests::rejects_bad_watch_len_and_alignment ... ok
+test debug::tests::rejects_unknown_verbs ... ok
+test debug::tests::reverse_continue_makes_at_most_three_seeks_whatever_the_hits ... ok
+test debug::tests::step_thread_steps_a_watched_store_and_reports_it_retired ... ok
+test debug::tests::stepi_defaults_to_one ... ok
+test debug::tests::watched_of_names_the_range_a_wider_store_covers ... ok
+test rsp::tests::a_bad_checksum_is_a_bad_frame_and_escapes_round_trip ... ok
+test rsp::tests::a_packet_split_across_reads_and_two_in_one_read_both_frame ... ok
+test rsp::tests::a_start_stop_names_its_thread_every_thread_and_the_expedited_registers ... ok
+test rsp::tests::each_terminal_outcome_maps_to_its_measured_stop ... ok
+test rsp::tests::every_register_lands_at_its_target_xml_offset_and_the_stop_reply_expedites_the_same_bytes ... ok
+test rsp::tests::every_stop_kind_carries_its_measured_signal_and_keys ... ok
+test rsp::tests::garbage_before_a_packet_is_skipped_and_a_split_checksum_waits_for_its_second_digit ... ok
+test rsp::tests::hex_round_trips_and_rejects_odd_input ... ok
+test rsp::tests::the_checksum_is_the_byte_sum_of_the_escaped_body ... ok
+test rsp::tests::the_image_list_describes_a_real_binary_at_its_load_address ... ok
+test rsp::tests::the_register_description_numbers_68_registers_in_gdb_order ... ok
+test rsp::tests::xfer_reads_in_chunks_and_past_the_end ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+

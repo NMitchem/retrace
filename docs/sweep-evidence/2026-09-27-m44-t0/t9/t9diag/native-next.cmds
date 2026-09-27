@@ -1,0 +1,20 @@
+target create /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/crashy
+b main
+run
+breakpoint set -a 0x100000530
+continue
+next
+register read pc
+process kill
+run
+continue
+thread step-inst-over
+register read pc
+process kill
+run
+continue
+thread step-inst
+thread step-out
+register read pc
+process kill
+script print("END")

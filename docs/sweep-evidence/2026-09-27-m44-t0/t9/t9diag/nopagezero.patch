@@ -1,0 +1,16 @@
+diff --git a/crates/retrace/src/rsp.rs b/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/src/crates/retrace/src/rsp.rs
+index 9a53455..8d59b17 100644
+--- a/crates/retrace/src/rsp.rs
++++ b/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/src/crates/retrace/src/rsp.rs
+@@ -272,7 +272,10 @@ pub(crate) fn image_json(hdr: &[u8], load_address: u64, path: &str) -> Result<St
+     let text = segs.iter().find(|s| s.name == "__TEXT").ok_or("no __TEXT segment")?;
+     let slide = load_address.wrapping_sub(text.vmaddr);
+     let uuid = uuid.ok_or("no LC_UUID")?;
+-    let seg_json: Vec<String> = segs.iter().map(|s| {
++    // T9DIAG: omit __PAGEZERO. lldb's DynamicLoaderDarwin::UpdateImageLoadAddress turns a
++    // maxprot-0 __PAGEZERO segment into Process::AddInvalidMemoryRegion([0, 4 GiB)), and every
++    // lldb-side read below 4 GiB then fails with no packet, retrace's guest stack included.
++    let seg_json: Vec<String> = segs.iter().filter(|s| s.name != "__PAGEZERO").map(|s| {
+         let vmaddr = if s.name == "__PAGEZERO" { s.vmaddr } else { s.vmaddr.wrapping_add(slide) };
+         format!(r#"{{"name":"{}","vmaddr":{vmaddr},"vmsize":{},"fileoff":{},"filesize":{},"maxprot":{}}}"#,
+                 json_str(&s.name), s.vmsize, s.fileoff, s.filesize, s.maxprot)
