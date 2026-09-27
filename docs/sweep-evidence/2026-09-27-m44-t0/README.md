@@ -61,3 +61,24 @@ The two trace-reading tests (`m3-nums-test.rs`, `m3-paths-test.rs`) ran on the w
 
 lldb's stderr was empty in all five sessions and is not kept. Each command file names the
 session's scratch paths and port; they are records of what ran, not reusable as they stand.
+
+## `t4/` — Task 4's re-measure on the committed rows
+
+Task 4 re-ran the seven-target sweep on Task 2's committed build (`5ac50f7`), controller-run in a
+scratch `git archive` tree (`t4-controller.md`, copied here as `t4-controller-note.md`), then a
+resumed implementer read the kept traces for landmark numbers before writing
+`crates/retrace/tests/apple_walls_e2e.rs`'s `ls`/`ed` gates and the five re-parked reasons. No
+`.bin` trace is committed (Ruling P1); every landmark cited in the gates' `#[ignore]` reasons was
+read from the scratch copies before they were discarded.
+
+| file | what it is |
+|---|---|
+| `t4-sweep.sh` | the controller's sweep script: `ed`/`ls`/`dddiagnose`/`automationmodetool` together, then each xcrun trio member alone after `rm -f /var/tmp/xcrun_db` (Ruling T4-a, a cold cache per member) |
+| `t4-list-a.txt`, `t4-list-{desdp,dyld_info,flex}.txt` | `RETRACE_SWEEP_LIST` for the first group and each trio member |
+| `t4-sweep-a.log`, `t4-sweep-{desdp,dyld_info,flex}.log` | `tools/apple-sweep.sh`'s output per run (`PASS`/`FAIL`/`ROW`/`TALLY`) |
+| `{ed,ls,dddiagnose,automationmodetool,desdp,dyld_info,flex}.rec.err` | each target's recorder stderr (`RETRACE_SWEEP_KEEP_ALL=1`'s kept copy; the `.bin` trace is not committed) |
+| `{ed,ls,dddiagnose,desdp,dyld_info,flex}.rp.err`, `.rp.out` | each target's replay stderr/stdout (`automationmodetool`'s recorder panicked, so no replay ran and it has neither) |
+| `t4-nums-test.rs` | the throwaway landmark reader (run as `crates/retrace-trace/tests/t4_m44_nums.rs`, then deleted — adapted from t0's `m3-nums-test.rs`) |
+| `t4-nums.log` | its output: per trace, the first landmark and count of each M44-relevant syscall number (461, 464, 345, 10, 128, 244, 374), plus the trace's terminal event — the source for every landmark cited in the gates' rewritten `#[ignore]` reasons |
+| `t4-traces.txt` | the 7 kept t4 traces (scratchpad paths) that `t4-nums-test.rs` read |
+| `t4-controller-note.md` | the controller's Step 1 record: method, the seven-target results table (labels identical to t0 M3 round b), and what the implementer still owed |

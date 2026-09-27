@@ -1,0 +1,4 @@
+/bin/ed
+/bin/ls
+/usr/bin/dddiagnose
+/usr/bin/automationmodetool

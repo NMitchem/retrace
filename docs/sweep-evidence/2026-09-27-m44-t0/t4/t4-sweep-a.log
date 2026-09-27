@@ -1,0 +1,9 @@
+PASS /bin/ed
+ROW	/bin/ed	PASS	0	0	61187	n/a		
+PASS /bin/ls
+ROW	/bin/ls	PASS	0	0	61221	n/a		
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1c03 (guest task port Some(515)) send_size 24)
+ROW	/usr/bin/dddiagnose	FAIL	4	3	61252	454	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1c03 (guest task port Some(515)) send_size 24	DIVERGENCE at landmark 454 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (6746886) panicked at crates/retrace-arch/src/lib.rs:982:38: M33: syscall 374 (374) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from )
+ROW	/usr/bin/automationmodetool	FAIL	101	n/a	61296	n/a	thread 'main' (6746886) panicked at crates/retrace-arch/src/lib.rs:982:38: M33: syscall 374 (374) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from 	
+TALLY pass=2 fail=2 skip=0

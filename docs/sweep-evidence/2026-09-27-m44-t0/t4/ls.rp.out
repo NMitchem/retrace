@@ -1,0 +1,15 @@
+CLAUDE.md
+Cargo.lock
+Cargo.toml
+LICENSE-APACHE
+LICENSE-MIT
+README.md
+clippy.toml
+crates
+docs
+justfile
+retrace.entitlements
+rust-toolchain.toml
+spikes
+target
+tools
