@@ -86,6 +86,12 @@ pub const SYS_POSIX_SPAWN: u64 = 244;
 /// `fstatfs64(int, struct statfs64 *)` — SDK `sys/mount.h:444`, header-declared like its M10
 /// siblings.
 pub const SYS_FSTATFS64: u64 = 346;
+/// M44: `statfs64(const char *path, struct statfs64 *buf)` — `fstatfs64`'s path twin (SDK 345/346).
+/// Reached by `/usr/bin/dddiagnose` since M38.
+pub const SYS_STATFS64: u64 = 345;
+/// M44: `getattrlistbulk(int dirfd, struct attrlist *alist, void *attrBuf, size_t attrBufSize,
+/// uint64_t options)` (SDK 461). Reached by `/bin/ls`, which bulk-enumerates a directory with it.
+pub const SYS_GETATTRLISTBULK: u64 = 461;
 /// `getdirentries64` — **not in the SDK at all** (libc calls it privately from `opendir`/
 /// `readdir`, so no `sys/syscall.h`-adjacent header declares its prototype). Its fd-in-`x0`
 /// position is therefore MEASURED, not header-derived: M25-cpython Finding 3 captured the trap
@@ -563,6 +569,17 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // fstatat64(int dirfd, const char *path, struct stat *buf, int flag): a dirfd like
         // openat's; buf is the fixed 144-byte struct (sys/stat.h).
         SYS_FSTATAT64 => row!(P, [Fd, Path, Ptr, Scalar]),
+        // statfs64(const char *path, struct statfs64 *buf): the path twin of fstatfs64 (SDK
+        // 345/346); buf is the same fixed 2,168-byte struct, measured at M29 Task 7 for fstatfs64 —
+        // the cited bound. M44 (t0 M3: /usr/bin/dddiagnose reaches it).
+        SYS_STATFS64 => row!(P, [Path, Ptr]),
+        // getattrlistbulk(int dirfd, struct attrlist *alist, void *attrBuf, size_t attrBufSize,
+        //                 uint64_t options): alist is the fixed 24-byte struct its getattrlist
+        // siblings cite. attrBuf is filled with as many entries as fit in attrBufSize — the
+        // CALLER's size, with no kernel cap below the window that t0 M2 could cite — so Dest with
+        // its length in x3: the clamp and the diff window both follow it (M26's class). ls passed
+        // 32,768 (t0 M2). The dirfd is translated; the directory offset it advances is the host's.
+        SYS_GETATTRLISTBULK => row!(P, [Fd, Ptr, Dest(Reg(3)), Scalar, Scalar]),
         // shm_open(const char *name, int oflag, mode_t mode) → a NEW descriptor: guest fds are not
         // files-only.
         SYS_SHM_OPEN => row!(F, [Path, Scalar, Scalar]),
@@ -758,6 +775,13 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // `fsgetpath_extended`) — the cited bound; fsid is 8 bytes copied in (`sizeof(fsid_t)`),
         // and names a VOLUME, not a descriptor.
         427 => row!(P, [Ptr, Scalar, Ptr, Scalar]),
+        // unlink(const char *path): M44 (t0 M3: /bin/ed reaches it, opening then unlinking its own
+        // buffer file, e.g. /tmp/ed.mXuuhI).
+        10 => row!(P, [Path]),
+        // rename(const char *from, const char *to): M44 (t0 M3: the xcrun trio's — desdp,
+        // dyld_info, flex — cache rewrite, reached only when xcrun rebuilds its host cache
+        // /var/tmp/xcrun_db; Ruling T0-e — host-state-dependent, unlike ed's unlink above).
+        128 => row!(P, [Path, Path]),
         // execve(char *fname, char **argp, char **envp): the kernel reads every argv/envp string
         // through the nested pointers — rule 1, NestedSource (EXPECTED_DIFFS; exercised by /bin/sh).
         // REFUSED since M38, never forwarded: the record arm ahead of the generic forward answers
@@ -1583,7 +1607,7 @@ mod tests {
                     SYS_FSTAT, SYS_FSTAT64, SYS_LSEEK, SYS_IOCTL, SYS_DUP,
                     SYS_CONNECT, SYS_CONNECT_NOCANCEL, SYS_SENDTO, SYS_FGETATTRLIST,
                     SYS_OPENAT, SYS_OPENAT_NOCANCEL, SYS_FSTATAT64,
-                    SYS_GETDIRENTRIES64, SYS_FSTATFS64] {
+                    SYS_GETDIRENTRIES64, SYS_FSTATFS64, SYS_GETATTRLISTBULK] {
             assert_eq!(fd_operands(num).collect::<Vec<_>>(), [0], "syscall {num} holds its fd in x0");
         }
         assert_eq!(fd_operands(SYS_MMAP).collect::<Vec<_>>(), [4], "mmap's fd is x4, consumed by guest_mmap_file");
@@ -1628,6 +1652,8 @@ mod tests {
         assert_eq!(dest_buffer(336), Some((4, DestLen::Reg(5))));
         assert_eq!(dest_buffer(169), Some((2, DestLen::Reg(3))));
         assert_eq!(dest_buffer(170), Some((2, DestLen::Reg(3))));
+        // M44 t0 M2: getattrlistbulk fills attrBuf (x2) up to the caller's attrBufSize (x3).
+        assert_eq!(dest_buffer(SYS_GETATTRLISTBULK), Some((2, DestLen::Reg(3))));
     }
 
     // Absence must mean "provably writes no buffer we can size", never "not gotten to yet".
@@ -1882,6 +1908,7 @@ mod tests {
     #[test]
     fn m44_syscall_numbers() {
         assert_eq!((SYS_OPENAT_NOCANCEL, SYS_CONNECT_NOCANCEL), (464, 409));
+        assert_eq!((SYS_STATFS64, SYS_GETATTRLISTBULK), (345, 461));
     }
 
     // M37: the fd half of both predicates lives in the box (`Box_::is_console_write` /
