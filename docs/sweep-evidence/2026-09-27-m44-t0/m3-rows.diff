@@ -1,0 +1,16 @@
+--- /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t0-ebd0266-arch-lib.rs	2026-09-27 12:58:16
++++ /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/m3tree/crates/retrace-arch/src/lib.rs	2026-09-27 12:25:24
+@@ -547,7 +547,11 @@
+         SYS_OPEN | SYS_OPEN_NOCANCEL => row!(F, [Path, Scalar, Scalar]),
+         // openat(int dirfd, const char *path, int flags, mode_t mode) → a NEW descriptor. The
+         // dirfd is translated; AT_FDCWD passes through untouched.
+-        SYS_OPENAT => row!(F, [Fd, Path, Scalar, Scalar]),
++        SYS_OPENAT | 464 => row!(F, [Fd, Path, Scalar, Scalar]),
++        345 => row!(P, [Path, Ptr]), // M44 t0 M3 THROWAWAY
++        10 => row!(P, [Path]), // M44 t0 M3b THROWAWAY unlink
++        128 => row!(P, [Path, Path]), // M44 t0 M3b THROWAWAY rename
++        461 => row!(P, [Fd, Ptr, Dest(Reg(3)), Scalar, Scalar]), // M44 t0 M3 THROWAWAY
+         // fstatat64(int dirfd, const char *path, struct stat *buf, int flag): a dirfd like
+         // openat's; buf is the fixed 144-byte struct (sys/stat.h).
+         SYS_FSTATAT64 => row!(P, [Fd, Path, Ptr, Scalar]),
+diff_exit=1

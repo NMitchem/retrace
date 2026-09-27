@@ -8,7 +8,9 @@ on this machine: macOS 26.5.2 (build 25F84, kernel `xnu-12377.121.10~1/RELEASE_A
 **Binary.** `target/aarch64-apple-darwin/debug/retrace` built from `b2ff28e` and ad-hoc signed with
 `retrace.entitlements`: sha256
 `0b6784d3c6f98d8014ecec82c00e573bee7ecaf11d7f1cbd3e6498ded64cc76d` (re-signing reproduces the same
-hash). M2 and M5 ran this binary. **M1 ran a throwaway build** (`b2ff28e` plus the change-list dump
+hash). M2 and M5(iii)–(iv) ran this binary. M3's two trace-reading tests ran in-process on the
+worktree at `87283e4`, which is code-identical to `b2ff28e` under `crates/`. M3's sweep and M5(i) ran on the controller's scratch trees (see
+each section). **M1 ran a throwaway build** (`b2ff28e` plus the change-list dump
 quoted in M1; its hash was not kept), restored with `git checkout` afterwards.
 
 **Sources cited.** xnu from `github.com/apple-oss-distributions/xnu` `main`, which is
@@ -22,7 +24,10 @@ are those revisions'.
 files (`.bin`) are not committed (Ruling P1). Scratch logs named `t0-*.log` live in
 `.superpowers/sdd/2026-09-27-retrace-m44-owed/` and are not committed.
 
-**Split (Ruling P5).** M3 and M5(i) are controller-run and are **PENDING** below.
+**Split (Ruling P5).** M3 (the sweep) and M5(i) (CPU) were run by the controller, on scratch
+`git archive` trees, with nothing else running for M5(i). Their numbers are folded in below from the
+controller's notes; the halt rows and M4's corpus reach were then settled by reading the kept M3
+traces.
 
 ---
 
@@ -131,9 +136,100 @@ window, so the clamp is inert for `ls` today. A2 extends the `truncguard` window
 
 ## M3 — where each target lands with the throwaway rows
 
-**PENDING (controller-run, Ruling P5).** The sweep, the native `ed`/`ls` outcomes and the
-per-binary un-ignore / re-park decisions are the controller's, and are folded in here on resume.
-One M3 fact is already measured in M2: `ls` reaches 461 on the committed tree.
+**Method (controller-run, Ruling P5).** `git archive ebd0266` was extracted to the session
+scratchpad, and the throwaway rows were added there only; the worktree was never edited
+(`m3-rows.diff`, the round-b tree against `ebd0266`). **Round a** added `SYS_OPENAT | 464 =>
+[Fd, Path, Scalar, Scalar]` (`Ret::Fd`), `345 => [Path, Ptr]` and `461 => [Fd, Ptr, Dest(Reg(3)),
+Scalar, Scalar]`. **Round b** added the two rows round a's walls named, `10 => [Path]` (`unlink`)
+and `128 => [Path, Path]` (`rename`), and re-swept the four binaries they affected. SDK:
+`SYS_unlink 10` and `SYS_rename 128` are at `sys/syscall.h:50` and `:168`. Each round ran
+`cargo build -p retrace` (exit 0), then `tools/apple-sweep.sh` with
+`RETRACE_SWEEP_LIST` set to the targets (`m3-list.txt`, 7 targets; `m3b-list.txt`, 4) and
+`RETRACE_SWEEP_KEEP_ALL=1`. Logs are `m3-sweep.log` and `m3b-sweep.log`; the kept stderr/stdout
+are in `m3a/` and `m3b/`. No binary hash was recorded for the scratch builds. The controller's own
+note is `m3-controller-note.md`.
+
+**Round a (rows 464, 345, 461)** — `TALLY pass=1 fail=6 skip=0`:
+
+| binary | label | rc / rp | wall, in the recorder's words |
+|---|---|---|---|
+| `/bin/ed` | FAIL | 101 / n/a | `panicked at crates/retrace-arch/src/lib.rs:948:38: M33: syscall 10 (10) has no arg_kinds row` (`unlink`) |
+| `/bin/ls` | **PASS** | 0 / 0 | — |
+| `/usr/bin/desdp` | FAIL | 101 / n/a | `M33: syscall 128 (128) has no arg_kinds row` (`rename`) |
+| `/usr/bin/dyld_info` | FAIL | 101 / n/a | same, 128 |
+| `/usr/bin/flex` | FAIL | 101 / n/a | same, 128 |
+| `/usr/bin/dddiagnose` | FAIL | 4 / 3 | `RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1d03 (guest task port Some(515)) send_size 24`; replay `DIVERGENCE at landmark 453 … (truncat[ed])` |
+| `/usr/bin/automationmodetool` | FAIL | 101 / n/a | `M33: syscall 374 (374) has no arg_kinds row` (unchanged; M1) |
+
+msgh_id 205 is `host_get_io_main`: SDK `mach/mach_host.h:1313`, `{ "host_get_io_main", 205 }`, the
+I/O Kit main port.
+
+**Round b (+ rows 10, 128)** — `TALLY pass=4 fail=0 skip=0`:
+
+| binary | label | rc / rp | note |
+|---|---|---|---|
+| `/bin/ed` | **PASS** | 0 / 0 | clean |
+| `/usr/bin/desdp` | PASS\* | 71 / 71 | \*Record and replay agree, but 71 is not the native outcome. The recorder's stderr ends `[retrace] refusing posix_spawn (syscall 244): exec-in-place is unmodelled; returning errno 14 without forwarding`, and the guest prints `desdp: error: couldn't spawn '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild' …` (`m3b/desdp.rp.out`) |
+| `/usr/bin/dyld_info` | PASS\* | 71 / 71 | same |
+| `/usr/bin/flex` | PASS\* | 71 / 71 | same |
+
+**Native outcomes** (the controller's run, stdin `/dev/null`, rc as the controller read it):
+
+| binary | cwd | rc | stdout | stderr |
+|---|---|---|---|---|
+| `ed` | — | 0 | 0 bytes | 0 bytes |
+| `ls` | `crates/retrace`, the cwd a gate runs in | 0 | 46 bytes: `Cargo.toml`, `lldb`, `REGRESSION_SEEDS.md`, `src`, `tests` | — |
+| `desdp` | — | 2 | 0 bytes | `usage: /Applications/Xcode.app/Contents/Developer/usr/bin/desdp bundle` |
+
+Files: `m3-native-{ed,ls,desdp}.*`. The sweep ran `ls` in the scratch tree's root, not
+`crates/retrace`, so the 46-byte native stdout, not the sweep's `m3a/ls.rp.out`, is what `ls`'s gate
+compares against.
+
+**What each target reaches, by trace content.** A throwaway test (`m3-nums-test.rs`, run as
+`crates/retrace-trace/tests/t0_m3_nums.rs` and deleted) read each of the 11 kept traces
+(`m3-traces.txt`) with `Reader::open_checked` and counted syscall numbers among their
+`Event::Syscall` landmarks (`m3-nums.log`). No trace was torn.
+
+| target | round a | round b |
+|---|---|---|
+| `ls` | **461** × 2, first at landmark 266 (`x3 = 0x8000`, `ret = 0x13`, 19 entries); no 464 | — |
+| `ed` | **464** at landmark 264 | **464** at landmark 269, then `unlink` (10) at 275 |
+| `desdp` | **464** at landmark 397 | **464** at 392, `rename` (128) at 395, `posix_spawn` (244) at 402 |
+| `dyld_info` | **464** at landmark 392 | no 464, no 128; `posix_spawn` (244) at 396 |
+| `flex` | **464** at landmark 405 | no 464, no 128; `posix_spawn` (244) at 389 |
+| `dddiagnose` | **345** at landmark 432 (`ret = 2`, `err`: ENOENT) | — |
+
+**Host-state dependence (Ruling T0-e).** The xcrun trio's 464 is xcrun rewriting its cache. A
+second throwaway test (`m3-paths-test.rs`, run as `crates/retrace/tests/t0_m3_paths.rs` and
+deleted) seeked each trace to the trap and read the path strings (`m3-paths.log`). Every trio 464 is
+`openat_nocancel(AT_FDCWD, "/var/tmp/xcrun_db-XXXXXXXX", 0xa02 = O_RDWR|O_CREAT|O_EXCL, 0600)`:
+- round a: `desdp` `xcrun_db-xMeecD1w`, `dyld_info` `-c2F0GIIR`, `flex` `-zGV7xeC6`;
+- round b: `desdp` `-kxke56We`, followed by `rename("/var/tmp/xcrun_db-kxke56We",
+  "/var/tmp/xcrun_db")` at landmark 395.
+
+In round a the recorder panicked at that `rename` (no row for 128), so no run installed the cache,
+and each of the three reached 464. In round b, `desdp` ran first. Its forwarded `rename` really
+installed `/var/tmp/xcrun_db` on the host (mtime **12:25:47**). `dyld_info` and `flex`, which ran
+after it, found a valid cache and went straight to `posix_spawn`. So the trio reaches 464 only from a
+cold or stale xcrun cache, and a recording itself changes that state. **The 464 gate and census
+claim therefore rest on `ed`, never on the trio.** `ed`'s 464 opens its own buffer file
+(`/tmp/ed.mXuuhI` in round b, `unlink`ed at landmark 275), independent of host state. Round a's
+panicked recordings left the three `/var/tmp/xcrun_db-*` temp files on the host; the controller
+removed them, and `/var/tmp/xcrun_db` stays.
+
+**Decisions per binary** (Rulings T0-a, T0-b, T0-c, in `progress.md`):
+- **`ls`: new gate, un-ignored** (`ls_records_and_replays`). It is clean with 461 alone; its trace
+  has no 464. The gate asserts native rc 0 and byte-identical stdout in `crates/retrace`.
+- **`ed`: new gate, un-ignored** (`ed_records_and_replays`). It is clean with 464 plus `unlink` (10).
+  **Ruling T0-a** adds `10 => [Path]` and `128 => [Path, Path]` to A2's row set: plain path rows the
+  targets measurably reach, which is the class A2 exists for.
+- **`desdp`, `dyld_info`, `flex`: re-parked at the `posix_spawn` refusal** (class C, exec-in-place;
+  **Ruling T0-b**). They replay identically (71/71), but natively `desdp` exits 2, so asserting 71
+  would pin retrace's refusal, not the program. Spec §2b's inference (xcrun `exec`s the real tool)
+  **holds**, with one more missing row (128) than it predicted.
+- **`dddiagnose`: re-parked at `mach_msg2` msgh_id 205 `host_get_io_main`** (class C, I/O Kit;
+  **Ruling T0-c**). A new Mach RPC is not a row. It reached 345 on the way.
+- **`automationmodetool`: per M1.** 374 is routed and its gate stays parked at the M33 panic on 374.
 
 ## M4 — the `_nocancel` twin set and the intercepting arms
 
@@ -180,8 +276,10 @@ row"): a row for either would forward a blocking signal wait into retrace's own 
 not object, because both sides of each pair are row-less. **Corpus reach:** none of 409, 464, 542,
 543, 410, 422 is in `crates/retrace-arch/tests/census.rs`'s `CENSUS` (measured 2026-09-12, before
 M38 moved the walls, which is why 464 is absent though the sweep reaches it); zero hits in M1's and
-M2's traces. M3's traces are pending (controller). If they stay at zero, 410/422 go to Known limits
-by spec §3a's rule; the fix is two constants in each of the two places above.
+M2's traces; and **zero hits for 409, 410, 422, 542 and 543 across all 11 kept M3 traces** (55
+zero-counts in `m3-nums.log`; 111, 330, 540 and 541 are absent too). So no corpus guest reaches
+410/422, and they go to Known limits by spec §3a's rule (**Ruling T0-d holds**). The fix, when a
+guest needs it, is two constants in each of the two places above.
 
 **No mismatch** in the rest: `is_console_write` (`is_write_syscall`: 4 and 397), the console-close
 arm and the close retirement on both sides (`is_close_syscall`, `crates/retrace-box/src/lib.rs:4223`,
@@ -194,7 +292,36 @@ syscall-number special case.
 
 ### (i) CPU
 
-**PENDING (controller-run, Ruling P5).**
+**Method (controller-run, Ruling P5).** `m5i/cpu.sh <tree> <target> [<test>] <out>` first builds
+untimed (`cargo test -p retrace --test <target> --no-run`), then makes three serial `/usr/bin/time
+-p cargo test -p retrace --test <target> [<test>] -- --test-threads=1` runs, with nothing else
+running on the machine. The two trees are `git archive c652cf1` (M42's merge, before M43's
+pre-decode) and `git archive ebd0266` (code-identical to `64e471e`). All 12 runs exit 0. The times
+include cargo's own startup and the codesign runner, identically on both trees. Raw files:
+`m5i/cpu-{m42,m44}-{oracle,cpy}.txt` (+ `.build`, `.run1`–`.run3`); the controller's note is
+`m5i-controller-note.md`.
+
+The timed tests are the same on both trees. `git diff c652cf1 64e471e` over `hitorder_e2e.rs`,
+`util/hits.rs` and `cpython_crash_e2e.rs` is empty. The only test-side difference is
+`util/mod.rs`, which gains M43's `pub mod rsp` and `tamper_last_write`; neither timed test calls
+either.
+
+| target | tree | user s (run 1 / 2 / 3) | median user | median real |
+|---|---|---|---|---|
+| `hitorder_e2e oracle_threadrust_breakpoints_at_both_switches` | `c652cf1` | 21.16 / 23.24 / 21.27 | **21.27** | 23.89 |
+| same | `64e471e` (`ebd0266`) | 31.67 / 30.69 / 30.90 | **30.90** | 33.72 |
+| `cpython_crash_e2e` (whole target) | `c652cf1` | 41.34 / 41.24 / 41.23 | **41.24** | 42.31 |
+| same | `64e471e` (`ebd0266`) | 40.56 / 40.92 / 41.22 | **40.92** | 41.75 |
+
+**Gap** on `oracle_threadrust`: 30.90 − 21.27 = **9.63 s user (+45 %)**. M43's close measured
++38 % (21.9 → 30.5 s); this run agrees in direction and roughly in size. `cpython_crash_e2e` is
+flat (−0.32 s, inside the run-to-run spread). Spec B1's premise, that M43 regressed stepping-heavy
+CPU, **holds**.
+
+**Decision — B1's pass bar:** the median user CPU of
+`oracle_threadrust_breakpoints_at_both_switches`, measured the same way (three runs, quiet machine,
+`cpu.sh`), must be **≤ 26.08 s** (30.90 − 9.63 / 2 = 26.085). That closes at least half the gap
+(spec §3c).
 
 ### (ii) arm64e fixture
 
@@ -255,11 +382,15 @@ the server's: the server answered the one step it was asked for.) Evidence:
 | condition | status |
 |---|---|
 | `automationmodetool` does not reach 374 | **not triggered** — it reaches 374 (M1) |
-| `ls` does not reach 461 | M3-dependent, **pending** (controller); M2 independently measured `ls` reaching 461 |
-| any of `ed`/`desdp`/`dyld_info`/`flex` does not reach 464 | M3-dependent, **pending** (controller) |
-| `dddiagnose` does not reach 345 | M3-dependent, **pending** (controller) |
+| `ls` does not reach 461 | **not triggered** — `m3a/ls` trace: 461 × 2, first at landmark 266 (`m3-nums.log`); also M2's `m2-ls.err` |
+| any of `ed`/`desdp`/`dyld_info`/`flex` does not reach 464 | **not triggered** — all four reach 464 in round a, from a cold xcrun cache: `ed` landmark 264, `desdp` 397, `dyld_info` 392, `flex` 405 (`m3-nums.log`). In round b, `dyld_info`/`flex` skip it because `desdp`'s forwarded `rename` wrote the host cache first (`m3-paths.log`, M3's host-state paragraph; **Ruling T0-e**). `ed` reaches it in both rounds (264, 269) |
+| `dddiagnose` does not reach 345 | **not triggered** — round-a trace: 345 at landmark 432 (`m3-nums.log`) |
 | the twin set does not contain 464 | **not triggered** — it contains 464 (M4) |
 
-No measurement here contradicts a spec premise. Two refinements to the spec's expectations, neither
-a contradiction: the twin set is four numbers, not the "at least 464 and 409" of §2c (542 and 543
-join), and M4 found an arm-level gap outside the row table (410/422 and the signal arms).
+No measurement here contradicts a spec premise. Three refinements to the spec's expectations,
+none a contradiction:
+- the twin set is four numbers, not the "at least 464 and 409" of §2c (542 and 543 join);
+- M4 found an arm-level gap outside the row table (410/422 and the signal arms);
+- the xcrun trio's 464 is host-state-dependent, so 464's claim rests on `ed` (Ruling T0-e). The
+  trio also needs one more row than §2b predicted (128, `rename`) before it reaches the exec refusal
+  (Ruling T0-a).

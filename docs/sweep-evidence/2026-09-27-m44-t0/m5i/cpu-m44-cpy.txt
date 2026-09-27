@@ -1,0 +1,21 @@
+run 1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/cpython_crash_e2e.rs (target/aarch64-apple-darwin/debug/deps/cpython_crash_e2e-a45f679f40238729)
+real 41.41
+user 40.56
+sys 0.44
+exit=0
+run 2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/cpython_crash_e2e.rs (target/aarch64-apple-darwin/debug/deps/cpython_crash_e2e-a45f679f40238729)
+real 41.75
+user 40.92
+sys 0.42
+exit=0
+run 3
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/cpython_crash_e2e.rs (target/aarch64-apple-darwin/debug/deps/cpython_crash_e2e-a45f679f40238729)
+real 42.09
+user 41.22
+sys 0.42
+exit=0

@@ -1,0 +1,2 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+  Executable tests/cpython_crash_e2e.rs (target/aarch64-apple-darwin/debug/deps/cpython_crash_e2e-a45f679f40238729)

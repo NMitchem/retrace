@@ -1,0 +1,16 @@
+   Compiling retrace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/t0_m3_paths.rs (target/aarch64-apple-darwin/debug/deps/t0_m3_paths-87cf805dac6459d5)
+
+running 1 test
+test t0_m3_paths ... T0M3P /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/m3b-evidence/desdp.bin landmark 392 pc=0x1804b3950 0x6cdf0 = "/var/tmp/xcrun_db-kxke56We"
+T0M3P /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/m3b-evidence/desdp.bin landmark 395 pc=0x1804b1888 0x6cdf0 = "/var/tmp/xcrun_db-kxke56We"
+T0M3P /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/m3b-evidence/desdp.bin landmark 395 pc=0x1804b1888 0x6cc10 = "/var/tmp/xcrun_db"
+T0M3P /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/m3-evidence/desdp.bin landmark 397 pc=0x1804b3950 0x6b800 = "/var/tmp/xcrun_db-xMeecD1w"
+T0M3P /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/m3-evidence/dyld_info.bin landmark 392 pc=0x1804b3950 0x6d370 = "/var/tmp/xcrun_db-c2F0GIIR"
+T0M3P /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/m3-evidence/flex.bin landmark 405 pc=0x1804b3950 0x6c780 = "/var/tmp/xcrun_db-zGV7xeC6"
+T0M3P /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/m3b-evidence/ed.bin landmark 269 pc=0x1804b3950 0x100010080 = "/tmp/ed.mXuuhI"
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.96s
+

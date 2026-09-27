@@ -1,0 +1,2 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+  Executable tests/hitorder_e2e.rs (target/aarch64-apple-darwin/debug/deps/hitorder_e2e-040de643b7f09740)
