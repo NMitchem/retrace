@@ -55,11 +55,19 @@ pub(crate) struct Backings { v: Vec<Backing>, idx: SpanIndex }
 
 impl Backings {
     pub(crate) fn new() -> Self { Backings { v: Vec::new(), idx: SpanIndex::default() } }
+    // Vec first, index second: if the overlap assert fires, the Backing is already in the Vec and
+    // drops with it after `vm` (the field order), never mid-unwind while stage-2 still maps it.
     pub(crate) fn push(&mut self, b: Backing) {
-        self.idx.insert(b.ipa, b.len, self.v.len());
+        let (ipa, len, pos) = (b.ipa, b.len, self.v.len());
         self.v.push(b);
+        self.idx.insert(ipa, len, pos);
     }
-    pub(crate) fn extend(&mut self, it: impl IntoIterator<Item = Backing>) { for b in it { self.push(b); } }
+    // The same order for the whole batch, so no Backing is left in `it` to drop mid-unwind.
+    pub(crate) fn extend(&mut self, it: impl IntoIterator<Item = Backing>) {
+        let from = self.v.len();
+        self.v.extend(it);
+        for (pos, b) in self.v.iter().enumerate().skip(from) { self.idx.insert(b.ipa, b.len, pos); }
+    }
     pub(crate) fn remove(&mut self, pos: usize) -> Backing {
         self.idx.remove(pos);
         self.v.remove(pos)
@@ -135,10 +143,35 @@ mod tests {
     }
 
     #[test]
+    fn a_read_whose_end_would_overflow_is_held_by_nothing() {
+        let mut idx = SpanIndex::default();
+        idx.insert(0x4000, 0x4000, 0);
+        assert_eq!(idx.holding(u64::MAX - 1, 8), None, "checked_add answers None, it does not wrap or panic");
+        assert_eq!(idx.containing(u64::MAX), None);
+    }
+
+    #[test]
     #[should_panic(expected = "overlaps")]
     fn an_overlapping_insert_fails_loud() {
         let mut idx = SpanIndex::default();
         idx.insert(0x8000, 0x8000, 0);
         idx.insert(0xc000, 0x4000, 1);
+    }
+
+    // The two below reach the successor check: the span already indexed sorts at or after the new one.
+    #[test]
+    #[should_panic(expected = "overlaps")]
+    fn a_second_backing_at_the_same_start_fails_loud() {
+        let mut idx = SpanIndex::default();
+        idx.insert(0x8000, 0x4000, 0);
+        idx.insert(0x8000, 0x4000, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "overlaps")]
+    fn an_insert_running_into_the_next_span_fails_loud() {
+        let mut idx = SpanIndex::default();
+        idx.insert(0xc000, 0x4000, 0);
+        idx.insert(0x8000, 0x8000, 1);
     }
 }
