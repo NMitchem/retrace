@@ -145,6 +145,11 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     (542, View::NestedPointer, "preadv_nocancel(fd, …): preadv's twin, refused upstream like 540 — M44; unexercised"),
     (543, View::FdOperands, "pwritev_nocancel(fd, …): pwritev's twin — M44; unexercised"),
     (543, View::ReadsGuestBuffer, "pwritev_nocancel(fd, …): pwritev's twin, forwarded like 541 — M44; unexercised"),
+    // M44 A2: getattrlistbulk's dirfd, and (if Dest) its buffer. statfs64 has neither an Fd nor a
+    // Dest, so no view of it differs and it has no entry. unlink (10) and rename (128) likewise
+    // have no Fd/Dest/nested-pointer/reader kind, so neither differs and neither has an entry.
+    (461, View::FdOperands, "getattrlistbulk(dirfd, …) — M44; exercised (/bin/ls)"),
+    (461, View::DestBuffer, "getattrlistbulk's attrBuf is a Dest of x3 bytes (t0 M2: no cap below the window) — M44; exercised (/bin/ls)"),
 ];
 
 /// The BSD numbers, the mach traps (negative, as the two's-complement `u64` the trap carries), and
