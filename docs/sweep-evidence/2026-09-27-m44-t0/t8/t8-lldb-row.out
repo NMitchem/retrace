@@ -1,0 +1,48 @@
+(lldb) command source -s 0 '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t8-lldb-row.cmds'
+Executing commands in '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t8-lldb-row.cmds'.
+(lldb) log enable -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t8-lldb-row.packets gdb-remote packets
+(lldb) gdb-remote 127.0.0.1:49373
+Process 1 stopped
+* thread #1, stop reason = start of recording
+    frame #0: 0x00000001400049c0 
+->  0x1400049c0: mov    x0, sp
+    0x1400049c4: and    sp, x0, #0xfffffffffffffff0
+    0x1400049c8: mov    x29, #0x0                 ; =0 
+    0x1400049cc: mov    x30, #0x0                 ; =0 
+Target 0: (threadrust) stopped.
+(lldb) command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+(lldb) breakpoint set -a 0x1804b0b78 -i 0
+Breakpoint 1: address = 0x00000001804b0b78
+(lldb) process continue
+Process 1 resuming
+Process 1 stopped
+* thread #2, stop reason = breakpoint 1.1
+    frame #0: 0x00000001804b0b78 
+->  0x1804b0b78: svc    #0x80
+    0x1804b0b7c: b.lo   0x1804b0b9c
+    0x1804b0b80: pacibsp 
+    0x1804b0b84: stp    x29, x30, [sp, #-0x10]!
+Target 0: (threadrust) stopped.
+(lldb) breakpoint delete 1
+1 breakpoints deleted; 0 breakpoint locations disabled.
+(lldb) thread select 2
+(lldb) thread step-inst
+* thread #2, stop reason = breakpoint 1.1
+    frame #0: 0x00000001804b0b78 
+->  0x1804b0b78: svc    #0x80
+    0x1804b0b7c: b.lo   0x1804b0b9c
+    0x1804b0b80: pacibsp 
+    0x1804b0b84: stp    x29, x30, [sp, #-0x10]!
+Process 1 stopped
+* thread #1, stop reason = exited (code 0)
+    frame #0: 0x00000001804b5580 
+->  0x1804b5580: svc    #0x80
+    0x1804b5584: b.lo   0x1804b55a4
+    0x1804b5588: pacibsp 
+    0x1804b558c: stp    x29, x30, [sp, #-0x10]!
+Target 0: (threadrust) stopped.
+(lldb) thread list
+Process 1 stopped
+* thread #1: tid = 0x0001, 0x00000001804b5580, stop reason = exited (code 0)
+(lldb) script print("END")
+END

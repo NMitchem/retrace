@@ -1,0 +1,6 @@
+breakpoint set -a 0x1804b0b78 -i 0
+process continue
+breakpoint delete 1
+thread select 2
+thread step-inst
+thread list

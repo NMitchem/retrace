@@ -1,8 +1,9 @@
 //! M43: a minimal gdb-remote client for `gdbserver_e2e` and `lldb_e2e`. It spawns `retrace
 //! gdbserver` (the codesigned copy), learns the port from its one stderr line, and exchanges
 //! packets. The handshake uses ack mode; everything after `QStartNoAckMode` uses no-ack mode, as
-//! lldb does. It also holds the blocking-step fixture (`threadrust_block` and its two helpers) and
-//! the register oracle's parser (`dbg_field`), which both test files share.
+//! lldb does. It also holds the blocking-step fixture (`threadrust_block` and its two helpers), the
+//! thread-exit fixture (`threadrust_child_exit`, M44 B3) and the register oracle's parser
+//! (`dbg_field`), which both test files share.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -226,6 +227,18 @@ pub fn threadrust_block() -> (&'static Path, usize, u32) {
         (tr, n, t)
     });
     (p.as_path(), *n, *t)
+}
+
+/// M44 B3: the same threadrust recording, the landmark of the child's own `bsdthread_terminate`
+/// (its last trap), and the child's thread. Returns (trace, landmark x, child).
+pub fn threadrust_child_exit() -> (&'static Path, usize, u32) {
+    let (tr, _, _) = threadrust_block();
+    let ev = retrace_trace::Reader::open(tr).unwrap();
+    let (x, child) = (1..ev.len()).find_map(|i| match ev[i] {
+        retrace_trace::Event::Syscall { num, thread, .. } if num == retrace_arch::SYS_BSDTHREAD_TERMINATE => Some((i, thread)),
+        _ => None,
+    }).expect("the child's bsdthread_terminate");
+    (tr, x, child)
 }
 
 /// The pc of the trap that ends window `n` (landmark n's svc): seek the window's full length.

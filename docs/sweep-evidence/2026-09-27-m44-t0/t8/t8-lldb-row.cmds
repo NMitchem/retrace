@@ -1,0 +1,10 @@
+log enable -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t8-lldb-row.packets gdb-remote packets
+gdb-remote 127.0.0.1:49373
+command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+breakpoint set -a 0x1804b0b78 -i 0
+process continue
+breakpoint delete 1
+thread select 2
+thread step-inst
+thread list
+script print("END")

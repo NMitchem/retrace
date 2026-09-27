@@ -225,6 +225,33 @@ fn to_svc(svc: u64, m: usize) -> Vec<String> {
     vec![format!("breakpoint set -a {svc:#x} -i {m}"), "process continue".into(), "breakpoint delete 1".into()]
 }
 
+/// `session`, with lldb's gdb-remote packet log enabled after the connect. Also returns every
+/// packet lldb sent, as the log prints it past `send packet: $` (checksum included).
+fn packet_logged_session(trace: &Path, cmds: &[String]) -> (Option<i32>, String, String, Vec<String>) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pkt = std::env::temp_dir().join(format!("retrace-lldb-{}-{n}.packets", std::process::id()));
+    let mut all = vec![format!("log enable -f {} gdb-remote packets", pkt.display())];
+    all.extend(cmds.iter().cloned());
+    let (code, out, err) = session(trace, &all);
+    let log = std::fs::read_to_string(&pkt).unwrap_or_default();
+    let _ = std::fs::remove_file(&pkt);
+    let sends = log.lines().filter_map(|l| l.split_once("send packet: $").map(|(_, p)| p.to_string())).collect();
+    (code, out, err, sends)
+}
+
+/// A `vCont`'s actions, without the checksum. None for any other packet.
+fn vcont_actions(p: &str) -> Option<Vec<&str>> {
+    p.strip_prefix("vCont;").map(|b| b.split('#').next().unwrap_or("").split(';').collect())
+}
+/// A step, as the server reads one: a `vCont` with a step action ANYWHERE (`vCont;c:1;s:2` is a
+/// step, gdbserver.rs `handle`'s `vCont` arm).
+fn is_step(p: &str) -> bool { vcont_actions(p).is_some_and(|a| a.iter().any(|x| x.starts_with(['s', 'S']))) }
+/// A resume: `c`, or a `vCont` of continue actions alone.
+fn is_resume(p: &str) -> bool {
+    p.starts_with("c#") || vcont_actions(p).is_some_and(|a| a.iter().all(|x| x.starts_with(['c', 'C'])))
+}
+
 #[test]
 fn lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_running() {
     // Spec R7's fallback (Ruling T4-a) and §3d rule 1 on the stepped thread (Ruling T4-b), in lldb
@@ -299,24 +326,23 @@ fn lldb_steps_a_thread_across_its_own_exit_without_looping() {
     // step was answered on another thread, and B3's stop is named on the running thread. The
     // session is bounded (BOUND), so a loop fails here as a killed session with no END.
     //
-    // lldb-2100 does not loop, and it does not display B3's stop either. The server answers the step
-    // with the exception stop on the running thread, tid 1 (`gdbserver_e2e`'s
+    // lldb-2100 does not loop, and it does not display B3's own stop either. The server answers the
+    // step with the exception stop on the running thread, tid 1 (`gdbserver_e2e`'s
     // `a_step_across_the_stepped_threads_own_exit_stops_there` pins that). lldb suspended tid 1 for
-    // the `vCont;s:2`, so it ignores the stop. Its step log (`log enable lldb step thread`, M44 Task
-    // 8's `t8-lldb-steplog.log`) reads `Thread::ShouldStop for tid = 0x0001 0x0001, should_stop = 0
-    // (ignore since thread was suspended)`. The stepped thread is gone, so nothing re-steps: lldb
-    // sends one `c` and runs to the end of the recording. That is lldb's behaviour, not the
-    // server's, pinned so that a change in it is seen, and routed (M44 Ruling T8-a).
+    // the `vCont;s:2`, so it ignores the stop. Its step log (`log enable lldb step thread`,
+    // `docs/sweep-evidence/2026-09-27-m44-t0/t8/t8-lldb-steplog.log`, line 46) reads
+    // `Thread::ShouldStop for tid = 0x0001 0x0001, should_stop = 0 (ignore since thread was
+    // suspended)`. The stepped thread is gone, so nothing re-steps: lldb sends one `c`. With no
+    // breakpoint ahead, that runs to the end of the recording. This is lldb's behaviour, not the
+    // server's, pinned so that a change in it is seen; the display is routed (M44 Ruling T8-a). The
+    // `c` is a real continue from the exit's boundary, so lldb no longer skips the breakpoints
+    // after the exit (the next row).
     if !lldb_runs() {
         util::announce("SKIPPED lldb_steps_a_thread_across_its_own_exit…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
-    let (tr, _, _) = util::rsp::threadrust_block();
+    let (tr, x, child) = util::rsp::threadrust_child_exit();
     let ev = retrace_trace::Reader::open(tr).unwrap();
-    let (x, child) = (1..ev.len()).find_map(|i| match ev[i] {
-        retrace_trace::Event::Syscall { num, thread, .. } if num == retrace_arch::SYS_BSDTHREAD_TERMINATE => Some((i, thread)),
-        _ => None,
-    }).expect("the child's bsdthread_terminate");
     let (exit_code, exit_thread) = ev.iter().find_map(|e| match e {
         retrace_trace::Event::Exit { code, thread } => Some((*code, *thread)),
         _ => None,
@@ -327,26 +353,63 @@ fn lldb_steps_a_thread_across_its_own_exit_without_looping() {
         assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
         util::rsp::continue_to_window(&mut c, x).0
     };
-    let pkt = std::env::temp_dir().join(format!("retrace-lldb-b3-{}.packets", std::process::id()));
-    let mut cmds = vec![format!("log enable -f {} gdb-remote packets", pkt.display())];
-    cmds.extend(to_svc(svc, m));
+    let mut cmds = to_svc(svc, m);
     cmds.extend([format!("thread select {}", child + 1), "thread step-inst".into(), "thread list".into()]);
-    let (code, out, err) = session(tr, &cmds);
-    let packets = std::fs::read_to_string(&pkt).unwrap_or_default();
-    let _ = std::fs::remove_file(&pkt);
+    let (code, out, err, sends) = packet_logged_session(tr, &cmds);
     let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
     assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {t}");
     assert_eq!(code, Some(0), "{t}");
-    // The step is sent once and never re-sent, and lldb's one resume after it is a `c`.
-    let sends: Vec<&str> = packets.lines().filter_map(|l| l.split_once("send packet: $").map(|(_, p)| p)).collect();
-    let steps: Vec<usize> = (0..sends.len()).filter(|&i| sends[i].starts_with("vCont;s")).collect();
+    // The step is sent once and never re-sent, and lldb's one resume after it is a continue.
+    assert!(!sends.is_empty(), "lldb's packet log is empty: {t}");
+    let steps: Vec<usize> = (0..sends.len()).filter(|&i| is_step(&sends[i])).collect();
     assert_eq!(steps.len(), 1, "one step, never re-sent: {sends:?}: {t}");
-    let resumes = sends[steps[0] + 1..].iter().filter(|p| p.starts_with("c#") || p.starts_with("vCont;c")).count();
+    let resumes = sends[steps[0] + 1..].iter().filter(|p| is_resume(p)).count();
     assert_eq!(resumes, 1, "lldb resumed once after the ignored stop: {sends:?}: {t}");
     // lldb's stop is the end of the recording, on the thread that exits the process. Measured:
     // `* thread #1: tid = 0x0001, 0x00000001804b5580, stop reason = exited (code 0)`.
     let sel = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {t}"));
     assert_eq!((sel.1, sel.3), (u64::from(exit_thread) + 1, format!("exited (code {exit_code})").as_str()), "{t}");
+}
+
+#[test]
+fn lldb_stops_at_a_breakpoint_past_a_step_across_the_threads_own_exit() {
+    // M44 B3's effect in lldb (Ruling T8-b). lldb ignores B3's own stop and resumes, as the row
+    // above pins. That resume is now a real continue from the exit's boundary, with lldb's
+    // breakpoints armed. Before M44, the step's run until the stepped thread was current again
+    // armed nothing and consumed the rest of the recording. A breakpoint that main reaches after
+    // the child's exit was skipped, and lldb stopped at the end.
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_stops_at_a_breakpoint_past_a_step_across…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (tr, x, child) = util::rsp::threadrust_child_exit();
+    let ev = retrace_trace::Reader::open(tr).unwrap();
+    let main = match ev[x + 1] {
+        retrace_trace::Event::Syscall { thread, .. } => thread,
+        _ => panic!("landmark {} is not a syscall", x + 1),
+    };
+    assert_ne!(main, child, "window {} runs after the child's exit, on another thread", x + 1);
+    // The svc that ends window x + 1. Main runs it after the child has exited, and no earlier
+    // instruction of that window is a svc, so it is the breakpoint's first hit after the exit.
+    let b = util::rsp::trap_pc(tr, x + 1);
+    let svc = util::rsp::trap_pc(tr, x);
+    let m = {
+        let mut c = util::rsp::Rsp::spawn(tr, &[]);
+        assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+        util::rsp::continue_to_window(&mut c, x).0
+    };
+    let mut cmds = to_svc(svc, m);
+    cmds.extend([format!("breakpoint set -a {b:#x}"), format!("thread select {}", child + 1),
+                 "thread step-inst".into(), "thread list".into(), "process plugin packet monitor where".into()]);
+    let (code, out, err) = session(tr, &cmds);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end: {t}");
+    assert_eq!(code, Some(0), "{t}");
+    let sel = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {t}"));
+    assert_eq!(sel, (true, u64::from(main) + 1, b, "breakpoint 2.1"), "main, at the breakpoint past the exit: {t}");
+    let w = wheres(&out);
+    assert_eq!(w.len(), 1, "{t}");
+    assert!(w[0].starts_with(&format!("{}, ", x + 1)), "in window {}, not at the end of the recording: {t}", x + 1);
 }
 
 #[test]
