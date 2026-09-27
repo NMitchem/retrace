@@ -294,6 +294,62 @@ fn lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_r
 }
 
 #[test]
+fn lldb_steps_a_thread_across_its_own_exit_without_looping() {
+    // M44 B3's loop check in lldb itself (spec §3c): M43 measured lldb re-stepping forever when a
+    // step was answered on another thread, and B3's stop is named on the running thread. The
+    // session is bounded (BOUND), so a loop fails here as a killed session with no END.
+    //
+    // lldb-2100 does not loop, and it does not display B3's stop either. The server answers the step
+    // with the exception stop on the running thread, tid 1 (`gdbserver_e2e`'s
+    // `a_step_across_the_stepped_threads_own_exit_stops_there` pins that). lldb suspended tid 1 for
+    // the `vCont;s:2`, so it ignores the stop. Its step log (`log enable lldb step thread`, M44 Task
+    // 8's `t8-lldb-steplog.log`) reads `Thread::ShouldStop for tid = 0x0001 0x0001, should_stop = 0
+    // (ignore since thread was suspended)`. The stepped thread is gone, so nothing re-steps: lldb
+    // sends one `c` and runs to the end of the recording. That is lldb's behaviour, not the
+    // server's, pinned so that a change in it is seen, and routed (M44 Ruling T8-a).
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_steps_a_thread_across_its_own_exit…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (tr, _, _) = util::rsp::threadrust_block();
+    let ev = retrace_trace::Reader::open(tr).unwrap();
+    let (x, child) = (1..ev.len()).find_map(|i| match ev[i] {
+        retrace_trace::Event::Syscall { num, thread, .. } if num == retrace_arch::SYS_BSDTHREAD_TERMINATE => Some((i, thread)),
+        _ => None,
+    }).expect("the child's bsdthread_terminate");
+    let (exit_code, exit_thread) = ev.iter().find_map(|e| match e {
+        retrace_trace::Event::Exit { code, thread } => Some((*code, *thread)),
+        _ => None,
+    }).expect("threadrust exits");
+    let svc = util::rsp::trap_pc(tr, x);
+    let m = {
+        let mut c = util::rsp::Rsp::spawn(tr, &[]);
+        assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+        util::rsp::continue_to_window(&mut c, x).0
+    };
+    let pkt = std::env::temp_dir().join(format!("retrace-lldb-b3-{}.packets", std::process::id()));
+    let mut cmds = vec![format!("log enable -f {} gdb-remote packets", pkt.display())];
+    cmds.extend(to_svc(svc, m));
+    cmds.extend([format!("thread select {}", child + 1), "thread step-inst".into(), "thread list".into()]);
+    let (code, out, err) = session(tr, &cmds);
+    let packets = std::fs::read_to_string(&pkt).unwrap_or_default();
+    let _ = std::fs::remove_file(&pkt);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {t}");
+    assert_eq!(code, Some(0), "{t}");
+    // The step is sent once and never re-sent, and lldb's one resume after it is a `c`.
+    let sends: Vec<&str> = packets.lines().filter_map(|l| l.split_once("send packet: $").map(|(_, p)| p)).collect();
+    let steps: Vec<usize> = (0..sends.len()).filter(|&i| sends[i].starts_with("vCont;s")).collect();
+    assert_eq!(steps.len(), 1, "one step, never re-sent: {sends:?}: {t}");
+    let resumes = sends[steps[0] + 1..].iter().filter(|p| p.starts_with("c#") || p.starts_with("vCont;c")).count();
+    assert_eq!(resumes, 1, "lldb resumed once after the ignored stop: {sends:?}: {t}");
+    // lldb's stop is the end of the recording, on the thread that exits the process. Measured:
+    // `* thread #1: tid = 0x0001, 0x00000001804b5580, stop reason = exited (code 0)`.
+    let sel = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {t}"));
+    assert_eq!((sel.1, sel.3), (u64::from(exit_thread) + 1, format!("exited (code {exit_code})").as_str()), "{t}");
+}
+
+#[test]
 fn lldb_reverse_steps_back_onto_another_threads_trap() {
     // Spec §3e (Ruling T5-b): a reverse step can cross a landmark backward onto another thread's
     // trap, and the reply names the thread current there. lldb has no step plan for a `bc`, so it
