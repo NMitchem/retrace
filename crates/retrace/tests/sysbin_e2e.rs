@@ -64,7 +64,7 @@ fn an_objc_heavy_system_tool_records_and_replays() {
     // Announce rather than skip quietly if it is missing — a silent skip reads as a green it did
     // not earn (the discipline `jq_e2e` established).
     if !std::path::Path::new("/usr/bin/aa").exists() {
-        eprintln!("SKIPPING an_objc_heavy_system_tool_records_and_replays: /usr/bin/aa is absent \
+        util::announce("SKIPPING an_objc_heavy_system_tool_records_and_replays: /usr/bin/aa is absent \
                    on this machine. It is an OS artifact, not a repo artifact.");
         return;
     }
@@ -102,7 +102,7 @@ fn an_objc_heavy_system_tool_records_and_replays() {
 #[test]
 fn ps_records_and_replays() {
     if !std::path::Path::new("/bin/ps").exists() {
-        eprintln!("SKIPPED ps_records_and_replays: /bin/ps not found. This gate did NOT run — it \
+        util::announce("SKIPPED ps_records_and_replays: /bin/ps not found. This gate did NOT run — it \
                    is not evidence of anything.");
         return;
     }
