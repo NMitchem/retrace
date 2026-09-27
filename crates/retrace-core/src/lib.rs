@@ -154,8 +154,8 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
         let thread = b.threads().current() as u32;
         if trace_log {
             if let Stop::Syscall { num, args } = &stop {
-                eprintln!("[trap] num={} (0x{:x}) pc={:#x} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
-                    *num as i64, num, b.position(), args[0], args[1], args[2], args[3], args[4], args[5]);
+                eprintln!("[trap] num={} (0x{:x}) pc={:#x} args=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
+                    *num as i64, num, b.position(), args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
                 // Echo dyld's fd-1/2 diagnostics so a fatal error message is visible. Names the
                 // console the slot STANDS FOR beside the number the guest used (M37 fix wave,
                 // final review M5): `[fd17 (console 1)]` for a write through a `dup2(1, 17)`
