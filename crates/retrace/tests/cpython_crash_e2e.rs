@@ -63,10 +63,10 @@ fn crash_and_marker_thread(trace: &Path) -> ((u64, u64, u64, u32), u32) {
 #[test]
 fn cpython_runs_a_real_script_crashes_on_the_computed_pointer_and_reverse_debugs_to_its_store() {
     if !Path::new(REAL).exists() {
-        eprintln!(
+        util::announce(&format!(
             "SKIPPED cpython_runs_a_real_script…: {REAL} not found (expected a Homebrew \
              `python@3.14` install). This gate did NOT run — it is not evidence of anything."
-        );
+        ));
         return;
     }
     let (rec, trace) = util::record_dynamic_args(REAL, &[retrace_guest::CRASH_PY]);

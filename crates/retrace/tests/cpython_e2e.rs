@@ -45,11 +45,11 @@ const LAUNCHER: &str = "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/
 #[test]
 fn the_real_cpython_interpreter_records_and_replays() {
     if !std::path::Path::new(REAL).exists() {
-        eprintln!(
+        util::announce(&format!(
             "SKIPPED the_real_cpython_interpreter_records_and_replays: {REAL} not found \
              (expected a Homebrew `python@3.14` install). This gate did NOT run — it is not \
              evidence of anything."
-        );
+        ));
         return;
     }
     // `assert_rung_records_and_replays` demands a clean exit(0) with exactly this stdout and
@@ -61,11 +61,11 @@ fn the_real_cpython_interpreter_records_and_replays() {
 #[test]
 fn the_launcher_records_and_replays_its_own_posix_spawn_failure() {
     if !std::path::Path::new(LAUNCHER).exists() {
-        eprintln!(
+        util::announce(&format!(
             "SKIPPED the_launcher_records_and_replays_its_own_posix_spawn_failure: {LAUNCHER} \
              not found (expected a Homebrew `python@3.14` install). This gate did NOT run — it is \
              not evidence of anything."
-        );
+        ));
         return;
     }
     // Can't use `assert_rung_records_and_replays` here: it demands exit(0), and this guest's own

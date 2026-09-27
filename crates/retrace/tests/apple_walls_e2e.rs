@@ -17,7 +17,7 @@ mod util;
 
 fn records_and_replays_clean(path: &str) {
     if !std::path::Path::new(path).exists() {
-        eprintln!("SKIPPED: {path} is not present on this machine");
+        util::announce(&format!("SKIPPED: {path} is not present on this machine"));
         return;
     }
     let (rec, trace) = util::record_dynamic(path);
@@ -55,7 +55,7 @@ fn tcsh_records_and_replays() { records_and_replays_clean("/bin/tcsh"); }
 fn launchctl_records_and_replays() {
     let path = "/bin/launchctl";
     if !std::path::Path::new(path).exists() {
-        eprintln!("SKIPPED: {path} is not present on this machine");
+        util::announce(&format!("SKIPPED: {path} is not present on this machine"));
         return;
     }
     let (rec, trace) = util::record_dynamic(path);
