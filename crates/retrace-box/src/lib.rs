@@ -3,6 +3,8 @@ use retrace_arch::{decode_excl, ec_of, Ec, ExclInsn};
 use retrace_guest::Loaded;
 use retrace_trace::{Regs, Region};
 
+mod backings;
+use backings::Backings;
 mod cache;
 pub use cache::AuthSlot;
 use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
@@ -491,7 +493,7 @@ pub struct Box_ {
     vcpu: Vcpu,
     #[allow(dead_code)] // never read; held only so Drop runs hv_vm_destroy after vcpu's
     vm: Vm,
-    backings: Vec<Backing>,
+    backings: Backings,
     // PROT_NONE address-space reservations as (start, len), recorded by guest_vm_reserve and
     // demand-committed page-by-page on first touch by commit_reserved_page (the moral twin of the
     // cache demand-pager). Reset to empty in restore() alongside `mmap_next` so replay's address
@@ -1191,7 +1193,7 @@ impl Box_ {
     // overwritten). Pushes the L2 + every L3 as backings; the caller stage-2-maps them. NEVER
     // file-backed (SPTM). Returns (ttbr0 = PT_L1_IPA, l2_host, next_l3) so runtime promotion can
     // edit the live L2 and continue the same L3 allocation window.
-    fn build_tables(backings: &mut Vec<Backing>, exec: &[(u64, u64, u64)]) -> (u64, *mut u8, u64) {
+    fn build_tables(backings: &mut Backings, exec: &[(u64, u64, u64)]) -> (u64, *mut u8, u64) {
         assert!(exec.iter().all(|&(_, len, _)| len > 0), "exec ranges must be non-empty");
         let (l2_host, l2_len) = alloc_pages(GRANULE);
         let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
@@ -1375,10 +1377,10 @@ impl Box_ {
         // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
-        let mut backings = Vec::new();
+        let mut backings = Backings::new();
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
-        let map = |vm: &Vm, backings: &mut Vec<Backing>, ipa: u64, src: &[u8], memsz: usize| {
+        let map = |vm: &Vm, backings: &mut Backings, ipa: u64, src: &[u8], memsz: usize| {
             let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
             unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), host, src.len()); }
             assert!(ipa.is_multiple_of(GRANULE as u64), "retrace-box: guest region IPA {ipa:#x} is not 16 KiB-granule-aligned (hv_vm_map requires it); a differently-linked guest needs 16 KiB-aligned segments");
@@ -1942,10 +1944,10 @@ impl Box_ {
         // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
-        let mut backings = Vec::new();
+        let mut backings = Backings::new();
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
-        let map = |vm: &Vm, backings: &mut Vec<Backing>, ipa: u64, src: &[u8], memsz: usize| {
+        let map = |vm: &Vm, backings: &mut Backings, ipa: u64, src: &[u8], memsz: usize| {
             let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
             unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), host, src.len()); }
             assert!(ipa.is_multiple_of(GRANULE as u64), "retrace-box: guest region IPA {ipa:#x} is not 16 KiB-granule-aligned (hv_vm_map requires it); a differently-linked guest needs 16 KiB-aligned segments");
@@ -2287,7 +2289,7 @@ impl Box_ {
         let base = hint & !(g - 1);
         let round_up = |x: u64| (x + g - 1) & !(g - 1);
         let mut cands = vec![base];
-        for b in &self.backings {
+        for b in self.backings.iter() {
             let end = round_up(b.ipa + b.len as u64);
             if end > base { cands.push(end); }
         }
@@ -3181,7 +3183,7 @@ impl Box_ {
         // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
-        let mut backings = Vec::new();
+        let mut backings = Backings::new();
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         for r in regions {
@@ -3376,14 +3378,12 @@ impl Box_ {
     }
 
     // Translate a guest IPA to (host pointer, bytes available to the end of its backing).
+    // M44 B1: by the index beside the Vec (backings.rs).
     fn host_span(&self, ipa: u64) -> Option<(*mut u8, usize)> {
-        for bk in &self.backings {
-            if ipa >= bk.ipa && ipa < bk.ipa + bk.len as u64 {
-                let off = (ipa - bk.ipa) as usize;
-                return Some((unsafe { bk.host.add(off) }, bk.len - off));
-            }
-        }
-        None
+        self.backings.containing(ipa).map(|bk| {
+            let off = (ipa - bk.ipa) as usize;
+            (unsafe { bk.host.add(off) }, bk.len - off)
+        })
     }
 
     /// The `[ipa, ipa+len)` span of the backing containing `ipa`, or `None` if unmapped.
@@ -3398,10 +3398,10 @@ impl Box_ {
     /// adjacent backings is refused, not merely logged. Run with `RETRACE_DEREFLEN=1` to print the
     /// backing span an assertion failure names, which is what settles whether the panic is this R1
     /// case or a genuinely oversized request.
+    ///
+    /// M44 B1: by the index beside the Vec (backings.rs).
     fn backing_of(&self, ipa: u64) -> Option<(u64, usize)> {
-        self.backings.iter()
-            .find(|bk| ipa >= bk.ipa && ipa < bk.ipa + bk.len as u64)
-            .map(|bk| (bk.ipa, bk.len))
+        self.backings.containing(ipa).map(|bk| (bk.ipa, bk.len))
     }
 
     /// Memory-safety clamp (debt #1): a buffer-filling syscall must not have the host kernel write
@@ -4647,12 +4647,11 @@ impl Box_ {
     }
 
     /// Read `len` bytes of guest memory at `ipa` (1:1, so directly from the backing).
+    /// M44 B1: by the index beside the Vec (backings.rs).
     pub fn read_guest(&self, ipa: u64, len: usize) -> Vec<u8> {
-        for bk in &self.backings {
-            if ipa >= bk.ipa && ipa + len as u64 <= bk.ipa + bk.len as u64 {
-                let off = (ipa - bk.ipa) as usize;
-                return unsafe { std::slice::from_raw_parts(bk.host.add(off), len) }.to_vec();
-            }
+        if let Some(bk) = self.backings.holding(ipa, len) {
+            let off = (ipa - bk.ipa) as usize;
+            return unsafe { std::slice::from_raw_parts(bk.host.add(off), len) }.to_vec();
         }
         panic!("read_guest: ipa 0x{ipa:x} len {len} not mapped");
     }
@@ -4661,12 +4660,11 @@ impl Box_ {
     /// does not fit inside a single backing — deterministic all-or-nothing (no clamping, no partial
     /// read). For callers (the M3 debugger's memory reads) that must tolerate unmapped/partial spans;
     /// `read_guest`'s panic stays load-bearing fail-loud for internal callers.
+    /// M44 B1: by the index beside the Vec (backings.rs).
     pub fn read_guest_checked(&self, ipa: u64, len: usize) -> Option<Vec<u8>> {
-        for bk in &self.backings {
-            if ipa >= bk.ipa && ipa + len as u64 <= bk.ipa + bk.len as u64 {
-                let off = (ipa - bk.ipa) as usize;
-                return Some(unsafe { std::slice::from_raw_parts(bk.host.add(off), len) }.to_vec());
-            }
+        if let Some(bk) = self.backings.holding(ipa, len) {
+            let off = (ipa - bk.ipa) as usize;
+            return Some(unsafe { std::slice::from_raw_parts(bk.host.add(off), len) }.to_vec());
         }
         None
     }
@@ -5800,7 +5798,7 @@ impl Box_ {
     /// Capture all backings + architectural registers as an Event::Snapshot.
     pub fn snapshot(&self) -> retrace_trace::Event {
         let mut mem = Vec::new();
-        for bk in &self.backings {
+        for bk in self.backings.iter() {
             let bytes = unsafe { std::slice::from_raw_parts(bk.host, bk.len) }.to_vec();
             mem.push(Region { ipa: bk.ipa, bytes });
         }
@@ -5941,7 +5939,7 @@ impl Box_ {
     /// additionally captures FP/SIMD state and the true values of every field `restore()` defaults.
     pub fn checkpoint(&self) -> BoxState {
         let mut mem = Vec::new();
-        for bk in &self.backings {
+        for bk in self.backings.iter() {
             let bytes = unsafe { std::slice::from_raw_parts(bk.host, bk.len) }.to_vec();
             mem.push(Region { ipa: bk.ipa, bytes });
         }
@@ -6001,7 +5999,7 @@ impl Box_ {
         // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
-        let mut backings = Vec::new();
+        let mut backings = Backings::new();
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         for r in &state.mem {
