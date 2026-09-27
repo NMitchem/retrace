@@ -4647,6 +4647,7 @@ impl Box_ {
     }
 
     /// Read `len` bytes of guest memory at `ipa` (1:1, so directly from the backing).
+    ///
     /// M44 B1: by the index beside the Vec (backings.rs).
     pub fn read_guest(&self, ipa: u64, len: usize) -> Vec<u8> {
         if let Some(bk) = self.backings.holding(ipa, len) {
@@ -4660,6 +4661,7 @@ impl Box_ {
     /// does not fit inside a single backing — deterministic all-or-nothing (no clamping, no partial
     /// read). For callers (the M3 debugger's memory reads) that must tolerate unmapped/partial spans;
     /// `read_guest`'s panic stays load-bearing fail-loud for internal callers.
+    ///
     /// M44 B1: by the index beside the Vec (backings.rs).
     pub fn read_guest_checked(&self, ipa: u64, len: usize) -> Option<Vec<u8>> {
         if let Some(bk) = self.backings.holding(ipa, len) {
