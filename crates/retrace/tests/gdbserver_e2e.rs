@@ -464,23 +464,18 @@ fn a_step_on_a_thread_that_is_not_running_is_refused_in_place() {
     assert_eq!(c.where_(), before);
 }
 
-/// threadrust's child: the landmark of its own `bsdthread_terminate` and the child's thread.
-fn threadrust_child_exit() -> (&'static Path, usize, u32) {
-    let (tr, _, _) = r::threadrust_block();
-    let ev = retrace_trace::Reader::open(tr).unwrap();
-    let (x, child) = (1..ev.len()).find_map(|i| match ev[i] {
-        retrace_trace::Event::Syscall { num, thread, .. } if num == retrace_arch::SYS_BSDTHREAD_TERMINATE => Some((i, thread)),
-        _ => None,
-    }).expect("the child's bsdthread_terminate");
-    (tr, x, child)
-}
-
 #[test]
 fn a_step_across_the_stepped_threads_own_exit_stops_there() {
     // M44 B3: the child's `bsdthread_terminate` is its last trap. Before M44 the step ran on until
     // the child was current again — never — and so to the end of the recording. The stop is named
-    // on the thread now running: the exited one has no context left to name.
-    let (tr, x, child) = threadrust_child_exit();
+    // on the thread now running, because the exited one is not in the reply's `threads:` list.
+    let (tr, x, child) = r::threadrust_child_exit();
+    // The thread running at (x + 1, 0), from the recording: landmark x + 1's own thread tag.
+    let running = match retrace_trace::Reader::open(tr).unwrap()[x + 1] {
+        retrace_trace::Event::Syscall { thread, .. } => thread,
+        _ => panic!("landmark {} is not a syscall", x + 1),
+    };
+    assert_ne!(running, child);
     let svc = r::trap_pc(tr, x);
     let mut c = Rsp::spawn(tr, &[]);
     assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
@@ -491,7 +486,10 @@ fn a_step_across_the_stepped_threads_own_exit_stops_there() {
     assert!(s.contains("reason:exception;"), "not trace, and not the end of the recording: {s}");
     assert!(!s.contains("replaylog:end;"), "{s}");
     assert!(r::description(&s).unwrap().contains(&format!("thread {} exited during the step", child + 1)), "{s}");
-    assert!(c.where_().starts_with(&format!("at ({}, 0)", x + 1)), "at the exit's boundary: {}", c.where_());
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", running + 1).as_str()), "on the running thread: {s}");
+    // An arrival (Bp), as every step's stop is: a forward `c` from here reports the next hit.
+    let w = c.where_();
+    assert!(w.starts_with(&format!("at ({}, 0) phase=Bp", x + 1)), "at the exit's boundary, as an arrival: {w}");
 }
 
 #[test]

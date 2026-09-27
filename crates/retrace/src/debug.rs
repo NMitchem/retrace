@@ -931,10 +931,12 @@ impl<'a> Exec<'a> {
     }
 
     /// M43 §3d: one instruction of thread `t` (retrace's id), as lldb's `s` needs it. It crosses a
-    /// trap, and a blocking syscall until `t` runs again. A trap that returns to itself is never
-    /// `Stepped`, because lldb re-steps a `trace` whose pc did not move forever (t0 L4b, L7). An
-    /// instruction that branches to itself (`b .`) does retire with its pc unchanged and is
-    /// `Stepped`: that is one real instruction, and lldb loops on it on a live target too.
+    /// trap, and a blocking syscall until `t` runs again. A trap that is `t`'s own exit stops at the
+    /// exit's boundary as `ThreadExited` (M44 B3), because nothing runs `t` again. A trap that
+    /// returns to itself is never `Stepped`, because lldb re-steps a `trace` whose pc did not move
+    /// forever (t0 L4b, L7). An instruction that branches to itself (`b .`) does retire with its pc
+    /// unchanged and is `Stepped`: that is one real instruction, and lldb loops on it on a live
+    /// target too.
     pub(crate) fn step_thread<W: Write>(&mut self, t: u32, out: &mut W) -> Result<Halt, String> {
         let cur = self.sess().current_thread();
         if t != cur {
