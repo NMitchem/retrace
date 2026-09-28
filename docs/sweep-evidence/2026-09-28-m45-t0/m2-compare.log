@@ -1,0 +1,28 @@
+M1 trap (x1 masked): [trap] num=374 (0x176) pc=0x1804afa48 args=[0xffffffff,X1,0x1,0x0,0x0,0x0,0x0,0x21]
+timer entry == M1
+timer trap (x1 masked) == M1
+timer: 374 lines=1 traps=244 stdout-bytes=       0
+timer: the three traps before 374:
+[trap] num=-14 (0xfffffffffffffff2) pc=0x1801155b8 args=[0x203,0x1ec444000,0x24000,0x0,0x1,0x10,0x63,0x0]
+[trap] num=368 (0x170) pc=0x1804af9f0 args=[0x400,0x27fefe8,0x18,0x0,0x10,0x0,0x0,0x3]
+[trap] num=367 (0x16f) pc=0x1804afa1c args=[0x0,0x27fefe8,0x18,0x0,0x10,0x0,0x0,0x3]
+thread 'main' (8006916) panicked at crates/retrace-arch/src/lib.rs:983:38:
+M33: syscall 374 (374) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslat
+after entry == M1
+after trap (x1 masked) == M1
+after: 374 lines=1 traps=246 stdout-bytes=       0
+after: the three traps before 374:
+[trap] num=-14 (0xfffffffffffffff2) pc=0x1801155b8 args=[0x203,0x1ec444000,0x24000,0x0,0x1,0x10,0x63,0x0]
+[trap] num=368 (0x170) pc=0x1804af9f0 args=[0x400,0x27ff008,0x18,0x0,0x10,0x0,0x0,0x3]
+[trap] num=367 (0x16f) pc=0x1804afa1c args=[0x0,0x27ff008,0x18,0x0,0x10,0x0,0x0,0x3]
+thread 'main' (8006941) panicked at crates/retrace-arch/src/lib.rs:983:38:
+M33: syscall 374 (374) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslat
+signal entry == M1
+signal trap (x1 masked) == M1
+signal: 374 lines=1 traps=245 stdout-bytes=       0
+signal: the three traps before 374:
+[trap] num=46 (0x2e) pc=0x1804b4478 args=[0x1e,0x27ff6f8,0x27ff720,0x27ffe48,0x1,0x10,0x63,0x0]
+[trap] num=368 (0x170) pc=0x1804af9f0 args=[0x400,0x27fef48,0x18,0x0,0x10,0x0,0x0,0x3]
+[trap] num=367 (0x16f) pc=0x1804afa1c args=[0x0,0x27fef48,0x18,0x0,0x10,0x0,0x0,0x3]
+thread 'main' (8006962) panicked at crates/retrace-arch/src/lib.rs:983:38:
+M33: syscall 374 (374) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslat
