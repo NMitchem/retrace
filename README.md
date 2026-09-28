@@ -585,7 +585,7 @@ route — why one of them is a failure by design, and the reconstruction caveat 
   where it had read the host `dup`'s clear flag (`dupfd_e2e`). Nothing new is recorded and
   `TRACE_MAGIC` did not move.
 
-**Gate:** 831 passed / 0 failed / 9 ignored across 146 test binaries. The close ran the full chunked gate
+**Gate:** 832 passed / 0 failed / 9 ignored across 146 test binaries. The close ran the full chunked gate
 from one background script (`gate.sh` in the milestone's ledger directory), every test chunk
 `--no-fail-fast` and every exit code captured before any pipe: `ws`, `box`, `--bins`, one
 `--test <name>` invocation for each of the seventy-seven files in `crates/retrace/tests/`, and
@@ -616,21 +616,22 @@ files changed their `#[test]` count, and every other file's count is M43's (coun
 | `retrace-box/src/backings.rs` | — | 6 | **+6**, new module (the index against the linear scan over randomised probes; the zero-length read at a backing's end; an overlapping insert fails loud on either side, and at the same start; a read whose end would overflow is held by nothing) |
 | `retrace/tests/apple_walls_e2e.rs` | 8 | 10 | **+2** (`ls` and `ed` record and replay) |
 | `retrace/tests/dupfd_e2e.rs` | 2 | 3 | **+1** (`F_DUPFD_CLOEXEC` sets close-on-exec as native does) |
-| `retrace/tests/gdbserver_e2e.rs` | 28 | 38 | **+10** (`disarm-rsi`; a step across its own thread's exit; another thread's breakpoint, mid-window breakpoint and watched store ending a blocked step; a step of a thread that is not running, of one that does not exist and of one that has exited; a step the recording's end comes before, in both arms and at an exit; the finish's arrival past a breakpointed trap — two rows rewritten in place) |
+| `retrace/tests/gdbserver_e2e.rs` | 28 | 39 | **+11** (`disarm-rsi`; a step across its own thread's exit; another thread's breakpoint, mid-window breakpoint and watched store ending a blocked step; a step of a thread that is not running, of one that does not exist and of one that has exited; a step the recording's end comes before, in both arms and at an exit; the finish's arrival past a breakpointed trap; a `c` after a step across its own thread's exit reports a breakpoint at the running thread's pc — two rows rewritten in place) |
 | `retrace/tests/lldb_e2e.rs` | 5 | 12 | **+7** (a step across its own thread's exit without looping, and a breakpoint after it; `next`, `ni`, and `thread step-out`/`finish` over a call; `bt` on an arm64e guest; a step the recording ends before — one row rewritten in place) |
 | `retrace/tests/skiplines.rs` | — | 3 | **+3**, new binary (the detector, its own positive control, and the `SKIPLINES CONTROL` line) |
 
-+31 `#[test]` attributes, `--bins` unchanged at **32**, and **two new test binaries**, `nocancel`
-(in `retrace-arch`) and `skiplines`. The tree holds **838** `#[test]` attributes by the same
++32 `#[test]` attributes, `--bins` unchanged at **32**, and **two new test binaries**, `nocancel`
+(in `retrace-arch`) and `skiplines`. The tree holds **839** `#[test]` attributes by the same
 per-file pattern (M43 held 807). The run still reports the 2 census tests twice (`census.rs`
 executes in its own binary and again inside `legacy_equivalence`'s `#[path]` include), and a bare
 `grep -c '#\[test\]'` over-counts by one, because a comment in `legacy_equivalence.rs` mentions the
-attribute in prose. The plan predicted +18 before t0; the source count is +31, and every difference
+attribute in prose. The plan predicted +18 before t0; the source count is +32, and every difference
 is a review fix round or a row measurement asked for: Task 6 is +6 where it counted 3 (its fix round
 pinned both overlap sides and the overflow); Task 8 is +3 where it counted 2 (the lldb row that
 tells B3 apart); Task 9 is +3 where it counted 2 (`ni` split from `next`); Task 11 is +2 where it
 counted 0 (the store-watch and mid-window rows); and Task 12 is +7 where it counted 1 (its first
-commit replaced one row with two, and its fix round added five wire rows and one lldb row).
+commit replaced one row with two, and its fix round added five wire rows and one lldb row); and
+the final review's fix wave added one wire row (B3's park, FW-2).
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
 lesson). `retrace` ran **per-target** — seventy-seven `--test <name>` invocations, one after another
@@ -811,7 +812,7 @@ server. Since M44 the image list leaves out the executable's `__PAGEZERO`: in a 
 `__PAGEZERO` into an invalid region no packet can reach. That is a divergence from a stock Mach-O
 segment list, specific to retrace's guest layout.
 
-`gdbserver_e2e` (38 tests) guards the protocol with a Rust RSP client and needs no lldb, so it runs
+`gdbserver_e2e` (39 tests) guards the protocol with a Rust RSP client and needs no lldb, so it runs
 on any machine that runs the VM tests. `lldb_e2e` (12 tests) guards what lldb itself does with it,
 and skips loudly without lldb. Known limits lists what the server does not do.
 
