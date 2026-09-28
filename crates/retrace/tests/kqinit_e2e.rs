@@ -46,7 +46,10 @@ fn the_measured_init_records_as_one_emulated_landmark_and_replays() {
 }
 
 /// Review Focus 1: the entry's two halves sit on different 16 KiB pages, which need not be
-/// adjacent in IPA space, so only a page-by-page read gets the second half right.
+/// adjacent in IPA space, so only a page-by-page read gets the second half right. The fixture puts
+/// only `ident` (8 bytes) on the first page; `filter`, `flags`, `qos` and `udata`, all non-zero,
+/// are on the second, so a reader that loses or zero-fills the second half is refused, naming one
+/// of them.
 #[test]
 fn an_entry_straddling_a_page_is_read_whole() {
     records_one_emulated_init(&["straddle"]);
@@ -71,23 +74,32 @@ fn an_unmeasured_shape_stops_the_recorder_naming_what_differs() {
 
 /// The only test that can see the replay mirror. While the return is a constant, the mirror's
 /// compare is vacuous on an honest trace (the M18 t5 mirror's comment says the same of its own).
-/// So rewrite the recorded return, and replay must name the mismatch at that landmark; without the
-/// mirror, generic replay would feed the 1 to the guest in silence.
+/// So tamper with the recording twice, and replay must name each at that landmark. First the
+/// return rewritten to 1: without the mirror, generic replay would feed the 1 to the guest in
+/// silence (M45 t2 control 2 measured that nothing later diverges either). Then `err` set with the
+/// return left 0: record fixes `err: false, writes: []`, so the mirror must refuse a recording
+/// carrying either rather than hand the guest a carry-set error the emulation never produced.
 #[test]
 fn replay_recomputes_the_emulated_return() {
     let trace = records_one_emulated_init(&[]);
     let i = kevent_events(&trace)[0].0;
-    let mut ev = retrace_trace::Reader::open(&trace).unwrap();
-    if let Event::Syscall { ret, .. } = &mut ev[i] { *ret = 1; }
-    let bad = trace.with_extension("rc1.bin");
-    let mut w = retrace_trace::Writer::create(&bad).unwrap();
-    for e in &ev { w.append(e).unwrap(); }
-    drop(w);
-    let rp = util::replay(&bad);
-    assert_eq!(rp.code, 3, "replay of the rewritten trace must diverge (exit 3): {}", rp.stderr);
-    assert!(rp.stderr.contains(&format!("DIVERGENCE at landmark {i} "))
-        && rp.stderr.contains("kevent_qos rc mismatch: replay 0x0 != recorded 0x1"),
-        "the divergence must be the mirror's, at the 374 landmark {i}: {}", rp.stderr);
+    // (file, recorded ret, recorded err, the mirror's words). The honest event is (0, false):
+    // `records_one_emulated_init` asserted it, so each row changes exactly one field.
+    for (ext, bad_ret, bad_err, why) in [
+        ("rc1.bin", 1, false, "kevent_qos rc mismatch: replay 0x0 != recorded 0x1"),
+        ("err1.bin", 0, true, "kevent_qos recorded err=true with 0 writes"),
+    ] {
+        let mut ev = retrace_trace::Reader::open(&trace).unwrap();
+        if let Event::Syscall { ret, err, .. } = &mut ev[i] { (*ret, *err) = (bad_ret, bad_err); }
+        let bad = trace.with_extension(ext);
+        let mut w = retrace_trace::Writer::create(&bad).unwrap();
+        for e in &ev { w.append(e).unwrap(); }
+        drop(w);
+        let rp = util::replay(&bad);
+        assert_eq!(rp.code, 3, "{ext}: replay of the rewritten trace must diverge (exit 3): {}", rp.stderr);
+        assert!(rp.stderr.contains(&format!("DIVERGENCE at landmark {i} ")) && rp.stderr.contains(why),
+            "{ext}: the divergence must be the mirror's {why:?}, at the 374 landmark {i}: {}", rp.stderr);
+    }
 }
 
 /// Review Focus 5: a debugger position enters replay mid-trace. Seeking onto the emulated

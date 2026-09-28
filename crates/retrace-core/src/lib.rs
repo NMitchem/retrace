@@ -2249,6 +2249,14 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("kevent_qos rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
                                 }
+                                // Record fixes `err: false, writes: []`, so a recording carrying
+                                // either is not one this arm produced: refuse it rather than feed
+                                // the guest an error or apply writes the emulation never made (the
+                                // M38 exec-refusal mirror's `(ret, err, writes)` stance).
+                                if *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("kevent_qos recorded err={err} with {} writes; the emulation records neither", writes.len()) });
+                                }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
