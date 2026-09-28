@@ -389,6 +389,16 @@ fn main() {
         .status().expect("clang exec_dyn");
     assert!(status.success(), "exec_dyn guest build failed");
 
+    // kqinit_dyn: the M45 fixture — libdispatch's workqueue-kqueue init call, issued by hand
+    // through `svc`, after a dispatch_async brings the workqueue up. Same recipe as hello_dyn.
+    let src = format!("{}/c/kqinit_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/kqinit_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang kqinit_dyn");
+    assert!(status.success(), "kqinit_dyn guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));

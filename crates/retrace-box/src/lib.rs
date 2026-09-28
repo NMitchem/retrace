@@ -5191,6 +5191,42 @@ impl Box_ {
         0
     }
 
+    /// `kevent_qos(kq, changelist, nchanges, eventlist, nevents, data_out, data_available, flags)`
+    /// with `KEVENT_FLAG_WORKQ`: libdispatch's `_dispatch_kq_init` registering the event manager's
+    /// `EVFILT_USER` wake-up on the process's workqueue kqueue (M45).
+    ///
+    /// **Emulated, never forwarded**, for the reason `guest_workq_open` documents, one level up.
+    /// With `KEVENT_FLAG_WORKQ`, xnu resolves `kq` to `p->p_fd.fd_wqkqueue`, allocating it if absent
+    /// (`kern_event.c` `kevent_get_kqwq`), and that is RETRACE's own process's (M44 t0 M1). It
+    /// cannot be refused with an errno either: libdispatch `DISPATCH_CLIENT_CRASH`es on any errno
+    /// but `EINTR` (`event_kevent.c:700-709`), so an errno would only move the crash into the guest
+    /// and hide why.
+    ///
+    /// **Exactly one shape is modelled**, the measured one (`retrace_arch::kqinit_shape`), and it is
+    /// modelled as the smallest success there is. `KEVENT_FLAG_IMMEDIATE` with no event list places
+    /// zero events, so the return is 0 (t0 M3 measured it natively). Nothing is kept, and `&self`
+    /// says so: nothing M45 runs reads a knote table. A trigger, a timer, a delete or any other
+    /// shape is refused BY VALUE, naming the field, which is `guest_workq_kernreturn`'s stance: a
+    /// guessed kevent silently corrupts libdispatch's event state.
+    ///
+    /// The entry is read through the guest's own stage-1 walk, page by page (`read_va_prefix`), so
+    /// an entry straddling two pages is read whole, and one that does not fully translate arrives
+    /// short and is refused by the validator.
+    ///
+    /// Deterministic and above the trace: the only inputs are `args` and 72 bytes of guest memory,
+    /// which record and replay hold identically, and both dispatch arms reach this through the same
+    /// call. Symmetry rule 1 holds by construction.
+    pub fn guest_kevent_qos(&self, args: [u64; 8]) -> u64 {
+        let entry = self.read_va_prefix(args[1], retrace_arch::KEVENT_QOS_SIZE);
+        if let Err(why) = retrace_arch::kqinit_shape(args, &entry) {
+            panic!("M45: unmeasured kevent_qos shape: {why}. Only libdispatch's `_dispatch_kq_init` \
+                    (KEVENT_FLAG_WORKQ|IMMEDIATE, one EVFILT_USER EV_ADD|EV_CLEAR entry, no event \
+                    list) is modelled (M45 §2a). Measure what issues this one before modelling it; \
+                    a guessed kevent silently corrupts libdispatch's event state. args={args:#x?}");
+        }
+        0
+    }
+
     /// Reserve the main thread's believed-but-unbacked stack (M8 spec risk R3).
     ///
     /// **A reservation, not an `mmap`** — the same choice, for the same measured reason, as

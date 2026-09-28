@@ -1047,6 +1047,19 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     .map_err(|e| format!("append workq_kernreturn: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
+            // M45: kevent_qos is EMULATED, never forwarded (see Box_::guest_kevent_qos). With
+            // KEVENT_FLAG_WORKQ the host kernel would act on RETRACE's own workqueue kqueue, the
+            // workq pair's class (M44 t0 M1). This arm may PANIC by design: every shape but the
+            // measured init is refused by value, naming the field, before anything is appended.
+            //
+            // `writes` is empty and that is deliberate: the call writes no guest memory, and its
+            // return is a constant the replay mirror recomputes identically.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_KEVENT_QOS => {
+                let rc = b.guest_kevent_qos(args);
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append kevent_qos: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
             // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
             // real thread inside retrace's own process at a guest address (see
             // Box_::guest_bsdthread_create).
@@ -1223,6 +1236,14 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     "workq syscall {num} reached the generic forward arm — it must be emulated \
                      above (M18 Stage 2a). Forwarding it creates a real host worker thread inside \
                      the recorder and takes a SIGSEGV at address 0.");
+                // M45: kevent_qos joins them. With KEVENT_FLAG_WORKQ the host kernel resolves the
+                // call to RETRACE's own workqueue kqueue (M44 t0 M1); the arm above emulates the one
+                // measured shape and refuses the rest. This assert is what makes "never forwarded"
+                // a checked fact rather than an arm-ordering accident (the gap M37 measured for
+                // bsdthread_create).
+                assert!(num != retrace_arch::SYS_KEVENT_QOS,
+                    "kevent_qos (374) reached the generic forward arm — it must be emulated above \
+                     (M45). Forwarded, KEVENT_FLAG_WORKQ acts on retrace's own workqueue kqueue.");
                 // M27: the destination sits behind a pointer INSIDE a guest struct, which
                 // forward_and_diff never translates — so forwarding hands the host kernel a guest
                 // IPA as a host address. No guest in the gate calls these (measured: absent from
@@ -2213,6 +2234,20 @@ impl ReplaySession {
                                 if rc != *ret {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("workq_kernreturn rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M45: the record arm's mirror (symmetry rule 1), placed with the workq
+                            // mirrors so it inherits the arm-top `verify_thread` and adds none of its
+                            // own. While the return is a constant this compare is vacuous on an
+                            // honest trace; kqinit_e2e's rewritten-return test is what makes it
+                            // observable.
+                            if num == retrace_arch::SYS_KEVENT_QOS {
+                                let rc = self.b.guest_kevent_qos(args);
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("kevent_qos rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
