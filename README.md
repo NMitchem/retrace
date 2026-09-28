@@ -79,8 +79,9 @@ value included) exits 2, and any other failure exits 5 with `GDBSERVER ERROR: �
 with lldb* under "What works today".
 
 `RETRACE_TRACE=1` on a `record`/`record-dyn` run logs every dispatched trap and decodes `mach_msg2`
-sends. It is the first thing to reach for on a bring-up failure. **Record-only** — `ReplaySession`
-carries no trace instrumentation, so no `[trap]` line is ever printed on replay.
+sends. It is the first thing to reach for on a bring-up failure. Each `[trap]` line prints `x0`–`x7`
+(since M44: `kevent_qos` carries its flags in `x7`). **Record-only** — `ReplaySession` carries no
+trace instrumentation, so no `[trap]` line is ever printed on replay.
 
 `replay` exits **3** on a divergence, naming the landmark, PC, and what mismatched.
 
@@ -124,30 +125,30 @@ records and replays byte-identically, twice:
 
 **Apple's own binaries, measured — and, since M29, re-measurable; since M36, with the reason each
 failing row fails and a parked gate for every one that is retrace's; since M37, the same reasons
-from any recorder pid; since M38, with two false passes turned into named walls.**
-`tools/apple-sweep.sh` points
-retrace straight at each file in a committed 54-entry corpus and prints a tally: **44 of 54 record
-and replay**, stdout byte-identical and exit codes equal (`TALLY pass=44 fail=10 skip=0`, measured
-2026-09-21 on the M39 close's binary, one run at recorder pids `0x71d2`–`0x7dcf`; the same figure
-M38 measured 2026-09-16, and **no row changed its label** between the two runs — M39's one wall is
-reached by `import ctypes`, and no corpus binary loads `_ctypes.so`). The figure last
-moved at M38, from M37's 45/9, by **three rows, each explained by name**: `launchctl` is *clean* now (the
-receive-shaped `mach_msg2` it stopped at is refused deterministically, and it runs to its own
-usage `exit(1)`, byte-identical on both sides); `ls` and `ed` are *not* — and were not before
-either: both had been "passing" by failing identically (`ls` printing an `EBADF` error for `.`;
-`ed` exiting 2 with its error message lost) on an `AT_FDCWD` the fd table rejected, and with the
-sentinel honoured each now runs on to a syscall the box has no `arg_kinds` row for
-(`getattrlistbulk` 461; `openat_nocancel` 464) and stops **loud**. A silent lie replaced by a
-named wall is the honest-gate discipline working, not a regression, and both are on the owed list
-by number. M37 had run the sweep three times on 2026-09-13 with the recorder's pid steered into
-the three regimes M36 had measured (below `0x4000`; inside `[0x4000, 0x10000)`; inside
-`[0x10000, 0x18000)`) and tallied 45/9 in all three with the same nine labels in every regime —
-the pid-collision defect that once selected a wall is gone, and M38's single run (spec R6) rests
-on that. The ten rows that are not clean are read off kept evidence, one class each, and **seven
-parked gates** (`crates/retrace/tests/apple_walls_e2e.rs`, one per binary that is retrace's to fix
-or model and has a gate) stand for them, each `#[ignore]` reason the measurement that parks it.
-Among the 44: `cat`, `cp`, `mv`, `rm`,
-`chmod`, `mkdir`, `ln`, `df`, `sh`, `dash`, `bash`, `zsh`, `expr`, and — since M27 — `ps`. (This
+from any recorder pid; since M44, with the two false passes M38 turned into named walls now clean.**
+`tools/apple-sweep.sh` points retrace straight at each file in a committed 54-entry corpus and
+prints a tally: **49 of 54 record and replay**, stdout byte-identical and exit codes equal (`TALLY
+pass=49 fail=5 skip=0`, measured 2026-09-27 on M44's branch commit `5ee07b8`, whose record and
+replay paths the later task commits do not touch, one run at recorder pids `0x8972`–`0x901a`). The figure moved from M39's 44/10 by **five rows, each explained
+by name**. `ls` and `ed` are *clean* now, rc 0 on both sides with byte-identical stdout: the rows
+M44 added (`getattrlistbulk` 461 for `ls`; `openat_nocancel` 464 and `unlink` 10 for `ed`) carry
+each past the wall it had stopped at, loud, since M38. (From M33 through M37 both had "passed" by
+failing identically on an `AT_FDCWD` the fd table rejected; M38 honoured the sentinel and turned
+that silent lie into two named walls.) The other three are `desdp`, `dyld_info` and `flex`, and
+they pass **in the sweep's sense only**: past 464 and `rename` (128) each reaches xcrun's
+`posix_spawn`, which retrace refuses (exec-in-place is unmodelled), and exits 71 on both sides,
+where natively `desdp` exits 2 with its usage, so their gates stay parked (Known limits). M37 had
+run the sweep three times on 2026-09-13 with the recorder's pid steered into the three regimes M36
+had measured (below `0x4000`; inside `[0x4000, 0x10000)`; inside `[0x10000, 0x18000)`) and tallied
+45/9 in all three with the same nine labels in every regime — the pid-collision defect that once
+selected a wall is gone, and every single-run sweep since (M38's, M39's, M44's) rests on that. The
+five rows that are not clean are read off kept evidence, one class each, and **seven parked gates**
+(`crates/retrace/tests/apple_walls_e2e.rs`) stand for the four of them that are retrace's to model
+and for the xcrun trio, each `#[ignore]` reason the measurement that parks it; `ls`, `ed` and
+`launchctl` have gates in the same file that run.
+Among the 49: `cat`, `cp`, `mv`, `rm`,
+`chmod`, `mkdir`, `ln`, `df`, `sh`, `dash`, `bash`, `zsh`, `expr`, since M27 `ps`, and since
+M44 `ls` and `ed`. (This
 sentence named `grep`, `wc`, `uname` and `bzip2` from M22 through M32; none of the four is in the
 committed corpus, a leftover of the uncommitted sample the reconstruction caveat below describes,
 corrected at M33.) Before M22 that number was **zero**, and not for the reason
@@ -159,9 +160,8 @@ that cannot terminate, while a third — `dddiagnose` — happened to land on th
 counted as a clean pass, which M36 measured to be that identical crash. **Read that
 decomposition as an account, not an audit**: the 54-binary sample behind the old 47 was never
 committed, so the corpus here is a reconstruction and the two figures are not strictly comparable.
-See Known limits for the ten-row table — the face each row shows, its class, its gate and its
-route — which rows are new to the list, why one of them is a failure by design, and the
-reconstruction caveat in full.
+See Known limits for the five-row table — the face each row shows, its class, its gate and its
+route — why one of them is a failure by design, and the reconstruction caveat in full.
 
 **Capabilities**
 
@@ -216,7 +216,11 @@ reconstruction caveat in full.
   it, so a load-exclusive that overwrites its own base (`ldxr x9, [x9]`) keeps the address it
   marked, and a store-exclusive whose target is unmapped or not EL0-writable is stepped natively
   into the fault the recording holds, not emulated. Both were panics under M42; Known limits has
-  the details and the measurement.
+  the details and the measurement. Since M44 each guest read behind that decode finds its backing
+  by binary search over a sorted index kept beside the backing list (`retrace-box/src/backings.rs`,
+  spans asserted disjoint), not by a linear scan; an equivalence test over randomised probes pins it
+  to the scan it replaced, and the backing list itself is never reordered, so snapshot bytes do not
+  move (spec R2). Known limits has the CPU it recovered and what it did not.
 - **Crashes are first-class** — a faulting guest is recorded, replayed, and seekable;
   reverse-continue reaches the corrupting store.
 - **Symbolicated addresses** — since M19, pc-bearing debugger output names the function it is in:
@@ -380,8 +384,10 @@ reconstruction caveat in full.
   M32 tables **verbatim** as a fixture and sweeps every syscall number in the domain (BSD
   `0..=1023`, mach traps `-1..=-128`, the `MAC_SYSCALL_MAGIC` band) through every view **in both
   directions** — a view that disagrees with its legacy table without an `EXPECTED_DIFFS` entry
-  fails, and a listed entry that no longer differs fails too. There are **22** such entries, each
-  with its reason. **Sixteen** are descriptors the legacy `fd_operands` never translated —
+  fails, and a listed entry that no longer differs fails too. There are **35** such entries today,
+  each with its reason: 26 at M43's close, and nine M44 added for the `_nocancel` twins it joined
+  to their plain rows (464, 409, 542, 543) and for `getattrlistbulk`'s row (461). M33's twenty-two
+  were these. **Sixteen** are descriptors the legacy `fd_operands` never translated —
   `pwrite`/`pwrite_nocancel`/`writev`/`writev_nocancel`/`pwritev`, `sendto_nocancel`/`sendmsg`/
   `sendmsg_nocancel`/`sendmsg_x`/`sendfile`, and the six refused `readv`/`recvmsg` spellings (moot:
   refused upstream, before translation runs) — the M10 class, in the tree since M30 tabled them as
@@ -401,6 +407,9 @@ reconstruction caveat in full.
   launcher), and all 54 Apple-sweep binaries — recorded under `RETRACE_TRACE=1` on 2026-09-12:
   **108 distinct numbers over 114 invocations**, pinned by `census.rs`, which fails if any census
   number lacks a row and checks every `unexercised` label against the census in both directions.
+  Since M44 it pins **113**: the five numbers the sweep's binaries reached once M38 moved their
+  walls (`unlink` 10, `rename` 128, `statfs64` 345, `getattrlistbulk` 461, `openat_nocancel` 464),
+  each measured by M44's t0 in a kept trace.
   Two of the spec's open questions were settled by measurement rather than by rule. The corpora
   issue **four** `ioctl` requests — `FIODTYPE`, `TIOCGWINSZ`, `TIOCGETA`, and dyld's
   `DTRACEHIOC_ADDDOF`, whose 8-byte `_IOW` parameter *is* a guest pointer — and the last was
@@ -478,7 +487,8 @@ reconstruction caveat in full.
   refused too, with a code **chosen by measurement** over the six (`MACH_RCV_INVALID_NAME` — the
   only one all six accept, 6/6 against 5/6 for the spec's `TIMED_OUT` default, which crashes
   `dddiagnose` in the guest): `launchctl` runs to its own clean exit and is un-parked; the other
-  five run on to a syscall with no `arg_kinds` row and are re-parked there, class B. Every mirror
+  five ran on to a syscall with no `arg_kinds` row and were re-parked there, class B, until M44
+  tabled three of those rows and routed the fourth (Known limits has where each stops now). Every mirror
   sits inside an existing arm — no new returning arm, `verify_thread`'s seven sites unchanged.
 - **`import ctypes` works, and a real script that crashes records, replays and reverse-debugs.**
   Rung 8, since M39. The interpreter runs `crates/retrace-guest/py/crash.py`, a script file that
@@ -558,67 +568,72 @@ reconstruction caveat in full.
   armed names the real write too: on the t0 recording it resolves `(1126, 1765682)` and one `stepi`
   sets the cell to `0x701238000`, where M39's tree resolved `(1126, 29627)` — an earlier run of the
   same store on another address, 1,736,055 instructions early.
+- **Every `_nocancel` spelling shares its plain form's row, checked against the SDK; `ls` and `ed`
+  record and replay; `F_DUPFD_CLOEXEC` sets close-on-exec.** Since M44.
+  `crates/retrace-arch/tests/nocancel.rs` parses the SDK's `sys/syscall.h` at test time and, for
+  each of its 32 `_nocancel` names (every one has a plain twin), asserts that `arg_kinds` gives the
+  twin and its plain form the same row. That is the rule the table's own comment states, which five
+  milestones had broken by hand, and it went red on exactly four twins: 409 `connect_nocancel`, 464
+  `openat_nocancel`, 542 `preadv_nocancel` and 543 `pwritev_nocancel`. Each now shares its plain
+  row, so 542 is refused upstream as 540 is and 543 is forwarded as 541 is. Beside them M44 tabled
+  `statfs64` (345, `[Path, Ptr]`, `fstatfs64`'s path twin), `getattrlistbulk` (461,
+  `[Fd, Ptr, Dest(Reg(3)), Scalar, Scalar]`: xnu never checks `bufferSize`, so the window follows
+  it), `unlink` (10) and `rename` (128), each reached by a corpus binary. `/bin/ls` and `/bin/ed`
+  now record and replay clean, and `apple_walls_e2e`'s `ls_records_and_replays` and
+  `ed_records_and_replays` run un-ignored. And `guest_fcntl_dupfd` sets `FD_CLOEXEC` on the host
+  `dup` when the command is `F_DUPFD_CLOEXEC`, so a forwarded `F_GETFD` reads 1 as native does,
+  where it had read the host `dup`'s clear flag (`dupfd_e2e`). Nothing new is recorded and
+  `TRACE_MAGIC` did not move.
 
-**Gate:** 800 passed / 0 failed / 9 ignored across 144 test binaries: M42's 747 plus the 53
-`#[test]` M43 added. The close ran the full chunked gate on the last code commit before the fix
-wave (`b0b4492`), from one background script, every test chunk `--no-fail-fast` and every exit
-code captured before any pipe:
-`ws`, `box`, `--bins`, one `--test <name>` invocation for each of the seventy-six files in
-`crates/retrace/tests/`, and clippy over `--workspace --all-targets` with `-D warnings`. All 80
-chunks exited 0, in 33 min 27 s wall-clock (run alongside read-only review agents), and it
-measured **798**: M42's 747 plus the 51 `#[test]` M43 had added by then, predicted exactly by
-source count. The final review's fix wave then added two `gdbserver_e2e` rows and changed no
-`src/`, so it re-ran `gdbserver_e2e` (**28**), `lldb_e2e` (5) and clippy (clean), and did not re-run
-any other chunk: 798 + 2 = **800**. The testing note below says how the chunks are assembled. The
-"test binaries"
+**Gate:** M44-GATE-COUNT across M44-GATE-BINARIES test binaries. The close ran the full chunked gate
+from one background script (`gate.sh` in the milestone's ledger directory), every test chunk
+`--no-fail-fast` and every exit code captured before any pipe: `ws`, `box`, `--bins`, one
+`--test <name>` invocation for each of the seventy-seven files in `crates/retrace/tests/`, and
+clippy over `--workspace --all-targets` with `-D warnings`. The status log's M44 section has the
+tally chunk by chunk. The testing note below says how the chunks are assembled. The "test binaries"
 figure is test executables plus the `Doc-tests` harnesses cargo reports, each of which runs zero
 tests — the convention every milestone since M14 has counted by, kept for comparability and
-written out here so nobody has to re-derive it. No `#[ignore]` line was added or removed
-(`git diff c652cf1 -- crates` touches none), so the parked gates are M38's, unchanged: the two
+written out here so nobody has to re-derive it. No `#[ignore]` line was added or removed (nine at
+M43's close and nine now, by `git grep` over `crates/`), so nine gates are parked: the two
 long-standing — `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8
 risk R3 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol
-wall) — plus the seven in `apple_walls_e2e`, one per non-clean Apple-sweep row that is retrace's to
-fix or model and has a gate, each reason the measurement that parks it. All are described under
-Known limits. **M43 parked nothing new and un-parked nothing** — it added a way to drive the
-debugger and hardened stepping inside an exclusive pair, not what records — so the seven Apple rows
-stand exactly where M38 left them. `lldb_e2e` needs `/usr/bin/lldb` (spec §4's, never the one on
-`PATH`): each of its tests skips loudly (`SKIPPED …: This gate did NOT run.`) when
-`/usr/bin/lldb --version` does not run, and its CPython test also skips without Homebrew Python. A
-skipped test is counted as passed, as `jq_e2e`'s are, so grep its log for `SKIPPED` before reading
-its count as lldb having run. Its log also names the lldb that ran, once
-(`lldb_e2e runs /usr/bin/lldb: lldb-2100.0.17.203`). Both lines are written past libtest's output
-capture, since the final fix wave: libtest captures `eprintln!` in a test that passes, and a skip
-passes, so an `eprintln!` line reaches a log only when its test fails. The close therefore re-ran
-every other target that can skip with `--nocapture`, and none skipped; the status log's M43 section
-has the run and its control.
+wall) — plus the seven in `apple_walls_e2e`, each reason the measurement that parks it. **M44
+re-parked five of those seven at new, measured walls** and added two gates there that run, `ls` and
+`ed`; Known limits has each. `lldb_e2e` needs `/usr/bin/lldb` (never the one on `PATH`): each of
+its tests skips loudly (`SKIPPED …: This gate did NOT run.`) when `/usr/bin/lldb --version` does not
+run, and its CPython test also skips without Homebrew Python. A skipped test is counted as passed,
+as `jq_e2e`'s are, and since M44 every skip line reaches the ordinary gate log (Testing, below), so
+grep the logs for `SKIPP` before reading a count as the gate having run.
 
-Reconciled against M42's 747 / 0 / 9 over 142 **file-by-file rather than by sum** — six files
-changed their count, and every other file's count is M42's (`git diff c652cf1 -- crates` adds 53
-lines matching `^\+[[:space:]]*#\[test\]` and removes none):
+Reconciled against M43's 800 / 0 / 9 over 144 **file-by-file rather than by sum**, by source: eight
+files changed their `#[test]` count, and every other file's count is M43's (counting
+`^\s*#\[test\]` per file at `64e471e` and at the branch head):
 
-| file | M42 | M43 | delta |
+| file | M43 | M44 | delta |
 |---|---|---|---|
-| `retrace-box/src/excl.rs` | 26 | 28 | **+2** (`classify_retire`: a retire is classified by ISS.EX when ISV is set and by the pre-step decode otherwise, and a disagreement is an error in both directions) |
-| `retrace/src/debug.rs` | 17 | 20 | **+3** (each motion returns the `Halt` it printed; `recover` leaves a usable session at the saved cursor after a mid-scan divergence; `step_thread` reports a watched store retired) |
-| `retrace/src/rsp.rs` | — | 12 | **+12**, new module (framing, checksums, escapes and resync; hex; target.xml and every register at its offset; the stop replies, every stop kind's keys and the terminal mapping; the image JSON) |
-| `retrace/tests/gdbserver_e2e.rs` | — | 28 | **+28**, new binary (the handshake, registers, memory, refusals, the image list and how a session ends; §3c's positions in both directions, breakpoints, both caps and the divergence recovery; a step across a trap and across a blocking syscall, rule 1, the R7 fallback, the reverse step and every step packet form; from the final fix wave, every thread's own registers at a blocked stop, and a step whose crossing reports a syscall write) |
-| `retrace/tests/lldb_e2e.rs` | — | 5 | **+5**, new binary (real lldb: `crashy` from its crash back to the corrupting store, a determinism check, CPython, the blocked step with rule 1, and a reverse step onto another thread's trap) |
-| `retrace/tests/llsc_e2e.rs` | 47 | 50 | **+3** (`llscedge.s` records and replays its crash; a load-exclusive whose base is its destination steps without panicking; a stepped store-exclusive to a read-only word ends in the recorded crash) |
+| `retrace-arch/src/lib.rs` | 44 | 45 | **+1** (`m44_syscall_numbers`: the new constants for 464, 409, 345 and 461) |
+| `retrace-arch/tests/nocancel.rs` | — | 1 | **+1**, new binary (every SDK `_nocancel` twin shares its plain form's row) |
+| `retrace-box/src/backings.rs` | — | 6 | **+6**, new module (the index against the linear scan over randomised probes; the zero-length read at a backing's end; an overlapping insert fails loud on either side, and at the same start; a read whose end would overflow is held by nothing) |
+| `retrace/tests/apple_walls_e2e.rs` | 8 | 10 | **+2** (`ls` and `ed` record and replay) |
+| `retrace/tests/dupfd_e2e.rs` | 2 | 3 | **+1** (`F_DUPFD_CLOEXEC` sets close-on-exec as native does) |
+| `retrace/tests/gdbserver_e2e.rs` | 28 | 38 | **+10** (`disarm-rsi`; a step across its own thread's exit; another thread's breakpoint, mid-window breakpoint and watched store ending a blocked step; a step of a thread that is not running, of one that does not exist and of one that has exited; a step the recording's end comes before, in both arms and at an exit; the finish's arrival past a breakpointed trap — two rows rewritten in place) |
+| `retrace/tests/lldb_e2e.rs` | 5 | 12 | **+7** (a step across its own thread's exit without looping, and a breakpoint after it; `next`, `ni`, and `thread step-out`/`finish` over a call; `bt` on an arm64e guest; a step the recording ends before — one row rewritten in place) |
+| `retrace/tests/skiplines.rs` | — | 3 | **+3**, new binary (the detector, its own positive control, and the `SKIPLINES CONTROL` line) |
 
-+53 `#[test]` attributes, `#[ignore]` unchanged, `--bins` **17 → 32**, and **two new test
-binaries**, `gdbserver_e2e` and `lldb_e2e`. The tree holds **807** `#[test]` attributes by
-`git grep -E '^[[:space:]]*#\[test\]'` over `crates/` (M42 held 754 by the same pattern). The run
-still reports the 2 census tests twice (`census.rs` executes in its own binary and again inside
-`legacy_equivalence`'s `#[path]` include), and a bare `grep -c '#\[test\]'` over-counts by one,
-because a comment in `legacy_equivalence.rs` mentions the attribute in prose. The spec's §9
-estimate, made before the plan's per-task counts existed, summed to +44; the source count is +53.
-Task 2 is +20 where it counted ~15, since its review fix round added three unit tests and three
-wire rows. Task 3 is +12 where it counted ~13. Task 4 is +9 where it counted ~8, with the R7
-fallback's row and two review rows. Task 5 is +5 where it counted ~3, with the R7 row and the
-reverse step onto another thread's trap. The final fix wave is +2, which §9 did not foresee.
++31 `#[test]` attributes, `--bins` unchanged at **32**, and **two new test binaries**, `nocancel`
+(in `retrace-arch`) and `skiplines`. The tree holds **838** `#[test]` attributes by the same
+per-file pattern (M43 held 807). The run still reports the 2 census tests twice (`census.rs`
+executes in its own binary and again inside `legacy_equivalence`'s `#[path]` include), and a bare
+`grep -c '#\[test\]'` over-counts by one, because a comment in `legacy_equivalence.rs` mentions the
+attribute in prose. The plan predicted +18 before t0; the source count is +31, and every difference
+is a review fix round or a row measurement asked for: Task 6 is +6 where it counted 3 (its fix round
+pinned both overlap sides and the overflow); Task 8 is +3 where it counted 2 (the lldb row that
+tells B3 apart); Task 9 is +3 where it counted 2 (`ni` split from `next`); Task 11 is +2 where it
+counted 0 (the store-watch and mid-window rows); and Task 12 is +7 where it counted 1 (its first
+commit replaced one row with two, and its fix round added five wire rows and one lldb row).
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson). `retrace` ran **per-target** — seventy-six `--test <name>` invocations, one after another
+lesson). `retrace` ran **per-target** — seventy-seven `--test <name>` invocations, one after another
 from a single background script, because the whole package exceeds the tool ceiling, over the
 target list `ls crates/retrace/tests/*.rs` wrote — **plus the `--bins` chunk**, which is the only
 place the 32 unit tests inside the `retrace` binary run: 20 in `crates/retrace/src/debug.rs` and
@@ -722,13 +737,60 @@ server's. What `thread step-inst` does while the direction is reversed is unmeas
 forward with `process continue -F` first.
 
 `lldb_e2e` also drives `breakpoint set -a <addr>` (with `-i <n>`), `breakpoint delete`,
-`register read pc`, `memory read`, `bt 1`, `thread step-inst`, `thread list`, `thread select`, and
+`register read pc`, `memory read`, `bt`, `thread step-inst`, `thread step-inst-over`, `next`,
+`thread step-out`, `finish`, `thread list`, `thread select`, and
 `process plugin packet monitor where`, which prints the server's own cursor,
 `at (n, k) phase=<Sys|Bp|Watch> pc=… thread=…`. The server describes the general and FP registers
 (x0–x28, fp, lr, sp, pc, cpsr; v0–v31, fpsr, fpcr) and reads them for any live thread, from its
 saved context when it is not the running one. A motion that fails (a replay divergence, say)
 re-seeks to where it started and answers a stop whose reason is the failure's text. The server
 never answers a resume with an error, which would cost lldb its connection (t0 L7).
+
+**Stepping over a call, and stepping threads, since M44.** Each item below is pinned by a wire row
+in `gdbserver_e2e`, a bounded lldb session in `lldb_e2e`, or both (and the `__PAGEZERO` omission by
+a unit test in `rsp.rs` too).
+- **`thread step-inst-over` (`ni`), `next`, `thread step-out` and `finish`** over a call stop at
+  the return address, the `bl`'s pc + 4, as native lldb does on the same binary: measured on
+  `crashy`'s first `bl`, into `fstat`'s dyld stub. Until M44 none did. Each needs the saved return
+  address off the stack, and the server's image list carried the executable's `__PAGEZERO`
+  (maxprot 0, `[0, 4 GiB)`), which lldb's Darwin loader turns into an invalid-memory region: lldb
+  then failed every read below 4 GiB locally, with no packet sent, and a retrace guest's main stack
+  lives there (`DYN_STACK_TOP = 0x280_0000`). So `bt` stopped at frame #0, `ni` degraded to a bare
+  step, `step-out` and `finish` failed with `Could not create return address breakpoint`, and `next`
+  landed on the call's target. The server now leaves `__PAGEZERO` out (below), and `bt` from the
+  stub shows `crashy`main + 60` as frame #1.
+- **`bt` on an arm64e guest unwinds through PAC-signed return addresses.** `qHostInfo` carries
+  `addressing_bits:47`, the guest's VA width (`T0SZ = 17`). Without it lldb-2100 printed frames #1
+  and #2 of `btchain` with their signatures still on and unsymbolicated, and lost `start`; with it
+  `bt` is `f3`, `f2`, `f1`, `start`.
+- **A step across the stepped thread's own exit stops at the exit.** `thread step-inst` on the
+  `svc` of `__bsdthread_terminate` stops at that landmark's boundary with `reason:exception`,
+  `thread N exited during the step`, named on the thread that runs next, where it used to run to
+  the end of the recording. lldb does not display that stop (Known limits), but its follow-up
+  `continue` is now a real one: it stops at a breakpoint the other thread reaches after the exit,
+  where before M44 it ran past every such breakpoint to the end.
+- **Another thread's hit ends a blocked step.** While the stepped thread is blocked in a syscall, the
+  run until it runs again now has the user's breakpoints and watchpoints armed. A hit by another
+  thread ends the step with a `reason:exception` stop on the **stepped** thread that names the hit —
+  lldb shows `stop reason = thread 2 hit breakpoint at 0x1804ecc14 during thread 1's step` — and is
+  re-parked exactly as `continue` would park it (a watched store stepped to retirement, so `m`
+  reads the new value; a syscall write at `(n, 0, Bp)`), so a reverse `continue` finds it again.
+  That is M43's measured-safe L7 form: lldb sends one `vCont;s` and stops. It also stops a forward
+  `process continue` whose first act is lldb's own step-off from a breakpoint on a blocking `svc`,
+  at another thread's hit during that wait (measured once, by Task 11's probe).
+- **A step of a thread that is not running runs until that thread is scheduled, then steps it**
+  (`thread select 2; thread step-inst`), as a blocked step already did. M43 refused it in place. A
+  step of a thread that has exited, or never existed, is refused in place: `cannot step thread N:
+  it is not a live thread`. If the recording ends first, by another thread's exit or crash, the step
+  is refused **on the stepped thread**, parked at the end: `the recording ended (thread 2 crashed:
+  pc=… far=… esr=…) before thread 1 ran` (`… ran again` for a blocked step). Answered on the thread
+  that ended it instead, that end made lldb re-step the thread it had asked for until the session's
+  120 s bound killed it: 508, 633 and 538 × `vCont;s` for a crash in each arm and for an exit.
+  Refused, each is one step, and lldb prints `END` and exits 0.
+- **`monitor disarm-rsi`** clears what `arm-rsi` set, and `rsi` sends it when lldb's reverse resume
+  fails after arming, so the next `process continue -R` is a reverse continue again rather than one
+  step back. The `rsi` side has no automated test: the server never sends the plain-signal stop
+  that makes a reverse resume fail (t0 L4d); the wire row drives both monitor commands.
 
 **`--exe <path>`** names the recorded executable. lldb symbolicates the exe (``crashy`main + 204``
 above) from an image list the server builds out of the recording's own opening snapshot: the
@@ -739,19 +801,21 @@ from `argv[0]` on the opening stack when that is absolute; `--exe` supplies it o
 path the server advertises no image list and lldb's older loader runs, with no symbols for the exe
 until lldb is given the file: t0 L2 measured `target create <exe>` then
 `target modules load --file <exe> --slide 0` doing that, against t0's own stub rather than this
-server.
+server. Since M44 the image list leaves out the executable's `__PAGEZERO`: in a retrace guest
+`[0, 4 GiB)` is not unmapped (the main stack lives there), and lldb turns a listed maxprot-0
+`__PAGEZERO` into an invalid region no packet can reach. That is a divergence from a stock Mach-O
+segment list, specific to retrace's guest layout.
 
-`gdbserver_e2e` (28 tests) guards the protocol with a Rust RSP client and needs no lldb, so it runs
-on any machine that runs the VM tests. `lldb_e2e` (5 tests) guards what lldb itself does with it,
+`gdbserver_e2e` (38 tests) guards the protocol with a Rust RSP client and needs no lldb, so it runs
+on any machine that runs the VM tests. `lldb_e2e` (12 tests) guards what lldb itself does with it,
 and skips loudly without lldb. Known limits lists what the server does not do.
 
 ## Known limits
 
 These are real and current, not aspirational gaps.
 
-- **Ten rows of 54 sampled Apple system binaries are not clean, and since M36 the sweep says
-  why each one is not — since M37, the same why from any recorder pid; since M38, two of the ten
-  are rows that used to "pass" by failing identically.** `tools/apple-sweep.sh`,
+- **Five rows of 54 sampled Apple system binaries are not clean, and since M36 the sweep says
+  why each one is not — since M37, the same why from any recorder pid.** `tools/apple-sweep.sh`,
   over the committed 54-entry corpus `tools/apple-sweep-binaries.txt`, records and replays each binary and prints a `TALLY` line, so
   since M29 this figure is **reproducible instead of remembered**. Since M36 the sweep also prints
   *why*: every row carries the recorder's exit code, the replay's, the recorder's pid, the first
@@ -761,11 +825,12 @@ These are real and current, not aspirational gaps.
   rc=4: …)` rather than `replay diverged`; an identical crash on both sides is labelled
   `PASS … (identical fault, rc=N)` rather than a bare PASS; `RETRACE_SWEEP_KEEP=<dir>` keeps
   each non-clean row's stderr and trace, and since M37 `RETRACE_SWEEP_KEEP_ALL=1` keeps every
-  row's, PASS rows included — what the M37 audits were run over. **M39 ran it once on 2026-09-21**
-  on the close's binary (branch commit `123cb97`, recorder pids 29138–32207 = `0x71d2`–`0x7dcf`)
-  and tallied **`pass=44 fail=10 skip=0`** with **no row changing its label** against M38's run;
-  M38 had run it once on 2026-09-16 (branch commit `911214e`, recorder pids
-  `0x1564a`–`0x15faa`) for the same tally — one regime each time, because M37 had already shown
+  row's, PASS rows included — what the M37 audits were run over. **M44 ran it once on 2026-09-27**
+  (branch commit `5ee07b8`, recorder pids 35186–36890 = `0x8972`–`0x901a`; the two task commits
+  after it, `50c81df` and `cbe59d7`, touch only the debugger and its RSP server, which the sweep
+  never runs) and tallied **`pass=49 fail=5 skip=0`**. M39 had run it once on
+  2026-09-21 (branch commit `123cb97`) for `pass=44 fail=10 skip=0`, and M38 once on 2026-09-16
+  (branch commit `911214e`) for the same — one regime each time, because M37 had already shown
   the pid selects nothing; M37 had run it three times on 2026-09-13
   with the recorder's pid steered into the three regimes M36 measured and tallied 45/9 in all
   three with the same nine labels in every regime — the acceptance measurement the §4b fix owed,
@@ -777,56 +842,66 @@ These are real and current, not aspirational gaps.
   | M37 I | 17124–20042 (`0x42e4`–`0x4e4a`) | inside `[0x4000, 0x10000)`, the trampoline page — colliding before M37 | `pass=45 fail=9 skip=0` |
   | M37 S | 66163–68793 (`0x10273`–`0x10cb9`) | inside `[0x10000, 0x18000)`, the guest's own `os_alloc_once` slab — colliding before M37 | `pass=45 fail=9 skip=0` |
   | M38 | 87626–90026 (`0x1564a`–`0x15faa`) | inside `[0x10000, 0x18000)` again — irrelevant since M37 | `pass=44 fail=10 skip=0` |
-  | **M39** | 29138–32207 (`0x71d2`–`0x7dcf`) | inside `[0x4000, 0x10000)`, the trampoline page again — irrelevant since M37 | `pass=44 fail=10 skip=0` |
+  | M39 | 29138–32207 (`0x71d2`–`0x7dcf`) | inside `[0x4000, 0x10000)`, the trampoline page again — irrelevant since M37 | `pass=44 fail=10 skip=0` |
+  | **M44** | 35186–36890 (`0x8972`–`0x901a`) | inside `[0x4000, 0x10000)` again — irrelevant since M37 | `pass=49 fail=5 skip=0` |
 
-  **M39's run moved no row's label**, and the reason it was expected not to is worth stating:
-  its one wall is reached by `import ctypes`, and no binary in the corpus loads `_ctypes.so`.
-  Nine rows differ in a field that is not a label — seven carry a fresh panic thread id and a
-  source line number that moved inside M38's own close (M38 swept `911214e` and did not
-  re-sweep after `cbc75ff`), and `csh`/`tcsh` moved their divergence landmark up ten and down
-  three, inside the run-to-run spread M37 measured. `docs/sweep-evidence/2026-09-17-m39/README.md`
-  has both measurements.
-
-  Against M37's run N, **46 rows are unchanged and 8 moved**, every one for a reason M38 made
-  (M38's own evidence README has that row-by-row diff): `launchctl` FAIL → PASS (the receive-shaped
-  `mach_msg2` is refused, it runs to its own usage exit); `automationmodetool`, `desdp`,
-  `dyld_info`, `flex`, `dddiagnose` from that receive to the first syscall behind it with no
-  `arg_kinds` row (rc 101, the M33 fail-loud); and `ls` and `ed` from a false PASS to the same
-  kind of wall (below). So 44 = 45 − `ls` − `ed` + `launchctl`. The ten rows that are not clean,
-  each with the class the M32–M38 charter's enum gives it, read off the kept evidence and never
-  off the sweep's label, the gate that stands for it and where it is routed:
+  Against M39's run, **46 rows are unchanged and 8 differ**
+  (`docs/sweep-evidence/2026-09-27-m44/README.md` has the row-by-row diff), and every label that
+  moved is a row M44 names. `ls` and `ed` went FAIL → PASS, rc 0/0, past the rows M44 added
+  (`getattrlistbulk` 461 for `ls`; `openat_nocancel` 464 and `unlink` 10 for `ed`). `desdp`,
+  `dyld_info` and `flex` went FAIL → PASS 71/71, **in the sweep's sense only** (below).
+  `dddiagnose` stayed a FAIL, moved from its missing row (`statfs64` 345, now tabled) to a class-C
+  record error. So 49 = 44 + `ls` + `ed` + the trio. The other two moves are landmarks, and M44
+  measured their spread for the first time: `csh` went 346 → 338 and `tcsh` 341 → 333, at the same
+  wall. Over eight recordings of `csh`, four on M44's base binary and four on the swept one,
+  alternating, the trap count before the wall ranged 333–346 on both, and that count less the
+  `gettimeofday` (116) traps was exactly 316 on all eight: the spread is the shell's own timing,
+  not retrace's. `automationmodetool`'s panic line moved from `lib.rs:946:38` to `:982:38` only
+  because M44's rows sit above `forwarded_shape`. The five rows that are not clean, each with its
+  class, read off the kept evidence and never off the sweep's label, the gate that stands for it
+  and where it is routed:
 
   | binary | face | class | gate (`crates/retrace/tests/apple_walls_e2e.rs`) | route |
   |---|---|---|---|---|
   | `/bin/csh` | `fork` — `mach_ports_register` | **C** new subsystem: process creation | `csh_records_and_replays` | parked, not routed |
   | `/bin/tcsh` | `fork` — `mach_ports_register` | **C** | `tcsh_records_and_replays` | parked, not routed |
-  | `/usr/bin/automationmodetool` | no row for `kevent_qos` (374) | **B** known-unmodelled (a row closes it; libdispatch's kevent workloop may be a subsystem behind it) | `automationmodetool_records_and_replays` | parked at the row, owed |
-  | `/usr/bin/desdp` | no row for `openat_nocancel` (464) | **B** | `desdp_records_and_replays` | parked at the row, owed |
-  | `/usr/bin/dyld_info` | no row for `openat_nocancel` (464) | **B** (one hard-linked xcrun stub with `desdp`/`flex`) | `dyld_info_records_and_replays` | parked at the row, owed |
-  | `/usr/bin/flex` | no row for `openat_nocancel` (464) | **B** | `flex_records_and_replays` | parked at the row, owed |
-  | `/usr/bin/dddiagnose` | no row for `statfs64` (345) | **B** | `dddiagnose_records_and_replays` | parked at the row, owed |
-  | `/bin/ls` | no row for `getattrlistbulk` (461) | **B** — new to the list at M38, a false PASS before | none (its row was never parked) | owed |
-  | `/bin/ed` | no row for `openat_nocancel` (464) | **B** — new to the list at M38, a false PASS before | none | owed |
+  | `/usr/bin/dddiagnose` | `host_get_io_main` (`mach_msg2` msgh_id 205) | **C** new subsystem: the I/O Kit main port | `dddiagnose_records_and_replays` | parked, not routed |
+  | `/usr/bin/automationmodetool` | no row for `kevent_qos` (374), and a row cannot close it | **C** new subsystem: libdispatch's workqueue-kqueue initialisation | `automationmodetool_records_and_replays` | parked, routed to its own milestone (M44 R4) |
   | `/usr/bin/yes` | 30 s watchdog | **D** not-a-defect | none | retired |
+
+  **The xcrun trio's PASS is not the program's outcome.** `desdp`, `dyld_info` and `flex` are hard
+  links to one Xcode `xcrun` stub. Each reaches xcrun's `posix_spawn`, which retrace refuses
+  (exec-in-place is unmodelled), and exits 71 on both sides with identical stdout, so the sweep
+  counts it a PASS; natively `desdp` exits 2 with its usage. Their gates therefore stay parked at
+  that refusal, class C, because asserting 71 would pin retrace's refusal, not the program. On the
+  way, from a cold xcrun cache, each takes `openat_nocancel` (464) and `rename` (128) to rewrite
+  `/var/tmp/xcrun_db`, and a recording's forwarded `rename` really installs that cache on the host;
+  from a valid cache the trio skips both rows and goes straight to `posix_spawn` (M44 t0, Ruling
+  T0-e). Task 4 measured each member alone from a cold cache: 464, `rename` three landmarks later,
+  the refusal seven after. The M44 sweep ran with the cache present and recorded no trap log, so
+  which path its trio took is not measured, and its label move is not by itself evidence for the
+  464 row. The 464 gate and census claim rest on `ed`, whose 464 opens its own buffer file.
 
   `/bin/launchctl` left the table at M38: it is `PASS` 1/1, its own no-argument usage on stdout
   (4,484 bytes, byte-identical to the host's native output), and its gate runs, asserting on that
-  outcome rather than on `rc == 0`.
+  outcome rather than on `rc == 0`. `ls` and `ed` left it at M44: `PASS` 0/0, and their gates,
+  `ls_records_and_replays` and `ed_records_and_replays`, run.
 
   The faces, each in the recorder's own words. **A missing row** is `recorder panicked: thread
-  'main' … panicked at crates/retrace-arch/src/lib.rs:944:38: M33: syscall N (N) has no arg_kinds
-  row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified …`, rc 101, no
-  replay run (the harness labels a recorder panic before replaying): the M33 fail-loud doing its
-  job on a syscall the census never saw, reached by seven rows since M38 — five because the
-  receive-shaped `mach_msg2` that used to stop them is now refused (`MACH_RCV_INVALID_NAME`,
-  chosen by measurement, the one code all six accepted) and they run 20–50 landmarks further, two
-  (`ls`, `ed`) because their `fstatat64(AT_FDCWD, …)` succeeds now and they run on. The missing
-  rows are **five numbers** — 461 `getattrlistbulk` (`ls`), 468 `getattrlistat` (M34's pair to
-  it), 464 `openat_nocancel` (`ed`, `desdp`, `dyld_info`, `flex` — **four corpus binaries behind
-  one row**, the `_nocancel` twin of `openat` 463, precisely the documented nocancel trap, which
-  is what sharpens the successor's case: one line frees four rows), 345 `statfs64` (`dddiagnose` — the
-  fixed-struct twin of `fstatfs64`, M29), 374 `kevent_qos` (`automationmodetool`) — the successor's
-  measured scope, at the top of the owed list. **`fork`** is `record error, rc=4: RECORD ERROR:
+  'main' … panicked at crates/retrace-arch/src/lib.rs:982:38: M33: syscall 374 (374) has no
+  arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified …`, rc 101,
+  no replay run (the harness labels a recorder panic before replaying): the M33 fail-loud, reached
+  now only by `automationmodetool`. M44's t0 measured why no row can close it: libdispatch's
+  `_dispatch_kq_init` issues `kevent_qos` with `x0 = −1` (no `kqueue` ran), flags `x7 = 0x21`
+  (`KEVENT_FLAG_WORKQ | KEVENT_FLAG_IMMEDIATE`) and one `EVFILT_USER` entry. Forwarded, the
+  workqueue flag would register on **retrace's own** process's workqueue kqueue, and libdispatch
+  crashes on any errno but `EINTR`, so a refusal only moves the guest to a crash: the call needs a
+  modelled success. **`host_get_io_main`** is `record error, rc=4: RECORD ERROR: unsupported
+  mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send_size 24`,
+  rc/rp 4/3, the I/O Kit main port (SDK `mach/mach_host.h:1313`); Task 4 measured `dddiagnose`
+  reaching it 21 landmarks after its `statfs64`, which records and fails `ENOENT`, harmlessly. The **exec
+  refusal** is `[retrace] refusing posix_spawn (syscall 244): exec-in-place is unmodelled;
+  returning errno 14 without forwarding`, the trio's. **`fork`** is `record error, rc=4: RECORD ERROR:
   unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515))
   send_size 64`, rc/rp 4/3: `mach_ports_register` (`task.defs` 3400+3, a complex message with
   three port descriptors the router does not know) from libxpc `xpc_atfork_prepare` ←
@@ -857,7 +932,10 @@ These are real and current, not aspirational gaps.
   *serviced* refusal of the SEND|RCV shape, survived by every guest that reaches it and
   unseparated from the receive (no run reaches the receive without it); since M38 a second line,
   `refusing mach_msg2 message-queue receive`, follows it on the six rows. Evidence:
-  `docs/sweep-evidence/2026-09-16-m38/` — the refusal-code measurement (18 cells, all three
+  `docs/sweep-evidence/2026-09-27-m44/` — M44's sweep log, every non-clean row's stderr under
+  `sweep/`, the trio's re-run with its `rec.err` kept, and the eight-run `csh` measurement;
+  `docs/sweep-evidence/2026-09-27-m44-t0/` — M44's t0 (its README says what each file is) and
+  Task 4's per-binary re-measure under `t4/`; `docs/sweep-evidence/2026-09-16-m38/` — the refusal-code measurement (18 cells, all three
   candidates' stderr), the M38 sweep log and every non-clean row's stderr under `sweep/`, and the
   `/bin/ed` and `csh`/`tcsh` traced runs; `docs/sweep-evidence/2026-09-13-m37/<basename>.{N,I,S}.{rec,rp}.err`,
   verbatim, with the counting rules, the reader and the three audits in that directory's README;
@@ -885,7 +963,8 @@ These are real and current, not aspirational gaps.
   cannot pass under any method that requires a bounded
   comparison and is counted a FAIL **on purpose**, since excluding it would raise the tally without
   changing anything about retrace. The `identical fault` rows are still counted in `pass` so the
-  tally series 46/8 ↔ 45/9 ↔ 44/10 stays comparable across M33–M38 (none occurred at M37 or M38);
+  tally series 46/8 ↔ 45/9 ↔ 44/10 ↔ 49/5 stays comparable across M33–M44 (none occurred at M37,
+  M38 or M44);
   the label on the line is the correction.
   M22's four named causes are all accounted for — the `pc=0x4204` group (13) and the `msgh_id` 412
   group (4) were cleared at M23 (the 13-group's residue, the `brk`, was M36's colliding-pid face of
@@ -903,10 +982,12 @@ These are real and current, not aspirational gaps.
   on two rows that M38 then un-hid: `ls` and `ed` "passed" in every sweep of the committed
   corpus from M33 through M37 by failing identically on an `AT_FDCWD` the fd table rejected
   (the defect itself dates from M10 t3; the descriptor entry below); with the
-  sentinel honoured each runs on to a missing row and fails loud, which is why the tally *fell*
+  sentinel honoured each ran on to a missing row and failed loud, which is why the tally *fell*
   by two at a milestone that fixed a defect. An M10-class wrong descriptor is deterministic on
   both sides, so a translation fix moves a binary here only by letting it reach something else —
-  here, two rows the census never saw.
+  there, two rows the census never saw, which M44 then tabled. M44's xcrun trio is the same lesson
+  from the other side: three rows that exit 71 on both sides at retrace's own refusal count as
+  PASS, which is why their gates, not the tally, carry them.
 - **A guest must be arm64 or arm64e.** `slice_native` picks the slice this machine would execute —
   arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
   binary is refused by name. There is no emulation of another ISA and none is planned.
@@ -1209,10 +1290,13 @@ These are real and current, not aspirational gaps.
   retrace working rather than a bug — but the guest you get is the shim reporting a failure, not
   the program you meant to run. The behaviour is pinned by a test whose job is to hold the
   limitation visible (it asserts on the refusal line, which only the refusal prints), and which is
-  to be **rewritten rather than defended** when exec-in-place lands.
+  to be **rewritten rather than defended** when exec-in-place lands. Since M44 the same refusal
+  parks three Apple-sweep gates, the xcrun trio's (`desdp`, `dyld_info`, `flex`; the sweep entry
+  above).
 - **A syscall with no row cannot be forwarded — closed structurally at M33 — but a row's
-  descriptor positions are still only as right as the reviewer, five rows the corpus reaches are
-  missing, and `x1` is written for one syscall only.** Before M33, a syscall that took a descriptor but was missing from
+  descriptor positions are still only as right as the reviewer, one number the corpus reaches has
+  no row by design, two `_nocancel` twins escape their plain forms' arms, and `x1` is written for
+  one syscall only.** Before M33, a syscall that took a descriptor but was missing from
   `retrace_arch::fd_operands` had its guest fd forwarded to the host **unchanged**, where the same
   integer names a different file — the class M25 hit with `getdirentries64`/`fstatfs64`, and the
   default arm `_ => &[]` meant the next missing entry failed the same silent way. The blast-radius
@@ -1230,11 +1314,9 @@ These are real and current, not aspirational gaps.
   (`FdTable::dup_from(src, min)` — the lowest free *guest* slot ≥ `min`, the source's kind, both
   sides; a host `dup` behind it on record, never a host `F_DUPFD`, whose minimum would be a host
   number; the range check is the table's too since the final-review fix, so a `min` outside
-  `[0, DUP2_MAX_FD)` is `EINVAL` on both sides rather than record-only; the close-on-exec bit is
-  not modelled — exec is refused, and its one observable is a forwarded `F_GETFD`, which reads
-  the host `dup`'s *clear* flag, so a guest doing `F_DUPFD_CLOEXEC` then `F_GETFD` reads 0 where
-  native reads 1, deterministic across record and replay because the recorded return carries it,
-  a fidelity gap and not a divergence — so both commands share the path), and **`pipe`** binds
+  `[0, DUP2_MAX_FD)` is `EINVAL` on both sides rather than record-only; since M44
+  `F_DUPFD_CLOEXEC` also sets `FD_CLOEXEC` on that host `dup` — so both commands share the path),
+  and **`pipe`** binds
   both ends (`Box_::bind_returned_pair`, read end
   first; `Event::Syscall::ret1` carries the write end; `csh`/`tcsh` now receive `(4, 5)` and
   `fcntl` their moved ends successfully where they used to `EBADF` a raw host descriptor and a
@@ -1245,15 +1327,22 @@ These are real and current, not aspirational gaps.
   written only for `pipe`** (narrow capture, spec R2): every other syscall leaves the guest's `x1`
   stale where xnu would write `retval[1]` — deterministic on both sides, and `fork` is the only
   other two-register call in the ABI, itself class C; the uniform capture is a measurement a later
-  milestone can take with the field already in the trace. And **five `arg_kinds` rows the corpus
-  reaches are missing** — 461, 468, 464, 345, 374 — each a loud M33 panic on the row that
-  reaches it (`ls`; `ed`/`desdp`/`dyld_info`/`flex`; `dddiagnose`; `automationmodetool`), left for
-  the successor rather than added unmeasured at the end of an unattended run (the ledger's
-  rulings at Tasks 3, 5 and 6); 464 is `openat`'s `_nocancel` twin and 345 is `fstatfs64`'s
-  fixed-struct twin, so two of the five are one-line copies of rows that exist. A third is the
-  final review's, ruled out of M38's scope as an unmeasured behaviour change at the close and
-  owed here instead: **`F_DUPFD_CLOEXEC`'s bit on the host dup** (one line in
-  `guest_fcntl_dupfd`; only `F_GETFD` observes it). What stays open
+  milestone can take with the field already in the trace. **The rows M38 left missing are tabled
+  or routed since M44.** 461 `getattrlistbulk` (`[Fd, Ptr, Dest(Reg(3)), Scalar, Scalar]`: xnu
+  never checks `bufferSize`, so there is no cap to cite and the window follows the caller's
+  length), 464 `openat_nocancel` (`openat`'s row) and 345 `statfs64` (`[Path, Ptr]`, `fstatfs64`'s
+  path twin) are tabled, with `unlink` (10) and `rename` (128), which M44's t0 found behind them.
+  374 `kevent_qos` is **routed**, not tabled: t0 measured `x7 = 0x21` (the workqueue flag), `x0 = −1`
+  and no `kqueue`, so R4's conditions for a row fail, and the call needs emulation (the sweep entry
+  above); it stays a loud M33 panic until then. 468 is `fchownat`; `getattrlistat` is 476; neither
+  is reached, and neither has a row (M44 R1). **Two `_nocancel` twins escape their plain forms'
+  arms**: `sigsuspend_nocancel` (410) and `__sigwait_nocancel` (422) are in neither
+  `retrace_arch::is_signal_syscall` nor `record_box`'s sigsuspend/`__sigwait` panic arm, which
+  match 111 and 330 only (M44 t0 M4). Both are row-less, so today each still fails loud at the
+  forward, but the M33 panic's advice, "add the row", would be wrong for them: a row would forward a
+  blocking signal wait into retrace's own thread, and `nocancel.rs` would not object, since both
+  sides of each pair are row-less. No corpus guest reaches either (0 hits in t0's eleven kept
+  traces); the fix, when one does, is the two numbers in each of those two places. What stays open
   is one level down. **A wrong position in a row is silent**: the equivalence sweep proves the
   views reproduce the legacy tables, and `Scalar`-versus-`Fd` on a *new* row is checked by nothing
   but the prototype and the reviewer. **`AT_FDCWD` is honoured in the 32-bit form since M38**:
@@ -1398,13 +1487,23 @@ These are real and current, not aspirational gaps.
   destination (`ldxr x9, [x9]`) no longer panics either: `step()` reads the base before the load
   overwrites it (`a_load_exclusive_whose_base_is_its_destination_steps_without_panicking`). That
   decode costs one extra guest read, a page walk and a word, on **every** step, not only inside a
-  pair: about **+38 %** CPU on M41's step-bound hit oracle (`oracle_threadrust`, 21.9 s → 30.5 s
-  user) and about +2 % on rung 8's reverse demo. The backing lookup behind each read
-  (`read_guest_checked`, `va_leaf`) scans linearly, and an O(log n) backing index is owed (Ruling
-  T1-c). The hit oracle (`tests/util/hits.rs`) is no longer limited by pairs: on
+  pair. M44's t0 measured it on M41's step-bound hit oracle
+  (`oracle_threadrust_breakpoints_at_both_switches`, median user CPU of three runs on a quiet
+  machine): **21.27 s** before the decode (`c652cf1`) and **30.90 s** after it (M43's close), a gap
+  of 9.63 s (+45 %; M43 had measured +38 %), with rung 8's reverse demo flat. **M44's backing index
+  recovered a third of it, not the half it was meant to**: every guest read now finds its backing by
+  binary search (What works today), and the same test's median is **27.63 s**, 3.27 s of the gap,
+  against the spec's bar of 26.08 s. The miss is routed, not waived. A profile names what is left:
+  about 6.0 s of the ~6.4 s residual is `Box_::insn_at` in `step()`'s pre-decode, which resolves the
+  pc through a full guest page-table walk on every step — four index lookups (about 3.2 s in this
+  unoptimised build), a heap allocation, copy and free per read (about 1.8 s), and an HVF
+  `SCTLR_EL1` read. The CLI's debug children did not grow; all of it is in the test process's
+  in-process oracle. Owed, proposed and unmeasured: a per-page VA → IPA or decoded-instruction
+  cache, invalidated on remap and W^X promotion, and a non-allocating four-byte read. The hit
+  oracle (`tests/util/hits.rs`) is no longer limited by pairs: on
   `threadrust` it starts at landmark 1 again, where M41 had started it at the `bsdthread_create`
   landmark to stay clear of dyld's three `getpid` pairs. It now steps through all three, at
-  22.95 s CPU for that test at M42's close, and about 30.5 s user since M43's pre-decode (above),
+  22.95 s CPU for that test at M42's close and 27.63 s median user since M44's index (above),
   against M41's 120 s budget.
 - **Debugging with lldb: what `retrace gdbserver` does not do.** Since M43 (What works today). Each
   is by design or measured, unless it says otherwise.
@@ -1421,49 +1520,48 @@ These are real and current, not aspirational gaps.
     of five only moved the runaway from six user breakpoints to five.)
   - **Watchpoints are writes only.** Read and access watchpoints are refused: retrace watches
     writes. A watch's length must be 1, 2, 4 or 8, and its address a multiple of it.
-  - **Only the running thread can step.** A recording cannot run a thread it did not run, so
-    `thread step-inst` on another thread is refused in place: lldb shows
-    `stop reason = cannot step thread N: only the running thread (M) can step` on the thread it
-    stepped. (Named on the running thread instead, lldb-2100 re-stepped forever: 80,103
-    `vCont;s:2` in 60 s, Ruling T4-b.)
-  - **A breakpoint at a thread's pc when that thread is not the running one stalls every forward
-    `continue`** (Ruling T5-a). lldb decides by pc, at each resume, whether to step a thread off a
-    breakpoint first. The server refuses that step by the rule above, so each forward
-    `process continue` stops in place with that refusal, nothing moved. It does not loop. The
-    workaround is to disable that breakpoint until its thread runs. The measured trigger is a
-    breakpoint added while stopped; one that already existed when the thread came to rest on it is
-    unmeasured. A breakpoint on the user's thread function does not trigger it, because an unstarted
-    thread's saved pc is libpthread's `thread_start` (`0x1804ecc14` in the probe), not that
-    function. The realistic triggers are an address breakpoint on `thread_start`, or one on a
-    blocked thread's resume pc (`svc + 4`). Measured once, by Task 5's probe (the status log's M43
-    section); no test pins it.
-  - **A hit by another thread during a blocked step is not reported** (spec R7's fallback,
-    measured). When the stepped thread blocks in a syscall, the server runs the recording with
-    **nothing armed** until that thread runs again, and the step ends on it one instruction past
-    its `svc`. A breakpoint or watchpoint that another thread hits in the meantime passes
-    unreported. R7 as designed reported it as that thread's stop, and lldb-2100 looped on that
-    reply (307,016 `vCont;s:1` in 60 s, Ruling T4-a).
-    **lldb takes such a step on its own, inside `process continue`.** Before a forward resume it
-    steps a thread off a breakpoint at that thread's pc: t0 L3 measured `z0`, `vCont;s:1`, `Z0`,
-    `c` both for a continue from a breakpoint stop and for each hit an ignore count skips. So a
-    forward `process continue` from a breakpoint on an `svc` that blocks begins with a blocked step,
-    and so does every ignored-count hit of such a breakpoint, and, by the same rule though not
-    separately measured, every false-condition hit. Other threads' breakpoint and watchpoint hits
-    during that wait are skipped with no report, and the `process continue` the user typed resumes
-    after them. A reverse continue still finds them. The workaround is not to break on the `svc`
-    itself: break on the syscall stub's entry instead. This composition of L3 with the fallback is
-    read from the code, not measured in an lldb session against the server.
-  - **The end of the recording reached during a blocked step shows as a refusal** (Ruling T4-c).
-    If the recording ends, by another thread's exit or crash, before the stepped thread runs
-    again, the server reports the end on the thread that ended it. lldb re-steps its own thread
-    after a step answered on another thread (measured in Task 4 with a breakpoint stop), so it
-    then shows rule 1's refusal rather than the end. Inferred, not measured: no fixture has this
-    shape.
-  - **A step over the stepped thread's own exit runs to the end of the recording.** `thread
-    step-inst` on the `svc` of `__bsdthread_terminate` ends the stepped thread, so the run until
-    that thread runs again can never find it: it runs to the end of the recording with nothing
-    armed, and cannot be interrupted (above). What lldb does next, with its stepped thread gone, is
-    unmeasured. Read from the code; no fixture has this shape.
+  - **lldb does not display the stop at a thread's own exit** (M44 Ruling T8-a, as corrected). A
+    step across the stepped thread's own exit stops at the exit on the wire, named on the thread
+    that runs next (What works today). lldb-2100 had suspended that thread for the step, and it
+    ignores a stop on a thread it suspended (`Thread::ShouldStop … should_stop = 0 (ignore since
+    thread was suspended)`, `docs/sweep-evidence/2026-09-27-m44-t0/t8/t8-lldb-steplog.log` line
+    46), so it sends one `c` and runs on. That `c` now stops at the user's breakpoints after the
+    exit, so the step is not wasted, but its own stop is never shown. The successor is a
+    one-argument change, naming the stop on the exited thread, plus two decisions: whether that
+    thread joins `threads:` for that one stop, and which context to report, since its stale saved
+    pc measured `0x4404`, not its exit `svc`. lldb's reaction to either is unmeasured.
+  - **Another thread's syscall write during a blocked step has no fixture.** A breakpoint or a
+    watched store hit by another thread while the stepped thread is blocked ends the step (What
+    works today), and both have rows. A syscall's write to a watched range by another thread has
+    none: in every candidate fixture the writing thread stores to that buffer first, so the store
+    ends the step before the syscall writes (M44 Task 11, probed on `threadrust`, presumed for the
+    rest). The path reuses the forward syscall-watch re-park, which rows do cover. Its successor
+    needs a fixture whose other thread's syscall writes a buffer that thread never stored to. lldb
+    also does not count such a hit on the other thread's breakpoint, and that thread's row shows no
+    stop reason, since the stop is an exception on the stepped thread (L7's form).
+  - **A breakpoint lldb lifts for its step is not armed for the other threads while the step
+    waits** (M44 Ruling T12-b). Before it steps, lldb removes the breakpoints at the threads'
+    current pcs (Task 11's probe measured it lifting both the one at the stepping thread's `svc` and
+    one at the other thread's saved pc). During a blocked step, or a step of a thread that is not
+    running, the run until the stepped thread runs arms only what is inserted, so another thread
+    passing a lifted address is not reported (inferred from the code, not measured with lldb).
+    Arming it anyway is not the obvious fix: lldb believes no site is inserted there, and what it
+    does with a hit it cannot match is unmeasured.
+  - **M43's T5-a stall is retired by inference, not by measurement.** M43 measured a breakpoint added at
+    a non-running thread's pc stalling every forward `process continue` in place: lldb steps that
+    thread off it first, and the server refused any step of a thread that was not running. M44
+    replaced that refusal (a step of such a thread runs until it is scheduled), so the step-off
+    should now run; the stall's own lldb shape has not been re-run since.
+  - **The end of the recording during a step reads as a refusal on the stepped thread** (M44
+    Ruling T12-a). When the recording ends, by another thread's exit or crash, before the stepped
+    thread runs, the step is refused on the stepped thread, naming the end (What works today). So a
+    crash shows as a description on the stepped thread rather than as the crashing thread's signal,
+    although lldb still shows `EXC_BAD_ACCESS` on the crashing thread's own row. lldb measured
+    three shapes: a crash while stepping a thread that is not running, a crash during a blocked
+    step, and an exit while stepping a parked worker. Only the first has a permanent lldb row; the
+    other two have wire rows. A step of a live thread that never runs again (one blocked for good,
+    a parked workqueue worker) waits for the next hit or for that end, and no row runs that wait
+    forward to the end: the rows start at the terminal.
   - **Only the executable is symbolicated.** dyld and the shared cache are never listed (spec R5:
     listing dyld plants a persistent internal breakpoint, one of the six), so frames in dyld and
     `libsystem` show bare addresses under lldb, although the script debugger names dyld's (M19).
@@ -1475,8 +1573,9 @@ These are real and current, not aspirational gaps.
     sticky direction is documented, not fixed: after `process continue -R` or `rsi`, a plain
     `continue` goes backward until `process continue -F`.
   - **Two lldb cosmetics.** lldb re-indexes a thread id it has seen exit (Task 5's probe listed tid
-    2 as `#3`), and after a refused step it keeps a stale `breakpoint 1.1` stop reason on another
-    thread, even for a breakpoint since deleted. Both come from lldb, not the server.
+    2 as `#3`), and after a step of another thread it keeps a stale `breakpoint 1.1` stop reason on
+    the thread it suspended, even for a breakpoint since deleted. Both come from lldb, not the
+    server.
   - **The CLI's `where` still prints no phase** (M41's owed item). The server's
     `process plugin packet monitor where` prints the phase of its own cursor.
 - **A bad debugger operand now fails later than it used to.** `where; break zzz` printed nothing and
@@ -1485,10 +1584,10 @@ These are real and current, not aspirational gaps.
 - **The script debugger has no DWARF, no line numbers and no backtraces.** M19 reads `LC_SYMTAB`
   only, so an address becomes `_child+0x30` and never `crashthread.c:35`, and `retrace debug` has no
   unwinder, so it prints no stack trace. Under lldb (M43) lldb's own unwinder runs over the
-  registers and memory the server serves, and what is measured is frame #0: `bt 1` names
-  `crashy`main` (`lldb_e2e`). Deeper frames, line numbers from DWARF in the executable on disk, and
-  an arm64e guest's PAC-signed saved LRs are all unmeasured. `qHostInfo` sends no
-  `addressing_bits`, so lldb may not strip those signatures, and unwinding past frame #0 may stop.
+  registers and memory the server serves, and since M44 it is measured past frame #0: from
+  `fstat`'s stub in `crashy`, `bt` gives `crashy`main + 60` as frame #1, and on the arm64e
+  `btchain` all four frames through PAC-signed saved LRs (What works today). Line numbers from
+  DWARF in the executable on disk are unmeasured.
 - **The trace format is not stable.** `TRACE_MAGIC` broke in M15, M16, M24 and again in M38.
   Recordings are currently working artifacts, not things to keep across milestones — and M24 is the
   milestone that made the refusal honest, so a stale one is now rejected at open instead of
@@ -1512,18 +1611,23 @@ These are real and current, not aspirational gaps.
   by M36, **moved by M37** to the walls it measured, and at **M38 one was un-parked** (`launchctl`
   — the RCV-shaped `mach_msg2` is refused and it runs to its own usage exit; the test asserts on
   that, not on `rc == 0`) **and five moved in place** to the first missing `arg_kinds` row behind
-  the refusal (class B: `kevent_qos` 374, `openat_nocancel` 464 ×3, `statfs64` 345; un-parked
-  when the row exists and the row records past it), while `csh`/`tcsh` stay at `fork` (class C:
+  the refusal (class B: `kevent_qos` 374, `openat_nocancel` 464 ×3, `statfs64` 345). **M44 moved
+  those five again**, each reason rewritten: `desdp`, `dyld_info` and `flex` to the `posix_spawn`
+  refusal (class C, exec-in-place; un-parked when exec-in-place is modelled), `dddiagnose` to
+  `host_get_io_main` (class C, the I/O Kit main port; un-parked when msgh_id 205 is serviced), and
+  `automationmodetool` stays at 374, reclassified class C and routed to its own milestone (R4;
+  un-parked when the workqueue `kevent_qos` is emulated as a modelled success), while `csh`/`tcsh` stay at `fork` (class C:
   `mach_ports_register` from `xpc_atfork_prepare`, `fork`(2) behind it; un-parked when the box
   models process creation) with their `pipe` landmark refreshed — each reason the measurement
   that parks it — the label, `rc`/`rp`, the recorder pid and its regime, the landmarks, the
   recorder's own line with its symbol, the evidence file, the class, and what un-parks it — and
   each run once with `--ignored` to show it fails for exactly that reason (M37: 8 of 8 at pids
   72339–72381; M38: the five re-parked, each printing its wall by name in
-  `docs/sweep-evidence/2026-09-16-m38/gates.log`). **M39 moved none of them**: its one wall was
-  cleared inside the milestone, so no gate was parked, un-parked or re-worded, and M39's sweep
-  changed no row's label. `ls` and `ed`, non-clean since M38, have no
-  gate: their rows were never parked, and the same five-number list un-parks them. Before M36 the
+  `docs/sweep-evidence/2026-09-16-m38/gates.log`; M44: all seven, `0 passed; 7 failed`, each on its
+  own wall). **M39 moved none of them**: its one wall was cleared inside the milestone, so no gate
+  was parked, un-parked or re-worded, and M39's sweep changed no row's label. `ls` and `ed`,
+  non-clean from M38 to M44, got gates at M44 (spec R6: a wall with no gate is invisible to the gate
+  log), and both run: `ls_records_and_replays` and `ed_records_and_replays`. Before M36 the
   two long-standing ones were the whole count, and the `brk` wall M23 found had **no** gate from
   M23 to M35 — a gap this README recorded in its own voice as a gap rather than a decision, now
   paid. It was **three** between M22 and M23 — M22 parked `sysbin_e2e`'s second gate at
@@ -1652,20 +1756,20 @@ pid-unique copy (see Codesigning above), so concurrent test processes do not con
 
 Some end-to-end gates depend on `/opt/homebrew/bin/jq`, which is not a repo artifact. They skip
 rather than fail when it is absent, and print a `SKIPPED` line, because a silent skip would read as a
-green it did not earn. **But a line printed with `eprintln!` does not reach a gate log.** libtest
-captures `eprintln!` in a test that passes, and a skip passes. This was measured at M43's close. So
-that line reaches a log only under `--nocapture`. The same applies to the Homebrew CPython gates and
-to the gates that record binaries out of `/bin` and `/usr/bin`: those are OS artifacts, present on
-any macOS 26 machine, but announced rather than skipped silently if absent.
+green it did not earn. The same applies to the Homebrew CPython gates, to `lldb_e2e` (which needs
+`/usr/bin/lldb`, and Homebrew Python for its CPython test), and to the gates that record binaries
+out of `/bin` and `/usr/bin`: those are OS artifacts, present on any macOS 26 machine, but announced
+rather than skipped silently if absent.
 
-To tell a skip from a run, re-run the targets that can skip with `-- --test-threads=1 --nocapture`
-and grep for `SKIPP` (`fallthrough_e2e` says `SKIPPING`). The targets are `apple_walls_e2e`,
-`cpython_crash_e2e`, `cpython_e2e`, `fallthrough_e2e`, `jq_e2e`, `jq_file_e2e`, `symbolops_e2e` and
-`sysbin_e2e`.
-
-`lldb_e2e` is the exception. It needs `/usr/bin/lldb` and, for its CPython test, Homebrew Python, and
-it writes its `SKIPPED` lines to stderr directly, past the capture, so its ordinary gate log shows
-them.
+**Since M44 every skip line reaches the ordinary gate log.** libtest captures `eprintln!` in a test
+that passes, and a skip passes, so an `eprintln!` skip line never reached a gate log (measured at
+M43's close). Every skip now goes through `util::announce` (`crates/retrace/tests/util/mod.rs`),
+which writes to the process's stderr past the capture, and `skiplines.rs` fails the gate if any
+test file writes a skip line with `eprintln!`. Its control test announces a fixed
+`SKIPLINES CONTROL: …` line, which M44 found in an ordinary run's log with no `--nocapture`. So to
+tell a skip from a run, grep the gate logs for `SKIPP` (`fallthrough_e2e` says `SKIPPING`);
+`--nocapture` is no longer needed. The detector sees only an `eprintln!` whose string literal
+begins `SKIP`: a skip line built from a variable, or written in lower case, slips past it.
 
 ### Continuous integration — there isn't any, and there can't be
 
