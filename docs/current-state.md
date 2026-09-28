@@ -1524,7 +1524,14 @@ These are real and current, not aspirational gaps.
   materialises at `__ulock_wake` using a measured correction to the woken thread's saved context, and
   nothing has measured the equivalent here, so the wake names the measurement it owes. One further
   value is an extrapolation and flagged as such at its call site: the QoS entry-flags word
-  `0x244004`, which no live run reproduced.
+  `0x244004`, which no live run reproduced. **Past the global queues, every libdispatch path
+  measured stops at a second `kevent_qos`, right after M45's emulated init.** That covers a
+  `DISPATCH_SOURCE_TYPE_TIMER` source, `dispatch_after` and `automationmodetool`. The call has
+  `x7 = 0x23` (`KEVENT_FLAG_WORKQ | KEVENT_FLAG_ERROR_EVENTS | KEVENT_FLAG_IMMEDIATE`), an event
+  list of 16 and one entry with filter −14. It is measured and refused by value, not modelled. That
+  it is libdispatch's memory-pressure source is inferred from its values, not symbolicated. A third
+  candidate, a `DISPATCH_SOURCE_TYPE_SIGNAL` source, has no native reference: natively it hangs
+  (M45 Ruling T0-a).
 - **The scheduler is cooperative,** switching only when a thread blocks or exits. That is what makes
   the schedule replayable without recording it, and it is a deliberate trade: interleavings that
   require preemption mid-critical-section never occur, so **races that need preemption to manifest
