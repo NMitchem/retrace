@@ -322,6 +322,9 @@ fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_n
     let rows = thread_rows(&out);
     let stepped = rows.iter().find(|r| r.1 == me).unwrap_or_else(|| panic!("the stepped thread's row: {ta}"));
     assert!(stepped.3.contains(&format!("hit breakpoint at {b:#x}")), "{rows:?}: {ta}");
+    // Still the selected thread, at its blocked resume pc: one past the `svc`.
+    assert!(stepped.0, "the stepped thread is selected: {rows:?}: {ta}");
+    assert_eq!(stepped.2, svc + 4, "{rows:?}: {ta}");
     let w = wheres(&out);
     assert_eq!(w.len(), 2, "{ta}");
     assert!(w[0].starts_with(&format!("{n}, ")), "lldb stopped in window n = {n}: {ta}");

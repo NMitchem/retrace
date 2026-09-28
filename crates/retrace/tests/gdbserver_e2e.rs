@@ -447,6 +447,71 @@ fn a_blocked_step_stops_at_another_threads_breakpoint_on_the_stepped_thread() {
     assert!(c.where_().starts_with(&format!("at ({}, 0)", n + 1)), "parked at the hit: {}", c.where_());
 }
 
+/// The thread that runs window `w`: the one whose trap ends it.
+fn window_thread(trace: &Path, w: usize) -> u32 {
+    match retrace_trace::Reader::open(trace).unwrap()[w] {
+        retrace_trace::Event::Syscall { thread, .. } => thread,
+        _ => panic!("landmark {w} is not a syscall"),
+    }
+}
+
+#[test]
+fn a_blocked_step_stops_at_another_threads_breakpoint_mid_window() {
+    // M44 B6(a), Ruling T11-a: the row above's breakpoint sits on the other thread's first
+    // instruction, which the until-run's finish reports at the boundary. This one sits three
+    // instructions in, so the scan's hardware breakpoint finds it mid-window and resolves it from
+    // the scan's own start (`resolve_nth` from kctx = start_k).
+    let (tr, n, t) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
+    let b = retrace_core::seek(tr, n + 1, 3).unwrap().pc();
+    assert!(b != retrace_core::seek(tr, n + 1, 0).unwrap().pc() && b != svc, "{b:#x} is mid-window");
+    let other = window_thread(tr, n + 1);
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, n);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    assert_eq!(c.send(&format!("Z0,{b:x},4")), "OK");
+    let s = c.send(&format!("vCont;s:{:x}", t + 1));
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "on the stepped thread: {s}");
+    assert_eq!(r::description(&s).unwrap(),
+        format!("thread {} hit breakpoint at {b:#x} during thread {}'s step", other + 1, t + 1));
+    assert!(c.where_().starts_with(&format!("at ({}, 3) phase=Bp", n + 1)), "resolved at k = 3: {}", c.where_());
+}
+
+#[test]
+fn a_blocked_step_stops_after_another_threads_watched_store_on_the_stepped_thread() {
+    // M44 B6(a), Ruling T11-a: a store watch that ends a blocked step is re-parked exactly as
+    // `continue`'s is (§3c: reported AFTER the store retires), not left pre-retire, where memory
+    // still reads the old value and a step of the writer reports the same store again.
+    // watchthread's main blocks in `h.join()`, and only then does the child store to its cell.
+    let (tr, n, t, cell) = r::watchthread_block();
+    let (w, k) = r::first_store(tr, n + 1, cell); // the child's store is the instruction at (w, k)
+    let word = |k| u64::from_le_bytes(retrace_core::seek(tr, w, k).unwrap().read_mem(cell, 8).unwrap().try_into().unwrap());
+    let (old, new) = (word(k), word(k + 1));
+    assert_ne!(old, new, "the store writes the watched word");
+    let child = window_thread(tr, w);
+    assert_ne!(child, t, "another thread stores");
+    let svc = r::trap_pc(tr, n);
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, n);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    assert_eq!(c.send(&format!("Z2,{cell:x},8")), "OK");
+    let s = c.send(&format!("vCont;s:{:x}", t + 1));
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "on the stepped thread: {s}");
+    assert_eq!(r::description(&s).unwrap(),
+        format!("thread {} hit a store to watched {cell:#x} during thread {}'s step", child + 1, t + 1));
+    assert_eq!(mem_u64(&mut c, cell), new, "the store retired, as a forward watch stop has it: {s}");
+    assert!(c.where_().starts_with(&format!("at ({w}, {}) phase=Bp", k + 1)), "after the store: {}", c.where_());
+    // Backward from there: the same store, pre-retire, with the old value in memory.
+    let b = c.send("bc");
+    assert_eq!(r::key(&b, "watch"), Some(format!("{cell:x}").as_str()), "{b}");
+    assert_eq!(mem_u64(&mut c, cell), old, "before the store");
+    assert!(c.where_().starts_with(&format!("at ({w}, {k}) phase=Bp")), "{}", c.where_());
+}
+
 #[test]
 fn a_step_on_a_thread_that_is_not_running_is_refused_in_place() {
     // §3d rule 1: a non-moving exception stop, measured safe (t0 L7).

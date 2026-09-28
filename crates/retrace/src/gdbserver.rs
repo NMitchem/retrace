@@ -7,7 +7,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use retrace_core::{Outcome, ReplaySession, ThreadState, EXE_BASE};
-use crate::debug::{Exec, Halt, Phase};
+use crate::debug::{Exec, Halt, Hit, Phase};
 use crate::rsp::{self, Decoder, Frame, StopKind};
 
 /// §3g, spec R10: fixed, so lldb's transcripts are stable (t0 L10), and `os_version` only selects
@@ -288,9 +288,21 @@ impl<'a> Server<'a> {
                 Halt::ThreadExited { thread } => Ok(s.stop(StopKind::Exception { signal: 5,
                     text: format!("thread {} exited during the step", thread + 1) }, None)),
                 // M44 B6(a): named on the stepped thread (t0 L7's measured-safe form), saying which
-                // thread hit what; the cursor is parked at that hit.
-                Halt::StepInterrupted { thread, by, what } => Ok(s.stop(StopKind::Exception { signal: 5,
-                    text: format!("thread {} hit {what} during thread {}'s step", by + 1, thread + 1) }, Some(thread))),
+                // thread hit what. The hit is re-parked first, exactly as `continue`'s is
+                // (`forward_hit`, Ruling T11-a), and described from where it now stands.
+                Halt::StepInterrupted { thread, by, hit } => {
+                    let kind = s.forward_hit(hit)?;
+                    let what = match hit {
+                        Hit::Break => format!("breakpoint at {:#x}", s.ex.sess().pc()), // not re-parked
+                        Hit::Watch { watched } => format!("a store to watched {watched:#x}"),
+                        Hit::WatchSys { watched } => format!("a syscall write to watched {watched:#x}"),
+                    };
+                    let mut text = format!("thread {} hit {what} during thread {}'s step", by + 1, thread + 1);
+                    if let StopKind::Exception { text: why, .. } = kind {
+                        text = format!("{text}, and {why}"); // the store did not retire
+                    }
+                    Ok(s.stop(StopKind::Exception { signal: 5, text }, Some(thread)))
+                }
                 other => s.reply_forward(other),
             }
         })
@@ -330,26 +342,38 @@ impl<'a> Server<'a> {
         self.motion(|s| { let h = s.ex.cmd_continue(&mut std::io::sink())?; s.reply_forward(h) })
     }
 
-    /// §3c: forward. A store watch is reported AFTER the store retires, so the server steps it.
+    /// §3c: forward. Each hit is re-parked and reported through `forward_hit`.
     fn reply_forward(&mut self, h: Halt) -> Result<String, String> {
         Ok(match h {
-            Halt::Break => self.stop(StopKind::Breakpoint, None),
-            Halt::Watch { watched } => match self.ex.cmd_stepi(1, &mut std::io::sink())? {
-                Halt::Stepped => self.stop(StopKind::Watch(watched), None),
-                // The store did not retire (it faults). Say so, at the store; the cursor stays ON its
-                // watch, so the next `c` crosses to the fault through Exec's own finish.
-                Halt::Refused(why) => self.stop(StopKind::Exception { signal: 5,
-                    text: format!("the watched store at {:#x} did not retire: {why}", self.ex.sess().pc()) }, None),
-                other => return Err(format!("stepping a watched store reported {other:?}")),
-            },
+            Halt::Break => { let kind = self.forward_hit(Hit::Break)?; self.stop(kind, None) }
+            Halt::Watch { watched } => { let kind = self.forward_hit(Hit::Watch { watched })?; self.stop(kind, None) }
             Halt::WatchSys { watched, thread } => {
-                // An arrival at (n, 0), so a reverse `c` finds this write again (§3c, the forward
-                // syscall-watch row).
-                self.ex.set_phase(Phase::Bp);
-                self.stop(StopKind::Watch(watched), Some(thread))
+                let kind = self.forward_hit(Hit::WatchSys { watched })?;
+                self.stop(kind, Some(thread))
             }
             Halt::Terminal(r) => self.terminal(&r.outcome),
             other => return Err(format!("a forward motion reported {other:?}")),
+        })
+    }
+
+    /// §3c's forward report of a hit, with its re-park, which M43 R2 gives the server rather than
+    /// `Exec`. A store watch is reported AFTER the store retires, so the server steps it. A syscall
+    /// write becomes an arrival at (n, 0), so a reverse `c` finds it again (the forward
+    /// syscall-watch row). Both forward paths report through here, `continue`'s stop and a blocked
+    /// step that another thread's hit ended (M44 B6(a)), so the two park identically by
+    /// construction (Ruling T11-a).
+    fn forward_hit(&mut self, hit: Hit) -> Result<StopKind, String> {
+        Ok(match hit {
+            Hit::Break => StopKind::Breakpoint,
+            Hit::Watch { watched } => match self.ex.cmd_stepi(1, &mut std::io::sink())? {
+                Halt::Stepped => StopKind::Watch(watched),
+                // The store did not retire (it faults). Say so, at the store; the cursor stays ON its
+                // watch, so the next `c` crosses to the fault through Exec's own finish.
+                Halt::Refused(why) => StopKind::Exception { signal: 5,
+                    text: format!("the watched store at {:#x} did not retire: {why}", self.ex.sess().pc()) },
+                other => return Err(format!("stepping a watched store reported {other:?}")),
+            },
+            Hit::WatchSys { watched } => { self.ex.set_phase(Phase::Bp); StopKind::Watch(watched) }
         })
     }
 

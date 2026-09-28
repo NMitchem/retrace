@@ -342,8 +342,18 @@ pub(crate) enum Halt {
     /// runs it again, so the step ends at that boundary instead of at the end of the recording.
     ThreadExited { thread: u32 },
     /// M44 B6(a): a step of `thread` that blocked was ended by another thread's hit (`by`), parked
-    /// at that hit. `what` names it for the stop's description.
-    StepInterrupted { thread: u32, by: u32, what: String },
+    /// at that hit exactly as `continue` parks it (`Break`, `Watch`, `WatchSys` above). The server
+    /// re-parks and reports it as it does `continue`'s (Ruling T11-a).
+    StepInterrupted { thread: u32, by: u32, hit: Hit },
+}
+
+/// M44 B6(a): the hits a step's run until its thread is current can end on, as `StepInterrupted`
+/// carries them. Exactly `continue`'s three hit stops, so nothing else can be carried.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Hit {
+    Break,
+    Watch { watched: u64 },
+    WatchSys { watched: u64 },
 }
 
 /// The scripted-debugger executor. Holds the cursor P = (`n`, `k`, `phase`) (M41 §3b) and at most ONE
@@ -763,9 +773,10 @@ impl<'a> Exec<'a> {
             // ---- Finish (n, k): its hits still ahead of the cursor ----
             loop {
                 // M43 §3d's arrival invariant (end when `t` runs again, before anything at that
-                // coordinate, M41 R4). With hits armed (M44 B6(a)) the finish can step and cross, as
-                // R7 was first designed, and a crossing here leaves k == 0 with the phase Sys. At
-                // entry another thread is current, so this cannot fire there.
+                // coordinate, M41 R4), defensive. An until-run enters the finish at (n, 0, Sys) with
+                // another thread current, and either returns `Break` or breaks to the scan. The
+                // finish steps, and so could cross to `t`'s arrival, only after a scoped-out watch
+                // (`continue 'finish` below), and the gdbserver cannot scope a watch.
                 if let Some(t) = until {
                     if self.k == 0 && self.phase == Phase::Sys && self.sess().current_thread() == t {
                         self.phase = Phase::Bp;
@@ -918,6 +929,8 @@ impl<'a> Exec<'a> {
                     }
                     Advance::WatchSyscall { watched, thread } => {
                         if self.watch_thread_matches(watched, thread) {
+                            // Reported even when this event is also `t`'s arrival: the write sits at
+                            // (n, 0, Sys), which orders before the arrival's (n, 0, Bp).
                             let n = self.sess().landmark();
                             line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
                             self.sess_mut().clear_breakpoints(); // keep this session, hit-clean
@@ -925,7 +938,13 @@ impl<'a> Exec<'a> {
                             (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
                             return Ok(Halt::WatchSys { watched, thread });
                         }
-                        // Scoped out: the writing event is already consumed, so keep scanning.
+                        // Scoped out: the writing event is already consumed, so keep scanning. That
+                        // skips the `Event` arm's arrival check, so an until-run would scan on past
+                        // `t`'s resume point if this event were it. Unreachable today: only a
+                        // thread-scoped watch is scoped out, and the gdbserver cannot scope one.
+                        assert!(until.is_none(),
+                            "an until-run met a thread-scoped watch: scanning on past its scoped-out syscall \
+                             write would overshoot the stepped thread's resume point");
                     }
                 }
             }
@@ -1011,20 +1030,21 @@ impl<'a> Exec<'a> {
     }
 
     /// Run until thread `t` is current again (M43 §3d's until-run), with the user's hits armed. A
-    /// hit on the way ends the run as `StepInterrupted` on `t` (M44 B6(a)).
+    /// hit on the way ends the run as `StepInterrupted` on `t` (M44 B6(a)), parked where
+    /// `continue` parks that hit; the server re-parks it as it does `continue`'s (Ruling T11-a).
     fn run_until_thread<W: Write>(&mut self, t: u32, out: &mut W) -> Result<Halt, String> {
+        // A breakpoint's or a store's thread is the current one. A syscall write's is the thread
+        // that issued it, which a blocking syscall has already switched away from.
         Ok(match self.continue_until(Some(t), out)? {
             Halt::Break => {
-                let (by, pc) = (self.sess().current_thread(), self.sess().pc());
-                Halt::StepInterrupted { thread: t, by, what: format!("breakpoint at {pc:#x}") }
+                let by = self.sess().current_thread();
+                Halt::StepInterrupted { thread: t, by, hit: Hit::Break }
             }
             Halt::Watch { watched } => {
                 let by = self.sess().current_thread();
-                Halt::StepInterrupted { thread: t, by, what: format!("a store to watched {watched:#x}") }
+                Halt::StepInterrupted { thread: t, by, hit: Hit::Watch { watched } }
             }
-            Halt::WatchSys { watched, thread: by } => {
-                Halt::StepInterrupted { thread: t, by, what: format!("a syscall write to watched {watched:#x}") }
-            }
+            Halt::WatchSys { watched, thread: by } => Halt::StepInterrupted { thread: t, by, hit: Hit::WatchSys { watched } },
             other => other,
         })
     }
