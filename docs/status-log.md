@@ -13725,8 +13725,8 @@ The milestone's numbers:
 - `TRACE_MAGIC` unmoved at `RT\x00\x0a` (`crates/retrace-trace` has no diff);
 - **zero** `#[ignore]` lines added or removed (9 → 9): one reason rewritten at a new wall
   (`automationmodetool`), and one extended with a second outcome (`dddiagnose`);
-- the spec's six rulings (R1–R6), four pre-flight rulings (P1–P4) and twelve execution rulings
-  (T0-a, T0-b, X-1, X-2, T2-a, T2-b, T3-a … T3-e, T4-a);
+- the spec's six rulings (R1–R6), four pre-flight rulings (P1–P4) and nineteen execution rulings
+  (T0-a, T0-b, X-1, X-2, T2-a, T2-b, T3-a … T3-e, T4-a, T5-a, X-1b, X-1c, T5-b, F-1, F-2, F-3);
 - **seven** commits after the spec (`cf54422`) and the plan (`a78f28f`): t0's `10ee268`; Task 1's
   `bdca598`; Task 2's `8e60bd0` and its fix round `28fddc4`; Task 3's walk `09a105f`, sweep
   `8d39cc6` and fix round `64712bd`. Then Task 4's docs, in three commits: `61959b2`, written
@@ -14161,6 +14161,43 @@ Execution:
   moves no asserted text. Cost if wrong: one line reverted.
 * **T4-a** — this section's gate subsection is appended by Task 5 after the gate runs, not
   written as a placeholder by Task 4. Cost if wrong: none.
+* **T5-a** — Task 5's gate runs concurrently with Task 4. Task 4 touches only docs, and no test
+  reads a doc (no `include_str!` or `read_to_string` of one under `crates/`), so the code gated is
+  the code Task 4's commit carries. If the final fix wave touches `crates/`, the affected chunks
+  re-run. Cost if wrong: one gate re-run.
+* **X-1b** — once `readme-launch` reached local main (`5cd6a38`), main is merged INTO this branch
+  before Task 4's docs land. That is a local, reversible integration of upstream, not P4's merge.
+  Every Task 4 README hunk is re-targeted to `docs/current-state.md`, and the new front-page
+  README.md is edited only if M45 changed something it states. Cost if wrong: a merge commit the
+  operator did not expect, undoable by reset before P4's merge.
+* **X-1c** — the close gate running at `64712bd` is stopped, because main's `host_svc` change
+  alters `crates/` and the close must gate the merged tree. The partial run is archived in the
+  ledger (`gate-64712bd-partial/`: `ws`, `box`, `bins` and 34 `e2e` targets, all `exit=0`), as
+  evidence for M45's own code before the merge. The full gate re-runs on the merged tree, and the
+  prediction is unchanged, since main added no test. Cost if wrong: one gate re-run, the cost
+  already paid.
+* **T5-b** — the final whole-branch review covers `5cd6a38..HEAD`, M45's exact delta on top of
+  local main, not the plan's `60f0452..HEAD`. After X-1b's merge, the plan's range would put
+  `readme-launch`'s work, gated by its own author, under M45's review. The review runs concurrently
+  with the gate, read-only. Cost if wrong: `readme-launch`'s `host_svc` change goes unreviewed by
+  M45; it is outside M45's scope and was gated on its own branch.
+* **F-1** — the final fix wave takes the review's Important 1 and Minors 1, 2, 4, 5, 6, 7, 8 and 9b,
+  plus X-2's owed wording as an oracle limitation. Minor 7 is a minimal front-page hedge: the sweep
+  figure varies with host state. Main's CLAUDE.md makes the Apple-sweep figure a thing the README
+  states, and M45's run changed its composition. All of these are docs, comments or `#[ignore]`
+  strings, with no behaviour change. Cost if wrong: a docs-only commit reverted.
+* **F-2** — Minor 3 is parked and written into "What stays owed": the replay-side validator
+  panics rather than returning a `Divergence`. It is reachable only after an earlier silent
+  divergence, the second-shape successor reworks `guest_kevent_qos` anyway, and changing it now
+  would be a product-code change at close needing a box/core/oracle re-gate. Minor 9a (the mirror
+  does not compare `ret1`) is parked as inert, since `returns_fd_pair(374)` is false. Task 4's
+  review nits are parked. Cost if wrong: a debugger session on an already-diverged replay dies with
+  a misleading panic until the successor lands.
+* **F-3** — the fix wave's `crates/` edits wait until the running gate writes `DONE`, so no source
+  edit lands under it. Those edits are the `kqinit_e2e.rs` comment, the `apple_walls_e2e.rs` reason
+  and the `retrace-arch` 374-row comment. Afterwards the touched chunks re-run: `apple_walls_e2e`,
+  `kqinit_e2e`, `ws` for `retrace-arch`, and clippy. The controller writes this section's gate
+  subsection after the re-runs. Cost if wrong: a delay of the remaining gate minutes.
 
 ### What stays owed
 
