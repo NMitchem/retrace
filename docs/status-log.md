@@ -14221,10 +14221,24 @@ Execution:
   `kqueue()` descriptor.
 * **Knotes and their events**: `EVFILT_USER` triggers (`NOTE_TRIGGER`), `EVFILT_TIMER` and
   `EVFILT_MACHPORT` knotes, delivering events to workers, and any knote state (R3).
-* **X-2.** `fstat64`'s recorded writes reach about 0x260 bytes past its 144-byte stat buffer, so a
-  tampered or wrong return can be healed by a later landmark rather than diverge (Task 2, control
-  2). Why the recorded region is that wide is unmeasured. The implementer's guess, the diff window
-  capturing bytes the kernel did not change, is also unmeasured.
+* **X-2, a limitation of the determinism oracle.** Recorded writes that re-impose record-time
+  bytes outside the kernel's destination can erase ANY replay divergence in nearby memory, not
+  only a tampered 374 return. `fstat64`'s recorded writes reach about 0x260 bytes past its
+  144-byte stat buffer (Task 2, control 2), and that is how a tampered return healed instead of
+  diverging. Why the recorded region is that wide is unmeasured. The implementer's guess, the diff
+  window capturing bytes the kernel did not change, is also unmeasured.
+* **A replay-side validator failure panics instead of diverging** (final review Minor 3, parked
+  by F-2).
+  - **The behaviour.** On replay, `guest_kevent_qos` re-reads the entry from guest memory. A
+    mismatch panics with the record-side "unmeasured kevent_qos shape … Measure what issues this
+    one" message instead of returning a `Divergence`. A mismatch is possible only after an earlier
+    silent divergence.
+  - **Why it matters.** That kills a `retrace debug` or `gdbserver` session, and it blames the
+    wrong cause.
+  - **The fix and its owner.** A shared `Result`-returning check, where record panics and replay
+    diverges. It is parked to the second-shape successor, which reworks the function.
+* **The replay mirror does not compare `ret1`** (final review Minor 9a, parked by F-2). It is
+  inert, because `returns_fd_pair(374)` is false.
 * **The forwarded-`MADV_FREE_REUSABLE` class-E hazard** (T3-c).
   - **Measured on `ps`:** the recorded final image can depend on host memory pressure, so a guest
     that frees a large buffer shortly before exit can flake class E.
