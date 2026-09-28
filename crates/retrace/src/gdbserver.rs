@@ -12,7 +12,10 @@ use crate::rsp::{self, Decoder, Frame, StopKind};
 
 /// §3g, spec R10: fixed, so lldb's transcripts are stable (t0 L10), and `os_version` only selects
 /// lldb's newer macOS loader (t0 L2).
-const QHOSTINFO: &str = "cputype:16777228;cpusubtype:0;ostype:macosx;vendor:apple;endian:little;ptrsize:8;watchpoint_exceptions_received:after;";
+// M44 B5: `addressing_bits:47` — the guest VA width (T0SZ = 17). Without it lldb cannot strip a
+// PAC-signed saved LR and an arm64e `bt` stops early (measured: 3 frames, only #0 symbolicated —
+// #1 and #2 printed still signed, 0x0024000100000328 and 0x005000010000030c, and f1's caller lost).
+const QHOSTINFO: &str = "cputype:16777228;cpusubtype:0;ostype:macosx;vendor:apple;endian:little;ptrsize:8;watchpoint_exceptions_received:after;addressing_bits:47;";
 const OS_VERSION: &str = "os_version:26.0.0;";
 const QPROCESSINFO: &str = "pid:1;parent-pid:1;cputype:100000c;cpusubtype:0;ostype:macosx;vendor:apple;endian:little;ptrsize:8;";
 const QSUPPORTED: &str = "PacketSize=20000;QStartNoAckMode+;qXfer:features:read+;QThreadSuffixSupported+;QListThreadsInStopReply+;ReverseContinue+;ReverseStep+";

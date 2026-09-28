@@ -41,8 +41,11 @@ fn retrace_py() -> String { concat!(env!("CARGO_MANIFEST_DIR"), "/lldb/retrace.p
 /// `END` sentinel appended), return (lldb's exit code or None if killed at the bound, stdout, stderr).
 /// The server and lldb are each held by a `KillOnDrop`, so every path, a panic included, kills and
 /// reaps both.
-fn session(trace: &Path, cmds: &[String]) -> (Option<i32>, String, String) {
-    let (srv, port, srv_err) = util::rsp::spawn_server(trace, &[]);
+fn session(trace: &Path, cmds: &[String]) -> (Option<i32>, String, String) { session_with(trace, &[], cmds) }
+
+/// `session`, with `server_args` passed to `retrace gdbserver` after the trace (M44 B5: `--exe`).
+fn session_with(trace: &Path, server_args: &[&str], cmds: &[String]) -> (Option<i32>, String, String) {
+    let (srv, port, srv_err) = util::rsp::spawn_server(trace, server_args);
     let srv = util::rsp::KillOnDrop(srv);
     let base = std::env::temp_dir().join(format!("retrace-lldb-{}-{port}", std::process::id()));
     let (cmd_p, out_p, err_p) = (base.with_extension("cmds"), base.with_extension("out"), base.with_extension("err"));
@@ -542,5 +545,28 @@ fn lldb_steps_out_of_a_call_with_step_out_and_finish() {
         assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
         assert_eq!(code, Some(0), "{t}");
         assert_eq!(values(&out, "pc = ").last().copied(), Some(bl + 4), "{t}");
+    }
+}
+
+#[test]
+fn lldb_backtraces_an_arm64e_guest_through_signed_return_addresses() {
+    // M44 B5 (M43 F-3): only frame #0 was ever measured (crashy, arm64). Here every saved LR is
+    // PAC-signed; an unwinder that does not strip stops at frame #0 or #1.
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_backtraces_an_arm64e_guest…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (rec, tr) = util::record(retrace_guest::BTCHAIN);
+    assert_eq!(rec.code, 139, "record btchain: {}", rec.stderr);
+    let cmds = vec!["process continue".into(), "bt".into()];
+    let (code, out, err) = session_with(&tr, &["--exe", retrace_guest::BTCHAIN], &cmds);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
+    // `bt`'s own lines only: lldb also prints a `frame #0` line at the connect and at every stop.
+    let bt = out.split_once("(lldb) bt\n").map_or("", |(_, r)| r);
+    let frames: Vec<&str> = bt.lines().take_while(|l| !l.starts_with("(lldb)")).filter(|l| l.contains("frame #")).collect();
+    assert!(frames.len() >= 3, "bt shows f3, f2 and f1 at least: {t}");
+    for (i, f) in ["f3", "f2", "f1"].iter().enumerate() {
+        assert!(frames[i].contains(&format!("`{f}")), "frame #{i} is {f} — a signed LR stripped: {t}");
     }
 }
