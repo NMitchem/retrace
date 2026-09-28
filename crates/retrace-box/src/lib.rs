@@ -1066,12 +1066,18 @@ fn alloc_pages(len: usize) -> (*mut u8, usize) {
 // The kernel may clobber the caller-saved scratch registers (x8-x15, x17); they are declared
 // clobbered so the compiler keeps no live value across the svc. x18 is platform-reserved — never
 // touch it. Flags are NOT preserved (we read the carry via `cset`), so no `preserves_flags`.
+// NZCV is zeroed before the svc because only a BSD syscall writes the carry: a Mach trap (negative
+// x16 — `mach_msg2`, `task_self_trap`) returns its kern_return_t in x0 and leaves C as it found
+// it, so without the clear `err` was whatever the compiler last left in C. The debug build left it
+// clear and the release build set it, so a release recorder saw `task_self_trap` "fail", never
+// learned the guest task port, and refused `/bin/echo`'s first `mach_vm_map` (4811) as unsupported.
 // SAFETY: record-only; the caller has already translated guest pointers to host addresses.
 unsafe fn host_svc(num: u64, a: [u64; 8]) -> (u64, u64, bool) {
     let ret: u64;
     let ret1: u64;
     let carry: u64;
     core::arch::asm!(
+        "msr nzcv, xzr",
         "svc #0x80",
         "cset {c}, cs",
         in("x16") num,
