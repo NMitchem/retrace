@@ -5222,7 +5222,8 @@ impl Box_ {
             panic!("M45: unmeasured kevent_qos shape: {why}. Only libdispatch's `_dispatch_kq_init` \
                     (KEVENT_FLAG_WORKQ|IMMEDIATE, one EVFILT_USER EV_ADD|EV_CLEAR entry, no event \
                     list) is modelled (M45 §2a). Measure what issues this one before modelling it; \
-                    a guessed kevent silently corrupts libdispatch's event state. args={args:#x?}");
+                    a guessed kevent silently corrupts libdispatch's event state. args=[{}]",
+                    args.map(|a| format!("{a:#x}")).join(","));
         }
         0
     }
