@@ -1,0 +1,85 @@
+# M44 final review FW-3: the xcrun trio's NATIVE outcomes, each measured on its own.
+#
+# Why: apple_walls_e2e's dyld_info and flex ignore reasons cited desdp's native rc (2, t0 M3)
+# "because the trio shares one stub", which was never measured. xcrun dispatches by argv[0], so
+# each member's native outcome is its own tool's. Shape: the sweep's (no arguments, stdin
+# </dev/null), each member run from its own fresh, empty cwd in the ledger's scratch directory
+# (.superpowers/sdd/2026-09-27-retrace-m44-owed/fw3-native/), because flex writes lex.yy.c into its
+# cwd. With empty stdin it wrote nothing. desdp is re-measured beside them as a cross-check of t0 M3
+# (docs/sweep-evidence/2026-09-27-m44-t0/m3-native-desdp.err).
+#
+# Results: desdp rc 2 (usage), dyld_info rc 0 (usage, on stderr), flex rc 1 (`<stdin>:1: premature
+# EOF`). None is 71, so the recorded rc/rp 71/71 is retrace's posix_spawn refusal, not the program.
+#
+# Also measured: the "one stub" premise is false for desdp. dyld_info and flex are the same file (one
+# inode, 78 hard links in /usr/bin, among them clang, lldb and make); desdp is a different file
+# (another inode, 16 links, among them xcodebuild, actool and xctrace). Both link only
+# /usr/lib/libxcselect.dylib and libSystem: two xcselect shims, not one.
+#
+# The script, run as `bash native-trio.sh > native-trio.txt 2>&1` from the worktree root (exit 0).
+# It was run twice; both runs gave the same rcs and first lines, and this is the second:
+#
+#   #!/bin/bash
+#   # M44 final review FW-3: each xcrun-trio member run natively with the sweep's shape (no arguments,
+#   # stdin </dev/null), from a fresh scratch cwd per member (flex writes lex.yy.c into its cwd).
+#   # Prints, per member: rc, stdout/stderr byte counts, first stdout/stderr line, and the files the
+#   # run left in its cwd. Also the host xcrun cache /var/tmp/xcrun_db's state before and after.
+#   set -u
+#   here=$(cd "$(dirname "$0")" && pwd)
+#   echo "# date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')  host: $(sw_vers -productVersion) $(uname -m)"
+#   echo "# xcode-select -p: $(xcode-select -p 2>&1)"
+#   for m in desdp dyld_info flex; do
+#       echo "# /usr/bin/$m: $(ls -li /usr/bin/$m | awk '{print "inode", $1, "links", $3, "size", $6}')"
+#   done
+#   for m in desdp flex; do
+#       echo "# find /usr/bin -samefile /usr/bin/$m | wc -l: $(find /usr/bin -samefile /usr/bin/$m 2>/dev/null | wc -l | tr -d ' ')"
+#       echo "# otool -L /usr/bin/$m: $(otool -L /usr/bin/$m | tail -n +2 | awk '{print $1}' | tr '\n' ' ')"
+#   done
+#   echo "# /var/tmp/xcrun_db before: $(ls -l /var/tmp/xcrun_db 2>&1)"
+#   for m in desdp dyld_info flex; do
+#       d="$here/cwd-$m"
+#       rm -rf "$d"; mkdir -p "$d"
+#       (cd "$d" && /usr/bin/$m </dev/null >"$here/$m.out" 2>"$here/$m.err")
+#       rc=$?
+#       echo
+#       echo "\$ cd cwd-$m && /usr/bin/$m </dev/null >$m.out 2>$m.err; echo \$?"
+#       echo "$m rc=$rc stdout_bytes=$(wc -c <"$here/$m.out" | tr -d ' ') stderr_bytes=$(wc -c <"$here/$m.err" | tr -d ' ')"
+#       echo "$m first stdout line: $(head -1 "$here/$m.out")"
+#       echo "$m first stderr line: $(head -1 "$here/$m.err")"
+#       echo "$m files left in cwd: $(cd "$d" && ls -A | tr '\n' ' ')"
+#   done
+#   echo
+#   echo "# /var/tmp/xcrun_db after: $(ls -l /var/tmp/xcrun_db 2>&1)"
+#
+# Its output:
+
+# date: 2026-09-28T04:34:17Z  host: 26.5.2 arm64
+# xcode-select -p: /Applications/Xcode.app/Contents/Developer
+# /usr/bin/desdp: inode 1152921500312571603 links 16 size 135488
+# /usr/bin/dyld_info: inode 1152921500312571585 links 78 size 118928
+# /usr/bin/flex: inode 1152921500312571585 links 78 size 118928
+# find /usr/bin -samefile /usr/bin/desdp | wc -l: 16
+# otool -L /usr/bin/desdp: /usr/lib/libxcselect.dylib /usr/lib/libSystem.B.dylib 
+# find /usr/bin -samefile /usr/bin/flex | wc -l: 78
+# otool -L /usr/bin/flex: /usr/lib/libxcselect.dylib /usr/lib/libSystem.B.dylib 
+# /var/tmp/xcrun_db before: -rw-------@ 1 noahmitchem  wheel  16 Sep 27 13:39 /var/tmp/xcrun_db
+
+$ cd cwd-desdp && /usr/bin/desdp </dev/null >desdp.out 2>desdp.err; echo $?
+desdp rc=2 stdout_bytes=0 stderr_bytes=71
+desdp first stdout line: 
+desdp first stderr line: usage: /Applications/Xcode.app/Contents/Developer/usr/bin/desdp bundle
+desdp files left in cwd: 
+
+$ cd cwd-dyld_info && /usr/bin/dyld_info </dev/null >dyld_info.out 2>dyld_info.err; echo $?
+dyld_info rc=0 stdout_bytes=0 stderr_bytes=2431
+dyld_info first stdout line: 
+dyld_info first stderr line: Usage: dyld_info <options>* <mach-o file>+ | -all_dir <dir> | -all_dyld_cache
+dyld_info files left in cwd: 
+
+$ cd cwd-flex && /usr/bin/flex </dev/null >flex.out 2>flex.err; echo $?
+flex rc=1 stdout_bytes=0 stderr_bytes=25
+flex first stdout line: 
+flex first stderr line: <stdin>:1: premature EOF
+flex files left in cwd: 
+
+# /var/tmp/xcrun_db after: -rw-------@ 1 noahmitchem  wheel  16 Sep 27 13:39 /var/tmp/xcrun_db
