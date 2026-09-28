@@ -14,6 +14,8 @@ bullet; Ruling R4). **Scope:** "init + walk". Emulate the one measured shape as 
 validated success, refuse every other shape by value, and walk the guests to their next wall.
 **Mechanism:** approach A of three. A stateful knote table (B) was rejected as state nothing reads.
 Forwarding with translation (C) was rejected as unsound (§2c).
+**Corrected from the plan, 2026-09-28:** §3a, §3b, §3c, §3e, §7 and §9. Writing executable steps
+against the code found seven things the prose had wrong or missing; §11 lists each.
 
 ## 1. Purpose
 
@@ -128,8 +130,11 @@ t0 runs on the branch before any product code and writes the companion file.
   shows the entry. Note which candidates reach 374 and whether their shape equals M1's. A candidate
   that reaches a different shape is recorded, not modelled (**Halt 2**).
 - **M3, the native return.** Build the §3e mechanism fixture and run it **natively** (not under
-  retrace), printing the call's return and carry flag. Expected: 0, carry clear (§2c).
-- **M4, the baseline.** The M44 close's counts (832/0/9 over 146), re-derived from source by the
+  retrace), printing the call's return and carry flag. Expected: 0, carry clear (§2c). **Halt 6**
+  otherwise (§7).
+- **M4, automationmodetool natively** (§11 item 4): its no-argument rc and stdout. Outcome A (§3f)
+  must assert that outcome, and the shared helper asserts rc 0.
+- **M5, the baseline.** The M44 close's counts (832/0/9 over 146), re-derived from source by the
   file-by-file method, so §9's prediction starts from a measured floor.
 
 ### 3b. The validator (`retrace-arch`)
@@ -138,12 +143,14 @@ t0 runs on the branch before any product code and writes the companion file.
 
 - Named constants, each with a citation:
   - `SYS_KEVENT_QOS = 374`
-  - `EVFILT_USER`, `EV_ADD`, `EV_CLEAR`, `NOTE_TRIGGER` (SDK)
+  - `EVFILT_USER`, `EV_ADD`, `EV_ENABLE`, `EV_CLEAR` (SDK). `EV_ENABLE` is the fixture's refusal
+    mode. `NOTE_TRIGGER` is not needed: exact comparison refuses it without naming it (§11 item 1).
   - `KEVENT_FLAG_IMMEDIATE` (SDK), `KEVENT_FLAG_WORKQ` (xnu)
   - `KEVENT_QOS_SIZE = 72`
-  - the §2b offsets
-- `pub const KQINIT_ENTRY: [u8; 72]`: the measured entry, built from named fields, with provenance
-  per field.
+- `pub struct KeventQos` (the §2b fields, with `from_bytes`, `to_bytes` and a named `fields()`
+  list) and `pub const KQINIT: KeventQos`: the measured entry, built from named fields, with
+  provenance per field. The offsets live in `from_bytes`/`to_bytes`, and a test pins each one
+  (§11 item 1).
 - `pub fn kqinit_shape(args: [u64; 8], entry: &[u8]) -> Result<(), String>`. This is a pure
   function; `Ok` means "this is the measured init". It checks, in order, and the first mismatch
   becomes the `Err`, naming the argument or field, the measured value and the actual value:
@@ -153,7 +160,8 @@ t0 runs on the branch before any product code and writes the companion file.
   4. `args[5] == 0 && args[6] == 0`
   5. `args[7] as u32 == KEVENT_FLAG_WORKQ | KEVENT_FLAG_IMMEDIATE`
   6. `entry.len() == 72`
-  7. `entry == KQINIT_ENTRY`, reported by the first differing field, not the first differing byte
+  7. the entry decodes to `KQINIT`, reported by the first differing field, not the first
+     differing byte
 
   `int` and `unsigned int` parameters are compared on their **low 32 bits**, because the kernel
   reads 32 bits (M38's `AT_FDCWD` lesson: the recorded register was `0xffffffff`, not
@@ -164,7 +172,8 @@ proposed to accept as-is (Ruling R1).
 
 ### 3c. The box method (`retrace-box`)
 
-`pub fn guest_kevent_qos(&mut self, args: [u64; 8]) -> u64`. It sits beside
+`pub fn guest_kevent_qos(&self, args: [u64; 8]) -> u64`. It takes `&self` because it keeps no
+state, and the signature enforces that (§11 item 2). It sits beside
 `guest_workq_kernreturn` and carries a doc comment in that style: what it emulates, why it is never
 forwarded, and what a refusal means.
 
@@ -193,14 +202,17 @@ identically by record and replay.
   `set_x0_err_and_return(*ret, *err)` and `finish_event()`. **No `verify_thread` of its own:** this
   position inherits the arm-top call, as the comment at the workqueue mirrors states. Adding one
   would double-check and mislead the next reader about the count of seven.
-- **Forward arm.** The assert at `:1222` gains `SYS_KEVENT_QOS` beside the workqueue pair, with its
-  message widened to match. It is an `assert!`, kept in release, and it makes "never forwarded" a
-  checked fact rather than an arm-ordering accident (the gap M37 measured for `bsdthread_create`).
+- **Forward arm.** A separate `assert!(num != SYS_KEVENT_QOS, …)` goes directly after the
+  workqueue pair's assert at `:1222`, with its own message. It is an `assert!`, kept in release,
+  and it makes "never forwarded" a checked fact rather than an arm-ordering accident (the gap M37
+  measured for `bsdthread_create`).
 - **Documentation row.** `374 => row!(P, [Scalar, Ptr, Scalar, Ptr, Scalar, Ptr, Ptr, Scalar])` goes
   in `arg_kinds`'s "threads / workqueue (emulated above the trace …) rows are documentation" section
   (`crates/retrace-arch/src/lib.rs:708-737`). Its comment names the emulation.
-  - Whether a documentation row needs a census or `legacy_equivalence` entry is for the plan to
-    settle by reading those tests. **Inferred:** it does, as 367/368 have.
+  - **Settled by the plan** (§11 item 6): 374 joins `tests/census.rs`'s `CENSUS`, since
+    automationmodetool was measured dispatching it. The row has no `Fd`, `Dest`, `NestedDest`,
+    `Source` or `Ret::Fd` kind, so no `legacy_equivalence` view differs and no `EXPECTED_DIFFS`
+    entry is needed.
   - The `kqueue` row's comment (`:806-808`, "No kevent spelling … is in the census") is corrected to
     say 374 is emulated and 363/369/375 remain row-less.
 
@@ -211,17 +223,23 @@ meaning, and 374 has never been appended to any trace: before M45 it panicked at
 ### 3e. The mechanism fixture and its gate
 
 - **The fixture:** `crates/retrace-guest/c/kqinit_dyn.c`, built by `build.rs` like its siblings.
-  `main` builds `KQINIT_ENTRY`'s bytes on its stack and issues 374 through inline
-  `svc #0x80` with `x16 = 374`, `w0 = -1` (so `x0` reads `0xffffffff`, as measured),
-  `x2 = 1`, `x3`–`x6 = 0` and `w7 = 0x21`. It captures `x0` and the carry flag, writes a marker
-  line carrying both, and exits 0.
+  `main` first brings up the process's workqueue with one `dispatch_async`, in every mode, because
+  that is the context libdispatch makes the call in (§11 item 5). It then builds `KQINIT`'s
+  bytes on its stack and issues 374 through inline `svc #0x80` with `x16 = 374`, `w0 = -1` (so
+  `x0` reads `0xffffffff`, as measured), `x2 = 1`, `x3`–`x6 = 0` and `w7 = 0x21`. It captures `x0`
+  and the carry flag, writes a marker line carrying both, and exits 0.
   - Inline `svc`, not `syscall()`: libSystem's `syscall()` goes through the indirect `SYS_syscall`
     (0), so retrace would see syscall 0, not 374 (Ruling R4).
-  - An argv switch selects the **refusal mode**, which issues the same call with the entry's
-    `flags` set to `EV_ADD|EV_CLEAR|EV_ENABLE`. The refused value is one field away from the
-    measured one, so the refusal must name `flags`.
-- **The gate:** `crates/retrace/tests/kqinit_e2e.rs`, three tests, spawning the CLI with the
-  `util::bin()` codesign pattern.
+  - An argv switch selects a mode (§11 item 3):
+    - `straddle` issues the measured call from an entry that straddles a 16 KiB page;
+    - `flags`, the **refusal mode**, sets the entry's `flags` to `EV_ADD|EV_CLEAR|EV_ENABLE`. The
+      refused value is one field away from the measured one, so the refusal must name `flags`;
+    - `badptr` passes change-list address `0x10`, which no page maps, so the refusal must say the
+      entry does not translate.
+- **The gate:** `crates/retrace/tests/kqinit_e2e.rs`, five tests, spawning the CLI through
+  `util`'s helpers and their `util::bin()` codesign pattern. The plan's Task 2 has the test names;
+  the two not described below are the `straddle` mode's run of the first test's assertions, and a
+  seek onto the emulated landmark and either side of it, each replayed to the recorded end.
   - `kqinit_records_and_replays`:
     - the trace holds exactly one `Event::Syscall` with `num == 374`, and it has `ret == 0`,
       `err == false`, empty `writes` and `args[7] == 0x21`;
@@ -284,6 +302,9 @@ Task-level, after §3b–§3e land:
 | `kqinit_e2e`: one 374 event, rc 0, no writes, `args[7] == 0x21`, 2 byte-identical replays | the arm is missing, forwards, or diverges | no: a forward would carry writes or a different rc, and a missing mirror diverges |
 | `kqinit_e2e`: refusal names `flags` 0x21 vs 0x25 | the refusal is silent or mis-attributed | no |
 | `kqinit_e2e`: a trace with `ret` rewritten to 1 diverges with `kevent_qos rc mismatch` | the replay mirror is missing or does not compare | no: without the mirror replay feeds the 1 in silence |
+| `kqinit_e2e`: an entry straddling a 16 KiB page records as the one landmark | the entry is read flat from the first half's IPA | no: the second half's page need not be adjacent in IPA space |
+| `kqinit_e2e`: change list `0x10` is refused as untranslated | an unmapped pointer is read, faulted or padded | no |
+| `kqinit_e2e`: seeks onto the landmark and to either side replay to the end | the mirror only works entered from landmark 1 | no |
 | forward-arm assert includes 374 | a future arm reordering forwards 374 | it is the guard |
 | `automationmodetool_records_and_replays` | outcome A regresses | n/a when re-parked (outcome B) |
 
@@ -316,7 +337,7 @@ Task-level, after §3b–§3e land:
    - The forward arm's assert list sentence gains 374.
    - The e2e list gains `kqinit_e2e`.
 7. The chunked gate is green, including the `--bins` chunk and every split library crate's `--doc`,
-   and reconciled file by file against t0 M4 (§9).
+   and reconciled file by file against t0 M5 (§9).
 8. The whole-branch review has run and its fix wave is applied, then a `--no-ff` merge into local
    `main` with the tree-identity check. Push and worktree cleanup are the operator's.
 
@@ -333,6 +354,8 @@ the design to get past it.
    This is not a halt of the milestone, only of widening.
 4. Any step would need a trace-format change or a `TRACE_MAGIC` bump.
 5. A gate red that M45's diff does not explain.
+6. t0 M3's native run of the fixture does not print `kqinit rc=0 carry=0`. The constant the box
+   returns would then not be the kernel's (§11 item 4).
 
 **Not done here:**
 - `EVFILT_USER` triggers (`NOTE_TRIGGER`)
@@ -362,19 +385,19 @@ the design to get past it.
 
 ## 9. Gate prediction
 
-This is written against M44's close, 832 passed / 0 failed / 9 ignored over 146 test binaries. t0 M4
+This is written against M44's close, 832 passed / 0 failed / 9 ignored over 146 test binaries. t0 M5
 re-derives that floor from source before the prediction is pinned.
 
 - **New binaries:** 2 (`retrace-arch/tests/kqinit.rs` and `retrace/tests/kqinit_e2e.rs`), giving
   **148**.
-- **New passing tests:** the validator file's count, which the plan pins by enumerating its tests;
-  plus 3 in `kqinit_e2e`; plus 0 or 1 for a GCD candidate gate; plus 1 if automationmodetool has
-  outcome A. The documentation row may add census rows but not tests (inferred, §3d).
-- **Ignored:** 9, or 8 with outcome A.
-- **Failed:** 0.
+- **New passing tests (pinned by the plan, §11 item 7):** 14. That is 8 validator tests, 5 in
+  `kqinit_e2e` and 1 `retrace-guest` unit test (`kqinit_guest_parses`). A GCD candidate gate adds
+  2 (its e2e test and its `*_guest_parses`). Outcome A moves 1 from ignored to passed. The
+  documentation row adds a census number but no test.
+- **Prediction:** outcome B with no GCD gate is **846 / 0 / 9 over 148**. A GCD gate makes it
+  848 / 0 / 9. Outcome A adds 1 passed and removes 1 ignored from either line.
 
-The plan turns this into one number per outcome before the gate runs. The gate is reconciled file by
-file against it, not by the sum.
+The gate is reconciled file by file against it, not by the sum.
 
 ## 10. Conformance with the governing documents
 
@@ -425,3 +448,29 @@ and `DESIGN.md` (repository `charpente`, a sibling project) are checked too.
 
 The rest of charpente's DESIGN (storage, replication, auth, the typed web surface) governs a backend
 framework and has no retrace analogue. It is not applicable, and it is not being skipped.
+
+## 11. Corrections from the plan (2026-09-28)
+
+Writing executable steps against the code (plan: `docs/superpowers/plans/2026-09-28-retrace-m45-kqinit.md`)
+found these. Each is corrected in place above; this list says what changed and why.
+
+1. **§3b's entry is a struct, not a byte constant.** `KQINIT: KeventQos` with
+   `from_bytes`/`to_bytes`/`fields()` gives field-named refusals without a second copy of the
+   layout. The offsets live in those two functions, and a test pins each one at xnu's offset.
+   `NOTE_TRIGGER` is dropped, because exact comparison refuses it without naming it, and a `pub`
+   constant nothing reads is noise. `EV_ENABLE` is added for the fixture's refusal mode.
+2. **§3c's method takes `&self`.** It keeps no state, and the signature now enforces that.
+3. **§3e's gate is five tests, and the fixture has four modes.** The spec's three tests left two
+   inputs unexercised: an entry straddling a page (a flat read would be silently wrong) and a seek
+   entering replay at or beside the landmark. `badptr` joins the refusal test, since an unmapped
+   change list must be refused by name.
+4. **§3a gains M4 (automationmodetool natively), and the baseline becomes M5.** The shared gate
+   helper asserts rc 0, so outcome A needs the native rc first. **Halt 6** is added for M3: if the
+   native return is not 0 with carry clear, the box's constant is not the kernel's.
+5. **The fixture warms the workqueue first**, with one `dispatch_async` in every mode. M44 t0 M1
+   measured the call right after the workqueue pair, and whether a process with no workqueue gets
+   the same native return is exactly what M3 cannot vouch for otherwise.
+6. **§3d's documentation-row question is settled.** 374 joins `CENSUS`, and no view differs, so
+   there is no `EXPECTED_DIFFS` entry.
+7. **§9's counts are pinned:** +14 tests over 148 binaries (846/0/9 for outcome B without a GCD
+   gate).
