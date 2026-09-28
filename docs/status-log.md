@@ -14257,9 +14257,11 @@ Execution:
   - the plan's text still says `16384 − 40` (superseded by T2-a; the plan is history);
   - the sweep's `automationmodetool` `rec.err` shows the pre-T3-e multi-line `args`, as the
     evidence README notes;
-  - `automationmodetool`'s `#[ignore]` reason quotes the panic at `lib.rs:5222:13`, as measured.
-    Since the merge of `40ead39` it is `:5228:13`. The reason's measurement stands; only the line
-    moved.
+  - `automationmodetool`'s `#[ignore]` reason quoted the panic at `lib.rs:5222:13`, as measured,
+    which became `:5228:13` after the merge of `40ead39`. **Discharged in the final fix wave (item
+    H)**: the reason now cites the panic by its function,
+    `lib.rs (Box_::guest_kevent_qos): M45: …`, as `docs/current-state.md` does, so a line move
+    cannot stale it again.
 * **M44's owed items M45 did not touch**, carried forward by reference to M44's "What stays owed"
   and its fix wave's additions. That is every M44 item except the first, 374, which M45 discharges
   for the init shape alone:
