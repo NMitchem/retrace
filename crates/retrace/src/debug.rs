@@ -341,8 +341,9 @@ pub(crate) enum Halt {
     /// another thread first (M44 Ruling T12-a), the cursor is parked at the terminal and the thread
     /// did not run again (a blocked step's thread ran only the trap it blocked in).
     Refused(String),
-    /// M44 B3: `step_thread`'s thread exited in the step's crossing, parked at (n, 0, Bp). Nothing
-    /// runs it again, so the step ends at that boundary instead of at the end of the recording.
+    /// M44 B3: `step_thread`'s thread exited in the step's crossing, parked at (n, 0, Sys), the
+    /// crossing's own position (Ruling FW-b). Nothing runs it again, so the step ends at that
+    /// boundary instead of at the end of the recording.
     ThreadExited { thread: u32 },
     /// M44 B6(a): a step of `thread` that blocked was ended by another thread's hit (`by`), parked
     /// at that hit exactly as `continue` parks it (`Break`, `Watch`, `WatchSys` above). The server
@@ -1027,11 +1028,14 @@ impl<'a> Exec<'a> {
                             return Ok(Halt::Stepped);
                         }
                         // M44 B3: or `t` exited, crossing its own exit. Nothing will run it again, so
-                        // the until-run below would reach the end of the recording; stop here.
+                        // the until-run below would reach the end of the recording; stop here. Phase
+                        // Sys, as the blocked arm below parks (M44 final review, Ruling FW-b): this is
+                        // the crossing's own position, not an arrival of the thread now running, so a
+                        // breakpoint at that thread's pc is still ahead and the next `c` reports it.
                         let exited = self.sess().thread_summaries().iter()
                             .any(|s| s.tid == t && matches!(s.state, ThreadState::Exited(_)));
                         if exited {
-                            (self.n, self.k, self.phase) = (n, 0, Phase::Bp);
+                            (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
                             return Ok(Halt::ThreadExited { thread: t });
                         }
                         // `t` blocked. Run until it is current again, or until another thread's hit
