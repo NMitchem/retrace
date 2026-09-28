@@ -426,11 +426,11 @@ fn a_step_over_a_blocking_syscall_ends_when_the_stepped_thread_runs_again() {
 }
 
 #[test]
-fn a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread() {
-    // Spec R7's fallback (Task 4 Step 8): lldb-2100 re-steps the stepped thread forever when the
-    // step is answered by another thread's `reason:breakpoint` (307,016 × `vCont;s:1` in 60 s). So
-    // the run until the stepped thread resumes arms nothing. The breakpoint sits where the other
-    // thread runs first, at (n + 1, 0); R7 as first written reported it there.
+fn a_blocked_step_stops_at_another_threads_breakpoint_on_the_stepped_thread() {
+    // M44 B6(a), replacing M43's R7 fallback row: during a blocked step, another thread's hit ends
+    // the step. The stop is named on the STEPPED thread with reason exception (t0 L7's
+    // measured-safe form) — M43 measured lldb looping forever (307,016 × `vCont;s:1` in 60 s) when
+    // the same hit was reported as `reason:breakpoint` on the other thread.
     let (tr, n, t) = r::threadrust_block();
     let svc = r::trap_pc(tr, n);
     let b = retrace_core::seek(tr, n + 1, 0).unwrap().pc();
@@ -440,9 +440,11 @@ fn a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread() {
     assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
     assert_eq!(c.send(&format!("Z0,{b:x},4")), "OK");
     let s = c.send(&format!("vCont;s:{:x}", t + 1));
-    assert!(s.contains("reason:trace;"), "not another thread's breakpoint: {s}");
-    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "{s}");
-    assert_eq!(pc_of(&s), svc + 4);
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "on the stepped thread: {s}");
+    let d = r::description(&s).unwrap();
+    assert!(d.contains(&format!("breakpoint at {b:#x}")), "names the other thread's hit: {d}");
+    assert!(c.where_().starts_with(&format!("at ({}, 0)", n + 1)), "parked at the hit: {}", c.where_());
 }
 
 #[test]

@@ -274,13 +274,17 @@ fn is_resume(p: &str) -> bool {
 }
 
 #[test]
-fn lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_running() {
-    // Spec R7's fallback (Ruling T4-a) and §3d rule 1 on the stepped thread (Ruling T4-b), in lldb
-    // itself. Each looped lldb-2100 before its fix (Task 4: 307,016 × `vCont;s:1` and 80,103 ×
-    // `vCont;s:2` in 60 s). Measured against this row: rule 1 named on the running thread loops
-    // session B until the bound kills it, without `END`. The fallback undone no longer loops,
-    // because rule 1 now ends lldb's re-step: session A stops refused on the stepped thread, with
-    // the other thread at its breakpoint, which the `thread list` assertion catches.
+fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_not_running() {
+    // M44 B6(a)'s loop check in lldb itself (spec §3c), and §3d rule 1 on the stepped thread (M43
+    // Ruling T4-b). M43 armed nothing during a blocked step (R7's fallback, Ruling T4-a), because
+    // lldb-2100 re-stepped forever when another thread's hit was reported on that thread (Task 4:
+    // 307,016 × `vCont;s:1` in 60 s). B6(a) reports the hit in t0 L7's measured-safe form instead:
+    // `reason:exception` on the STEPPED thread, naming the hit. lldb sends the step once and shows
+    // that stop on the stepped thread. With B6(a) undone, session A ends `instruction step into` at
+    // svc + 4, at a later landmark, which the row and the second `where` catch. Each session is
+    // bounded (BOUND), so a loop fails as a killed session with no END. Measured against session
+    // B: rule 1 named on the running thread loops it until the bound kills it (80,103 × `vCont;s:2`
+    // in 60 s).
     if !lldb_runs() {
         util::announce("SKIPPED lldb_steps_a_blocked_thread…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
@@ -306,25 +310,22 @@ fn lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_r
     };
     let where_ = || "process plugin packet monitor where".to_string();
 
-    // Session A: the step blocks and ends on the stepped thread at svc + 4, not at the other
-    // thread's breakpoint on the way.
+    // Session A (M44 B6(a)): the step blocks, and the other thread's breakpoint at `b` ends it:
+    // stopped on the stepped thread, reason exception, naming the hit — and lldb does not re-step.
     let mut a = to_svc(svc, m);
     a.extend([where_(), format!("breakpoint set -a {b:#x}"), "thread step-inst".into(), "thread list".into(),
               where_()]);
     let (code, out, err) = session(tr, &a);
     let ta = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
-    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end: {ta}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {ta}");
     assert_eq!(code, Some(0), "{ta}");
     let rows = thread_rows(&out);
-    assert!(rows.contains(&(true, me, svc + 4, "instruction step into")), "{rows:?}: {ta}");
-    // Before the step, `where` pins where lldb stopped: in window n, the wait that blocked, so `m`
-    // is asserted rather than inferred. After it, a later landmark shows that other threads ran
-    // during the step. Together: the step crossed the block.
+    let stepped = rows.iter().find(|r| r.1 == me).unwrap_or_else(|| panic!("the stepped thread's row: {ta}"));
+    assert!(stepped.3.contains(&format!("hit breakpoint at {b:#x}")), "{rows:?}: {ta}");
     let w = wheres(&out);
     assert_eq!(w.len(), 2, "{ta}");
     assert!(w[0].starts_with(&format!("{n}, ")), "lldb stopped in window n = {n}: {ta}");
-    let landed: usize = w[1].split(',').next().unwrap().parse().unwrap();
-    assert!(landed > n + 1, "other threads ran during the step (n = {n}): {ta}");
+    assert!(w[1].starts_with(&format!("{}, 0", n + 1)), "parked at the other thread's hit: {ta}");
 
     // Session B: a step on the thread that is not running is refused, named on that thread.
     // lldb numbers threads in the order it first sees them, and thread 1 is alone at the start of

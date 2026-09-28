@@ -287,6 +287,10 @@ impl<'a> Server<'a> {
                 // step, and resumes (`lldb_e2e`, Ruling T8-a).
                 Halt::ThreadExited { thread } => Ok(s.stop(StopKind::Exception { signal: 5,
                     text: format!("thread {} exited during the step", thread + 1) }, None)),
+                // M44 B6(a): named on the stepped thread (t0 L7's measured-safe form), saying which
+                // thread hit what; the cursor is parked at that hit.
+                Halt::StepInterrupted { thread, by, what } => Ok(s.stop(StopKind::Exception { signal: 5,
+                    text: format!("thread {} hit {what} during thread {}'s step", by + 1, thread + 1) }, Some(thread))),
                 other => s.reply_forward(other),
             }
         })
