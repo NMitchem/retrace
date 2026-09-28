@@ -951,7 +951,8 @@ impl<'a> Exec<'a> {
         }
     }
 
-    /// M43 §3d: one instruction of thread `t` (retrace's id), as lldb's `s` needs it. It crosses a
+    /// M43 §3d: one instruction of thread `t` (retrace's id), as lldb's `s` needs it. A `t` that is
+    /// live but not running is first run to until it is scheduled (M44 B6(b)). It crosses a
     /// trap, and a blocking syscall until `t` runs again, unless another thread's hit ends it first
     /// (`StepInterrupted`, M44 B6(a)). A trap that is `t`'s own exit stops at the exit's boundary as
     /// `ThreadExited` (M44 B3), because nothing runs `t` again. A trap that returns to itself is
@@ -961,8 +962,18 @@ impl<'a> Exec<'a> {
     pub(crate) fn step_thread<W: Write>(&mut self, t: u32, out: &mut W) -> Result<Halt, String> {
         let cur = self.sess().current_thread();
         if t != cur {
-            return Ok(Halt::Refused(format!(
-                "cannot step thread {}: only the running thread ({}) can step", t + 1, cur + 1)));
+            // M44 B6(b): a live thread that is not running is run to until it is — the blocked
+            // step's tail — then stepped one instruction. One that has exited, or never existed,
+            // is still refused in place (§3d rule 1).
+            let live = self.sess().thread_summaries().iter()
+                .any(|s| s.tid == t && !matches!(s.state, ThreadState::Exited(_)));
+            if !live {
+                return Ok(Halt::Refused(format!("cannot step thread {}: it is not a live thread", t + 1)));
+            }
+            return match self.run_until_thread(t, out)? {
+                Halt::Stepped => self.step_thread(t, out),
+                other => Ok(other),
+            };
         }
         let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
         let pc0 = self.sess().pc();

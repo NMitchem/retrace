@@ -275,16 +275,17 @@ fn is_resume(p: &str) -> bool {
 
 #[test]
 fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_not_running() {
-    // M44 B6(a)'s loop check in lldb itself (spec §3c), and §3d rule 1 on the stepped thread (M43
-    // Ruling T4-b). M43 armed nothing during a blocked step (R7's fallback, Ruling T4-a), because
-    // lldb-2100 re-stepped forever when another thread's hit was reported on that thread (Task 4:
-    // 307,016 × `vCont;s:1` in 60 s). B6(a) reports the hit in t0 L7's measured-safe form instead:
+    // M44 B6(a)'s and B6(b)'s loop checks in lldb itself (spec §3c). M43 armed nothing during a
+    // blocked step (R7's fallback, Ruling T4-a), because lldb-2100 re-stepped forever when another
+    // thread's hit was reported on that thread (Task 4: 307,016 × `vCont;s:1` in 60 s). B6(a) reports the hit in t0 L7's measured-safe form instead:
     // `reason:exception` on the STEPPED thread, naming the hit. lldb sends the step once and shows
     // that stop on the stepped thread. With B6(a) undone, session A ends `instruction step into` at
     // svc + 4, at a later landmark, which the row and the second `where` catch. Each session is
-    // bounded (BOUND), so a loop fails as a killed session with no END. Measured against session
-    // B: rule 1 named on the running thread loops it until the bound kills it (80,103 × `vCont;s:2`
-    // in 60 s).
+    // bounded (BOUND), so a loop fails as a killed session with no END. Session B stepped a thread
+    // that is not running: M43 refused it on that thread (§3d rule 1, Ruling T4-b; named on the
+    // running thread instead, lldb looped: 80,103 × `vCont;s:2` in 60 s). B6(b) runs until the
+    // thread is scheduled and steps it, and lldb sends the step once. With B6(b) undone, the step
+    // is refused in place, and the thread's pc is its saved one, one instruction short of the row's.
     if !lldb_runs() {
         util::announce("SKIPPED lldb_steps_a_blocked_thread…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
@@ -300,14 +301,6 @@ fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_n
         util::rsp::continue_to_window(&mut c, n).0
     };
     let (me, other) = (u64::from(t) + 1, if t == 0 { 2 } else { 1 }); // RSP tids
-    // Session B's pc oracle: `dbg_regs_of` at the refusal's own position, window n's trap, since a
-    // refusal moves nothing. Not `b`: that is (n + 1, 0), a later position, which agrees only if
-    // the switch resumes the thread at exactly its saved pc.
-    let other_pc = {
-        let len = retrace_core::seek(tr, n, 0).unwrap().window_len_here().unwrap();
-        let s = retrace_core::seek(tr, n, len).unwrap();
-        util::rsp::dbg_field(&s.dbg_regs_of(other as usize - 1).unwrap(), "pc")
-    };
     let where_ = || "process plugin packet monitor where".to_string();
 
     // Session A (M44 B6(a)): the step blocks, and the other thread's breakpoint at `b` ends it:
@@ -330,19 +323,24 @@ fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_n
     assert!(w[0].starts_with(&format!("{n}, ")), "lldb stopped in window n = {n}: {ta}");
     assert!(w[1].starts_with(&format!("{}, 0", n + 1)), "parked at the other thread's hit: {ta}");
 
-    // Session B: a step on the thread that is not running is refused, named on that thread.
+    // Session B (M44 B6(b)): a step of the thread that is not running runs until it is, then steps
+    // it: lldb shows that thread stopped by the step, one instruction past where it resumed.
     // lldb numbers threads in the order it first sees them, and thread 1 is alone at the start of
     // recording, so the other thread's lldb index is its RSP tid; the `*` row's tid confirms it.
+    // The oracle is bounded by the recording's length (Ruling P4): a seek that fails yields None.
+    let len = retrace_trace::Reader::open(tr).unwrap().len();
+    let want_b = (n + 1..len).find_map(|mm| {
+        let mut s = retrace_core::seek(tr, mm, 0).ok()?;
+        (u64::from(s.current_thread()) + 1 == other).then(|| { s.step_insns(1).unwrap(); s.pc() })
+    }).expect("the other thread runs again");
     let mut bb = to_svc(svc, m);
     bb.extend([format!("thread select {other}"), "thread step-inst".into(), "thread list".into()]);
     let (code, out, err) = session(tr, &bb);
     let tb = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
-    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end: {tb}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {tb}");
     assert_eq!(code, Some(0), "{tb}");
-    let refused = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tb}"));
-    assert_eq!(refused.1, other, "{tb}");
-    assert!(refused.3.starts_with(&format!("cannot step thread {other}: ")), "{refused:?}: {tb}");
-    assert_eq!(refused.2, other_pc, "the refused thread's own saved pc, not the running one's: {tb}");
+    let row = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tb}"));
+    assert_eq!((row.1, row.2), (other, want_b), "{tb}");
 }
 
 #[test]
