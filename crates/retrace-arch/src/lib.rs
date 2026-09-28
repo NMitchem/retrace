@@ -742,7 +742,11 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // under KEVENT_FLAG_WORKQ, not a descriptor), the change list is one 72-byte entry, and
         // eventlist/data_out/data_available are NULL — the bounds these kinds cite. No row can
         // describe a FORWARDED kevent_qos (M44 R4: count × size, nested idents); the generic
-        // forward arm asserts 374 away, so this row is never consulted by a forward.
+        // forward arm asserts 374 away, so this row is never consulted by a forward. The row
+        // describes the MODELLED workqueue shape: x0 is Scalar because it is the -1 workqueue
+        // sentinel. A kevent_qos on a guest kqueue() fd carries a DESCRIPTOR in x0, so a successor
+        // that ever forwards a descriptor-based kevent_qos must make x0 an Fd, or it silently
+        // forwards a raw guest fd (the M10 class).
         SYS_KEVENT_QOS => row!(P, [Scalar, Ptr, Scalar, Ptr, Scalar, Ptr, Ptr, Scalar]),
         // bsdthread_ctl(user_addr_t cmd, arg1, arg2, arg3): xnu-private, cmd-dependent
         // (bsd/pthread/pthread_workqueue.c `bsdthread_ctl`). arg1/arg2 are port names, priorities
