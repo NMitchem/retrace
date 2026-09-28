@@ -78,7 +78,8 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   the written bytes and never on an exit code), `pipe_e2e` (a guest whose `pipe` pair must both be
   guest-numbered — the trace's `ret1` is the assertion, since before M38 the write end was the
   guest's own stale `x1`), `dupfd_e2e` (a guest whose `fcntl(F_DUPFD, 10)` must return exactly the
-  guest minimum, a number no host `dup` could produce), `atfdcwd_e2e` (a guest whose
+  guest minimum, a number no host `dup` could produce; since M44 also `F_DUPFD_CLOEXEC` then
+  `F_GETFD` reading 1, as native does), `atfdcwd_e2e` (a guest whose
   `fstatat(AT_FDCWD, …)` must carry the 32-bit sentinel `0xfffffffe` in the trace AND succeed),
   `exec_e2e` (a guest whose `execve`/`posix_spawn` are refused — asserted on the recorder's
   refusal line, because the errno alone is what the old forward also returned), `cpython_crash_e2e`
@@ -100,10 +101,16 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   `tests/util/hits.rs` single-steps a recording with everything armed and checks
   `continue`/`reverse-continue` chains against every hardware stop), `gdbserver_e2e` (M43: the
   `retrace gdbserver` RSP server on the wire, through a Rust client in `tests/util/rsp.rs` and no
-  lldb — positions both ways, stepping, the refusals, the divergence recovery and R7's fallback),
+  lldb — positions both ways, stepping, the refusals and the divergence recovery; M44 added
+  `disarm-rsi`, a step across its own thread's exit, another thread's hit ending a blocked step, a
+  step of a thread that is not running, and a step the recording's end comes before),
   `lldb_e2e` (M43: real lldb-2100 reverse-steps through `crashy`'s crash, plus the CPython demo, a
-  determinism check, and the blocked-step and cross-thread `rsi` rows; it skips loudly without
-  lldb, and its CPython test without Homebrew Python). Run one with
+  determinism check, and the blocked-step and cross-thread `rsi` rows; M44 added `ni`, `next`,
+  `thread step-out` and `finish` over a call, an arm64e `bt`, and bounded sessions for M44's
+  stepping changes, each asserting lldb does not loop; it skips loudly without lldb, and its CPython
+  test without Homebrew Python), `apple_walls_e2e` (Apple binaries by path: M44's
+  `ls_records_and_replays` and `ed_records_and_replays` run beside `launchctl`'s; the other seven
+  are parked at their measured walls), `skiplines` (M44: the skip-line detector and its control). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -350,12 +357,14 @@ Two rules these gates taught, which bind their successors:
   Per-test specifics belong in comments in the test file, next to the assertion they explain.
 - **A skipped test must announce itself.** `jq_e2e` / `jq_file_e2e` depend on
   `/opt/homebrew/bin/jq`, which is not a repo artifact; they skip with a `SKIPPED` line rather than
-  passing quietly. A silent skip reads as a green it did not earn. **Where that line goes matters.**
+  passing quietly. A silent skip reads as a green it did not earn.
+  **Where that line goes matters.**
   libtest captures `eprintln!` in a *passing* test, and a skip passes, so an `eprintln!` skip line
-  never reaches a gate log. This was measured at M43's close. Only `lldb_e2e` writes its skip line to
-  stderr directly (`announce`); the other skippable targets still use `eprintln!`, which is owed.
-  Until they are fixed, check skips by re-running those targets with `--nocapture`; the README's
-  Testing section lists them. A new skip should write past the capture, as `lldb_e2e` does.
+  never reaches a gate log (measured at M43's close). Since M44 every skip goes through
+  `util::announce` (`crates/retrace/tests/util/mod.rs`), which writes past the capture, and
+  `skiplines.rs` fails the gate if any test file writes a `SKIP` line with `eprintln!`. It sees only
+  a string literal that begins `SKIP`: a skip line built from a variable, or in lower case, slips
+  past it.
 
 One distinction that is easy to get backwards when writing such a test: a signal the guest **raises**
 is `Event::Signal`, while one derived from a **hardware fault** whose disposition is not a handler
