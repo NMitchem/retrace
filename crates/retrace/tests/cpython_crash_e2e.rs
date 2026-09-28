@@ -15,9 +15,10 @@
 // `cell` and every coordinate are DISCOVERED from the recording (the M6 marker convention).
 //
 // Neither the interpreter nor its stdlib is a repo artifact, so the test skips with a loud
-// eprintln! naming the missing path rather than passing quietly — a silent skip reads as a green
-// it did not earn. That is also why every mechanism the walk fixes gets its own repo-owned guard
-// (vmremap_e2e is the first): this gate guards nothing on a machine without Homebrew Python.
+// `util::announce` line (writes past libtest's capture) naming the missing path rather than
+// passing quietly — a silent skip reads as a green it did not earn. That is also why every
+// mechanism the walk fixes gets its own repo-owned guard (vmremap_e2e is the first): this gate
+// guards nothing on a machine without Homebrew Python.
 mod util;
 use std::path::Path;
 use retrace_trace::{Event, Reader};
@@ -63,10 +64,10 @@ fn crash_and_marker_thread(trace: &Path) -> ((u64, u64, u64, u32), u32) {
 #[test]
 fn cpython_runs_a_real_script_crashes_on_the_computed_pointer_and_reverse_debugs_to_its_store() {
     if !Path::new(REAL).exists() {
-        eprintln!(
+        util::announce(&format!(
             "SKIPPED cpython_runs_a_real_script…: {REAL} not found (expected a Homebrew \
              `python@3.14` install). This gate did NOT run — it is not evidence of anything."
-        );
+        ));
         return;
     }
     let (rec, trace) = util::record_dynamic_args(REAL, &[retrace_guest::CRASH_PY]);

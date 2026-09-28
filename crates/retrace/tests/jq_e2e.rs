@@ -13,8 +13,8 @@ const JQ: &str = "/opt/homebrew/bin/jq";
 #[test]
 fn jq_records_and_replays() {
     if !std::path::Path::new(JQ).exists() {
-        eprintln!("SKIPPED jq_records_and_replays: {JQ} not installed (`brew install jq`). \
-                   This gate did NOT run — it is not evidence of anything.");
+        util::announce(&format!("SKIPPED jq_records_and_replays: {JQ} not installed (`brew install jq`). \
+                   This gate did NOT run — it is not evidence of anything."));
         return;
     }
     let out = util::assert_rung_records_and_replays(JQ, &["-n", "1+1"], b"2\n");

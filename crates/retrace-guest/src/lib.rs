@@ -172,6 +172,8 @@ pub const CRASHTHREAD: &str = concat!(env!("OUT_DIR"), "/crashthread");
 pub const SIGCATCH_DYN: &str = concat!(env!("OUT_DIR"), "/sigcatch_dyn");
 pub const DYLD_PATH: &str = "/usr/lib/dyld";
 pub const STRIP47: &str = concat!(env!("OUT_DIR"), "/strip47");
+/// M44 B5: arm64e `_start -> f1 -> f2 -> f3`, each frame's LR PAC-signed, crashing in f3.
+pub const BTCHAIN: &str = concat!(env!("OUT_DIR"), "/btchain");
 pub const BFAMSTRIP: &str = concat!(env!("OUT_DIR"), "/bfamstrip");
 pub const RESERVECOMMIT: &str = concat!(env!("OUT_DIR"), "/reservecommit");
 pub const WILDSTORE: &str = concat!(env!("OUT_DIR"), "/wildstore");

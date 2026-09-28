@@ -426,11 +426,11 @@ fn a_step_over_a_blocking_syscall_ends_when_the_stepped_thread_runs_again() {
 }
 
 #[test]
-fn a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread() {
-    // Spec R7's fallback (Task 4 Step 8): lldb-2100 re-steps the stepped thread forever when the
-    // step is answered by another thread's `reason:breakpoint` (307,016 × `vCont;s:1` in 60 s). So
-    // the run until the stepped thread resumes arms nothing. The breakpoint sits where the other
-    // thread runs first, at (n + 1, 0); R7 as first written reported it there.
+fn a_blocked_step_stops_at_another_threads_breakpoint_on_the_stepped_thread() {
+    // M44 B6(a), replacing M43's R7 fallback row: during a blocked step, another thread's hit ends
+    // the step. The stop is named on the STEPPED thread with reason exception (t0 L7's
+    // measured-safe form) — M43 measured lldb looping forever (307,016 × `vCont;s:1` in 60 s) when
+    // the same hit was reported as `reason:breakpoint` on the other thread.
     let (tr, n, t) = r::threadrust_block();
     let svc = r::trap_pc(tr, n);
     let b = retrace_core::seek(tr, n + 1, 0).unwrap().pc();
@@ -440,28 +440,318 @@ fn a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread() {
     assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
     assert_eq!(c.send(&format!("Z0,{b:x},4")), "OK");
     let s = c.send(&format!("vCont;s:{:x}", t + 1));
-    assert!(s.contains("reason:trace;"), "not another thread's breakpoint: {s}");
-    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "{s}");
-    assert_eq!(pc_of(&s), svc + 4);
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "on the stepped thread: {s}");
+    let d = r::description(&s).unwrap();
+    assert!(d.contains(&format!("breakpoint at {b:#x}")), "names the other thread's hit: {d}");
+    assert!(c.where_().starts_with(&format!("at ({}, 0)", n + 1)), "parked at the hit: {}", c.where_());
+}
+
+/// The thread that runs window `w`: the one whose trap ends it.
+fn window_thread(trace: &Path, w: usize) -> u32 {
+    match retrace_trace::Reader::open(trace).unwrap()[w] {
+        retrace_trace::Event::Syscall { thread, .. } => thread,
+        _ => panic!("landmark {w} is not a syscall"),
+    }
 }
 
 #[test]
-fn a_step_on_a_thread_that_is_not_running_is_refused_in_place() {
-    // §3d rule 1: a non-moving exception stop, measured safe (t0 L7).
+fn a_blocked_step_stops_at_another_threads_breakpoint_mid_window() {
+    // M44 B6(a), Ruling T11-a: the row above's breakpoint sits on the other thread's first
+    // instruction, which the until-run's finish reports at the boundary. This one sits three
+    // instructions in, so the scan's hardware breakpoint finds it mid-window and resolves it from
+    // the scan's own start (`resolve_nth` from kctx = start_k).
     let (tr, n, t) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
+    let b = retrace_core::seek(tr, n + 1, 3).unwrap().pc();
+    assert!(b != retrace_core::seek(tr, n + 1, 0).unwrap().pc() && b != svc, "{b:#x} is mid-window");
+    let other = window_thread(tr, n + 1);
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, n);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    assert_eq!(c.send(&format!("Z0,{b:x},4")), "OK");
+    let s = c.send(&format!("vCont;s:{:x}", t + 1));
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "on the stepped thread: {s}");
+    assert_eq!(r::description(&s).unwrap(),
+        format!("thread {} hit breakpoint at {b:#x} during thread {}'s step", other + 1, t + 1));
+    assert!(c.where_().starts_with(&format!("at ({}, 3) phase=Bp", n + 1)), "resolved at k = 3: {}", c.where_());
+}
+
+#[test]
+fn a_blocked_step_stops_after_another_threads_watched_store_on_the_stepped_thread() {
+    // M44 B6(a), Ruling T11-a: a store watch that ends a blocked step is re-parked exactly as
+    // `continue`'s is (§3c: reported AFTER the store retires), not left pre-retire, where memory
+    // still reads the old value and a step of the writer reports the same store again.
+    // watchthread's main blocks in `h.join()`, and only then does the child store to its cell.
+    let (tr, n, t, cell) = r::watchthread_block();
+    let (w, k) = r::first_store(tr, n + 1, cell); // the child's store is the instruction at (w, k)
+    let word = |k| u64::from_le_bytes(retrace_core::seek(tr, w, k).unwrap().read_mem(cell, 8).unwrap().try_into().unwrap());
+    let (old, new) = (word(k), word(k + 1));
+    assert_ne!(old, new, "the store writes the watched word");
+    let child = window_thread(tr, w);
+    assert_ne!(child, t, "another thread stores");
     let svc = r::trap_pc(tr, n);
     let mut c = Rsp::spawn(tr, &[]);
     assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
     r::continue_to_window(&mut c, n);
-    let other = if t == 0 { 2 } else { 1 }; // an RSP tid that is not t + 1
-    let before = c.where_();
-    let s = c.send(&format!("vCont;s:{other:x}"));
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    assert_eq!(c.send(&format!("Z2,{cell:x},8")), "OK");
+    let s = c.send(&format!("vCont;s:{:x}", t + 1));
     assert!(s.contains("reason:exception;"), "{s}");
-    assert!(r::description(&s).unwrap().contains("cannot step thread"), "{s}");
-    // On the stepped thread (t0 L7). Named on the running one, lldb re-steps forever (Task 4's
-    // measurement).
-    assert_eq!(r::key(&s, "thread"), Some(format!("{other:x}").as_str()), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "on the stepped thread: {s}");
+    assert_eq!(r::description(&s).unwrap(),
+        format!("thread {} hit a store to watched {cell:#x} during thread {}'s step", child + 1, t + 1));
+    assert_eq!(mem_u64(&mut c, cell), new, "the store retired, as a forward watch stop has it: {s}");
+    assert!(c.where_().starts_with(&format!("at ({w}, {}) phase=Bp", k + 1)), "after the store: {}", c.where_());
+    // Backward from there: the same store, pre-retire, with the old value in memory.
+    let b = c.send("bc");
+    assert_eq!(r::key(&b, "watch"), Some(format!("{cell:x}").as_str()), "{b}");
+    assert_eq!(mem_u64(&mut c, cell), old, "before the store");
+    assert!(c.where_().starts_with(&format!("at ({w}, {k}) phase=Bp")), "{}", c.where_());
+}
+
+/// M44 B6(b)'s oracle, without the server: the first landmark after `n` where thread `t` (retrace's
+/// id) is current, then one instruction of it. Bounded by the recording's length (Ruling P4): a
+/// seek that fails yields None, so an unbounded search would never end.
+fn one_insn_once_it_runs(trace: &Path, n: usize, t: u32) -> u64 {
+    let len = retrace_trace::Reader::open(trace).unwrap().len();
+    (n + 1..len).find_map(|m| {
+        let mut s = retrace_core::seek(trace, m, 0).ok()?;
+        (s.current_thread() == t).then(|| { s.step_insns(1).unwrap(); s.pc() })
+    }).expect("the thread runs again")
+}
+
+#[test]
+fn a_step_on_a_thread_that_is_not_running_runs_until_it_is_scheduled() {
+    // M44 B6(b), M43 T5-a's successor: a step of a live thread that is not running runs until that
+    // thread is scheduled, then steps it one instruction — as a blocked step's tail already does.
+    let (tr, n, t) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
+    let other = if t == 0 { 1u32 } else { 0 }; // retrace's id of the thread that is not t
+    let want = one_insn_once_it_runs(tr, n, other);
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, n);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK"); // nothing armed: B6(b) alone
+    let s = c.send(&format!("vCont;s:{:x}", other + 1));
+    assert!(s.contains("reason:trace;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", other + 1).as_str()), "{s}");
+    assert_eq!(pc_of(&s), want, "one instruction of the other thread, once it runs");
+}
+
+#[test]
+fn a_step_on_a_thread_that_is_not_running_arrives_past_the_running_threads_breakpointed_trap() {
+    // M44 B6(b), Ruling T12-c: the row above with the breakpoint at the running thread's svc kept,
+    // as lldb keeps it (it lifts a breakpoint only for a thread it resumes). The until-run's finish
+    // steps that trap, crossing to (n + 1, 0), where the other thread arrives. The finish's
+    // arrival check ends the run there; without it the scan starts past the arrival and runs the
+    // other thread's window.
+    let (tr, n, t) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
+    let other = if t == 0 { 1u32 } else { 0 };
+    let want = one_insn_once_it_runs(tr, n, other);
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, n);
+    let s = c.send(&format!("vCont;s:{:x}", other + 1));
+    assert!(s.contains("reason:trace;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", other + 1).as_str()), "{s}");
+    assert_eq!(pc_of(&s), want, "one instruction of the other thread, from its arrival");
+}
+
+#[test]
+fn a_step_on_a_thread_that_does_not_exist_is_refused_in_place() {
+    // §3d rule 1 survives B6(b) for a thread that is not live: refused, nothing moves.
+    let (tr, n, _) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, n);
+    let before = c.where_();
+    let s = c.send("vCont;s:63");
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert!(r::description(&s).unwrap().contains("cannot step thread 99"), "{s}");
     assert_eq!(c.where_(), before);
+}
+
+#[test]
+fn a_step_on_a_thread_that_has_exited_is_refused_in_place() {
+    // §3d rule 1 survives B6(b) for a thread that has exited, the other half of `live`: after the
+    // child's step across its own exit (M44 B3), a second step of it is refused. The stop is named
+    // on the running thread, because the child is not in `threads:`, and nothing moves.
+    let (tr, x, child) = r::threadrust_child_exit();
+    let running = window_thread(tr, x + 1);
+    assert_ne!(running, child);
+    let svc = r::trap_pc(tr, x);
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, x);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    let step = format!("vCont;s:{:x}", child + 1);
+    let s = c.send(&step);
+    assert!(r::description(&s).unwrap().contains(&format!("thread {} exited during the step", child + 1)), "{s}");
+    let before = c.where_();
+    let s = c.send(&step);
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::description(&s).unwrap(), format!("cannot step thread {}: it is not a live thread", child + 1));
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", running + 1).as_str()), "on the running thread: {s}");
+    assert_eq!(c.where_(), before);
+}
+
+#[test]
+fn a_step_of_a_thread_the_recording_ends_before_is_refused_on_that_thread() {
+    // M44 Ruling T12-a: at crashthread's crash, main is live, blocked in `pthread_join`, and nothing
+    // runs it again. B6(b)'s until-run reaches the recording's end, on the child. Answered as the
+    // child's terminal, lldb-2100 ignored the stop (it had suspended the child for the step) and
+    // re-stepped main without end (the review's probe: 128 × `vCont;s:1` in 30 s). It is main's
+    // refusal instead, in t0 L7's form, naming the terminal, and the cursor stays at the terminal.
+    let (tr, _, t) = r::crashthread_block();
+    let mut c = Rsp::spawn(tr, &[]);
+    let end = c.send("c");
+    let by = u32::from_str_radix(r::key(&end, "thread").expect("the crash names its thread"), 16).unwrap();
+    assert!(end.starts_with("T0b") && by != t + 1, "the recording ends on another thread: {end}");
+    let at = c.where_();
+    let step = format!("vCont;s:{:x}", t + 1);
+    let s = c.send(&step);
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "on the stepped thread: {s}");
+    let d = r::description(&s).unwrap();
+    assert!(d.starts_with(&format!("the recording ended (thread {by} crashed: pc=0x"))
+        && d.ends_with(&format!(") before thread {} ran", t + 1)), "{d}");
+    assert_eq!(c.where_(), at, "parked at the terminal");
+    assert_eq!(c.send(&step), s, "a second step: the same refusal");
+    assert_eq!(c.where_(), at, "and no motion");
+}
+
+#[test]
+fn a_blocked_step_the_recording_ends_before_is_refused_on_the_stepped_thread() {
+    // M44 Ruling T12-a's blocked arm: main's step crosses its `pthread_join` wait and blocks, and
+    // the child then crashes. Nothing runs main again, so the until-run reaches the recording's end,
+    // on the child: main's refusal, parked at the terminal, where a `c` from the start parks.
+    let (tr, n, t) = r::crashthread_block();
+    let svc = r::trap_pc(tr, n);
+    let by = retrace_trace::Reader::open(tr).unwrap().iter().find_map(|e| match e {
+        retrace_trace::Event::Crash { thread, .. } => Some(*thread + 1),
+        _ => None,
+    }).expect("crashthread crashes");
+    assert_ne!(by, t + 1, "on another thread");
+    let at_end = { let mut c = Rsp::spawn(tr, &[]); c.send("c"); c.where_() };
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, n);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    let s = c.send(&format!("vCont;s:{:x}", t + 1));
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", t + 1).as_str()), "on the stepped thread: {s}");
+    let d = r::description(&s).unwrap();
+    assert!(d.starts_with(&format!("the recording ended (thread {by} crashed: pc=0x"))
+        && d.ends_with(&format!(") before thread {} ran again", t + 1)), "{d}");
+    assert_eq!(c.where_(), at_end, "parked at the terminal");
+}
+
+fn dispatch() -> &'static Path {
+    static C: OnceLock<PathBuf> = OnceLock::new();
+    C.get_or_init(|| {
+        let (rec, t) = util::record_dynamic(retrace_guest::DISPATCH_DYN);
+        assert_eq!(rec.code, 0, "record dispatch_dyn: {}", rec.stderr);
+        t
+    })
+}
+
+#[test]
+fn a_step_of_a_thread_the_guest_exits_before_is_refused_on_that_thread() {
+    // M44 Ruling T12-a, the exit's terminal: at dispatch_dyn's exit, its workqueue worker is live,
+    // parked with no waker (`BlockReason::Parked`), and nothing runs it again. No terminal is a
+    // `W`: the exit's reply is `replaylog:end`, named on the exiting thread. So a step of the
+    // worker answered with it looped lldb as the crash did (measured with T12-a undone: 538 ×
+    // `vCont;s:2` in the 120 s bound). It is the worker's refusal, naming the exit.
+    let tr = dispatch();
+    let (code, by) = retrace_trace::Reader::open(tr).unwrap().iter().find_map(|e| match e {
+        retrace_trace::Event::Exit { code, thread } => Some((*code, *thread + 1)),
+        _ => None,
+    }).expect("dispatch_dyn exits");
+    let mut c = Rsp::spawn(tr, &[]);
+    let end = c.send("c");
+    assert!(end.contains("replaylog:end;"), "{end}");
+    assert_eq!(r::key(&end, "thread"), Some(format!("{by:x}").as_str()), "{end}");
+    let live: Vec<u32> = c.send("qfThreadInfo")[1..].split(',').map(|t| u32::from_str_radix(t, 16).unwrap()).collect();
+    let worker = *live.iter().find(|&&t| t != by).expect("a live thread besides the exiting one");
+    let at = c.where_();
+    let s = c.send(&format!("vCont;s:{worker:x}"));
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{worker:x}").as_str()), "on the stepped thread: {s}");
+    assert_eq!(r::description(&s).unwrap(),
+        format!("the recording ended (the guest exited (code {code}) on thread {by}) before thread {worker} ran"));
+    assert_eq!(c.where_(), at, "parked at the terminal");
+}
+
+#[test]
+fn a_step_across_the_stepped_threads_own_exit_stops_there() {
+    // M44 B3: the child's `bsdthread_terminate` is its last trap. Before M44 the step ran on until
+    // the child was current again — never — and so to the end of the recording. The stop is named
+    // on the thread now running, because the exited one is not in the reply's `threads:` list.
+    let (tr, x, child) = r::threadrust_child_exit();
+    // The thread running at (x + 1, 0), from the recording: landmark x + 1's own thread tag.
+    let running = match retrace_trace::Reader::open(tr).unwrap()[x + 1] {
+        retrace_trace::Event::Syscall { thread, .. } => thread,
+        _ => panic!("landmark {} is not a syscall", x + 1),
+    };
+    assert_ne!(running, child);
+    let svc = r::trap_pc(tr, x);
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    let (_, at) = r::continue_to_window(&mut c, x);
+    assert_eq!(r::key(&at, "thread"), Some(format!("{:x}", child + 1).as_str()), "{at}");
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    let s = c.send(&format!("vCont;s:{:x}", child + 1));
+    assert!(s.contains("reason:exception;"), "not trace, and not the end of the recording: {s}");
+    assert!(!s.contains("replaylog:end;"), "{s}");
+    assert!(r::description(&s).unwrap().contains(&format!("thread {} exited during the step", child + 1)), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", running + 1).as_str()), "on the running thread: {s}");
+    // The crossing's own position (Sys), as the blocked step parks, not an arrival (Bp) of the
+    // running thread: a breakpoint at that thread's pc is still ahead, and the next `c` reports it
+    // (Ruling FW-b; the row below). Before the final review this was Bp, which skipped it.
+    let w = c.where_();
+    assert!(w.starts_with(&format!("at ({}, 0) phase=Sys", x + 1)), "at the exit's boundary, the crossing's position: {w}");
+}
+
+#[test]
+fn a_continue_after_a_step_across_the_threads_own_exit_reports_a_breakpoint_at_the_running_threads_pc() {
+    // M44 final review, Ruling FW-b. B3's stop names the thread now running, and lldb-2100 ignores
+    // it and sends `c`. A user breakpoint at that thread's resume pc must be reported by that `c`,
+    // at the exit's boundary, as `continue` would report it there. Parked as an arrival (Bp), the
+    // `c` stepped over it in silence and ran to the end (the control). lldb shows the same
+    // difference: `thread step-inst` now ends at that breakpoint, hit count 1, where Bp ran it to
+    // the end, hit count 0 (docs/sweep-evidence/2026-09-27-m44/fw2/). The setup is the row
+    // above's; each reply is bounded by `util::rsp`'s `REPLY_BOUND`.
+    let (tr, x, child) = r::threadrust_child_exit();
+    let running = match retrace_trace::Reader::open(tr).unwrap()[x + 1] {
+        retrace_trace::Event::Syscall { thread, .. } => thread,
+        _ => panic!("landmark {} is not a syscall", x + 1),
+    };
+    assert_ne!(running, child);
+    let svc = r::trap_pc(tr, x);
+    // The running thread's resume pc at the exit's boundary, from a seek the server cannot influence.
+    let resume = retrace_core::seek(tr, x + 1, 0).unwrap().pc();
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, x);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    let s = c.send(&format!("vCont;s:{:x}", child + 1));
+    assert!(r::description(&s).unwrap_or_default().contains(&format!("thread {} exited during the step", child + 1)), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", running + 1).as_str()), "on the running thread: {s}");
+    let pc = pc_of(&s);
+    assert_eq!(pc, resume, "B3's stop reports the running thread's resume pc");
+
+    assert_eq!(c.send(&format!("Z0,{pc:x},4")), "OK");
+    let b = c.send("c");
+    assert!(b.contains("reason:breakpoint;"), "the breakpoint at the running thread's pc, not skipped: {b}");
+    assert_eq!(r::key(&b, "thread"), Some(format!("{:x}", running + 1).as_str()), "on the running thread: {b}");
+    assert_eq!(pc_of(&b), pc, "{b}");
+    let w = c.where_();
+    assert!(w.starts_with(&format!("at ({}, 0) phase=Bp pc={pc:#x}", x + 1)), "at the exit's boundary, not a later pass: {w}");
 }
 
 #[test]
@@ -549,6 +839,24 @@ fn a_reverse_step_moves_back_one_and_stops_at_the_start() {
     assert_eq!(c.send_collect(&format!("qRcmd,{hexcmd}")).1, "OK");
     assert!(c.send("s").contains("reason:trace;"));
     assert_eq!(c.send("bc"), start, "the `s` after `arm-rsi` cleared it");
+}
+
+#[test]
+fn disarm_rsi_makes_the_next_bc_a_reverse_continue_again() {
+    // M44 B2: what `rsi` sends when `ContinueInDirection` fails after `arm-rsi` succeeded. Armed, the
+    // next `bc` is one step back; disarmed, it is a reverse continue — here, to the start. Both
+    // monitor commands are idempotent: an `E` reply would make `rsi`'s own cleanup fail.
+    let mut c = Rsp::spawn(watchsweep(), &[]);
+    let entry = retrace_core::seek(watchsweep(), 1, 0).unwrap().pc();
+    let cmd = |s: &str| format!("qRcmd,{}", hexs(s.as_bytes()));
+    for _ in 0..3 { assert!(c.send("s").contains("reason:trace;")); }
+    assert_eq!(c.send_collect(&cmd("disarm-rsi")).1, "OK", "disarming an unarmed server is not an error");
+    assert_eq!(c.send_collect(&cmd("arm-rsi")).1, "OK");
+    assert_eq!(c.send_collect(&cmd("arm-rsi")).1, "OK", "arming an armed server is not an error");
+    assert_eq!(c.send_collect(&cmd("disarm-rsi")).1, "OK");
+    let b = c.send("bc");
+    assert_eq!(r::description(&b).as_deref(), Some("start of recording"), "disarmed: a reverse continue: {b}");
+    assert_eq!(pc_of(&b), entry, "not entry + 8, where an armed bc would have stopped");
 }
 
 #[test]

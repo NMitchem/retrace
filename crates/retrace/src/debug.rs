@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use retrace_core::{checkpointed_seek, Advance, Armed, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped};
+use retrace_core::{checkpointed_seek, Advance, Armed, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped, ThreadState};
 use retrace_core::symbols::Symbols;
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
@@ -335,9 +335,29 @@ pub(crate) enum Halt {
     /// `reverse-stepi` stopped at (1, 0).
     AtStart,
     /// The step did not move the thread, with the reason. Nothing moved for `stepi`'s window end or
-    /// fault, or for `step_thread`'s wrong thread (M43 §3d rule 1). For `step_thread`'s trap that
-    /// returns to itself, the cursor crossed the event and only the pc stayed.
+    /// fault, or for `step_thread`'s thread that is not live (M43 §3d rule 1, as M44 B6(b) leaves
+    /// it). For `step_thread`'s trap that returns to itself, the cursor crossed the event and only
+    /// the pc stayed. For its run until the thread is current that reached the recording's end on
+    /// another thread first (M44 Ruling T12-a), the cursor is parked at the terminal and the thread
+    /// did not run again (a blocked step's thread ran only the trap it blocked in).
     Refused(String),
+    /// M44 B3: `step_thread`'s thread exited in the step's crossing, parked at (n, 0, Sys), the
+    /// crossing's own position (Ruling FW-b). Nothing runs it again, so the step ends at that
+    /// boundary instead of at the end of the recording.
+    ThreadExited { thread: u32 },
+    /// M44 B6(a): a step of `thread` that blocked was ended by another thread's hit (`by`), parked
+    /// at that hit exactly as `continue` parks it (`Break`, `Watch`, `WatchSys` above). The server
+    /// re-parks and reports it as it does `continue`'s (Ruling T11-a).
+    StepInterrupted { thread: u32, by: u32, hit: Hit },
+}
+
+/// M44 B6(a): the hits a step's run until its thread is current can end on, as `StepInterrupted`
+/// carries them. Exactly `continue`'s three hit stops, so nothing else can be carried.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Hit {
+    Break,
+    Watch { watched: u64 },
+    WatchSys { watched: u64 },
 }
 
 /// The scripted-debugger executor. Holds the cursor P = (`n`, `k`, `phase`) (M41 §3b) and at most ONE
@@ -738,29 +758,34 @@ impl<'a> Exec<'a> {
 
     /// `cmd_continue`'s run, with one extra stop (M43 §3d): with `until: Some(t)`, arriving at a
     /// boundary where thread `t` is current ends the run as `Halt::Stepped`, before anything at that
-    /// coordinate. `step_thread` uses it when the stepped thread blocked. With `None` it is
-    /// `continue` exactly.
+    /// coordinate. `step_thread` uses it when the stepped thread blocked, and when it is not running
+    /// (M44 B6(b)). With `None` it is `continue` exactly.
     ///
-    /// With `Some(t)` nothing is armed (spec R7's fallback): lldb-2100 re-steps its thread forever
-    /// when a step is answered by another thread's stop, a breakpoint's included (Task 4's
-    /// measurement: 307,016 × `vCont;s:1` in 60 s). So a hit by another thread during one blocked
-    /// step is not reported.
+    /// With `Some(t)` the user's hits are armed as for `continue` (M44 B6(a)), and a hit by another
+    /// thread during one such step ends it: `run_until_thread` reports it on `t`. M43 armed
+    /// nothing here (spec R7's fallback), because lldb-2100 re-stepped its thread forever when the
+    /// hit was answered on the other thread (Task 4's measurement: 307,016 × `vCont;s:1` in 60 s).
     pub(crate) fn continue_until<W: Write>(&mut self, until: Option<u32>, out: &mut W) -> Result<Halt, String> {
-        let (bps, ws): (Vec<u64>, Vec<(u64, u64)>) = match until {
-            Some(_) => (Vec::new(), Vec::new()),
-            None => (self.breakpoints.clone(), self.watches.iter().map(|&(a, l, _)| (a, l)).collect()),
-        };
+        // M44 B6(a): an until-run arms the user's hits too; `run_until_thread` turns a hit into
+        // `StepInterrupted`. (M43's R7 fallback armed nothing, because the hit was reported on the
+        // other thread and lldb looped on that; t0 L7's form names the stepped thread instead.)
+        let (bps, ws): (Vec<u64>, Vec<(u64, u64)>) =
+            (self.breakpoints.clone(), self.watches.iter().map(|&(a, l, _)| (a, l)).collect());
         let diverged = |d: retrace_core::Divergence|
             format!("continue diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail);
         'finish: loop {
             // ---- Finish (n, k): its hits still ahead of the cursor ----
             loop {
-                // M43 §3d, defensive: under R7's fallback nothing is armed while `until` is Some, so
-                // the finish never steps or crosses, and only the scan's `Event` check below fires.
-                // This one runs only at entry, where another thread is current, so it cannot fire
-                // there either. It keeps the arrival invariant (end when `t` runs again, before
-                // anything at that coordinate, M41 R4) should the until-run ever arm hits again, as
-                // R7 was first designed: then a crossing here leaves k == 0 with the phase Sys.
+                // M43 §3d's arrival invariant: end when `t` is current, before anything at that
+                // coordinate (M41 R4). Load-bearing since M44 B6(b): a step of a thread that is not
+                // running enters the finish wherever the cursor stands. If the running thread stands
+                // on a user breakpoint at a blocking trap (lldb lifts a breakpoint only for a thread
+                // it resumes), the finish crosses that trap to (n + 1, 0, Sys), where `t` may arrive.
+                // This check ends the run there; the scan would start past the arrival and run `t`'s
+                // window (`gdbserver_e2e`'s `…past_the_running_threads_breakpointed_trap` row). A
+                // blocked step enters at (n, 0, Sys) with another thread current, and crosses to an
+                // arrival here only after a scoped-out watch (`continue 'finish` below), which the
+                // gdbserver cannot set.
                 if let Some(t) = until {
                     if self.k == 0 && self.phase == Phase::Sys && self.sess().current_thread() == t {
                         self.phase = Phase::Bp;
@@ -913,6 +938,8 @@ impl<'a> Exec<'a> {
                     }
                     Advance::WatchSyscall { watched, thread } => {
                         if self.watch_thread_matches(watched, thread) {
+                            // Reported even when this event is also `t`'s arrival: the write sits at
+                            // (n, 0, Sys), which orders before the arrival's (n, 0, Bp).
                             let n = self.sess().landmark();
                             line(out, format_args!("hit watch {watched:#x} (syscall write) at ({n}, 0)"))?;
                             self.sess_mut().clear_breakpoints(); // keep this session, hit-clean
@@ -920,23 +947,43 @@ impl<'a> Exec<'a> {
                             (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
                             return Ok(Halt::WatchSys { watched, thread });
                         }
-                        // Scoped out: the writing event is already consumed, so keep scanning.
+                        // Scoped out: the writing event is already consumed, so keep scanning. That
+                        // skips the `Event` arm's arrival check, so an until-run would scan on past
+                        // `t`'s resume point if this event were it. Unreachable today: only a
+                        // thread-scoped watch is scoped out, and the gdbserver cannot scope one.
+                        assert!(until.is_none(),
+                            "an until-run met a thread-scoped watch: scanning on past its scoped-out syscall \
+                             write would overshoot the stepped thread's resume point");
                     }
                 }
             }
         }
     }
 
-    /// M43 §3d: one instruction of thread `t` (retrace's id), as lldb's `s` needs it. It crosses a
-    /// trap, and a blocking syscall until `t` runs again. A trap that returns to itself is never
-    /// `Stepped`, because lldb re-steps a `trace` whose pc did not move forever (t0 L4b, L7). An
-    /// instruction that branches to itself (`b .`) does retire with its pc unchanged and is
+    /// M43 §3d: one instruction of thread `t` (retrace's id), as lldb's `s` needs it. A `t` that is
+    /// live but not running is first run to until it is scheduled (M44 B6(b)). It crosses a
+    /// trap, and a blocking syscall until `t` runs again, unless another thread's hit ends it first
+    /// (`StepInterrupted`, M44 B6(a)), or the recording ends first on another thread (`Refused`,
+    /// Ruling T12-a). A trap that is `t`'s own exit stops at the exit's boundary as `ThreadExited`
+    /// (M44 B3), because nothing runs `t` again. A trap that returns to itself is
+    /// never `Stepped`, because lldb re-steps a `trace` whose pc did not move forever (t0 L4b, L7).
+    /// An instruction that branches to itself (`b .`) does retire with its pc unchanged and is
     /// `Stepped`: that is one real instruction, and lldb loops on it on a live target too.
     pub(crate) fn step_thread<W: Write>(&mut self, t: u32, out: &mut W) -> Result<Halt, String> {
         let cur = self.sess().current_thread();
         if t != cur {
-            return Ok(Halt::Refused(format!(
-                "cannot step thread {}: only the running thread ({}) can step", t + 1, cur + 1)));
+            // M44 B6(b): a live thread that is not running is run to until it is — the blocked
+            // step's tail — then stepped one instruction. One that has exited, or never existed,
+            // is still refused in place (§3d rule 1).
+            let live = self.sess().thread_summaries().iter()
+                .any(|s| s.tid == t && !matches!(s.state, ThreadState::Exited(_)));
+            if !live {
+                return Ok(Halt::Refused(format!("cannot step thread {}: it is not a live thread", t + 1)));
+            }
+            return match self.run_until_thread(t, false, out)? {
+                Halt::Stepped => self.step_thread(t, out),
+                other => Ok(other),
+            };
         }
         let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
         let pc0 = self.sess().pc();
@@ -980,11 +1027,23 @@ impl<'a> Exec<'a> {
                             }
                             return Ok(Halt::Stepped);
                         }
-                        // `t` blocked. Run until it is current again, with nothing armed (spec R7's
-                        // fallback, measured: lldb loops on another thread's stop). Phase Sys: the
-                        // crossing's own position, as `continue`'s finish leaves it.
+                        // M44 B3: or `t` exited, crossing its own exit. Nothing will run it again, so
+                        // the until-run below would reach the end of the recording; stop here. Phase
+                        // Sys, as the blocked arm below parks (M44 final review, Ruling FW-b): this is
+                        // the crossing's own position, not an arrival of the thread now running, so a
+                        // breakpoint at that thread's pc is still ahead and the next `c` reports it.
+                        let exited = self.sess().thread_summaries().iter()
+                            .any(|s| s.tid == t && matches!(s.state, ThreadState::Exited(_)));
+                        if exited {
+                            (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
+                            return Ok(Halt::ThreadExited { thread: t });
+                        }
+                        // `t` blocked. Run until it is current again, until another thread's hit
+                        // (M44 B6(a)), or until the recording's end (Ruling T12-a, a refusal on
+                        // `t`). Phase Sys: the crossing's own position, as `continue`'s
+                        // finish leaves it, so a breakpoint at the incoming thread's pc is ahead.
                         (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
-                        self.continue_until(Some(t), out)
+                        self.run_until_thread(t, true, out)
                     }
                     Advance::Break | Advance::Watch { .. } => Err(
                         "step: a hardware stop during a one-event crossing (breakpoints are off and the \
@@ -993,6 +1052,47 @@ impl<'a> Exec<'a> {
             }
             Armed::Break => Err("step: a breakpoint stop with no breakpoint armed".into()),
         }
+    }
+
+    /// Run until thread `t` is current (M43 §3d's until-run), with the user's hits armed: `again`
+    /// after `t` blocked in its own step, or for the first time from the cursor in a step of a `t`
+    /// that is not running (M44 B6(b)). A hit on the way ends the run as `StepInterrupted` on `t`
+    /// (M44 B6(a)), parked where `continue` parks that hit; the server re-parks it as it does
+    /// `continue`'s (Ruling T11-a).
+    ///
+    /// The recording's end on another thread, before `t` runs, is `t`'s refusal, naming that
+    /// terminal, with the cursor parked at it (Ruling T12-a). Answered as the other thread's
+    /// terminal, the stop named a thread lldb-2100 had suspended for the step, so lldb ignored it
+    /// and re-stepped `t` without end (the review's probe on crashthread: 128 × `vCont;s:1` in
+    /// 30 s). Each re-step reached the same terminal again.
+    fn run_until_thread<W: Write>(&mut self, t: u32, again: bool, out: &mut W) -> Result<Halt, String> {
+        // A breakpoint's or a store's thread is the current one. A syscall write's is the thread
+        // that issued it, which is the `thread` that `Advance::WatchSyscall` carries, not whichever
+        // thread is current after it. That is right whether or not the syscall blocked: one that
+        // blocked has already switched away from its thread, and one that did not has not. A
+        // terminal's is the current one, as the server reports it.
+        Ok(match self.continue_until(Some(t), out)? {
+            Halt::Break => {
+                let by = self.sess().current_thread();
+                Halt::StepInterrupted { thread: t, by, hit: Hit::Break }
+            }
+            Halt::Watch { watched } => {
+                let by = self.sess().current_thread();
+                Halt::StepInterrupted { thread: t, by, hit: Hit::Watch { watched } }
+            }
+            Halt::WatchSys { watched, thread: by } => Halt::StepInterrupted { thread: t, by, hit: Hit::WatchSys { watched } },
+            Halt::Terminal(r) if self.sess().current_thread() != t => {
+                let by = self.sess().current_thread() + 1;
+                let what = match r.outcome {
+                    Outcome::Exit { code } => format!("the guest exited (code {code}) on thread {by}"),
+                    Outcome::Crash { pc, esr, far } => format!("thread {by} crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"),
+                    Outcome::Signal { sig } => format!("the guest was terminated by signal {sig} on thread {by}"),
+                };
+                Halt::Refused(format!("the recording ended ({what}) before thread {} ran{}",
+                    t + 1, if again { " again" } else { "" }))
+            }
+            other => other,
+        })
     }
 
     /// Run backward to the last hit — breakpoint, hardware watch, or syscall watch — before the

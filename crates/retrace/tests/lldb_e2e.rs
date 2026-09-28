@@ -3,13 +3,12 @@
 //! criterion, "reverse-step through a real crash in LLDB", on the repo-owned `crashy` fixture, and
 //! on CPython when Homebrew's is installed.
 //!
-//! lldb is not a repo artifact, so each test skips with a loud `SKIPPED` line (`announce`) when
+//! lldb is not a repo artifact, so each test skips with a loud `SKIPPED` line (`util::announce`) when
 //! `/usr/bin/lldb --version` does not run. A silent skip reads as a green it did not earn. The lldb
 //! invocation is `lldb -x -b -s <file> </dev/null`, never `-o`, which silently stops after a crash
 //! or boundary stop and exits 0 (t0 L10). The script's last command prints `END`, and every test
 //! asserts it.
 mod util;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -22,12 +21,6 @@ const BOUND: u64 = 120;
 /// on `PATH`: a Homebrew LLVM `lldb` earlier there would put this gate on a different lldb.
 const LLDB: &str = "/usr/bin/lldb";
 
-/// One line on the process's own stderr, past libtest's output capture. libtest captures
-/// `eprintln!` in a test that passes, and a skip passes, so an `eprintln!` line reaches a gate log
-/// only when its test fails. Measured in the final fix wave: with `eprintln!`, a passing run's log
-/// carried no version line.
-fn announce(line: &str) { let _ = writeln!(std::io::stderr(), "{line}"); }
-
 /// Whether `LLDB --version` runs. Its first line is announced once, so a gate log shows which lldb ran.
 fn lldb_runs() -> bool {
     static V: OnceLock<Option<String>> = OnceLock::new();
@@ -35,8 +28,8 @@ fn lldb_runs() -> bool {
         let v = Command::new(LLDB).arg("--version").output().ok().filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string());
         match &v {
-            Some(line) => announce(&format!("lldb_e2e runs {LLDB}: {line}")),
-            None => announce(&format!("lldb_e2e: `{LLDB} --version` did not run")),
+            Some(line) => util::announce(&format!("lldb_e2e runs {LLDB}: {line}")),
+            None => util::announce(&format!("lldb_e2e: `{LLDB} --version` did not run")),
         }
         v
     }).is_some()
@@ -48,8 +41,11 @@ fn retrace_py() -> String { concat!(env!("CARGO_MANIFEST_DIR"), "/lldb/retrace.p
 /// `END` sentinel appended), return (lldb's exit code or None if killed at the bound, stdout, stderr).
 /// The server and lldb are each held by a `KillOnDrop`, so every path, a panic included, kills and
 /// reaps both.
-fn session(trace: &Path, cmds: &[String]) -> (Option<i32>, String, String) {
-    let (srv, port, srv_err) = util::rsp::spawn_server(trace, &[]);
+fn session(trace: &Path, cmds: &[String]) -> (Option<i32>, String, String) { session_with(trace, &[], cmds) }
+
+/// `session`, with `server_args` passed to `retrace gdbserver` after the trace (M44 B5: `--exe`).
+fn session_with(trace: &Path, server_args: &[&str], cmds: &[String]) -> (Option<i32>, String, String) {
+    let (srv, port, srv_err) = util::rsp::spawn_server(trace, server_args);
     let srv = util::rsp::KillOnDrop(srv);
     let base = std::env::temp_dir().join(format!("retrace-lldb-{}-{port}", std::process::id()));
     let (cmd_p, out_p, err_p) = (base.with_extension("cmds"), base.with_extension("out"), base.with_extension("err"));
@@ -109,6 +105,24 @@ fn crashy_trace() -> PathBuf {
     t
 }
 
+/// The first `bl` in `crashy`'s `_main` (its `fstat` call), from the fixture's symbols and the
+/// recording's own bytes: `EXE_BASE` is `crashy`'s `__TEXT` vmaddr, so `nm`'s address is the guest
+/// pc. Never hard-coded. The target is not decoded: every row below expects `bl + 4` (M44 Task 9b —
+/// with `__PAGEZERO` no longer in lldb's loader, lldb unwinds normally and every stepping command
+/// stops at the return address, never at the call's target).
+fn crashy_first_bl(trace: &Path) -> u64 {
+    let out = Command::new("nm").arg(retrace_guest::CRASHY).output().expect("nm");
+    let main = String::from_utf8(out.stdout).unwrap().lines().find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        (f.len() == 3 && f[2] == "_main").then(|| u64::from_str_radix(f[0], 16).unwrap())
+    }).expect("_main in crashy");
+    let s = retrace_core::seek(trace, 1, 0).unwrap();
+    let code = s.read_mem(main, 256).expect("main's text is in the recording");
+    let i = code.chunks(4).position(|w| u32::from_le_bytes(w.try_into().unwrap()) & 0xfc00_0000 == 0x9400_0000)
+        .expect("a bl in main's first 64 instructions");
+    main + 4 * i as u64
+}
+
 fn crashy_script(ptr: u64) -> Vec<String> {
     vec!["process continue".into(), "bt 1".into(),
          format!("watchpoint set expression -w write -s 8 -- {ptr:#x}"),
@@ -120,7 +134,7 @@ fn crashy_script(ptr: u64) -> Vec<String> {
 #[test]
 fn lldb_reverse_debugs_crashy_from_the_crash_to_its_corrupting_store() {
     if !lldb_runs() {
-        announce("SKIPPED lldb_reverse_debugs_crashy…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        util::announce("SKIPPED lldb_reverse_debugs_crashy…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let trace = crashy_trace();
@@ -152,7 +166,7 @@ fn lldb_reverse_debugs_crashy_from_the_crash_to_its_corrupting_store() {
 #[test]
 fn an_lldb_session_is_deterministic() {
     if !lldb_runs() {
-        announce("SKIPPED an_lldb_session_is_deterministic: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        util::announce("SKIPPED an_lldb_session_is_deterministic: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let trace = crashy_trace();
@@ -181,7 +195,7 @@ fn lldb_reverse_debugs_cpython_from_the_crash_to_the_store_of_the_pointer() {
     const REAL: &str = "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python";
     const TARGET: u64 = 0x4000_DEAD_0000;
     if !lldb_runs() || !Path::new(REAL).exists() {
-        announce(&format!("SKIPPED lldb_reverse_debugs_cpython…: needs {LLDB} and {REAL}. This gate did NOT run."));
+        util::announce(&format!("SKIPPED lldb_reverse_debugs_cpython…: needs {LLDB} and {REAL}. This gate did NOT run."));
         return;
     }
     let (rec, trace) = util::record_dynamic_args(REAL, &[retrace_guest::CRASH_PY]);
@@ -232,16 +246,49 @@ fn to_svc(svc: u64, m: usize) -> Vec<String> {
     vec![format!("breakpoint set -a {svc:#x} -i {m}"), "process continue".into(), "breakpoint delete 1".into()]
 }
 
+/// `session`, with lldb's gdb-remote packet log enabled after the connect. Also returns every
+/// packet lldb sent, as the log prints it past `send packet: $` (checksum included).
+fn packet_logged_session(trace: &Path, cmds: &[String]) -> (Option<i32>, String, String, Vec<String>) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pkt = std::env::temp_dir().join(format!("retrace-lldb-{}-{n}.packets", std::process::id()));
+    let mut all = vec![format!("log enable -f {} gdb-remote packets", pkt.display())];
+    all.extend(cmds.iter().cloned());
+    let (code, out, err) = session(trace, &all);
+    let log = std::fs::read_to_string(&pkt).unwrap_or_default();
+    let _ = std::fs::remove_file(&pkt);
+    let sends = log.lines().filter_map(|l| l.split_once("send packet: $").map(|(_, p)| p.to_string())).collect();
+    (code, out, err, sends)
+}
+
+/// A `vCont`'s actions, without the checksum. None for any other packet.
+fn vcont_actions(p: &str) -> Option<Vec<&str>> {
+    p.strip_prefix("vCont;").map(|b| b.split('#').next().unwrap_or("").split(';').collect())
+}
+/// A step, as the server reads one: a `vCont` with a step action ANYWHERE (`vCont;c:1;s:2` is a
+/// step, gdbserver.rs `handle`'s `vCont` arm).
+fn is_step(p: &str) -> bool { vcont_actions(p).is_some_and(|a| a.iter().any(|x| x.starts_with(['s', 'S']))) }
+/// A resume: `c`, or a `vCont` of continue actions alone.
+fn is_resume(p: &str) -> bool {
+    p.starts_with("c#") || vcont_actions(p).is_some_and(|a| a.iter().all(|x| x.starts_with(['c', 'C'])))
+}
+
 #[test]
-fn lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_running() {
-    // Spec R7's fallback (Ruling T4-a) and §3d rule 1 on the stepped thread (Ruling T4-b), in lldb
-    // itself. Each looped lldb-2100 before its fix (Task 4: 307,016 × `vCont;s:1` and 80,103 ×
-    // `vCont;s:2` in 60 s). Measured against this row: rule 1 named on the running thread loops
-    // session B until the bound kills it, without `END`. The fallback undone no longer loops,
-    // because rule 1 now ends lldb's re-step: session A stops refused on the stepped thread, with
-    // the other thread at its breakpoint, which the `thread list` assertion catches.
+fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_not_running() {
+    // M44 B6(a)'s and B6(b)'s loop checks in lldb itself (spec §3c). M43 armed nothing during a
+    // blocked step (R7's fallback, Ruling T4-a), because lldb-2100 re-stepped forever when another
+    // thread's hit was reported on that thread (Task 4: 307,016 × `vCont;s:1` in 60 s). B6(a)
+    // reports the hit in t0 L7's measured-safe form instead: `reason:exception` on the STEPPED
+    // thread, naming the hit. lldb sends the step once and shows that stop on the stepped thread.
+    // With B6(a) undone, session A ends `instruction step into` at svc + 4, at a later landmark,
+    // which the row and the second `where` catch. Each session is bounded (BOUND), so a loop fails
+    // as a killed session with no END. Session B stepped a thread that is not running: M43 refused
+    // it on that thread (§3d rule 1, Ruling T4-b; named on the running thread instead, lldb looped:
+    // 80,103 × `vCont;s:2` in 60 s). B6(b) runs until the thread is scheduled and steps it, and
+    // lldb sends the step once. With B6(b) undone, the step is refused in place, and the thread's
+    // pc is its saved one, one instruction short of the row's.
     if !lldb_runs() {
-        announce("SKIPPED lldb_steps_a_blocked_thread…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        util::announce("SKIPPED lldb_steps_a_blocked_thread…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let (tr, n, t) = util::rsp::threadrust_block();
@@ -255,49 +302,179 @@ fn lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_r
         util::rsp::continue_to_window(&mut c, n).0
     };
     let (me, other) = (u64::from(t) + 1, if t == 0 { 2 } else { 1 }); // RSP tids
-    // Session B's pc oracle: `dbg_regs_of` at the refusal's own position, window n's trap, since a
-    // refusal moves nothing. Not `b`: that is (n + 1, 0), a later position, which agrees only if
-    // the switch resumes the thread at exactly its saved pc.
-    let other_pc = {
-        let len = retrace_core::seek(tr, n, 0).unwrap().window_len_here().unwrap();
-        let s = retrace_core::seek(tr, n, len).unwrap();
-        util::rsp::dbg_field(&s.dbg_regs_of(other as usize - 1).unwrap(), "pc")
-    };
     let where_ = || "process plugin packet monitor where".to_string();
 
-    // Session A: the step blocks and ends on the stepped thread at svc + 4, not at the other
-    // thread's breakpoint on the way.
+    // Session A (M44 B6(a)): the step blocks, and the other thread's breakpoint at `b` ends it:
+    // stopped on the stepped thread, reason exception, naming the hit — and lldb does not re-step.
     let mut a = to_svc(svc, m);
     a.extend([where_(), format!("breakpoint set -a {b:#x}"), "thread step-inst".into(), "thread list".into(),
               where_()]);
     let (code, out, err) = session(tr, &a);
     let ta = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
-    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end: {ta}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {ta}");
     assert_eq!(code, Some(0), "{ta}");
     let rows = thread_rows(&out);
-    assert!(rows.contains(&(true, me, svc + 4, "instruction step into")), "{rows:?}: {ta}");
-    // Before the step, `where` pins where lldb stopped: in window n, the wait that blocked, so `m`
-    // is asserted rather than inferred. After it, a later landmark shows that other threads ran
-    // during the step. Together: the step crossed the block.
+    let stepped = rows.iter().find(|r| r.1 == me).unwrap_or_else(|| panic!("the stepped thread's row: {ta}"));
+    assert!(stepped.3.contains(&format!("hit breakpoint at {b:#x}")), "{rows:?}: {ta}");
+    // Still the selected thread, at its blocked resume pc: one past the `svc`.
+    assert!(stepped.0, "the stepped thread is selected: {rows:?}: {ta}");
+    assert_eq!(stepped.2, svc + 4, "{rows:?}: {ta}");
     let w = wheres(&out);
     assert_eq!(w.len(), 2, "{ta}");
     assert!(w[0].starts_with(&format!("{n}, ")), "lldb stopped in window n = {n}: {ta}");
-    let landed: usize = w[1].split(',').next().unwrap().parse().unwrap();
-    assert!(landed > n + 1, "other threads ran during the step (n = {n}): {ta}");
+    assert!(w[1].starts_with(&format!("{}, 0", n + 1)), "parked at the other thread's hit: {ta}");
 
-    // Session B: a step on the thread that is not running is refused, named on that thread.
+    // Session B (M44 B6(b)): a step of the thread that is not running runs until it is, then steps
+    // it: lldb shows that thread stopped by the step, one instruction past where it resumed.
     // lldb numbers threads in the order it first sees them, and thread 1 is alone at the start of
     // recording, so the other thread's lldb index is its RSP tid; the `*` row's tid confirms it.
+    // The oracle is bounded by the recording's length (Ruling P4): a seek that fails yields None.
+    let len = retrace_trace::Reader::open(tr).unwrap().len();
+    let want_b = (n + 1..len).find_map(|mm| {
+        let mut s = retrace_core::seek(tr, mm, 0).ok()?;
+        (u64::from(s.current_thread()) + 1 == other).then(|| { s.step_insns(1).unwrap(); s.pc() })
+    }).expect("the other thread runs again");
     let mut bb = to_svc(svc, m);
     bb.extend([format!("thread select {other}"), "thread step-inst".into(), "thread list".into()]);
     let (code, out, err) = session(tr, &bb);
     let tb = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
-    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end: {tb}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {tb}");
     assert_eq!(code, Some(0), "{tb}");
-    let refused = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tb}"));
-    assert_eq!(refused.1, other, "{tb}");
-    assert!(refused.3.starts_with(&format!("cannot step thread {other}: ")), "{refused:?}: {tb}");
-    assert_eq!(refused.2, other_pc, "the refused thread's own saved pc, not the running one's: {tb}");
+    let row = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tb}"));
+    assert_eq!((row.1, row.2), (other, want_b), "{tb}");
+}
+
+#[test]
+fn lldb_steps_a_thread_the_recording_ends_before_without_looping() {
+    // M44 Ruling T12-a's loop check in lldb itself, the review's probe. At crashthread's crash,
+    // main is live, blocked in `pthread_join`, and nothing runs it again. Before T12-a, B6(b)'s
+    // step of main was answered with the child's terminal, named on the child. lldb had suspended
+    // the child for the step, so it ignored that stop and re-stepped main until the bound killed
+    // it (128 × `vCont;s:1` in 30 s). Now the step is main's refusal, in t0 L7's form, naming the
+    // terminal. The session is bounded (BOUND), so a loop fails as a killed session with no END.
+    // With T12-a undone, this row fails exactly that way.
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_steps_a_thread_the_recording_ends_before…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (tr, _, t) = util::rsp::crashthread_block();
+    let by = retrace_trace::Reader::open(tr).unwrap().iter().find_map(|e| match e {
+        retrace_trace::Event::Crash { thread, .. } => Some(u64::from(*thread) + 1),
+        _ => None,
+    }).expect("crashthread crashes");
+    // lldb numbers threads in the order it first sees them, and main is alone at the start of
+    // recording, so main's lldb index is its RSP tid; the `*` row's tid confirms it.
+    let me = u64::from(t) + 1;
+    assert_ne!(by, me, "the recording ends on another thread");
+    let cmds = vec!["process continue".into(), format!("thread select {me}"), "thread step-inst".into(),
+                    "thread list".into()];
+    let (code, out, err, sends) = packet_logged_session(tr, &cmds);
+    let tt = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {tt}");
+    assert_eq!(code, Some(0), "{tt}");
+    assert!(!sends.is_empty(), "lldb's packet log is empty: {tt}");
+    // Measured: one `vCont;s:1`. At most two is Ruling T12-a's bar.
+    let steps = sends.iter().filter(|p| is_step(p)).count();
+    assert!((1..=2).contains(&steps), "the step is sent, and not re-sent without end: {steps} steps: {sends:?}: {tt}");
+    // lldb shows main stopped by the refusal. Measured: `* thread #1: tid = 0x0001,
+    // 0x00000001804afaf8, stop reason = the recording ended (thread 2 crashed: pc=0x10000050c
+    // far=0x4000dead0000 esr=0x92000045) before thread 1 ran`.
+    let sel = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tt}"));
+    assert_eq!(sel.1, me, "{tt}");
+    assert!(sel.3.starts_with(&format!("the recording ended (thread {by} crashed: pc=0x"))
+        && sel.3.ends_with(&format!(") before thread {me} ran")), "{sel:?}: {tt}");
+}
+
+#[test]
+fn lldb_steps_a_thread_across_its_own_exit_without_looping() {
+    // M44 B3's loop check in lldb itself (spec §3c): M43 measured lldb re-stepping forever when a
+    // step was answered on another thread, and B3's stop is named on the running thread. The
+    // session is bounded (BOUND), so a loop fails here as a killed session with no END.
+    //
+    // lldb-2100 does not loop, and it does not display B3's own stop either. The server answers the
+    // step with the exception stop on the running thread, tid 1 (`gdbserver_e2e`'s
+    // `a_step_across_the_stepped_threads_own_exit_stops_there` pins that). lldb suspended tid 1 for
+    // the `vCont;s:2`, so it ignores the stop. Its step log (`log enable lldb step thread`,
+    // `docs/sweep-evidence/2026-09-27-m44-t0/t8/t8-lldb-steplog.log`, line 46) reads
+    // `Thread::ShouldStop for tid = 0x0001 0x0001, should_stop = 0 (ignore since thread was
+    // suspended)`. The stepped thread is gone, so nothing re-steps: lldb sends one `c`. With no
+    // breakpoint ahead, that runs to the end of the recording. This is lldb's behaviour, not the
+    // server's, pinned so that a change in it is seen; the display is routed (M44 Ruling T8-a). The
+    // `c` is a real continue from the exit's boundary, so lldb no longer skips the breakpoints
+    // after the exit (the next row).
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_steps_a_thread_across_its_own_exit…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (tr, x, child) = util::rsp::threadrust_child_exit();
+    let ev = retrace_trace::Reader::open(tr).unwrap();
+    let (exit_code, exit_thread) = ev.iter().find_map(|e| match e {
+        retrace_trace::Event::Exit { code, thread } => Some((*code, *thread)),
+        _ => None,
+    }).expect("threadrust exits");
+    let svc = util::rsp::trap_pc(tr, x);
+    let m = {
+        let mut c = util::rsp::Rsp::spawn(tr, &[]);
+        assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+        util::rsp::continue_to_window(&mut c, x).0
+    };
+    let mut cmds = to_svc(svc, m);
+    cmds.extend([format!("thread select {}", child + 1), "thread step-inst".into(), "thread list".into()]);
+    let (code, out, err, sends) = packet_logged_session(tr, &cmds);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {t}");
+    assert_eq!(code, Some(0), "{t}");
+    // The step is sent once and never re-sent, and lldb's one resume after it is a continue.
+    assert!(!sends.is_empty(), "lldb's packet log is empty: {t}");
+    let steps: Vec<usize> = (0..sends.len()).filter(|&i| is_step(&sends[i])).collect();
+    assert_eq!(steps.len(), 1, "one step, never re-sent: {sends:?}: {t}");
+    let resumes = sends[steps[0] + 1..].iter().filter(|p| is_resume(p)).count();
+    assert_eq!(resumes, 1, "lldb resumed once after the ignored stop: {sends:?}: {t}");
+    // lldb's stop is the end of the recording, on the thread that exits the process. Measured:
+    // `* thread #1: tid = 0x0001, 0x00000001804b5580, stop reason = exited (code 0)`.
+    let sel = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {t}"));
+    assert_eq!((sel.1, sel.3), (u64::from(exit_thread) + 1, format!("exited (code {exit_code})").as_str()), "{t}");
+}
+
+#[test]
+fn lldb_stops_at_a_breakpoint_past_a_step_across_the_threads_own_exit() {
+    // M44 B3's effect in lldb (Ruling T8-b). lldb ignores B3's own stop and resumes, as the row
+    // above pins. That resume is now a real continue from the exit's boundary, with lldb's
+    // breakpoints armed. Before M44, the step's run until the stepped thread was current again
+    // armed nothing and consumed the rest of the recording. A breakpoint that main reaches after
+    // the child's exit was skipped, and lldb stopped at the end.
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_stops_at_a_breakpoint_past_a_step_across…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (tr, x, child) = util::rsp::threadrust_child_exit();
+    let ev = retrace_trace::Reader::open(tr).unwrap();
+    let main = match ev[x + 1] {
+        retrace_trace::Event::Syscall { thread, .. } => thread,
+        _ => panic!("landmark {} is not a syscall", x + 1),
+    };
+    assert_ne!(main, child, "window {} runs after the child's exit, on another thread", x + 1);
+    // The svc that ends window x + 1. Main runs it after the child has exited, and no earlier
+    // instruction of that window is a svc, so it is the breakpoint's first hit after the exit.
+    let b = util::rsp::trap_pc(tr, x + 1);
+    let svc = util::rsp::trap_pc(tr, x);
+    let m = {
+        let mut c = util::rsp::Rsp::spawn(tr, &[]);
+        assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+        util::rsp::continue_to_window(&mut c, x).0
+    };
+    let mut cmds = to_svc(svc, m);
+    cmds.extend([format!("breakpoint set -a {b:#x}"), format!("thread select {}", child + 1),
+                 "thread step-inst".into(), "thread list".into(), "process plugin packet monitor where".into()]);
+    let (code, out, err) = session(tr, &cmds);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end: {t}");
+    assert_eq!(code, Some(0), "{t}");
+    let sel = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {t}"));
+    assert_eq!(sel, (true, u64::from(main) + 1, b, "breakpoint 2.1"), "main, at the breakpoint past the exit: {t}");
+    let w = wheres(&out);
+    assert_eq!(w.len(), 1, "{t}");
+    assert!(w[0].starts_with(&format!("{}, ", x + 1)), "in window {}, not at the end of the recording: {t}", x + 1);
 }
 
 #[test]
@@ -307,7 +484,7 @@ fn lldb_reverse_steps_back_onto_another_threads_trap() {
     // displays that stop instead of re-stepping. After the blocked step, window L begins on the
     // stepped thread, and window L - 1 ended at the other thread's svc.
     if !lldb_runs() {
-        announce("SKIPPED lldb_reverse_steps_back…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        util::announce("SKIPPED lldb_reverse_steps_back…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
     }
     let (tr, n, t) = util::rsp::threadrust_block();
@@ -346,4 +523,95 @@ fn lldb_reverse_steps_back_onto_another_threads_trap() {
     let w = wheres(&out);
     assert_eq!(w.len(), 1, "{tt}");
     assert!(w[0].starts_with(&format!("{}, {len}) ", l - 1)), "at window L - 1's trap: {tt}");
+}
+
+#[test]
+fn lldb_steps_over_a_call_with_next() {
+    // M44 B4, corrected by Task 9b: `next` at a call stops at the return address, `bl` + 4, exactly
+    // like native lldb. t0 M5(iv)'s original "stops at the bl's TARGET" was measured under the
+    // `__PAGEZERO` bug (Task 9b): lldb could not unwind out of the dyld stub the call lands in, so
+    // it never inserted the transient Z0 the step-over needs and just reported the bare step's
+    // landing. With `__PAGEZERO` no longer in lldb's loader (`rsp::image_json`), it unwinds
+    // normally and behaves like the `ni` row below. See
+    // `docs/superpowers/specs/2026-09-27-retrace-m44-owed-measurements.md`'s M5(iv) correction.
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_steps_over_a_call_with_next: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let tr = crashy_trace();
+    let bl = crashy_first_bl(&tr);
+    let cmds = vec![format!("breakpoint set -a {bl:#x}"), "process continue".into(), "next".into(), "register read pc".into()];
+    let (code, out, err) = session(&tr, &cmds);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
+    assert_eq!(code, Some(0), "{t}");
+    assert_eq!(values(&out, "pc = ").last().copied(), Some(bl + 4), "{t}");
+}
+
+#[test]
+fn lldb_steps_over_a_call_with_ni() {
+    // M44 B4 (M43 F-3): lldb's step-over inserts one transient Z0 at the return address (t0 L5) and
+    // continues there. Task 9 measured this broken over retrace's gdbserver for a call into a dyld
+    // stub; Task 9b root-caused and fixed it (`rsp::image_json` no longer lists `__PAGEZERO`, so
+    // lldb's loader stops treating [0, 4 GiB) — where a retrace guest's stack lives — as invalid
+    // memory, and lldb's unwinder can read the saved return address off the stack again).
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_steps_over_a_call_with_ni: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let tr = crashy_trace();
+    let bl = crashy_first_bl(&tr);
+    let cmds = vec![format!("breakpoint set -a {bl:#x}"), "process continue".into(), "thread step-inst-over".into(), "register read pc".into()];
+    let (code, out, err) = session(&tr, &cmds);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
+    assert_eq!(code, Some(0), "{t}");
+    assert_eq!(values(&out, "pc = ").last().copied(), Some(bl + 4), "{t}");
+}
+
+#[test]
+fn lldb_steps_out_of_a_call_with_step_out_and_finish() {
+    // M44 B4: one `thread step-inst` into the `bl`'s stub, then out again: lldb unwinds to the
+    // caller and stops at the return address, the `bl`'s pc + 4. Task 9 measured both `thread
+    // step-out` and `finish` failing here (`Could not create return address breakpoint`); Task 9b's
+    // `__PAGEZERO` fix (see `lldb_steps_over_a_call_with_ni`'s comment) is what makes both pass.
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_steps_out_of_a_call…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let tr = crashy_trace();
+    let bl = crashy_first_bl(&tr);
+    for out_cmd in ["thread step-out", "finish"] {
+        let cmds = vec![format!("breakpoint set -a {bl:#x}"), "process continue".into(),
+                        "thread step-inst".into(), out_cmd.into(), "register read pc".into()];
+        let (code, out, err) = session(&tr, &cmds);
+        let t = format!("{out_cmd}: exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+        assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
+        assert_eq!(code, Some(0), "{t}");
+        assert_eq!(values(&out, "pc = ").last().copied(), Some(bl + 4), "{t}");
+    }
+}
+
+#[test]
+fn lldb_backtraces_an_arm64e_guest_through_signed_return_addresses() {
+    // M44 B5 (M43 F-3): only frame #0 was ever measured (crashy, arm64). Here every saved LR is
+    // PAC-signed; an unwinder that does not strip stops at frame #0 or #1.
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_backtraces_an_arm64e_guest…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (rec, tr) = util::record(retrace_guest::BTCHAIN);
+    assert_eq!(rec.code, 139, "record btchain: {}", rec.stderr);
+    let cmds = vec!["process continue".into(), "bt".into()];
+    let (code, out, err) = session_with(&tr, &["--exe", retrace_guest::BTCHAIN], &cmds);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
+    assert_eq!(code, Some(0), "{t}");
+    // `bt`'s own lines only: lldb also prints a `frame #0` line at the connect and at every stop.
+    let bt = out.split_once("(lldb) bt\n").map_or("", |(_, r)| r);
+    let frames: Vec<&str> = bt.lines().take_while(|l| !l.starts_with("(lldb)")).filter(|l| l.contains("frame #")).collect();
+    assert!(frames.len() >= 3, "bt shows f3, f2 and f1 at least: {t}");
+    for (i, f) in ["f3", "f2", "f1"].iter().enumerate() {
+        assert!(frames[i].contains(&format!("`{f}")), "frame #{i} is {f} — a signed LR stripped: {t}");
+    }
 }

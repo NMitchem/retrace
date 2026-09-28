@@ -7,12 +7,15 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use retrace_core::{Outcome, ReplaySession, ThreadState, EXE_BASE};
-use crate::debug::{Exec, Halt, Phase};
+use crate::debug::{Exec, Halt, Hit, Phase};
 use crate::rsp::{self, Decoder, Frame, StopKind};
 
 /// §3g, spec R10: fixed, so lldb's transcripts are stable (t0 L10), and `os_version` only selects
 /// lldb's newer macOS loader (t0 L2).
-const QHOSTINFO: &str = "cputype:16777228;cpusubtype:0;ostype:macosx;vendor:apple;endian:little;ptrsize:8;watchpoint_exceptions_received:after;";
+// M44 B5: `addressing_bits:47` — the guest VA width (T0SZ = 17). Without it lldb cannot strip a
+// PAC-signed saved LR and an arm64e `bt` stops early (measured: 3 frames, only #0 symbolicated —
+// #1 and #2 printed still signed, 0x0024000100000328 and 0x005000010000030c, and f1's caller lost).
+const QHOSTINFO: &str = "cputype:16777228;cpusubtype:0;ostype:macosx;vendor:apple;endian:little;ptrsize:8;watchpoint_exceptions_received:after;addressing_bits:47;";
 const OS_VERSION: &str = "os_version:26.0.0;";
 const QPROCESSINFO: &str = "pid:1;parent-pid:1;cputype:100000c;cpusubtype:0;ostype:macosx;vendor:apple;endian:little;ptrsize:8;";
 const QSUPPORTED: &str = "PacketSize=20000;QStartNoAckMode+;qXfer:features:read+;QThreadSuffixSupported+;QListThreadsInStopReply+;ReverseContinue+;ReverseStep+";
@@ -239,8 +242,9 @@ impl<'a> Server<'a> {
             _ if body.starts_with("vCont;") => {
                 // A step action ANYWHERE makes it a step (§3d), on the thread the first one names
                 // (`s:<tid>`, `S05:<tid>`, or none). lldb may list continue actions first
-                // (`vCont;c:2;s:1`). Those are moot, because only the running thread can step
-                // (§3d rule 1). Only a vCont of continue actions alone is a continue.
+                // (`vCont;c:2;s:1`). Those are moot: the other threads run as the recording ran
+                // them, and a step of a thread that is not running runs them until it is (M44
+                // B6(b)). Only a vCont of continue actions alone is a continue.
                 let acts: Vec<&str> = body["vCont;".len()..].split(';').collect();
                 if let Some(act) = acts.iter().find(|a| a.starts_with(['s', 'S'])) {
                     let tid = act.split_once(':').and_then(|(_, t)| u32::from_str_radix(t, 16).ok());
@@ -269,14 +273,42 @@ impl<'a> Server<'a> {
             match s.ex.step_thread(t, &mut std::io::sink())? {
                 Halt::Stepped => Ok(s.stop(StopKind::Trace, None)),
                 // Reported on the thread lldb stepped, t0 L7's measured-safe form
-                // (`l7_stepfail3_desc`). Named on the running thread instead, lldb-2100 re-steps
-                // forever (Task 4's measurement: 80,103 × `vCont;s:2` in 60 s). A thread that does
-                // not exist, or has exited, cannot be named: the running one is.
+                // (`l7_stepfail3_desc`). Named on another thread, lldb-2100 ignores the stop (it
+                // suspended that thread for the step) and re-steps forever (Task 4's measurement:
+                // 80,103 × `vCont;s:2` in 60 s). Since M44 B6(b), a refused thread that is live is
+                // the running one after a trap that returns to itself, and is not running only when
+                // the recording ended before it ran (Ruling T12-a): `then_some(t)` names that one.
+                // A thread that does not exist, or has exited, is not in the reply's `threads:`
+                // list (`live_threads`), so it is not named, though `thread_ctx` may still hold an
+                // exited one's stale context (B3's arm below): the running one is named instead.
                 Halt::Refused(why) => {
                     let on = s.live_threads().iter().any(|&(r, _)| r == t + 1).then_some(t);
                     Ok(s.stop(StopKind::Exception { signal: 5, text: why }, on))
                 }
                 Halt::WatchStepped { watched } => Ok(s.stop(StopKind::Watch(watched), None)),
+                // M44 B3: the stepped thread has exited, so it is not in the reply's `threads:` list
+                // (`live_threads` drops exited threads, though `thread_ctx` still holds its stale
+                // context), and a `thread:` outside that list is not sent. Named on the running
+                // thread, saying why. lldb-2100 ignores it, since it suspended that thread for the
+                // step, and resumes (`lldb_e2e`, Ruling T8-a).
+                Halt::ThreadExited { thread } => Ok(s.stop(StopKind::Exception { signal: 5,
+                    text: format!("thread {} exited during the step", thread + 1) }, None)),
+                // M44 B6(a): named on the stepped thread (t0 L7's measured-safe form), saying which
+                // thread hit what. The hit is re-parked first, exactly as `continue`'s is
+                // (`forward_hit`, Ruling T11-a), and described from where it now stands.
+                Halt::StepInterrupted { thread, by, hit } => {
+                    let kind = s.forward_hit(hit)?;
+                    let what = match hit {
+                        Hit::Break => format!("breakpoint at {:#x}", s.ex.sess().pc()), // not re-parked
+                        Hit::Watch { watched } => format!("a store to watched {watched:#x}"),
+                        Hit::WatchSys { watched } => format!("a syscall write to watched {watched:#x}"),
+                    };
+                    let mut text = format!("thread {} hit {what} during thread {}'s step", by + 1, thread + 1);
+                    if let StopKind::Exception { text: why, .. } = kind {
+                        text = format!("{text}, and {why}"); // the store did not retire
+                    }
+                    Ok(s.stop(StopKind::Exception { signal: 5, text }, Some(thread)))
+                }
                 other => s.reply_forward(other),
             }
         })
@@ -316,26 +348,38 @@ impl<'a> Server<'a> {
         self.motion(|s| { let h = s.ex.cmd_continue(&mut std::io::sink())?; s.reply_forward(h) })
     }
 
-    /// §3c: forward. A store watch is reported AFTER the store retires, so the server steps it.
+    /// §3c: forward. Each hit is re-parked and reported through `forward_hit`.
     fn reply_forward(&mut self, h: Halt) -> Result<String, String> {
         Ok(match h {
-            Halt::Break => self.stop(StopKind::Breakpoint, None),
-            Halt::Watch { watched } => match self.ex.cmd_stepi(1, &mut std::io::sink())? {
-                Halt::Stepped => self.stop(StopKind::Watch(watched), None),
-                // The store did not retire (it faults). Say so, at the store; the cursor stays ON its
-                // watch, so the next `c` crosses to the fault through Exec's own finish.
-                Halt::Refused(why) => self.stop(StopKind::Exception { signal: 5,
-                    text: format!("the watched store at {:#x} did not retire: {why}", self.ex.sess().pc()) }, None),
-                other => return Err(format!("stepping a watched store reported {other:?}")),
-            },
+            Halt::Break => { let kind = self.forward_hit(Hit::Break)?; self.stop(kind, None) }
+            Halt::Watch { watched } => { let kind = self.forward_hit(Hit::Watch { watched })?; self.stop(kind, None) }
             Halt::WatchSys { watched, thread } => {
-                // An arrival at (n, 0), so a reverse `c` finds this write again (§3c, the forward
-                // syscall-watch row).
-                self.ex.set_phase(Phase::Bp);
-                self.stop(StopKind::Watch(watched), Some(thread))
+                let kind = self.forward_hit(Hit::WatchSys { watched })?;
+                self.stop(kind, Some(thread))
             }
             Halt::Terminal(r) => self.terminal(&r.outcome),
             other => return Err(format!("a forward motion reported {other:?}")),
+        })
+    }
+
+    /// §3c's forward report of a hit, with its re-park, which M43 R2 gives the server rather than
+    /// `Exec`. A store watch is reported AFTER the store retires, so the server steps it. A syscall
+    /// write becomes an arrival at (n, 0), so a reverse `c` finds it again (the forward
+    /// syscall-watch row). Both forward paths report through here, `continue`'s stop and a blocked
+    /// step that another thread's hit ended (M44 B6(a)), so the two park identically by
+    /// construction (Ruling T11-a).
+    fn forward_hit(&mut self, hit: Hit) -> Result<StopKind, String> {
+        Ok(match hit {
+            Hit::Break => StopKind::Breakpoint,
+            Hit::Watch { watched } => match self.ex.cmd_stepi(1, &mut std::io::sink())? {
+                Halt::Stepped => StopKind::Watch(watched),
+                // The store did not retire (it faults). Say so, at the store; the cursor stays ON its
+                // watch, so the next `c` crosses to the fault through Exec's own finish.
+                Halt::Refused(why) => StopKind::Exception { signal: 5,
+                    text: format!("the watched store at {:#x} did not retire: {why}", self.ex.sess().pc()) },
+                other => return Err(format!("stepping a watched store reported {other:?}")),
+            },
+            Hit::WatchSys { watched } => { self.ex.set_phase(Phase::Bp); StopKind::Watch(watched) }
         })
     }
 
@@ -410,6 +454,10 @@ impl<'a> Server<'a> {
             }
             // §3e: what `rsi` sends before `process continue -R` (t0 L3, `l3_rsi`).
             "arm-rsi" => { self.rsi_armed = true; (vec!["OK".into()], false) }
+            // M44 B2: what `rsi` sends when `ContinueInDirection` fails after `arm-rsi` succeeded,
+            // so the next `process continue -R` is a reverse continue again, not one step back.
+            // Idempotent, like `arm-rsi`.
+            "disarm-rsi" => { self.rsi_armed = false; (vec!["OK".into()], false) }
             _ => (vec!["E01".into()], false),
         }
     }

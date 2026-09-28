@@ -16,8 +16,8 @@ const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rung3
 #[test]
 fn jq_reads_a_file_argument_and_replays() {
     if !std::path::Path::new(JQ).exists() {
-        eprintln!("SKIPPED jq_reads_a_file_argument_and_replays: {JQ} not installed \
-                   (`brew install jq`). This gate did NOT run — it is not evidence of anything.");
+        util::announce(&format!("SKIPPED jq_reads_a_file_argument_and_replays: {JQ} not installed \
+                   (`brew install jq`). This gate did NOT run — it is not evidence of anything."));
         return;
     }
     let out = util::assert_rung_records_and_replays(JQ, &[".name", FIXTURE], b"\"retrace\"\n");
@@ -30,8 +30,8 @@ fn jq_reads_a_file_argument_and_replays() {
 #[test]
 fn the_replay_does_not_depend_on_the_input_file() {
     if !std::path::Path::new(JQ).exists() {
-        eprintln!("SKIPPED the_replay_does_not_depend_on_the_input_file: {JQ} not installed \
-                   (`brew install jq`). This gate did NOT run — it is not evidence of anything.");
+        util::announce(&format!("SKIPPED the_replay_does_not_depend_on_the_input_file: {JQ} not installed \
+                   (`brew install jq`). This gate did NOT run — it is not evidence of anything."));
         return;
     }
     // Record from a scratch copy so the repo fixture is never mutated.

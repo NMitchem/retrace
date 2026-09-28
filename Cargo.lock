@@ -225,6 +225,7 @@ dependencies = [
  "libc",
  "retrace-arch",
  "retrace-guest",
+ "retrace-sim",
  "retrace-trace",
 ]
 

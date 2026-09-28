@@ -66,6 +66,9 @@ pub const SYS_DUP2: u64 = 90;
 pub const SYS_FCNTL: u64 = 92;
 pub const SYS_SOCKET: u64 = 97;
 pub const SYS_CONNECT: u64 = 98;
+/// M44: `connect`'s `_nocancel` twin (SDK `SYS_connect_nocancel 409`). No corpus guest reaches it;
+/// the twin rule tables it (`tests/nocancel.rs`).
+pub const SYS_CONNECT_NOCANCEL: u64 = 409;
 pub const SYS_SENDTO: u64 = 133;
 pub const SYS_FGETATTRLIST: u64 = 228;
 pub const SYS_SHM_OPEN: u64 = 266;
@@ -74,12 +77,21 @@ pub const SYS_READ_NOCANCEL: u64 = 396;
 pub const SYS_OPEN_NOCANCEL: u64 = 398;
 pub const SYS_FCNTL_NOCANCEL: u64 = 406;
 pub const SYS_OPENAT: u64 = 463;
+/// M44: `openat`'s `_nocancel` twin (SDK `SYS_openat_nocancel 464`). Reached by `/bin/ed`, and the
+/// `xcrun` trio (`desdp`, `dyld_info`, `flex`) when xcrun rebuilds its cache.
+pub const SYS_OPENAT_NOCANCEL: u64 = 464;
 pub const SYS_FSTATAT64: u64 = 470;
 pub const SYS_EXECVE: u64 = 59;
 pub const SYS_POSIX_SPAWN: u64 = 244;
 /// `fstatfs64(int, struct statfs64 *)` — SDK `sys/mount.h:444`, header-declared like its M10
 /// siblings.
 pub const SYS_FSTATFS64: u64 = 346;
+/// M44: `statfs64(const char *path, struct statfs64 *buf)` — `fstatfs64`'s path twin (SDK 345/346).
+/// Reached by `/usr/bin/dddiagnose` since M38.
+pub const SYS_STATFS64: u64 = 345;
+/// M44: `getattrlistbulk(int dirfd, struct attrlist *alist, void *attrBuf, size_t attrBufSize,
+/// uint64_t options)` (SDK 461). Reached by `/bin/ls`, which bulk-enumerates a directory with it.
+pub const SYS_GETATTRLISTBULK: u64 = 461;
 /// `getdirentries64` — **not in the SDK at all** (libc calls it privately from `opendir`/
 /// `readdir`, so no `sys/syscall.h`-adjacent header declares its prototype). Its fd-in-`x0`
 /// position is therefore MEASURED, not header-derived: M25-cpython Finding 3 captured the trap
@@ -378,13 +390,18 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // each iov_base for iov_len — nested, caller-sized, untranslated (M30). 412 is the one
         // untranslated-fd row a corpus guest (/bin/ed) is measured to dispatch (tests/census.rs).
         121 | 412 => row!(P, [Fd, NestedSource, Scalar]),
-        // pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset)
-        541 => row!(P, [Fd, NestedSource, Scalar, Scalar]),
+        // pwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset) / pwritev_nocancel:
+        // M44's twin set found 543 (`sys/syscall.h`) missing this row; joined the same way as
+        // every other pair — sharing 541's row means 543 is forwarded exactly as 541 is today.
+        541 | 543 => row!(P, [Fd, NestedSource, Scalar, Scalar]),
         // readv(int fd, struct iovec *iov, int iovcnt) / readv_nocancel: the kernel WRITES through
         // iov_base — refused by value in retrace-core before translate_fds ever runs (M27).
         120 | 411 => row!(P, [Fd, NestedDest, Scalar]),
-        // preadv(int fd, struct iovec *iov, int iovcnt, off_t offset)
-        540 => row!(P, [Fd, NestedDest, Scalar, Scalar]),
+        // preadv(int fd, struct iovec *iov, int iovcnt, off_t offset) / preadv_nocancel: M44's twin
+        // set found 542 (`sys/syscall.h`) missing this row; joined the same way. Sharing 540's row
+        // means 542 is refused by the generic forward arm's `writes_via_nested_pointer` assert
+        // exactly as 540 is.
+        540 | 542 => row!(P, [Fd, NestedDest, Scalar, Scalar]),
         // ---- sockets ------------------------------------------------------------------------
         // recvmsg(int s, struct msghdr *msg, int flags) / recvmsg_nocancel: msg_iov is nested.
         27 | 401 => row!(P, [Fd, NestedDest, Scalar]),
@@ -413,9 +430,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // was already in fd_operands — the M10 class, and the same both-tables-at-once asymmetry
         // M27 found in pread_nocancel.
         SYS_RECVFROM | SYS_RECVFROM_NOCANCEL => row!(P, [Fd, Dest(Reg(2)), Scalar, Scalar, Ptr, Ptr]),
-        // connect(int s, const struct sockaddr *name, socklen_t namelen): namelen > SOCK_MAXADDRLEN
-        // (255) is rejected — the cited bound.
-        SYS_CONNECT => row!(P, [Fd, Ptr, Scalar]),
+        // connect(int s, const struct sockaddr *name, socklen_t namelen) / connect_nocancel:
+        // namelen > SOCK_MAXADDRLEN (255) is rejected — the cited bound. M44: the twin joins.
+        SYS_CONNECT | SYS_CONNECT_NOCANCEL => row!(P, [Fd, Ptr, Scalar]),
         // socket(int domain, int type, int protocol) → a NEW descriptor: guest fds are not
         // files-only.
         SYS_SOCKET => row!(F, [Scalar, Scalar, Scalar]),
@@ -495,7 +512,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_FCNTL | SYS_FCNTL_NOCANCEL => row!(P, [Fd, Scalar, Ptr]),
         // fstat(int fd, struct stat *buf) / fstat64: a fixed 144-byte struct (sys/stat.h).
         SYS_FSTAT | SYS_FSTAT64 => row!(P, [Fd, Ptr]),
-        // fstatfs64(int fd, struct statfs *buf): a fixed 2168-byte struct (measured at M29 Task 7).
+        // fstatfs64(int fd, struct statfs64 *buf) (SDK sys/mount.h:444): a fixed 2168-byte struct
+        // (measured at M29 Task 7).
         // M25-cpython Task 3, header-derived like its M10 siblings (see its constant).
         SYS_FSTATFS64 => row!(P, [Fd, Ptr]),
         // lseek(int fd, off_t offset, int whence)
@@ -545,12 +563,24 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // ---- paths --------------------------------------------------------------------------
         // open(const char *path, int flags, mode_t mode) / open_nocancel → a NEW descriptor
         SYS_OPEN | SYS_OPEN_NOCANCEL => row!(F, [Path, Scalar, Scalar]),
-        // openat(int dirfd, const char *path, int flags, mode_t mode) → a NEW descriptor. The
-        // dirfd is translated; AT_FDCWD passes through untouched.
-        SYS_OPENAT => row!(F, [Fd, Path, Scalar, Scalar]),
+        // openat(int dirfd, const char *path, int flags, mode_t mode) / openat_nocancel → a NEW
+        // descriptor. The dirfd is translated; AT_FDCWD passes through untouched. M44: 464 was the
+        // `_nocancel` trap's fifth instance, and four corpus binaries stopped on it.
+        SYS_OPENAT | SYS_OPENAT_NOCANCEL => row!(F, [Fd, Path, Scalar, Scalar]),
         // fstatat64(int dirfd, const char *path, struct stat *buf, int flag): a dirfd like
         // openat's; buf is the fixed 144-byte struct (sys/stat.h).
         SYS_FSTATAT64 => row!(P, [Fd, Path, Ptr, Scalar]),
+        // statfs64(const char *path, struct statfs64 *buf): the path twin of fstatfs64 (SDK
+        // 345/346); buf is the same fixed 2,168-byte struct, measured at M29 Task 7 for fstatfs64 —
+        // the cited bound. M44 (t0 M3: /usr/bin/dddiagnose reaches it).
+        SYS_STATFS64 => row!(P, [Path, Ptr]),
+        // getattrlistbulk(int dirfd, struct attrlist *alist, void *attrBuf, size_t attrBufSize,
+        //                 uint64_t options): alist is the fixed 24-byte struct its getattrlist
+        // siblings cite. attrBuf is filled with as many entries as fit in attrBufSize — the
+        // CALLER's size, with no kernel cap below the window that t0 M2 could cite — so Dest with
+        // its length in x3: the clamp and the diff window both follow it (M26's class). ls passed
+        // 32,768 (t0 M2). The dirfd is translated; the directory offset it advances is the host's.
+        SYS_GETATTRLISTBULK => row!(P, [Fd, Ptr, Dest(Reg(3)), Scalar, Scalar]),
         // shm_open(const char *name, int oflag, mode_t mode) → a NEW descriptor: guest fds are not
         // files-only.
         SYS_SHM_OPEN => row!(F, [Path, Scalar, Scalar]),
@@ -746,6 +776,13 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // `fsgetpath_extended`) — the cited bound; fsid is 8 bytes copied in (`sizeof(fsid_t)`),
         // and names a VOLUME, not a descriptor.
         427 => row!(P, [Ptr, Scalar, Ptr, Scalar]),
+        // unlink(const char *path): M44 (t0 M3: /bin/ed reaches it, opening then unlinking its own
+        // buffer file, e.g. /tmp/ed.mXuuhI).
+        10 => row!(P, [Path]),
+        // rename(const char *from, const char *to): M44 (t0 M3: the xcrun trio's — desdp,
+        // dyld_info, flex — cache rewrite, reached only when xcrun rebuilds its host cache
+        // /var/tmp/xcrun_db; Ruling T0-e — host-state-dependent, unlike ed's unlink above).
+        128 => row!(P, [Path, Path]),
         // execve(char *fname, char **argp, char **envp): the kernel reads every argv/envp string
         // through the nested pointers — rule 1, NestedSource (EXPECTED_DIFFS; exercised by /bin/sh).
         // REFUSED since M38, never forwarded: the record arm ahead of the generic forward answers
@@ -1569,8 +1606,9 @@ mod tests {
         for num in [SYS_CLOSE, SYS_CLOSE_NOCANCEL, SYS_READ, SYS_READ_NOCANCEL, SYS_PREAD,
                     SYS_WRITE, SYS_WRITE_NOCANCEL, SYS_FCNTL, SYS_FCNTL_NOCANCEL,
                     SYS_FSTAT, SYS_FSTAT64, SYS_LSEEK, SYS_IOCTL, SYS_DUP,
-                    SYS_CONNECT, SYS_SENDTO, SYS_FGETATTRLIST, SYS_OPENAT, SYS_FSTATAT64,
-                    SYS_GETDIRENTRIES64, SYS_FSTATFS64] {
+                    SYS_CONNECT, SYS_CONNECT_NOCANCEL, SYS_SENDTO, SYS_FGETATTRLIST,
+                    SYS_OPENAT, SYS_OPENAT_NOCANCEL, SYS_FSTATAT64,
+                    SYS_GETDIRENTRIES64, SYS_FSTATFS64, SYS_GETATTRLISTBULK] {
             assert_eq!(fd_operands(num).collect::<Vec<_>>(), [0], "syscall {num} holds its fd in x0");
         }
         assert_eq!(fd_operands(SYS_MMAP).collect::<Vec<_>>(), [4], "mmap's fd is x4, consumed by guest_mmap_file");
@@ -1615,6 +1653,8 @@ mod tests {
         assert_eq!(dest_buffer(336), Some((4, DestLen::Reg(5))));
         assert_eq!(dest_buffer(169), Some((2, DestLen::Reg(3))));
         assert_eq!(dest_buffer(170), Some((2, DestLen::Reg(3))));
+        // M44 t0 M2: getattrlistbulk fills attrBuf (x2) up to the caller's attrBufSize (x3).
+        assert_eq!(dest_buffer(SYS_GETATTRLISTBULK), Some((2, DestLen::Reg(3))));
     }
 
     // Absence must mean "provably writes no buffer we can size", never "not gotten to yet".
@@ -1864,6 +1904,12 @@ mod tests {
     #[test]
     fn m25_syscall_numbers() {
         assert_eq!((SYS_GETDIRENTRIES64, SYS_FSTATFS64), (344, 346));
+    }
+
+    #[test]
+    fn m44_syscall_numbers() {
+        assert_eq!((SYS_OPENAT_NOCANCEL, SYS_CONNECT_NOCANCEL), (464, 409));
+        assert_eq!((SYS_STATFS64, SYS_GETATTRLISTBULK), (345, 461));
     }
 
     // M37: the fd half of both predicates lives in the box (`Box_::is_console_write` /
