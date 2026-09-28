@@ -13729,7 +13729,21 @@ The milestone's numbers:
   (T0-a, T0-b, X-1, X-2, T2-a, T2-b, T3-a … T3-e, T4-a);
 - **seven** commits after the spec (`cf54422`) and the plan (`a78f28f`): t0's `10ee268`; Task 1's
   `bdca598`; Task 2's `8e60bd0` and its fix round `28fddc4`; Task 3's walk `09a105f`, sweep
-  `8d39cc6` and fix round `64712bd`. Then this docs commit.
+  `8d39cc6` and fix round `64712bd`. Then Task 4's docs, in three commits: `61959b2`, written
+  against the old README.md; the merge of local main, `4ac98a6`; and the commit that re-targets
+  those edits to `docs/current-state.md`.
+
+**`readme-launch` landed mid-milestone** (Ruling X-1, triggered). It reached local main as
+`5cd6a38` while Task 4 was writing, and was merged into this branch as `4ac98a6`. From then on:
+- `docs/current-state.md` is the current-state document: the old README, moved intact, which
+  CLAUDE.md now names as what a milestone close edits;
+- README.md is a short front page.
+
+M45's "What works today" and "Known limits" edits therefore live in `docs/current-state.md`, and
+"the README" in this section's rulings means the file as it was before that merge. The merge also
+brought `40ead39`: `host_svc` zeroes NZCV before the `svc`, six lines in
+`crates/retrace-box/src/lib.rs`. That moves M45's refusal panic from `lib.rs:5222:13`, the line the
+walk and the sweep printed, to `:5228:13`.
 
 The gate is this section's last subsection, appended after it ran (Ruling T4-a).
 
@@ -13960,7 +13974,11 @@ The controller ran the sweep (Ruling T3-a) on a signed scratchpad copy of the br
 `09a105f`, sha256 `5c3c0be6…`. `09a105f` touches only `apple_walls_e2e.rs` and evidence, so the
 swept record and replay paths are `28fddc4`'s. It ran detached with no concurrent `cargo`, at
 `pidstart` 50734 and recorder pids 50761–56189 (`0xc649`–`0xdb7d`): **`TALLY pass=49 fail=5
-skip=0`**, `SWEEP_EXIT=0`. The swept binary predates `64712bd`'s text-only change. Evidence is in
+skip=0`**, `SWEEP_EXIT=0`. The swept binary predates `64712bd`'s text-only change. It also
+predates `40ead39`'s `host_svc` change, merged from `readme-launch` after the sweep. That commit's
+author states the debug build already left the carry clear, so by that account the debug binary
+swept here behaves as the fixed one does, and the sweep evidence stands. That was not re-measured
+here. Evidence is in
 `docs/sweep-evidence/2026-09-28-m45/`, whose README is the authority, and no `.bin` is committed.
 
 **That is M44's tally, but five rows differ** (`rowdiff.txt`; 49 identical). Each move was measured
@@ -14029,6 +14047,10 @@ Measured at `64712bd`:
 - `CENSUS` holds 114 entries.
 - **Existing test files.** The branch changes two: `apple_walls_e2e.rs` (two `#[ignore]` reasons
   and the header comment) and `census.rs` (the doc comment and 374's entry). No assertion changed.
+
+Re-checked after the merge, at `4ac98a6`, with the same results: 853 `#[test]`, 9 `#[ignore]`,
+`verify_thread` 7, and no `crates/retrace-trace` diff against `a78f28f`. Against `64712bd` the merge
+brought only `crates/retrace-box/src/lib.rs` (+6, `40ead39`) and `tools/bench.py`, and no test.
 
 The spec's §9 prediction for outcome B with no GCD gate is 846 / 0 / 9 over 148 binaries. The gate
 below is reconciled against it.
@@ -14106,7 +14128,10 @@ Execution:
   `docs/current-state.md`, and its `host_svc` hunk is checked against M45's `retrace-box` edit
   (different functions; no textual conflict is inferred). Updated before Task 4: `readme-launch` is
   committed at `fbaba9b`, not merged, and X-1 stands. Cost if wrong: one move of README hunks at
-  merge time.
+  merge time. **Triggered during Task 4.** `readme-launch` landed on local main as `5cd6a38` and was
+  merged into this branch as `4ac98a6`, the operator authorizing main's README.md. `61959b2`'s
+  README hunks were re-applied to `docs/current-state.md`: all 17 applied by offset alone.
+  CLAUDE.md auto-merged with M45's three edits intact.
 * **X-2** — control 2's observation is pre-existing and out of scope: `fstat64`'s recorded writes
   reach about 0x260 bytes past its 144-byte buffer, so a tampered return heals instead of diverging.
   It is owed as an unmeasured observation about the diff window's width. M45's gate is unaffected,
@@ -14179,7 +14204,10 @@ Execution:
   - Task 1's report says "7 tests" and lists 8;
   - the plan's text still says `16384 − 40` (superseded by T2-a; the plan is history);
   - the sweep's `automationmodetool` `rec.err` shows the pre-T3-e multi-line `args`, as the
-    evidence README notes.
+    evidence README notes;
+  - `automationmodetool`'s `#[ignore]` reason quotes the panic at `lib.rs:5222:13`, as measured.
+    Since the merge of `40ead39` it is `:5228:13`. The reason's measurement stands; only the line
+    moved.
 * **M44's owed items M45 did not touch**, carried forward by reference to M44's "What stays owed"
   and its fix wave's additions. That is every M44 item except the first, 374, which M45 discharges
   for the init shape alone:
