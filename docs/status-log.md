@@ -13687,3 +13687,512 @@ over 77. This is run 1 plus exactly the one new `gdbserver_e2e` row, and it reco
 again: 841 = 839 in source + the 2 census tests `legacy_equivalence` includes, and every `e2e`
 target's passed-plus-ignored equals its file's `#[test]` count. `SKIPLINES CONTROL` is again in the
 ordinary `skiplines` log, and no gate log carries a `SKIPPED` line.
+
+## M45-kqinit: libdispatch's workqueue-kqueue init, emulated
+
+M44 routed one item to its own milestone (its "What stays owed", first bullet; Ruling R4): 374
+`kevent_qos` with `KEVENT_FLAG_WORKQ`, libdispatch's `_dispatch_kq_init`, which parked
+`automationmodetool` at M33's missing-row panic. No row could close it. The workqueue flag makes xnu
+act on the calling process's workqueue kqueue, which is retrace's own, and libdispatch
+`DISPATCH_CLIENT_CRASH`es on any errno but `EINTR`, so the call needs a modelled success. M45
+emulates that one call (spec `2026-09-28-retrace-m45-kqinit-design.md`, approach A of three, chosen
+by the operator in brainstorming). `Box_::guest_kevent_qos` checks the call against the one measured
+shape and returns 0. It is stateless and above the trace, and a record arm and a replay mirror call
+it identically. Every other shape is refused by value, with a panic naming the field. Then M45
+walked the guests to their next wall.
+
+**Outcome B (spec §7 Halt 3, which halts widening, not the milestone).** `automationmodetool`'s
+init now records as the emulated landmark (362, rc 0, no writes, thread 0). The very next call is a
+second `kevent_qos` shape, which M45 refuses and does not model: `x3` an event list, `x4` = 16,
+`x7` = `0x23` (`KEVENT_FLAG_WORKQ|KEVENT_FLAG_ERROR_EVENTS|KEVENT_FLAG_IMMEDIATE`), and one entry
+with filter −14, flags `0x0185` and fflags `0xf0000037`. By its values it is libdispatch's own
+memory-pressure source; that attribution is inferred and not symbolicated. The two GCD candidates
+walked, `timer` and `after`, stop at the same call, so no GCD gate was added, and the third,
+`signal`, was dropped because it hangs natively (Ruling T0-a). **The emulation alone unblocks no
+real program yet.** Every libdispatch path measured makes the second call right after the init, and
+the successor that models that shape is what moves them. §3e's mechanism gate, `kqinit_e2e`,
+carries the milestone alone.
+
+The milestone's numbers:
+- **one** new fixture, `crates/retrace-guest/c/kqinit_dyn.c`;
+- **two** new test binaries, `kqinit` in `retrace-arch` and `kqinit_e2e`;
+- **+14** `#[test]` attributes over three files, 839 → 853 by source;
+- **one** new `arg_kinds` row (374, documentation only), and census 113 → 114; `EXPECTED_DIFFS`
+  unchanged at 35;
+- **zero** `Box_` fields added (`guest_kevent_qos` takes `&self`);
+- **one** record arm, **one** replay mirror inside the existing `Syscall` arm's `if num ==` chain,
+  and **one** forward-arm `assert!`; `verify_thread` **7 → 7**;
+- `TRACE_MAGIC` unmoved at `RT\x00\x0a` (`crates/retrace-trace` has no diff);
+- **zero** `#[ignore]` lines added or removed (9 → 9): one reason rewritten at a new wall
+  (`automationmodetool`), and one extended with a second outcome (`dddiagnose`);
+- the spec's six rulings (R1–R6), four pre-flight rulings (P1–P4) and twelve execution rulings
+  (T0-a, T0-b, X-1, X-2, T2-a, T2-b, T3-a … T3-e, T4-a);
+- **seven** commits after the spec (`cf54422`) and the plan (`a78f28f`): t0's `10ee268`; Task 1's
+  `bdca598`; Task 2's `8e60bd0` and its fix round `28fddc4`; Task 3's walk `09a105f`, sweep
+  `8d39cc6` and fix round `64712bd`. Then this docs commit.
+
+The gate is this section's last subsection, appended after it ran (Ruling T4-a).
+
+**Forward pointers to the sections above.** Each earlier section stays as it was written. The
+`:NNNN` cites are this file's line numbers.
+
+1. **M44's routed 374 is emulated by M45; see below.** M44's "What stays owed" says "374
+   `kevent_qos`, routed (R4): the workqueue-kqueue case … must be **emulated** as a modelled
+   success" (`:13540–13542`). Only the measured init shape is emulated. Every other shape is refused.
+2. **M37's retirement of `dddiagnose`'s `mfm_alloc+0x230` face is contradicted.** M37 held that
+   "neither face can be reached with a correctly-forwarded pid (three sweeps, 0 `identical fault`,
+   0 `brk`)" (`:9638–9644`) and retired M36's two questions about it (`:9726–9729`). M45 met that
+   face with correctly forwarded pids: pc `0x180302eb0`, esr `0x92000045`, `far` varying. It met it
+   on M44's crates (a base binary built from `a78f28f`) as well as M45's, in about one of four traced
+   runs per binary and in M45's sweep. M36 had symbolicated it (`:8169`, `:8208`) and classed it
+   downstream of §4b (`:8342–8347`). M36's Finding 3 (`:8429–8452`) located a crash-vs-`brk` fork
+   in a `gettimeofday` polling loop and a `far` that varied between runs, and both fit what M45
+   sees. The `brk` face has not recurred.
+3. **M38 R3's `MACH_RCV_INVALID_NAME`-vs-`MACH_RCV_TIMED_OUT` discrimination is owed a
+   re-measure** (`:10112`, `:10115–10119`). The one row that discriminated was `dddiagnose`, and
+   `TIMED_OUT`'s losing cell there was this same face, "~10 landmarks after the receive". M45 sees
+   it under the winning `INVALID_NAME`, about 9 landmarks after the refused receive, in the two
+   faulting runs it traced. R3 compared one run per code, so it may have compared two samples of
+   this coin flip. The refusal code is not changed here.
+4. **M37's owed `MADV_FREE_REUSABLE` hazard is now measured.** M37 recorded "`MADV_FREE_REUSABLE` on
+   the guest backing … the host may lazily reclaim those guest pages … Not measured"
+   (`:9685–9688`, and `:9107–9108`). M38 carried it as "unchanged, unmeasured" (`:10423`). Its first
+   measured instance is `/bin/ps` in M45's sweep (below).
+
+### What t0 measured
+
+The companion is the record: `docs/superpowers/specs/2026-09-28-retrace-m45-kqinit-measurements.md`,
+with its evidence in `docs/sweep-evidence/2026-09-28-m45-t0/`, commit `10ee268`. It was measured on
+macOS 26.5.2 (25F84). M1 and M2 recorded on a throwaway build: `a78f28f` plus a four-line
+`[kevent_qos]` dump in `record_box`'s trace block, with no row and no arm for 374. The dump was
+restored before the commit, and `git status --short` then printed nothing. M2's candidates were
+also run natively, and M3 and M4 ran only natively. The commands ran from scripts in the ledger,
+because the worktree guard refuses inline multi-command shell (Ruling T0-b).
+
+- **M1 — the whole call.** `automationmodetool`'s 374 is
+  `args=[0xffffffff,0x27ff348,0x1,0x0,0x0,0x0,0x0,0x21]` at pc `0x1804afa48`, on thread 0, right
+  after the 368/367 pair. Its 72-byte entry is:
+  - ident 1;
+  - filter −10 (`EVFILT_USER`);
+  - flags `0x21` (`EV_ADD|EV_CLEAR`);
+  - qos `0x02000000`;
+  - udata `0xfffffffffffffff8`;
+  - bytes 24–71 zero.
+
+  So spec §2a's inferred-zero fields (`fflags`, `xflags`, `data`, `ext[4]`) are measured zero, and
+  `x1` equals M44's. The run has 359 `[trap]` lines where M44's had 361. The difference is two
+  `gettimeofday` traps, so landmark numbers read from older evidence drift. Halt 1 was not tripped.
+- **M2 — three GCD candidates**: a `DISPATCH_SOURCE_TYPE_TIMER` source, `dispatch_after`, and a
+  `DISPATCH_SOURCE_TYPE_SIGNAL` source. All three reach 374 with M1's shape exactly (`x1` masked,
+  all 72 bytes equal), on thread 0, after the workqueue pair. Halt 2 was not tripped. **But
+  `signal` hangs natively.** Its first run was killed after more than 120 s (rc 143), and five runs
+  bounded at 10 s all timed out with 0 bytes of stdout. The cause was not measured. One possibility
+  is that `raise` runs before the asynchronous `EVFILT_SIGNAL` registration and `SIG_IGN` discards
+  the signal; that is an inference. Ruling T0-a dropped it.
+- **M3 — the native return.** The fixture, the P1-ruled text, run natively prints exactly
+  `kqinit rc=0 carry=0` in its default and `straddle` modes. The box's constant is the kernel's.
+  Halt 6 was not tripped.
+- **M4 — `automationmodetool` natively**: rc 0, 97 bytes of stdout starting
+  `Automation Mode is disabled.`, and empty stderr. The text is this host's state, so a gate should
+  compare record with replay, not with this text.
+- **M5 — the base count**: 839 `#[test]` attributes at `a78f28f`. That is M44's 832 + 9 = 841, less
+  the 2 census tests that `legacy_equivalence` compiles a second time.
+
+Halts 1, 2 and 6 were not tripped. Halt 3 was tripped in the walk (below). Halt 4 was not, since
+nothing moved the format. Halt 5 belongs to the gate.
+
+### The validator (Task 1, `bdca598`)
+
+`retrace-arch` stays zero-dependency. It gains:
+- `SYS_KEVENT_QOS = 374`;
+- the SDK's `EVFILT_USER`, `EV_ADD`, `EV_ENABLE`, `EV_CLEAR` and `KEVENT_FLAG_IMMEDIATE`, and xnu's
+  `KEVENT_FLAG_WORKQ`;
+- `KEVENT_QOS_SIZE = 72`;
+- `KeventQos`, with `from_bytes`, `to_bytes` and `fields()`;
+- `KQINIT`, the measured entry;
+- `kqinit_shape(args, entry) -> Result<(), String>`.
+
+The validator names the first mismatch it finds, checking in this order:
+1. `kq`;
+2. `nchanges`;
+3. no event list;
+4. no data out;
+5. flags `0x21`;
+6. an entry of 72 bytes;
+7. the entry equal to `KQINIT`, reported by its first differing field.
+
+`int` arguments are compared on their low 32 bits and pointers on 64 (R2). The change-list address
+is not compared.
+
+`tests/kqinit.rs` holds 8 tests:
+- the measured init accepted;
+- every single-bit flip of the entry refused (576 cases);
+- each field named at its xnu offset;
+- an `int` argument's upper half ignored;
+- every bit the kernel reads of each checked argument refused, by register;
+- the change-list address not compared;
+- a short entry refused as untranslated;
+- the constants equal the SDK's.
+
+RED was an unresolved import; GREEN was 8/8; clippy was clean. The review approved it with no
+Critical or Important finding.
+
+### The emulation (Task 2, `8e60bd0` + `28fddc4`)
+
+**The fixture, `kqinit_dyn.c`.** In every mode it first brings the workqueue up with one
+`dispatch_async` (Review Focus 4). It then builds `KQINIT` on its stack and issues 374 by inline
+`svc`, not `syscall()` (R4), with `x16 = 374`, `w0 = −1`, `x2 = 1`, `x3`–`x6 = 0` and `w7 = 0x21`.
+It prints `kqinit rc=… carry=…`. Its modes:
+- the default;
+- `straddle`, an entry across a 16 KiB page;
+- `flags`, which sets `EV_ENABLE`, giving `0x25`;
+- `badptr`, a change list at `1 << 47` (Ruling P1).
+
+**The code.**
+- **The box method.** `Box_::guest_kevent_qos(&self, args)` reads the entry through
+  `read_va_prefix`, the guest's own stage-1 walk page by page. It either panics with
+  `M45: unmeasured kevent_qos shape: {why}. …` or returns 0.
+- **The record arm** follows the `SYS_WORKQ_KERNRETURN` arm and appends
+  `Syscall { ret: 0, ret1: 0, err: false, writes: [] }`.
+- **The replay mirror** is in the `Syscall` arm's `if num ==` chain, after the workqueue mirror. It
+  recomputes the return and diverges with `kevent_qos rc mismatch: replay … != recorded …`. It has
+  no `verify_thread` of its own: it inherits the arm-top call, so the count stays at seven.
+- **The forward arm** gains an `assert!(num != SYS_KEVENT_QOS, …)`, kept in release. It makes
+  "never forwarded" a checked fact rather than an arm-ordering accident, the gap M37 measured for
+  `bsdthread_create`.
+- **The documentation row** is 374 `[Scalar, Ptr, Scalar, Ptr, Scalar, Ptr, Ptr, Scalar]`, in the
+  workqueue section. The `kqueue` (362) comment is corrected, and `CENSUS` gains 374, with no view
+  differing.
+
+**The gate, `kqinit_e2e.rs`: five tests.**
+- `the_measured_init_records_as_one_emulated_landmark_and_replays`: one 374 event, rc 0, no writes,
+  `args[7] == 0x21`, the marker, and two byte-identical replays;
+- `an_entry_straddling_a_page_is_read_whole`;
+- `an_unmeasured_shape_stops_the_recorder_naming_what_differs`: `flags` is `0x25` against the
+  measured `0x21`, and `badptr` reads 0 of 72 bytes;
+- `replay_recomputes_the_emulated_return`;
+- `seeks_either_side_of_the_landmark_replay_to_the_end`.
+
+RED was 0/5, each on the M33 panic. GREEN was 5/5. `ev.len() == 1` held in both call modes, which
+confirms t0's inference that the fixture's own call is the trace's only 374. Four neighbours passed
+(`dispatch_e2e` 2, `thread_oracle` 7, `exec_e2e` 1, `hello_dyn_e2e` 1), and clippy was clean.
+
+**Controls**, on the committed tree, each restored with `git checkout`:
+1. **The record arm deleted: 0 passed, 5 failed**, not only the first test as spec §3e predicted.
+   Every test records the fixture, and every record now stops at the new forward assert:
+   `crates/retrace-core/src/lib.rs:1231:17: kevent_qos (374) reached the generic forward arm — it
+   must be emulated above (M45)`. The row exists now, so the M33 panic no longer fires first, and
+   the assert is what catches the call.
+2. **The replay mirror deleted: 4 passed, 1 failed.** Only `replay_recomputes_the_emulated_return`
+   failed, with replay exiting 0, not 3. The rewritten trace replays to exit 0, prints
+   `kqinit rc=0 carry=0`, and passes the final compare. The implementer measured why with the
+   debugger:
+   - the guest's `x0` is 1 after the `svc`, so the tampered return does reach the guest;
+   - the next landmark, `fstat64` (339) inside `printf`'s stdio setup, applies recorded writes
+     that cover `0x27ff680`, 0x260 bytes past its 144-byte stat buffer;
+   - those writes put the record-time 0 back in `printf`'s varargs slot.
+
+   So the tamper heals, and the rewritten-return test is the only oracle that sees the mirror.
+   Ruling X-2 routes the width observation.
+3. **The entry compare deleted:** `kqinit_e2e` 4 passed, 1 failed (the recorder accepts `0x25` and
+   exits 0), and `retrace-arch`'s `kqinit` 6 passed, 2 failed (the bit-flip sweep and the field
+   offsets).
+
+**The review** approved Task 2 with two Minors, both plan-mandated. The fix round `28fddc4` took
+both:
+- **T2-a.** The straddle offset went from `16384 − 40` to `16384 − 8`, so only `ident` is on the
+  first page and the non-zero `filter`, `flags`, `qos` and `udata` are on the second. Before, only
+  `ext` zeros sat on the second page, so a reader that lost the second half would have passed.
+  - The fixture was re-measured natively, and both modes still print `kqinit rc=0 carry=0`.
+  - Its control was a first-page-only reader, zero-padded to 72 bytes. It turned the straddle test
+    red with `changelist[0].filter is 0x0, measured 0xfff6`.
+  - It also turned `badptr` red, which nobody predicted. The padding makes the 0-byte read 72 bytes,
+    so the refusal names `ident` instead. That shows the `badptr` assertion would catch a reader
+    that pads short reads.
+- **T2-b.** The mirror also diverges when the recorded landmark carries `err == true` or any
+  writes, with the message `kevent_qos recorded err=… with N writes; the emulation records
+  neither`. That is the M38 exec-refusal mirror's stance. The test tampers twice, the return to 1
+  and then `err` to true, and the test count stays 5.
+
+### The walk (Task 3, `09a105f` + `64712bd`)
+
+**`automationmodetool` on the landed emulation.**
+- **The recording.** Record exits 101 with 0 bytes of stdout, against 97 natively. There are two
+  374 `[trap]` lines among 363.
+- **The trace**, read by a throwaway reader (`landmarks.txt`), holds `events=363`. `#362` is the
+  emulated init: `args=[ffffffff, 27ff348, 1, 0, 0, 0, 0, 21] ret=0x0 ret1=0x0 err=false writes=0
+  thread=0`.
+- **The refused call is landmark 363.** It panicked before its event was appended. M44's reason had
+  361, and the difference is the `gettimeofday` count.
+- **The second call's entry** was read by `retrace debug` from the partial recording. The
+  breakpoint was on the stub's `svc`, `0x1804afa44`; the trap pc `0x1804afa48` is the return
+  address, and a first try there stopped after the call.
+  - It stopped at position (363, 1841) on thread 0.
+  - Its arguments: `x0 = 0xffffffff`, `x1 = 0x27ff298`, `x2 = 1`, `x3 = 0x27fedb8`, `x4 = 0x10`,
+    `x5 = x6 = 0`, `x7 = 0x23`.
+  - Its entry: ident 0; filter `0xfff2` (−14, which the public SDK's `sys/event.h` does not define);
+    flags `0x0185` (`EV_ADD|EV_ENABLE|EV_DISPATCH|EV_UDATA_SPECIFIC`); qos `0x02000000`; udata
+    `0x6c850`; fflags `0xf0000037`; the rest zero.
+  - The fflags' low bits `0x07` are the public `DISPATCH_MEMORYPRESSURE_NORMAL|WARN|CRITICAL`, and
+    `0x30` and `0xf0000000` are not public. Hence the memory-pressure reading, inferred and not
+    symbolicated.
+- **Outcome B, Halt 3:** re-parked and not modelled (Ruling T3-b). The gate's `#[ignore]` reason
+  was rewritten in the house form: the measurement, the evidence, and "UN-IGNORE when this second
+  shape … is measured and modelled, and whatever the run reaches next is cleared". The body is
+  unchanged. With `--ignored` the gate ran 0 passed, 1 failed at the new wall; without it,
+  `apple_walls_e2e` ran 3 passed, 7 ignored.
+
+**The GCD candidates.** `timer` records the emulated init at `#246` and is refused at landmark 247,
+where the debugger read the entry at (247, 2002). `after` records it at `#245` and is refused at
+landmark 246, entry at (246, 1885). Both record 101 with 0 bytes of stdout, and no replay ran.
+Across the three programs only `udata` and the stack addresses differ, and the return address,
+`x30 = 0x180359a2c`, is the same in all three, so the second call is libdispatch's own, not any one
+program's. No GCD gate was added. `signal` was dropped (T0-a).
+
+**The fix round `64712bd`** (Ruling T3-e) put the refusal panic's `args` on one line. The `{:#x?}`
+form had spread them over ten lines, so the parked gate's four-line stderr tail showed only
+`0x0, 0x23, ]`. The `--ignored` tail now names the wall. The prefix, the field clause and the panic
+site `crates/retrace-box/src/lib.rs:5222:13` are unchanged, and `kqinit_e2e` passed 5/5 again.
+
+### The sweep (Task 3, `8d39cc6` + `64712bd`, run by the controller)
+
+The controller ran the sweep (Ruling T3-a) on a signed scratchpad copy of the branch binary at
+`09a105f`, sha256 `5c3c0be6…`. `09a105f` touches only `apple_walls_e2e.rs` and evidence, so the
+swept record and replay paths are `28fddc4`'s. It ran detached with no concurrent `cargo`, at
+`pidstart` 50734 and recorder pids 50761–56189 (`0xc649`–`0xdb7d`): **`TALLY pass=49 fail=5
+skip=0`**, `SWEEP_EXIT=0`. The swept binary predates `64712bd`'s text-only change. Evidence is in
+`docs/sweep-evidence/2026-09-28-m45/`, whose README is the authority, and no `.bin` is committed.
+
+**That is M44's tally, but five rows differ** (`rowdiff.txt`; 49 identical). Each move was measured
+against a base binary, built from `git archive a78f28f` (its crates are `60f0452`'s) and signed,
+sha256 `a5fd53a3…`, alternating with the swept binary on the same host:
+
+- **`automationmodetool`** stays `FAIL` 101/n/a, but its face moved from the M33 panic to the M45
+  refusal. This is the one row M45's diff moved.
+- **`/bin/ps`** went `PASS` 0/0 → `FAIL` 0/3, **class E**: `memory divergence at ipa 0x701414078:
+  replay=0xf5 recorded=0x00`. It came at landmark 16044, the final Snapshot, after replay consumed
+  all 16043 syscall landmarks (`#16043` is `Exit` 0).
+  - `#253`, the process-table `sysctl` with `oldp = 0x701400000`, recorded a write carrying `0xf5`
+    there, and nothing later writes that byte.
+  - `#16040` `madvise(0x701400000, 0x50000, MADV_FREE_REUSABLE)` and `#16041` on the next range are
+    forwarded. The `Ptr` row rebases them onto retrace's own backing.
+  - In the final snapshot, page `0x701414000` reads 0 non-zero bytes against 1,876 in `#253`'s
+    write, while the other 11 pages that call filled match it count for count (`ps-pagemap.txt`).
+    That is read as the host reclaiming a reusable page; it is a fingerprint, not an observed
+    reclaim.
+  - It is not M45. The trace has zero 374 events, and the same recording replayed on the base
+    binary diverges identically (`ps-replay-control.txt`).
+  - It is intermittent. Twenty fresh alternating runs, 10 per binary, were clean, at 590–614 host
+    processes and memory-pressure level 1 (`ps-control.txt`).
+  - Ruling T3-c accepted it without forcing memory pressure on a shared host.
+- **`dddiagnose`** went `FAIL` 4/3 (msgh_id 205, landmark 455) → `PASS` 139/139, an identical
+  fault, `guest crashed: pc=0x180302eb0 far=0x4000050050 esr=0x92000045`.
+  - **Two outcomes.** Of eight traced runs alternating the binaries, each binary faulted once and
+    stopped at 205 three times (`dddiagnose-control.txt`). The `far` was `0x2000050040` on t3 and
+    `0x4000050050` on base.
+  - **The receive.** Every run refuses the RCV-only receive once. The faulting runs refuse it at
+    trap #384 and #383 and fault after trap 393 and 392, about 9 landmarks later, a sample of two.
+    All eight runs have 0 `kevent_qos` traps (`dddiagnose-traps.txt`).
+  - **Where the runs part.** They part at one extra `gettimeofday`, `[trap]` 209. Before it, only
+    host-supplied values differ (`dddiagnose-prefork.txt`): the recorder's pid in `proc_info` #24
+    and `csops` #200, host port names in `mach_msg2` #185, #192 and #193 and in the `-18` traps
+    #186 and #194, and `x6` of `gettimeofday` #208, which that call does not read. After it, line
+    86 of each run's VM list is the same `mach_vm_deallocate` on a different address
+    (`0xa0027c000` against `0xa00408000`), and the fault follows about 180 landmarks later.
+  - **Not traced further**, so the root cause is not measured.
+  - This is the face the forward pointers above are about. `dddiagnose`'s `#[ignore]` reason gained
+    the fault outcome and a stricter condition in `64712bd`: UN-IGNORE when 205 is serviced **and**
+    the `mfm_alloc` face is explained or measured absent.
+- **`csh`** 338 → 336 and **`tcsh`** 333 → 336 moved their landmark only. Eight fresh samples, two
+  per shell per binary, gave 336–344 traps, and 317 on all eight once the `gettimeofday` traps are
+  subtracted (`csh-samples.txt`), one above M44's 316. The base binary shows 317 too, so the shift
+  is not in M45's diff. Whether the host or an M44 change after M44's sweep added the trap was not
+  traced.
+
+`ps` going out and `dddiagnose` coming in cancel, so the tally equals M44's, and outcome B's
+prediction, by coincidence. `ps`'s is a class-E row, the kind M36 (`:8308`), M38 (`:10190`), M39
+(`:10830`) and M44 (`:13358`) each recorded none of. It is a pre-existing, named hazard, not a
+regression of this milestone.
+
+### The audit (Task 4)
+
+Measured at `64712bd`:
+- `git diff a78f28f 64712bd -- crates/retrace-trace` is empty, so `TRACE_MAGIC` did not move and
+  `Event` did not change.
+- `grep -c 'self.verify_thread(' crates/retrace-core/src/lib.rs` is **7**.
+- Lines matching `^\s*#\[ignore` over `crates/` number 9, as at `a78f28f`.
+- The `#[test]` count is **853** by source. Per file against t0 M5:
+  - `crates/retrace-arch/tests/kqinit.rs`: +8, new binary;
+  - `crates/retrace/tests/kqinit_e2e.rs`: +5, new binary;
+  - `crates/retrace-guest/src/lib.rs`: 19 → 20 (`kqinit_guest_parses`).
+  Every other file is unchanged.
+- `CENSUS` holds 114 entries.
+- **Existing test files.** The branch changes two: `apple_walls_e2e.rs` (two `#[ignore]` reasons
+  and the header comment) and `census.rs` (the doc comment and 374's entry). No assertion changed.
+
+The spec's §9 prediction for outcome B with no GCD gate is 846 / 0 / 9 over 148 binaries. The gate
+below is reconciled against it.
+
+### What measurement changed
+
+- **The init is exactly the measured shape** (t0 M1). §2a's inferred-zero fields are measured zero,
+  so the emulated shape has only `x1` free.
+- **The fixture's own call is the trace's only 374** (Task 2, `ev.len() == 1` in both modes). That
+  confirms t0 M3's inference.
+- **The spec's three GCD candidates became two**, because `signal` hangs natively (t0 M2, T0-a).
+- **Two fixture inputs could not pin what they claimed.**
+  - The spec's `badptr` address `0x10` was not provably untranslated in a dynamic guest (P1, found
+    by the pre-flight scan).
+  - The plan's straddle offset, `16384 − 40`, left only `ext` zeros on the second page, so a reader
+    that lost the second half would pass (T2-a, found by review).
+- **The controls went past their predictions.**
+  - Control 1 turned all five tests red, not one.
+  - Control 2 found that without the mirror nothing downstream diverges either, because the next
+    landmark's recorded writes heal a tampered return (X-2).
+  - T2-a's control also turned `badptr` red, through the reader's padding.
+- **Outcome B for every libdispatch path measured.** The second call is libdispatch's own (the same
+  return address in three programs), so the init alone moves no program.
+- **The refusal's multi-line `args` hid the wall** from the parked gate's own positive control
+  (T3-e).
+- **An unchanged tally hid five moved rows.** Two of the moves are host state.
+  - M37's `MADV_FREE_REUSABLE` hazard is measured for the first time.
+  - The `mfm_alloc` face contradicts M37's retirement, and R3 owes a re-measure.
+- **The `csh`/`tcsh` constant is 317**, not M44's 316, on the base binary too.
+- **"Right conclusion, wrong supporting fact" recurred once.** The sweep README's first
+  `dddiagnose` account said M36 and M44 had already recorded the row as host- and guest-dependent.
+  Review found otherwise: M36 classed the face downstream of §4b, M37 retired it, and M44 recorded
+  no host-dependence (Important 1, Ruling T3-d). The host-state conclusion stood, and its history
+  was rewritten with the two contradictions it had missed. Unlike M44's three, this one was caught
+  by review of the claim.
+
+### Rulings
+
+The spec's rulings stand:
+- **R1** — the entry is compared exactly, all 72 bytes, including `ident`, `udata` and `qos`, which
+  brainstorming had proposed to accept as-is. One shape is measured, and the refuse-by-value
+  stance admits only the measured bytes. A future libdispatch that changes them should stop the
+  recorder, not pass silently.
+- **R2** — `int` parameters are compared on 32 bits and pointers on 64, the M38 `AT_FDCWD` lesson.
+- **R3** — stateless (approach A). A knote table would be state nothing reads until a milestone
+  that models triggers, which can add it with its own measurement.
+- **R4** — the fixture uses inline `svc`. libSystem's `syscall()` goes through the indirect
+  `SYS_syscall` (0), so retrace would see 0, not 374.
+- **R5** — a refusal is a panic, not an errno. An errno is libdispatch's crash with the cause
+  hidden; the panic names it.
+- **R6** — no `TRACE_MAGIC` bump. No `Event` shape changes, no snapshot byte changes meaning, and
+  374 was never appended to a trace before M45, because M33's row check panicked first.
+
+Pre-flight:
+
+* **P1** — `badptr` passes `1 << 47`, not `0x10`. Whether VA `0x10` translates in a dynamic guest
+  is unmeasured, and an address past 47 bits provably translates to nothing. Cost if wrong: none
+  silent, since a translation would fail the test loudly, naming a field.
+* **P2** — the SDD workspace is kept at the finish (project convention). Cost if wrong: disk space.
+* **P3** — t0 M3 measures the P1-ruled fixture, so the committed file and the natively measured one
+  are identical. Cost if wrong: M3 would measure a file that differs by one unexecuted line.
+* **P4** — Task 5's merge runs only after asking the operator, because the session is
+  worktree-isolated and a merge is a stop-and-ask side effect. Cost if wrong: one pause.
+
+Execution:
+
+* **T0-a** — the `signal` candidate is dropped from the walk and owed. Natively it hangs every
+  time; the likely cause is an inference. Cost if wrong: one fewer candidate, and the mechanism gate
+  is unaffected.
+* **T0-b** — t0 ran the brief's commands from scripts in the ledger, unchanged, because the
+  worktree guard refuses inline multi-command shell. Cost if wrong: none.
+* **X-1** — a parallel branch, `readme-launch`, moves README.md to `docs/current-state.md` and adds
+  a release-only `host_svc` carry fix. M45 keeps editing README.md. At the merge, which stops for
+  the operator (P4): if `readme-launch` lands first, M45's README hunks move to
+  `docs/current-state.md`, and its `host_svc` hunk is checked against M45's `retrace-box` edit
+  (different functions; no textual conflict is inferred). Updated before Task 4: `readme-launch` is
+  committed at `fbaba9b`, not merged, and X-1 stands. Cost if wrong: one move of README hunks at
+  merge time.
+* **X-2** — control 2's observation is pre-existing and out of scope: `fstat64`'s recorded writes
+  reach about 0x260 bytes past its 144-byte buffer, so a tampered return heals instead of diverging.
+  It is owed as an unmeasured observation about the diff window's width. M45's gate is unaffected,
+  since the rewritten-return test is the oracle that sees the mirror. Cost if wrong: a latent
+  replay-healing class stays unmeasured one milestone longer.
+* **T2-a** — the straddle offset becomes `16384 − 8`, re-measured natively and proven by a control.
+  The plan's mandated offset is overridden, because Review Focus 1 claimed a pin that offset could
+  not deliver. Cost if wrong: one fix round.
+* **T2-b** — the mirror also diverges on a recorded `err` or writes, with its own detail text, and
+  the test gains a second tampering (the count stays 5). Cost if wrong: one fix round.
+* **T3-a** — Task 3 runs split. The implementer does the walk; the controller runs the sweep
+  detached on a signed scratchpad copy with no concurrent `cargo`, so the 30 s per-phase watchdog is
+  not starved; the implementer is then resumed for the evidence. Cost if wrong: one extra commit.
+* **T3-b** — Halt 3 is honoured as the spec defines it, as routing and not a milestone halt. The
+  second shape is not modelled, the milestone rests on the mechanism gate alone, and the docs say
+  plainly that the emulation alone unblocks no real program yet. Cost if wrong: the operator may
+  prefer to widen to the second shape before merging, which is a follow-up milestone, not rework.
+* **T3-c** — the `ps` move is accepted as host state on three measurements (the same-recording base
+  replay, the zero-374 trace, the mechanism), without forcing memory pressure for a fresh base
+  recording on a shared host. The hazard is owed as measured. Cost if wrong: an M45-caused
+  divergence misfiled, bounded by the zero-374 fact, which leaves M45's code no path to run.
+* **T3-d** — fix round 1 takes every review finding. The Important one (the `dddiagnose` history)
+  is done as the reviewer prescribed, and the two status-log forward pointers go to Task 4. Cost if
+  wrong: one round.
+* **T3-e** — Task 2's refusal panic prints `args` on one line (authorized across the task
+  boundary), restoring `apple_walls_e2e`'s promise that `--ignored` shows the wall by name. It
+  moves no asserted text. Cost if wrong: one line reverted.
+* **T4-a** — this section's gate subsection is appended by Task 5 after the gate runs, not
+  written as a placeholder by Task 4. Cost if wrong: none.
+
+### What stays owed
+
+* **The second `kevent_qos` shape.** It is a `KEVENT_FLAG_WORKQ|KEVENT_FLAG_ERROR_EVENTS|
+  KEVENT_FLAG_IMMEDIATE` call with an event list of 16. Its one entry has filter −14, flags
+  `EV_ADD|EV_ENABLE|EV_DISPATCH|EV_UDATA_SPECIFIC`, qos `0x02000000` and fflags `0xf0000037`; by
+  its values it is libdispatch's memory-pressure source, which is inferred and not symbolicated.
+  Modelling it moves:
+  - `automationmodetool`, parked at landmark 363;
+  - `timer`, stopped at landmark 247;
+  - `after`, stopped at landmark 246.
+
+  Until then the emulation alone unblocks no real program. Whatever each reaches next is
+  unmeasured.
+  With an event list the kernel can write events back, so its model may be more than a constant
+  return; that is inferred, and what the kernel writes for this call is unmeasured.
+* **`signal`** (T0-a): natively it hangs, so it has no reference outcome. Its cause is unmeasured.
+* **The rest of the `kevent` family.** `kevent` (363), `kevent64` (369) and `kevent_id` (375) have
+  no row. Every `kevent_qos` shape other than the init is refused, and so is `kevent_qos` on a guest
+  `kqueue()` descriptor.
+* **Knotes and their events**: `EVFILT_USER` triggers (`NOTE_TRIGGER`), `EVFILT_TIMER` and
+  `EVFILT_MACHPORT` knotes, delivering events to workers, and any knote state (R3).
+* **X-2.** `fstat64`'s recorded writes reach about 0x260 bytes past its 144-byte stat buffer, so a
+  tampered or wrong return can be healed by a later landmark rather than diverge (Task 2, control
+  2). Why the recorded region is that wide is unmeasured. The implementer's guess, the diff window
+  capturing bytes the kernel did not change, is also unmeasured.
+* **The forwarded-`MADV_FREE_REUSABLE` class-E hazard** (T3-c).
+  - **Measured on `ps`:** the recorded final image can depend on host memory pressure, so a guest
+    that frees a large buffer shortly before exit can flake class E.
+  - **A subtler variant** is possible and unmeasured: a page reclaimed *before* a later syscall
+    writes it makes that call's pre-image zeros, so zero bytes of its output would go unrecorded.
+  - **Not reproduced record-side.** No fresh recording reproduced the reclaim.
+  - **The `ps` gate.** `sysbin_e2e`'s `ps_records_and_replays` records the same binary, so it is
+    exposed to the same flake. That is inferred, not observed.
+* **`dddiagnose`'s `mfm_alloc+0x230` face and M38 R3's re-measure** (forward pointers 2 and 3).
+  Nothing was traced past the region-placement split, and "about 9 landmarks" rests on two faulting
+  runs.
+* **The `csh`/`tcsh` constant's move to 317.** The extra trap was not traced.
+* **Parked minors**:
+  - t0's evidence README states its commit and date once, not per row;
+  - Task 1's report says "7 tests" and lists 8;
+  - the plan's text still says `16384 − 40` (superseded by T2-a; the plan is history);
+  - the sweep's `automationmodetool` `rec.err` shows the pre-T3-e multi-line `args`, as the
+    evidence README notes.
+* **M44's owed items M45 did not touch**, carried forward by reference to M44's "What stays owed"
+  and its fix wave's additions. That is every M44 item except the first, 374, which M45 discharges
+  for the init shape alone:
+  - 410/422's arm gap;
+  - exec-in-place;
+  - `host_get_io_main`;
+  - B1's CPU;
+  - lldb's display of B3's stop;
+  - B6(a)'s syscall-write path;
+  - T12-b;
+  - M43's T5-a stall;
+  - the skip detector's literal-only reach;
+  - the `__PAGEZERO` note;
+  - M44's parked minors that its fix wave did not discharge;
+  - M43's owed items, as M44 carried them;
+  - lldb's hit and ignore counts under the L7 form.
