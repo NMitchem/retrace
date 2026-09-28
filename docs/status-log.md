@@ -13873,7 +13873,10 @@ It prints `kqinit rc=… carry=…`. Its modes:
   no `verify_thread` of its own: it inherits the arm-top call, so the count stays at seven.
 - **The forward arm** gains an `assert!(num != SYS_KEVENT_QOS, …)`, kept in release. It makes
   "never forwarded" a checked fact rather than an arm-ordering accident, the gap M37 measured for
-  `bsdthread_create`.
+  `bsdthread_create`. That assert is the only thing that tells the emulation from a forward, as
+  with the workq pair. A forwarded init would record the same landmark: natively rc 0 with carry
+  clear (t0 M3), and with no event list, no writes. So `kqinit_e2e`'s landmark assertion cannot
+  tell the two apart; its comment said otherwise until the final review's Minor 1.
 - **The documentation row** is 374 `[Scalar, Ptr, Scalar, Ptr, Scalar, Ptr, Ptr, Scalar]`, in the
   workqueue section. The `kqueue` (362) comment is corrected, and `CENSUS` gains 374, with no view
   differing.

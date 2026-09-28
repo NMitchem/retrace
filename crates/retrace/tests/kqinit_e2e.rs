@@ -26,8 +26,9 @@ fn records_one_emulated_init(mode: &[&str]) -> PathBuf {
     let ev = kevent_events(&trace);
     assert_eq!(ev.len(), 1, "{mode:?}: exactly one kevent_qos landmark: {ev:?}");
     let Event::Syscall { args, ret, err, writes, .. } = &ev[0].1 else { unreachable!() };
-    // The difference M45 makes: a forward would carry the host's writes or return; a missing arm
-    // never gets here (the recorder panics at M33's row check, or at the forward arm's assert).
+    // The emulated landmark. A forward would record the same thing: natively the call returns 0
+    // with carry clear (t0 M3), and with no event list nothing is written. Only the forward arm's
+    // assert tells the emulation from a forward, as with the workq pair.
     assert_eq!((*ret, *err, writes.len()), (0, false, 0),
         "{mode:?}: the emulation returns 0, clears carry and writes nothing");
     assert_eq!(args[7], 0x21, "{mode:?}: KEVENT_FLAG_WORKQ | KEVENT_FLAG_IMMEDIATE");
