@@ -242,8 +242,9 @@ impl<'a> Server<'a> {
             _ if body.starts_with("vCont;") => {
                 // A step action ANYWHERE makes it a step (§3d), on the thread the first one names
                 // (`s:<tid>`, `S05:<tid>`, or none). lldb may list continue actions first
-                // (`vCont;c:2;s:1`). Those are moot, because only the running thread can step
-                // (§3d rule 1). Only a vCont of continue actions alone is a continue.
+                // (`vCont;c:2;s:1`). Those are moot: the other threads run as the recording ran
+                // them, and a step of a thread that is not running runs them until it is (M44
+                // B6(b)). Only a vCont of continue actions alone is a continue.
                 let acts: Vec<&str> = body["vCont;".len()..].split(';').collect();
                 if let Some(act) = acts.iter().find(|a| a.starts_with(['s', 'S'])) {
                     let tid = act.split_once(':').and_then(|(_, t)| u32::from_str_radix(t, 16).ok());

@@ -513,21 +513,42 @@ fn a_blocked_step_stops_after_another_threads_watched_store_on_the_stepped_threa
 }
 
 #[test]
-fn a_step_on_a_thread_that_is_not_running_is_refused_in_place() {
-    // §3d rule 1: a non-moving exception stop, measured safe (t0 L7).
+fn a_step_on_a_thread_that_is_not_running_runs_until_it_is_scheduled() {
+    // M44 B6(b), M43 T5-a's successor: a step of a live thread that is not running runs until that
+    // thread is scheduled, then steps it one instruction — as a blocked step's tail already does.
     let (tr, n, t) = r::threadrust_block();
+    let svc = r::trap_pc(tr, n);
+    let other = if t == 0 { 1u32 } else { 0 }; // retrace's id of the thread that is not t
+    // The oracle, without the server: the first landmark after n where `other` is current, then
+    // one instruction of it. Bounded by the recording's length (Ruling P4): a seek that fails
+    // yields None, so an unbounded search would never end.
+    let len = retrace_trace::Reader::open(tr).unwrap().len();
+    let want = (n + 1..len).find_map(|m| {
+        let mut s = retrace_core::seek(tr, m, 0).ok()?;
+        (s.current_thread() == other).then(|| { s.step_insns(1).unwrap(); s.pc() })
+    }).expect("the other thread runs again");
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, n);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK"); // nothing armed: B6(b) alone
+    let s = c.send(&format!("vCont;s:{:x}", other + 1));
+    assert!(s.contains("reason:trace;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", other + 1).as_str()), "{s}");
+    assert_eq!(pc_of(&s), want, "one instruction of the other thread, once it runs");
+}
+
+#[test]
+fn a_step_on_a_thread_that_does_not_exist_is_refused_in_place() {
+    // §3d rule 1 survives B6(b) for a thread that is not live: refused, nothing moves.
+    let (tr, n, _) = r::threadrust_block();
     let svc = r::trap_pc(tr, n);
     let mut c = Rsp::spawn(tr, &[]);
     assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
     r::continue_to_window(&mut c, n);
-    let other = if t == 0 { 2 } else { 1 }; // an RSP tid that is not t + 1
     let before = c.where_();
-    let s = c.send(&format!("vCont;s:{other:x}"));
+    let s = c.send("vCont;s:63");
     assert!(s.contains("reason:exception;"), "{s}");
-    assert!(r::description(&s).unwrap().contains("cannot step thread"), "{s}");
-    // On the stepped thread (t0 L7). Named on the running one, lldb re-steps forever (Task 4's
-    // measurement).
-    assert_eq!(r::key(&s, "thread"), Some(format!("{other:x}").as_str()), "{s}");
+    assert!(r::description(&s).unwrap().contains("cannot step thread 99"), "{s}");
     assert_eq!(c.where_(), before);
 }
 
