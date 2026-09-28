@@ -3,8 +3,9 @@
 //! packets. The handshake uses ack mode; everything after `QStartNoAckMode` uses no-ack mode, as
 //! lldb does. It also holds the blocking-step fixture (`threadrust_block` and its two helpers), the
 //! thread-exit fixture (`threadrust_child_exit`, M44 B3), the blocked step into another thread's
-//! store (`watchthread_block` and its oracle `first_store`, M44 B6(a)) and the register oracle's
-//! parser (`dbg_field`), which both test files share.
+//! store (`watchthread_block` and its oracle `first_store`, M44 B6(a)), the recording that ends on
+//! another thread (`crashthread_block`, M44 Ruling T12-a) and the register oracle's parser
+//! (`dbg_field`), which both test files share.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -218,6 +219,20 @@ pub fn threadrust_block() -> (&'static Path, usize, u32) {
     let (p, n, t) = C.get_or_init(|| {
         let (rec, tr) = super::record_dynamic(retrace_guest::THREADRUST);
         assert_eq!(rec.code, 0, "record threadrust: {}", rec.stderr);
+        let (n, t) = first_block(&tr);
+        (tr, n, t)
+    });
+    (p.as_path(), *n, *t)
+}
+
+/// M44 Ruling T12-a: the crashthread recording, main's blocking wait in `pthread_join` (as
+/// `threadrust_block` finds it), and main's thread. The child then faults with no handler, so the
+/// recording ends on the child while main is live and blocked. Returns (trace, n, t).
+pub fn crashthread_block() -> (&'static Path, usize, u32) {
+    static C: OnceLock<(PathBuf, usize, u32)> = OnceLock::new();
+    let (p, n, t) = C.get_or_init(|| {
+        let (rec, tr) = super::record_dynamic(retrace_guest::CRASHTHREAD);
+        assert_eq!(rec.code, 139, "record crashthread: {}", rec.stderr);
         let (n, t) = first_block(&tr);
         (tr, n, t)
     });

@@ -277,15 +277,16 @@ fn is_resume(p: &str) -> bool {
 fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_not_running() {
     // M44 B6(a)'s and B6(b)'s loop checks in lldb itself (spec §3c). M43 armed nothing during a
     // blocked step (R7's fallback, Ruling T4-a), because lldb-2100 re-stepped forever when another
-    // thread's hit was reported on that thread (Task 4: 307,016 × `vCont;s:1` in 60 s). B6(a) reports the hit in t0 L7's measured-safe form instead:
-    // `reason:exception` on the STEPPED thread, naming the hit. lldb sends the step once and shows
-    // that stop on the stepped thread. With B6(a) undone, session A ends `instruction step into` at
-    // svc + 4, at a later landmark, which the row and the second `where` catch. Each session is
-    // bounded (BOUND), so a loop fails as a killed session with no END. Session B stepped a thread
-    // that is not running: M43 refused it on that thread (§3d rule 1, Ruling T4-b; named on the
-    // running thread instead, lldb looped: 80,103 × `vCont;s:2` in 60 s). B6(b) runs until the
-    // thread is scheduled and steps it, and lldb sends the step once. With B6(b) undone, the step
-    // is refused in place, and the thread's pc is its saved one, one instruction short of the row's.
+    // thread's hit was reported on that thread (Task 4: 307,016 × `vCont;s:1` in 60 s). B6(a)
+    // reports the hit in t0 L7's measured-safe form instead: `reason:exception` on the STEPPED
+    // thread, naming the hit. lldb sends the step once and shows that stop on the stepped thread.
+    // With B6(a) undone, session A ends `instruction step into` at svc + 4, at a later landmark,
+    // which the row and the second `where` catch. Each session is bounded (BOUND), so a loop fails
+    // as a killed session with no END. Session B stepped a thread that is not running: M43 refused
+    // it on that thread (§3d rule 1, Ruling T4-b; named on the running thread instead, lldb looped:
+    // 80,103 × `vCont;s:2` in 60 s). B6(b) runs until the thread is scheduled and steps it, and
+    // lldb sends the step once. With B6(b) undone, the step is refused in place, and the thread's
+    // pc is its saved one, one instruction short of the row's.
     if !lldb_runs() {
         util::announce("SKIPPED lldb_steps_a_blocked_thread…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
         return;
@@ -341,6 +342,47 @@ fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_n
     assert_eq!(code, Some(0), "{tb}");
     let row = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tb}"));
     assert_eq!((row.1, row.2), (other, want_b), "{tb}");
+}
+
+#[test]
+fn lldb_steps_a_thread_the_recording_ends_before_without_looping() {
+    // M44 Ruling T12-a's loop check in lldb itself, the review's probe. At crashthread's crash,
+    // main is live, blocked in `pthread_join`, and nothing runs it again. Before T12-a, B6(b)'s
+    // step of main was answered with the child's terminal, named on the child. lldb had suspended
+    // the child for the step, so it ignored that stop and re-stepped main until the bound killed
+    // it (128 × `vCont;s:1` in 30 s). Now the step is main's refusal, in t0 L7's form, naming the
+    // terminal. The session is bounded (BOUND), so a loop fails as a killed session with no END.
+    // With T12-a undone, this row fails exactly that way.
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_steps_a_thread_the_recording_ends_before…: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (tr, _, t) = util::rsp::crashthread_block();
+    let by = retrace_trace::Reader::open(tr).unwrap().iter().find_map(|e| match e {
+        retrace_trace::Event::Crash { thread, .. } => Some(u64::from(*thread) + 1),
+        _ => None,
+    }).expect("crashthread crashes");
+    // lldb numbers threads in the order it first sees them, and main is alone at the start of
+    // recording, so main's lldb index is its RSP tid; the `*` row's tid confirms it.
+    let me = u64::from(t) + 1;
+    assert_ne!(by, me, "the recording ends on another thread");
+    let cmds = vec!["process continue".into(), format!("thread select {me}"), "thread step-inst".into(),
+                    "thread list".into()];
+    let (code, out, err, sends) = packet_logged_session(tr, &cmds);
+    let tt = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {tt}");
+    assert_eq!(code, Some(0), "{tt}");
+    assert!(!sends.is_empty(), "lldb's packet log is empty: {tt}");
+    // Measured: one `vCont;s:1`. At most two is Ruling T12-a's bar.
+    let steps = sends.iter().filter(|p| is_step(p)).count();
+    assert!((1..=2).contains(&steps), "the step is sent, and not re-sent without end: {steps} steps: {sends:?}: {tt}");
+    // lldb shows main stopped by the refusal. Measured: `* thread #1: tid = 0x0001,
+    // 0x00000001804afaf8, stop reason = the recording ended (thread 2 crashed: pc=0x10000050c
+    // far=0x4000dead0000 esr=0x92000045) before thread 1 ran`.
+    let sel = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tt}"));
+    assert_eq!(sel.1, me, "{tt}");
+    assert!(sel.3.starts_with(&format!("the recording ended (thread {by} crashed: pc=0x"))
+        && sel.3.ends_with(&format!(") before thread {me} ran")), "{sel:?}: {tt}");
 }
 
 #[test]
