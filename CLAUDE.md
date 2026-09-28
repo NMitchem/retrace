@@ -360,11 +360,13 @@ Two rules these gates taught, which bind their successors:
   passing quietly. A silent skip reads as a green it did not earn.
   **Where that line goes matters.**
   libtest captures `eprintln!` in a *passing* test, and a skip passes, so an `eprintln!` skip line
-  never reaches a gate log (measured at M43's close). Since M44 every skip goes through
-  `util::announce` (`crates/retrace/tests/util/mod.rs`), which writes past the capture, and
-  `skiplines.rs` fails the gate if any test file writes a `SKIP` line with `eprintln!`. It sees only
-  a string literal that begins `SKIP`: a skip line built from a variable, or in lower case, slips
-  past it.
+  never reaches a gate log (measured at M43's close). Since M44 every skip writes past the capture:
+  `crates/retrace`'s tests through `util::announce` (`crates/retrace/tests/util/mod.rs`), and a
+  test in another crate, which cannot reach that module, through a local `announce` with the same
+  body (`retrace-core`'s `machmsgband_dyn` has one). `skiplines.rs` fails the gate if any `.rs` file
+  under any crate's `tests/`, searched recursively, calls `eprintln!` with `SKIP` anywhere in its
+  first string literal. It reads only that literal: a skip line built from a variable, or in lower
+  case, slips past it.
 
 One distinction that is easy to get backwards when writing such a test: a signal the guest **raises**
 is `Event::Signal`, while one derived from a **hardware fault** whose disposition is not a handler
