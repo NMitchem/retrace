@@ -215,6 +215,9 @@ pub const ATFDCWD_DYN: &str = concat!(env!("OUT_DIR"), "/atfdcwd_dyn");
 /// M38: `execve` then `posix_spawn(SETEXEC)`; prints the errno each returns — both are refused,
 /// never forwarded.
 pub const EXEC_DYN: &str = concat!(env!("OUT_DIR"), "/exec_dyn");
+/// M45: libdispatch's workqueue-kqueue init (`kevent_qos` 374), issued by hand after a
+/// `dispatch_async`. `argv[1]` selects `straddle`, `flags` or `badptr`; see the source's header.
+pub const KQINIT_DYN: &str = concat!(env!("OUT_DIR"), "/kqinit_dyn");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
@@ -389,6 +392,13 @@ mod tests {
     fn exec_guest_parses() {
         // M38: proves the build.rs wiring and the path constant; behaviour is exec_e2e's.
         let l = parse_macho(&std::fs::read(EXEC_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn kqinit_guest_parses() {
+        // M45: proves the build.rs wiring and the path constant; behaviour is kqinit_e2e's.
+        let l = parse_macho(&std::fs::read(KQINIT_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 

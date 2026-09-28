@@ -735,6 +735,15 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // for MIN(sizeof(cfg), affinity) bytes for SETUP_DISPATCH (bsd/pthread/pthread_workqueue.c
         // `workq_kernreturn`). Emulated (M18); the box refuses unmeasured opcodes by value.
         SYS_WORKQ_KERNRETURN => row!(P, [Scalar, Ptr, Scalar, Scalar]),
+        // kevent_qos(int kq, const struct kevent_qos_s *changelist, int nchanges,
+        //   struct kevent_qos_s *eventlist, int nevents, void *data_out, size_t *data_available,
+        //   unsigned int flags): xnu-private (bsd/sys/event_private.h). Emulated (M45) as exactly
+        // one shape, libdispatch's workqueue-kqueue init (`kqinit_shape`): kq is -1 (a value
+        // under KEVENT_FLAG_WORKQ, not a descriptor), the change list is one 72-byte entry, and
+        // eventlist/data_out/data_available are NULL — the bounds these kinds cite. No row can
+        // describe a FORWARDED kevent_qos (M44 R4: count × size, nested idents); the generic
+        // forward arm asserts 374 away, so this row is never consulted by a forward.
+        SYS_KEVENT_QOS => row!(P, [Scalar, Ptr, Scalar, Ptr, Scalar, Ptr, Ptr, Scalar]),
         // bsdthread_ctl(user_addr_t cmd, arg1, arg2, arg3): xnu-private, cmd-dependent
         // (bsd/pthread/pthread_workqueue.c `bsdthread_ctl`). arg1/arg2 are port names, priorities
         // or resource keys the kernel never dereferences; arg3 is, for QOS_OVERRIDE_DISPATCH
@@ -804,8 +813,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // read end first) and `x1` is captured as the event's `ret1`; `Ret::FdPair`'s doc has it.
         42 => row!(Ret::FdPair, []),
         // kqueue(void) → a NEW descriptor (bsd/kern/kern_event.c `kqueue`). Bound like open's
-        // (EXPECTED_DIFFS; exercised by /bin/wait4path). No kevent spelling (363/369/374/375) is
-        // in the census, so nothing yet consumes the bound slot.
+        // (EXPECTED_DIFFS; exercised by /bin/wait4path). Nothing yet consumes the bound slot: 374
+        // is emulated only for the workqueue kqueue (M45), never on a descriptor, and 363/369/375
+        // have no row.
         362 => row!(F, []),
         // ---- memory ---------------------------------------------------------------------------
         // munmap(void *addr, size_t len) / mprotect(addr, len, prot): emulated above the trace
