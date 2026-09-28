@@ -272,8 +272,13 @@ pub(crate) fn image_json(hdr: &[u8], load_address: u64, path: &str) -> Result<St
     let text = segs.iter().find(|s| s.name == "__TEXT").ok_or("no __TEXT segment")?;
     let slide = load_address.wrapping_sub(text.vmaddr);
     let uuid = uuid.ok_or("no LC_UUID")?;
-    let seg_json: Vec<String> = segs.iter().map(|s| {
-        let vmaddr = if s.name == "__PAGEZERO" { s.vmaddr } else { s.vmaddr.wrapping_add(slide) };
+    // M44 Task 9b (docs/sweep-evidence/2026-09-27-m44-t0/t9/): omit __PAGEZERO. lldb's Darwin loader
+    // turns a maxprot-0 __PAGEZERO into an invalid-memory region for [0, 4 GiB) and then fails every
+    // read there LOCALLY, no packet sent — but a retrace guest's main stack lives inside that range
+    // (DYN_STACK_TOP), so lldb can never read a saved return address off it and drops every frame
+    // past the one it's standing in. Measured: with __PAGEZERO left out, lldb unwinds normally.
+    let seg_json: Vec<String> = segs.iter().filter(|s| s.name != "__PAGEZERO").map(|s| {
+        let vmaddr = s.vmaddr.wrapping_add(slide);
         format!(r#"{{"name":"{}","vmaddr":{vmaddr},"vmsize":{},"fileoff":{},"filesize":{},"maxprot":{}}}"#,
                 json_str(&s.name), s.vmsize, s.fileoff, s.filesize, s.maxprot)
     }).collect();
@@ -468,6 +473,12 @@ mod tests {
         let j = image_json(&file, 0x1_0000_0000, retrace_guest::HELLO).unwrap();
         assert!(j.starts_with(r#"{"images":[{"load_address":4294967296,"mod_date":0,"pathname":""#), "{j}");
         assert!(j.contains(r#""name":"__TEXT","vmaddr":4294967296"#), "{j}");
+        // M44 Task 9b (docs/sweep-evidence/2026-09-27-m44-t0/t9/): a maxprot-0 `__PAGEZERO` segment
+        // makes lldb's Darwin loader mark [0, 4 GiB) invalid memory and fail every read there
+        // locally, with no packet sent — exactly where a retrace guest's main stack lives. `hello`'s
+        // Mach-O header does carry one (otool -l), so this proves the server leaves it out.
+        assert!(!j.contains("__PAGEZERO"), "{j}");
+        assert!(!j.contains(r#""maxprot":0"#), "no other segment in this fixture has maxprot 0: {j}");
         let uuid = j.split(r#""uuid":""#).nth(1).and_then(|r| r.split('"').next()).unwrap();
         assert_eq!(uuid.len(), 36, "{uuid}");
         assert!(image_json(&file[..16], 0x1_0000_0000, "x").is_err(), "a truncated header is an Err, not a panic");

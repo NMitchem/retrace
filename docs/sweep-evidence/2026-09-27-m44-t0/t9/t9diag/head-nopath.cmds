@@ -1,0 +1,13 @@
+target create /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/crashy
+gdb-remote 127.0.0.1:52001
+command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+log enable -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/head-nopath.packets gdb-remote packets
+target modules load --file crashy --slide 0
+breakpoint set -a 0x100000530
+process continue
+thread step-inst
+bt
+script err = lldb.SBError(); v = lldb.process.ReadUnsignedFromMemory(0x27ff7b8, 8, err); print("SB read [0x27ff7b8]:", hex(v), "error:", err.GetCString())
+thread step-out
+register read pc
+script print("END")

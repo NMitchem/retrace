@@ -1,0 +1,63 @@
+(lldb) command source -s 0 'r2.cmds'
+Executing commands in '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/r2.cmds'.
+(lldb) gdb-remote 127.0.0.1:51889
+Process 1 stopped
+* thread #1, stop reason = start of recording
+    frame #0: 0x00000001400049c0 
+->  0x1400049c0: mov    x0, sp
+    0x1400049c4: and    sp, x0, #0xfffffffffffffff0
+    0x1400049c8: mov    x29, #0x0                 ; =0 
+    0x1400049cc: mov    x30, #0x0                 ; =0 
+Target 0: (crashy) stopped.
+(lldb) command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+(lldb) log enable -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/r2.packets gdb-remote packets
+(lldb) breakpoint set -a 0x100000530
+Breakpoint 1: where = crashy`main + 56, address = 0x0000000100000530
+(lldb) process continue
+Process 1 resuming
+Process 1 stopped
+* thread #1, stop reason = breakpoint 1.1
+    frame #0: 0x0000000100000530 crashy`main + 56
+crashy`main:
+->  0x100000530 <+56>: bl     0x1000005d8               ; symbol stub for: fstat
+    0x100000534 <+60>: ldr    w0, [sp, #0x1c]
+    0x100000538 <+64>: adrp   x1, 0
+    0x10000053c <+68>: add    x1, x1, #0x5f0            ; "CRASHY:"
+Target 0: (crashy) stopped.
+(lldb) thread step-inst
+Process 1 stopped
+* thread #1, stop reason = instruction step into
+    frame #0: 0x00000001000005d8 crashy`fstat
+crashy`fstat:
+    0x1000005d8 <+0>: adrp   x16, 4
+    0x1000005dc <+4>: ldr    x16, [x16]
+    0x1000005e0 <+8>: br     x16
+
+crashy`write:
+    0x1000005e4 <+0>: adrp   x16, 4
+Target 0: (crashy) stopped.
+(lldb) register read fp lr sp pc
+      fp = 0x00000000027ff7b0
+      lr = 0x0000000100000534  crashy`main + 60
+      sp = 0x00000000027ff770
+      pc = 0x00000001000005d8 crashy`symbol stub for: fstat  crashy`symbol stub for: fstat
+(lldb) process plugin packet send m27ff7b0,10
+  packet: m27ff7b0,10
+response: 10fe7f0200000000003e138001000000
+(lldb) script print("MEMREAD-BEGIN")
+MEMREAD-BEGIN
+(lldb) script lldb.debugger.HandleCommand("memory read -c 16 0x27ff7b0")
+(lldb) script err = lldb.SBError(); v = lldb.process.ReadUnsignedFromMemory(0x27ff7b8, 8, err); print("SB read [0x27ff7b8]:", hex(v), "error:", err.GetCString())
+SB read [0x27ff7b8]: 0x0 error: memory read failed for 0x27ff7b8
+(lldb) script err = lldb.SBError(); v = lldb.process.ReadUnsignedFromMemory(0xfffffff8, 8, err); print("SB read [0xfffffff8]:", hex(v), "error:", err.GetCString())
+SB read [0xfffffff8]: 0x0 error: memory read failed for 0xfffffff8
+(lldb) script err = lldb.SBError(); v = lldb.process.ReadUnsignedFromMemory(0x100000000, 4, err); print("SB read [0x100000000]:", hex(v), "error:", err.GetCString())
+SB read [0x100000000]: 0xfeedfacf error: None
+(lldb) script print("MEMREAD-END")
+MEMREAD-END
+(lldb) log enable -v -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/r2.unwind lldb unwind
+(lldb) bt
+* thread #1, stop reason = instruction step into
+  * frame #0: 0x00000001000005d8 crashy`fstat
+(lldb) script print("END")
+END

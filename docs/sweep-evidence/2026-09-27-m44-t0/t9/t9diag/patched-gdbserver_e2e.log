@@ -1,0 +1,38 @@
+   Compiling retrace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/src/crates/retrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.78s
+     Running tests/gdbserver_e2e.rs (target/aarch64-apple-darwin/debug/deps/gdbserver_e2e-338d8d88907f0d8d)
+
+running 30 tests
+test a_blocked_step_runs_past_another_threads_breakpoint_to_the_stepped_thread ... ok
+test a_breakpoint_is_reported_at_its_pc_forward_and_backward ... ok
+test a_divergence_is_a_stop_at_the_saved_cursor_never_an_error_reply ... ok
+test a_flag_given_last_without_its_value_is_a_usage_error ... ok
+test a_forward_watch_is_reported_after_its_store_and_a_reverse_one_before_it ... ok
+test a_peer_that_resets_the_connection_ends_the_server_cleanly ... ok
+test a_reverse_step_moves_back_one_and_stops_at_the_start ... ok
+test a_second_connection_is_refused_while_the_first_is_served ... ok
+test a_static_guest_lists_nothing_unless_given_its_path ... ok
+test a_step_across_the_stepped_threads_own_exit_stops_there ... ok
+test a_step_at_the_end_of_recording_reports_the_end_again ... ok
+test a_step_crosses_a_syscall_and_lands_after_it ... ok
+test a_step_on_a_thread_that_is_not_running_is_refused_in_place ... ok
+test a_step_onto_a_watched_store_reports_the_watch_after_it ... ok
+test a_step_over_a_blocking_syscall_ends_when_the_stepped_thread_runs_again ... ok
+test a_step_whose_crossing_writes_a_watched_cell_answers_watch_and_reverse_finds_the_write ... ok
+test a_syscall_write_is_reported_after_the_syscall_forward_and_at_its_trap_backward ... ok
+test breakpoints_cap_at_six_and_reinsertion_is_idempotent ... ok
+test disarm_rsi_makes_the_next_bc_a_reverse_continue_again ... ok
+test every_step_packet_form_steps_the_running_thread ... ok
+test every_thread_is_served_its_own_registers_at_a_blocked_stop ... ok
+test k_and_d_end_the_server_cleanly_and_so_does_a_dropped_connection ... ok
+test memory_reads_match_the_recording_and_a_straddling_read_returns_its_prefix ... ok
+test no_earlier_hit_goes_to_the_start_and_the_end_of_recording_is_reversible ... ok
+test registers_match_a_replay_session_at_the_same_position ... ok
+test the_crash_is_exc_bad_access_and_reverse_reaches_the_corrupting_store ... ok
+test the_exe_is_listed_from_argv0_when_the_recording_has_one ... ok
+test the_handshake_stops_at_the_start_of_recording ... ok
+test watchpoints_are_write_only_and_cap_at_four ... ok
+test writes_are_refused_and_move_nothing ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 77.94s
+

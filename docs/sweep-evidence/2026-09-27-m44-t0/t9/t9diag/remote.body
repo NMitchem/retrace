@@ -1,0 +1,14 @@
+log enable -f @D@/@TAG@.packets gdb-remote packets
+breakpoint set -a 0x100000530
+process continue
+log enable -v -f @D@/@TAG@.unwind lldb unwind
+thread step-inst
+bt
+frame select 1
+log disable lldb unwind
+image list
+image show-unwind -a 0x1000005d8
+image show-unwind -a 0x100000534
+memory region 0x1000005d8
+memory region 0x100000534
+register read fp lr sp pc

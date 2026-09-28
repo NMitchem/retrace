@@ -1,0 +1,73 @@
+   Compiling retrace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.02s
+     Running tests/lldb_e2e.rs (target/aarch64-apple-darwin/debug/deps/lldb_e2e-0c621ee11cc70216)
+
+running 1 test
+test lldb_stops_at_a_breakpoint_past_a_step_across_the_threads_own_exit ... lldb_e2e runs /usr/bin/lldb: lldb-2100.0.17.203
+T8MEASURE
+exit Some(0)
+--- stdout
+(lldb) command source -s 0 '/var/folders/sv/qhscv_qn0yz__5bbk46tlfy00000gn/T/retrace-lldb-94209-50104.cmds'
+Executing commands in '/var/folders/sv/qhscv_qn0yz__5bbk46tlfy00000gn/T/retrace-lldb-94209-50104.cmds'.
+(lldb) gdb-remote 127.0.0.1:50104
+Process 1 stopped
+* thread #1, stop reason = start of recording
+    frame #0: 0x00000001400049c0 
+->  0x1400049c0: mov    x0, sp
+    0x1400049c4: and    sp, x0, #0xfffffffffffffff0
+    0x1400049c8: mov    x29, #0x0                 ; =0 
+    0x1400049cc: mov    x30, #0x0                 ; =0 
+Target 0: (threadrust) stopped.
+(lldb) command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+(lldb) breakpoint set -a 0x1804b0b78 -i 0
+Breakpoint 1: address = 0x00000001804b0b78
+(lldb) process continue
+Process 1 resuming
+Process 1 stopped
+* thread #2, stop reason = breakpoint 1.1
+    frame #0: 0x00000001804b0b78 
+->  0x1804b0b78: svc    #0x80
+    0x1804b0b7c: b.lo   0x1804b0b9c
+    0x1804b0b80: pacibsp 
+    0x1804b0b84: stp    x29, x30, [sp, #-0x10]!
+Target 0: (threadrust) stopped.
+(lldb) breakpoint delete 1
+1 breakpoints deleted; 0 breakpoint locations disabled.
+(lldb) breakpoint set -a 0x1804adaa4
+Breakpoint 2: address = 0x00000001804adaa4
+(lldb) thread select 2
+(lldb) thread step-inst
+* thread #2, stop reason = breakpoint 1.1
+    frame #0: 0x00000001804b0b78 
+->  0x1804b0b78: svc    #0x80
+    0x1804b0b7c: b.lo   0x1804b0b9c
+    0x1804b0b80: pacibsp 
+    0x1804b0b84: stp    x29, x30, [sp, #-0x10]!
+Process 1 stopped
+* thread #1, stop reason = breakpoint 2.1
+    frame #0: 0x00000001804adaa4 
+->  0x1804adaa4: svc    #0x80
+    0x1804adaa8: ret    
+    0x1804adaac: mov    x16, #-0xd                ; =-13 
+    0x1804adab0: svc    #0x80
+Target 0: (threadrust) stopped.
+(lldb) thread list
+Process 1 stopped
+* thread #1: tid = 0x0001, 0x00000001804adaa4, stop reason = breakpoint 2.1
+(lldb) process plugin packet monitor where
+at (265, 66) phase=Bp pc=0x1804adaa4 thread=1
+  packet: qRcmd,7768657265
+response: OK
+(lldb) script print("END")
+END
+
+--- stderr
+
+--- gdbserver stderr
+listening on 127.0.0.1:50104
+
+T8MEASURE-END
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 23.53s
+

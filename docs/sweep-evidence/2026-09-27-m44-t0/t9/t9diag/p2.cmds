@@ -1,0 +1,17 @@
+gdb-remote 127.0.0.1:51907
+command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+log enable -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/p2.packets gdb-remote packets
+breakpoint set -a 0x100000530
+process continue
+thread step-inst
+register read fp lr sp pc
+process plugin packet send m27ff7b0,10
+script print("MEMREAD-BEGIN")
+script lldb.debugger.HandleCommand("memory read -c 16 0x27ff7b0")
+script err = lldb.SBError(); v = lldb.process.ReadUnsignedFromMemory(0x27ff7b8, 8, err); print("SB read [0x27ff7b8]:", hex(v), "error:", err.GetCString())
+script err = lldb.SBError(); v = lldb.process.ReadUnsignedFromMemory(0xfffffff8, 8, err); print("SB read [0xfffffff8]:", hex(v), "error:", err.GetCString())
+script err = lldb.SBError(); v = lldb.process.ReadUnsignedFromMemory(0x100000000, 4, err); print("SB read [0x100000000]:", hex(v), "error:", err.GetCString())
+script print("MEMREAD-END")
+log enable -v -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/p2.unwind lldb unwind
+bt
+script print("END")

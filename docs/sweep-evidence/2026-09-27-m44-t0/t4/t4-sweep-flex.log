@@ -1,0 +1,3 @@
+PASS /usr/bin/flex
+ROW	/usr/bin/flex	PASS	71	71	61471	n/a		
+TALLY pass=1 fail=0 skip=0

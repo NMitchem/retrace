@@ -1,0 +1,12 @@
+# t13-csh-samples.sh, 2026-09-27, same host, alternating binaries.
+# base = ebd0266 (the M44 base, M43's merged close); t13 = 5ee07b8 (the swept binary).
+# traps = [trap] lines before the 3403 wall under RETRACE_TRACE=1; gtod = gettimeofday (116) traps.
+1 base traps=337 gtod=21
+1 t13 traps=346 gtod=30
+2 base traps=340 gtod=24
+2 t13 traps=337 gtod=21
+3 base traps=333 gtod=17
+3 t13 traps=333 gtod=17
+4 base traps=336 gtod=20
+4 t13 traps=334 gtod=18
+# traps - gtod = 316 on all eight runs.

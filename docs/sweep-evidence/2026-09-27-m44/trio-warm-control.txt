@@ -1,0 +1,10 @@
+# t13-trio-base.sh, 2026-09-27, after the sweep. /var/tmp/xcrun_db present both before and after
+# (16 bytes, mtime Sep 27 13:39 — written by Task 4's cold-cache recordings' forwarded rename).
+# base = ebd0266 (the M44 base: no 464 or 128 row); t13 = 5ee07b8 (the swept binary).
+# Counts are [trap] lines under RETRACE_TRACE=1 for openat_nocancel (464), rename (128), posix_spawn (244).
+base desdp rc=71 464=0 128=0 244=1 panic=0
+base dyld_info rc=71 464=0 128=0 244=1 panic=0
+base flex rc=71 464=0 128=0 244=1 panic=0
+t13 desdp rc=71 464=0 128=0 244=1 panic=0
+t13 dyld_info rc=71 464=0 128=0 244=1 panic=0
+t13 flex rc=71 464=0 128=0 244=1 panic=0

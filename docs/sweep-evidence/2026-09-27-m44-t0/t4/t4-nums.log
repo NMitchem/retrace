@@ -1,0 +1,65 @@
+   Compiling retrace-trace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace-trace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
+     Running tests/t4_m44_nums.rs (target/aarch64-apple-darwin/debug/deps/t4_m44_nums-5826464a323b084e)
+
+running 1 test
+test t4_m44_nums ... T4M44 TRACE /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/t4-evidence/ed.bin events=274 syscalls=271 truncated=false last=Snapshot
+T4M44   num=461 count=0
+T4M44   num=464 count=1 first=landmark 265 thread=0 ret=0x4 err=false x0=0xfffffffe x1=0x100010080 x2=0xa02 x3=0x180
+T4M44   num=345 count=0
+T4M44   num=10 count=1 first=landmark 271 thread=0 ret=0x0 err=false x0=0x100010080 x1=0x0 x2=0x120a8 x3=0x180
+T4M44   num=128 count=0
+T4M44   num=244 count=0
+T4M44   num=374 count=0
+T4M44 TRACE /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/t4-evidence/ls.bin events=271 syscalls=268 truncated=false last=Snapshot
+T4M44   num=461 count=2 first=landmark 260 thread=0 ret=0x11 err=false x0=0x6 x1=0x27ff028 x2=0x700c00000 x3=0x8000
+T4M44   num=464 count=0
+T4M44   num=345 count=0
+T4M44   num=10 count=0
+T4M44   num=128 count=0
+T4M44   num=244 count=0
+T4M44   num=374 count=0
+T4M44 TRACE /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/t4-evidence/dddiagnose.bin events=454 syscalls=453 truncated=false last=Syscall(-29)
+T4M44   num=461 count=0
+T4M44   num=464 count=0
+T4M44   num=345 count=1 first=landmark 433 thread=0 ret=0x2 err=true x0=0x184793a19 x1=0x27fcaf0 x2=0xd0e80018451d130 x3=0x27fd588
+T4M44   num=10 count=0
+T4M44   num=128 count=0
+T4M44   num=244 count=0
+T4M44   num=374 count=0
+T4M44 TRACE /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/t4-evidence/automationmodetool.bin events=361 syscalls=360 truncated=false last=Syscall(367)
+T4M44   num=461 count=0
+T4M44   num=464 count=0
+T4M44   num=345 count=0
+T4M44   num=10 count=0
+T4M44   num=128 count=0
+T4M44   num=244 count=0
+T4M44   num=374 count=0
+T4M44 TRACE /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/t4-evidence/desdp.bin events=417 syscalls=414 truncated=false last=Snapshot
+T4M44   num=461 count=0
+T4M44   num=464 count=1 first=landmark 395 thread=0 ret=0x4 err=false x0=0xfffffffe x1=0x6d460 x2=0xa02 x3=0x180
+T4M44   num=345 count=0
+T4M44   num=10 count=0
+T4M44   num=128 count=1 first=landmark 398 thread=0 ret=0x0 err=false x0=0x6d460 x1=0x6d260 x2=0x10 x3=0x180
+T4M44   num=244 count=1 first=landmark 405 thread=0 ret=0xe err=true x0=0x27fddb0 x1=0x6d3e0 x2=0x0 x3=0x27fde48
+T4M44   num=374 count=0
+T4M44 TRACE /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/t4-evidence/dyld_info.bin events=415 syscalls=412 truncated=false last=Snapshot
+T4M44   num=461 count=0
+T4M44   num=464 count=1 first=landmark 393 thread=0 ret=0x4 err=false x0=0xfffffffe x1=0x6bad0 x2=0xa02 x3=0x180
+T4M44   num=345 count=0
+T4M44   num=10 count=0
+T4M44   num=128 count=1 first=landmark 396 thread=0 ret=0x0 err=false x0=0x6bad0 x1=0x6b970 x2=0x10 x3=0x180
+T4M44   num=244 count=1 first=landmark 403 thread=0 ret=0xe err=true x0=0x27fdd90 x1=0x6b9f0 x2=0x0 x3=0x27fde28
+T4M44   num=374 count=0
+T4M44 TRACE /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/1996e432-75ea-4d65-a52b-ed70d24a05b8/scratchpad/t4-evidence/flex.bin events=420 syscalls=417 truncated=false last=Snapshot
+T4M44   num=461 count=0
+T4M44   num=464 count=1 first=landmark 398 thread=0 ret=0x4 err=false x0=0xfffffffe x1=0x6d5f0 x2=0xa02 x3=0x180
+T4M44   num=345 count=0
+T4M44   num=10 count=0
+T4M44   num=128 count=1 first=landmark 401 thread=0 ret=0x0 err=false x0=0x6d5f0 x1=0x6d4f0 x2=0x10 x3=0x180
+T4M44   num=244 count=1 first=landmark 408 thread=0 ret=0xe err=true x0=0x27fdda0 x1=0x6d570 x2=0x0 x3=0x27fde38
+T4M44   num=374 count=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.37s
+

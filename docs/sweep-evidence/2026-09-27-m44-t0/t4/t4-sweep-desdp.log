@@ -1,0 +1,3 @@
+PASS /usr/bin/desdp
+ROW	/usr/bin/desdp	PASS	71	71	61327	n/a		
+TALLY pass=1 fail=0 skip=0

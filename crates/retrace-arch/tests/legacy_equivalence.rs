@@ -130,6 +130,26 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     // M37: dup2 is modelled in the box. Its second operand is the guest's own target slot number
     // — translating it would forward a HOST descriptor as the target and overwrite retrace's own.
     (90, View::FdOperands, "dup2(fd, fd2): fd2 is the guest's target slot, not a descriptor to translate — M37; exercised (/bin/csh, /bin/tcsh: dup2(0,16) (1,17) (2,18) (16,19))"),
+    // M44 A1: `_nocancel` twins the SDK-driven twin test (`tests/nocancel.rs`) found. Each shares
+    // its plain form's row, so its views differ from the pre-M33 tables exactly where the plain
+    // form's row differs from "no row".
+    (464, View::FdOperands, "openat_nocancel(dirfd, …): openat's twin — M44; exercised (/bin/ed, and the xcrun trio (desdp, dyld_info, flex) when xcrun rebuilds its cache)"),
+    (464, View::AllocatesFd, "openat_nocancel returns a new descriptor, as openat does — M44; exercised (/bin/ed, and the xcrun trio (desdp, dyld_info, flex) when xcrun rebuilds its cache)"),
+    (409, View::FdOperands, "connect_nocancel(s, …): connect's twin — M44; unexercised"),
+    // preadv/pwritev's twins (542, 543): the spec named only 464 and 409, but t0 M4's SDK-driven
+    // sweep found these two as well. Sharing 540's/541's row differs from the legacy tables (which
+    // predate both numbers entirely) in every view where the shared row is non-default, not only
+    // FdOperands: 540's own NestedPointer/ReadsGuestBuffer diffs are ABSENT from this list because
+    // the legacy `matches!` lists already name 540 and 541 literally — they do not name 542/543.
+    (542, View::FdOperands, "preadv_nocancel(fd, …): preadv's twin — M44; unexercised"),
+    (542, View::NestedPointer, "preadv_nocancel(fd, …): preadv's twin, refused upstream like 540 — M44; unexercised"),
+    (543, View::FdOperands, "pwritev_nocancel(fd, …): pwritev's twin — M44; unexercised"),
+    (543, View::ReadsGuestBuffer, "pwritev_nocancel(fd, …): pwritev's twin, forwarded like 541 — M44; unexercised"),
+    // M44 A2: getattrlistbulk's dirfd, and (if Dest) its buffer. statfs64 has neither an Fd nor a
+    // Dest, so no view of it differs and it has no entry. unlink (10) and rename (128) likewise
+    // have no Fd/Dest/nested-pointer/reader kind, so neither differs and neither has an entry.
+    (461, View::FdOperands, "getattrlistbulk(dirfd, …) — M44; exercised (/bin/ls)"),
+    (461, View::DestBuffer, "getattrlistbulk's attrBuf is a Dest of x3 bytes (t0 M2: no cap below the window) — M44; exercised (/bin/ls)"),
 ];
 
 /// The BSD numbers, the mach traps (negative, as the two's-complement `u64` the trap carries), and

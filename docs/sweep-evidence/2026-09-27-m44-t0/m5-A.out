@@ -1,0 +1,51 @@
+(lldb) command source -s 0 '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t0-m5-A.cmds'
+Executing commands in '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t0-m5-A.cmds'.
+(lldb) log enable -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t0-m5-A.packets gdb-remote packets
+(lldb) gdb-remote 127.0.0.1:61156
+Process 1 stopped
+* thread #1, stop reason = start of recording
+    frame #0: 0x00000001400049c0 
+->  0x1400049c0: mov    x0, sp
+    0x1400049c4: and    sp, x0, #0xfffffffffffffff0
+    0x1400049c8: mov    x29, #0x0                 ; =0 
+    0x1400049cc: mov    x30, #0x0                 ; =0 
+Target 0: (No executable module.) stopped.
+(lldb) command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+(lldb) breakpoint set -a 0x1804afaf4 -i 0
+Breakpoint 1: address = 0x00000001804afaf4
+(lldb) process continue
+Process 1 resuming
+Process 1 stopped
+* thread #1, stop reason = breakpoint 1.1
+    frame #0: 0x00000001804afaf4 
+->  0x1804afaf4: svc    #0x80
+    0x1804afaf8: b.lo   0x1804afb18
+    0x1804afafc: pacibsp 
+    0x1804afb00: stp    x29, x30, [sp, #-0x10]!
+Target 0: (No executable module.) stopped.
+(lldb) breakpoint delete 1
+1 breakpoints deleted; 0 breakpoint locations disabled.
+(lldb) process plugin packet monitor where
+at (261, 312) phase=Bp pc=0x1804afaf4 thread=1
+  packet: qRcmd,7768657265
+response: OK
+(lldb) breakpoint set -a 0x1804ecc14
+Breakpoint 2: address = 0x00000001804ecc14
+(lldb) thread step-inst
+Process 1 stopped
+* thread #1, stop reason = instruction step into
+    frame #0: 0x00000001804afaf8 
+->  0x1804afaf8: b.lo   0x1804afb18
+    0x1804afafc: pacibsp 
+    0x1804afb00: stp    x29, x30, [sp, #-0x10]!
+    0x1804afb04: mov    x29, sp
+Target 0: (No executable module.) stopped.
+(lldb) thread list
+Process 1 stopped
+* thread #1: tid = 0x0001, 0x00000001804afaf8, stop reason = instruction step into
+(lldb) process plugin packet monitor where
+at (268, 0) phase=Bp pc=0x1804afaf8 thread=1
+  packet: qRcmd,7768657265
+response: OK
+(lldb) script print("END")
+END

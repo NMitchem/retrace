@@ -1,0 +1,78 @@
+ Process::PrivateResume() m_stop_id = 1, public state: stopped private state: stopped
+ WillResume Thread #1 (0x0xc1ecf9e18): tid = 0x0001, pc = 0x1400049c0, sp = 0x027ffdf0, fp = 0x00000000, plan = 'base plan', state = running, stop others = 0
+ Process::PrivateResume WillResume direction=0
+<lldb.process.internal-state(pid=1)>             Current Plan for thread 1(0xc1ecf9e18) (0x0001, running): base plan being asked whether we should report run.
+ Process::PrivateResume thinks the process has resumed.
+<lldb.process.internal-state(pid=1)>             Discarding thread plans for thread (tid = 0x0002, force 1)
+<lldb.process.internal-state(pid=1)>             Thread::PushPlan(0x0xc1dc40618): "Base thread plan.", tid = 0x0002.
+<lldb.process.internal-state(pid=1)>             0xc1dc40618: tid = 0x2: stop info = <NULL> (stop_id = 2)
+<lldb.process.internal-state(pid=1)>             0xc1dc40618: tid = 0x2: stop info = breakpoint  (stop_id = 2)
+<lldb.process.internal-state(pid=1)>             
+<lldb.process.internal-state(pid=1)>             ThreadList::ShouldStop: 2 threads, 2 unsuspended threads
+<lldb.process.internal-state(pid=1)>             0xc1ecf9e18: tid = 0x1: stop info = <NULL> (stop_id = 2)
+<lldb.process.internal-state(pid=1)>             Thread::ShouldStop for tid = 0x0001 0x0001, pc = 0x00000001804afaf8, should_stop = 0 (ignore since no stop reason)
+<lldb.process.internal-state(pid=1)>             Thread::ShouldStop(0xc1dc40618) for tid = 0x0002 0x0002, pc = 0x00000001804b0b78
+<lldb.process.internal-state(pid=1)>             ^^^^^^^^ Thread::ShouldStop Begin ^^^^^^^^
+<lldb.process.internal-state(pid=1)>             Plan stack initial state:
+  thread #2: tid = 0x0002:
+    Active plan stack:
+      Element 0: Base thread plan.
+
+<lldb.process.internal-state(pid=1)>             Base plan discarding thread plans for thread tid = 0x0002 (breakpoint hit.)
+<lldb.process.internal-state(pid=1)>             Discarding thread plans for thread (tid = 0x0002, force 0)
+<lldb.process.internal-state(pid=1)>             Base plan says should stop: 1.
+<lldb.process.internal-state(pid=1)>             Plan stack final state:
+  thread #2: tid = 0x0002:
+    Active plan stack:
+      Element 0: Base thread plan.
+
+<lldb.process.internal-state(pid=1)>             vvvvvvvv Thread::ShouldStop End (returning 1) vvvvvvvv
+<lldb.process.internal-state(pid=1)>             ThreadList::ShouldStop overall should_stop = 1
+ Process::PerformAction returning from action with m_should_stop: 1.
+ Frame #0 not recognized
+ No relevant frame!
+ Thread::PushPlan(0x0xc1dc40618): "Stepping one instruction past 0x00000001804b0b78 which has no symbol stepping into calls", tid = 0x0002.
+ Process::PrivateResume() m_stop_id = 2, public state: stopped private state: stopped
+ WillResume Thread #1 (0x0xc1ecf9e18): tid = 0x0001, pc = 0x1804afaf8, sp = 0x027ff470, fp = 0x027ff4d0, plan = 'base plan', state = suspended, stop others = 0
+ WillResume Thread #2 (0x0xc1dc40618): tid = 0x0002, pc = 0x1804b0b78, sp = 0x30203f10, fp = 0x30203f60, plan = 'Step over single instruction', state = stepping, stop others = 1
+ Process::PrivateResume WillResume direction=0
+<lldb.process.internal-state(pid=1)>             Current Plan for thread 1(0xc1ecf9e18) (0x0001, suspended): base plan being asked whether we should report run.
+<lldb.process.internal-state(pid=1)>             Current Plan for thread 2(0xc1dc40618) (0x0002, stepping): Step over single instruction being asked whether we should report run.
+ Process::PrivateResume thinks the process has resumed.
+<lldb.process.internal-state(pid=1)>             0xc1ecf9e18: tid = 0x1: stop info = <NULL> (stop_id = 3)
+<lldb.process.internal-state(pid=1)>             0xc1ecf9e18: tid = 0x1: stop info = thread 2 exited during the step (stop_id = 3)
+<lldb.process.internal-state(pid=1)>             
+<lldb.process.internal-state(pid=1)>             ThreadList::ShouldStop: 1 threads, 1 unsuspended threads
+<lldb.process.internal-state(pid=1)>             Thread::ShouldStop for tid = 0x0001 0x0001, should_stop = 0 (ignore since thread was suspended)
+<lldb.process.internal-state(pid=1)>             ThreadList::ShouldStop overall should_stop = 0
+<lldb.process.internal-state(pid=1)>             ThreadList::ShouldReportStop 1 threads
+<lldb.process.internal-state(pid=1)>             Thread::ShouldReportStop() tid = 0x0001: returning vote 0 (temporary state was suspended or invalid)
+<lldb.process.internal-state(pid=1)>             Returning no opinion
+<lldb.process.internal-state(pid=1)>             Process::PrivateResume() m_stop_id = 3, public state: running private state: stopped
+<lldb.process.internal-state(pid=1)>             WillResume Thread #1 (0x0xc1ecf9e18): tid = 0x0001, pc = 0x1804afaf8, sp = 0x027ff470, fp = 0x027ff4d0, plan = 'base plan', state = running, stop others = 0
+<lldb.process.internal-state(pid=1)>             Process::PrivateResume WillResume direction=0
+<lldb.process.internal-state(pid=1)>             Process::PrivateResume thinks the process has resumed.
+<lldb.process.internal-state(pid=1)>             0xc1ecf9e18: tid = 0x1: stop info = <NULL> (stop_id = 4)
+<lldb.process.internal-state(pid=1)>             0xc1ecf9e18: tid = 0x1: stop info = exited (code 0) (stop_id = 4)
+<lldb.process.internal-state(pid=1)>             
+<lldb.process.internal-state(pid=1)>             ThreadList::ShouldStop: 1 threads, 1 unsuspended threads
+<lldb.process.internal-state(pid=1)>             Thread::ShouldStop(0xc1ecf9e18) for tid = 0x0001 0x0001, pc = 0x00000001804b5580
+<lldb.process.internal-state(pid=1)>             ^^^^^^^^ Thread::ShouldStop Begin ^^^^^^^^
+<lldb.process.internal-state(pid=1)>             Plan stack initial state:
+  thread #1: tid = 0x0001:
+    Active plan stack:
+      Element 0: Base thread plan.
+
+<lldb.process.internal-state(pid=1)>             Base plan says should stop: 1.
+<lldb.process.internal-state(pid=1)>             Plan stack final state:
+  thread #1: tid = 0x0001:
+    Active plan stack:
+      Element 0: Base thread plan.
+
+<lldb.process.internal-state(pid=1)>             vvvvvvvv Thread::ShouldStop End (returning 1) vvvvvvvv
+<lldb.process.internal-state(pid=1)>             ThreadList::ShouldStop overall should_stop = 1
+ Frame #0 not recognized
+ No relevant frame!
+<lldb.comm.lldb.ScriptInterpreterIORedirect.comm>                thread created
+ Discarding thread plans for thread (tid = 0x0001, force 1)
+ Discarding thread plans for thread (tid = 0x0001, force 1)

@@ -1,0 +1,12 @@
+ th1/fr1 looking for register saved location for reg 29
+th1/fr0 supplying caller's saved fp (29)'s location using EmulateInstructionARM64 UnwindPlan
+th1/fr0 supplying caller's register fp (29) from the live RegisterContext at frame 0
+ th1/fr1 looking for register saved location for reg 32
+th1/fr0 supplying caller's saved pc (32)'s location, cached
+th1/fr0 supplying caller's saved pc (32)'s location, cached
+ th1/fr1 could not get pc value
+ Frame 1 invalid RegisterContext for this frame, stopping stack walk
+th1 Unwind of this thread is complete.
+(plugin = gdb-remote, state = detached)
+(plugin = gdb-remote, state = exited)
+(plugin = gdb-remote, state = exited, stop_id = 4

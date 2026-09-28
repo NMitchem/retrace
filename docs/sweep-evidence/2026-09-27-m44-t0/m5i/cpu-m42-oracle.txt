@@ -1,0 +1,21 @@
+run 1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/hitorder_e2e.rs (target/aarch64-apple-darwin/debug/deps/hitorder_e2e-040de643b7f09740)
+real 23.89
+user 21.16
+sys 1.83
+exit=0
+run 2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/hitorder_e2e.rs (target/aarch64-apple-darwin/debug/deps/hitorder_e2e-040de643b7f09740)
+real 25.54
+user 23.24
+sys 1.79
+exit=0
+run 3
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/hitorder_e2e.rs (target/aarch64-apple-darwin/debug/deps/hitorder_e2e-040de643b7f09740)
+real 23.57
+user 21.27
+sys 1.77
+exit=0

@@ -1,0 +1,17 @@
+breakpoint set -a 0x1804b0b78 -i 0
+process continue
+thread list
+process plugin packet monitor where
+breakpoint delete 1
+breakpoint set -a 0x1804afaf8
+thread select 2
+thread step-inst
+thread list
+process plugin packet monitor where
+process continue
+thread list
+process plugin packet monitor where
+breakpoint list
+process continue
+thread list
+process plugin packet monitor where

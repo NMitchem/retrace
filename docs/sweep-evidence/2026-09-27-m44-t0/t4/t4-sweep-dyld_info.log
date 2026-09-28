@@ -1,0 +1,3 @@
+PASS /usr/bin/dyld_info
+ROW	/usr/bin/dyld_info	PASS	71	71	61387	n/a		
+TALLY pass=1 fail=0 skip=0

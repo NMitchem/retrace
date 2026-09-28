@@ -49,6 +49,14 @@ pub fn bin() -> &'static str {
 
 pub struct RunOut { pub code: i32, pub stdout: Vec<u8>, pub stderr: String }
 
+/// One line on the test process's own stderr, past libtest's output capture. libtest captures
+/// `eprintln!` in a test that passes, and a skip passes, so an `eprintln!` skip line reaches a gate
+/// log only when its test fails (measured at M43's close). Moved here from `lldb_e2e` at M44 (A5).
+pub fn announce(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
 fn run(args: &[&str]) -> RunOut {
     let out = Command::new(bin()).args(args).output().unwrap();
     RunOut {

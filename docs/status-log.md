@@ -13057,3 +13057,633 @@ No other chunk was re-run, because no `src/` changed: `git diff a1618d6 338fe9b 
 only `gdbserver_e2e.rs`, `lldb_e2e.rs` and `util/rsp.rs`. It adds two `#[test]` lines and removes
 none, touches no `#[ignore]`, and removes no assertion. So the gate is 798 + 2 = **800 / 0 / 9 over
 144**. The tree holds 807 `#[test]` attributes.
+
+## M44-owed: the missing rows, the swallowed skips, and M43's debugger debts
+
+M43 closed the original design's v1 exit (lldb reverse-steps a real crash). What was left had no
+endpoint in the docs; it was breadth and hardening. M44 paid the owed list that is cheapest per line
+of change, in two tracks under one gate and one close (spec `2026-09-27-retrace-m44-owed-design.md`,
+Ruling R3: the operator's choice, against the controller's recommendation to split them). **Track A,
+breadth**: the syscall rows the Apple corpus reached with none, every `_nocancel` twin checked
+against the SDK, `F_DUPFD_CLOEXEC`'s close-on-exec bit, gates for `ls` and `ed`, and skip lines that
+reach a gate log. **Track B, M43's debugger debts**: a backing-lookup index, `disarm-rsi`, a step that
+stops at its own thread's exit, lldb rows for `ni`/`next`/`step-out`/`finish`, an arm64e `bt`, and the
+two stepping behaviour changes M43 left unmeasured.
+
+The milestone's numbers: **one** new fixture (`crates/retrace-guest/asm/btchain.s`, arm64e); **one**
+new module (`crates/retrace-box/src/backings.rs`); **two** new test binaries (`nocancel` in
+`retrace-arch`, and `skiplines`); **+32** `#[test]` attributes over eight files, 807 → 839 by
+source (+31 at `cbe59d7`, +1 from the final review's fix wave); **four** new `arg_kinds` rows (345, 461, 10, 128) and **four** `_nocancel` twins joined to
+their plain forms' rows (409, 464, 542, 543); census 108 → 113; `EXPECTED_DIFFS` 26 → 35;
+**zero** `Box_` fields added (`backings` changed type in place, `Vec<Backing>` → `Backings`, its
+position and so the drop order unchanged); **zero** dispatch arms changed (`retrace-core`'s diff is
+the `[trap]` line printing `x0`–`x7`), `verify_thread` **7 → 7**, `TRACE_MAGIC` unmoved at
+`RT\x00\x0a` (`crates/retrace-trace` has no diff); **zero** `#[ignore]` lines added or removed (9 →
+9), five parked gates re-parked at new walls and two new gates that run; the spec's six rulings
+(R1–R6), five pre-flight rulings (P1–P5, P1 amended) and twenty-one execution rulings (T0-a …
+T12-c, T8-a later corrected); **twenty-three** commits after the spec (`be5dc2b`) and the plan
+(`ebd0266`): t0's three (`b2ff28e`, `87283e4`, `1ae3979`) and twenty task commits — twelve first
+commits, seven review fix-round commits (`ffab395`, `488076f`, `dcca6c6`, `8420eda`, `82af2a8`,
+and Task 12's one round in two, `50c81df` + `cbe59d7`), and Task 9b (`e99c19f`); then this close.
+Gate: **832 passed / 0 failed / 9 ignored across 146 test binaries**, the re-gate after the final
+review's fix wave (831 at `cbe59d7`, the gate below).
+
+**A correction to the sections above.**
+The M34–M40 sections above name 468 `getattrlistat`. 468 is `fchownat` (SDK); `getattrlistat` is 476; see M44 §2a.
+The spec (§2a) traced the misnaming to M34's
+spec, whence it rode through the status log from M34 to M40 and into the README. M38's ledger even
+wrote out the row it expected at 468, which is `getattrlistat`'s shape; keyed at 468 it would have
+treated `fchownat`'s `gid` as a destination pointer whose length is the `flag` word. No corpus
+binary reaches 468 or 476, so Ruling R1 dropped 468 from the owed set, and neither number has a
+row. The README is corrected in place; those sections are left as written.
+
+### What t0 measured
+
+The companion (`docs/superpowers/specs/2026-09-27-retrace-m44-owed-measurements.md`) is the record,
+with its evidence in `docs/sweep-evidence/2026-09-27-m44-t0/`. t0 is three commits: `b2ff28e` (the
+`[trap]` line prints `x0`–`x7`, kept), `87283e4` (M1, M2, M4, M5(ii)–(iv)) and `1ae3979` (M3 and
+M5(i), which the controller ran on scratch trees, Ruling P5).
+
+- **M1 — 374 is routed.** `automationmodetool`'s call is
+  `kevent_qos(-1, …, nchanges 1, …, flags 0x21)`: `x7 = KEVENT_FLAG_WORKQ | KEVENT_FLAG_IMMEDIATE`,
+  one `EVFILT_USER` entry with `EV_ADD|EV_CLEAR`, `_PTHREAD_PRIORITY_EVENT_MANAGER_FLAG` and
+  `DISPATCH_WLH_MANAGER` — byte for byte libdispatch's `_dispatch_kq_init`, right after the box's
+  emulated 368/367 pair, with no `kqueue` (362) anywhere in the run. R4's conditions 1 and 2 fail: the
+  workqueue flag makes xnu act on the calling process's workqueue kqueue (retrace's own, spec §7
+  halt 4's class), and `x0 = −1` is no guest slot. And libdispatch `DISPATCH_CLIENT_CRASH`es on any
+  errno but `EINTR`, so a refusal only moves the guest to a crash: the call needs a modelled success.
+  No row for 374 was ever added, even on the throwaway build.
+- **M2 — 461 is `Dest(Reg(3))`.** xnu's `getattrlistbulk()` never checks `bufferSize`; its only use
+  sizes the uio (`vfs_attrlist.c:4343`), and `readdirattr` caps only its per-entry kernel buffer. With
+  no citable cap inside the window, M34's `Ptr` precedent does not apply. `ls` passes 32,768 bytes, so
+  the clamp is inert for it.
+- **M3 — where each target lands.** Round a (throwaway rows 464, 345, 461) tallied 1/6: `ls` clean;
+  `ed` at `unlink` (10); the xcrun trio at `rename` (128); `dddiagnose` at `mach_msg2` msgh_id 205
+  (`host_get_io_main`); `automationmodetool` unchanged at 374. Round b (+ 10, 128) tallied 4/0: `ed`
+  clean, and the trio `PASS` 71/71 at M38's `posix_spawn` refusal, where natively `desdp` exits 2.
+  Rulings T0-a (10 and 128 join the row set), T0-b (the trio re-parks at the refusal) and T0-c
+  (`dddiagnose` re-parks at 205). Reading the eleven kept traces found the trio's 464 is xcrun
+  rewriting its cache: `openat_nocancel(AT_FDCWD, "/var/tmp/xcrun_db-XXXXXXXX", O_RDWR|O_CREAT|O_EXCL)`
+  then `rename` onto `/var/tmp/xcrun_db`. Round b's `desdp`, running first, installed that cache on
+  the host through its forwarded `rename`, and `dyld_info` and `flex` then skipped 464 and 128
+  entirely. The implementer halted on that as a possible contradicted premise; Ruling T0-e held it
+  not one (all four reach 464 from a cold cache) and moved the 464 gate and census claim onto `ed`,
+  whose 464 opens its own buffer file.
+- **M4 — the twin set is four.** All 32 SDK `_nocancel` names have a plain twin (`ORPHANS` empty);
+  14 pairs share one row, 14 have none on either side, and four have a row on the plain side only:
+  409 `connect_nocancel`, 464 `openat_nocancel`, 542 `preadv_nocancel`, 543 `pwritev_nocancel` — the
+  spec predicted 464 and 409. Two intercepting arms miss a twin: `record_box`'s sigsuspend/`__sigwait`
+  panic arm and `is_signal_syscall` match 111 and 330, not 410 and 422. 0 hits for 409, 410, 422, 542
+  or 543 across the eleven traces, so Ruling T0-d lists 410/422 rather than fixing them.
+- **M5(i) — B1's bar.** `oracle_threadrust_breakpoints_at_both_switches`, three serial runs per tree
+  on a quiet machine: median user **21.27 s** at `c652cf1` (before M43's pre-decode) and **30.90 s**
+  at `64e471e`, a gap of **9.63 s (+45 %)**; M43 had measured +38 %. `cpython_crash_e2e` flat. B1's
+  bar: median ≤ **26.08 s**, half the gap.
+- **M5(ii).** No arm64e fixture had a call chain (`strip47`, `bfamstrip` are single-`_start` asm), so
+  B5 builds `btchain`.
+- **M5(iii) — lldb baselines on `threadrust`**, every session bounded at 120 s: A, a blocked step
+  past another thread's breakpoint, one `vCont;s:1`, ends on the stepped thread at `svc + 4`; B, a
+  step of the thread that is not running, one `vCont;s:2`, refused in place; C, a step across the
+  child's `bsdthread_terminate` (361), one `vCont;s:2` and one `c`, **runs to the end of the
+  recording**.
+- **M5(iv) — `next` at a `bl`.** On `crashy`'s first `bl` (`0x100000530`, into `fstat`'s stub),
+  `next` stopped at the call's **target**, `0x1000005d8`, with one `vCont;s:1`, and t0 wrote that
+  down as lldb's behaviour without a line table. **That was wrong** (Task 9b, below): it was measured
+  under a server bug, and the measurements file carries an appended correction.
+
+### The `_nocancel` structural test (Task 1, `6dc7f43`)
+
+`crates/retrace-arch/tests/nocancel.rs` parses the SDK's `sys/syscall.h` at test time (Ruling R5:
+a committed list cannot see a new SDK's twins) and asserts `arg_kinds(X_nocancel) == arg_kinds(X)`
+for every pair where either side has a row. RED named exactly t0 M4's four pairs. 464 joins
+`SYS_OPENAT` and 409 `SYS_CONNECT` as named constants; 542 and 543 join 540 and 541 as literals,
+because the plain arms are literals. So 542 is refused upstream as 540 is, and 543 forwarded as 541
+is. `EXPECTED_DIFFS` gained seven entries, the 542/543 ones found by running
+`every_view_reproduces_its_legacy_table` rather than derived by hand; `CENSUS` gained 464, its note
+leading with `ed` (T0-e). The control failed naming exactly `openat`/`openat_nocancel`. Task 1's
+Step 6, the 410/422 arm fix, was skipped per T0-d.
+
+### The rows (Task 2, `5ac50f7`)
+
+`statfs64` (345) `[Path, Ptr]`, `fstatfs64`'s path twin with M29's 2,168-byte struct;
+`getattrlistbulk` (461) `[Fd, Ptr, Dest(Reg(3)), Scalar, Scalar]` per t0 M2; `unlink` (10) `[Path]`
+and `rename` (128) `[Path, Path]` per T0-a, literal-keyed in the `PATH_MAX` section (Ruling T0-f).
+374 got nothing. RED: the census test named `[10, 128, 345, 461]` as numbers with no row. 461 needed two
+`EXPECTED_DIFFS` entries; 345, 10 and 128 none, because none of the five views fires on a row of
+`Path`s and a `Ptr`, measured by running `legacy_equivalence` before writing any entry. `truncguard`'s
+window test expects 461's window to widen to the test's 150,000-byte buffer, the `Dest` value.
+Control: 461 as `Ptr` failed both the window test and the `dest_buffer` unit test.
+
+### `F_DUPFD_CLOEXEC` (Task 3, `c993acb`)
+
+`guest_fcntl_dupfd` sets `FD_CLOEXEC` on the host `dup` when the command is `F_DUPFD_CLOEXEC`, so a
+forwarded `F_GETFD` reads 1 as native does. Record-side only: replay's mirror recomputes the table
+half and never opens a host fd for this path, which the implementer read in `retrace-core` before
+writing that claim. `dupfd_dyn.c` gained an `F_DUPFD_CLOEXEC(f, 14)` + `F_GETFD` probe, and
+`dupfd_e2e`'s expected stdout and landmark count changed with it (P3). RED `cloexec=0` in all three
+tests; the control reproduced it. Ruling T3-a parked a redundant assertion rather than deleting it.
+
+### The gates (Task 4, `b525384`)
+
+The controller re-measured on `5ac50f7` first, each trio member alone from a cold cache (Ruling
+T4-a), with labels identical to t0's round b. `ls_records_and_replays` and `ed_records_and_replays`
+were added and run (Ruling R6 would have given them gates even parked). Five `#[ignore]` reasons were
+rewritten at their measured walls: the trio at the `posix_spawn` refusal (464 at landmark ~393–398,
+`rename` three later, the refusal seven after; class C, exec-in-place), `dddiagnose` at
+`host_get_io_main` (345 at 433, msgh_id 205 at 454; class C, the I/O Kit main port), and
+`automationmodetool` at 374, **reclassified class C** and routed to its own milestone (R4), with
+t0 M1's measurement in its reason. `apple_walls_e2e`: 3 passed, 7 ignored; with `--ignored`, `0
+passed; 7 failed`, each on its own wall. Evidence under `docs/sweep-evidence/2026-09-27-m44-t0/t4/`.
+
+### Skip lines (Task 5, `c409248` + `ffab395`)
+
+`util::announce` (a `writeln!` to the process's stderr, past libtest's capture) moved from
+`lldb_e2e.rs` into `tests/util/mod.rs`, and every skip line goes through it: 14 sites in 8 files, the
+exact RED of the new detector, plus `lldb_e2e`'s seven calls. `skiplines.rs` fails the gate on any
+`eprintln!` whose string literal begins `SKIP`, carries its own positive control, and announces
+`SKIPLINES CONTROL: …`, which appeared in an ordinary run's log with no `--nocapture` (the
+ledger's `t5-green.log`). Control: one site reverted to `eprintln!` failed the detector naming
+`jq_e2e.rs:16`. The fix round (`ffab395`) corrected two doc comments that still said
+`eprintln!`; Ruling T5-a let the controller review that six-line prose diff itself. Review Minor 2
+was parked: the detector sees only a literal beginning `SKIP`, so a skip built from a variable, or
+lower-case, slips past it.
+
+### The backing index (Task 6, `3265442` + `488076f`)
+
+`backings.rs` adds `SpanIndex`, `(start, len, pos)` sorted by start and asserted disjoint on insert,
+and `Backings { v, idx }`, which derefs to `[Backing]` and has no `DerefMut`, so every mutation must
+go through a method that keeps the index current (17 pushes, one extend and two removes, which the
+review verified). The four hot lookups (`read_guest`, `read_guest_checked`, `host_span`, `backing_of`)
+binary-search it; the Vec is never reordered, so `snapshot`/`checkpoint` bytes are unchanged (R2).
+An equivalence test over `retrace-sim` probes pins it to the linear scan. The box suite ran 325/0/0
+over 41 binaries with 0 `overlaps` panics; the controller's e2e runs (hitorder 28, gdbserver 23,
+llsc 50, reverse_debug 1, watchsweep 4) passed. The fix round (`488076f`) pinned the successor-side
+overlap assert (two `should_panic` tests, proven by deletion), moved each `Backing` into the Vec
+before the index can panic, so none is dropped mid-unwind while stage 2 maps it, and pinned the
+overflow case. **The CPU bar missed**, timed by the controller on a quiet machine: 29.28 / 27.45 /
+27.63 s, median **27.63 s** against 26.08 s — 3.27 s of the 9.63 s gap recovered (34 %). Ruling
+T6-a routed it, T6-b held Task 7 for the profiler, and T6-c named the successor from the profile
+(`t6-profile.md`): of the ~6.4 s residual, `Box_::insn_at` in `step()`'s pre-decode is ~6.0 s — a
+full guest stage-1 walk per step, four `SpanIndex` lookups (~3.2 s at opt-level 0), a heap `Vec`
+alloc/copy/free per read (~1.8 s), an HVF `SCTLR_EL1` read (~0.15 s). No linear scan is left on the
+path; it is repeated computation, all in the test process's in-process oracle.
+
+### `disarm-rsi` (Task 7, `3fd211c`)
+
+`monitor disarm-rsi` clears `rsi_armed`, idempotent like `arm-rsi`, and `retrace.py`'s `rsi` sends it
+when `ContinueInDirection` fails. The wire row checks that a `bc` after `arm-rsi` then
+`disarm-rsi` is a reverse continue again, not a one-instruction step back; it was RED on its first
+assertion, `E01` for disarming an unarmed server. The control failed one assertion earlier than the
+plan predicted (the description, not the pc), which the implementer reported rather than aligned.
+The `rsi` failure branch has no automated test: the server never sends the plain-signal stop that
+makes a reverse resume fail (M43 L4d).
+
+### A step across its own thread's exit (Task 8, `2a83d7e` + `dcca6c6`)
+
+`step_thread`'s `Advance::Event` branch returns `Halt::ThreadExited` when the stepped thread has
+exited after the crossing, and the server answers `reason:exception`,
+`thread N exited during the step`, at `(x + 1, 0, Bp)`, named on the running thread. Wire row RED →
+GREEN; with the fix removed it fails at `replaylog:end`, t0's shape C. lldb does **not** loop (one
+`vCont;s`) — but it never shows the stop either: it had suspended the running thread for
+`vCont;s:2`, and ignores a stop on a thread it suspended (`t8-lldb-steplog.log` line 46,
+`Thread::ShouldStop … should_stop = 0 (ignore since thread was suspended)`), so it sends one `c`. Ruling T8-a kept B3 on the spec's loop condition
+and first said "lldb users see no change". The review's Important 3 measured otherwise
+(Ruling T8-b): before B3, lldb's follow-up `c` found the recording already consumed; after it, that
+`c` is a real continue with the user's `Z0`s armed, and lldb stops at a breakpoint main reaches after
+the exit (`stop reason = breakpoint 2.1` at `(265, 66)`), where without the fix it ran to `exited
+(code 0)`. **T8-a CORRECTED:** "lldb users see no change from B3" was wrong — right conclusion (keep
+B3), wrong supporting fact. The fix round (`dcca6c6`) pinned the reply's thread and phase (two
+controls, each red), added that discriminating lldb row, corrected the rationale (`thread_ctx` does
+return a stale context for an exited tid; the real constraint is `threads:` membership, and naming
+the exited thread measured a stale pc of `0x4404`), and committed the step logs to
+`docs/sweep-evidence/2026-09-27-m44-t0/t8/`.
+
+### Stepping over a call, and `__PAGEZERO` (Task 9, `5d1945c` + `e99c19f`)
+
+The four rows on `crashy`'s first `bl`: `next` passed first time, expecting t0 M5(iv)'s target;
+`thread step-inst-over`, `thread step-out` and `finish` failed. lldb's unwinder built no frame past
+the dyld stub over the server, where native lldb on the same binary built three. `5d1945c` committed
+them with two rows `#[ignore]`d at that wall, and the review asked for better reasons. Ruling T9-a
+sent a bounded diagnosis first (`t9-diagnosis.md`, now under
+`docs/sweep-evidence/2026-09-27-m44-t0/t9/`): the server's `jGetLoadedDynamicLibrariesInfos` answer
+listed the exe's `__PAGEZERO` (maxprot 0, `[0, 4 GiB)`), which lldb's Darwin loader turns into an
+invalid-memory region, failing every read below 4 GiB **locally, with no packet sent** — and a
+retrace guest's main stack is there (`DYN_STACK_TOP`; sp was about `0x27ff770`). The saved LR at
+`[fp + 8]` was unreadable, and frame #1 dropped. A throwaway patch omitting the segment gave `bt`
+its `main + 60` frame and stopped `ni`, `step-out` and `finish` at `0x100000534` — and turned
+`next` red: it lands at `bl + 4`, as native lldb does. **t0 M5(iv) was measured under this bug**,
+and its "lldb's behaviour, not the server's" was the server's. Ruling T9-b fixed it in M44 as Task
+9b (`e99c19f`): `image_json` omits `__PAGEZERO` (an `rsp.rs` unit test, RED first), both rows
+un-ignored, and `next` expects `bl + 4`; Ruling T9-c declared the review's three findings on the
+old reasons superseded. `thread step-out` and `finish`, each run alone, exit 0 at `0x100000534`.
+Controls: the filter reverted re-reds the unit test and reproduces Task 9's lldb error.
+
+### arm64e `bt` (Task 10, `578fdff` + `8420eda`)
+
+`btchain.s` is freestanding arm64e with `f1` → `f2` → `f3`, each `paciasp`-signed, `f3` storing to
+`GARBAGE_VA` (rc 139). Without a hint, lldb's `bt` showed frame #0 symbolicated and frames #1 and #2
+still carrying their PAC bits (`0x0024000100000328`, `0x005000010000030c`), and lost `start`; its
+unwind log shows lldb reading the frame records, and only the address mask missing. With
+`addressing_bits:47` in `QHOSTINFO` (the guest's `T0SZ = 17`, one `TCR_EL1_V` at every load and
+restore site), `bt` is `f3 + 24`, `f2 + 16`, `f1 + 16`, `start + 8`. The row asserts the symbolicated
+names, which a count alone would not discriminate. Controls: the hint removed re-reds it; 9b's
+`__PAGEZERO` restored re-reds it too, so the row also guards 9b on an arm64e guest. The brief's frame
+filter picked up lldb's connect and stop `frame #0` lines, a brief defect the implementer scoped to
+`bt`'s own output. The fix round added the exit-code assert its siblings have.
+
+### Another thread's hit during a blocked step (Task 11, `a718e02` + `82af2a8`)
+
+B6(a): the until-run of a blocked step now arms the user's breakpoints and watchpoints, and a hit by
+another thread returns `Halt::StepInterrupted`, answered `reason:exception` on the **stepped** thread,
+`thread 2 hit breakpoint at 0x1804ecc14 during thread 1's step` — M43's L7 measured-safe form. Wire
+row RED (`reason:trace` at `svc + 4`) → GREEN; lldb session A: one `vCont;s:1`, `END`, lldb displays
+the named stop; with the fix removed lldb shows `instruction step into`, so the row discriminates. A
+probe also measured lldb's own step-off inside `process continue` from a breakpoint on a blocking
+`svc`: with a breakpoint at no thread's current pc, the continue now stops at the other thread's hit,
+named on the stepped thread; with one at the other thread's saved pc, lldb lifted it for the step-off
+and M43's T5-a stall applied (measured at `a718e02`, before Task 12). The probe was a temporary test,
+not committed. The review found one Critical (plan-mandated): a hit from a **watch**
+bypassed M43 §3c's forward re-parks, so a store-watch stop left the old value in memory and a
+syscall-watch park made the next `bc` skip the write just reported. Ruling T11-a: `StepInterrupted`
+carries the hit's kind (`Hit { Break | Watch | WatchSys }`), and both forward paths re-park through
+one helper, `forward_hit`, identical by construction. The fix round (`82af2a8`) added a store-watch
+row on `watchthread` (RED on `a718e02` with `m` reading 0, GREEN reading `0xc417d00000000001`; the
+re-park removed re-reds it) and a mid-window breakpoint row (coverage, green on both). **The
+syscall-write path is routed**. A search of six threaded fixtures (`threadrust`, `watchthread`,
+`sigthread`, `sigblocked`, `crashthread`, `dispatch_dyn`) found candidates — the new thread's
+`sigaltstack(NULL, &old)` in four, a `mach_vm_map` in `sigblocked` — but on `threadrust`, the one
+probed, the writing thread zero-stores the same buffer earlier in the window (`mem::zeroed()`'s
+`stp`/`str` at `(259, 1450..1452)`), so the store ends the step first; the others are presumed the
+same, unprobed. The path reuses `forward_hit`, which the forward syscall-watch rows cover.
+
+### A step of a thread that is not running (Task 12, `5ee07b8` + `50c81df` + `cbe59d7`)
+
+B6(b): `step_thread(t)` for a live `t` that is not running runs until `t` is scheduled
+(`run_until_thread`), then steps it, one level of recursion. A thread that is not live is refused
+in place, `cannot step thread N: it is not a live thread`; M43's rule 1 ("only the running thread
+can step") is retired. RED on the old refusal → GREEN; lldb session B: one `vCont;s:2`, thread #2
+stepped from `0x1804ecc14` to `0x1804ecc18`. The review found a Critical **by measuring it**: when
+the recording ends before `t` runs, the terminal was answered on another thread, and lldb re-stepped
+until the session's bound killed it (crashthread: 128 × `vCont;s:1` in 30 s). Before B6(b), rule
+1's refusal had ended that after one step. Ruling T12-a fixed rather than reverted: a terminal reached before `t` runs, in either
+until-run (the blocked arm and the not-running arm), becomes `Halt::Refused` on `t`, `the recording
+ended (<what>) before thread N ran[ again]`, parked at the terminal. The fix round found the exit
+loops the same way, since no terminal sends `W` (an exit is `T05 … replaylog:end` on the exiting
+thread), and the one condition covers it. Measured with lldb, bounded at 120 s, fix against pre-fix:
+crash in the not-running arm 1 against **508** `vCont;s:1`; crash in the blocked arm 1 against
+**633**; exit while stepping `dispatch_dyn`'s parked worker 1 against **538** `vCont;s:2`. Rows: two
+crash wire rows, an exit wire row on `dispatch_dyn`, a has-exited refusal, a sibling with the
+breakpoint at the running thread's trap kept armed (the only row that reaches the finish's arrival
+check, T12-c), and a bounded lldb row for the crash. Controls: T12-a undone fails both crash wire
+rows, the exit row and the lldb row (508 × `vCont;s:1`, killed at the 120 s bound); the arrival
+check removed fails only the sibling.
+Ruling T12-b routed the review's Important 3 to Known limits: a breakpoint lldb lifted at the
+stepped thread's pc is not armed for the other threads during the until-run (inferred).
+
+### The sweep (Task 13, run by the controller)
+
+`tools/apple-sweep.sh` on a signed copy of the branch binary at `5ee07b8` (sha256
+`4d3f1b9b565f363ba291317f4f8e371d6628ebed68718d7baad78c79c0020005`; `50c81df` and `cbe59d7` touch only
+`debug.rs`, `gdbserver.rs` and tests, which the sweep's `record-dyn`/`replay` never reach), recorder
+pids 35186–36890: **`TALLY pass=49 fail=5 skip=0`**, against M39's 44/10. Evidence in
+`docs/sweep-evidence/2026-09-27-m44/`, no `.bin` committed. 46 rows unchanged, 8 differ: `ls`, `ed`
+FAIL → PASS 0/0; `desdp`, `dyld_info`, `flex` FAIL → PASS 71/71 at the `posix_spawn` refusal (a PASS
+in the sweep's sense only; their gates stay parked, T0-b); `dddiagnose` from 345 to msgh_id 205, class
+C, its replay diverging at landmark 455 (Task 4 measured 454 on `5ac50f7`; the one-landmark move is
+unmeasured, and the gate asserts on the label and the wall, not the landmark); `csh` 346 → 338 and
+`tcsh` 341 → 333, same wall. The csh/tcsh spread, recorded by M39 without a mechanism, was measured:
+eight `csh` recordings, four on the base binary (`ebd0266`) and four on the swept one, alternating,
+gave 333–346 traps before the wall on both, and 316 on all eight once the `gettimeofday` (116)
+traps are subtracted — the shell's timing, not retrace's. No row moved backwards, and there is no
+class-E row. **One attribution was wrong, and was caught**: the sweep's evidence README first
+credited the trio's FAIL → PASS to A1's 464 row. The sweep ran with xcrun's cache present, and from
+a valid cache the trio skips 464 and 128 and goes straight to `posix_spawn` (T0-e). The docs
+implementer flagged the tension, and the controller then measured it (`trio-warm-control.txt` in the
+evidence directory): from the same cache, the M44 base binary `ebd0266`, which has no 464 row, and
+the swept binary both record all three to 71/71 with **zero** 464 or 128 traps. So the swept trio
+move is the host's cache, which Task 4's cold-cache recordings installed through a forwarded
+`rename`. It is not the 464 row. Task 4's cold-cache runs and `ed` are the 464 row's evidence. This
+is the milestone's third "right conclusion, wrong supporting fact": the row is owed and landed, but
+the sweep does not show it. Anything this close changes under `crates/` after `cbe59d7` postdates the
+swept binary too.
+
+### The audit (this close)
+
+`git diff 64e471e cbe59d7 -- crates/retrace-trace` is empty, so `TRACE_MAGIC` did not move and
+`Event` did not change. `retrace-core`'s diff is the `[trap]` line alone, `x0`–`x7` (kept, spec
+§3b). `grep -c 'self.verify_thread(' crates/retrace-core/src/lib.rs` is **7**. `Box_` gained no
+field: `backings` changed type in place. Lines matching `^\s*#\[ignore`: 9 at `64e471e`, 9 at
+`cbe59d7` (`git grep`). Every `assert` line the branch removes from a test file is in a place the
+spec and Ruling P3 authorise: `dupfd_e2e`'s landmark count (2 → 3, T3), and the three rows the spec
+names for B6 (§3c, §11 item 1) — `gdbserver_e2e`'s blocked-step and not-running rows, and the
+`lldb_e2e` row that runs sessions A and B. `crates/retrace/src/debug.rs` holds **20** `#[test]` and
+`crates/retrace/src/rsp.rs` **12**, as at M43, so the `--bins` chunk is 32 again (Task 9b extended an
+existing `rsp.rs` test rather than adding one).
+
+### The gate
+
+**831 passed / 0 failed / 9 ignored across 146 test binaries at `cbe59d7`**, the last code commit
+before the final review; the re-gate after its fix wave is at the end of this section. The full gate ran from the worktree as one
+background script (`gate.sh` in the ledger directory, M43's retargeted), chunked as CLAUDE.md
+requires, every test chunk `--no-fail-fast` and each chunk's exit code written to
+`gate-summary.txt` before any pipe: `ws` (the workspace less `retrace-box` and `retrace`), `box`
+(whole package, so `Doc-tests retrace_box` is present), `bins`, one `e2e` chunk per file of
+`ls crates/retrace/tests/*.rs` (**77** targets, `skiplines` new), and clippy over `--workspace
+--all-targets` with `-D warnings`.
+
+The tally, chunk by chunk (`tally.sh`, ANSI stripped; every one of the 81 lines in
+`gate-summary.txt` reads `exit=0`: `ws`, `box`, `bins`, 77 `e2e`, `clippy`):
+
+| chunk | passed / failed / ignored | binaries |
+|---|---|---|
+| `ws` | 180 / 0 / 0 | 27 (six `Doc-tests`, each 0 tests) |
+| `box` | 328 / 0 / 0 | 41 (`Doc-tests retrace_box`, 0 tests) |
+| `bins` | 32 / 0 / 0 | 1 |
+| `e2e` | 291 / 0 / 9 | 77 |
+| **all** | **831 / 0 / 9** | **146** |
+
+**Reconciled file by file against the prediction below: 840 = 838 + 2, exactly.** Every `e2e`
+target's passed-plus-ignored equals its file's `#[test]` count. `retrace-box` gates 328 against 328
+in source. The one difference anywhere is `legacy_equivalence`, which gates 5 against the 3 in its
+file: `census.rs`'s two tests compile into it too, and the file says so at line 12. That is the
+same 2 by which M43's 809 exceeded its 807, and it is unchanged. The nine ignored are the seven
+`apple_walls_e2e` parks (`automationmodetool`, `csh`, `dddiagnose`, `desdp`, `dyld_info`, `flex`,
+`tcsh`), `a_rust_stack_overflow_strikes_its_own_guard_page` and `cache_symbol_e2e`. They are M43's
+nine: `ls` and `ed` were added as new, un-ignored gates. **No gate log carries a `SKIPPED` line.** jq,
+Homebrew Python and lldb were all present, so every skippable target ran for real. That is now a
+statement a gate log can carry, where M43's close had to re-run with `--nocapture` to make it.
+`gate-e2e-skiplines.log`, an ordinary run with no `--nocapture`, contains `SKIPLINES CONTROL:
+util::announce reaches a gate log past libtest's capture`.
+
+**The prediction, by source, before the gate.** `predict.sh` counts `^\s*#\[test\]` per file at
+`64e471e` and at the head: **807 → 838 (+31)**, and test targets 144 → 146 (`crates/retrace/tests`
+76 → 77, `crates/retrace-arch/tests` 2 → 3). Eight files changed:
+
+| file | M43 | M44 | delta, by task |
+|---|---|---|---|
+| `crates/retrace-arch/src/lib.rs` | 44 | 45 | +1: `m44_syscall_numbers` (T1, extended by T2) |
+| `crates/retrace-arch/tests/nocancel.rs` | — | 1 | +1, new binary (T1) |
+| `crates/retrace-box/src/backings.rs` | — | 6 | +6, new module: 3 (T6) + 3 (T6 fix round) |
+| `crates/retrace/tests/apple_walls_e2e.rs` | 8 | 10 | +2: `ls`, `ed` (T4) |
+| `crates/retrace/tests/dupfd_e2e.rs` | 2 | 3 | +1 (T3) |
+| `crates/retrace/tests/gdbserver_e2e.rs` | 28 | 38 | +10: 1 (T7), 1 (T8), 2 (T11 fix round; its first commit rewrote one row), 1 (T12: one row replaced by two), 5 (T12 fix round) |
+| `crates/retrace/tests/lldb_e2e.rs` | 5 | 12 | +7: 1 + 1 (T8 and its fix round), 3 (T9), 1 (T10), 1 (T12 fix round); T11 and T12 rewrote one row's sessions |
+| `crates/retrace/tests/skiplines.rs` | — | 3 | +3, new binary (T5) |
+
+The plan's table said +18 tests over 146 binaries, before t0. The differences, by task: T6 +3 (its
+fix round's pins), T8 +1 (the discriminating lldb row, T8-b), T9 +1 (`ni` split from `next`), T11
++2 (T11-a's rows), T12 +6 (the replaced row's second half and T12-a/T12-c's rows): 18 + 13 = 31.
+The 2 census tests still run twice (`census.rs` in its own binary and again inside
+`legacy_equivalence`'s `#[path]` include, as Task 1's run shows: `legacy_equivalence` 5 passed, its
+own 3 plus 2), so the gated passed-plus-ignored is expected to sit 2 above the source count, as
+M43's 800 + 9 did over 807; the per-chunk tally above is the reconciliation against the gate's own
+count. The spec's §9 estimate, before t0, was +12 to +18 tests and +2 or +3 binaries, with 5 to 11
+ignored; the ignored count by source is 9.
+
+**The skip-line control.** Task 14 greps the ordinary `skiplines` gate log for `SKIPLINES
+CONTROL`, spec §6 item 6 (Task 5 had already found it in an ordinary run's log, the ledger's
+`t5-green.log`). With
+every skip line past the capture, a gate log is now a channel that can carry a skip, which M43's
+close had to reconstruct with `--nocapture` re-runs.
+
+### What measurement changed
+
+- **374 needs emulation, not a row** (t0 M1). The workqueue flag makes a forward act on retrace's own
+  process, and libdispatch crashes on any errno but `EINTR`.
+- **The twin set is four, not "464 and 409"** (t0 M4): 542 and 543 joined, and two arms outside the
+  table (410, 422) miss their twins.
+- **The xcrun trio needed one more row than predicted** (128) and then reached the exec refusal, as
+  the spec inferred. Its 464 depends on host state that a recording itself changes (T0-e), so the
+  464 claim rests on `ed`.
+- **B1 missed its bar.** It recovered a third of the gap, not half, and the profile moved the
+  target: the residual is not a scan but repeated work per step, `insn_at`'s walk and allocations.
+- **B3 is lldb-visible after all**, though lldb never shows its stop (T8-b's measurement).
+- **B4's wall was one server answer.** Task 9 parked two rows (`ni`; `step-out` and `finish`) at a
+  mechanism it could not pin, with a hypothesis about lldb's stub unwinding; the diagnosis found
+  `__PAGEZERO` in the image list, a two-line server change.
+- **A blocked step's watch hits needed continue's re-parks** (T11's Critical, found by review), now
+  shared through `forward_hit`.
+- **B6(b) as designed looped lldb at the recording's end** — 508, 633 and 538 × `vCont;s` in 120 s
+  — which the review measured and T12-a closed; and **the exit terminal loops as the crash does**,
+  because the server never sends `W`.
+- **M43's stepping regression is +45 %, not +38 %** (t0 M5(i), three runs per tree on a quiet
+  machine: 21.27 → 30.90 s median user), the same direction and roughly the size M43 measured.
+- **The csh/tcsh landmark spread is `gettimeofday`**, measured for the first time.
+- **The first pathspec for excluding trace files staged nothing** (Ruling P1's
+  `':(exclude)*.bin'`, measured under git 2.50.1, exit 0 and silent); P1 was amended to the
+  directory-anchored form.
+- **"Right conclusion, wrong supporting fact" recurred three times.**
+  - T8-a kept B3 on the right grounds but claimed lldb users would see no change, which T8-b measured
+    false.
+  - t0 M5(iv) reported `next` landing on the call's target as lldb's own behaviour, when it was
+    measured under the server's `__PAGEZERO` bug; with the bug fixed, `next` lands at `bl + 4`, as
+    native lldb does.
+  - The sweep's evidence README credited the trio's move to the 464 row, which a warm-cache control
+    measured false (above).
+
+  The first two were caught by a measurement a later step took for another reason. The third was
+  caught by an implementer reading the evidence against T0-e. None was caught by review of the claim.
+
+### Rulings
+
+The spec's R1–R6 stand: 468 dropped and neither 468 nor 476 given a row (R1); B1 indexes beside
+`backings`, never reorders it (R2); the debugger debts ride in M44 by the operator's choice (R3);
+374's four-condition rule, which routed it (R4); A1 parses the SDK header at test time (R5); `ls`
+and `ed` get gates even if they park (R6), and both run.
+
+Pre-flight:
+
+* **P1** — evidence commits exclude trace files. **Amended**: the working pathspec is the
+  directory-anchored `':(exclude)<dir>/*.bin'`, since the bare form stages nothing.
+* **P2** — scratch outputs go to the ledger or the session scratchpad.
+* **P3** — the "no existing assertion changes" constraint governs the debugger tests; assertion
+  changes a task explicitly mandates elsewhere (T2's `truncguard`, T3's `dupfd_e2e`, T4's reasons,
+  T10's `qHostInfo`) are in scope.
+* **P4** — T12's oracles bound their search by the trace's landmark count.
+* **P5** — t0 split: the controller runs M3 and M5(i), the implementer folds them in.
+
+Execution:
+
+* **T0-a** — `unlink` (10) and `rename` (128) join A2's rows.
+* **T0-b** — the xcrun trio re-parks at the `posix_spawn` refusal, not un-ignored.
+* **T0-c** — `dddiagnose` re-parks at msgh_id 205 `host_get_io_main`.
+* **T0-d** — 410/422's arm gap is listed in Known limits, not fixed.
+* **T0-e** — halt 1 not triggered; the trio's 464 is host-state-dependent, and the 464 gate and
+  census claim rest on `ed`.
+* **T0-f** — 10 and 128 as literal-keyed rows in the `PATH_MAX` section.
+* **T3-a** — a redundant assertion parked, not removed.
+* **T4-a** — each trio member swept alone from a cold cache.
+* **T5-a** — the controller reviews a comment-only fix diff itself.
+* **T6-a** — the missed CPU bar is routed, not halted; a profile first.
+* **T6-b** — Task 7 waits for the profiler.
+* **T6-c** — the residual routed to a successor: a per-page VA → IPA or decoded-instruction cache and
+  a non-allocating four-byte read.
+* **T8-a** — keep B3: the spec's condition is a loop check, and lldb does not loop. **Corrected**:
+  "lldb users see no change from B3" was wrong; lldb does not display B3's own stop, but no longer
+  skips user breakpoints after the stepped thread's exit. The successor is a one-argument change
+  (name the exited thread) plus two decisions (`threads:` membership; which context to report — its
+  stale saved pc measured `0x4404`).
+* **T8-b** — the fix round takes all three Important findings and measures the third.
+* **T9-a** — a bounded diagnosis of the unwinder before Task 10.
+* **T9-b** — fix `__PAGEZERO` in M44 as Task 9b; `next` expects `bl + 4`; t0 M5(iv) corrected by an
+  appended note.
+* **T9-c** — Task 9's review findings superseded by 9b.
+* **T11-a** — `StepInterrupted` carries the hit's kind and re-parks through `forward_hit`; the
+  syscall-write path routed for want of a fixture.
+* **T12-a** — fix B6(b), do not revert: a terminal reached before the stepped thread runs is refused on
+  that thread.
+* **T12-b** — the lifted-breakpoint gap is a documented Known limit.
+* **T12-c** — the finish's arrival check documented and pinned, and the minors fixed.
+
+### What stays owed
+
+* **374 `kevent_qos`**, routed (R4): the workqueue-kqueue case (`KEVENT_FLAG_WORKQ`, `x0 = −1`,
+  `EVFILT_USER`) must be **emulated** as a modelled success, never forwarded or refused.
+  `automationmodetool` stays parked there.
+* **410 `sigsuspend_nocancel` and 422 `__sigwait_nocancel`** (T0-d): missing from
+  `is_signal_syscall` and from `record_box`'s panic arm. No corpus guest reaches either; the fix is
+  the two numbers in each place, when one does.
+* **Exec-in-place**, which parks the xcrun trio (T0-b) as well as the CPython launcher. The trio's
+  464 reach depends on xcrun's host cache (T0-e), so the 464 gate rests on `ed`.
+* **`host_get_io_main`** (msgh_id 205), class C, which parks `dddiagnose` (T0-c). `csh`/`tcsh`'s
+  `fork` is unchanged.
+* **B1's CPU** (T6-a, T6-c): median 27.63 s against the 26.08 s bar (M43 30.90, M42 21.27). The
+  residual is `insn_at` per step; the successor is a per-page VA → IPA or decoded-instruction cache,
+  whose design owes invalidation on remap and W^X promotion (T6-c), and a non-allocating read. The
+  profile's ceilings are unmeasured proposals. Also parked from B1: the overlap assert rests on HVF
+  refusing overlapping stage-2 maps, and `guest_munmap`'s `position()` is still linear (the profile
+  found no linear scan left on the step path).
+* **lldb's display of B3's stop** (T8-a corrected): name the stop on the exited thread, and decide
+  `threads:` membership and which context to report.
+* **B6(a)'s syscall-write path** (T11-a): a fixture whose other thread's syscall writes a buffer it
+  never stored to first.
+* **T12-b**: a breakpoint lldb lifted at the stepped thread's pc is not armed for the other threads'
+  until-run. Inferred; arming it is unmeasured with lldb.
+* **M43's T5-a stall is retired only by inference**: B6(b) replaced the rule-1 refusal it rested on,
+  and its lldb shape has not been re-run since (Task 11's probe measured the stall at `a718e02`,
+  before B6(b)).
+* **The skip-line detector sees only literals beginning `SKIP`** (Task 5's review, Minor 2).
+* **`__PAGEZERO` is omitted from the image list** because retrace's guest stack lives below 4 GiB, a
+  retrace-layout-specific divergence from a stock Mach-O segment list (Task 9b's review). Not a
+  defect; the README says so where it describes the list.
+* **Parked minors**: t0's binary hash not rebuilt-verified, and its evidence file count explained only
+  in the report; the pre-existing `fstatfs64` (346) row comment says `struct statfs *` where the SDK
+  has `struct statfs64 *`; Task 4's `automationmodetool` pc carried from t0 M1's traced run, and the
+  `dyld_info`/`flex` reasons citing `desdp`'s native rc; B1's `len == 0` check compares presence only;
+  `retrace.py`'s throwaway `SBCommandReturnObject` unchecked; Task 8's comment "a thread: outside that
+  list is not sent" reads as general, and `gdbserver.rs`'s `Refused`-arm comment carries the older
+  "cannot be named" imprecision; Task 11's `run_until_thread` comment assumes the writing syscall
+  blocked, and its evidence numbering is off by one; Task 12's "ran" against "ran again" wording, no
+  row that runs the not-running arm forward to the terminal, and a `debug.rs` comment that omits the
+  recording's end; Task 1's constants placed beside each plain sibling rather than grouped
+  (idiom-consistent); Task 9b's un-ignore comments longer than one line.
+* **M43's owed items M44 did not touch**: `gdbserver_e2e`'s runtime (now 38 rows); M43 spec §7's
+  lldb limits that B2–B6 did not retire (no interrupt during a motion, no read or access
+  watchpoints, no symbols for dyld or the shared cache, no expression that runs code, at most 6
+  breakpoints and 4 watchpoints with the all-six step-over runaway, a reverse step only through
+  `rsi` with lldb's sticky direction, the CLI's `where` phase); a NAK's multi-packet resend (T2-b);
+  the `Refused` and dead-server paths with no fixture, `C<sig>;<addr>`'s ignored address and a
+  non-abort crash's symbol-less description (T3-c); `KillOnDrop`'s harmless wait; §3d's trap that
+  returns to itself; M41's and M42's owed lists and M40's `crc32` and `reverse-stepi` cost, as M43
+  left them; and the two long-parked gates, `stackoverflow_rust_e2e` and `symbols_e2e`.
+
+### The final review's fix wave
+
+The whole-branch review (`ebd0266..5b476d6`) ruled "ready to merge, with fixes": no Critical issue,
+one Important and five Minor, and it confirmed several parked cosmetics. It verified the rest sound:
+every `Halt`'s reply, and every reply's `thread:` inside its `threads:`; no reachable lldb loop; no
+lost or doubled hit; B1 on every mutation path; 461's clamp to the backing; A3's symmetry; and this
+log's append-only discipline. The controller ruled FW-a (Minor 1 is corrected by a note, and the
+gate stays as it is), FW-b (Minor 2 is fixed) and FW-c (two dismissals, below). One fix wave, one
+commit per item and one for the docs:
+
+* **FW-1 (Important), `391d595`: skip lines outside `crates/retrace/tests/` still escaped the
+  capture.** `retrace-core`'s `machmsgband_dyn.rs` wrote its two partial skips,
+  `[M32 t1 corpus] SKIPPED jq …` and `… cpython …`, with `eprintln!`, while README and CLAUDE.md
+  said every skip reached the log. Each drops a guest from the corpus walk. The Task 5 detector
+  missed both in three ways: it read only the top level of `crates/retrace/tests/`, only that one
+  crate, and only literals that *begin* `SKIP`. It now scans every `.rs` file under every
+  `crates/*/tests/`, recursively, and flags `SKIP` anywhere in an `eprintln!`'s first string
+  literal. Its floor is 120 files (134 today), and three files it must reach
+  (`retrace-core/tests/machmsgband_dyn.rs`, `retrace/tests/util/mod.rs` and `util/rsp.rs`) pin the
+  three blind spots. **RED** named exactly the two lines, `machmsgband_dyn.rs:257` and `:269`, and
+  nothing else. Both now go through a local `announce` with `util::announce`'s body, since
+  `retrace-core` cannot reach `util`. **Control:** with the scan made non-recursive, the detector
+  fails on `retrace/tests/util/mod.rs`. Its positive control gained the mid-literal shape and a
+  quote before the `SKIP`, escaped and raw. `machmsgband_dyn` run with `--nocapture` printed no
+  SKIPPED line, because this machine has both jq and Homebrew Python (their corpus rows printed).
+  The new lines print only where one of them is missing, and no skip was faked to show one. What
+  stays owed is narrower now: the detector still reads only a literal, so a skip line built from a
+  variable, or written in lower case, slips past.
+* **FW-2 (Minor 2), `36a5ae7`: B3 parked as an arrival and skipped a breakpoint at the running
+  thread's pc.** Task 8 parked B3's stop at `(x + 1, 0, Bp)` (its subsection above). lldb ignores
+  that stop and sends `c`, and from `Bp` the finish stepped over the running thread's instruction at
+  `(x + 1, 0)`, so a user breakpoint at that thread's resume pc was skipped in silence, though
+  `continue` itself reports one there. Under **Ruling FW-b** B3 now parks at `Phase::Sys`, as the
+  blocked step does: its stop is the crossing's own position, not an arrival of the running thread.
+  The T8 wire row's phase assertion moved from `Bp` to `Sys`; that row is this milestone's, so
+  Ruling P3 does not bind it. A new wire row,
+  `a_continue_after_a_step_across_the_threads_own_exit_reports_a_breakpoint_at_the_running_threads_pc`,
+  takes the same fixture to B3's stop, checks the stop's pc against a seek of `(x + 1, 0)`, sets
+  `Z0` there and sends `c`, and asserts a breakpoint stop at that pc, on that thread, at
+  `(x + 1, 0) phase=Bp`. **Control:** with the park reverted to `Bp`, the new row fails; the `c`
+  ran to `replaylog:end`, `exited (code 0)`. `lldb_e2e` passed 12/12, both B3 rows included. A
+  probe measured the change in lldb too (`docs/sweep-evidence/2026-09-27-m44/fw2/`, no `.bin`):
+  with a breakpoint at main's resume pc `0x1804afaf8`, `thread step-inst` on the child's
+  `bsdthread_terminate` now ends at `breakpoint 2.1` on thread 1, at `(265, 0)`, with a hit count
+  of 1. With the park at `Bp` it ran to the end, with a hit count of 0. Neither run looped or
+  reported the hit twice, so the ruling's fallback (revert, and list a Known limit) was not needed.
+* **FW-3 (Minor 5), `554e224`: `dyld_info`'s and `flex`'s ignore reasons cited `desdp`'s native
+  rc.** Each was measured natively with the sweep's shape (no arguments, stdin `</dev/null`), from
+  its own empty cwd in the ledger's scratch directory: `dyld_info` exits **0** (usage on stderr),
+  `flex` exits **1** (`<stdin>:1: premature EOF`, and no `lex.yy.c`), and `desdp` again exits 2.
+  None is 71, so the conclusion stands: 71/71 is retrace's `posix_spawn` refusal, not the program.
+  The measurement also found the reasons' premise false. `dyld_info` and `flex` are one hard-linked
+  file (78 links), and `desdp` is another (16 links); both are xcselect shims. So "the trio shares
+  one stub", in the reasons, in the README's trio paragraph and in M38's section of this log
+  ("the three are one hard-linked Xcode `xcrun` stub"), was never true for `desdp`. The reasons and
+  the README now say so; M38's line stays as it was written. Evidence:
+  `docs/sweep-evidence/2026-09-27-m44/native-trio.txt`, with the commands.
+* **FW-4 (Minors 1, 3 and 4), the docs commit.** Minor 1 (Ruling FW-a): the measurements file said
+  `ls`'s gate asserts native rc 0 and byte-identical stdout. `ls_records_and_replays` asserts record
+  rc 0, replay rc 0, and replay stdout equal to record stdout. Two notes, "Corrected by the M44
+  final review", are appended there in Task 9b's form, and the originals stand. A listing that
+  record and replay agree on but that is wrong is not caught by the `ls` gate. Minor 3: a new README
+  Known limit. B6(a)'s L7 form reports another thread's hit as an exception on the stepped thread,
+  so lldb applies no hit count, ignore count or condition to it; that is inferred and unmeasured.
+  lldb's step-off inside a plain `process continue` is such a step, so a conditional breakpoint on
+  another thread can stop that `continue` unconditionally. The "does not count" fragment moved there
+  from the syscall-write bullet. Minor 4: README's "lldb still shows `EXC_BAD_ACCESS` on the
+  crashing thread's own row" now names its measured shape, where lldb had already stopped at the
+  crash before the step. When the crash is first reached inside the step (the blocked arm), the
+  crashing thread's `qThreadStopInfo` reports no stop reason, and Task 12's fix round saw that row
+  empty in lldb's `thread list`.
+* **FW-5, `fef689b`: four comments.** `fstatfs64`'s prototype is `struct statfs64 *` (SDK
+  `sys/mount.h:444`). The `Refused` arm's "cannot be named" becomes the real constraint, `threads:`
+  membership (`live_threads`). `run_until_thread`'s syscall-write comment no longer assumes the
+  writing syscall blocked: the thread comes from `Advance::WatchSyscall`, which is right either
+  way. The blocked step's comment adds the recording's end (T12-a).
+* **Dismissed (Ruling FW-c).** "ran" against "ran again" in T12-a's not-running text: a runnable
+  thread that never started never ran, so "again" would be false for it. No row runs the
+  not-running arm forward to the terminal: it takes the same `continue_until` → `park_at_terminal`
+  path as the blocked-arm row, which does. The rest of the review's parked table is dismissed as it
+  ruled.
+
+**Discharged from "What stays owed" above:** the detector's prefix-only match (its literal-only
+limit stays) and, from the parked minors, the `fstatfs64` comment, the `dyld_info`/`flex` reasons,
+the `Refused` arm's "cannot be named", `run_until_thread`'s blocking assumption and the `debug.rs`
+comment that omitted the recording's end. **Added:** lldb's hit and ignore counts and conditions
+under the L7 form, inferred and unmeasured (Minor 3).
+
+**`#[test]` delta:** +1, in `gdbserver_e2e.rs`; no other file gains or loses a `#[test]`, and no
+`#[ignore]` changes. One existing assertion changed: the B3 wire row's phase, `Bp` to `Sys`. The
+controller re-gates after this wave, and the gate's counts belong to that run.
+
+**The re-gate.** FW-2 changed `debug.rs`'s behaviour, and every debugger suite spawns the `retrace`
+binary, so every chunk was re-run, not a subset. It ran the same `gate.sh` at `8c59c27`, and run 1's
+logs were kept beside it. Result: **832 passed / 0 failed / 9 ignored across 146 test binaries**, all
+81 chunks `exit=0`: `ws` 180/0/0 over 27, `box` 328/0/0 over 41, `bins` 32/0/0 over 1, `e2e` 292/0/9
+over 77. This is run 1 plus exactly the one new `gdbserver_e2e` row, and it reconciles file by file
+again: 841 = 839 in source + the 2 census tests `legacy_equivalence` includes, and every `e2e`
+target's passed-plus-ignored equals its file's `#[test]` count. `SKIPLINES CONTROL` is again in the
+ordinary `skiplines` log, and no gate log carries a `SKIPPED` line.

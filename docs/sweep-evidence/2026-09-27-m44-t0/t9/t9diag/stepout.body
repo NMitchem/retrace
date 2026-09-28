@@ -1,0 +1,6 @@
+log enable -f @D@/@TAG@.packets gdb-remote packets
+breakpoint set -a 0x100000530
+process continue
+thread step-inst
+thread step-out
+register read pc

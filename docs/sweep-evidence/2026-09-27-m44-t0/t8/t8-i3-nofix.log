@@ -1,0 +1,171 @@
+   Compiling retrace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace)
+warning: unused variable: `exited`
+   --> crates/retrace/src/debug.rs:988:29
+    |
+988 |                         let exited = self.sess().thread_summaries().iter()
+    |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_exited`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variant `ThreadExited` is never constructed
+   --> crates/retrace/src/debug.rs:343:5
+    |
+320 | pub(crate) enum Halt {
+    |                 ---- variant in this enum
+...
+343 |     ThreadExited { thread: u32 },
+    |     ^^^^^^^^^^^^
+    |
+    = note: `Halt` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `retrace` (bin "retrace") generated 2 warnings (run `cargo fix --bin "retrace" -p retrace` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running tests/lldb_e2e.rs (target/aarch64-apple-darwin/debug/deps/lldb_e2e-0c621ee11cc70216)
+
+running 1 test
+test lldb_stops_at_a_breakpoint_past_a_step_across_the_threads_own_exit ... lldb_e2e runs /usr/bin/lldb: lldb-2100.0.17.203
+T8MEASURE
+exit Some(0)
+--- stdout
+(lldb) command source -s 0 '/var/folders/sv/qhscv_qn0yz__5bbk46tlfy00000gn/T/retrace-lldb-94316-50123.cmds'
+Executing commands in '/var/folders/sv/qhscv_qn0yz__5bbk46tlfy00000gn/T/retrace-lldb-94316-50123.cmds'.
+(lldb) gdb-remote 127.0.0.1:50123
+Process 1 stopped
+* thread #1, stop reason = start of recording
+    frame #0: 0x00000001400049c0 
+->  0x1400049c0: mov    x0, sp
+    0x1400049c4: and    sp, x0, #0xfffffffffffffff0
+    0x1400049c8: mov    x29, #0x0                 ; =0 
+    0x1400049cc: mov    x30, #0x0                 ; =0 
+Target 0: (threadrust) stopped.
+(lldb) command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+(lldb) breakpoint set -a 0x1804b0b78 -i 0
+Breakpoint 1: address = 0x00000001804b0b78
+(lldb) process continue
+Process 1 resuming
+Process 1 stopped
+* thread #2, stop reason = breakpoint 1.1
+    frame #0: 0x00000001804b0b78 
+->  0x1804b0b78: svc    #0x80
+    0x1804b0b7c: b.lo   0x1804b0b9c
+    0x1804b0b80: pacibsp 
+    0x1804b0b84: stp    x29, x30, [sp, #-0x10]!
+Target 0: (threadrust) stopped.
+(lldb) breakpoint delete 1
+1 breakpoints deleted; 0 breakpoint locations disabled.
+(lldb) breakpoint set -a 0x1804adaa4
+Breakpoint 2: address = 0x00000001804adaa4
+(lldb) thread select 2
+(lldb) thread step-inst
+* thread #2, stop reason = breakpoint 1.1
+    frame #0: 0x00000001804b0b78 
+->  0x1804b0b78: svc    #0x80
+    0x1804b0b7c: b.lo   0x1804b0b9c
+    0x1804b0b80: pacibsp 
+    0x1804b0b84: stp    x29, x30, [sp, #-0x10]!
+Process 1 stopped
+* thread #1, stop reason = exited (code 0)
+    frame #0: 0x00000001804b5580 
+->  0x1804b5580: svc    #0x80
+    0x1804b5584: b.lo   0x1804b55a4
+    0x1804b5588: pacibsp 
+    0x1804b558c: stp    x29, x30, [sp, #-0x10]!
+Target 0: (threadrust) stopped.
+(lldb) thread list
+Process 1 stopped
+* thread #1: tid = 0x0001, 0x00000001804b5580, stop reason = exited (code 0)
+(lldb) process plugin packet monitor where
+at (264, 3988) phase=Watch pc=0x1804b5580 thread=1
+  packet: qRcmd,7768657265
+response: OK
+(lldb) script print("END")
+END
+
+--- stderr
+
+--- gdbserver stderr
+listening on 127.0.0.1:50123
+
+T8MEASURE-END
+FAILED
+
+failures:
+
+---- lldb_stops_at_a_breakpoint_past_a_step_across_the_threads_own_exit stdout ----
+
+thread 'lldb_stops_at_a_breakpoint_past_a_step_across_the_threads_own_exit' (6970054) panicked at crates/retrace/tests/lldb_e2e.rs:407:5:
+assertion `left == right` failed: main, at the breakpoint past the exit: exit Some(0)
+--- stdout
+(lldb) command source -s 0 '/var/folders/sv/qhscv_qn0yz__5bbk46tlfy00000gn/T/retrace-lldb-94316-50123.cmds'
+Executing commands in '/var/folders/sv/qhscv_qn0yz__5bbk46tlfy00000gn/T/retrace-lldb-94316-50123.cmds'.
+(lldb) gdb-remote 127.0.0.1:50123
+Process 1 stopped
+* thread #1, stop reason = start of recording
+    frame #0: 0x00000001400049c0 
+->  0x1400049c0: mov    x0, sp
+    0x1400049c4: and    sp, x0, #0xfffffffffffffff0
+    0x1400049c8: mov    x29, #0x0                 ; =0 
+    0x1400049cc: mov    x30, #0x0                 ; =0 
+Target 0: (threadrust) stopped.
+(lldb) command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+(lldb) breakpoint set -a 0x1804b0b78 -i 0
+Breakpoint 1: address = 0x00000001804b0b78
+(lldb) process continue
+Process 1 resuming
+Process 1 stopped
+* thread #2, stop reason = breakpoint 1.1
+    frame #0: 0x00000001804b0b78 
+->  0x1804b0b78: svc    #0x80
+    0x1804b0b7c: b.lo   0x1804b0b9c
+    0x1804b0b80: pacibsp 
+    0x1804b0b84: stp    x29, x30, [sp, #-0x10]!
+Target 0: (threadrust) stopped.
+(lldb) breakpoint delete 1
+1 breakpoints deleted; 0 breakpoint locations disabled.
+(lldb) breakpoint set -a 0x1804adaa4
+Breakpoint 2: address = 0x00000001804adaa4
+(lldb) thread select 2
+(lldb) thread step-inst
+* thread #2, stop reason = breakpoint 1.1
+    frame #0: 0x00000001804b0b78 
+->  0x1804b0b78: svc    #0x80
+    0x1804b0b7c: b.lo   0x1804b0b9c
+    0x1804b0b80: pacibsp 
+    0x1804b0b84: stp    x29, x30, [sp, #-0x10]!
+Process 1 stopped
+* thread #1, stop reason = exited (code 0)
+    frame #0: 0x00000001804b5580 
+->  0x1804b5580: svc    #0x80
+    0x1804b5584: b.lo   0x1804b55a4
+    0x1804b5588: pacibsp 
+    0x1804b558c: stp    x29, x30, [sp, #-0x10]!
+Target 0: (threadrust) stopped.
+(lldb) thread list
+Process 1 stopped
+* thread #1: tid = 0x0001, 0x00000001804b5580, stop reason = exited (code 0)
+(lldb) process plugin packet monitor where
+at (264, 3988) phase=Watch pc=0x1804b5580 thread=1
+  packet: qRcmd,7768657265
+response: OK
+(lldb) script print("END")
+END
+
+--- stderr
+
+--- gdbserver stderr
+listening on 127.0.0.1:50123
+
+  left: (true, 1, 6447388032, "exited (code 0)")
+ right: (true, 1, 6447356580, "breakpoint 2.1")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    lldb_stops_at_a_breakpoint_past_a_step_across_the_threads_own_exit
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 20.61s
+
+error: test failed, to rerun pass `-p retrace --test lldb_e2e`
+error: 1 target failed:
+    `-p retrace --test lldb_e2e`

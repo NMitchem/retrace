@@ -1,0 +1,47 @@
+(lldb) command source -s 0 '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t0-m5-next.cmds'
+Executing commands in '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t0-m5-next.cmds'.
+(lldb) log enable -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t0-m5-next.packets gdb-remote packets
+(lldb) gdb-remote 127.0.0.1:61172
+Process 1 stopped
+* thread #1, stop reason = start of recording
+    frame #0: 0x00000001400049c0 
+->  0x1400049c0: mov    x0, sp
+    0x1400049c4: and    sp, x0, #0xfffffffffffffff0
+    0x1400049c8: mov    x29, #0x0                 ; =0 
+    0x1400049cc: mov    x30, #0x0                 ; =0 
+Target 0: (No executable module.) stopped.
+(lldb) command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+(lldb) breakpoint set -a 0x100000530
+Breakpoint 1: address = 0x0000000100000530
+(lldb) process continue
+Process 1 resuming
+Process 1 stopped
+* thread #1, stop reason = breakpoint 1.1
+    frame #0: 0x0000000100000530 
+->  0x100000530: bl     0x1000005d8
+    0x100000534: ldr    w0, [sp, #0x1c]
+    0x100000538: adrp   x1, 0
+    0x10000053c: add    x1, x1, #0x5f0
+Target 0: (No executable module.) stopped.
+(lldb) register read pc
+      pc = 0x0000000100000530
+(lldb) next
+Process 1 stopped
+* thread #1, stop reason = instruction step over
+    frame #0: 0x00000001000005d8 
+->  0x1000005d8: adrp   x16, 4
+    0x1000005dc: ldr    x16, [x16]
+    0x1000005e0: br     x16
+    0x1000005e4: adrp   x16, 4
+Target 0: (No executable module.) stopped.
+(lldb) register read pc
+      pc = 0x00000001000005d8
+(lldb) thread list
+Process 1 stopped
+* thread #1: tid = 0x0001, 0x00000001000005d8, stop reason = instruction step over
+(lldb) process plugin packet monitor where
+at (252, 178) phase=Bp pc=0x1000005d8 thread=1
+  packet: qRcmd,7768657265
+response: OK
+(lldb) script print("END")
+END

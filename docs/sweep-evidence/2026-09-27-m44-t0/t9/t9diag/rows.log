@@ -1,0 +1,156 @@
+=== head-ni
+lldb exit=0
+(lldb) process continue
+* thread #1, stop reason = breakpoint 1.1
+(lldb) thread step-inst-over
+* thread #1, stop reason = instruction step over
+(lldb) register read pc
+      pc = 0x00000001000005d8 crashy`symbol stub for: fstat  crashy`symbol stub for: fstat
+(lldb) script print("END")
+END
+--- packets after the breakpoint stop:
+$vCont?#49
+$Z0,100000530,4#cf
+$c#63
+$m100000400,200#e0
+$m100000600,200#e2
+$z0,100000530,4#ef
+$vCont;s:1#23
+$m100000400,200#e0
+$Z0,100000530,4#cf
+$z0,100000530,4#ef
+=== head-stepout
+lldb exit=1
+(lldb) process continue
+* thread #1, stop reason = breakpoint 1.1
+(lldb) thread step-inst
+* thread #1, stop reason = instruction step into
+(lldb) thread step-out
+error: Could not create return address breakpoint.
+--- packets after the breakpoint stop:
+$vCont?#49
+$Z0,100000530,4#cf
+$c#63
+$m100000400,200#e0
+$m100000600,200#e2
+$z0,100000530,4#ef
+$vCont;s:1#23
+$m100000400,200#e0
+$Z0,100000530,4#cf
+$z0,100000530,4#ef
+=== head-finish
+lldb exit=1
+(lldb) process continue
+* thread #1, stop reason = breakpoint 1.1
+(lldb) thread step-inst
+* thread #1, stop reason = instruction step into
+(lldb) finish
+error: Could not create return address breakpoint.
+--- packets after the breakpoint stop:
+$vCont?#49
+$Z0,100000530,4#cf
+$c#63
+$m100000400,200#e0
+$m100000600,200#e2
+$z0,100000530,4#ef
+$vCont;s:1#23
+$m100000400,200#e0
+$Z0,100000530,4#cf
+$z0,100000530,4#ef
+=== patched-ni
+lldb exit=0
+(lldb) process continue
+* thread #1, stop reason = breakpoint 1.1
+(lldb) thread step-inst-over
+* thread #1, stop reason = instruction step over
+(lldb) register read pc
+      pc = 0x0000000100000534 crashy`main + 60  crashy`main + 60
+(lldb) script print("END")
+END
+--- packets after the breakpoint stop:
+$vCont?#49
+$Z0,100000530,4#cf
+$c#63
+$m100000400,200#e0
+$m27ff600,200#f6
+$m27ffe00,200#25
+$m100000600,200#e2
+$z0,100000530,4#ef
+$vCont;s:1#23
+$m100000400,200#e0
+$m27ff600,200#f6
+$Z0,100000530,4#cf
+$Z0,100000534,4#d3
+$c#63
+$m27ff600,200#f6
+$m27ffe00,200#25
+$z0,100000534,4#f3
+$m100000400,200#e0
+$m100000600,200#e2
+$z0,100000530,4#ef
+=== patched-stepout
+lldb exit=0
+(lldb) process continue
+* thread #1, stop reason = breakpoint 1.1
+(lldb) thread step-inst
+* thread #1, stop reason = instruction step into
+(lldb) thread step-out
+* thread #1, stop reason = step out
+(lldb) register read pc
+      pc = 0x0000000100000534 crashy`main + 60  crashy`main + 60
+(lldb) script print("END")
+END
+--- packets after the breakpoint stop:
+$vCont?#49
+$Z0,100000530,4#cf
+$c#63
+$m100000400,200#e0
+$m27ff600,200#f6
+$m27ffe00,200#25
+$m100000600,200#e2
+$z0,100000530,4#ef
+$vCont;s:1#23
+$m100000400,200#e0
+$m27ff600,200#f6
+$Z0,100000530,4#cf
+$Z0,100000534,4#d3
+$c#63
+$m27ff600,200#f6
+$m27ffe00,200#25
+$z0,100000534,4#f3
+$m100000400,200#e0
+$m100000600,200#e2
+$z0,100000530,4#ef
+=== patched-finish
+lldb exit=0
+(lldb) process continue
+* thread #1, stop reason = breakpoint 1.1
+(lldb) thread step-inst
+* thread #1, stop reason = instruction step into
+(lldb) finish
+* thread #1, stop reason = step out
+(lldb) register read pc
+      pc = 0x0000000100000534 crashy`main + 60  crashy`main + 60
+(lldb) script print("END")
+END
+--- packets after the breakpoint stop:
+$vCont?#49
+$Z0,100000530,4#cf
+$c#63
+$m100000400,200#e0
+$m27ff600,200#f6
+$m27ffe00,200#25
+$m100000600,200#e2
+$z0,100000530,4#ef
+$vCont;s:1#23
+$m100000400,200#e0
+$m27ff600,200#f6
+$Z0,100000530,4#cf
+$Z0,100000534,4#d3
+$c#63
+$m27ff600,200#f6
+$m27ffe00,200#25
+$z0,100000534,4#f3
+$m100000400,200#e0
+$m100000600,200#e2
+$z0,100000530,4#ef

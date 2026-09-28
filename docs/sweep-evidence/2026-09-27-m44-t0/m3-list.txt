@@ -1,0 +1,7 @@
+/bin/ed
+/bin/ls
+/usr/bin/desdp
+/usr/bin/dyld_info
+/usr/bin/flex
+/usr/bin/dddiagnose
+/usr/bin/automationmodetool

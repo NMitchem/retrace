@@ -1,0 +1,24 @@
+   Compiling retrace-sim v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace-sim)
+   Compiling retrace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
+     Running tests/t0_m5.rs (target/aarch64-apple-darwin/debug/deps/t0_m5-09c41f6e7fcf581c)
+
+running 1 test
+test t0_m5_params ... T0M5 events=272
+T0M5 A/B n=261 t=0 me=1 svc=0x1804afaf4 m=0 b=0x1804ecc14 other=2 other_pc=0x1804ecc14
+T0M5 thread 0: landmarks=263 first=1 last=269 last_num=Some(4) tail=[(269, Some(4)), (268, Some(-12)), (261, Some(515)), (260, Some(360)), (259, Some(-14))]
+T0M5 thread 1: landmarks=6 first=262 last=267 last_num=Some(361) tail=[(267, Some(361)), (266, Some(516)), (265, Some(331)), (264, Some(4)), (263, Some(53))]
+T0M5 C lc=267 num=Some(361) svc_c=0x1804b0b78 m_c=0 next=Some((Some(0), Some(-12)))
+T0M5 ev[264] thread=Some(1) num=Some(4)
+T0M5 ev[265] thread=Some(1) num=Some(331)
+T0M5 ev[266] thread=Some(1) num=Some(516)
+T0M5 ev[267] thread=Some(1) num=Some(361)
+T0M5 ev[268] thread=Some(0) num=Some(-12)
+T0M5 ev[269] thread=Some(0) num=Some(4)
+T0M5 ev[270] thread=None num=None
+T0M5 ev[271] thread=None num=None
+T0M5 last=Some(Discriminant(0))
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.05s
+

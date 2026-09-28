@@ -223,6 +223,10 @@ fn the_window_widens_for_the_m34_rows_and_not_for_getattrlist() {
         "getattrlist is kernel-bounded at 15,360 bytes (ATTR_MAX_BUFFER_LONGPATHS) and stays Ptr");
     assert_eq!(b.diff_window_for_test(retrace_arch::SYS_FGETATTRLIST, 2, AVAIL, &args), FLAT,
         "fgetattrlist shares getattrlist's packers and their bound, and stays Ptr");
+
+    // M44 A2 (t0 M2): getattrlistbulk's attrBuf is x2 and its length x3.
+    assert_eq!(b.diff_window_for_test(retrace_arch::SYS_GETATTRLISTBULK, 2, AVAIL, &args), 150_000,
+        "getattrlistbulk has no kernel cap below the window: its Dest follows attrBufSize");
 }
 
 // M34 control 3: the forwarded-count clamp REACHES the new rows. `tests/clamp.rs` proves

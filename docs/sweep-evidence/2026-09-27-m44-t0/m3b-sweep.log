@@ -1,0 +1,9 @@
+PASS /bin/ed
+ROW	/bin/ed	PASS	0	0	13311	n/a		
+PASS /usr/bin/desdp
+ROW	/usr/bin/desdp	PASS	71	71	13392	n/a		
+PASS /usr/bin/dyld_info
+ROW	/usr/bin/dyld_info	PASS	71	71	13491	n/a		
+PASS /usr/bin/flex
+ROW	/usr/bin/flex	PASS	71	71	13600	n/a		
+TALLY pass=4 fail=0 skip=0

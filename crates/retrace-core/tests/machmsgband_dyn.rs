@@ -76,6 +76,13 @@ const MACH_TASK_SELF: u64 = (-28i64) as u64;
 // assertion checks that the bound is still SMALL ENOUGH for the proof to hold. Two different jobs,
 // and for one round this file claimed the first was doing the second.
 
+/// A skip line, written past libtest's capture: `retrace`'s `util::announce`, which this crate
+/// cannot reach (M44 final review FW-1).
+fn announce(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
 /// Builds `(exe, dyld)` `Loaded` pairs exactly as `crates/retrace/src/main.rs`'s `record-dyn` CLI
 /// path does, and records into a fresh temp trace. Shared by every guest this file records, so the
 /// dyld-resolution logic (real Homebrew binaries carry their own `LC_LOAD_DYLINKER`; the repo's own
@@ -254,9 +261,9 @@ fn every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band() {
         let trace = record_dynamic_guest(JQ, &["-n", "1+1"], "jq-corpus");
         for row in walk_all_mach_msg2_landmarks(&trace) { all_rows.push(("jq", row)); }
     } else {
-        eprintln!("[M32 t1 corpus] SKIPPED jq: {JQ} not installed (`brew install jq`). The \
+        announce(&format!("[M32 t1 corpus] SKIPPED jq: {JQ} not installed (`brew install jq`). The \
                     corpus walk below does NOT include jq's mach_msg2 calls -- this is a gap in \
-                    coverage, not evidence that jq has none.");
+                    coverage, not evidence that jq has none."));
     }
 
     // CPython: Homebrew-only, per cpython_e2e.rs's own convention -- same loud-skip posture.
@@ -266,9 +273,9 @@ fn every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band() {
         let trace = record_dynamic_guest(CPYTHON, &["-c", "print(1)"], "cpython-corpus");
         for row in walk_all_mach_msg2_landmarks(&trace) { all_rows.push(("cpython", row)); }
     } else {
-        eprintln!("[M32 t1 corpus] SKIPPED cpython: {CPYTHON} not found (expected a Homebrew \
+        announce(&format!("[M32 t1 corpus] SKIPPED cpython: {CPYTHON} not found (expected a Homebrew \
                     python@3.14 install). The corpus walk below does NOT include CPython's \
-                    mach_msg2 calls -- this is a gap in coverage, not evidence that it has none.");
+                    mach_msg2 calls -- this is a gap in coverage, not evidence that it has none."));
     }
 
     assert!(!all_rows.is_empty(), "the corpus walk found ZERO mach_msg2 landmarks across every \

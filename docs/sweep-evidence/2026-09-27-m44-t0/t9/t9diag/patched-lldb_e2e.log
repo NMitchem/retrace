@@ -1,0 +1,83 @@
+   Compiling retrace-sim v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/src/crates/retrace-sim)
+   Compiling retrace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/src/crates/retrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.04s
+     Running tests/lldb_e2e.rs (target/aarch64-apple-darwin/debug/deps/lldb_e2e-0c621ee11cc70216)
+
+running 10 tests
+test an_lldb_session_is_deterministic ... lldb_e2e runs /usr/bin/lldb: lldb-2100.0.17.203
+ok
+test lldb_reverse_debugs_cpython_from_the_crash_to_the_store_of_the_pointer ... ok
+test lldb_reverse_debugs_crashy_from_the_crash_to_its_corrupting_store ... ok
+test lldb_reverse_steps_back_onto_another_threads_trap ... ok
+test lldb_steps_a_blocked_thread_to_where_it_resumes_and_refuses_one_that_is_not_running ... ok
+test lldb_steps_a_thread_across_its_own_exit_without_looping ... ok
+test lldb_steps_out_of_a_call_with_step_out_and_finish ... ok
+test lldb_steps_over_a_call_with_next ... FAILED
+test lldb_steps_over_a_call_with_ni ... ok
+test lldb_stops_at_a_breakpoint_past_a_step_across_the_threads_own_exit ... ok
+
+failures:
+
+---- lldb_steps_over_a_call_with_next stdout ----
+
+thread 'lldb_steps_over_a_call_with_next' (7091480) panicked at crates/retrace/tests/lldb_e2e.rs:504:5:
+assertion `left == right` failed: exit Some(0)
+--- stdout
+(lldb) command source -s 0 '/var/folders/sv/qhscv_qn0yz__5bbk46tlfy00000gn/T/retrace-lldb-8594-52057.cmds'
+Executing commands in '/var/folders/sv/qhscv_qn0yz__5bbk46tlfy00000gn/T/retrace-lldb-8594-52057.cmds'.
+(lldb) gdb-remote 127.0.0.1:52057
+Process 1 stopped
+* thread #1, stop reason = start of recording
+    frame #0: 0x00000001400049c0 
+->  0x1400049c0: mov    x0, sp
+    0x1400049c4: and    sp, x0, #0xfffffffffffffff0
+    0x1400049c8: mov    x29, #0x0                 ; =0 
+    0x1400049cc: mov    x30, #0x0                 ; =0 
+Target 0: (crashy) stopped.
+(lldb) command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/src/crates/retrace/lldb/retrace.py
+(lldb) breakpoint set -a 0x100000530
+Breakpoint 1: where = crashy`main + 56, address = 0x0000000100000530
+(lldb) process continue
+Process 1 resuming
+Process 1 stopped
+* thread #1, stop reason = breakpoint 1.1
+    frame #0: 0x0000000100000530 crashy`main + 56
+crashy`main:
+->  0x100000530 <+56>: bl     0x1000005d8               ; symbol stub for: fstat
+    0x100000534 <+60>: ldr    w0, [sp, #0x1c]
+    0x100000538 <+64>: adrp   x1, 0
+    0x10000053c <+68>: add    x1, x1, #0x5f0            ; "CRASHY:"
+Target 0: (crashy) stopped.
+(lldb) next
+Process 1 stopped
+* thread #1, stop reason = instruction step over
+    frame #0: 0x0000000100000534 crashy`main + 60
+crashy`main:
+->  0x100000534 <+60>: ldr    w0, [sp, #0x1c]
+    0x100000538 <+64>: adrp   x1, 0
+    0x10000053c <+68>: add    x1, x1, #0x5f0            ; "CRASHY:"
+    0x100000540 <+72>: mov    x2, #0x7                  ; =7 
+Target 0: (crashy) stopped.
+(lldb) register read pc
+      pc = 0x0000000100000534 crashy`main + 60  crashy`main + 60
+(lldb) script print("END")
+END
+
+--- stderr
+
+--- gdbserver stderr
+listening on 127.0.0.1:52057
+
+  left: Some(4294968628)
+ right: Some(4294968792)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    lldb_steps_over_a_call_with_next
+
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 141.53s
+
+error: test failed, to rerun pass `-p retrace --test lldb_e2e`
+error: 1 target failed:
+    `-p retrace --test lldb_e2e`

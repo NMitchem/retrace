@@ -1,0 +1,17 @@
+target create /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/crashy
+b main
+run
+breakpoint set -a 0x100000530
+continue
+log enable -v -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/native-unwind.log lldb unwind
+thread step-inst
+bt
+frame select 1
+log disable lldb unwind
+image list
+image show-unwind -a 0x1000005d8
+image show-unwind -a 0x100000534
+memory region 0x1000005d8
+memory region 0x100000534
+register read fp lr sp pc
+script print("END")

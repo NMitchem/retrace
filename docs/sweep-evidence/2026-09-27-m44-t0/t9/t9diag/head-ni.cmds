@@ -1,0 +1,8 @@
+gdb-remote 127.0.0.1:51933
+command script import /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/crates/retrace/lldb/retrace.py
+log enable -f /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m44-owed/.superpowers/sdd/2026-09-27-retrace-m44-owed/t9diag/head-ni.packets gdb-remote packets
+breakpoint set -a 0x100000530
+process continue
+thread step-inst-over
+register read pc
+script print("END")

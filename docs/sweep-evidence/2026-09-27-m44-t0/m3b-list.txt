@@ -1,0 +1,4 @@
+/bin/ed
+/usr/bin/desdp
+/usr/bin/dyld_info
+/usr/bin/flex

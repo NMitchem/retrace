@@ -136,8 +136,8 @@ fn a_bad_name_fails_after_earlier_commands_have_run() {
 fn a_stripped_guest_errors_cleanly_instead_of_guessing() {
     const JQ: &str = "/opt/homebrew/bin/jq";
     if !std::path::Path::new(JQ).exists() {
-        eprintln!("SKIPPED a_stripped_guest_errors_cleanly_instead_of_guessing: {JQ} not installed \
-                   (`brew install jq`). This gate did NOT run — it is not evidence of anything.");
+        util::announce(&format!("SKIPPED a_stripped_guest_errors_cleanly_instead_of_guessing: {JQ} not installed \
+                   (`brew install jq`). This gate did NOT run — it is not evidence of anything."));
         return;
     }
     let (rec, trace) = util::record_dynamic_args(JQ, &["-n", "1+1"]);
@@ -176,7 +176,7 @@ fn a_genuinely_duplicated_dyld_name_is_refused_not_guessed() {
     let nm = std::process::Command::new("nm")
         .args(["-arch", "arm64e", "/usr/lib/dyld"]).output();
     let Ok(nm) = nm else {
-        eprintln!("SKIPPED a_genuinely_duplicated_dyld_name_is_refused_not_guessed: `nm` unavailable. \
+        util::announce("SKIPPED a_genuinely_duplicated_dyld_name_is_refused_not_guessed: `nm` unavailable. \
                    This gate did NOT run.");
         return;
     };
@@ -188,7 +188,7 @@ fn a_genuinely_duplicated_dyld_name_is_refused_not_guessed() {
     names.sort_unstable();
     let dup = names.windows(2).find(|w| w[0] == w[1]).map(|w| w[0].to_string());
     let Some(dup) = dup else {
-        eprintln!("SKIPPED a_genuinely_duplicated_dyld_name_is_refused_not_guessed: this dyld's \
+        util::announce("SKIPPED a_genuinely_duplicated_dyld_name_is_refused_not_guessed: this dyld's \
                    arm64e slice duplicates no text symbol name. This gate did NOT run.");
         return;
     };

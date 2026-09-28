@@ -36,8 +36,8 @@ fn fall_through_counts_match_between_record_and_replay() {
     // The fixture that actually exercises the phenomenon.
     const AA: &str = "/usr/bin/aa";
     if !std::path::Path::new(AA).exists() {
-        eprintln!("SKIPPING the nonzero half of this gate: {AA} is missing. The zero fixture cannot \
-                   catch a replay side that stops counting, so this run checked strictly less.");
+        util::announce(&format!("SKIPPING the nonzero half of this gate: {AA} is missing. The zero fixture cannot \
+                   catch a replay side that stops counting, so this run checked strictly less."));
         return;
     }
     let n = check("aa", AA, None);
