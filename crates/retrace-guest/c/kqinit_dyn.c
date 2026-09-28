@@ -80,8 +80,10 @@ int main(int argc, char **argv) {
     } else if (strcmp(mode, "straddle") == 0) {
         void *buf = NULL;
         if (posix_memalign(&buf, 16384, 32768) != 0) return 2;
-        // 16384 - 40: 40 bytes in the first page, 32 in the second, and 8-byte aligned.
-        char *at = (char *)buf + 16384 - 40;
+        // 16384 - 8: 8 bytes in the first page, 64 in the second, and 8-byte aligned. Only `ident`
+        // stays on the first page; filter, flags, qos and udata, all non-zero, land on the second,
+        // so a reader that loses the second half is refused rather than passing on zeros.
+        char *at = (char *)buf + 16384 - 8;
         memcpy(at, &kev, sizeof kev);
         changelist = (uint64_t)at;
     } else if (mode[0] != '\0') {
