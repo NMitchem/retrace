@@ -5,10 +5,15 @@ against M39's run (`docs/sweep-evidence/2026-09-17-m39/`), per spec §3a A6 ("re
 by row against M39's `pass=44 fail=10 skip=0`") and §6 item 7 ("every moved row named").
 
 **Result: `TALLY pass=49 fail=5 skip=0`, against M39's `pass=44 fail=10 skip=0`.** Six rows changed
-their label, and every one of them is a row M44 names: `ed`, `ls` and the xcrun trio (`desdp`,
-`dyld_info`, `flex`) move FAIL → PASS, and `dddiagnose` moves from a recorder panic to a class-C
-record error. `csh` and `tcsh` moved only their landmark, and that move is measured below as the
-guest's own nondeterminism. No row moved for a reason the spec does not name.
+their label:
+- `ed` and `ls` move FAIL → PASS by M44's rows.
+- `dddiagnose` moves from a recorder panic to a class-C record error by M44's `statfs64` row.
+- The xcrun trio (`desdp`, `dyld_info`, `flex`) move FAIL → PASS in the sweep's sense. That move is
+  **the host's xcrun cache, not M44**. A warm-cache control on the M44 base binary reproduces it
+  (below).
+
+`csh` and `tcsh` moved only their landmark, and that move is measured below as the guest's own
+nondeterminism. No row moved for a reason this README does not measure.
 
 ## Method
 
@@ -59,7 +64,7 @@ normalised out. **46 rows are identical and 8 differ.**
 |---|---|---|---|
 | `/bin/ed` | `FAIL` 101/n/a, panic: syscall 464 has no row | `PASS` 0/0 | **A1**: `openat_nocancel` (464) joins `openat`'s row |
 | `/bin/ls` | `FAIL` 101/n/a, panic: syscall 461 has no row | `PASS` 0/0 | **A2**: `getattrlistbulk` (461) row |
-| `/usr/bin/desdp` | `FAIL` 101/n/a, panic: syscall 464 | `PASS` 71/71 | **A1** (464), then the M38 `posix_spawn` refusal; see below |
+| `/usr/bin/desdp` | `FAIL` 101/n/a, panic: syscall 464 | `PASS` 71/71 | **host state**: xcrun's warm cache skips 464, straight to the M38 `posix_spawn` refusal; see below |
 | `/usr/bin/dyld_info` | `FAIL` 101/n/a, panic: syscall 464 | `PASS` 71/71 | same |
 | `/usr/bin/flex` | `FAIL` 101/n/a, panic: syscall 464 | `PASS` 71/71 | same |
 | `/usr/bin/dddiagnose` | `FAIL` 101/n/a, panic: syscall 345 has no row | `FAIL` 4/3, `RECORD ERROR` msgh_id 205 | **A2**: `statfs64` (345) row; the next wall is class C |
@@ -76,7 +81,7 @@ identical.
 
 `desdp`, `dyld_info` and `flex` all exit 71 (`EX_OSERR`) on both record and replay, with identical
 stdout, so the sweep counts them `PASS`. Natively, `desdp` with no arguments exits 2 and prints
-usage (t0 M3). They now get past 464 and reach xcrun's `posix_spawn`, which M38 refuses:
+usage (t0 M3). They reach xcrun's `posix_spawn`, which M38 refuses:
 
 ```
 [retrace] refusing posix_spawn (syscall 244): exec-in-place is unmodelled; returning errno 14 without forwarding
@@ -88,6 +93,20 @@ warm cache, the full sweep's condition. The run gave `TALLY pass=3 fail=0 skip=0
 `trio/*.rec.err` carry the line above. Task 4 measured the same line from a cold cache
 (`docs/sweep-evidence/2026-09-27-m44-t0/t4/`). Their `apple_walls_e2e` gates stay parked at that
 refusal (Ruling T0-b), class C, because exec-in-place is unmodelled.
+
+**Why they moved since M39, measured, and a correction.** This README first credited the trio's
+move to A1's 464 row, and that was wrong. From a valid xcrun cache the trio skips 464 and `rename`
+(128) and goes straight to `posix_spawn` (M44 t0, Ruling T0-e). `/var/tmp/xcrun_db` was present for
+the whole sweep, with mtime 13:39, written by Task 4's cold-cache recordings' forwarded `rename`.
+
+The control (`t13-trio-base.sh`, output in `trio-warm-control.txt`) ran after the sweep, from that
+same cache, under `RETRACE_TRACE=1`. The M44 base binary `ebd0266` has no 464 or 128 row, yet it
+records all three to 71/71, exactly as the swept binary does, with **zero** 464 and zero 128 traps
+on either binary and one `posix_spawn` (244) each.
+
+So M39's 464 panics were a cold cache, and this sweep's PASS is a warm one. The 464 row's evidence
+is `ed`, whose 464 opens its own buffer file, together with Task 4's cold-cache runs. The trio
+supplies none of it.
 
 ### The csh/tcsh landmark move is gettimeofday
 
@@ -106,11 +125,15 @@ measured. The gate asserts on the label and the wall, not on the landmark.
 
 ## Ruling
 
-**Acceptance met.** Every row that moved its label is one M44 names: ed and ls are un-parked (A4),
-the trio moved to its re-parked wall (A4, Ruling T0-b), and dddiagnose moved to its re-parked wall
-(A4). Nothing moved backwards: no `PASS` became a `FAIL`, and no `FAIL` changed class except
-dddiagnose, which went from a missing row to class C. The only other moves are two landmarks, and
-those are now attributed to a counted syscall.
+**Acceptance met.** Every row that moved is explained by measurement:
+- `ed` and `ls` are un-parked by M44's rows: `ed` by 464 (A1) and `unlink` (A2), `ls` by 461 (A2); gated by A4.
+- `dddiagnose` moved to its re-parked wall (A2, A4).
+- The trio moved by host state, which the warm-cache control reproduces on the base binary. Their
+  gates stay parked at the `posix_spawn` refusal (T0-b).
+
+Nothing moved backwards: no `PASS` became a `FAIL`, and no `FAIL` changed class except `dddiagnose`,
+which went from a missing row to class C. The only other moves are two landmarks, and those are now
+attributed to a counted syscall.
 
 ## Files
 
@@ -120,7 +143,8 @@ those are now attributed to a counted syscall.
   `automationmodetool`, `csh`, `dddiagnose`, `tcsh`, `yes`.
 - `trio/` — the trio re-run's log and its three `rec.err`.
 - `csh-samples.txt` — the eight-run gettimeofday measurement.
-- `t13-sweep.sh`, `t13-trio.sh`, `t13-csh-samples.sh` — the scripts, with the session's scratchpad
+- `trio-warm-control.txt` — the warm-cache control, base binary against swept binary.
+- `t13-sweep.sh`, `t13-trio.sh`, `t13-csh-samples.sh`, `t13-trio-base.sh` — the scripts, with the session's scratchpad
   paths left as they ran.
 - **No `.bin` trace files are committed.** The five the sweep kept were removed unread after the
   tally, and the trio re-run's three were removed the same way.

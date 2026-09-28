@@ -332,7 +332,33 @@ per-file expected counts once t0 has run.
 
 ## 10. Outcome
 
-*(Filled at the close.)*
+*(Filled at the close, 2026-09-27, on `cbe59d7`, the last code commit before the final review.)*
+Gate: **831 passed / 0 failed / 9 ignored across 146 test binaries**. All 81 chunks exited 0.
+Reconciled file by file against M43's 800 / 0 / 9 over 144: +31 `#[test]` over eight files, two new
+binaries (`nocancel`, `skiplines`), no `#[ignore]` added or removed, and 840 = 838 in source + the 2
+census tests that `legacy_equivalence` includes. `crates/retrace-trace` has no diff, so
+`TRACE_MAGIC` did not move. The status log's M44 section has the chunk-by-chunk tally.
+
+§6, item by item:
+1. The measurements file exists, with M1–M5 answered. Its M5(iv) carries an appended correction,
+   because it was measured under the `__PAGEZERO` bug.
+2. `nocancel.rs` is green. M4's arm mismatches (410, 422) are listed (T0-d).
+3. 464 and 409 landed with 542 and 543 (A1), 345 and 461 landed (A2), and 374 was routed (R4, t0 M1).
+   10 and 128 were added, as t0 M3 found them owed.
+4. `F_DUPFD_CLOEXEC` is green.
+5. `ls` and `ed` were un-ignored. The trio (at the `posix_spawn` refusal), `dddiagnose` (msgh_id 205)
+   and `automationmodetool` (374) were re-parked with rewritten reasons.
+6. There is no `eprintln!` skip line, and `SKIPLINES CONTROL` appears in an ordinary gate log.
+7. The sweep ran at 49 / 5 against M39's 44 / 10, with every moved row measured. The trio's move is
+   host state, not the 464 row, per the warm-cache control.
+8. B1's equivalence is green, but **its CPU bar was missed and routed** (27.63 s against 26.08 s;
+   T6-a/c). B2, B3 and B4 are green, B4 through a server fix (`__PAGEZERO`, T9-b). B5 shipped
+   (`addressing_bits:47`). B6(a) shipped for breakpoints and store watches, with its syscall-write
+   path routed for want of a fixture. B6(b) shipped with T12-a's loop-breaker at the recording's end.
+9. 0 failed, chunked, reconciled.
+10. The README was edited in place, the status log appended with the 468 pointer, and CLAUDE.md's
+    skip paragraph replaced, with `skiplines` added to the e2e list.
+11. The branch is merged `--no-ff` into local `main` and not pushed.
 
 ## 11. Corrections from the plan (2026-09-27)
 

@@ -13085,7 +13085,7 @@ T12-c, T8-a later corrected); **twenty-three** commits after the spec (`be5dc2b`
 (`ebd0266`): t0's three (`b2ff28e`, `87283e4`, `1ae3979`) and twenty task commits — twelve first
 commits, seven review fix-round commits (`ffab395`, `488076f`, `dcca6c6`, `8420eda`, `82af2a8`,
 and Task 12's one round in two, `50c81df` + `cbe59d7`), and Task 9b (`e99c19f`); then this close.
-Gate: **M44-GATE-COUNT across M44-GATE-BINARIES test binaries**.
+Gate: **831 passed / 0 failed / 9 ignored across 146 test binaries**.
 
 **A correction to the sections above.**
 The M34–M40 sections above name 468 `getattrlistat`. 468 is `fchownat` (SDK); `getattrlistat` is 476; see M44 §2a.
@@ -13354,11 +13354,16 @@ unmeasured, and the gate asserts on the label and the wall, not the landmark); `
 eight `csh` recordings, four on the base binary (`ebd0266`) and four on the swept one, alternating,
 gave 333–346 traps before the wall on both, and 316 on all eight once the `gettimeofday` (116)
 traps are subtracted — the shell's timing, not retrace's. No row moved backwards, and there is no
-class-E row. **One attribution is narrower than it looks**: the sweep ran with xcrun's cache
-present, and from a valid cache the trio skips 464 and 128 and goes straight to `posix_spawn`
-(T0-e). The sweep keeps no `rec.err` for a `PASS` row, and the trio's re-run that read the refusal
-line was warm too, so the swept trio move is not by itself evidence for the 464 row; Task 4's
-cold-cache runs are. Anything this close changes under `crates/` after `cbe59d7` postdates the
+class-E row. **One attribution was wrong, and was caught**: the sweep's evidence README first
+credited the trio's FAIL → PASS to A1's 464 row. The sweep ran with xcrun's cache present, and from
+a valid cache the trio skips 464 and 128 and goes straight to `posix_spawn` (T0-e). The docs
+implementer flagged the tension, and the controller then measured it (`trio-warm-control.txt` in the
+evidence directory): from the same cache, the M44 base binary `ebd0266`, which has no 464 row, and
+the swept binary both record all three to 71/71 with **zero** 464 or 128 traps. So the swept trio
+move is the host's cache, which Task 4's cold-cache recordings installed through a forwarded
+`rename`. It is not the 464 row. Task 4's cold-cache runs and `ed` are the 464 row's evidence. This
+is the milestone's third "right conclusion, wrong supporting fact": the row is owed and landed, but
+the sweep does not show it. Anything this close changes under `crates/` after `cbe59d7` postdates the
 swept binary too.
 
 ### The audit (this close)
@@ -13376,7 +13381,7 @@ existing `rsp.rs` test rather than adding one).
 
 ### The gate
 
-**M44-GATE-COUNT across M44-GATE-BINARIES test binaries.** The full gate ran from the worktree as one
+**831 passed / 0 failed / 9 ignored across 146 test binaries.** The full gate ran from the worktree as one
 background script (`gate.sh` in the ledger directory, M43's retargeted), chunked as CLAUDE.md
 requires, every test chunk `--no-fail-fast` and each chunk's exit code written to
 `gate-summary.txt` before any pipe: `ws` (the workspace less `retrace-box` and `retrace`), `box`
@@ -13384,7 +13389,29 @@ requires, every test chunk `--no-fail-fast` and each chunk's exit code written t
 `ls crates/retrace/tests/*.rs` (**77** targets, `skiplines` new), and clippy over `--workspace
 --all-targets` with `-D warnings`.
 
-M44-GATE-DETAIL
+The tally, chunk by chunk (`tally.sh`, ANSI stripped; every one of the 81 lines in
+`gate-summary.txt` reads `exit=0`: `ws`, `box`, `bins`, 77 `e2e`, `clippy`):
+
+| chunk | passed / failed / ignored | binaries |
+|---|---|---|
+| `ws` | 180 / 0 / 0 | 27 (six `Doc-tests`, each 0 tests) |
+| `box` | 328 / 0 / 0 | 41 (`Doc-tests retrace_box`, 0 tests) |
+| `bins` | 32 / 0 / 0 | 1 |
+| `e2e` | 291 / 0 / 9 | 77 |
+| **all** | **831 / 0 / 9** | **146** |
+
+**Reconciled file by file against the prediction below: 840 = 838 + 2, exactly.** Every `e2e`
+target's passed-plus-ignored equals its file's `#[test]` count. `retrace-box` gates 328 against 328
+in source. The one difference anywhere is `legacy_equivalence`, which gates 5 against the 3 in its
+file: `census.rs`'s two tests compile into it too, and the file says so at line 12. That is the
+same 2 by which M43's 809 exceeded its 807, and it is unchanged. The nine ignored are the seven
+`apple_walls_e2e` parks (`automationmodetool`, `csh`, `dddiagnose`, `desdp`, `dyld_info`, `flex`,
+`tcsh`), `a_rust_stack_overflow_strikes_its_own_guard_page` and `cache_symbol_e2e`. They are M43's
+nine: `ls` and `ed` were added as new, un-ignored gates. **No gate log carries a `SKIPPED` line.** jq,
+Homebrew Python and lldb were all present, so every skippable target ran for real. That is now a
+statement a gate log can carry, where M43's close had to re-run with `--nocapture` to make it.
+`gate-e2e-skiplines.log`, an ordinary run with no `--nocapture`, contains `SKIPLINES CONTROL:
+util::announce reaches a gate log past libtest's capture`.
 
 **The prediction, by source, before the gate.** `predict.sh` counts `^\s*#\[test\]` per file at
 `64e471e` and at the head: **807 → 838 (+31)**, and test targets 144 → 146 (`crates/retrace/tests`
@@ -13443,11 +13470,17 @@ close had to reconstruct with `--nocapture` re-runs.
 - **The first pathspec for excluding trace files staged nothing** (Ruling P1's
   `':(exclude)*.bin'`, measured under git 2.50.1, exit 0 and silent); P1 was amended to the
   directory-anchored form.
-- **"Right conclusion, wrong supporting fact" recurred twice.** T8-a kept B3 on the right grounds but
-  claimed lldb users would see no change, which T8-b measured false. And t0 M5(iv) reported `next`
-  landing on the call's target as lldb's own behaviour, when it was measured under the server's
-  `__PAGEZERO` bug; with the bug fixed, `next` lands at `bl + 4`, as native lldb does. Both were
-  caught by a measurement a later step took for another reason, and neither by review of the claim.
+- **"Right conclusion, wrong supporting fact" recurred three times.**
+  - T8-a kept B3 on the right grounds but claimed lldb users would see no change, which T8-b measured
+    false.
+  - t0 M5(iv) reported `next` landing on the call's target as lldb's own behaviour, when it was
+    measured under the server's `__PAGEZERO` bug; with the bug fixed, `next` lands at `bl + 4`, as
+    native lldb does.
+  - The sweep's evidence README credited the trio's move to the 464 row, which a warm-cache control
+    measured false (above).
+
+  The first two were caught by a measurement a later step took for another reason. The third was
+  caught by an implementer reading the evidence against T0-e. None was caught by review of the claim.
 
 ### Rulings
 
