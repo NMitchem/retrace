@@ -426,6 +426,19 @@ fn main() {
         .status().expect("clang strip47");
     assert!(status.success(), "strip47 guest build failed");
 
+    // btchain: M44 B5 — `_start -> f1 -> f2 -> f3`, each frame's saved LR signed with paciasp, f3
+    // crashing at the M6 GARBAGE_VA, so lldb's `bt` over gdb-remote must strip a PAC signature to
+    // unwind past frame #0. -arch arm64e for the same reason as strip47 above: the PAC posture is
+    // derived from the main executable's arch, and a plain-arm64 guest would boot PAC-off, leaving
+    // every saved LR unsigned and the row vacuous. VM-only, like strip47.
+    let src = format!("{}/asm/btchain.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/btchain");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64e","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang btchain");
+    assert!(status.success(), "btchain guest build failed");
+
     // bfamstrip: pacdb-sign + corrupt + autdb -> FEAT_FPAC fault the box emulates by stripping.
     // The M2-bfam strip-on-FPAC property test. -arch arm64e (Task 7, M7): same reasoning as
     // strip47 above — with PAC posture derived from the main executable's arch, a plain-arm64
