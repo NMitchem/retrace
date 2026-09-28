@@ -13,11 +13,16 @@ Requires **macOS 26.x on Apple Silicon**. Runs non-root; SIP may stay enabled. E
 touches `hv_*` needs the `com.apple.security.hypervisor` entitlement (ad-hoc signable — see
 Codesigning below).
 
-**The README is the current-state document** — what runs today, the known limits, and the gate. Read
-it before starting work. The milestone-by-milestone history lives in `docs/status-log.md` (M0–M16,
-verbatim, each entry true as of its own milestone) and the design specs in
+**`docs/current-state.md` is the current-state document** — what runs today, the known limits,
+performance, and the gate. Read it before starting work. The **README** is the public front page:
+a short summary, a demo, the headline limits and the performance table, drawn from
+`current-state.md` and never contradicting it. The milestone-by-milestone history lives in
+`docs/status-log.md` (verbatim, each entry true as of its own milestone) and the design specs in
 `docs/superpowers/specs/`. Reach for the log when you need to know *how* something came to be or
-what a past milestone measured; reach for the README when you need to know what is true now.
+what a past milestone measured; reach for `current-state.md` when you need to know what is true
+now. (Until 2026-09-28 the README *was* the current-state document; it moved to
+`docs/current-state.md` intact, so older specs, plans and comments that say "the README's Known
+limits" mean that file.)
 
 ## Commands
 
@@ -117,7 +122,7 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
-  record) and summarised under "Known limits" in the README.
+  record) and summarised under "Known limits" in `docs/current-state.md`.
 - CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
   exe through real `/usr/lib/dyld`; append `-- <guest args…>` to pass the guest an argv),
   `... replay t.bin`.
@@ -333,21 +338,26 @@ Development is milestone-driven, M0 onward. Each milestone has a design spec in
 for the milestone, so `ls` them for the current list rather than trusting a list written here.
 Per-task reports and code-review diffs land in `.superpowers/sdd/`.
 
-**Two documents, two jobs, and they must not be merged.** The **README** says what is true *now* —
-capability, limits, gate. It is **edited in place** as reality changes, so it never needs a
-"superseded" note. `docs/status-log.md` is the **append-only history**: a closing milestone adds a
-new section to it and never rewrites an old one, so an earlier claim that later proved wrong is
-left standing with a forward pointer rather than quietly corrected.
+**Two documents, two jobs, and they must not be merged.** `docs/current-state.md` says what is
+true *now* — capability, limits, gate. It is **edited in place** as reality changes, so it never
+needs a "superseded" note. `docs/status-log.md` is the **append-only history**: a closing milestone
+adds a new section to it and never rewrites an old one, so an earlier claim that later proved wrong
+is left standing with a forward pointer rather than quietly corrected.
 
 At a milestone close you therefore touch **both**: append the new Status section to the log, and
-**edit** the README's "What works today" / "Known limits" so they describe the new reality. Do not
-restate either in this file — a third copy is a copy that goes stale.
+**edit** `docs/current-state.md`'s "What works today" / "Known limits" so they describe the new
+reality. Then check the **README**, the short public summary: if the milestone changed anything
+it states (a limit in its Limits list, a headline capability, the Apple-sweep figure, the
+performance table), edit it to match; otherwise leave it alone. It carries no milestone history
+and no measurement detail. Do not restate any of these in this file — a copy is a copy that goes
+stale.
 
 ## Honest-gate discipline
 
 A headline end-to-end gate is parked `#[ignore]`d at the current wall, with the wall documented
 honestly, rather than being faked green or deleted. When you clear a wall, move the gate forward and
-rewrite that documentation — the test's `#[ignore]` reason, the README's "Known limits", and the new
+rewrite that documentation — the test's `#[ignore]` reason, "Known limits" in
+`docs/current-state.md` (and the README's Limits list, if the wall is one it names), and the new
 section you append to `docs/status-log.md`. If
 nothing is left to park it at, un-`#[ignore]` it and say so. A milestone that parks a *new* gate for
 a capability it does not yet have has regressed nothing; that is the discipline working, not a
