@@ -1,0 +1,23 @@
+# The recorded traces' own landmarks (Reader::open_checked; #0 is the Snapshot). Each trace ends
+# at the emulated init: the refused second kevent_qos panicked before its event was appended.
+== automationmodetool (/private/tmp/claude-501/m45-amt2.bin)
+events=363 torn=false
+#0 Snapshot
+#359 Syscall num=133 args=[3, 27fe900, da, 0, 0, 0, 0, 27ff318] ret=0xda ret1=0x0 err=false writes=0 thread=0
+#360 Syscall num=368 args=[400, 27ff258, 18, 0, 1, 0, 0, 3] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#361 Syscall num=367 args=[0, 27ff258, 18, 0, 1, 0, 0, 3] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#362 Syscall num=374 args=[ffffffff, 27ff348, 1, 0, 0, 0, 0, 21] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+== gcd-timer (/private/tmp/claude-501/m45-timer-2.bin)
+events=247 torn=false
+#0 Snapshot
+#243 Syscall num=18446744073709551602 args=[203, 1ec444000, 24000, 0, 1, 10, 63, 0] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#244 Syscall num=368 args=[400, 27fefe8, 18, 0, 10, 0, 0, 3] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#245 Syscall num=367 args=[0, 27fefe8, 18, 0, 10, 0, 0, 3] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#246 Syscall num=374 args=[ffffffff, 27ff0d8, 1, 0, 0, 0, 0, 21] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+== gcd-after (/private/tmp/claude-501/m45-after-2.bin)
+events=246 torn=false
+#0 Snapshot
+#242 Syscall num=18446744073709551602 args=[203, 1ec444000, 24000, 0, 1, 10, 63, 0] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#243 Syscall num=368 args=[400, 27ff008, 18, 0, 10, 0, 0, 3] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#244 Syscall num=367 args=[0, 27ff008, 18, 0, 10, 0, 0, 3] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#245 Syscall num=374 args=[ffffffff, 27ff0f8, 1, 0, 0, 0, 0, 21] ret=0x0 ret1=0x0 err=false writes=0 thread=0
