@@ -651,6 +651,42 @@ fn a_blocked_step_the_recording_ends_before_is_refused_on_the_stepped_thread() {
     assert_eq!(c.where_(), at_end, "parked at the terminal");
 }
 
+fn dispatch() -> &'static Path {
+    static C: OnceLock<PathBuf> = OnceLock::new();
+    C.get_or_init(|| {
+        let (rec, t) = util::record_dynamic(retrace_guest::DISPATCH_DYN);
+        assert_eq!(rec.code, 0, "record dispatch_dyn: {}", rec.stderr);
+        t
+    })
+}
+
+#[test]
+fn a_step_of_a_thread_the_guest_exits_before_is_refused_on_that_thread() {
+    // M44 Ruling T12-a, the exit's terminal: at dispatch_dyn's exit, its workqueue worker is live,
+    // parked with no waker (`BlockReason::Parked`), and nothing runs it again. No terminal is a
+    // `W`: the exit's reply is `replaylog:end`, named on the exiting thread. So a step of the
+    // worker answered with it looped lldb as the crash did (measured with T12-a undone: 538 ×
+    // `vCont;s:2` in the 120 s bound). It is the worker's refusal, naming the exit.
+    let tr = dispatch();
+    let (code, by) = retrace_trace::Reader::open(tr).unwrap().iter().find_map(|e| match e {
+        retrace_trace::Event::Exit { code, thread } => Some((*code, *thread + 1)),
+        _ => None,
+    }).expect("dispatch_dyn exits");
+    let mut c = Rsp::spawn(tr, &[]);
+    let end = c.send("c");
+    assert!(end.contains("replaylog:end;"), "{end}");
+    assert_eq!(r::key(&end, "thread"), Some(format!("{by:x}").as_str()), "{end}");
+    let live: Vec<u32> = c.send("qfThreadInfo")[1..].split(',').map(|t| u32::from_str_radix(t, 16).unwrap()).collect();
+    let worker = *live.iter().find(|&&t| t != by).expect("a live thread besides the exiting one");
+    let at = c.where_();
+    let s = c.send(&format!("vCont;s:{worker:x}"));
+    assert!(s.contains("reason:exception;"), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{worker:x}").as_str()), "on the stepped thread: {s}");
+    assert_eq!(r::description(&s).unwrap(),
+        format!("the recording ended (the guest exited (code {code}) on thread {by}) before thread {worker} ran"));
+    assert_eq!(c.where_(), at, "parked at the terminal");
+}
+
 #[test]
 fn a_step_across_the_stepped_threads_own_exit_stops_there() {
     // M44 B3: the child's `bsdthread_terminate` is its last trap. Before M44 the step ran on until
