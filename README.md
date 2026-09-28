@@ -135,8 +135,8 @@ M44 added (`getattrlistbulk` 461 for `ls`; `openat_nocancel` 464 and `unlink` 10
 each past the wall it had stopped at, loud, since M38. (From M33 through M37 both had "passed" by
 failing identically on an `AT_FDCWD` the fd table rejected; M38 honoured the sentinel and turned
 that silent lie into two named walls.) The other three are `desdp`, `dyld_info` and `flex`, and
-they pass **in the sweep's sense only**: past 464 and `rename` (128) each reaches xcrun's
-`posix_spawn`, which retrace refuses (exec-in-place is unmodelled), and exits 71 on both sides,
+they pass **in the sweep's sense only**: from a cold xcrun cache past 464 and `rename` (128), and
+from a warm one directly, each reaches xcrun's `posix_spawn`, which retrace refuses (exec-in-place is unmodelled), and exits 71 on both sides,
 where natively `desdp` exits 2 with its usage, so their gates stay parked (Known limits). M37 had
 run the sweep three times on 2026-09-13 with the recorder's pid steered into the three regimes M36
 had measured (below `0x4000`; inside `[0x4000, 0x10000)`; inside `[0x10000, 0x18000)`) and tallied
@@ -585,7 +585,7 @@ route — why one of them is a failure by design, and the reconstruction caveat 
   where it had read the host `dup`'s clear flag (`dupfd_e2e`). Nothing new is recorded and
   `TRACE_MAGIC` did not move.
 
-**Gate:** M44-GATE-COUNT across M44-GATE-BINARIES test binaries. The close ran the full chunked gate
+**Gate:** 831 passed / 0 failed / 9 ignored across 146 test binaries. The close ran the full chunked gate
 from one background script (`gate.sh` in the milestone's ledger directory), every test chunk
 `--no-fail-fast` and every exit code captured before any pipe: `ws`, `box`, `--bins`, one
 `--test <name>` invocation for each of the seventy-seven files in `crates/retrace/tests/`, and
@@ -878,9 +878,11 @@ These are real and current, not aspirational gaps.
   `/var/tmp/xcrun_db`, and a recording's forwarded `rename` really installs that cache on the host;
   from a valid cache the trio skips both rows and goes straight to `posix_spawn` (M44 t0, Ruling
   T0-e). Task 4 measured each member alone from a cold cache: 464, `rename` three landmarks later,
-  the refusal seven after. The M44 sweep ran with the cache present and recorded no trap log, so
-  which path its trio took is not measured, and its label move is not by itself evidence for the
-  464 row. The 464 gate and census claim rest on `ed`, whose 464 opens its own buffer file.
+  the refusal seven after. The M44 sweep ran with the cache present, and that path was measured
+  after it: from the same cache, the M44 base binary (`ebd0266`, which has no 464 row) and the
+  swept binary both record all three to 71/71 with no 464 or 128 trap. The sweep's trio move from
+  M39 is therefore the host's cache, not the 464 row. The 464 gate and census claim rest on `ed`,
+  whose 464 opens its own buffer file.
 
   `/bin/launchctl` left the table at M38: it is `PASS` 1/1, its own no-argument usage on stdout
   (4,484 bytes, byte-identical to the host's native output), and its gate runs, asserting on that
