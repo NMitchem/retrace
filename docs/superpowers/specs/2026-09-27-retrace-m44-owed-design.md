@@ -358,7 +358,8 @@ census tests that `legacy_equivalence` includes. `crates/retrace-trace` has no d
 9. 0 failed, chunked, reconciled.
 10. The README was edited in place, the status log appended with the 468 pointer, and CLAUDE.md's
     skip paragraph replaced, with `skiplines` added to the e2e list.
-11. The branch is merged `--no-ff` into local `main` and not pushed.
+11. Met by the `--no-ff` merge that brings this branch into local `main`, the commit after this
+    text; not pushed without the operator's say-so.
 
 ## 11. Corrections from the plan (2026-09-27)
 
