@@ -1547,9 +1547,16 @@ These are real and current, not aspirational gaps.
     none: in every candidate fixture the writing thread stores to that buffer first, so the store
     ends the step before the syscall writes (M44 Task 11, probed on `threadrust`, presumed for the
     rest). The path reuses the forward syscall-watch re-park, which rows do cover. Its successor
-    needs a fixture whose other thread's syscall writes a buffer that thread never stored to. lldb
-    also does not count such a hit on the other thread's breakpoint, and that thread's row shows no
-    stop reason, since the stop is an exception on the stepped thread (L7's form).
+    needs a fixture whose other thread's syscall writes a buffer that thread never stored to.
+  - **lldb applies no hit count, ignore count or condition to another thread's hit during a
+    step** (M44 B6(a), L7's form). Such a hit ends the step as an exception on the **stepped**
+    thread, naming the hit, so lldb never sees it as a hit of that breakpoint: it adds nothing to
+    the breakpoint's hit count, spends none of an ignore count (`breakpoint set -i`), and evaluates
+    no condition. This is inferred from the reply's form and unmeasured. What was measured is that
+    the other thread's row in `thread list` shows no stop reason (M44 Task 11). lldb's step-off from
+    a breakpoint on a blocking `svc` inside a plain `process continue` is such a step, so a
+    conditional breakpoint on another thread can stop that `continue` unconditionally, and one with
+    an ignore count can stop it at a hit the count should have passed.
   - **A breakpoint lldb lifts for its step is not armed for the other threads while the step
     waits** (M44 Ruling T12-b). Before it steps, lldb removes the breakpoints at the threads'
     current pcs (Task 11's probe measured it lifting both the one at the stepping thread's `svc` and
@@ -1566,10 +1573,14 @@ These are real and current, not aspirational gaps.
   - **The end of the recording during a step reads as a refusal on the stepped thread** (M44
     Ruling T12-a). When the recording ends, by another thread's exit or crash, before the stepped
     thread runs, the step is refused on the stepped thread, naming the end (What works today). So a
-    crash shows as a description on the stepped thread rather than as the crashing thread's signal,
-    although lldb still shows `EXC_BAD_ACCESS` on the crashing thread's own row. lldb measured
-    three shapes: a crash while stepping a thread that is not running, a crash during a blocked
-    step, and an exit while stepping a parked worker. Only the first has a permanent lldb row; the
+    crash shows as a description on the stepped thread rather than as the crashing thread's signal.
+    lldb still shows `EXC_BAD_ACCESS` on the crashing thread's own row only where it had already
+    stopped at the crash before the step (the permanent lldb row's shape). When the crash is first
+    reached inside the step (the blocked arm), the crashing thread's `qThreadStopInfo` reports no
+    stop reason, because the last stop is the stepped thread's, and lldb's `thread list` showed
+    that row with none (M44 Task 12's fix round). lldb measured three shapes: a crash while
+    stepping a thread that is not running, a crash during a blocked step, and an exit while
+    stepping a parked worker. Only the first has a permanent lldb row; the
     other two have wire rows. A step of a live thread that never runs again (one blocked for good,
     a parked workqueue worker) waits for the next hit or for that end, and no row runs that wait
     forward to the end: the rows start at the terminal.

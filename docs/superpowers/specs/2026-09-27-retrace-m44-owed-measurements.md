@@ -185,6 +185,15 @@ Files: `m3-native-{ed,ls,desdp}.*`. The sweep ran `ls` in the scratch tree's roo
 `crates/retrace`, so the 46-byte native stdout, not the sweep's `m3a/ls.rp.out`, is what `ls`'s gate
 compares against.
 
+**Corrected by the M44 final review.** `ls`'s gate compares against neither listing.
+`ls_records_and_replays` runs `records_and_replays_clean`, which asserts three things: the
+recording exits 0, the replay exits 0, and the replay's stdout equals the recording's, byte for
+byte. It never runs `ls` natively, and nothing compares either run with the 46 bytes above. So a
+listing that record and replay agree on, but that is wrong, is not caught by the `ls` gate. That is
+what A4's guard requires (spec §4: the row's difference, rc 101 to a recorded outcome), and Ruling
+FW-a keeps the gate so rather than strengthen it: a native comparison is extra, and its cwd
+interacts with the recording's own files.
+
 **What each target reaches, by trace content.** A throwaway test (`m3-nums-test.rs`, run as
 `crates/retrace-trace/tests/t0_m3_nums.rs` and deleted) read each of the 11 kept traces
 (`m3-traces.txt`) with `Reader::open_checked` and counted syscall numbers among their
@@ -230,6 +239,12 @@ removed them, and `/var/tmp/xcrun_db` stays.
 - **`dddiagnose`: re-parked at `mach_msg2` msgh_id 205 `host_get_io_main`** (class C, I/O Kit;
   **Ruling T0-c**). A new Mach RPC is not a row. It reached 345 on the way.
 - **`automationmodetool`: per M1.** 374 is routed and its gate stays parked at the M33 panic on 374.
+
+**Corrected by the M44 final review.** The `ls` decision above says its gate "asserts native rc 0
+and byte-identical stdout in `crates/retrace`". It does not: it asserts record rc 0, replay rc 0,
+and replay stdout equal to record stdout, and never runs `ls` natively (the correction under
+**Native outcomes** above, and Ruling FW-a). A listing that record and replay agree on, but that is
+wrong, is not caught by that gate.
 
 ## M4 — the `_nocancel` twin set and the intercepting arms
 

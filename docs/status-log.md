@@ -13584,3 +13584,95 @@ Execution:
   non-abort crash's symbol-less description (T3-c); `KillOnDrop`'s harmless wait; §3d's trap that
   returns to itself; M41's and M42's owed lists and M40's `crc32` and `reverse-stepi` cost, as M43
   left them; and the two long-parked gates, `stackoverflow_rust_e2e` and `symbols_e2e`.
+
+### The final review's fix wave
+
+The whole-branch review (`ebd0266..5b476d6`) ruled "ready to merge, with fixes": no Critical issue,
+one Important and five Minor, and it confirmed several parked cosmetics. It verified the rest sound:
+every `Halt`'s reply, and every reply's `thread:` inside its `threads:`; no reachable lldb loop; no
+lost or doubled hit; B1 on every mutation path; 461's clamp to the backing; A3's symmetry; and this
+log's append-only discipline. The controller ruled FW-a (Minor 1 is corrected by a note, and the
+gate stays as it is), FW-b (Minor 2 is fixed) and FW-c (two dismissals, below). One fix wave, one
+commit per item and one for the docs:
+
+* **FW-1 (Important), `391d595`: skip lines outside `crates/retrace/tests/` still escaped the
+  capture.** `retrace-core`'s `machmsgband_dyn.rs` wrote its two partial skips,
+  `[M32 t1 corpus] SKIPPED jq …` and `… cpython …`, with `eprintln!`, while README and CLAUDE.md
+  said every skip reached the log. Each drops a guest from the corpus walk. The Task 5 detector
+  missed both in three ways: it read only the top level of `crates/retrace/tests/`, only that one
+  crate, and only literals that *begin* `SKIP`. It now scans every `.rs` file under every
+  `crates/*/tests/`, recursively, and flags `SKIP` anywhere in an `eprintln!`'s first string
+  literal. Its floor is 120 files (134 today), and three files it must reach
+  (`retrace-core/tests/machmsgband_dyn.rs`, `retrace/tests/util/mod.rs` and `util/rsp.rs`) pin the
+  three blind spots. **RED** named exactly the two lines, `machmsgband_dyn.rs:257` and `:269`, and
+  nothing else. Both now go through a local `announce` with `util::announce`'s body, since
+  `retrace-core` cannot reach `util`. **Control:** with the scan made non-recursive, the detector
+  fails on `retrace/tests/util/mod.rs`. Its positive control gained the mid-literal shape and a
+  quote before the `SKIP`, escaped and raw. `machmsgband_dyn` run with `--nocapture` printed no
+  SKIPPED line, because this machine has both jq and Homebrew Python (their corpus rows printed).
+  The new lines print only where one of them is missing, and no skip was faked to show one. What
+  stays owed is narrower now: the detector still reads only a literal, so a skip line built from a
+  variable, or written in lower case, slips past.
+* **FW-2 (Minor 2), `36a5ae7`: B3 parked as an arrival and skipped a breakpoint at the running
+  thread's pc.** Task 8 parked B3's stop at `(x + 1, 0, Bp)` (its subsection above). lldb ignores
+  that stop and sends `c`, and from `Bp` the finish stepped over the running thread's instruction at
+  `(x + 1, 0)`, so a user breakpoint at that thread's resume pc was skipped in silence, though
+  `continue` itself reports one there. Under **Ruling FW-b** B3 now parks at `Phase::Sys`, as the
+  blocked step does: its stop is the crossing's own position, not an arrival of the running thread.
+  The T8 wire row's phase assertion moved from `Bp` to `Sys`; that row is this milestone's, so
+  Ruling P3 does not bind it. A new wire row,
+  `a_continue_after_a_step_across_the_threads_own_exit_reports_a_breakpoint_at_the_running_threads_pc`,
+  takes the same fixture to B3's stop, checks the stop's pc against a seek of `(x + 1, 0)`, sets
+  `Z0` there and sends `c`, and asserts a breakpoint stop at that pc, on that thread, at
+  `(x + 1, 0) phase=Bp`. **Control:** with the park reverted to `Bp`, the new row fails; the `c`
+  ran to `replaylog:end`, `exited (code 0)`. `lldb_e2e` passed 12/12, both B3 rows included. A
+  probe measured the change in lldb too (`docs/sweep-evidence/2026-09-27-m44/fw2/`, no `.bin`):
+  with a breakpoint at main's resume pc `0x1804afaf8`, `thread step-inst` on the child's
+  `bsdthread_terminate` now ends at `breakpoint 2.1` on thread 1, at `(265, 0)`, with a hit count
+  of 1. With the park at `Bp` it ran to the end, with a hit count of 0. Neither run looped or
+  reported the hit twice, so the ruling's fallback (revert, and list a Known limit) was not needed.
+* **FW-3 (Minor 5), `554e224`: `dyld_info`'s and `flex`'s ignore reasons cited `desdp`'s native
+  rc.** Each was measured natively with the sweep's shape (no arguments, stdin `</dev/null`), from
+  its own empty cwd in the ledger's scratch directory: `dyld_info` exits **0** (usage on stderr),
+  `flex` exits **1** (`<stdin>:1: premature EOF`, and no `lex.yy.c`), and `desdp` again exits 2.
+  None is 71, so the conclusion stands: 71/71 is retrace's `posix_spawn` refusal, not the program.
+  The measurement also found the reasons' premise false. `dyld_info` and `flex` are one hard-linked
+  file (78 links), and `desdp` is another (16 links); both are xcselect shims. So "the trio shares
+  one stub", in the reasons, in the README's trio paragraph and in M38's section of this log
+  ("the three are one hard-linked Xcode `xcrun` stub"), was never true for `desdp`. The reasons and
+  the README now say so; M38's line stays as it was written. Evidence:
+  `docs/sweep-evidence/2026-09-27-m44/native-trio.txt`, with the commands.
+* **FW-4 (Minors 1, 3 and 4), the docs commit.** Minor 1 (Ruling FW-a): the measurements file said
+  `ls`'s gate asserts native rc 0 and byte-identical stdout. `ls_records_and_replays` asserts record
+  rc 0, replay rc 0, and replay stdout equal to record stdout. Two notes, "Corrected by the M44
+  final review", are appended there in Task 9b's form, and the originals stand. A listing that
+  record and replay agree on but that is wrong is not caught by the `ls` gate. Minor 3: a new README
+  Known limit. B6(a)'s L7 form reports another thread's hit as an exception on the stepped thread,
+  so lldb applies no hit count, ignore count or condition to it; that is inferred and unmeasured.
+  lldb's step-off inside a plain `process continue` is such a step, so a conditional breakpoint on
+  another thread can stop that `continue` unconditionally. The "does not count" fragment moved there
+  from the syscall-write bullet. Minor 4: README's "lldb still shows `EXC_BAD_ACCESS` on the
+  crashing thread's own row" now names its measured shape, where lldb had already stopped at the
+  crash before the step. When the crash is first reached inside the step (the blocked arm), the
+  crashing thread's `qThreadStopInfo` reports no stop reason, and Task 12's fix round saw that row
+  empty in lldb's `thread list`.
+* **FW-5, `fef689b`: four comments.** `fstatfs64`'s prototype is `struct statfs64 *` (SDK
+  `sys/mount.h:444`). The `Refused` arm's "cannot be named" becomes the real constraint, `threads:`
+  membership (`live_threads`). `run_until_thread`'s syscall-write comment no longer assumes the
+  writing syscall blocked: the thread comes from `Advance::WatchSyscall`, which is right either
+  way. The blocked step's comment adds the recording's end (T12-a).
+* **Dismissed (Ruling FW-c).** "ran" against "ran again" in T12-a's not-running text: a runnable
+  thread that never started never ran, so "again" would be false for it. No row runs the
+  not-running arm forward to the terminal: it takes the same `continue_until` → `park_at_terminal`
+  path as the blocked-arm row, which does. The rest of the review's parked table is dismissed as it
+  ruled.
+
+**Discharged from "What stays owed" above:** the detector's prefix-only match (its literal-only
+limit stays) and, from the parked minors, the `fstatfs64` comment, the `dyld_info`/`flex` reasons,
+the `Refused` arm's "cannot be named", `run_until_thread`'s blocking assumption and the `debug.rs`
+comment that omitted the recording's end. **Added:** lldb's hit and ignore counts and conditions
+under the L7 form, inferred and unmeasured (Minor 3).
+
+**`#[test]` delta:** +1, in `gdbserver_e2e.rs`; no other file gains or loses a `#[test]`, and no
+`#[ignore]` changes. One existing assertion changed: the B3 wire row's phase, `Bp` to `Sys`. The
+controller re-gates after this wave, and the gate's counts belong to that run.
