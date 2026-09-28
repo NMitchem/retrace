@@ -768,7 +768,12 @@ a unit test in `rsp.rs` too).
   `thread N exited during the step`, named on the thread that runs next, where it used to run to
   the end of the recording. lldb does not display that stop (Known limits), but its follow-up
   `continue` is now a real one: it stops at a breakpoint the other thread reaches after the exit,
-  where before M44 it ran past every such breakpoint to the end.
+  where before M44 it ran past every such breakpoint to the end. That includes a breakpoint at the
+  very pc the other thread resumes at, because the stop is parked at the crossing's own position,
+  as a blocked step's is (M44's final review, Ruling FW-b). Parked as an arrival, which it was
+  until then, that breakpoint was stepped over in silence: measured under lldb, `thread step-inst`
+  now ends at `breakpoint 2.1` on thread 1 with a hit count of 1, where it had run to the end with
+  a hit count of 0 (`docs/sweep-evidence/2026-09-27-m44/fw2/`).
 - **Another thread's hit ends a blocked step.** While the stepped thread is blocked in a syscall, the
   run until it runs again now has the user's breakpoints and watchpoints armed. A hit by another
   thread ends the step with a `reason:exception` stop on the **stepped** thread that names the hit —

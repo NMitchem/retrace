@@ -710,9 +710,48 @@ fn a_step_across_the_stepped_threads_own_exit_stops_there() {
     assert!(!s.contains("replaylog:end;"), "{s}");
     assert!(r::description(&s).unwrap().contains(&format!("thread {} exited during the step", child + 1)), "{s}");
     assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", running + 1).as_str()), "on the running thread: {s}");
-    // An arrival (Bp), as every step's stop is: a forward `c` from here reports the next hit.
+    // The crossing's own position (Sys), as the blocked step parks, not an arrival (Bp) of the
+    // running thread: a breakpoint at that thread's pc is still ahead, and the next `c` reports it
+    // (Ruling FW-b; the row below). Before the final review this was Bp, which skipped it.
     let w = c.where_();
-    assert!(w.starts_with(&format!("at ({}, 0) phase=Bp", x + 1)), "at the exit's boundary, as an arrival: {w}");
+    assert!(w.starts_with(&format!("at ({}, 0) phase=Sys", x + 1)), "at the exit's boundary, the crossing's position: {w}");
+}
+
+#[test]
+fn a_continue_after_a_step_across_the_threads_own_exit_reports_a_breakpoint_at_the_running_threads_pc() {
+    // M44 final review, Ruling FW-b. B3's stop names the thread now running, and lldb-2100 ignores
+    // it and sends `c`. A user breakpoint at that thread's resume pc must be reported by that `c`,
+    // at the exit's boundary, as `continue` would report it there. Parked as an arrival (Bp), the
+    // `c` stepped over it in silence and ran to the end (the control). lldb shows the same
+    // difference: `thread step-inst` now ends at that breakpoint, hit count 1, where Bp ran it to
+    // the end, hit count 0 (docs/sweep-evidence/2026-09-27-m44/fw2/). The setup is the row
+    // above's; each reply is bounded by `util::rsp`'s `REPLY_BOUND`.
+    let (tr, x, child) = r::threadrust_child_exit();
+    let running = match retrace_trace::Reader::open(tr).unwrap()[x + 1] {
+        retrace_trace::Event::Syscall { thread, .. } => thread,
+        _ => panic!("landmark {} is not a syscall", x + 1),
+    };
+    assert_ne!(running, child);
+    let svc = r::trap_pc(tr, x);
+    // The running thread's resume pc at the exit's boundary, from a seek the server cannot influence.
+    let resume = retrace_core::seek(tr, x + 1, 0).unwrap().pc();
+    let mut c = Rsp::spawn(tr, &[]);
+    assert_eq!(c.send(&format!("Z0,{svc:x},4")), "OK");
+    r::continue_to_window(&mut c, x);
+    assert_eq!(c.send(&format!("z0,{svc:x},4")), "OK");
+    let s = c.send(&format!("vCont;s:{:x}", child + 1));
+    assert!(r::description(&s).unwrap_or_default().contains(&format!("thread {} exited during the step", child + 1)), "{s}");
+    assert_eq!(r::key(&s, "thread"), Some(format!("{:x}", running + 1).as_str()), "on the running thread: {s}");
+    let pc = pc_of(&s);
+    assert_eq!(pc, resume, "B3's stop reports the running thread's resume pc");
+
+    assert_eq!(c.send(&format!("Z0,{pc:x},4")), "OK");
+    let b = c.send("c");
+    assert!(b.contains("reason:breakpoint;"), "the breakpoint at the running thread's pc, not skipped: {b}");
+    assert_eq!(r::key(&b, "thread"), Some(format!("{:x}", running + 1).as_str()), "on the running thread: {b}");
+    assert_eq!(pc_of(&b), pc, "{b}");
+    let w = c.where_();
+    assert!(w.starts_with(&format!("at ({}, 0) phase=Bp pc={pc:#x}", x + 1)), "at the exit's boundary, not a later pass: {w}");
 }
 
 #[test]
