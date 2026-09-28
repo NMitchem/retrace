@@ -874,11 +874,15 @@ These are real and current, not aspirational gaps.
   | `/usr/bin/automationmodetool` | no row for `kevent_qos` (374), and a row cannot close it | **C** new subsystem: libdispatch's workqueue-kqueue initialisation | `automationmodetool_records_and_replays` | parked, routed to its own milestone (M44 R4) |
   | `/usr/bin/yes` | 30 s watchdog | **D** not-a-defect | none | retired |
 
-  **The xcrun trio's PASS is not the program's outcome.** `desdp`, `dyld_info` and `flex` are hard
-  links to one Xcode `xcrun` stub. Each reaches xcrun's `posix_spawn`, which retrace refuses
-  (exec-in-place is unmodelled), and exits 71 on both sides with identical stdout, so the sweep
-  counts it a PASS; natively `desdp` exits 2 with its usage. Their gates therefore stay parked at
-  that refusal, class C, because asserting 71 would pin retrace's refusal, not the program. On the
+  **The xcrun trio's PASS is not the program's outcome.** `desdp`, `dyld_info` and `flex` are
+  xcselect shims that dispatch by name: `dyld_info` and `flex` are one hard-linked file, `desdp`
+  another. Each reaches xcrun's `posix_spawn`, which retrace refuses (exec-in-place is
+  unmodelled), and exits 71 on both sides with identical stdout, so the sweep counts it a PASS.
+  Natively, with the sweep's empty stdin, `desdp` exits 2 with its usage, `dyld_info` 0 with its
+  usage on stderr, and `flex` 1 (`<stdin>:1: premature EOF`), each measured on its own by M44's
+  final review (`docs/sweep-evidence/2026-09-27-m44/native-trio.txt`). None is 71. Their gates
+  therefore stay parked at that refusal, class C, because asserting 71 would pin retrace's
+  refusal, not the program. On the
   way, from a cold xcrun cache, each takes `openat_nocancel` (464) and `rename` (128) to rewrite
   `/var/tmp/xcrun_db`, and a recording's forwarded `rename` really installs that cache on the host;
   from a valid cache the trio skips both rows and goes straight to `posix_spawn` (M44 t0, Ruling
