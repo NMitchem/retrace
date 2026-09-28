@@ -1005,12 +1005,10 @@ These are real and current, not aspirational gaps.
   kqueue, while libdispatch crashes on any errno but `EINTR`. M45 emulated that one measured shape
   as a modelled success, so the run now passes the init (landmark 362 in M45's walk) and stops at
   **the M45 refusal**: `recorder panicked: thread 'main' … panicked at
-  crates/retrace-box/src/lib.rs:5222:13: M45: unmeasured kevent_qos shape: x3 (eventlist) is
-  0x27fedb8, measured 0x0. …`, rc 101, no replay run, at the next landmark, 363. (That is the line
-  M45's walk and sweep printed. The panic now sits at `:5228:13`, only because the `host_svc` fix
-  merged from `readme-launch` added six lines above it.) That is a second
-  `kevent_qos` with an event list and `KEVENT_FLAG_ERROR_EVENTS`, refused by value and not
-  modelled. Landmark numbers move with the host's `gettimeofday` count.
+  crates/retrace-box/src/lib.rs (Box_::guest_kevent_qos): M45: unmeasured kevent_qos shape: x3
+  (eventlist) is 0x27fedb8, measured 0x0. …`, rc 101, no replay run, at the next landmark, 363.
+  That is a second `kevent_qos` with an event list and `KEVENT_FLAG_ERROR_EVENTS`, refused by
+  value and not modelled. Landmark numbers move with the host's `gettimeofday` count.
   **`host_get_io_main`** is `record error, rc=4: RECORD ERROR: unsupported
   mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send_size 24`,
   rc/rp 4/3, the I/O Kit main port (SDK `mach/mach_host.h:1313`); M44's Task 4 measured
