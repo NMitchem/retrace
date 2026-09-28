@@ -1038,8 +1038,9 @@ impl<'a> Exec<'a> {
                             (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
                             return Ok(Halt::ThreadExited { thread: t });
                         }
-                        // `t` blocked. Run until it is current again, or until another thread's hit
-                        // (M44 B6(a)). Phase Sys: the crossing's own position, as `continue`'s
+                        // `t` blocked. Run until it is current again, until another thread's hit
+                        // (M44 B6(a)), or until the recording's end (Ruling T12-a, a refusal on
+                        // `t`). Phase Sys: the crossing's own position, as `continue`'s
                         // finish leaves it, so a breakpoint at the incoming thread's pc is ahead.
                         (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
                         self.run_until_thread(t, true, out)
@@ -1066,8 +1067,10 @@ impl<'a> Exec<'a> {
     /// 30 s). Each re-step reached the same terminal again.
     fn run_until_thread<W: Write>(&mut self, t: u32, again: bool, out: &mut W) -> Result<Halt, String> {
         // A breakpoint's or a store's thread is the current one. A syscall write's is the thread
-        // that issued it, which a blocking syscall has already switched away from. A terminal's is
-        // the current one, as the server reports it.
+        // that issued it, which is the `thread` that `Advance::WatchSyscall` carries, not whichever
+        // thread is current after it. That is right whether or not the syscall blocked: one that
+        // blocked has already switched away from its thread, and one that did not has not. A
+        // terminal's is the current one, as the server reports it.
         Ok(match self.continue_until(Some(t), out)? {
             Halt::Break => {
                 let by = self.sess().current_thread();

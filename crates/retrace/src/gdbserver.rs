@@ -278,7 +278,9 @@ impl<'a> Server<'a> {
                 // 80,103 × `vCont;s:2` in 60 s). Since M44 B6(b), a refused thread that is live is
                 // the running one after a trap that returns to itself, and is not running only when
                 // the recording ended before it ran (Ruling T12-a): `then_some(t)` names that one.
-                // A thread that does not exist, or has exited, cannot be named: the running one is.
+                // A thread that does not exist, or has exited, is not in the reply's `threads:`
+                // list (`live_threads`), so it is not named, though `thread_ctx` may still hold an
+                // exited one's stale context (B3's arm below): the running one is named instead.
                 Halt::Refused(why) => {
                     let on = s.live_threads().iter().any(|&(r, _)| r == t + 1).then_some(t);
                     Ok(s.stop(StopKind::Exception { signal: 5, text: why }, on))
