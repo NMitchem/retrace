@@ -332,11 +332,14 @@ per-file expected counts once t0 has run.
 
 ## 10. Outcome
 
-*(Filled at the close, 2026-09-27, on `cbe59d7`, the last code commit before the final review.)*
-Gate: **831 passed / 0 failed / 9 ignored across 146 test binaries**. All 81 chunks exited 0.
-Reconciled file by file against M43's 800 / 0 / 9 over 144: +31 `#[test]` over eight files, two new
-binaries (`nocancel`, `skiplines`), no `#[ignore]` added or removed, and 840 = 838 in source + the 2
-census tests that `legacy_equivalence` includes. `crates/retrace-trace` has no diff, so
+*(Filled at the close, 2026-09-27, on `cbe59d7`, and moved by the final review's fix wave.)* Gate:
+**832 passed / 0 failed / 9 ignored across 146 test binaries**. The full chunked gate measured **831**
+on `cbe59d7`, the last code commit before the final review, with all 81 chunks exiting 0. The fix
+wave changed `debug.rs`'s behaviour (B3's park, FW-2) and added one `gdbserver_e2e` row, so the whole
+gate was re-run at `8c59c27`: 832, all 81 chunks exiting 0. Reconciled file by file against M43's
+800 / 0 / 9 over 144: +32 `#[test]` over eight files, two new binaries (`nocancel`, `skiplines`), no
+`#[ignore]` added or removed, and 841 = 839 in source + the 2 census tests that
+`legacy_equivalence` includes. `crates/retrace-trace` has no diff, so
 `TRACE_MAGIC` did not move. The status log's M44 section has the chunk-by-chunk tally.
 
 §6, item by item:

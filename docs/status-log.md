@@ -13072,8 +13072,8 @@ two stepping behaviour changes M43 left unmeasured.
 
 The milestone's numbers: **one** new fixture (`crates/retrace-guest/asm/btchain.s`, arm64e); **one**
 new module (`crates/retrace-box/src/backings.rs`); **two** new test binaries (`nocancel` in
-`retrace-arch`, and `skiplines`); **+31** `#[test]` attributes over eight files, 807 → 838 by
-source; **four** new `arg_kinds` rows (345, 461, 10, 128) and **four** `_nocancel` twins joined to
+`retrace-arch`, and `skiplines`); **+32** `#[test]` attributes over eight files, 807 → 839 by
+source (+31 at `cbe59d7`, +1 from the final review's fix wave); **four** new `arg_kinds` rows (345, 461, 10, 128) and **four** `_nocancel` twins joined to
 their plain forms' rows (409, 464, 542, 543); census 108 → 113; `EXPECTED_DIFFS` 26 → 35;
 **zero** `Box_` fields added (`backings` changed type in place, `Vec<Backing>` → `Backings`, its
 position and so the drop order unchanged); **zero** dispatch arms changed (`retrace-core`'s diff is
@@ -13085,7 +13085,8 @@ T12-c, T8-a later corrected); **twenty-three** commits after the spec (`be5dc2b`
 (`ebd0266`): t0's three (`b2ff28e`, `87283e4`, `1ae3979`) and twenty task commits — twelve first
 commits, seven review fix-round commits (`ffab395`, `488076f`, `dcca6c6`, `8420eda`, `82af2a8`,
 and Task 12's one round in two, `50c81df` + `cbe59d7`), and Task 9b (`e99c19f`); then this close.
-Gate: **831 passed / 0 failed / 9 ignored across 146 test binaries**.
+Gate: **832 passed / 0 failed / 9 ignored across 146 test binaries**, the re-gate after the final
+review's fix wave (831 at `cbe59d7`, the gate below).
 
 **A correction to the sections above.**
 The M34–M40 sections above name 468 `getattrlistat`. 468 is `fchownat` (SDK); `getattrlistat` is 476; see M44 §2a.
@@ -13381,7 +13382,8 @@ existing `rsp.rs` test rather than adding one).
 
 ### The gate
 
-**831 passed / 0 failed / 9 ignored across 146 test binaries.** The full gate ran from the worktree as one
+**831 passed / 0 failed / 9 ignored across 146 test binaries at `cbe59d7`**, the last code commit
+before the final review; the re-gate after its fix wave is at the end of this section. The full gate ran from the worktree as one
 background script (`gate.sh` in the ledger directory, M43's retargeted), chunked as CLAUDE.md
 requires, every test chunk `--no-fail-fast` and each chunk's exit code written to
 `gate-summary.txt` before any pipe: `ws` (the workspace less `retrace-box` and `retrace`), `box`
@@ -13676,3 +13678,12 @@ under the L7 form, inferred and unmeasured (Minor 3).
 **`#[test]` delta:** +1, in `gdbserver_e2e.rs`; no other file gains or loses a `#[test]`, and no
 `#[ignore]` changes. One existing assertion changed: the B3 wire row's phase, `Bp` to `Sys`. The
 controller re-gates after this wave, and the gate's counts belong to that run.
+
+**The re-gate.** FW-2 changed `debug.rs`'s behaviour, and every debugger suite spawns the `retrace`
+binary, so every chunk was re-run, not a subset. It ran the same `gate.sh` at `8c59c27`, and run 1's
+logs were kept beside it. Result: **832 passed / 0 failed / 9 ignored across 146 test binaries**, all
+81 chunks `exit=0`: `ws` 180/0/0 over 27, `box` 328/0/0 over 41, `bins` 32/0/0 over 1, `e2e` 292/0/9
+over 77. This is run 1 plus exactly the one new `gdbserver_e2e` row, and it reconciles file by file
+again: 841 = 839 in source + the 2 census tests `legacy_equivalence` includes, and every `e2e`
+target's passed-plus-ignored equals its file's `#[test]` count. `SKIPLINES CONTROL` is again in the
+ordinary `skiplines` log, and no gate log carries a `SKIPPED` line.
