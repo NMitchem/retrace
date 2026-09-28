@@ -591,56 +591,49 @@ reconstruction caveat in full.
   where it had read the host `dup`'s clear flag (`dupfd_e2e`). Nothing new is recorded and
   `TRACE_MAGIC` did not move.
 
-**Gate:** 832 passed / 0 failed / 9 ignored across 146 test binaries. The close ran the full chunked gate
+**Gate:** 846 passed / 0 failed / 9 ignored across 148 test binaries. The close ran the full chunked gate
 from one background script (`gate.sh` in the milestone's ledger directory), every test chunk
 `--no-fail-fast` and every exit code captured before any pipe: `ws`, `box`, `--bins`, one
-`--test <name>` invocation for each of the seventy-seven files in `crates/retrace/tests/`, and
-clippy over `--workspace --all-targets` with `-D warnings`. The status log's M44 section has the
+`--test <name>` invocation for each of the seventy-eight files in `crates/retrace/tests/`, and
+clippy over `--workspace --all-targets` with `-D warnings`. The status log's M45 section has the
 tally chunk by chunk. The testing note below says how the chunks are assembled. The "test binaries"
 figure is test executables plus the `Doc-tests` harnesses cargo reports, each of which runs zero
 tests — the convention every milestone since M14 has counted by, kept for comparability and
 written out here so nobody has to re-derive it. No `#[ignore]` line was added or removed (nine at
-M43's close and nine now, by `git grep` over `crates/`), so nine gates are parked: the two
+M44's close and nine now, by `git grep` over `crates/`), so nine gates are parked: the two
 long-standing — `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8
 risk R3 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol
-wall) — plus the seven in `apple_walls_e2e`, each reason the measurement that parks it. **M44
-re-parked five of those seven at new, measured walls** and added two gates there that run, `ls` and
-`ed`; Known limits has each. `lldb_e2e` needs `/usr/bin/lldb` (never the one on `PATH`): each of
+wall) — plus the seven in `apple_walls_e2e`, each reason the measurement that parks it. **M45
+re-parked `automationmodetool` at a new, measured wall** — past the emulated workqueue-kqueue init,
+at the second `kevent_qos` shape, measured and refused rather than modelled — and amended
+`dddiagnose`'s reason with its measured second face; `ls`, `ed` and `launchctl` run. Known limits
+has each. `lldb_e2e` needs `/usr/bin/lldb` (never the one on `PATH`): each of
 its tests skips loudly (`SKIPPED …: This gate did NOT run.`) when `/usr/bin/lldb --version` does not
 run, and its CPython test also skips without Homebrew Python. A skipped test is counted as passed,
 as `jq_e2e`'s are, and since M44 every skip line reaches the ordinary gate log (Testing, below), so
 grep the logs for `SKIPP` before reading a count as the gate having run.
 
-Reconciled against M43's 800 / 0 / 9 over 144 **file-by-file rather than by sum**, by source: eight
-files changed their `#[test]` count, and every other file's count is M43's (counting
-`^\s*#\[test\]` per file at `64e471e` and at the branch head):
+Reconciled against M44's 832 / 0 / 9 over 146 **file-by-file rather than by sum**, by source: three
+files changed their `#[test]` count, and every other file's count is M44's (counting
+`^\s*#\[test\]` per file at `60f0452` and at the branch head):
 
-| file | M43 | M44 | delta |
+| file | M44 | M45 | delta |
 |---|---|---|---|
-| `retrace-arch/src/lib.rs` | 44 | 45 | **+1** (`m44_syscall_numbers`: the new constants for 464, 409, 345 and 461) |
-| `retrace-arch/tests/nocancel.rs` | — | 1 | **+1**, new binary (every SDK `_nocancel` twin shares its plain form's row) |
-| `retrace-box/src/backings.rs` | — | 6 | **+6**, new module (the index against the linear scan over randomised probes; the zero-length read at a backing's end; an overlapping insert fails loud on either side, and at the same start; a read whose end would overflow is held by nothing) |
-| `retrace/tests/apple_walls_e2e.rs` | 8 | 10 | **+2** (`ls` and `ed` record and replay) |
-| `retrace/tests/dupfd_e2e.rs` | 2 | 3 | **+1** (`F_DUPFD_CLOEXEC` sets close-on-exec as native does) |
-| `retrace/tests/gdbserver_e2e.rs` | 28 | 39 | **+11** (`disarm-rsi`; a step across its own thread's exit; another thread's breakpoint, mid-window breakpoint and watched store ending a blocked step; a step of a thread that is not running, of one that does not exist and of one that has exited; a step the recording's end comes before, in both arms and at an exit; the finish's arrival past a breakpointed trap; a `c` after a step across its own thread's exit reports a breakpoint at the running thread's pc — two rows rewritten in place) |
-| `retrace/tests/lldb_e2e.rs` | 5 | 12 | **+7** (a step across its own thread's exit without looping, and a breakpoint after it; `next`, `ni`, and `thread step-out`/`finish` over a call; `bt` on an arm64e guest; a step the recording ends before — one row rewritten in place) |
-| `retrace/tests/skiplines.rs` | — | 3 | **+3**, new binary (the detector, its own positive control, and the `SKIPLINES CONTROL` line) |
+| `retrace-arch/tests/kqinit.rs` | — | 8 | **+8**, new binary (the measured init is accepted; every single-bit flip of the entry is refused, each field named at its xnu offset; an `int` argument's upper half is ignored as the kernel ignores it, and every bit the kernel reads of each checked argument is refused by register; the change-list address is not compared; a short entry is refused as untranslated; the constants are the SDK's) |
+| `retrace-guest/src/lib.rs` | 19 | 20 | **+1** (`kqinit_guest_parses`: the new fixture builds and parses) |
+| `retrace/tests/kqinit_e2e.rs` | — | 5 | **+5**, new binary (the init records as one emulated landmark and replays; an entry straddling a page is read whole; an unmeasured shape stops the recorder naming the field; replay recomputes the emulated return and refuses a recorded `err`; seeks either side of the landmark replay to the end) |
 
-+32 `#[test]` attributes, `--bins` unchanged at **32**, and **two new test binaries**, `nocancel`
-(in `retrace-arch`) and `skiplines`. The tree holds **839** `#[test]` attributes by the same
-per-file pattern (M43 held 807). The run still reports the 2 census tests twice (`census.rs`
-executes in its own binary and again inside `legacy_equivalence`'s `#[path]` include), and a bare
-`grep -c '#\[test\]'` over-counts by one, because a comment in `legacy_equivalence.rs` mentions the
-attribute in prose. The plan predicted +18 before t0; the source count is +32, and every difference
-is a review fix round or a row measurement asked for: Task 6 is +6 where it counted 3 (its fix round
-pinned both overlap sides and the overflow); Task 8 is +3 where it counted 2 (the lldb row that
-tells B3 apart); Task 9 is +3 where it counted 2 (`ni` split from `next`); Task 11 is +2 where it
-counted 0 (the store-watch and mid-window rows); and Task 12 is +7 where it counted 1 (its first
-commit replaced one row with two, and its fix round added five wire rows and one lldb row); and
-the final review's fix wave added one wire row (B3's park, FW-2).
++14 `#[test]` attributes, `--bins` unchanged at **32**, and **two new test binaries**, `kqinit` (in
+`retrace-arch`) and `kqinit_e2e`. The tree holds **853** `#[test]` attributes by the same per-file
+pattern (M44 held 839). The run still reports the 2 census tests twice (`census.rs` executes in its
+own binary and again inside `legacy_equivalence`'s `#[path]` include), so 853 + 2 = 855 = 846 + 9,
+and a bare `grep -c '#\[test\]'` over-counts by one, because a comment in `legacy_equivalence.rs`
+mentions the attribute in prose. The plan predicted +14 for the outcome without a GCD gate, and the
+source count is +14 exactly: the walk found every libdispatch path stopping at the second
+`kevent_qos` shape, so no GCD gate was added.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson). `retrace` ran **per-target** — seventy-seven `--test <name>` invocations, one after another
+lesson). `retrace` ran **per-target** — seventy-eight `--test <name>` invocations, one after another
 from a single background script, because the whole package exceeds the tool ceiling, over the
 target list `ls crates/retrace/tests/*.rs` wrote — **plus the `--bins` chunk**, which is the only
 place the 32 unit tests inside the `retrace` binary run: 20 in `crates/retrace/src/debug.rs` and

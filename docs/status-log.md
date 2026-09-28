@@ -14281,3 +14281,58 @@ Execution:
   - M44's parked minors that its fix wave did not discharge;
   - M43's owed items, as M44 carried them;
   - lldb's hit and ignore counts under the L7 form.
+
+### The gate
+
+**846 passed / 0 failed / 9 ignored across 148 test binaries at `4ac98a6`**, the merge of local
+main (readme-launch, `5cd6a38`) into the branch, which is the last code commit before the final
+review. Every commit after it is documentation, a comment, or an `#[ignore]` string. The full gate
+ran from the worktree as one background script (`gate.sh` in the ledger directory, M44's
+retargeted), chunked as CLAUDE.md requires, every test chunk `--no-fail-fast` and each chunk's exit
+code written to `gate-summary.txt` before any pipe: `ws` (the workspace less `retrace-box` and
+`retrace`), `box` (whole package, so `Doc-tests retrace_box` is present), `bins`, one `e2e` chunk
+per file of `ls crates/retrace/tests/*.rs` (**78** targets, `kqinit_e2e` new), and clippy over
+`--workspace --all-targets` with `-D warnings`.
+
+The tally, chunk by chunk (`tally.sh`, ANSI stripped; every one of the 82 lines in
+`gate-summary.txt` reads `exit=0`: `ws`, `box`, `bins`, 78 `e2e`, `clippy`):
+
+| chunk | passed / failed / ignored | binaries |
+|---|---|---|
+| `ws` | 189 / 0 / 0 | 28 (six `Doc-tests`, each 0 tests) |
+| `box` | 328 / 0 / 0 | 41 (`Doc-tests retrace_box`, 0 tests) |
+| `bins` | 32 / 0 / 0 | 1 |
+| `e2e` | 297 / 0 / 9 | 78 |
+| **all** | **846 / 0 / 9** | **148** |
+
+**The prediction, by source, before the gate, and its reconciliation.** `predict.sh` counts
+`^\s*#\[test\]` per file at `60f0452` and at the head: **839 → 853 (+14)**, and test targets 146 →
+148 (`crates/retrace/tests` 77 → 78, `crates/retrace-arch/tests` 3 → 4). Three files changed:
+`crates/retrace-arch/tests/kqinit.rs` 0 → 8 (Task 1, new binary), `crates/retrace-guest/src/lib.rs`
+19 → 20 (Task 2, `kqinit_guest_parses`) and `crates/retrace/tests/kqinit_e2e.rs` 0 → 5 (Task 2, new
+binary). That is the plan's prediction for the outcome without a GCD gate, exactly. 853 + 2 = 855 =
+846 + 9: the 2 is `census.rs`'s pair compiled a second time into `legacy_equivalence`, as at every
+close since M33. Against M44's 832 / 0 / 9 over 146, the gate moved by +14 passed and +2 binaries and
+nothing else; `kqinit_e2e` gates 5 against 5 in source and `apple_walls_e2e` gates 3 passed and 7
+ignored against 10. The nine ignored are M44's nine: `automationmodetool` stays parked, re-parked at
+the second `kevent_qos` shape (outcome B), and `dddiagnose`'s reason gained its measured fault face.
+**No gate log carries a `SKIPPED` line** (`grep -a -l SKIPP gate-*.log` prints nothing): jq,
+Homebrew Python and lldb were all present, so every skippable target ran for real, and
+`gate-e2e-skiplines.log` carries `SKIPLINES CONTROL: util::announce reaches a gate log past
+libtest's capture`. `sysbin_e2e`, whose `ps_records_and_replays` is exposed to the MADV_FREE flake
+the sweep measured, passed on this run.
+
+**A first gate was stopped, not failed** (Ruling X-1c). It ran at `64712bd`, before main's
+readme-launch merge, and reached `ws`, `box`, `bins` and 34 `e2e` targets, every one `exit=0`,
+before it was stopped: main's `host_svc` change touches `crates/`, and the close gates the merged
+tree. Its logs are kept in the ledger directory as `gate-64712bd-partial/`.
+
+**The re-gate after the final review's fix wave** (Ruling F-3). The wave's `crates/` edits (items
+H–J: the `automationmodetool` reason's panic cite, `kqinit_e2e.rs`'s comment, the 374 row's
+comment) were made only after the gate wrote `DONE`, and the chunks they touch re-ran at `b5225c8`
+(`rerun.sh`): `ws` 189 / 0 / 0 over 28, identical to the gate's; `apple_walls_e2e` 3 / 0 / 7;
+`kqinit_e2e` 5 / 0 / 0; clippy `exit=0`. The parked gate's `--ignored` control fails at its wall
+(0 / 1, `exit=101`) and names it in one line, which Task 3's fix round made possible by printing
+the refusal's `args` on one line (Ruling T3-e): `panicked at crates/retrace-box/src/lib.rs:5228:13: M45: unmeasured kevent_qos shape: x3
+(eventlist) is 0x27fedb8, measured 0x0. … args=[0xffffffff,0x27ff298,0x1,0x27fedb8,0x10,0x0,0x0,0x23]`.
+The gate stands at 846 / 0 / 9 over 148.
