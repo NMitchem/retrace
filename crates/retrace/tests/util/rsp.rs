@@ -2,8 +2,9 @@
 //! gdbserver` (the codesigned copy), learns the port from its one stderr line, and exchanges
 //! packets. The handshake uses ack mode; everything after `QStartNoAckMode` uses no-ack mode, as
 //! lldb does. It also holds the blocking-step fixture (`threadrust_block` and its two helpers), the
-//! thread-exit fixture (`threadrust_child_exit`, M44 B3) and the register oracle's parser
-//! (`dbg_field`), which both test files share.
+//! thread-exit fixture (`threadrust_child_exit`, M44 B3), the blocked step into another thread's
+//! store (`watchthread_block` and its oracle `first_store`, M44 B6(a)) and the register oracle's
+//! parser (`dbg_field`), which both test files share.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -217,16 +218,61 @@ pub fn threadrust_block() -> (&'static Path, usize, u32) {
     let (p, n, t) = C.get_or_init(|| {
         let (rec, tr) = super::record_dynamic(retrace_guest::THREADRUST);
         assert_eq!(rec.code, 0, "record threadrust: {}", rec.stderr);
-        let ev = retrace_trace::Reader::open(&tr).unwrap();
-        let thread_of = |e: &retrace_trace::Event| match e {
-            retrace_trace::Event::Syscall { thread, .. } => Some(*thread), _ => None };
-        let n = (1..ev.len() - 1).find(|&i| matches!(ev[i], retrace_trace::Event::Syscall { num: 515, .. })
-            && thread_of(&ev[i + 1]).is_some() && thread_of(&ev[i + 1]) != thread_of(&ev[i]))
-            .expect("a __ulock_wait that blocked");
-        let t = thread_of(&ev[n]).unwrap();
+        let (n, t) = first_block(&tr);
         (tr, n, t)
     });
     (p.as_path(), *n, *t)
+}
+
+/// The first `__ulock_wait` (515) whose NEXT landmark runs another thread, and its thread.
+fn first_block(trace: &Path) -> (usize, u32) {
+    let ev = retrace_trace::Reader::open(trace).unwrap();
+    let thread_of = |e: &retrace_trace::Event| match e {
+        retrace_trace::Event::Syscall { thread, .. } => Some(*thread), _ => None };
+    let n = (1..ev.len() - 1).find(|&i| matches!(ev[i], retrace_trace::Event::Syscall { num: 515, .. })
+        && thread_of(&ev[i + 1]).is_some() && thread_of(&ev[i + 1]) != thread_of(&ev[i]))
+        .expect("a __ulock_wait that blocked");
+    (n, thread_of(&ev[n]).unwrap())
+}
+
+/// M44 B6(a): the watchthread recording, main's blocking wait in `h.join()` (as
+/// `threadrust_block` finds it), its thread, and the child's cell. The child stores to that cell
+/// only after main blocks. The guest prints the cell's address (a `static mut`'s address crosses
+/// no syscall boundary, `thread_watch_e2e`'s method). Returns (trace, n, t, cell).
+pub fn watchthread_block() -> (&'static Path, usize, u32, u64) {
+    static C: OnceLock<(PathBuf, usize, u32, u64)> = OnceLock::new();
+    let (p, n, t, cell) = C.get_or_init(|| {
+        let (rec, tr) = super::record_dynamic(retrace_guest::WATCHTHREAD);
+        assert_eq!(rec.code, 0, "record watchthread: {}", rec.stderr);
+        let out = String::from_utf8_lossy(&rec.stdout).into_owned();
+        let hex = out.lines().find_map(|l| l.strip_prefix("child cell 0x")).expect("the child cell's line");
+        let cell = u64::from_str_radix(hex.trim(), 16).unwrap();
+        let (n, t) = first_block(&tr);
+        (tr, n, t, cell)
+    });
+    (p.as_path(), *n, *t, *cell)
+}
+
+/// Where the 8-byte word at `addr` first changes at or after landmark `from`, by an oracle the
+/// server cannot influence: advance landmark by landmark to the window whose end sees the change,
+/// then step that window until the word moves. Returns (window, k): the store is the instruction
+/// at (window, k).
+pub fn first_store(trace: &Path, from: usize, addr: u64) -> (usize, u64) {
+    let word = |s: &retrace_core::ReplaySession| s.read_mem(addr, 8).expect("a mapped word");
+    let mut s = retrace_core::seek(trace, from, 0).unwrap();
+    let before = word(&s);
+    let w = loop {
+        let n = s.landmark();
+        s.advance().unwrap_or_else(|d| panic!("advance diverged: {}", d.detail));
+        if word(&s) != before { break n; }
+    };
+    drop(s); // one VM per process: free it before the next seek
+    let mut s = retrace_core::seek(trace, w, 0).unwrap();
+    for k in 0.. {
+        s.step_insns(1).unwrap();
+        if word(&s) != before { return (w, k); }
+    }
+    unreachable!()
 }
 
 /// M44 B3: the same threadrust recording, the landmark of the child's own `bsdthread_terminate`
