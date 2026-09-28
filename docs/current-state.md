@@ -95,7 +95,8 @@ landmarks before exit; that is a fingerprint, not an observed reclaim. It is fla
 were clean), and it is the first measurement of a hazard M37 named. `dddiagnose` went FAIL →
 PASS, but only as an identical fault. It is bimodal on M44's crates and M45's alike: about one
 run in four faults at M36's `mfm_alloc+0x230` face, and the rest stop at `host_get_io_main` as
-before. `csh` and `tcsh` moved their landmark only. `ps` out and `dddiagnose` in is why the count
+before. That rate is 2 of 8 traced runs (one per binary) plus the sweep's own run, and "about one
+run in four" means that sample wherever it appears below. `csh` and `tcsh` moved their landmark only. `ps` out and `dddiagnose` in is why the count
 did not move. M44's 49 had moved from M39's 44/10 by **five rows, each explained by name**. `ls`
 and `ed` are *clean* now, rc 0 on both sides with byte-identical stdout: the rows
 M44 added (`getattrlistbulk` 461 for `ls`; `openat_nocancel` 464 and `unlink` 10 for `ed`) carry
@@ -118,7 +119,8 @@ its class-E row is host state, and `sysbin_e2e`'s `ps_records_and_replays` runs.
 Among the 49: `cat`, `cp`, `mv`, `rm`,
 `chmod`, `mkdir`, `ln`, `df`, `sh`, `dash`, `bash`, `zsh`, `expr`, and since
 M44 `ls` and `ed`; `dddiagnose` counts only as an identical fault. `ps`, among them from M27 through
-M44, is out of this run's 49 on the reclaimed page. (This
+M44, is out of this run's 49 on a page the host reclaimed, by the page-map fingerprint, not an
+observed reclaim. (This
 sentence named `grep`, `wc`, `uname` and `bzip2` from M22 through M32; none of the four is in the
 committed corpus, a leftover of the uncommitted sample the reconstruction caveat below describes,
 corrected at M33.) Before M22 that number was **zero**, and not for the reason
@@ -905,9 +907,10 @@ These are real and current, not aspirational gaps.
   - **`automationmodetool`** is still `FAIL` 101/n/a. It is the one row M45's diff moved: the init
     is emulated, and the run reaches the second `kevent_qos` shape, refused by value (the face
     below).
-  - **`/bin/ps`** went `PASS` 0/0 → `FAIL` 0/3, a **class-E row**, the kind the M36, M38, M39
-    and M44 runs each recorded none of. Record and replay each ran to the end: replay consumed
-    all 16043 syscall landmarks (`#16043` is `Exit` 0) and stopped at `#16044`, the final full-memory compare, on `memory divergence at ipa
+  - **`/bin/ps`** went `PASS` 0/0 → `FAIL` 0/3, a **class-E row**. M36 recorded no class-E2
+    row, and the M38, M39 and M44 runs recorded no class-E row. Record and replay each ran to the
+    end: replay consumed all 16043 syscall landmarks (`#16043` is `Exit` 0) and stopped at
+    `#16044`, the final full-memory compare, on `memory divergence at ipa
     0x701414078: replay=0xf5 recorded=0x00`. The cause is **host state**. Landmark `#253`, the
     process-table `sysctl`, wrote that byte, and nothing later writes it. `#16040`, three landmarks
     before `exit`, is a forwarded `madvise(0x701400000, 0x50000, MADV_FREE_REUSABLE)`. `madvise`'s
@@ -964,7 +967,7 @@ These are real and current, not aspirational gaps.
   |---|---|---|---|---|
   | `/bin/csh` | `fork` — `mach_ports_register` | **C** new subsystem: process creation | `csh_records_and_replays` | parked, not routed |
   | `/bin/tcsh` | `fork` — `mach_ports_register` | **C** | `tcsh_records_and_replays` | parked, not routed |
-  | `/bin/ps` | `memory divergence at ipa 0x701414078` at the final compare, rc/rp 0/3; intermittent (20 fresh runs clean) | **E** host state: a forwarded `MADV_FREE_REUSABLE` page reclaimed by the host before the final snapshot | none here; `sysbin_e2e`'s `ps_records_and_replays` runs | owed, not routed (M37's named hazard, first measured by M45) |
+  | `/bin/ps` | `memory divergence at ipa 0x701414078` at the final compare, rc/rp 0/3; intermittent (20 fresh runs clean) | **E** host state: a forwarded `MADV_FREE_REUSABLE` page that the page-map fingerprint reads as reclaimed by the host before the final snapshot (not an observed reclaim) | none here; `sysbin_e2e`'s `ps_records_and_replays` runs | owed, not routed (M37's named hazard, first measured by M45) |
   | `/usr/bin/dddiagnose` | `host_get_io_main` (`mach_msg2` msgh_id 205), or, about one run in four, the `mfm_alloc+0x230` identical fault (139/139, this run's) | **C** new subsystem: the I/O Kit main port; the fault's root cause is unmeasured | `dddiagnose_records_and_replays` | parked, not routed |
   | `/usr/bin/automationmodetool` | a second `kevent_qos` (374) shape, refused by value: `M45: unmeasured kevent_qos shape: x3 (eventlist) is 0x27fedb8, measured 0x0` | **C** new subsystem: libdispatch's kevent source registration through the workqueue kqueue | `automationmodetool_records_and_replays` | parked, routed to its own milestone (M45 §7 Halt 3) |
   | `/usr/bin/yes` | 30 s watchdog | **D** not-a-defect | none | retired |
@@ -1136,7 +1139,8 @@ These are real and current, not aspirational gaps.
   the real length only where `retrace_arch::dest_buffer` knows it. M26 covered `read`(3)/`pread`(153)/
   `read_nocancel`(396); **M27 added `sysctl`(202)** (length at `*(size_t*)x3`, unbounded, and the
   reason `/bin/ps`'s process table now records whole; M45's one sweep failure of `ps` is a
-  different mechanism, a host-reclaimed page, in the sweep entry above) and
+  different mechanism, a page the host reclaimed by the page-map fingerprint, not an observed
+  reclaim, in the sweep entry above) and
   **`pread_nocancel`(414)**, which before M27 was missing from
   `fd_operands`, the clamp **and** the window at once — the missing clamp was the serious half, since
   an unclamped forward lets the host kernel write past the guest's actual backing. **M29 adds four

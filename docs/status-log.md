@@ -14028,8 +14028,9 @@ sha256 `a5fd53a3…`, alternating with the swept binary on the same host:
   traced.
 
 `ps` going out and `dddiagnose` coming in cancel, so the tally equals M44's, and outcome B's
-prediction, by coincidence. `ps`'s is a class-E row, the kind M36 (`:8308`), M38 (`:10190`), M39
-(`:10830`) and M44 (`:13358`) each recorded none of. It is a pre-existing, named hazard, not a
+prediction, by coincidence. `ps`'s is a class-E row. M36 recorded no class-E2 row (`:8308`; its
+E1 items at `:8310` were the harness's own labelling defects), and M38 (`:10190`), M39 (`:10830`) and M44 (`:13358`)
+recorded no class-E row. It is a pre-existing, named hazard, not a
 regression of this milestone.
 
 ### The audit (Task 4)
