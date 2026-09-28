@@ -967,7 +967,7 @@ These are real and current, not aspirational gaps.
   |---|---|---|---|---|
   | `/bin/csh` | `fork` — `mach_ports_register` | **C** new subsystem: process creation | `csh_records_and_replays` | parked, not routed |
   | `/bin/tcsh` | `fork` — `mach_ports_register` | **C** | `tcsh_records_and_replays` | parked, not routed |
-  | `/bin/ps` | `memory divergence at ipa 0x701414078` at the final compare, rc/rp 0/3; intermittent (20 fresh runs clean) | **E** host state: a forwarded `MADV_FREE_REUSABLE` page that the page-map fingerprint reads as reclaimed by the host before the final snapshot (not an observed reclaim) | none here; `sysbin_e2e`'s `ps_records_and_replays` runs | owed, not routed (M37's named hazard, first measured by M45) |
+  | `/bin/ps` | `memory divergence at ipa 0x701414078` at the final compare, rc/rp 0/3; intermittent (20 fresh runs clean) | **E** host state: a forwarded `MADV_FREE_REUSABLE` page that the page-map fingerprint reads as reclaimed by the host before the final snapshot (not an observed reclaim) | none here; `sysbin_e2e`'s `ps_records_and_replays` runs (exposed to the same flake, inferred) | owed, not routed (M37's named hazard, first measured by M45) |
   | `/usr/bin/dddiagnose` | `host_get_io_main` (`mach_msg2` msgh_id 205), or, about one run in four, the `mfm_alloc+0x230` identical fault (139/139, this run's) | **C** new subsystem: the I/O Kit main port; the fault's root cause is unmeasured | `dddiagnose_records_and_replays` | parked, not routed |
   | `/usr/bin/automationmodetool` | a second `kevent_qos` (374) shape, refused by value: `M45: unmeasured kevent_qos shape: x3 (eventlist) is 0x27fedb8, measured 0x0` | **C** new subsystem: libdispatch's kevent source registration through the workqueue kqueue | `automationmodetool_records_and_replays` | parked, routed to its own milestone (M45 §7 Halt 3) |
   | `/usr/bin/yes` | 30 s watchdog | **D** not-a-defect | none | retired |
@@ -1121,6 +1121,12 @@ These are real and current, not aspirational gaps.
   there, two rows the census never saw, which M44 then tabled. M44's xcrun trio is the same lesson
   from the other side: three rows that exit 71 on both sides at retrace's own refusal count as
   PASS, which is why their gates, not the tally, carry them.
+- **A forwarded `madvise(MADV_FREE_REUSABLE)` can make a recording depend on host memory
+  pressure.** It is forwarded onto retrace's own backing, so the host may reclaim a page whose
+  contents the recording still expects, and a final-image compare can then depend on host memory
+  pressure. This was measured on `/bin/ps` in M45's sweep (the sweep entry above). Exposure is
+  inferred for any gate whose guest frees memory that way, `sysbin_e2e`'s
+  `ps_records_and_replays` included.
 - **jq aborts building a large array, and the cause is not diagnosed (measured 2026-09-28).**
   `jq -n '[range(0;N)] | add'` records and replays at `N = 100000` and exits 134 (`SIGABRT`) at
   `N = 300000`, on record and identically on replay, where native jq exits 0. The last traps before
