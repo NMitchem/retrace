@@ -512,7 +512,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_FCNTL | SYS_FCNTL_NOCANCEL => row!(P, [Fd, Scalar, Ptr]),
         // fstat(int fd, struct stat *buf) / fstat64: a fixed 144-byte struct (sys/stat.h).
         SYS_FSTAT | SYS_FSTAT64 => row!(P, [Fd, Ptr]),
-        // fstatfs64(int fd, struct statfs *buf): a fixed 2168-byte struct (measured at M29 Task 7).
+        // fstatfs64(int fd, struct statfs64 *buf) (SDK sys/mount.h:444): a fixed 2168-byte struct
+        // (measured at M29 Task 7).
         // M25-cpython Task 3, header-derived like its M10 siblings (see its constant).
         SYS_FSTATFS64 => row!(P, [Fd, Ptr]),
         // lseek(int fd, off_t offset, int whence)
