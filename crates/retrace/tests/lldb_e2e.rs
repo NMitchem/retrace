@@ -562,6 +562,7 @@ fn lldb_backtraces_an_arm64e_guest_through_signed_return_addresses() {
     let (code, out, err) = session_with(&tr, &["--exe", retrace_guest::BTCHAIN], &cmds);
     let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
     assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
+    assert_eq!(code, Some(0), "{t}");
     // `bt`'s own lines only: lldb also prints a `frame #0` line at the connect and at every stop.
     let bt = out.split_once("(lldb) bt\n").map_or("", |(_, r)| r);
     let frames: Vec<&str> = bt.lines().take_while(|l| !l.starts_with("(lldb)")).filter(|l| l.contains("frame #")).collect();
