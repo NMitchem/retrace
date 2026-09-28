@@ -273,9 +273,12 @@ impl<'a> Server<'a> {
             match s.ex.step_thread(t, &mut std::io::sink())? {
                 Halt::Stepped => Ok(s.stop(StopKind::Trace, None)),
                 // Reported on the thread lldb stepped, t0 L7's measured-safe form
-                // (`l7_stepfail3_desc`). Named on the running thread instead, lldb-2100 re-steps
-                // forever (Task 4's measurement: 80,103 × `vCont;s:2` in 60 s). A thread that does
-                // not exist, or has exited, cannot be named: the running one is.
+                // (`l7_stepfail3_desc`). Named on another thread, lldb-2100 ignores the stop (it
+                // suspended that thread for the step) and re-steps forever (Task 4's measurement:
+                // 80,103 × `vCont;s:2` in 60 s). Since M44 B6(b), a refused thread that is live is
+                // the running one after a trap that returns to itself, and is not running only when
+                // the recording ended before it ran (Ruling T12-a): `then_some(t)` names that one.
+                // A thread that does not exist, or has exited, cannot be named: the running one is.
                 Halt::Refused(why) => {
                     let on = s.live_threads().iter().any(|&(r, _)| r == t + 1).then_some(t);
                     Ok(s.stop(StopKind::Exception { signal: 5, text: why }, on))
