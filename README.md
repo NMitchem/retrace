@@ -1765,13 +1765,16 @@ rather than skipped silently if absent.
 
 **Since M44 every skip line reaches the ordinary gate log.** libtest captures `eprintln!` in a test
 that passes, and a skip passes, so an `eprintln!` skip line never reached a gate log (measured at
-M43's close). Every skip now goes through `util::announce` (`crates/retrace/tests/util/mod.rs`),
-which writes to the process's stderr past the capture, and `skiplines.rs` fails the gate if any
-test file writes a skip line with `eprintln!`. Its control test announces a fixed
-`SKIPLINES CONTROL: …` line, which M44 found in an ordinary run's log with no `--nocapture`. So to
-tell a skip from a run, grep the gate logs for `SKIPP` (`fallthrough_e2e` says `SKIPPING`);
-`--nocapture` is no longer needed. The detector sees only an `eprintln!` whose string literal
-begins `SKIP`: a skip line built from a variable, or written in lower case, slips past it.
+M43's close). Every skip now writes to the process's stderr past the capture: `crates/retrace`'s
+tests through `util::announce` (`crates/retrace/tests/util/mod.rs`), and `retrace-core`'s
+`machmsgband_dyn`, which cannot reach that module, through a local `announce` with the same body
+(M44's final review found its two partial skips, `[M32 t1 corpus] SKIPPED …`, still on `eprintln!`).
+`skiplines.rs` fails the gate if any `.rs` file under any crate's `tests/` directory, searched
+recursively so `tests/util/` is included, calls `eprintln!` with `SKIP` anywhere in its first string
+literal. Its control test announces a fixed `SKIPLINES CONTROL: …` line, which M44 found in an
+ordinary run's log with no `--nocapture`. So to tell a skip from a run, grep the gate logs for
+`SKIPP` (`fallthrough_e2e` says `SKIPPING`); `--nocapture` is no longer needed. The detector reads
+only that literal: a skip line built from a variable, or written in lower case, slips past it.
 
 ### Continuous integration — there isn't any, and there can't be
 
