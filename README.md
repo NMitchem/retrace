@@ -94,7 +94,9 @@ has every limit with the measurement behind it.
 - **Unmodelled syscalls are refused, never guessed at.** A program that reaches a syscall or Mach
   message retrace has no model for stops with a `RECORD ERROR` naming it. Of the 54 Apple binaries
   in the committed sample, 49 record and replay identically, three of those by reaching the
-  refused `posix_spawn` identically on both sides.
+  refused `posix_spawn` identically on both sides. The count moves by a row or two between runs
+  with host state (`/bin/ps`'s `MADV_FREE` reclaim, `dddiagnose`'s bimodal fault); see
+  [`docs/current-state.md`](docs/current-state.md#known-limits).
 - **Traces are large and the format is not stable.** Tens to hundreds of MiB, uncompressed, and
   recordings from an older retrace are rejected rather than misread.
 - **Debugging is instruction-level.** The built-in debugger has no DWARF, line numbers or
