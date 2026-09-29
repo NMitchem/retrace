@@ -565,3 +565,81 @@ by file.
 - **"Never assert on an exit code a weaker failure would also produce."** Tests 1–4 assert markers
   and named fields, test 6 asserts a divergence exit together with its detail, and test 5 asserts
   state.
+
+## 11. Corrections and rulings from the plan
+
+Writing the plan (`docs/superpowers/plans/2026-09-29-retrace-m46-gcdtimers.md`) against the code
+and the sources corrected the spec in ten places. Each correction is listed here rather than edited
+into the sections above, so the approved text stays readable as approved.
+
+1. **R7: one clock.** This is the one ruling the operator has not yet seen, and **approving the plan
+   approves it.** Striking it puts H1 back as a t0 halt.
+   - **Why H1 would fire.** Reading the sources shows H1 fires on every fixture.
+     - libdispatch takes its UPTIME timer "now" from `mach_get_times` (libdispatch
+       `src/shims/time.h:220-235`, `src/event/event_kevent.c:2526`).
+     - `mach_get_times` falls back to `gettimeofday` (116) with a mach-time out-parameter whenever
+       the commpage's gettimeofday stamp is a second or more from `mach_absolute_time` (xnu
+       `libsyscall/wrappers/mach_get_times.c`, `__commpage_gettimeofday.c`).
+     - retrace freezes the commpage at load while the timebase is synthetic, so the fallback is
+       always taken. The guest therefore reads the host's mach time for "now" and `synthetic_tsc`
+       for its deadlines. No deadline is ever due on the host clock, and libdispatch re-arms without
+       end.
+   - **The remedy.** The recorder rewrites 116's mach-time out-parameter to the guest's own clock
+     (`now_guest()`, which is `synthetic_tsc` plus the commpage's timebase offset) and appends that
+     write to the event. Replay applies it verbatim, as it applies any recorded write, so no replay
+     code changes.
+   - **What it does not change.**
+     - The trace format does not move.
+     - A pre-M46 trace, which carries the host's value, replays exactly as before.
+     - The wall time in `tv` stays the host's, recorded.
+   - **Why not the commpage remedy §7 names.** It would change what snapshot bytes mean, which is a
+     `TRACE_MAGIC` bump and so H4. It would also need the frozen stamp to track the synthetic clock
+     on every read. R7 changes one recorded value.
+   - **t0 M1 still measures the channel.** If M1 measures the fallback away (`clock ok` with no
+     116), Task 1 drops the rewrite and keeps the test. H1 still stands for any other host-clock
+     channel R7 does not close.
+2. **`try_workq_kernreturn`.** The `Result` §3g asks for comes from a new
+   `try_workq_kernreturn`, which both arms call. `guest_workq_kernreturn` stays as a wrapper that
+   panics on `Err`, so M18's `threads.rs` tests keep their signature and their `0xbeef` refusal.
+3. **The redelivery returns `self`.** This resolves §3d's hazard. The box installs the upcall block
+   on the live vCPU and returns the manager's pthread as the call's result, so the arm's ordinary
+   `set_x0_err_and_return(self, false)` completes it: `x0 = self`, `PC = ELR = entry`. That is
+   identical on both sides, and the mirror compares the recorded `ret` as it does any other. For the
+   same reason, a manager re-entered while it is the current thread (parked, then fired by the idle
+   jump in the same settle) has its block loaded onto the vCPU. `switch_to_thread` returns early
+   for the current thread, so a block written only to the table would never load.
+4. **The replay refusal wraps the record side's words.** The text is `<call> refused on replay,
+   though the recording accepted it — replay diverged before this landmark: <message>`, not §3g's
+   `kevent_qos shape: …`. It names the call and keeps the refusal whole.
+5. **The poke's `qos` is 0.** `_dispatch_event_loop_poke`'s struct literal sets none. §2b did not
+   state it, and t0 M3 confirms it.
+6. **An immediate timer registration is refused, not modelled.** §3b's `KeventShape::TimerAdd` and
+   §3d's matching bullet are dropped: `kevent_qos_shape` refuses filter −7 by name. Reaching that
+   path takes more than 14 deferred changes in one drain, and no fixture comes close. If t0 M3 sees
+   it on a fixture's path, that is the plan's Halt 6, and the milestone re-plans.
+7. **Test 5 is two tests, and test 6 tampers memory, not the trace.**
+   - **5a, the seek.** It finds the fire by the clock jump, not by the armed count. In `after`'s
+     default mode, the manager's `KEVENT_RETURN` arms the timer and that landmark's own settle fires
+     it, so no boundary sees it armed. It compares a checkpoint continued across the jump against a
+     cold seek.
+   - **5b, `reverse-continue`.** It watches the handler's cell and checks that `where` names the
+     worker that stored to it.
+   - **Test 6 tampers memory.** §3f's "a recorded landmark is rewritten" cannot reach the validator,
+     because the mirror compares the recorded `(num, args)` before it classifies anything. Test 6
+     instead steps to the landmark's `svc`, tampers the entry in guest memory through a test
+     accessor, and asserts the `Divergence` and its detail in process.
+8. **Files and fixtures the spec did not name.**
+   - `crates/retrace-box/tests/kqmanager.rs`: seven box-level tests of the manager's lifecycle and
+     refusals, a new binary.
+   - `after_dyn`'s `clock` mode, which is R7's fixture.
+   - Its default mode prints the handler cell's address, for test 5b.
+   - `ThreadTable` gains `unpark` and `stack_of`.
+   - §3c's manager is one enum, `Manager { None, Bound(tid), Unbound(tid) }`.
+   - `gcdtimer_e2e` has eight tests, not six.
+9. **The count.** 853 → 895 `#[test]` lines. With the two `census.rs` tests compiled twice, that is
+   **897 passed + ignored over 151 binaries**: 888 / 0 / 9, or 889 / 0 / 8 if `automationmodetool`
+   un-ignores. This replaces §9's provisional 865 over 150.
+10. **Halt 7, the other clocks.** Stop if t0 M1(c) finds the guest's `mach_absolute_time` at or
+    above `2^62`, which libdispatch turns into `DISPATCH_TIME_FOREVER`. Stop too if another frozen
+    commpage clock (approximate or continuous time) is on the UPTIME timer path. R7 does not reach
+    either one.
