@@ -233,7 +233,7 @@ For each hit whose backtrace contains `_dispatch_event_loop_timer_arm`, `_dispat
 ```bash
 export L=/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers
 lldb -b -o "disassemble -n mach_absolute_time" -o "disassemble -n __commpage_gettimeofday_internal" -- $L/t0/after_dyn > $L/t0/m1c-disasm.log 2>&1; echo "exit=$?"
-tools/codesign-run.sh target/aarch64-apple-darwin/debug/retrace debug /private/tmp/claude-501/m46-clock.bin --script "x 0xffffc080 0x60" > $L/t0/m1c-commpage.out 2>&1; echo "exit=$?"
+tools/codesign-run.sh target/aarch64-apple-darwin/debug/retrace debug /private/tmp/claude-501/m46-clock.bin --script "x 0xfffffc080 0x60" > $L/t0/m1c-commpage.out 2>&1; echo "exit=$?"
 cat $L/t0/m1c-commpage.out
 ```
 
@@ -244,7 +244,7 @@ From the disassembly, record:
 
 From the commpage bytes, record the 8-byte timebase offset. Compute the guest's `mach_absolute_time` at start as `0x1_0000_0000 + offset` (wrapping). **Halt 7** if it is at or above `0x4000_0000_0000_0000`.
 
-If the `x` address form is rejected, the commpage IPA is `0xF_FFFF_C000` (`crates/retrace-box/src/lib.rs`, `COMMPAGE_IPA`), so write the address as `0xfffffc080`. Task 1's `COMMPAGE_TIMEBASE_OFFSET_IPA` takes the measured offset.
+The address is the commpage's (`COMMPAGE_IPA` = `0xF_FFFF_C000` in `crates/retrace-box/src/lib.rs`, which is also its guest VA) plus `0x80`. If `x` rejects it, report the rejection text and read the same 0x60 bytes out of the trace's opening `Snapshot` at that IPA instead. Task 1's `COMMPAGE_TIMEBASE_OFFSET_IPA` takes the measured offset.
 
 - [ ] **Step 6: M2, the manager's entry, natively**
 
