@@ -115,7 +115,10 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   stepping changes, each asserting lldb does not loop; it skips loudly without lldb, and its CPython
   test without Homebrew Python), `apple_walls_e2e` (Apple binaries by path: M44's
   `ls_records_and_replays` and `ed_records_and_replays` run beside `launchctl`'s; the other seven
-  are parked at their measured walls), `skiplines` (M44: the skip-line detector and its control). Run one with
+  are parked at their measured walls), `skiplines` (M44: the skip-line detector and its control), `kqinit_e2e` (M45: libdispatch's
+  workqueue-kqueue init, `kevent_qos` with `KEVENT_FLAG_WORKQ`, issued by hand from `kqinit_dyn.c`
+  and emulated as one measured shape; asserts the landmark, the refusals by value, a rewritten
+  return replay must name, and seeks across it). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -261,10 +264,14 @@ space and never a guest address (M18 Stage 2b); and a workqueue worker parked at
 opcode `0x4` (`BlockReason::Parked`) has **no waker at all** — libpthread `brk`s if that call ever
 returns. Forwarding `bsdthread_create` would be not merely wrong but whole-process fatal (the host
 would start a real thread on retrace's own `_pthread_start`, which PAC-fails on the guest's pthread
-struct) — and **nothing asserts against it**: the emulating arm (`crates/retrace-core/src/lib.rs:1006`)
+struct) — and **nothing asserts against it**: the emulating arm (`crates/retrace-core/src/lib.rs:1075`)
 sits before the generic forward arm and that ordering is the only guard. The generic arm's asserts
-are `is_signal_syscall`, the workq pair and `writes_via_nested_pointer` only; the claim that it
+are `is_signal_syscall`, the workq pair, `kevent_qos` (M45) and `writes_via_nested_pointer` only; the claim that it
 "asserts" stood here from M14 to M37 and was measured false at M37.
+Since M45 libdispatch's workqueue-kqueue init, `kevent_qos` (374) with `KEVENT_FLAG_WORKQ`, is
+emulated beside the workq pair for the same reason (forwarded, it acts on retrace's own workqueue
+kqueue): exactly one measured shape, returning 0 (`Box_::guest_kevent_qos`), and every other shape
+refused by value, naming the field.
 
 **Emulating a syscall's entry contract is not the same as emulating the syscall.** Besides the new
 thread's registers, `guest_bsdthread_create` must reproduce what the *kernel* writes on the way

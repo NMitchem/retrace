@@ -1,0 +1,11 @@
+# t3-csh-samples.sh, 2026-09-28, same host, alternating binaries.
+# base = a78f28f (M45's base, M44's close crates); t3 = 09a105f (the swept binary).
+# traps = [trap] lines before the 3403 wall; gtod = gettimeofday (116) traps.
+1 csh base rc=4 traps=338 gtod=21 traps-gtod=317 3403-lines=1
+1 csh t3 rc=4 traps=340 gtod=23 traps-gtod=317 3403-lines=1
+1 tcsh base rc=4 traps=338 gtod=21 traps-gtod=317 3403-lines=1
+1 tcsh t3 rc=4 traps=344 gtod=27 traps-gtod=317 3403-lines=1
+2 csh base rc=4 traps=337 gtod=20 traps-gtod=317 3403-lines=1
+2 csh t3 rc=4 traps=337 gtod=20 traps-gtod=317 3403-lines=1
+2 tcsh base rc=4 traps=337 gtod=20 traps-gtod=317 3403-lines=1
+2 tcsh t3 rc=4 traps=336 gtod=19 traps-gtod=317 3403-lines=1

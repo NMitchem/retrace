@@ -735,6 +735,19 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // for MIN(sizeof(cfg), affinity) bytes for SETUP_DISPATCH (bsd/pthread/pthread_workqueue.c
         // `workq_kernreturn`). Emulated (M18); the box refuses unmeasured opcodes by value.
         SYS_WORKQ_KERNRETURN => row!(P, [Scalar, Ptr, Scalar, Scalar]),
+        // kevent_qos(int kq, const struct kevent_qos_s *changelist, int nchanges,
+        //   struct kevent_qos_s *eventlist, int nevents, void *data_out, size_t *data_available,
+        //   unsigned int flags): xnu-private (bsd/sys/event_private.h). Emulated (M45) as exactly
+        // one shape, libdispatch's workqueue-kqueue init (`kqinit_shape`): kq is -1 (a value
+        // under KEVENT_FLAG_WORKQ, not a descriptor), the change list is one 72-byte entry, and
+        // eventlist/data_out/data_available are NULL — the bounds these kinds cite. No row can
+        // describe a FORWARDED kevent_qos (M44 R4: count × size, nested idents); the generic
+        // forward arm asserts 374 away, so this row is never consulted by a forward. The row
+        // describes the MODELLED workqueue shape: x0 is Scalar because it is the -1 workqueue
+        // sentinel. A kevent_qos on a guest kqueue() fd carries a DESCRIPTOR in x0, so a successor
+        // that ever forwards a descriptor-based kevent_qos must make x0 an Fd, or it silently
+        // forwards a raw guest fd (the M10 class).
+        SYS_KEVENT_QOS => row!(P, [Scalar, Ptr, Scalar, Ptr, Scalar, Ptr, Ptr, Scalar]),
         // bsdthread_ctl(user_addr_t cmd, arg1, arg2, arg3): xnu-private, cmd-dependent
         // (bsd/pthread/pthread_workqueue.c `bsdthread_ctl`). arg1/arg2 are port names, priorities
         // or resource keys the kernel never dereferences; arg3 is, for QOS_OVERRIDE_DISPATCH
@@ -804,8 +817,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // read end first) and `x1` is captured as the event's `ret1`; `Ret::FdPair`'s doc has it.
         42 => row!(Ret::FdPair, []),
         // kqueue(void) → a NEW descriptor (bsd/kern/kern_event.c `kqueue`). Bound like open's
-        // (EXPECTED_DIFFS; exercised by /bin/wait4path). No kevent spelling (363/369/374/375) is
-        // in the census, so nothing yet consumes the bound slot.
+        // (EXPECTED_DIFFS; exercised by /bin/wait4path). Nothing yet consumes the bound slot: 374
+        // is emulated only for the workqueue kqueue (M45), never on a descriptor, and 363/369/375
+        // have no row.
         362 => row!(F, []),
         // ---- memory ---------------------------------------------------------------------------
         // munmap(void *addr, size_t len) / mprotect(addr, len, prot): emulated above the trace
@@ -1220,6 +1234,14 @@ pub const SYS_WORKQ_OPEN: u64 = 367;
 /// not a ceiling: the park/return opcodes a *running* worker issues cannot be enumerated until
 /// Stage 2b makes one run.
 pub const SYS_WORKQ_KERNRETURN: u64 = 368;
+/// `kevent_qos(int kq, const struct kevent_qos_s *changelist, int nchanges, struct kevent_qos_s
+/// *eventlist, int nevents, void *data_out, size_t *data_available, unsigned int flags)`. This is
+/// xnu's private `bsd/sys/event_private.h`; the SDK carries only the number. **Never forwarded**
+/// (M45): with `KEVENT_FLAG_WORKQ` the kernel resolves `kq` to the PROCESS's workqueue kqueue,
+/// allocating it if absent (`kern_event.c` `kevent_get_kqwq`), which is retrace's own, the class
+/// `SYS_WORKQ_OPEN` names (M44 t0 M1). `Box_::guest_kevent_qos` emulates exactly one shape,
+/// libdispatch's `_dispatch_kq_init` (`kqinit_shape`), and refuses every other by value.
+pub const SYS_KEVENT_QOS: u64 = 374;
 /// `thread_selfid()` — already fires and already survives.
 pub const SYS_THREAD_SELFID: u64 = 372;
 /// `__ulock_wait(operation, addr, value, timeout_us)` — the primitive `__pthread_join`'s retry
@@ -1384,6 +1406,145 @@ pub fn is_signal_syscall(num: u64) -> bool {
 /// replay mirror share.
 pub fn exec_refusal_errno(num: u64) -> Option<u64> {
     match num { SYS_EXECVE | SYS_POSIX_SPAWN => Some(14), _ => None }
+}
+
+// ---- M45-kqinit: libdispatch's workqueue-kqueue initialisation ------------------------------------
+// Flag and filter values from the macOS 26 SDK's `sys/event.h`, which tests/kqinit.rs re-reads at
+// test time. The exception is `KEVENT_FLAG_WORKQ`, which the SDK does not ship: it is xnu's
+// `bsd/sys/event_private.h:141`, and the same test asserts the SDK still lacks it.
+/// `EVFILT_USER` (`sys/event.h:77`), as the `i16` a `kevent_qos_s` carries.
+pub const EVFILT_USER: i16 = -10;
+/// `EV_ADD` (`sys/event.h:136`).
+pub const EV_ADD: u16 = 0x0001;
+/// `EV_ENABLE` (`sys/event.h:138`). Not in the measured shape; `kqinit_dyn`'s refusal mode adds it.
+pub const EV_ENABLE: u16 = 0x0004;
+/// `EV_CLEAR` (`sys/event.h:143`).
+pub const EV_CLEAR: u16 = 0x0020;
+/// `KEVENT_FLAG_IMMEDIATE` (`sys/event.h:132`): poll, never block.
+pub const KEVENT_FLAG_IMMEDIATE: u32 = 0x1;
+/// `KEVENT_FLAG_WORKQ` (xnu `bsd/sys/event_private.h:141`): "interact with the default workq kq".
+pub const KEVENT_FLAG_WORKQ: u32 = 0x20;
+/// `sizeof(struct kevent_qos_s)` (xnu `event_private.h:115-125`). The struct has no padding.
+pub const KEVENT_QOS_SIZE: usize = 72;
+
+/// `struct kevent_qos_s` (xnu `bsd/sys/event_private.h:115-125`), little-endian. Offsets: `ident`
+/// 0, `filter` 8, `flags` 10, `qos` 12, `udata` 16, `fflags` 24, `xflags` 28, `data` 32, `ext` 40.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeventQos {
+    pub ident: u64,
+    pub filter: i16,
+    pub flags: u16,
+    pub qos: i32,
+    pub udata: u64,
+    pub fflags: u32,
+    pub xflags: u32,
+    pub data: i64,
+    pub ext: [u64; 4],
+}
+
+impl KeventQos {
+    pub fn from_bytes(b: &[u8; KEVENT_QOS_SIZE]) -> KeventQos {
+        let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let u16_at = |o: usize| u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+        KeventQos {
+            ident: u64_at(0),
+            filter: u16_at(8) as i16,
+            flags: u16_at(10),
+            qos: u32_at(12) as i32,
+            udata: u64_at(16),
+            fflags: u32_at(24),
+            xflags: u32_at(28),
+            data: u64_at(32) as i64,
+            ext: [u64_at(40), u64_at(48), u64_at(56), u64_at(64)],
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; KEVENT_QOS_SIZE] {
+        let mut b = [0u8; KEVENT_QOS_SIZE];
+        b[0..8].copy_from_slice(&self.ident.to_le_bytes());
+        b[8..10].copy_from_slice(&self.filter.to_le_bytes());
+        b[10..12].copy_from_slice(&self.flags.to_le_bytes());
+        b[12..16].copy_from_slice(&self.qos.to_le_bytes());
+        b[16..24].copy_from_slice(&self.udata.to_le_bytes());
+        b[24..28].copy_from_slice(&self.fflags.to_le_bytes());
+        b[28..32].copy_from_slice(&self.xflags.to_le_bytes());
+        b[32..40].copy_from_slice(&self.data.to_le_bytes());
+        for (i, e) in self.ext.iter().enumerate() {
+            b[40 + 8 * i..48 + 8 * i].copy_from_slice(&e.to_le_bytes());
+        }
+        b
+    }
+
+    /// Every field as `(name, bits)` in layout order, a signed field as its two's-complement bits
+    /// at its own width, so a refusal prints `filter` as `0xfff6`, never a sign-extended `u64`.
+    pub fn fields(&self) -> [(&'static str, u64); 12] {
+        [
+            ("ident", self.ident),
+            ("filter", u64::from(self.filter as u16)),
+            ("flags", u64::from(self.flags)),
+            ("qos", u64::from(self.qos as u32)),
+            ("udata", self.udata),
+            ("fflags", u64::from(self.fflags)),
+            ("xflags", u64::from(self.xflags)),
+            ("data", self.data as u64),
+            ("ext[0]", self.ext[0]),
+            ("ext[1]", self.ext[1]),
+            ("ext[2]", self.ext[2]),
+            ("ext[3]", self.ext[3]),
+        ]
+    }
+}
+
+/// The one entry M45 models: libdispatch's `_dispatch_kq_init` (`event_kevent.c:689-699`).
+/// `ident`, `filter`, `flags`, `qos` and `udata` were measured by M44 t0 M1, and the other seven
+/// fields (all zero) by M45 t0 M1.
+pub const KQINIT: KeventQos = KeventQos {
+    ident: 1,
+    filter: EVFILT_USER,
+    flags: EV_ADD | EV_CLEAR,
+    qos: 0x0200_0000, // _PTHREAD_PRIORITY_EVENT_MANAGER_FLAG
+    udata: !0x7,      // DISPATCH_WLH_MANAGER
+    fflags: 0,
+    xflags: 0,
+    data: 0,
+    ext: [0; 4],
+};
+
+/// Is this `kevent_qos` call the measured init? `Ok` iff every argument the kernel reads, and all
+/// 72 bytes of the one change-list entry, equal the measurement (M45 §2a). Otherwise `Err` names
+/// the first difference: the register or field, what it is, and what was measured.
+///
+/// `int` and `unsigned int` parameters are compared on the 32 bits the kernel reads (R2; the M38
+/// `AT_FDCWD` lesson), and pointers whole. `x1`, the change list's address, is where the entry is
+/// rather than what it is, and is not compared: the caller reads the entry through it and passes
+/// the bytes. A short `entry` means the change list did not fully translate.
+pub fn kqinit_shape(args: [u64; 8], entry: &[u8]) -> Result<(), String> {
+    const LOW: u64 = 0xffff_ffff;
+    let checks: [(usize, &str, u64, u64); 7] = [
+        (0, "kq, as int", 0xffff_ffff, args[0] & LOW),
+        (2, "nchanges, as int", 1, args[2] & LOW),
+        (3, "eventlist", 0, args[3]),
+        (4, "nevents, as int", 0, args[4] & LOW),
+        (5, "data_out", 0, args[5]),
+        (6, "data_available", 0, args[6]),
+        (7, "flags, as unsigned int", u64::from(KEVENT_FLAG_WORKQ | KEVENT_FLAG_IMMEDIATE), args[7] & LOW),
+    ];
+    for (i, name, want, got) in checks {
+        if got != want {
+            return Err(format!("x{i} ({name}) is {got:#x}, measured {want:#x}"));
+        }
+    }
+    let Ok(bytes) = <&[u8; KEVENT_QOS_SIZE]>::try_from(entry) else {
+        return Err(format!("the change list's entry read {} of {KEVENT_QOS_SIZE} bytes: it does not \
+                            fully translate", entry.len()));
+    };
+    for ((name, got), (_, want)) in KeventQos::from_bytes(bytes).fields().into_iter().zip(KQINIT.fields()) {
+        if got != want {
+            return Err(format!("changelist[0].{name} is {got:#x}, measured {want:#x}"));
+        }
+    }
+    Ok(())
 }
 
 // ---- M12-signal-delivery ---------------------------------------------------------------------

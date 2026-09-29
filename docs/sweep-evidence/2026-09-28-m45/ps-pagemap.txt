@@ -1,0 +1,120 @@
+events=16045 torn=false
+#0 Snapshot pc=0x1400049c0 regions=137 covering=[]
+#253 Syscall num=202 args=[27ff840, 4, 701400000, 27ff710, 0, 0, 0, 0] ret=0x0 err=false thread=0 write ipa=0x701400000 len=0x4ce30 byte=0xf5
+#689 Syscall(args in block) num=539 args=[203, c622, 701450150, 61e10, 61e00, 1, 36303073797474, 0] ret=0x1 err=true thread=0 writes=0
+#691 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#692 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 30, 0] ret=0x0 err=false thread=0 writes=0
+#1130 Syscall(args in block) num=539 args=[203, c357, 701450328, 61e10, 61e00, 1, 31303073797474, 0] ret=0x1 err=true thread=0 writes=0
+#1132 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#1133 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 30, 0] ret=0x0 err=false thread=0 writes=0
+#1573 Syscall(args in block) num=539 args=[203, 9920, 701450500, 61e10, 61e00, 27ff437, 37303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#1575 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#1576 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 65, 0] ret=0x0 err=false thread=0 writes=0
+#2016 Syscall(args in block) num=539 args=[203, 974b, 7014506d8, 61e10, 61e00, 0, 37303073797474, ffffffffbfc007ff] ret=0x1 err=true thread=0 writes=0
+#2018 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#2019 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 68, 0] ret=0x0 err=false thread=0 writes=0
+#2454 Syscall(args in block) num=539 args=[203, 2f9c, 7014508b0, 61e10, 61e00, 0, 34303073797474, ffffffffbfc007ff] ret=0x1 err=true thread=0 writes=0
+#2456 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#2457 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 10, 0, 0] ret=0x0 err=false thread=0 writes=0
+#2896 Syscall(args in block) num=539 args=[203, 1514, 701450a88, 61e30, 61e40, 0, 32303073797474, ffffffffbfc007ff] ret=0x1 err=true thread=0 writes=0
+#2898 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#2899 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 65, 0] ret=0x0 err=false thread=0 writes=0
+#3338 Syscall(args in block) num=539 args=[203, 1287, 701450c60, 61e50, 61e40, 0, 32303073797474, ffffffffbfc007ff] ret=0x1 err=true thread=0 writes=0
+#3340 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#3341 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 68, 0] ret=0x0 err=false thread=0 writes=0
+#3779 Syscall(args in block) num=539 args=[203, 170c4, 701450e38, 61e70, 61e80, 0, 31303073797474, ffffffffbfc007ff] ret=0x1 err=true thread=0 writes=0
+#3781 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#3782 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 65, 0] ret=0x0 err=false thread=0 writes=0
+#4221 Syscall(args in block) num=539 args=[203, 16ef3, 701451010, 61e90, 61e80, 0, 31303073797474, ffffffffbfc007ff] ret=0x1 err=true thread=0 writes=0
+#4223 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#4224 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#4661 Syscall(args in block) num=539 args=[203, 1522e, 7014511e8, 61eb0, 61ec0, 27ff437, 30303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#4663 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#4664 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#5101 Syscall(args in block) num=539 args=[203, 14e7a, 7014513c0, 61ed0, 61ec0, 27ff437, 30303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#5103 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#5104 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#5540 Syscall(args in block) num=539 args=[203, 14e3f, 701451598, 61ef0, 61f00, 27ff437, 36303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#5542 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#5543 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#5979 Syscall(args in block) num=539 args=[203, 14c81, 701451770, a, 700c08080, 27ff437, 36303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#5981 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#5982 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#6417 Syscall(args in block) num=539 args=[203, 14c3c, 701451948, a, 700c08080, 27ff437, 34303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#6419 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#6420 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#6855 Syscall(args in block) num=539 args=[203, 14a7e, 701451b20, a, 700c08080, 27ff437, 34303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#6857 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#6858 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#7288 Syscall(args in block) num=539 args=[203, 18113, 701451cf8, a, 700c08080, 27ff437, 35303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#7290 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#7291 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 6c, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#7720 Syscall(args in block) num=539 args=[203, 12eb1, 701451ed0, a, 700c08080, 27ff437, 33303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#7722 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#7723 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#8152 Syscall(args in block) num=539 args=[203, 12ca0, 7014520a8, a, 700c08080, 27ff437, 33303073797474, fffff0007ffff800] ret=0x1 err=true thread=0 writes=0
+#8154 Syscall(args in block) num=202 args=[27ff658, 3, 701474000, 27ff648, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#8155 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff630, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#8594 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=1
+#8595 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#9033 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#9034 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#9473 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#9474 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 30, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#9913 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#9914 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#10353 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#10354 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#10794 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#10795 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#11235 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#11236 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#11666 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#11667 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#12097 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#12098 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#12534 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#12535 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 20, 3ff800, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#12971 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#12972 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#13408 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#13409 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#13840 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#13841 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 6c, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#14278 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#14279 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 30, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#14716 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#14717 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#15154 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#15155 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#15596 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#15597 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 68, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#16038 Syscall(args in block) num=202 args=[27ff628, 3, 701474000, 27ff618, 0, 0, 0, 0] ret=0x0 err=false thread=0 writes=2
+#16039 Syscall(args in block) num=75 args=[701474000, 100000, 7, 0, 0, 27ff600, 65, fffff0007ffff800] ret=0x0 err=false thread=0 writes=0
+#16040 Syscall(args in block) num=75 args=[701400000, 50000, 7, 0, 0, 1ec701f90, 65, fffff0003ffff800] ret=0x0 err=false thread=0 writes=0
+#16041 Syscall(args in block) num=75 args=[701450000, 24000, 7, 0, 0, 0, 0, fffff0003ffff800] ret=0x0 err=false thread=0 writes=0
+#16043 Exit code=0 thread=0
+#16044 Snapshot pc=0x4404 regions=628 covering=[(701400000, 400000, 0)]
+    bytes[0x701414068..0x701414088] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+page 0x701400000: final snapshot non-zero bytes= 1654  last recorded write (landmark, non-zero bytes)=Some((253, 1654))
+page 0x701404000: final snapshot non-zero bytes= 1698  last recorded write (landmark, non-zero bytes)=Some((253, 1698))
+page 0x701408000: final snapshot non-zero bytes= 1753  last recorded write (landmark, non-zero bytes)=Some((253, 1753))
+page 0x70140c000: final snapshot non-zero bytes= 1804  last recorded write (landmark, non-zero bytes)=Some((253, 1804))
+page 0x701410000: final snapshot non-zero bytes= 1837  last recorded write (landmark, non-zero bytes)=Some((253, 1837))
+page 0x701414000: final snapshot non-zero bytes=    0  last recorded write (landmark, non-zero bytes)=Some((253, 1876))
+page 0x701418000: final snapshot non-zero bytes= 1793  last recorded write (landmark, non-zero bytes)=Some((253, 1793))
+page 0x70141c000: final snapshot non-zero bytes= 1742  last recorded write (landmark, non-zero bytes)=Some((253, 1742))
+page 0x701420000: final snapshot non-zero bytes= 1765  last recorded write (landmark, non-zero bytes)=Some((253, 1765))
+page 0x701424000: final snapshot non-zero bytes= 1754  last recorded write (landmark, non-zero bytes)=Some((253, 1754))
+page 0x701428000: final snapshot non-zero bytes= 1715  last recorded write (landmark, non-zero bytes)=Some((253, 1715))
+page 0x70142c000: final snapshot non-zero bytes= 1384  last recorded write (landmark, non-zero bytes)=Some((253, 1384))
+page 0x701430000: final snapshot non-zero bytes=    0  last recorded write (landmark, non-zero bytes)=Some((253, 0))
+page 0x701434000: final snapshot non-zero bytes=    0  last recorded write (landmark, non-zero bytes)=Some((253, 0))
+page 0x701438000: final snapshot non-zero bytes=    0  last recorded write (landmark, non-zero bytes)=Some((253, 0))
+page 0x70143c000: final snapshot non-zero bytes=    0  last recorded write (landmark, non-zero bytes)=Some((253, 0))
+page 0x701440000: final snapshot non-zero bytes=    0  last recorded write (landmark, non-zero bytes)=Some((253, 0))
+page 0x701444000: final snapshot non-zero bytes=    0  last recorded write (landmark, non-zero bytes)=Some((253, 0))
+page 0x701448000: final snapshot non-zero bytes=    0  last recorded write (landmark, non-zero bytes)=Some((253, 0))
+page 0x70144c000: final snapshot non-zero bytes=    0  last recorded write (landmark, non-zero bytes)=Some((253, 0))
+kevent_qos(374) events: 0
+syscall counts (top 25): [(340, 15442), (344, 108), (202, 87), (-14, 47), (75, 38), (346, 36), (398, 36), (399, 36), (116, 19), (-15, 19), (539, 18), (6, 13), (-47, 11), (-12, 10), (5, 8), (54, 8), (73, 7), (92, 7), (38, 6), (483, 6), (74, 4), (294, 4), (338, 4), (381, 4), (-19, 4)]

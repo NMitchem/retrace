@@ -29,6 +29,10 @@
 //! 10 `unlink` (`/bin/ed`), 128 `rename` (the xcrun trio, when xcrun rebuilds its cache), 345
 //! `statfs64` (`/usr/bin/dddiagnose`), 461 `getattrlistbulk` (`/bin/ls`), and 464 `openat_nocancel`
 //! (`/bin/ed`, and the `xcrun` trio (`desdp`, `dyld_info`, `flex`) when xcrun rebuilds its cache).
+//!
+//! M45 adds 374 `kevent_qos`, measured from the same `[trap] num=` lines by M44 t0 M1 and M45 t0 M1
+//! (`/usr/bin/automationmodetool`): libdispatch's workqueue-kqueue init, emulated since M45 and
+//! documented by its row.
 use retrace_arch::arg_kinds;
 
 pub const CENSUS: &[i64] = &[
@@ -36,8 +40,8 @@ pub const CENSUS: &[i64] = &[
     5, 6, 10, 13, 20, 24, 25, 33, 36, 37, 38, 39, 41, 42, 43, 46, 47, 48, 49, 52, 53, 54, 58, 59,
     60, 73, 74, 75, 81, 90, 92, 97, 98, 116, 117, 128, 133, 153, 169, 170, 184, 189, 191, 194, 195,
     197, 199, 202, 220, 228, 244, 266, 286, 294, 327, 328, 329, 331, 336, 338, 339, 340, 344, 345,
-    346, 347, 360, 361, 362, 366, 367, 368, 372, 381, 396, 397, 398, 399, 406, 412, 427, 461, 463,
-    464, 470, 478, 483, 500, 515, 516, 539, 550, 2147483648,
+    346, 347, 360, 361, 362, 366, 367, 368, 372, 374, 381, 396, 397, 398, 399, 406, 412, 427, 461,
+    463, 464, 470, 478, 483, 500, 515, 516, 539, 550, 2147483648,
 ];
 
 #[test]

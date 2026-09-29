@@ -1,0 +1,9 @@
+# run: traps = [trap] lines; 374 = kevent_qos traps; rcv# = trap # of the RCV-only mach_msg2 (options 0x404000102)
+a1-t3 traps=393 374=0 rcv#=384  receive-refusals=1 :: guest crashed: pc=0x180302eb0 far=0x2000050040 esr=0x92000045
+a1-base traps=392 374=0 rcv#=383  receive-refusals=1 :: guest crashed: pc=0x180302eb0 far=0x4000050050 esr=0x92000045
+a2-t3 traps=451 374=0 rcv#=380  receive-refusals=1 :: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1d03 (guest task port Some(515)) sen
+a2-base traps=453 374=0 rcv#=382  receive-refusals=1 :: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send
+b1-t3 traps=458 374=0 rcv#=387  receive-refusals=1 :: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xb03 (guest task port Some(515)) send
+b1-base traps=454 374=0 rcv#=383  receive-refusals=1 :: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1b03 (guest task port Some(515)) sen
+b2-t3 traps=454 374=0 rcv#=383  receive-refusals=1 :: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1c03 (guest task port Some(515)) sen
+b2-base traps=448 374=0 rcv#=377  receive-refusals=1 :: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1b03 (guest task port Some(515)) sen

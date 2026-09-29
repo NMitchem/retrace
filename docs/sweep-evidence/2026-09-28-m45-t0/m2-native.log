@@ -1,0 +1,16 @@
+timer build=0
+timer native=0
+after build=0
+after native=0
+signal build=0
+Terminated: 15             $L/t0-m2/$c > $L/t0-m2/$c.native.out
+signal native=143
+== timer
+0000000    f   i   r   e   d  \n   d   o   n   e  \n                    
+0000013
+== after
+0000000    f   i   r   e   d  \n   d   o   n   e  \n                    
+0000013
+== signal
+
+[exited with code 0]
