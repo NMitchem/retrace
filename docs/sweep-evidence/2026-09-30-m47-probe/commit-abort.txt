@@ -1,0 +1,28 @@
+# g35 (git commit, scratch build with rows + MADV_ZERO arm, madvise 7 FORWARDED): guest SIGABRT, identical on replay
+# x22 at the abort (retrace debug 'continue; x 0x180328e07 96'):
+b'*** error for object %p: pointer being freed was not allocated\n'
+# frame-pointer walk of the guest stack dump (x29 chain), symbolicated against the host cache (slide added) and atos for git:
+cache slide 0x1900000
+0x1804b65e4 libsystem_kernel.dylib __pthread_kill + 0x4
+0x1803f8644 libsystem_c.dylib abort + 0x94
+0x1802f1a40 libsystem_malloc.dylib malloc_vreport + 0x37c
+0x1802f528c libsystem_malloc.dylib malloc_report + 0x40
+0x1802fa648 libsystem_malloc.dylib ___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED + 0x4c
+0x1803874dc libsystem_c.dylib tzload + 0xfc
+0x180387d64 libsystem_c.dylib tzparse + 0x74
+0x180387aa4 libsystem_c.dylib tzload + 0x6c4
+0x180387300 libsystem_c.dylib tzsetwall_basic + 0x158
+0x180386ea4 libsystem_c.dylib localtime_r + 0x34
+0x180133e00 dyld start + 0x1b50
+datestamp (in git) + 68
+fmt_ident (in git) + 680
+cmd_commit (in git) + 2592
+run_builtin (in git) + 440
+handle_builtin (in git) + 340
+cmd_main (in git) + 856
+main (in git) + 40
+# madvise / mach_vm landmarks in g35.bin (td), tail:
+events=616 torn=false
+#593 num=75 args=[7009a4000, 20000, 7, 0] ret=0x0 ret1=0x0 err=false thread=0
+#612 num=478 args=[1000, 1, 0, 0] ret=0x0 ret1=0x0 err=false thread=0
+#613 num=329 args=[3, 27fd6f8, 0, 0] ret=0x0 ret1=0x0 err=false thread=0

@@ -1,0 +1,4 @@
+# localtime_r control (lt.c) on unpatched 427fa0a: record/replay
+2023-11-14 19:13 -03
+2023-11-14 19:13 -03
+replay IDENTICAL

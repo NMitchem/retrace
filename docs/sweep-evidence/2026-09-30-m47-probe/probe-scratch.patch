@@ -1,0 +1,70 @@
+diff --git a/crates/retrace-arch/src/lib.rs b/crates/retrace-arch/src/lib.rs
+index c621764..18489ad 100644
+--- a/crates/retrace-arch/src/lib.rs
++++ b/crates/retrace-arch/src/lib.rs
+@@ -797,6 +797,22 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
+         // unlink(const char *path): M44 (t0 M3: /bin/ed reaches it, opening then unlinking its own
+         // buffer file, e.g. /tmp/ed.mXuuhI).
+         10 => row!(P, [Path]),
++        // PROBE SCRATCH (not for main): chdir(const char *path) — forwarded, it moves retrace's own cwd.
++        12 => row!(P, [Path]),
++        // PROBE SCRATCH: mkdir(const char *path, mode_t mode).
++        136 => row!(P, [Path, Scalar]),
++        // PROBE SCRATCH: link(path1, path2); rename(from, to); rmdir(path); chmod(path, mode);
++        // fchmod(fd, mode); fsync(fd).
++        9 => row!(P, [Path, Path]),
++        128 => row!(P, [Path, Path]),
++        137 => row!(P, [Path]),
++        15 => row!(P, [Path, Scalar]),
++        124 => row!(P, [Fd, Scalar]),
++        95 => row!(P, [Fd]),
++        // PROBE SCRATCH: utimes(const char *path, const struct timeval *times) — times is read.
++        138 => row!(P, [Path, Ptr]),
++        // PROBE SCRATCH: __pthread_canceled(int action).
++        333 => row!(P, [Scalar]),
+         // rename(const char *from, const char *to): M44 (t0 M3: the xcrun trio's — desdp,
+         // dyld_info, flex — cache rewrite, reached only when xcrun rebuilds its host cache
+         // /var/tmp/xcrun_db; Ruling T0-e — host-state-dependent, unlike ed's unlink above).
+diff --git a/crates/retrace-core/src/lib.rs b/crates/retrace-core/src/lib.rs
+index 96dad95..36309a8 100644
+--- a/crates/retrace-core/src/lib.rs
++++ b/crates/retrace-core/src/lib.rs
+@@ -406,6 +406,38 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
+                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append mac_syscall: {e}"))?; count += 1;
+                 b.apply_and_return(0, false, &writes);
+             }
++            // PROBE SCRATCH (not for main): __mac_syscall("AMFI", 0x5a, {inFlags, &outFlags}) —
++            // the kernel writes through the NESTED outFlags pointer, a guest VA that is unmapped in
++            // retrace's own space, so the generic forward EFAULTs and dyld's amfiFlags() becomes 0.
++            // Ask the host with a host out-pointer and record the 8-byte answer as a guest write.
++            Stop::Syscall { num, args } if num == 381 && args[1] == 0x5a && b.is_mapped(args[2]) => {
++                let inflags = b.read_u64(args[2]);
++                let out_ptr = b.read_u64(args[2] + 8);
++                let mut out: u64 = 0;
++                #[repr(C)] struct AmfiArgs { i: u64, o: *mut u64 }
++                let mut a = AmfiArgs { i: inflags, o: &mut out };
++                unsafe extern "C" { fn __mac_syscall(p: *const std::ffi::c_char, c: i32, a: *mut std::ffi::c_void) -> i32; }
++                let r = unsafe { __mac_syscall(c"AMFI".as_ptr(), 0x5a, (&mut a as *mut AmfiArgs).cast()) };
++                eprintln!("[probe] AMFI dyld policy in={inflags:#x} r={r} out={out:#x} out_ptr={out_ptr:#x}");
++                let writes = vec![Region { ipa: out_ptr, bytes: out.to_le_bytes().to_vec() }];
++                w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append amfi: {e}"))?; count += 1;
++                b.apply_and_return(0, false, &writes);
++            }
++            // PROBE SCRATCH: madvise(addr, len, MADV_ZERO=11) zeroes the range — the kernel WRITES
++            // guest memory past any diff window. Zero it here and record the zeros instead.
++            // PROBE SCRATCH (causation test): MADV_FREE_REUSABLE (7) / MADV_FREE_REUSE (8) as
++            // no-ops — a kernel that never reclaims is a valid kernel. Not forwarded.
++            Stop::Syscall { num, args } if num == 75 && (args[2] == 7 || args[2] == 8) && std::env::var_os("PROBE_NOREUSABLE").is_some() => {
++                eprintln!("[probe] madvise({:#x}, {:#x}, {}) not forwarded (no-op)", args[0], args[1], args[2]);
++                w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append madv: {e}"))?; count += 1;
++                b.apply_and_return(0, false, &[]);
++            }
++            Stop::Syscall { num, args } if num == 75 && args[2] == 11 && b.is_mapped(args[0]) => {
++                eprintln!("[probe] MADV_ZERO addr={:#x} len={:#x} (emulated as a recorded zero write)", args[0], args[1]);
++                let writes = vec![Region { ipa: args[0], bytes: vec![0u8; args[1] as usize] }];
++                w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append madv_zero: {e}"))?; count += 1;
++                b.apply_and_return(0, false, &writes);
++            }
+             // mach_vm_allocate / mach_vm_map: allocate anonymous GUEST memory (never forward). The
+             // kernel writes the chosen address into *args[1]; we allocate a deterministic guest IPA
+             // and store it there, returning KERN_SUCCESS.

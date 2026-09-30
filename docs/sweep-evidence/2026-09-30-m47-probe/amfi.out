@@ -1,0 +1,10 @@
+# ./amfi (ad-hoc)
+in=0 ret=0 out=0x1df
+in=2 ret=0 out=0x140
+in=4 ret=0 out=0x1df
+in=6 ret=0 out=0x140
+# ./amfi_hv (ad-hoc + retrace.entitlements)
+in=0 ret=0 out=0x1df
+in=2 ret=0 out=0x140
+in=4 ret=0 out=0x1df
+in=6 ret=0 out=0x140

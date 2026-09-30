@@ -1,0 +1,6 @@
+# jq -n '[range(0;300000)] | add': native, then scratch build with madvise forwarded vs no-op'd (PROBE_NOREUSABLE=1)
+native: 44999850000
+== forward: no-op'd madvise calls=0
+guest terminated by signal 6
+== noop: no-op'd madvise calls=57
+guest terminated by signal 6

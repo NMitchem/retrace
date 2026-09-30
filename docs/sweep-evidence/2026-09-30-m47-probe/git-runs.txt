@@ -1,0 +1,126 @@
+# git runs: per-run recorder/replay outcome lines (stdout head, panic/error/terminated lines, replay compare)
+== git1  trace=59280240
+  stdout: git version 2.50.1 (Apple Git-155)|
+  replay: stdout IDENTICAL
+== git2  trace=14525746
+  stdout: 
+     1 M33: syscall 12 (12) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rule
+     1 thread 'main' (11873914) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+== git3  trace=14557649
+  stdout: 
+     1 M33: syscall 12 (12) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rule
+     1 thread 'main' (11873938) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+== git4  trace=14589250
+  stdout: 
+     1 M33: syscall 12 (12) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rule
+     1 thread 'main' (11873965) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+== git11  trace=60144725
+  stdout: 28b378e8db437bb2e8cacaab08ac9bf0cb7cbff5|
+  replay: stdout IDENTICAL
+== git12  trace=69578465
+  stdout: 28b378e first|
+  replay: stdout IDENTICAL
+== git13  trace=14840831
+  stdout: 
+     1 M33: syscall 12 (12) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rule
+     1 thread 'main' (11874654) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+== git14  trace=15969278
+  stdout: 
+     1 M33: syscall 12 (12) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rule
+     1 thread 'main' (11874715) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+== git15  trace=69535840
+  stdout: commit 28b378e8db437bb2e8cacaab08ac9bf0cb7cbff5|Author: p <p@p>|Date:   Wed Sep 30 08:26:46 2026 -0300||    first|| a.txt | 1 +| 1 file changed, 1 insertion(+)|
+  replay: stdout IDENTICAL
+== git21  trace=70434253
+  stdout:  M a.txt|?? b.txt|
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2e8
+  replay: stdout IDENTICAL
+== git22  trace=66252304
+  stdout: diff --git a/a.txt b/a.txt|index 45b983b..990ddbd 100644|--- a/a.txt|+++ b/a.txt|@@ -1 +1,2 @@| hi|+change|
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2e8
+  replay: stdout IDENTICAL
+== git23  trace=60318976
+  stdout: 28b378e8db437bb2e8cacaab08ac9bf0cb7cbff5|
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff258
+  replay: stdout IDENTICAL
+== git24  trace=70659078
+  stdout: On branch main|Changes not staged for commit:|  (use "git add <file>..." to update what will be committed)|  (use "git restore <file>..." to discard changes in 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2f8
+  replay: stdout IDENTICAL
+== git25  trace=16534906
+  stdout: 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2e8
+     1 M33: syscall 136 (136) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the ru
+     1 thread 'main' (11876891) panicked at crates/retrace-arch/src/lib.rs:1004:38:
+== g30  trace=60177058
+  stdout: fatal: Unable to create '/private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/f3fccc20-651e-4651-96ff-661888b49a37/scratchpad/probe/repo/.git/ind
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2e8
+  replay: stdout IDENTICAL
+== g31  trace=16408586
+  stdout: 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2e8
+     1 M33: syscall 9 (9) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules 
+     1 thread 'main' (11879131) panicked at crates/retrace-arch/src/lib.rs:1006:38:
+== g32  trace=69906878
+  stdout: 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2e8
+  replay: stdout IDENTICAL
+== g33  trace=17073952
+  stdout: 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff298
+     1 syscall 75 wrote into the 64-byte guard band past its 65536-byte diff window at ipa 0x7009a4000. The band was filled with a known pattern before the call and checked after, so this holds whatever bytes the kernel wrote — including zeros over zeros, which 
+     1 thread 'main' (11880873) panicked at crates/retrace-box/src/lib.rs:4186:17:
+== g34  trace=16520870
+  stdout: 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff298
+     1 M33: syscall 138 (138) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the ru
+     1 thread 'main' (11882508) panicked at crates/retrace-arch/src/lib.rs:1014:38:
+== g35  trace=70372385
+  stdout: 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff298
+     1 guest terminated by signal 6
+  replay: stdout IDENTICAL
+== g36  trace=18370821
+  stdout: 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff298
+     1 [probe] MADV_ZERO addr=0x7009a4000 len=0x80000 (emulated as a recorded zero write)
+     1 [probe] madvise(0x7009a4000, 0x20000, 7) not forwarded (no-op)
+     1 [probe] madvise(0x700a24000, 0x10000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa008cc000, 0x10000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa008cc000, 0xc000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa008d8000, 0xc000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa008dc000, 0x10000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa008ec000, 0x10000, 7) not forwarded (no-op)
+     1 M33: syscall 333 (333) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the ru
+     1 thread 'main' (11889995) panicked at crates/retrace-arch/src/lib.rs:1016:38:
+== g40  trace=18495651
+  stdout: 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff298
+     1 [probe] MADV_ZERO addr=0x7015a4000 len=0x80000 (emulated as a recorded zero write)
+     2 [probe] madvise(0x7015a4000, 0x10000, 7) not forwarded (no-op)
+     1 [probe] madvise(0x7015a4000, 0x20000, 7) not forwarded (no-op)
+     1 [probe] madvise(0x701624000, 0x10000, 7) not forwarded (no-op)
+     2 [probe] madvise(0xa00870000, 0x10000, 7) not forwarded (no-op)
+     2 [probe] madvise(0xa00880000, 0x10000, 7) not forwarded (no-op)
+     3 [probe] madvise(0xa00890000, 0x10000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa00890000, 0xc000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa0089c000, 0xc000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa008a0000, 0x10000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa008b0000, 0x10000, 7) not forwarded (no-op)
+     1 RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64
+  replay: stdout IDENTICAL
+== g41  trace=72517680
+  stdout: 
+     1 [probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff268
+     1 [probe] MADV_ZERO addr=0x7015a4000 len=0x80000 (emulated as a recorded zero write)
+     2 [probe] madvise(0x7015a4000, 0x10000, 7) not forwarded (no-op)
+     1 [probe] madvise(0x7015a4000, 0x20000, 7) not forwarded (no-op)
+     1 [probe] madvise(0x701624000, 0x10000, 7) not forwarded (no-op)
+     2 [probe] madvise(0xa0084c000, 0x10000, 7) not forwarded (no-op)
+     2 [probe] madvise(0xa0085c000, 0x10000, 7) not forwarded (no-op)
+     3 [probe] madvise(0xa0086c000, 0x10000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa0086c000, 0xc000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa00878000, 0xc000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa0087c000, 0x10000, 7) not forwarded (no-op)
+     1 [probe] madvise(0xa0088c000, 0x10000, 7) not forwarded (no-op)
+  replay: stdout IDENTICAL

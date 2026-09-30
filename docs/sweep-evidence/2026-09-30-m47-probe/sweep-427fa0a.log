@@ -1,0 +1,114 @@
+pidstart=40929
+binary=/private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/f3fccc20-651e-4651-96ff-661888b49a37/scratchpad/retrace sha256=20f6c7824678625ea3550bb8e8bde2b267ba456a72b1540b54d89581c205adfa commit=427fa0a date=2026-09-30 08:36:51 -03
+load-start:  8:36  up 6 days, 11:20, 7 users, load averages: 1.93 2.27 2.41
+PASS /bin/[
+ROW	/bin/[	PASS	2	2	40955	n/a		
+PASS /bin/bash
+ROW	/bin/bash	PASS	0	0	41018	n/a		
+PASS /bin/cat
+ROW	/bin/cat	PASS	0	0	41071	n/a		
+PASS /bin/chmod
+ROW	/bin/chmod	PASS	1	1	41135	n/a		
+PASS /bin/cp
+ROW	/bin/cp	PASS	64	64	41187	n/a		
+FAIL /bin/csh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+ROW	/bin/csh	FAIL	4	3	41235	338	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 338 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+PASS /bin/dash
+ROW	/bin/dash	PASS	0	0	41263	n/a		
+PASS /bin/date
+ROW	/bin/date	PASS	0	0	41305	n/a		
+PASS /bin/dd
+ROW	/bin/dd	PASS	0	0	41369	n/a		
+PASS /bin/df
+ROW	/bin/df	PASS	0	0	41411	n/a		
+PASS /bin/echo
+ROW	/bin/echo	PASS	0	0	41444	n/a		
+PASS /bin/ed
+ROW	/bin/ed	PASS	0	0	41498	n/a		
+PASS /bin/expr
+ROW	/bin/expr	PASS	2	2	41532	n/a		
+PASS /bin/hostname
+ROW	/bin/hostname	PASS	0	0	41562	n/a		
+PASS /bin/kill
+ROW	/bin/kill	PASS	2	2	41589	n/a		
+PASS /bin/ksh
+ROW	/bin/ksh	PASS	0	0	41623	n/a		
+PASS /bin/launchctl
+ROW	/bin/launchctl	PASS	1	1	41649	n/a		
+PASS /bin/link
+ROW	/bin/link	PASS	1	1	41691	n/a		
+PASS /bin/ln
+ROW	/bin/ln	PASS	1	1	41737	n/a		
+PASS /bin/ls
+ROW	/bin/ls	PASS	0	0	41774	n/a		
+PASS /bin/mkdir
+ROW	/bin/mkdir	PASS	64	64	41819	n/a		
+PASS /bin/mv
+ROW	/bin/mv	PASS	64	64	41861	n/a		
+PASS /bin/pax
+ROW	/bin/pax	PASS	1	1	41889	n/a		
+PASS /bin/ps
+ROW	/bin/ps	PASS	0	0	41936	n/a		
+PASS /bin/pwd
+ROW	/bin/pwd	PASS	0	0	42032	n/a		
+PASS /bin/realpath
+ROW	/bin/realpath	PASS	0	0	42070	n/a		
+PASS /bin/rm
+ROW	/bin/rm	PASS	64	64	42096	n/a		
+PASS /bin/rmdir
+ROW	/bin/rmdir	PASS	1	1	42125	n/a		
+PASS /bin/sh
+ROW	/bin/sh	PASS	1	1	42151	n/a		
+PASS /bin/sleep
+ROW	/bin/sleep	PASS	1	1	42180	n/a		
+PASS /bin/stty
+ROW	/bin/stty	PASS	1	1	42218	n/a		
+PASS /bin/sync
+ROW	/bin/sync	PASS	0	0	42263	n/a		
+FAIL /bin/tcsh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+ROW	/bin/tcsh	FAIL	4	3	42302	341	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 341 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+PASS /bin/test
+ROW	/bin/test	PASS	1	1	42345	n/a		
+PASS /bin/unlink
+ROW	/bin/unlink	PASS	64	64	42383	n/a		
+PASS /bin/wait4path
+ROW	/bin/wait4path	PASS	1	1	42420	n/a		
+PASS /bin/zsh
+ROW	/bin/zsh	PASS	0	0	42457	n/a		
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (11897333) panicked at crates/retrace-arch/src/lib.rs:1002:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument fro)
+ROW	/usr/bin/automationmodetool	FAIL	101	n/a	42504	n/a	thread 'main' (11897333) panicked at crates/retrace-arch/src/lib.rs:1002:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument fro	
+PASS /usr/bin/desdp
+ROW	/usr/bin/desdp	PASS	71	71	42525	n/a		
+PASS /usr/bin/dyld_info
+ROW	/usr/bin/dyld_info	PASS	71	71	42598	n/a		
+PASS /usr/bin/flex
+ROW	/usr/bin/flex	PASS	71	71	42637	n/a		
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1c03 (guest task port Some(515)) send_size 24)
+ROW	/usr/bin/dddiagnose	FAIL	4	3	42740	448	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1c03 (guest task port Some(515)) send_size 24	DIVERGENCE at landmark 448 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+PASS /usr/bin/basename
+ROW	/usr/bin/basename	PASS	1	1	42768	n/a		
+PASS /usr/bin/dirname
+ROW	/usr/bin/dirname	PASS	1	1	42810	n/a		
+PASS /usr/bin/env
+ROW	/usr/bin/env	PASS	0	0	42847	n/a		
+PASS /usr/bin/head
+ROW	/usr/bin/head	PASS	0	0	42880	n/a		
+PASS /usr/bin/tail
+ROW	/usr/bin/tail	PASS	0	0	42926	n/a		
+PASS /usr/bin/sort
+ROW	/usr/bin/sort	PASS	0	0	42963	n/a		
+PASS /usr/bin/uniq
+ROW	/usr/bin/uniq	PASS	0	0	42995	n/a		
+PASS /usr/bin/cut
+ROW	/usr/bin/cut	PASS	1	1	43024	n/a		
+PASS /usr/bin/tr
+ROW	/usr/bin/tr	PASS	1	1	43050	n/a		
+FAIL /usr/bin/yes (timed out after 30s recording)
+ROW	/usr/bin/yes	FAIL	137	n/a	43131	n/a		
+PASS /usr/bin/true
+ROW	/usr/bin/true	PASS	0	0	43576	n/a		
+PASS /usr/bin/printenv
+ROW	/usr/bin/printenv	PASS	0	0	43653	n/a		
+TALLY pass=49 fail=5 skip=0
+SWEEP_EXIT=0
+load-end:  8:42  up 6 days, 11:26, 7 users, load averages: 1.85 2.07 2.28 date=2026-09-30 08:42:00 -03

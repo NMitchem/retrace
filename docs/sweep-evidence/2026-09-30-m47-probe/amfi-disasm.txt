@@ -1,0 +1,49 @@
+# /usr/lib/dyld (arm64e slice, on disk): amfi_check_dyld_policy_self and SyscallDelegate::amfiFlags
+_amfi_check_dyld_policy_self:
+0000000000078be4	cbz	x1, 0x78c50
+0000000000078be8	pacibsp
+0000000000078bec	sub	sp, sp, #0x40
+0000000000078bf0	stp	x20, x19, [sp, #0x20]
+0000000000078bf4	stp	x29, x30, [sp, #0x30]
+0000000000078bf8	add	x29, sp, #0x30
+0000000000078bfc	mov	x19, x1
+0000000000078c00	str	xzr, [x1]
+0000000000078c04	mov	x8, #-0x5555555555555556
+0000000000078c08	stp	x8, x0, [sp, #0x8]
+0000000000078c0c	add	x8, sp, #0x8
+0000000000078c10	str	x8, [sp, #0x18]
+0000000000078c14	adrp	x0, 40 ; 0xa0000
+0000000000078c18	add	x0, x0, #0xbf1 ; literal pool for: "AMFI"
+0000000000078c1c	add	x2, sp, #0x10
+0000000000078c20	mov	w1, #0x5a
+0000000000078c24	bl	___sandbox_ms
+0000000000078c28	cbz	w0, 0x78c34
+0000000000078c2c	bl	___error
+0000000000078c30	ldr	w0, [x0]
+0000000000078c34	ldr	x8, [sp, #0x8]
+0000000000078c38	str	x8, [x19]
+0000000000078c3c	ldp	x29, x30, [sp, #0x30]
+0000000000078c40	ldp	x20, x19, [sp, #0x20]
+0000000000078c44	add	sp, sp, #0x40
+0000000000078c48	autibsp
+0000000000078c4c	ret
+0000000000078c50	mov	w0, #0x16
+__ZNK5dyld415SyscallDelegate9amfiFlagsEbb:
+000000000001cf88	pacibsp
+000000000001cf8c	sub	sp, sp, #0x20
+000000000001cf90	stp	x29, x30, [sp, #0x10]
+000000000001cf94	add	x29, sp, #0x10
+000000000001cf98	str	xzr, [sp, #0x8]
+000000000001cf9c	cmp	w1, #0x0
+000000000001cfa0	mov	w8, #0x2
+000000000001cfa4	csel	x8, x8, xzr, ne
+000000000001cfa8	orr	x9, x8, #0x4
+000000000001cfac	cmp	w2, #0x0
+000000000001cfb0	csel	x0, x9, x8, ne
+000000000001cfb4	add	x1, sp, #0x8
+000000000001cfb8	bl	_amfi_check_dyld_policy_self
+000000000001cfbc	ldr	x8, [sp, #0x8]
+000000000001cfc0	cmp	w0, #0x0
+000000000001cfc4	csel	x0, x8, xzr, eq
+000000000001cfc8	ldp	x29, x30, [sp, #0x10]
+000000000001cfcc	add	sp, sp, #0x20

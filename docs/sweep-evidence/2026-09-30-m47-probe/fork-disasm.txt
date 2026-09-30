@@ -1,0 +1,59 @@
+# native (lldb, host 26.x): libsystem_c fork and libsystem_kernel __fork
+libsystem_c.dylib`fork:
+    0x181ca31a0 <+0>:   pacibsp 
+    0x181ca31a4 <+4>:   stp    x20, x19, [sp, #-0x20]!
+    0x181ca31a8 <+8>:   stp    x29, x30, [sp, #0x10]
+    0x181ca31ac <+12>:  add    x29, sp, #0x10
+    0x181ca31b0 <+16>:  adrp   x8, 443233
+    0x181ca31b4 <+20>:  ldr    x8, [x8, #0x28]
+    0x181ca31b8 <+24>:  cbz    x8, 0x181ca31c8           ; <+40>
+    0x181ca31bc <+28>:  mov    w0, #0x0                  ; =0 
+    0x181ca31c0 <+32>:  blraaz x8
+    0x181ca31c4 <+36>:  b      0x181ca31d4               ; <+52>
+    0x181ca31c8 <+40>:  adrp   x8, 443233
+    0x181ca31cc <+44>:  ldr    x8, [x8, #0x40]
+    0x181ca31d0 <+48>:  blraaz x8
+    0x181ca31d4 <+52>:  bl     0x181cf8fdc               ; symbol stub for: __fork
+    0x181ca31d8 <+56>:  mov    x19, x0
+    0x181ca31dc <+60>:  cbz    w0, 0x181ca31fc           ; <+92>
+    0x181ca31e0 <+64>:  adrp   x8, 443232
+    0x181ca31e4 <+68>:  cmn    w19, #0x1
+    0x181ca31e8 <+72>:  ldr    x8, [x8, #0xfe8]
+    0x181ca31ec <+76>:  cbnz   x8, 0x181ca3208           ; <+104>
+    0x181ca31f0 <+80>:  adrp   x8, 443233
+    0x181ca31f4 <+84>:  ldr    x8, [x8, #0x48]
+    0x181ca31f8 <+88>:  b      0x181ca321c               ; <+124>
+    0x181ca31fc <+92>:  adrp   x8, 443232
+    0x181ca3200 <+96>:  ldr    x8, [x8, #0xff0]
+    0x181ca3204 <+100>: cbz    x8, 0x181ca3214           ; <+116>
+    0x181ca3208 <+104>: mov    w0, #0x0                  ; =0 
+    0x181ca320c <+108>: blraaz x8
+    0x181ca3210 <+112>: b      0x181ca3220               ; <+128>
+    0x181ca3214 <+116>: adrp   x8, 443233
+    0x181ca3218 <+120>: ldr    x8, [x8, #0x50]
+    0x181ca321c <+124>: blraaz x8
+    0x181ca3220 <+128>: mov    x0, x19
+    0x181ca3224 <+132>: ldp    x29, x30, [sp, #0x10]
+    0x181ca3228 <+136>: ldp    x20, x19, [sp], #0x20
+    0x181ca322c <+140>: retab  
+(lldb) disassemble -n __fork -c 19
+libsystem_kernel.dylib`__fork:
+    0x181db58ec <+0>:  pacibsp 
+    0x181db58f0 <+4>:  stp    x29, x30, [sp, #-0x10]!
+    0x181db58f4 <+8>:  mov    x29, sp
+    0x181db58f8 <+12>: mov    x16, #0x2                 ; =2 
+    0x181db58fc <+16>: svc    #0x80
+    0x181db5900 <+20>: b.hs   0x181db5924               ; <+56>
+    0x181db5904 <+24>: cbz    x1, 0x181db592c           ; <+64>
+    0x181db5908 <+28>: adrp   x9, 442960
+    0x181db590c <+32>: add    x9, x9, #0xd58            ; _current_pid
+    0x181db5910 <+36>: mov    w0, #0x0                  ; =0 
+    0x181db5914 <+40>: str    w0, [x9]
+    0x181db5918 <+44>: mov    sp, x29
+    0x181db591c <+48>: ldp    x29, x30, [sp], #0x10
+    0x181db5920 <+52>: retab  
+    0x181db5924 <+56>: bl     0x181daf5d4               ; cerror
+    0x181db5928 <+60>: mov    w0, #-0x1                 ; =-1 
+    0x181db592c <+64>: mov    sp, x29
+    0x181db5930 <+68>: ldp    x29, x30, [sp], #0x10
+    0x181db5934 <+72>: retab  

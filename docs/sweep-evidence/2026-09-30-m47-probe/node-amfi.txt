@@ -1,0 +1,22 @@
+# node base run (427fa0a, RETRACE_TRACE=1): guest stderr (dyld) and panic
+[fd2 (console 2)] dyld[36211]: 
+[fd2 (console 2)] Library not loaded: @rpath/libno
+[fd2 (console 2)] de.141.dylib
+  Referenced from: 
+[fd2 (console 2)] <4EC815EE-775A-3897-BA9A-A5C28EB
+[fd2 (console 2)] 9D16D> /opt/homebrew/Cellar/node
+[fd2 (console 2)] /25.6.1/bin/node
+  Reason: , (se
+[fd2 (console 2)] curity policy does not allow @ p
+[fd2 (console 2)] ath expansion)
+
+
+thread 'main' (11859731) panicked at crates/retrace-core/src/lib.rs:1016:67:
+syscall 521 (terminate/abort_with_payload) is a terminal path that bypasses signal disposition entirely and is not modelled (measured: unexercised by any gate guest). It is asserted rather than forwarded because forwarding it kills the RECORDER. Model it as a second terminal event shape if a guest needs it.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+# every __mac_syscall (381) landmark in node2.bin (td)
+events=111 torn=false
+#55 num=381 args=[1801b7eb4, 2, 27ff280, a] ret=0xe ret1=0x0 err=true thread=0
+#59 num=381 args=[1801b4bf1, 5a, 27ff300, a] ret=0xe ret1=0x0 err=true thread=0
+#74 num=381 args=[1801b7eb4, 2, 27fedd0, a] ret=0xe ret1=0x0 err=true thread=0
