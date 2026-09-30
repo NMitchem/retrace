@@ -67,9 +67,9 @@ at (245, 70) pc=0x10000059c thread=0  in _main+0xa4
   breakpoint or watchpoint hit. Checkpoints make backward seeks fast.
 - **Watchpoints that name the writer.** A hardware watchpoint plus reverse-continue finds the last
   store to an address, and says which thread made it.
-- **Threads and signals.** Multi-threaded guests (`std::thread`, pthreads, GCD's global queues)
-  record and replay, and signals reach the thread they were sent to, through the handler the
-  program installed.
+- **Threads and signals.** Multi-threaded guests (`std::thread`, pthreads, GCD's global queues,
+  and GCD timers on the uptime clock: `dispatch_after` and timer sources) record and replay, and
+  signals reach the thread they were sent to, through the handler the program installed.
 - **Crashes.** A crashing run is a normal recording that ends at the fault, so you can debug it
   backwards.
 - **lldb.** `retrace gdbserver` speaks gdb-remote: continue and step both ways, breakpoints,

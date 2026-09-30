@@ -14388,7 +14388,8 @@ The milestone's numbers:
   and `clock`) and `crates/retrace-guest/c/timer_dyn.c`;
 - **four** new test binaries: `gcdshapes` in `retrace-arch`, `kqmanager` and `kport` in
   `retrace-box`, and `gcdtimer_e2e`;
-- **+43** `#[test]` attributes over six files, 853 → 896 by source (the audit below);
+- **+52** `#[test]` attributes over six files, 853 → 905 by source (the audit below): +43 from
+  Tasks 1–5, and +9 from the final review's fix wave;
 - **zero** `arg_kinds` rows added: `CENSUS` stays at 114 and `EXPECTED_DIFFS` at 35;
 - **one** `Box_` field added, `kq`, in `BoxState`, the checkpoint capture, `from_checkpoint`, all
   three `Box_` literals, and `checkpointparity.rs`'s audit with a named row;
@@ -14397,17 +14398,19 @@ The milestone's numbers:
   the generic forward arm. `verify_thread` **7 → 7**;
 - `TRACE_MAGIC` unmoved at `RT\x00\x0a` (`crates/retrace-trace` has no diff);
 - **zero** `#[ignore]` lines added or removed (9 → 9): one reason rewritten at a new wall
-  (`automationmodetool`);
+  (`automationmodetool`), and one amended with M46's measurement (`dddiagnose`, final review);
 - the plan's three named exceptions to "existing assertions stay" (`kqinit_e2e.rs:69`'s refusal
   prefix `M45:` → `M46:`, `automationmodetool`'s re-park, and `checkpointparity.rs`'s added row),
   plus T4-a's: `crates/retrace/tests/kport.rs`'s pinned child port `0x0BAD_7001` → `0x0BAD_7007`;
-- the spec's six rulings (R1–R6) and the plan's R7, five pre-flight rulings (P1–P5) and eleven
-  execution rulings (T0-a, T0-b, T0-c, T2-a, T4-a, T4-b, T4-c, T5-a, T5-b, T6-a, T6-b);
+- the spec's six rulings (R1–R6) and the plan's R7, five pre-flight rulings (P1–P5) and nineteen
+  execution rulings (T0-a, T0-b, T0-c, T2-a, T4-a, T4-b, T4-c, T5-a, T5-b, T6-a, T6-b, T7-a, T8-a,
+  T8-b, and the final review's F-a to F-e);
 - **eleven** commits after the spec (`9ba90b5`) and the plan (`748c27b`): the plan's amendments
   `2bc0730` (P1) and `3d40e41` (T0-a and T0-b, into the plan and spec §11 items 11–12); t0's
   `b95890e`; Task 1's `623a62d`; Task 2's `af5bc6b`; Task 3's `419aca7`; Task 4's `bbb7f4c`; Task
   5's `c8c838e` and its fix round `d369fcc`; Task 6's `ddf3836` and its fix round `3a372a9`. Then
-  Task 7's docs.
+  Task 7's docs (`10edbd6`), the final review's fix wave (`a824083`, `2068405`, `7efcc58`,
+  `51990cb`, `c43a23f`, `86d74b8`) and the close.
 
 The gate subsection below holds the prediction; Task 8 appends the measured gate after it runs.
 
@@ -14803,16 +14806,21 @@ committed.
 
 ### The audit (Task 7)
 
-Measured at `3a372a9`, from source:
+Measured at `86d74b8`, the fix wave's head, from source (first measured at `3a372a9`; the fix wave
+moved only the `#[test]` counts):
 - `git diff f907c33 3a372a9 -- crates/retrace-trace` is empty, so `TRACE_MAGIC` did not move and
   `Event` did not change.
 - `grep -c 'self.verify_thread(' crates/retrace-core/src/lib.rs` is **7**.
 - Lines matching `^\s*#\[ignore` over `crates/` number **9**, as at `f907c33`.
-- The `#[test]` count is **896** by source, against 853 at `f907c33`. Per file:
-  - `crates/retrace-arch/tests/gcdshapes.rs`: +14, new binary (Task 2);
-  - `crates/retrace-box/src/kq.rs`: +11, inside `retrace-box`'s lib binary (Task 3);
-  - `crates/retrace-box/tests/kqmanager.rs`: +7, new binary (Task 4);
-  - `crates/retrace-box/tests/kport.rs`: +1, new binary (Task 4, T4-c);
+- The `#[test]` count is **905** by source, against 853 at `f907c33`. Per file:
+  - `crates/retrace-arch/tests/gcdshapes.rs`: +15, new binary (Task 2's 14, and the final
+    review's disarm bit-flip sweep);
+  - `crates/retrace-box/src/kq.rs`: +12, inside `retrace-box`'s lib binary (Task 3's 11, and the
+    final review's `take_events` truncation test);
+  - `crates/retrace-box/tests/kqmanager.rs`: +12, new binary (Task 4's 7; the final review's I2
+    pair, M1's refusal and the two knote-table prefixes);
+  - `crates/retrace-box/tests/kport.rs`: +3, new binary (Task 4's T4-c test; the final review's I1
+    bound, accepted at `0x3ff` and refused at `0x400`);
   - `crates/retrace/tests/gcdtimer_e2e.rs`: +8, new binary (Tasks 1, 4 and 5);
   - `crates/retrace-guest/src/lib.rs`: 20 → 22 (`after_guest_parses`, `timer_guest_parses`).
 
@@ -14822,12 +14830,108 @@ Measured at `3a372a9`, from source:
 
 ### The gate
 
-Task 8 writes this subsection after the gate runs. The prediction, by source, before it: **853 →
-896 `#[test]`**, so **passed + ignored = 898 over 152 binaries**. That is the plan's 895 / 897 /
-151 (spec §11 item 9), plus T4-c's new `crates/retrace-box/tests/kport.rs`, one test in one
-binary.
+**898 passed / 0 failed / 9 ignored across 152 test binaries at `86d74b8`**, the head of the
+final review's fix wave and the last code commit. Every commit after it is documentation. The
+full gate ran from the worktree as one background script (`gate.sh` in the ledger directory, M45's
+retargeted), chunked as CLAUDE.md requires, every test chunk `--no-fail-fast` and each chunk's exit
+code written to `gate-summary.txt` before any pipe: `ws` (the workspace less `retrace-box` and
+`retrace`), `box` (whole package, so `Doc-tests retrace_box` is present), `bins`, one `e2e` chunk
+per file of `ls crates/retrace/tests/*.rs` (**79** targets, `gcdtimer_e2e` new), and clippy over
+`--workspace --all-targets` with `-D warnings`.
 
-<!-- M46 Task 8: measured gate line goes here -->
+The tally, chunk by chunk (`tally.sh`, ANSI stripped; every one of the 83 chunk lines in
+`gate-summary.txt` reads `exit=0`: `ws`, `box`, `bins`, 79 `e2e`, `clippy`):
+
+| chunk | passed / failed / ignored | binaries |
+|---|---|---|
+| `ws` | 206 / 0 / 0 | 29 (six `Doc-tests`, each 0 tests) |
+| `box` | 355 / 0 / 0 | 43 (`Doc-tests retrace_box`, 0 tests) |
+| `bins` | 32 / 0 / 0 | 1 |
+| `e2e` | 305 / 0 / 9 | 79 |
+| **all** | **898 / 0 / 9** | **152** |
+
+**The prediction, by source, before each gate, and its reconciliation.** `predict.sh` counts
+`^\s*#\[test\]` per file at `f907c33` and at the head. Before the first gate it printed **853 →
+896 (+43)** and test targets 148 → 152 (`crates/retrace/tests` 78 → 79, `crates/retrace-arch/tests`
+4 → 5, `crates/retrace-box/tests` 39 → 41): the plan's 895 / 897 / 151 (spec §11 item 9), plus
+T4-c's `crates/retrace-box/tests/kport.rs`, one test in one binary. After the fix wave it printed
+**853 → 905 (+52)**, the same four new targets; the per-file audit above has each file. 905 + 2 =
+907 = 898 + 9: the 2 is `census.rs`'s pair compiled a second time into `legacy_equivalence`, as at
+every close since M33. Against M45's 846 / 0 / 9 over 148, the gate moved by +52 passed and +4
+binaries and nothing else: `ws` +17 (`gcdshapes` 15, the guest crate 2), `box` +27 (`kq.rs` 12,
+`kqmanager` 12, `kport` 3), `e2e` +8 (`gcdtimer_e2e`), `bins` unchanged at 32. `gcdtimer_e2e` gates
+8 against 8 in source, `kqinit_e2e` 5 / 0 / 0, `dispatch_e2e` 2 / 0 / 0, and `apple_walls_e2e`
+3 passed and 7 ignored against 10. The nine ignored are M45's nine: `automationmodetool` stays
+parked, re-parked at `kevent_id` (outcome B), and `dddiagnose`'s reason gained M46's re-measure.
+**No gate log carries a `SKIPPED` line** (`grep -a -l SKIPP gate-*.log` prints nothing): jq,
+Homebrew Python and lldb were all present, so every skippable target ran for real, and
+`gate-e2e-skiplines.log` carries `SKIPLINES CONTROL: util::announce reaches a gate log past
+libtest's capture`. `sysbin_e2e`, whose `ps_records_and_replays` is exposed to the `MADV_FREE`
+flake, passed (3 / 0 / 0).
+
+**The gate ran twice, both green.** The first run, at `3a372a9` (Task 7's docs committed during it,
+T8-a), was **889 / 0 / 9 over 152**, the first prediction exactly (`ws` 205 over 29, `box` 347 over
+43, `bins` 32, `e2e` 305 / 0 / 9 over 79; every line `exit=0`). The final review's fix wave waited
+for its `DONE` (F-b) and edited `retrace-box` and `retrace-core`, which every e2e target links, so
+the whole gate ran again rather than a subset (F-e). The first run's logs are kept in the ledger
+directory as `gate-run1/`. Both ran on a host loaded by an unrelated `cargo-mutants` job (load
+averages between 7 and 80); no test timed out.
+
+### The final review
+
+The whole-branch review (`748c27b..10edbd6`, Opus, read-only, concurrent with the first gate by
+T8-b) returned **"ready to merge, with fixes"**: nothing Critical, two Important, four Minor, and a
+triage of all 26 of the ledger's deferred minors (one must-fix, twelve cheap, thirteen left). It
+confirmed the things this design most risks: record and replay call the same `Box_` methods with
+the same arguments; `kq` is in every rebuild path, with the parity row's precondition making its
+row non-vacuous; R7's guard (`args[2] != 0 && !err`) matches xnu's copy-out and runs after
+`forward_and_diff`'s own region, so replay applies it last and verbatim; the idle jump is strictly
+forward, once per settle, and no timer fires twice; `verify_thread` has seven sites.
+
+- **I1, the kport bound** (`a824083`). M46's `(tid << 2) | 3` reaches `GUEST_THREAD_PORT_BASE`'s
+  bits 12–14 from tid `0x400`, where the old `BASE | tid` first aliased at `0x1000`, and tid
+  `0x401` takes tid 1's name, silently (`thread_of_port` takes the first match, and lock owners
+  merge). M18 never reuses a parked worker, so a loop of about 1025 `dispatch_async` round trips
+  reaches it. `guest_thread_kport` now asserts `tid < 0x400`, still a `const fn`; `kport.rs` pins
+  `0x3ff` accepted and `0x400` refused.
+- **I2, a wake seam with no signal guard** (`2068405`). `should_pend_for` pends a signal on any
+  blocked target, a parked one included. Before M46 a parked thread stayed blocked, so
+  `assert_no_stranded_signals` saw a stranded signal at exit; M46's `ThreadTable::unpark` makes
+  the manager runnable and `enter_manager` replaces its context with the signal still pending, so
+  it would be delivered at a point nothing has measured — the class M18's `-33` arm refuses. (The
+  assert's own message says the signal "would vanish where assert_no_stranded_signals cannot see
+  it", which the scoped re-review measured as an overstatement: the pending bit stays on the thread,
+  and a manager that parks again holding it is still caught at exit. The refusal is right; its
+  message is parked as a minor.) `unpark` now asserts the thread's whole
+  pending set is empty, **masked or not**: the fixer measured that the narrower
+  `peek_deliverable` (`pending & !mask`) lets a masked pending signal through (a control with it
+  swapped in turned the new masked test red and left the unmasked one green), and the manager's
+  mask across a reuse re-entry is itself unmeasured. The message names the measurement owed.
+- **M1** (`7efcc58`). A `THREAD_RETURN` (`0x4`) from the bound manager is refused by value, naming
+  `KEVENT_RETURN` (`0x40`) as the manager's return, where it had parked silently and left
+  `Manager::Bound` naming a parked thread (spec §1 success criterion 3).
+- **M2** (`51990cb`). The `workq_kernreturn` replay mirror now refuses a recording carrying `err` or
+  writes, as the `kevent_qos` mirror does. The fixer established the condition first: record's
+  only 368 arm panics on `Err` before appending and appends `err: false, writes: []` on `Ok`, no
+  earlier arm matches 368, and the generic forward arm asserts 368 never reaches it.
+- **The cheap minors** (`c43a23f` tests, `86d74b8` docs and comments): a bit-flip refusal sweep
+  for a disarm entry (`gcdshapes.rs`); `take_events`' truncation (`kq.rs`); the two
+  `against the knote table` prefixes pinned (`kqmanager.rs`); the WALL-timer test's doc reworded
+  to what it shows; `kevent_return_change`'s two copied comparisons commented; the stale record-arm
+  comment naming `guest_workq_kernreturn`; test 2's bound annotated with its measured counts; the
+  measurements file's M1(c) marked abridged and its unbalanced backticks fixed (in M1(a), and the
+  same fault in M1(c)); and `dddiagnose`'s `#[ignore]` reason amended with M46's re-measure.
+- **Not taken:** M3 and M4 (F-a), the `Review Focus` breadcrumbs (F-d), and the thirteen minors the
+  review triaged as "leave", which are under "Parked minors" below with its reasons.
+
+The wave added **+9** `#[test]` and no binary. Its own runs, before the re-gate: `retrace-box`
+355 passed over 43, `retrace-arch` 76 over 7, `retrace-core` 88 over 10, `gcdtimer_e2e` +
+`kqinit_e2e` + `dispatch_e2e` 15 over 3, clippy clean, every exit 0. The scoped re-review (Opus)
+**approved** all sixteen items. It checked that `unpark`'s one caller is `request_manager`'s
+`Unbound` arm, that `Bound` is cleared by an empty `KEVENT_RETURN` so no once-manager thread can
+reach M1's refusal, and M2's precondition against the record arm. It left one minor: `unpark`
+checks the signal before the "is parked" assert, so a call on an unparked thread with a signal
+pending would be misreported, which its single caller cannot produce.
 
 ### What measurement changed
 
@@ -14949,6 +15053,27 @@ Execution:
   at load 8–35), attributed to load by elimination", never "host state, measured on both binaries",
   and cites the base's own `ps` kill as support, not proof. Cost if wrong: none; the change is
   wording.
+* **T7-a** — the README's "Threads and signals" bullet gains GCD timers on the uptime clock
+  (`dispatch_after`, timer sources), written with the gate close; no Limits line is added, since
+  the spin-wait hang and the refused clocks stay in current-state, which the Limits section links.
+  Cost if wrong: one README phrase to strike.
+* **T8-a** — the first gate ran concurrently with Task 7, because Task 7 was docs only and no test
+  reads a doc at runtime. Cost if wrong: one gate re-run.
+* **T8-b** — the final whole-branch review ran concurrently with the gate, over `748c27b..10edbd6`
+  with a code-focused package. Cost if wrong: the evidence files went unreviewed there, and Task 6's
+  two reviews had covered them.
+* **F-a** — the fix wave carries I1, I2, M1, M2 (conditional on the record arm proving it never
+  records `err` or writes, which it does) and the reviewer's cheap minors; M3 and M4 are left. Cost
+  if wrong: M3 stays a panic where a `Divergence` would read better, loud either way.
+* **F-b** — the fix wave waited for the first gate's `DONE`, because `gate.sh` recompiles the
+  working tree per chunk. Cost if wrong: an hour of wall clock.
+* **F-c** — the fix wave commits one commit per Important or Minor item and two for the cheap
+  minors, relaxing the plan's one commit per item. Cost if wrong: none.
+* **F-d** — the final review's request to replace the `Review Focus N` breadcrumbs is overruled:
+  the form is house style in M41–M45's tests. Cost if wrong: none; they are comments.
+* **F-e** — after the fix wave the whole chunked gate re-ran, not a subset, because the wave edits
+  `retrace-box` and `retrace-core`, which every e2e target links, and M1 and M2 add refusals any
+  GCD-using guest could reach. Cost if wrong: about 1.5 h of wall clock.
 
 ### What stays owed
 
@@ -14984,32 +15109,35 @@ Execution:
 * **The `KEVENT_RETURN` disarm path end to end** (T5-a). Only box-level tests reach it.
 * **The native-only `workq_kernreturn(0x80)`** (`SET_EVENT_MANAGER_PRIORITY`), which runs natively
   between `0x400` and the init and which retrace's trace never shows. Not investigated.
-* **Parked minors** (the ledger's deferred items):
+* **Parked minors** (the ledger's deferred items the final review left parked, each with its
+  reason; the items it paid are listed under "The final review" above):
   - t0: M1(b) could say that the deadline side also has `clock_gettime_nsec_np` and
-    `mach_continuous_time` branches, unmeasured; M1(c)'s disassembly block is an abridged
-    paraphrase not marked as one; M1(a) has an unbalanced backtick.
-  - Task 1: `after_dyn.c`'s local `abs` shadows libc's `abs()`.
-  - Task 2: `kevent_return_change`'s `want.flags` and `want.fflags` copy the entry's own values, so
-    those comparisons cannot fail (the fields are validated above them), and a comment is owed;
-    the disarm is tested only on the happy case, with no bit-flip sweep; the timer-fflags and
-    `WQ_FLAG_*` group doc comments sit on the first constant only.
-  - Task 3: `take_events`' truncation (knotes past `max` stay active) is untested; the parity
-    staging never sets a timer's `fired` bit; `/// Review Focus N.` doc lines on the `kq` tests are
-    process breadcrumbs.
-  - Task 4: `guest_thread_kport` has no bound. `(tid << 2) | 3` reaches bit 12 of
-    `GUEST_THREAD_PORT_BASE` at tid `0x401`, which then aliases tid 1's name silently, and M18
-    never reuses workers, so a GCD-heavy guest could reach it. The ledger marks it for the final
-    review to weigh (a one-line `assert!(tid < 0x400)`). Also: `kqmanager`'s redelivery test
-    catches a missing load only through `x4`; the `M46: KEVENT_RETURN against the knote table:` and
-    `M46: kevent_qos against the knote table:` prefixes are pinned by no test; the WALL-timer test's
-    doc overclaims "before any clock read"; and two nits (a missing blank line after `unpark`, and
-    an older record-arm comment that still names `guest_workq_kernreturn` as the refuser).
-  - Task 5: test 6's case 1 steps to the `svc` before checking the entry's filter; test 4's
-    `fired` absence check is weak; a `(Review Focus 3)` cite names the plan; `the_idle_jump`'s
-    subtraction would panic on underflow; test 2's upper bound of 12 is unmeasured (the measured
-    counts are 2, 3 and 4).
-  - Task 6: `dddiagnose`'s `#[ignore]` reason cites only M45's measurement, where M46 measured it
-    alternating on both binaries.
+    `mach_continuous_time` branches, unmeasured (not R7's concern; t0 is a record of what it
+    measured).
+  - Task 1: `after_dyn.c`'s local `abs` shadows libc's `abs()` (cosmetic, in a C fixture).
+  - Task 2: the timer-fflags and `WQ_FLAG_*` group doc comments sit on the first constant only.
+  - Task 3: the parity staging never sets a timer's `fired` bit (the derived `PartialEq` compares
+    the whole struct).
+  - Task 4: `kqmanager`'s redelivery test catches a missing load only through `x4` (Task 4's
+    control 2 showed a missing load is caught another way, as an opcode `0x0` refusal).
+  - Task 5: test 6's case 1 steps to the `svc` before checking the entry's filter (the entry is
+    written inside the window, so the filter can only be read at the `svc`); test 4's `fired`
+    absence check is weak (the named refusal and T5-b's non-vacuity assertion carry the test);
+    `the_idle_jump`'s subtraction would panic on underflow (loudly, in a debug build, on a clock
+    that is monotonic within a session).
+  - The final review's M3: replay's `task_get_special_port` (3409) arm panics on a `which` other
+    than the two it answers, where the decode-error path above it returns a `Divergence`
+    (pre-existing posture, loud either way). Its M4: R7 panics on a mach-time out-parameter that is
+    not 8-aligned (loud; only `mach_get_times` passes one, always aligned). The `workq_kernreturn`
+    mirror's new `err`/writes refusal, like its `kevent_qos` twin, has no test: only a hand-edited
+    trace reaches it.
+  - The scoped re-review's two: `unpark`'s signal assert runs before its "is parked" assert (its one
+    caller cannot reach the misreport), and that assert's message overstates the harm as a signal
+    that "would vanish" (the pending bit stays; the harm is delivery at an unmeasured point). The
+    disarm validation inherits the arm's read-not-compared fields (`udata`, `data`, `ext[1]`), as
+    before the wave.
+  - The `/// Review Focus N` breadcrumbs the final review asked to replace are kept, as house style
+    since M41 (Ruling F-d).
 * **M45's owed items M46 did not touch**, carried forward by reference to M45's "What stays owed"
   (`:14206–14283`). That is every M45 item except the three M46 pays (the second shape, the
   replay-side panic, `ret1`) and the part of "Knotes and their events" it models:

@@ -288,9 +288,11 @@ reconstruction caveat in full.
   (`M46: unmeasured kevent_qos shape: …`, `M46: unmeasured KEVENT_RETURN change: changelist[i]. …`,
   naming the field, its measured value and its actual one), and a knote-table state whose kernel
   answer is unmeasured (`M46: … against the knote table: …`, such as a disarm of a timer that is
-  not armed, and a `KEVENT_RETURN` from a thread that is not the bound manager). The recorder
-  panics on either. A replay that meets one, which it can only after an earlier silent divergence,
-  reports a divergence naming the landmark (`… refused on replay, though the recording accepted it
+  not armed, and a `KEVENT_RETURN` from a thread that is not the bound manager; and, since the
+  final review, `M46: workq_kernreturn THREAD_RETURN (0x4) from thread …, which is the bound event
+  manager`, since the manager returns through `KEVENT_RETURN` and never parks as a plain
+  worker). The recorder panics on either. A replay that meets one, which it can only after an
+  earlier silent divergence, reports a divergence naming the landmark (`… refused on replay, though the recording accepted it
   — replay diverged before this landmark: …`) rather than panicking, and both mirrors compare
   `ret1`: the two items M45 left owed. **One recorded value changes (M46 R7).** On record,
   `gettimeofday`'s (116) mach-time out-parameter is rewritten to the guest's own clock
@@ -634,49 +636,53 @@ reconstruction caveat in full.
   where it had read the host `dup`'s clear flag (`dupfd_e2e`). Nothing new is recorded and
   `TRACE_MAGIC` did not move.
 
-**Gate:** 846 passed / 0 failed / 9 ignored across 148 test binaries. The close ran the full chunked gate
+**Gate:** 898 passed / 0 failed / 9 ignored across 152 test binaries. The close ran the full chunked gate
 from one background script (`gate.sh` in the milestone's ledger directory), every test chunk
 `--no-fail-fast` and every exit code captured before any pipe: `ws`, `box`, `--bins`, one
-`--test <name>` invocation for each of the seventy-eight files in `crates/retrace/tests/`, and
-clippy over `--workspace --all-targets` with `-D warnings`. The status log's M45 section has the
-tally chunk by chunk. The testing note below says how the chunks are assembled. The "test binaries"
+`--test <name>` invocation for each of the seventy-nine files in `crates/retrace/tests/`, and
+clippy over `--workspace --all-targets` with `-D warnings`. The status log's M46 section has the
+tally chunk by chunk, and the earlier green run it replaced (889 / 0 / 9, before the final review's
+fix wave). The testing note below says how the chunks are assembled. The "test binaries"
 figure is test executables plus the `Doc-tests` harnesses cargo reports, each of which runs zero
 tests — the convention every milestone since M14 has counted by, kept for comparability and
 written out here so nobody has to re-derive it. No `#[ignore]` line was added or removed (nine at
-M44's close and nine now, by `git grep` over `crates/`), so nine gates are parked: the two
+M45's close and nine now, by `git grep` over `crates/`), so nine gates are parked: the two
 long-standing — `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8
 risk R3 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol
-wall) — plus the seven in `apple_walls_e2e`, each reason the measurement that parks it. **M45
-re-parked `automationmodetool` at a new, measured wall** — past the emulated workqueue-kqueue init,
-at the second `kevent_qos` shape, measured and refused rather than modelled — and amended
-`dddiagnose`'s reason with its measured second face; `ls`, `ed` and `launchctl` run. Known limits
-has each. `lldb_e2e` needs `/usr/bin/lldb` (never the one on `PATH`): each of
+wall) — plus the seven in `apple_walls_e2e`, each reason the measurement that parks it. **M46
+re-parked `automationmodetool` at a new, measured wall** — past M46's model (the memory-pressure
+registration and the debug-control-port answer), at `kevent_id` (375), a libdispatch workloop
+thread request from libxpc, outside M46 — and amended `dddiagnose`'s reason with M46's re-measure
+of both its faces; `ls`, `ed` and `launchctl` run. Known limits has each. `lldb_e2e` needs `/usr/bin/lldb` (never the one on `PATH`): each of
 its tests skips loudly (`SKIPPED …: This gate did NOT run.`) when `/usr/bin/lldb --version` does not
 run, and its CPython test also skips without Homebrew Python. A skipped test is counted as passed,
 as `jq_e2e`'s are, and since M44 every skip line reaches the ordinary gate log (Testing, below), so
 grep the logs for `SKIPP` before reading a count as the gate having run.
 
-Reconciled against M44's 832 / 0 / 9 over 146 **file-by-file rather than by sum**, by source: three
-files changed their `#[test]` count, and every other file's count is M44's (counting
-`^\s*#\[test\]` per file at `60f0452` and at the branch head):
+Reconciled against M45's 846 / 0 / 9 over 148 **file-by-file rather than by sum**, by source: six
+files changed their `#[test]` count, and every other file's count is M45's (counting
+`^\s*#\[test\]` per file at `f907c33` and at the branch head):
 
-| file | M44 | M45 | delta |
+| file | M45 | M46 | delta |
 |---|---|---|---|
-| `retrace-arch/tests/kqinit.rs` | — | 8 | **+8**, new binary (the measured init is accepted; every single-bit flip of the entry is refused, each field named at its xnu offset; an `int` argument's upper half is ignored as the kernel ignores it, and every bit the kernel reads of each checked argument is refused by register; the change-list address is not compared; a short entry is refused as untranslated; the constants are the SDK's) |
-| `retrace-guest/src/lib.rs` | 19 | 20 | **+1** (`kqinit_guest_parses`: the new fixture builds and parses) |
-| `retrace/tests/kqinit_e2e.rs` | — | 5 | **+5**, new binary (the init records as one emulated landmark and replays; an entry straddling a page is read whole; an unmeasured shape stops the recorder naming the field; replay recomputes the emulated return and refuses a recorded `err`; seeks either side of the landmark replay to the end) |
+| `retrace-arch/tests/gcdshapes.rs` | — | 15 | **+15**, new binary (the init keeps M45's meaning; the memory-pressure registration, the manager poke, a timer arm and a timer disarm are each classified with the fields the kernel and libdispatch vary read, and every compared bit of each is refused; any other flags word or filter, and a short entry, is refused; MONOTONIC and WALL timers are refused naming their fflags; argument widths follow the kernel's types; the delivered events are the measured bytes; the constants are the SDK's) |
+| `retrace-box/src/kq.rs` | — | 12 | **+12**, inside `retrace-box`'s lib binary (the knote table: a trigger before the init and a second init are refused; a trigger raises one user event; fired timers are delivered in ident order after it; knotes past `max` stay active for the next take; a delivered timer is dropped; an armed timer's re-arm reprograms it, a change while its fire is queued and a disarm of an unarmed timer are refused; the idle jump lands on the deadline, never backwards, over armed timers only) |
+| `retrace-box/tests/kqmanager.rs` | — | 12 | **+12**, new binary (a poke spawns the manager with the first-use register block, and a second spawns nothing; an empty `KEVENT_RETURN` parks it; a poke re-enters it with the reuse flags; a pending trigger is redelivered on the same thread; the refusals by value: a `KEVENT_RETURN` from another thread, a `THREAD_RETURN` from the bound manager, a WALL timer, and the two `against the knote table` prefixes; a poke to a parked manager with a signal pending, masked or not) |
+| `retrace-box/tests/kport.rs` | — | 3 | **+3**, new binary (every box-spawned kport ends in binary 11 like a real port name; tid `0x3ff` is the last the scheme can name; tid `0x400` is refused) |
+| `retrace-guest/src/lib.rs` | 20 | 22 | **+2** (`after_guest_parses`, `timer_guest_parses`: the new fixtures build and parse) |
+| `retrace/tests/gcdtimer_e2e.rs` | — | 8 | **+8**, new binary (the guest clock has one source, R7; a `dispatch_after` fires on the synthetic clock and replays; two timers on one bucket fire in deadline order; a repeating timer ticks three times and replays; a WALL timer is refused before it arms; a seek across the idle jump matches a cold seek; `reverse-continue` reaches the handler's store and names its worker; a shape refused on replay is a divergence naming it, not a panic) |
 
-+14 `#[test]` attributes, `--bins` unchanged at **32**, and **two new test binaries**, `kqinit` (in
-`retrace-arch`) and `kqinit_e2e`. The tree holds **853** `#[test]` attributes by the same per-file
-pattern (M44 held 839). The run still reports the 2 census tests twice (`census.rs` executes in its
-own binary and again inside `legacy_equivalence`'s `#[path]` include), so 853 + 2 = 855 = 846 + 9,
-and a bare `grep -c '#\[test\]'` over-counts by one, because a comment in `legacy_equivalence.rs`
-mentions the attribute in prose. The plan predicted +14 for the outcome without a GCD gate, and the
-source count is +14 exactly: the walk found every libdispatch path stopping at the second
-`kevent_qos` shape, so no GCD gate was added.
++52 `#[test]` attributes, `--bins` unchanged at **32**, and **four new test binaries**:
+`gcdshapes` (in `retrace-arch`), `kqmanager` and `kport` (in `retrace-box`), and `gcdtimer_e2e`.
+The tree holds **905** `#[test]` attributes by the same per-file pattern (M45 held 853). The run
+still reports the 2 census tests twice (`census.rs` executes in its own binary and again inside
+`legacy_equivalence`'s `#[path]` include), so 905 + 2 = 907 = 898 + 9, and a bare
+`grep -c '#\[test\]'` over-counts by one, because a comment in `legacy_equivalence.rs` mentions the
+attribute in prose. The first prediction, +43, was the plan's +42 plus T4-c's `kport` test; the
+final review's fix wave added +9 and no binary.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson). `retrace` ran **per-target** — seventy-eight `--test <name>` invocations, one after another
+lesson). `retrace` ran **per-target** — seventy-nine `--test <name>` invocations, one after another
 from a single background script, because the whole package exceeds the tool ceiling, over the
 target list `ls crates/retrace/tests/*.rs` wrote — **plus the `--bins` chunk**, which is the only
 place the 32 unit tests inside the `retrace` binary run: 20 in `crates/retrace/src/debug.rs` and
@@ -1911,6 +1917,20 @@ These are real and current, not aspirational gaps.
   `GUEST_THREAD_PORT_BASE | tid` an even tid had bit 0 clear, and M46's first handler worker,
   thread 2, waited on its own recursive lock through `__ulock_wait2` (544) (M46 Task 4). No
   `TRACE_MAGIC` bump was made: the divergence is loud, and no snapshot byte changes meaning.
+- **A guest that spawns more than 1023 threads stops.** The scheme leaves `tid << 2` bits 2–11, so
+  `guest_thread_kport` asserts `tid < 0x400`: past it the name would reach
+  `GUEST_THREAD_PORT_BASE`'s own bits 12–14 and give two threads one mach port name, silently
+  (`thread_of_port` takes the first match, and lock owners merge). M18 never reuses a parked
+  worker, so the count is of every thread the run ever spawned, not of live ones (M46 final
+  review I1; the old `BASE | tid` aliased at `0x1000`).
+- **A signal sent to libdispatch's parked event manager aborts at the manager's next
+  re-entry.** A parked workqueue thread is blocked, so a signal to it pends; `ThreadTable::unpark`
+  asserts the thread's whole pending set is empty, masked or not, because the kernel's register
+  state for a parked manager that a signal interrupts is unmeasured (the equivalent of
+  `blockedctx.rs`'s measurement for a `__ulock_wait`-blocked thread): re-entering the manager
+  replaces its context and leaves the signal pending, to be delivered at a point nothing has
+  measured (M46 final review I2). Only a `pthread_kill` aimed at the manager's port reaches it; no
+  guest in the tree does.
 - **A signal to a thread that never wakes is never delivered.** Signals to a blocked thread are
   pended and materialised at the wake that makes the thread runnable; retrace does not interrupt the
   wait with `EINTR` as a real kernel would. A guest that strands a signal this way fails loud at a
