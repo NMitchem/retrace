@@ -178,6 +178,7 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     let noaccess = b.noaccess().to_vec();
     let fts = b.fall_throughs();
     let excl = b.dbg_excl();
+    let kq = b.dbg_kq().clone();
     let mut live_backings = b.dbg_backings();
     live_backings.sort_unstable();
     let next_l3 = b.dbg_next_l3();
@@ -213,6 +214,7 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     assert_eq!(r.noaccess(), noaccess.as_slice(), "{label}: PROT_NONE map");
     assert_eq!(r.fall_throughs(), fts, "{label}: fall-through counter");
     assert_eq!(r.dbg_excl(), excl, "{label}: exclusive-monitor shadow (M42)");
+    assert_eq!(r.dbg_kq(), &kq, "{label}: the workqueue kqueue (M46)");
     let mut restored_backings = r.dbg_backings();
     restored_backings.sort_unstable();
     assert_eq!(restored_backings.len(), live_backings.len(), "{label}: backing count");
@@ -292,6 +294,8 @@ fn a_checkpointed_static_box_matches_the_box_it_came_from() {
 /// of `state.stack_top`/`state.stack_size` (`crates/retrace-box/src/lib.rs:5266-5267`, the
 /// `stack_top:`/`stack_size:` lines of `from_checkpoint`'s `Box_` literal) from a
 /// hardcoded recomputation of the same constant.
+///
+/// The workqueue kqueue (M46) is staged through `dbg_kq_mut`, the one field no guest-free call reaches.
 #[test]
 fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
     let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
@@ -357,6 +361,17 @@ fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
     // read back by `assert_checkpoint_parity` via `Box_::tpidrro_el0()`.
     b.set_tpidrro_el0(0xDEAD_0000);
 
+    // The workqueue kqueue (M46): a registered user knote with a trigger pending, a memory-pressure
+    // registration, an armed timer and a parked manager, so every field is off its default.
+    {
+        let kq = b.dbg_kq_mut();
+        kq.register_user().unwrap();
+        kq.trigger_user().unwrap();
+        kq.register_memstatus(0x6c850).unwrap();
+        kq.add_timer(retrace_arch::TIMER_IDENT_BASE, 0x1_2345_6789, 0x100, 0xAB00).unwrap();
+        kq.set_manager(retrace_box::kq::Manager::Unbound(1));
+    }
+
     // PRECONDITIONS. Without these the comparison below is Default == Default.
     assert_eq!(b.fds().slots()[open_fd as usize], retrace_box::FdSlot::Open,
         "precondition: an OPEN guest fd");
@@ -389,6 +404,8 @@ fn a_checkpointed_box_with_rich_state_matches_the_box_it_came_from() {
         "precondition: a breakpoint is ARMED too — the other half of the debugger-four reset \
          check, got {debug_state}");
     assert_eq!(b.tpidrro_el0(), 0xDEAD_0000, "precondition: tpidrro_el0 staged");
+    assert_ne!(b.dbg_kq(), &retrace_box::kq::WorkqKqueue::default(),
+        "precondition: a non-default knote table, or the M46 row compares Default == Default");
 
     assert_checkpoint_parity(b, "rich");
 }
