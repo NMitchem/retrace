@@ -118,7 +118,11 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   are parked at their measured walls), `skiplines` (M44: the skip-line detector and its control), `kqinit_e2e` (M45: libdispatch's
   workqueue-kqueue init, `kevent_qos` with `KEVENT_FLAG_WORKQ`, issued by hand from `kqinit_dyn.c`
   and emulated as one measured shape; asserts the landmark, the refusals by value, a rewritten
-  return replay must name, and seeks across it). Run one with
+  return replay must name, and seeks across it), `gcdtimer_e2e` (M46: libdispatch's
+  event manager and UPTIME timers on the synthetic clock — a `dispatch_after`, a repeating timer
+  source, two timers in deadline order, the WALL refusal by value, a seek across the idle jump,
+  `reverse-continue` to the handler's store on its worker, a replay-side refusal reported as a
+  divergence, and R7's one-clock check through `mach_get_times`). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -262,16 +266,25 @@ address→thread-index mapping is needed; the mach semaphore pair `semaphore_wai
 (`-33`) is correlated by **port name**, since what that trap carries is a name in retrace's own IPC
 space and never a guest address (M18 Stage 2b); and a workqueue worker parked at `workq_kernreturn`
 opcode `0x4` (`BlockReason::Parked`) has **no waker at all** — libpthread `brk`s if that call ever
-returns. Forwarding `bsdthread_create` would be not merely wrong but whole-process fatal (the host
-would start a real thread on retrace's own `_pthread_start`, which PAC-fails on the guest's pthread
-struct) — and **nothing asserts against it**: the emulating arm (`crates/retrace-core/src/lib.rs:1075`)
-sits before the generic forward arm and that ordering is the only guard. The generic arm's asserts
-are `is_signal_syscall`, the workq pair, `kevent_qos` (M45) and `writes_via_nested_pointer` only; the claim that it
-"asserts" stood here from M14 to M37 and was measured false at M37.
-Since M45 libdispatch's workqueue-kqueue init, `kevent_qos` (374) with `KEVENT_FLAG_WORKQ`, is
-emulated beside the workq pair for the same reason (forwarded, it acts on retrace's own workqueue
-kqueue): exactly one measured shape, returning 0 (`Box_::guest_kevent_qos`), and every other shape
-refused by value, naming the field.
+returns. The event manager, parked at opcode `0x40` since M46, is the one exception: a knote
+activation re-enters it (`ThreadTable::unpark`). Forwarding `bsdthread_create` would be not merely
+wrong but whole-process fatal (the host would start a real thread on retrace's own `_pthread_start`,
+which PAC-fails on the guest's pthread struct) — and **nothing asserts against it**: the emulating
+arm (`crates/retrace-core/src/lib.rs:1089`) sits before the generic forward arm and that ordering is
+the only guard. The generic arm's asserts are `is_signal_syscall`, the workq pair, `kevent_qos`
+(M45) and `writes_via_nested_pointer` only; the claim that it "asserts" stood here from M14 to M37
+and was measured false at M37. Since M45 libdispatch's workqueue-kqueue init, `kevent_qos` (374)
+with `KEVENT_FLAG_WORKQ`, is emulated beside the workq pair for the same reason (forwarded, it acts
+on retrace's own workqueue kqueue): M45 emulated exactly one measured shape, returning 0
+(`Box_::guest_kevent_qos`), and refused every other by value, naming the field.
+Since M46 the box also models libdispatch's **event manager**: `kevent_qos`'s memory-pressure
+registration and manager poke join M45's init, the manager's `KEVENT_RETURN` (`0x40`) registers
+UPTIME timers, and `schedule_after_block` fires them on `synthetic_tsc` — overdue timers first,
+then, with nothing runnable, one jump of the clock to the earliest deadline. All of it is box state
+(`Box_::kq`, carried in `BoxState`), rebuilt from the guest's own syscalls on both sides, so nothing
+new is recorded. The recorder does rewrite one value: `gettimeofday`'s mach-time out-parameter
+becomes the guest's own clock (M46 R7), because libdispatch reads its timer "now" through
+`mach_get_times`, whose commpage path always falls back to 116 under a frozen commpage.
 
 **Emulating a syscall's entry contract is not the same as emulating the syscall.** Besides the new
 thread's registers, `guest_bsdthread_create` must reproduce what the *kernel* writes on the way
