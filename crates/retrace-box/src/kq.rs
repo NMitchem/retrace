@@ -206,6 +206,21 @@ mod tests {
             vec![USER_WAKE_EVENT, timer_fired_event(T0, 5, 0xa), timer_fired_event(T1, 7, 0xb)]);
     }
 
+    /// The manager's list holds 16. A knote past `max` is not dropped: it stays active, and the
+    /// next scan delivers it.
+    #[test]
+    fn knotes_past_max_stay_active_for_the_next_take() {
+        let mut k = inited();
+        k.add_timer(T0, 100, 5, 0xa).unwrap();
+        k.add_timer(T1, 100, 7, 0xb).unwrap();
+        k.trigger_user().unwrap();
+        assert_eq!(k.fire_due(100), 2);
+        assert_eq!(k.take_events(2), vec![USER_WAKE_EVENT, timer_fired_event(T0, 5, 0xa)]);
+        assert!(k.has_pending(), "T1 is past max and still active");
+        assert_eq!(k.take_events(2), vec![timer_fired_event(T1, 7, 0xb)]);
+        assert!(!k.has_pending());
+    }
+
     #[test]
     fn a_delivered_timer_is_dropped() {
         let mut k = inited();

@@ -159,6 +159,23 @@ fn a_timer_disarm_is_classified() {
     assert_eq!(kevent_return_change(&e.to_bytes()), Ok(ChangeEntry::TimerDelete { ident: TIMER_IDENT_BASE | 1 }));
 }
 
+/// No fixture reaches the disarm (`ChangeEntry::TimerDelete`) end to end (M46 t5), so this sweep
+/// is its only guard. The validator reads the same three fields for a disarm as for an arm.
+#[test]
+fn every_compared_bit_of_a_timer_disarm_is_refused() {
+    // Read, not compared (R1): udata 16..24, data 32..40, ext[1] 48..56.
+    let read = |b: usize| (16..24).contains(&b) || (32..40).contains(&b) || (48..56).contains(&b);
+    let disarm = KeventQos { flags: EV_DELETE | EV_ONESHOT, data: 0, ext: [0; 4], ..timer_add(1, 0, 0, 0x6c850) };
+    assert_eq!(kevent_return_change(&disarm.to_bytes()), Ok(ChangeEntry::TimerDelete { ident: TIMER_IDENT_BASE | 1 }));
+    for byte in (0..KEVENT_QOS_SIZE).filter(|&b| !read(b)) {
+        for bit in 0..8 {
+            let mut e = disarm.to_bytes();
+            e[byte] ^= 1 << bit;
+            assert!(kevent_return_change(&e).is_err(), "byte {byte} bit {bit} flipped and still accepted");
+        }
+    }
+}
+
 /// M46 §7: MONOTONIC and WALL timers name the clock the model lacks. fflags are judged before the
 /// ident, so the refusal names them (kqmanager's WALL-timer test matches on this text).
 #[test]
