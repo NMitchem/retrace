@@ -6512,6 +6512,13 @@ impl Box_ {
     #[doc(hidden)]
     pub fn dbg_kq_mut(&mut self) -> &mut kq::WorkqKqueue { &mut self.kq }
 
+    /// Test-only (M46): write guest memory by VA, page by page, as the box's own event writes do.
+    /// `gcdtimer_e2e` tampers an entry at its `svc` with this, to reach the replay-side validators.
+    #[doc(hidden)]
+    pub fn dbg_write_va(&mut self, va: u64, bytes: &[u8]) -> Result<(), String> {
+        self.write_va_committing(va, bytes)
+    }
+
     /// Test-only (M24 t2): the guest's memory map as `(ipa, len)` pairs — what `tests/restoreparity.rs`
     /// compares between a load box and a restore box built from that box's own snapshot.
     ///
