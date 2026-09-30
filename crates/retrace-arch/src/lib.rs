@@ -2,6 +2,11 @@
 pub enum Ec { Svc, Hvc, SysReg, SoftStep, Breakpoint, Watchpoint, DataAbort, InstrAbort, Other(u8) }
 
 pub const SYS_WRITE: u64 = 4;
+/// `gettimeofday(struct timeval *tp, struct timezone *tzp, uint64_t *mach_absolute_time)` — the
+/// third, xnu-private out-pointer is what `mach_get_times` passes (xnu
+/// `libsyscall/wrappers/mach_get_times.c`). The recorder rewrites what the kernel writes there to
+/// the guest's own clock (M46 R7).
+pub const SYS_GETTIMEOFDAY: u64 = 116;
 /// `SYS_write_nocancel` (`sys/syscall.h:437`). Identical `(fd, buf, nbyte)` ABI to `write`; the
 /// `_nocancel` variants only skip the pthread cancellation point. libc's **stdio** flush takes this
 /// path, so any guest that uses `printf`/`fwrite` — `jq` among them — reaches the console through
