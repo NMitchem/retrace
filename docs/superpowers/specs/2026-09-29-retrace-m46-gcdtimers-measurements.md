@@ -61,7 +61,7 @@ follow-ups placed the fallback:
 - The `clock` record exits 0, and `m1a-clock.out` is `clock bad`.
 - `m1a-clock.err` has 19 `num=116` traps.
   - 18 are at pc `0x1804b1b60` with a zero third argument. That is
-    `libsystem_kernel`__gettimeofday + 12`, plain `gettimeofday`.
+    ``libsystem_kernel`__gettimeofday + 12``, plain `gettimeofday`.
   - One has a nonzero third argument:
 
   ```
@@ -161,7 +161,8 @@ triggered.
 
 **Command.** Step 5, verbatim. The address `x 0xfffffc080 0x60` was accepted.
 
-**The disassembly** (`m1c-disasm.log`, `libsystem_kernel`mach_absolute_time`):
+**The disassembly, abridged** (a paraphrase of `m1c-disasm.log`, ``libsystem_kernel`mach_absolute_time``,
+not a verbatim quote; the log has the instructions in full):
 
 ```
 movk x3, #0x0, lsl #48 ; movk x3, #0xf, lsl #32 ; movk x3, #0xffff, lsl #16 ; movk x3, #0xc088

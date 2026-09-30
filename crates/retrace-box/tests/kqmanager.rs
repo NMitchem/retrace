@@ -211,8 +211,9 @@ fn a_poke_to_a_parked_manager_with_a_masked_signal_pending_on_it_is_refused_too(
     let _ = poke(&mut b, e);
 }
 
-/// M46 §7: the refusal names the fflags, and it comes before any clock read, so it reaches a box
-/// with no commpage.
+/// M46 §7: the refusal names the fflags, and it comes back as an `Err` on a static box with no
+/// commpage. The test cannot show that the refusal precedes a clock read: nothing is armed here, and
+/// the clock is read only while a timer is armed, so it would go unread in either order.
 #[test]
 fn a_kevent_return_carrying_a_wall_timer_is_refused_naming_its_fflags() {
     let (mut b, _, pthread) = spawned();
