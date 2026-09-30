@@ -1244,8 +1244,9 @@ pub const SYS_WORKQ_KERNRETURN: u64 = 368;
 /// xnu's private `bsd/sys/event_private.h`; the SDK carries only the number. **Never forwarded**
 /// (M45): with `KEVENT_FLAG_WORKQ` the kernel resolves `kq` to the PROCESS's workqueue kqueue,
 /// allocating it if absent (`kern_event.c` `kevent_get_kqwq`), which is retrace's own, the class
-/// `SYS_WORKQ_OPEN` names (M44 t0 M1). `Box_::guest_kevent_qos` emulates exactly one shape,
-/// libdispatch's `_dispatch_kq_init` (`kqinit_shape`), and refuses every other by value.
+/// `SYS_WORKQ_OPEN` names (M44 t0 M1). `Box_::guest_kevent_qos` models three shapes,
+/// libdispatch's workqueue-kqueue init (`kqinit_shape`), its memory-pressure registration and its
+/// manager poke, classified by `kevent_qos_shape` (M46), and refuses every other by value.
 pub const SYS_KEVENT_QOS: u64 = 374;
 /// `thread_selfid()` — already fires and already survives.
 pub const SYS_THREAD_SELFID: u64 = 372;
@@ -1551,6 +1552,243 @@ pub fn kqinit_shape(args: [u64; 8], entry: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ---- M46-gcdtimers: libdispatch's event manager and its timers ----------------------------------
+// Values from the macOS 26 SDK's `sys/event.h`, which tests/gcdshapes.rs re-reads at test time,
+// except where a comment cites xnu or libpthread: those are private and absent from the SDK.
+/// `EVFILT_TIMER` (`sys/event.h:74`).
+pub const EVFILT_TIMER: i16 = -7;
+/// `EVFILT_MEMORYSTATUS` (xnu `bsd/sys/event_private.h:81`; the SDK does not ship it).
+pub const EVFILT_MEMORYSTATUS: i16 = -14;
+/// `EV_DELETE` (`sys/event.h:137`).
+pub const EV_DELETE: u16 = 0x0002;
+/// `EV_ONESHOT` (`sys/event.h:142`).
+pub const EV_ONESHOT: u16 = 0x0010;
+/// `EV_DISPATCH` (`sys/event.h:149`).
+pub const EV_DISPATCH: u16 = 0x0080;
+/// `EV_UDATA_SPECIFIC` (`sys/event.h:150`).
+pub const EV_UDATA_SPECIFIC: u16 = 0x0100;
+/// `NOTE_TRIGGER` (`sys/event.h:204`): fire an `EVFILT_USER` knote.
+pub const NOTE_TRIGGER: u32 = 0x0100_0000;
+/// The timer fflags (`sys/event.h:304-318`).
+pub const NOTE_NSECONDS: u32 = 0x04;
+pub const NOTE_ABSOLUTE: u32 = 0x08;
+pub const NOTE_LEEWAY: u32 = 0x10;
+pub const NOTE_CRITICAL: u32 = 0x20;
+pub const NOTE_BACKGROUND: u32 = 0x40;
+pub const NOTE_MACH_CONTINUOUS_TIME: u32 = 0x80;
+pub const NOTE_MACHTIME: u32 = 0x100;
+/// `KEVENT_FLAG_ERROR_EVENTS` (`sys/event.h:133`): copy out change errors only.
+pub const KEVENT_FLAG_ERROR_EVENTS: u32 = 0x2;
+/// `_PTHREAD_PRIORITY_EVENT_MANAGER_FLAG`: the `qos` of every knote in the manager's bucket (the
+/// value `KQINIT` carries).
+pub const EVENT_MANAGER_QOS: i32 = 0x0200_0000;
+
+/// `WQOPS_THREAD_KEVENT_RETURN` (xnu `bsd/pthread/workqueue_syscalls.h`): a kevent worker handing
+/// its change list back (libpthread `pthread.c:2581-2635`). Emulated by
+/// `Box_::try_workq_kernreturn`, and only from the bound event manager.
+pub const WQOPS_THREAD_KEVENT_RETURN: u64 = 0x40;
+/// The flags word a workqueue thread's entry receives in `x4` (xnu `workqueue_syscalls.h:51-66`).
+pub const WQ_FLAG_THREAD_PRIO_QOS: u32 = 0x0000_4000;
+pub const WQ_FLAG_THREAD_REUSE: u32 = 0x0002_0000;
+pub const WQ_FLAG_THREAD_NEWSPI: u32 = 0x0004_0000;
+pub const WQ_FLAG_THREAD_KEVENT: u32 = 0x0008_0000;
+pub const WQ_FLAG_THREAD_EVENT_MANAGER: u32 = 0x0010_0000;
+pub const WQ_FLAG_THREAD_TSD_BASE_SET: u32 = 0x0020_0000;
+/// `WQ_KEVENT_LIST_LEN` (libpthread `kern/kern_support.c`): the most events one kevent upcall
+/// carries, laid out at `self − 16 × 72`.
+pub const WQ_KEVENT_LIST_LEN: usize = 16;
+
+/// The UPTIME timer fflags, indexed by libdispatch's timer index `tidx` (clock × 3 + QoS bucket,
+/// with UPTIME = clock 0 and NORMAL/CRITICAL/BACKGROUND = 0/1/2; libdispatch
+/// `event_internal.h:681-695`, the fflags table `event_kevent.c:49-75`; t0 M3). UPTIME is the only
+/// clock M46 models.
+pub const UPTIME_TIMER_FFLAGS: [u32; 3] = [
+    NOTE_MACHTIME | NOTE_ABSOLUTE | NOTE_LEEWAY,
+    NOTE_MACHTIME | NOTE_ABSOLUTE | NOTE_LEEWAY | NOTE_CRITICAL,
+    NOTE_MACHTIME | NOTE_ABSOLUTE | NOTE_LEEWAY | NOTE_BACKGROUND,
+];
+/// `DISPATCH_KEVENT_TIMEOUT_IDENT_MASK` (libdispatch `event_kevent.c:2488`): a timer knote's
+/// ident is this, ORed with its `tidx`.
+pub const TIMER_IDENT_BASE: u64 = 0xffff_ffff_ffff_ff00;
+
+/// libdispatch's memory-pressure registration (`_dispatch_memorypressure_init`, M46 §2a), measured
+/// by M45's walk. `udata` is a heap pointer that varies per run: read, not compared (R1).
+pub const MEMSTATUS_ADD: KeventQos = KeventQos {
+    ident: 0,
+    filter: EVFILT_MEMORYSTATUS,
+    flags: EV_ADD | EV_ENABLE | EV_DISPATCH | EV_UDATA_SPECIFIC, // 0x0185
+    qos: EVENT_MANAGER_QOS,
+    udata: 0,
+    fflags: 0xf000_0037, // PRESSURE_NORMAL|WARN|CRITICAL, PROC_LIMIT_WARN|CRITICAL, MSL_STATUS
+    xflags: 0,
+    data: 0,
+    ext: [0; 4],
+};
+
+/// The event manager's poke (`_dispatch_event_loop_poke`, libdispatch `event_kevent.c:1979-1988`):
+/// a `NOTE_TRIGGER` touch of the init's `EVFILT_USER` knote. Every field is a constant and every
+/// field is compared (t0 M3; the struct literal sets no `qos`).
+pub const MANAGER_POKE: KeventQos = KeventQos {
+    ident: 1,
+    filter: EVFILT_USER,
+    flags: 0,
+    qos: 0,
+    udata: !0x7, // DISPATCH_WLH_MANAGER
+    fflags: NOTE_TRIGGER,
+    xflags: 0,
+    data: 0,
+    ext: [0; 4],
+};
+
+/// One `kevent_qos` call the box models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeventShape {
+    /// M45's `_dispatch_kq_init` (`KQINIT`).
+    Init,
+    /// `MEMSTATUS_ADD`, carrying the udata it registered.
+    MemoryStatusAdd { udata: u64 },
+    /// `MANAGER_POKE`.
+    ManagerPoke,
+}
+
+/// One entry of a `KEVENT_RETURN` change list the box models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeEntry {
+    /// Arm (or reprogram) an UPTIME timer for the absolute deadline `deadline`, in the guest's
+    /// `mach_absolute_time` ticks.
+    TimerAdd { ident: u64, deadline: u64, leeway: u64, udata: u64 },
+    /// Disarm an armed timer.
+    TimerDelete { ident: u64 },
+}
+
+/// The first field of `got` that differs from `want`, skipping those named in `read`, as
+/// `"<field> is <got>, measured <want>"`.
+fn first_difference(got: &KeventQos, want: &KeventQos, read: &[&str]) -> Result<(), String> {
+    for ((name, g), (_, w)) in got.fields().into_iter().zip(want.fields()) {
+        if !read.contains(&name) && g != w {
+            return Err(format!("{name} is {g:#x}, measured {w:#x}"));
+        }
+    }
+    Ok(())
+}
+
+/// Classify a `kevent_qos` call as one of the three shapes the box models (M46 §3b), or name the
+/// first register or field that differs. `x7 = 0x21` is M45's init, judged by `kqinit_shape` so
+/// its texts survive. `x7 = 0x23` is a registration from a thread with no deferred-items list: the
+/// memory-pressure source or the manager poke, told apart by the entry's filter.
+///
+/// `int` arguments are compared on the 32 bits the kernel reads, and pointers whole (R2). `x1` and
+/// `x3` locate the lists and are not compared (M45 R4). A short `entry` did not fully translate.
+pub fn kevent_qos_shape(args: [u64; 8], entry: &[u8]) -> Result<KeventShape, String> {
+    const LOW: u64 = 0xffff_ffff;
+    let init = u64::from(KEVENT_FLAG_WORKQ | KEVENT_FLAG_IMMEDIATE);
+    let registration = u64::from(KEVENT_FLAG_WORKQ | KEVENT_FLAG_ERROR_EVENTS | KEVENT_FLAG_IMMEDIATE);
+    let flags = args[7] & LOW;
+    if flags == init {
+        return kqinit_shape(args, entry).map(|()| KeventShape::Init);
+    }
+    if flags != registration {
+        return Err(format!("x7 (flags, as unsigned int) is {flags:#x}, measured {init:#x} (the init) \
+                            or {registration:#x} (a registration)"));
+    }
+    let checks: [(usize, &str, u64, u64); 5] = [
+        (0, "kq, as int", 0xffff_ffff, args[0] & LOW),
+        (2, "nchanges, as int", 1, args[2] & LOW),
+        (4, "nevents, as int", WQ_KEVENT_LIST_LEN as u64, args[4] & LOW),
+        (5, "data_out", 0, args[5]),
+        (6, "data_available", 0, args[6]),
+    ];
+    for (i, name, want, got) in checks {
+        if got != want {
+            return Err(format!("x{i} ({name}) is {got:#x}, measured {want:#x}"));
+        }
+    }
+    let Ok(bytes) = <&[u8; KEVENT_QOS_SIZE]>::try_from(entry) else {
+        return Err(format!("the change list's entry read {} of {KEVENT_QOS_SIZE} bytes: it does not \
+                            fully translate", entry.len()));
+    };
+    let e = KeventQos::from_bytes(bytes);
+    match e.filter {
+        EVFILT_MEMORYSTATUS => first_difference(&e, &MEMSTATUS_ADD, &["udata"])
+            .map(|()| KeventShape::MemoryStatusAdd { udata: e.udata }),
+        EVFILT_USER => first_difference(&e, &MANAGER_POKE, &[]).map(|()| KeventShape::ManagerPoke),
+        other => Err(format!("filter is {:#x}, measured {:#x} (EVFILT_MEMORYSTATUS) or {:#x} \
+                              (EVFILT_USER); an immediate timer or any other registration is not \
+                              modelled (M46 §7)",
+                             other as u16, EVFILT_MEMORYSTATUS as u16, EVFILT_USER as u16)),
+    }
+    .map_err(|why| format!("changelist[0].{why}"))
+}
+
+/// Classify one 72-byte `KEVENT_RETURN` change entry (M46 §3b): an UPTIME timer arm or disarm, or
+/// `Err` naming the first field that differs. `filter`, `flags` and `fflags` are judged first, so a
+/// MONOTONIC or WALL timer is refused by the fflags that name its clock, not by its ident. The
+/// deadline (`data`), the leeway (`ext[1]`) and `udata` vary per call and are read (R1).
+pub fn kevent_return_change(entry: &[u8; KEVENT_QOS_SIZE]) -> Result<ChangeEntry, String> {
+    let e = KeventQos::from_bytes(entry);
+    if e.filter != EVFILT_TIMER {
+        return Err(format!("filter is {:#x}, measured {:#x} (EVFILT_TIMER): the manager's only \
+                            measured change is a timer", e.filter as u16, EVFILT_TIMER as u16));
+    }
+    let arm = EV_ADD | EV_ENABLE | EV_ONESHOT;
+    let disarm = EV_DELETE | EV_ONESHOT;
+    if e.flags != arm && e.flags != disarm {
+        return Err(format!("flags is {:#x}, measured {arm:#x} (an arm) or {disarm:#x} (a disarm)", e.flags));
+    }
+    let Some(tidx) = UPTIME_TIMER_FFLAGS.iter().position(|&f| f == e.fflags) else {
+        let uptime = UPTIME_TIMER_FFLAGS.map(|f| format!("{f:#x}")).join(", ");
+        return Err(format!("fflags is {:#x}, measured one of {uptime} (the UPTIME clock); MONOTONIC and \
+                            WALL timers are not modelled (M46 §7)", e.fflags));
+    };
+    let want = KeventQos {
+        ident: TIMER_IDENT_BASE | tidx as u64,
+        filter: EVFILT_TIMER,
+        flags: e.flags,
+        qos: EVENT_MANAGER_QOS,
+        udata: 0,
+        fflags: e.fflags,
+        xflags: 0,
+        data: 0,
+        ext: [0; 4],
+    };
+    first_difference(&e, &want, &["udata", "data", "ext[1]"])?;
+    Ok(if e.flags == arm {
+        ChangeEntry::TimerAdd { ident: e.ident, deadline: e.data as u64, leeway: e.ext[1], udata: e.udata }
+    } else {
+        ChangeEntry::TimerDelete { ident: e.ident }
+    })
+}
+
+/// The event a fired timer knote delivers (xnu `kern_event.c:1822-1905`, `:4427`; spec §2c; t0 M2):
+/// the registered flags plus `EV_CLEAR` (`0x35`), `data` 1 (one expiration), `ext[1]` the leeway.
+pub fn timer_fired_event(ident: u64, leeway: u64, udata: u64) -> KeventQos {
+    KeventQos {
+        ident,
+        filter: EVFILT_TIMER,
+        flags: EV_ADD | EV_ENABLE | EV_ONESHOT | EV_CLEAR,
+        qos: EVENT_MANAGER_QOS,
+        udata,
+        fflags: 0,
+        xflags: 0,
+        data: 1,
+        ext: [0, leeway, 0, 0],
+    }
+}
+
+/// The event the triggered `EVFILT_USER` knote delivers (xnu `kern_event.c:1972-1986`; t0 M2).
+/// libdispatch ignores its content (`event_kevent.c:576-579`): its job is to bring the manager up.
+pub const USER_WAKE_EVENT: KeventQos = KeventQos {
+    ident: 1,
+    filter: EVFILT_USER,
+    flags: EV_ADD | EV_CLEAR,
+    qos: EVENT_MANAGER_QOS,
+    udata: !0x7,
+    fflags: 0,
+    xflags: 0,
+    data: 0,
+    ext: [0; 4],
+};
 
 // ---- M12-signal-delivery ---------------------------------------------------------------------
 // Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here
