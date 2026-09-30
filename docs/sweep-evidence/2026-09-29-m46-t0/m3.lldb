@@ -1,0 +1,4 @@
+breakpoint set -n kevent_qos -C "register read x0 x1 x2 x3 x4 x5 x6 x7" -C "memory read -s8 -fx -c9 '$x1 ? $x1 : $sp'" -C "thread info" -C "continue"
+breakpoint set -n __workq_kernreturn -C "register read x0 x1 x2 x3" -C "memory read -s8 -fx -c27 '$x1 ? $x1 : $sp'" -C "thread info" -C "continue"
+breakpoint set -n kevent_id -C "register read x0 x1 x2 x3 x4 x5 x6 x7" -C "thread info" -C "continue"
+run

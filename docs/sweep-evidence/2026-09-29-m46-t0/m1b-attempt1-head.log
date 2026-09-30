@@ -1,0 +1,200 @@
+(lldb) target create "/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn"
+Current executable set to '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn' (arm64).
+(lldb) command source -s 0 '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/m1b.lldb'
+Executing commands in '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/m1b.lldb'.
+(lldb) breakpoint set -n mach_get_times
+Breakpoint 1: where = libsystem_kernel.dylib`mach_get_times, address = 0x00000001804afcd0
+(lldb) breakpoint set -n mach_absolute_time
+Breakpoint 2: where = libsystem_kernel.dylib`mach_absolute_time, address = 0x00000001804ae0a0
+(lldb) breakpoint set -n mach_approximate_time
+Breakpoint 3: where = libsystem_kernel.dylib`mach_approximate_time, address = 0x00000001804af484
+(lldb) breakpoint set -n mach_continuous_time
+Breakpoint 4: where = libsystem_kernel.dylib`mach_continuous_time, address = 0x00000001804ae024
+(lldb) breakpoint set -n gettimeofday
+Breakpoint 5: where = libsystem_c.dylib`gettimeofday, address = 0x0000000180386d88
+(lldb) breakpoint command add -o "bt 12" -o "continue" 1 2 3 4 5
+(lldb) run
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue
+Process 56121 resuming
+Command #1 'continue' continued the target.
+(lldb)  continue

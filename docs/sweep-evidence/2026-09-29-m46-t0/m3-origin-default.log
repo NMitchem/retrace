@@ -1,0 +1,131 @@
+(lldb) target create ".superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn"
+Current executable set to '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn' (arm64).
+(lldb) command source -s 0 '.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/m3-origin.lldb'
+Executing commands in '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/m3-origin.lldb'.
+(lldb) breakpoint set -n task_get_special_port -C "register read x0 x1 x2" -C "bt 8" -C "continue"
+Breakpoint 1: where = libsystem_kernel.dylib`task_get_special_port, address = 0x00000001804ae1c8
+(lldb) breakpoint set -n kevent_qos -C "register read x0 x2 x7" -C "memory read -s8 -fx -c2 '$x1 ? $x1 : $sp'" -C "bt 10" -C "continue"
+Breakpoint 2: where = libsystem_kernel.dylib`kevent_qos, address = 0x00000001804afa40
+(lldb) breakpoint set -n host_request_notification -C "register read x0 x1 x2" -C "bt 8" -C "continue"
+Breakpoint 3: where = libsystem_kernel.dylib`host_request_notification, address = 0x00000001804afdb8
+(lldb) run
+(lldb)  register read x0 x1 x2
+      x0 = 0x0000000000000203
+      x1 = 0x0000000000000004
+      x2 = 0x0000000100010450
+(lldb)  bt 8
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+  * frame #0: 0x0000000181dae1c8 libsystem_kernel.dylib`task_get_special_port
+    frame #1: 0x0000000181ac0880 libxpc.dylib`_libxpc_initializer + 1040
+    frame #2: 0x0000000191c4135c libSystem.B.dylib`libSystem_initializer + 256
+    frame #3: 0x0000000181a60e30 dyld`invocation function for block in dyld4::Loader::findAndRunAllInitializers(dyld4::RuntimeState&) const::$_0::operator()() const + 180
+    frame #4: 0x0000000181a6c114 dyld`invocation function for block in dyld3::MachOAnalyzer::forEachInitializer(Diagnostics&, dyld3::MachOAnalyzer::VMAddrConverter const&, void (unsigned int) block_pointer, void const*) const + 320
+    frame #5: 0x0000000181aa2860 dyld`invocation function for block in mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const + 312
+    frame #6: 0x0000000181a9f394 dyld`mach_o::UnsafeHeader::forEachLoadCommand(void (load_command const*, bool&) block_pointer) const + 208
+    frame #7: 0x0000000181aa0c3c dyld`mach_o::UnsafeHeader::forEachSection(void (mach_o::UnsafeHeader::SectionInfo const&, bool&) block_pointer) const + 124
+(lldb)  continue
+Process 6543 resuming
+Command #3 'continue' continued the target.
+fired cell 0x100008000
+(lldb)  register read x0 x2 x7
+      x0 = 0x00000000ffffffff
+      x2 = 0x0000000000000001
+      x7 = 0x0000000000000021
+(lldb)  memory read -s8 -fx -c2 '$x1 ? $x1 : $sp'
+0x16fdfdd78: 0x0000000000000001 0x020000000021fff6
+(lldb)  bt 10
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 2.1
+  * frame #0: 0x0000000181dafa40 libsystem_kernel.dylib`kevent_qos
+    frame #1: 0x0000000181c5be64 libdispatch.dylib`_dispatch_kq_init + 152
+    frame #2: 0x0000000181c504b0 libdispatch.dylib`_dispatch_client_callout + 16
+    frame #3: 0x0000000181c39630 libdispatch.dylib`_dispatch_once_callout + 32
+    frame #4: 0x0000000181c59ac8 libdispatch.dylib`_dispatch_kq_poll + 320
+    frame #5: 0x0000000181c595a4 libdispatch.dylib`_dispatch_kq_drain + 260
+    frame #6: 0x0000000181c58dfc libdispatch.dylib`_dispatch_event_loop_poke + 156
+    frame #7: 0x0000000181c442b8 libdispatch.dylib`_dispatch_mgr_queue_push + 88
+    frame #8: 0x0000000100000754 after_dyn`main + 524
+    frame #9: 0x0000000181a33e00 dyld`start + 6992
+(lldb)  continue
+Process 6543 resuming
+Command #4 'continue' continued the target.
+(lldb)  register read x0 x2 x7
+      x0 = 0x00000000ffffffff
+      x2 = 0x0000000000000001
+      x7 = 0x0000000000000023
+(lldb)  memory read -s8 -fx -c2 '$x1 ? $x1 : $sp'
+0x16fdfdcc8: 0x0000000000000000 0x020000000185fff2
+(lldb)  bt 10
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 2.1
+  * frame #0: 0x0000000181dafa40 libsystem_kernel.dylib`kevent_qos
+    frame #1: 0x0000000181c59a2c libdispatch.dylib`_dispatch_kq_poll + 164
+    frame #2: 0x0000000181c595a4 libdispatch.dylib`_dispatch_kq_drain + 260
+    frame #3: 0x0000000181c587c4 libdispatch.dylib`_dispatch_kq_unote_update + 332
+    frame #4: 0x0000000181c4cb08 libdispatch.dylib`_dispatch_source_install + 40
+    frame #5: 0x0000000181c4ca1c libdispatch.dylib`_dispatch_source_activate + 444
+    frame #6: 0x0000000181c3e9a0 libdispatch.dylib`_dispatch_lane_resume_activate + 104
+    frame #7: 0x0000000181c5bef4 libdispatch.dylib`_dispatch_memorypressure_create + 88
+    frame #8: 0x0000000181c59ae4 libdispatch.dylib`_dispatch_kq_poll + 348
+    frame #9: 0x0000000181c595a4 libdispatch.dylib`_dispatch_kq_drain + 260
+(lldb)  continue
+Process 6543 resuming
+Command #4 'continue' continued the target.
+(lldb)  register read x0 x1 x2
+      x0 = 0x0000000000000203
+      x1 = 0x000000000000000a
+      x2 = 0x000000016fdfddec
+(lldb)  bt 8
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+  * frame #0: 0x0000000181dae1c8 libsystem_kernel.dylib`task_get_special_port
+    frame #1: 0x0000000181c5cee4 libdispatch.dylib`_voucher_activity_debug_channel_init + 72
+    frame #2: 0x0000000181c59ae8 libdispatch.dylib`_dispatch_kq_poll + 352
+    frame #3: 0x0000000181c595a4 libdispatch.dylib`_dispatch_kq_drain + 260
+    frame #4: 0x0000000181c58dfc libdispatch.dylib`_dispatch_event_loop_poke + 156
+    frame #5: 0x0000000181c442b8 libdispatch.dylib`_dispatch_mgr_queue_push + 88
+    frame #6: 0x0000000100000754 after_dyn`main + 524
+    frame #7: 0x0000000181a33e00 dyld`start + 6992
+(lldb)  continue
+Process 6543 resuming
+Command #3 'continue' continued the target.
+(lldb)  register read x0 x2 x7
+      x0 = 0x00000000ffffffff
+      x2 = 0x0000000000000001
+      x7 = 0x0000000000000023
+(lldb)  memory read -s8 -fx -c2 '$x1 ? $x1 : $sp'
+0x16fdfdce8: 0x0000000000001b03 0x840008ff0385fff8
+(lldb)  bt 10
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 2.1
+  * frame #0: 0x0000000181dafa40 libsystem_kernel.dylib`kevent_qos
+    frame #1: 0x0000000181c59a2c libdispatch.dylib`_dispatch_kq_poll + 164
+    frame #2: 0x0000000181c595a4 libdispatch.dylib`_dispatch_kq_drain + 260
+    frame #3: 0x0000000181c587c4 libdispatch.dylib`_dispatch_kq_unote_update + 332
+    frame #4: 0x0000000181c53914 libdispatch.dylib`_dispatch_mach_activate + 72
+    frame #5: 0x0000000181c3e9a0 libdispatch.dylib`_dispatch_lane_resume_activate + 104
+    frame #6: 0x0000000181c5cf2c libdispatch.dylib`_voucher_activity_debug_channel_init + 144
+    frame #7: 0x0000000181c59ae8 libdispatch.dylib`_dispatch_kq_poll + 352
+    frame #8: 0x0000000181c595a4 libdispatch.dylib`_dispatch_kq_drain + 260
+    frame #9: 0x0000000181c58dfc libdispatch.dylib`_dispatch_event_loop_poke + 156
+(lldb)  continue
+Process 6543 resuming
+Command #4 'continue' continued the target.
+(lldb)  register read x0 x2 x7
+      x0 = 0x00000000ffffffff
+      x2 = 0x0000000000000001
+      x7 = 0x0000000000000023
+(lldb)  memory read -s8 -fx -c2 '$x1 ? $x1 : $sp'
+0x16fdfe368: 0x0000000000000001 0x000000000000fff6
+(lldb)  bt 10
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 2.1
+  * frame #0: 0x0000000181dafa40 libsystem_kernel.dylib`kevent_qos
+    frame #1: 0x0000000181c59a2c libdispatch.dylib`_dispatch_kq_poll + 164
+    frame #2: 0x0000000181c595a4 libdispatch.dylib`_dispatch_kq_drain + 260
+    frame #3: 0x0000000181c58dfc libdispatch.dylib`_dispatch_event_loop_poke + 156
+    frame #4: 0x0000000181c442b8 libdispatch.dylib`_dispatch_mgr_queue_push + 88
+    frame #5: 0x0000000100000754 after_dyn`main + 524
+    frame #6: 0x0000000181a33e00 dyld`start + 6992
+(lldb)  continue
+Process 6543 resuming
+Command #4 'continue' continued the target.
+fired
+done
+Process 6543 launched: '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn' (arm64)
+Process 6543 exited with status = 0 (0x00000000)

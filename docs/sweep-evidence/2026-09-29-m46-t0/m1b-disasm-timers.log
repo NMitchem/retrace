@@ -1,0 +1,824 @@
+(lldb) target create ".superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn"
+Current executable set to '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn' (arm64).
+(lldb) disassemble -n _dispatch_event_loop_drain_timers
+libdispatch.dylib`_dispatch_event_loop_drain_timers:
+libdispatch.dylib[0x180357054] <+0>:    pacibsp 
+libdispatch.dylib[0x180357058] <+4>:    sub    sp, sp, #0xb0
+libdispatch.dylib[0x18035705c] <+8>:    stp    x28, x27, [sp, #0x50]
+libdispatch.dylib[0x180357060] <+12>:   stp    x26, x25, [sp, #0x60]
+libdispatch.dylib[0x180357064] <+16>:   stp    x24, x23, [sp, #0x70]
+libdispatch.dylib[0x180357068] <+20>:   stp    x22, x21, [sp, #0x80]
+libdispatch.dylib[0x18035706c] <+24>:   stp    x20, x19, [sp, #0x90]
+libdispatch.dylib[0x180357070] <+28>:   stp    x29, x30, [sp, #0xa0]
+libdispatch.dylib[0x180357074] <+32>:   add    x29, sp, #0xa0
+libdispatch.dylib[0x180357078] <+36>:   mov    x27, x1
+libdispatch.dylib[0x18035707c] <+40>:   mov    x20, x0
+libdispatch.dylib[0x180357080] <+44>:   add    x24, sp, #0x20
+libdispatch.dylib[0x180357084] <+48>:   stp    xzr, xzr, [sp, #0x20]
+libdispatch.dylib[0x180357088] <+52>:   mov    w19, w1
+libdispatch.dylib[0x18035708c] <+56>:   str    xzr, [sp, #0x30]
+libdispatch.dylib[0x180357090] <+60>:   mov    x28, #0x7fffffffffffffff  ; =9223372036854775807 
+libdispatch.dylib[0x180357094] <+64>:   mov    x25, #0x7ffffffffffffffe  ; =9223372036854775806 
+libdispatch.dylib[0x180357098] <+68>:   cbz    w27, 0x1803572bc          ; <+616>
+libdispatch.dylib[0x18035709c] <+72>:   mov    x21, #0x0                 ; =0 
+libdispatch.dylib[0x1803570a0] <+76>:   add    x23, x20, x21, lsl #5
+libdispatch.dylib[0x1803570a4] <+80>:   ldr    x22, [x23, #0x8]!
+libdispatch.dylib[0x1803570a8] <+84>:   cbz    x22, 0x1803572b0          ; <+604>
+libdispatch.dylib[0x1803570ac] <+88>:   mov    w8, #0xaaab               ; =43691 
+libdispatch.dylib[0x1803570b0] <+92>:   movk   w8, #0xaaaa, lsl #16
+libdispatch.dylib[0x1803570b4] <+96>:   mul    x8, x21, x8
+libdispatch.dylib[0x1803570b8] <+100>:  lsr    x26, x8, #33
+libdispatch.dylib[0x1803570bc] <+104>:  ldr    x10, [x24, x26, lsl #3]
+libdispatch.dylib[0x1803570c0] <+108>:  cbz    x10, 0x180357250          ; <+508>
+libdispatch.dylib[0x1803570c4] <+112>:  mov    x9, x22
+libdispatch.dylib[0x1803570c8] <+116>:  ldr    x8, [x9, #0x50]!
+libdispatch.dylib[0x1803570cc] <+120>:  subs   x10, x10, x8
+libdispatch.dylib[0x1803570d0] <+124>:  b.lo   0x1803572b0               ; <+604>
+libdispatch.dylib[0x1803570d4] <+128>:  ldrb   w11, [x22, #0x1e]
+libdispatch.dylib[0x1803570d8] <+132>:  tbnz   w11, #0x6, 0x180357200    ; <+428>
+libdispatch.dylib[0x1803570dc] <+136>:  ldr    x11, [x22, #0x68]
+libdispatch.dylib[0x1803570e0] <+140>:  cbz    x11, 0x1803570f0          ; <+156>
+libdispatch.dylib[0x1803570e4] <+144>:  mov    x0, x22
+libdispatch.dylib[0x1803570e8] <+148>:  bl     0x180356ea4               ; _dispatch_timer_unote_configure
+libdispatch.dylib[0x1803570ec] <+152>:  b      0x1803571f4               ; <+416>
+libdispatch.dylib[0x1803570f0] <+156>:  ldr    x11, [x22, #0x48]
+libdispatch.dylib[0x1803570f4] <+160>:  cbnz   x11, 0x180357280          ; <+556>
+libdispatch.dylib[0x1803570f8] <+164>:  ldr    x11, [x22, #0x60]
+libdispatch.dylib[0x1803570fc] <+168>:  udiv   x10, x10, x11
+libdispatch.dylib[0x180357100] <+172>:  add    x12, x10, #0x1
+libdispatch.dylib[0x180357104] <+176>:  cmp    x12, x28
+libdispatch.dylib[0x180357108] <+180>:  csinc  x10, x28, x10, hs
+libdispatch.dylib[0x18035710c] <+184>:  cmp    x11, x25
+libdispatch.dylib[0x180357110] <+188>:  b.hi   0x180357134               ; <+224>
+libdispatch.dylib[0x180357114] <+192>:  mul    x9, x10, x11
+libdispatch.dylib[0x180357118] <+196>:  ldr    x11, [x22, #0x58]
+libdispatch.dylib[0x18035711c] <+200>:  add    x11, x11, x9
+libdispatch.dylib[0x180357120] <+204>:  add    x8, x9, x8
+libdispatch.dylib[0x180357124] <+208>:  cmp    x8, x25
+libdispatch.dylib[0x180357128] <+212>:  stp    x8, x11, [x22, #0x50]
+libdispatch.dylib[0x18035712c] <+216>:  cset   w8, hi
+libdispatch.dylib[0x180357130] <+220>:  b      0x180357140               ; <+236>
+libdispatch.dylib[0x180357134] <+224>:  mov    x8, #-0x1                 ; =-1 
+libdispatch.dylib[0x180357138] <+228>:  stp    x8, x8, [x9]
+libdispatch.dylib[0x18035713c] <+232>:  mov    w8, #0x1                  ; =1 
+libdispatch.dylib[0x180357140] <+236>:  lsl    x25, x10, #1
+libdispatch.dylib[0x180357144] <+240>:  ldr    x9, [x22, #0x8]
+libdispatch.dylib[0x180357148] <+244>:  mvn    x0, x9
+libdispatch.dylib[0x18035714c] <+248>:  ldr    x9, [x0, #0x38]
+libdispatch.dylib[0x180357150] <+252>:  lsr    x9, x9, #55
+libdispatch.dylib[0x180357154] <+256>:  cbnz   x9, 0x1803572a8           ; <+596>
+libdispatch.dylib[0x180357158] <+260>:  ldr    w9, [x22, #0x18]
+libdispatch.dylib[0x18035715c] <+264>:  cmn    w9, #0x1
+libdispatch.dylib[0x180357160] <+268>:  cset   w9, eq
+libdispatch.dylib[0x180357164] <+272>:  orr    w8, w9, w8
+libdispatch.dylib[0x180357168] <+276>:  tbz    w8, #0x0, 0x180357188     ; <+308>
+libdispatch.dylib[0x18035716c] <+280>:  mov    x0, x22
+libdispatch.dylib[0x180357170] <+284>:  mov    x1, x20
+libdispatch.dylib[0x180357174] <+288>:  bl     0x1803577bc               ; _dispatch_timer_unote_disarm
+libdispatch.dylib[0x180357178] <+292>:  orr    x8, x25, #0x1
+libdispatch.dylib[0x18035717c] <+296>:  add    x9, x22, #0x48
+libdispatch.dylib[0x180357180] <+300>:  stlr   x8, [x9]
+libdispatch.dylib[0x180357184] <+304>:  b      0x1803571c0               ; <+364>
+libdispatch.dylib[0x180357188] <+308>:  ldr    w8, [x0, #0x8]
+libdispatch.dylib[0x18035718c] <+312>:  mov    w9, #0x7fffffff           ; =2147483647 
+libdispatch.dylib[0x180357190] <+316>:  cmp    w8, w9
+libdispatch.dylib[0x180357194] <+320>:  b.eq   0x1803571ac               ; <+344>
+libdispatch.dylib[0x180357198] <+324>:  add    x8, x0, #0x8
+libdispatch.dylib[0x18035719c] <+328>:  mov    w9, #0x2                  ; =2 
+libdispatch.dylib[0x1803571a0] <+332>:  ldadd  w9, w8, [x8]
+libdispatch.dylib[0x1803571a4] <+336>:  cmp    w8, #0x0
+libdispatch.dylib[0x1803571a8] <+340>:  b.le   0x1803577b4               ; <+1888>
+libdispatch.dylib[0x1803571ac] <+344>:  mov    x0, x22
+libdispatch.dylib[0x1803571b0] <+348>:  mov    x1, x20
+libdispatch.dylib[0x1803571b4] <+352>:  mov    x2, x21
+libdispatch.dylib[0x1803571b8] <+356>:  bl     0x180357970               ; _dispatch_timer_unote_arm
+libdispatch.dylib[0x1803571bc] <+360>:  str    x25, [x22, #0x48]
+libdispatch.dylib[0x1803571c0] <+364>:  mov    x25, #0x7ffffffffffffffe  ; =9223372036854775806 
+libdispatch.dylib[0x1803571c4] <+368>:  mov    x0, #0x0                  ; =0 
+libdispatch.dylib[0x1803571c8] <+372>:  cbnz   w0, 0x18035729c           ; <+584>
+libdispatch.dylib[0x1803571cc] <+376>:  ldr    x16, [x22]
+libdispatch.dylib[0x1803571d0] <+380>:  mov    x17, x22
+libdispatch.dylib[0x1803571d4] <+384>:  movk   x17, #0x6ae1, lsl #48
+libdispatch.dylib[0x1803571d8] <+388>:  autda  x16, x17
+libdispatch.dylib[0x1803571dc] <+392>:  ldr    x8, [x16, #0x30]
+libdispatch.dylib[0x1803571e0] <+396>:  mov    x0, x22
+libdispatch.dylib[0x1803571e4] <+400>:  mov    w1, #0x10                 ; =16 
+libdispatch.dylib[0x1803571e8] <+404>:  mov    x2, #0x0                  ; =0 
+libdispatch.dylib[0x1803571ec] <+408>:  mov    x3, #0x0                  ; =0 
+libdispatch.dylib[0x1803571f0] <+412>:  blraaz x8
+libdispatch.dylib[0x1803571f4] <+416>:  ldr    x22, [x23]
+libdispatch.dylib[0x1803571f8] <+420>:  cbnz   x22, 0x1803570bc          ; <+104>
+libdispatch.dylib[0x1803571fc] <+424>:  b      0x1803572b0               ; <+604>
+libdispatch.dylib[0x180357200] <+428>:  mov    x0, x22
+libdispatch.dylib[0x180357204] <+432>:  mov    x1, x20
+libdispatch.dylib[0x180357208] <+436>:  bl     0x1803577bc               ; _dispatch_timer_unote_disarm
+libdispatch.dylib[0x18035720c] <+440>:  ldr    x8, [x22, #0x10]
+libdispatch.dylib[0x180357210] <+444>:  and    x0, x8, #0xfffffffffffffffc
+libdispatch.dylib[0x180357214] <+448>:  cmn    x0, #0x4
+libdispatch.dylib[0x180357218] <+452>:  ccmp   x0, #0x0, #0x4, ne
+libdispatch.dylib[0x18035721c] <+456>:  b.eq   0x180357240               ; <+492>
+libdispatch.dylib[0x180357220] <+460>:  add    x8, x0, #0x60
+libdispatch.dylib[0x180357224] <+464>:  mov    w9, #-0x1                 ; =-1 
+libdispatch.dylib[0x180357228] <+468>:  ldadd  w9, w8, [x8]
+libdispatch.dylib[0x18035722c] <+472>:  cmp    w8, #0x0
+libdispatch.dylib[0x180357230] <+476>:  b.gt   0x180357240               ; <+492>
+libdispatch.dylib[0x180357234] <+480>:  tbnz   w8, #0x1f, 0x1803577b8    ; <+1892>
+libdispatch.dylib[0x180357238] <+484>:  mov    x1, x0
+libdispatch.dylib[0x18035723c] <+488>:  bl     0x180370128               ; _dispatch_event_loop_drain_timers.cold.2
+libdispatch.dylib[0x180357240] <+492>:  add    x0, x22, #0x10
+libdispatch.dylib[0x180357244] <+496>:  mov    x1, x22
+libdispatch.dylib[0x180357248] <+500>:  bl     0x180370160               ; _dispatch_event_loop_drain_timers.cold.3
+libdispatch.dylib[0x18035724c] <+504>:  b      0x1803571f4               ; <+416>
+libdispatch.dylib[0x180357250] <+508>:  stp    xzr, xzr, [sp, #0x38]
+libdispatch.dylib[0x180357254] <+512>:  add    x0, sp, #0x20
+libdispatch.dylib[0x180357258] <+516>:  add    x1, x24, #0x8
+libdispatch.dylib[0x18035725c] <+520>:  add    x2, sp, #0x38
+libdispatch.dylib[0x180357260] <+524>:  bl     0x180372d34               ; symbol stub for: mach_get_times
+libdispatch.dylib[0x180357264] <+528>:  ldp    x8, x9, [sp, #0x38]
+libdispatch.dylib[0x180357268] <+532>:  mov    w10, #0xca00              ; =51712 
+libdispatch.dylib[0x18035726c] <+536>:  movk   w10, #0x3b9a, lsl #16
+libdispatch.dylib[0x180357270] <+540>:  madd   x8, x8, x10, x9
+libdispatch.dylib[0x180357274] <+544>:  str    x8, [sp, #0x30]
+libdispatch.dylib[0x180357278] <+548>:  ldr    x10, [x24, x26, lsl #3]
+libdispatch.dylib[0x18035727c] <+552>:  b      0x1803570c4               ; <+112>
+libdispatch.dylib[0x180357280] <+556>:  mov    x0, x22
+libdispatch.dylib[0x180357284] <+560>:  mov    x1, x20
+libdispatch.dylib[0x180357288] <+564>:  bl     0x1803577bc               ; _dispatch_timer_unote_disarm
+libdispatch.dylib[0x18035728c] <+568>:  add    x8, x22, #0x48
+libdispatch.dylib[0x180357290] <+572>:  mov    w9, #0x1                  ; =1 
+libdispatch.dylib[0x180357294] <+576>:  ldset  x9, x8, [x8]
+libdispatch.dylib[0x180357298] <+580>:  b      0x1803571c4               ; <+368>
+libdispatch.dylib[0x18035729c] <+584>:  mov    x0, x22
+libdispatch.dylib[0x1803572a0] <+588>:  bl     0x180370228               ; _dispatch_event_loop_drain_timers.cold.6
+libdispatch.dylib[0x1803572a4] <+592>:  b      0x1803571cc               ; <+376>
+libdispatch.dylib[0x1803572a8] <+596>:  bl     0x1803701e0               ; _dispatch_event_loop_drain_timers.cold.5
+libdispatch.dylib[0x1803572ac] <+600>:  b      0x18035716c               ; <+280>
+libdispatch.dylib[0x1803572b0] <+604>:  add    x21, x21, #0x1
+libdispatch.dylib[0x1803572b4] <+608>:  cmp    x21, x19
+libdispatch.dylib[0x1803572b8] <+612>:  b.ne   0x1803570a0               ; <+76>
+libdispatch.dylib[0x1803572bc] <+616>:  str    x19, [sp, #0x18]
+libdispatch.dylib[0x1803572c0] <+620>:  ldrb   w8, [x20, #0x6]
+libdispatch.dylib[0x1803572c4] <+624>:  ands   w22, w8, #0x7
+libdispatch.dylib[0x1803572c8] <+628>:  mov    w23, #-0x1                ; =-1 
+libdispatch.dylib[0x1803572cc] <+632>:  b.eq   0x180357310               ; <+700>
+libdispatch.dylib[0x1803572d0] <+636>:  mov    x0, #0x0                  ; =0 
+libdispatch.dylib[0x1803572d4] <+640>:  cbz    w0, 0x180357310           ; <+700>
+libdispatch.dylib[0x1803572d8] <+644>:  rbit   w8, w22
+libdispatch.dylib[0x1803572dc] <+648>:  clz    w19, w8
+libdispatch.dylib[0x1803572e0] <+652>:  adrp   x8, 443304
+libdispatch.dylib[0x1803572e4] <+656>:  add    x8, x8, #0xad8            ; _dispatch_trace_next_timer
+libdispatch.dylib[0x1803572e8] <+660>:  ldr    x21, [x8, w19, uxtw #3]
+libdispatch.dylib[0x1803572ec] <+664>:  mov    x0, #0x0                  ; =0 
+libdispatch.dylib[0x1803572f0] <+668>:  cbnz   w0, 0x180357304           ; <+688>
+libdispatch.dylib[0x1803572f4] <+672>:  lsl    w8, w23, w19
+libdispatch.dylib[0x1803572f8] <+676>:  add    w22, w8, w22
+libdispatch.dylib[0x1803572fc] <+680>:  cbnz   w22, 0x1803572d0          ; <+636>
+libdispatch.dylib[0x180357300] <+684>:  b      0x180357310               ; <+700>
+libdispatch.dylib[0x180357304] <+688>:  mov    x0, x21
+libdispatch.dylib[0x180357308] <+692>:  bl     0x18037025c               ; _dispatch_event_loop_drain_timers.cold.7
+libdispatch.dylib[0x18035730c] <+696>:  b      0x1803572f4               ; <+672>
+libdispatch.dylib[0x180357310] <+700>:  strb   wzr, [x20, #0x6]
+libdispatch.dylib[0x180357314] <+704>:  ldr    x19, [sp, #0x18]
+libdispatch.dylib[0x180357318] <+708>:  cbz    w27, 0x180357794          ; <+1856>
+libdispatch.dylib[0x18035731c] <+712>:  str    w27, [sp, #0xc]
+libdispatch.dylib[0x180357320] <+716>:  mov    x21, #0x0                 ; =0 
+libdispatch.dylib[0x180357324] <+720>:  add    x28, x20, x21, lsl #5
+libdispatch.dylib[0x180357328] <+724>:  mov    x26, x28
+libdispatch.dylib[0x18035732c] <+728>:  ldrb   w8, [x26, #0x7]!
+libdispatch.dylib[0x180357330] <+732>:  tbz    w8, #0x1, 0x180357538     ; <+1252>
+libdispatch.dylib[0x180357334] <+736>:  mov    w8, #0xaaab               ; =43691 
+libdispatch.dylib[0x180357338] <+740>:  movk   w8, #0xaaaa, lsl #16
+libdispatch.dylib[0x18035733c] <+744>:  umull  x8, w21, w8
+libdispatch.dylib[0x180357340] <+748>:  lsr    x19, x8, #33
+libdispatch.dylib[0x180357344] <+752>:  add    w8, w19, w19, lsl #1
+libdispatch.dylib[0x180357348] <+756>:  sub    w22, w21, w8
+libdispatch.dylib[0x18035734c] <+760>:  mov    x23, x28
+libdispatch.dylib[0x180357350] <+764>:  ldr    x8, [x23, #0x8]!
+libdispatch.dylib[0x180357354] <+768>:  cbz    x8, 0x180357508           ; <+1204>
+libdispatch.dylib[0x180357358] <+772>:  ldr    x25, [x8, #0x50]
+libdispatch.dylib[0x18035735c] <+776>:  ldr    x8, [x28, #0x10]
+libdispatch.dylib[0x180357360] <+780>:  ldr    x27, [x8, #0x58]
+libdispatch.dylib[0x180357364] <+784>:  ldr    x8, [x24, w19, uxtw #3]
+libdispatch.dylib[0x180357368] <+788>:  cbz    x8, 0x1803575b0           ; <+1372>
+libdispatch.dylib[0x18035736c] <+792>:  cmp    x25, x8
+libdispatch.dylib[0x180357370] <+796>:  b.ls   0x1803574ec               ; <+1176>
+libdispatch.dylib[0x180357374] <+800>:  ldr    w9, [x28]
+libdispatch.dylib[0x180357378] <+804>:  cmp    w9, #0x3
+libdispatch.dylib[0x18035737c] <+808>:  b.lo   0x1803574c4               ; <+1136>
+libdispatch.dylib[0x180357380] <+812>:  adrp   x10, 28
+libdispatch.dylib[0x180357384] <+816>:  add    x10, x10, #0xef0          ; _dispatch_kevent_coalescing_window
+libdispatch.dylib[0x180357388] <+820>:  ldr    x10, [x10, w22, uxtw #3]
+libdispatch.dylib[0x18035738c] <+824>:  add    x11, x10, x25
+libdispatch.dylib[0x180357390] <+828>:  cmp    x11, x27
+libdispatch.dylib[0x180357394] <+832>:  mov    w6, #-0x4                 ; =-4 
+libdispatch.dylib[0x180357398] <+836>:  mov    w7, #0x1e                 ; =30 
+libdispatch.dylib[0x18035739c] <+840>:  mov    w19, #0x1c                ; =28 
+libdispatch.dylib[0x1803573a0] <+844>:  b.hs   0x1803574c4               ; <+1136>
+libdispatch.dylib[0x1803573a4] <+848>:  sub    x10, x27, x10
+libdispatch.dylib[0x1803573a8] <+852>:  ldr    x11, [x28, #0x8]
+libdispatch.dylib[0x1803573ac] <+856>:  ldr    x25, [x11, #0x50]
+libdispatch.dylib[0x1803573b0] <+860>:  ldrb   w11, [x28, #0x4]
+libdispatch.dylib[0x1803573b4] <+864>:  sub    w12, w11, #0x2
+libdispatch.dylib[0x1803573b8] <+868>:  mov    w13, #0x8                 ; =8 
+libdispatch.dylib[0x1803573bc] <+872>:  lsl    w13, w13, w12
+libdispatch.dylib[0x1803573c0] <+876>:  add    x12, x28, #0x18
+libdispatch.dylib[0x1803573c4] <+880>:  sub    w13, w13, #0x1e
+libdispatch.dylib[0x1803573c8] <+884>:  mov    w14, #0x2                 ; =2 
+libdispatch.dylib[0x1803573cc] <+888>:  cmp    w14, #0x1
+libdispatch.dylib[0x1803573d0] <+892>:  b.hi   0x1803573dc               ; <+904>
+libdispatch.dylib[0x1803573d4] <+896>:  add    x15, x23, w14, uxtw #3
+libdispatch.dylib[0x1803573d8] <+900>:  b      0x180357424               ; <+976>
+libdispatch.dylib[0x1803573dc] <+904>:  sub    w15, w14, #0x2
+libdispatch.dylib[0x1803573e0] <+908>:  orr    w16, w15, #0x7
+libdispatch.dylib[0x1803573e4] <+912>:  clz    w16, w16
+libdispatch.dylib[0x1803573e8] <+916>:  sub    w17, w7, w16
+libdispatch.dylib[0x1803573ec] <+920>:  cmp    w17, w11
+libdispatch.dylib[0x1803573f0] <+924>:  mov    x17, x12
+libdispatch.dylib[0x1803573f4] <+928>:  b.eq   0x180357404               ; <+944>
+libdispatch.dylib[0x1803573f8] <+932>:  ldr    x17, [x12]
+libdispatch.dylib[0x1803573fc] <+936>:  add    w0, w13, w16
+libdispatch.dylib[0x180357400] <+940>:  add    x17, x17, w0, uxtw #3
+libdispatch.dylib[0x180357404] <+944>:  ldr    x17, [x17]
+libdispatch.dylib[0x180357408] <+948>:  sub    w0, w19, w16
+libdispatch.dylib[0x18035740c] <+952>:  mov    w1, #-0x8                 ; =-8 
+libdispatch.dylib[0x180357410] <+956>:  lsl    w0, w1, w0
+libdispatch.dylib[0x180357414] <+960>:  cmp    w16, #0x1d
+libdispatch.dylib[0x180357418] <+964>:  csel   w16, wzr, w0, eq
+libdispatch.dylib[0x18035741c] <+968>:  add    w15, w16, w15
+libdispatch.dylib[0x180357420] <+972>:  add    x15, x17, w15, uxtw #3
+libdispatch.dylib[0x180357424] <+976>:  ldr    x15, [x15]
+libdispatch.dylib[0x180357428] <+980>:  ldr    x15, [x15, #0x50]
+libdispatch.dylib[0x18035742c] <+984>:  cmp    x15, x25
+libdispatch.dylib[0x180357430] <+988>:  csel   x16, x15, x25, hi
+libdispatch.dylib[0x180357434] <+992>:  and    w17, w14, #0x1
+libdispatch.dylib[0x180357438] <+996>:  lsl    w0, w14, #1
+libdispatch.dylib[0x18035743c] <+1000>: sub    w0, w0, w17
+libdispatch.dylib[0x180357440] <+1004>: add    w0, w0, #0x2
+libdispatch.dylib[0x180357444] <+1008>: and    w1, w14, #0xfffffffe
+libdispatch.dylib[0x180357448] <+1012>: add    w2, w1, #0x2
+libdispatch.dylib[0x18035744c] <+1016>: sub    w3, w14, #0x2
+libdispatch.dylib[0x180357450] <+1020>: lsr    w3, w3, #1
+libdispatch.dylib[0x180357454] <+1024>: and    w3, w3, #0x7ffffffe
+libdispatch.dylib[0x180357458] <+1028>: cmp    w2, w9
+libdispatch.dylib[0x18035745c] <+1032>: csel   w4, w1, w3, ne
+libdispatch.dylib[0x180357460] <+1036>: add    w5, w4, #0x3
+libdispatch.dylib[0x180357464] <+1040>: sub    w4, w6, w4
+libdispatch.dylib[0x180357468] <+1044>: rbit   w4, w4
+libdispatch.dylib[0x18035746c] <+1048>: clz    w4, w4
+libdispatch.dylib[0x180357470] <+1052>: lsr    w4, w5, w4
+libdispatch.dylib[0x180357474] <+1056>: orr    w17, w17, w4, lsl #1
+libdispatch.dylib[0x180357478] <+1060>: cmp    w4, #0x0
+libdispatch.dylib[0x18035747c] <+1064>: csinv  w17, w17, wzr, ne
+libdispatch.dylib[0x180357480] <+1068>: cmp    w0, w9
+libdispatch.dylib[0x180357484] <+1072>: csel   w17, w0, w17, lo
+libdispatch.dylib[0x180357488] <+1076>: cmp    w2, w9
+libdispatch.dylib[0x18035748c] <+1080>: csel   w0, w1, w3, ne
+libdispatch.dylib[0x180357490] <+1084>: add    w1, w0, #0x3
+libdispatch.dylib[0x180357494] <+1088>: sub    w0, w6, w0
+libdispatch.dylib[0x180357498] <+1092>: rbit   w0, w0
+libdispatch.dylib[0x18035749c] <+1096>: clz    w0, w0
+libdispatch.dylib[0x1803574a0] <+1100>: lsr    w0, w1, w0
+libdispatch.dylib[0x1803574a4] <+1104>: bfi    w14, w0, #1, #31
+libdispatch.dylib[0x1803574a8] <+1108>: cmp    w0, #0x0
+libdispatch.dylib[0x1803574ac] <+1112>: csinv  w14, w14, wzr, ne
+libdispatch.dylib[0x1803574b0] <+1116>: cmp    x15, x10
+libdispatch.dylib[0x1803574b4] <+1120>: csel   x25, x16, x25, ls
+libdispatch.dylib[0x1803574b8] <+1124>: csel   w14, w17, w14, ls
+libdispatch.dylib[0x1803574bc] <+1128>: cmp    w14, w9
+libdispatch.dylib[0x1803574c0] <+1132>: b.lo   0x1803573cc               ; <+888>
+libdispatch.dylib[0x1803574c4] <+1136>: subs   x9, x25, x8
+libdispatch.dylib[0x1803574c8] <+1140>: mov    x10, #0x7fffffffffffffff  ; =9223372036854775807 
+libdispatch.dylib[0x1803574cc] <+1144>: cmp    x9, x10
+libdispatch.dylib[0x1803574d0] <+1148>: csel   x11, x9, x10, lo
+libdispatch.dylib[0x1803574d4] <+1152>: sub    x9, x27, x25
+libdispatch.dylib[0x1803574d8] <+1156>: cmp    x9, x10
+libdispatch.dylib[0x1803574dc] <+1160>: mov    x27, #0x7fffffffffffffff  ; =9223372036854775807 
+libdispatch.dylib[0x1803574e0] <+1164>: csel   x10, x9, x10, lo
+libdispatch.dylib[0x1803574e4] <+1168>: cmp    x25, x8
+libdispatch.dylib[0x1803574e8] <+1172>: b.ne   0x180357548               ; <+1268>
+libdispatch.dylib[0x1803574ec] <+1176>: mov    w8, #0x1                  ; =1 
+libdispatch.dylib[0x1803574f0] <+1180>: lsl    w8, w8, w22
+libdispatch.dylib[0x1803574f4] <+1184>: ldrb   w9, [x20, #0x6]
+libdispatch.dylib[0x1803574f8] <+1188>: orr    w8, w9, w8
+libdispatch.dylib[0x1803574fc] <+1192>: orr    w8, w8, #0x80
+libdispatch.dylib[0x180357500] <+1196>: strb   w8, [x20, #0x6]
+libdispatch.dylib[0x180357504] <+1200>: mov    x25, #0x7ffffffffffffffe  ; =9223372036854775806 
+libdispatch.dylib[0x180357508] <+1204>: adrp   x8, 443304
+libdispatch.dylib[0x18035750c] <+1208>: add    x8, x8, #0xad8            ; _dispatch_trace_next_timer
+libdispatch.dylib[0x180357510] <+1212>: str    xzr, [x8, w22, uxtw #3]
+libdispatch.dylib[0x180357514] <+1216>: ldrb   w8, [x26]
+libdispatch.dylib[0x180357518] <+1220>: tbz    w8, #0x0, 0x18035752c     ; <+1240>
+libdispatch.dylib[0x18035751c] <+1224>: mov    x0, x20
+libdispatch.dylib[0x180357520] <+1228>: mov    x1, x21
+libdispatch.dylib[0x180357524] <+1232>: bl     0x18035a9e0               ; _dispatch_event_loop_timer_delete
+libdispatch.dylib[0x180357528] <+1236>: ldrb   w8, [x26]
+libdispatch.dylib[0x18035752c] <+1240>: and    w8, w8, #0xfc
+libdispatch.dylib[0x180357530] <+1244>: strb   w8, [x26]
+libdispatch.dylib[0x180357534] <+1248>: ldr    x19, [sp, #0x18]
+libdispatch.dylib[0x180357538] <+1252>: add    x21, x21, #0x1
+libdispatch.dylib[0x18035753c] <+1256>: cmp    x21, x19
+libdispatch.dylib[0x180357540] <+1260>: b.ne   0x180357324               ; <+720>
+libdispatch.dylib[0x180357544] <+1264>: b      0x180357784               ; <+1840>
+libdispatch.dylib[0x180357548] <+1268>: mov    x9, #-0x7fffffffffffffff  ; =-9223372036854775807 
+libdispatch.dylib[0x18035754c] <+1272>: add    x8, x11, x9
+libdispatch.dylib[0x180357550] <+1276>: cmp    x8, x9
+libdispatch.dylib[0x180357554] <+1280>: mov    x25, #0x7ffffffffffffffe  ; =9223372036854775806 
+libdispatch.dylib[0x180357558] <+1284>: b.ls   0x180357508               ; <+1204>
+libdispatch.dylib[0x18035755c] <+1288>: str    x10, [sp, #0x10]
+libdispatch.dylib[0x180357560] <+1292>: mov    x26, x11
+libdispatch.dylib[0x180357564] <+1296>: ldr    x25, [x23]
+libdispatch.dylib[0x180357568] <+1300>: adrp   x8, 443304
+libdispatch.dylib[0x18035756c] <+1304>: add    x8, x8, #0xad8            ; _dispatch_trace_next_timer
+libdispatch.dylib[0x180357570] <+1308>: str    x25, [x8, w22, uxtw #3]
+libdispatch.dylib[0x180357574] <+1312>: mov    x0, #0x0                  ; =0 
+libdispatch.dylib[0x180357578] <+1316>: ldr    x19, [sp, #0x18]
+libdispatch.dylib[0x18035757c] <+1320>: cbnz   w0, 0x1803575e0           ; <+1420>
+libdispatch.dylib[0x180357580] <+1324>: add    x4, sp, #0x20
+libdispatch.dylib[0x180357584] <+1328>: mov    x0, x20
+libdispatch.dylib[0x180357588] <+1332>: mov    x1, x21
+libdispatch.dylib[0x18035758c] <+1336>: mov    x2, x26
+libdispatch.dylib[0x180357590] <+1340>: ldr    x3, [sp, #0x10]
+libdispatch.dylib[0x180357594] <+1344>: bl     0x18035a868               ; _dispatch_event_loop_timer_arm
+libdispatch.dylib[0x180357598] <+1348>: ldrb   w8, [x28, #0x7]
+libdispatch.dylib[0x18035759c] <+1352>: and    w8, w8, #0xfc
+libdispatch.dylib[0x1803575a0] <+1356>: orr    w8, w8, #0x1
+libdispatch.dylib[0x1803575a4] <+1360>: strb   w8, [x28, #0x7]
+libdispatch.dylib[0x1803575a8] <+1364>: mov    x25, #0x7ffffffffffffffe  ; =9223372036854775806 
+libdispatch.dylib[0x1803575ac] <+1368>: b      0x180357538               ; <+1252>
+libdispatch.dylib[0x1803575b0] <+1372>: stp    xzr, xzr, [sp, #0x38]
+libdispatch.dylib[0x1803575b4] <+1376>: add    x0, sp, #0x20
+libdispatch.dylib[0x1803575b8] <+1380>: add    x1, x24, #0x8
+libdispatch.dylib[0x1803575bc] <+1384>: add    x2, sp, #0x38
+libdispatch.dylib[0x1803575c0] <+1388>: bl     0x180372d34               ; symbol stub for: mach_get_times
+libdispatch.dylib[0x1803575c4] <+1392>: ldp    x8, x9, [sp, #0x38]
+libdispatch.dylib[0x1803575c8] <+1396>: mov    w10, #0xca00              ; =51712 
+libdispatch.dylib[0x1803575cc] <+1400>: movk   w10, #0x3b9a, lsl #16
+libdispatch.dylib[0x1803575d0] <+1404>: madd   x8, x8, x10, x9
+libdispatch.dylib[0x1803575d4] <+1408>: str    x8, [sp, #0x30]
+libdispatch.dylib[0x1803575d8] <+1412>: ldr    x8, [x24, w19, uxtw #3]
+libdispatch.dylib[0x1803575dc] <+1416>: b      0x18035736c               ; <+792>
+libdispatch.dylib[0x1803575e0] <+1420>: cbz    x25, 0x180357580          ; <+1324>
+libdispatch.dylib[0x1803575e4] <+1424>: ldr    x22, [x25, #0x8]
+libdispatch.dylib[0x1803575e8] <+1428>: ldr    w23, [x25, #0x18]
+libdispatch.dylib[0x1803575ec] <+1432>: stp    xzr, xzr, [sp, #0x38]
+libdispatch.dylib[0x1803575f0] <+1436>: str    xzr, [sp, #0x48]
+libdispatch.dylib[0x1803575f4] <+1440>: ldr    x8, [x25, #0x28]
+libdispatch.dylib[0x1803575f8] <+1444>: cbz    x8, 0x180357604           ; <+1456>
+libdispatch.dylib[0x1803575fc] <+1448>: ldr    x1, [x8, #0x20]
+libdispatch.dylib[0x180357600] <+1452>: b      0x180357608               ; <+1460>
+libdispatch.dylib[0x180357604] <+1456>: mov    x1, #0x0                  ; =0 
+libdispatch.dylib[0x180357608] <+1460>: str    x26, [sp, #0x38]
+libdispatch.dylib[0x18035760c] <+1464>: ldp    x9, x8, [x25, #0x50]
+libdispatch.dylib[0x180357610] <+1468>: sub    x0, x8, x9
+libdispatch.dylib[0x180357614] <+1472>: ldr    x8, [x25, #0x60]
+libdispatch.dylib[0x180357618] <+1476>: cmp    w23, #0x5
+libdispatch.dylib[0x18035761c] <+1480>: b.hi   0x1803576a4               ; <+1616>
+libdispatch.dylib[0x180357620] <+1484>: adrp   x9, 432355
+libdispatch.dylib[0x180357624] <+1488>: add    x9, x9, #0xb88            ; _dispatch_host_time_mach2nano
+libdispatch.dylib[0x180357628] <+1492>: ldr    x9, [x9]
+libdispatch.dylib[0x18035762c] <+1496>: cbnz   x9, 0x180357684           ; <+1584>
+libdispatch.dylib[0x180357630] <+1500>: cbz    x8, 0x18035767c           ; <+1576>
+libdispatch.dylib[0x180357634] <+1504>: mov    x9, #0xdf39               ; =57145 
+libdispatch.dylib[0x180357638] <+1508>: movk   x9, #0x8d4f, lsl #16
+libdispatch.dylib[0x18035763c] <+1512>: movk   x9, #0x6e97, lsl #32
+libdispatch.dylib[0x180357640] <+1516>: movk   x9, #0x312, lsl #48
+libdispatch.dylib[0x180357644] <+1520>: cmp    x8, x9
+libdispatch.dylib[0x180357648] <+1524>: b.hi   0x1803576ac               ; <+1624>
+libdispatch.dylib[0x18035764c] <+1528>: mov    x9, #0x3f7b               ; =16251 
+libdispatch.dylib[0x180357650] <+1532>: movk   x9, #0x5e35, lsl #16
+libdispatch.dylib[0x180357654] <+1536>: movk   x9, #0x49ba, lsl #32
+libdispatch.dylib[0x180357658] <+1540>: movk   x9, #0x20c, lsl #48
+libdispatch.dylib[0x18035765c] <+1544>: cmp    x8, x9
+libdispatch.dylib[0x180357660] <+1548>: b.hi   0x180357768               ; <+1812>
+libdispatch.dylib[0x180357664] <+1552>: mov    w9, #0x7d                 ; =125 
+libdispatch.dylib[0x180357668] <+1556>: mul    x8, x8, x9
+libdispatch.dylib[0x18035766c] <+1560>: mov    x9, #-0x5555555555555556  ; =-6148914691236517206 
+libdispatch.dylib[0x180357670] <+1564>: movk   x9, #0xaaab
+libdispatch.dylib[0x180357674] <+1568>: umulh  x8, x8, x9
+libdispatch.dylib[0x180357678] <+1572>: lsr    x8, x8, #1
+libdispatch.dylib[0x18035767c] <+1576>: str    x8, [sp, #0x40]
+libdispatch.dylib[0x180357680] <+1580>: b      0x1803576cc               ; <+1656>
+libdispatch.dylib[0x180357684] <+1584>: mov    x19, x0
+libdispatch.dylib[0x180357688] <+1588>: mov    x0, x8
+libdispatch.dylib[0x18035768c] <+1592>: mov    x25, x1
+libdispatch.dylib[0x180357690] <+1596>: blraaz x9
+libdispatch.dylib[0x180357694] <+1600>: mov    x1, x25
+libdispatch.dylib[0x180357698] <+1604>: mov    x8, x0
+libdispatch.dylib[0x18035769c] <+1608>: mov    x0, x19
+libdispatch.dylib[0x1803576a0] <+1612>: ldr    x19, [sp, #0x18]
+libdispatch.dylib[0x1803576a4] <+1616>: cmp    x8, x27
+libdispatch.dylib[0x1803576a8] <+1620>: b.lo   0x1803576b0               ; <+1628>
+libdispatch.dylib[0x1803576ac] <+1624>: mov    x8, #-0x1                 ; =-1 
+libdispatch.dylib[0x1803576b0] <+1628>: str    x8, [sp, #0x40]
+libdispatch.dylib[0x1803576b4] <+1632>: cmp    w23, #0x5
+libdispatch.dylib[0x1803576b8] <+1636>: b.hi   0x18035773c               ; <+1768>
+libdispatch.dylib[0x1803576bc] <+1640>: adrp   x8, 432355
+libdispatch.dylib[0x1803576c0] <+1644>: add    x8, x8, #0xb88            ; _dispatch_host_time_mach2nano
+libdispatch.dylib[0x1803576c4] <+1648>: ldr    x8, [x8]
+libdispatch.dylib[0x1803576c8] <+1652>: cbnz   x8, 0x18035772c           ; <+1752>
+libdispatch.dylib[0x1803576cc] <+1656>: cbz    x0, 0x180357718           ; <+1732>
+libdispatch.dylib[0x1803576d0] <+1660>: mov    x8, #0xdf39               ; =57145 
+libdispatch.dylib[0x1803576d4] <+1664>: movk   x8, #0x8d4f, lsl #16
+libdispatch.dylib[0x1803576d8] <+1668>: movk   x8, #0x6e97, lsl #32
+libdispatch.dylib[0x1803576dc] <+1672>: movk   x8, #0x312, lsl #48
+libdispatch.dylib[0x1803576e0] <+1676>: cmp    x0, x8
+libdispatch.dylib[0x1803576e4] <+1680>: b.hi   0x180357744               ; <+1776>
+libdispatch.dylib[0x1803576e8] <+1684>: mov    x8, #0x3f7b               ; =16251 
+libdispatch.dylib[0x1803576ec] <+1688>: movk   x8, #0x5e35, lsl #16
+libdispatch.dylib[0x1803576f0] <+1692>: movk   x8, #0x49ba, lsl #32
+libdispatch.dylib[0x1803576f4] <+1696>: movk   x8, #0x20c, lsl #48
+libdispatch.dylib[0x1803576f8] <+1700>: cmp    x0, x8
+libdispatch.dylib[0x1803576fc] <+1704>: b.hi   0x18035774c               ; <+1784>
+libdispatch.dylib[0x180357700] <+1708>: mov    w8, #0x7d                 ; =125 
+libdispatch.dylib[0x180357704] <+1712>: mul    x8, x0, x8
+libdispatch.dylib[0x180357708] <+1716>: mov    x9, #-0x5555555555555556  ; =-6148914691236517206 
+libdispatch.dylib[0x18035770c] <+1720>: movk   x9, #0xaaab
+libdispatch.dylib[0x180357710] <+1724>: umulh  x8, x8, x9
+libdispatch.dylib[0x180357714] <+1728>: lsr    x0, x8, #1
+libdispatch.dylib[0x180357718] <+1732>: str    x0, [sp, #0x48]
+libdispatch.dylib[0x18035771c] <+1736>: mvn    x0, x22
+libdispatch.dylib[0x180357720] <+1740>: add    x2, sp, #0x38
+libdispatch.dylib[0x180357724] <+1744>: nop    
+libdispatch.dylib[0x180357728] <+1748>: b      0x180357580               ; <+1324>
+libdispatch.dylib[0x18035772c] <+1752>: mov    x19, x1
+libdispatch.dylib[0x180357730] <+1756>: blraaz x8
+libdispatch.dylib[0x180357734] <+1760>: mov    x1, x19
+libdispatch.dylib[0x180357738] <+1764>: ldr    x19, [sp, #0x18]
+libdispatch.dylib[0x18035773c] <+1768>: cmp    x0, x27
+libdispatch.dylib[0x180357740] <+1772>: b.lo   0x180357718               ; <+1732>
+libdispatch.dylib[0x180357744] <+1776>: mov    x0, #-0x1                 ; =-1 
+libdispatch.dylib[0x180357748] <+1780>: b      0x180357718               ; <+1732>
+libdispatch.dylib[0x18035774c] <+1784>: mov    x8, #-0x5555555555555556  ; =-6148914691236517206 
+libdispatch.dylib[0x180357750] <+1788>: movk   x8, #0xaaab
+libdispatch.dylib[0x180357754] <+1792>: umulh  x8, x0, x8
+libdispatch.dylib[0x180357758] <+1796>: lsr    x8, x8, #1
+libdispatch.dylib[0x18035775c] <+1800>: mov    w9, #0x7d                 ; =125 
+libdispatch.dylib[0x180357760] <+1804>: mul    x0, x8, x9
+libdispatch.dylib[0x180357764] <+1808>: b      0x180357718               ; <+1732>
+libdispatch.dylib[0x180357768] <+1812>: mov    x9, #-0x5555555555555556  ; =-6148914691236517206 
+libdispatch.dylib[0x18035776c] <+1816>: movk   x9, #0xaaab
+libdispatch.dylib[0x180357770] <+1820>: umulh  x8, x8, x9
+libdispatch.dylib[0x180357774] <+1824>: lsr    x8, x8, #1
+libdispatch.dylib[0x180357778] <+1828>: mov    w9, #0x7d                 ; =125 
+libdispatch.dylib[0x18035777c] <+1832>: mul    x8, x8, x9
+libdispatch.dylib[0x180357780] <+1836>: b      0x18035767c               ; <+1576>
+libdispatch.dylib[0x180357784] <+1840>: ldrb   w8, [x20, #0x6]
+libdispatch.dylib[0x180357788] <+1844>: ldr    w27, [sp, #0xc]
+libdispatch.dylib[0x18035778c] <+1848>: mov    x28, #0x7fffffffffffffff  ; =9223372036854775807 
+libdispatch.dylib[0x180357790] <+1852>: cbnz   w8, 0x180357098           ; <+68>
+libdispatch.dylib[0x180357794] <+1856>: ldp    x29, x30, [sp, #0xa0]
+libdispatch.dylib[0x180357798] <+1860>: ldp    x20, x19, [sp, #0x90]
+libdispatch.dylib[0x18035779c] <+1864>: ldp    x22, x21, [sp, #0x80]
+libdispatch.dylib[0x1803577a0] <+1868>: ldp    x24, x23, [sp, #0x70]
+libdispatch.dylib[0x1803577a4] <+1872>: ldp    x26, x25, [sp, #0x60]
+libdispatch.dylib[0x1803577a8] <+1876>: ldp    x28, x27, [sp, #0x50]
+libdispatch.dylib[0x1803577ac] <+1880>: add    sp, sp, #0xb0
+libdispatch.dylib[0x1803577b0] <+1884>: retab  
+libdispatch.dylib[0x1803577b4] <+1888>: bl     0x18036b800               ; _dispatch_group_create_and_enter.cold.1
+libdispatch.dylib[0x1803577b8] <+1892>: bl     0x18036b75c               ; _os_object_allows_weak_reference.cold.1
+(lldb) disassemble -n _dispatch_event_loop_timer_arm
+libdispatch.dylib`_dispatch_event_loop_timer_arm:
+libdispatch.dylib[0x18035a868] <+0>:   pacibsp 
+libdispatch.dylib[0x18035a86c] <+4>:   sub    sp, sp, #0x50
+libdispatch.dylib[0x18035a870] <+8>:   stp    x24, x23, [sp, #0x10]
+libdispatch.dylib[0x18035a874] <+12>:  stp    x22, x21, [sp, #0x20]
+libdispatch.dylib[0x18035a878] <+16>:  stp    x20, x19, [sp, #0x30]
+libdispatch.dylib[0x18035a87c] <+20>:  stp    x29, x30, [sp, #0x40]
+libdispatch.dylib[0x18035a880] <+24>:  add    x29, sp, #0x40
+libdispatch.dylib[0x18035a884] <+28>:  mov    x21, x3
+libdispatch.dylib[0x18035a888] <+32>:  mov    x22, x2
+libdispatch.dylib[0x18035a88c] <+36>:  mov    x19, x1
+libdispatch.dylib[0x18035a890] <+40>:  mov    x20, x0
+libdispatch.dylib[0x18035a894] <+44>:  mov    w8, #0xaaab               ; =43691 
+libdispatch.dylib[0x18035a898] <+48>:  movk   w8, #0xaaaa, lsl #16
+libdispatch.dylib[0x18035a89c] <+52>:  umull  x8, w1, w8
+libdispatch.dylib[0x18035a8a0] <+56>:  lsr    x24, x8, #33
+libdispatch.dylib[0x18035a8a4] <+60>:  ldr    x8, [x4, x24, lsl #3]
+libdispatch.dylib[0x18035a8a8] <+64>:  cbz    x8, 0x18035a90c           ; <+164>
+libdispatch.dylib[0x18035a8ac] <+68>:  adrp   x9, 432352
+libdispatch.dylib[0x18035a8b0] <+72>:  ldrb   w9, [x9, #0xbec]
+libdispatch.dylib[0x18035a8b4] <+76>:  cmp    w9, #0x1
+libdispatch.dylib[0x18035a8b8] <+80>:  add    x8, x8, x22
+libdispatch.dylib[0x18035a8bc] <+84>:  add    x9, x8, x21
+libdispatch.dylib[0x18035a8c0] <+88>:  csel   x3, x21, xzr, ne
+libdispatch.dylib[0x18035a8c4] <+92>:  csel   x2, x8, x9, ne
+libdispatch.dylib[0x18035a8c8] <+96>:  mov    x0, x20
+libdispatch.dylib[0x18035a8cc] <+100>: mov    x1, x19
+libdispatch.dylib[0x18035a8d0] <+104>: mov    w4, #0x5                  ; =5 
+libdispatch.dylib[0x18035a8d4] <+108>: bl     0x18035a948               ; _dispatch_event_loop_timer_program
+libdispatch.dylib[0x18035a8d8] <+112>: sub    w8, w19, #0x6
+libdispatch.dylib[0x18035a8dc] <+116>: cmp    w8, #0x2
+libdispatch.dylib[0x18035a8e0] <+120>: b.hi   0x18035a8f4               ; <+140>
+libdispatch.dylib[0x18035a8e4] <+124>: adrp   x8, 443302
+libdispatch.dylib[0x18035a8e8] <+128>: ldr    x8, [x8, #0x310]
+libdispatch.dylib[0x18035a8ec] <+132>: cmn    x8, #0x1
+libdispatch.dylib[0x18035a8f0] <+136>: b.ne   0x18035a940               ; <+216>
+libdispatch.dylib[0x18035a8f4] <+140>: ldp    x29, x30, [sp, #0x40]
+libdispatch.dylib[0x18035a8f8] <+144>: ldp    x20, x19, [sp, #0x30]
+libdispatch.dylib[0x18035a8fc] <+148>: ldp    x22, x21, [sp, #0x20]
+libdispatch.dylib[0x18035a900] <+152>: ldp    x24, x23, [sp, #0x10]
+libdispatch.dylib[0x18035a904] <+156>: add    sp, sp, #0x50
+libdispatch.dylib[0x18035a908] <+160>: retab  
+libdispatch.dylib[0x18035a90c] <+164>: mov    x23, x4
+libdispatch.dylib[0x18035a910] <+168>: stp    xzr, xzr, [sp]
+libdispatch.dylib[0x18035a914] <+172>: add    x1, x4, #0x8
+libdispatch.dylib[0x18035a918] <+176>: mov    x2, sp
+libdispatch.dylib[0x18035a91c] <+180>: mov    x0, x4
+libdispatch.dylib[0x18035a920] <+184>: bl     0x180372d34               ; symbol stub for: mach_get_times
+libdispatch.dylib[0x18035a924] <+188>: mov    w8, #0xca00               ; =51712 
+libdispatch.dylib[0x18035a928] <+192>: movk   w8, #0x3b9a, lsl #16
+libdispatch.dylib[0x18035a92c] <+196>: ldp    x9, x10, [sp]
+libdispatch.dylib[0x18035a930] <+200>: madd   x8, x9, x8, x10
+libdispatch.dylib[0x18035a934] <+204>: str    x8, [x23, #0x10]
+libdispatch.dylib[0x18035a938] <+208>: ldr    x8, [x23, x24, lsl #3]
+libdispatch.dylib[0x18035a93c] <+212>: b      0x18035a8ac               ; <+68>
+libdispatch.dylib[0x18035a940] <+216>: bl     0x18037061c               ; _dispatch_event_loop_timer_arm.cold.1
+libdispatch.dylib[0x18035a944] <+220>: b      0x18035a8f4               ; <+140>
+(lldb) disassemble -n _dispatch_event_loop_timer_program
+libdispatch.dylib`_dispatch_event_loop_timer_program:
+libdispatch.dylib[0x18035a948] <+0>:   mov    x8, x0
+libdispatch.dylib[0x18035a94c] <+4>:   mrs    x9, TPIDRRO_EL0
+libdispatch.dylib[0x18035a950] <+8>:   ldr    x0, [x9, #0xd8]
+libdispatch.dylib[0x18035a954] <+12>:  mov    w9, w1
+libdispatch.dylib[0x18035a958] <+16>:  cmn    x0, #0x4
+libdispatch.dylib[0x18035a95c] <+20>:  b.eq   0x18035a978               ; <+48>
+libdispatch.dylib[0x18035a960] <+24>:  add    x10, x8, x9, lsl #5
+libdispatch.dylib[0x18035a964] <+28>:  ldrb   w10, [x10, #0x5]
+libdispatch.dylib[0x18035a968] <+32>:  mov    w11, #0x80                ; =128 
+libdispatch.dylib[0x18035a96c] <+36>:  lsl    x10, x11, x10
+libdispatch.dylib[0x18035a970] <+40>:  orr    w10, w10, #0xff
+libdispatch.dylib[0x18035a974] <+44>:  b      0x18035a97c               ; <+52>
+libdispatch.dylib[0x18035a978] <+48>:  mov    w10, #0x2000000           ; =33554432 
+libdispatch.dylib[0x18035a97c] <+52>:  pacibsp 
+libdispatch.dylib[0x18035a980] <+56>:  sub    sp, sp, #0x60
+libdispatch.dylib[0x18035a984] <+60>:  stp    x29, x30, [sp, #0x50]
+libdispatch.dylib[0x18035a988] <+64>:  add    x29, sp, #0x50
+libdispatch.dylib[0x18035a98c] <+68>:  orr    x11, x9, #0xffffffffffffff00
+libdispatch.dylib[0x18035a990] <+72>:  str    x11, [sp, #0x8]
+libdispatch.dylib[0x18035a994] <+76>:  mov    w11, #0xfff9              ; =65529 
+libdispatch.dylib[0x18035a998] <+80>:  strh   w11, [sp, #0x10]
+libdispatch.dylib[0x18035a99c] <+84>:  orr    w11, w4, #0x10
+libdispatch.dylib[0x18035a9a0] <+88>:  strh   w11, [sp, #0x12]
+libdispatch.dylib[0x18035a9a4] <+92>:  str    w10, [sp, #0x14]
+libdispatch.dylib[0x18035a9a8] <+96>:  str    x8, [sp, #0x18]
+libdispatch.dylib[0x18035a9ac] <+100>: adrp   x8, 25
+libdispatch.dylib[0x18035a9b0] <+104>: add    x8, x8, #0xf10            ; _dispatch_timer_index_to_fflags
+libdispatch.dylib[0x18035a9b4] <+108>: ldr    w8, [x8, x9, lsl #2]
+libdispatch.dylib[0x18035a9b8] <+112>: stp    w8, wzr, [sp, #0x20]
+libdispatch.dylib[0x18035a9bc] <+116>: str    x2, [sp, #0x28]
+libdispatch.dylib[0x18035a9c0] <+120>: movi.2d v0, #0000000000000000
+libdispatch.dylib[0x18035a9c4] <+124>: stp    q0, q0, [sp, #0x30]
+libdispatch.dylib[0x18035a9c8] <+128>: str    x3, [sp, #0x38]
+libdispatch.dylib[0x18035a9cc] <+132>: add    x1, sp, #0x8
+libdispatch.dylib[0x18035a9d0] <+136>: bl     0x1803580b8               ; _dispatch_kq_deferred_update
+libdispatch.dylib[0x18035a9d4] <+140>: ldp    x29, x30, [sp, #0x50]
+libdispatch.dylib[0x18035a9d8] <+144>: add    sp, sp, #0x60
+libdispatch.dylib[0x18035a9dc] <+148>: retab  
+(lldb) disassemble -n _dispatch_event_loop_timer_delete
+libdispatch.dylib`_dispatch_event_loop_timer_delete:
+libdispatch.dylib[0x18035a9e0] <+0>:  mov    x2, #0x0                  ; =0 
+libdispatch.dylib[0x18035a9e4] <+4>:  mov    x3, #0x0                  ; =0 
+libdispatch.dylib[0x18035a9e8] <+8>:  mov    w4, #0x2                  ; =2 
+libdispatch.dylib[0x18035a9ec] <+12>: b      0x18035a948               ; _dispatch_event_loop_timer_program
+(lldb) disassemble -n _dispatch_mgr_queue_drain
+libdispatch.dylib`_dispatch_mgr_queue_drain:
+libdispatch.dylib[0x180349984] <+0>:   pacibsp 
+libdispatch.dylib[0x180349988] <+4>:   sub    sp, sp, #0x60
+libdispatch.dylib[0x18034998c] <+8>:   stp    x22, x21, [sp, #0x30]
+libdispatch.dylib[0x180349990] <+12>:  stp    x20, x19, [sp, #0x40]
+libdispatch.dylib[0x180349994] <+16>:  stp    x29, x30, [sp, #0x50]
+libdispatch.dylib[0x180349998] <+20>:  add    x29, sp, #0x50
+libdispatch.dylib[0x18034999c] <+24>:  movi.2d v0, #0000000000000000
+libdispatch.dylib[0x1803499a0] <+28>:  stp    q0, q0, [sp, #0x10]
+libdispatch.dylib[0x1803499a4] <+32>:  mov    x8, #0x20000000000        ; =2199023255552 
+libdispatch.dylib[0x1803499a8] <+36>:  movk   x8, #0x40, lsl #48
+libdispatch.dylib[0x1803499ac] <+40>:  str    x8, [sp, #0x8]
+libdispatch.dylib[0x1803499b0] <+44>:  adrp   x8, 443317
+libdispatch.dylib[0x1803499b4] <+48>:  add    x8, x8, #0x780            ; _dispatch_mgr_q
+libdispatch.dylib[0x1803499b8] <+52>:  ldr    x8, [x8, #0x30]
+libdispatch.dylib[0x1803499bc] <+56>:  cbz    x8, 0x180349a48           ; <+196>
+libdispatch.dylib[0x1803499c0] <+60>:  mov    w20, #-0xf0001            ; =-983041 
+libdispatch.dylib[0x1803499c4] <+64>:  mrs    x21, TPIDRRO_EL0
+libdispatch.dylib[0x1803499c8] <+68>:  ldr    x8, [x21, #0xc8]
+libdispatch.dylib[0x1803499cc] <+72>:  mvn    w9, w8
+libdispatch.dylib[0x1803499d0] <+76>:  tst    x9, #0xf0000
+libdispatch.dylib[0x1803499d4] <+80>:  b.eq   0x1803499e4               ; <+96>
+libdispatch.dylib[0x1803499d8] <+84>:  and    x8, x8, x20
+libdispatch.dylib[0x1803499dc] <+88>:  orr    x8, x8, #0xf0000
+libdispatch.dylib[0x1803499e0] <+92>:  str    x8, [x21, #0xc8]
+libdispatch.dylib[0x1803499e4] <+96>:  adrp   x0, 443317
+libdispatch.dylib[0x1803499e8] <+100>: add    x0, x0, #0x780            ; _dispatch_mgr_q
+libdispatch.dylib[0x1803499ec] <+104>: add    x1, sp, #0x10
+libdispatch.dylib[0x1803499f0] <+108>: add    x3, sp, #0x8
+libdispatch.dylib[0x1803499f4] <+112>: mov    w2, #0x40000              ; =262144 
+libdispatch.dylib[0x1803499f8] <+116>: bl     0x18033ed4c               ; _dispatch_lane_serial_drain
+libdispatch.dylib[0x1803499fc] <+120>: cbnz   x0, 0x180349a5c           ; <+216>
+libdispatch.dylib[0x180349a00] <+124>: ldr    x19, [x21, #0xe0]
+libdispatch.dylib[0x180349a04] <+128>: cbz    x19, 0x180349a34          ; <+176>
+libdispatch.dylib[0x180349a08] <+132>: str    xzr, [x21, #0xe0]
+libdispatch.dylib[0x180349a0c] <+136>: ldr    w8, [x19, #0x20]
+libdispatch.dylib[0x180349a10] <+140>: cbz    w8, 0x180349a20           ; <+156>
+libdispatch.dylib[0x180349a14] <+144>: mov    x0, #0x0                  ; =0 
+libdispatch.dylib[0x180349a18] <+148>: mov    w1, #0x0                  ; =0 
+libdispatch.dylib[0x180349a1c] <+152>: bl     0x18033a2e8               ; _dispatch_set_priority_and_mach_voucher_slow
+libdispatch.dylib[0x180349a20] <+156>: add    x8, x19, #0xc
+libdispatch.dylib[0x180349a24] <+160>: mov    w9, #-0x1                 ; =-1 
+libdispatch.dylib[0x180349a28] <+164>: ldadd  w9, w0, [x8]
+libdispatch.dylib[0x180349a2c] <+168>: cmp    w0, #0x1
+libdispatch.dylib[0x180349a30] <+172>: b.le   0x180349a60               ; <+220>
+libdispatch.dylib[0x180349a34] <+176>: ldr    x8, [x21, #0xc8]
+libdispatch.dylib[0x180349a38] <+180>: tst    x8, #0xf0000
+libdispatch.dylib[0x180349a3c] <+184>: b.eq   0x180349a48               ; <+196>
+libdispatch.dylib[0x180349a40] <+188>: and    x8, x8, x20
+libdispatch.dylib[0x180349a44] <+192>: str    x8, [x21, #0xc8]
+libdispatch.dylib[0x180349a48] <+196>: ldp    x29, x30, [sp, #0x50]
+libdispatch.dylib[0x180349a4c] <+200>: ldp    x20, x19, [sp, #0x40]
+libdispatch.dylib[0x180349a50] <+204>: ldp    x22, x21, [sp, #0x30]
+libdispatch.dylib[0x180349a54] <+208>: add    sp, sp, #0x60
+libdispatch.dylib[0x180349a58] <+212>: retab  
+libdispatch.dylib[0x180349a5c] <+216>: bl     0x18036e7b8               ; _dispatch_mgr_queue_drain.cold.1
+libdispatch.dylib[0x180349a60] <+220>: mov    x1, x19
+libdispatch.dylib[0x180349a64] <+224>: bl     0x18036e7d8               ; dispatch_mig_server.cold.1
+libdispatch.dylib[0x180349a68] <+228>: b      0x180349a34               ; <+176>
+(lldb) disassemble -n _dispatch_event_loop_drain
+libdispatch.dylib`_dispatch_event_loop_drain:
+libdispatch.dylib[0x1803591d0] <+0>:   pacibsp 
+libdispatch.dylib[0x1803591d4] <+4>:   sub    sp, sp, #0x70
+libdispatch.dylib[0x1803591d8] <+8>:   stp    x28, x27, [sp, #0x10]
+libdispatch.dylib[0x1803591dc] <+12>:  stp    x26, x25, [sp, #0x20]
+libdispatch.dylib[0x1803591e0] <+16>:  stp    x24, x23, [sp, #0x30]
+libdispatch.dylib[0x1803591e4] <+20>:  stp    x22, x21, [sp, #0x40]
+libdispatch.dylib[0x1803591e8] <+24>:  stp    x20, x19, [sp, #0x50]
+libdispatch.dylib[0x1803591ec] <+28>:  stp    x29, x30, [sp, #0x60]
+libdispatch.dylib[0x1803591f0] <+32>:  add    x29, sp, #0x60
+libdispatch.dylib[0x1803591f4] <+36>:  mov    x19, x0
+libdispatch.dylib[0x1803591f8] <+40>:  mrs    x22, TPIDRRO_EL0
+libdispatch.dylib[0x1803591fc] <+44>:  ldr    x23, [x22, #0xe8]
+libdispatch.dylib[0x180359200] <+48>:  ldr    x20, [x23, #0x18]
+libdispatch.dylib[0x180359204] <+52>:  add    x8, x20, #0x38
+libdispatch.dylib[0x180359208] <+56>:  str    x8, [sp, #0x8]
+libdispatch.dylib[0x18035920c] <+60>:  and    w25, w0, #0x3
+libdispatch.dylib[0x180359210] <+64>:  mov    w26, #-0x1                ; =-1 
+libdispatch.dylib[0x180359214] <+68>:  mov    x27, #-0x2153000000000000 ; =-2401263026318606336 
+libdispatch.dylib[0x180359218] <+72>:  ldrb   w8, [x23, #0x35]
+libdispatch.dylib[0x18035921c] <+76>:  tbz    w8, #0x1, 0x180359320     ; <+336>
+libdispatch.dylib[0x180359220] <+80>:  ldr    x9, [sp, #0x8]
+libdispatch.dylib[0x180359224] <+84>:  ldr    x9, [x9]
+libdispatch.dylib[0x180359228] <+88>:  and    w8, w8, #0xfffffffd
+libdispatch.dylib[0x18035922c] <+92>:  strb   w8, [x23, #0x35]
+libdispatch.dylib[0x180359230] <+96>:  ldr    x10, [x23, #0x28]
+libdispatch.dylib[0x180359234] <+100>: ldrh   w8, [x23, #0x30]
+libdispatch.dylib[0x180359238] <+104>: cbz    w8, 0x180359280           ; <+176>
+libdispatch.dylib[0x18035923c] <+108>: mov    x11, #0x0                 ; =0 
+libdispatch.dylib[0x180359240] <+112>: add    x12, x10, #0x10
+libdispatch.dylib[0x180359244] <+116>: ldursh w13, [x12, #-0x8]
+libdispatch.dylib[0x180359248] <+120>: cmn    w13, #0x11
+libdispatch.dylib[0x18035924c] <+124>: b.ne   0x180359268               ; <+152>
+libdispatch.dylib[0x180359250] <+128>: ldur   x13, [x12, #-0x10]
+libdispatch.dylib[0x180359254] <+132>: cmp    x13, x20
+libdispatch.dylib[0x180359258] <+136>: b.ne   0x180359268               ; <+152>
+libdispatch.dylib[0x18035925c] <+140>: ldr    x13, [x12]
+libdispatch.dylib[0x180359260] <+144>: cmp    x13, x20
+libdispatch.dylib[0x180359264] <+148>: b.eq   0x180359284               ; <+180>
+libdispatch.dylib[0x180359268] <+152>: add    x11, x11, #0x1
+libdispatch.dylib[0x18035926c] <+156>: add    x12, x12, #0x48
+libdispatch.dylib[0x180359270] <+160>: cmp    x8, x11
+libdispatch.dylib[0x180359274] <+164>: b.ne   0x180359244               ; <+116>
+libdispatch.dylib[0x180359278] <+168>: mov    x11, x8
+libdispatch.dylib[0x18035927c] <+172>: b      0x18035928c               ; <+188>
+libdispatch.dylib[0x180359280] <+176>: mov    w11, #0x0                 ; =0 
+libdispatch.dylib[0x180359284] <+180>: cmp    w11, w8
+libdispatch.dylib[0x180359288] <+184>: b.ne   0x180359294               ; <+196>
+libdispatch.dylib[0x18035928c] <+188>: add    w8, w8, #0x1
+libdispatch.dylib[0x180359290] <+192>: strh   w8, [x23, #0x30]
+libdispatch.dylib[0x180359294] <+196>: ldr    x8, [x20, #0x18]
+libdispatch.dylib[0x180359298] <+200>: ldr    w8, [x8, #0x54]
+libdispatch.dylib[0x18035929c] <+204>: tbnz   w8, #0x1b, 0x18035947c    ; <+684>
+libdispatch.dylib[0x1803592a0] <+208>: ubfx   x12, x9, #32, #3
+libdispatch.dylib[0x1803592a4] <+212>: ubfx   w13, w8, #8, #4
+libdispatch.dylib[0x1803592a8] <+216>: cmp    w12, w13
+libdispatch.dylib[0x1803592ac] <+220>: csel   w12, w12, w13, hi
+libdispatch.dylib[0x1803592b0] <+224>: mov    w13, #0x48                ; =72 
+libdispatch.dylib[0x1803592b4] <+228>: umaddl x10, w11, w13, x10
+libdispatch.dylib[0x1803592b8] <+232>: str    x20, [x10]
+libdispatch.dylib[0x1803592bc] <+236>: cmp    w12, #0x1
+libdispatch.dylib[0x1803592c0] <+240>: csinc  w11, w12, wzr, hi
+libdispatch.dylib[0x1803592c4] <+244>: mov    w12, #0x80                ; =128 
+libdispatch.dylib[0x1803592c8] <+248>: lsl    w11, w12, w11
+libdispatch.dylib[0x1803592cc] <+252>: and    w8, w8, #0x80000000
+libdispatch.dylib[0x1803592d0] <+256>: orr    w8, w11, w8
+libdispatch.dylib[0x1803592d4] <+260>: orr    w8, w8, #0xff
+libdispatch.dylib[0x1803592d8] <+264>: mov    w11, #0xffef              ; =65519 
+libdispatch.dylib[0x1803592dc] <+268>: movk   w11, #0x5, lsl #16
+libdispatch.dylib[0x1803592e0] <+272>: stp    w11, w8, [x10, #0x8]
+libdispatch.dylib[0x1803592e4] <+276>: str    x20, [x10, #0x10]
+libdispatch.dylib[0x1803592e8] <+280>: ands   x8, x9, #0x2
+libdispatch.dylib[0x1803592ec] <+284>: mov    w11, #0x191               ; =401 
+libdispatch.dylib[0x1803592f0] <+288>: mov    w12, #0x111               ; =273 
+libdispatch.dylib[0x1803592f4] <+292>: csel   w11, w12, w11, eq
+libdispatch.dylib[0x1803592f8] <+296>: str    w11, [x10, #0x18]
+libdispatch.dylib[0x1803592fc] <+300>: stur   xzr, [x10, #0x24]
+libdispatch.dylib[0x180359300] <+304>: stur   xzr, [x10, #0x1c]
+libdispatch.dylib[0x180359304] <+308>: mov    x11, #0x1                 ; =1 
+libdispatch.dylib[0x180359308] <+312>: movk   x11, #0x37, lsl #32
+libdispatch.dylib[0x18035930c] <+316>: orr    x8, x8, x11
+libdispatch.dylib[0x180359310] <+320>: str    wzr, [x10, #0x2c]
+libdispatch.dylib[0x180359314] <+324>: ldr    x11, [sp, #0x8]
+libdispatch.dylib[0x180359318] <+328>: stp    x11, x8, [x10, #0x30]
+libdispatch.dylib[0x18035931c] <+332>: str    x9, [x10, #0x40]
+libdispatch.dylib[0x180359320] <+336>: ldrh   w2, [x23, #0x30]
+libdispatch.dylib[0x180359324] <+340>: strh   wzr, [x23, #0x30]
+libdispatch.dylib[0x180359328] <+344>: ldp    x21, x1, [x23, #0x20]
+libdispatch.dylib[0x18035932c] <+348>: str    xzr, [x23, #0x20]
+libdispatch.dylib[0x180359330] <+352>: mov    x0, x20
+libdispatch.dylib[0x180359334] <+356>: mov    x3, x19
+libdispatch.dylib[0x180359338] <+360>: bl     0x1803594a0               ; _dispatch_kq_drain
+libdispatch.dylib[0x18035933c] <+364>: cbz    x21, 0x1803593b0          ; <+480>
+libdispatch.dylib[0x180359340] <+368>: mov    w28, #0x0                 ; =0 
+libdispatch.dylib[0x180359344] <+372>: tbnz   w21, #0x0, 0x18035935c    ; <+396>
+libdispatch.dylib[0x180359348] <+376>: ldr    x24, [x21, #0x8]
+libdispatch.dylib[0x18035934c] <+380>: mov    x0, x21
+libdispatch.dylib[0x180359350] <+384>: bl     0x180372b64               ; symbol stub for: free
+libdispatch.dylib[0x180359354] <+388>: mov    x21, x24
+libdispatch.dylib[0x180359358] <+392>: b      0x18035939c               ; <+460>
+libdispatch.dylib[0x18035935c] <+396>: and    x0, x21, #0xfffffffffffffffe
+libdispatch.dylib[0x180359360] <+400>: ldr    x21, [x0, #0x78]
+libdispatch.dylib[0x180359364] <+404>: str    xzr, [x0, #0x78]
+libdispatch.dylib[0x180359368] <+408>: add    x8, x0, #0x60
+libdispatch.dylib[0x18035936c] <+412>: ldadd  w26, w8, [x8]
+libdispatch.dylib[0x180359370] <+416>: cmp    w8, #0x0
+libdispatch.dylib[0x180359374] <+420>: b.gt   0x18035939c               ; <+460>
+libdispatch.dylib[0x180359378] <+424>: tbnz   w8, #0x1f, 0x180359434    ; <+612>
+libdispatch.dylib[0x18035937c] <+428>: str    x27, [x0, #0x38]
+libdispatch.dylib[0x180359380] <+432>: ldr    x16, [x0]
+libdispatch.dylib[0x180359384] <+436>: mov    x17, x0
+libdispatch.dylib[0x180359388] <+440>: movk   x17, #0x6ae1, lsl #48
+libdispatch.dylib[0x18035938c] <+444>: autda  x16, x17
+libdispatch.dylib[0x180359390] <+448>: ldr    x8, [x16, #0x38]!
+libdispatch.dylib[0x180359394] <+452>: movk   x16, #0x77b7, lsl #48
+libdispatch.dylib[0x180359398] <+456>: blraa  x8, x16
+libdispatch.dylib[0x18035939c] <+460>: add    w28, w28, #0x1
+libdispatch.dylib[0x1803593a0] <+464>: cbnz   x21, 0x180359344          ; <+372>
+libdispatch.dylib[0x1803593a4] <+468>: and    w8, w28, #0xffff
+libdispatch.dylib[0x1803593a8] <+472>: cmp    w8, #0x11
+libdispatch.dylib[0x1803593ac] <+476>: b.hs   0x180359454               ; <+644>
+libdispatch.dylib[0x1803593b0] <+480>: cmn    x20, #0x4
+libdispatch.dylib[0x1803593b4] <+484>: b.eq   0x180359404               ; <+564>
+libdispatch.dylib[0x1803593b8] <+488>: cbz    x20, 0x180359404          ; <+564>
+libdispatch.dylib[0x1803593bc] <+492>: ldr    x16, [x20]
+libdispatch.dylib[0x1803593c0] <+496>: mov    x17, x20
+libdispatch.dylib[0x1803593c4] <+500>: movk   x17, #0x6ae1, lsl #48
+libdispatch.dylib[0x1803593c8] <+504>: autda  x16, x17
+libdispatch.dylib[0x1803593cc] <+508>: mov    x17, x16
+libdispatch.dylib[0x1803593d0] <+512>: xpacd  x17
+libdispatch.dylib[0x1803593d4] <+516>: cmp    x16, x17
+libdispatch.dylib[0x1803593d8] <+520>: b.eq   0x1803593e0               ; <+528>
+libdispatch.dylib[0x1803593dc] <+524>: brk    #0xc472
+libdispatch.dylib[0x1803593e0] <+528>: ldrb   w8, [x16, #0x28]
+libdispatch.dylib[0x1803593e4] <+532>: cmp    x8, #0x12
+libdispatch.dylib[0x1803593e8] <+536>: b.ne   0x180359404               ; <+564>
+libdispatch.dylib[0x1803593ec] <+540>: ldr    x0, [x20, #0x30]
+libdispatch.dylib[0x1803593f0] <+544>: cbz    x0, 0x180359404           ; <+564>
+libdispatch.dylib[0x1803593f4] <+548>: ldrb   w8, [x0, #0x6]
+libdispatch.dylib[0x1803593f8] <+552>: cbz    w8, 0x180359404           ; <+564>
+libdispatch.dylib[0x1803593fc] <+556>: mov    w1, #0x6                  ; =6 
+libdispatch.dylib[0x180359400] <+560>: bl     0x180357054               ; _dispatch_event_loop_drain_timers
+libdispatch.dylib[0x180359404] <+564>: cmp    w25, #0x1
+libdispatch.dylib[0x180359408] <+568>: b.ne   0x180359414               ; <+580>
+libdispatch.dylib[0x18035940c] <+572>: ldr    x8, [x22, #0x28]
+libdispatch.dylib[0x180359410] <+576>: cbnz   x8, 0x180359218           ; <+72>
+libdispatch.dylib[0x180359414] <+580>: ldp    x29, x30, [sp, #0x60]
+libdispatch.dylib[0x180359418] <+584>: ldp    x20, x19, [sp, #0x50]
+libdispatch.dylib[0x18035941c] <+588>: ldp    x22, x21, [sp, #0x40]
+libdispatch.dylib[0x180359420] <+592>: ldp    x24, x23, [sp, #0x30]
+libdispatch.dylib[0x180359424] <+596>: ldp    x26, x25, [sp, #0x20]
+libdispatch.dylib[0x180359428] <+600>: ldp    x28, x27, [sp, #0x10]
+libdispatch.dylib[0x18035942c] <+604>: add    sp, sp, #0x70
+libdispatch.dylib[0x180359430] <+608>: retab  
+libdispatch.dylib[0x180359434] <+612>: stp    x20, x21, [sp, #-0x10]!
+libdispatch.dylib[0x180359438] <+616>: adrp   x20, 27
+libdispatch.dylib[0x18035943c] <+620>: add    x20, x20, #0xcd0          ; "API MISUSE: Over-release of an object"
+libdispatch.dylib[0x180359440] <+624>: adrp   x21, 432353
+libdispatch.dylib[0x180359444] <+628>: add    x21, x21, #0xa38          ; gCRAnnotations
+libdispatch.dylib[0x180359448] <+632>: str    x20, [x21, #0x8]
+libdispatch.dylib[0x18035944c] <+636>: ldp    x20, x21, [sp], #0x10
+libdispatch.dylib[0x180359450] <+640>: brk    #0x1
+libdispatch.dylib[0x180359454] <+644>: and    x8, x28, #0xffff
+libdispatch.dylib[0x180359458] <+648>: stp    x20, x21, [sp, #-0x10]!
+libdispatch.dylib[0x18035945c] <+652>: adrp   x20, 31
+libdispatch.dylib[0x180359460] <+656>: add    x20, x20, #0xbea          ; "BUG IN LIBDISPATCH: Too many deferred free items"
+libdispatch.dylib[0x180359464] <+660>: adrp   x21, 432353
+libdispatch.dylib[0x180359468] <+664>: add    x21, x21, #0xa38          ; gCRAnnotations
+libdispatch.dylib[0x18035946c] <+668>: str    x20, [x21, #0x8]
+libdispatch.dylib[0x180359470] <+672>: str    x8, [x21, #0x38]
+libdispatch.dylib[0x180359474] <+676>: ldp    x20, x21, [sp], #0x10
+libdispatch.dylib[0x180359478] <+680>: brk    #0x1
+libdispatch.dylib[0x18035947c] <+684>: stp    x20, x21, [sp, #-0x10]!
+libdispatch.dylib[0x180359480] <+688>: adrp   x20, 32
+libdispatch.dylib[0x180359484] <+692>: add    x20, x20, #0xbc           ; "BUG IN LIBDISPATCH: Waking up a kq with cooperative thread request is not supported"
+libdispatch.dylib[0x180359488] <+696>: adrp   x21, 432353
+libdispatch.dylib[0x18035948c] <+700>: add    x21, x21, #0xa38          ; gCRAnnotations
+libdispatch.dylib[0x180359490] <+704>: str    x20, [x21, #0x8]
+libdispatch.dylib[0x180359494] <+708>: str    x8, [x21, #0x38]
+libdispatch.dylib[0x180359498] <+712>: ldp    x20, x21, [sp], #0x10
+libdispatch.dylib[0x18035949c] <+716>: brk    #0x1

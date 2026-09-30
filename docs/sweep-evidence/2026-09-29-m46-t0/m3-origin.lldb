@@ -1,0 +1,4 @@
+breakpoint set -n task_get_special_port -C "register read x0 x1 x2" -C "bt 8" -C "continue"
+breakpoint set -n kevent_qos -C "register read x0 x2 x7" -C "memory read -s8 -fx -c2 '$x1 ? $x1 : $sp'" -C "bt 10" -C "continue"
+breakpoint set -n host_request_notification -C "register read x0 x1 x2" -C "bt 8" -C "continue"
+run
