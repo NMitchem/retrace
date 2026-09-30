@@ -85,10 +85,11 @@ pub enum BlockReason {
     /// M18 Stage 2b: a workqueue worker parked in `workq_kernreturn(0x4)`, waiting for the kernel
     /// to hand it more work.
     ///
-    /// **Keyless, and nothing wakes it.** Stage 2b's scope excludes thread reuse, so no wake seam
-    /// matches this variant — by construction, since it carries no key for either seam to compare.
-    /// A parked worker therefore stays parked for the rest of the run, which is exactly what makes
-    /// `pick_next` hand the vCPU back to main and lets the guest finish.
+    /// **Keyless.** A plain worker parked here is never woken: M18's scope excludes thread reuse, so
+    /// it stays parked for the rest of the run, which is what makes `pick_next` hand the vCPU back to
+    /// main. The one exception since M46 is the event manager, parked in
+    /// `workq_kernreturn(THREAD_KEVENT_RETURN)`: a knote activation re-enters it through
+    /// `ThreadTable::unpark` with a fresh register block (`Box_::request_manager`).
     ///
     /// `Blocked`, not `Exited`, because a parked workqueue thread is **alive**: the real kernel can
     /// re-enter it with new work. `Exited` carries a return value a parked worker does not have, and
@@ -156,6 +157,19 @@ impl ThreadTable {
     pub fn len(&self) -> usize { self.threads.len() }
     pub fn is_empty(&self) -> bool { self.threads.is_empty() }
     pub fn state_of(&self, tid: usize) -> ThreadState { self.threads[tid].state }
+
+    /// `(base, len)` of `tid`'s stack. M46's manager re-entry reads the base: it is the `x2` a
+    /// workqueue upcall carries.
+    pub fn stack_of(&self, tid: usize) -> (u64, u64) { self.threads[tid].stack }
+
+    /// M46: make a parked workqueue thread runnable again. This is the reuse wake
+    /// `BlockReason::Parked`'s doc reserved, used only for the event manager. Asserts the thread was
+    /// parked, because waking anything else here would be a scheduling bug.
+    pub fn unpark(&mut self, tid: usize) {
+        assert_eq!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Parked),
+            "M46: unpark of thread {tid}, which is not parked");
+        self.threads[tid].state = ThreadState::Runnable;
+    }
     pub fn ctx_of(&self, tid: usize) -> &ThreadCtx { &self.threads[tid].ctx }
     pub fn ctx_mut(&mut self, tid: usize) -> &mut ThreadCtx { &mut self.threads[tid].ctx }
 

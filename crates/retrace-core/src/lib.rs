@@ -504,17 +504,28 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
                     machmsg::Route::ServiceGetSpecialPort => {
-                        // task_get_special_port(3409): libxpc's initializer fetches TASK_BOOTSTRAP_PORT.
-                        // Answer with a REAL kernel-valid send right minted in retrace's OWN IPC space
-                        // (M2-xpcport) — never forwarded (that would hand over the host's real launchd
-                        // port). The minted name is nondeterministic, so it is RECORDED here and replay
-                        // applies it verbatim (the task_self posture). Only which==4 modeled.
+                        // task_get_special_port(3409). Never forwarded, since that would hand over
+                        // the host's real ports. Two ports are modeled:
+                        // - TASK_BOOTSTRAP_PORT (4), from libxpc's initializer. It is answered with a
+                        //   REAL kernel-valid send right minted in retrace's OWN IPC space
+                        //   (M2-xpcport). The minted name is nondeterministic, so it is RECORDED here
+                        //   and replay applies it verbatim (the task_self posture).
+                        // - TASK_DEBUG_CONTROL_PORT (10), from libdispatch's
+                        //   `_voucher_activity_debug_channel_init` (M46 t0 M3). It is answered with
+                        //   MACH_PORT_NULL. retrace keeps no debug control port, because the 3410 arm
+                        //   below drops the one libtrace sets. libdispatch connects its debug channel
+                        //   only `if (dbgp)` (voucher.c:844), so the channel's EVFILT_MACHPORT
+                        //   registration never happens (M46 Ruling T0-a). The reply is
+                        //   deterministic, so replay recomputes and byte-compares it.
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let which = machmsg::decode_get_special_port(&buf)
                             .unwrap_or_else(|e| panic!("task_get_special_port (3409) decode: {e}"));
-                        assert_eq!(which, 4,
-                            "only TASK_BOOTSTRAP_PORT (4) is modeled; got which={which}");
-                        let name = b.mint_bootstrap_port();
+                        let name = match which {
+                            machmsg::TASK_BOOTSTRAP_PORT => b.mint_bootstrap_port(),
+                            machmsg::TASK_DEBUG_CONTROL_PORT => 0,
+                            other => panic!("only TASK_BOOTSTRAP_PORT (4) and TASK_DEBUG_CONTROL_PORT (10) \
+                                             are modeled; got which={other}"),
+                        };
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_get_special_port_reply(m.reply_port, name) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
@@ -531,7 +542,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let which = machmsg::decode_set_special_port(&buf)
                             .unwrap_or_else(|e| panic!("task_set_special_port (3410) decode: {e}"));
-                        assert_eq!(which, 10,
+                        assert_eq!(which, machmsg::TASK_DEBUG_CONTROL_PORT,
                             "only TASK_DEBUG_CONTROL_PORT (10) is modeled; got which={which}");
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS) }];
@@ -1042,20 +1053,23 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // handing the syscall to the host kernel. (Stage 2b t2 removed the REQTHREADS panic
             // this comment used to name; that opcode now builds the worker.)
             Stop::Syscall { num, args } if num == retrace_arch::SYS_WORKQ_KERNRETURN => {
-                let rc = b.guest_workq_kernreturn(args);
+                // M46: the Result form both arms share; a refusal still stops the recorder here.
+                let rc = b.try_workq_kernreturn(args).unwrap_or_else(|m| panic!("{m}"));
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append workq_kernreturn: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
             // M45: kevent_qos is EMULATED, never forwarded (see Box_::guest_kevent_qos). With
             // KEVENT_FLAG_WORKQ the host kernel would act on RETRACE's own workqueue kqueue, the
-            // workq pair's class (M44 t0 M1). This arm may PANIC by design: every shape but the
-            // measured init is refused by value, naming the field, before anything is appended.
+            // workq pair's class (M44 t0 M1). This arm may PANIC by design: every shape but the three
+            // measured ones (M46) is refused by value, naming the field, before anything is appended.
             //
-            // `writes` is empty and that is deliberate: the call writes no guest memory, and its
-            // return is a constant the replay mirror recomputes identically.
+            // `writes` is empty and that is deliberate: the call's own out-parameters are untouched,
+            // and its return is a constant the replay mirror recomputes identically. A poke may fill
+            // the event manager's list, but that is a box write both sides recompute (M46 R3), not
+            // one this call records.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_KEVENT_QOS => {
-                let rc = b.guest_kevent_qos(args);
+                let rc = b.guest_kevent_qos(args).unwrap_or_else(|m| panic!("{m}"));
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append kevent_qos: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
@@ -1067,7 +1081,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // M14 t11: it DOES now write guest memory — the child's kport into the guest's pthread
             // struct at +0xf8, the write `pthread_join` is unusable without — and the event STILL
             // carries no writes. That is deliberate, not an oversight. The value is
-            // `GUEST_THREAD_PORT_BASE | tid`, a pure function of the guest's own syscall sequence,
+            // `guest_thread_kport(tid)`, a pure function of the guest's own syscall sequence,
             // and the replay arm below calls the same `guest_bsdthread_create` with identical args:
             // both sides therefore recompute the identical byte at the identical address (symmetry
             // rule 1), so recording it would be recording a constant. The exit-time full-memory
@@ -2044,16 +2058,29 @@ impl ReplaySession {
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
                                     machmsg::Route::ServiceGetSpecialPort => {
-                                        // The reply carries a REAL, nondeterministic minted port name
-                                        // (M2-xpcport, task_self posture): apply the recorded reply VERBATIM
-                                        // — do NOT recompute/byte-compare (the name cannot be regenerated;
-                                        // re-adding the byte-compare would guarantee a divergence). The
-                                        // decode+assert(which==4) stays as a cheap deterministic guard.
+                                        // One posture per modeled port (see the record arm):
+                                        // - which == 4: the reply carries a REAL, nondeterministic
+                                        //   minted port name (M2-xpcport, task_self posture). It is
+                                        //   applied VERBATIM, because the name cannot be regenerated
+                                        //   and a byte-compare would guarantee a divergence.
+                                        // - which == 10: MACH_PORT_NULL, which is deterministic (M46
+                                        //   Ruling T0-a). This is the STANDARD posture: recompute,
+                                        //   byte-compare, then apply, as the 3410 arm does.
                                         let buf = self.b.read_guest(m.data, m.send_size as usize);
                                         let which = machmsg::decode_get_special_port(&buf).map_err(|e| Divergence {
                                             landmark: self.idx, pc, detail: format!("replay get_special_port decode: {e}") })?;
-                                        assert_eq!(which, 4,
-                                            "only TASK_BOOTSTRAP_PORT (4) is modeled; got which={which}");
+                                        match which {
+                                            machmsg::TASK_BOOTSTRAP_PORT => {}
+                                            machmsg::TASK_DEBUG_CONTROL_PORT => {
+                                                let reply = machmsg::encode_get_special_port_reply(m.reply_port, 0);
+                                                if writes.len() != 1 || writes[0].bytes != reply {
+                                                    return Err(Divergence { landmark: self.idx, pc,
+                                                        detail: "task_get_special_port(TASK_DEBUG_CONTROL_PORT) reply mismatch".into() });
+                                                }
+                                            }
+                                            other => panic!("only TASK_BOOTSTRAP_PORT (4) and TASK_DEBUG_CONTROL_PORT (10) \
+                                                             are modeled; got which={other}"),
+                                        }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
                                     machmsg::Route::ServiceSetSpecialPort => {
@@ -2065,7 +2092,7 @@ impl ReplaySession {
                                         let buf = self.b.read_guest(m.data, m.send_size as usize);
                                         let which = machmsg::decode_set_special_port(&buf).map_err(|e| Divergence {
                                             landmark: self.idx, pc, detail: format!("replay set_special_port decode: {e}") })?;
-                                        assert_eq!(which, 10,
+                                        assert_eq!(which, machmsg::TASK_DEBUG_CONTROL_PORT,
                                             "only TASK_DEBUG_CONTROL_PORT (10) is modeled; got which={which}");
                                         let reply = machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS);
                                         if writes.len() != 1 || writes[0].bytes != reply {
@@ -2237,10 +2264,22 @@ impl ReplaySession {
                                 return self.finish_event();
                             }
                             if num == retrace_arch::SYS_WORKQ_KERNRETURN {
-                                let rc = self.b.guest_workq_kernreturn(args);
+                                // M46 §3g: a refusal here is reachable only after an earlier silent
+                                // divergence (record accepted this call), so it is reported as one
+                                // rather than panicking (M45 F-2).
+                                let rc = match self.b.try_workq_kernreturn(args) {
+                                    Ok(rc) => rc,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "workq_kernreturn refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
                                 if rc != *ret {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("workq_kernreturn rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                if *ret1 != 0 {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("workq_kernreturn recorded ret1={ret1:#x}; the emulation records 0") });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
@@ -2251,10 +2290,20 @@ impl ReplaySession {
                             // honest trace; kqinit_e2e's rewritten-return test is what makes it
                             // observable.
                             if num == retrace_arch::SYS_KEVENT_QOS {
-                                let rc = self.b.guest_kevent_qos(args);
+                                let rc = match self.b.guest_kevent_qos(args) {
+                                    Ok(rc) => rc,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "kevent_qos refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
                                 if rc != *ret {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("kevent_qos rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                // M46 §3g: M45 owed this compare. Record fixes ret1 at 0.
+                                if *ret1 != 0 {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("kevent_qos recorded ret1={ret1:#x}; the emulation records 0") });
                                 }
                                 // Record fixes `err: false, writes: []`, so a recording carrying
                                 // either is not one this arm produced: refuse it rather than feed

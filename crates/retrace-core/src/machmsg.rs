@@ -266,9 +266,18 @@ pub fn decode_vm_remap(buf: &[u8]) -> Result<VmRemapReq, String> {
     })
 }
 
+/// `TASK_BOOTSTRAP_PORT` (SDK `mach/task_special_ports.h`): libxpc's initializer fetches it, and
+/// retrace answers with a port minted in its own IPC space (M2-xpcport).
+pub const TASK_BOOTSTRAP_PORT: u32 = 4;
+/// `TASK_DEBUG_CONTROL_PORT` (SDK `mach/task_special_ports.h`): libtrace sets it (3410) and
+/// libdispatch's `_voucher_activity_debug_channel_init` fetches it (3409). retrace keeps none, so
+/// the fetch answers `MACH_PORT_NULL` (M46 t0 Ruling T0-a).
+pub const TASK_DEBUG_CONTROL_PORT: u32 = 10;
+
 /// task_get_special_port (3409) request body: header(24) + NDR(8) + `which_port: int`(4) = 36 bytes.
-/// Returns `which_port` (offset 32); dispatch asserts it == 4 (TASK_BOOTSTRAP_PORT) — the only one
-/// modeled. Validates the length and msgh_id so a malformed/mis-routed request fails loud.
+/// Returns `which_port` (offset 32); dispatch models TASK_BOOTSTRAP_PORT (4) and, since M46,
+/// TASK_DEBUG_CONTROL_PORT (10), and panics on any other. Validates the length and msgh_id so a
+/// malformed/mis-routed request fails loud.
 pub fn decode_get_special_port(buf: &[u8]) -> Result<u32, String> {
     if buf.len() < 36 { return Err(format!("get_special_port request short: {} < 36", buf.len())); }
     let id = u32_at(buf, 20);
