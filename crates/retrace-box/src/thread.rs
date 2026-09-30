@@ -165,7 +165,29 @@ impl ThreadTable {
     /// M46: make a parked workqueue thread runnable again. This is the reuse wake
     /// `BlockReason::Parked`'s doc reserved, used only for the event manager. Asserts the thread was
     /// parked, because waking anything else here would be a scheduling bug.
+    ///
+    /// **Asserts no signal is pending on it, masked or not.** `Box_::should_pend_for` pends a
+    /// signal on any `Blocked(_)` target, `Parked` included. While the thread stayed parked,
+    /// `assert_no_stranded_signals` would catch that signal at exit. This wake makes the thread
+    /// Runnable, and its caller then replaces the thread's context with a fresh upcall block
+    /// (`Box_::enter_manager`). A signal pending here would vanish where no assert sees it, and
+    /// record and replay would agree while it did. That is the class the M18 `semaphore_signal_trap`
+    /// arm asserts against.
+    ///
+    /// The predicate is the whole pending set, not `peek_deliverable`, which filters by mask. The
+    /// mask a pending-but-masked signal waits on is not measured for this thread either. The
+    /// manager's mask is inherited from whichever thread requested it (`spawn`), not whatever the
+    /// kernel gives a workqueue thread, and whether the kernel's reuse re-entry resets it is part of
+    /// the owed measurement. Below the trace, so it fires identically on record and replay.
     pub fn unpark(&mut self, tid: usize) {
+        let pending = self.threads[tid].pending;
+        assert!(pending == 0,
+            "M46: unpark of parked workqueue thread {tid} with signal set {pending:#x} pending (bit n \
+             is signal n+1, masked or not). The re-entry replaces its context with a fresh upcall \
+             block, so the signal would vanish where assert_no_stranded_signals cannot see it. \
+             Measure the kernel's register state for a parked workqueue manager that a signal \
+             interrupts, as blockedctx.rs does for a __ulock_wait-blocked thread, and model the \
+             delivery on both sides before allowing this.");
         assert_eq!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Parked),
             "M46: unpark of thread {tid}, which is not parked");
         self.threads[tid].state = ThreadState::Runnable;
