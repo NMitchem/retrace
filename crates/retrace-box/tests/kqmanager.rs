@@ -8,8 +8,8 @@
 //! t0 M2. `0x1E_0000` redelivery was NOT observed (no native `KEVENT_RETURN` found events
 //! waiting), so it stays inferred from xnu (`pthread_workqueue.c:3695-3703`), and the redelivery
 //! test pins an inferred value.
-use retrace_arch::{KeventQos, EVENT_MANAGER_QOS, EVFILT_TIMER, EV_ADD, EV_ENABLE, EV_ONESHOT, KQINIT,
-                   MANAGER_POKE, SIG_BLOCK, TIMER_IDENT_BASE, USER_WAKE_EVENT};
+use retrace_arch::{KeventQos, EVENT_MANAGER_QOS, EVFILT_TIMER, EV_ADD, EV_DELETE, EV_ENABLE, EV_ONESHOT,
+                   KQINIT, MANAGER_POKE, SIG_BLOCK, TIMER_IDENT_BASE, UPTIME_TIMER_FFLAGS, USER_WAKE_EVENT};
 use retrace_box::kq::Manager;
 use retrace_box::thread::{BlockReason, ThreadState};
 use retrace_box::Box_;
@@ -133,6 +133,30 @@ fn a_kevent_return_from_a_thread_that_is_not_the_bound_manager_is_refused() {
     let (mut b, _, pthread) = spawned();
     let err = b.try_workq_kernreturn(kevent_return(pthread - 0x480, 0)).unwrap_err();
     assert!(err.contains("from thread 0, which is not the bound event manager"), "{err}");
+}
+
+/// A second init is a knote-table refusal: the shape is M45's init, and the table already holds its
+/// `EVFILT_USER` knote.
+#[test]
+fn a_second_init_is_refused_against_the_knote_table() {
+    let (mut b, e) = inited();
+    b.poke_guest(e, &KQINIT.to_bytes());
+    let err = b.guest_kevent_qos([0xffff_ffff, e, 1, 0, 0, 0, 0, 0x21]).unwrap_err();
+    assert!(err.contains("M46: kevent_qos against the knote table: "), "{err}");
+}
+
+/// A disarm of a timer that is not armed passes the entry's classification and is refused by the
+/// knote table, since the kernel's `ENOENT` answer is an `EV_ERROR` event, which is not modelled.
+#[test]
+fn a_disarm_of_an_unarmed_timer_is_refused_against_the_knote_table() {
+    let (mut b, _, pthread) = spawned();
+    b.switch_to_thread(1);
+    let disarm = KeventQos { ident: TIMER_IDENT_BASE, filter: EVFILT_TIMER, flags: EV_DELETE | EV_ONESHOT,
+                             qos: EVENT_MANAGER_QOS, udata: 0x6c850, fflags: UPTIME_TIMER_FFLAGS[0], xflags: 0,
+                             data: 0, ext: [0; 4] };
+    b.poke_guest(pthread - 0x480, &disarm.to_bytes());
+    let err = b.try_workq_kernreturn(kevent_return(pthread - 0x480, 1)).unwrap_err();
+    assert!(err.contains("M46: KEVENT_RETURN against the knote table: "), "{err}");
 }
 
 /// M46 final review M1: a plain worker's park (`THREAD_RETURN`, 0x4) from the bound manager is
