@@ -14874,8 +14874,9 @@ T8-a), was **889 / 0 / 9 over 152**, the first prediction exactly (`ws` 205 over
 43, `bins` 32, `e2e` 305 / 0 / 9 over 79; every line `exit=0`). The final review's fix wave waited
 for its `DONE` (F-b) and edited `retrace-box` and `retrace-core`, which every e2e target links, so
 the whole gate ran again rather than a subset (F-e). The first run's logs are kept in the ledger
-directory as `gate-run1/`. Both ran on a host loaded by an unrelated `cargo-mutants` job (load
-averages between 7 and 80); no test timed out.
+directory as `gate-run1/`. Both ran on a host loaded by an unrelated `cargo-mutants` job, by the
+controller's `uptime` readings logged in the ledger: 1-minute averages of 15.2, 7.1 and 79.9
+during the first run, and one reading of 31.5 during the second. No test timed out.
 
 ### The final review
 
@@ -14901,7 +14902,8 @@ forward, once per settle, and no timer fires twice; `verify_thread` has seven si
   it would be delivered at a point nothing has measured — the class M18's `-33` arm refuses. (The
   assert's own message says the signal "would vanish where assert_no_stranded_signals cannot see
   it", which the scoped re-review measured as an overstatement: the pending bit stays on the thread,
-  and a manager that parks again holding it is still caught at exit. The refusal is right; its
+  and a manager that parks again holding it is still caught at exit if the signal is unmasked
+  (`assert_no_stranded_signals` reads `pending & !mask`). The refusal is right; its
   message is parked as a minor.) `unpark` now asserts the thread's whole
   pending set is empty, **masked or not**: the fixer measured that the narrower
   `peek_deliverable` (`pending & !mask`) lets a masked pending signal through (a control with it
