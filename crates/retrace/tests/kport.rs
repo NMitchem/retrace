@@ -1,6 +1,6 @@
 // M16 Task 1 / spec risk R1. The port->tid map M16 needs is read back OUT of the guest's own
 // pthread struct rather than reconstructed from tid, because that is the only rule that covers
-// main: retrace writes `GUEST_THREAD_PORT_BASE | tid` for every thread it spawns, but main's
+// main: retrace writes `guest_thread_kport(tid)` for every thread it spawns, but main's
 // kport is written by libpthread's `__pthread_main_thread_init`, in userspace, and retrace has
 // never read that field back. This test IS the measurement.
 mod util;
@@ -36,13 +36,16 @@ fn every_live_thread_has_a_distinct_readable_kport() {
     let main_port = s.dbg_kport_of(0).expect("main's pthread must be mapped and readable");
     let child_port = s.dbg_kport_of(1).expect("the child's pthread must be mapped and readable");
 
-    assert_eq!(child_port, 0x0BAD_7001,
+    // M46 Ruling T4-a moved this value from `0x0BAD_7001` (`BASE | tid`): a real port name ends
+    // in binary 11, and the guest's lock code reads those two bits.
+    assert_eq!(child_port, 0x0BAD_7007,
         "the child's kport is the one retrace itself wrote in guest_bsdthread_create: \
-         GUEST_THREAD_PORT_BASE | tid");
+         GUEST_THREAD_PORT_BASE | (tid << 2) | 3");
     assert_ne!(main_port, 0,
         "R1: main's kport is libpthread's own write. A zero here means the field is not populated \
-         at this point in the run, and M16-port must fall back to recognising 0x0BAD_7000|tid for \
-         children and failing loud on anything else. Report the value either way.");
+         at this point in the run, and M16-port must fall back to recognising \
+         0x0BAD_7000|(tid<<2)|3 for children and failing loud on anything else. Report the value \
+         either way.");
     assert_ne!(main_port, child_port,
         "two threads that share a kport would make port->tid resolution ambiguous");
     eprintln!("R1 MEASURED: main kport = {main_port:#x}, child kport = {child_port:#x}");
@@ -73,7 +76,7 @@ fn a_port_resolves_to_the_thread_that_owns_it() {
 /// that quietly drops it.
 ///
 /// `0xDEAD_BEEF` is safe as a never-issued port precisely because the test above pins what IS
-/// issued: children get `GUEST_THREAD_PORT_BASE | tid` (`0x0BAD_7001` for tid 1) and main's comes
+/// issued: children get `guest_thread_kport(tid)` (`0x0BAD_7007` for tid 1) and main's comes
 /// from libpthread. Neither can collide with this.
 #[test]
 fn an_unissued_port_is_reported_rather_than_aborted_on() {
