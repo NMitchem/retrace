@@ -1,0 +1,26 @@
+# __mac_syscall("Sandbox", 2, arg): the two callers, measured 2026-09-30 during plan writing
+# Trace: g32.bin (git add, scratch CLI). Landmarks from td-main.rs; structs via
+#   retrace debug g32.bin --script 'break <pc>; continue; where; regs; x <x2> 64'
+# (the breakpoint lands after the svc, so x0 already holds the errno); callers and strings
+# symbolicated natively with sym2.py (host cache slide added).
+
+#55/#74/#109  pc=0x180119ecc (dyld's __mac_syscall stub)  ret=0xe (EFAULT)  err=true
+  caller x30=0x18019591c = dyld sandbox_check_common + 0x214
+  arg @0x27ff270: 30 f2 7f 02 00 00 00 00 | eb 9a 00 00 00 00 00 00 | ee b6 1a 80 01 00 00 00 | 41 00 00 00 00 00 00 00 | 26 02 00 00 00 00 00 00 | 01 00 00 00 00 00 00 00
+    +0  0x27ff230     a guest STACK pointer (nested; the forward hands it to the host as a host address)
+    +8  0x9aeb        (retrace's pid at the time: getpid is forwarded)
+    +16 0x1801ab6ee   -> "syscall-unix"   (the sandbox operation)
+    +24 0x41, +32 0x226, +40 1
+
+#234  pc=0x1804af730 (libsystem_kernel __mac_syscall)  ret=0x16 (EINVAL)  err=true
+  caller x30=0x18df15a78 = libsystem_sandbox rootless_check_trusted_internal + 0x130
+  arg @0x27fb370: 40 b4 7f 02 00 00 00 00 | 01 00 00 00 00 00 00 00 | 5b b4 f1 8d 01 00 00 00 | f0 00 00 00 00 00 00 00 | 04 00 00 00 00 00 00 00 | 05 00 00 20 00 00 00 00
+    +0  0x27fb440     a guest STACK pointer (nested)
+    +8  1
+    +16 0x18df1b45b   -> "file-write-data"
+    +24 0xf0, +32 4, +40 0x20000005
+
+Policy strings: 0x1801b7eb4 -> "Sandbox" (dyld), 0x18df1ac55 -> "Sandbox" (libsystem_sandbox).
+Reading: both are sandbox checks whose struct carries nested guest pointers at +0 and +16; the
+forward's errno is what the host kernel said about a struct it could not follow. Continuity is
+expressible BY VALUE on the operation string at *(arg+16): "syscall-unix" -> 14, "file-write-data" -> 22.

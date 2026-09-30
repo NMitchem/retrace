@@ -25,6 +25,8 @@ cut from them with `td-main.rs`, a throwaway trace dumper over `retrace_trace::R
 | `jq-ab.txt` | The jq 300k abort, A/B with madvise forwarded and no-op'd. It aborts both ways, so it is **not** this bug. |
 | `lt.c`, `lt-control.txt` | A minimal `localtime_r` guest. It records and replays cleanly, so git's abort needs git's heap history. |
 | `sweep-427fa0a.log`, `sweep/` | The owed M46 T6-a re-sweep on an idle host: load 1.93 at the start, 1.85 at the end, 5 minutes, `TALLY pass=49 fail=5`. It uses the unpatched CLI and `sweep-run.sh`, and `sweep/` holds the non-clean rows' stderr. It is M47's sweep baseline. |
+| `sandbox-call2.txt` | Added while the plan was being written. It covers both `__mac_syscall("Sandbox", 2, …)` callers (dyld's `sandbox_check_common`, which gets EFAULT, and libsystem_sandbox's `rootless_check_trusted_internal`, which gets EINVAL). For each it gives the argument struct, with nested guest pointers at +0 and +16, and the operation name at `*(arg + 16)`, which is the key R7's continuity rule uses (spec §11 item 5). |
+| `sym2.py` | The symbolicator `sandbox-call2.txt` used: `sym.py` with the host's shared-cache slide added. |
 | `gp.sh`, `sweep-run.sh`, `td-main.rs`, `sym.py`, `probe-scratch.patch` | The scripts and the scratch patch, so that each result can be re-run. |
 
 ## Findings

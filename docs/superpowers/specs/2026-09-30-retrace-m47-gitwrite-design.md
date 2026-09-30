@@ -655,3 +655,55 @@ against it file by file.
   - `forkfail` asserts the errno line and the refusal line.
   - `rpath` asserts the recorded AMFI bit.
   - `madv zero` asserts the zeros and the empty writes.
+
+## 11. Corrections from the plan
+
+Writing the plan (`docs/superpowers/plans/2026-09-30-retrace-m47-gitwrite.md`) against the code
+found these. Where this section and §1–§10 disagree, this section holds. Items 1 and 2 add to the
+milestone's scope and are the operator's to approve.
+
+1. **Row 333 was missing.** The probe's `g36` stopped at the M33 panic for `__pthread_canceled`
+   (333), the fork path's `pthread_setcancelstate`, before it reached 3403 (`git-runs.txt`). §2d
+   named the call and §3b omitted its row. The plan adds `333 => [Scalar]`, forwarded on the 331
+   precedent ("noted, not modelled": retrace never cancels a thread), and adds 333 to the census.
+2. **Fork's row lands with its refusal, and the generic arm gains a fork assert.** A row makes
+   `forwarded_shape` accept 2, so from that commit on a missing refusal arm would forward `fork`
+   and start a real child of the recorder. The row therefore lands in the same task as the refusal
+   (plan Task 4), never earlier. Beside the `madvise` assert, the generic arm asserts
+   `fork_refusal_errno(num).is_none()`, so "never forwarded" is a checked fact and not a matter of
+   arm order. Task 4's control deletes the refusal arm and watches that assert fire.
+3. **`guest_madvise(&self, args) -> Result<Vec<Region>, String>`**, not `Result<u64, String>`
+   (§3c). It returns the zero-fill writes; both the record arm and the mirror apply them with
+   `apply_and_return`, so the M5 watch check sees a zero-fill as a write. Every accepted call
+   returns 0. A reserved page the guest never touched gets no write, because it commits as zero on
+   first touch. It takes `&self`: the model commits nothing.
+4. **`Box_::read_guest_cstr(va, cap)` is new.** The policy and operation names are shared-cache
+   `__cstring`s the code computes an address for without loading from them, so their pages may be
+   unstaged at the `svc`. The read pages in a missing cache page (`page_in_cache`), the same
+   deterministic operation a guest load would have triggered, on both sides at the same landmark.
+   It reads at most `cap` bytes, NUL included, as `copyinstr` does. The policy uses
+   `MAC_MAX_POLICY_NAME` (32); the operation uses M47's own `SANDBOX_OPERATION_MAX` (64).
+5. **Sandbox continuity is keyed by the operation name at `*(arg + 16)`**
+   (`docs/sweep-evidence/2026-09-30-m47-probe/sandbox-call2.txt`): `syscall-unix` → 14 and
+   `file-write-data` → 22. That is R7's "rule t0 M2(b) measures", measured while planning. t0
+   re-measures it across the corpus (M2(a)). M2(b) now measures only the native answers, for the
+   fidelity gap Known limits names.
+6. **`MacCall::SandboxCheck`**, not `SandboxContinuity(..)` (§3d). The classifier returns the pair;
+   `sandbox_check_continuity(operation)` supplies the errno; `Box_::guest_mac_syscall` returns
+   `MacSyscall::{AmfiDyldPolicy { in_flags, out_ipa }, SandboxCheck { errno }}`. One record arm
+   handles both pairs, so §4's "drop the `Sandbox` arm" control becomes "delete the `__mac_syscall`
+   arm", and "move the arm below the generic arm" becomes "delete the arm". Each is the same
+   breakage with the same expected assert.
+7. **CLAUDE.md's "Guest threads" paragraph does change** (§3h said it does not). It lists the
+   generic arm's asserts by name, and M47 adds two (`madvise`, `fork`).
+8. **The 3403 decoder is exact.** Exactly 64 bytes, `COMPLEX`, id 3403, descriptor count 3, and
+   each descriptor's type byte 0 (`MACH_MSG_PORT_DESCRIPTOR`), all per t0 M3(a). The names and
+   dispositions are not modelled; if M3(a) measures `MOVE_SEND`, the decoder's doc names the extra
+   user reference the model leaves in retrace's own IPC space.
+9. **Two plan halts join §7:**
+   - **H7:** t0 M2(a) finds a `(policy, call)` pair other than the two.
+   - **H8:** a Sandbox call-2 operation other than the two, or a forwarded call-2 result that
+     carried writes or differed between two runs of one guest. This is H2's case, measured.
+10. **§9's prediction is superseded.** The plan counts +39 + k `#[test]` lines, where k is t0 M4's
+    in-list write commands beyond `add` and `commit`. That is 946 + k passed-plus-ignored over 158
+    binaries, 10 of them ignored unless `csh`/`tcsh` move.
