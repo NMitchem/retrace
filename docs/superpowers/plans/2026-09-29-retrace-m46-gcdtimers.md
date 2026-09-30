@@ -852,7 +852,7 @@ fn a_timer_disarm_is_classified() {
 }
 
 /// M46 §7: MONOTONIC and WALL timers name the clock the model lacks. fflags are judged before the
-/// ident, so the refusal names them (gcdtimer_e2e's `wall` test matches on this text).
+/// ident, so the refusal names them (kqmanager's WALL-timer test matches on this text).
 #[test]
 fn monotonic_and_wall_timers_are_refused_naming_their_fflags() {
     for (fflags, tidx) in [(0x198u32, 3u64), (0x9c, 6)] {
@@ -1664,9 +1664,10 @@ Expected: the rich tier fails on `the workqueue kqueue (M46)` or on `internal bo
   - the manager methods after it;
   - `schedule_after_block`.
 - Create: `crates/retrace-box/tests/kqmanager.rs`
-- Modify: `crates/retrace-core/src/lib.rs`: the `workq_kernreturn` and `kevent_qos` record arms and replay mirrors
+- Modify: `crates/retrace-core/src/lib.rs`: the `workq_kernreturn` and `kevent_qos` record arms and replay mirrors; the `ServiceGetSpecialPort` record arm and replay mirror (Step 4b, t0 Ruling T0-a)
+- Modify: `crates/retrace-core/src/machmsg.rs`: `TASK_BOOTSTRAP_PORT`, `TASK_DEBUG_CONTROL_PORT` (Step 4b)
 - Modify: `crates/retrace/tests/kqinit_e2e.rs:69`
-- Modify: `crates/retrace/tests/gcdtimer_e2e.rs`: `kevent_returns` and test 1
+- Modify: `crates/retrace/tests/gcdtimer_e2e.rs`: `kevent_returns`, `special_port_replies` and test 1
 
 **Interfaces:**
 - Consumes:
@@ -1679,7 +1680,16 @@ Expected: the rich tier fails on `the workqueue kqueue (M46)` or on `internal bo
   - `pub fn ThreadTable::stack_of(&self, tid: usize) -> (u64, u64)`
   - `pub fn ThreadTable::unpark(&mut self, tid: usize)`
   - private: `request_manager`, `spawn_manager`, `enter_manager`, `fill_manager_upcall`, `write_va_committing`, `guest_workq_kevent_return`, `park_on_svc`, `fire_due_timers`, `fmt_args`
-  - `gcdtimer_e2e.rs`: `kevent_returns(trace) -> Vec<(usize, u32, u64)>`
+  - `gcdtimer_e2e.rs`: `kevent_returns(trace) -> Vec<(usize, u32, u64)>`, `special_port_replies(trace) -> Vec<u32>`
+  - `retrace_core::machmsg::{TASK_BOOTSTRAP_PORT, TASK_DEBUG_CONTROL_PORT}: u32`
+
+**t0 Ruling T0-a (H3), which this task implements in Step 4b.**
+- **What t0 found.** t0 M3 measured a third registration on every fixture's path: libdispatch's `_voucher_activity_debug_channel_init` calls `task_get_special_port(TASK_DEBUG_CONTROL_PORT = 10)` (mach_msg2 3409). When the port it gets is non-null, it registers an `EVFILT_MACHPORT` knote for its debug channel.
+- **Why the recorder stops.** retrace's 3409 arm models only `which == 4` and asserts, so the recorder would panic there, before any timer.
+- **The ruling.** Answer `which == 10` with `KERN_SUCCESS` and `MACH_PORT_NULL`.
+  - retrace keeps no debug control port: the 3410 arm drops the port libtrace sets (M2-setport).
+  - libdispatch connects the channel only `if (dbgp)` (libdispatch `src/voucher.c:844`), so the registration never happens and no new `kevent_qos` shape is needed.
+  - The reply is deterministic, so replay recomputes and byte-compares it (the 3410 arm's standard posture). The `which == 4` reply keeps M2-xpcport's verbatim posture.
 
 - [ ] **Step 1: The failing gate: test 1, and the box-level manager tests**
 
@@ -1697,6 +1707,19 @@ fn kevent_returns(trace: &Path) -> Vec<(usize, u32, u64)> {
     }).collect()
 }
 
+/// The port name in every recorded `task_get_special_port` reply (msgh_id 3509), in trace order.
+/// The reply is the one write its mach_msg2 landmark carries: a 24-byte header with `msgh_id` at
+/// offset 20, the descriptor count at 24, then the port descriptor's name at 28
+/// (`machmsg::encode_get_special_port_reply`).
+fn special_port_replies(trace: &Path) -> Vec<u32> {
+    let word = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+    events(trace).into_iter().filter_map(|(_, e)| match e {
+        Event::Syscall { writes, .. } if writes.len() == 1 && writes[0].bytes.len() >= 32
+            && word(&writes[0].bytes, 20) == 3509 => Some(word(&writes[0].bytes, 28)),
+        _ => None,
+    }).collect()
+}
+
 /// Spec §3f test 1. A `dispatch_after` records to exit 0 with its markers, and two replays are
 /// byte-identical. Before M46 the recorder stopped at libdispatch's second `kevent_qos`, so the
 /// markers are the difference. The manager's KEVENT_RETURN landmarks, on a nonzero thread, are the
@@ -1706,6 +1729,11 @@ fn a_dispatch_after_fires_on_the_synthetic_clock_and_replays() {
     let (rec, trace) = records_and_replays(retrace_guest::AFTER_DYN, &[]);
     let out = String::from_utf8_lossy(&rec.stdout);
     assert!(out.starts_with("fired cell 0x") && out.ends_with("\nfired\ndone\n"), "stdout: {out:?}");
+    // t0 Ruling T0-a: libxpc's bootstrap port is minted, so its name is nonzero. libdispatch's
+    // debug control port is MACH_PORT_NULL, so its debug channel registers no EVFILT_MACHPORT knote.
+    let ports = special_port_replies(&trace);
+    assert!(ports.first().is_some_and(|&p| p != 0) && ports.iter().filter(|&&p| p == 0).count() == 1,
+        "a minted bootstrap port first, and exactly one null debug control port (T0-a): {ports:#x?}");
     let rets = kevent_returns(&trace);
     let manager = rets.first().map(|r| r.1)
         .expect("the manager must hand its changes back through KEVENT_RETURN");
@@ -2343,6 +2371,99 @@ Then, directly after that mirror's `rc != *ret` block, add:
 
 In `crates/retrace/tests/kqinit_e2e.rs`, line 69, replace `M45: unmeasured kevent_qos shape: {why}` with `M46: unmeasured kevent_qos shape: {why}`. This is the plan's named exception: the prefix names the milestone that owns the refusal, and the field text after it is unchanged.
 
+Also, in the record `SYS_KEVENT_QOS` arm, replace the comment paragraph that begins `// \`writes\` is empty and that is deliberate` with:
+
+```rust
+            // `writes` is empty and that is deliberate: the call's own out-parameters are untouched,
+            // and its return is a constant the replay mirror recomputes identically. A poke may fill
+            // the event manager's list, but that is a box write both sides recompute (M46 R3), not
+            // one this call records.
+```
+
+(Controller Ruling P5.)
+
+- [ ] **Step 4b: The debug control port (t0 Ruling T0-a)**
+
+In `crates/retrace-core/src/machmsg.rs`, directly before `pub fn decode_get_special_port`:
+
+```rust
+/// `TASK_BOOTSTRAP_PORT` (SDK `mach/task_special_ports.h`): libxpc's initializer fetches it, and
+/// retrace answers with a port minted in its own IPC space (M2-xpcport).
+pub const TASK_BOOTSTRAP_PORT: u32 = 4;
+/// `TASK_DEBUG_CONTROL_PORT` (SDK `mach/task_special_ports.h`): libtrace sets it (3410) and
+/// libdispatch's `_voucher_activity_debug_channel_init` fetches it (3409). retrace keeps none, so
+/// the fetch answers `MACH_PORT_NULL` (M46 t0 Ruling T0-a).
+pub const TASK_DEBUG_CONTROL_PORT: u32 = 10;
+```
+
+In `crates/retrace-core/src/lib.rs`'s `record_box`, replace the `machmsg::Route::ServiceGetSpecialPort => { … }` arm, comment included, with:
+
+```rust
+                    machmsg::Route::ServiceGetSpecialPort => {
+                        // task_get_special_port(3409). Never forwarded, since that would hand over
+                        // the host's real ports. Two ports are modeled:
+                        // - TASK_BOOTSTRAP_PORT (4), from libxpc's initializer. It is answered with a
+                        //   REAL kernel-valid send right minted in retrace's OWN IPC space
+                        //   (M2-xpcport). The minted name is nondeterministic, so it is RECORDED here
+                        //   and replay applies it verbatim (the task_self posture).
+                        // - TASK_DEBUG_CONTROL_PORT (10), from libdispatch's
+                        //   `_voucher_activity_debug_channel_init` (M46 t0 M3). It is answered with
+                        //   MACH_PORT_NULL. retrace keeps no debug control port, because the 3410 arm
+                        //   below drops the one libtrace sets. libdispatch connects its debug channel
+                        //   only `if (dbgp)` (voucher.c:844), so the channel's EVFILT_MACHPORT
+                        //   registration never happens (M46 Ruling T0-a). The reply is
+                        //   deterministic, so replay recomputes and byte-compares it.
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let which = machmsg::decode_get_special_port(&buf)
+                            .unwrap_or_else(|e| panic!("task_get_special_port (3409) decode: {e}"));
+                        let name = match which {
+                            machmsg::TASK_BOOTSTRAP_PORT => b.mint_bootstrap_port(),
+                            machmsg::TASK_DEBUG_CONTROL_PORT => 0,
+                            other => panic!("only TASK_BOOTSTRAP_PORT (4) and TASK_DEBUG_CONTROL_PORT (10) \
+                                             are modeled; got which={other}"),
+                        };
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_get_special_port_reply(m.reply_port, name) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 get_special_port: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
+```
+
+In `ReplaySession::advance`, replace the `machmsg::Route::ServiceGetSpecialPort => { … }` mirror, comment included, with:
+
+```rust
+                                    machmsg::Route::ServiceGetSpecialPort => {
+                                        // One posture per modeled port (see the record arm):
+                                        // - which == 4: the reply carries a REAL, nondeterministic
+                                        //   minted port name (M2-xpcport, task_self posture). It is
+                                        //   applied VERBATIM, because the name cannot be regenerated
+                                        //   and a byte-compare would guarantee a divergence.
+                                        // - which == 10: MACH_PORT_NULL, which is deterministic (M46
+                                        //   Ruling T0-a). This is the STANDARD posture: recompute,
+                                        //   byte-compare, then apply, as the 3410 arm does.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        let which = machmsg::decode_get_special_port(&buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay get_special_port decode: {e}") })?;
+                                        match which {
+                                            machmsg::TASK_BOOTSTRAP_PORT => {}
+                                            machmsg::TASK_DEBUG_CONTROL_PORT => {
+                                                let reply = machmsg::encode_get_special_port_reply(m.reply_port, 0);
+                                                if writes.len() != 1 || writes[0].bytes != reply {
+                                                    return Err(Divergence { landmark: self.idx, pc,
+                                                        detail: "task_get_special_port(TASK_DEBUG_CONTROL_PORT) reply mismatch".into() });
+                                                }
+                                            }
+                                            other => panic!("only TASK_BOOTSTRAP_PORT (4) and TASK_DEBUG_CONTROL_PORT (10) \
+                                                             are modeled; got which={other}"),
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+```
+
+Replace the literal `10` in both `ServiceSetSpecialPort` arms' `assert_eq!(which, 10, …)` with `machmsg::TASK_DEBUG_CONTROL_PORT`, so that the two arms name the one port they share.
+
 - [ ] **Step 5: Run the gate green, plus the neighbours and clippy**
 
 ```bash
@@ -2544,17 +2665,31 @@ fn a_repeating_timer_ticks_three_times_and_replays() {
     assert!(rets.len() >= 3 && rets.len() <= 24, "three fires: {} KEVENT_RETURNs", rets.len());
 }
 
-/// Spec §3f test 4: a WALL timer is refused by value, naming its fflags. An exit code alone would
-/// not do: a recorder that accepted the timer and jumped the clock to a wall-clock deadline could
-/// exit either way.
+/// Spec §3f test 4, re-planned by t0 Ruling T0-b. A WALL timer is refused by value before it
+/// arms.
+///
+/// libdispatch registers for calendar-change notifications the first time it arms a WALL timer,
+/// with an `EVFILT_MACHPORT` `kevent_qos` from the manager (t0 M3, `wall` call 7), before the
+/// KEVENT_RETURN that carries the timer's fflags `0x9c`. The recorder refuses that registration
+/// by its filter. The `0x9c` refusal itself is pinned at box level (`kqmanager.rs`) and in
+/// `gcdshapes.rs`.
+///
+/// An exit code alone would not do: a recorder that accepted the timer and jumped the clock to a
+/// wall-clock deadline could exit either way.
 #[test]
-fn a_wall_clock_timer_is_refused_naming_its_fflags() {
-    let (rec, _) = util::record_dynamic_args(retrace_guest::AFTER_DYN, &["wall"]);
+fn a_wall_clock_timer_is_refused_before_it_arms() {
+    let (rec, trace) = util::record_dynamic_args(retrace_guest::AFTER_DYN, &["wall"]);
     assert_eq!(rec.code, 101, "the recorder must stop at the refusal. stderr:\n{}", rec.stderr);
-    assert!(rec.stderr.contains("M46: unmeasured KEVENT_RETURN change: changelist[")
-            && rec.stderr.contains("fflags is 0x9c, measured one of 0x118, 0x138, 0x158"),
-        "the refusal must name the WALL fflags (t0 M3). stderr:\n{}", rec.stderr);
-    assert!(!rec.stdout.windows(6).any(|w| w == b"fired\n"), "the guest must not run past the refused arm");
+    assert!(rec.stderr.contains("M46: unmeasured kevent_qos shape: changelist[0].filter is 0xfff8"),
+        "the refusal must name the calendar-change registration's filter, -8 EVFILT_MACHPORT (t0 M3). \
+         stderr:\n{}", rec.stderr);
+    // The refused call appends no landmark, so a KEVENT_RETURN carrying a change in the trace
+    // would mean the manager armed something before the refusal. The WALL timer must never arm.
+    let armed = events(&trace).into_iter().filter(|(_, e)| matches!(e, Event::Syscall { num, args, .. }
+        if *num == retrace_arch::SYS_WORKQ_KERNRETURN
+        && args[0] == retrace_arch::WQOPS_THREAD_KEVENT_RETURN && args[2] & 0xffff_ffff != 0)).count();
+    assert_eq!(armed, 0, "no KEVENT_RETURN carrying a change may precede the refusal");
+    assert!(!rec.stdout.windows(6).any(|w| w == b"fired\n"), "the guest must not run past the refused registration");
 }
 
 fn synthetic_tsc(state: &str) -> u64 {
@@ -2725,7 +2860,9 @@ git commit -m "M46 t5: the gate — deadline order, a repeating timer, the WALL 
 
 Run each, record the symptom, restore:
 
-1. **The fflags check widened.** In `kevent_return_change`, replace the `let Some(tidx) = … else { … };` statement with `let tidx = UPTIME_TIMER_FFLAGS.iter().position(|&f| f == e.fflags).unwrap_or(0);`. Run `gcdtimer_e2e`. Expected: `a_wall_clock_timer_…` fails. Either the recorder no longer names `fflags is 0x9c` (it refuses on the ident instead), or it runs on. Restore with `git checkout -- crates/retrace-arch/src/lib.rs`.
+1. **The fflags check widened, then the registration check widened** (t0 Ruling T0-b: test 4 now stops at the calendar-change registration, so the fflags control goes to the box-level test that still reaches the fflags).
+   - **1a.** In `kevent_return_change`, replace the `let Some(tidx) = … else { … };` statement with `let tidx = UPTIME_TIMER_FFLAGS.iter().position(|&f| f == e.fflags).unwrap_or(0);`. Run `cargo test -p retrace-box --test kqmanager --no-fail-fast -- --test-threads=1`. Expected: `a_kevent_return_carrying_a_wall_timer_is_refused_naming_its_fflags` fails, because the refusal no longer names `fflags is 0x9c` and names the ident instead. Restore with `git checkout -- crates/retrace-arch/src/lib.rs`.
+   - **1b.** In `kevent_qos_shape`'s `match e.filter`, add the arm `-8 => Ok(KeventShape::ManagerPoke),` before the `other` arm, so that an `EVFILT_MACHPORT` registration is silently accepted. Run `gcdtimer_e2e`. Expected: `a_wall_clock_timer_is_refused_before_it_arms` fails, because the recorder runs past the registration and the refusal moves or disappears. Restore with `git checkout -- crates/retrace-arch/src/lib.rs`.
 2. **`kq` dropped from `from_checkpoint`.** Replace `kq: state.kq.clone(),` with `kq: kq::WorkqKqueue::default(),`. Run `gcdtimer_e2e`. Expected: `a_seek_across_the_idle_jump_…` fails: the warm session diverges at landmark `n`, because the emptied table holds no bound manager, so the manager's KEVENT_RETURN is refused as coming from a thread that is not it. Restore with `git checkout -- crates/retrace-box/src/lib.rs`.
 3. **M45's panic restored in the replay mirror.** In the `SYS_KEVENT_QOS` mirror, replace the `match self.b.guest_kevent_qos(args) { … };` with `self.b.guest_kevent_qos(args).unwrap_or_else(|m| panic!("{m}"));`. Run `gcdtimer_e2e`. Expected: `a_shape_refused_on_replay_…` fails with a panic in case 1. Restore with `git checkout -- crates/retrace-core/src/lib.rs`.
 
@@ -2844,10 +2981,11 @@ Find each passage with `grep -n` and edit it to describe the new reality:
   - a `dispatch_after` and a repeating timer source record and replay (`gcdtimer_e2e`);
   - the two refusal families;
   - R7: `gettimeofday`'s mach-time out-parameter is the guest's own clock, recorded.
-- **Known limits.** Add three:
+- **Known limits.** Add four:
   - §3e's limit: a timer fires only when some thread blocks, so a guest that spins waiting for one hangs;
-  - MONOTONIC and WALL timers, memory-pressure delivery and `EVFILT_MACHPORT`/`EVFILT_SIGNAL` knotes are refused by value;
-  - wall time (`gettimeofday`'s `tv`) is still the host's, recorded, while mach time is synthetic.
+  - MONOTONIC and WALL timers, memory-pressure delivery and `EVFILT_MACHPORT`/`EVFILT_SIGNAL` knotes are refused by value. A WALL timer is refused at its first step, the calendar-change registration (t0 Ruling T0-b);
+  - wall time (`gettimeofday`'s `tv`) is still the host's, recorded, while mach time is synthetic;
+  - `task_get_special_port(TASK_DEBUG_CONTROL_PORT)` answers `MACH_PORT_NULL`, so libdispatch's debug channel (what a `log stream` client attaches to) is never connected (t0 Ruling T0-a).
 
   Replace the sentence saying any `kevent_qos` shape other than the init is refused with the three-shape account.
 - **The ignored-gates paragraph** (`grep -n 'automationmodetool' docs/current-state.md`): outcome A says M46 un-parked it; outcome B names the new wall.
@@ -2917,6 +3055,8 @@ Append `## M46-gcdtimers: libdispatch timers, end to end, on the synthetic clock
   - plain-worker reuse;
   - preemptive firing;
   - wall time still the host's;
+  - the debug control port: kept (or minted) with a register-only `EVFILT_MACHPORT` knote, in place of T0-a's null answer;
+  - calendar-change notification (`host_request_notification` and its `EVFILT_MACHPORT` knote), the WALL clock's first step;
   - `automationmodetool`'s new wall, if outcome B;
   - M45's and M44's untouched owed items, by reference.
 
