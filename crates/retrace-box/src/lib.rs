@@ -680,7 +680,19 @@ const GUEST_THREAD_PORT_BASE: u32 = 0x0BAD_7000;
 /// libdispatch's `DLOCK_OWNER_MASK` reads both (measured by M46 Task 4: with bit 0 clear, a
 /// recursive `os_unfair_lock` waited on itself). A pre-M46 recording with a box-spawned thread
 /// replays with a different kport and diverges loudly.
+///
+/// **Bounded at `tid < 0x400`, and asserted.** `GUEST_THREAD_PORT_BASE` has bits 12–14 set, and
+/// `tid << 2` reaches bit 12 at tid `0x400`, so from there a name repeats an earlier thread's:
+/// tid `0x401` would get tid 1's `0x0BAD_7007`. Nothing downstream would notice. `thread_of_port`
+/// takes the first live match, and two lock owners would merge into one. The bound is reachable,
+/// because M18 never reuses a parked worker, so every workqueue request spawns a new tid. A guest
+/// that spawns more than 1023 threads stops here by design, rather than aliasing.
 const fn guest_thread_kport(tid: usize) -> u32 {
+    assert!(tid < 0x400,
+        "M46: a box-spawned thread id past 0x3ff reaches GUEST_THREAD_PORT_BASE's bits 12-14, so its \
+         mach port name would alias an earlier thread's (tid 0x401 would get tid 1's 0x0BAD7007) and \
+         two threads would share one name. M18 never reuses a parked worker, so a guest that spawns \
+         more than 1023 threads stops here by design; widen the name scheme before raising this bound.");
     GUEST_THREAD_PORT_BASE | ((tid as u32) << 2) | 3
 }
 
