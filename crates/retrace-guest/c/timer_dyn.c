@@ -1,7 +1,8 @@
 // M46. The repeating timer-source fixture (spec §3f): a DISPATCH_SOURCE_TYPE_TIMER with a 50 ms
 // interval prints "tick 1" to "tick 3", cancels itself on the third and signals main, which writes
-// "done\n". It exercises the re-arm after every fire, manager reuse across fires, and the disarm
-// the cancel issues for the armed fourth tick.
+// "done\n". It exercises the re-arm after every fire and manager reuse across fires. The cancel's
+// disarm of the armed fourth-tick timer does not reach the box before exit (M46 t5 measured one
+// timer still armed at the exit landmark), so the disarm path is not exercised.
 // Native stdout (M46 t0): "tick 1\ntick 2\ntick 3\ndone\n".
 #include <dispatch/dispatch.h>
 #include <stdio.h>

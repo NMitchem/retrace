@@ -101,7 +101,10 @@ fn two_timers_on_one_bucket_fire_in_deadline_order() {
     assert!(rets.len() >= 2 && rets.len() <= 12, "two fires: {} KEVENT_RETURNs", rets.len());
 }
 
-/// Spec §3f test 3: re-arm after every fire, and manager reuse across fires.
+/// Spec §3f test 3: re-arm after every fire, and manager reuse across fires. The `KEVENT_RETURN`
+/// disarm path (`ChangeEntry::TimerDelete`) is not guarded end to end by this fixture, because the
+/// cancel's disarm does not reach the box before exit (M46 t5); the box-level refusals in `kq.rs`
+/// are what cover it.
 #[test]
 fn a_repeating_timer_ticks_three_times_and_replays() {
     let (rec, trace) = records_and_replays(retrace_guest::TIMER_DYN, &[]);
@@ -130,9 +133,17 @@ fn a_wall_clock_timer_is_refused_before_it_arms() {
     assert!(rec.stderr.contains("M46: unmeasured kevent_qos shape: changelist[0].filter is 0xfff8"),
         "the refusal must name the calendar-change registration's filter, -8 EVFILT_MACHPORT (t0 M3). \
          stderr:\n{}", rec.stderr);
+    // Ruling T5-b: the `armed` count below is vacuous on an empty or truncated trace, so first
+    // prove the landmarks recorded before the refusal survive it. Main's `0x23` registrations
+    // (the memory-pressure source and the poke) both precede the manager's refused one.
+    let evs = events(&trace);
+    assert!(evs.iter().any(|(_, e)| matches!(e, Event::Syscall { num, args, .. }
+        if *num == retrace_arch::SYS_KEVENT_QOS && args[7] & 0xffff_ffff == 0x23)),
+        "the refused record must still leave its earlier landmarks readable: no 0x23 kevent_qos \
+         among the trace's {} events", evs.len());
     // The refused call appends no landmark, so a KEVENT_RETURN carrying a change in the trace
     // would mean the manager armed something before the refusal. The WALL timer must never arm.
-    let armed = events(&trace).into_iter().filter(|(_, e)| matches!(e, Event::Syscall { num, args, .. }
+    let armed = evs.into_iter().filter(|(_, e)| matches!(e, Event::Syscall { num, args, .. }
         if *num == retrace_arch::SYS_WORKQ_KERNRETURN
         && args[0] == retrace_arch::WQOPS_THREAD_KEVENT_RETURN && args[2] & 0xffff_ffff != 0)).count();
     assert_eq!(armed, 0, "no KEVENT_RETURN carrying a change may precede the refusal");
