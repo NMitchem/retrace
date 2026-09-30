@@ -1,0 +1,27 @@
+# t6-timeouts.sh: the last landmarks of each watchdog-killed run's kept trace (#0 is the Snapshot).
+# A recording that completes ends Exit/Crash then a final Snapshot; a trace ending at Exit/Crash
+# with no Snapshot after it was killed after the guest's own terminal event.
+== /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/docs/sweep-evidence/2026-09-29-m46/sweep/[.bin (5370791 bytes)
+events=249 torn=false
+gettimeofday(116) events=19
+#246 Syscall num=397 args=[2, 61440, 9, 1804f8a10, 0, 27ff880, 5d, 0] ret=0x9 ret1=0x0 err=false writes=0 thread=0
+#247 Syscall num=397 args=[2, 1ec70157f, 1, b, 61a40, 27ff880, 5d, 0] ret=0x1 ret1=0x0 err=false writes=0 thread=0
+#248 Exit code=2 thread=0
+== /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/docs/sweep-evidence/2026-09-29-m46/sweep/kill.bin (29077702 bytes)
+events=245 torn=false
+gettimeofday(116) events=16
+#242 Syscall num=397 args=[2, 27ff2d8, 86, 27ff35e, 100000bca, 27ff830, a, 0] ret=0x86 ret1=0x0 err=false writes=0 thread=0
+#243 Exit code=2 thread=0
+#244 Snapshot
+== /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/ded102ca-3bed-47b2-9edf-8814adf76fbc/scratchpad/ctl/moved-t6-1/dddiagnose.bin (9467025 bytes)
+events=391 torn=false
+gettimeofday(116) events=20
+#388 Syscall num=6 args=[4, 6bfc0, 1ca, 0, 0, 27fcb30, 74, bf0] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#389 Syscall num=463 args=[fffffffe, 27fcb98, 1000104, 0, 180233125, 27fcb80, 74, 400] ret=0x2 ret1=0x0 err=true writes=0 thread=0
+#390 Crash pc=0x180302eb0 esr=0x92000045 far=0x4000050040 thread=0
+== /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/ded102ca-3bed-47b2-9edf-8814adf76fbc/scratchpad/ctl/moved-base-2/ps.bin (57819351 bytes)
+events=7246 torn=false
+gettimeofday(116) events=17
+#7243 Syscall num=340 args=[27ff560, 27ff4d0, 0, 27ff56d, 0, 27ff407, 30303073797474, fffff0007ffff800] ret=0x0 ret1=0x0 err=false writes=2 thread=0
+#7244 Syscall num=399 args=[4, a002f9640, 0, a, 701008080, 27ff407, 30303073797474, fffff0007ffff800] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#7245 Syscall num=202 args=[27ff628, 2, 27ff624, 27ff618, 0, 0, 30, fffff0007ffff800] ret=0x0 ret1=0x0 err=false writes=2 thread=0

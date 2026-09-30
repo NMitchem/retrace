@@ -1,0 +1,110 @@
+1,54c1,54
+< ROW	/bin/[	PASS	2	2	50761	n/a		
+< ROW	/bin/bash	PASS	0	0	51065	n/a		
+< ROW	/bin/cat	PASS	0	0	51143	n/a		
+< ROW	/bin/chmod	PASS	1	1	51214	n/a		
+< ROW	/bin/cp	PASS	64	64	51361	n/a		
+< ROW	/bin/csh	FAIL	4	3	51426	336	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 336 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+< ROW	/bin/dash	PASS	0	0	51454	n/a		
+< ROW	/bin/date	PASS	0	0	51614	n/a		
+< ROW	/bin/dd	PASS	0	0	51688	n/a		
+< ROW	/bin/df	PASS	0	0	51766	n/a		
+< ROW	/bin/echo	PASS	0	0	52005	n/a		
+< ROW	/bin/ed	PASS	0	0	52070	n/a		
+< ROW	/bin/expr	PASS	2	2	52178	n/a		
+< ROW	/bin/hostname	PASS	0	0	52225	n/a		
+< ROW	/bin/kill	PASS	2	2	52284	n/a		
+< ROW	/bin/ksh	PASS	0	0	52335	n/a		
+< ROW	/bin/launchctl	PASS	1	1	52409	n/a		
+< ROW	/bin/link	PASS	1	1	52501	n/a		
+< ROW	/bin/ln	PASS	1	1	52534	n/a		
+< ROW	/bin/ls	PASS	0	0	52603	n/a		
+< ROW	/bin/mkdir	PASS	64	64	52629	n/a		
+< ROW	/bin/mv	PASS	64	64	52664	n/a		
+< ROW	/bin/pax	PASS	1	1	52700	n/a		
+< ROW	/bin/ps	FAIL	0	3	52743	16044		DIVERGENCE at landmark 16044 pc=0x1804b5584: memory divergence at ipa 0x701414078: replay=0xf5 recorded=0x00
+< ROW	/bin/pwd	PASS	0	0	52959	n/a		
+< ROW	/bin/realpath	PASS	0	0	52998	n/a		
+< ROW	/bin/rm	PASS	64	64	53032	n/a		
+< ROW	/bin/rmdir	PASS	1	1	53092	n/a		
+< ROW	/bin/sh	PASS	1	1	53141	n/a		
+< ROW	/bin/sleep	PASS	1	1	53177	n/a		
+< ROW	/bin/stty	PASS	1	1	53212	n/a		
+< ROW	/bin/sync	PASS	0	0	53325	n/a		
+< ROW	/bin/tcsh	FAIL	4	3	53400	336	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 336 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+< ROW	/bin/test	PASS	1	1	53432	n/a		
+< ROW	/bin/unlink	PASS	64	64	53527	n/a		
+< ROW	/bin/wait4path	PASS	1	1	53870	n/a		
+< ROW	/bin/zsh	PASS	0	0	53963	n/a		
+< ROW	/usr/bin/automationmodetool	FAIL	101	n/a	54100	n/a	thread 'main' (8220048) panicked at crates/retrace-box/src/lib.rs:5222:13: M45: unmeasured kevent_qos shape: x3 (eventlist) is 0x27fedb8, measured 0x0. Only libdispatch's `_dispatch_kq_init` (KEVENT_FLAG_WORKQ|IMMEDIATE, one EVFILT_USER EV_ADD|EV_CLEAR entry, no event list) is modelled (M45 §2a). Me	
+< ROW	/usr/bin/desdp	PASS	71	71	54122	n/a		
+< ROW	/usr/bin/dyld_info	PASS	71	71	54196	n/a		
+< ROW	/usr/bin/flex	PASS	71	71	54323	n/a		
+< ROW	/usr/bin/dddiagnose	PASS	139	139	54420	n/a		
+< ROW	/usr/bin/basename	PASS	1	1	54561	n/a		
+< ROW	/usr/bin/dirname	PASS	1	1	54656	n/a		
+< ROW	/usr/bin/env	PASS	0	0	54714	n/a		
+< ROW	/usr/bin/head	PASS	0	0	54756	n/a		
+< ROW	/usr/bin/tail	PASS	0	0	54817	n/a		
+< ROW	/usr/bin/sort	PASS	0	0	54861	n/a		
+< ROW	/usr/bin/uniq	PASS	0	0	54961	n/a		
+< ROW	/usr/bin/cut	PASS	1	1	55028	n/a		
+< ROW	/usr/bin/tr	PASS	1	1	55070	n/a		
+< ROW	/usr/bin/yes	FAIL	137	n/a	55194	n/a		
+< ROW	/usr/bin/true	PASS	0	0	55960	n/a		
+< ROW	/usr/bin/printenv	PASS	0	0	56189	n/a		
+---
+> ROW	/bin/[	FAIL	137	n/a	12468	n/a		
+> ROW	/bin/bash	PASS	0	0	12555	n/a		
+> ROW	/bin/cat	PASS	0	0	12693	n/a		
+> ROW	/bin/chmod	PASS	1	1	13175	n/a		
+> ROW	/bin/cp	PASS	64	64	13461	n/a		
+> ROW	/bin/csh	FAIL	4	3	13705	338	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 338 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+> ROW	/bin/dash	PASS	0	0	13808	n/a		
+> ROW	/bin/date	PASS	0	0	14312	n/a		
+> ROW	/bin/dd	PASS	0	0	14940	n/a		
+> ROW	/bin/df	PASS	0	0	15027	n/a		
+> ROW	/bin/echo	PASS	0	0	15174	n/a		
+> ROW	/bin/ed	PASS	0	0	15394	n/a		
+> ROW	/bin/expr	PASS	2	2	15886	n/a		
+> ROW	/bin/hostname	PASS	0	0	15969	n/a		
+> ROW	/bin/kill	FAIL	2	137	16506	n/a		
+> ROW	/bin/ksh	PASS	0	0	16818	n/a		
+> ROW	/bin/launchctl	PASS	1	1	17102	n/a		
+> ROW	/bin/link	PASS	1	1	17189	n/a		
+> ROW	/bin/ln	PASS	1	1	17289	n/a		
+> ROW	/bin/ls	PASS	0	0	17342	n/a		
+> ROW	/bin/mkdir	PASS	64	64	17427	n/a		
+> ROW	/bin/mv	PASS	64	64	17472	n/a		
+> ROW	/bin/pax	PASS	1	1	17529	n/a		
+> ROW	/bin/ps	PASS	0	0	17573	n/a		
+> ROW	/bin/pwd	PASS	0	0	17670	n/a		
+> ROW	/bin/realpath	PASS	0	0	17717	n/a		
+> ROW	/bin/rm	PASS	64	64	17757	n/a		
+> ROW	/bin/rmdir	PASS	1	1	17800	n/a		
+> ROW	/bin/sh	PASS	1	1	17848	n/a		
+> ROW	/bin/sleep	PASS	1	1	17901	n/a		
+> ROW	/bin/stty	PASS	1	1	17948	n/a		
+> ROW	/bin/sync	PASS	0	0	17996	n/a		
+> ROW	/bin/tcsh	FAIL	4	3	18041	340	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 340 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+> ROW	/bin/test	PASS	1	1	18087	n/a		
+> ROW	/bin/unlink	PASS	64	64	18125	n/a		
+> ROW	/bin/wait4path	PASS	1	1	18172	n/a		
+> ROW	/bin/zsh	PASS	0	0	18219	n/a		
+> ROW	/usr/bin/automationmodetool	FAIL	101	n/a	18284	n/a	thread 'main' (10993161) panicked at crates/retrace-arch/src/lib.rs:1002:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument fro	
+> ROW	/usr/bin/desdp	PASS	71	71	18308	n/a		
+> ROW	/usr/bin/dyld_info	PASS	71	71	18364	n/a		
+> ROW	/usr/bin/flex	PASS	71	71	18436	n/a		
+> ROW	/usr/bin/dddiagnose	FAIL	4	3	18507	452	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1e03 (guest task port Some(515)) send_size 24	DIVERGENCE at landmark 452 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+> ROW	/usr/bin/basename	PASS	1	1	18545	n/a		
+> ROW	/usr/bin/dirname	PASS	1	1	18590	n/a		
+> ROW	/usr/bin/env	PASS	0	0	18634	n/a		
+> ROW	/usr/bin/head	PASS	0	0	18694	n/a		
+> ROW	/usr/bin/tail	PASS	0	0	18751	n/a		
+> ROW	/usr/bin/sort	PASS	0	0	18799	n/a		
+> ROW	/usr/bin/uniq	PASS	0	0	18845	n/a		
+> ROW	/usr/bin/cut	PASS	1	1	18889	n/a		
+> ROW	/usr/bin/tr	PASS	1	1	18933	n/a		
+> ROW	/usr/bin/yes	FAIL	137	n/a	18979	n/a		
+> ROW	/usr/bin/true	PASS	0	0	19052	n/a		
+> ROW	/usr/bin/printenv	PASS	0	0	19096	n/a		
