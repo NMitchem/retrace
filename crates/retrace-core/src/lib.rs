@@ -2281,6 +2281,14 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!("workq_kernreturn recorded ret1={ret1:#x}; the emulation records 0") });
                                 }
+                                // Record fixes `err: false, writes: []` (its only arm appends on
+                                // `Ok` alone, and the generic forward arm asserts this number never
+                                // reaches it), so refuse a recording carrying either, as the
+                                // kevent_qos mirror below does.
+                                if *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("workq_kernreturn recorded err={err} with {} writes; the emulation records neither", writes.len()) });
+                                }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
