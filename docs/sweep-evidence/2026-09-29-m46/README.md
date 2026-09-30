@@ -9,17 +9,19 @@ Two measurements live here:
   binary.
 
 **Result: `TALLY pass=47 fail=7 skip=0`,** against M45's `pass=49 fail=5`. Seven rows differ from
-M45's, and every one is explained below by measurement:
+M45's. Five are explained below by measurement, and two, the watchdog kills, are attributed to host
+load by elimination:
 
 - **`automationmodetool`** is still `FAIL` 101/n/a. It now stops at the next wall: `kevent_id`(375),
   a libdispatch workloop thread request, which has no `arg_kinds` row and is outside M46 (§7 H5).
   M45 stopped it at the second `kevent_qos`. **This is the only move M46 made** (outcome B).
-- **`/bin/[` moved from `PASS` 2/2 to `FAIL` 137/n/a (timed out after 30s recording).** Host
-  state: the host's load. The kept trace had already recorded the guest's own `Exit code=2` when
-  the watchdog killed the recorder. All four controls pass 2/2, two on each binary.
-- **`/bin/kill` moved from `PASS` 2/2 to `FAIL` 2/137 (timed out after 30s replaying).** Host
-  state: the host's load. The sweep's own recording replays clean, rp 2 with no divergence, in
-  6–16 s on both binaries. All four controls pass.
+- **`/bin/[` moved from `PASS` 2/2 to `FAIL` 137/n/a (timed out after 30s recording).** Not
+  reproduced on either binary; attributed to host load by elimination. The kept trace had already
+  recorded the guest's own `Exit code=2` when the watchdog killed the recorder. All four controls
+  pass 2/2, two on each binary.
+- **`/bin/kill` moved from `PASS` 2/2 to `FAIL` 2/137 (timed out after 30s replaying).** Not
+  reproduced on either binary; attributed to host load by elimination. The sweep's own recording
+  replays clean, rp 2 with no divergence, in 6–16 s on both binaries. All four controls pass.
 - **`/bin/ps` moved from `FAIL` 0/3 to `PASS` 0/0.** Host state. M45's `FAIL` was a class-E row, a
   page the host reclaimed, and M45 measured it as intermittent. Here it passes on both binaries.
 - **`/usr/bin/dddiagnose` moved from `PASS` 139/139 (identical fault) to `FAIL` 4/3, msgh_id 205.**
@@ -28,11 +30,14 @@ M45's, and every one is explained below by measurement:
   guest's own `gettimeofday` count. On all eight traced samples, on both binaries, the trap count
   minus the `gettimeofday` traps is 317, the constant M45 measured.
 
-**The tally is depressed by the host's load, not by M46.** The two new `FAIL`s are both watchdog
-kills (`[`, `kill`). They happened during the sweep, at a load average of 35–50 on 12 CPUs, from
-an unrelated `cargo-mutants` run. Neither reproduces on either binary in any control. The two other
-count moves cancel: `ps` went `FAIL` → `PASS` and `dddiagnose` went `PASS` → `FAIL`. If the two
-timeouts are set aside, the tally matches M45's 49/5.
+**The two new `FAIL`s are watchdog kills that no control reproduced.** Both `[` and `kill` were
+killed by the 30 s watchdog during the sweep, while an unrelated `cargo-mutants` run loaded the
+12-CPU host: a 1-minute load of 35.31 at the sweep's start, and 15-minute averages of 24.85 at the
+start, 27.40 at 00:46 and 23.81 at the end (`sweep.log`, `sweep-midpoint.txt`). Neither kill
+reproduces on either binary in any control, so M46 is not shown to cause them, and load is the
+attribution by elimination, not a measurement. The two other count moves cancel: `ps` went `FAIL` →
+`PASS` and `dddiagnose` went `PASS` → `FAIL`. If the two timeouts are set aside, the tally matches
+M45's 49/5.
 
 **R7 reaches no moved row.** R7 rewrites `gettimeofday`'s mach-time out-parameter only when the call
 passes one (`x2 != 0`). Every kept trace was read, from the sweep, the controls and Step 1: 26
@@ -42,20 +47,28 @@ So no landmark in this sweep moved because of R7.
 ## Host state
 
 An unrelated `cargo-mutants` run shared the host throughout. It is not this milestone's, and it was
-not touched. The host has 12 CPUs (`sysctl hw.ncpu`). Load averages, as `uptime` printed them:
+not touched. The host has 12 CPUs (`sysctl hw.ncpu`). The logged load averages, as `uptime`
+printed them into committed files:
 
 | when | load averages (1 / 5 / 15 min) |
 |---|---|
 | sweep start, 00:19 (`sweep.log`) | 35.31 / 22.56 / 24.85 |
-| during, 00:20 / 00:21 | 41.47 / 42.61 (1-min) |
-| during, 00:43 | 50.40 / 36.47 / 30.67 |
+| mid-sweep, 00:46, row 30 of 54 (`sweep-midpoint.txt`) | 14.33 / 26.32 / 27.40 |
 | sweep end, 00:50:29 (`sweep.log`) | 13.38 / 19.16 / 23.81 |
 | controls, 00:51–00:58 (`controls.txt`, per round) | 10.71 → 8.13 → **34.77** → 16.96 (1-min) |
 | traced samples, 00:59–01:01 (`samples.txt`) | 7.5–8.1, then 6.34 (1-min) |
 
-The sweep took 31 minutes. Load is a named factor in every timeout below. The controls ran at a
-lower load than the sweep, except at round 2's start, 34.77. That spike is when the base binary's
-own `ps` timed out.
+`sweep-midpoint.txt` is the output of `t6-wait-rows.sh`, a bounded wait this task ran on the sweep
+log. It was written at 00:46 and copied here unchanged in fix round 1.
+
+**Unlogged observations.** Three more `uptime` readings were taken by hand during the sweep. They
+were not written to any file, so they are observations, not evidence: 1-minute loads of 41.47 at
+00:20, 42.61 at 00:21 and 50.40 at 00:43.
+
+The sweep took 31 minutes. Load is the attributed factor in every timeout below. Most control rounds
+started at 1-minute loads of 8–17, lower than the sweep's start. The exception is round 2's base
+start, 34.77, close to the sweep's 35.31, and that is the round in which the base binary's own `ps`
+timed out.
 
 ## Method
 
@@ -113,9 +126,9 @@ own `ps` timed out.
 
 | row | label | `rc`/`rp` | wall |
 |---|---|---|---|
-| `/bin/[` | `FAIL` (timed out after 30s recording) | 137 / n/a | **host state (load)**: the kept trace ends `#248 Exit code=2` with no final snapshot (below) |
+| `/bin/[` | `FAIL` (timed out after 30s recording) | 137 / n/a | **attributed to host load (not reproduced)**: the kept trace ends `#248 Exit code=2` with no final snapshot (below) |
 | `/bin/csh` | `FAIL` (record error) | 4 / 3 | 3403 (`mach_ports_register` ← `fork`), class C (unchanged); landmark 338 |
-| `/bin/kill` | `FAIL` (timed out after 30s replaying) | 2 / 137 | **host state (load)**: the recording is complete and replays clean on both binaries (below) |
+| `/bin/kill` | `FAIL` (timed out after 30s replaying) | 2 / 137 | **attributed to host load (not reproduced)**: the recording is complete and replays clean on both binaries (below) |
 | `/bin/tcsh` | `FAIL` (record error) | 4 / 3 | 3403, class C (unchanged); landmark 340 |
 | `/usr/bin/automationmodetool` | `FAIL` (recorder panicked) | 101 / n/a | `M33: syscall 375 (375) has no arg_kinds row` — `kevent_id`, a workloop thread request, class C, M46 §7 H5 (the walk, below) |
 | `/usr/bin/dddiagnose` | `FAIL` (record error) | 4 / 3 | `mach_msg2` msgh_id 205 (`host_get_io_main`), class C (unchanged); landmark 452 |
@@ -135,8 +148,8 @@ No row is an `identical fault` in this sweep.
 | row | M45 | M46 | moved by |
 |---|---|---|---|
 | `/usr/bin/automationmodetool` | `FAIL` 101/n/a, panic: `M45: unmeasured kevent_qos shape` | `FAIL` 101/n/a, panic: `M33: syscall 375 (375) has no arg_kinds row` | **M46**: the second `kevent_qos` is modelled, and the run reaches `kevent_id` |
-| `/bin/[` | `PASS` 2/2 | `FAIL` 137/n/a, timed out recording | **host state**: the host's load (below) |
-| `/bin/kill` | `PASS` 2/2 | `FAIL` 2/137, timed out replaying | **host state**: the host's load (below) |
+| `/bin/[` | `PASS` 2/2 | `FAIL` 137/n/a, timed out recording | **attributed to host load (not reproduced)**, by elimination (below) |
+| `/bin/kill` | `PASS` 2/2 | `FAIL` 2/137, timed out replaying | **attributed to host load (not reproduced)**, by elimination (below) |
 | `/bin/ps` | `FAIL` 0/3, landmark 16044 (class E) | `PASS` 0/0 | **host state**: M45's intermittent reclaimed page (below) |
 | `/usr/bin/dddiagnose` | `PASS` 139/139 (identical fault) | `FAIL` 4/3, 205, landmark 452 | **host state**: both outcomes on both binaries (below) |
 | `/bin/csh` | `FAIL` 4/3, landmark 336 | `FAIL` 4/3, landmark 338 | the guest's own `gettimeofday` count (below) |
@@ -162,7 +175,7 @@ t6:
 **`automationmodetool` is the one row whose outcome follows the binary.** Both base runs stop at
 M45's wall, and both t6 runs stop at `kevent_id`.
 
-### `/bin/[` and `/bin/kill`: watchdog kills under load
+### `/bin/[` and `/bin/kill`: watchdog kills, not reproduced
 
 Each row timed out once, in the sweep. That had never happened to either row: no earlier sweep
 here (M38, M39, M44, M45) shows any timeout except `yes`.
@@ -173,12 +186,12 @@ here (M38, M39, M44, M45) shows any timeout except `yes`.
   other run, when the watchdog killed the recorder at its final full-memory snapshot. Nothing hung.
 - The sweep's `kill.bin` is complete: `#243 Exit code=2`, then `#244 Snapshot`. Only its replay
   was killed.
-- Two control runs were also killed by the watchdog, one on each binary, which shows that load
-  kills runs on both binaries:
+- Two control runs were also killed by the watchdog, one on each binary. So a watchdog kill does
+  not follow the binary:
   - **t6, round 1, `dddiagnose`.** Its trace ends `#390 Crash pc=0x180302eb0 esr=0x92000045`, the
     M45 `mfm_alloc` fault face, with no final Snapshot. The guest had reached its fault.
-  - **base, round 2, `ps`.** Killed mid-run at landmark 7245 of its roughly 16043. That was during
-    the 34.77 load spike, and it was the **base** binary.
+  - **base, round 2, `ps`.** Killed mid-run at landmark 7245 of its roughly 16043, in the round
+    that started at a 1-minute load of 34.77. It was the **base** binary.
 
 **The recordings are sound** (`samples.txt` A). The sweep's own `kill.bin` replayed on both
 binaries, twice each, alternating:
@@ -188,12 +201,19 @@ A 1 t6 rp=2 secs=6 stdout=134 divergence-lines=0
 A 2 base rp=2 secs=16 stdout=134 divergence-lines=0
 A 2 t6 rp=2 secs=16 stdout=134 divergence-lines=0
 ```
-At a load of about 8, the replay takes 6–16 s on either binary. The sweep ran at 35–50, and there it
-took more than 30 s.
+At a load of about 8, the replay takes 6–16 s on either binary. In the sweep, which started at a
+1-minute load of 35.31 (`sweep.log`), it took more than 30 s.
 
-**Ruling.** Host state. The base binary shows the same kind of kill (`ps`, round 2). Each row passes
-in 4 of 4 controls on both binaries. Every killed trace had reached, or passed, the guest's own
-terminal event.
+**Ruling.** Not reproduced on either binary; attributed to host load by elimination. Each row passes
+4 of 4 controls, two on each binary, at logged 1-minute loads of 8–35, and the base binary was
+never swept at the sweep's own load. So the cause is not measured. What supports load as the
+attribution:
+- the base binary has its own watchdog kill (`ps`, round 2), and so does t6 (`dddiagnose`,
+  round 1);
+- the sweep's `[` trace had reached the guest's own `Exit code=2`, `kill`'s recording is complete
+  through `Exit` and its final Snapshot, and t6's `dddiagnose` kill came after its `Crash`: none of
+  those kills cut off a guest that had not reached its terminal event. (The base `ps` kill, mid-run,
+  is the exception, and it is on the base binary.)
 
 ### `/bin/ps`: back to `PASS`
 
@@ -252,12 +272,18 @@ B 2 tcsh t6 rc=4 traps=343 gtod=26 traps-gtod=317
 the record exited 101, so no replay ran (`t6-step1.sh`, `automationmodetool.rec.err`, 365 `[trap]`
 lines).
 
-**Where M46's model carries the run** (`landmarks.txt`, the trace's own events):
+**Where M46's model carries the run** (`landmarks.txt`, the trace's own events). `landmarks.txt`
+was produced by an earlier build of the committed `tracedump.rs`, which lacked only the final
+`with-mach-time-out-param` count; every line it does print is unchanged in the later build:
 - `#362` is `kevent_qos`, M45's init: rc 0.
 - `#363` is `kevent_qos` with `x3 = 0x27fedb8`, `x4 = 16`, `x7 = 0x23`: the memory-pressure
   registration M45 refused. It **records, rc 0, no writes, thread 0.**
-- `#364` is `mach_msg2` msgh_id 3409, `task_get_special_port(which = 10, TASK_DEBUG_CONTROL_PORT)`.
-  It is answered with `MACH_PORT_NULL` (t0 Ruling T0-a), one write.
+- `#364` is `mach_msg2` msgh_id 3409 (decoded in `automationmodetool.rec.err`: `which` = 10,
+  `TASK_DEBUG_CONTROL_PORT`). The trace shows `#364 Syscall num=-47 … ret=0x0 … err=false writes=1
+  thread=0`: one write, the reply. That reply answers `MACH_PORT_NULL` by M46 Ruling T0-a (Task 0:
+  `task_get_special_port(TASK_DEBUG_CONTROL_PORT = 10)` answers `KERN_SUCCESS` with
+  `MACH_PORT_NULL`, recomputed and byte-compared on replay). `landmarks.txt` shows the write count,
+  not the reply's bytes.
 
 **The wall is landmark 365**, the call after those, which is never appended:
 - `kevent_id`(375), trap pc `0x1804afa74`;
@@ -290,9 +316,13 @@ lines).
   `com.apple.NSXPCConnection.m-user.com.apple.dt.automationmode.reader`.
 - **The frame chain.** It was walked from `x29` at the svc, and each saved lr had its PAC bits
   stripped. It was symbolicated by lldb against the host's shared cache. The guest's libraries sit
-  at the same addresses: `x30`, `0x180359a64`, is exactly `_dispatch_kq_poll+216`'s
-  `bl kevent_id` + 4, and M45's `kevent_qos` return `0x180359a2c` is `_dispatch_kq_poll+164`'s.
-  The chain:
+  at the same addresses (`automationmodetool.kqpoll.txt`, `t6-kqpoll.sh`):
+  - `x30`, `0x180359a64`, is `_dispatch_kq_poll+220`, the return address of the `bl kevent_id` at
+    `_dispatch_kq_poll+216`;
+  - M45's `kevent_qos` return, `0x180359a2c` (`x30` in M45's `automationmodetool.entry.txt`), is
+    `_dispatch_kq_poll+164`, the return address of the `bl kevent_qos` at `+160`.
+
+  The chain, each frame named by its return address:
   - libdispatch `_dispatch_kq_poll+220`
   - libdispatch `_dispatch_event_loop_poke+336`
   - libxpc `_xpc_connection_init_failed+352`
@@ -331,27 +361,30 @@ lines).
 
 ## Ruling
 
-Every row that moved is explained by measurement:
+Five moved rows are explained by measurement, and two are attributed by elimination:
 - **`automationmodetool`** moved by M46. The memory-pressure registration now records, and the run
   reaches `kevent_id`, outside M46 (H5). In the controls, its outcome follows the binary.
-- **`[`** and **`kill`** moved by host state: watchdog kills under a load of 35–50 from an unrelated
-  process.
-  - Each kept trace had reached the guest's own exit.
-  - Each row passes 4 of 4 controls on both binaries.
-  - The base binary shows the same kind of kill (`ps`).
+- **`[`** and **`kill`**: watchdog kills, not reproduced on either binary, attributed to host load by
+  elimination. The sweep started at a logged 1-minute load of 35.31, from an unrelated process.
+  - The sweep's `[` trace had reached the guest's own exit, and `kill`'s recording is complete.
+  - Each row passes 4 of 4 controls, two on each binary.
+  - Both binaries have a watchdog kill of their own in the controls (base `ps`, t6 `dddiagnose`).
 - **`ps`** moved by host state, M45's intermittent class-E reclaim not recurring.
 - **`dddiagnose`** moved by host state, M45's coin flip: both faces occur on both binaries.
 - **`csh`/`tcsh`** moved by the guest's `gettimeofday` count. `traps − gtod` is 317 on all eight
   samples on both binaries, and R7 does not act on any of those calls.
 
-**No row moved because of M46's diff other than `automationmodetool`.** No moved row is
-unexplained, so none is H5 on that account. R7 changed nothing observable in this corpus: no kept
+**No row is shown to have moved because of M46's diff other than `automationmodetool`.** No moved
+row is left without an explanation, so none is H5 on that account, but the two timeouts rest on
+elimination rather than a reproduced measurement. R7 changed nothing observable in this corpus: no kept
 trace has a `gettimeofday` with a mach-time out-parameter.
 
 ## Files
 
 - `sweep.log`: the full detached log. It holds the wrapper's header lines, `load-start`, 54 `ROW`
   lines, `TALLY pass=47 fail=7 skip=0`, `SWEEP_EXIT=0` and `load-end`.
+- `sweep-midpoint.txt`: `t6-wait-rows.sh`'s output at 00:46, row 30 of 54, with its `uptime` line
+  (added in fix round 1, unchanged).
 - `rows.txt`: the sweep's `ROW` lines.
 - `rowdiff.txt`: the brief's raw diff against M45's `ROW` lines.
 - `rowdiff-norm.txt`: the normalised diff (47 identical, 7 differ).
@@ -363,7 +396,8 @@ trace has a `gettimeofday` with a mach-time out-parameter.
   runs.
 - `timeouts.txt`: the last landmarks of each watchdog-killed run.
 - `r7reach.txt`: the `gettimeofday` counts per kept trace, and those R7 acts on.
-- The walk: `automationmodetool.{rec.err,rec.out,entry.txt,frames.txt}` and `landmarks.txt`.
+- The walk: `automationmodetool.{rec.err,rec.out,entry.txt,frames.txt,kqpoll.txt}` and
+  `landmarks.txt`.
 - The scripts, with the session's scratchpad paths left as they ran:
   - `t6-step1.sh`, the brief's Step 1;
   - `t6-wall-entry.sh`;
@@ -374,7 +408,8 @@ trace has a `gettimeofday` with a mach-time out-parameter.
   - `t6-controls.sh`;
   - `t6-samples.sh`;
   - `t6-timeouts.sh`;
-  - `t6-r7reach.sh`.
+  - `t6-r7reach.sh`;
+  - `t6-wait-rows.sh` and `t6-kqpoll.sh`, both added in fix round 1.
 - `tracedump.rs`: the throwaway reader's source.
 - **No `.bin` trace files are committed.**
   - The sweep kept seven. They were read by `timeouts.txt` and `r7reach.txt`, then removed.
