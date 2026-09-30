@@ -32,3 +32,34 @@ fn every_box_spawned_kport_ends_in_binary_11_like_a_real_port_name() {
     owners.dedup();
     assert_eq!(owners.len(), kports.len(), "distinct kports, even under DLOCK_OWNER_MASK: {kports:#x?}");
 }
+
+/// Spawn tids `1..=n` through `bsdthread_create`, all on one pthread struct, so each spawn
+/// overwrites its `+0xf8` kport field and `kport_of(n)` reads the name tid `n` was given.
+fn spawn_through(n: usize) -> Box_ {
+    let mut b = tb();
+    b.set_thread_start_pc(0x0001_804b_2000);
+    let p = b.stack_top() - 0x1000;
+    for _ in 1..=n {
+        b.guest_bsdthread_create([0x1_0002_4e00, 0, p - 0x100, p, 0, 0, 0, 0]);
+    }
+    b
+}
+
+/// `GUEST_THREAD_PORT_BASE` (`0x0BAD_7000`) has bits 12–14 set, so `tid << 2` fits under them only
+/// up to tid `0x3ff`. That last tid still gets a name ending in binary 11.
+#[test]
+fn tid_0x3ff_is_the_last_kport_the_scheme_can_name_and_it_ends_in_binary_11() {
+    let b = spawn_through(0x3ff);
+    let k = b.kport_of(0x3ff).expect("the shared pthread is mapped");
+    assert_eq!(k, 0x0BAD_7FFF, "GUEST_THREAD_PORT_BASE | (0x3ff << 2) | 3");
+    assert_eq!(k & 3, 3, "{k:#x} must end in binary 11");
+}
+
+/// From tid `0x400` on, `tid << 2` reaches the base's bits, and tid `0x401` would be handed tid 1's
+/// `0x0BAD_7007`. Two threads with one name alias silently in `thread_of_port` and in lock owners,
+/// and M18 never reuses a worker, so the box stops at the 1024th spawn instead.
+#[test]
+#[should_panic(expected = "M18 never reuses a parked worker, so a guest that spawns more than 1023 threads stops here by design")]
+fn tid_0x400_is_refused_because_its_kport_would_alias_an_earlier_threads() {
+    spawn_through(0x400);
+}
