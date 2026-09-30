@@ -1257,10 +1257,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // M10: `ret` is already a GUEST descriptor when this syscall produced one, and a
                 // successful close has already retired its slot — forward_and_diff owns both halves
                 // of the fd contract so no caller has to remember the second one.
-                let (ret, ret1, err, writes) = b.forward_and_diff(num, args);
+                let (ret, ret1, err, mut writes) = b.forward_and_diff(num, args);
                 // M38: pipe's write end. Gated on the row, not on `ret1 != 0`, so the guest's x1
                 // is touched for exactly the rows replay touches it for.
                 if retrace_arch::returns_fd_pair(num) { b.set_ret1(ret1); }
+                // M46 R7: gettimeofday's mach-time out-parameter is the guest's own clock, not the
+                // host's (see Box_::synthesize_mach_time_out). The rewrite is appended to the
+                // event's writes, so replay applies it last with no code of its own. A failed call
+                // wrote nothing, so there is nothing to rewrite.
+                if num == retrace_arch::SYS_GETTIMEOFDAY && args[2] != 0 && !err {
+                    writes.push(b.synthesize_mach_time_out(args[2]));
+                }
                 w.append(&Event::Syscall { num, args, ret, ret1, err, writes, thread }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }

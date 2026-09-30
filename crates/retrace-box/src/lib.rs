@@ -152,6 +152,10 @@ pub const SHARED_REGION_END:   u64 = 0x3_0000_0000;
 // live kernel page — makes record and replay read identical bytes; the copy is captured in the
 // initial snapshot, so restore re-maps it and replay diverges nowhere.
 pub const COMMPAGE_IPA: u64 = 0x0000_000F_FFFF_C000;
+/// M46: `_COMM_PAGE_TIMEBASE_OFFSET` (xnu `osfmk/arm/cpu_capabilities.h`): what the guest's
+/// `mach_absolute_time` adds to the counter it reads (t0 M1(c)). The commpage is a copy frozen at
+/// load and restored from the snapshot, so this word is identical on every rebuild path.
+const COMMPAGE_TIMEBASE_OFFSET_IPA: u64 = COMMPAGE_IPA + 0x88;
 // A second commpage-region page the kernel maps just below the data commpage (dyld reads it in
 // early init). Same treatment: freeze a host copy. Both pages are one granule each.
 pub const COMMPAGE2_IPA: u64 = 0x0000_000F_FFFF_4000;
@@ -5232,6 +5236,50 @@ impl Box_ {
                     args.map(|a| format!("{a:#x}")).join(","));
         }
         0
+    }
+
+    /// M46: the guest-visible `mach_absolute_time` for the current synthetic clock. It is the
+    /// counter the timebase `MRS` last returned plus the commpage's timebase offset, which is what
+    /// the guest's own `mach_absolute_time` computes (t0 M1(c)). Every input is box state that
+    /// record and replay hold identically.
+    fn now_guest(&self) -> u64 {
+        self.synthetic_tsc.wrapping_add(self.timebase_offset())
+    }
+
+    /// M46: the commpage's `_COMM_PAGE_TIMEBASE_OFFSET`. Only a dynamic guest has a commpage, and
+    /// only a dynamic guest reads the guest clock through `mach_get_times` or arms a timer.
+    fn timebase_offset(&self) -> u64 {
+        let b = self.read_guest_checked(COMMPAGE_TIMEBASE_OFFSET_IPA, 8).expect(
+            "M46: the guest clock was read on a box with no commpage. Only a dynamic guest reaches \
+             mach_get_times's fallback or arms a timer.");
+        u64::from_le_bytes(b.try_into().unwrap())
+    }
+
+    /// M46 R7: rewrite `gettimeofday`'s (116) `mach_absolute_time` out-parameter, which the host
+    /// kernel has just written with the HOST's mach time, to the guest's own clock. Returns the
+    /// write for the recorder to append to the event, so that the trace carries the guest's value
+    /// and replay's ordinary `apply_and_return` lands it last.
+    ///
+    /// **Why:** `mach_get_times` falls back to this syscall whenever the commpage's gettimeofday
+    /// stamp is a second or more from `mach_absolute_time` (xnu `mach_get_times.c`,
+    /// `__commpage_gettimeofday.c`). retrace freezes the commpage at load while the timebase is
+    /// synthetic, so the fallback is always taken. Before R7 the guest then held two clocks:
+    /// `mach_absolute_time` from `synthetic_tsc`, and `mach_get_times` from the host. libdispatch
+    /// takes its timer "now" from the second (libdispatch `src/shims/time.h:220-235`) and its
+    /// deadlines from the first, so no timer could fire on the synthetic clock (t0 M1).
+    ///
+    /// **Record-only, by design.** Replay applies the recorded write verbatim, so no replay code
+    /// changes and a pre-M46 trace, which carries the host's value, replays exactly as before. The
+    /// value is also the one replay would compute: `now_guest()` at this landmark reads only state
+    /// both sides hold identically. The wall time in `tv` stays the host's, recorded as before.
+    pub fn synthesize_mach_time_out(&mut self, va: u64) -> Region {
+        let now = self.now_guest().to_le_bytes();
+        // An aligned u64 cannot straddle a page, so one translation covers all 8 bytes.
+        let ipa = self.va_to_ipa(va).filter(|_| va.is_multiple_of(8)).unwrap_or_else(|| panic!(
+            "M46 R7: gettimeofday's mach-time out-parameter {va:#x} does not translate or is not \
+             8-aligned, though the kernel has just written it"));
+        self.write_guest(ipa, &now);
+        Region { ipa, bytes: now.to_vec() }
     }
 
     /// Reserve the main thread's believed-but-unbacked stack (M8 spec risk R3).

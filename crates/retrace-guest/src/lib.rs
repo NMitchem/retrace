@@ -218,6 +218,9 @@ pub const EXEC_DYN: &str = concat!(env!("OUT_DIR"), "/exec_dyn");
 /// M45: libdispatch's workqueue-kqueue init (`kevent_qos` 374), issued by hand after a
 /// `dispatch_async`. `argv[1]` selects `straddle`, `flags` or `badptr`; see the source's header.
 pub const KQINIT_DYN: &str = concat!(env!("OUT_DIR"), "/kqinit_dyn");
+/// M46: `dispatch_after` on the synthetic clock. `argv[1]` selects `two`, `wall` or `clock`; see the
+/// source's header.
+pub const AFTER_DYN: &str = concat!(env!("OUT_DIR"), "/after_dyn");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
@@ -399,6 +402,13 @@ mod tests {
     fn kqinit_guest_parses() {
         // M45: proves the build.rs wiring and the path constant; behaviour is kqinit_e2e's.
         let l = parse_macho(&std::fs::read(KQINIT_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn after_guest_parses() {
+        // M46: proves the build.rs wiring and the path constant; behaviour is gcdtimer_e2e's.
+        let l = parse_macho(&std::fs::read(AFTER_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
