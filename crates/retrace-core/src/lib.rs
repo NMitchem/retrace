@@ -2854,6 +2854,17 @@ impl ReplaySession {
     /// M16 Task 1: `Box_::kport_of`, for the R1 measurement gate. Test-only, like `dbg_regs_of`.
     #[doc(hidden)]
     pub fn dbg_kport_of(&self, tid: usize) -> Option<u32> { self.b.kport_of(tid) }
+    /// M46: `Box_::dbg_internal_state`, which includes `synthetic_tsc` and the knote table. Test-only.
+    #[doc(hidden)]
+    pub fn dbg_internal_state(&self) -> String { self.b.dbg_internal_state() }
+    /// M46: timers armed and not yet fired. Test-only: `gcdtimer_e2e` checks the idle jump delivered its timer.
+    #[doc(hidden)]
+    pub fn dbg_armed_timers(&self) -> usize { self.b.dbg_kq().armed_count() }
+    /// M46: write guest memory by VA at the current position. Test-only: tampering here is how
+    /// `gcdtimer_e2e` reaches the replay-side validators, which a rewritten trace field cannot
+    /// reach, because the mirror compares recorded fields first.
+    #[doc(hidden)]
+    pub fn dbg_write_mem(&mut self, va: u64, bytes: &[u8]) -> Result<(), String> { self.b.dbg_write_va(va, bytes) }
     /// M16 Task 4: `Box_::thread_of_port`, for the port->tid resolution gate. Test-only, like
     /// `dbg_kport_of`.
     #[doc(hidden)]
