@@ -1,0 +1,40 @@
+# t6-controls.sh moved: list=/bin/[ /bin/kill /bin/ps /bin/csh /bin/tcsh /usr/bin/automationmodetool /usr/bin/dddiagnose  timeout=30s
+# base sha256=1f42428f768c06c00f885e74c66cc3ccd248b9cacbc942ccd23783ade88b1599 (f907c33)
+# t6   sha256=9e3007defe855dfe05d57361f3163c87ad136a4cfff3eb0c9ef3b74737bc987e (d369fcc, the swept binary)
+## round 1 binary base start 00:51:09 load averages: 10.71 17.76 23.08
+1 base ROW	/bin/[	PASS	2	2	19283	n/a		
+1 base ROW	/bin/kill	PASS	2	2	19328	n/a		
+1 base ROW	/bin/ps	PASS	0	0	19381	n/a		
+1 base ROW	/bin/csh	FAIL	4	3	19482	337	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 337 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+1 base ROW	/bin/tcsh	FAIL	4	3	19513	342	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 342 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+1 base ROW	/usr/bin/automationmodetool	FAIL	101	n/a	19541	n/a	thread 'main' (11000326) panicked at crates/retrace-box/src/lib.rs:5228:13: M45: unmeasured kevent_qos shape: x3 (eventlist) is 0x27fedb8, measured 0x0. Only libdispatch's `_dispatch_kq_init` (KEVENT_FLAG_WORKQ|IMMEDIATE, one EVFILT_USER EV_ADD|EV_CLEAR entry, no event list) is modelled (M45 §2a). M	
+1 base ROW	/usr/bin/dddiagnose	FAIL	4	3	19563	454	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xa03 (guest task port Some(515)) send_size 24	DIVERGENCE at landmark 454 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+1 base TALLY pass=3 fail=4 skip=0
+## round 1 binary t6 start 00:52:12 load averages: 8.13 15.61 21.88
+1 t6 ROW	/bin/[	PASS	2	2	19609	n/a		
+1 t6 ROW	/bin/kill	PASS	2	2	19644	n/a		
+1 t6 ROW	/bin/ps	PASS	0	0	19677	n/a		
+1 t6 ROW	/bin/csh	FAIL	4	3	19764	337	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 337 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+1 t6 ROW	/bin/tcsh	FAIL	4	3	20105	339	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 339 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+1 t6 ROW	/usr/bin/automationmodetool	FAIL	101	n/a	20463	n/a	thread 'main' (11008979) panicked at crates/retrace-arch/src/lib.rs:1002:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument fro	
+1 t6 ROW	/usr/bin/dddiagnose	FAIL	137	n/a	20563	n/a		
+1 t6 TALLY pass=3 fail=4 skip=0
+## round 2 binary base start 00:53:48 load averages: 34.77 19.70 22.62
+2 base ROW	/bin/[	PASS	2	2	20644	n/a		
+2 base ROW	/bin/kill	PASS	2	2	20729	n/a		
+2 base ROW	/bin/ps	FAIL	137	n/a	20778	n/a		
+2 base ROW	/bin/csh	FAIL	4	3	20826	336	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 336 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+2 base ROW	/bin/tcsh	FAIL	4	3	20860	335	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 335 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+2 base ROW	/usr/bin/automationmodetool	FAIL	101	n/a	20899	n/a	thread 'main' (11012844) panicked at crates/retrace-box/src/lib.rs:5228:13: M45: unmeasured kevent_qos shape: x3 (eventlist) is 0x27fedb8, measured 0x0. Only libdispatch's `_dispatch_kq_init` (KEVENT_FLAG_WORKQ|IMMEDIATE, one EVFILT_USER EV_ADD|EV_CLEAR entry, no event list) is modelled (M45 §2a). M	
+2 base ROW	/usr/bin/dddiagnose	FAIL	4	3	20923	451	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1d03 (guest task port Some(515)) send_size 24	DIVERGENCE at landmark 451 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+2 base TALLY pass=2 fail=5 skip=0
+## round 2 binary t6 start 00:56:02 load averages: 16.96 21.96 23.45
+2 t6 ROW	/bin/[	PASS	2	2	20975	n/a		
+2 t6 ROW	/bin/kill	PASS	2	2	21043	n/a		
+2 t6 ROW	/bin/ps	PASS	0	0	21094	n/a		
+2 t6 ROW	/bin/csh	FAIL	4	3	21184	337	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 337 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+2 t6 ROW	/bin/tcsh	FAIL	4	3	21252	338	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64	DIVERGENCE at landmark 338 pc=0x1804adc34: expected recorded syscall, got None (truncated=false)
+2 t6 ROW	/usr/bin/automationmodetool	FAIL	101	n/a	21628	n/a	thread 'main' (11019418) panicked at crates/retrace-arch/src/lib.rs:1002:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument fro	
+2 t6 ROW	/usr/bin/dddiagnose	PASS	139	139	21653	n/a		
+2 t6 TALLY pass=4 fail=3 skip=0
+## end 00:58:27 load averages: 14.52 17.64 21.36

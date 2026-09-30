@@ -1,0 +1,7 @@
+/bin/[
+/bin/kill
+/bin/ps
+/bin/csh
+/bin/tcsh
+/usr/bin/automationmodetool
+/usr/bin/dddiagnose

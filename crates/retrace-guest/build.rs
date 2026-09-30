@@ -399,6 +399,25 @@ fn main() {
         .status().expect("clang kqinit_dyn");
     assert!(status.success(), "kqinit_dyn guest build failed");
 
+    // after_dyn: the M46 fixture — dispatch_after on the synthetic clock (modes two, wall), and
+    // mach_get_times against mach_absolute_time (mode clock, R7). Same recipe as hello_dyn.
+    let src = format!("{}/c/after_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/after_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang after_dyn");
+    assert!(status.success(), "after_dyn guest build failed");
+
+    // timer_dyn: the M46 repeating timer-source fixture. Same recipe as hello_dyn.
+    let src = format!("{}/c/timer_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/timer_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang timer_dyn");
+    assert!(status.success(), "timer_dyn guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));

@@ -1,0 +1,32 @@
+(lldb) target create "/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn"
+Current executable set to '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn' (arm64).
+(lldb) command source -s 0 '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/m1b.lldb'
+Executing commands in '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/m1b.lldb'.
+(lldb) breakpoint set -n mach_get_times -C "bt 12" -C "continue"
+Breakpoint 1: where = libsystem_kernel.dylib`mach_get_times, address = 0x00000001804afcd0
+(lldb) breakpoint set -n mach_absolute_time -c "$lr != 0x181dafc24" -C "bt 12" -C "continue"
+Breakpoint 2: where = libsystem_kernel.dylib`mach_absolute_time, address = 0x00000001804ae0a0
+(lldb) breakpoint set -n mach_approximate_time -C "bt 12" -C "continue"
+Breakpoint 3: where = libsystem_kernel.dylib`mach_approximate_time, address = 0x00000001804af484
+(lldb) breakpoint set -n mach_continuous_time -C "bt 12" -C "continue"
+Breakpoint 4: where = libsystem_kernel.dylib`mach_continuous_time, address = 0x00000001804ae024
+(lldb) breakpoint set -n gettimeofday -C "bt 12" -C "continue"
+Breakpoint 5: where = libsystem_c.dylib`gettimeofday, address = 0x0000000180386d88
+(lldb) run
+(lldb)  bt 12
+* thread #1, stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba78e4 libcorecrypto.dylib`ccrng_schedule_timer_init + 44
+    frame #4: 0x0000000181baff0c libcorecrypto.dylib`ccrng_process_init + 76
+    frame #5: 0x0000000181b35df8 libcorecrypto.dylib`init + 48
+    frame #6: 0x0000000181df8b98 libsystem_platform.dylib`_os_once_callout + 32
+    frame #7: 0x0000000181df8b6c libsystem_platform.dylib`_os_once + 76
+    frame #8: 0x0000000181bad484 libcorecrypto.dylib`ccrng_prng.cold.1 + 44
+    frame #9: 0x0000000181b57efc libcorecrypto.dylib`ccrng_prng + 92
+    frame #10: 0x0000000181c81210 libsystem_c.dylib`arc4_init + 60
+    frame #11: 0x0000000181c925ec libsystem_c.dylib`arc4random_uniform + 32
+(lldb)  continue
+Process 97408 resuming
+Command #2 'continue' continued the target.

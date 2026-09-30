@@ -1,0 +1,7 @@
+rows=30 waited=540s
+FAIL /bin/[ (timed out after 30s recording)
+FAIL /bin/csh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+FAIL /bin/kill (timed out after 30s replaying)
+ 0:46  up 6 days,  3:30, 7 users, load averages: 14.33 26.32 27.40
+
+[exited with code 0]

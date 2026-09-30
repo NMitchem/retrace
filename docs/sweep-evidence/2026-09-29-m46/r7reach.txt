@@ -1,0 +1,26 @@
+# t6-r7reach.sh: per kept trace, gettimeofday (116) events, and those with x2 != 0 (R7's only case).
+/private/tmp/claude-501/m46-amt.bin gettimeofday(116) events=23 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+sweep/[.bin gettimeofday(116) events=19 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+sweep/automationmodetool.bin gettimeofday(116) events=21 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+sweep/csh.bin gettimeofday(116) events=21 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+sweep/dddiagnose.bin gettimeofday(116) events=21 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+sweep/kill.bin gettimeofday(116) events=16 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+sweep/tcsh.bin gettimeofday(116) events=23 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+sweep/yes.bin gettimeofday(116) events=19 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-base-1/automationmodetool.bin gettimeofday(116) events=26 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-base-1/csh.bin gettimeofday(116) events=20 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-base-1/dddiagnose.bin gettimeofday(116) events=23 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-base-1/tcsh.bin gettimeofday(116) events=25 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-base-2/automationmodetool.bin gettimeofday(116) events=24 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-base-2/csh.bin gettimeofday(116) events=19 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-base-2/dddiagnose.bin gettimeofday(116) events=20 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-base-2/ps.bin gettimeofday(116) events=17 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-base-2/tcsh.bin gettimeofday(116) events=18 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-t6-1/automationmodetool.bin gettimeofday(116) events=21 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-t6-1/csh.bin gettimeofday(116) events=20 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-t6-1/dddiagnose.bin gettimeofday(116) events=20 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-t6-1/tcsh.bin gettimeofday(116) events=22 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-t6-2/automationmodetool.bin gettimeofday(116) events=23 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-t6-2/csh.bin gettimeofday(116) events=20 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-t6-2/dddiagnose.bin gettimeofday(116) events=18 with-mach-time-out-param(x2!=0, R7 rewrites)=0
+ctl/moved-t6-2/tcsh.bin gettimeofday(116) events=21 with-mach-time-out-param(x2!=0, R7 rewrites)=0

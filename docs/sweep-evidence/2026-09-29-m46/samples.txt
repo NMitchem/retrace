@@ -1,0 +1,22 @@
+# t6-samples.sh, 2026-09-30 00:59:42, same host, alternating binaries.
+# base = f907c33 (the M45 merge); t6 = d369fcc (the swept binary).
+## A. the sweep's kill.bin replayed
+A 1 base rp=2 secs=6 stdout=134 divergence-lines=0 load averages: 7.82 14.77 19.93
+A 1 t6 rp=2 secs=6 stdout=134 divergence-lines=0 load averages: 7.59 14.61 19.84
+A 2 base rp=2 secs=16 stdout=134 divergence-lines=0 load averages: 8.07 14.36 19.66
+A 2 t6 rp=2 secs=16 stdout=134 divergence-lines=0 load averages: 7.52 13.94 19.41
+## B. csh/tcsh: traps = [trap] lines before the 3403 wall; gtod = gettimeofday (116) traps
+B 1 csh base rc=4 traps=338 gtod=21 traps-gtod=317 3403-lines=1
+B 1 csh t6 rc=4 traps=334 gtod=17 traps-gtod=317 3403-lines=1
+B 1 tcsh base rc=4 traps=341 gtod=24 traps-gtod=317 3403-lines=1
+B 1 tcsh t6 rc=4 traps=337 gtod=20 traps-gtod=317 3403-lines=1
+B 2 csh base rc=4 traps=338 gtod=21 traps-gtod=317 3403-lines=1
+B 2 csh t6 rc=4 traps=334 gtod=17 traps-gtod=317 3403-lines=1
+B 2 tcsh base rc=4 traps=335 gtod=18 traps-gtod=317 3403-lines=1
+B 2 tcsh t6 rc=4 traps=343 gtod=26 traps-gtod=317 3403-lines=1
+## C. dddiagnose: traced record, bounded at 180 s
+C 1 base rc=139 secs=11 traps=389 gtod=20 receive-refused-at-trap=380 outcome: guest crashed: pc=0x180302eb0 far=0x2000050060 esr=0x92000045
+C 1 t6 rc=4 secs=1 traps=455 gtod=24 receive-refused-at-trap=384 outcome: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send_size 24
+C 2 base rc=4 secs=1 traps=452 gtod=21 receive-refused-at-trap=381 outcome: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send_size 24
+C 2 t6 rc=4 secs=1 traps=453 gtod=22 receive-refused-at-trap=382 outcome: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xd03 (guest task port Some(515)) send_size 24
+## end 01:01:14 load averages: 6.34 12.61 18.61

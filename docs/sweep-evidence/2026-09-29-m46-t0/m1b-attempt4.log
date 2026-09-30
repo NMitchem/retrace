@@ -1,0 +1,567 @@
+(lldb) target create "/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn"
+Current executable set to '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn' (arm64).
+(lldb) command source -s 0 '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/m1b.lldb'
+Executing commands in '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/m1b.lldb'.
+(lldb) breakpoint set -n mach_get_times -C "bt 12" -C "continue"
+Breakpoint 1: where = libsystem_kernel.dylib`mach_get_times, address = 0x00000001804afcd0
+(lldb) breakpoint set -n mach_approximate_time -C "bt 12" -C "continue"
+Breakpoint 2: where = libsystem_kernel.dylib`mach_approximate_time, address = 0x00000001804af484
+(lldb) breakpoint set -n mach_continuous_time -C "bt 12" -C "continue"
+Breakpoint 3: where = libsystem_kernel.dylib`mach_continuous_time, address = 0x00000001804ae024
+(lldb) breakpoint set -n mach_continuous_approximate_time -C "bt 12" -C "continue"
+Breakpoint 4: where = libsystem_kernel.dylib`mach_continuous_approximate_time, address = 0x00000001804b549c
+(lldb) breakpoint set -n gettimeofday -C "bt 12" -C "continue"
+Breakpoint 5: where = libsystem_c.dylib`gettimeofday, address = 0x0000000180386d88
+(lldb) breakpoint set -a 0x180339c60 -C "bt 12" -C "continue"
+Breakpoint 6: address = 0x0000000180339c60
+(lldb) breakpoint set -a 0x180339ff0 -C "bt 12" -C "continue"
+Breakpoint 7: address = 0x0000000180339ff0
+(lldb) breakpoint set -a 0x18034ba98 -C "bt 12" -C "continue"
+Breakpoint 8: address = 0x000000018034ba98
+(lldb) breakpoint set -a 0x18034bb6c -C "bt 12" -C "continue"
+Breakpoint 9: address = 0x000000018034bb6c
+(lldb) breakpoint set -a 0x18034be24 -C "bt 12" -C "continue"
+Breakpoint 10: address = 0x000000018034be24
+(lldb) breakpoint set -a 0x18034e128 -C "bt 12" -C "continue"
+Breakpoint 11: address = 0x000000018034e128
+(lldb) breakpoint set -a 0x18034fd1c -C "bt 12" -C "continue"
+Breakpoint 12: address = 0x000000018034fd1c
+(lldb) breakpoint set -a 0x180350148 -C "bt 12" -C "continue"
+Breakpoint 13: address = 0x0000000180350148
+(lldb) breakpoint set -a 0x180369684 -C "bt 12" -C "continue"
+Breakpoint 14: address = 0x0000000180369684
+(lldb) breakpoint set -a 0x180369f84 -C "bt 12" -C "continue"
+Breakpoint 15: address = 0x0000000180369f84
+(lldb) breakpoint set -a 0x180369fa4 -C "bt 12" -C "continue"
+Breakpoint 16: address = 0x0000000180369fa4
+(lldb) breakpoint set -a 0x1803723dc -C "bt 12" -C "continue"
+Breakpoint 17: address = 0x00000001803723dc
+(lldb) breakpoint set -a 0x1803725b0 -C "bt 12" -C "continue"
+Breakpoint 18: address = 0x00000001803725b0
+(lldb) breakpoint set -a 0x1803727bc -C "bt 12" -C "continue"
+Breakpoint 19: address = 0x00000001803727bc
+(lldb) breakpoint set -a 0x1803727d8 -C "bt 12" -C "continue"
+Breakpoint 20: address = 0x00000001803727d8
+(lldb) breakpoint list
+Current breakpoints:
+1: name = 'mach_get_times', locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  1.1: where = libsystem_kernel.dylib`mach_get_times, address = libsystem_kernel.dylib[0x00000001804afcd0], unresolved, hit count = 0 
+
+2: name = 'mach_approximate_time', locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  2.1: where = libsystem_kernel.dylib`mach_approximate_time, address = libsystem_kernel.dylib[0x00000001804af484], unresolved, hit count = 0 
+
+3: name = 'mach_continuous_time', locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  3.1: where = libsystem_kernel.dylib`mach_continuous_time, address = libsystem_kernel.dylib[0x00000001804ae024], unresolved, hit count = 0 
+
+4: name = 'mach_continuous_approximate_time', locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  4.1: where = libsystem_kernel.dylib`mach_continuous_approximate_time, address = libsystem_kernel.dylib[0x00000001804b549c], unresolved, hit count = 0 
+
+5: name = 'gettimeofday', locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  5.1: where = libsystem_c.dylib`gettimeofday, address = libsystem_c.dylib[0x0000000180386d88], unresolved, hit count = 0 
+
+6: address = 0x0000000180339c60, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  6.1: address = 0x0000000180339c60, unresolved, hit count = 0 
+
+7: address = 0x0000000180339ff0, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  7.1: address = 0x0000000180339ff0, unresolved, hit count = 0 
+
+8: address = 0x000000018034ba98, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  8.1: address = 0x000000018034ba98, unresolved, hit count = 0 
+
+9: address = 0x000000018034bb6c, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  9.1: address = 0x000000018034bb6c, unresolved, hit count = 0 
+
+10: address = 0x000000018034be24, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  10.1: address = 0x000000018034be24, unresolved, hit count = 0 
+
+11: address = 0x000000018034e128, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  11.1: address = 0x000000018034e128, unresolved, hit count = 0 
+
+12: address = 0x000000018034fd1c, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  12.1: address = 0x000000018034fd1c, unresolved, hit count = 0 
+
+13: address = 0x0000000180350148, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  13.1: address = 0x0000000180350148, unresolved, hit count = 0 
+
+14: address = 0x0000000180369684, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  14.1: address = 0x0000000180369684, unresolved, hit count = 0 
+
+15: address = 0x0000000180369f84, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  15.1: address = 0x0000000180369f84, unresolved, hit count = 0 
+
+16: address = 0x0000000180369fa4, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  16.1: address = 0x0000000180369fa4, unresolved, hit count = 0 
+
+17: address = 0x00000001803723dc, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  17.1: address = 0x00000001803723dc, unresolved, hit count = 0 
+
+18: address = 0x00000001803725b0, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  18.1: address = 0x00000001803725b0, unresolved, hit count = 0 
+
+19: address = 0x00000001803727bc, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  19.1: address = 0x00000001803727bc, unresolved, hit count = 0 
+
+20: address = 0x00000001803727d8, locations = 1
+    Breakpoint commands:
+      bt 12
+      continue
+
+  20.1: address = 0x00000001803727d8, unresolved, hit count = 0 
+
+(lldb) run
+(lldb)  bt 12
+* thread #1, stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba78e4 libcorecrypto.dylib`ccrng_schedule_timer_init + 44
+    frame #4: 0x0000000181baff0c libcorecrypto.dylib`ccrng_process_init + 76
+    frame #5: 0x0000000181b35df8 libcorecrypto.dylib`init + 48
+    frame #6: 0x0000000181df8b98 libsystem_platform.dylib`_os_once_callout + 32
+    frame #7: 0x0000000181df8b6c libsystem_platform.dylib`_os_once + 76
+    frame #8: 0x0000000181bad484 libcorecrypto.dylib`ccrng_prng.cold.1 + 44
+    frame #9: 0x0000000181b57efc libcorecrypto.dylib`ccrng_prng + 92
+    frame #10: 0x0000000181c81210 libsystem_c.dylib`arc4_init + 60
+    frame #11: 0x0000000181c925ec libsystem_c.dylib`arc4random_uniform + 32
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181baffac libcorecrypto.dylib`ccrng_process_init + 236
+    frame #4: 0x0000000181b35df8 libcorecrypto.dylib`init + 48
+    frame #5: 0x0000000181df8b98 libsystem_platform.dylib`_os_once_callout + 32
+    frame #6: 0x0000000181df8b6c libsystem_platform.dylib`_os_once + 76
+    frame #7: 0x0000000181bad484 libcorecrypto.dylib`ccrng_prng.cold.1 + 44
+    frame #8: 0x0000000181b57efc libcorecrypto.dylib`ccrng_prng + 92
+    frame #9: 0x0000000181c81210 libsystem_c.dylib`arc4_init + 60
+    frame #10: 0x0000000181c925ec libsystem_c.dylib`arc4random_uniform + 32
+    frame #11: 0x0000000181c0134c libsystem_malloc.dylib`mvm_guarded_range_init + 52
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x0000000181c0134c libsystem_malloc.dylib`mvm_guarded_range_init + 52
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x0000000181c0134c libsystem_malloc.dylib`mvm_guarded_range_init + 52
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x0000000181c0134c libsystem_malloc.dylib`mvm_guarded_range_init + 52
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x0000000181c0134c libsystem_malloc.dylib`mvm_guarded_range_init + 52
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x0000000181c01370 libsystem_malloc.dylib`mvm_guarded_range_init + 88
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181c12e10 libsystem_malloc.dylib`_xzm_initialize_xzone_data + 76
+    frame #9: 0x0000000181c122e8 libsystem_malloc.dylib`xzm_main_malloc_zone_create + 8424
+    frame #10: 0x0000000181bf2884 libsystem_malloc.dylib`__malloc_init + 2508
+    frame #11: 0x0000000191c41328 libSystem.B.dylib`libSystem_initializer + 204
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x000000018198ed1c libobjc.A.dylib`map_images_nolock + 3836
+    frame #9: 0x000000018198dd90 libobjc.A.dylib`map_images + 112
+    frame #10: 0x0000000181a4ae14 dyld`invocation function for block in dyld4::RuntimeState::setObjCNotifiers(dyld4::ReadOnlyCallback<void (*)(char const*, mach_header const*)>, dyld4::ReadOnlyCallback<void (*)(mach_header const*, void*, mach_header const*, void const*)>, dyld4::ReadOnlyCallback<void (*)(_dyld_objc_notify_mapped_info const*)>, dyld4::ReadOnlyCallback<void (*)(unsigned int, _dyld_objc_notify_mapped_info const*, void (unsigned int) block_pointer)>)::$_0::operator()() const + 1036
+    frame #11: 0x0000000181a3da44 dyld`dyld4::RuntimeLocks::withLoadersReadLock(void () block_pointer) + 84
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 5.1
+  * frame #0: 0x0000000181c86d88 libsystem_c.dylib`gettimeofday
+    frame #1: 0x0000000181cb44c8 libsystem_c.dylib`_mach_boottime_usec + 64
+    frame #2: 0x0000000181c81058 libsystem_c.dylib`clock_gettime_nsec_np + 124
+    frame #3: 0x0000000181ba793c libcorecrypto.dylib`ccrng_schedule_timer_read + 28
+    frame #4: 0x0000000181ba79c4 libcorecrypto.dylib`ccrng_schedule_tree_read + 60
+    frame #5: 0x0000000181ba7864 libcorecrypto.dylib`ccrng_schedule_read + 48
+    frame #6: 0x0000000181b70ae0 libcorecrypto.dylib`ccrng_crypto_generate + 112
+    frame #7: 0x0000000181b368b4 libcorecrypto.dylib`generate + 28
+    frame #8: 0x0000000181b91314 libcorecrypto.dylib`ccrng_uniform_internal + 72
+    frame #9: 0x0000000181b3dd70 libcorecrypto.dylib`ccrng_uniform + 60
+    frame #10: 0x0000000181c92600 libsystem_c.dylib`arc4random_uniform + 52
+    frame #11: 0x000000018198ed40 libobjc.A.dylib`map_images_nolock + 3872
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+fired cell 0x100008000
+(lldb)  bt 12
+  thread #2, queue = 'com.apple.libdispatch-manager', stop reason = breakpoint 1.1
+    frame #0: 0x0000000181dafcd0 libsystem_kernel.dylib`mach_get_times
+    frame #1: 0x0000000181c57264 libdispatch.dylib`_dispatch_event_loop_drain_timers + 528
+    frame #2: 0x0000000181c49334 libdispatch.dylib`_dispatch_kevent_worker_thread + 444
+    frame #3: 0x0000000181dedef8 libsystem_pthread.dylib`_pthread_wqthread + 348
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+(lldb)  bt 12
+  thread #2, queue = 'com.apple.libdispatch-manager', stop reason = breakpoint 1.1
+    frame #0: 0x0000000181dafcd0 libsystem_kernel.dylib`mach_get_times
+    frame #1: 0x0000000181c57264 libdispatch.dylib`_dispatch_event_loop_drain_timers + 528
+    frame #2: 0x0000000181c49334 libdispatch.dylib`_dispatch_kevent_worker_thread + 444
+    frame #3: 0x0000000181dedef8 libsystem_pthread.dylib`_pthread_wqthread + 348
+(lldb)  continue
+Process 1682 resuming
+Command #2 'continue' continued the target.
+fired
+done
+Process 1682 launched: '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn' (arm64)
+Process 1682 exited with status = 0 (0x00000000)

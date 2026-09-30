@@ -1,0 +1,14 @@
+(lldb) target create ".superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn"
+Current executable set to '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m46-gcdtimers/.superpowers/sdd/2026-09-29-retrace-m46-gcdtimers/t0/after_dyn' (arm64).
+(lldb) image lookup -a 0x1804b1b30
+      Address: libsystem_kernel.dylib[0x00000001804b1b30] (libsystem_kernel.dylib.__TEXT.__text + 17264)
+      Summary: libsystem_kernel.dylib`__gettimeofday_with_mach + 8
+(lldb) image lookup -a 0x1804b1b60
+      Address: libsystem_kernel.dylib[0x00000001804b1b60] (libsystem_kernel.dylib.__TEXT.__text + 17312)
+      Summary: libsystem_kernel.dylib`__gettimeofday + 12
+(lldb) image lookup -a 0x1804afd34
+      Address: libsystem_kernel.dylib[0x00000001804afd34] (libsystem_kernel.dylib.__TEXT.__text + 9588)
+      Summary: libsystem_kernel.dylib`mach_get_times + 100
+(lldb) image lookup -a 0x1804afc24
+      Address: libsystem_kernel.dylib[0x00000001804afc24] (libsystem_kernel.dylib.__TEXT.__text + 9316)
+      Summary: libsystem_kernel.dylib`__commpage_gettimeofday_internal + 44

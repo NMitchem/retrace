@@ -569,7 +569,7 @@ by file.
 ## 11. Corrections and rulings from the plan
 
 Writing the plan (`docs/superpowers/plans/2026-09-29-retrace-m46-gcdtimers.md`) against the code
-and the sources corrected the spec in ten places. Each correction is listed here rather than edited
+and the sources corrected the spec in ten places, and t0's measurements added two more (items 11–12). Each correction is listed here rather than edited
 into the sections above, so the approved text stays readable as approved.
 
 1. **R7: one clock.** This is the one ruling the operator has not yet seen, and **approving the plan
@@ -643,3 +643,21 @@ into the sections above, so the approved text stays readable as approved.
     above `2^62`, which libdispatch turns into `DISPATCH_TIME_FOREVER`. Stop too if another frozen
     commpage clock (approximate or continuous time) is on the UPTIME timer path. R7 does not reach
     either one.
+11. **H3, measured at t0 and ruled (t0 Ruling T0-a).** t0 M3 found a third registration on every
+    fixture's path: an `EVFILT_MACHPORT` `kevent_qos` for libdispatch's debug channel. The precondition
+    for it is `task_get_special_port(TASK_DEBUG_CONTROL_PORT = 10)` (3409), which retrace's 3409 arm
+    refused, because it modeled only `which == 4`.
+    - **The ruling.** 3409 with `which == 10` answers `KERN_SUCCESS` with `MACH_PORT_NULL`, and the
+      registration never happens. H3's "register-only" branch is therefore not needed.
+    - **Why this answer.** retrace keeps no debug control port: its 3410 arm drops the port libtrace
+      sets (M2-setport). libdispatch connects the channel only `if (dbgp)` (`voucher.c:844`).
+    - **Posture.** The reply is deterministic, so replay recomputes and byte-compares it.
+    - **What stays owed.** A kept or minted port with a register-only knote.
+12. **Test 4 stops at the WALL clock's first step (t0 Ruling T0-b).** Before its KEVENT_RETURN, a WALL
+    timer's first arm registers for calendar-change notifications: an `EVFILT_MACHPORT` `kevent_qos`
+    from the manager, then `host_request_notification` (t0 M3). Test 4 therefore asserts the refusal
+    of that registration by its filter, `0xfff8`, and that no timer armed.
+    - **Where `0x9c` is pinned now.** The fflags refusal stays at box level (`kqmanager.rs`) and in
+      `gcdshapes.rs`.
+    - **§4's widened-fflags control** moves to the box-level test, and a second control widens the
+      registration check against test 4.

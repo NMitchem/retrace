@@ -1,0 +1,18 @@
+# t6-kqpoll.sh: _dispatch_kq_poll's two kevent call returns, by lldb (host shared cache, unslid).
+(lldb) target create /usr/bin/automationmodetool
+(lldb) image lookup -a 0x180359a2c
+      Address: libdispatch.dylib[0x0000000180359a2c] (libdispatch.dylib.__TEXT.__text + 145644)
+      Summary: libdispatch.dylib`_dispatch_kq_poll + 164
+(lldb) image lookup -a 0x180359a64
+      Address: libdispatch.dylib[0x0000000180359a64] (libdispatch.dylib.__TEXT.__text + 145700)
+      Summary: libdispatch.dylib`_dispatch_kq_poll + 220
+(lldb) disassemble -s 0x180359a24 -e 0x180359a30
+libdispatch.dylib`_dispatch_kq_poll:
+libdispatch.dylib[0x180359a24] <+156>: mov    x7, x19
+libdispatch.dylib[0x180359a28] <+160>: bl     0x180372c34               ; symbol stub for: kevent_qos
+libdispatch.dylib[0x180359a2c] <+164>: b      0x180359a64               ; <+220>
+(lldb) disassemble -s 0x180359a5c -e 0x180359a68
+libdispatch.dylib`_dispatch_kq_poll:
+libdispatch.dylib[0x180359a5c] <+212>: mov    x7, x19
+libdispatch.dylib[0x180359a60] <+216>: bl     0x180372c24               ; symbol stub for: kevent_id
+libdispatch.dylib[0x180359a64] <+220>: cmn    w0, #0x1

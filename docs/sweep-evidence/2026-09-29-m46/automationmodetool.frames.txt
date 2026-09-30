@@ -1,0 +1,86 @@
+# t6-frames.sh: the refused kevent_id's caller chain (debugger at the svc, lldb symbols).
+## debugger
+> break 0x1804afa70
+breakpoint at 0x1804afa70
+> continue
+hit 0x1804afa70 at (365, +?)
+resolved (365, 83)
+> where
+at (365, 83) pc=0x1804afa70 thread=0
+> x 0x6bc40 96
+0x6bc40: 63 6f 6d 2e 61 70 70 6c 65 2e 4e 53 58 50 43 43 6f 6e 6e 65 63 74 69 6f 6e 2e 6d 2d 75 73 65 72 2e 63 6f 6d 2e 61 70 70 6c 65 2e 64 74 2e 61 75 74 6f 6d 61 74 69 6f 6e 6d 6f 64 65 2e 72 65 61 64 65 72 00 00 00 00 00 00 00 00 00 00 00 00 00 c0 da 6f ec 01 80 4d 00 04 00 00 00 01 00 00 00
+> x 0x27ff440 1024
+0x27ff440: b0 f4 7f 02 00 00 00 00 b0 8e 35 80 01 80 47 bd 00 00 00 00 00 00 00 00 90 bc 06 00 00 00 00 00 ef ff 05 00 ff 08 00 00 90 bc 06 00 00 00 00 00 11 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 c8 bc 06 00 00 00 00 00 01 00 00 00 37 00 00 00 01 00 00 00 a4 fe 1f 00 00 00 00 00 00 00 00 00 10 bd 06 00 00 00 00 00 00 f5 7f 02 00 00 00 00 2c 53 1e 80 01 80 0a a0 00 01 00 08 10 bd 06 00 00 00 00 00 00 00 00 00 70 c0 06 00 00 00 00 00 00 0f 0e 0d 0c 0b 0a 00 70 c0 06 00 00 00 00 00 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 10 bd 06 00 00 00 00 00 b0 f5 7f 02 00 00 00 00 ec a3 1c 80 01 80 26 87 a0 f5 7f 02 00 00 00 00 dc 8b 21 80 01 00 4f 10 00 02 00 08 10 bd 06 00 00 00 00 00 00 04 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 f0 1b 80 01 00 00 00 24 a0 1c 80 01 00 00 00 45 ef 20 80 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0f 0e 0d 0c 0b 0a 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 5a 87 20 80 01 00 00 00 70 c0 06 00 00 00 00 00 00 00 00 00 00 00 00 00 10 bd 06 00 00 00 00 00 40 f6 7f 02 00 00 00 00 38 a0 1c 80 01 00 1d 80 02 06 00 08 10 bd 06 00 00 00 00 00 22 08 5a 87 20 80 01 00 00 00 00 04 01 00 00 00 00 04 00 00 00 00 00 04 00 00 00 00 22 08 50 be 06 00 00 00 00 00 c0 40 e1 e7 b0 3f 00 0f 0e 0d 0c 0b 0a 00 70 b6 6f ec 01 00 00 00 80 fa 7f 02 00 00 00 00 a0 41 44 ec 01 00 00 00 00 00 00 00 00 00 00 00 a8 b2 c3 e9 01 00 00 00 10 c0 06 00 00 00 00 00 80 b8 06 00 00 00 00 00 10 bd 06 00 00 00 00 00 70 f6 7f 02 00 00 00 00 80 c8 1c 80 01 00 19 4e 70 f6 7f 02 00 00 00 00 e0 86 db 81 01 00 38 18 80 b8 06 00 00 00 00 00 18 41 22 9b 02 00 00 00 c0 f6 7f 02 00 00 00 00 30 35 84 35 02 00 4e 5b 02 01 42 08 18 41 22 9b 02 00 00 00 74 75 73 3a 6f 6e 20 4d 6f 64 65 2c 00 0f 0e 0d 0c 0b 0a 00 a8 b2 c3 e9 01 00 00 00 70 14 70 ec 01 00 00 00 00 00 03 00 00 00 00 00 40 ab 06 00 00 00 00 00 40 f7 7f 02 00 00 00 00 fc 36 84 35 02 80 18 f7 71 f6 aa 1c d0 07 db 3f 00 00 00 00 00 00 00 00 ea f3 7c ff b5 3f b2 3f 00 00 00 00 00 00 00 00 40 ab 06 00 00 00 00 00 07 46 a8 fc 01 00 00 00 5c 40 84 35 02 80 23 7b 10 00 00 00 00 00 00 00 00 b7 06 00 00 00 00 00 10 00 00 00 00 00 00 00 a8 b2 c3 e9 01 00 00 00 70 14 70 ec 01 00 00 00 00 00 03 00 00 00 00 00 b0 f7 7f 02 00 00 00 00 60 f7 7f 02 00 00 00 00 80 40 84 35 02 00 28 66 00 00 03 00 00 00 00 00 e0 ab 06 00 00 00 00 00 70 f7 7f 02 00 00 00 00 b0 04 35 80 01 00 28 48 a0 f7 7f 02 00 00 00 00 60 63 34 80 01 00 18 33 00 e7 6f ec 01 00 00 00 00 00 00 00 00 00 00 00 40 ab 06 00 00 00 00 00 38 40 c2 00 07 00 00 00 10 f8 7f 02 00 00 00 00 34 40 84 35 02 00 34 34 e0 b7 6f ec 01 00 65 00 00 00 00 c2 00 00 00 00 5c 40 84 35 02 80 07 0f 08 3f 22 9b 02 00 00 00 40 ab 06 00 00 00 00 00 e0 f7 7f 02 00 00 00 00 00 00 00 00 00 00 00 00 e0 f7 7f 02 00 00 00 00 00 00 00 20 20 00 00 00 00 f8 ff 3f 00 f0 ff ff 40 ab 06 00 00 00 00 00 38 40 c2 00 07 00 00 00 40 f8 7f 02 00 00 00 00 34 32 84 35 02 00 02 e2 63 00 00 00 00 00 00 00 00 0f 0e 0d 0c 0b 0a 00 80 a2 06 00 00 00 00 00 38 40 c2 00 07 00 00 00
+## label at 0x6bc40 (the queue's dq_label pointer, read at id+0x48 in entry.txt)
+com.apple.NSXPCConnection.m-user.com.apple.dt.automationmode.reader
+## frame-pointer chain from x29 = 0x27ff440
+lr0 (x30 at the svc) 0x180359a64
+fp 0x27ff440 next_fp 0x27ff4b0 lr 0xbd47800180358eb0 stripped 0x180358eb0
+fp 0x27ff4b0 next_fp 0x27ff500 lr 0xa00a8001801e532c stripped 0x1801e532c
+fp 0x27ff500 next_fp 0x27ff5b0 lr 0x87268001801ca3ec stripped 0x1801ca3ec
+fp 0x27ff5b0 next_fp 0x27ff640 lr 0x801d0001801ca038 stripped 0x1801ca038
+fp 0x27ff640 next_fp 0x27ff670 lr 0x4e190001801cc880 stripped 0x1801cc880
+fp 0x27ff670 next_fp 0x27ff6c0 lr 0x5b4e000235843530 stripped 0x235843530
+fp 0x27ff6c0 next_fp 0x27ff740 lr 0xf7188002358436fc stripped 0x2358436fc
+fp 0x27ff740 next_fp 0x27ff760 lr 0x6628000235844080 stripped 0x235844080
+fp 0x27ff760 next_fp 0x27ff770 lr 0x48280001803504b0 stripped 0x1803504b0
+fp 0x27ff770 next_fp 0x27ff7a0 lr 0x3318000180346360 stripped 0x180346360
+fp 0x27ff7a0 next_fp 0x27ff810 lr 0x3434000235844034 stripped 0x235844034
+fp 0x27ff810 next_fp 0x27ff840 lr 0xe202000235843234 stripped 0x235843234
+## lldb (target /usr/bin/automationmodetool, not running: the host shared cache's unslid addresses)
+(lldb) target create /usr/bin/automationmodetool
+(lldb) image lookup -a 0x180359a64
+      Address: libdispatch.dylib[0x0000000180359a64] (libdispatch.dylib.__TEXT.__text + 145700)
+      Summary: libdispatch.dylib`_dispatch_kq_poll + 220
+(lldb) image lookup -a 0x180358eb0
+      Address: libdispatch.dylib[0x0000000180358eb0] (libdispatch.dylib.__TEXT.__text + 142704)
+      Summary: libdispatch.dylib`_dispatch_event_loop_poke + 336
+(lldb) image lookup -a 0x1801e532c
+      Address: libxpc.dylib[0x00000001801e532c] (libxpc.dylib.__TEXT.__text + 151228)
+      Summary: libxpc.dylib`_xpc_connection_init_failed + 352
+(lldb) image lookup -a 0x1801ca3ec
+      Address: libxpc.dylib[0x00000001801ca3ec] (libxpc.dylib.__TEXT.__text + 40828)
+      Summary: libxpc.dylib`_xpc_connection_init + 744
+(lldb) image lookup -a 0x1801ca038
+      Address: libxpc.dylib[0x00000001801ca038] (libxpc.dylib.__TEXT.__text + 39880)
+      Summary: libxpc.dylib`_xpc_connection_activate_if_needed + 544
+(lldb) image lookup -a 0x1801cc880
+      Address: libxpc.dylib[0x00000001801cc880] (libxpc.dylib.__TEXT.__text + 50192)
+      Summary: libxpc.dylib`xpc_connection_resume + 104
+(lldb) image lookup -a 0x235843530
+      Address: AutomationMode[0x0000000235843530] (AutomationMode.__TEXT.__text + 13768)
+      Summary: AutomationMode`__29+[XAMObserver sharedInstance]_block_invoke + 232
+(lldb) image lookup -a 0x2358436fc
+      Address: AutomationMode[0x00000002358436fc] (AutomationMode.__TEXT.__text + 14228)
+      Summary: AutomationMode`-[XAMObserver currentAutomationModeEnabledStateFromDaemon] + 52
+(lldb) image lookup -a 0x235844080
+      Address: AutomationMode[0x0000000235844080] (AutomationMode.__TEXT.__text + 16664)
+      Summary: AutomationMode`__38-[XAMObserver isAutomationModeEnabled]_block_invoke + 36
+(lldb) image lookup -a 0x1803504b0
+      Address: libdispatch.dylib[0x00000001803504b0] (libdispatch.dylib.__TEXT.__text + 107376)
+      Summary: libdispatch.dylib`_dispatch_client_callout + 16
+(lldb) image lookup -a 0x180346360
+      Address: libdispatch.dylib[0x0000000180346360] (libdispatch.dylib.__TEXT.__text + 66080)
+      Summary: libdispatch.dylib`_dispatch_lane_barrier_sync_invoke_and_complete + 56
+(lldb) image lookup -a 0x235844034
+      Address: AutomationMode[0x0000000235844034] (AutomationMode.__TEXT.__text + 16588)
+      Summary: AutomationMode`-[XAMObserver isAutomationModeEnabled] + 132
+(lldb) image lookup -a 0x235843234
+      Address: AutomationMode[0x0000000235843234] (AutomationMode.__TEXT.__text + 13004)
+      Summary: AutomationMode`XAMIsAutomationModeEnabled + 64
+(lldb) disassemble -s 0x180359a30 -e 0x180359a68
+libdispatch.dylib`_dispatch_kq_poll:
+libdispatch.dylib[0x180359a30] <+168>: mov    x27, x9
+libdispatch.dylib[0x180359a34] <+172>: tst    w19, #0x2
+libdispatch.dylib[0x180359a38] <+176>: csel   w8, w28, w10, eq
+libdispatch.dylib[0x180359a3c] <+180>: orr    w19, w8, w19
+libdispatch.dylib[0x180359a40] <+184>: mov    x0, x26
+libdispatch.dylib[0x180359a44] <+188>: mov    x1, x25
+libdispatch.dylib[0x180359a48] <+192>: mov    x2, x24
+libdispatch.dylib[0x180359a4c] <+196>: mov    x3, x23
+libdispatch.dylib[0x180359a50] <+200>: mov    x4, x22
+libdispatch.dylib[0x180359a54] <+204>: mov    x5, x21
+libdispatch.dylib[0x180359a58] <+208>: mov    x6, x20
+libdispatch.dylib[0x180359a5c] <+212>: mov    x7, x19
+libdispatch.dylib[0x180359a60] <+216>: bl     0x180372c24               ; symbol stub for: kevent_id
+libdispatch.dylib[0x180359a64] <+220>: cmn    w0, #0x1

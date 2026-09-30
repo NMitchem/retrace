@@ -1,0 +1,18 @@
+rows: M45 54, M46 54
+identical rows: 47
+--- M45 side of each differing row
+/bin/[	PASS	2	2	n/a	
+/bin/csh	FAIL	4	3	336	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(TID)) send_size 64
+/bin/kill	PASS	2	2	n/a	
+/bin/ps	FAIL	0	3	16044	
+/bin/tcsh	FAIL	4	3	336	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(TID)) send_size 64
+/usr/bin/automationmodetool	FAIL	101	n/a	n/a	thread 'main' (TID) panicked at crates/retrace-box/src/lib.rs:5222:13: M45: unmeasured kevent_qos shape: x3 (eventlist) 
+/usr/bin/dddiagnose	PASS	139	139	n/a	
+--- M46 side of each differing row
+/bin/[	FAIL	137	n/a	n/a	
+/bin/csh	FAIL	4	3	338	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(TID)) send_size 64
+/bin/kill	FAIL	2	137	n/a	
+/bin/ps	PASS	0	0	n/a	
+/bin/tcsh	FAIL	4	3	340	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(TID)) send_size 64
+/usr/bin/automationmodetool	FAIL	101	n/a	n/a	thread 'main' (TID) panicked at crates/retrace-arch/src/lib.rs:1002:38: M33: syscall 375 (TID) has no arg_kinds row in c
+/usr/bin/dddiagnose	FAIL	4	3	452	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1e03 (guest task port Some(TID)) send_size 24

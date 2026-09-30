@@ -1,0 +1,12 @@
+# The recorded trace's own landmarks (Reader::open_checked; #0 is the Snapshot). The trace ends
+# at the 3409 reply: the kevent_id (375) panicked before its event was appended.
+== automationmodetool (/private/tmp/claude-501/m46-amt.bin)
+events=365 torn=false
+#0 Snapshot
+#359 Syscall num=133 args=[3, 27fe900, da, 0, 0, 0, 0, 27ff318] ret=0xda ret1=0x0 err=false writes=0 thread=0
+#360 Syscall num=368 args=[400, 27ff258, 18, 0, 1, 0, 0, 3] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#361 Syscall num=367 args=[0, 27ff258, 18, 0, 1, 0, 0, 3] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#362 Syscall num=374 args=[ffffffff, 27ff348, 1, 0, 0, 0, 0, 21] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#363 Syscall num=374 args=[ffffffff, 27ff298, 1, 27fedb8, 10, 0, 0, 23] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#364 Syscall num=-47 args=[27ff360, 200000003, 2400001513, 160300000203, d5100000000, 160300000000, 30, 0] ret=0x0 ret1=0x0 err=false writes=1 thread=0
+gettimeofday(116) events=23

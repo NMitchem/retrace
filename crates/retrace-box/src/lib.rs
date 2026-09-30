@@ -11,6 +11,7 @@ use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
 pub mod thread;
+pub mod kq;
 mod excl;
 pub use excl::{Excl, SetBy};
 pub use sig::{
@@ -152,6 +153,10 @@ pub const SHARED_REGION_END:   u64 = 0x3_0000_0000;
 // live kernel page — makes record and replay read identical bytes; the copy is captured in the
 // initial snapshot, so restore re-maps it and replay diverges nowhere.
 pub const COMMPAGE_IPA: u64 = 0x0000_000F_FFFF_C000;
+/// M46: `_COMM_PAGE_TIMEBASE_OFFSET` (xnu `osfmk/arm/cpu_capabilities.h`): what the guest's
+/// `mach_absolute_time` adds to the counter it reads (t0 M1(c)). The commpage is a copy frozen at
+/// load and restored from the snapshot, so this word is identical on every rebuild path.
+const COMMPAGE_TIMEBASE_OFFSET_IPA: u64 = COMMPAGE_IPA + 0x88;
 // A second commpage-region page the kernel maps just below the data commpage (dyld reads it in
 // early init). Same treatment: freeze a host copy. Both pages are one granule each.
 pub const COMMPAGE2_IPA: u64 = 0x0000_000F_FFFF_4000;
@@ -622,6 +627,10 @@ pub struct Box_ {
     /// unaffected. Deliberately NOT carried in `BoxState`, for the same reason as `window_cap`:
     /// production never reads it, so a restored session starting its own count at 0 is correct.
     canary_disturbances: u64,
+    /// M46 §3c: the workqueue kqueue's knotes and its event manager. This is box state, not trace
+    /// state: record and replay rebuild it from the guest's own syscalls, and every rebuild path
+    /// carries it (`BoxState`).
+    kq: kq::WorkqKqueue,
     /// M42: the shadow of this vCPU's local exclusive monitor (spec §3a).
     /// - Set when `step()` retires a load-exclusive (and, from Task 5, inferred at a native debug
     ///   stop).
@@ -654,9 +663,9 @@ const PTHREAD_TSD_OFF: u64 = 0xe0;
 const PTHREAD_START_TSD_BASE_SET: u64 = 0x1000_0000;
 
 /// Base for the synthetic mach port names retrace hands guest threads, in the same obviously-fake
-/// `0x0BAD….` shape as `SYNTHETIC_BOOTSTRAP_PORT`. The name is `BASE | tid`, so it is a pure
-/// function of the guest's own syscall sequence: non-zero (what `join` actually tests), distinct per
-/// thread, and identical on record and replay with nothing recorded.
+/// `0x0BAD….` shape as `SYNTHETIC_BOOTSTRAP_PORT`. The name is `guest_thread_kport(tid)`, so it is
+/// a pure function of the guest's own syscall sequence: non-zero (what `join` actually tests),
+/// distinct per thread, and identical on record and replay with nothing recorded.
 ///
 /// A real kport would be a host-allocated name and therefore nondeterministic — the same reason
 /// M2-xpcport had to take a deliberate record/replay asymmetry for its minted bootstrap port. This
@@ -664,6 +673,28 @@ const PTHREAD_START_TSD_BASE_SET: u64 = 0x1000_0000;
 /// it only as the `__ulock_wait` comparison value at `pthread+0x34` and passes it back verbatim in
 /// `bsdthread_terminate`'s `port` argument, both of which stay inside the box.
 const GUEST_THREAD_PORT_BASE: u32 = 0x0BAD_7000;
+
+/// The mach port name of box-spawned thread `tid`: `GUEST_THREAD_PORT_BASE | (tid << 2) | 3`
+/// (M46 Ruling T4-a). The low two bits are set because real names always end in `0b11`, and the
+/// guest's lock code reads them as flags: libplatform's `OS_ULOCK_OWNER` reads bit 0, and
+/// libdispatch's `DLOCK_OWNER_MASK` reads both (measured by M46 Task 4: with bit 0 clear, a
+/// recursive `os_unfair_lock` waited on itself). A pre-M46 recording with a box-spawned thread
+/// replays with a different kport and diverges loudly.
+///
+/// **Bounded at `tid < 0x400`, and asserted.** `GUEST_THREAD_PORT_BASE` has bits 12–14 set, and
+/// `tid << 2` reaches bit 12 at tid `0x400`, so from there a name repeats an earlier thread's:
+/// tid `0x401` would get tid 1's `0x0BAD_7007`. Nothing downstream would notice. `thread_of_port`
+/// takes the first live match, and two lock owners would merge into one. The bound is reachable,
+/// because M18 never reuses a parked worker, so every workqueue request spawns a new tid. A guest
+/// that spawns more than 1023 threads stops here by design, rather than aliasing.
+const fn guest_thread_kport(tid: usize) -> u32 {
+    assert!(tid < 0x400,
+        "M46: a box-spawned thread id past 0x3ff reaches GUEST_THREAD_PORT_BASE's bits 12-14, so its \
+         mach port name would alias an earlier thread's (tid 0x401 would get tid 1's 0x0BAD7007) and \
+         two threads would share one name. M18 never reuses a parked worker, so a guest that spawns \
+         more than 1023 threads stops here by design; widen the name scheme before raising this bound.");
+    GUEST_THREAD_PORT_BASE | ((tid as u32) << 2) | 3
+}
 
 /// The stack retrace gives a workqueue worker, in bytes. **This number is retrace's own choice**,
 /// and uniquely among the constants around `guest_workq_reqthreads` it is not a measurement:
@@ -698,6 +729,25 @@ const WQ_WORKER_STACK_SIZE: u64 = 0x8_0000;
 ///   a **different thread role**: it also writes `pthread+0xa4 = 1` and bypasses the QoS arithmetic
 ///   entirely. Task 1 §5 item 3 names setting it as the precise mistake to avoid.
 const WQ_ENTRY_FLAGS_FRESH: u64 = 0x24_4000;
+
+/// M46 §2c: the entry flags of the event manager's FIRST upcall:
+/// `TSD_BASE_SET | EVENT_MANAGER | KEVENT | NEWSPI | PRIO_QOS | 8` = `0x3C_4008` (t0 M2). QoS 8 is
+/// the manager's (xnu `pthread_workqueue.c:714`).
+const WQ_ENTRY_FLAGS_MANAGER_FRESH: u64 = (retrace_arch::WQ_FLAG_THREAD_TSD_BASE_SET
+    | retrace_arch::WQ_FLAG_THREAD_EVENT_MANAGER | retrace_arch::WQ_FLAG_THREAD_KEVENT
+    | retrace_arch::WQ_FLAG_THREAD_NEWSPI | retrace_arch::WQ_FLAG_THREAD_PRIO_QOS) as u64 | 8;
+/// M46 §2c: a parked manager re-entered: `REUSE` in place of `TSD_BASE_SET`, `0x1E_4008` (t0 M2).
+const WQ_ENTRY_FLAGS_MANAGER_REUSE: u64 = (retrace_arch::WQ_FLAG_THREAD_REUSE
+    | retrace_arch::WQ_FLAG_THREAD_EVENT_MANAGER | retrace_arch::WQ_FLAG_THREAD_KEVENT
+    | retrace_arch::WQ_FLAG_THREAD_NEWSPI | retrace_arch::WQ_FLAG_THREAD_PRIO_QOS) as u64 | 8;
+/// M46 §2c: a redelivery from inside `KEVENT_RETURN`, with no `PRIO_QOS` and no QoS byte:
+/// `0x1E_0000` (xnu `pthread_workqueue.c:3695-3703`). Inferred, not measured: t0 M2 saw no native
+/// `KEVENT_RETURN` find events waiting, so no native redelivery was observed.
+const WQ_ENTRY_FLAGS_MANAGER_REDELIVER: u64 = (retrace_arch::WQ_FLAG_THREAD_REUSE
+    | retrace_arch::WQ_FLAG_THREAD_EVENT_MANAGER | retrace_arch::WQ_FLAG_THREAD_KEVENT
+    | retrace_arch::WQ_FLAG_THREAD_NEWSPI) as u64;
+/// M46 §2c: a kevent upcall's events sit at `self − 16 × 72` (libpthread `kern_support.c:887-913`).
+const WQ_KEVENT_LIST_OFF: u64 = (retrace_arch::WQ_KEVENT_LIST_LEN * retrace_arch::KEVENT_QOS_SIZE) as u64;
 
 /// Ceiling on the `numthreads` a single `REQTHREADS` may ask for. **Not a measurement** — like
 /// `WQ_WORKER_STACK_SIZE` this is retrace's own number, and it exists only so that a garbage
@@ -1020,6 +1070,10 @@ pub struct BoxState {
     // counter exists to prevent. Carried from the outset, in the same commit that introduced the
     // counter (`1c4c74f`) — so this field is a carry, not one of the class's instances.
     pub fall_throughs: u64,
+    // M46: carried because a mid-run capture cannot re-derive it: the registrations, arms and fires
+    // happened behind the checkpoint. Dropping it would make a seek past a fire replay a manager
+    // whose knote table is empty (gcdtimer_e2e's seek test, and its control).
+    pub kq: kq::WorkqKqueue,
     // M42: carried because a mid-pair capture cannot re-derive it. The load-exclusive that set it
     // retired behind the checkpoint, and the hardware monitor never survives an exit. Resetting it
     // would make a seek past a stepped load-exclusive fail that pair's store, which is the bug M42
@@ -1430,7 +1484,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, excl: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -2032,7 +2086,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, excl: None };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -3272,7 +3326,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, excl: None };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -4832,7 +4886,7 @@ impl Box_ {
     /// `tid`'s mach-port name, read back out of its own `pthread` struct at `+0xf8`.
     ///
     /// READ, not reconstructed. For a thread retrace spawned this returns the
-    /// `GUEST_THREAD_PORT_BASE | tid` it wrote itself; for main it returns what libpthread's
+    /// `guest_thread_kport(tid)` it wrote itself; for main it returns what libpthread's
     /// `__pthread_main_thread_init` stored. Reading is what makes main need no special case.
     pub fn kport_of(&self, tid: usize) -> Option<u32> {
         let va = self.pthread_of(tid)?;
@@ -4972,7 +5026,17 @@ impl Box_ {
     /// The XNU names in the constants are attributed from public libpthread sources and are NOT
     /// verified on this machine — `pthread/workqueue_private.h` ships in neither `/usr/include` nor
     /// the Xcode SDK. The raw values are the measurement; the names are a lead.
+    ///
+    /// M46: `try_workq_kernreturn` is the dispatch; this wrapper, which panics on its `Err`, keeps
+    /// the M18 tests' signature.
     pub fn guest_workq_kernreturn(&mut self, args: [u64; 8]) -> u64 {
+        self.try_workq_kernreturn(args).unwrap_or_else(|m| panic!("{m}"))
+    }
+
+    /// The dispatch both arms call (M46 §3g). An `Err` is a refusal: the record arm panics with it,
+    /// and the replay mirror reports it as a divergence. M18's per-opcode asserts inside
+    /// REQTHREADS and THREAD_RETURN still panic on both sides.
+    pub fn try_workq_kernreturn(&mut self, args: [u64; 8]) -> Result<u64, String> {
         // libdispatch configuring the workqueue for dispatch. Carries a guest pointer in `args[1]`
         // (measured `0x27ff6a8`) that Stage 2b needs and Stage 2a only has to not forward.
         const WQOPS_SETUP_DISPATCH: u64 = 0x400;
@@ -4984,16 +5048,28 @@ impl Box_ {
         const WQOPS_THREAD_RETURN: u64 = 0x4;
 
         match args[0] {
-            WQOPS_SETUP_DISPATCH => 0,
-            WQOPS_QUEUE_REQTHREADS => self.guest_workq_reqthreads(args),
-            WQOPS_THREAD_RETURN => self.guest_workq_park(args),
-            other => panic!(
+            WQOPS_SETUP_DISPATCH => Ok(0),
+            WQOPS_QUEUE_REQTHREADS => Ok(self.guest_workq_reqthreads(args)),
+            // M46: the bound manager returns through THREAD_KEVENT_RETURN, never this. Parked here,
+            // it would leave the knote table naming a bound manager that never scans again, so
+            // every later activation would be dropped in silence. Measured libpthread never does it.
+            WQOPS_THREAD_RETURN if self.kq.manager() == kq::Manager::Bound(self.threads.current()) =>
+                Err(format!(
+                    "M46: workq_kernreturn THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) from thread {}, \
+                     which is the bound event manager: the bound manager returns through \
+                     THREAD_KEVENT_RETURN ({:#x}), and measured libpthread never parks it with \
+                     THREAD_RETURN (M46 §3d). args=[{}]",
+                    self.threads.current(), retrace_arch::WQOPS_THREAD_KEVENT_RETURN, Self::fmt_args(args))),
+            WQOPS_THREAD_RETURN => Ok(self.guest_workq_park(args)),
+            retrace_arch::WQOPS_THREAD_KEVENT_RETURN => self.guest_workq_kevent_return(args),
+            other => Err(format!(
                 "M18 Stage 2b: unmeasured workq_kernreturn opcode {other:#x} — only \
                  SETUP_DISPATCH ({WQOPS_SETUP_DISPATCH:#x}), REQTHREADS \
-                 ({WQOPS_QUEUE_REQTHREADS:#x}) and THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) have \
-                 ever been observed (M18 Task 6; Stage 2b Task 1 §3d). Measure what \
-                 issues this one before modelling it; a guessed opcode silently corrupts the \
-                 guest's workqueue state. args={args:#x?}"),
+                 ({WQOPS_QUEUE_REQTHREADS:#x}), THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) and, since \
+                 M46, THREAD_KEVENT_RETURN ({:#x}) have ever been observed (M18 Task 6; Stage 2b \
+                 Task 1 §3d; M46 t0 M3). Measure what issues this one before modelling it; a \
+                 guessed opcode silently corrupts the guest's workqueue state. args={args:#x?}",
+                retrace_arch::WQOPS_THREAD_KEVENT_RETURN)),
         }
     }
 
@@ -5057,13 +5133,21 @@ impl Box_ {
              are XNU's kevent-carrying variant, which must return events rather than merely park; \
              measure it before modelling it. args={args:#x?}",
             (args[1], args[2], args[3]));
+        self.park_on_svc();
+        0
+    }
+
+    /// Block the current thread `Parked` and rewind its `ELR_EL1` onto the `svc`: the two moves
+    /// `guest_workq_park`'s doc explains. Both dispatch arms call `set_x0_err_and_return` after the
+    /// box returns, which sets `PC = ELR_EL1`, so the rewind is what keeps the parked context from
+    /// being resumable into a return. A64 instructions are 4 bytes, and `ELR_EL1` on an SVC trap
+    /// holds the address of the one AFTER the `svc`. `wrapping_sub`, because an ELR this low is a
+    /// broken box, not a case for this helper to police. Shared by a worker's THREAD_RETURN and the
+    /// manager's empty KEVENT_RETURN (M46).
+    fn park_on_svc(&mut self) {
         self.threads.block(thread::BlockReason::Parked);
-        // A64 instructions are 4 bytes, and `ELR_EL1` on an SVC trap holds the address of the one
-        // AFTER the `svc` — so `- 4` is the `svc` itself. `wrapping_sub` because an ELR this low is
-        // a broken box, not a case for this arm to police.
         let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::ELR_EL1, elr.wrapping_sub(4)).unwrap();
-        0
     }
 
     /// `workq_kernreturn(WQOPS_QUEUE_REQTHREADS, 0, numthreads, priority)` — libdispatch asking the
@@ -5147,7 +5231,7 @@ impl Box_ {
             ctx.regs.x[0] = pthread;
             // x1 — the thread's mach port name. `0x302c str w1, [x0, #0xf8]` inside
             // `__pthread_wqthread_setup` — the SAME `pthread + 0xf8` M14 measured for a
-            // `bsdthread_create` child, which is why this reuses `GUEST_THREAD_PORT_BASE | tid`
+            // `bsdthread_create` child, which is why this reuses `guest_thread_kport(tid)`
             // rather than minting a new scheme. Uniqueness is load-bearing beyond the `brk` below:
             // `Box_::thread_of_port` resolves a port back to a thread by reading that field out of
             // guest memory, and M16's signal delivery routes on the answer, so a worker sharing a
@@ -5156,7 +5240,7 @@ impl Box_ {
             // Unlike M14's silent `pthread_join` failure, a bad value here is LOUD: `0x30c8 ldr
             // w8,[x19,#0xf8]; add w9,w8,#1; cmp w9,#1; b.ls` fires `brk #0xb001` with "BUG IN
             // CLIENT OF LIBPTHREAD: Unable to allocate thread port" for BOTH `0` and `-1` (§4).
-            ctx.regs.x[1] = (GUEST_THREAD_PORT_BASE | tid as u32) as u64;
+            ctx.regs.x[1] = guest_thread_kport(tid) as u64;
             // x2 — the LOW end of the stack region. `0x2fe0 sub x10, x2, x10` and
             // `0x2ff0 stp x0, x2, [x0, #0xb0]` inside setup, which derive every stack field of the
             // struct from x0 and x2 alone. §2c: "Neither is derived from the other, and neither is
@@ -5198,40 +5282,276 @@ impl Box_ {
     }
 
     /// `kevent_qos(kq, changelist, nchanges, eventlist, nevents, data_out, data_available, flags)`
-    /// with `KEVENT_FLAG_WORKQ`: libdispatch's `_dispatch_kq_init` registering the event manager's
-    /// `EVFILT_USER` wake-up on the process's workqueue kqueue (M45).
+    /// with `KEVENT_FLAG_WORKQ`: libdispatch talking to the process's workqueue kqueue (M45, M46).
     ///
-    /// **Emulated, never forwarded**, for the reason `guest_workq_open` documents, one level up.
-    /// With `KEVENT_FLAG_WORKQ`, xnu resolves `kq` to `p->p_fd.fd_wqkqueue`, allocating it if absent
-    /// (`kern_event.c` `kevent_get_kqwq`), and that is RETRACE's own process's (M44 t0 M1). It
-    /// cannot be refused with an errno either: libdispatch `DISPATCH_CLIENT_CRASH`es on any errno
-    /// but `EINTR` (`event_kevent.c:700-709`), so an errno would only move the crash into the guest
-    /// and hide why.
+    /// **Emulated, never forwarded**, for the reason `guest_workq_open` documents, one level up. With
+    /// `KEVENT_FLAG_WORKQ`, xnu resolves `kq` to the process's workqueue kqueue, which is RETRACE's
+    /// own (M44 t0 M1). It cannot be refused with an errno either: libdispatch
+    /// `DISPATCH_CLIENT_CRASH`es on any errno but `EINTR` (`event_kevent.c:700-709`).
     ///
-    /// **Exactly one shape is modelled**, the measured one (`retrace_arch::kqinit_shape`), and it is
-    /// modelled as the smallest success there is. `KEVENT_FLAG_IMMEDIATE` with no event list places
-    /// zero events, so the return is 0 (t0 M3 measured it natively). Nothing is kept, and `&self`
-    /// says so: nothing M45 runs reads a knote table. A trigger, a timer, a delete or any other
-    /// shape is refused BY VALUE, naming the field, which is `guest_workq_kernreturn`'s stance: a
-    /// guessed kevent silently corrupts libdispatch's event state.
+    /// **Three shapes are modelled** (`retrace_arch::kevent_qos_shape`), each against the knote
+    /// table (M46 §3d):
+    /// - M45's init registers the manager's `EVFILT_USER` knote;
+    /// - libdispatch's memory-pressure source registers, and never activates;
+    /// - the manager poke triggers the user knote and requests the manager.
     ///
-    /// The entry is read through the guest's own stage-1 walk, page by page (`read_va_prefix`), so
-    /// an entry straddling two pages is read whole, and one that does not fully translate arrives
-    /// short and is refused by the validator.
+    /// Each returns 0 and writes nothing: under `ERROR_EVENTS` the kernel copies out only errors
+    /// (§2a). Any other shape, or a table state the kernel's answer is unmeasured for, is refused by
+    /// value, naming the field. `Err` carries the record arm's panic text; the replay mirror wraps it
+    /// as a divergence (§3g).
     ///
-    /// Deterministic and above the trace: the only inputs are `args` and 72 bytes of guest memory,
-    /// which record and replay hold identically, and both dispatch arms reach this through the same
-    /// call. Symmetry rule 1 holds by construction.
-    pub fn guest_kevent_qos(&self, args: [u64; 8]) -> u64 {
+    /// The entry is read through the guest's own stage-1 walk, page by page (`read_va_prefix`).
+    /// Deterministic: the inputs are `args`, 72 bytes of guest memory and the knote table, which
+    /// record and replay hold identically.
+    pub fn guest_kevent_qos(&mut self, args: [u64; 8]) -> Result<u64, String> {
         let entry = self.read_va_prefix(args[1], retrace_arch::KEVENT_QOS_SIZE);
-        if let Err(why) = retrace_arch::kqinit_shape(args, &entry) {
-            panic!("M45: unmeasured kevent_qos shape: {why}. Only libdispatch's `_dispatch_kq_init` \
-                    (KEVENT_FLAG_WORKQ|IMMEDIATE, one EVFILT_USER EV_ADD|EV_CLEAR entry, no event \
-                    list) is modelled (M45 §2a). Measure what issues this one before modelling it; \
-                    a guessed kevent silently corrupts libdispatch's event state. args=[{}]",
-                    args.map(|a| format!("{a:#x}")).join(","));
+        let shape = retrace_arch::kevent_qos_shape(args, &entry).map_err(|why| format!(
+            "M46: unmeasured kevent_qos shape: {why}. Modelled: libdispatch's workqueue-kqueue init, \
+             its memory-pressure registration and its manager poke (M46 §2a-§2b). Measure what \
+             issues this one before modelling it; a guessed kevent silently corrupts libdispatch's \
+             event state. args=[{}]", Self::fmt_args(args)))?;
+        let table = |why: String| format!(
+            "M46: kevent_qos against the knote table: {why}. args=[{}]", Self::fmt_args(args));
+        match shape {
+            retrace_arch::KeventShape::Init => self.kq.register_user().map_err(table)?,
+            retrace_arch::KeventShape::MemoryStatusAdd { udata } => self.kq.register_memstatus(udata).map_err(table)?,
+            retrace_arch::KeventShape::ManagerPoke => {
+                self.kq.trigger_user().map_err(table)?;
+                self.request_manager();
+            }
         }
-        0
+        Ok(0)
+    }
+
+    /// `args` as `0x…,0x…` on one line (M45 T3-e: a refusal must fit a log line).
+    fn fmt_args(args: [u64; 8]) -> String {
+        args.map(|a| format!("{a:#x}")).join(",")
+    }
+
+    /// M46 §3d: a knote activated, so the manager is wanted. With no manager thread, spawn one;
+    /// with a parked one, re-enter it; with a bound one, do nothing, because its next
+    /// `KEVENT_RETURN` scan collects the events. A spawned or re-entered manager is Runnable and
+    /// runs when the current thread blocks: the cooperative rule, unchanged.
+    fn request_manager(&mut self) {
+        if !self.kq.has_pending() { return; }
+        match self.kq.manager() {
+            kq::Manager::Bound(_) => {}
+            kq::Manager::None => self.spawn_manager(),
+            kq::Manager::Unbound(tid) => {
+                self.threads.unpark(tid);
+                let pthread = self.pthread_of(tid).expect("a parked manager has a pthread");
+                let stack_base = self.threads.stack_of(tid).0;
+                self.enter_manager(tid, pthread, stack_base, WQ_ENTRY_FLAGS_MANAGER_REUSE);
+            }
+        }
+    }
+
+    /// M46: the first manager request builds a fresh workqueue thread on M18's worker path
+    /// (`place_worker_stack`). The same placement, the same cursor, and so deterministic with
+    /// nothing recorded.
+    fn spawn_manager(&mut self) {
+        let pthsize = self.pthread_size.expect(
+            "M46: a knote activated with no registered pthread size — bsdthread_register captures it, \
+             and every dynamic guest registers at startup") as u64;
+        let (stack_base, stack_top, pthread) = self.place_worker_stack(pthsize);
+        let tid = self.threads.len();
+        // The requesting thread's EL0 PSTATE, as `guest_workq_reqthreads` gives a worker (M14's
+        // lesson: zeroed()'s 0 is not an EL0 PSTATE to resume into).
+        let ctx = thread::ThreadCtx { spsr: self.spsr(), ..thread::ThreadCtx::zeroed() };
+        let spawned = self.threads.spawn(ctx, (stack_base, stack_top - stack_base));
+        assert_eq!(spawned, tid, "ThreadTable::spawn appends; the kport assumes it");
+        self.enter_manager(tid, pthread, stack_base, WQ_ENTRY_FLAGS_MANAGER_FRESH);
+    }
+
+    /// M46 §2c, §3d: write the active knotes into `tid`'s event list and give it a fresh upcall
+    /// register block, which is libpthread's `workq_set_register_state`. Every general register is
+    /// zeroed except the six the entry reads.
+    ///
+    /// **The current thread's block goes onto the vCPU; any other thread's goes into its saved
+    /// context.** `switch_to_thread` returns early for the current thread, so a block written only
+    /// to the table would never load. That case is a manager re-entered in the same settle that
+    /// parked it, or a redelivery from inside its own `KEVENT_RETURN` (Review Focus 3). A later
+    /// switch away saves the live vCPU, the block included. A syscall exit has already cleared the
+    /// exclusive shadow, so there is none to carry.
+    fn enter_manager(&mut self, tid: usize, pthread: u64, stack_base: u64, flags: u64) {
+        let entry = self.wq_thread_pc.expect(
+            "M46: a manager upcall with no registered wqthread entry — refusing to enter an invented \
+             address; bsdthread_register captures it at startup");
+        let n = self.fill_manager_upcall(pthread);
+        let list = pthread - WQ_KEVENT_LIST_OFF;
+        let mut ctx = self.thread_ctx(tid).expect("the manager is in the thread table");
+        ctx.regs.x = [0; 31];
+        ctx.regs.pc = entry;
+        ctx.elr = entry;
+        ctx.regs.cpsr = ctx.spsr;
+        ctx.regs.x[0] = pthread;
+        ctx.regs.x[1] = guest_thread_kport(tid) as u64;
+        ctx.regs.x[2] = stack_base;
+        ctx.regs.x[3] = list;
+        ctx.regs.x[4] = flags;
+        ctx.regs.x[5] = n as u64;
+        // With no mach-message payload the stack top is the list itself (spec §2c).
+        ctx.regs.sp_el0 = list;
+        ctx.tpidrro_el0 = pthread + PTHREAD_TSD_OFF;
+        if tid == self.threads.current() {
+            self.load_ctx(&ctx);
+        } else {
+            *self.threads.ctx_mut(tid) = ctx;
+        }
+        self.kq.set_manager(kq::Manager::Bound(tid));
+    }
+
+    /// M46 §3d: deliver up to 16 active knotes into the manager's event list at `self − 0x480`.
+    /// These are box writes computed from box state, recomputed on both sides and never recorded,
+    /// like `guest_bsdthread_create`'s kport write. A fresh manager's list page is still a bare
+    /// reservation, so the write commits it.
+    fn fill_manager_upcall(&mut self, pthread: u64) -> usize {
+        let events = self.kq.take_events(retrace_arch::WQ_KEVENT_LIST_LEN);
+        assert!(!events.is_empty(), "M46: a manager upcall with no active knote — request_manager checks has_pending first");
+        let list = pthread - WQ_KEVENT_LIST_OFF;
+        for (i, e) in events.iter().enumerate() {
+            let at = list + (i * retrace_arch::KEVENT_QOS_SIZE) as u64;
+            self.write_va_committing(at, &e.to_bytes())
+                .unwrap_or_else(|m| panic!("M46: writing the manager's event list: {m}"));
+        }
+        events.len()
+    }
+
+    /// Write `bytes` at guest VA `va`, page by page through the guest's own stage-1 walk,
+    /// demand-committing a reserved page the way a guest store would (`commit_reserved_page`).
+    fn write_va_committing(&mut self, va: u64, bytes: &[u8]) -> Result<(), String> {
+        let mut done = 0;
+        while done < bytes.len() {
+            let a = va + done as u64;
+            let ipa = self.va_to_ipa(a).ok_or_else(|| format!("{a:#x} does not translate"))?;
+            let n = (((a | (GRANULE as u64 - 1)) + 1 - a) as usize).min(bytes.len() - done);
+            if self.host_span(ipa).is_none() && !self.commit_reserved_page(ipa) {
+                return Err(format!("{a:#x} (ipa {ipa:#x}) is neither backed nor reserved"));
+            }
+            self.write_guest(ipa, &bytes[done..done + n]);
+            done += n;
+        }
+        Ok(())
+    }
+
+    /// `workq_kernreturn(THREAD_KEVENT_RETURN, changelist, nchanges, 0)`: the event manager handing
+    /// back its change list (M46 §3d; libpthread `pthread.c:2581-2635`, xnu
+    /// `pthread_workqueue.c:3641-3745`).
+    ///
+    /// In order, it:
+    /// 1. registers every change (each classified first, all before any is applied);
+    /// 2. fires every timer the guest clock has reached (§3e rule 1);
+    /// 3. scans for active knotes.
+    ///
+    /// With some, it redelivers on the same thread and returns `self`, so that the arm's
+    /// `set_x0_err_and_return(self, false)` completes the upcall. With none, the manager unbinds and
+    /// parks on its `svc`. Every refusal comes before the clock is read.
+    fn guest_workq_kevent_return(&mut self, args: [u64; 8]) -> Result<u64, String> {
+        let cur = self.threads.current();
+        if self.kq.manager() != kq::Manager::Bound(cur) {
+            return Err(format!(
+                "M46: workq_kernreturn THREAD_KEVENT_RETURN (0x40) from thread {cur}, which is not the \
+                 bound event manager ({:?}): only a thread entered with WQ_FLAG_THREAD_EVENT_MANAGER \
+                 returns kevents here (M46 §3d). args=[{}]", self.kq.manager(), Self::fmt_args(args)));
+        }
+        let n = (args[2] & 0xffff_ffff) as usize;
+        if n > retrace_arch::WQ_KEVENT_LIST_LEN || args[3] & 0xffff_ffff != 0 {
+            return Err(format!(
+                "M46: workq_kernreturn THREAD_KEVENT_RETURN with {n} changes and x3 {:#x}; measured at \
+                 most {} changes and x3 0 (libpthread pthread.c:2581-2635). args=[{}]",
+                args[3], retrace_arch::WQ_KEVENT_LIST_LEN, Self::fmt_args(args)));
+        }
+        let size = retrace_arch::KEVENT_QOS_SIZE;
+        let bytes = self.read_va_prefix(args[1], n * size);
+        if bytes.len() < n * size {
+            return Err(format!(
+                "M46: unmeasured KEVENT_RETURN change: the change list read {} of {} bytes: it does not \
+                 fully translate. args=[{}]", bytes.len(), n * size, Self::fmt_args(args)));
+        }
+        let mut changes = Vec::with_capacity(n);
+        for (i, e) in bytes.chunks_exact(size).enumerate() {
+            let entry: &[u8; retrace_arch::KEVENT_QOS_SIZE] = e.try_into().expect("chunks_exact");
+            changes.push(retrace_arch::kevent_return_change(entry).map_err(|why| format!(
+                "M46: unmeasured KEVENT_RETURN change: changelist[{i}].{why}. args=[{}]",
+                Self::fmt_args(args)))?);
+        }
+        for c in changes {
+            match c {
+                retrace_arch::ChangeEntry::TimerAdd { ident, deadline, leeway, udata } =>
+                    self.kq.add_timer(ident, deadline, leeway, udata),
+                retrace_arch::ChangeEntry::TimerDelete { ident } => self.kq.delete_timer(ident),
+            }.map_err(|why| format!("M46: KEVENT_RETURN against the knote table: {why}. args=[{}]",
+                                    Self::fmt_args(args)))?;
+        }
+        if self.kq.armed_count() > 0 {
+            let now = self.now_guest();
+            self.kq.fire_due(now);
+        }
+        let pthread = self.pthread_of(cur).expect("the running manager has a pthread");
+        if self.kq.has_pending() {
+            let stack_base = self.threads.stack_of(cur).0;
+            self.enter_manager(cur, pthread, stack_base, WQ_ENTRY_FLAGS_MANAGER_REDELIVER);
+            Ok(pthread)
+        } else {
+            self.kq.set_manager(kq::Manager::Unbound(cur));
+            self.park_on_svc();
+            Ok(0)
+        }
+    }
+
+    /// M46 §3e rule 1: fire every armed timer the guest clock has reached, and request the manager
+    /// for them. Reads nothing while no timer is armed, so a guest without timers, and a static box
+    /// without a commpage, never reach the clock.
+    fn fire_due_timers(&mut self) {
+        if self.kq.armed_count() == 0 { return; }
+        let now = self.now_guest();
+        if self.kq.fire_due(now) > 0 {
+            self.request_manager();
+        }
+    }
+
+    /// M46: the guest-visible `mach_absolute_time` for the current synthetic clock. It is the
+    /// counter the timebase `MRS` last returned plus the commpage's timebase offset, which is what
+    /// the guest's own `mach_absolute_time` computes (t0 M1(c)). Every input is box state that
+    /// record and replay hold identically.
+    fn now_guest(&self) -> u64 {
+        self.synthetic_tsc.wrapping_add(self.timebase_offset())
+    }
+
+    /// M46: the commpage's `_COMM_PAGE_TIMEBASE_OFFSET`. Only a dynamic guest has a commpage, and
+    /// only a dynamic guest reads the guest clock through `mach_get_times` or arms a timer.
+    fn timebase_offset(&self) -> u64 {
+        let b = self.read_guest_checked(COMMPAGE_TIMEBASE_OFFSET_IPA, 8).expect(
+            "M46: the guest clock was read on a box with no commpage. Only a dynamic guest reaches \
+             mach_get_times's fallback or arms a timer.");
+        u64::from_le_bytes(b.try_into().unwrap())
+    }
+
+    /// M46 R7: rewrite `gettimeofday`'s (116) `mach_absolute_time` out-parameter, which the host
+    /// kernel has just written with the HOST's mach time, to the guest's own clock. Returns the
+    /// write for the recorder to append to the event, so that the trace carries the guest's value
+    /// and replay's ordinary `apply_and_return` lands it last.
+    ///
+    /// **Why:** `mach_get_times` falls back to this syscall whenever the commpage's gettimeofday
+    /// stamp is a second or more from `mach_absolute_time` (xnu `mach_get_times.c`,
+    /// `__commpage_gettimeofday.c`). retrace freezes the commpage at load while the timebase is
+    /// synthetic, so the fallback is always taken. Before R7 the guest then held two clocks:
+    /// `mach_absolute_time` from `synthetic_tsc`, and `mach_get_times` from the host. libdispatch
+    /// takes its timer "now" from the second (libdispatch `src/shims/time.h:220-235`) and its
+    /// deadlines from the first, so no timer could fire on the synthetic clock (t0 M1).
+    ///
+    /// **Record-only, by design.** Replay applies the recorded write verbatim, so no replay code
+    /// changes and a pre-M46 trace, which carries the host's value, replays exactly as before. The
+    /// value is also the one replay would compute: `now_guest()` at this landmark reads only state
+    /// both sides hold identically. The wall time in `tv` stays the host's, recorded as before.
+    pub fn synthesize_mach_time_out(&mut self, va: u64) -> Region {
+        let now = self.now_guest().to_le_bytes();
+        // An aligned u64 cannot straddle a page, so one translation covers all 8 bytes.
+        let ipa = self.va_to_ipa(va).filter(|_| va.is_multiple_of(8)).unwrap_or_else(|| panic!(
+            "M46 R7: gettimeofday's mach-time out-parameter {va:#x} does not translate or is not \
+             8-aligned, though the kernel has just written it"));
+        self.write_guest(ipa, &now);
+        Region { ipa, bytes: now.to_vec() }
     }
 
     /// Reserve the main thread's believed-but-unbacked stack (M8 spec risk R3).
@@ -5505,7 +5825,7 @@ impl Box_ {
         // (`+0x90`/`+0x98`, the contract above), so an unmapped pthread here means the box's view of
         // guest memory disagrees with the guest's — worth a panic, not a silent skip that would
         // resurface as the very "join returns without waiting" bug this write exists to prevent.
-        let port = GUEST_THREAD_PORT_BASE | tid as u32;
+        let port = guest_thread_kport(tid);
         let ipa = self.va_to_ipa(pthread + PTHREAD_KPORT_OFF).unwrap_or_else(|| {
             panic!("M14: bsdthread_create pthread struct {pthread:#x} has no mapping for +0xf8")
         });
@@ -5812,14 +6132,36 @@ impl Box_ {
     /// The pick is `ThreadTable::pick_next` — lowest-indexed runnable — which is a pure function of
     /// the guest's own syscall sequence. That is what lets record and replay schedule identically
     /// with NOTHING recorded and no trace-format change (symmetry rule 2).
+    ///
+    /// M46 §3e adds time, still a pure function of box state, because every path that reaches here
+    /// (`run()`, `step()`, replay's `finish_event`) reaches it at the same point in that sequence:
+    /// 1. **Overdue timers fire** before the pick.
+    /// 2. **The idle jump.** If nothing is runnable and a timer is armed, `synthetic_tsc` jumps so
+    ///    that the guest clock reads the earliest deadline (R4: the earliest kernel-faithful point),
+    ///    rule 1 runs again, and the pick is retried, exactly once. The clock never moves
+    ///    backwards (`kq::tsc_for_deadline`).
+    /// 3. **Otherwise it is a deadlock**, as since M14, and the panic lists the knote table.
+    ///
+    /// A timer fires only when some thread blocks. A guest that spins without blocking never lets
+    /// one fire: the cooperative scheduler's limit, extended to time (`docs/current-state.md`).
     pub fn schedule_after_block(&mut self) {
-        match self.threads.pick_next() {
+        self.fire_due_timers();
+        let mut next = self.threads.pick_next();
+        if next.is_none() {
+            if let Some(deadline) = self.kq.earliest_deadline() {
+                self.synthetic_tsc = kq::tsc_for_deadline(self.synthetic_tsc, self.timebase_offset(), deadline);
+                self.fire_due_timers();
+                next = self.threads.pick_next();
+            }
+        }
+        match next {
             Some(tid) => self.switch_to_thread(tid),
             None => panic!(
-                "M14: DEADLOCK — no runnable thread. {} live of {} total. States: {:?}",
+                "M14: DEADLOCK — no runnable thread. {} live of {} total. States: {:?}. Knotes: {:?}",
                 self.threads.live(),
                 self.threads.len(),
-                (0..self.threads.len()).map(|i| self.threads.state_of(i)).collect::<Vec<_>>()
+                (0..self.threads.len()).map(|i| self.threads.state_of(i)).collect::<Vec<_>>(),
+                self.kq
             ),
         }
     }
@@ -6028,6 +6370,7 @@ impl Box_ {
             fd_slots: self.fds.slots(),
             sigtable: self.sigtable.clone(),
             fall_throughs: self.fall_throughs,
+            kq: self.kq.clone(),
             excl: self.excl.clone(),
         }
     }
@@ -6150,6 +6493,7 @@ impl Box_ {
             // correct rather than lossy. Same argument as `window_cap` directly above.
             canary_disturbances: 0,
             // M42: RESTORED from the capture, never reset (spec §3f); see the `BoxState` field.
+            kq: state.kq.clone(),
             excl: state.excl.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
@@ -6174,10 +6518,27 @@ impl Box_ {
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
             self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
-            self.pac_enabled)
+            self.pac_enabled, self.kq)
+    }
+
+    /// Test-only (M46): the workqueue kqueue, for `checkpointparity.rs` and the box-level manager
+    /// tests.
+    #[doc(hidden)]
+    pub fn dbg_kq(&self) -> &kq::WorkqKqueue { &self.kq }
+
+    /// Test-only (M46): stage knote-table state on a static box, the way `checkpointparity.rs`
+    /// stages every other field through a public method.
+    #[doc(hidden)]
+    pub fn dbg_kq_mut(&mut self) -> &mut kq::WorkqKqueue { &mut self.kq }
+
+    /// Test-only (M46): write guest memory by VA, page by page, as the box's own event writes do.
+    /// `gcdtimer_e2e` tampers an entry at its `svc` with this, to reach the replay-side validators.
+    #[doc(hidden)]
+    pub fn dbg_write_va(&mut self, va: u64, bytes: &[u8]) -> Result<(), String> {
+        self.write_va_committing(va, bytes)
     }
 
     /// Test-only (M24 t2): the guest's memory map as `(ipa, len)` pairs — what `tests/restoreparity.rs`
