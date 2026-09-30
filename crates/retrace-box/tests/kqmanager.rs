@@ -135,6 +135,20 @@ fn a_kevent_return_from_a_thread_that_is_not_the_bound_manager_is_refused() {
     assert!(err.contains("from thread 0, which is not the bound event manager"), "{err}");
 }
 
+/// M46 final review M1: a plain worker's park (`THREAD_RETURN`, 0x4) from the bound manager is
+/// refused by value, before anything changes. Parked that way, the manager would stay `Bound` and
+/// never scan again.
+#[test]
+fn a_thread_return_from_the_bound_manager_is_refused_naming_kevent_return() {
+    let (mut b, _, _) = spawned();
+    b.switch_to_thread(1);
+    let err = b.try_workq_kernreturn([0x4, 0, 0, 0, 0, 0, 0, 0]).unwrap_err();
+    assert!(err.contains("M46: workq_kernreturn THREAD_RETURN (0x4) from thread 1, which is the bound event manager")
+        && err.contains("THREAD_KEVENT_RETURN (0x40)"), "{err}");
+    assert_eq!(b.threads().state_of(1), ThreadState::Runnable, "not parked");
+    assert_eq!(b.dbg_kq().manager(), Manager::Bound(1));
+}
+
 /// A manager parked on its `svc`, the vCPU back on main: the state
 /// `a_kevent_return_with_nothing_pending_parks_the_manager_on_its_svc` pins.
 fn parked() -> (Box_, u64) {

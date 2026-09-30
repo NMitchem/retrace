@@ -5050,6 +5050,16 @@ impl Box_ {
         match args[0] {
             WQOPS_SETUP_DISPATCH => Ok(0),
             WQOPS_QUEUE_REQTHREADS => Ok(self.guest_workq_reqthreads(args)),
+            // M46: the bound manager returns through THREAD_KEVENT_RETURN, never this. Parked here,
+            // it would leave the knote table naming a bound manager that never scans again, so
+            // every later activation would be dropped in silence. Measured libpthread never does it.
+            WQOPS_THREAD_RETURN if self.kq.manager() == kq::Manager::Bound(self.threads.current()) =>
+                Err(format!(
+                    "M46: workq_kernreturn THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) from thread {}, \
+                     which is the bound event manager: the bound manager returns through \
+                     THREAD_KEVENT_RETURN ({:#x}), and measured libpthread never parks it with \
+                     THREAD_RETURN (M46 §3d). args=[{}]",
+                    self.threads.current(), retrace_arch::WQOPS_THREAD_KEVENT_RETURN, Self::fmt_args(args))),
             WQOPS_THREAD_RETURN => Ok(self.guest_workq_park(args)),
             retrace_arch::WQOPS_THREAD_KEVENT_RETURN => self.guest_workq_kevent_return(args),
             other => Err(format!(
