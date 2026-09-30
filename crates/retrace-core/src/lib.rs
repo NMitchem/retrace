@@ -1048,10 +1048,14 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.set_x0_err_and_return(rc, false);
             }
             // M18 Stage 2a: workq_kernreturn is EMULATED, never forwarded — same reason. Note this
-            // arm may PANIC by design: `guest_workq_kernreturn` refuses every operation word no run
-            // has measured BY VALUE, so the recorder stops here naming the opcode rather than
-            // handing the syscall to the host kernel. (Stage 2b t2 removed the REQTHREADS panic
-            // this comment used to name; that opcode now builds the worker.)
+            // arm may PANIC by design: `try_workq_kernreturn` returns `Err` BY VALUE for every
+            // operation word no run has measured and, since M46, for a THREAD_KEVENT_RETURN it
+            // cannot model (the wrong thread, an unmeasured change, a knote-table state) and a
+            // THREAD_RETURN from the bound manager. This arm panics with that text before
+            // appending, so the recorder stops here naming the cause rather than handing the
+            // syscall to the host kernel. M18's per-opcode asserts inside REQTHREADS and
+            // THREAD_RETURN panic directly. (Stage 2b t2 removed the REQTHREADS panic this comment
+            // used to name; that opcode now builds the worker.)
             Stop::Syscall { num, args } if num == retrace_arch::SYS_WORKQ_KERNRETURN => {
                 // M46: the Result form both arms share; a refusal still stops the recorder here.
                 let rc = b.try_workq_kernreturn(args).unwrap_or_else(|m| panic!("{m}"));

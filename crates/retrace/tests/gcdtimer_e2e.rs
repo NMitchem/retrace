@@ -98,6 +98,8 @@ fn two_timers_on_one_bucket_fire_in_deadline_order() {
     let (rec, trace) = records_and_replays(retrace_guest::AFTER_DYN, &["two"]);
     assert_eq!(rec.stdout, b"A\nB\ndone\n", "got {:?}", String::from_utf8_lossy(&rec.stdout));
     let rets = kevent_returns(&trace);
+    // Measured 3 (M46 t5, `task-5-report.md`; native 3, t0 M3). The bound 12 is headroom, not a
+    // measurement.
     assert!(rets.len() >= 2 && rets.len() <= 12, "two fires: {} KEVENT_RETURNs", rets.len());
 }
 

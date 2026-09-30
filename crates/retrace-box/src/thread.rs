@@ -192,6 +192,7 @@ impl ThreadTable {
             "M46: unpark of thread {tid}, which is not parked");
         self.threads[tid].state = ThreadState::Runnable;
     }
+
     pub fn ctx_of(&self, tid: usize) -> &ThreadCtx { &self.threads[tid].ctx }
     pub fn ctx_mut(&mut self, tid: usize) -> &mut ThreadCtx { &mut self.threads[tid].ctx }
 

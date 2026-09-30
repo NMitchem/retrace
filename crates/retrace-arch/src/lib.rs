@@ -1741,6 +1741,10 @@ pub fn kevent_return_change(entry: &[u8; KEVENT_QOS_SIZE]) -> Result<ChangeEntry
         return Err(format!("fflags is {:#x}, measured one of {uptime} (the UPTIME clock); MONOTONIC and \
                             WALL timers are not modelled (M46 §7)", e.fflags));
     };
+    // `flags` and `fflags` copy `e`'s own values, and `filter` was already checked, so those three
+    // comparisons cannot fail: the checks above validate them. What `first_difference` actually
+    // validates is `ident` (against the `tidx` the fflags named), `qos`, `xflags`, `ext[0]`,
+    // `ext[2]` and `ext[3]`.
     let want = KeventQos {
         ident: TIMER_IDENT_BASE | tidx as u64,
         filter: EVFILT_TIMER,
