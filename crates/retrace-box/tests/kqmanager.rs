@@ -9,7 +9,7 @@
 //! waiting), so it stays inferred from xnu (`pthread_workqueue.c:3695-3703`), and the redelivery
 //! test pins an inferred value.
 use retrace_arch::{KeventQos, EVENT_MANAGER_QOS, EVFILT_TIMER, EV_ADD, EV_ENABLE, EV_ONESHOT, KQINIT,
-                   MANAGER_POKE, TIMER_IDENT_BASE, USER_WAKE_EVENT};
+                   MANAGER_POKE, SIG_BLOCK, TIMER_IDENT_BASE, USER_WAKE_EVENT};
 use retrace_box::kq::Manager;
 use retrace_box::thread::{BlockReason, ThreadState};
 use retrace_box::Box_;
@@ -133,6 +133,44 @@ fn a_kevent_return_from_a_thread_that_is_not_the_bound_manager_is_refused() {
     let (mut b, _, pthread) = spawned();
     let err = b.try_workq_kernreturn(kevent_return(pthread - 0x480, 0)).unwrap_err();
     assert!(err.contains("from thread 0, which is not the bound event manager"), "{err}");
+}
+
+/// A manager parked on its `svc`, the vCPU back on main: the state
+/// `a_kevent_return_with_nothing_pending_parks_the_manager_on_its_svc` pins.
+fn parked() -> (Box_, u64) {
+    let (mut b, e, pthread) = spawned();
+    b.switch_to_thread(1);
+    b.try_workq_kernreturn(kevent_return(pthread - 0x480, 0)).unwrap();
+    b.set_x0_err_and_return(0, false);
+    b.schedule_after_block();
+    (b, e)
+}
+
+/// `sys/signal.h`.
+const SIGUSR1: u64 = 30;
+
+/// M46 final review I2. `should_pend_for` pends a signal on a parked manager, because it is
+/// `Blocked`. The poke's re-entry would make it Runnable and replace its context, leaving the bit
+/// set where `assert_no_stranded_signals` cannot see it, so the unpark refuses.
+#[test]
+#[should_panic(expected = "M46: unpark of parked workqueue thread 1 with signal set 0x20000000 pending")]
+fn a_poke_to_a_parked_manager_with_a_signal_pending_on_it_is_refused() {
+    let (mut b, e) = parked();
+    assert!(b.should_pend_for(1, SIGUSR1), "the raise path's own predicate pends on a parked target");
+    b.threads_mut().pend(1, SIGUSR1);
+    let _ = poke(&mut b, e);
+}
+
+/// The same refusal for a signal the manager's mask blocks, which `peek_deliverable` does not see.
+/// The mask on a workqueue thread is unmeasured, so the unpark checks the whole pending set.
+#[test]
+#[should_panic(expected = "M46: unpark of parked workqueue thread 1 with signal set 0x20000000 pending")]
+fn a_poke_to_a_parked_manager_with_a_masked_signal_pending_on_it_is_refused_too() {
+    let (mut b, e) = parked();
+    b.threads_mut().set_mask_of(1, SIG_BLOCK, 1 << (SIGUSR1 - 1));
+    b.threads_mut().pend(1, SIGUSR1);
+    assert_eq!(b.threads().peek_deliverable(1), None, "masked, so not deliverable");
+    let _ = poke(&mut b, e);
 }
 
 /// M46 §7: the refusal names the fflags, and it comes before any clock read, so it reaches a box
