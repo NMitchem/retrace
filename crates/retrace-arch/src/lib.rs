@@ -710,6 +710,12 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // the guest's; the exiting guest thread that issues it never observes the difference.
         // Noted here, not modelled.
         331 => row!(P, [Scalar]),
+        // __pthread_canceled(int action): xnu-private, one scalar (SDK `SYS___pthread_canceled
+        // 333`). M47: git's run-command issues it through `pthread_setcancelstate` around its
+        // maintenance fork (the probe's g36 stopped at this row's absence; g40 passed it). Forwarded
+        // like 331 above: the kernel applies it to RETRACE's thread, and retrace never cancels a
+        // thread, so the flag it sets is inert. Noted, not modelled.
+        333 => row!(P, [Scalar]),
         // ---- threads / workqueue (emulated above the trace, M14/M18 — rows are documentation) ---
         // bsdthread_create(func, func_arg, stack, pthread, flags): xnu-private, shape per
         // SYS_BSDTHREAD_CREATE's doc. func/func_arg/stack are values handed to the new thread's
@@ -801,6 +807,23 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // dyld_info, flex — cache rewrite, reached only when xcrun rebuilds its host cache
         // /var/tmp/xcrun_db; Ruling T0-e — host-state-dependent, unlike ed's unlink above).
         128 => row!(P, [Path, Path]),
+        // chdir(const char *path): M47 (the 2026-09-30 probe and t0 M4: git calls it for `-C`, and
+        // at startup even without `-C`). FORWARDED, and like fchdir (13) below it moves RETRACE's
+        // own working directory. On record that is the point: the guest's later relative paths
+        // are forwarded too and must resolve where the guest put them. Inert on replay, which
+        // forwards nothing (R1). t0 M5 found no relative path retrace opens after the guest starts.
+        12 => row!(P, [Path]),
+        // mkdir(const char *path, mode_t mode): M47 (git `add`, creating `.git/objects/xx`).
+        136 => row!(P, [Path, Scalar]),
+        // link(const char *path1, const char *path2): M47 (git `add`, moving a finished object from
+        // its temporary name into place).
+        9 => row!(P, [Path, Path]),
+        // utimes(const char *path, const struct timeval times[2]): M47 (git's object freshen; the
+        // probe reached it only after a crashed run left objects behind, and `fsops_dyn` reaches it
+        // deterministically). `times` is read for exactly two timevals, 2 × 16 = 32 bytes
+        // (bsd/vfs/vfs_syscalls.c `getutimes`, one `copyin` of `sizeof(tv)`), the cited bound —
+        // Ptr. NULL means "now".
+        138 => row!(P, [Path, Ptr]),
         // execve(char *fname, char **argp, char **envp): the kernel reads every argv/envp string
         // through the nested pointers — rule 1, NestedSource (EXPECTED_DIFFS; exercised by /bin/sh).
         // REFUSED since M38, never forwarded: the record arm ahead of the generic forward answers
