@@ -1,0 +1,21 @@
+native rc=0
+logflake2 bin=base run=1 rc=0 stdout==native:yes 
+logflake2 bin=base run=2 rc=0 stdout==native:yes 
+logflake2 bin=base run=3 rc=0 stdout==native:yes 
+logflake2 bin=base run=4 rc=0 stdout==native:yes 
+logflake2 bin=base run=5 rc=0 stdout==native:yes 
+logflake2 bin=base run=6 rc=0 stdout==native:yes 
+logflake2 bin=base run=7 rc=0 stdout==native:yes 
+logflake2 bin=base run=8 rc=134 stdout==native:no guest terminated by signal 6
+logflake2 bin=base run=9 rc=0 stdout==native:yes 
+logflake2 bin=base run=10 rc=0 stdout==native:yes 
+logflake2 bin=census run=1 rc=0 stdout==native:yes 
+logflake2 bin=census run=2 rc=0 stdout==native:yes 
+logflake2 bin=census run=3 rc=0 stdout==native:yes 
+logflake2 bin=census run=4 rc=0 stdout==native:yes 
+logflake2 bin=census run=5 rc=0 stdout==native:yes 
+logflake2 bin=census run=6 rc=0 stdout==native:yes 
+logflake2 bin=census run=7 rc=0 stdout==native:yes 
+logflake2 bin=census run=8 rc=0 stdout==native:yes 
+logflake2 bin=census run=9 rc=0 stdout==native:yes 
+logflake2 bin=census run=10 rc=134 stdout==native:no guest terminated by signal 6

@@ -1,0 +1,21 @@
+native rc=0
+logflake bin=base run=1 rc=101 stdout==native:no thread 'main' (16530161) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=base run=2 rc=101 stdout==native:no thread 'main' (16530181) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=base run=3 rc=101 stdout==native:no thread 'main' (16530220) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=base run=4 rc=101 stdout==native:no thread 'main' (16530286) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=base run=5 rc=101 stdout==native:no thread 'main' (16530312) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=base run=6 rc=101 stdout==native:no thread 'main' (16530342) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=base run=7 rc=101 stdout==native:no thread 'main' (16530415) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=base run=8 rc=101 stdout==native:no thread 'main' (16530437) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=base run=9 rc=101 stdout==native:no thread 'main' (16530469) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=base run=10 rc=101 stdout==native:no thread 'main' (16530521) panicked at crates/retrace-arch/src/lib.rs:1002:38:
+logflake bin=census run=1 rc=0 stdout==native:yes 
+logflake bin=census run=2 rc=134 stdout==native:no guest terminated by signal 6
+logflake bin=census run=3 rc=134 stdout==native:no guest terminated by signal 6
+logflake bin=census run=4 rc=0 stdout==native:yes 
+logflake bin=census run=5 rc=0 stdout==native:yes 
+logflake bin=census run=6 rc=0 stdout==native:yes 
+logflake bin=census run=7 rc=0 stdout==native:yes 
+logflake bin=census run=8 rc=0 stdout==native:yes 
+logflake bin=census run=9 rc=0 stdout==native:yes 
+logflake bin=census run=10 rc=0 stdout==native:yes 

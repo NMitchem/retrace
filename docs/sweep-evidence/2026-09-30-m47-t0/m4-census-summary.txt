@@ -1,0 +1,14 @@
+madvise advice census:
+  advice 7: 44 calls, guests ['.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4-retry/tag-try1.rec.err', '.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4/add.rec.err', '.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4/branch.rec.err', '.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4/commit.rec.err', '.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4/log.rec.err', '.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4/mv.rec.err', '.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4/rm.rec.err', '.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4/show.rec.err']
+  advice 11: 3 calls, guests ['.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4/commit.rec.err', '.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m4/stash.rec.err']
+madvise alignment:
+  ('addr16k', 'len16k', 'len>0'): 47
+__mac_syscall census (policy, call, op, ret, err, writes):
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff1a8', '', ''): 2
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff1f8', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff238', '', ''): 5
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff248', '', ''): 5
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff258', '', ''): 4
+  ('AMFI-resident', 0, '"AMFI\\0"', '', '', ''): 17
+  ('Sandbox', 2, 'file-write-data', '0x16', 'true', '0'): 17
+  ('Sandbox', 2, 'syscall-unix', '0xe', 'true', '0'): 51

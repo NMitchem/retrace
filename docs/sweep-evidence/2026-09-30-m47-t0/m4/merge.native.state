@@ -1,0 +1,10 @@
+ M a.txt
+?? b.txt
+?? c.txt
+100644 5626abf0f72e58d7a153368ba57db4c673c0e171 0	a.txt
+100644 718f4d2ff533cf8ead8d3556cf43912bd245fbc4 0	t.txt
+refs/heads/main
+refs/heads/topic
+88f648b999776ed638b0fef31e483387a3bd5065 topic
+20e50a07feffafe7699bf38ff4027a606f406eaa first
+refs/heads/main

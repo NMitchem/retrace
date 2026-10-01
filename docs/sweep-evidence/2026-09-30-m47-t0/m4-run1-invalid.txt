@@ -1,0 +1,14 @@
+M4 READ status-porcelain native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ status native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ diff native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ diff-cached native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ log native_rc=0 rec_rc=134 rp_rc=134 stdout_rec==native:no rp==rec:yes wall=
+M4 READ show native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ rev-parse native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 WRITE add native_rc=0 rec_rc=0 rp_rc=0 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE commit native_rc=0 rec_rc=1 rp_rc=1 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE branch native_rc=0 rec_rc=128 rp_rc=128 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE tag native_rc=0 rec_rc=128 rp_rc=128 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE switch-c native_rc=0 rec_rc=128 rp_rc=128 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE mv native_rc=0 rec_rc=128 rp_rc=128 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE rm native_rc=0 rec_rc=128 rp_rc=128 state_rec==native:yes rp==rec:yes wall=

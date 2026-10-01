@@ -1,0 +1,30 @@
+madvise advice census:
+  advice 7: 169 calls, guests ['apple:/bin/date', 'apple:/bin/ps', 'apple:/bin/zsh', 'cpython:crash', 'cpython:print', 'fix:madv-reuse', 'jq:--version', 'jq:file']
+  advice 8: 1 calls, guests ['fix:madv-reuse']
+  advice 9: 1 calls, guests ['fix:madv-bad']
+  advice 11: 1 calls, guests ['fix:madv-zero']
+madvise alignment:
+  ('addr16k', 'len16k', 'len>0'): 172
+__mac_syscall census (policy, call, op, ret, err, writes):
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27fcc98', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27fd488', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27fd498', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27fd4a8', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27fedb8', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff208', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff238', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff258', '', ''): 4
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff268', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff298', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2b8', '', ''): 2
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2c8', '', ''): 27
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2d8', '', ''): 2
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2f8', '', ''): 1
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff338', '', ''): 2
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff348', '', ''): 4
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff358', '', ''): 32
+  ('AMFI', 90, '', '[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff368', '', ''): 17
+  ('AMFI-resident', 0, '"AMFI\\0"', '', '', ''): 100
+  ('Sandbox', 2, 'file-write-data', '0x16', 'true', '0'): 40
+  ('Sandbox', 2, 'syscall-unix', '0xe', 'true', '0'): 297
+  ('Sandbox', 4, '', '0x2d', 'true', '0'): 6

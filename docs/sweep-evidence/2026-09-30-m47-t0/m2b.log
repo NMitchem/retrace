@@ -1,0 +1,9 @@
+(lldb) target create "/Applications/Xcode.app/Contents/Developer/usr/bin/git"
+Current executable set to '/Applications/Xcode.app/Contents/Developer/usr/bin/git' (arm64).
+(lldb) settings set -- target.run-args  "-C" "/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m2b-repo" "status" "--porcelain"
+(lldb) command source -s 0 '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m2b.lldb'
+Executing commands in '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/m2b.lldb'.
+(lldb) breakpoint set -n __mac_syscall
+Breakpoint 1: where = libsystem_kernel.dylib`__mac_syscall, address = 0x00000001804af728
+(lldb) run
+error: process exited with status -1 (attach failed (Not allowed to attach to process.  Look in the console messages (Console.app), near the debugserver entries, when the attach failed.  The subsystem that denied the attach permission will likely have logged an informative message about why it was denied.))

@@ -1,0 +1,5 @@
+breakpoint set -n libSystem_atfork_prepare
+run
+breakpoint set -r '.' -s libsystem_kernel.dylib
+breakpoint command add -o "frame info" -o "continue" 2
+continue
