@@ -1,0 +1,143 @@
+guest:after_dyn pipeline_exit=0 traps=268 last=
+guest:altstack pipeline_exit=0 traps=7 last=
+guest:argv_echo pipeline_exit=0 traps=246 last=
+guest:atfdcwd_dyn pipeline_exit=0 traps=258 last=
+guest:bfamstrip pipeline_exit=0 traps=1 last=
+guest:bigread pipeline_exit=0 traps=5 last=
+guest:bigwrite pipeline_exit=0 traps=4 last=
+guest:blockedfault pipeline_exit=0 traps=2 last=thread 'main' (14374121) panicked at crates/retrace-core/src/lib.rs:215:21:
+guest:btchain pipeline_exit=0 traps=0 last=
+guest:carveout pipeline_exit=0 traps=5 last=
+guest:closefd_dyn pipeline_exit=0 traps=253 last=
+guest:closewrite_dyn pipeline_exit=0 traps=255 last=
+guest:crash pipeline_exit=0 traps=0 last=
+guest:crashjmp pipeline_exit=0 traps=0 last=
+guest:crashthread pipeline_exit=0 traps=257 last=
+guest:crashy pipeline_exit=0 traps=252 last=
+guest:dispatch_dyn pipeline_exit=0 traps=259 last=
+guest:dup2_dyn pipeline_exit=0 traps=246 last=
+guest:dupfd_dyn pipeline_exit=0 traps=247 last=
+guest:dupkind_dyn pipeline_exit=0 traps=261 last=
+guest:exec_dyn pipeline_exit=0 traps=249 last=
+guest:execmap pipeline_exit=0 traps=3 last=
+guest:failproc pipeline_exit=0 traps=3 last=
+guest:failsys pipeline_exit=0 traps=2 last=
+guest:failsysctl pipeline_exit=0 traps=3 last=
+guest:fdtable_dyn pipeline_exit=0 traps=262 last=
+guest:fileio pipeline_exit=0 traps=6 last=
+guest:fixedinner pipeline_exit=0 traps=6 last=
+guest:hello pipeline_exit=0 traps=2 last=
+guest:hello_dyn pipeline_exit=0 traps=253 last=
+guest:hello_rust pipeline_exit=0 traps=256 last=
+guest:killother pipeline_exit=0 traps=1 last=thread 'main' (14375794) panicked at crates/retrace-core/src/lib.rs:917:21:
+guest:kqinit_dyn pipeline_exit=0 traps=262 last=
+guest:llsc pipeline_exit=0 traps=10 last=
+guest:llscbound pipeline_exit=0 traps=1 last=
+guest:llscedge pipeline_exit=0 traps=1 last=
+guest:machmsg pipeline_exit=0 traps=5 last=
+guest:mmapfile pipeline_exit=0 traps=4 last=
+guest:mmapguest pipeline_exit=0 traps=4 last=
+guest:oldlensysctl pipeline_exit=0 traps=2 last=thread 'main' (14376095) panicked at crates/retrace-box/src/lib.rs:4022:29:
+guest:overflow pipeline_exit=0 traps=258 last=thread 'main' (14376130) panicked at crates/retrace-core/src/lib.rs:215:21:
+guest:pacguest pipeline_exit=0 traps=1 last=
+guest:panicky pipeline_exit=0 traps=272 last=thread 'main' (0) panicked at /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/crates/retrace-guest/rs/panicky.rs:14:5:
+guest:pipe_dyn pipeline_exit=0 traps=254 last=
+guest:protnone pipeline_exit=0 traps=2 last=
+guest:protnone_mach pipeline_exit=0 traps=2 last=
+guest:protreserve pipeline_exit=0 traps=2 last=thread 'main' (14376507) panicked at crates/retrace-box/src/lib.rs:1754:13:
+guest:protrestore pipeline_exit=0 traps=4 last=
+guest:protrust pipeline_exit=0 traps=267 last=
+guest:raise pipeline_exit=0 traps=2 last=
+guest:remap pipeline_exit=0 traps=4 last=
+guest:reservecommit pipeline_exit=0 traps=3 last=
+guest:scalarprobe pipeline_exit=0 traps=3 last=
+guest:segvcatch pipeline_exit=0 traps=5 last=
+guest:segvy pipeline_exit=0 traps=266 last=
+guest:sigblocked pipeline_exit=0 traps=288 last=
+guest:sigcatch_dyn pipeline_exit=0 traps=253 last=
+guest:sigframe pipeline_exit=0 traps=5 last=
+guest:sigign pipeline_exit=0 traps=5 last=
+guest:sigthread pipeline_exit=0 traps=288 last=
+guest:spinloop pipeline_exit=0 traps=2 last=
+guest:stdio_dyn pipeline_exit=0 traps=254 last=
+guest:steppy pipeline_exit=0 traps=1 last=
+guest:strip47 pipeline_exit=0 traps=2 last=
+guest:threadrust pipeline_exit=0 traps=272 last=
+guest:timer_dyn pipeline_exit=0 traps=279 last=
+guest:tlbiexec pipeline_exit=0 traps=4 last=
+guest:unaligned pipeline_exit=0 traps=1 last=
+guest:unenum pipeline_exit=0 traps=1 last=thread 'main' (14377840) panicked at crates/retrace-arch/src/lib.rs:1018:38:
+guest:usrstack pipeline_exit=0 traps=5 last=
+guest:vecsurvive pipeline_exit=0 traps=5 last=
+guest:vmremap_dyn pipeline_exit=0 traps=288 last=
+guest:watchloop pipeline_exit=0 traps=2 last=
+guest:watchsweep pipeline_exit=0 traps=2 last=
+guest:watchthread pipeline_exit=0 traps=276 last=
+guest:wildfixed pipeline_exit=0 traps=4 last=
+guest:wildstore pipeline_exit=0 traps=0 last=RECORD ERROR: non-syscall exit: data abort (EC=0x24 ISS=0x1010046 FSC=0x6) far/ipa=0xb00000000 (UNMAPPED) pc=0x1000002f0 elr=0x0
+fix:fsops pipeline_exit=0 traps=259 last=
+fix:madv-zero pipeline_exit=0 traps=247 last=
+fix:madv-reuse pipeline_exit=0 traps=247 last=
+fix:madv-bad pipeline_exit=0 traps=248 last=
+fix:rpath pipeline_exit=0 traps=274 last=
+fix:forkfail pipeline_exit=0 traps=242 last=RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64
+jq:--version pipeline_exit=0 traps=314 last=
+jq:file pipeline_exit=0 traps=349 last=
+cpython:print pipeline_exit=0 traps=825 last=
+cpython:crash pipeline_exit=0 traps=1133 last=
+node:-e pipeline_exit=0 traps=1093 last=thread 'main' (14379297) panicked at crates/retrace-arch/src/lib.rs:1018:38:
+apple:/bin/[ pipeline_exit=0 traps=245 last=
+apple:/bin/bash pipeline_exit=0 traps=310 last=
+apple:/bin/cat pipeline_exit=0 traps=248 last=
+apple:/bin/chmod pipeline_exit=0 traps=245 last=
+apple:/bin/cp pipeline_exit=0 traps=249 last=
+apple:/bin/csh pipeline_exit=0 traps=343 last=RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64
+apple:/bin/dash pipeline_exit=0 traps=273 last=
+apple:/bin/date pipeline_exit=0 traps=279 last=
+apple:/bin/dd pipeline_exit=0 traps=264 last=
+apple:/bin/df pipeline_exit=0 traps=280 last=
+apple:/bin/echo pipeline_exit=0 traps=246 last=
+apple:/bin/ed pipeline_exit=0 traps=268 last=
+apple:/bin/expr pipeline_exit=0 traps=249 last=
+apple:/bin/hostname pipeline_exit=0 traps=250 last=
+apple:/bin/kill pipeline_exit=0 traps=246 last=
+apple:/bin/ksh pipeline_exit=0 traps=357 last=
+apple:/bin/launchctl pipeline_exit=0 traps=347 last=
+apple:/bin/link pipeline_exit=0 traps=245 last=
+apple:/bin/ln pipeline_exit=0 traps=244 last=
+apple:/bin/ls pipeline_exit=0 traps=276 last=
+apple:/bin/mkdir pipeline_exit=0 traps=247 last=
+apple:/bin/mv pipeline_exit=0 traps=243 last=
+apple:/bin/pax pipeline_exit=0 traps=278 last=
+apple:/bin/ps pipeline_exit=0 traps=17730 last=
+apple:/bin/pwd pipeline_exit=0 traps=250 last=
+apple:/bin/realpath pipeline_exit=0 traps=256 last=
+apple:/bin/rm pipeline_exit=0 traps=247 last=
+apple:/bin/rmdir pipeline_exit=0 traps=248 last=
+apple:/bin/sh pipeline_exit=0 traps=246 last=
+apple:/bin/sleep pipeline_exit=0 traps=249 last=
+apple:/bin/stty pipeline_exit=0 traps=251 last=
+apple:/bin/sync pipeline_exit=0 traps=245 last=
+apple:/bin/tcsh pipeline_exit=0 traps=337 last=RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64
+apple:/bin/test pipeline_exit=0 traps=247 last=
+apple:/bin/unlink pipeline_exit=0 traps=248 last=
+apple:/bin/wait4path pipeline_exit=0 traps=242 last=
+apple:/bin/zsh pipeline_exit=0 traps=367 last=
+apple:/usr/bin/automationmodetool pipeline_exit=0 traps=359 last=thread 'main' (14386737) panicked at crates/retrace-arch/src/lib.rs:1018:38:
+apple:/usr/bin/desdp pipeline_exit=0 traps=400 last=
+apple:/usr/bin/dyld_info pipeline_exit=0 traps=399 last=
+apple:/usr/bin/flex pipeline_exit=0 traps=404 last=
+apple:/usr/bin/dddiagnose pipeline_exit=0 traps=451 last=RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1e03 (guest task port Some(515)) send_size 24
+apple:/usr/bin/basename pipeline_exit=0 traps=248 last=
+apple:/usr/bin/dirname pipeline_exit=0 traps=246 last=
+apple:/usr/bin/env pipeline_exit=0 traps=247 last=
+apple:/usr/bin/head pipeline_exit=0 traps=249 last=
+apple:/usr/bin/tail pipeline_exit=0 traps=255 last=
+apple:/usr/bin/sort pipeline_exit=0 traps=277 last=
+apple:/usr/bin/uniq pipeline_exit=0 traps=249 last=
+apple:/usr/bin/cut pipeline_exit=0 traps=249 last=
+apple:/usr/bin/tr pipeline_exit=0 traps=249 last=
+apple:/usr/bin/yes pipeline_exit=0 traps=342 last=
+apple:/usr/bin/true pipeline_exit=0 traps=241 last=
+apple:/usr/bin/printenv pipeline_exit=0 traps=248 last=
+DONE matched_total=1329 -> /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/census.tsv
