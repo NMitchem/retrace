@@ -5323,6 +5323,51 @@ impl Box_ {
         Ok(0)
     }
 
+    /// M47 §3c: `madvise(addr, len, behav)` (75), **modelled, never forwarded**. Forwarded, the
+    /// host applied the advice to RETRACE's backing of the guest range: a `MADV_FREE_REUSABLE`
+    /// there lets the host reclaim pages the guest may later write through stage 2 (the hazard M37
+    /// named and M45 first read on `/bin/ps`), and a `MADV_ZERO` wrote 512 KiB past the diff window
+    /// and stopped the recorder at the guard band (the 2026-09-30 probe's g33). The heap abort the
+    /// probe first blamed on the forward (g35) is a separate, pre-existing defect (t0 M1(b)).
+    ///
+    /// The advice comes from `retrace_arch::madvise_effect`, read as the `int` the kernel reads. The
+    /// range must start on a 16 KiB page: native madvise accepts an unaligned address, but no corpus
+    /// call is unaligned, so the model refuses it rather than guess (t0 M1(d)). Every page of the
+    /// range, `len` rounded up as xnu rounds it, must be the guest's: backed, or inside a
+    /// reservation (`commit_reserved_page`'s bookkeeping). Anything else is refused by value rather
+    /// than answered with a guessed errno, and the refusal comes before any write is computed.
+    ///
+    /// Returns the call's writes for the caller to apply with `apply_and_return`, so a watched range
+    /// sees a zero-fill as a write. `Zero` gives one zeroed page per BACKED page of the range; a
+    /// reserved page commits as zero, so it needs none. `NoOp` gives none. The writes are recomputed
+    /// identically on both sides and never recorded (R3). Every accepted call returns 0.
+    pub fn guest_madvise(&self, args: [u64; 8]) -> Result<Vec<Region>, String> {
+        let (addr, len) = (args[0], args[1]);
+        let effect = retrace_arch::madvise_effect(args[2] as u32)
+            .map_err(|why| format!("{why}. args=[{}]", Self::fmt_args(args)))?;
+        let g = GRANULE as u64;
+        if addr % g != 0 {
+            return Err(format!("M47: madvise range starts at {addr:#x}, not on a 16 KiB page (native accepts \
+                it; no corpus call is unaligned — t0 M1(d)). args=[{}]", Self::fmt_args(args)));
+        }
+        let end = addr.checked_add(len).and_then(|e| e.checked_add(g - 1)).map(|e| e & !(g - 1))
+            .ok_or_else(|| format!("M47: madvise range {addr:#x}+{len:#x} overflows. args=[{}]", Self::fmt_args(args)))?;
+        let mut writes = Vec::new();
+        let mut page = addr;
+        while page < end {
+            let backed = self.host_span(page).is_some();
+            if !backed && !self.reservations.iter().any(|&(s, l)| (s..s + l).contains(&page)) {
+                return Err(format!("M47: madvise range page {page:#x} is neither backed nor reserved — the \
+                    range runs outside the guest's mappings. args=[{}]", Self::fmt_args(args)));
+            }
+            if backed && effect == retrace_arch::MadviseEffect::Zero {
+                writes.push(Region { ipa: page, bytes: vec![0u8; GRANULE] });
+            }
+            page += g;
+        }
+        Ok(writes)
+    }
+
     /// `args` as `0x…,0x…` on one line (M45 T3-e: a refusal must fit a log line).
     fn fmt_args(args: [u64; 8]) -> String {
         args.map(|a| format!("{a:#x}")).join(",")

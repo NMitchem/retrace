@@ -1235,6 +1235,16 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.apply_and_return(e, true, &[]);
             }
 
+            // M47 §3c: madvise is MODELLED, never forwarded (see Box_::guest_madvise). The zeros a
+            // MADV_ZERO makes are applied here and recomputed by the mirror, never recorded (R3), so
+            // the event carries no writes. A refusal panics before anything is appended (R5).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MADVISE => {
+                let zeros = b.guest_madvise(args).unwrap_or_else(|m| panic!("{m}"));
+                w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append madvise: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &zeros);
+            }
+
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
                 // M11 correctness invariant: no signal syscall may reach forward_and_diff, which
@@ -1262,6 +1272,14 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 assert!(num != retrace_arch::SYS_KEVENT_QOS,
                     "kevent_qos (374) reached the generic forward arm — it must be emulated above \
                      (M45). Forwarded, KEVENT_FLAG_WORKQ acts on retrace's own workqueue kqueue.");
+                // M47 §3c: madvise joins them. Forwarded, the advice acts on RETRACE's backing of
+                // the guest range: a MADV_FREE_REUSABLE there lets the host reclaim pages the guest
+                // may later write through stage 2, and a MADV_ZERO wrote 512 KiB past the diff
+                // window. The arm above models it; this assert makes "never forwarded" a checked
+                // fact rather than an arm-ordering accident.
+                assert!(num != retrace_arch::SYS_MADVISE,
+                    "madvise (75) reached the generic forward arm — it must be modelled above (M47). \
+                     Forwarded, its advice acts on retrace's own backing of the guest range.");
                 // M27: the destination sits behind a pointer INSIDE a guest struct, which
                 // forward_and_diff never translates — so forwarding hands the host kernel a guest
                 // IPA as a host address. No guest in the gate calls these (measured: absent from
@@ -1906,6 +1924,25 @@ impl ReplaySession {
                                          expected errno {e}, err, no writes", writes.len()) });
                                 }
                                 self.b.apply_and_return(*ret, *err, writes);
+                                return self.finish_event();
+                            }
+                            // M47 §3c: the madvise arm's mirror (symmetry rule 1). The zeros are
+                            // recomputed from the same box state and applied; the recording carries
+                            // none (R3), so a recorded write, return or error is a trace this build
+                            // did not write.
+                            if num == retrace_arch::SYS_MADVISE {
+                                let zeros = match self.b.guest_madvise(args) {
+                                    Ok(z) => z,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "madvise refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                if *ret != 0 || *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "madvise recorded ret={ret:#x} ret1={ret1:#x} err={err} with {} write(s); \
+                                         the model records 0, 0, false and none (R3)", writes.len()) });
+                                }
+                                self.b.apply_and_return(0, false, &zeros);
                                 return self.finish_event();
                             }
                             // M11 mirror of record's serviced-signal arms. Recompute the SAME table

@@ -856,18 +856,15 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_MPROTECT => row!(P, [Scalar, Scalar, Scalar]),
         // madvise(void *addr, size_t len, int behav): addr is a VM range the kernel neither reads
         // nor writes as data (bsd/kern/kern_mman.c `madvise`: `madvise_sanitize` then
-        // `mach_vm_behavior_set(user_map, start, size, …)`, no copyin/copyout). FORWARDED, and the
-        // rebase is the load-bearing part: the host kernel applies `behav` to whatever lies at the
-        // forwarded address in RETRACE's address space, so `host_span` must rebase it onto the
-        // guest backing — which is why it is `Ptr` and not `Scalar`. M37's static audit found it
-        // `Scalar` (M33 wrote the row when every register was probed regardless, so the kind
-        // carried nothing); once `Scalar` means "never probed", a raw guest IPA would have reached
-        // the host as the range to `MADV_FREE_REUSABLE` — an `ENOMEM`/`EINVAL` where the guest
-        // had success, or retrace's own pages discarded if the IPA happened to be mapped there.
-        // Live on the corpus: CPython issues 44 `madvise(nano-band or mmap-area addr, ≤ 0x20000,
-        // 7)` per run — 40 in the nano band, 4 at MMAP_BASE+0x20000/+0x2c000, the four that
-        // answered EPERM in the counterfactual.
-        // The `Ptr` bound is trivially citable — zero bytes of data cross.
+        // `mach_vm_behavior_set(user_map, start, size, …)`, no copyin/copyout). NEVER FORWARDED
+        // since M47: the record arm ahead of the generic forward models it by advice
+        // (`madvise_effect`, `Box_::guest_madvise`), and the generic arm asserts it never arrives.
+        // Forwarded (M2–M46), the host applied `behav` to RETRACE's backing of the guest range. A
+        // MADV_FREE_REUSABLE there let the host reclaim pages the guest may later write through
+        // stage 2 (the hazard M37 named, first read on /bin/ps; CPython issues 44 `madvise(…, 7)`
+        // per run), and a MADV_ZERO wrote 512 KiB past the diff window and stopped the recorder at
+        // the guard band (the M47 probe's g33). The row stays for the census and the views, and
+        // `Ptr` still says what the argument is: a range, rebased when it was forwarded.
         75 => row!(P, [Ptr, Scalar, Scalar]),
         // shared_region_check_np(uint64_t *start_address): 8 bytes out — serviced above the
         // trace (forced to fail so dyld maps the cache itself).
@@ -1816,6 +1813,47 @@ pub const USER_WAKE_EVENT: KeventQos = KeventQos {
     data: 0,
     ext: [0; 4],
 };
+
+// ---- M47-gitwrite: madvise, __mac_syscall and fork, modelled ---------------------------------------
+// Values from the macOS 26 SDK's `sys/mman.h`, `sys/syscall.h` and `sys/errno.h`, which
+// tests/gitshapes.rs re-reads at test time.
+/// `madvise` (SDK `SYS_madvise 75`). Modelled by advice since M47, never forwarded.
+pub const SYS_MADVISE: u64 = 75;
+/// `MADV_FREE_REUSABLE` (`sys/mman.h:217`): libmalloc marks a freed span reusable.
+pub const MADV_FREE_REUSABLE: u32 = 7;
+/// `MADV_FREE_REUSE` (`sys/mman.h:218`): libmalloc takes a reusable span back.
+pub const MADV_FREE_REUSE: u32 = 8;
+/// `MADV_ZERO` (`sys/mman.h:221`): "zero pages without faulting in additional pages" — libmalloc
+/// zeroing a span in place (git `commit`, the probe's g33).
+pub const MADV_ZERO: u32 = 11;
+
+/// What a modelled `madvise` advice does to guest memory (M47 §3c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MadviseEffect {
+    /// Nothing. Kernel-faithful for these values: a kernel may keep a reusable or freed page's
+    /// contents indefinitely, and native reclamation depends on memory pressure, so no guest can
+    /// depend on it. A deterministic "never reclaims" is one legal kernel.
+    NoOp,
+    /// Every resident page of the range reads as zero afterwards. A page never touched already
+    /// reads as zero, which is why `MADV_ZERO` need not fault one in.
+    Zero,
+}
+
+/// The effect of `madvise` advice `advice`, the `int behav` the kernel reads (the caller passes the
+/// register's low 32 bits). The accepted set is EXACTLY t0 M1(a)'s census (M47 §3c); every other
+/// value is refused by value, naming it, because a guessed effect is either a lie about memory or a
+/// forward onto retrace's own backing.
+pub fn madvise_effect(advice: u32) -> Result<MadviseEffect, String> {
+    match advice {
+        MADV_FREE_REUSABLE | MADV_FREE_REUSE => Ok(MadviseEffect::NoOp),
+        MADV_ZERO => Ok(MadviseEffect::Zero),
+        _ => Err(format!(
+            "M47: unmeasured madvise advice {advice}. Modelled, from t0 M1(a)'s census: \
+             FREE_REUSABLE (7) and FREE_REUSE (8) as no-ops and ZERO (11) as a zero-fill (M47 §3c). \
+             Measure its native effect before modelling it; forwarded, an advice acts on retrace's \
+             own backing of the guest range")),
+    }
+}
 
 // ---- M12-signal-delivery ---------------------------------------------------------------------
 // Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here

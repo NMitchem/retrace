@@ -2,7 +2,7 @@
 //! `mac_syscall_model` with `sandbox_check_continuity`, and `fork_refusal_errno`. VM-free. Every
 //! number is read from the SDK's headers at test time (M44 R5's method), so a value typed from
 //! memory cannot satisfy these.
-use retrace_arch::{arg_kinds, ArgKind, Ret};
+use retrace_arch::{arg_kinds, madvise_effect, ArgKind, MadviseEffect, Ret, MADV_FREE_REUSABLE, MADV_FREE_REUSE, MADV_ZERO, SYS_MADVISE};
 
 fn sdk_header(rel: &str) -> String {
     let out = std::process::Command::new("xcrun").arg("--show-sdk-path").output().expect("run xcrun");
@@ -44,5 +44,36 @@ fn the_path_rows_are_written_from_their_prototypes() {
     for (n, kinds) in want {
         let s = arg_kinds(n).unwrap_or_else(|| panic!("syscall {n} has no arg_kinds row"));
         assert_eq!((s.args, s.ret), (kinds, Ret::Plain), "syscall {n}");
+    }
+}
+
+/// M47 §3c: the advice values are the SDK's (`sys/mman.h`), and so is `madvise`'s number.
+#[test]
+fn the_madvise_values_are_the_sdks() {
+    assert_eq!(define(&sdk_header("sys/syscall.h"), "SYS_madvise"), Some(SYS_MADVISE as i64));
+    let m = sdk_header("sys/mman.h");
+    for (name, v) in [("MADV_FREE_REUSABLE", MADV_FREE_REUSABLE), ("MADV_FREE_REUSE", MADV_FREE_REUSE),
+                      ("MADV_ZERO", MADV_ZERO)] {
+        assert_eq!(define(&m, name), Some(i64::from(v)), "{name}");
+    }
+}
+
+/// M47 §3c: t0 M1(a)'s census, and only it, is modelled.
+#[test]
+fn the_measured_advice_values_are_modelled() {
+    assert_eq!(madvise_effect(MADV_FREE_REUSABLE), Ok(MadviseEffect::NoOp));
+    assert_eq!(madvise_effect(MADV_FREE_REUSE), Ok(MadviseEffect::NoOp));
+    assert_eq!(madvise_effect(MADV_ZERO), Ok(MadviseEffect::Zero));
+}
+
+/// M47 §3c: every other value is refused by value, naming it — the kernel's whole `int` range is
+/// swept at its edges and densely where `sys/mman.h` defines values.
+#[test]
+fn every_other_advice_value_is_refused_naming_it() {
+    let accepted = [MADV_FREE_REUSABLE, MADV_FREE_REUSE, MADV_ZERO];
+    for v in (0..=64u32).chain([0x7fff_ffff, 0x8000_0000, 0xffff_fff9, u32::MAX]) {
+        if accepted.contains(&v) { continue; }
+        let e = madvise_effect(v).unwrap_err();
+        assert!(e.starts_with(&format!("M47: unmeasured madvise advice {v}.")), "{v}: {e}");
     }
 }
