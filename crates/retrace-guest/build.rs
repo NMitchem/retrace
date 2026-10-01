@@ -428,6 +428,15 @@ fn main() {
         .status().expect("clang fsops_dyn");
     assert!(status.success(), "fsops_dyn guest build failed");
 
+    // madv_dyn: the M47 madvise fixture — modes zero, reuse and bad. Same recipe as hello_dyn.
+    let src = format!("{}/c/madv_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/madv_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang madv_dyn");
+    assert!(status.success(), "madv_dyn guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));

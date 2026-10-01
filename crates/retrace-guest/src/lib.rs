@@ -225,6 +225,8 @@ pub const AFTER_DYN: &str = concat!(env!("OUT_DIR"), "/after_dyn");
 pub const TIMER_DYN: &str = concat!(env!("OUT_DIR"), "/timer_dyn");
 /// M47: mkdir, chdir, link, rename and utimes under a directory the test names (spec §3f).
 pub const FSOPS_DYN: &str = concat!(env!("OUT_DIR"), "/fsops_dyn");
+/// M47: `madvise` by mode — `zero`, `reuse`, `bad` (spec §3f).
+pub const MADV_DYN: &str = concat!(env!("OUT_DIR"), "/madv_dyn");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
@@ -427,6 +429,13 @@ mod tests {
     fn fsops_guest_parses() {
         // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
         let l = parse_macho(&std::fs::read(FSOPS_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn madv_guest_parses() {
+        // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
+        let l = parse_macho(&std::fs::read(MADV_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
