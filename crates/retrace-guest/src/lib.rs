@@ -223,6 +223,8 @@ pub const KQINIT_DYN: &str = concat!(env!("OUT_DIR"), "/kqinit_dyn");
 pub const AFTER_DYN: &str = concat!(env!("OUT_DIR"), "/after_dyn");
 /// M46: a repeating `DISPATCH_SOURCE_TYPE_TIMER` that ticks three times and cancels itself.
 pub const TIMER_DYN: &str = concat!(env!("OUT_DIR"), "/timer_dyn");
+/// M47: mkdir, chdir, link, rename and utimes under a directory the test names (spec §3f).
+pub const FSOPS_DYN: &str = concat!(env!("OUT_DIR"), "/fsops_dyn");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
@@ -418,6 +420,13 @@ mod tests {
     fn timer_guest_parses() {
         // M46: proves the build.rs wiring and the path constant; behaviour is gcdtimer_e2e's.
         let l = parse_macho(&std::fs::read(TIMER_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn fsops_guest_parses() {
+        // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
+        let l = parse_macho(&std::fs::read(FSOPS_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
