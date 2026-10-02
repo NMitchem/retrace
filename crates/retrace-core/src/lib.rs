@@ -1245,6 +1245,30 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.apply_and_return(0, false, &zeros);
             }
 
+            // M47 §3d: __mac_syscall is MODELLED per (policy, call), never forwarded: a policy may
+            // write through a pointer INSIDE `arg` (AMFI's outFlags), which a forward hands the host
+            // as a host address (NestedDest; the generic arm's assert refuses any other pair).
+            // AMFI's answer is the host's, about retrace's own process (R4), asked with host-owned
+            // pointers and recorded as the one 8-byte write at outFlags — the task_info posture. A
+            // host error is recorded as that error with no write, which is what a native failure
+            // looks like to dyld. Sandbox's call 2 keeps the errno the pre-M47 forward returned (R7);
+            // its call 4 answers ENOTSUP with no write, as native and the forward both did (t0, H7).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MAC_SYSCALL => {
+                let call = b.guest_mac_syscall(args).unwrap_or_else(|m| panic!("{m}"));
+                let (ret, err, writes) = match call {
+                    retrace_box::MacSyscall::AmfiDyldPolicy { in_flags, out_ipa } =>
+                        match retrace_box::host_amfi_dyld_policy(in_flags) {
+                            Ok(flags) => (0, false, vec![Region { ipa: out_ipa, bytes: flags.to_le_bytes().to_vec() }]),
+                            Err(errno) => (errno, true, vec![]),
+                        },
+                    retrace_box::MacSyscall::SandboxCheck { errno } => (errno, true, vec![]),
+                    retrace_box::MacSyscall::SandboxContainerPath { errno } => (errno, true, vec![]),
+                };
+                w.append(&Event::Syscall { num, args, ret, ret1: 0, err, writes: writes.clone(), thread })
+                    .map_err(|e| format!("append __mac_syscall: {e}"))?; count += 1;
+                b.apply_and_return(ret, err, &writes);
+            }
+
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
                 // M11 correctness invariant: no signal syscall may reach forward_and_diff, which
@@ -1943,6 +1967,35 @@ impl ReplaySession {
                                          the model records 0, 0, false and none (R3)", writes.len()) });
                                 }
                                 self.b.apply_and_return(0, false, &zeros);
+                                return self.finish_event();
+                            }
+                            // M47 §3d: the __mac_syscall arm's mirror (symmetry rule 1). The
+                            // classification is recomputed from guest memory. AMFI's answer is host
+                            // data, so the recorded write is applied rather than recomputed, once its
+                            // address is checked against the outFlags replay reads; Sandbox's errno
+                            // is recomputed and compared.
+                            if num == retrace_arch::SYS_MAC_SYSCALL {
+                                let call = match self.b.guest_mac_syscall(args) {
+                                    Ok(c) => c,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "__mac_syscall refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                let ok = *ret1 == 0 && match call {
+                                    retrace_box::MacSyscall::AmfiDyldPolicy { out_ipa, .. } =>
+                                        (!*err && *ret == 0 && writes.len() == 1 && writes[0].ipa == out_ipa
+                                            && writes[0].bytes.len() == 8)
+                                        || (*err && writes.is_empty()),
+                                    retrace_box::MacSyscall::SandboxCheck { errno } => *err && *ret == errno && writes.is_empty(),
+                                    retrace_box::MacSyscall::SandboxContainerPath { errno } => *err && *ret == errno && writes.is_empty(),
+                                };
+                                if !ok {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "__mac_syscall recorded ret={ret:#x} ret1={ret1:#x} err={err} with {} write(s) {:x?}; \
+                                         replay classifies it as {call:?}",
+                                        writes.len(), writes.iter().map(|r| (r.ipa, r.bytes.len())).collect::<Vec<_>>()) });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
                             // M11 mirror of record's serviced-signal arms. Recompute the SAME table

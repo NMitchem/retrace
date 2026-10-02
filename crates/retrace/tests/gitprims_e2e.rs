@@ -118,3 +118,67 @@ fn replay_refuses_a_madvise_landmark_that_carries_writes() {
     assert_eq!(rp.code, 3, "a tampered madvise landmark must be a divergence: {}", rp.stderr);
     assert!(rp.stderr.contains("madvise recorded ret=0x0 ret1=0x0 err=false with 1 write(s)"), "{}", rp.stderr);
 }
+
+/// Bit 0 of AMFI's dyld-policy answer, `AMFI_DYLD_OUTPUT_ALLOW_AT_PATH` (dyld's
+/// `amfi_check_dyld_policy_self` output flags): the bit an `@rpath` load needs.
+const ALLOW_AT_PATH: u64 = 1;
+
+/// RED at `427fa0a`: dyld's `@`-path refusal, then `abort_with_payload` (521), which the recorder
+/// asserts on. The difference: the dylib's marker, and the AMFI landmark's one recorded 8-byte
+/// write with ALLOW_AT_PATH set. Every other `__mac_syscall` landmark must be a Sandbox check
+/// answered by continuity (R7): an error with no writes.
+#[test]
+fn an_rpath_guest_loads_because_amfi_is_answered_by_the_host() {
+    let (rec, trace) = records_and_replays_twice(retrace_guest::RPATH_DYN, &[]);
+    assert_eq!(String::from_utf8_lossy(&rec.stdout), "rpath marker=47\n");
+    let mut amfi = 0;
+    for e in retrace_trace::Reader::open(&trace).unwrap() {
+        let Event::Syscall { num, args, ret, err, writes, .. } = e else { continue };
+        if num != retrace_arch::SYS_MAC_SYSCALL { continue; }
+        if args[1] as u32 == retrace_arch::AMFI_DYLD_POLICY_SELF {
+            assert!(!err && ret == 0 && writes.len() == 1 && writes[0].bytes.len() == 8, "AMFI landmark: ret {ret} err {err} {writes:x?}");
+            let flags = u64::from_le_bytes(writes[0].bytes[..].try_into().unwrap());
+            assert_eq!(flags & ALLOW_AT_PATH, ALLOW_AT_PATH, "the recorded answer {flags:#x} must allow @-path expansion");
+            amfi += 1;
+        } else {
+            assert_eq!(args[1] as u32, retrace_arch::SANDBOX_CHECK, "a __mac_syscall that is neither: {args:x?}");
+            assert!(err && writes.is_empty() && (ret == 14 || ret == 22), "Sandbox landmark: ret {ret} err {err} {} writes", writes.len());
+        }
+    }
+    assert_eq!(amfi, 1, "dyld asks AMFI once (t0 M2(a))");
+}
+
+/// Review Focus 4. AMFI's answer is applied, not recomputed (it is host data), so its ADDRESS is the
+/// one thing replay can check: an answer recorded anywhere but the outFlags replay reads diverges.
+#[test]
+fn replay_refuses_an_amfi_answer_recorded_at_another_address() {
+    let (_, trace) = records_and_replays_twice(retrace_guest::RPATH_DYN, &[]);
+    let t = tamper(&trace, "amfi", |e| match e {
+        Event::Syscall { num, args, writes, .. }
+            if *num == retrace_arch::SYS_MAC_SYSCALL && args[1] as u32 == retrace_arch::AMFI_DYLD_POLICY_SELF => {
+            writes[0].ipa += 8;
+            true
+        }
+        _ => false,
+    });
+    let rp = util::replay(&t);
+    assert_eq!(rp.code, 3, "a moved AMFI answer must be a divergence: {}", rp.stderr);
+    assert!(rp.stderr.contains("__mac_syscall recorded ret=0x0 ret1=0x0 err=false with 1 write(s)"), "{}", rp.stderr);
+}
+
+/// t0, after H7: no RED at `427fa0a` — the forward returned the same ENOTSUP, by luck, through a nested
+/// pointer the host never followed. After M47 an unmodelled call 4 stops the recorder by value, at the
+/// `__mac_syscall` arm's `mac_syscall_model` refusal (Step 8's control 3; with no arm at all, the
+/// generic arm's NestedDest assert); the difference is that it is answered, never forwarded.
+#[test]
+fn sandbox_container_path_is_answered_enotsup_without_forwarding() {
+    let (rec, trace) = records_and_replays_twice(retrace_guest::SBXPATH_DYN, &[]);
+    assert_eq!(String::from_utf8_lossy(&rec.stdout), "sandbox_container_path_for_pid rc=-1 errno=45 buf_touched=0\n");
+    let calls: Vec<_> = retrace_trace::Reader::open(&trace).unwrap().into_iter().filter_map(|e| match e {
+        Event::Syscall { num, args, ret, err, writes, .. }
+            if num == retrace_arch::SYS_MAC_SYSCALL && args[1] as u32 == retrace_arch::SANDBOX_CONTAINER_PATH =>
+            Some((ret, err, writes.len())),
+        _ => None,
+    }).collect();
+    assert!(!calls.is_empty() && calls.iter().all(|&c| c == (45, true, 0)), "Sandbox call 4 landmarks: {calls:?}");
+}

@@ -1147,6 +1147,37 @@ unsafe fn host_svc(num: u64, a: [u64; 8]) -> (u64, u64, bool) {
     (ret, ret1, carry != 0)
 }
 
+/// M47 §3d: AMFI's dyld policy for RETRACE's own process — `__mac_syscall("AMFI", 0x5a, {inFlags,
+/// &out})` with every pointer host-owned, so the host kernel never sees a guest address. The record
+/// arm writes the answer to the guest's `outFlags` and records it: the answer is host data, as
+/// `task_info`'s audit token is (R4). `Err` is the host's errno. Record-only; replay applies the
+/// recorded answer.
+pub fn host_amfi_dyld_policy(in_flags: u64) -> Result<u64, u64> {
+    #[repr(C)]
+    struct AmfiArgs { in_flags: u64, out: *mut u64 }
+    unsafe extern "C" {
+        fn __mac_syscall(policy: *const std::ffi::c_char, call: i32, arg: *mut std::ffi::c_void) -> i32;
+    }
+    let mut out: u64 = 0;
+    let mut a = AmfiArgs { in_flags, out: &mut out };
+    // SAFETY: `a` and `out` outlive the call, and the policy name is a NUL-terminated literal.
+    let r = unsafe {
+        __mac_syscall(c"AMFI".as_ptr(), retrace_arch::AMFI_DYLD_POLICY_SELF as i32, (&mut a as *mut AmfiArgs).cast())
+    };
+    if r == 0 { Ok(out) } else { Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u64) }
+}
+
+/// What `Box_::guest_mac_syscall` found (M47 §3d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacSyscall {
+    /// `("AMFI", 0x5a)`: `arg` is `{u64 inFlags; u64 *outFlags}`; the answer lands at `out_ipa`.
+    AmfiDyldPolicy { in_flags: u64, out_ipa: u64 },
+    /// `("Sandbox", 2)`: the errno the pre-M47 forward returned for this operation (R7).
+    SandboxCheck { errno: u64 },
+    /// `("Sandbox", 4)`: `sandbox_container_path_for_pid`; answered ENOTSUP with nothing written.
+    SandboxContainerPath { errno: u64 },
+}
+
 // --- M2-xpcport: mint a real bootstrap send right in retrace's own IPC space ---
 // mach_port_options_t (<mach/port.h>): { uint32_t flags; mach_port_limits_t mpl; uint64_t reserved[2] }
 // where mach_port_limits_t = { mach_port_msgcount_t mpl_qlimit } (one u32). 24 bytes, repr(C).
@@ -5366,6 +5397,87 @@ impl Box_ {
             page += g;
         }
         Ok(writes)
+    }
+
+    /// M47: the NUL-terminated guest string at `va`, read the way the kernel's `copyinstr` reads it
+    /// into a `cap`-byte buffer: at most `cap` bytes, NUL included, and an error if none of them is a
+    /// NUL. Returned without the NUL.
+    ///
+    /// A shared-cache page the guest has not touched yet is paged in first (`page_in_cache`). A
+    /// policy or operation name is a `__cstring` the code computed an address for without loading
+    /// from it, so its page may be unstaged at the `svc` (t0 M2(c)). Paging it in is the same
+    /// deterministic operation a guest load would have triggered, and both sides do it at the same
+    /// landmark (symmetry rule 1: the record arm and the mirror call `guest_mac_syscall` alike).
+    pub fn read_guest_cstr(&mut self, va: u64, cap: usize) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        let mut a = va;
+        while out.len() < cap {
+            let ipa = self.va_to_ipa(a).ok_or_else(|| format!("{a:#x} has no stage-1 translation"))?;
+            // Checked: with the MMU off `va_to_ipa` is the identity for ANY address, so a pointer in
+            // the last page of the address space must be an `Err`, never an overflow panic.
+            let page_end = (a | (GRANULE as u64 - 1)).checked_add(1)
+                .ok_or_else(|| format!("{a:#x} runs past the end of the address space"))?;
+            let n = ((page_end - a) as usize).min(cap - out.len());
+            let bytes = match self.read_guest_checked(ipa, n) {
+                Some(b) => b,
+                None if self.page_in_cache(ipa) => self.read_guest_checked(ipa, n)
+                    .ok_or_else(|| format!("{a:#x} is unmapped after paging it in"))?,
+                None => return Err(format!("{a:#x} (ipa {ipa:#x}) is not mapped")),
+            };
+            if let Some(z) = bytes.iter().position(|&c| c == 0) {
+                out.extend_from_slice(&bytes[..z]);
+                return Ok(out);
+            }
+            out.extend_from_slice(&bytes);
+            a += n as u64;
+        }
+        Err(format!("no NUL within {cap} bytes of {va:#x}"))
+    }
+
+    /// M47 §3d: classify a `__mac_syscall` (381) from guest memory — `(policy, call)` through
+    /// `retrace_arch::mac_syscall_model`, then the struct the pair's policy reads. Shared by the
+    /// record arm and the replay mirror, which is what makes the classification symmetric.
+    ///
+    /// **Modelled, never forwarded.** A policy may write through a pointer inside `arg` (AMFI's
+    /// `outFlags`), which a forward hands the host as a host address. AMFI's `outFlags` must be a
+    /// mapped guest address for 8 bytes; natively an unmapped one is `EFAULT`, which the model
+    /// refuses rather than guessing. Sandbox's operation name is at `*(arg + 16)`. Sandbox call 4's
+    /// 32-byte struct must be mapped, and the call is answered ENOTSUP for any pid; measured for the
+    /// caller's own, the only corpus shape (replay cannot know the recorder's pid, so it is not
+    /// checked). Every other pair or operation is refused by value, naming it.
+    pub fn guest_mac_syscall(&mut self, args: [u64; 8]) -> Result<MacSyscall, String> {
+        let fail = |why: String| format!("{why}. args=[{}]", Self::fmt_args(args));
+        let policy = self.read_guest_cstr(args[0], retrace_arch::MAC_MAX_POLICY_NAME)
+            .map_err(|w| fail(format!("M47: __mac_syscall policy name: {w}")))?;
+        match retrace_arch::mac_syscall_model(&policy, args[1] as u32).map_err(fail)? {
+            retrace_arch::MacCall::AmfiDyldPolicy => {
+                let a = self.read_va_prefix(args[2], 16);
+                if a.len() != 16 {
+                    return Err(fail(format!("M47: AMFI argument struct at {:#x} is not mapped for 16 bytes", args[2])));
+                }
+                let in_flags = u64::from_le_bytes(a[0..8].try_into().unwrap());
+                let out = u64::from_le_bytes(a[8..16].try_into().unwrap());
+                let out_ipa = self.va_to_ipa(out).filter(|&i| self.read_guest_checked(i, 8).is_some())
+                    .ok_or_else(|| fail(format!("M47: AMFI outFlags {out:#x} is not mapped for 8 bytes")))?;
+                Ok(MacSyscall::AmfiDyldPolicy { in_flags, out_ipa })
+            }
+            retrace_arch::MacCall::SandboxCheck => {
+                let p = self.read_va_prefix(args[2].wrapping_add(16), 8);
+                if p.len() != 8 {
+                    return Err(fail(format!("M47: Sandbox argument struct at {:#x} is not mapped through +24", args[2])));
+                }
+                let op = self.read_guest_cstr(u64::from_le_bytes(p.try_into().unwrap()), retrace_arch::SANDBOX_OPERATION_MAX)
+                    .map_err(|w| fail(format!("M47: Sandbox operation name: {w}")))?;
+                let errno = retrace_arch::sandbox_check_continuity(&op).map_err(fail)?;
+                Ok(MacSyscall::SandboxCheck { errno })
+            }
+            retrace_arch::MacCall::SandboxContainerPath => {
+                if self.read_va_prefix(args[2], 32).len() != 32 {
+                    return Err(fail(format!("M47: Sandbox container-path struct at {:#x} is not mapped for 32 bytes", args[2])));
+                }
+                Ok(MacSyscall::SandboxContainerPath { errno: retrace_arch::ENOTSUP })
+            }
+        }
     }
 
     /// `args` as `0x…,0x…` on one line (M45 T3-e: a refusal must fit a log line).
