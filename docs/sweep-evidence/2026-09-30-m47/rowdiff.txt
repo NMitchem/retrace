@@ -1,0 +1,4 @@
+42c42
+< /usr/bin/dddiagnose	FAIL
+---
+> /usr/bin/dddiagnose	PASS

@@ -1,0 +1,29 @@
+# /bin/csh: the trace's own landmarks for the 3403 → fork → close(7) → read(6) → close(6) stretch, and the
+# wait4 (7) after it (never appended: the recorder panics on it, so it is this run's last [trap] line).
+# Run: 2026-10-02 00:11:21 -03, t6-shells-landmarks.sh (review I1, fix round 1), RETRACE_TRACE=1,
+# binary /private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/e8ce6f2f-a207-4e1f-9f44-7ab16e768127/scratchpad/retrace-t6 sha256=246d6f2cfacd13b1266c3da1f9a2989e56cbdb286314958d68f158713ab87847 (the sweep's), stdin /dev/null.
+# record rc=101, [trap] lines=341, gettimeofday(116) events=19.
+# Offset: this run's 3403 is landmark 336; the #[ignore] reason quotes the walk's run (t6-step2.sh,
+# csh.rec.err, gettimeofday 19), where it is 336. This run's numbers = the reason's + 0,
+# which is this run's gettimeofday count less the walk's (19 - 19). The landmark is 317 + that count.
+# td: the last 11 events (#0 Snapshot is always printed); each write's first 48 bytes in hex.
+events=341 torn=false
+#0 Snapshot
+#330 Syscall num=92 args=[6, 2, 1, a, 66400, 0, 0, fffff0003ffff800] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#331 Syscall num=41 args=[5, ffffffff, 1, a, 66400, 0, 0, fffff0003ffff800] ret=0x4 ret1=0x0 err=false writes=0 thread=0
+#332 Syscall num=41 args=[4, ffffffff, 1, a, 66400, 0, 0, fffff0003ffff800] ret=0x7 ret1=0x0 err=false writes=0 thread=0
+#333 Syscall num=6 args=[4, ffffffff, 1, a, 66400, 0, 0, fffff0003ffff800] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#334 Syscall num=6 args=[5, ffffffff, 1, a, 66400, 0, 0, fffff0003ffff800] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#335 Syscall num=92 args=[7, 2, 1, a, 66400, 0, 0, fffff0003ffff800] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#336 Syscall num=-47 args=[27fe1c0, 200000003, 4080001513, 110300000203, d4b00000000, 110300000003, 2c, 0] ret=0x0 ret1=0x0 err=false writes=1 thread=0
+    write ipa=0x27fe1c0 len=44 00 12 00 00 24 00 00 00 00 00 00 00 03 11 00 00 00 00 00 00 af 0d 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 08 00 00 00
+#337 Syscall num=2 args=[2ff68, 50000, 7f168001804f8cd8, 103, d4b00000000, 110300000003, 2c, 0] ret=0x23 ret1=0x0 err=true writes=0 thread=0
+#338 Syscall num=6 args=[7, 103, 103, 103, d4b00000000, 110300000003, 2c, 0] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#339 Syscall num=3 args=[6, 27fe300, 1000, 103, d4b00000000, 110300000003, 2c, 0] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#340 Syscall num=6 args=[6, 7e2580010004c0f4, 1000, 103, d4b00000000, 110300000003, 2c, 0] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+gettimeofday(116) events=19 fork(2) events=1
+# this run's refusal line and its last [trap] line (the wait4, landmark 341)
+[retrace] refusing fork (syscall 2): process creation is unmodelled; returning errno 35 without forwarding
+[trap] num=7 (0x7) pc=0x1804b5478 args=[0xffffffff,0x27fe2cc,0x0,0x0,0xd4b00000000,0x110300000003,0x2c,0x0]
+thread 'main' (18123578) panicked at crates/retrace-arch/src/lib.rs:1036:38:
+M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classif

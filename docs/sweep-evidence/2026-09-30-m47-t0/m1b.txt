@@ -1,0 +1,10 @@
+M1b mode=A run=1 rc=0 abort_lines=0 head=committed
+M1b mode=A run=2 rc=0 abort_lines=0 head=committed
+M1b mode=A run=3 rc=0 abort_lines=0 head=committed
+M1b mode=A run=4 rc=134 abort_lines=0 head=none
+M1b mode=A run=5 rc=134 abort_lines=0 head=none
+M1b mode=B run=1 rc=0 abort_lines=0 head=committed
+M1b mode=B run=2 rc=0 abort_lines=0 head=committed
+M1b mode=B run=3 rc=134 abort_lines=0 head=none
+M1b mode=B run=4 rc=134 abort_lines=0 head=none
+M1b mode=B run=5 rc=134 abort_lines=0 head=none

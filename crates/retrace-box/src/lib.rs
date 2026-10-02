@@ -1147,6 +1147,37 @@ unsafe fn host_svc(num: u64, a: [u64; 8]) -> (u64, u64, bool) {
     (ret, ret1, carry != 0)
 }
 
+/// M47 §3d: AMFI's dyld policy for RETRACE's own process — `__mac_syscall("AMFI", 0x5a, {inFlags,
+/// &out})` with every pointer host-owned, so the host kernel never sees a guest address. The record
+/// arm writes the answer to the guest's `outFlags` and records it: the answer is host data, as
+/// `task_info`'s audit token is (R4). `Err` is the host's errno. Record-only; replay applies the
+/// recorded answer.
+pub fn host_amfi_dyld_policy(in_flags: u64) -> Result<u64, u64> {
+    #[repr(C)]
+    struct AmfiArgs { in_flags: u64, out: *mut u64 }
+    unsafe extern "C" {
+        fn __mac_syscall(policy: *const std::ffi::c_char, call: i32, arg: *mut std::ffi::c_void) -> i32;
+    }
+    let mut out: u64 = 0;
+    let mut a = AmfiArgs { in_flags, out: &mut out };
+    // SAFETY: `a` and `out` outlive the call, and the policy name is a NUL-terminated literal.
+    let r = unsafe {
+        __mac_syscall(c"AMFI".as_ptr(), retrace_arch::AMFI_DYLD_POLICY_SELF as i32, (&mut a as *mut AmfiArgs).cast())
+    };
+    if r == 0 { Ok(out) } else { Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u64) }
+}
+
+/// What `Box_::guest_mac_syscall` found (M47 §3d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacSyscall {
+    /// `("AMFI", 0x5a)`: `arg` is `{u64 inFlags; u64 *outFlags}`; the answer lands at `out_ipa`.
+    AmfiDyldPolicy { in_flags: u64, out_ipa: u64 },
+    /// `("Sandbox", 2)`: the errno the pre-M47 forward returned for this operation (R7).
+    SandboxCheck { errno: u64 },
+    /// `("Sandbox", 4)`: `sandbox_container_path_for_pid`; answered ENOTSUP with nothing written.
+    SandboxContainerPath { errno: u64 },
+}
+
 // --- M2-xpcport: mint a real bootstrap send right in retrace's own IPC space ---
 // mach_port_options_t (<mach/port.h>): { uint32_t flags; mach_port_limits_t mpl; uint64_t reserved[2] }
 // where mach_port_limits_t = { mach_port_msgcount_t mpl_qlimit } (one u32). 24 bytes, repr(C).
@@ -2157,15 +2188,36 @@ impl Box_ {
     /// RO+exec. Returns the chosen IPA. Deterministic: identical call sequence => identical IPAs on
     /// replay.
     pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
+        self.guest_vm_map_masked(addr, size, 0, anywhere, exec)
+    }
+
+    /// `guest_vm_map` with `mach_vm_map`'s alignment `mask`: an ANYWHERE placement returns an
+    /// address with `ipa & mask == 0`, as `vm_map_enter` does. Ignored until M47: libmalloc's
+    /// xzone allocator maps each 4 MiB segment ANYWHERE with mask 0x3fffff and registers it in a
+    /// table indexed by `addr >> 22`, one entry per 4 MiB step FROM THE BASE
+    /// (`_xzm_segment_table_allocated_at`), so a segment placed off a 4 MiB boundary leaves the
+    /// granule its tail straddles unregistered, and freeing a chunk there aborts with "pointer
+    /// being freed was not allocated" (git `log -1`, ~1 run in 10: the random size of libmalloc's
+    /// guarded-range reservation moves the bump cursor). Record and replay ignored the mask
+    /// identically, so the oracle could not see it. Evidence: `docs/sweep-evidence/2026-09-30-m47-abort/`.
+    ///
+    /// `mask == 0` places byte-for-byte as before (M47 Ruling 3b-1): the bump cursor is rounded
+    /// only for a nonzero mask, and `first_fit` with `GRANULE - 1` is the old granule rounding.
+    /// FIXED ignores `mask`: `vm_map_enter` checks a FIXED address against it rather than choosing
+    /// one, every measured masked call is ANYWHERE, and that check is not modelled.
+    pub fn guest_vm_map_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool, exec: bool) -> u64 {
         let (host, rlen) = alloc_pages(size as usize);
+        let m = mask | (GRANULE as u64 - 1);
         let ipa = if anywhere {
+            assert!(mask < 1 << 36,
+                "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
             // Kernel-faithful VM_FLAGS_ANYWHERE-with-hint: search FORWARD from a non-zero hint for
             // the first free gap, treating reservations as occupied (what vm_map_enter does). When
             // the hint's own range is free, first_fit returns the hint verbatim (the common case);
             // when it collides — e.g. libmalloc's guarded-metadata commit whose hint is a reserved
             // band with an interior carveout — it lands in the first free gap (the hole). A zero hint
             // or no fit falls back to the deterministic bump allocator.
-            match if addr != 0 { self.first_fit(addr, rlen as u64) } else { None } {
+            match if addr != 0 { self.first_fit(addr, rlen as u64, m) } else { None } {
                 Some(a) => {
                     // A first-fit hit may land at/above the bump cursor (a hinted commit past every
                     // reservation); float mmap_next past it so no later bump hands out an overlapping
@@ -2176,6 +2228,7 @@ impl Box_ {
                 }
                 None => {
                     if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
+                    if mask != 0 { self.mmap_next = (self.mmap_next + m) & !m; }
                     let a = self.mmap_next; self.mmap_next += rlen as u64; a
                 }
             }
@@ -2205,9 +2258,21 @@ impl Box_ {
     /// fresh deterministic bump address (advancing `mmap_next` so nothing later collides).
     /// Deterministic: identical call sequence => identical returned address on replay.
     pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
+        self.guest_vm_reserve_masked(addr, size, 0, anywhere)
+    }
+
+    /// `guest_vm_reserve` with `mach_vm_map`'s alignment `mask`, honoured on ANYWHERE as
+    /// `guest_vm_map_masked` honours it: `mask == 0` and FIXED place exactly as before.
+    pub fn guest_vm_reserve_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool) -> u64 {
         // Page-granular extent: commit_reserved_page backs whole pages, so track whole pages.
         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
         let base = if anywhere {
+            assert!(mask < 1 << 36,
+                "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
+            if mask != 0 {
+                let m = mask | (GRANULE as u64 - 1);
+                self.mmap_next = (self.mmap_next + m) & !m;
+            }
             let end = self.mmap_next + rounded;
             assert!(end <= (1u64 << 36),
                 "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
@@ -2344,10 +2409,16 @@ impl Box_ {
     /// bump allocator). Pure function of (hint, len, backings, reservations) — identical on record &
     /// replay, so a first-fit-placed returned address is recomputed identically and byte-checked by
     /// the replay oracle (no new mirror needed; symmetry is structural).
-    fn first_fit(&self, hint: u64, len: u64) -> Option<u64> {
+    ///
+    /// `m` is the alignment mask, at least `GRANULE - 1`: every candidate is rounded up to it. The
+    /// argument above still holds — the lowest aligned fit is either the aligned hint or the
+    /// aligned end of the extent that blocks the aligned address below it. At `m == GRANULE - 1`
+    /// every candidate is what it was before the mask: the two window ends are page-aligned.
+    /// Saturating, so a garbage hint near `u64::MAX` still finds no fit and falls back to the bump.
+    fn first_fit(&self, hint: u64, len: u64, m: u64) -> Option<u64> {
         let g = GRANULE as u64;
-        let base = hint & !(g - 1);
-        let round_up = |x: u64| (x + g - 1) & !(g - 1);
+        let round_up = |x: u64| x.saturating_add(m) & !m;
+        let base = round_up(hint & !(g - 1));
         let mut cands = vec![base];
         for b in self.backings.iter() {
             let end = round_up(b.ipa + b.len as u64);
@@ -2357,8 +2428,8 @@ impl Box_ {
             let end = round_up(s + l);
             if end > base { cands.push(end); }
         }
-        if SHARED_REGION_END > base { cands.push(SHARED_REGION_END); }
-        if SCRATCH_RESERVED_END > base { cands.push(SCRATCH_RESERVED_END); }
+        if round_up(SHARED_REGION_END) > base { cands.push(round_up(SHARED_REGION_END)); }
+        if round_up(SCRATCH_RESERVED_END) > base { cands.push(round_up(SCRATCH_RESERVED_END)); }
         cands.sort_unstable();
         cands.dedup();
         cands.into_iter().find(|&a| self.range_is_free(a, len))
@@ -5321,6 +5392,136 @@ impl Box_ {
             }
         }
         Ok(0)
+    }
+
+    /// M47 §3c: `madvise(addr, len, behav)` (75), **modelled, never forwarded**. Forwarded, the
+    /// host applied the advice to RETRACE's backing of the guest range: a `MADV_FREE_REUSABLE`
+    /// there lets the host reclaim pages the guest may later write through stage 2 (the hazard M37
+    /// named and M45 first read on `/bin/ps`), and a `MADV_ZERO` wrote 512 KiB past the diff window
+    /// and stopped the recorder at the guard band (the 2026-09-30 probe's g33). The heap abort the
+    /// probe first blamed on the forward (g35) is a separate, pre-existing defect (t0 M1(b)).
+    ///
+    /// The advice comes from `retrace_arch::madvise_effect`, read as the `int` the kernel reads. The
+    /// range must start on a 16 KiB page: native madvise accepts an unaligned address, but no corpus
+    /// call is unaligned, so the model refuses it rather than guess (t0 M1(d)). Every page of the
+    /// range, `len` rounded up as xnu rounds it, must be the guest's: backed, or inside a
+    /// reservation (`commit_reserved_page`'s bookkeeping). Anything else is refused by value rather
+    /// than answered with a guessed errno, and the refusal comes before any write is computed.
+    ///
+    /// Returns the call's writes for the caller to apply with `apply_and_return`, so a watched range
+    /// sees a zero-fill as a write. `Zero` gives one zeroed page per BACKED page of the range; a
+    /// reserved page commits as zero, so it needs none. `NoOp` gives none. The writes are recomputed
+    /// identically on both sides and never recorded (R3). Every accepted call returns 0.
+    pub fn guest_madvise(&self, args: [u64; 8]) -> Result<Vec<Region>, String> {
+        let (addr, len) = (args[0], args[1]);
+        let effect = retrace_arch::madvise_effect(args[2] as u32)
+            .map_err(|why| format!("{why}. args=[{}]", Self::fmt_args(args)))?;
+        let g = GRANULE as u64;
+        if addr % g != 0 {
+            return Err(format!("M47: madvise range starts at {addr:#x}, not on a 16 KiB page (native accepts \
+                it; no corpus call is unaligned — t0 M1(d)). args=[{}]", Self::fmt_args(args)));
+        }
+        let end = addr.checked_add(len).and_then(|e| e.checked_add(g - 1)).map(|e| e & !(g - 1))
+            .ok_or_else(|| format!("M47: madvise range {addr:#x}+{len:#x} overflows. args=[{}]", Self::fmt_args(args)))?;
+        let mut writes = Vec::new();
+        let mut page = addr;
+        while page < end {
+            let backed = self.host_span(page).is_some();
+            if !backed && !self.reservations.iter().any(|&(s, l)| (s..s + l).contains(&page)) {
+                return Err(format!("M47: madvise range page {page:#x} is neither backed nor reserved — the \
+                    range runs outside the guest's mappings. args=[{}]", Self::fmt_args(args)));
+            }
+            if backed && effect == retrace_arch::MadviseEffect::Zero {
+                writes.push(Region { ipa: page, bytes: vec![0u8; GRANULE] });
+            }
+            page += g;
+        }
+        Ok(writes)
+    }
+
+    /// M47: the NUL-terminated guest string at `va`, read the way the kernel's `copyinstr` reads it
+    /// into a `cap`-byte buffer: at most `cap` bytes, NUL included, and an error if none of them is a
+    /// NUL. Returned without the NUL.
+    ///
+    /// A shared-cache page the guest has not touched yet is paged in first (`page_in_cache`). A
+    /// policy or operation name is a `__cstring` the code computed an address for without loading
+    /// from it, so its page could be unstaged at the `svc` (spec §11 item 4). Paging it in is the same
+    /// deterministic operation a guest load would have triggered, and both sides do it at the same
+    /// landmark (symmetry rule 1: the record arm and the mirror call `guest_mac_syscall` alike).
+    ///
+    /// **No test reaches the page-in.** t0 M2(c) found every policy and operation string resident at
+    /// the trap across the corpus, and M47 t3 measured 0 page-ins recording rpath_dyn, sbxpath_dyn,
+    /// hello_dyn and madv_dyn. The path stands on the argument above, not on a run.
+    pub fn read_guest_cstr(&mut self, va: u64, cap: usize) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        let mut a = va;
+        while out.len() < cap {
+            let ipa = self.va_to_ipa(a).ok_or_else(|| format!("{a:#x} has no stage-1 translation"))?;
+            // Checked: with the MMU off `va_to_ipa` is the identity for ANY address, so a pointer in
+            // the last page of the address space must be an `Err`, never an overflow panic.
+            let page_end = (a | (GRANULE as u64 - 1)).checked_add(1)
+                .ok_or_else(|| format!("{a:#x} runs past the end of the address space"))?;
+            let n = ((page_end - a) as usize).min(cap - out.len());
+            let bytes = match self.read_guest_checked(ipa, n) {
+                Some(b) => b,
+                None if self.page_in_cache(ipa) => self.read_guest_checked(ipa, n)
+                    .ok_or_else(|| format!("{a:#x} is unmapped after paging it in"))?,
+                None => return Err(format!("{a:#x} (ipa {ipa:#x}) is not mapped")),
+            };
+            if let Some(z) = bytes.iter().position(|&c| c == 0) {
+                out.extend_from_slice(&bytes[..z]);
+                return Ok(out);
+            }
+            out.extend_from_slice(&bytes);
+            a += n as u64;
+        }
+        Err(format!("no NUL within {cap} bytes of {va:#x}"))
+    }
+
+    /// M47 §3d: classify a `__mac_syscall` (381) from guest memory — `(policy, call)` through
+    /// `retrace_arch::mac_syscall_model`, then the struct the pair's policy reads. Shared by the
+    /// record arm and the replay mirror, which is what makes the classification symmetric.
+    ///
+    /// **Modelled, never forwarded.** A policy may write through a pointer inside `arg` (AMFI's
+    /// `outFlags`), which a forward hands the host as a host address. AMFI's `outFlags` must be a
+    /// mapped guest address for 8 bytes; natively an unmapped one is `EFAULT`, which the model
+    /// refuses rather than guessing. Sandbox's operation name is at `*(arg + 16)`. Sandbox call 4's
+    /// 32-byte struct must be mapped, and the call is answered ENOTSUP for any pid; measured for the
+    /// caller's own, the only corpus shape (replay cannot know the recorder's pid, so it is not
+    /// checked). Every other pair or operation is refused by value, naming it.
+    pub fn guest_mac_syscall(&mut self, args: [u64; 8]) -> Result<MacSyscall, String> {
+        let fail = |why: String| format!("{why}. args=[{}]", Self::fmt_args(args));
+        let policy = self.read_guest_cstr(args[0], retrace_arch::MAC_MAX_POLICY_NAME)
+            .map_err(|w| fail(format!("M47: __mac_syscall policy name: {w}")))?;
+        match retrace_arch::mac_syscall_model(&policy, args[1] as u32).map_err(fail)? {
+            retrace_arch::MacCall::AmfiDyldPolicy => {
+                let a = self.read_va_prefix(args[2], 16);
+                if a.len() != 16 {
+                    return Err(fail(format!("M47: AMFI argument struct at {:#x} is not mapped for 16 bytes", args[2])));
+                }
+                let in_flags = u64::from_le_bytes(a[0..8].try_into().unwrap());
+                let out = u64::from_le_bytes(a[8..16].try_into().unwrap());
+                let out_ipa = self.va_to_ipa(out).filter(|&i| self.read_guest_checked(i, 8).is_some())
+                    .ok_or_else(|| fail(format!("M47: AMFI outFlags {out:#x} is not mapped for 8 bytes")))?;
+                Ok(MacSyscall::AmfiDyldPolicy { in_flags, out_ipa })
+            }
+            retrace_arch::MacCall::SandboxCheck => {
+                let p = self.read_va_prefix(args[2].wrapping_add(16), 8);
+                if p.len() != 8 {
+                    return Err(fail(format!("M47: Sandbox argument struct at {:#x} is not mapped through +24", args[2])));
+                }
+                let op = self.read_guest_cstr(u64::from_le_bytes(p.try_into().unwrap()), retrace_arch::SANDBOX_OPERATION_MAX)
+                    .map_err(|w| fail(format!("M47: Sandbox operation name: {w}")))?;
+                let errno = retrace_arch::sandbox_check_continuity(&op).map_err(fail)?;
+                Ok(MacSyscall::SandboxCheck { errno })
+            }
+            retrace_arch::MacCall::SandboxContainerPath => {
+                if self.read_va_prefix(args[2], 32).len() != 32 {
+                    return Err(fail(format!("M47: Sandbox container-path struct at {:#x} is not mapped for 32 bytes", args[2])));
+                }
+                Ok(MacSyscall::SandboxContainerPath { errno: retrace_arch::ENOTSUP })
+            }
+        }
     }
 
     /// `args` as `0x…,0x…` on one line (M45 T3-e: a refusal must fit a log line).

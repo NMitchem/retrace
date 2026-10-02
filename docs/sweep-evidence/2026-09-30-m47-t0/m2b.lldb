@@ -1,0 +1,58 @@
+breakpoint set -n __mac_syscall
+run
+register read x0 x1 x2
+memory read -s8 -fx -c3 $x2
+x/s *(char **)($x2 + 16)
+x/s $x0
+finish
+register read x0
+continue
+register read x0 x1 x2
+memory read -s8 -fx -c3 $x2
+x/s *(char **)($x2 + 16)
+x/s $x0
+finish
+register read x0
+continue
+register read x0 x1 x2
+memory read -s8 -fx -c3 $x2
+x/s *(char **)($x2 + 16)
+x/s $x0
+finish
+register read x0
+continue
+register read x0 x1 x2
+memory read -s8 -fx -c3 $x2
+x/s *(char **)($x2 + 16)
+x/s $x0
+finish
+register read x0
+continue
+register read x0 x1 x2
+memory read -s8 -fx -c3 $x2
+x/s *(char **)($x2 + 16)
+x/s $x0
+finish
+register read x0
+continue
+register read x0 x1 x2
+memory read -s8 -fx -c3 $x2
+x/s *(char **)($x2 + 16)
+x/s $x0
+finish
+register read x0
+continue
+register read x0 x1 x2
+memory read -s8 -fx -c3 $x2
+x/s *(char **)($x2 + 16)
+x/s $x0
+finish
+register read x0
+continue
+register read x0 x1 x2
+memory read -s8 -fx -c3 $x2
+x/s *(char **)($x2 + 16)
+x/s $x0
+finish
+register read x0
+continue

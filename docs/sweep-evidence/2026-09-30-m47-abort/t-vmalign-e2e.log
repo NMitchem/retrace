@@ -1,0 +1,10 @@
+   Compiling retrace-core v0.0.0 (/private/tmp/claude-501/m47-abort/src-fix/crates/retrace-core)
+   Compiling retrace v0.0.0 (/private/tmp/claude-501/m47-abort/src-fix/crates/retrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running tests/vmalign_e2e.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/vmalign_e2e-de3f9bf01167242b)
+
+running 1 test
+test every_masked_anywhere_map_comes_back_aligned_and_replays ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.49s
+

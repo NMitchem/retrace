@@ -1,0 +1,22 @@
+Thu Oct  1 22:21:15 -03 2026
+run=1 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=2 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=3 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=4 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=5 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=6 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=7 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=8 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=9 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=10 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=11 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=12 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=13 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=14 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=15 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=16 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=17 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=18 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=19 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+run=20 rc=0 stdout==native:yes replay_rc=0 replay_stdout==record:yes 
+SUMMARY bin=/private/tmp/claude-501/m47-t3b-retrace N=20 aborts=0 stdout_mismatch=0 replay_failures=0

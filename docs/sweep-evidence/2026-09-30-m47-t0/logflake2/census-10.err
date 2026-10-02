@@ -1,0 +1,16 @@
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[m47] num=381 args=[0x1801b7eb4,0x2,0x27ff270] policy="Sandbox" op="syscall-unix" ret=0xe err=true writes=0
+[m47] amfi policy_resident="AMFI\0"
+[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff2e8
+[m47] num=381 args=[0x1801b7eb4,0x2,0x27fedc0] policy="Sandbox" op="syscall-unix" ret=0xe err=true writes=0
+[m47] num=381 args=[0x1801b7eb4,0x2,0x27fbe90] policy="Sandbox" op="syscall-unix" ret=0xe err=true writes=0
+[retrace] forwarding mach_msg2 host_info (msgh_id 200) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_clock_service (msgh_id 206) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_create (msgh_id 3418) to host (decided allowlist)
+[m47] num=381 args=[0x18df1ac55,0x2,0x27fb370] policy="Sandbox" op="file-write-data" ret=0x16 err=true writes=0
+[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1203 send_size 248): the box hosts no message-queue receivers
+[retrace] fall-throughs: 5
+guest terminated by signal 6

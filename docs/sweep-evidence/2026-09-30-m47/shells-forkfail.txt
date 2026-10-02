@@ -1,0 +1,7 @@
+uid processes now: 377
+control sh fork-failing exit=128 stdout=[] stderr=[/bin/sh: fork: Resource temporarily unavailable]
+csh empty-env exit=0 stdout=[] stderr=[]
+csh empty-env fork-failing exit=0 stdout=[] stderr=[]
+tcsh empty-env exit=0 stdout=[] stderr=[]
+tcsh empty-env fork-failing exit=0 stdout=[] stderr=[]
+script exit=0

@@ -1,0 +1,16 @@
+M4 READ status-porcelain native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ status native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ diff native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ diff-cached native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ log native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ show native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 READ rev-parse native_rc=0 rec_rc=0 rp_rc=0 stdout_rec==native:yes rp==rec:yes wall=
+M4 WRITE add native_rc=0 rec_rc=0 rp_rc=0 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE commit native_rc=0 rec_rc=0 rp_rc=0 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE branch native_rc=0 rec_rc=0 rp_rc=0 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE tag native_rc=0 rec_rc=134 rp_rc=134 state_rec==native:no rp==rec:yes wall=
+M4 WRITE switch-c native_rc=0 rec_rc=0 rp_rc=0 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE mv native_rc=0 rec_rc=0 rp_rc=0 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE rm native_rc=0 rec_rc=0 rp_rc=0 state_rec==native:yes rp==rec:yes wall=
+M4 WRITE stash native_rc=0 rec_rc=4 rp_rc=n/a state_rec==native:no rp==rec:n/a wall=RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64
+M4 WRITE merge native_rc=0 rec_rc=101 rp_rc=n/a state_rec==native:no rp==rec:n/a wall=thread 'main' (16560566) panicked at crates/retrace-arch/src/lib.rs:1018:38:

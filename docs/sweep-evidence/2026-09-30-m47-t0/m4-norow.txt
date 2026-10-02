@@ -1,0 +1,19 @@
+m4/add.rec.err: 9  12  136  
+m4/branch.rec.err: 12  
+m4/commit.rec.err: 9  12  136  
+m4/diff-cached.rec.err: 12  
+m4/diff.rec.err: 12  
+m4/log.rec.err: 12  
+m4/merge.rec.err: 12  83  
+m4/mv.rec.err: 12  
+m4/rev-parse.rec.err: 12  
+m4/rm.rec.err: 12  
+m4/show.rec.err: 12  
+m4/stash.rec.err: 9  12  136  333  
+m4/status-porcelain.rec.err: 12  
+m4/status.rec.err: 12  
+m4/switch-c.rec.err: 12  
+m4/tag.rec.err: 12  
+m4-retry/tag-try1.rec.err: 12  
+m3b/git-commit.err: 2  9  12  136  333  
+m3b/forkfail.err: 2  

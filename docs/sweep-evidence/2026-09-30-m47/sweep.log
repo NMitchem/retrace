@@ -1,0 +1,115 @@
+pidstart=99787
+binary=/private/tmp/claude-501/-Users-noahmitchem-Documents-GitHub-retrace/e8ce6f2f-a207-4e1f-9f44-7ab16e768127/scratchpad/retrace-t6 sha256=246d6f2cfacd13b1266c3da1f9a2989e56cbdb286314958d68f158713ab87847 commit=a8a1ecd date=2026-10-01 23:36:44 -03
+load-start: 23:36  up 8 days,  2:20, 10 users, load averages: 6.23 5.03 4.39 vm.loadavg={ 6.23 5.03 4.39 }
+xcrun_db-start: -rw-------@ 1 noahmitchem  wheel  16 Sep 27 14:39 /var/tmp/xcrun_db
+PASS /bin/[
+ROW	/bin/[	PASS	2	2	99814	n/a		
+PASS /bin/bash
+ROW	/bin/bash	PASS	0	0	99970	n/a		
+PASS /bin/cat
+ROW	/bin/cat	PASS	0	0	241	n/a		
+PASS /bin/chmod
+ROW	/bin/chmod	PASS	1	1	304	n/a		
+PASS /bin/cp
+ROW	/bin/cp	PASS	64	64	362	n/a		
+FAIL /bin/csh (recorder panicked: thread 'main' (17955312) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from th)
+ROW	/bin/csh	FAIL	101	n/a	549	n/a	thread 'main' (17955312) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from th	
+PASS /bin/dash
+ROW	/bin/dash	PASS	0	0	581	n/a		
+PASS /bin/date
+ROW	/bin/date	PASS	0	0	683	n/a		
+PASS /bin/dd
+ROW	/bin/dd	PASS	0	0	1079	n/a		
+PASS /bin/df
+ROW	/bin/df	PASS	0	0	1148	n/a		
+PASS /bin/echo
+ROW	/bin/echo	PASS	0	0	1187	n/a		
+PASS /bin/ed
+ROW	/bin/ed	PASS	0	0	1232	n/a		
+PASS /bin/expr
+ROW	/bin/expr	PASS	2	2	1377	n/a		
+PASS /bin/hostname
+ROW	/bin/hostname	PASS	0	0	1581	n/a		
+PASS /bin/kill
+ROW	/bin/kill	PASS	2	2	1612	n/a		
+PASS /bin/ksh
+ROW	/bin/ksh	PASS	0	0	1736	n/a		
+PASS /bin/launchctl
+ROW	/bin/launchctl	PASS	1	1	1876	n/a		
+PASS /bin/link
+ROW	/bin/link	PASS	1	1	1979	n/a		
+PASS /bin/ln
+ROW	/bin/ln	PASS	1	1	2041	n/a		
+PASS /bin/ls
+ROW	/bin/ls	PASS	0	0	2116	n/a		
+PASS /bin/mkdir
+ROW	/bin/mkdir	PASS	64	64	2216	n/a		
+PASS /bin/mv
+ROW	/bin/mv	PASS	64	64	2336	n/a		
+PASS /bin/pax
+ROW	/bin/pax	PASS	1	1	2375	n/a		
+PASS /bin/ps
+ROW	/bin/ps	PASS	0	0	2456	n/a		
+PASS /bin/pwd
+ROW	/bin/pwd	PASS	0	0	3150	n/a		
+PASS /bin/realpath
+ROW	/bin/realpath	PASS	0	0	3199	n/a		
+PASS /bin/rm
+ROW	/bin/rm	PASS	64	64	3591	n/a		
+PASS /bin/rmdir
+ROW	/bin/rmdir	PASS	1	1	3774	n/a		
+PASS /bin/sh
+ROW	/bin/sh	PASS	1	1	3894	n/a		
+PASS /bin/sleep
+ROW	/bin/sleep	PASS	1	1	4004	n/a		
+PASS /bin/stty
+ROW	/bin/stty	PASS	1	1	4030	n/a		
+PASS /bin/sync
+ROW	/bin/sync	PASS	0	0	4145	n/a		
+FAIL /bin/tcsh (recorder panicked: thread 'main' (17974050) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from th)
+ROW	/bin/tcsh	FAIL	101	n/a	4186	n/a	thread 'main' (17974050) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from th	
+PASS /bin/test
+ROW	/bin/test	PASS	1	1	4207	n/a		
+PASS /bin/unlink
+ROW	/bin/unlink	PASS	64	64	4251	n/a		
+PASS /bin/wait4path
+ROW	/bin/wait4path	PASS	1	1	4320	n/a		
+PASS /bin/zsh
+ROW	/bin/zsh	PASS	0	0	4348	n/a		
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (17975074) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument fro)
+ROW	/usr/bin/automationmodetool	FAIL	101	n/a	4418	n/a	thread 'main' (17975074) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument fro	
+PASS /usr/bin/desdp
+ROW	/usr/bin/desdp	PASS	71	71	4442	n/a		
+PASS /usr/bin/dyld_info
+ROW	/usr/bin/dyld_info	PASS	71	71	4475	n/a		
+PASS /usr/bin/flex
+ROW	/usr/bin/flex	PASS	71	71	4549	n/a		
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+ROW	/usr/bin/dddiagnose	PASS	139	139	4579	n/a		
+PASS /usr/bin/basename
+ROW	/usr/bin/basename	PASS	1	1	4797	n/a		
+PASS /usr/bin/dirname
+ROW	/usr/bin/dirname	PASS	1	1	4841	n/a		
+PASS /usr/bin/env
+ROW	/usr/bin/env	PASS	0	0	4875	n/a		
+PASS /usr/bin/head
+ROW	/usr/bin/head	PASS	0	0	4916	n/a		
+PASS /usr/bin/tail
+ROW	/usr/bin/tail	PASS	0	0	4958	n/a		
+PASS /usr/bin/sort
+ROW	/usr/bin/sort	PASS	0	0	4986	n/a		
+PASS /usr/bin/uniq
+ROW	/usr/bin/uniq	PASS	0	0	5017	n/a		
+PASS /usr/bin/cut
+ROW	/usr/bin/cut	PASS	1	1	5147	n/a		
+PASS /usr/bin/tr
+ROW	/usr/bin/tr	PASS	1	1	5181	n/a		
+FAIL /usr/bin/yes (timed out after 30s recording)
+ROW	/usr/bin/yes	FAIL	137	n/a	5228	n/a		
+PASS /usr/bin/true
+ROW	/usr/bin/true	PASS	0	0	5416	n/a		
+PASS /usr/bin/printenv
+ROW	/usr/bin/printenv	PASS	0	0	5459	n/a		
+TALLY pass=50 fail=4 skip=0
+SWEEP_EXIT=0
+load-end: 23:43  up 8 days,  2:27, 10 users, load averages: 3.55 4.03 4.12 vm.loadavg={ 3.55 4.03 4.12 } date=2026-10-01 23:43:22 -03

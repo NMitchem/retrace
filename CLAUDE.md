@@ -122,7 +122,18 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   event manager and UPTIME timers on the synthetic clock — a `dispatch_after`, a repeating timer
   source, two timers in deadline order, the WALL refusal by value, a seek across the idle jump,
   `reverse-continue` to the handler's store on its worker, a replay-side refusal reported as a
-  divergence, and R7's one-clock check through `mach_get_times`). Run one with
+  divergence, and R7's one-clock check through `mach_get_times`), `vmalign_e2e` (M47: a guest's
+  masked `mach_vm_map`s, over the trap and the 4811 route, must come back aligned and replay — the
+  repo-owned guard for the alignment mask retrace ignored before M47, which put xzone malloc's 4 MiB
+  segment off its boundary and intermittently aborted git in libmalloc), `gitprims_e2e` (M47: the
+  repo-owned fixtures for git's mechanisms — `fsops_dyn`'s forwarded path rows landing on disk,
+  `madv_dyn`'s `MADV_ZERO` recomputed and never recorded, the no-op reuse pair and the refused
+  advice, `rpath_dyn` loading through `@rpath` because AMFI is answered by the host, `sbxpath_dyn`'s
+  Sandbox container-path call answered `ENOTSUP`, `forkfail_dyn`'s fork refused with `EAGAIN`, and
+  two tampered-trace divergences), `git_e2e` (M47: Xcode's `git` — read commands against native,
+  `add`, default-config `commit` through the refused maintenance fork, and `branch`, `tag`,
+  `switch -c`, `mv` and `rm --cached`; skips loudly without Xcode), `node_e2e` (M47: node parked at
+  its measured wall; skips loudly without Homebrew node). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -167,8 +178,10 @@ are gitignored); build/run recipes and findings are in `spikes/README.md`.
   format break — bump `TRACE_MAGIC`.** **So is changing what a snapshot's bytes _mean_**: M23 changed
   the trampoline's vector padding without bumping, and a pre-M23 trace then restored its old padding
   under code that assumed the new — M24 bumped for it (to `RT\x00\x09` then; moved again by M38
-  for `ret1`, so it is `RT\x00\x0a` now). `open_checked` drops a torn/corrupt tail rather than
-  panicking.
+  for `ret1` and by M47 for the `mach_vm_map` alignment mask, so it is `RT\x00\x0b` now).
+  `open_checked` drops a torn/corrupt tail rather than panicking, and since M47 a trace whose header
+  is another `RT` version is refused by name ("recorded by a different retrace trace format (not
+  torn)") rather than as torn.
 - **`retrace-guest`** — the Mach-O loader (`parse_macho`, `slice_arm64e`) **and** the guest test
   programs. `asm/*.s` (freestanding, `-nostdlib -static`) and `c/hello_dyn.c` are compiled by
   `build.rs` into `OUT_DIR`; path constants (`HELLO`, `HELLO_DYN`, …) point at them.
@@ -270,12 +283,13 @@ returns. The event manager, parked at opcode `0x40` since M46, is the one except
 activation re-enters it (`ThreadTable::unpark`). Forwarding `bsdthread_create` would be not merely
 wrong but whole-process fatal (the host would start a real thread on retrace's own `_pthread_start`,
 which PAC-fails on the guest's pthread struct) — and **nothing asserts against it**: the emulating
-arm (`crates/retrace-core/src/lib.rs:1089`) sits before the generic forward arm and that ordering is
+arm in `record_box` (`crates/retrace-core/src/lib.rs`) sits before the generic forward arm and that ordering is
 the only guard. The generic arm's asserts are `is_signal_syscall`, the workq pair, `kevent_qos`
-(M45) and `writes_via_nested_pointer` only; the claim that it "asserts" stood here from M14 to M37
-and was measured false at M37. Since M45 libdispatch's workqueue-kqueue init, `kevent_qos` (374)
-with `KEVENT_FLAG_WORKQ`, is emulated beside the workq pair for the same reason (forwarded, it acts
-on retrace's own workqueue kqueue): M45 emulated exactly one measured shape, returning 0
+(M45), `writes_via_nested_pointer`, and since M47 `madvise` and `fork` only; the claim that it
+"asserts" stood here from M14 to M37 and was measured false at M37. Since M45 libdispatch's
+workqueue-kqueue init, `kevent_qos` (374) with `KEVENT_FLAG_WORKQ`, is emulated beside the workq
+pair for the same reason (forwarded, it acts on retrace's own workqueue kqueue): M45 emulated
+exactly one measured shape, returning 0
 (`Box_::guest_kevent_qos`), and refused every other by value, naming the field.
 Since M46 the box also models libdispatch's **event manager**: `kevent_qos`'s memory-pressure
 registration and manager poke join M45's init, the manager's `KEVENT_RETURN` (`0x40`) registers
@@ -322,15 +336,16 @@ does *not* materialise:
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (which bumped
-`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0a`, moved again by M24 and then by M38 for
-`ret1`, so every pre-M38 recording is unreadable) — and replay recomputes the current thread and
-compares it. `verify_thread` has **seven** call sites, one in each arm that consumes a landmark
-and `return`s, each placed *after* that arm's own field comparison so a genuine argument divergence
-still reports as itself; the `SignalDelivery` landmark is checked by an eighth, inline comparison in
-`mirror_delivery`, deliberately not `verify_thread`, because its tag is the **receiving** thread
-rather than the current one. That count is the thing to check when adding an arm: each site exists
-because a mirror `return`s before reaching the generic dispatch, so **every new mirror silently
-creates a new hole until its oracle call is added** — nothing structural couples the two. Without
+`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0b`, moved again by M24, then by M38 for
+`ret1` and by M47 for the `mach_vm_map` alignment mask, so every pre-M47 recording is unreadable)
+— and replay recomputes the current thread and compares it. `verify_thread` has **seven** call
+sites, one in each arm that consumes a landmark and `return`s, each placed *after* that arm's own
+field comparison so a genuine argument divergence still reports as itself; the `SignalDelivery`
+landmark is checked by an eighth, inline comparison in `mirror_delivery`, deliberately not
+`verify_thread`, because its tag is the **receiving** thread rather than the current one. That
+count is the thing to check when adding an arm: each site exists because a mirror `return`s
+before reaching the generic dispatch, so **every new mirror silently creates a new hole until its
+oracle call is added** — nothing structural couples the two. Without
 the check, two threads running the same code issue byte-identical `(num, args)` and a wrong-thread
 replay continues in silence. `Event::Sched` is **gone**, not reserved: emitting it would silently
 renumber every landmark, and nothing in either dispatch loop can see a switch. **All seven sites are

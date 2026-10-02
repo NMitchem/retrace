@@ -1,0 +1,63 @@
+# t6-shells-frames.sh: /bin/csh's refused fork and the wait4 behind it (debugger at each svc, lldb symbols).
+## fork: debugger at 0x1804b58fc
+> break 0x1804b58fc
+breakpoint at 0x1804b58fc
+> continue
+hit 0x1804b58fc at (337, +?)
+resolved (337, 109007)
+> where
+at (337, 109007) pc=0x1804b58fc thread=0
+> regs
+x0 =0x000000000002ff68  x1 =0x0000000000050000  x2 =0x7f168001804f8cd8  x3 =0x0000000000000103  
+x4 =0x00000d4b00000000  x5 =0x0000130300000003  x6 =0x000000000000002c  x7 =0x0000000000000000  
+x8 =0x0000000000000000  x9 =0x0000000000030000  x10=0x00000000000000f0  x11=0x0000000000000a5b  
+x12=0x0000000000000000  x13=0x0000000000000002  x14=0x0100000000000000  x15=0x0000000700c00000  
+x16=0x0000000000000002  x17=0x00000001edd36f80  x18=0x0000000000000000  x19=0x0000000100059540  
+x20=0x0000000000000000  x21=0x000000010006e3f0  x22=0x000000010006e780  x23=0x0000000000000000  
+x24=0x0000000100066258  x25=0x0000000100066268  x26=0x000000010006e460  x27=0x00000000027fff30  
+x28=0x0000000000000001  x29=0x00000000027fe290  x30=0x9a7f8001803a31d8  
+sp=0x27fe290 pc=0x1804b58fc elr=0x1800e17c4 far=0x1803d7320 spsr=0x60200000
+## fork: frame-pointer chain from x29 = 0x27fe290
+lr0 (x30 at the svc) 0x1803a31d8
+fp 0x27fe290 next_fp 0x27fe2b0 lr 0x9a7f8001803a31d8 stripped 0x1803a31d8
+fp 0x27fe2b0 next_fp 0x27ff330 lr 0x8c18000100047e50 stripped 0x100047e50
+## fork: lldb (target /bin/csh, not running)
+(lldb) target create /bin/csh
+(lldb) image lookup -a 0x1803a31d8
+      Address: libsystem_c.dylib[0x00000001803a31d8] (libsystem_c.dylib.__TEXT.__text + 140064)
+      Summary: libsystem_c.dylib`fork + 56
+(lldb) image lookup -a 0x1803a31d8
+      Address: libsystem_c.dylib[0x00000001803a31d8] (libsystem_c.dylib.__TEXT.__text + 140064)
+      Summary: libsystem_c.dylib`fork + 56
+(lldb) image lookup -a 0x100047e50
+      Address: csh[0x0000000100047e50] (csh.__TEXT.__text + 292664)
+      Summary: csh`remotehost + 108
+## wait4: debugger at 0x1804b5474
+> break 0x1804b5474
+breakpoint at 0x1804b5474
+> continue
+hit 0x1804b5474 at (341, +?)
+resolved (341, 34)
+> where
+at (341, 34) pc=0x1804b5474 thread=0
+> regs
+x0 =0x00000000ffffffff  x1 =0x00000000027fe2cc  x2 =0x0000000000000000  x3 =0x0000000000000000  
+x4 =0x00000d4b00000000  x5 =0x0000130300000003  x6 =0x000000000000002c  x7 =0x0000000000000000  
+x8 =0x00000000ffffffec  x9 =0x000a0b0c0d0e0f00  x10=0x0000000000000040  x11=0x0000000000000002  
+x12=0x0000000000000000  x13=0x0000000000000002  x14=0x0100000000000000  x15=0x0000000700c00000  
+x16=0x0000000000000007  x17=0x00000001edd37148  x18=0x0000000000000000  x19=0x00000000ffffffff  
+x20=0x0000000000000000  x21=0x000000010006e3f0  x22=0x000000010006e780  x23=0x0000000000000000  
+x24=0x0000000100066258  x25=0x0000000100066268  x26=0x000000010006e460  x27=0x00000000027fff30  
+x28=0x0000000000000001  x29=0x00000000027ff330  x30=0x0000000100047ed0  
+sp=0x27fe2c0 pc=0x1804b5474 elr=0x1804ae8f0 far=0x1803d7320 spsr=0x60000000
+## wait4: frame-pointer chain from x29 = 0x27ff330
+lr0 (x30 at the svc) 0x100047ed0
+fp 0x27ff330 next_fp 0x27ff8b0 lr 0xd6c000100001348 stripped 0x100001348
+## wait4: lldb (target /bin/csh, not running)
+(lldb) target create /bin/csh
+(lldb) image lookup -a 0x100047ed0
+      Address: csh[0x0000000100047ed0] (csh.__TEXT.__text + 292792)
+      Summary: csh`remotehost + 236
+(lldb) image lookup -a 0x100001348
+      Address: csh[0x0000000100001348] (csh.__TEXT.__text + 3120)
+      Summary: csh`main + 3120

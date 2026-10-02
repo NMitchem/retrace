@@ -1,0 +1,21 @@
+run=1 rc=0 head=committed fsck_lines=0 
+run=2 rc=0 head=committed fsck_lines=0 
+run=3 rc=0 head=committed fsck_lines=0 
+run=4 rc=134 head=none fsck_lines=2 guest terminated by signal 6
+run=5 rc=0 head=committed fsck_lines=0 
+run=6 rc=134 head=none fsck_lines=2 guest terminated by signal 6
+run=7 rc=134 head=none fsck_lines=2 guest terminated by signal 6
+run=8 rc=0 head=committed fsck_lines=0 
+run=9 rc=0 head=committed fsck_lines=0 
+run=10 rc=134 head=none fsck_lines=2 guest terminated by signal 6
+run=11 rc=134 head=none fsck_lines=2 guest terminated by signal 6
+run=12 rc=134 head=none fsck_lines=2 guest terminated by signal 6
+run=13 rc=0 head=committed fsck_lines=0 
+run=14 rc=134 head=none fsck_lines=2 guest terminated by signal 6
+run=15 rc=0 head=committed fsck_lines=0 
+run=16 rc=134 head=none fsck_lines=2 guest terminated by signal 6
+run=17 rc=0 head=committed fsck_lines=0 
+run=18 rc=134 head=none fsck_lines=2 guest terminated by signal 6
+run=19 rc=0 head=committed fsck_lines=0 
+run=20 rc=0 head=committed fsck_lines=0 
+SUMMARY bin=/private/tmp/claude-501/m47-census-retrace N=20 aborts=9 no_commit=9 replay_failures=0

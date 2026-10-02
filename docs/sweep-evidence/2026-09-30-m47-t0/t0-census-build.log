@@ -1,0 +1,18 @@
+   Compiling retrace-arch v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/crates/retrace-arch)
+warning: unreachable pattern
+   --> crates/retrace-arch/src/lib.rs:819:9
+    |
+807 |         128 => row!(P, [Path, Path]),
+    |         --- matches all the relevant values
+...
+819 |         128 => row!(P, [Path, Path]),
+    |         ^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling retrace-guest v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/crates/retrace-guest)
+   Compiling retrace-box v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/crates/retrace-box)
+warning: `retrace-arch` (lib) generated 1 warning
+   Compiling retrace-core v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/crates/retrace-core)
+   Compiling retrace v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/crates/retrace)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.47s

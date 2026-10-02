@@ -1,0 +1,12 @@
+== native, GIT_TRACE=1 (the child processes stash starts)
+git.c:476               trace: built-in: git stash -q
+run-command.c:673       trace: run_command: GIT_INDEX_FILE=.git/index.stash.71894 git update-index --ignore-skip-worktree-entries -z --add --remove --stdin
+run-command.c:765       trace: start_command: /Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git update-index --ignore-skip-worktree-entries -z --add --remove --stdin
+git.c:476               trace: built-in: git update-index --ignore-skip-worktree-entries -z --add --remove --stdin
+run-command.c:673       trace: run_command: git reset --hard -q --no-recurse-submodules
+run-command.c:765       trace: start_command: /Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git reset --hard -q --no-recurse-submodules
+git.c:476               trace: built-in: git reset --hard -q --no-recurse-submodules
+== m3b build: record rc=1
+[m47-scratch] 3403 answered KERN_SUCCESS (mig_reply_error)
+[m47-scratch] fork (2) refused EAGAIN
+== stash list after

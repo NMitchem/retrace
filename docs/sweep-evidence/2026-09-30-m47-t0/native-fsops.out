@@ -1,0 +1,2 @@
+mkdir chdir link rename utimes ok
+h mtime=1234567890 nlink=2

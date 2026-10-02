@@ -1,0 +1,7 @@
+setup=0
+rc=0
+--- m3c.out
+--- m3c.err
+error: cannot fork() for maintenance: Resource temporarily unavailable
+--- log -1
+second

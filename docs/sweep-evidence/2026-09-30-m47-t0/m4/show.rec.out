@@ -1,0 +1,8 @@
+commit fcb94e8ed13e30ccb6e2398f153d776aac336bba
+Author: retrace <retrace@example.invalid>
+Date:   Thu Oct 1 18:13:03 2026 -0300
+
+    first
+
+ a.txt | 1 +
+ 1 file changed, 1 insertion(+)

@@ -1,0 +1,24 @@
+(lldb) image lookup -a 0x1804f18d8
+      Summary: libsystem_pthread.dylib`pthread_kill + 296
+(lldb) image lookup -a 0x1803f8644
+      Summary: libsystem_c.dylib`abort + 148
+(lldb) image lookup -a 0x1802f1a40
+      Summary: libsystem_malloc.dylib`malloc_vreport + 892
+(lldb) image lookup -a 0x1802f528c
+      Summary: libsystem_malloc.dylib`malloc_report + 64
+(lldb) image lookup -a 0x1802fa648
+      Summary: libsystem_malloc.dylib`___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED + 76
+(lldb) image lookup -a 0x19028d918
+arm64
+git_deflate_end_gently (in git) + 72
+write_loose_object (in git) + 296
+write_object_file_flags (in git) + 416
+commit_tree_extended (in git) + 1204
+cmd_commit (in git) + 6772
+run_builtin (in git) + 440
+handle_builtin (in git) + 340
+cmd_main (in git) + 856
+main (in git) + 40
+(lldb) image lookup -a 0x19028d918
+      Address: libz.1.dylib[0x000000019028d918] (libz.1.dylib.__TEXT.__text + 13016)
+      Summary: libz.1.dylib`deflateEnd + 88

@@ -1,0 +1,25 @@
+commit=a8a1ecd date=2026-10-01 23:30:43 -03 load={ 2.10 2.80 3.52 }
+=== csh
+csh native exit=1 stdout-bytes=0 stderr-bytes=25
+csh record exit=101
+csh traps=341
+[retrace] refusing fork (syscall 2): process creation is unmodelled; returning errno 35 without forwarding
+thread 'main' (17921385) panicked at crates/retrace-arch/src/lib.rs:1036:38:
+M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+csh rec.out bytes=0
+csh replay exit=3
+DIVERGENCE at landmark 341 pc=0x1804b5478: expected recorded syscall, got None (truncated=false)
+csh cmp=0
+=== tcsh
+tcsh native exit=1 stdout-bytes=0 stderr-bytes=25
+tcsh record exit=101
+tcsh traps=345
+[retrace] refusing fork (syscall 2): process creation is unmodelled; returning errno 35 without forwarding
+thread 'main' (17921529) panicked at crates/retrace-arch/src/lib.rs:1036:38:
+M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+tcsh rec.out bytes=0
+tcsh replay exit=3
+DIVERGENCE at landmark 345 pc=0x1804b5478: expected recorded syscall, got None (truncated=false)
+tcsh cmp=0
+load-end={ 2.09 2.78 3.51 }
+script exit=0

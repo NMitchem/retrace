@@ -1,0 +1,10 @@
+breakpoint set -n mach_msg2_internal -c '*(unsigned int *)($x0 + 20) == 3403'
+run
+memory read -s1 -fx -c64 $x0
+register read x0 x1 x2 x3 x4 x5 x6 x7
+bt 10
+expr unsigned long $m = (unsigned long)$x0
+finish
+register read x0
+memory read -s1 -fx -c48 $m
+continue

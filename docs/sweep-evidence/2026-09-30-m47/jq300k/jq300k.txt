@@ -1,0 +1,25 @@
+jq=/opt/homebrew/bin/jq (jq-1.8.2) realpath=/opt/homebrew/Cellar/jq/1.8.2/bin/jq
+base sha256=e4ae912e44c071e33ca978f9f78613b21709cac4a996b8ed50deaac01582defb
+t6   sha256=246d6f2cfacd13b1266c3da1f9a2989e56cbdb286314958d68f158713ab87847
+start 2026-10-02 00:03:50 -03 load={ 1.30 2.09 3.14 }
+native rc=0 stdout=[44999850000] stderr-bytes=0
+r1 base record rc=134 4s stdout=[] | replay rc=134 5s stdout=[] | cmp=0 | trace-bytes=51558153 | load={ 1.33 2.07 3.12 }
+   rec.err last: guest terminated by signal 6
+   rp.err first DIVERGENCE: 
+r1 t6 record rc=0 4s stdout=[44999850000] | replay rc=0 4s stdout=[44999850000] | cmp=0 | trace-bytes=41969074 | load={ 1.71 2.13 3.13 }
+   rec.err last: [retrace] fall-throughs: 0
+   rp.err first DIVERGENCE: 
+r2 base record rc=134 5s stdout=[] | replay rc=134 4s stdout=[] | cmp=0 | trace-bytes=51418995 | load={ 1.83 2.14 3.13 }
+   rec.err last: guest terminated by signal 6
+   rp.err first DIVERGENCE: 
+r2 t6 record rc=0 5s stdout=[44999850000] | replay rc=0 7s stdout=[44999850000] | cmp=0 | trace-bytes=41907391 | load={ 3.64 2.52 3.25 }
+   rec.err last: [retrace] fall-throughs: 0
+   rp.err first DIVERGENCE: 
+r3 base record rc=134 9s stdout=[] | replay rc=134 10s stdout=[] | cmp=0 | trace-bytes=51468755 | load={ 4.71 2.84 3.35 }
+   rec.err last: guest terminated by signal 6
+   rp.err first DIVERGENCE: 
+r3 t6 record rc=0 7s stdout=[44999850000] | replay rc=0 5s stdout=[44999850000] | cmp=0 | trace-bytes=41924083 | load={ 5.06 2.98 3.39 }
+   rec.err last: [retrace] fall-throughs: 0
+   rp.err first DIVERGENCE: 
+end 2026-10-02 00:04:59 -03 load={ 5.06 2.98 3.39 }
+script exit=0

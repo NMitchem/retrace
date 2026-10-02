@@ -33,15 +33,25 @@
 //! M45 adds 374 `kevent_qos`, measured from the same `[trap] num=` lines by M44 t0 M1 and M45 t0 M1
 //! (`/usr/bin/automationmodetool`): libdispatch's workqueue-kqueue init, emulated since M45 and
 //! documented by its row.
+//!
+//! M47 adds 9 `link`, 12 `chdir`, 136 `mkdir`, 138 `utimes` and 333 `__pthread_canceled`, measured
+//! from the same `[trap] num=` lines in the 2026-09-30 probe's `git` runs
+//! (`docs/sweep-evidence/2026-09-30-m47-probe/git-runs.txt`). M47 t0 M4 dispatched 9, 12 and 136
+//! again; 333 was reached on the default-config commit's fork path (t0 M3(b)); 138 is reached by
+//! the repo-owned `fsops_dyn`. All five are forwarded.
+//!
+//! M47 also adds 2 `fork`, reached by `forkfail_dyn`, by default-config `git commit` and by
+//! `/bin/csh`/`/bin/tcsh` once the prepare handler's `mach_ports_register` (3403) is answered
+//! (M47 t0 M3); it is refused, never forwarded.
 use retrace_arch::arg_kinds;
 
 pub const CENSUS: &[i64] = &[
-    -89, -70, -50, -47, -36, -33, -29, -28, -27, -26, -24, -19, -18, -15, -14, -12, -10, 1, 3, 4,
-    5, 6, 10, 13, 20, 24, 25, 33, 36, 37, 38, 39, 41, 42, 43, 46, 47, 48, 49, 52, 53, 54, 58, 59,
-    60, 73, 74, 75, 81, 90, 92, 97, 98, 116, 117, 128, 133, 153, 169, 170, 184, 189, 191, 194, 195,
-    197, 199, 202, 220, 228, 244, 266, 286, 294, 327, 328, 329, 331, 336, 338, 339, 340, 344, 345,
-    346, 347, 360, 361, 362, 366, 367, 368, 372, 374, 381, 396, 397, 398, 399, 406, 412, 427, 461,
-    463, 464, 470, 478, 483, 500, 515, 516, 539, 550, 2147483648,
+    -89, -70, -50, -47, -36, -33, -29, -28, -27, -26, -24, -19, -18, -15, -14, -12, -10, 1, 2, 3, 4,
+    5, 6, 9, 10, 12, 13, 20, 24, 25, 33, 36, 37, 38, 39, 41, 42, 43, 46, 47, 48, 49, 52, 53, 54,
+    58, 59, 60, 73, 74, 75, 81, 90, 92, 97, 98, 116, 117, 128, 133, 136, 138, 153, 169, 170, 184,
+    189, 191, 194, 195, 197, 199, 202, 220, 228, 244, 266, 286, 294, 327, 328, 329, 331, 333, 336,
+    338, 339, 340, 344, 345, 346, 347, 360, 361, 362, 366, 367, 368, 372, 374, 381, 396, 397, 398,
+    399, 406, 412, 427, 461, 463, 464, 470, 478, 483, 500, 515, 516, 539, 550, 2147483648,
 ];
 
 #[test]

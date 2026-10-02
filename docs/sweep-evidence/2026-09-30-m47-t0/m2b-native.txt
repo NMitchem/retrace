@@ -1,0 +1,29 @@
+interposer build=0
+m2bnative build=0
+== (1) interposer on hello_dyn (a repo dyld guest), natively
+[m2b] __mac_syscall("Sandbox", 0x2, 0x16f15aa60) rc=0 errno=0 caller=0x18f815a78
+[m2b]   arg[0..48]: 30 ab 15 6f 01 00 00 00 01 00 00 00 00 00 00 00 5b b4 81 8f 01 00 00 00 f0 00 00 00 00 00 00 00 03 00 00 00 00 00 00 00 05 00 00 20 00 00 00 00
+[m2b]   op="file-write-data" *(arg+0) changed=0
+[m2b]   *(arg+0)[0..48] after: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 10 00 00 00 00 00 00 00 c0 00 c4 91 01 00 00 00
+hi
+hello_dyn rc=0
+== (1) interposer on rpath_dyn, natively
+[m2b] __mac_syscall("Sandbox", 0x2, 0x16f812b70) rc=0 errno=0 caller=0x18f815a78
+[m2b]   arg[0..48]: 40 2c 81 6f 01 00 00 00 01 00 00 00 00 00 00 00 5b b4 81 8f 01 00 00 00 f0 00 00 00 00 00 00 00 03 00 00 00 00 00 00 00 05 00 00 20 00 00 00 00
+[m2b]   op="file-write-data" *(arg+0) changed=0
+[m2b]   *(arg+0)[0..48] after: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 10 00 00 00 00 00 00 00 c0 00 c4 91 01 00 00 00
+rpath marker=47
+rpath_dyn rc=0
+== (1) interposer on call4native, natively
+[m2b] __mac_syscall("Sandbox", 0x2, 0x16fa0ab80) rc=0 errno=0 caller=0x18f815a78
+[m2b]   arg[0..48]: 50 ac a0 6f 01 00 00 00 01 00 00 00 00 00 00 00 5b b4 81 8f 01 00 00 00 f0 00 00 00 00 00 00 00 03 00 00 00 00 00 00 00 05 00 00 20 00 00 00 00
+[m2b]   op="file-write-data" *(arg+0) changed=0
+[m2b]   *(arg+0)[0..48] after: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 10 00 00 00 00 00 00 00 c0 00 c4 91 01 00 00 00
+[m2b] __mac_syscall("Sandbox", 0x4, 0x16fa0e238) rc=-1 errno=45 caller=0x18f815b60
+[m2b]   arg[0..48]: b3 eb 00 00 00 00 00 00 00 00 00 00 00 00 00 00 c8 e2 a0 6f 01 00 00 00 00 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 41 d4 ed 01 00 00 00
+sandbox_container_path_for_pid rc=-1 errno=45 buf_touched=0
+call4native rc=0
+== (2) m2bnative: the measured structs, issued natively
+dyld syscall-unix: __mac_syscall("Sandbox", 2, {out, 0xebb4, "syscall-unix", 0x41, 0x226, 0x1}) rc=0 errno=0 out_written=0
+libsystem_sandbox file-write-data: __mac_syscall("Sandbox", 2, {out, 0x1, "file-write-data", 0xf0, 0x4, 0x20000005}) rc=-1 errno=9 out_written=0
+m2bnative rc=0

@@ -1,0 +1,37 @@
+--- pristine/crates/retrace-core/src/lib.rs	2026-10-01 18:21:51
++++ src/crates/retrace-core/src/lib.rs	2026-10-01 18:34:51
+@@ -296,6 +296,10 @@
+                     Ok(ipa) => (ipa, false),
+                     Err(errno) => (errno, true),
+                 };
++                if std::env::var_os("RETRACE_VMLOG").is_some() {
++                    eprintln!("[vmlog] mmap addr {:#x} len {:#x} prot {:#x} flags {:#x} -> {ret:#x} err {err}",
++                        args[0], args[1], args[2], args[3]);
++                }
+                 w.append(&Event::Syscall { num, args, ret, ret1: 0, err, writes: vec![], thread }).map_err(|e| format!("append mmap: {e}"))?; count += 1;
+                 b.set_x0_err_and_return(ret, err);
+             }
+@@ -425,6 +429,11 @@
+                 } else {
+                     b.guest_vm_map(req, size, anywhere, exec)
+                 };
++                if std::env::var_os("RETRACE_VMLOG").is_some() {
++                    let mask = if num == MACH_VM_MAP { args[3] } else { 0 };
++                    eprintln!("[vmlog] trap {} hint {req:#x} size {size:#x} mask {mask:#x} flags {flags:#x} prot {prot:#x} -> {ipa:#x}{}",
++                        num as i64, if mask != 0 && ipa & mask != 0 { " MISALIGNED" } else { "" });
++                }
+                 let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
+                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
+                 b.apply_and_return(0, false, &writes);
+@@ -469,6 +478,11 @@
+                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
+                             b.guest_vm_map(req.address, req.size, anywhere, exec)
+                         };
++                        if std::env::var_os("RETRACE_VMLOG").is_some() {
++                            eprintln!("[vmlog] 4811 hint {:#x} size {:#x} mask {:#x} flags {:#x} prot {:#x} -> {ipa:#x}{}",
++                                req.address, req.size, req.mask, req.flags, req.cur_protection,
++                                if req.mask != 0 && ipa & req.mask != 0 { " MISALIGNED" } else { "" });
++                        }
+                         let writes = vec![Region { ipa: m.data,
+                             bytes: machmsg::encode_vm_map_reply(m.reply_port, ipa) }];
+                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,

@@ -1,0 +1,26 @@
+build=0
+== mode call
+mode=call pid=61307 bootstrap_port=0x807 task=0x203
+(1) mach_ports_register(task, {bootstrap 0x807, 0, 0}, 3) kr=0 ((os/kern) successful)
+rc=0
+== mode msg2
+mode=msg2 pid=61308 bootstrap_port=0x80b task=0x203
+(2) request:
+    13 15 00 80 40 00 00 00 03 02 00 00 07 07 00 00
+    00 00 00 00 4b 0d 00 00 03 00 00 00 0b 08 00 00
+    00 00 00 00 00 00 13 00 00 00 00 00 00 00 00 00
+    00 00 13 00 00 00 00 00 00 00 00 00 00 00 13 00
+(2) mach_msg ret=0 reply msgh_size=36 msgh_id=3503 RetCode(+32)=0
+    reply:
+    00 12 00 00 24 00 00 00 00 00 00 00 07 07 00 00
+    00 00 00 00 af 0d 00 00 00 00 00 00 01 00 00 00
+    00 00 00 00 00 00 00 00 08 00 00 00 00 00 00 00
+rc=0
+== mode msg
+mode=msg pid=61309 bootstrap_port=0x80b task=0x203
+(2) request:
+    13 15 00 80 40 00 00 00 03 02 00 00 0f 07 00 00
+    00 00 00 00 4b 0d 00 00 03 00 00 00 0b 08 00 00
+    00 00 00 00 00 00 13 00 00 00 00 00 00 00 00 00
+    00 00 13 00 00 00 00 00 00 00 00 00 00 00 13 00
+rc=137

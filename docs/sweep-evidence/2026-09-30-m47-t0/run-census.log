@@ -1,0 +1,7 @@
+GOUT=target/aarch64-apple-darwin/debug/build/retrace-guest-1c1babd99bbb9451/out
+Thu Oct  1 09:14:12 -03 2026
+exit=0
+Thu Oct  1 09:18:52 -03 2026
+apple:/usr/bin/true pipeline_exit=0 traps=241 last=
+apple:/usr/bin/printenv pipeline_exit=0 traps=248 last=
+DONE matched_total=1329 -> /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m47-gitwrite/.superpowers/sdd/2026-09-30-retrace-m47-gitwrite/t0/census.tsv

@@ -1,0 +1,17 @@
+node=/opt/homebrew/Cellar/node/25.6.1/bin/node version=v25.6.1 commit=a8a1ecd date=2026-10-01 23:26:55 -03
+load-start: { 2.67 3.02 3.76 }
+record exit=101
+secs=47 trace-bytes=354715684
+load-end: { 4.35 3.50 3.90 }
+traps=1101
+--- first stop lines
+thread 'main' (17896196) panicked at crates/retrace-arch/src/lib.rs:1036:38:
+M33: syscall 363 (363) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+--- last three traps
+[trap] num=4 (0x4) pc=0x1804b1834 args=[0x6,0x27ff43f,0x1,0x103,0x0,0xf,0x6461657268546e,0xfffff0003ffff800]
+[trap] num=362 (0x16a) pc=0x1804b3f98 args=[0x27ff450,0x27ff450,0x1804edb6c,0x103,0x0,0xf,0x6461657268546e,0xfffff0003ffff800]
+[trap] num=363 (0x16b) pc=0x1804b3fc4 args=[0x7,0x27ff368,0x2,0x27ff368,0x1,0x27ff358,0x6461657268546e,0xfffff0003ffff800]
+--- stderr lines, stdout bytes
+    1319
+       0
+script exit=0
