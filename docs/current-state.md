@@ -740,10 +740,10 @@ reconstruction caveat in full.
   clock pinned, 6 of 6 aborting seeds became 0 of 6 with the fix. Unpinned, `commit` aborted 9 of
   20 on t0's census build before it, and 0 of 20 (the diagnosis's build) and 0 of 10 (M47's, `git
   fsck --strict` clean 10 of 10) after; `log -1` aborted 2 of 30 before, too rarely for its 0
-  after to weigh much. jq's 300,000-element
-  run now records, replays and prints native's `44999850000`, 3 of 3, where the pre-M47 binary
-  aborted 3 of 3, and two builds that differ only by the fix split the same way: measured
-  (`docs/sweep-evidence/2026-09-30-m47/jq300k/`), not gated. Inferred, not measured: a later
+  after to weigh much. jq's 300,000-element run now records, replays and prints native's
+  `44999850000`, 3 of 3, where the pre-M47 binary aborted 3 of 3, and two builds that differ only
+  by the fix split the same way: measured (`docs/sweep-evidence/2026-09-30-m47/jq300k/`), not
+  gated. Inferred, not measured: a later
   segment registering that granule would have resolved a pointer to the wrong segment's metadata,
   silently. `vmalign_e2e` (five masked maps over both routes, a reservation and a hinted map among
   them) and `crates/retrace-box/tests/vmalign.rs` are the deterministic guards, and the diagnosis
@@ -756,53 +756,63 @@ reconstruction caveat in full.
   is recomputed on both sides. `verify_thread` keeps its seven call sites: the `madvise` and
   `__mac_syscall` mirrors sit inside the existing `Syscall` chain, after its check.
 
-**Gate:** 898 passed / 0 failed / 9 ignored across 152 test binaries. The close ran the full chunked gate
+**Gate:** 950 passed / 0 failed / 10 ignored across 160 test binaries. The close ran the full chunked gate
 from one background script (`gate.sh` in the milestone's ledger directory), every test chunk
 `--no-fail-fast` and every exit code captured before any pipe: `ws`, `box`, `--bins`, one
-`--test <name>` invocation for each of the seventy-nine files in `crates/retrace/tests/`, and
-clippy over `--workspace --all-targets` with `-D warnings`. The status log's M46 section has the
-tally chunk by chunk, and the earlier green run it replaced (889 / 0 / 9, before the final review's
-fix wave). The testing note below says how the chunks are assembled. The "test binaries"
-figure is test executables plus the `Doc-tests` harnesses cargo reports, each of which runs zero
-tests — the convention every milestone since M14 has counted by, kept for comparability and
-written out here so nobody has to re-derive it. No `#[ignore]` line was added or removed (nine at
-M45's close and nine now, by `git grep` over `crates/`), so nine gates are parked: the two
-long-standing — `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8
-risk R3 wall it stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol
-wall) — plus the seven in `apple_walls_e2e`, each reason the measurement that parks it. **M46
-re-parked `automationmodetool` at a new, measured wall** — past M46's model (the memory-pressure
-registration and the debug-control-port answer), at `kevent_id` (375), a libdispatch workloop
-thread request from libxpc, outside M46 — and amended `dddiagnose`'s reason with M46's re-measure
-of both its faces; `ls`, `ed` and `launchctl` run. Known limits has each. `lldb_e2e` needs `/usr/bin/lldb` (never the one on `PATH`): each of
-its tests skips loudly (`SKIPPED …: This gate did NOT run.`) when `/usr/bin/lldb --version` does not
-run, and its CPython test also skips without Homebrew Python. A skipped test is counted as passed,
-as `jq_e2e`'s are, and since M44 every skip line reaches the ordinary gate log (Testing, below), so
-grep the logs for `SKIPP` before reading a count as the gate having run.
+`--test <name>` invocation for each of the eighty-three files in `crates/retrace/tests/`, and
+clippy over `--workspace --all-targets` with `-D warnings`. It ran at `abcb591`, M47's last code
+commit, on 2026-10-02 from 00:55 to 01:49 at a starting 1-minute load of 2.07, and it was the first
+gate run: the count matched the prediction made from source before it. The status log's M47 section
+has the tally chunk by chunk. The testing note below says how the chunks are assembled. The "test
+binaries" figure is test executables plus the `Doc-tests` harnesses cargo reports, each of which
+runs zero tests — the convention every milestone since M14 has counted by, kept for comparability
+and written out here so nobody has to re-derive it. One `#[ignore]` line was added (nine at M46's
+close and ten now, by `git grep` over `crates/`), so ten gates are parked: the two long-standing —
+`stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3 wall it
+stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall) — the
+seven in `apple_walls_e2e`, each reason the measurement that parks it, and `node_e2e`, new in M47
+and parked at `kevent` (363) on a guest `kqueue()`. **M47 re-parked `csh` and `tcsh` at a new,
+measured wall** — past the 3403 answer and the refused `fork`, at `wait4` (7), the wait for a child
+the refused fork never made — and amended `automationmodetool`'s reason with the line its panic
+moved to; `ls`, `ed` and `launchctl` run. Known limits has each. `lldb_e2e` needs `/usr/bin/lldb`
+(never the one on `PATH`): each of its tests skips loudly (`SKIPPED …: This gate did NOT run.`)
+when `/usr/bin/lldb --version` does not run, and its CPython test also skips without Homebrew
+Python. `git_e2e` skips loudly without Xcode's `git`, and `node_e2e` without Homebrew `node`. A
+skipped test is counted as passed, as `jq_e2e`'s are, and since M44 every skip line reaches the
+ordinary gate log (Testing, below), so grep the logs for `SKIPP` before reading a count as the
+gate having run. M47's close found none.
 
-Reconciled against M45's 846 / 0 / 9 over 148 **file-by-file rather than by sum**, by source: six
-files changed their `#[test]` count, and every other file's count is M45's (counting
-`^\s*#\[test\]` per file at `f907c33` and at the branch head):
+Reconciled against M46's 898 / 0 / 9 over 152 **file-by-file rather than by sum**, by source:
+eleven files changed their `#[test]` count, and every other file's count is M46's (counting
+`^\s*#\[test\]` per file at `39e0d8d`, whose code is M46's, and at the branch head):
 
-| file | M45 | M46 | delta |
+| file | M46 | M47 | delta |
 |---|---|---|---|
-| `retrace-arch/tests/gcdshapes.rs` | — | 15 | **+15**, new binary (the init keeps M45's meaning; the memory-pressure registration, the manager poke, a timer arm and a timer disarm are each classified with the fields the kernel and libdispatch vary read, and every compared bit of each is refused; any other flags word or filter, and a short entry, is refused; MONOTONIC and WALL timers are refused naming their fflags; argument widths follow the kernel's types; the delivered events are the measured bytes; the constants are the SDK's) |
-| `retrace-box/src/kq.rs` | — | 12 | **+12**, inside `retrace-box`'s lib binary (the knote table: a trigger before the init and a second init are refused; a trigger raises one user event; fired timers are delivered in ident order after it; knotes past `max` stay active for the next take; a delivered timer is dropped; an armed timer's re-arm reprograms it, a change while its fire is queued and a disarm of an unarmed timer are refused; the idle jump lands on the deadline, never backwards, over armed timers only) |
-| `retrace-box/tests/kqmanager.rs` | — | 12 | **+12**, new binary (a poke spawns the manager with the first-use register block, and a second spawns nothing; an empty `KEVENT_RETURN` parks it; a poke re-enters it with the reuse flags; a pending trigger is redelivered on the same thread; the refusals by value: a `KEVENT_RETURN` from another thread, a `THREAD_RETURN` from the bound manager, a WALL timer, and the two `against the knote table` prefixes; a poke to a parked manager with a signal pending, masked or not) |
-| `retrace-box/tests/kport.rs` | — | 3 | **+3**, new binary (every box-spawned kport ends in binary 11 like a real port name; tid `0x3ff` is the last the scheme can name; tid `0x400` is refused) |
-| `retrace-guest/src/lib.rs` | 20 | 22 | **+2** (`after_guest_parses`, `timer_guest_parses`: the new fixtures build and parse) |
-| `retrace/tests/gcdtimer_e2e.rs` | — | 8 | **+8**, new binary (the guest clock has one source, R7; a `dispatch_after` fires on the synthetic clock and replays; two timers on one bucket fire in deadline order; a repeating timer ticks three times and replays; a WALL timer is refused before it arms; a seek across the idle jump matches a cold seek; `reverse-continue` reaches the handler's store and names its worker; a shape refused on replay is a divergence naming it, not a panic) |
+| `retrace-arch/tests/gitshapes.rs` | — | 10 | **+10**, new binary (the path rows are the SDK's numbers and written from their prototypes; the `madvise` values are the SDK's, the measured advice is modelled and every other value refused naming it; the three modelled `__mac_syscall` pairs are classified, every flipped or truncated policy or call is refused, Sandbox continuity is by operation and refuses the rest, and the rows are nested destinations; `fork` alone is refused with `EAGAIN`) |
+| `retrace-box/tests/madvise.rs` | — | 6 | **+6**, new binary (`MADV_ZERO` writes every backed page and no reserved one, and a length short of a page zeroes the whole last page as xnu rounds it; a no-op advice writes nothing; a range past the guest's mappings is refused naming the page, and so is an address off a 16 KiB page; the advice int's upper half is ignored as the kernel ignores it) |
+| `retrace-box/tests/macsyscall.rs` | — | 6 | **+6**, new binary (AMFI is classified with its flags and the IPA of its out-flags, and the host answers it for this process with `@path` allowed; Sandbox call 2 is answered by its operation and call 4 `ENOTSUP`; an unterminated policy is refused as `copyinstr` would, and an unmodelled policy or operation by name) |
+| `retrace-box/tests/vmalign.rs` | — | 4 | **+4**, new binary (a masked ANYWHERE map from the bump cursor, a masked reservation and a masked hinted map come back aligned, the last clearing its occupied hint; mask zero keeps the old contiguous placement) |
+| `retrace-core/src/machmsg.rs` | 32 | 34 | **+2** (`mach_ports_register` routes to the task port only; its decoder rejects every malformed field) |
+| `retrace-guest/src/lib.rs` | 22 | 28 | **+6** (`fsops`, `madv`, `rpath`, `sbxpath`, `vmalign` and `forkfail`: the new fixtures build and parse) |
+| `retrace-trace/src/lib.rs` | 14 | 15 | **+1** (another format version is refused by name, not as a torn trace) |
+| `retrace/tests/gitprims_e2e.rs` | — | 9 | **+9**, new binary (the forwarded path rows land on disk; `MADV_ZERO` is recomputed and records no bytes; the reuse pair keeps the bytes; an unmeasured advice stops the recorder naming it; replay refuses a `madvise` landmark carrying writes; an `@rpath` guest loads because AMFI is answered by the host, and replay refuses an AMFI answer recorded at another address; Sandbox's container-path call is answered `ENOTSUP`; `fork` is refused with `EAGAIN` after its prepare handler's 3403 is answered) |
+| `retrace/tests/git_e2e.rs` | — | 7 | **+7**, new binary (every read command matches native and replays identically; `add`, `branch` with `tag`, `switch -c`, `mv` and `rm --cached` are read back by native git; a default-config `commit` refuses the maintenance fork and writes the native tree) |
+| `retrace/tests/vmalign_e2e.rs` | — | 1 | **+1**, new binary (every masked ANYWHERE map, over the trap and the 4811 route, comes back aligned and replays) |
+| `retrace/tests/node_e2e.rs` | — | 1 | **+1**, new binary, `#[ignore]`d at `kevent` (363) |
 
-+52 `#[test]` attributes, `--bins` unchanged at **32**, and **four new test binaries**:
-`gcdshapes` (in `retrace-arch`), `kqmanager` and `kport` (in `retrace-box`), and `gcdtimer_e2e`.
-The tree holds **905** `#[test]` attributes by the same per-file pattern (M45 held 853). The run
-still reports the 2 census tests twice (`census.rs` executes in its own binary and again inside
-`legacy_equivalence`'s `#[path]` include), so 905 + 2 = 907 = 898 + 9, and a bare
-`grep -c '#\[test\]'` over-counts by one, because a comment in `legacy_equivalence.rs` mentions the
-attribute in prose. The first prediction, +43, was the plan's +42 plus T4-c's `kport` test; the
-final review's fix wave added +9 and no binary.
++53 `#[test]` attributes, `--bins` unchanged at **32**, and **eight new test binaries**:
+`gitshapes` (in `retrace-arch`), `madvise`, `macsyscall` and `vmalign` (in `retrace-box`), and
+`gitprims_e2e`, `git_e2e`, `vmalign_e2e` and `node_e2e`. The tree holds **958** `#[test]`
+attributes by the same per-file pattern (M46 held 905). The run still reports the 2 census tests
+twice (`census.rs` executes in its own binary and again inside `legacy_equivalence`'s `#[path]`
+include), so 958 + 2 = 960 = 950 + 10, and a bare `grep -c '#\[test\]'` over-counts by one,
+because a comment in `legacy_equivalence.rs` mentions the attribute in prose. The plan predicted
++39 + k, +44 with t0's k = 5; the measured +53 adds Task 3's three Sandbox call-4 tests, Task 3b's
+six mask-fix guards and its older-format test (none in the plan), and takes away one `git_e2e`
+test: the out-list dropped `stash` and `merge`, and `branch` with `tag` stayed one test.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson). `retrace` ran **per-target** — seventy-nine `--test <name>` invocations, one after another
+lesson). `retrace` ran **per-target** — eighty-three `--test <name>` invocations, one after another
 from a single background script, because the whole package exceeds the tool ceiling, over the
 target list `ls crates/retrace/tests/*.rs` wrote — **plus the `--bins` chunk**, which is the only
 place the 32 unit tests inside the `retrace` binary run: 20 in `crates/retrace/src/debug.rs` and
@@ -1216,8 +1226,9 @@ These are real and current, not aspirational gaps.
   a FAIL at 205) but whose gate stays parked, each with its class, read off the kept evidence and
   never off the sweep's label, the gate that stands for it and where it is routed. The idle
   re-sweep left `csh`, `tcsh`, `automationmodetool`, `dddiagnose` and `yes` not clean. `/bin/ps`,
-  M45's class-E row, has left the table: it passes in M46's run, the idle re-sweep and M47's run,
-  and since M47 the forwarded `madvise` behind it no longer exists (the M45 entry above):
+  M45's class-E row, has left the table because since M47 the forwarded `madvise` behind it no
+  longer exists (the M45 entry above). Its passes in M46's run, the idle re-sweep and M47's run
+  would not retire it alone, since M45 measured its divergence as intermittent:
 
   | binary | face | class | gate (`crates/retrace/tests/apple_walls_e2e.rs`) | route |
   |---|---|---|---|---|

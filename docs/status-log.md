@@ -15221,9 +15221,9 @@ test):
 - `#[ignore]` lines **9 → 10** (`node_e2e`); three reasons rewritten at new walls (`csh`, `tcsh`
   and `node_e2e`'s provisional one) and one amended with a parenthetical (`automationmodetool`,
   Ruling T6-b);
-- the spec's seven rulings (R1–R7), six pre-flight rulings (P1–P6) and fourteen execution rulings
+- the spec's seven rulings (R1–R7), six pre-flight rulings (P1–P6) and fifteen execution rulings
   (C1, C2 with its resolution, C3, T0-I2, T0-I3, T2-a, T2-b, T2-c, T3-a, 3b-1, T3b-F1, T5-a, T6-a,
-  T6-b);
+  T6-b, T7-a);
 - **fifteen** commits after the spec (`39e0d8d`) and the plan (`aa16f01`): t0's `090bf5e` and
   `788a024`; Task 1's `c310a7e`; Task 2's `abce963`; Task 3's `4e84841` and `fc40187`; Task 3b's
   `4915a18`, `0d8a0a2`, `6a6c1c9` and `6f97d6e`; Task 4's `4513e7a`; Task 5's `a8a1ecd`; Task 6's
@@ -15458,7 +15458,43 @@ asserts are, in order, the signal, workq, `kevent_qos`, `madvise`, `fork` and ne
 
 ### The gate
 
-PENDING — Task 8 fills this.
+**950 passed / 0 failed / 10 ignored across 160 test binaries at `abcb591`**, M47's last code
+commit (Task 7's; every commit after it is documentation). The full gate ran from the worktree as
+one background script (`gate.sh` in the ledger directory, M46's retargeted), chunked as CLAUDE.md
+requires, every test chunk `--no-fail-fast` and each chunk's exit code written to
+`gate-summary.txt` before any pipe: `ws` (the workspace less `retrace-box` and `retrace`), `box`
+(whole package, so `Doc-tests retrace_box` is present), `bins`, one `e2e` chunk per file of
+`ls crates/retrace/tests/*.rs` (**83** targets: `gitprims_e2e`, `git_e2e`, `vmalign_e2e` and
+`node_e2e` new), and clippy over `--workspace --all-targets` with `-D warnings`. It ran 2026-10-02
+00:55–01:49 at a starting 1-minute load of 2.07, and it was the only gate run: nothing failed, so
+nothing was re-run.
+
+The tally, chunk by chunk (`tally.sh`, ANSI stripped; every one of the 87 chunk lines in
+`gate-summary.txt` reads `exit=0`: `ws`, `box`, `bins`, 83 `e2e`, `clippy`):
+
+| chunk | passed / failed / ignored | binaries |
+|---|---|---|
+| `ws` | 225 / 0 / 0 | 30 (`gitshapes` new) |
+| `box` | 371 / 0 / 0 | 46 (`madvise`, `macsyscall`, `vmalign` new) |
+| `bins` | 32 / 0 / 0 | 1 |
+| `e2e` | 322 / 0 / 10 | 83 |
+| **all** | **950 / 0 / 10** | **160** |
+
+No `SKIPPED` line appears in any gate log: Xcode's `git`, `jq`, Homebrew Python, `node` and
+`/usr/bin/lldb` were all present, so every skip-capable gate ran. The ten ignored are M46's nine
+(`csh` and `tcsh` at their new wall, `wait4`) and `node_e2e`.
+
+**The prediction, by source, before the gate, and its reconciliation.** `predict.sh` counts
+`^\s*#\[test\]` per file at `39e0d8d` (M46's code) and at the head. Run at `1755d59`, before Task
+7, which changed no count, it printed **905 → 958 (+53)** and test targets 152 → 160
+(`crates/retrace/tests` 79 → 83, `crates/retrace-arch/tests` 5 → 6, `crates/retrace-box/tests`
+41 → 44). With the census pair counted twice, as since M45, that is 960 passed + ignored over 160,
+which the gate matched exactly. By file: `gitshapes.rs` +10, `madvise.rs` +6, `macsyscall.rs` +6,
+`vmalign.rs` +4, `machmsg.rs` +2, `retrace-guest/src/lib.rs` +6, `retrace-trace/src/lib.rs` +1,
+`gitprims_e2e.rs` +9, `git_e2e.rs` +7, `vmalign_e2e.rs` +1, `node_e2e.rs` +1 (ignored). Against
+the plan's +39 + k (k = 5, +44): Task 3's Sandbox call-4 addendum +3, Task 3b's guards +6 and its
+older-format test +1, and `git_e2e` −1 (Ruling T5-a). `docs/current-state.md`'s Gate paragraph has
+the table with each file's tests named.
 
 ### What measurement changed
 
@@ -15535,6 +15571,9 @@ Execution:
   detached, no concurrent `cargo`); cost: a contended sweep, re-run.
 - **T6-b** — `automationmodetool`'s reason keeps M46's verbatim quote and gains a parenthetical
   with M47's line; current-state carries M47's; cost: one parenthetical.
+- **T7-a** — the headline Apple-sweep figure stays 49 of 54, the idle-host confirmation, with
+  M47's 50/4 beside it: M47's extra pass is `dddiagnose`'s host-state alternation at a load above
+  6, not a capability (M46's T6-a convention); cost: one number.
 
 ### Named weakness
 
