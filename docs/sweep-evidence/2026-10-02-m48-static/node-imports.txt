@@ -1,0 +1,75 @@
+# otool -L /opt/homebrew/Cellar/node/25.6.1/bin/node
+/opt/homebrew/Cellar/node/25.6.1/bin/node:
+	@rpath/libnode.141.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.12)
+	/opt/homebrew/opt/llhttp/lib/libllhttp.9.3.dylib (compatibility version 9.3.0, current version 9.3.0)
+	/opt/homebrew/opt/libuv/lib/libuv.1.dylib (compatibility version 1.0.0, current version 1.0.0)
+	/opt/homebrew/opt/ada-url/lib/libada.3.dylib (compatibility version 3.0.0, current version 3.4.2)
+	/opt/homebrew/opt/simdjson/lib/libsimdjson.29.dylib (compatibility version 29.0.0, current version 29.0.0)
+	/opt/homebrew/opt/brotli/lib/libbrotlidec.1.dylib (compatibility version 1.0.0, current version 1.2.0)
+	/opt/homebrew/opt/brotli/lib/libbrotlienc.1.dylib (compatibility version 1.0.0, current version 1.2.0)
+	/opt/homebrew/opt/c-ares/lib/libcares.2.dylib (compatibility version 2.0.0, current version 2.19.5)
+	/opt/homebrew/opt/hdrhistogram_c/lib/libhdr_histogram.6.dylib (compatibility version 6.0.0, current version 6.2.3)
+	/opt/homebrew/opt/libnghttp2/lib/libnghttp2.14.dylib (compatibility version 44.0.0, current version 44.2.0)
+	/opt/homebrew/opt/libnghttp3/lib/libnghttp3.9.dylib (compatibility version 9.0.0, current version 9.6.1)
+	/opt/homebrew/opt/libngtcp2/lib/libngtcp2.16.dylib (compatibility version 24.0.0, current version 24.3.0)
+	/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib (compatibility version 9.0.0, current version 9.6.0)
+	/opt/homebrew/opt/uvwasi/lib/libuvwasi.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/opt/homebrew/opt/zstd/lib/libzstd.1.dylib (compatibility version 1.0.0, current version 1.5.7)
+	/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib (compatibility version 3.0.0, current version 3.0.0)
+	/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib (compatibility version 3.0.0, current version 3.0.0)
+	/opt/homebrew/opt/icu4c@78/lib/libicui18n.78.dylib (compatibility version 78.0.0, current version 78.2.0)
+	/opt/homebrew/opt/icu4c@78/lib/libicuuc.78.dylib (compatibility version 78.0.0, current version 78.2.0)
+	/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 4201.0.0)
+	/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61901.60.40)
+	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2000.67.0)
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+
+# nm -u /opt/homebrew/Cellar/node/25.6.1/lib/libnode.141.dylib (filtered: JIT, condvars, threads, semaphores, kqueue)
+_dispatch_semaphore_create
+_dispatch_semaphore_signal
+_dispatch_semaphore_wait
+_mmap
+_mprotect
+_pthread_cond_init
+_pthread_cond_signal
+_pthread_cond_timedwait
+_pthread_cond_timedwait_relative_np
+_pthread_cond_wait
+_pthread_create
+_pthread_jit_write_protect_np
+_sys_icache_invalidate
+_uv_sem_destroy
+_uv_sem_init
+_uv_sem_post
+_uv_sem_wait
+
+# nm -u /opt/homebrew/opt/libuv/lib/libuv.1.dylib (filtered)
+_kevent
+_kqueue
+_pipe
+_posix_spawn
+_posix_spawn_file_actions_addclose
+_posix_spawn_file_actions_adddup2
+_posix_spawn_file_actions_addinherit_np
+_posix_spawn_file_actions_addopen
+_posix_spawn_file_actions_destroy
+_posix_spawn_file_actions_init
+_posix_spawnattr_destroy
+_posix_spawnattr_init
+_posix_spawnattr_setflags
+_posix_spawnattr_setsigdefault
+_posix_spawnattr_setsigmask
+_pthread_cond_broadcast
+_pthread_cond_destroy
+_pthread_cond_init
+_pthread_cond_signal
+_pthread_cond_timedwait_relative_np
+_pthread_cond_wait
+_pthread_create
+_semaphore_create
+_semaphore_destroy
+_semaphore_signal
+_semaphore_timedwait
+_semaphore_wait
+_socketpair

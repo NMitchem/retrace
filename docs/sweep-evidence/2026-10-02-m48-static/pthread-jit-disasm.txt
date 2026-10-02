@@ -1,0 +1,139 @@
+# xcrun dyld_info -disassemble /usr/lib/system/libsystem_pthread.dylib (macOS 26.5.2, M4 Pro), excerpt
+_pthread_jit_write_protect_np:
+0x000007364   mov      x8, #0xfffff0000     
+0x000007368   movk     x8, #0xc10c          
+0x00000736C   ldrb     w9, [x8]             
+0x000007370   cbz      w9, 0x74cc           
+0x000007374   ldrb     w9, [x8]             
+0x000007378   cbz      w0, 0x73cc           
+0x00000737C   cbz      w9, 0x7568           
+0x000007380   ldrb     w8, [x8]             
+0x000007384   dmb      ishst                
+0x000007388   sub      w9, w8, #0x2         
+0x00000738C   cmp      w9, #0x2             
+0x000007390   b.hs     0x741c               
+0x000007394   movk     x0, #0xc118          
+0x000007398   movk     x0, #0xffff, lsl #16 
+0x00000739C   movk     x0, #0xf, lsl #32    
+0x0000073A0   movk     x0, #0x0, lsl #48    
+0x0000073A4   ldr      x0, [x0]             
+0x0000073A8   msr      S3_6_C15_C1_5, x0    
+0x0000073AC   isb                           
+0x0000073B0   movk     x1, #0xc118          
+0x0000073B4   movk     x1, #0xffff, lsl #16 
+0x0000073B8   movk     x1, #0xf, lsl #32    
+0x0000073BC   movk     x1, #0x0, lsl #48    
+0x0000073C0   ldr      x8, [x1]             
+0x0000073C4   mrs      x9, S3_6_C15_C1_5    
+0x0000073C8   b        0x7458               
+0x0000073CC   cbz      w9, 0x7568           
+0x0000073D0   ldrb     w9, [x8]             
+0x0000073D4   dmb      ishst                
+0x0000073D8   sub      w10, w9, #0x2        
+0x0000073DC   cmp      w10, #0x2            
+0x0000073E0   b.hs     0x7478               
+0x0000073E4   movk     x0, #0xc110          
+0x0000073E8   movk     x0, #0xffff, lsl #16 
+0x0000073EC   movk     x0, #0xf, lsl #32    
+0x0000073F0   movk     x0, #0x0, lsl #48    
+0x0000073F4   ldr      x0, [x0]             
+0x0000073F8   msr      S3_6_C15_C1_5, x0    
+0x0000073FC   isb                           
+0x000007400   movk     x1, #0xc110          
+0x000007404   movk     x1, #0xffff, lsl #16 
+0x000007408   movk     x1, #0xf, lsl #32    
+0x00000740C   movk     x1, #0x0, lsl #48    
+0x000007410   ldr      x9, [x1]             
+0x000007414   mrs      x10, S3_6_C15_C1_5   
+0x000007418   b        0x74b4               
+0x00000741C   cmp      w8, #0x1             
+0x000007420   b.ne     0x7568               
+0x000007424   movk     x0, #0xc118          
+0x000007428   movk     x0, #0xffff, lsl #16 
+0x00000742C   movk     x0, #0xf, lsl #32    
+0x000007430   movk     x0, #0x0, lsl #48    
+0x000007434   ldr      x0, [x0]             
+0x000007438   msr      S3_4_C15_C2_7, x0    
+0x00000743C   isb                           
+0x000007440   movk     x1, #0xc118          
+0x000007444   movk     x1, #0xffff, lsl #16 
+0x000007448   movk     x1, #0xf, lsl #32    
+0x00000744C   movk     x1, #0x0, lsl #48    
+0x000007450   ldr      x8, [x1]             
+0x000007454   mrs      x9, S3_4_C15_C2_7    
+0x000007458   cmp      x8, x9               
+0x00000745C   b.ne     0x7568               
+0x000007460   adrp     x8, 17               ; 0x18000
+0x000007464   ldrb     w8, [x8]             
+0x000007468   tbz      w8, #0x0, 0x74cc     
+0x00000746C   stp      x29, x30, [sp, #-0x10]! 
+0x000007470   mov      x29, sp              
+0x000007474   bl       _pthread_jit_write_protect_np.cold.1 
+0x000007478   cmp      w9, #0x1             
+0x00000747C   b.ne     0x7568               
+0x000007480   movk     x0, #0xc110          
+0x000007484   movk     x0, #0xffff, lsl #16 
+0x000007488   movk     x0, #0xf, lsl #32    
+0x00000748C   movk     x0, #0x0, lsl #48    
+0x000007490   ldr      x0, [x0]             
+0x000007494   msr      S3_4_C15_C2_7, x0    
+0x000007498   isb                           
+0x00000749C   movk     x1, #0xc110          
+0x0000074A0   movk     x1, #0xffff, lsl #16 
+0x0000074A4   movk     x1, #0xf, lsl #32    
+0x0000074A8   movk     x1, #0x0, lsl #48    
+0x0000074AC   ldr      x9, [x1]             
+0x0000074B0   mrs      x10, S3_4_C15_C2_7   
+0x0000074B4   cmp      x9, x10              
+0x0000074B8   b.ne     0x7568               
+0x0000074BC   adrp     x9, 17               ; 0x18000
+0x0000074C0   ldrb     w9, [x9]             
+0x0000074C4   cmp      w9, #0x1             
+0x0000074C8   b.eq     0x74d0               
+0x0000074CC   ret                           
+0x0000074D0   ldrb     w9, [x8]             
+0x0000074D4   cbz      w9, 0x7568           
+0x0000074D8   ldrb     w8, [x8]             
+0x0000074DC   dmb      ishst                
+0x0000074E0   sub      w9, w8, #0x2         
+0x0000074E4   cmp      w9, #0x2             
+0x0000074E8   b.hs     0x7524               
+0x0000074EC   movk     x0, #0xc118          
+0x0000074F0   movk     x0, #0xffff, lsl #16 
+0x0000074F4   movk     x0, #0xf, lsl #32    
+0x0000074F8   movk     x0, #0x0, lsl #48    
+0x0000074FC   ldr      x0, [x0]             
+0x000007500   msr      S3_6_C15_C1_5, x0    
+0x000007504   isb                           
+0x000007508   movk     x1, #0xc118          
+0x00000750C   movk     x1, #0xffff, lsl #16 
+0x000007510   movk     x1, #0xf, lsl #32    
+0x000007514   movk     x1, #0x0, lsl #48    
+0x000007518   ldr      x8, [x1]             
+0x00000751C   mrs      x9, S3_6_C15_C1_5    
+0x000007520   b        0x7560               
+0x000007524   cmp      w8, #0x1             
+0x000007528   b.ne     0x7568               
+0x00000752C   movk     x0, #0xc118          
+0x000007530   movk     x0, #0xffff, lsl #16 
+0x000007534   movk     x0, #0xf, lsl #32    
+0x000007538   movk     x0, #0x0, lsl #48    
+0x00000753C   ldr      x0, [x0]             
+0x000007540   msr      S3_4_C15_C2_7, x0    
+0x000007544   isb                           
+0x000007548   movk     x1, #0xc118          
+0x00000754C   movk     x1, #0xffff, lsl #16 
+0x000007550   movk     x1, #0xf, lsl #32    
+0x000007554   movk     x1, #0x0, lsl #48    
+0x000007558   ldr      x8, [x1]             
+0x00000755C   mrs      x9, S3_4_C15_C2_7    
+0x000007560   cmp      x8, x9               
+0x000007564   b.eq     0x746c               
+0x000007568   brk      #0x1                 
+_pthread_jit_write_protect_supported_np:
+0x00000756C   mov      x8, #0xfffff0000     
+0x000007570   movk     x8, #0xc10c          
+0x000007574   ldrb     w8, [x8]             
+0x000007578   cmp      w8, #0x0             
+0x00000757C   cset     w0, ne               
+0x000007580   ret                           
