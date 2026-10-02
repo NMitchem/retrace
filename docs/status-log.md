@@ -15151,3 +15151,417 @@ Execution:
   - the `csh`/`tcsh` constant's move to 317, still untraced;
   - M45's parked minors;
   - M44's owed items, as M45 carried them (`:14268–14283`).
+
+## M47-gitwrite: git's local workflow, with madvise, __mac_syscall and fork modelled
+
+The 2026-07-05 vision spec's v1 bar names three programs: `python3`, `node` and `git`. `python3`
+has been met since M26 and M39. `git` and `node` had never been run until the 2026-09-30 probe,
+which found read-only `git` already working and its write path blocked by a handful of measured
+walls (spec `2026-09-30-retrace-m47-gitwrite-design.md` §1–§2). M47 makes `git` the second of the
+three. The probe also blamed a silent heap corruption on the forwarded `madvise`; t0 measured that
+premise false, and a diagnosis inside the milestone found the real cause, retrace ignoring
+`mach_vm_map`'s alignment mask (Task 3b, below).
+
+What landed:
+- Five `arg_kinds` rows, forwarded: `link` (9), `chdir` (12), `mkdir` (136), `utimes` (138) and
+  `__pthread_canceled` (333) (Task 1).
+- `madvise` (75) modelled by advice and never forwarded: `MADV_FREE_REUSABLE` (7) and
+  `MADV_FREE_REUSE` (8) are no-ops, `MADV_ZERO` (11) zero-fills, recomputed on both sides and never
+  recorded (R3), and everything else is refused by value, behind a generic-arm assert (Task 2).
+- `__mac_syscall` (381) and the `0x8000_0000` band classified `[Path, Scalar, NestedDest]`, and
+  three `(policy, call)` pairs modelled: `("AMFI", 0x5a)` answered by the host into a host-owned
+  slot and recorded (R4), `("Sandbox", 2)` by continuity (R7), and `("Sandbox", 4)` answering
+  `ENOTSUP` (the operator's H7 ruling). `@rpath` guests load (Task 3).
+- `mach_vm_map`'s alignment mask honoured for `ANYWHERE` placements on the trap (−15) and the MIG
+  4811 route, and `TRACE_MAGIC` moved to `RT\x00\x0b` (the operator's H4 ruling), with an older
+  format refused by name (Task 3b).
+- `fork` (2) refused with `EAGAIN` behind a generic-arm assert, and `mach_ports_register` (msgh_id
+  3403), its prepare handler's one message, answered `KERN_SUCCESS` (Task 4).
+- `git_e2e` (Xcode's `git`, seven tests) and `node_e2e` (parked at its wall) (Task 5), and the
+  walk and sweep (Task 6).
+
+**Outcome.** Xcode's `git` (`/Applications/Xcode.app/Contents/Developer/usr/bin/git`, `git
+version 2.50.1 (Apple Git-155)`) records and replays its local workflow: seven read commands with
+stdout byte-identical to native, and `add`, default-config `commit` (through the refused
+maintenance fork), `branch`, `tag`, `switch -c`, `mv` and `rm --cached`, each checked on the
+repository it leaves. `git_e2e` ran green three consecutive times at Task 5. `node` loads its
+`@rpath` dylibs and re-parks one wall on, at `kevent` (363). `csh` and `tcsh` move past the fork to
+`wait4` (7). jq's 300,000-element abort, which current-state had carried as undiagnosed since
+2026-09-28, is cleared by the mask fix. The Apple sweep tallied 50/4, and no row's outcome is M47's.
+
+**Operator decisions.**
+- 2026-10-01: spec §11 items 1 and 2 approved (row 333 forwarded; `fork`'s row landing with its
+  refusal and a generic-arm `fork` assert).
+- 2026-10-01, t0's halt H7: model `("Sandbox", 4)` as a third pair answering `ENOTSUP` (45) with no
+  writes. Native and the forward's answer agree.
+- 2026-10-01: lldb cannot launch or attach here (Developer Mode is disabled and Xcode's git is
+  hardened), so t0 uses non-debugger fallbacks, each named as a deviation in its measurements
+  file. No host security setting was changed.
+- 2026-10-01, H4: bump `TRACE_MAGIC` to `RT\x00\x0b` for the mask fix, overriding spec R6, so that a
+  pre-M47 recording is rejected as an older format rather than diverging at its first masked
+  `mach_vm_map` as if it were nondeterminism.
+- The merge and push at the close stay the operator's.
+
+The milestone's numbers, measured from source at `1755d59`, Task 6's last commit (Task 7 changes no
+test):
+- **+53** `#[test]` attributes, 905 → 958. Per file: `crates/retrace-arch/tests/gitshapes.rs` 10
+  (new binary); `crates/retrace-box/tests/macsyscall.rs` 6, `madvise.rs` 6 and `vmalign.rs` 4 (three
+  new binaries); `crates/retrace-core/src/machmsg.rs` 32 → 34; `crates/retrace-guest/src/lib.rs`
+  22 → 28; `crates/retrace-trace/src/lib.rs` 14 → 15; `crates/retrace/tests/git_e2e.rs` 7,
+  `gitprims_e2e.rs` 9, `node_e2e.rs` 1 and `vmalign_e2e.rs` 1 (four new binaries). Every other
+  file's count is unchanged;
+- **eight** new test binaries, 152 → 160 predicted (the gate below measures it);
+- **six** `arg_kinds` rows added (9, 12, 136, 138, 333, and 2 for `fork`'s refusal) and two
+  changed (381 and `0x8000_0000` to `NestedDest`): `CENSUS` 114 → 120, `EXPECTED_DIFFS` 35 → 37;
+- **seven** new C fixtures in `crates/retrace-guest/c/`: `fsops_dyn`, `madv_dyn`, `rpath_dyn` with
+  its dylib `librpath_dyn`, `sbxpath_dyn`, `vmalign_dyn` and `forkfail_dyn`;
+- **two** new generic-arm asserts (`madvise`, `fork`); `verify_thread` **7 → 7**, every new mirror
+  inside the existing `Syscall` chain;
+- `TRACE_MAGIC` **`RT\x00\x0a` → `RT\x00\x0b`** (`0d8a0a2`);
+- `#[ignore]` lines **9 → 10** (`node_e2e`); three reasons rewritten at new walls (`csh`, `tcsh`
+  and `node_e2e`'s provisional one) and one amended with a parenthetical (`automationmodetool`,
+  Ruling T6-b);
+- the spec's seven rulings (R1–R7), six pre-flight rulings (P1–P6) and fourteen execution rulings
+  (C1, C2 with its resolution, C3, T0-I2, T0-I3, T2-a, T2-b, T2-c, T3-a, 3b-1, T3b-F1, T5-a, T6-a,
+  T6-b);
+- **fifteen** commits after the spec (`39e0d8d`) and the plan (`aa16f01`): t0's `090bf5e` and
+  `788a024`; Task 1's `c310a7e`; Task 2's `abce963`; Task 3's `4e84841` and `fc40187`; Task 3b's
+  `4915a18`, `0d8a0a2`, `6a6c1c9` and `6f97d6e`; Task 4's `4513e7a`; Task 5's `a8a1ecd`; Task 6's
+  `66ecb0f`, `e45f4a5` and its fix round `1755d59`. Then Task 7's docs and the close.
+
+**Forward pointers to the sections above.** Each earlier section stays as it was written. The
+`:NNNN` cites are this file's line numbers.
+
+1. **M46's "A re-sweep on an unloaded host" (`:15108`) is paid.** The 2026-09-30 probe re-swept the
+   M46 merge `427fa0a` at a 1-minute load of 1.93 → 1.85 and tallied `pass=49 fail=5`
+   (`docs/sweep-evidence/2026-09-30-m47-probe/sweep-427fa0a.log`): M45's figure, confirmed, with
+   `[` and `kill`, M46's two watchdog kills, passing. It is M47's row baseline.
+2. **M45's forwarded-`MADV_FREE_REUSABLE` class-E hazard (`:14245`, carried by M46 at `:15149`) is
+   retired by construction.** `madvise` is no longer forwarded, so no host call marks retrace's
+   backing reusable. No corruption from it was ever reproduced by a repo-owned trigger (t0 M1(c)),
+   so this is the removal of a mechanism, not the fix of an observed failure.
+3. **M46's "`kevent` … on a guest `kqueue()` descriptor" (`:15098`) stays owed, and `node` now
+   reaches it**: libuv's `EVFILT_USER` probe, at landmark 1,101 (Task 6).
+4. **M46's timed waits (`:15099–15102`) stay owed.** The operator routed them out of M47 (spec §7,
+   Q1). `git merge --ff-only`'s `setitimer` (83) is routed with them.
+5. **M45's `dddiagnose` coin flip (carried at `:15150`) is re-measured, not explained.** Both faces
+   occur on both binaries in M47's controls, and one base run showed a third face (Task 6).
+6. **M45's `csh`/`tcsh` constant, 317 (carried at `:15151`), holds.** The 3403 sits at 317 plus the
+   guest's `gettimeofday` count on M47's binary too.
+
+### What t0 measured
+
+The companion is the record: `docs/superpowers/specs/2026-09-30-retrace-m47-gitwrite-measurements.md`,
+with its evidence in `docs/sweep-evidence/2026-09-30-m47-t0/` (`090bf5e`; `788a024` added the
+census progress log the file cites, the review's I1). t0 changed no product code.
+- **M1, `madvise`.** (a) The advice census over 142 runs (every gate guest, the fixtures, jq,
+  CPython, node and the 54-binary corpus) plus git's own runs found {7, 8, 9, 11}: 169 calls of 7,
+  one each of 8, 9 and 11, the last three only from the `madv` fixture, and all 172 calls (and
+  git's 47) page-aligned with a nonzero page-multiple length. (b) **The probe's git heap abort is
+  not `madvise`'s.** `git commit` aborted 2 of 5 with advice 7 forwarded and 3 of 5 with it
+  no-op'd; a traced abort reads `pointer being freed was not allocated` from libz `deflateEnd+88`
+  under `write_loose_object`; `git log -1` aborts with no `madvise` at all; and the unpatched base
+  binary aborts `log -1` 1 run in 10, at libc `tzload+252`, the probe's own frame. (c) No
+  repo-owned trigger: `madv reuse` kept its bytes 5 of 5 on the base binary. (d) Native `madvise`
+  returns 0 at an unaligned address for every advice (the plan expected `EINVAL`), returns 0 for a
+  zero length, and `MADV_ZERO` rounds `len` up to the page.
+- **M2, `__mac_syscall`.** (a) The pair census: `("AMFI", 0x5a)` once per dyld guest from dyld (94)
+  and once more in six Apple binaries from libsystem_trace, each answered `0x1df` by the host;
+  `("Sandbox", 2)` from dyld's `sandbox_check_common` (`syscall-unix`, `EFAULT`, 297) and from
+  libsystem_sandbox's `rootless_check_trusted_internal` (`file-write-data`, `EINVAL`, 40, every
+  repo dyld guest, jq, CPython and node); and **a third pair**, `("Sandbox", 4)`,
+  `sandbox_container_path_for_pid`, six times in the xcrun trio, forwarded `ENOTSUP` with no
+  writes, natively `rc=-1 errno=45`. That was halt H7, ruled by the operator. Git adds no pair and
+  no operation. (b) Natively both call-2 checks answer 0: the fidelity gap R7 keeps. The forwarded
+  `file-write-data` struct carried an untranslated guest fd at `+32`. (c) The policy and operation
+  strings were resident at every trap measured.
+- **M3, `fork`.** (a) The 3403 request is 64 bytes, `COMPLEX`, three port descriptors of type 0,
+  all `COPY_SEND`, from libxpc `xpc_atfork_prepare`; natively it returns a 36-byte
+  `mig_reply_error_t`, id 3503, RetCode 0. (b) On a scratch build that answers 3403 and refuses
+  `fork`, nothing traps between the 3403 and the refused `fork`, the fixture's parent handlers
+  issue no trap, and git's trap order after it reads as git's own `atfork_parent`, its error line,
+  its notify pipe and its `post-commit` hook lookup (inferred from the order and `run-command.c`).
+  H1 not triggered. (c) Natively under `ulimit -u 1` git prints `error: cannot fork() for
+  maintenance: Resource temporarily unavailable`, exits 0 and writes the commit.
+- **M4, git's command list.** All seven reads byte-equal to native; the writes `add`, `commit`,
+  `branch`, `tag` (on a retry: its first run hit M1(b)'s abort), `switch -c`, `mv` and `rm` in.
+  Out (H5, routed): `stash`, which spawns `git update-index` and `git reset --hard` and under the
+  refusal prints `error: cannot fork() for update-index` and exits 1, and `merge --ff-only`, which
+  arms `setitimer` (83) with a `SIGALRM` handler. The missing rows were {9, 12, 83, 136, 333},
+  with 2 from M3(b); 138 was not reached by M4 (the probe met it on a freshening commit). Under
+  retrace the guest's fd 2 arrives on the record's stdout, because the console arm merges fd 1
+  and 2.
+- **M5, the `chdir` audit.** The one open retrace makes after the guest starts is the shared
+  cache's, by absolute path; everything else is before the first instruction, replay-only or
+  test-only. H6 not triggered.
+- **M6, the base count.** 905 `#[test]` over 137 test files, matching the pre-flight.
+
+H1, H2, H3 (advice 9 is issued only by its own fixture), H5, H6 and H8 were considered and none
+halted; H7 halted and was ruled. The load-bearing concern was M1(b): spec §2c and §4 rested on a
+one-run A/B whose madvise-free half did not reproduce (Rulings C1–C3, T0-I2, T0-I3).
+
+### The rows (Task 1, `c310a7e`)
+
+Rows 12, 136, 9 and 138 after 128, and 333 after 331, with the census's five numbers. RED: the
+`gitshapes` prototype test failed on `syscall 12 has no arg_kinds row`, and `gitprims_e2e` panicked
+at `M33: syscall 136`. GREEN: `fsops_dyn` records and replays twice, and the host's disk shows its
+work: the hard link (`nlink` 2), the `utimes` mtime, and the file a relative `open` after `chdir`
+created inside the new directory. The plan's replacement `CENSUS` array was checked to equal the old one plus exactly
+the five (Ruling P3).
+
+### The madvise model (Task 2, `abce963`)
+
+`retrace_arch::madvise_effect` accepts exactly {7, 8, 11}; `Box_::guest_madvise` checks every page
+of the range, `len` rounded up as xnu rounds it, is backed or reserved, and returns one zeroed page
+per backed page for `MADV_ZERO`. Record and mirror apply the writes with `apply_and_return`, so a
+watch sees a zero-fill; the mirror refuses a recorded landmark that carries writes. RED: two
+`gitprims_e2e` tests died at the M30 guard band on the forwarded `MADV_ZERO` (`syscall 75 wrote into
+the 64-byte guard band past its 65536-byte diff window`), and the refused-advice test recorded rc
+0; `madv_free_reusable…` passed at base, as t0 M1(c) predicted. Controls, each red:
+1. the record arm recording its zeros: replay `DIVERGENCE at landmark 244 … madvise recorded
+   ret=0x0 ret1=0x0 err=false with …write(s)`;
+2. `9 => NoOp`: `an unmeasured advice must not record: stdout "bad rc=0 errno=0"`;
+3. the record arm deleted: `madvise (75) reached the generic forward arm — it must be modelled
+   above (M47)`.
+
+### `__mac_syscall` (Task 3, `4e84841` + `fc40187`)
+
+Rows 381 and `0x8000_0000` became `[Path, Scalar, NestedDest]`; `mac_syscall_model` names three
+pairs and refuses the rest; `Box_::guest_mac_syscall` reads the policy and operation with
+`read_guest_cstr` (copyinstr semantics, bounded at 32 and 64 bytes); `host_amfi_dyld_policy` asks
+the host with a host-owned struct. RED: every `gitprims_e2e` test stopped at the generic arm's
+nested-pointer assert, since every dyld guest issues 381; at base, `rpath_dyn` died at
+`abort_with_payload` (521) on `Library not loaded: @rpath/librpath_dyn.dylib … (security policy
+does not allow @ path expansion)`. GREEN: eight `gitprims_e2e` tests, AMFI once on `rpath_dyn` with
+the host's `0x1df`, and a regression batch of nine targets. Controls, each red:
+1. the record arm deleted: the nested-pointer assert at the generic arm;
+2. the mirror's address check deleted: replay still exits 3, through a downstream divergence at
+   landmark 90, so only the test's message assertion catches it (it must never be loosened);
+3. the call-4 pair deleted: the arm's own refusal, `M47: unmodelled __mac_syscall policy "Sandbox"
+   call 0x4`, not the generic assert.
+
+`fc40187` corrected a doc claim the brief had supplied: `rpath_dyn` does **not** exercise
+`read_guest_cstr`'s page-in (0 page-ins measured on `rpath_dyn`, `sbxpath_dyn`, `hello_dyn` and
+`madv_dyn`).
+
+### The alignment mask (Task 3b, `4915a18`, `0d8a0a2`, `6a6c1c9`, `6f97d6e`)
+
+Ruling C2 ran a diagnosis-only agent beside t0's review and Tasks 1–3. Its finding
+(`docs/sweep-evidence/2026-09-30-m47-abort/`, committed by `6a6c1c9`):
+- retrace ignored `mach_vm_map`'s alignment mask (`vm_map_args` dropped `args[3]`; the 4811 route
+  decoded `req.mask` and never used it);
+- xzone malloc maps its 4 MiB segment `ANYWHERE` with mask `0x3fffff` and registers it one table
+  entry per 4 MiB step from its base, so an unaligned segment leaves the granule its tail
+  straddles unregistered, and a `free` there aborts with `pointer being freed was not allocated`;
+- which runs abort is decided by the size of libmalloc's guarded-range reservation, drawn from
+  corecrypto's RNG over `getentropy` and the forwarded `gettimeofday`, which sets the bump cursor;
+  a prediction rule over the segment base is right on 65 of 65 logged runs;
+- record and replay ignore the mask identically, so the oracle could not see it;
+- inferred, not measured: a later segment registering that granule would resolve a pointer to the
+  wrong segment's metadata silently.
+
+Ruling C2's resolution put the fix inside M47 as Task 3b, ported test-first. `guest_vm_map_masked`
+and `guest_vm_reserve_masked` (the old names delegate with mask 0) and a mask-aware `first_fit`;
+record and replay pass the same mask read from the same recorded args, so symmetry rule 1 holds by
+construction and no state is added. Ruling 3b-1 keeps a mask of 0 byte-identical; a `FIXED`
+placement ignores the mask, documented. RED: the guards did not compile, then with stubs three box
+tests failed (`got 0xa00004000`, `0xa00004000`, `0xa00008000`) and `vmalign_e2e` printed five
+`aligned=0`. GREEN with a 17-target regression batch. The control, both `m` lines made to ignore
+the mask, reproduced the same three failures and five `aligned=0`.
+
+`0d8a0a2` bumped `TRACE_MAGIC` (H4). The diagnosis's pre-fix trace replayed by the fix without the
+bump stops at landmark 524 on `mach_vm_map ipa mismatch: replay 0xa00c00000 != recorded
+0xa00854000`; with the bump it is refused at open. That refusal first read `empty/torn trace: no
+readable records`, which Ruling T3b-F1 judged a misreport, and `6f97d6e` added
+`Reader::format_skew`, consulted only when nothing was kept: `trace format RT\x00\x0a, but this
+retrace reads RT\x00\x0b: recorded by a different retrace trace format (not torn); record it again
+with this retrace`, under the existing `DIVERGENCE at landmark 0` prefix and exit 3 that the swarm's
+contract keeps.
+
+The proof, by weight:
+- with entropy and clock pinned, 6 of 6 aborting seeds became 0 of 6 with the fix;
+- `commit`, unpinned: 9 of 20 aborted on t0's census build, 0 of 20 on the diagnosis's fixed build
+  and 0 of 10 on M47's (`git fsck --strict` clean 10 of 10; P ≈ 0.0025 against 9 in 20);
+- `log -1`: 2 of 30 before, 0 of 30 and 0 of 20 after, which is weak (P ≈ 0.25 for the 20);
+- the deterministic, repo-owned guards: `vmalign_e2e` and `crates/retrace-box/tests/vmalign.rs`.
+
+### Fork (Task 4, `4513e7a`)
+
+`fork` is refused before the `madvise` arm with `EAGAIN` and no writes, and the generic arm asserts
+it never arrives; row `2 => row!(P, [])` lands in the same commit (spec §11 item 2).
+`Route::ServicePortsRegister` decodes 3403 exactly, gated on the task port, and answers a 44-byte
+`mig_reply_error`, id 3503, RetCode 0, recomputed and byte-compared on replay. Controls, each red:
+1. the base binary on `forkfail_dyn`: `RECORD ERROR: unsupported mach_msg2 … msgh_id 3403 …
+   send_size 64`;
+2. the fork record arm deleted: the new assert, `fork (2) reached the generic forward arm — it must
+   be refused above (M47). Forwarded, it starts a real child of the recorder.`, before any fork.
+
+### The gates (Task 5, `a8a1ecd`)
+
+`git_e2e` builds each repository natively with the guest's empty environment and names it with
+`-C` (the `chdir` row at work); reads compare stdout with native and two replays with the
+recording, writes are read back by native git, and the commit test asserts git's `CANNOT_FORK` line
+on the record's stdout and the recorder's refusal line on its stderr, against a native twin's tree.
+Ruling T5-a dropped `stash` and `merge` (t0's out-list), giving seven tests. RED at base: `M33:
+syscall 12 (12) has no arg_kinds row`. Three consecutive runs: 7 passed each, no skip. `node_e2e`
+stays `#[ignore]`d; with `--ignored` it stops at `M33: syscall 363 (363)`.
+
+### The walk (Task 6, `66ecb0f`, `e45f4a5`, `1755d59`)
+
+Evidence: `docs/sweep-evidence/2026-09-30-m47/` (its README says what each file is).
+- **node** (v25.6.1, libuv 1.52.1): the traced record exits 101 after 47 s with 1,101 traps and a
+  354,715,684-byte trace. The stop is `kevent(7, 0x27ff368, 2, 0x27ff368, 1, 0x27ff358)` at
+  landmark 1,101: two changes on one `EVFILT_USER` ident, `0x1e7e7711` (`EV_ADD|EV_CLEAR`, then
+  `NOTE_TRIGGER`), and a zero timeout. Its caller is libuv's `uv__kqueue_runtime_detection`,
+  matching byte for byte, on a throwaway `kqueue` (fd 7, the second `kqueue()`; the loop's is fd 4).
+  AMFI is answered at landmark 59 with one write. No thread, no `MAP_JIT` among 121 `mmap`s.
+  `node_e2e`'s reason was rewritten from these fields.
+- **`csh` and `tcsh`** (one hard-linked file): the 3403 is answered (landmark 336 in `csh`'s walk,
+  one 44-byte write), `fork` is refused (337, `ret=0x23 err=true`), and `remotehost`, which does not
+  test `fork`'s `-1`, closes its pipe's write end, reads EOF, closes the read end and calls
+  `wait4(-1, …, 0, NULL)` at 341 (345 in `tcsh`'s), which has no row. Natively, with the empty
+  environment and every fork failing (`ulimit -u 1`), both exit 0 silently; whether they fork at
+  all natively was not traced. Both gates re-parked at `wait4`, class C. The review's I1 (the
+  reasons' "one write" and `ret=35` had no committed evidence) was paid by `1755d59`, which commits
+  both shells' landmark dumps.
+- **jq 300k** (`e45f4a5`, `jq300k/`): the base binary aborts 134/134 three times of three; M47's
+  exits 0/0 and prints native's `44999850000` three of three; Task 3b's diagnosis pair, which
+  differs only by the mask fix, splits the same way. The abort was the mask class.
+
+### The sweep (Task 6)
+
+`tools/apple-sweep.sh` on a signed scratchpad copy of `a8a1ecd`'s binary, detached, with no
+`cargo` running (Ruling T6-a), 2026-10-01 23:36:44–23:43:22: **`TALLY pass=50 fail=4 skip=0`**.
+The host was loaded by an unrelated project's tests: a 1-minute load of 6.23 at the start, 2.78–6.88
+during it, 3.55 at the end. The recorder pid wrapped (99814 → 5459). Against the idle `427fa0a`
+baseline, 50 rows are identical and 4 differ, and each was re-swept on t0's base binary, alternating:
+- `dddiagnose` went `FAIL` 4/3 at msgh_id 205 → `PASS` 139/139, an identical fault: host state, the
+  coin flip (the fault in 3 of 6 base runs and 4 of 7 swept ones). One base run, at a 1-minute load
+  of 11.60, showed a third face, a data abort at `far` `0x1bf0` in libswiftCore
+  `_swift_release_dealloc+48`; it was seen on the base binary only, and whether it is the mask class
+  was not measured.
+- `csh` and `tcsh` moved from the 3403 to `wait4`, M47's: every control stops them at the 3403 on
+  the base binary and at `wait4` on the swept one.
+- `automationmodetool` moved only its panic's source line, `lib.rs:1002:38` → `:1036:38`.
+
+The xcrun trio passes 71/71 and `ps` 0/0. Since no row's outcome is M47's, the capability figure
+stays 49 of 54, the idle baseline's.
+
+### The audit (Task 7)
+
+Measured from source at `1755d59` (the numbers above): `git diff 427fa0a 1755d59 --
+crates/retrace-trace` is the magic bump, the renamed magic test, the prior-format test's new
+`RT\x00\x0a` and `format_skew` with its test; `grep -c 'self.verify_thread('
+crates/retrace-core/src/lib.rs` is 7; `^\s*#\[ignore` over `crates/` is 10; the generic arm's
+asserts are, in order, the signal, workq, `kevent_qos`, `madvise`, `fork` and nested-pointer ones.
+`arg_kinds` has no row for `vfork` (66), `wait4` (7), `setitimer` (83) or `kevent` (363).
+
+### The gate
+
+PENDING — Task 8 fills this.
+
+### What measurement changed
+
+- **The madvise premise was false** (t0 M1(b)). Spec §2c and §4 named the forwarded
+  `MADV_FREE_REUSABLE` as the cause of git's heap abort and `git_e2e`'s commit test as its guard.
+  The abort occurs with the advice no-op'd and with no `madvise` at all; its cause was the
+  `mach_vm_map` mask (Task 3b). The madvise model stands on its own terms (Ruling C1), and its
+  narrative was corrected in Task 2's comments, Task 5's doc and here (C3, T2-c).
+- **jq's 300k abort is the same class.** Spec §2c measured it "not this class" because it aborted
+  with the advice no-op'd, which was true of `madvise` and not of the mask; Task 6 measured the mask
+  fix clearing it.
+- **Native `madvise` accepts an unaligned address** (t0 M1(d)); the plan expected `EINVAL`. The
+  model refuses it anyway, because no corpus call is unaligned (T2-b).
+- **A third `__mac_syscall` pair exists** (t0 M2(a), H7), and a second AMFI caller, libsystem_trace,
+  in six Apple binaries.
+- **The forwarded `file-write-data` check carried a guest fd inside its struct** (t0 M2(b)),
+  evaluated against retrace's own fd 4. Nothing is forwarded now.
+- **`rpath_dyn` does not exercise the page-in** (`fc40187`): the strings were resident on every
+  guest measured, so `read_guest_cstr`'s page-in path is unexercised.
+- **git's out-list**: `stash` forks real children and `merge --ff-only` arms `setitimer` (t0 M4).
+- **The guest's fd 2 lands on the record's stdout** under the console arm (t0 M4), so the commit
+  test reads git's error line there (T5-a).
+- **node's wall is libuv's probe, not its loop** (Task 6), correcting the probe's wording.
+- **Spec R6, no magic bump, was overridden** by the operator at H4, and spec §3h, "the Guest
+  threads paragraph does not change", by spec §11 item 7.
+- **The prediction moved twice**: Task 3 was +15 `#[test]`, not the plan's +12 (the addendum's
+  three), and Task 3b added +7 with its fix round, to 958.
+
+### Rulings
+
+The spec's rulings, which record no cost-if-wrong:
+- **R1** — `chdir` is forwarded: right on record, inert on replay (t0 M5 found no relative open).
+- **R2** — a refused fork returns `EAGAIN`, the errno native `fork` documents.
+- **R3** — the `madvise` zeros are recomputed, not recorded (M46 R3's precedent).
+- **R4** — AMFI's answer is the host's, about retrace's own process; for a platform-binary guest it
+  may differ, documented rather than synthesized.
+- **R5** — a refusal is a panic on record and a `Divergence` on replay.
+- **R6** — no `TRACE_MAGIC` bump; overridden at H4 (above).
+- **R7** — Sandbox call 2 keeps the forward's answer, because the corpus passes with it.
+
+Pre-flight, each with its cost if wrong:
+- **P1** — long commands run in the background and are polled; cost: polling turns.
+- **P2** — a fixture t0 corrects is carried verbatim into the committing task; cost: stale text,
+  caught by its own e2e.
+- **P3** — Task 1 checks the plan's `CENSUS` array is the old one plus exactly the five; cost:
+  nothing.
+- **P4** — plain commands, the Write tool for files, no `VAR=val cmd`; cost: retried commands.
+- **P5** — deliverables are files written first; cost: none.
+- **P6** — evidence directories keep the plan's 2026-09-30 names although execution began
+  2026-10-01, each README stating its run date; cost: a directory dated a day early.
+
+Execution:
+- **C1** — Tasks 1–4 proceed unchanged after M1(b): their mechanisms stand without the abort;
+  cost: rework of Task 2's narrative only.
+- **C2** — a diagnosis-only agent hunts the abort in parallel; **resolved**: the cause was small
+  and attributable, so the fix landed inside M47 as Task 3b; cost: CPU contention with Tasks 1–3.
+- **C3** — the madvise-corruption narrative is corrected in Task 2's comments, Task 5's doc and the
+  docs; cost: none.
+- **T0-I2** — the gate never retries: had the abort stood, every git test it could hit would have
+  been parked; cost: none.
+- **T0-I3** — the commit test's guard claim is dropped, not replaced; cost: none.
+- **T2-a** — `madv_dyn`'s refused advice stays 9, since only the fixture issues it; cost: none.
+- **T2-b** — comments say native accepts an unaligned address and the model refuses it; cost: none.
+- **T2-c** — no text claims the forwarded advice caused the heap abort; cost: none.
+- **T3-a** — Task 3 absorbs the H7 pair, with its own fixture, so it has a running gate (the trio's
+  rows are ignored); cost: three tests and a fixture.
+- **3b-1** — a mask of 0 places byte-identically (cursor rounding only when the mask is nonzero),
+  and `FIXED` ignores the mask, documented; cost: a placement difference at mask 0.
+- **T3b-F1** — an older format is refused by name, not as a torn trace; cost: one test and a
+  message.
+- **T5-a** — `git_e2e` drops `stash` and `merge` and reads `CANNOT_FORK` on the record's stdout;
+  cost: one fewer test than planned.
+- **T6-a** — the sweep is delegated to Task 6's agent with the plan's conditions (a signed copy,
+  detached, no concurrent `cargo`); cost: a contended sweep, re-run.
+- **T6-b** — `automationmodetool`'s reason keeps M46's verbatim quote and gains a parenthetical
+  with M47's line; current-state carries M47's; cost: one parenthetical.
+
+### Named weakness
+
+Written as measured, not as spec §4 wrote it:
+- **`madvise`**: the forward is retired by construction (the model and the generic-arm assert). No
+  repo-owned trigger ever reproduced a reclaim corruption (t0 M1(c)), and the git abort was not one
+  (M1(b)). So `madv_dyn` and `gitprims_e2e` guard the model's mechanism, and the class-E reclaim
+  hazard is retired because the forward no longer exists, not because a corruption was observed
+  and fixed.
+- **The mask**: its guard is repo-owned, `vmalign_e2e`; git's end-to-end confirmation, `git_e2e`,
+  skips without Xcode, and its unpinned weight is the `commit` count above.
+- **Sandbox call 2** answers the pre-M47 errno where native answers 0 (R7, t0 M2(b)).
+- **AMFI's answer is the host's** (`0x1df` measured), so a guest whose native answer differs sees
+  retrace's.
+
+### What stays owed
+
+* **Timed waits** (M46's, routed out by the operator).
+* **Real process creation**: `fork` beyond the refusal, `vfork` (66, no row), exec-in-place and
+  `posix_spawn`. `csh` and `tcsh` stop at `wait4` (7) after the refusal.
+* **`kevent` on a guest `kqueue()`**, node's next wall, and the V8 JIT behind it.
+* **git's out-list**: `stash` (real children), `merge --ff-only` (`setitimer` 83, with the timed
+  waits), and the pager, editor, network and hooks, unmeasured.
+* **The Sandbox policy beyond continuity.**
+* **AMFI's answer for a platform-binary guest.**
+* **`dddiagnose`'s third face**, seen once on the base binary, unattributed.
+* **The parked review minors** (see the final review).
+* **M46's owed items M47 did not touch**, by reference to M46's "What stays owed"
+  (`:15080–15153`): every item except the unloaded re-sweep (paid) and the forwarded-`madvise`
+  hazard (retired). Its `kevent` and timed-wait items are restated above.
