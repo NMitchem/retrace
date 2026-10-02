@@ -1278,7 +1278,9 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
 
             // M47 §3d: __mac_syscall is MODELLED per (policy, call), never forwarded: a policy may
             // write through a pointer INSIDE `arg` (AMFI's outFlags), which a forward hands the host
-            // as a host address (NestedDest; the generic arm's assert refuses any other pair).
+            // as a host address (NestedDest). This arm refuses an unmodelled pair by value
+            // (`mac_syscall_model`); the generic arm's `writes_via_nested_pointer` assert is the
+            // backstop if the arm is ever removed.
             // AMFI's answer is the host's, about retrace's own process (R4), asked with host-owned
             // pointers and recorded as the one 8-byte write at outFlags — the task_info posture. A
             // host error is recorded as that error with no write, which is what a native failure
