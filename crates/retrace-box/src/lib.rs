@@ -5405,9 +5405,13 @@ impl Box_ {
     ///
     /// A shared-cache page the guest has not touched yet is paged in first (`page_in_cache`). A
     /// policy or operation name is a `__cstring` the code computed an address for without loading
-    /// from it, so its page may be unstaged at the `svc` (t0 M2(c)). Paging it in is the same
+    /// from it, so its page could be unstaged at the `svc` (spec §11 item 4). Paging it in is the same
     /// deterministic operation a guest load would have triggered, and both sides do it at the same
     /// landmark (symmetry rule 1: the record arm and the mirror call `guest_mac_syscall` alike).
+    ///
+    /// **No test reaches the page-in.** t0 M2(c) found every policy and operation string resident at
+    /// the trap across the corpus, and M47 t3 measured 0 page-ins recording rpath_dyn, sbxpath_dyn,
+    /// hello_dyn and madv_dyn. The path stands on the argument above, not on a run.
     pub fn read_guest_cstr(&mut self, va: u64, cap: usize) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
         let mut a = va;

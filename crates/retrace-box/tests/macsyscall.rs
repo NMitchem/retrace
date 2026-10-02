@@ -1,8 +1,10 @@
 //! M47 §3d, box level: `Box_::guest_mac_syscall` classifies from guest memory on a static box (MMU
 //! off, so VA == IPA), and `host_amfi_dyld_policy` asks the host. These pin what the fixtures may
 //! not reach (Review Focus 3 and 5): an `int` call's upper half, an unterminated policy, and
-//! unmodelled names. `gitprims_e2e`'s `rpath_dyn` covers the arms end to end, including the
-//! shared-cache page-in `read_guest_cstr` does for a real dyld.
+//! unmodelled names. `gitprims_e2e`'s `rpath_dyn` and `sbxpath_dyn` cover the arms end to end.
+//! No test reaches `read_guest_cstr`'s shared-cache page-in, kept per spec §11 item 4: t0 M2(c)
+//! found every policy and operation string resident at the trap, and M47 t3 measured 0 page-ins
+//! recording rpath_dyn, sbxpath_dyn, hello_dyn and madv_dyn.
 use retrace_box::{Box_, MacSyscall};
 
 fn tb() -> Box_ {
