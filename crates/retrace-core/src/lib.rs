@@ -38,10 +38,11 @@ const MACH_TASK_SELF: u64 = (-28i64) as u64; // task_self_trap: its result names
 const VM_FLAGS_ANYWHERE:  u64 = 0x1;
 const PROT_EXEC:          u64 = 0x4;
 
-// Extract (address-pointer, size, flags, cur_prot) for an anonymous mach_vm_map/allocate trap.
-fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64) {
-    if num == MACH_VM_MAP { (args[1], args[2], args[4], args[5]) }
-    else                  { (args[1], args[2], args[3], 0x3 /*RW*/) } // allocate: always RW anon
+// Extract (address-pointer, size, mask, flags, cur_prot) for an anonymous mach_vm_map/allocate
+// trap. `mask` is mach_vm_map's alignment mask (Box_::guest_vm_map_masked); allocate has none.
+fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64, u64) {
+    if num == MACH_VM_MAP { (args[1], args[2], args[3], args[4], args[5]) }
+    else                  { (args[1], args[2], 0, args[3], 0x3 /*RW*/) } // allocate: always RW anon
 }
 
 /// True if this `sysctl` is `{CTL_KERN, KERN_USRSTACK64}` — a 2-element mib read out of guest
@@ -410,7 +411,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // kernel writes the chosen address into *args[1]; we allocate a deterministic guest IPA
             // and store it there, returning KERN_SUCCESS.
             Stop::Syscall { num, args } if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP => {
-                let (addr_ptr, size, flags, prot) = vm_map_args(num, &args);
+                let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                 let exec = prot & PROT_EXEC != 0;
                 if exec { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
@@ -420,10 +421,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // else is an eagerly-backed map. Mirrors the MIG 4811 split below (guest_vm_reserve
                 // vs guest_vm_map) so a reservation arriving via the trap route genuinely reserves
                 // and is never eager-backed (fatal at 24 GiB). MACH_VM_ALLOCATE always carries RW.
+                // Both honour `mask` (see guest_vm_map_masked); replay passes the same one.
                 let ipa = if prot == 0 {
-                    b.guest_vm_reserve(req, size, anywhere)
+                    b.guest_vm_reserve_masked(req, size, mask, anywhere)
                 } else {
-                    b.guest_vm_map(req, size, anywhere, exec)
+                    b.guest_vm_map_masked(req, size, mask, anywhere, exec)
                 };
                 let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
@@ -462,12 +464,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
                         // cur_protection == 0 => a PROT_NONE address-space reservation (no backing,
                         // e.g. libmalloc's 24 GiB nano pointer range); anything else is a real
-                        // backed map. See guest_vm_reserve / guest_vm_map.
+                        // backed map. See guest_vm_reserve / guest_vm_map. Both honour `mask`.
                         let ipa = if req.cur_protection == 0 {
-                            b.guest_vm_reserve(req.address, req.size, anywhere)
+                            b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
                         } else {
                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                            b.guest_vm_map(req.address, req.size, anywhere, exec)
+                            b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
                         };
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_vm_map_reply(m.reply_port, ipa) }];
@@ -2117,10 +2119,10 @@ impl ReplaySession {
                                         // Same reservation/commit split as record (must reproduce the
                                         // identical returned address for the byte-equality check below).
                                         let ipa = if req.cur_protection == 0 {
-                                            self.b.guest_vm_reserve(req.address, req.size, anywhere)
+                                            self.b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
                                         } else {
                                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                                            self.b.guest_vm_map(req.address, req.size, anywhere, exec)
+                                            self.b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
                                         };
                                         let reply = machmsg::encode_vm_map_reply(m.reply_port, ipa);
                                         if writes.len() != 1 || writes[0].bytes != reply {
@@ -2292,7 +2294,7 @@ impl ReplaySession {
                             // then apply the recorded IPA write + KERN_SUCCESS. The recomputed IPA must
                             // equal what was recorded (bump allocator is deterministic).
                             if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP {
-                                let (addr_ptr, size, flags, prot) = vm_map_args(num, &args);
+                                let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
                                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                                 let exec = prot & PROT_EXEC != 0;
                                 let req = if self.b.is_mapped(addr_ptr) { self.b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
@@ -2300,9 +2302,9 @@ impl ReplaySession {
                                 // reserve, else eagerly back); must reproduce the identical returned IPA
                                 // for the byte-equality check below.
                                 let ipa = if prot == 0 {
-                                    self.b.guest_vm_reserve(req, size, anywhere)
+                                    self.b.guest_vm_reserve_masked(req, size, mask, anywhere)
                                 } else {
-                                    self.b.guest_vm_map(req, size, anywhere, exec)
+                                    self.b.guest_vm_map_masked(req, size, mask, anywhere, exec)
                                 };
                                 let recorded_ipa = writes.first()
                                     .map(|w| u64::from_le_bytes(w.bytes[..8].try_into().unwrap())).unwrap_or(ipa);

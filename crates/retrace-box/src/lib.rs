@@ -2188,7 +2188,26 @@ impl Box_ {
     /// RO+exec. Returns the chosen IPA. Deterministic: identical call sequence => identical IPAs on
     /// replay.
     pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
+        self.guest_vm_map_masked(addr, size, 0, anywhere, exec)
+    }
+
+    /// `guest_vm_map` with `mach_vm_map`'s alignment `mask`: an ANYWHERE placement returns an
+    /// address with `ipa & mask == 0`, as `vm_map_enter` does. Ignored until M47: libmalloc's
+    /// xzone allocator maps each 4 MiB segment ANYWHERE with mask 0x3fffff and registers it in a
+    /// table indexed by `addr >> 22`, one entry per 4 MiB step FROM THE BASE
+    /// (`_xzm_segment_table_allocated_at`), so a segment placed off a 4 MiB boundary leaves the
+    /// granule its tail straddles unregistered, and freeing a chunk there aborts with "pointer
+    /// being freed was not allocated" (git `log -1`, ~1 run in 10: the random size of libmalloc's
+    /// guarded-range reservation moves the bump cursor). Record and replay ignored the mask
+    /// identically, so the oracle could not see it. Evidence: `docs/sweep-evidence/2026-09-30-m47-abort/`.
+    ///
+    /// `mask == 0` places byte-for-byte as before (M47 Ruling 3b-1): the bump cursor is rounded
+    /// only for a nonzero mask, and `first_fit` with `GRANULE - 1` is the old granule rounding.
+    /// FIXED ignores `mask`: `vm_map_enter` checks a FIXED address against it rather than choosing
+    /// one, every measured masked call is ANYWHERE, and that check is not modelled.
+    pub fn guest_vm_map_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool, exec: bool) -> u64 {
         let (host, rlen) = alloc_pages(size as usize);
+        let m = mask | (GRANULE as u64 - 1);
         let ipa = if anywhere {
             // Kernel-faithful VM_FLAGS_ANYWHERE-with-hint: search FORWARD from a non-zero hint for
             // the first free gap, treating reservations as occupied (what vm_map_enter does). When
@@ -2196,7 +2215,7 @@ impl Box_ {
             // when it collides — e.g. libmalloc's guarded-metadata commit whose hint is a reserved
             // band with an interior carveout — it lands in the first free gap (the hole). A zero hint
             // or no fit falls back to the deterministic bump allocator.
-            match if addr != 0 { self.first_fit(addr, rlen as u64) } else { None } {
+            match if addr != 0 { self.first_fit(addr, rlen as u64, m) } else { None } {
                 Some(a) => {
                     // A first-fit hit may land at/above the bump cursor (a hinted commit past every
                     // reservation); float mmap_next past it so no later bump hands out an overlapping
@@ -2207,6 +2226,7 @@ impl Box_ {
                 }
                 None => {
                     if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
+                    if mask != 0 { self.mmap_next = (self.mmap_next + m) & !m; }
                     let a = self.mmap_next; self.mmap_next += rlen as u64; a
                 }
             }
@@ -2236,9 +2256,19 @@ impl Box_ {
     /// fresh deterministic bump address (advancing `mmap_next` so nothing later collides).
     /// Deterministic: identical call sequence => identical returned address on replay.
     pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
+        self.guest_vm_reserve_masked(addr, size, 0, anywhere)
+    }
+
+    /// `guest_vm_reserve` with `mach_vm_map`'s alignment `mask`, honoured on ANYWHERE as
+    /// `guest_vm_map_masked` honours it: `mask == 0` and FIXED place exactly as before.
+    pub fn guest_vm_reserve_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool) -> u64 {
         // Page-granular extent: commit_reserved_page backs whole pages, so track whole pages.
         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
         let base = if anywhere {
+            if mask != 0 {
+                let m = mask | (GRANULE as u64 - 1);
+                self.mmap_next = (self.mmap_next + m) & !m;
+            }
             let end = self.mmap_next + rounded;
             assert!(end <= (1u64 << 36),
                 "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
@@ -2375,10 +2405,16 @@ impl Box_ {
     /// bump allocator). Pure function of (hint, len, backings, reservations) — identical on record &
     /// replay, so a first-fit-placed returned address is recomputed identically and byte-checked by
     /// the replay oracle (no new mirror needed; symmetry is structural).
-    fn first_fit(&self, hint: u64, len: u64) -> Option<u64> {
+    ///
+    /// `m` is the alignment mask, at least `GRANULE - 1`: every candidate is rounded up to it. The
+    /// argument above still holds — the lowest aligned fit is either the aligned hint or the
+    /// aligned end of the extent that blocks the aligned address below it. At `m == GRANULE - 1`
+    /// every candidate is what it was before the mask: the two window ends are page-aligned.
+    /// Saturating, so a garbage hint near `u64::MAX` still finds no fit and falls back to the bump.
+    fn first_fit(&self, hint: u64, len: u64, m: u64) -> Option<u64> {
         let g = GRANULE as u64;
-        let base = hint & !(g - 1);
-        let round_up = |x: u64| (x + g - 1) & !(g - 1);
+        let round_up = |x: u64| x.saturating_add(m) & !m;
+        let base = round_up(hint & !(g - 1));
         let mut cands = vec![base];
         for b in self.backings.iter() {
             let end = round_up(b.ipa + b.len as u64);
@@ -2388,8 +2424,8 @@ impl Box_ {
             let end = round_up(s + l);
             if end > base { cands.push(end); }
         }
-        if SHARED_REGION_END > base { cands.push(SHARED_REGION_END); }
-        if SCRATCH_RESERVED_END > base { cands.push(SCRATCH_RESERVED_END); }
+        if round_up(SHARED_REGION_END) > base { cands.push(round_up(SHARED_REGION_END)); }
+        if round_up(SCRATCH_RESERVED_END) > base { cands.push(round_up(SCRATCH_RESERVED_END)); }
         cands.sort_unstable();
         cands.dedup();
         cands.into_iter().find(|&a| self.range_is_free(a, len))
