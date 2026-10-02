@@ -283,7 +283,7 @@ returns. The event manager, parked at opcode `0x40` since M46, is the one except
 activation re-enters it (`ThreadTable::unpark`). Forwarding `bsdthread_create` would be not merely
 wrong but whole-process fatal (the host would start a real thread on retrace's own `_pthread_start`,
 which PAC-fails on the guest's pthread struct) — and **nothing asserts against it**: the emulating
-arm (`crates/retrace-core/src/lib.rs:1089`) sits before the generic forward arm and that ordering is
+arm in `record_box` (`crates/retrace-core/src/lib.rs`) sits before the generic forward arm and that ordering is
 the only guard. The generic arm's asserts are `is_signal_syscall`, the workq pair, `kevent_qos`
 (M45), `writes_via_nested_pointer`, and since M47 `madvise` and `fork` only; the claim that it
 "asserts" stood here from M14 to M37 and was measured false at M37. Since M45 libdispatch's
