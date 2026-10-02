@@ -1,0 +1,58 @@
+base sha256=e4ae912e44c071e33ca978f9f78613b21709cac4a996b8ed50deaac01582defb
+t6   sha256=246d6f2cfacd13b1266c3da1f9a2989e56cbdb286314958d68f158713ab87847
+== r1-base start 23:44:25 load={ 4.72 4.15 4.15 }
+FAIL /bin/csh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+FAIL /bin/tcsh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (17984041) panicked at crates/retrace-arch/src/lib.rs:1002:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forward
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xb03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=4 skip=0
+== r1-t6 start 23:44:56 load={ 5.37 4.38 4.23 }
+FAIL /bin/csh (recorder panicked: thread 'main' (17985027) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an unt
+FAIL /bin/tcsh (recorder panicked: thread 'main' (17985118) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an un
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (17985176) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forward
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1d03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=4 skip=0
+== r2-base start 23:45:03 load={ 4.85 4.30 4.21 }
+FAIL /bin/csh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+FAIL /bin/tcsh (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(515)) send_size 64)
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (17985484) panicked at crates/retrace-arch/src/lib.rs:1002:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forward
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=3 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045
+== r2-t6 start 23:45:16 load={ 4.33 4.21 4.18 }
+FAIL /bin/csh (recorder panicked: thread 'main' (17985806) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an unt
+FAIL /bin/tcsh (recorder panicked: thread 'main' (17985860) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an un
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (17985901) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forward
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=3 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x4000050050 esr=0x92000045
+== d3-base start 23:45:33 load={ 5.42 4.46 4.26 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x4000050050 esr=0x92000045
+== d3-t6 start 23:45:54 load={ 9.66 5.41 4.61 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x4000050050 esr=0x92000045
+== d4-base start 23:46:09 load={ 8.46 5.36 4.60 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== d4-t6 start 23:46:11 load={ 8.46 5.36 4.60 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x2000050050 esr=0x92000045
+== d5-base start 23:46:42 load={ 11.60 6.40 5.00 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: non-syscall exit: data abort (EC=0x24 ISS=0x7 FSC=0x7) far/ipa=0x1bf0 (UNMAPPED) pc=0x193bbbca0 elr=0x193bbbc9c)
+TALLY pass=0 fail=1 skip=0
+== d5-t6 start 23:46:48 load={ 12.37 6.73 5.14 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1c03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== d6-base start 23:46:54 load={ 12.10 6.77 5.16 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x2000050060 esr=0x92000045
+== d6-t6 start 23:47:17 load={ 10.49 6.75 5.19 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xa03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+end 23:47:21 load={ 9.97 6.70 5.18 }
+script exit=0

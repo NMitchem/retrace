@@ -1,0 +1,45 @@
+# The recorded trace's own landmarks (Reader::open_checked; #0 is the Snapshot): every kqueue (362),
+# kevent (363), bsdthread_create (360) and __mac_syscall (381) event, then the last 10. The trace ends
+# at the second kqueue: the kevent (363) panicked before its event was appended.
+== node (/private/tmp/claude-501/m47-node.bin)
+events=1101 torn=false
+#0 Snapshot
+#55 Syscall num=381 args=[1801b7eb4, 2, 27ff280, a, 73, 69, 0, 0] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#59 Syscall num=381 args=[1801b4bf1, 5a, 27ff300, a, 0, 0, 0, 90] ret=0x0 ret1=0x0 err=false writes=1 thread=0
+#74 Syscall num=381 args=[1801b7eb4, 2, 27fedd0, a, 73, 69, 0, 80] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#611 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#625 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#631 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#636 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#641 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#646 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#651 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#656 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#661 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#666 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#671 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#676 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#681 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#686 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#691 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#696 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#701 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#707 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#714 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#720 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#725 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#730 Syscall num=381 args=[1801b7eb4, 2, 27fbe00, a, 73, 69, 1, 27fcb08] ret=0xe ret1=0x0 err=true writes=0 thread=0
+#865 Syscall num=381 args=[18df1ac55, 2, 27fb1a0, 28, 0, 56, 0, 470] ret=0x16 ret1=0x0 err=true writes=0 thread=0
+#1091 Syscall num=47 args=[1f5, 27ff5e8, 0, a14ea8054, a14da8100, 0, ffffffffbfc007ff, fffff0003ffff800] ret=0x14 ret1=0x0 err=false writes=0 thread=0
+#1092 Syscall num=43 args=[14, 27ff5e8, 0, a14ea8054, a14da8100, 0, ffffffffbfc007ff, fffff0003ffff800] ret=0x14 ret1=0x0 err=false writes=0 thread=0
+#1093 Syscall num=336 args=[5, 16607, 2, 0, 27ff568, f, 64, fffff0003ffff800] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#1094 Syscall num=362 args=[7af78, 27ff4d0, 1804edb6c, 1, 0, f, 6461657268546e, fffff0003ffff800] ret=0x4 ret1=0x0 err=false writes=0 thread=0
+#1095 Syscall num=92 args=[4, 2, 1, 1, 0, f, 6461657268546e, fffff0003ffff800] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#1096 Syscall num=42 args=[27ff420, 0, 0, 103, 0, f, 6461657268546e, fffff0003ffff800] ret=0x5 ret1=0x6 err=false writes=0 thread=0
+#1097 Syscall num=92 args=[5, 2, 1, 103, 0, f, 6461657268546e, fffff0003ffff800] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#1098 Syscall num=92 args=[6, 2, 1, 103, 0, f, 6461657268546e, fffff0003ffff800] ret=0x0 ret1=0x0 err=false writes=0 thread=0
+#1099 Syscall num=4 args=[6, 27ff43f, 1, 103, 0, f, 6461657268546e, fffff0003ffff800] ret=0x1 ret1=0x0 err=false writes=0 thread=0
+#1100 Syscall num=362 args=[27ff450, 27ff450, 1804edb6c, 103, 0, f, 6461657268546e, fffff0003ffff800] ret=0x7 ret1=0x0 err=false writes=0 thread=0
+gettimeofday(116) events=28 fork(2) events=0
+# t6-node-jit.sh: every mmap (197) in the trace, checked for MAP_JIT (0x800) in x3, and bsdthread_create (360)
+mmap(197) events=121 with MAP_JIT(0x800)=0 bsdthread_create(360)=0

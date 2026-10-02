@@ -1,0 +1,12 @@
+rows: 427fa0a 54, M47 54
+identical rows: 50
+--- 427fa0a side of each differing row
+/bin/csh	FAIL	4	3	338	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(TID)) send_size 64
+/bin/tcsh	FAIL	4	3	341	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 3403 dest 0x203 (guest task port Some(TID)) send_size 64
+/usr/bin/automationmodetool	FAIL	101	n/a	n/a	thread 'main' (TID) panicked at crates/retrace-arch/src/lib.rs:1002:38: M33: syscall 375 (TID) has no arg_kinds row in c
+/usr/bin/dddiagnose	FAIL	4	3	448	RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1c03 (guest task port Some(TID)) send_size 24
+--- M47 side of each differing row
+/bin/csh	FAIL	101	n/a	n/a	thread 'main' (TID) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (TID) has no arg_kinds row in cra
+/bin/tcsh	FAIL	101	n/a	n/a	thread 'main' (TID) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 7 (TID) has no arg_kinds row in cra
+/usr/bin/automationmodetool	FAIL	101	n/a	n/a	thread 'main' (TID) panicked at crates/retrace-arch/src/lib.rs:1036:38: M33: syscall 375 (TID) has no arg_kinds row in c
+/usr/bin/dddiagnose	PASS	139	139	n/a	

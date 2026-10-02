@@ -1,0 +1,6 @@
+csh host-env exit=1 stderr=Bad : modifier in $ '/'.
+csh empty-env exit=0 stderr=
+csh -f exit=0 stderr=
+tcsh host-env exit=1 stderr=Bad : modifier in $ '/'.
+tcsh empty-env exit=0 stderr=
+tcsh -f exit=0 stderr=

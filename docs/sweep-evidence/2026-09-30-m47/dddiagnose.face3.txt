@@ -1,0 +1,24 @@
+# dddiagnose, controls round d5-base (base binary m47-base-retrace, 427fa0a's code): the recorder's last line
+RECORD ERROR: non-syscall exit: data abort (EC=0x24 ISS=0x7 FSC=0x7) far/ipa=0x1bf0 (UNMAPPED) pc=0x193bbbca0 elr=0x193bbbc9c
+# lldb (target /usr/bin/dddiagnose, not running)
+(lldb) target create /usr/bin/dddiagnose
+(lldb) image lookup -a 0x193bbbca0
+      Address: libswiftCore.dylib[0x0000000193bbbca0] (libswiftCore.dylib.__TEXT.__text + 35328)
+      Summary: libswiftCore.dylib`_swift_release_dealloc + 48
+(lldb) image lookup -a 0x193bbbc9c
+      Address: libswiftCore.dylib[0x0000000193bbbc9c] (libswiftCore.dylib.__TEXT.__text + 35324)
+      Summary: libswiftCore.dylib`_swift_release_dealloc + 44
+(lldb) disassemble -s 0x193bbbc80 -e 0x193bbbcb0
+libswiftCore.dylib`_swift_release_dealloc:
+libswiftCore.dylib[0x193bbbc80] <+16>: stp    x10, x9, [sp, #0x30]
+libswiftCore.dylib[0x193bbbc84] <+20>: stp    x20, x19, [sp, #0x40]
+libswiftCore.dylib[0x193bbbc88] <+24>: stp    x29, x30, [sp, #0x50]
+libswiftCore.dylib[0x193bbbc8c] <+28>: add    x29, sp, #0x50
+libswiftCore.dylib[0x193bbbc90] <+32>: ldr    x16, [x0]
+libswiftCore.dylib[0x193bbbc94] <+36>: mov    x17, x0
+libswiftCore.dylib[0x193bbbc98] <+40>: movk   x17, #0x6ae1, lsl #48
+libswiftCore.dylib[0x193bbbc9c] <+44>: autda  x16, x17
+libswiftCore.dylib[0x193bbbca0] <+48>: ldr    x8, [x16, #-0x10]!
+libswiftCore.dylib[0x193bbbca4] <+52>: mov    x20, x0
+libswiftCore.dylib[0x193bbbca8] <+56>: movk   x16, #0xbbbf, lsl #48
+libswiftCore.dylib[0x193bbbcac] <+60>: blraa  x8, x16

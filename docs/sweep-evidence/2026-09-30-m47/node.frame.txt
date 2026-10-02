@@ -1,0 +1,53 @@
+# node: /opt/homebrew/Cellar/node/25.6.1/bin/node (v25.6.1); libuv: /opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib
+# node's libuv linkage (otool -L):
+	/opt/homebrew/opt/libuv/lib/libuv.1.dylib (compatibility version 1.0.0, current version 1.0.0)
+	/opt/homebrew/opt/uvwasi/lib/libuvwasi.dylib (compatibility version 0.0.0, current version 0.0.0)
+# nm: the static symbols bracketing offset 0x66bc
+0000000000006540 t _uv__async_fork
+0000000000006640 t _uv__kqueue_runtime_detection
+# otool -tV: _uv__kqueue_runtime_detection from its kqueue() call to the check of kevent's result
+_uv__kqueue_runtime_detection:
+0000000000006640	sub	sp, sp, #0x90
+0000000000006644	stp	x22, x21, [sp, #0x60]
+0000000000006648	stp	x20, x19, [sp, #0x70]
+000000000000664c	stp	x29, x30, [sp, #0x80]
+0000000000006650	add	x29, sp, #0x80
+0000000000006654	adrp	x8, 22 ; 0x1c000
+0000000000006658	ldr	x8, [x8, #0x48] ; literal pool symbol address: ___stack_chk_guard
+000000000000665c	ldr	x8, [x8]
+0000000000006660	stur	x8, [x29, #-0x28]
+0000000000006664	stp	xzr, xzr, [sp, #0x8]
+0000000000006668	bl	0x17460 ; symbol stub for: _kqueue
+000000000000666c	mov	x19, x0
+0000000000006670	mov	w20, #0x7711
+0000000000006674	movk	w20, #0x1e7e, lsl #16
+0000000000006678	str	x20, [sp, #0x18]
+000000000000667c	mov	w8, #0xfff6
+0000000000006680	movk	w8, #0x21, lsl #16
+0000000000006684	str	w8, [sp, #0x20]
+0000000000006688	stur	xzr, [sp, #0x2c]
+000000000000668c	stur	xzr, [sp, #0x24]
+0000000000006690	str	wzr, [sp, #0x34]
+0000000000006694	mov	x8, #0xfff6
+0000000000006698	movk	x8, #0x100, lsl #48
+000000000000669c	stp	x20, x8, [sp, #0x38]
+00000000000066a0	stp	xzr, xzr, [sp, #0x48]
+00000000000066a4	mov	w21, #0x1
+00000000000066a8	add	x1, sp, #0x18
+00000000000066ac	add	x3, sp, #0x18
+00000000000066b0	add	x5, sp, #0x8
+00000000000066b4	mov	w2, #0x2
+00000000000066b8	mov	w4, #0x1
+00000000000066bc	bl	0x17448 ; symbol stub for: _kevent
+00000000000066c0	cmp	w0, #0x1
+00000000000066c4	b.lt	0x66ec
+00000000000066c8	ldrh	w8, [sp, #0x20]
+00000000000066cc	mov	w9, #0xfff6
+00000000000066d0	cmp	w8, w9
+00000000000066d4	b.ne	0x66ec
+00000000000066d8	ldr	x8, [sp, #0x18]
+00000000000066dc	cmp	x8, x20
+00000000000066e0	b.ne	0x66ec
+00000000000066e4	ldrh	w8, [sp, #0x22]
+00000000000066e8	tbz	w8, #0xe, 0x66f4
+# guest x30 at the svc = 0xa0bd066c0 = 0xa0bd00000 + 0x66c0, the return address of the bl _kevent at 0x66bc

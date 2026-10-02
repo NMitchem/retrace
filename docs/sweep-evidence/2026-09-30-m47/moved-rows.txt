@@ -1,0 +1,7 @@
+# M47 Task 6: every row whose normalised ROW differs from the 427fa0a baseline (rowdiff-norm.txt).
+# Only dddiagnose moved its OUTCOME (rowdiff.txt); csh/tcsh moved their wall and rc, and
+# automationmodetool only its panic line's source line number.
+/bin/csh
+/bin/tcsh
+/usr/bin/automationmodetool
+/usr/bin/dddiagnose
