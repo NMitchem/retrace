@@ -1,0 +1,401 @@
+[capped: the last 400 of 1847 lines of /private/tmp/claude-501/m47-abort/gate-fix.log]
+
+running 63 tests
+test a_checkpoint_carries_every_thread_not_just_the_running_one ... ok
+test a_created_thread_resumes_with_the_creating_threads_el0_pstate ... ok
+test a_deadlock_fails_loud_instead_of_hanging ... ok
+test a_fresh_table_has_one_runnable_main_thread ... ok
+test a_lone_runnable_thread_never_needs_rescheduling ... ok
+test a_park_that_strands_the_guest_fails_loud_rather_than_hanging - should panic ... ok
+test a_parked_worker_is_unwakeable_by_either_seam_and_leaves_main_pickable ... ok
+test a_restored_checkpoint_puts_the_running_threads_pointer_back_on_the_vcpu ... ok
+test a_restored_checkpoint_still_has_every_thread ... ok
+test a_restored_checkpoint_still_knows_the_registered_trampoline ... ok
+test a_semaphore_block_does_not_disturb_the_ulock_wake_seam ... ok
+test a_semaphore_signal_wakes_only_its_own_port ... ok
+test a_semaphore_signal_with_no_waiter_is_legal_and_not_an_error ... ok
+test a_switch_round_trips_every_register_in_the_context ... ok
+test a_terminating_thread_exits_and_wakes_whoever_joined_it ... ok
+test a_thread_blocked_on_a_semaphore_is_woken_by_that_ports_signal ... ok
+test a_woken_joiner_carrying_a_pending_signal_trips_the_m17_tripwire - should panic ... ok
+test an_armed_watchpoint_survives_a_context_switch ... ok
+test an_exited_thread_is_never_picked_and_unblocks_its_joiner ... ok
+test blocking_on_an_already_exited_join_target_does_not_wait_forever ... ok
+test blocking_the_only_runnable_thread_leaves_the_child_pickable ... ok
+test bsdthread_create_builds_a_thread_at_the_registered_trampoline ... ok
+test bsdthread_create_without_a_registered_trampoline_fails_loud ... ok
+test bsdthread_create_writes_the_childs_thread_port_into_the_pthread_struct ... ok
+test bsdthread_register_captures_all_three_and_returns_the_feature_word ... ok
+test current_thread_follows_the_scheduler_across_a_switch ... ok
+test dbg_regs_of_is_none_for_an_out_of_range_thread_id ... ok
+test dbg_regs_of_reads_the_live_vcpu_for_the_current_thread_not_the_stale_table_slot ... ok
+test dbg_regs_of_reads_the_table_for_a_blocked_non_current_thread ... ok
+test every_thread_blocked_is_a_deadlock_and_pick_next_says_so ... ok
+test pick_next_is_lowest_indexed_runnable_which_is_what_makes_replay_deterministic ... ok
+test pick_next_skips_a_lower_indexed_exited_thread_for_a_still_runnable_higher_one ... ok
+test run_switches_to_the_child_when_main_blocks ... ok
+test run_switches_to_the_child_when_main_blocks_going_through_run ... ok
+test sem_signal_refuses_to_wake_more_than_one_waiter - should panic ... ok
+test sem_signal_wakes_the_waiter_and_names_it ... ok
+test sem_signal_with_nobody_parked_is_a_legal_no_op ... ok
+test sem_wait_blocks_the_caller_on_the_port_in_arg0 ... ok
+test spawn_appends_a_runnable_thread_and_does_not_switch ... ok
+test step_reschedules_off_a_blocked_thread_before_arming_the_step_bit ... ok
+test switch_to_clears_redirected_for_the_thread_it_switches_to ... ok
+test ulock_wait_answers_negative_efault_on_an_unmapped_address_instead_of_panicking ... ok
+test ulock_wait_blocks_only_when_the_guests_condition_still_holds ... ok
+test ulock_wait_rejects_an_unmeasured_operation_word - should panic ... ok
+test ulock_wake_rejects_an_unmeasured_operation_word - should panic ... ok
+test ulock_wake_wakes_exactly_the_thread_waiting_on_that_address ... ok
+test unblock_waiters_on_wakes_only_the_matching_address ... ok
+test workq_kernreturn_park_blocks_the_worker_and_leaves_it_unresumable ... ok
+test workq_kernreturn_park_refuses_a_kevent_carrying_variant - should panic ... ok
+test workq_kernreturn_refuses_an_unmeasured_opcode_by_value - should panic ... ok
+test workq_kernreturn_setup_dispatch_succeeds ... ok
+test workq_open_before_registration_fails_loud - should panic ... ok
+test workq_open_returns_success_once_the_guest_has_registered ... ok
+test workq_reqthreads_allocates_deterministically ... ok
+test workq_reqthreads_builds_numthreads_workers_each_with_its_own_stack_and_port ... ok
+test workq_reqthreads_leaves_an_uncommittable_guard_page_below_each_worker_stack ... ok
+test workq_reqthreads_refuses_a_count_past_the_sanity_ceiling - should panic ... ok
+test workq_reqthreads_refuses_a_qos_byte_that_is_not_one_bit - should panic ... ok
+test workq_reqthreads_refuses_a_qos_index_libpthread_would_silently_drop - should panic ... ok
+test workq_reqthreads_refuses_a_request_for_no_threads - should panic ... ok
+test workq_reqthreads_refuses_without_a_registered_entry_point - should panic ... ok
+test workq_reqthreads_seeds_the_measured_entry_contract ... ok
+test workq_reqthreads_spawns_one_runnable_worker_at_the_registered_entry ... ok
+
+test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/tlbi.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/tlbi-6715355ee995d55b)
+
+running 3 tests
+test flush_guest_tlb_is_repeatable ... ok
+test flush_guest_tlb_preserves_architectural_state ... ok
+test flush_guest_tlb_survives_checkpoint_restore ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/trampoline.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/trampoline-86de240cd10e4741)
+
+running 7 tests
+test a_fall_through_from_outside_the_vector_table_fails_loud - should panic ... ok
+test a_fall_through_onto_vector_padding_is_counted ... ok
+test a_fall_through_still_dispatches_the_exception_it_interrupted ... ok
+test el0_svc_reaches_vmm_via_trampoline ... ok
+test normal_vector_entries_are_not_counted_as_fall_throughs ... ok
+test vector_padding_traps_rather_than_undefs_dynamic ... ok
+test vector_padding_traps_rather_than_undefs_static ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/truncguard.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/truncguard-65f0d3ff8d0ece1b)
+
+running 22 tests
+test a_band_with_no_neighbours_keeps_its_full_length ... ok
+test a_changed_guard_band_means_the_write_ran_past_the_window ... ok
+test a_deref_len_is_refused_only_past_its_backing ... ok
+test a_duplicated_pointer_argument_does_not_manufacture_a_disturbance ... ok
+test a_failing_syscall_still_restores_the_canary ... ok
+test a_neighbour_starting_before_the_band_but_reaching_into_it_still_truncates ... ok
+test a_neighbour_starting_inside_the_band_truncates_it_there ... ok
+test a_null_oldp_sysctl_is_not_refused ... ok
+test a_recorded_region_longer_than_its_replay_backing_is_a_divergence ... ok
+test a_zero_length_argument_still_never_suppresses_its_own_band ... ok
+test a_zero_length_band_never_underflows ... ok
+test an_argument_never_suppresses_its_own_band ... ok
+test an_empty_guard_band_is_never_an_overrun ... ok
+test an_oldlenp_past_its_backing_is_refused - should panic ... ok
+test an_unchanged_guard_band_is_not_an_overrun ... ok
+test the_band_fires_when_the_kernel_writes_past_the_window - should panic ... ok
+test the_canary_catches_zeros_written_over_zeros - should panic ... ok
+test the_clamp_reaches_proc_info ... ok
+test the_same_fixture_and_cap_that_fooled_the_old_comparison_now_aborts - should panic ... ok
+test the_window_widens_for_each_m29_reg_addition ... ok
+test the_window_widens_for_the_m34_rows_and_not_for_getattrlist ... ok
+test two_overlapping_neighbours_produce_the_minimum_of_their_truncations ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vaipa.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/vaipa-5fac19759be8cba9)
+
+running 2 tests
+test walker_is_identity_across_the_dynamic_layout ... ok
+test walker_is_identity_on_mapped_vas_and_none_on_unmapped ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vmalign.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/vmalign-acdd18ec4e73ff84)
+
+running 4 tests
+test a_masked_anywhere_map_from_the_bump_cursor_is_aligned ... ok
+test a_masked_anywhere_reservation_is_aligned ... ok
+test a_masked_hinted_map_is_aligned_and_clears_the_occupied_hint ... ok
+test mask_zero_keeps_the_old_contiguous_placement ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vmremap.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/vmremap-2c3844e136f80e6a)
+
+running 3 tests
+test a_guest_allocated_source_reports_the_kernels_protections_for_its_band ... ok
+test a_non_page_multiple_size_is_refused - should panic ... ok
+test a_remapped_page_resolves_to_the_source_ipa_and_neighbours_stay_identity ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/xpcport.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/xpcport-1e602c46468817cf)
+
+running 1 test
+test minted_bootstrap_port_accepts_a_send_mod_refs_and_is_idempotent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/retrace_core-00f2ae7902bdaeb2)
+
+running 53 tests
+test machmsg::tests::a_message_queue_send_without_the_rpc_shape_still_fails_loud ... ok
+test machmsg::tests::a_one_way_message_queue_send_still_fails_loud ... ok
+test machmsg::tests::decode_get_special_port_rejects_malformed ... ok
+test machmsg::tests::decode_host_get_special_port_rejects_malformed ... ok
+test machmsg::tests::decode_rejects_malformed ... ok
+test machmsg::tests::decode_set_special_port_rejects_malformed ... ok
+test machmsg::tests::decodes_get_special_port_which ... ok
+test machmsg::tests::decodes_host_get_special_port_node_and_which ... ok
+test machmsg::tests::decodes_set_special_port_which ... ok
+test machmsg::tests::decodes_the_captured_vm_map_request ... ok
+test machmsg::tests::decodes_the_captured_vm_remap_request ... ok
+test machmsg::tests::encodes_a_byte_identical_get_special_port_reply ... ok
+test machmsg::tests::encodes_a_byte_identical_mig_error_reply ... ok
+test machmsg::tests::encodes_a_byte_identical_success_reply ... ok
+test machmsg::tests::everything_else_fails_loudly ... ok
+test machmsg::tests::mig_error_reply_has_the_documented_shape ... ok
+test machmsg::tests::restartable_register_stub_replies_success ... ok
+test machmsg::tests::routes_a_message_queue_receive_to_refusal ... ok
+test machmsg::tests::routes_a_message_queue_send_to_refusal ... ok
+test machmsg::tests::routes_get_special_port_to_service ... ok
+test machmsg::tests::routes_host_get_special_port_to_forward ... ok
+test machmsg::tests::routes_set_special_port_to_service ... ok
+test machmsg::tests::routes_the_decided_allowlist_to_forward ... ok
+test machmsg::tests::routes_vm_map_to_service_and_stubs_to_mig_reply ... ok
+test machmsg::tests::routes_vm_remap_to_service_only_on_the_guest_task_port ... ok
+test machmsg::tests::the_forward_body_guard_admits_only_the_plain_host_port ... ok
+test machmsg::tests::the_forward_body_guard_is_a_no_op_for_unguarded_ids ... ok
+test machmsg::tests::the_receive_refusal_is_a_receive_code ... ok
+test machmsg::tests::the_refusal_is_send_invalid_dest_and_not_invalid_right ... ok
+test machmsg::tests::unpacks_the_packed_register_abi ... ok
+test machmsg::tests::vm_remap_decode_rejects_malformed ... ok
+test machmsg::tests::vm_remap_reply_has_the_documented_shape ... ok
+test symbols::tests::a_data_symbol_is_reachable_by_name_but_not_by_address ... ok
+test symbols::tests::a_dyld_style_slide_is_derived_not_assumed ... ok
+test symbols::tests::a_name_at_two_addresses_yields_both_sorted ... ok
+test symbols::tests::a_name_only_in_dyld_still_resolves ... ok
+test symbols::tests::a_stab_entry_is_dropped ... ok
+test symbols::tests::a_unique_name_yields_exactly_one_address ... ok
+test symbols::tests::a_value_split_across_two_regions_is_gathered ... ok
+test symbols::tests::an_absent_name_yields_nothing_not_a_guess ... ok
+test symbols::tests::an_address_below_the_first_symbol_resolves_to_nothing ... ok
+test symbols::tests::an_address_past_text_end_resolves_to_nothing ... ok
+test symbols::tests::an_empty_symbols_formats_everything_as_bare_hex ... ok
+test symbols::tests::an_image_with_no_symtab_is_none_not_an_error ... ok
+test symbols::tests::an_indirect_symbol_is_dropped ... ok
+test symbols::tests::an_undefined_symbol_is_dropped ... ok
+test symbols::tests::bytes_absent_from_the_snapshot_are_none_not_a_panic ... ok
+test symbols::tests::format_always_contains_the_raw_address ... ok
+test symbols::tests::no_macho_header_at_the_base_is_none_not_a_panic ... ok
+test symbols::tests::one_name_at_one_address_is_not_reported_twice ... ok
+test symbols::tests::the_executable_shadows_dyld_for_a_shared_name ... ok
+test symbols::tests::the_worked_example_from_the_measurements_resolves ... ok
+test symbols::tests::ties_resolve_to_the_same_name_every_time ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/crash.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/crash-c0b6d4a41187fa4c)
+
+running 3 tests
+test data_abort_records_as_crash_and_replays ... ok
+test instruction_abort_records_as_crash ... ok
+test perturbed_crash_triple_is_a_loud_divergence ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/fdreplay.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/fdreplay-9925621c0e14e0dd)
+
+running 2 tests
+test a_recorded_host_shaped_fd_is_caught_as_divergence ... ok
+test the_recording_holds_guest_fds_not_host_fds ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/machmsgband_dyn.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/machmsgband_dyn-8ec8d05f771d921c)
+
+running 2 tests
+test every_real_mach_msg2_in_the_corpus_is_checked_for_a_nonzero_band ... ok
+test the_real_forwarded_task_info_calls_band_lands_at_or_past_send_size ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 175.19s
+
+     Running tests/mmap.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/mmap-a68f944196411b2d)
+
+running 1 test
+test mmap_guest_records_and_replays ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/protnone_mach.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/protnone_mach-5c70aaedadb33312)
+
+running 1 test
+test mach_vm_protect_is_routed_into_the_box_on_both_sides ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/record.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/record-4a15bd47ce8f98c6)
+
+running 1 test
+test recording_fileio_emits_fixture_and_logs_writes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/replay.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/replay-634b5138ec3edc32)
+
+running 13 tests
+test a_caught_fault_replays_bit_for_bit ... ok
+test a_caught_self_raise_replays_bit_for_bit ... ok
+test a_tampered_signal_frame_is_caught_as_divergence ... ok
+test a_tampered_thread_on_the_caught_raise_landmark_is_a_divergence ... ok
+test a_tampered_thread_on_the_sigreturn_landmark_is_a_divergence ... ok
+test empty_trace_is_a_named_divergence_not_a_panic ... ok
+test fileio_replays_identically_even_after_fixture_deleted ... ok
+test missing_trace_is_a_named_divergence_not_a_panic ... ok
+test replay_reproduces_recording_with_zero_divergence ... ok
+test seeking_between_a_caught_raise_and_its_delivery_is_a_named_error ... ok
+test step_armed_reports_each_stop_class_without_retiring ... ok
+test tampered_read_write_is_caught_by_final_memory ... ok
+test tampered_syscall_arg_is_caught_as_divergence ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running tests/signals.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/signals-3ea93e3be529d867)
+
+running 12 tests
+test a_blocked_synchronous_fault_asserts_rather_than_guessing - should panic ... ok
+test a_caught_self_raise_records_the_syscalls_success_in_the_frame ... ok
+test a_fault_with_a_handler_installed_delivers_instead_of_crashing ... ok
+test a_recorded_signal_replays_identically_twice ... ok
+test a_self_raised_sigabrt_is_a_recorded_terminal_signal_not_a_dead_recorder ... ok
+test an_ignored_signal_does_not_terminate_the_guest ... ok
+test an_uncaught_fault_is_still_a_crash ... ok
+test killing_another_process_fails_loud_instead_of_signalling_the_host - should panic ... ok
+test sigreturn_is_recorded_as_an_ordinary_syscall_between_delivery_and_resumption ... ok
+test the_sigign_guest_replays_bit_for_bit ... ok
+test two_recordings_of_the_raise_guest_are_byte_identical ... ok
+test two_recordings_of_the_sigign_guest_are_byte_identical ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+     Running unittests src/lib.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/retrace_guest-1384562528d612bf)
+
+running 23 tests
+test fat_tests::fat_parse_falls_back_to_plain_arm64 ... ok
+test fat_tests::fat_parse_prefers_arm64e_over_plain_arm64 ... ok
+test fat_tests::parse_macho_accepts_a_fat_binary ... ok
+test tests::after_guest_parses ... ok
+test tests::atfdcwd_guest_parses ... ok
+test tests::crash_py_fixture_is_wired ... ok
+test tests::dup2_guest_parses ... ok
+test tests::dupfd_guest_parses ... ok
+test tests::dupkind_guest_parses ... ok
+test tests::exec_guest_parses ... ok
+test tests::fileio_guest_parses ... ok
+test tests::hello_rust_guest_parses ... ok
+test tests::kqinit_guest_parses ... ok
+test tests::parse_macho_surfaces_cpusubtype ... ok
+test tests::parses_the_hello_guest ... ok
+test tests::pipe_guest_parses ... ok
+test tests::scalarprobe_guest_parses ... ok
+test tests::spinloop_guest_parses ... ok
+test tests::timer_guest_parses ... ok
+test tests::vmalign_guest_parses ... ok
+test tests::vmremap_guest_parses ... ok
+test tests::watchloop_guest_parses ... ok
+test tests::watchsweep_guest_parses ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m12_guests.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/m12_guests-ebeb2cf252b9885b)
+
+running 1 test
+test every_m12_guest_is_built_and_parses_as_a_macho ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/retrace_sim-3af306c9b38a0d15)
+
+running 2 tests
+test tests::rng_is_deterministic_per_seed ... ok
+test tests::truncate_fault_drops_tail ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/private/tmp/claude-501/m47-abort/target-fix/aarch64-apple-darwin/debug/deps/retrace_trace-4163dacd1d90387d)
+
+running 14 tests
+test tests::a_trace_written_with_the_old_magic_is_rejected_whole ... ok
+test tests::a_trace_written_with_the_previous_magic_is_rejected_whole ... ok
+test tests::crash_roundtrip ... ok
+test tests::magic_bumped_for_the_m38_second_return_register ... ok
+test tests::rejects_prior_format_version ... ok
+test tests::rejects_v3_traces ... ok
+test tests::rejects_v4_traces ... ok
+test tests::roundtrip ... ok
+test tests::signal_delivery_round_trips_through_the_writer_and_reader ... ok
+test tests::signal_event_round_trips ... ok
+test tests::the_four_new_thread_tags_round_trip ... ok
+test tests::torn_crash_tail_recovers_prefix ... ok
+test tests::torn_tail_recovers_prefix ... ok
+test tests::wrong_version_is_rejected ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests hv_sys
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests retrace_arch
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests retrace_box
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests retrace_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests retrace_guest
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests retrace_sim
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests retrace_trace
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

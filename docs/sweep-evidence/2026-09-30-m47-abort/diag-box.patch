@@ -1,0 +1,33 @@
+--- pristine/crates/retrace-box/src/lib.rs	2026-10-01 18:21:51
++++ src/crates/retrace-box/src/lib.rs	2026-10-01 18:39:59
+@@ -4073,6 +4073,30 @@
+         let mut sa = [0u64; 8];
+         for i in 0..8 { sa[i] = hargs[i] as u64; }
+         let (ret, ret1, err) = unsafe { host_svc(num, sa) };
++        // m47-abort DIAGNOSTIC ONLY: pin getentropy's bytes to a seed so the run's one entropy input
++        // is controlled. RETRACE_FIXENTROPY=<u8 seed>.
++        if num == 500 && !err {
++            if let Some(seed) = std::env::var_os("RETRACE_FIXENTROPY") {
++                let seed: u8 = seed.to_str().and_then(|s| s.parse().ok()).unwrap_or(0);
++                for k in 0..args[1] as usize {
++                    unsafe { *(sa[0] as *mut u8).add(k) = seed.wrapping_add(k as u8).wrapping_mul(0x9d) };
++                }
++                if std::env::var_os("RETRACE_VMLOG").is_some() {
++                    eprintln!("[vmlog] getentropy len {:#x} pinned to seed {seed}", args[1]);
++                }
++            }
++        }
++        // m47-abort DIAGNOSTIC ONLY: pin gettimeofday's tv to a per-call counter (RETRACE_FIXTIME).
++        if num == 116 && !err && sa[0] != 0 && std::env::var_os("RETRACE_FIXTIME").is_some() {
++            static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++            let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            let sec: i64 = 1_800_000_000 + (n / 1000) as i64;
++            let usec: i32 = ((n % 1000) * 1000) as i32;
++            unsafe {
++                std::ptr::copy_nonoverlapping(sec.to_le_bytes().as_ptr(), sa[0] as *mut u8, 8);
++                std::ptr::copy_nonoverlapping(usec.to_le_bytes().as_ptr(), (sa[0] as *mut u8).add(8), 4);
++            }
++        }
+         // M35 (H2): the capture — and the guard band inside it — runs on the FAILING path too.
+         // Until M35 this loop sat under `if !err` on the stated assumption that a failed syscall
+         // wrote nothing; M27 narrowed it (`ps`'s 83 sysctls all succeeded), M28 measured one case

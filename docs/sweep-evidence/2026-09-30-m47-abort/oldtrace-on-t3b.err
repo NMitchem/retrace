@@ -1,0 +1,2 @@
+DIVERGENCE at landmark 0 pc=0x0: empty/torn trace: no readable records
+repro: retrace replay /private/tmp/claude-501/m47-abort/cleanA.bin

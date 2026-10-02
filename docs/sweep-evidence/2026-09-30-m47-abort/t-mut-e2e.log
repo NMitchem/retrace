@@ -1,0 +1,25 @@
+   Compiling retrace-core v0.0.0 (/private/tmp/claude-501/m47-abort/src-mut/crates/retrace-core)
+   Compiling retrace v0.0.0 (/private/tmp/claude-501/m47-abort/src-mut/crates/retrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.92s
+     Running tests/vmalign_e2e.rs (/private/tmp/claude-501/m47-abort/target-mut/aarch64-apple-darwin/debug/deps/vmalign_e2e-de3f9bf01167242b)
+
+running 1 test
+test every_masked_anywhere_map_comes_back_aligned_and_replays ... FAILED
+
+failures:
+
+---- every_masked_anywhere_map_comes_back_aligned_and_replays stdout ----
+
+thread 'every_masked_anywhere_map_comes_back_aligned_and_replays' (16748709) panicked at crates/retrace/tests/util/mod.rs:224:5:
+assertion `left == right` failed: rung guest stdout mismatch — did it reach main? got "trap kr=0 aligned=0\nmig kr=0 aligned=0\ntrap-reserve kr=0 aligned=0\nmig-reserve kr=0 aligned=0\ntrap-hinted kr=0 aligned=0\n", want "trap kr=0 aligned=1\nmig kr=0 aligned=1\ntrap-reserve kr=0 aligned=1\nmig-reserve kr=0 aligned=1\ntrap-hinted kr=0 aligned=1\n"
+  left: [116, 114, 97, 112, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 48, 10, 109, 105, 103, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 48, 10, 116, 114, 97, 112, 45, 114, 101, 115, 101, 114, 118, 101, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 48, 10, 109, 105, 103, 45, 114, 101, 115, 101, 114, 118, 101, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 48, 10, 116, 114, 97, 112, 45, 104, 105, 110, 116, 101, 100, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 48, 10]
+ right: [116, 114, 97, 112, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 49, 10, 109, 105, 103, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 49, 10, 116, 114, 97, 112, 45, 114, 101, 115, 101, 114, 118, 101, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 49, 10, 109, 105, 103, 45, 114, 101, 115, 101, 114, 118, 101, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 49, 10, 116, 114, 97, 112, 45, 104, 105, 110, 116, 101, 100, 32, 107, 114, 61, 48, 32, 97, 108, 105, 103, 110, 101, 100, 61, 49, 10]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    every_masked_anywhere_map_comes_back_aligned_and_replays
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.80s
+
+error: test failed, to rerun pass `-p retrace --test vmalign_e2e`

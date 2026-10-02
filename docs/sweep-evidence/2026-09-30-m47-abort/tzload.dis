@@ -1,0 +1,587 @@
+(lldb) target create /Applications/Xcode.app/Contents/Developer/usr/bin/git
+Current executable set to '/Applications/Xcode.app/Contents/Developer/usr/bin/git' (arm64).
+(lldb) image lookup -a 0x1803874dc
+      Address: libsystem_c.dylib[0x00000001803874dc] (libsystem_c.dylib.__TEXT.__text + 26148)
+      Summary: libsystem_c.dylib`tzload + 252
+(lldb) disassemble -n tzload
+libsystem_c.dylib`tzload:
+libsystem_c.dylib[0x1803873e0] <+0>:    pacibsp 
+libsystem_c.dylib[0x1803873e4] <+4>:    sub    sp, sp, #0x110
+libsystem_c.dylib[0x1803873e8] <+8>:    stp    x28, x27, [sp, #0xb0]
+libsystem_c.dylib[0x1803873ec] <+12>:   stp    x26, x25, [sp, #0xc0]
+libsystem_c.dylib[0x1803873f0] <+16>:   stp    x24, x23, [sp, #0xd0]
+libsystem_c.dylib[0x1803873f4] <+20>:   stp    x22, x21, [sp, #0xe0]
+libsystem_c.dylib[0x1803873f8] <+24>:   stp    x20, x19, [sp, #0xf0]
+libsystem_c.dylib[0x1803873fc] <+28>:   stp    x29, x30, [sp, #0x100]
+libsystem_c.dylib[0x180387400] <+32>:   add    x29, sp, #0x100
+libsystem_c.dylib[0x180387404] <+36>:   mov    x21, x3
+libsystem_c.dylib[0x180387408] <+40>:   mov    x20, x2
+libsystem_c.dylib[0x18038740c] <+44>:   mov    x19, x1
+libsystem_c.dylib[0x180387410] <+48>:   mov    x23, x0
+libsystem_c.dylib[0x180387414] <+52>:   str    xzr, [x1, #0x10]
+libsystem_c.dylib[0x180387418] <+56>:   cbz    x0, 0x180387458           ; <+120>
+libsystem_c.dylib[0x18038741c] <+60>:   bl     0x1803f97fc               ; symbol stub for: issetugid
+libsystem_c.dylib[0x180387420] <+64>:   cbz    w0, 0x180387458           ; <+120>
+libsystem_c.dylib[0x180387424] <+68>:   ldrb   w8, [x23]
+libsystem_c.dylib[0x180387428] <+72>:   cmp    w8, #0x2f
+libsystem_c.dylib[0x18038742c] <+76>:   b.eq   0x180387454               ; <+116>
+libsystem_c.dylib[0x180387430] <+80>:   cmp    w8, #0x3a
+libsystem_c.dylib[0x180387434] <+84>:   b.ne   0x180387444               ; <+100>
+libsystem_c.dylib[0x180387438] <+88>:   ldrb   w8, [x23, #0x1]
+libsystem_c.dylib[0x18038743c] <+92>:   cmp    w8, #0x2f
+libsystem_c.dylib[0x180387440] <+96>:   b.eq   0x180387454               ; <+116>
+libsystem_c.dylib[0x180387444] <+100>:  mov    x0, x23
+libsystem_c.dylib[0x180387448] <+104>:  mov    w1, #0x2e                 ; =46 
+libsystem_c.dylib[0x18038744c] <+108>:  bl     0x1803f9e6c               ; symbol stub for: strmode
+libsystem_c.dylib[0x180387450] <+112>:  cbz    x0, 0x180387458           ; <+120>
+libsystem_c.dylib[0x180387454] <+116>:  mov    x23, #0x0                 ; =0 
+libsystem_c.dylib[0x180387458] <+120>:  cbz    x20, 0x180387460          ; <+128>
+libsystem_c.dylib[0x18038745c] <+124>:  strb   wzr, [x20]
+libsystem_c.dylib[0x180387460] <+128>:  movi.2d v0, #0000000000000000
+libsystem_c.dylib[0x180387464] <+132>:  stp    q0, q0, [sp, #0x80]
+libsystem_c.dylib[0x180387468] <+136>:  stp    q0, q0, [sp, #0x60]
+libsystem_c.dylib[0x18038746c] <+140>:  stp    q0, q0, [sp, #0x40]
+libsystem_c.dylib[0x180387470] <+144>:  stp    q0, q0, [sp, #0x20]
+libsystem_c.dylib[0x180387474] <+148>:  str    q0, [sp, #0x10]
+libsystem_c.dylib[0x180387478] <+152>:  mov    w0, #0x401                ; =1025 
+libsystem_c.dylib[0x18038747c] <+156>:  mov    w1, #0x840                ; =2112 
+libsystem_c.dylib[0x180387480] <+160>:  movk   w1, #0x55, lsl #16
+libsystem_c.dylib[0x180387484] <+164>:  bl     0x1803f98dc               ; symbol stub for: malloc_type_malloc
+libsystem_c.dylib[0x180387488] <+168>:  cbz    x0, 0x1803874cc           ; <+236>
+libsystem_c.dylib[0x18038748c] <+172>:  mov    x22, x0
+libsystem_c.dylib[0x180387490] <+176>:  adrp   x8, 119
+libsystem_c.dylib[0x180387494] <+180>:  add    x8, x8, #0xd70            ; "/etc/localtime"
+libsystem_c.dylib[0x180387498] <+184>:  cmp    x23, #0x0
+libsystem_c.dylib[0x18038749c] <+188>:  csel   x8, x8, x23, eq
+libsystem_c.dylib[0x1803874a0] <+192>:  mov    x9, x8
+libsystem_c.dylib[0x1803874a4] <+196>:  ldrb   w10, [x9], #0x1
+libsystem_c.dylib[0x1803874a8] <+200>:  cmp    w10, #0x3a
+libsystem_c.dylib[0x1803874ac] <+204>:  csel   x23, x8, x9, ne
+libsystem_c.dylib[0x1803874b0] <+208>:  ldrb   w8, [x23]
+libsystem_c.dylib[0x1803874b4] <+212>:  cmp    w8, #0x2f
+libsystem_c.dylib[0x1803874b8] <+216>:  b.ne   0x1803874e0               ; <+256>
+libsystem_c.dylib[0x1803874bc] <+220>:  mov    w24, #0x0                 ; =0 
+libsystem_c.dylib[0x1803874c0] <+224>:  cbnz   x20, 0x180387544          ; <+356>
+libsystem_c.dylib[0x1803874c4] <+228>:  tbz    w24, #0x0, 0x180387564    ; <+388>
+libsystem_c.dylib[0x1803874c8] <+232>:  b      0x180387574               ; <+404>
+libsystem_c.dylib[0x1803874cc] <+236>:  mov    x20, #0x0                 ; =0 
+libsystem_c.dylib[0x1803874d0] <+240>:  mov    w22, #-0x1                ; =-1 
+libsystem_c.dylib[0x1803874d4] <+244>:  mov    x0, x20
+libsystem_c.dylib[0x1803874d8] <+248>:  bl     0x1803f95ec               ; symbol stub for: free
+libsystem_c.dylib[0x1803874dc] <+252>:  b      0x180387a00               ; <+1568>
+libsystem_c.dylib[0x1803874e0] <+256>:  mov    x0, x23
+libsystem_c.dylib[0x1803874e4] <+260>:  bl     0x1803f9ebc               ; symbol stub for: strsignal_r
+libsystem_c.dylib[0x1803874e8] <+264>:  sub    x8, x0, #0x3e6
+libsystem_c.dylib[0x1803874ec] <+268>:  cmn    x8, #0x401
+libsystem_c.dylib[0x1803874f0] <+272>:  b.ls   0x1803879f4               ; <+1556>
+libsystem_c.dylib[0x1803874f4] <+276>:  adrp   x8, 119
+libsystem_c.dylib[0x1803874f8] <+280>:  add    x8, x8, #0x4e1            ; "/var/db/timezone/zoneinfo"
+libsystem_c.dylib[0x1803874fc] <+284>:  ldr    q0, [x8]
+libsystem_c.dylib[0x180387500] <+288>:  str    q0, [x22]
+libsystem_c.dylib[0x180387504] <+292>:  ldur   q0, [x8, #0xa]
+libsystem_c.dylib[0x180387508] <+296>:  stur   q0, [x22, #0xa]
+libsystem_c.dylib[0x18038750c] <+300>:  mov    x0, x22
+libsystem_c.dylib[0x180387510] <+304>:  bl     0x1803f9ebc               ; symbol stub for: strsignal_r
+libsystem_c.dylib[0x180387514] <+308>:  mov    w8, #0x2f                 ; =47 
+libsystem_c.dylib[0x180387518] <+312>:  strh   w8, [x22, x0]
+libsystem_c.dylib[0x18038751c] <+316>:  mov    x0, x22
+libsystem_c.dylib[0x180387520] <+320>:  mov    x1, x23
+libsystem_c.dylib[0x180387524] <+324>:  bl     0x1803883a8               ; strcat
+libsystem_c.dylib[0x180387528] <+328>:  mov    x0, x23
+libsystem_c.dylib[0x18038752c] <+332>:  mov    w1, #0x2e                 ; =46 
+libsystem_c.dylib[0x180387530] <+336>:  bl     0x1803f9e6c               ; symbol stub for: strmode
+libsystem_c.dylib[0x180387534] <+340>:  cmp    x0, #0x0
+libsystem_c.dylib[0x180387538] <+344>:  cset   w24, eq
+libsystem_c.dylib[0x18038753c] <+348>:  mov    x23, x22
+libsystem_c.dylib[0x180387540] <+352>:  cbz    x20, 0x1803874c4          ; <+228>
+libsystem_c.dylib[0x180387544] <+356>:  mov    x0, x23
+libsystem_c.dylib[0x180387548] <+360>:  bl     0x1803f9ebc               ; symbol stub for: strsignal_r
+libsystem_c.dylib[0x18038754c] <+364>:  cmp    x0, #0x400
+libsystem_c.dylib[0x180387550] <+368>:  b.hi   0x1803879fc               ; <+1564>
+libsystem_c.dylib[0x180387554] <+372>:  mov    x0, x20
+libsystem_c.dylib[0x180387558] <+376>:  mov    x1, x23
+libsystem_c.dylib[0x18038755c] <+380>:  bl     0x1803f9e8c               ; symbol stub for: strnstr
+libsystem_c.dylib[0x180387560] <+384>:  tbnz   w24, #0x0, 0x180387574    ; <+404>
+libsystem_c.dylib[0x180387564] <+388>:  mov    x0, x23
+libsystem_c.dylib[0x180387568] <+392>:  mov    w1, #0x4                  ; =4 
+libsystem_c.dylib[0x18038756c] <+396>:  bl     0x1803f935c               ; symbol stub for: access
+libsystem_c.dylib[0x180387570] <+400>:  cbnz   w0, 0x1803879f4           ; <+1556>
+libsystem_c.dylib[0x180387574] <+404>:  mov    x0, x23
+libsystem_c.dylib[0x180387578] <+408>:  mov    w1, #0x0                  ; =0 
+libsystem_c.dylib[0x18038757c] <+412>:  bl     0x1803f9a0c               ; symbol stub for: open$NOCANCEL
+libsystem_c.dylib[0x180387580] <+416>:  cmn    w0, #0x1
+libsystem_c.dylib[0x180387584] <+420>:  b.eq   0x1803879f4               ; <+1556>
+libsystem_c.dylib[0x180387588] <+424>:  mov    x23, x0
+libsystem_c.dylib[0x18038758c] <+428>:  add    x1, sp, #0x10
+libsystem_c.dylib[0x180387590] <+432>:  bl     0x1803f961c               ; symbol stub for: fstat
+libsystem_c.dylib[0x180387594] <+436>:  mov    x20, x0
+libsystem_c.dylib[0x180387598] <+440>:  ldrsh  w24, [sp, #0x14]
+libsystem_c.dylib[0x18038759c] <+444>:  mov    x0, x22
+libsystem_c.dylib[0x1803875a0] <+448>:  bl     0x1803f95ec               ; symbol stub for: free
+libsystem_c.dylib[0x1803875a4] <+452>:  tbnz   w20, #0x1f, 0x180387a24   ; <+1604>
+libsystem_c.dylib[0x1803875a8] <+456>:  cmn    w24, #0x7, lsl #12        ; =0x7000 
+libsystem_c.dylib[0x1803875ac] <+460>:  b.ge   0x180387a24               ; <+1604>
+libsystem_c.dylib[0x1803875b0] <+464>:  mov    x1, #0xe700               ; =59136 
+libsystem_c.dylib[0x1803875b4] <+468>:  movk   x1, #0xbe76, lsl #16
+libsystem_c.dylib[0x1803875b8] <+472>:  movk   x1, #0x40, lsl #32
+libsystem_c.dylib[0x1803875bc] <+476>:  movk   x1, #0x100, lsl #48
+libsystem_c.dylib[0x1803875c0] <+480>:  mov    w0, #0xa1e8               ; =41448 
+libsystem_c.dylib[0x1803875c4] <+484>:  bl     0x1803f98dc               ; symbol stub for: malloc_type_malloc
+libsystem_c.dylib[0x1803875c8] <+488>:  mov    x20, x0
+libsystem_c.dylib[0x1803875cc] <+492>:  cbz    x0, 0x1803874d0           ; <+240>
+libsystem_c.dylib[0x1803875d0] <+496>:  mov    x0, x23
+libsystem_c.dylib[0x1803875d4] <+500>:  mov    x1, x20
+libsystem_c.dylib[0x1803875d8] <+504>:  mov    w2, #0xa1e8               ; =41448 
+libsystem_c.dylib[0x1803875dc] <+508>:  bl     0x1803f9cfc               ; symbol stub for: read$NOCANCEL
+libsystem_c.dylib[0x1803875e0] <+512>:  mov    x24, x0
+libsystem_c.dylib[0x1803875e4] <+516>:  mov    x0, x23
+libsystem_c.dylib[0x1803875e8] <+520>:  bl     0x1803f946c               ; symbol stub for: close$NOCANCEL
+libsystem_c.dylib[0x1803875ec] <+524>:  mov    w22, #-0x1                ; =-1 
+libsystem_c.dylib[0x1803875f0] <+528>:  tbnz   w0, #0x1f, 0x1803874d4    ; <+244>
+libsystem_c.dylib[0x1803875f4] <+532>:  cmp    w24, #0x1
+libsystem_c.dylib[0x1803875f8] <+536>:  b.lt   0x1803874d4               ; <+244>
+libsystem_c.dylib[0x1803875fc] <+540>:  mov    w8, #0x4248               ; =16968 
+libsystem_c.dylib[0x180387600] <+544>:  mov    w9, #0x2598               ; =9624 
+libsystem_c.dylib[0x180387604] <+548>:  add    x8, x19, x8
+libsystem_c.dylib[0x180387608] <+552>:  add    x9, x19, x9
+libsystem_c.dylib[0x18038760c] <+556>:  add    x10, x20, #0x2c
+libsystem_c.dylib[0x180387610] <+560>:  add    x23, x19, #0x18
+libsystem_c.dylib[0x180387614] <+564>:  mov    w11, #0x2a48              ; =10824 
+libsystem_c.dylib[0x180387618] <+568>:  add    x11, x19, x11
+libsystem_c.dylib[0x18038761c] <+572>:  mov    w12, #0x4448              ; =17480 
+libsystem_c.dylib[0x180387620] <+576>:  add    x12, x19, x12
+libsystem_c.dylib[0x180387624] <+580>:  mov    w13, #0x4                 ; =4 
+libsystem_c.dylib[0x180387628] <+584>:  mov    w14, #0x18                ; =24 
+libsystem_c.dylib[0x18038762c] <+588>:  mov    w15, #0x6                 ; =6 
+libsystem_c.dylib[0x180387630] <+592>:  mov    w16, #0x2                 ; =2 
+libsystem_c.dylib[0x180387634] <+596>:  ldrsb  w17, [x20, #0x18]
+libsystem_c.dylib[0x180387638] <+600>:  asr    w0, w17, #7
+libsystem_c.dylib[0x18038763c] <+604>:  mov    w17, #0x18                ; =24 
+libsystem_c.dylib[0x180387640] <+608>:  ldrb   w1, [x20, x17]
+libsystem_c.dylib[0x180387644] <+612>:  orr    w0, w1, w0, lsl #8
+libsystem_c.dylib[0x180387648] <+616>:  add    x17, x17, #0x1
+libsystem_c.dylib[0x18038764c] <+620>:  cmp    x17, #0x1c
+libsystem_c.dylib[0x180387650] <+624>:  b.ne   0x180387640               ; <+608>
+libsystem_c.dylib[0x180387654] <+628>:  ldrsb  w17, [x20, #0x14]
+libsystem_c.dylib[0x180387658] <+632>:  asr    w17, w17, #7
+libsystem_c.dylib[0x18038765c] <+636>:  mov    w1, #0x14                 ; =20 
+libsystem_c.dylib[0x180387660] <+640>:  ldrb   w2, [x20, x1]
+libsystem_c.dylib[0x180387664] <+644>:  orr    w17, w2, w17, lsl #8
+libsystem_c.dylib[0x180387668] <+648>:  add    x1, x1, #0x1
+libsystem_c.dylib[0x18038766c] <+652>:  cmp    x1, #0x18
+libsystem_c.dylib[0x180387670] <+656>:  b.ne   0x180387660               ; <+640>
+libsystem_c.dylib[0x180387674] <+660>:  ldrsb  w1, [x20, #0x1c]
+libsystem_c.dylib[0x180387678] <+664>:  asr    w5, w1, #7
+libsystem_c.dylib[0x18038767c] <+668>:  mov    w1, #0x1c                 ; =28 
+libsystem_c.dylib[0x180387680] <+672>:  ldrb   w3, [x20, x1]
+libsystem_c.dylib[0x180387684] <+676>:  orr    w5, w3, w5, lsl #8
+libsystem_c.dylib[0x180387688] <+680>:  add    x1, x1, #0x1
+libsystem_c.dylib[0x18038768c] <+684>:  cmp    x1, #0x20
+libsystem_c.dylib[0x180387690] <+688>:  b.ne   0x180387680               ; <+672>
+libsystem_c.dylib[0x180387694] <+692>:  str    w5, [x19]
+libsystem_c.dylib[0x180387698] <+696>:  ldrsb  w1, [x20, #0x20]
+libsystem_c.dylib[0x18038769c] <+700>:  asr    w1, w1, #7
+libsystem_c.dylib[0x1803876a0] <+704>:  mov    w2, #0x20                 ; =32 
+libsystem_c.dylib[0x1803876a4] <+708>:  ldrb   w4, [x20, x2]
+libsystem_c.dylib[0x1803876a8] <+712>:  orr    w1, w4, w1, lsl #8
+libsystem_c.dylib[0x1803876ac] <+716>:  add    x2, x2, #0x1
+libsystem_c.dylib[0x1803876b0] <+720>:  cmp    x2, #0x24
+libsystem_c.dylib[0x1803876b4] <+724>:  b.ne   0x1803876a4               ; <+708>
+libsystem_c.dylib[0x1803876b8] <+728>:  str    w1, [x19, #0x4]
+libsystem_c.dylib[0x1803876bc] <+732>:  ldrsb  w2, [x20, #0x24]
+libsystem_c.dylib[0x1803876c0] <+736>:  asr    w2, w2, #7
+libsystem_c.dylib[0x1803876c4] <+740>:  mov    w4, #0x24                 ; =36 
+libsystem_c.dylib[0x1803876c8] <+744>:  ldrb   w6, [x20, x4]
+libsystem_c.dylib[0x1803876cc] <+748>:  orr    w2, w6, w2, lsl #8
+libsystem_c.dylib[0x1803876d0] <+752>:  add    x4, x4, #0x1
+libsystem_c.dylib[0x1803876d4] <+756>:  cmp    x4, #0x28
+libsystem_c.dylib[0x1803876d8] <+760>:  b.ne   0x1803876c8               ; <+744>
+libsystem_c.dylib[0x1803876dc] <+764>:  str    w2, [x19, #0x8]
+libsystem_c.dylib[0x1803876e0] <+768>:  ldrsb  w4, [x20, #0x28]
+libsystem_c.dylib[0x1803876e4] <+772>:  asr    w7, w4, #7
+libsystem_c.dylib[0x1803876e8] <+776>:  mov    w4, #0x28                 ; =40 
+libsystem_c.dylib[0x1803876ec] <+780>:  ldrb   w6, [x20, x4]
+libsystem_c.dylib[0x1803876f0] <+784>:  orr    w7, w6, w7, lsl #8
+libsystem_c.dylib[0x1803876f4] <+788>:  add    x4, x4, #0x1
+libsystem_c.dylib[0x1803876f8] <+792>:  cmp    x4, #0x2c
+libsystem_c.dylib[0x1803876fc] <+796>:  b.ne   0x1803876ec               ; <+780>
+libsystem_c.dylib[0x180387700] <+800>:  str    w7, [x19, #0xc]
+libsystem_c.dylib[0x180387704] <+804>:  mov    w22, #-0x1                ; =-1 
+libsystem_c.dylib[0x180387708] <+808>:  cmp    w5, #0x32
+libsystem_c.dylib[0x18038770c] <+812>:  b.hi   0x1803874d4               ; <+244>
+libsystem_c.dylib[0x180387710] <+816>:  sub    w4, w2, #0x101
+libsystem_c.dylib[0x180387714] <+820>:  cmn    w4, #0x100
+libsystem_c.dylib[0x180387718] <+824>:  b.lo   0x1803874d4               ; <+244>
+libsystem_c.dylib[0x18038771c] <+828>:  cmp    w1, #0x4b0
+libsystem_c.dylib[0x180387720] <+832>:  b.hi   0x1803874d4               ; <+244>
+libsystem_c.dylib[0x180387724] <+836>:  cmp    w7, #0x32
+libsystem_c.dylib[0x180387728] <+840>:  b.hi   0x1803874d4               ; <+244>
+libsystem_c.dylib[0x18038772c] <+844>:  cbz    w0, 0x180387738           ; <+856>
+libsystem_c.dylib[0x180387730] <+848>:  cmp    w2, w0
+libsystem_c.dylib[0x180387734] <+852>:  b.ne   0x1803874d4               ; <+244>
+libsystem_c.dylib[0x180387738] <+856>:  cbz    w17, 0x180387744          ; <+868>
+libsystem_c.dylib[0x18038773c] <+860>:  cmp    w2, w17
+libsystem_c.dylib[0x180387740] <+864>:  b.ne   0x1803874d4               ; <+244>
+libsystem_c.dylib[0x180387744] <+868>:  sxtw   x4, w24
+libsystem_c.dylib[0x180387748] <+872>:  sub    x4, x4, #0x2c
+libsystem_c.dylib[0x18038774c] <+876>:  orr    w22, w13, #0x1
+libsystem_c.dylib[0x180387750] <+880>:  add    w25, w13, #0x4
+libsystem_c.dylib[0x180387754] <+884>:  add    w26, w17, w0
+libsystem_c.dylib[0x180387758] <+888>:  madd   w25, w5, w25, w26
+libsystem_c.dylib[0x18038775c] <+892>:  madd   w22, w1, w22, w25
+libsystem_c.dylib[0x180387760] <+896>:  madd   w22, w2, w15, w22
+libsystem_c.dylib[0x180387764] <+900>:  add    w22, w22, w7
+libsystem_c.dylib[0x180387768] <+904>:  cmp    x4, x22
+libsystem_c.dylib[0x18038776c] <+908>:  b.lt   0x1803874d0               ; <+240>
+libsystem_c.dylib[0x180387770] <+912>:  mov    x4, x10
+libsystem_c.dylib[0x180387774] <+916>:  cbz    w1, 0x1803877fc           ; <+1052>
+libsystem_c.dylib[0x180387778] <+920>:  mov    x22, #0x0                 ; =0 
+libsystem_c.dylib[0x18038777c] <+924>:  mov    w25, w13
+libsystem_c.dylib[0x180387780] <+928>:  mov    x4, x10
+libsystem_c.dylib[0x180387784] <+932>:  ldrsb  w26, [x4]
+libsystem_c.dylib[0x180387788] <+936>:  sbfx   x26, x26, #7, #25
+libsystem_c.dylib[0x18038778c] <+940>:  cmp    w13, #0x4
+libsystem_c.dylib[0x180387790] <+944>:  b.ne   0x1803877b0               ; <+976>
+libsystem_c.dylib[0x180387794] <+948>:  mov    x27, #0x0                 ; =0 
+libsystem_c.dylib[0x180387798] <+952>:  ldrb   w28, [x4, x27]
+libsystem_c.dylib[0x18038779c] <+956>:  orr    x26, x28, x26, lsl #8
+libsystem_c.dylib[0x1803877a0] <+960>:  add    x27, x27, #0x1
+libsystem_c.dylib[0x1803877a4] <+964>:  cmp    x27, #0x4
+libsystem_c.dylib[0x1803877a8] <+968>:  b.ne   0x180387798               ; <+952>
+libsystem_c.dylib[0x1803877ac] <+972>:  b      0x1803877c8               ; <+1000>
+libsystem_c.dylib[0x1803877b0] <+976>:  mov    x27, #0x0                 ; =0 
+libsystem_c.dylib[0x1803877b4] <+980>:  ldrb   w28, [x4, x27]
+libsystem_c.dylib[0x1803877b8] <+984>:  orr    x26, x28, x26, lsl #8
+libsystem_c.dylib[0x1803877bc] <+988>:  add    x27, x27, #0x1
+libsystem_c.dylib[0x1803877c0] <+992>:  cmp    x27, #0x8
+libsystem_c.dylib[0x1803877c4] <+996>:  b.ne   0x1803877b4               ; <+980>
+libsystem_c.dylib[0x1803877c8] <+1000>: str    x26, [x23, x22, lsl #3]
+libsystem_c.dylib[0x1803877cc] <+1004>: add    x4, x4, x25
+libsystem_c.dylib[0x1803877d0] <+1008>: add    x22, x22, #0x1
+libsystem_c.dylib[0x1803877d4] <+1012>: cmp    x22, x1
+libsystem_c.dylib[0x1803877d8] <+1016>: b.ne   0x180387784               ; <+932>
+libsystem_c.dylib[0x1803877dc] <+1020>: mov    x22, x1
+libsystem_c.dylib[0x1803877e0] <+1024>: mov    x25, x9
+libsystem_c.dylib[0x1803877e4] <+1028>: ldrb   w26, [x4], #0x1
+libsystem_c.dylib[0x1803877e8] <+1032>: strb   w26, [x25], #0x1
+libsystem_c.dylib[0x1803877ec] <+1036>: cmp    w2, w26
+libsystem_c.dylib[0x1803877f0] <+1040>: b.le   0x1803874d0               ; <+240>
+libsystem_c.dylib[0x1803877f4] <+1044>: subs   x22, x22, #0x1
+libsystem_c.dylib[0x1803877f8] <+1048>: b.ne   0x1803877e4               ; <+1028>
+libsystem_c.dylib[0x1803877fc] <+1052>: mov    x22, #0x0                 ; =0 
+libsystem_c.dylib[0x180387800] <+1056>: mov    x25, #0x0                 ; =0 
+libsystem_c.dylib[0x180387804] <+1060>: ldrsb  w26, [x4]
+libsystem_c.dylib[0x180387808] <+1064>: sbfx   x26, x26, #7, #25
+libsystem_c.dylib[0x18038780c] <+1068>: ldrb   w27, [x4, x25]
+libsystem_c.dylib[0x180387810] <+1072>: orr    x26, x27, x26, lsl #8
+libsystem_c.dylib[0x180387814] <+1076>: add    x25, x25, #0x1
+libsystem_c.dylib[0x180387818] <+1080>: cmp    x25, #0x4
+libsystem_c.dylib[0x18038781c] <+1084>: b.ne   0x18038780c               ; <+1068>
+libsystem_c.dylib[0x180387820] <+1088>: madd   x25, x22, x14, x11
+libsystem_c.dylib[0x180387824] <+1092>: str    x26, [x25]
+libsystem_c.dylib[0x180387828] <+1096>: ldrb   w26, [x4, #0x4]
+libsystem_c.dylib[0x18038782c] <+1100>: str    w26, [x25, #0x8]
+libsystem_c.dylib[0x180387830] <+1104>: cmp    w26, #0x1
+libsystem_c.dylib[0x180387834] <+1108>: b.hi   0x1803874d0               ; <+240>
+libsystem_c.dylib[0x180387838] <+1112>: ldrb   w26, [x4, #0x5]
+libsystem_c.dylib[0x18038783c] <+1116>: str    w26, [x25, #0xc]
+libsystem_c.dylib[0x180387840] <+1120>: cmp    w7, w26
+libsystem_c.dylib[0x180387844] <+1124>: b.lt   0x1803874d0               ; <+240>
+libsystem_c.dylib[0x180387848] <+1128>: add    x4, x4, #0x6
+libsystem_c.dylib[0x18038784c] <+1132>: add    x22, x22, #0x1
+libsystem_c.dylib[0x180387850] <+1136>: cmp    x22, x2
+libsystem_c.dylib[0x180387854] <+1140>: b.ne   0x180387800               ; <+1056>
+libsystem_c.dylib[0x180387858] <+1144>: cmp    w7, #0x1
+libsystem_c.dylib[0x18038785c] <+1148>: b.lt   0x18038787c               ; <+1180>
+libsystem_c.dylib[0x180387860] <+1152>: mov    x7, x6
+libsystem_c.dylib[0x180387864] <+1156>: mov    x22, x8
+libsystem_c.dylib[0x180387868] <+1160>: ldrb   w25, [x4], #0x1
+libsystem_c.dylib[0x18038786c] <+1164>: strb   w25, [x22], #0x1
+libsystem_c.dylib[0x180387870] <+1168>: subs   x7, x7, #0x1
+libsystem_c.dylib[0x180387874] <+1172>: b.ne   0x180387868               ; <+1160>
+libsystem_c.dylib[0x180387878] <+1176>: b      0x180387880               ; <+1184>
+libsystem_c.dylib[0x18038787c] <+1180>: mov    x6, #0x0                  ; =0 
+libsystem_c.dylib[0x180387880] <+1184>: strb   wzr, [x8, x6]
+libsystem_c.dylib[0x180387884] <+1188>: cmp    w5, #0x1
+libsystem_c.dylib[0x180387888] <+1192>: b.lt   0x180387924               ; <+1348>
+libsystem_c.dylib[0x18038788c] <+1196>: mov    x5, #0x0                  ; =0 
+libsystem_c.dylib[0x180387890] <+1200>: mov    w6, w13
+libsystem_c.dylib[0x180387894] <+1204>: add    x7, x4, w13, uxtw
+libsystem_c.dylib[0x180387898] <+1208>: add    x22, x6, #0x4
+libsystem_c.dylib[0x18038789c] <+1212>: ldrsb  w25, [x4]
+libsystem_c.dylib[0x1803878a0] <+1216>: sbfx   x25, x25, #7, #25
+libsystem_c.dylib[0x1803878a4] <+1220>: cmp    w13, #0x4
+libsystem_c.dylib[0x1803878a8] <+1224>: b.ne   0x1803878c8               ; <+1256>
+libsystem_c.dylib[0x1803878ac] <+1228>: mov    x26, #0x0                 ; =0 
+libsystem_c.dylib[0x1803878b0] <+1232>: ldrb   w27, [x4, x26]
+libsystem_c.dylib[0x1803878b4] <+1236>: orr    x25, x27, x25, lsl #8
+libsystem_c.dylib[0x1803878b8] <+1240>: add    x26, x26, #0x1
+libsystem_c.dylib[0x1803878bc] <+1244>: cmp    x26, #0x4
+libsystem_c.dylib[0x1803878c0] <+1248>: b.ne   0x1803878b0               ; <+1232>
+libsystem_c.dylib[0x1803878c4] <+1252>: b      0x1803878e0               ; <+1280>
+libsystem_c.dylib[0x1803878c8] <+1256>: mov    x26, #0x0                 ; =0 
+libsystem_c.dylib[0x1803878cc] <+1260>: ldrb   w27, [x4, x26]
+libsystem_c.dylib[0x1803878d0] <+1264>: orr    x25, x27, x25, lsl #8
+libsystem_c.dylib[0x1803878d4] <+1268>: add    x26, x26, #0x1
+libsystem_c.dylib[0x1803878d8] <+1272>: cmp    x26, #0x8
+libsystem_c.dylib[0x1803878dc] <+1276>: b.ne   0x1803878cc               ; <+1260>
+libsystem_c.dylib[0x1803878e0] <+1280>: mov    x26, #0x0                 ; =0 
+libsystem_c.dylib[0x1803878e4] <+1284>: add    x27, x12, x5, lsl #4
+libsystem_c.dylib[0x1803878e8] <+1288>: str    x25, [x27]
+libsystem_c.dylib[0x1803878ec] <+1292>: add    x4, x4, x6
+libsystem_c.dylib[0x1803878f0] <+1296>: ldrsb  w25, [x4]
+libsystem_c.dylib[0x1803878f4] <+1300>: sbfx   x25, x25, #7, #25
+libsystem_c.dylib[0x1803878f8] <+1304>: ldrb   w28, [x7, x26]
+libsystem_c.dylib[0x1803878fc] <+1308>: orr    x25, x28, x25, lsl #8
+libsystem_c.dylib[0x180387900] <+1312>: add    x26, x26, #0x1
+libsystem_c.dylib[0x180387904] <+1316>: cmp    x26, #0x4
+libsystem_c.dylib[0x180387908] <+1320>: b.ne   0x1803878f8               ; <+1304>
+libsystem_c.dylib[0x18038790c] <+1324>: str    x25, [x27, #0x8]
+libsystem_c.dylib[0x180387910] <+1328>: add    x4, x4, #0x4
+libsystem_c.dylib[0x180387914] <+1332>: add    x5, x5, #0x1
+libsystem_c.dylib[0x180387918] <+1336>: add    x7, x7, x22
+libsystem_c.dylib[0x18038791c] <+1340>: cmp    x5, x3
+libsystem_c.dylib[0x180387920] <+1344>: b.ne   0x18038789c               ; <+1212>
+libsystem_c.dylib[0x180387924] <+1348>: mov    x3, x2
+libsystem_c.dylib[0x180387928] <+1352>: mov    w5, #0x2a58               ; =10840 
+libsystem_c.dylib[0x18038792c] <+1356>: cbz    w0, 0x180387944           ; <+1380>
+libsystem_c.dylib[0x180387930] <+1360>: ldrsb  w6, [x4], #0x1
+libsystem_c.dylib[0x180387934] <+1364>: str    w6, [x19, x5]
+libsystem_c.dylib[0x180387938] <+1368>: cmp    w6, #0x1
+libsystem_c.dylib[0x18038793c] <+1372>: b.hi   0x1803874d0               ; <+240>
+libsystem_c.dylib[0x180387940] <+1376>: b      0x180387948               ; <+1384>
+libsystem_c.dylib[0x180387944] <+1380>: str    wzr, [x19, x5]
+libsystem_c.dylib[0x180387948] <+1384>: add    x5, x5, #0x18
+libsystem_c.dylib[0x18038794c] <+1388>: subs   x3, x3, #0x1
+libsystem_c.dylib[0x180387950] <+1392>: b.ne   0x18038792c               ; <+1356>
+libsystem_c.dylib[0x180387954] <+1396>: mov    w0, #0x2a5c               ; =10844 
+libsystem_c.dylib[0x180387958] <+1400>: cbz    w17, 0x180387970          ; <+1424>
+libsystem_c.dylib[0x18038795c] <+1404>: ldrsb  w3, [x4], #0x1
+libsystem_c.dylib[0x180387960] <+1408>: str    w3, [x19, x0]
+libsystem_c.dylib[0x180387964] <+1412>: cmp    w3, #0x1
+libsystem_c.dylib[0x180387968] <+1416>: b.hi   0x1803874d0               ; <+240>
+libsystem_c.dylib[0x18038796c] <+1420>: b      0x180387974               ; <+1428>
+libsystem_c.dylib[0x180387970] <+1424>: str    wzr, [x19, x0]
+libsystem_c.dylib[0x180387974] <+1428>: add    x0, x0, #0x18
+libsystem_c.dylib[0x180387978] <+1432>: subs   x2, x2, #0x1
+libsystem_c.dylib[0x18038797c] <+1436>: b.ne   0x180387958               ; <+1400>
+libsystem_c.dylib[0x180387980] <+1440>: mov    x17, #0x0                 ; =0 
+libsystem_c.dylib[0x180387984] <+1444>: cmp    w1, #0x2
+libsystem_c.dylib[0x180387988] <+1448>: csel   w0, w1, w16, gt
+libsystem_c.dylib[0x18038798c] <+1452>: sub    w0, w0, #0x2
+libsystem_c.dylib[0x180387990] <+1456>: cmp    x0, x17
+libsystem_c.dylib[0x180387994] <+1460>: b.eq   0x1803879b0               ; <+1488>
+libsystem_c.dylib[0x180387998] <+1464>: add    x1, x19, x17, lsl #3
+libsystem_c.dylib[0x18038799c] <+1468>: add    x17, x17, #0x1
+libsystem_c.dylib[0x1803879a0] <+1472>: ldp    x2, x1, [x1, #0x18]
+libsystem_c.dylib[0x1803879a4] <+1476>: cmp    x2, x1
+libsystem_c.dylib[0x1803879a8] <+1480>: b.le   0x180387990               ; <+1456>
+libsystem_c.dylib[0x1803879ac] <+1484>: str    w17, [x19, #0x4]
+libsystem_c.dylib[0x1803879b0] <+1488>: ldrb   w17, [x20, #0x4]
+libsystem_c.dylib[0x1803879b4] <+1492>: cbz    w17, 0x180387a30          ; <+1616>
+libsystem_c.dylib[0x1803879b8] <+1496>: sub    w17, w20, w4
+libsystem_c.dylib[0x1803879bc] <+1500>: add    w17, w24, w17
+libsystem_c.dylib[0x1803879c0] <+1504>: cmp    w17, #0x1
+libsystem_c.dylib[0x1803879c4] <+1508>: b.lt   0x1803879e0               ; <+1536>
+libsystem_c.dylib[0x1803879c8] <+1512>: mov    x0, x17
+libsystem_c.dylib[0x1803879cc] <+1516>: mov    x1, x20
+libsystem_c.dylib[0x1803879d0] <+1520>: ldrb   w2, [x4], #0x1
+libsystem_c.dylib[0x1803879d4] <+1524>: strb   w2, [x1], #0x1
+libsystem_c.dylib[0x1803879d8] <+1528>: subs   x0, x0, #0x1
+libsystem_c.dylib[0x1803879dc] <+1532>: b.ne   0x1803879d0               ; <+1520>
+libsystem_c.dylib[0x1803879e0] <+1536>: mov    x24, x17
+libsystem_c.dylib[0x1803879e4] <+1540>: cmp    w13, #0x5
+libsystem_c.dylib[0x1803879e8] <+1544>: lsl    w13, w13, #1
+libsystem_c.dylib[0x1803879ec] <+1548>: b.lo   0x180387634               ; <+596>
+libsystem_c.dylib[0x1803879f0] <+1552>: b      0x180387a34               ; <+1620>
+libsystem_c.dylib[0x1803879f4] <+1556>: mov    x0, x22
+libsystem_c.dylib[0x1803879f8] <+1560>: bl     0x1803f95ec               ; symbol stub for: free
+libsystem_c.dylib[0x1803879fc] <+1564>: mov    w22, #-0x1                ; =-1 
+libsystem_c.dylib[0x180387a00] <+1568>: mov    x0, x22
+libsystem_c.dylib[0x180387a04] <+1572>: ldp    x29, x30, [sp, #0x100]
+libsystem_c.dylib[0x180387a08] <+1576>: ldp    x20, x19, [sp, #0xf0]
+libsystem_c.dylib[0x180387a0c] <+1580>: ldp    x22, x21, [sp, #0xe0]
+libsystem_c.dylib[0x180387a10] <+1584>: ldp    x24, x23, [sp, #0xd0]
+libsystem_c.dylib[0x180387a14] <+1588>: ldp    x26, x25, [sp, #0xc0]
+libsystem_c.dylib[0x180387a18] <+1592>: ldp    x28, x27, [sp, #0xb0]
+libsystem_c.dylib[0x180387a1c] <+1596>: add    sp, sp, #0x110
+libsystem_c.dylib[0x180387a20] <+1600>: retab  
+libsystem_c.dylib[0x180387a24] <+1604>: mov    x0, x23
+libsystem_c.dylib[0x180387a28] <+1608>: bl     0x1803f946c               ; symbol stub for: close$NOCANCEL
+libsystem_c.dylib[0x180387a2c] <+1612>: b      0x1803879fc               ; <+1564>
+libsystem_c.dylib[0x180387a30] <+1616>: mov    x17, x24
+libsystem_c.dylib[0x180387a34] <+1620>: stp    x11, x9, [sp]
+libsystem_c.dylib[0x180387a38] <+1624>: cbz    w21, 0x180387c04          ; <+2084>
+libsystem_c.dylib[0x180387a3c] <+1628>: cmp    w17, #0x2
+libsystem_c.dylib[0x180387a40] <+1632>: b.le   0x180387c04               ; <+2084>
+libsystem_c.dylib[0x180387a44] <+1636>: mov    x24, x8
+libsystem_c.dylib[0x180387a48] <+1640>: ldrb   w8, [x20]
+libsystem_c.dylib[0x180387a4c] <+1644>: cmp    w8, #0xa
+libsystem_c.dylib[0x180387a50] <+1648>: b.ne   0x180387c04               ; <+2084>
+libsystem_c.dylib[0x180387a54] <+1652>: sub    w22, w17, #0x1
+libsystem_c.dylib[0x180387a58] <+1656>: ldrb   w8, [x20, w22, uxtw]
+libsystem_c.dylib[0x180387a5c] <+1660>: cmp    w8, #0xa
+libsystem_c.dylib[0x180387a60] <+1664>: b.ne   0x180387c04               ; <+2084>
+libsystem_c.dylib[0x180387a64] <+1668>: ldr    w8, [x19, #0x8]
+libsystem_c.dylib[0x180387a68] <+1672>: cmp    w8, #0xfe
+libsystem_c.dylib[0x180387a6c] <+1676>: b.gt   0x180387c04               ; <+2084>
+libsystem_c.dylib[0x180387a70] <+1680>: mov    x1, #0xc985               ; =51589 
+libsystem_c.dylib[0x180387a74] <+1684>: movk   x1, #0x2151, lsl #16
+libsystem_c.dylib[0x180387a78] <+1688>: movk   x1, #0x40, lsl #32
+libsystem_c.dylib[0x180387a7c] <+1692>: movk   x1, #0x100, lsl #48
+libsystem_c.dylib[0x180387a80] <+1696>: mov    w0, #0x4768               ; =18280 
+libsystem_c.dylib[0x180387a84] <+1700>: bl     0x1803f98dc               ; symbol stub for: malloc_type_malloc
+libsystem_c.dylib[0x180387a88] <+1704>: cbz    x0, 0x1803874d0           ; <+240>
+libsystem_c.dylib[0x180387a8c] <+1708>: mov    x21, x0
+libsystem_c.dylib[0x180387a90] <+1712>: strb   wzr, [x20, w22, uxtw]
+libsystem_c.dylib[0x180387a94] <+1716>: add    x0, x20, #0x1
+libsystem_c.dylib[0x180387a98] <+1720>: mov    x1, x21
+libsystem_c.dylib[0x180387a9c] <+1724>: mov    w2, #0x0                  ; =0 
+libsystem_c.dylib[0x180387aa0] <+1728>: bl     0x180387cf0               ; tzparse
+libsystem_c.dylib[0x180387aa4] <+1732>: cbnz   w0, 0x180387bfc           ; <+2076>
+libsystem_c.dylib[0x180387aa8] <+1736>: ldr    w8, [x21, #0x8]
+libsystem_c.dylib[0x180387aac] <+1740>: cmp    w8, #0x2
+libsystem_c.dylib[0x180387ab0] <+1744>: b.ne   0x180387bfc               ; <+2076>
+libsystem_c.dylib[0x180387ab4] <+1748>: ldr    w9, [x19, #0xc]
+libsystem_c.dylib[0x180387ab8] <+1752>: ldr    w8, [x21, #0xc]
+libsystem_c.dylib[0x180387abc] <+1756>: add    w10, w8, w9
+libsystem_c.dylib[0x180387ac0] <+1760>: cmp    w10, #0x32
+libsystem_c.dylib[0x180387ac4] <+1764>: b.gt   0x180387bfc               ; <+2076>
+libsystem_c.dylib[0x180387ac8] <+1768>: ldr    w10, [x21, #0x2a54]
+libsystem_c.dylib[0x180387acc] <+1772>: add    w10, w10, w9
+libsystem_c.dylib[0x180387ad0] <+1776>: str    w10, [x21, #0x2a54]
+libsystem_c.dylib[0x180387ad4] <+1780>: ldr    w10, [x21, #0x2a6c]
+libsystem_c.dylib[0x180387ad8] <+1784>: add    w9, w10, w9
+libsystem_c.dylib[0x180387adc] <+1788>: str    w9, [x21, #0x2a6c]
+libsystem_c.dylib[0x180387ae0] <+1792>: cmp    w8, #0x1
+libsystem_c.dylib[0x180387ae4] <+1796>: b.lt   0x180387b18               ; <+1848>
+libsystem_c.dylib[0x180387ae8] <+1800>: mov    x8, #0x0                  ; =0 
+libsystem_c.dylib[0x180387aec] <+1804>: mov    w9, #0x4248               ; =16968 
+libsystem_c.dylib[0x180387af0] <+1808>: add    x9, x21, x9
+libsystem_c.dylib[0x180387af4] <+1812>: ldrb   w10, [x9, x8]
+libsystem_c.dylib[0x180387af8] <+1816>: ldrsw  x11, [x19, #0xc]
+libsystem_c.dylib[0x180387afc] <+1820>: add    w12, w11, #0x1
+libsystem_c.dylib[0x180387b00] <+1824>: str    w12, [x19, #0xc]
+libsystem_c.dylib[0x180387b04] <+1828>: strb   w10, [x24, x11]
+libsystem_c.dylib[0x180387b08] <+1832>: add    x8, x8, #0x1
+libsystem_c.dylib[0x180387b0c] <+1836>: ldrsw  x10, [x21, #0xc]
+libsystem_c.dylib[0x180387b10] <+1840>: cmp    x8, x10
+libsystem_c.dylib[0x180387b14] <+1844>: b.lt   0x180387af4               ; <+1812>
+libsystem_c.dylib[0x180387b18] <+1848>: add    x8, x21, #0x18
+libsystem_c.dylib[0x180387b1c] <+1852>: ldr    w9, [x21, #0x4]
+libsystem_c.dylib[0x180387b20] <+1856>: cmp    w9, #0x1
+libsystem_c.dylib[0x180387b24] <+1860>: b.lt   0x180387b54               ; <+1908>
+libsystem_c.dylib[0x180387b28] <+1864>: mov    x10, #0x0                 ; =0 
+libsystem_c.dylib[0x180387b2c] <+1868>: ldrsw  x11, [x19, #0x4]
+libsystem_c.dylib[0x180387b30] <+1872>: add    x11, x23, x11, lsl #3
+libsystem_c.dylib[0x180387b34] <+1876>: ldur   x11, [x11, #-0x8]
+libsystem_c.dylib[0x180387b38] <+1880>: ldr    x12, [x8, x10, lsl #3]
+libsystem_c.dylib[0x180387b3c] <+1884>: cmp    x12, x11
+libsystem_c.dylib[0x180387b40] <+1888>: b.gt   0x180387b58               ; <+1912>
+libsystem_c.dylib[0x180387b44] <+1892>: add    x10, x10, #0x1
+libsystem_c.dylib[0x180387b48] <+1896>: cmp    x9, x10
+libsystem_c.dylib[0x180387b4c] <+1900>: b.ne   0x180387b38               ; <+1880>
+libsystem_c.dylib[0x180387b50] <+1904>: b      0x180387bb0               ; <+2000>
+libsystem_c.dylib[0x180387b54] <+1908>: mov    w10, #0x0                 ; =0 
+libsystem_c.dylib[0x180387b58] <+1912>: cmp    w10, w9
+libsystem_c.dylib[0x180387b5c] <+1916>: b.ge   0x180387bb0               ; <+2000>
+libsystem_c.dylib[0x180387b60] <+1920>: mov    w9, #0x2598               ; =9624 
+libsystem_c.dylib[0x180387b64] <+1924>: add    x9, x21, x9
+libsystem_c.dylib[0x180387b68] <+1928>: mov    w10, w10
+libsystem_c.dylib[0x180387b6c] <+1932>: ldr    w11, [x19, #0x4]
+libsystem_c.dylib[0x180387b70] <+1936>: cmp    w11, #0x4af
+libsystem_c.dylib[0x180387b74] <+1940>: b.gt   0x180387bb0               ; <+2000>
+libsystem_c.dylib[0x180387b78] <+1944>: ldr    x12, [x8, x10, lsl #3]
+libsystem_c.dylib[0x180387b7c] <+1948>: str    x12, [x23, w11, sxtw #3]
+libsystem_c.dylib[0x180387b80] <+1952>: ldrb   w12, [x19, #0x8]
+libsystem_c.dylib[0x180387b84] <+1956>: ldrb   w13, [x9, x10]
+libsystem_c.dylib[0x180387b88] <+1960>: add    w13, w13, w12
+libsystem_c.dylib[0x180387b8c] <+1964>: ldr    x12, [sp, #0x8]
+libsystem_c.dylib[0x180387b90] <+1968>: strb   w13, [x12, w11, sxtw]
+libsystem_c.dylib[0x180387b94] <+1972>: ldr    w11, [x19, #0x4]
+libsystem_c.dylib[0x180387b98] <+1976>: add    w11, w11, #0x1
+libsystem_c.dylib[0x180387b9c] <+1980>: str    w11, [x19, #0x4]
+libsystem_c.dylib[0x180387ba0] <+1984>: add    x10, x10, #0x1
+libsystem_c.dylib[0x180387ba4] <+1988>: ldr    w12, [x21, #0x4]
+libsystem_c.dylib[0x180387ba8] <+1992>: cmp    w12, w10
+libsystem_c.dylib[0x180387bac] <+1996>: b.gt   0x180387b70               ; <+1936>
+libsystem_c.dylib[0x180387bb0] <+2000>: ldrsw  x8, [x19, #0x8]
+libsystem_c.dylib[0x180387bb4] <+2004>: add    w9, w8, #0x1
+libsystem_c.dylib[0x180387bb8] <+2008>: str    w9, [x19, #0x8]
+libsystem_c.dylib[0x180387bbc] <+2012>: mov    w9, #0x18                 ; =24 
+libsystem_c.dylib[0x180387bc0] <+2016>: mov    w10, #0x2a48              ; =10824 
+libsystem_c.dylib[0x180387bc4] <+2020>: ldr    q0, [x21, x10]
+libsystem_c.dylib[0x180387bc8] <+2024>: ldr    x10, [sp]
+libsystem_c.dylib[0x180387bcc] <+2028>: smaddl x8, w8, w9, x10
+libsystem_c.dylib[0x180387bd0] <+2032>: ldr    x11, [x21, #0x2a58]
+libsystem_c.dylib[0x180387bd4] <+2036>: str    x11, [x8, #0x10]
+libsystem_c.dylib[0x180387bd8] <+2040>: str    q0, [x8]
+libsystem_c.dylib[0x180387bdc] <+2044>: ldrsw  x8, [x19, #0x8]
+libsystem_c.dylib[0x180387be0] <+2048>: add    w11, w8, #0x1
+libsystem_c.dylib[0x180387be4] <+2052>: str    w11, [x19, #0x8]
+libsystem_c.dylib[0x180387be8] <+2056>: smaddl x8, w8, w9, x10
+libsystem_c.dylib[0x180387bec] <+2060>: ldr    q0, [x21, #0x2a60]
+libsystem_c.dylib[0x180387bf0] <+2064>: ldr    x9, [x21, #0x2a70]
+libsystem_c.dylib[0x180387bf4] <+2068>: str    x9, [x8, #0x10]
+libsystem_c.dylib[0x180387bf8] <+2072>: str    q0, [x8]
+libsystem_c.dylib[0x180387bfc] <+2076>: mov    x0, x21
+libsystem_c.dylib[0x180387c00] <+2080>: bl     0x1803f95ec               ; symbol stub for: free
+libsystem_c.dylib[0x180387c04] <+2084>: ldr    w25, [x19, #0x4]
+libsystem_c.dylib[0x180387c08] <+2088>: cmp    w25, #0x2
+libsystem_c.dylib[0x180387c0c] <+2092>: b.lt   0x180387cd8               ; <+2296>
+libsystem_c.dylib[0x180387c10] <+2096>: sxtw   x26, w25
+libsystem_c.dylib[0x180387c14] <+2100>: mov    x24, #0x5980              ; =22912 
+libsystem_c.dylib[0x180387c18] <+2104>: movk   x24, #0xf060, lsl #16
+libsystem_c.dylib[0x180387c1c] <+2108>: movk   x24, #0x2, lsl #32
+libsystem_c.dylib[0x180387c20] <+2112>: ldr    x8, [sp, #0x8]
+libsystem_c.dylib[0x180387c24] <+2116>: ldrb   w21, [x8]
+libsystem_c.dylib[0x180387c28] <+2120>: sub    x27, x25, #0x1
+libsystem_c.dylib[0x180387c2c] <+2124>: mov    w28, #0x20                ; =32 
+libsystem_c.dylib[0x180387c30] <+2128>: mov    w22, #0x2599              ; =9625 
+libsystem_c.dylib[0x180387c34] <+2132>: ldrb   w1, [x19, x22]
+libsystem_c.dylib[0x180387c38] <+2136>: mov    x0, x19
+libsystem_c.dylib[0x180387c3c] <+2140>: mov    x2, x21
+libsystem_c.dylib[0x180387c40] <+2144>: bl     0x1803883fc               ; typesequiv
+libsystem_c.dylib[0x180387c44] <+2148>: cbz    w0, 0x180387c5c           ; <+2172>
+libsystem_c.dylib[0x180387c48] <+2152>: ldr    x8, [x19, x28]
+libsystem_c.dylib[0x180387c4c] <+2156>: ldr    x9, [x19, #0x18]
+libsystem_c.dylib[0x180387c50] <+2160>: sub    x8, x8, x9
+libsystem_c.dylib[0x180387c54] <+2164>: cmp    x8, x24
+libsystem_c.dylib[0x180387c58] <+2168>: b.eq   0x180387c70               ; <+2192>
+libsystem_c.dylib[0x180387c5c] <+2172>: add    x28, x28, #0x8
+libsystem_c.dylib[0x180387c60] <+2176>: add    x22, x22, #0x1
+libsystem_c.dylib[0x180387c64] <+2180>: subs   x27, x27, #0x1
+libsystem_c.dylib[0x180387c68] <+2184>: b.ne   0x180387c34               ; <+2132>
+libsystem_c.dylib[0x180387c6c] <+2188>: b      0x180387c78               ; <+2200>
+libsystem_c.dylib[0x180387c70] <+2192>: mov    w8, #0x1                  ; =1 
+libsystem_c.dylib[0x180387c74] <+2196>: str    w8, [x19, #0x10]
+libsystem_c.dylib[0x180387c78] <+2200>: sub    x22, x26, #0x1
+libsystem_c.dylib[0x180387c7c] <+2204>: ldr    x8, [sp, #0x8]
+libsystem_c.dylib[0x180387c80] <+2208>: ldrb   w21, [x8, x22]
+libsystem_c.dylib[0x180387c84] <+2212>: sub    w8, w26, #0x2
+libsystem_c.dylib[0x180387c88] <+2216>: sub    w25, w25, #0x1
+libsystem_c.dylib[0x180387c8c] <+2220>: ubfiz  x9, x8, #3, #32
+libsystem_c.dylib[0x180387c90] <+2224>: add    x26, x9, #0x18
+libsystem_c.dylib[0x180387c94] <+2228>: mov    w9, #0x2598               ; =9624 
+libsystem_c.dylib[0x180387c98] <+2232>: add    x27, x8, x9
+libsystem_c.dylib[0x180387c9c] <+2236>: ldrb   w2, [x19, x27]
+libsystem_c.dylib[0x180387ca0] <+2240>: mov    x0, x19
+libsystem_c.dylib[0x180387ca4] <+2244>: mov    x1, x21
+libsystem_c.dylib[0x180387ca8] <+2248>: bl     0x1803883fc               ; typesequiv
+libsystem_c.dylib[0x180387cac] <+2252>: cbz    w0, 0x180387cc4           ; <+2276>
+libsystem_c.dylib[0x180387cb0] <+2256>: ldr    x8, [x23, x22, lsl #3]
+libsystem_c.dylib[0x180387cb4] <+2260>: ldr    x9, [x19, x26]
+libsystem_c.dylib[0x180387cb8] <+2264>: sub    x8, x8, x9
+libsystem_c.dylib[0x180387cbc] <+2268>: cmp    x8, x24
+libsystem_c.dylib[0x180387cc0] <+2272>: b.eq   0x180387ce0               ; <+2304>
+libsystem_c.dylib[0x180387cc4] <+2276>: sub    w25, w25, #0x1
+libsystem_c.dylib[0x180387cc8] <+2280>: sub    x26, x26, #0x8
+libsystem_c.dylib[0x180387ccc] <+2284>: sub    x27, x27, #0x1
+libsystem_c.dylib[0x180387cd0] <+2288>: cmp    w25, #0x0
+libsystem_c.dylib[0x180387cd4] <+2292>: b.gt   0x180387c9c               ; <+2236>
+libsystem_c.dylib[0x180387cd8] <+2296>: mov    w22, #0x0                 ; =0 
+libsystem_c.dylib[0x180387cdc] <+2300>: b      0x1803874d4               ; <+244>
+libsystem_c.dylib[0x180387ce0] <+2304>: mov    w22, #0x0                 ; =0 
+libsystem_c.dylib[0x180387ce4] <+2308>: mov    w8, #0x1                  ; =1 
+libsystem_c.dylib[0x180387ce8] <+2312>: str    w8, [x19, #0x14]
+libsystem_c.dylib[0x180387cec] <+2316>: b      0x1803874d4               ; <+244>

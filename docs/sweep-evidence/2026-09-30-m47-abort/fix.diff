@@ -1,0 +1,387 @@
+diff --git a/crates/retrace-box/src/lib.rs b/crates/retrace-box/src/lib.rs
+index 23aab26..0321f28 100644
+--- a/crates/retrace-box/src/lib.rs
++++ b/crates/retrace-box/src/lib.rs
+@@ -2157,7 +2157,21 @@ impl Box_ {
+     /// RO+exec. Returns the chosen IPA. Deterministic: identical call sequence => identical IPAs on
+     /// replay.
+     pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
++        self.guest_vm_map_masked(addr, size, 0, anywhere, exec)
++    }
++
++    /// `guest_vm_map` with `mach_vm_map`'s alignment `mask`: an ANYWHERE placement returns an
++    /// address with `ipa & mask == 0`, as `vm_map_enter` does. Ignored until the M47 abort
++    /// diagnosis: libmalloc's xzone allocator maps each 4 MiB segment ANYWHERE with mask 0x3fffff
++    /// and registers it in a table indexed by `addr >> 22`, one entry per 4 MiB step FROM THE BASE
++    /// (`_xzm_segment_table_allocated_at`), so a segment placed off a 4 MiB boundary leaves the
++    /// granule its tail straddles unregistered, and freeing a chunk there aborts with "pointer
++    /// being freed was not allocated" (git `log -1`, ~1 run in 10: the random size of libmalloc's
++    /// guarded-range reservation moves the bump cursor). FIXED ignores `mask`; no measured caller
++    /// passes a FIXED address that fails it.
++    pub fn guest_vm_map_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool, exec: bool) -> u64 {
+         let (host, rlen) = alloc_pages(size as usize);
++        let m = mask | (GRANULE as u64 - 1);
+         let ipa = if anywhere {
+             // Kernel-faithful VM_FLAGS_ANYWHERE-with-hint: search FORWARD from a non-zero hint for
+             // the first free gap, treating reservations as occupied (what vm_map_enter does). When
+@@ -2165,7 +2179,7 @@ impl Box_ {
+             // when it collides — e.g. libmalloc's guarded-metadata commit whose hint is a reserved
+             // band with an interior carveout — it lands in the first free gap (the hole). A zero hint
+             // or no fit falls back to the deterministic bump allocator.
+-            match if addr != 0 { self.first_fit(addr, rlen as u64) } else { None } {
++            match if addr != 0 { self.first_fit(addr, rlen as u64, m) } else { None } {
+                 Some(a) => {
+                     // A first-fit hit may land at/above the bump cursor (a hinted commit past every
+                     // reservation); float mmap_next past it so no later bump hands out an overlapping
+@@ -2176,6 +2190,7 @@ impl Box_ {
+                 }
+                 None => {
+                     if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
++                    self.mmap_next = (self.mmap_next + m) & !m;
+                     let a = self.mmap_next; self.mmap_next += rlen as u64; a
+                 }
+             }
+@@ -2205,9 +2220,17 @@ impl Box_ {
+     /// fresh deterministic bump address (advancing `mmap_next` so nothing later collides).
+     /// Deterministic: identical call sequence => identical returned address on replay.
+     pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
++        self.guest_vm_reserve_masked(addr, size, 0, anywhere)
++    }
++
++    /// `guest_vm_reserve` with `mach_vm_map`'s alignment `mask`, honoured on ANYWHERE as
++    /// `guest_vm_map_masked` honours it.
++    pub fn guest_vm_reserve_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool) -> u64 {
+         // Page-granular extent: commit_reserved_page backs whole pages, so track whole pages.
+         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
+         let base = if anywhere {
++            let m = mask | (GRANULE as u64 - 1);
++            self.mmap_next = (self.mmap_next + m) & !m;
+             let end = self.mmap_next + rounded;
+             assert!(end <= (1u64 << 36),
+                 "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
+@@ -2344,10 +2367,14 @@ impl Box_ {
+     /// bump allocator). Pure function of (hint, len, backings, reservations) — identical on record &
+     /// replay, so a first-fit-placed returned address is recomputed identically and byte-checked by
+     /// the replay oracle (no new mirror needed; symmetry is structural).
+-    fn first_fit(&self, hint: u64, len: u64) -> Option<u64> {
++    ///
++    /// `m` is the alignment mask, at least `GRANULE - 1`: every candidate is rounded up to it. The
++    /// argument above still holds — the lowest aligned fit is either the aligned hint or the
++    /// aligned end of the extent that blocks the aligned address below it.
++    fn first_fit(&self, hint: u64, len: u64, m: u64) -> Option<u64> {
+         let g = GRANULE as u64;
+-        let base = hint & !(g - 1);
+-        let round_up = |x: u64| (x + g - 1) & !(g - 1);
++        let round_up = |x: u64| (x + m) & !m;
++        let base = round_up(hint & !(g - 1));
+         let mut cands = vec![base];
+         for b in self.backings.iter() {
+             let end = round_up(b.ipa + b.len as u64);
+@@ -2357,8 +2384,8 @@ impl Box_ {
+             let end = round_up(s + l);
+             if end > base { cands.push(end); }
+         }
+-        if SHARED_REGION_END > base { cands.push(SHARED_REGION_END); }
+-        if SCRATCH_RESERVED_END > base { cands.push(SCRATCH_RESERVED_END); }
++        if round_up(SHARED_REGION_END) > base { cands.push(round_up(SHARED_REGION_END)); }
++        if round_up(SCRATCH_RESERVED_END) > base { cands.push(round_up(SCRATCH_RESERVED_END)); }
+         cands.sort_unstable();
+         cands.dedup();
+         cands.into_iter().find(|&a| self.range_is_free(a, len))
+diff --git a/crates/retrace-box/tests/vmalign.rs b/crates/retrace-box/tests/vmalign.rs
+new file mode 100644
+index 0000000..b001ea7
+--- /dev/null
++++ b/crates/retrace-box/tests/vmalign.rs
+@@ -0,0 +1,58 @@
++// mach_vm_map's alignment mask on ANYWHERE placement, driving Box_ directly (pattern: carveout.rs).
++// libmalloc's xzone allocator maps each 4 MiB segment with mask 0x3fffff and indexes its segment
++// table by `addr >> 22`; a segment placed off a 4 MiB boundary leaves its tail granule unregistered
++// and `free` there aborts (the M47 git abort). Each test first moves the bump cursor off the
++// boundary with a one-page map, so a placement that ignores the mask fails it. Run under
++// --test-threads=1 (one HVF VM per process).
++use retrace_box::{Box_, MMAP_BASE};
++use retrace_guest::{parse_macho, HELLO};
++
++const SEG: u64 = 0x40_0000;
++const MASK: u64 = SEG - 1;
++
++fn boxed() -> Box_ {
++    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
++    Box_::load(&loaded)
++}
++
++#[test]
++fn a_masked_anywhere_map_from_the_bump_cursor_is_aligned() {
++    let mut b = boxed();
++    let page = b.guest_vm_map(0, 0x4000, true, false);
++    assert_eq!(page, MMAP_BASE, "the first ANYWHERE map bumps from MMAP_BASE");
++    let seg = b.guest_vm_map_masked(0, SEG, MASK, true, false);
++    assert_eq!(seg & MASK, 0, "mask 0x3fffff must give a 4 MiB-aligned address, got {seg:#x}");
++    assert!(seg >= page + 0x4000, "it must not overlap the page before it");
++    let next = b.guest_vm_map(0, 0x4000, true, false);
++    assert!(next >= seg + SEG, "the cursor moves past the aligned segment, got {next:#x}");
++}
++
++#[test]
++fn a_masked_anywhere_reservation_is_aligned() {
++    let mut b = boxed();
++    let _ = b.guest_vm_map(0, 0x4000, true, false);
++    let r = b.guest_vm_reserve_masked(0, SEG, MASK, true);
++    assert_eq!(r & MASK, 0, "a reservation honours the mask too, got {r:#x}");
++    assert_eq!(b.reservations().last(), Some(&(r, SEG)));
++}
++
++#[test]
++fn a_masked_hinted_map_is_aligned_and_clears_the_occupied_hint() {
++    let mut b = boxed();
++    let page = b.guest_vm_map(0, 0x4000, true, false);
++    let _ = b.guest_vm_map(0, 0x4000, true, false);
++    // Hint at a page that is taken: first-fit must search forward to an ALIGNED free range.
++    let seg = b.guest_vm_map_masked(page, SEG, MASK, true, false);
++    assert_eq!(seg & MASK, 0, "the hinted first-fit path honours the mask, got {seg:#x}");
++    assert!(seg >= page + 0x8000, "and lands clear of both pages, got {seg:#x}");
++}
++
++#[test]
++fn mask_zero_keeps_the_old_contiguous_placement() {
++    let mut b = boxed();
++    let a = b.guest_vm_map(0, 0x4000, true, false);
++    let c = b.guest_vm_map_masked(0, 0x4000, 0, true, false);
++    assert_eq!(c, a + 0x4000, "an unmasked map is still the next page");
++    let r = b.guest_vm_reserve_masked(0, 0x4000, 0, true);
++    assert_eq!(r, c + 0x4000, "an unmasked reservation is still the next page");
++}
+diff --git a/crates/retrace-core/src/lib.rs b/crates/retrace-core/src/lib.rs
+index 96dad95..1e0f30a 100644
+--- a/crates/retrace-core/src/lib.rs
++++ b/crates/retrace-core/src/lib.rs
+@@ -38,10 +38,11 @@ const MACH_TASK_SELF: u64 = (-28i64) as u64; // task_self_trap: its result names
+ const VM_FLAGS_ANYWHERE:  u64 = 0x1;
+ const PROT_EXEC:          u64 = 0x4;
+ 
+-// Extract (address-pointer, size, flags, cur_prot) for an anonymous mach_vm_map/allocate trap.
+-fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64) {
+-    if num == MACH_VM_MAP { (args[1], args[2], args[4], args[5]) }
+-    else                  { (args[1], args[2], args[3], 0x3 /*RW*/) } // allocate: always RW anon
++// Extract (address-pointer, size, mask, flags, cur_prot) for an anonymous mach_vm_map/allocate
++// trap. `mask` is mach_vm_map's alignment mask (Box_::guest_vm_map_masked); allocate has none.
++fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64, u64) {
++    if num == MACH_VM_MAP { (args[1], args[2], args[3], args[4], args[5]) }
++    else                  { (args[1], args[2], 0, args[3], 0x3 /*RW*/) } // allocate: always RW anon
+ }
+ 
+ /// True if this `sysctl` is `{CTL_KERN, KERN_USRSTACK64}` — a 2-element mib read out of guest
+@@ -410,7 +411,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
+             // kernel writes the chosen address into *args[1]; we allocate a deterministic guest IPA
+             // and store it there, returning KERN_SUCCESS.
+             Stop::Syscall { num, args } if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP => {
+-                let (addr_ptr, size, flags, prot) = vm_map_args(num, &args);
++                let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
+                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
+                 let exec = prot & PROT_EXEC != 0;
+                 if exec { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
+@@ -420,10 +421,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
+                 // else is an eagerly-backed map. Mirrors the MIG 4811 split below (guest_vm_reserve
+                 // vs guest_vm_map) so a reservation arriving via the trap route genuinely reserves
+                 // and is never eager-backed (fatal at 24 GiB). MACH_VM_ALLOCATE always carries RW.
++                // Both honour `mask` (see guest_vm_map_masked); replay passes the same one.
+                 let ipa = if prot == 0 {
+-                    b.guest_vm_reserve(req, size, anywhere)
++                    b.guest_vm_reserve_masked(req, size, mask, anywhere)
+                 } else {
+-                    b.guest_vm_map(req, size, anywhere, exec)
++                    b.guest_vm_map_masked(req, size, mask, anywhere, exec)
+                 };
+                 let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
+                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
+@@ -462,12 +464,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
+                         let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
+                         // cur_protection == 0 => a PROT_NONE address-space reservation (no backing,
+                         // e.g. libmalloc's 24 GiB nano pointer range); anything else is a real
+-                        // backed map. See guest_vm_reserve / guest_vm_map.
++                        // backed map. See guest_vm_reserve / guest_vm_map. Both honour `mask`.
+                         let ipa = if req.cur_protection == 0 {
+-                            b.guest_vm_reserve(req.address, req.size, anywhere)
++                            b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
+                         } else {
+                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
+-                            b.guest_vm_map(req.address, req.size, anywhere, exec)
++                            b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
+                         };
+                         let writes = vec![Region { ipa: m.data,
+                             bytes: machmsg::encode_vm_map_reply(m.reply_port, ipa) }];
+@@ -2027,10 +2029,10 @@ impl ReplaySession {
+                                         // Same reservation/commit split as record (must reproduce the
+                                         // identical returned address for the byte-equality check below).
+                                         let ipa = if req.cur_protection == 0 {
+-                                            self.b.guest_vm_reserve(req.address, req.size, anywhere)
++                                            self.b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
+                                         } else {
+                                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
+-                                            self.b.guest_vm_map(req.address, req.size, anywhere, exec)
++                                            self.b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
+                                         };
+                                         let reply = machmsg::encode_vm_map_reply(m.reply_port, ipa);
+                                         if writes.len() != 1 || writes[0].bytes != reply {
+@@ -2202,7 +2204,7 @@ impl ReplaySession {
+                             // then apply the recorded IPA write + KERN_SUCCESS. The recomputed IPA must
+                             // equal what was recorded (bump allocator is deterministic).
+                             if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP {
+-                                let (addr_ptr, size, flags, prot) = vm_map_args(num, &args);
++                                let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
+                                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
+                                 let exec = prot & PROT_EXEC != 0;
+                                 let req = if self.b.is_mapped(addr_ptr) { self.b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
+@@ -2210,9 +2212,9 @@ impl ReplaySession {
+                                 // reserve, else eagerly back); must reproduce the identical returned IPA
+                                 // for the byte-equality check below.
+                                 let ipa = if prot == 0 {
+-                                    self.b.guest_vm_reserve(req, size, anywhere)
++                                    self.b.guest_vm_reserve_masked(req, size, mask, anywhere)
+                                 } else {
+-                                    self.b.guest_vm_map(req, size, anywhere, exec)
++                                    self.b.guest_vm_map_masked(req, size, mask, anywhere, exec)
+                                 };
+                                 let recorded_ipa = writes.first()
+                                     .map(|w| u64::from_le_bytes(w.bytes[..8].try_into().unwrap())).unwrap_or(ipa);
+diff --git a/crates/retrace-guest/build.rs b/crates/retrace-guest/build.rs
+index dc856c7..461bc5b 100644
+--- a/crates/retrace-guest/build.rs
++++ b/crates/retrace-guest/build.rs
+@@ -369,6 +369,17 @@ fn main() {
+         .status().expect("clang vmremap_dyn");
+     assert!(status.success(), "vmremap_dyn guest build failed");
+ 
++    // vmalign_dyn: the mach_vm_map alignment-mask guard — five 4 MiB maps with mask 0x3fffff
++    // (trap, MIG 4811, both reservation routes, a hinted one), each printing whether the kernel's
++    // answer was aligned. Same recipe as hello_dyn.
++    let src = format!("{}/c/vmalign_dyn.c", env!("CARGO_MANIFEST_DIR"));
++    let bin = format!("{out}/vmalign_dyn");
++    println!("cargo:rerun-if-changed={src}");
++    let status = Command::new("clang")
++        .args(["-arch","arm64","-o",&bin,&src])
++        .status().expect("clang vmalign_dyn");
++    assert!(status.success(), "vmalign_dyn guest build failed");
++
+     // atfdcwd_dyn: the M38 AT_FDCWD fixture — `fstatat(AT_FDCWD, ".")` prints `ok` when the
+     // sentinel passes through translation. Same recipe as hello_dyn.
+     let src = format!("{}/c/atfdcwd_dyn.c", env!("CARGO_MANIFEST_DIR"));
+diff --git a/crates/retrace-guest/c/vmalign_dyn.c b/crates/retrace-guest/c/vmalign_dyn.c
+new file mode 100644
+index 0000000..03802eb
+--- /dev/null
++++ b/crates/retrace-guest/c/vmalign_dyn.c
+@@ -0,0 +1,43 @@
++// mach_vm_map's alignment mask on an ANYWHERE placement (the m47-abort guard). libmalloc's xzone
++// allocator maps each 4 MiB segment with mask 0x3fffff and then registers it in a segment table
++// indexed by `addr >> 22`, one entry per 4 MiB granule from the base, so a segment that comes back
++// off a 4 MiB boundary straddles a granule nobody registers, and a free of a chunk in that tail
++// aborts with "pointer being freed was not allocated". Natively the kernel always honours the
++// mask, so every line below says aligned=1.
++//
++// Each map is preceded by a one-page allocation so that a placement which ignores the mask lands
++// off-boundary: two consecutive maps cannot both be aligned when a page separates them, so at
++// least one line says aligned=0 under such a placement, whatever state the run starts in.
++// Results are printed only at the end, so stdio's own allocations come after every map.
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#include <stdio.h>
++
++#define SEG 0x400000ull
++#define MASK (SEG - 1)
++
++struct row { const char *name; kern_return_t kr; mach_vm_address_t a; };
++
++static struct row one(const char *name, mach_vm_address_t hint, vm_prot_t cur, vm_prot_t max) {
++    mach_vm_address_t pad = 0;
++    mach_vm_allocate(mach_task_self(), &pad, 0x4000, VM_FLAGS_ANYWHERE);
++    if (hint == 1) hint = pad; // a hint the kernel cannot honour verbatim: that page is taken
++    mach_vm_address_t a = hint;
++    // max_protection == VM_PROT_ALL with no object takes libsystem's trap route (-15); any other
++    // max falls through to the MIG route (msgh_id 4811). cur == VM_PROT_NONE is a reservation.
++    kern_return_t kr = mach_vm_map(mach_task_self(), &a, SEG, MASK, VM_FLAGS_ANYWHERE,
++                                   MEMORY_OBJECT_NULL, 0, FALSE, cur, max, VM_INHERIT_DEFAULT);
++    return (struct row){ name, kr, a };
++}
++
++int main(void) {
++    struct row r[5];
++    r[0] = one("trap", 0, VM_PROT_DEFAULT, VM_PROT_ALL);
++    r[1] = one("mig", 0, VM_PROT_DEFAULT, VM_PROT_DEFAULT);
++    r[2] = one("trap-reserve", 0, VM_PROT_NONE, VM_PROT_ALL);
++    r[3] = one("mig-reserve", 0, VM_PROT_NONE, VM_PROT_DEFAULT);
++    r[4] = one("trap-hinted", 1, VM_PROT_DEFAULT, VM_PROT_ALL);
++    for (int i = 0; i < 5; i++)
++        printf("%s kr=%d aligned=%d\n", r[i].name, r[i].kr, r[i].kr == 0 && (r[i].a & MASK) == 0);
++    return 0;
++}
+diff --git a/crates/retrace-guest/src/lib.rs b/crates/retrace-guest/src/lib.rs
+index c653396..3440d5b 100644
+--- a/crates/retrace-guest/src/lib.rs
++++ b/crates/retrace-guest/src/lib.rs
+@@ -232,6 +232,10 @@ pub const CRASH_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.json
+ /// shape `import ctypes` triggers via libffi, minus CPython. Also the native protections probe
+ /// (spec R7): run without retrace it prints the kernel's `cur`/`max` for the remap.
+ pub const VMREMAP_DYN: &str = concat!(env!("OUT_DIR"), "/vmremap_dyn");
++/// The mach_vm_map alignment-mask guard: five 4 MiB ANYWHERE maps with mask `0x3fffff`, one per
++/// route the box services (trap, MIG 4811, both reservation forms, a hinted one), each line saying
++/// whether the answer was aligned. libmalloc's xzone allocator maps its segments this way.
++pub const VMALIGN_DYN: &str = concat!(env!("OUT_DIR"), "/vmalign_dyn");
+ /// M37 (C1): closes fd 1 and fd 2, then writes to each — exits 0 only if both writes are EBADF,
+ /// so the rung helper's exit-0 demand carries the "a closed console slot is closed on both sides"
+ /// property and its stdout equality carries the mirror.
+@@ -386,6 +390,13 @@ mod tests {
+         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+     }
+ 
++    #[test]
++    fn vmalign_guest_parses() {
++        // Proves the build.rs wiring and the path constant; behaviour is vmalign_e2e's.
++        let l = parse_macho(&std::fs::read(VMALIGN_DYN).unwrap());
++        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
++    }
++
+     #[test]
+     fn atfdcwd_guest_parses() {
+         // M38: proves the build.rs wiring and the path constant; behaviour is atfdcwd_e2e's.
+diff --git a/crates/retrace/tests/vmalign_e2e.rs b/crates/retrace/tests/vmalign_e2e.rs
+new file mode 100644
+index 0000000..f3b6ee4
+--- /dev/null
++++ b/crates/retrace/tests/vmalign_e2e.rs
+@@ -0,0 +1,34 @@
++// The mach_vm_map alignment-mask guard (M47 abort diagnosis). libmalloc's xzone allocator maps
++// each 4 MiB segment ANYWHERE with mask 0x3fffff and registers it in a segment table indexed by
++// `addr >> 22`, one entry per 4 MiB step from the base (`_xzm_segment_table_allocated_at`). Until
++// the fix the box ignored the mask, so the segment came back off a 4 MiB boundary, the granule its
++// tail straddled was never registered, and `free` of a chunk there aborted with "pointer being
++// freed was not allocated": Xcode's git, `log -1` about one run in ten, decided by the random size
++// of libmalloc's guarded-range reservation. Record and replay agreed throughout — both sides
++// ignored the mask identically — so this asserts on the GUEST's view of the address, which is the
++// one thing the bug changed. A repo-owned fixture rather than git: git is not a repo artifact, and
++// its abort depends on recorded entropy and the wall clock.
++//
++// Each map in the fixture is preceded by a one-page allocation, so under a placement that ignores
++// the mask at most one of the five can come back aligned: this fails whatever state the run starts
++// in (measured on the unfixed binary: all five `aligned=0`, and replay exits 0 reproducing them).
++mod util;
++use retrace_trace::{Event, Reader};
++
++// The native run's output, every route aligned.
++const EXPECT: &[u8] = b"trap kr=0 aligned=1\nmig kr=0 aligned=1\ntrap-reserve kr=0 aligned=1\n\
++mig-reserve kr=0 aligned=1\ntrap-hinted kr=0 aligned=1\n";
++
++#[test]
++fn every_masked_anywhere_map_comes_back_aligned_and_replays() {
++    let r = util::assert_rung_records_and_replays(retrace_guest::VMALIGN_DYN, &[], EXPECT);
++    // Both routes were exercised. The fixture's own trap-route maps are the only -15 calls with
++    // this mask AND untagged flags (libmalloc's segments carry VM tag 2), so exactly three — map,
++    // reserve, hinted — means the other two went to MIG 4811, whose mask sits in the message body
++    // where the trace cannot see it. Without this, a libsystem change that moved every call onto
++    // one route would leave the other unguarded while the stdout still matched.
++    let trap = Reader::open(&r.trace).unwrap().iter().filter(|e| matches!(e,
++        Event::Syscall { num, args, .. }
++            if *num == (-15i64) as u64 && args[3] == 0x3f_ffff && args[4] == 1)).count();
++    assert_eq!(trap, 3, "three masked maps take the trap route (map, reserve, hinted); the other two are 4811's");
++}

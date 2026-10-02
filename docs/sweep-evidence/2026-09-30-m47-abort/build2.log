@@ -1,0 +1,4 @@
+   Compiling retrace-box v0.0.0 (/private/tmp/claude-501/m47-abort/src/crates/retrace-box)
+   Compiling retrace-core v0.0.0 (/private/tmp/claude-501/m47-abort/src/crates/retrace-core)
+   Compiling retrace v0.0.0 (/private/tmp/claude-501/m47-abort/src/crates/retrace)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.91s

@@ -1,0 +1,27 @@
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[m47] num=381 args=[0x1801b7eb4,0x2,0x27ff1d0] policy="Sandbox" op="syscall-unix" ret=0xe err=true writes=0
+[m47] amfi policy_resident="AMFI\0"
+[probe] AMFI dyld policy in=0x0 r=0 out=0x1df out_ptr=0x27ff248
+[m47] num=381 args=[0x1801b7eb4,0x2,0x27fed20] policy="Sandbox" op="syscall-unix" ret=0xe err=true writes=0
+[m47] num=381 args=[0x1801b7eb4,0x2,0x27fbdf0] policy="Sandbox" op="syscall-unix" ret=0xe err=true writes=0
+[retrace] forwarding mach_msg2 host_info (msgh_id 200) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_clock_service (msgh_id 206) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_create (msgh_id 3418) to host (decided allowlist)
+[m47] num=381 args=[0x18df1ac55,0x2,0x27fb2d0] policy="Sandbox" op="file-write-data" ret=0x16 err=true writes=0
+[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1103 send_size 248): the box hosts no message-queue receivers
+[m47] num=75 args=[0x701400000,0x10000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0xa00c20000,0x10000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0xa00c10000,0x10000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0xa00c00000,0x10000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0x701400000,0x20000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0xa00c2c000,0xc000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0xa00c20000,0xc000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0x701400000,0x10000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0xa00c60000,0x10000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0xa00c50000,0x10000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[m47] num=75 args=[0xa00c40000,0x10000,0x7] policy="" op="" ret=0x0 err=false writes=0
+[probe] MADV_ZERO addr=0x701424000 len=0x80000 (emulated as a recorded zero write)
+[retrace] fall-throughs: 5

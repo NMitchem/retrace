@@ -1,0 +1,76 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.46
+   Compiling glob v0.3.3
+   Compiling prettyplease v0.2.37
+   Compiling libc v0.2.186
+   Compiling minimal-lexical v0.2.1
+   Compiling memchr v2.8.2
+   Compiling cfg-if v1.0.4
+   Compiling regex-syntax v0.8.11
+   Compiling serde_core v1.0.228
+   Compiling bindgen v0.70.1
+   Compiling libloading v0.8.9
+   Compiling either v1.16.0
+   Compiling itertools v0.13.0
+   Compiling shlex v1.3.0
+   Compiling serde v1.0.228
+   Compiling rustc-hash v1.1.0
+   Compiling log v0.4.33
+   Compiling clang-sys v1.8.1
+   Compiling bitflags v2.13.0
+   Compiling nom v7.1.3
+   Compiling retrace-guest v0.0.0 (/private/tmp/claude-501/m47-abort/src-mut/crates/retrace-guest)
+   Compiling retrace-arch v0.0.0 (/private/tmp/claude-501/m47-abort/src-mut/crates/retrace-arch)
+   Compiling regex-automata v0.4.14
+   Compiling retrace-sim v0.0.0 (/private/tmp/claude-501/m47-abort/src-mut/crates/retrace-sim)
+   Compiling cexpr v0.6.0
+   Compiling regex v1.12.4
+   Compiling syn v2.0.118
+   Compiling serde_derive v1.0.228
+   Compiling bincode v1.3.3
+   Compiling retrace-trace v0.0.0 (/private/tmp/claude-501/m47-abort/src-mut/crates/retrace-trace)
+   Compiling hv-sys v0.0.0 (/private/tmp/claude-501/m47-abort/src-mut/crates/hv-sys)
+   Compiling retrace-box v0.0.0 (/private/tmp/claude-501/m47-abort/src-mut/crates/retrace-box)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.89s
+     Running tests/vmalign.rs (/private/tmp/claude-501/m47-abort/target-mut/aarch64-apple-darwin/debug/deps/vmalign-acdd18ec4e73ff84)
+
+running 4 tests
+test a_masked_anywhere_map_from_the_bump_cursor_is_aligned ... FAILED
+test a_masked_anywhere_reservation_is_aligned ... FAILED
+test a_masked_hinted_map_is_aligned_and_clears_the_occupied_hint ... FAILED
+test mask_zero_keeps_the_old_contiguous_placement ... ok
+
+failures:
+
+---- a_masked_anywhere_map_from_the_bump_cursor_is_aligned stdout ----
+
+thread 'a_masked_anywhere_map_from_the_bump_cursor_is_aligned' (16748274) panicked at crates/retrace-box/tests/vmalign.rs:24:5:
+assertion `left == right` failed: mask 0x3fffff must give a 4 MiB-aligned address, got 0xa00004000
+  left: 16384
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_masked_anywhere_reservation_is_aligned stdout ----
+
+thread 'a_masked_anywhere_reservation_is_aligned' (16748276) panicked at crates/retrace-box/tests/vmalign.rs:35:5:
+assertion `left == right` failed: a reservation honours the mask too, got 0xa00004000
+  left: 16384
+ right: 0
+
+---- a_masked_hinted_map_is_aligned_and_clears_the_occupied_hint stdout ----
+
+thread 'a_masked_hinted_map_is_aligned_and_clears_the_occupied_hint' (16748278) panicked at crates/retrace-box/tests/vmalign.rs:46:5:
+assertion `left == right` failed: the hinted first-fit path honours the mask, got 0xa00008000
+  left: 32768
+ right: 0
+
+
+failures:
+    a_masked_anywhere_map_from_the_bump_cursor_is_aligned
+    a_masked_anywhere_reservation_is_aligned
+    a_masked_hinted_map_is_aligned_and_clears_the_occupied_hint
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p retrace-box --test vmalign`
