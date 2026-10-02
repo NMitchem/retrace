@@ -1,7 +1,7 @@
 // Throwaway (M47 Task 6): print a trace's length and torn flag, every Syscall landmark whose number is
 // in argv[3..] (decimal, may be negative) with its full args/ret/ret1/err/write count/thread, the last
-// argv[2] events, every terminal event, the gettimeofday (116) count, and per-number counts of the
-// syscalls a refused fork's aftermath may show (2 fork, 3403's -47 mach_msg2, 7 wait4, 37 kill).
+// argv[2] events, every terminal event, and the gettimeofday (116) and fork (2) counts. TD_BYTES=n adds
+// each shown write's first n bytes as printable ASCII; TD_HEX=n (fix round 1) as hex.
 use retrace_trace::{Event, Reader};
 
 fn main() {
@@ -31,6 +31,13 @@ fn main() {
                                 .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else if b == b'\n' { '|' } else { '.' })
                                 .collect();
                             println!("    write ipa={:#x} len={} {t}", w.ipa, w.bytes.len());
+                        }
+                    }
+                    // TD_HEX=n: each write's ipa, length and first n bytes in hex.
+                    if let Some(k) = std::env::var("TD_HEX").ok().and_then(|v| v.parse::<usize>().ok()) {
+                        for w in writes {
+                            let h: Vec<String> = w.bytes.iter().take(k).map(|b| format!("{b:02x}")).collect();
+                            println!("    write ipa={:#x} len={} {}", w.ipa, w.bytes.len(), h.join(" "));
                         }
                     }
                 }

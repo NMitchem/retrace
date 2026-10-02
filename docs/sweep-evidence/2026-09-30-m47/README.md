@@ -284,11 +284,21 @@ the sweep and its controls.
 - **The shells:** `shells-walk.txt`; `csh.{rec,rp}.{err,out}` and `tcsh.{rec,rp}.{err,out}` (the
   traced records, whole, and their replays); `csh.frames.txt`; `shells-native.txt`,
   `{csh,tcsh}.native.{out,err}`; `shells-forkfail.txt`.
+- `csh.landmarks.txt` (fix round 1, review I1): csh's own trace landmarks 330–340 and the `wait4`
+  trap at 341. They come from a later run (2026-10-02) on the swept binary. That run's `gettimeofday`
+  count is 19, the walk's, so its numbers equal the reason's. The 3403 at 336 has one 44-byte write:
+  the reply, msgh_id 3503, RetCode 0 (`KERN_SUCCESS`). The fork at 337 is `ret=0x23 err=true`.
+- `tcsh.landmarks.txt` (fix round 1): tcsh's own trace landmarks, from the same later run. Its
+  `gettimeofday` count is 19, the walk's 23 less 4, so its numbers are the reason's minus 4, and its
+  header says so. The 3403 at 336 (the reason's 340) has one 44-byte write, msgh_id 3503, RetCode 0.
+  The fork at 337 (the reason's 341) is `ret=0x23 err=true`.
 - **The scripts**, with the session's scratchpad paths left as they ran: `t6-build.sh`,
   `t6-step1.sh`, `t6-node-entry.sh`, `t6-node-frame.sh`, `t6-node-jit.sh`, `t6-step2.sh`,
   `t6-shells-native.sh`, `t6-shells-forkfail.sh`, `t6-shells-frames.sh`, `t6-sweep.sh`,
-  `t6-rowdiff.sh`, `t6-controls.sh`, `t6-ddd-face.sh`, `t6-cap.sh`, `t6-tests.sh`.
-- `tracedump.rs`: the throwaway reader's source (`td`).
+  `t6-rowdiff.sh`, `t6-controls.sh`, `t6-ddd-face.sh`, `t6-cap.sh`, `t6-tests.sh`, and
+  `t6-shells-landmarks.sh` (fix round 1).
+- `tracedump.rs`: the throwaway reader's source (`td`). Fix round 1 added `TD_HEX`, which prints a
+  write's bytes in hex.
 - `jq300k/`: the jq 300k runs, with their own README and their scripts (`jq300k/t6-jq300k.sh` and
   `jq300k/t6-jq300k-iso.sh`).
 - **No `.bin` trace files are committed.**
@@ -296,3 +306,4 @@ the sweep and its controls.
     They were read, then removed (`t6-cap.sh`).
   - The walk's traces (`/private/tmp/claude-501/m47-{node,csh,tcsh}.bin`) and the controls' (in the
     scratchpad) were removed after this README's measurements had read them.
+  - Fix round 1's two traces were removed by `t6-shells-landmarks.sh` once it had dumped them.
