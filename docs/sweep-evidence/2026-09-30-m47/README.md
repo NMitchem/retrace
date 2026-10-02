@@ -1,7 +1,7 @@
 # Sweep evidence — M47 Task 6, run 2026-10-01
 
 The directory keeps the plan's 2026-09-30 name (ledger Ruling P6). **Every file here was produced on
-2026-10-01**, on this machine: macOS 26.5.2 (25F84), 12 CPUs.
+2026-10-01, except `jq300k/`, which was produced on 2026-10-02**, on this machine: macOS 26.5.2 (25F84), 12 CPUs.
 
 Three measurements live here:
 - **The walk, node** (Step 1). `node -e 'console.log(1)'` on the finished M47 build, to its wall.
@@ -244,6 +244,18 @@ NULL)`. That call has no `arg_kinds` row.
 reasons are rewritten from these fields, class C (process creation: the `wait4` a refused fork's caller
 issues), not routed, and the file's header comment gains one sentence saying M47 moved them there.
 
+## jq's 300k abort (added by the controller, run 2026-10-02)
+
+`jq300k/` (its own README and its two scripts, `t6-jq300k.sh` and `t6-jq300k-iso.sh`). `jq -n '[range(0;300000)] | add'` was
+run three times on each binary, alternating, and each binary replayed only its own traces:
+- the base binary aborts 134/134 every time, and the swept binary exits 0/0 every time, printing
+  native's `44999850000`;
+- Task 3b's diagnosis pair, which differs **only** by the `mach_vm_map` mask fix, does the same:
+  `rt0` 134/134 ×3, `rt-fix` 0/0 ×3.
+
+So the 300k abort was the mask class, and **the mask fix clears it**. This was measured, run after
+the sweep and its controls.
+
 ## Ruling
 
 - **dddiagnose** moved its outcome by host state, the M45 coin flip. Both faces occur on both binaries
@@ -277,6 +289,8 @@ issues), not routed, and the file's header comment gains one sentence saying M47
   `t6-shells-native.sh`, `t6-shells-forkfail.sh`, `t6-shells-frames.sh`, `t6-sweep.sh`,
   `t6-rowdiff.sh`, `t6-controls.sh`, `t6-ddd-face.sh`, `t6-cap.sh`, `t6-tests.sh`.
 - `tracedump.rs`: the throwaway reader's source (`td`).
+- `jq300k/`: the jq 300k runs, with their own README and their scripts (`jq300k/t6-jq300k.sh` and
+  `jq300k/t6-jq300k-iso.sh`).
 - **No `.bin` trace files are committed.**
   - The sweep kept five (`automationmodetool`, `csh`, `dddiagnose`'s identical fault, `tcsh`, `yes`).
     They were read, then removed (`t6-cap.sh`).

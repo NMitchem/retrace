@@ -1,0 +1,23 @@
+rt0    sha256=9301e7717ca66ffdc71e3f2cf715730b839bfc74d295e71b2041bfba3a365ce0
+rt-fix sha256=43f00cafab5b41d88b40c0374fd83e54262c16b18f68aedc14148883e3d37a8e
+start 2026-10-02 00:05:39 -03 load={ 3.35 2.80 3.30 }
+i1 rt0 record rc=134 stdout=[] | replay rc=134 stdout=[] | cmp=0 | load={ 3.14 2.78 3.29 }
+   rec.err last: guest terminated by signal 6
+   rp.err first DIVERGENCE: 
+i1 rt-fix record rc=0 stdout=[44999850000] | replay rc=0 stdout=[44999850000] | cmp=0 | load={ 2.96 2.75 3.27 }
+   rec.err last: [retrace] fall-throughs: 0
+   rp.err first DIVERGENCE: 
+i2 rt0 record rc=134 stdout=[] | replay rc=134 stdout=[] | cmp=0 | load={ 2.80 2.72 3.26 }
+   rec.err last: guest terminated by signal 6
+   rp.err first DIVERGENCE: 
+i2 rt-fix record rc=0 stdout=[44999850000] | replay rc=0 stdout=[44999850000] | cmp=0 | load={ 2.52 2.66 3.23 }
+   rec.err last: [retrace] fall-throughs: 0
+   rp.err first DIVERGENCE: 
+i3 rt0 record rc=134 stdout=[] | replay rc=134 stdout=[] | cmp=0 | load={ 2.40 2.64 3.22 }
+   rec.err last: guest terminated by signal 6
+   rp.err first DIVERGENCE: 
+i3 rt-fix record rc=0 stdout=[44999850000] | replay rc=0 stdout=[44999850000] | cmp=0 | load={ 2.19 2.58 3.19 }
+   rec.err last: [retrace] fall-throughs: 0
+   rp.err first DIVERGENCE: 
+end 2026-10-02 00:06:27 -03 load={ 2.19 2.58 3.19 }
+script exit=0
