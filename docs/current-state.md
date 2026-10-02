@@ -690,7 +690,7 @@ reconstruction caveat in full.
   every backed page in the range, rounding the length up to the page as xnu does; a reserved page
   not yet committed needs nothing, since it commits as zero. `Box_::guest_madvise` recomputes the
   zeros on both sides and they are never recorded (M47 R3); both sides apply them as box writes,
-  so a watch sees a zero-fill. A zero length answers 0. Any other advice, an address off a 16 KiB
+  so a watch sees a zero-fill. A zero length answers 0 at a page-aligned address (an unaligned one is refused by the alignment rule even with length 0, where native answers 0). Any other advice, an address off a 16 KiB
   page, or a range that is neither backed nor reserved stops the recorder by value (Known limits).
   The generic forward arm asserts that 75 never reaches it. Before M47 the forward handed the
   host kernel retrace's own backing: `MADV_ZERO` wrote 512 KiB that the M30 guard band caught,
