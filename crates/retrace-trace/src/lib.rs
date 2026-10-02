@@ -137,6 +137,20 @@ impl Reader {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Vec<Event>> {
         Ok(Self::open_checked(path)?.0)
     }
+    /// M47: why a file that `open_checked` kept nothing from was refused, when the reason is
+    /// version skew rather than damage. Its header is an `RT` magic of ANOTHER format version, so a
+    /// different retrace wrote it (every older one, since M47's bump changed what a recorded
+    /// placement means). Returns a refusal naming both magics. Returns `None` for the current magic
+    /// and for anything that is not a 4-byte `RT` header (empty, short, foreign), which stays
+    /// `open_checked`'s keep-nothing case. Reads only the header; `open_checked` is unchanged.
+    pub fn format_skew<P: AsRef<Path>>(path: P) -> io::Result<Option<String>> {
+        let mut h = Vec::with_capacity(4);
+        File::open(path)?.take(4).read_to_end(&mut h)?;
+        if h.len() < 4 || h[0..2] != TRACE_MAGIC[0..2] || h[..] == TRACE_MAGIC[..] { return Ok(None); }
+        Ok(Some(format!(
+            r"trace format RT\x{:02x}\x{:02x}, but this retrace reads RT\x{:02x}\x{:02x}: recorded by a different retrace trace format (not torn); record it again with this retrace",
+            h[2], h[3], TRACE_MAGIC[2], TRACE_MAGIC[3])))
+    }
 }
 
 #[cfg(test)]
@@ -320,6 +334,26 @@ mod tests {
         // moved, but a pre-M47 recording's placements are no longer what replay recomputes, so it
         // would replay as a false divergence at its first masked map instead of being refused.
         assert_eq!(TRACE_MAGIC, *b"RT\x00\x0b");
+    }
+
+    #[test]
+    fn another_format_version_is_refused_by_name_not_as_torn() {
+        // M47: the bump exists so a pre-M47 recording is refused AS AN OLDER FORMAT. "Torn" would
+        // misreport it as corruption, as the divergence it replaced misreported it as
+        // nondeterminism. An `RT` header of another version must name both magics. The current
+        // magic, an empty or short file and a foreign header are not version skew; they stay
+        // `open_checked`'s keep-nothing case.
+        let p = named_tempfile("skewmagic");
+        std::fs::write(&p, b"RT\x00\x0arest-of-a-pre-M47-trace").unwrap();
+        let msg = Reader::format_skew(&p).unwrap().expect("an older RT magic is version skew");
+        let current = format!(r"RT\x{:02x}\x{:02x}", TRACE_MAGIC[2], TRACE_MAGIC[3]);
+        assert!(msg.contains(r"RT\x00\x0a") && msg.contains(&current) && msg.contains("different"),
+            "the refusal must name both magics and say the format differs: {msg}");
+        for not_skew in [&b""[..], b"RT\x00", b"XX\x00\x01junk", &TRACE_MAGIC[..]] {
+            std::fs::write(&p, not_skew).unwrap();
+            assert_eq!(Reader::format_skew(&p).unwrap(), None, "{not_skew:?} is not version skew");
+        }
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]

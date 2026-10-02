@@ -1403,6 +1403,13 @@ impl DecodedTrace {
     pub fn load(trace_path: &Path) -> Result<Self, String> {
         let (events, truncated) = retrace_trace::Reader::open_checked(trace_path)
             .map_err(|e| format!("cannot open trace: {e}"))?;
+        // M47: nothing kept because the header names ANOTHER format version means a different
+        // retrace wrote the trace. Refuse it by name, not as `open_decoded`'s "empty/torn". A trace
+        // that kept records never reaches this check.
+        if events.is_empty() {
+            if let Some(skew) = retrace_trace::Reader::format_skew(trace_path)
+                .map_err(|e| format!("cannot open trace: {e}"))? { return Err(skew); }
+        }
         Ok(DecodedTrace { events: events.into(), truncated })
     }
     pub fn events(&self) -> &[Event] { &self.events }
