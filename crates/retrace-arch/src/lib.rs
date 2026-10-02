@@ -290,11 +290,16 @@ pub enum ArgKind {
     /// unenumerated opcode — never forwarded. Translating them properly needs the
     /// `translate_mwl_regions` treatment plus its own measurement of the struct layout.
     ///
-    /// The six rows are the MEASURED family, not a proof of exhaustiveness — all header-derived
-    /// from `sys/syscall.h`. `aio_read` (216, via `aiocb.aio_buf`) has the same nested-write shape
-    /// and no row, because no guest this repo runs is measured to call it (`forwarded_shape` names
-    /// it if one does); `sendfile` (337, via `sf_hdtr`'s iovecs) has the nested shape on the READ
-    /// side and is `NestedSource` on its row.
+    /// The iovec and msghdr rows are the MEASURED family, not a proof of exhaustiveness — all
+    /// header-derived from `sys/syscall.h`. `aio_read` (216, via `aiocb.aio_buf`) has the same
+    /// nested-write shape and no row, because no guest this repo runs is measured to call it
+    /// (`forwarded_shape` names it if one does); `sendfile` (337, via `sf_hdtr`'s iovecs) has the
+    /// nested shape on the READ side and is `NestedSource` on its row.
+    ///
+    /// M47 added `__mac_syscall` (381) and its `MAC_SYSCALL_MAGIC` band: a policy may write through
+    /// a pointer inside `arg` (AMFI's `outFlags`). Those two are modelled above the generic arm per
+    /// `(policy, call)`: the arm refuses an unmodelled pair by value (`mac_syscall_model`), and the
+    /// generic arm's `writes_via_nested_pointer` assert is the backstop if the arm is ever removed.
     NestedDest,
     /// A pointer modelled no further than the flat window and the guard band: a read the kernel
     /// itself bounds far inside the window (a `sockaddr`, an `ioctl` parameter), a fixed struct it
@@ -710,6 +715,12 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // the guest's; the exiting guest thread that issues it never observes the difference.
         // Noted here, not modelled.
         331 => row!(P, [Scalar]),
+        // __pthread_canceled(int action): xnu-private, one scalar (SDK `SYS___pthread_canceled
+        // 333`). M47: git's run-command issues it through `pthread_setcancelstate` around its
+        // maintenance fork (the probe's g36 stopped at this row's absence; g40 passed it). Forwarded
+        // like 331 above: the kernel applies it to RETRACE's thread, and retrace never cancels a
+        // thread, so the flag it sets is inert. Noted, not modelled.
+        333 => row!(P, [Scalar]),
         // ---- threads / workqueue (emulated above the trace, M14/M18 — rows are documentation) ---
         // bsdthread_create(func, func_arg, stack, pthread, flags): xnu-private, shape per
         // SYS_BSDTHREAD_CREATE's doc. func/func_arg/stack are values handed to the new thread's
@@ -801,6 +812,29 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // dyld_info, flex — cache rewrite, reached only when xcrun rebuilds its host cache
         // /var/tmp/xcrun_db; Ruling T0-e — host-state-dependent, unlike ed's unlink above).
         128 => row!(P, [Path, Path]),
+        // chdir(const char *path): M47 (the 2026-09-30 probe and t0 M4: git calls it for `-C`, and
+        // at startup even without `-C`). FORWARDED, and like fchdir (13) below it moves RETRACE's
+        // own working directory. On record that is the point: the guest's later relative paths
+        // are forwarded too and must resolve where the guest put them. Inert on replay, which
+        // forwards nothing (R1). t0 M5 found no relative path retrace opens after the guest starts.
+        12 => row!(P, [Path]),
+        // mkdir(const char *path, mode_t mode): M47 (git `add`, creating `.git/objects/xx`).
+        136 => row!(P, [Path, Scalar]),
+        // link(const char *path1, const char *path2): M47 (git `add`, moving a finished object from
+        // its temporary name into place).
+        9 => row!(P, [Path, Path]),
+        // utimes(const char *path, const struct timeval times[2]): M47 (git's object freshen; the
+        // probe reached it only after a crashed run left objects behind, and `fsops_dyn` reaches it
+        // deterministically). `times` is read for exactly two timevals, 2 × 16 = 32 bytes
+        // (bsd/vfs/vfs_syscalls.c `getutimes`, one `copyin` of `sizeof(tv)`), the cited bound —
+        // Ptr. NULL means "now".
+        138 => row!(P, [Path, Ptr]),
+        // fork(void): REFUSED since M47, never forwarded. The record arm ahead of the generic
+        // forward answers `fork_refusal_errno` (EAGAIN) and writes nothing, on both sides, and the
+        // generic arm asserts it never arrives: this row makes `forwarded_shape` accept 2, so the
+        // assert is what stands between a missing arm and a real child of retrace. Documentation of
+        // the prototype only, as 59's and 244's are.
+        2 => row!(P, []),
         // execve(char *fname, char **argp, char **envp): the kernel reads every argv/envp string
         // through the nested pointers — rule 1, NestedSource (EXPECTED_DIFFS; exercised by /bin/sh).
         // REFUSED since M38, never forwarded: the record arm ahead of the generic forward answers
@@ -833,18 +867,15 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         SYS_MPROTECT => row!(P, [Scalar, Scalar, Scalar]),
         // madvise(void *addr, size_t len, int behav): addr is a VM range the kernel neither reads
         // nor writes as data (bsd/kern/kern_mman.c `madvise`: `madvise_sanitize` then
-        // `mach_vm_behavior_set(user_map, start, size, …)`, no copyin/copyout). FORWARDED, and the
-        // rebase is the load-bearing part: the host kernel applies `behav` to whatever lies at the
-        // forwarded address in RETRACE's address space, so `host_span` must rebase it onto the
-        // guest backing — which is why it is `Ptr` and not `Scalar`. M37's static audit found it
-        // `Scalar` (M33 wrote the row when every register was probed regardless, so the kind
-        // carried nothing); once `Scalar` means "never probed", a raw guest IPA would have reached
-        // the host as the range to `MADV_FREE_REUSABLE` — an `ENOMEM`/`EINVAL` where the guest
-        // had success, or retrace's own pages discarded if the IPA happened to be mapped there.
-        // Live on the corpus: CPython issues 44 `madvise(nano-band or mmap-area addr, ≤ 0x20000,
-        // 7)` per run — 40 in the nano band, 4 at MMAP_BASE+0x20000/+0x2c000, the four that
-        // answered EPERM in the counterfactual.
-        // The `Ptr` bound is trivially citable — zero bytes of data cross.
+        // `mach_vm_behavior_set(user_map, start, size, …)`, no copyin/copyout). NEVER FORWARDED
+        // since M47: the record arm ahead of the generic forward models it by advice
+        // (`madvise_effect`, `Box_::guest_madvise`), and the generic arm asserts it never arrives.
+        // Forwarded (M2–M46), the host applied `behav` to RETRACE's backing of the guest range. A
+        // MADV_FREE_REUSABLE there let the host reclaim pages the guest may later write through
+        // stage 2 (the hazard M37 named, first read on /bin/ps; CPython issues 44 `madvise(…, 7)`
+        // per run), and a MADV_ZERO wrote 512 KiB past the diff window and stopped the recorder at
+        // the guard band (the M47 probe's g33). The row stays for the census and the views, and
+        // `Ptr` still says what the argument is: a range, rebased when it was forwarded.
         75 => row!(P, [Ptr, Scalar, Scalar]),
         // shared_region_check_np(uint64_t *start_address): 8 bytes out — serviced above the
         // trace (forced to fail so dyld maps the cache itself).
@@ -890,19 +921,24 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // `syscall_csr_get_active_config`) — the cited bound.
         483 => row!(P, [Scalar, Ptr, Scalar]),
         // __mac_syscall(char *policy, int call, void *arg): policy is `copyinstr`'d into a
-        // MAC_MAX_POLICY_NAME (32) buffer (security/mac_base.c `__mac_syscall`) — NUL-terminated
-        // and kernel-stopped, so Path. arg: xnu itself never copies it — it hands the raw pointer
-        // to the policy's `mpo_policy_syscall(p, call, arg)`, and Sandbox.kext (closed) reads a
-        // per-`call` struct of ITS choosing. No argument carries a length, so rule 4's
-        // precondition (a caller-chosen length that can cross the window) is structurally
-        // absent; the size is the callee's, fixed per call — Ptr, on that reasoning rather than
-        // on a number nobody outside Apple can cite.
-        381 => row!(P, [Path, Scalar, Ptr]),
+        // MAC_MAX_POLICY_NAME (32) buffer (security/mac_base.c `__mac_syscall`) — Path. arg: xnu
+        // hands the raw pointer to the policy's `mpo_policy_syscall(p, call, arg)`, and the policy
+        // reads a per-call struct of ITS choosing, which may carry pointers the policy WRITES
+        // through. AMFI's dyld-policy call (0x5a) takes `{u64 inFlags; u64 *outFlags}` and writes
+        // `*outFlags` (the M47 probe's amfi-disasm.txt); Sandbox's call 2 struct holds guest stack
+        // pointers at +0 and +16 (sandbox-call2.txt). So NestedDest since M47. Forwarded (M2–M46), a
+        // guest address reached the host as a host address; the EFAULT every dyld guest got was
+        // luck, because the stack VA fell in retrace's own __PAGEZERO. MODELLED per (policy, call)
+        // above the generic forward (`Box_::guest_mac_syscall`); the arm refuses an unmodelled pair
+        // by value (`mac_syscall_model`), and the generic arm's `writes_via_nested_pointer` assert
+        // is the backstop if the arm is ever removed.
+        381 => row!(P, [Path, Scalar, NestedDest]),
         // MAC_SYSCALL_MAGIC (0x8000_0000): not a syscall number. dyld's inline
         // `__mac_syscall("Sandbox", …)` loads this magic into x16 (`movz x16, #0x8000, lsl #16`);
         // only a platform binary may issue it, so retrace-core synthesizes the reply and never
-        // forwards it (its `MAC_SYSCALL_MAGIC` arm). The argument shape is __mac_syscall's.
-        0x8000_0000 => row!(P, [Path, Scalar, Ptr]),
+        // forwards it (its `MAC_SYSCALL_MAGIC` arm). The argument shape is __mac_syscall's,
+        // NestedDest included since M47.
+        0x8000_0000 => row!(P, [Path, Scalar, NestedDest]),
         // proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg, void *buffer,
         //           int32_t buffersize): `proc_info_internal` (bsd/kern/proc_info.c) dispatches on
         // callnum (sys/proc_info_private.h). LISTPIDS (1) copies out min(nprocs+20, buffersize/4)
@@ -1414,6 +1450,17 @@ pub fn exec_refusal_errno(num: u64) -> Option<u64> {
     match num { SYS_EXECVE | SYS_POSIX_SPAWN => Some(14), _ => None }
 }
 
+/// M47 §3e: `fork` (2) is REFUSED, never forwarded, with `EAGAIN` (35), the errno `fork(2)`
+/// documents for a process limit reached, so the guest takes a failure path libc and its callers
+/// already have (R2): libc's `fork` calls `cerror`, then its parent handlers, and returns −1
+/// (the M47 probe's fork-disasm.txt). Fidelity, not continuity: before M47 a fork never returned,
+/// because its prepare handler's `mach_ports_register` (3403) stopped the recorder first. `vfork`
+/// (66) and the other process-creation calls have no row. `Some` doubles as the predicate the record
+/// arm, the replay mirror and the generic arm's assert share, as `exec_refusal_errno`'s does.
+pub fn fork_refusal_errno(num: u64) -> Option<u64> {
+    match num { SYS_FORK => Some(35), _ => None }
+}
+
 // ---- M45-kqinit: libdispatch's workqueue-kqueue initialisation ------------------------------------
 // Flag and filter values from the macOS 26 SDK's `sys/event.h`, which tests/kqinit.rs re-reads at
 // test time. The exception is `KEVENT_FLAG_WORKQ`, which the SDK does not ship: it is xnu's
@@ -1794,6 +1841,119 @@ pub const USER_WAKE_EVENT: KeventQos = KeventQos {
     ext: [0; 4],
 };
 
+// ---- M47-gitwrite: madvise, __mac_syscall and fork, modelled ---------------------------------------
+// Values from the macOS 26 SDK's `sys/mman.h`, `sys/syscall.h` and `sys/errno.h`, which
+// tests/gitshapes.rs re-reads at test time.
+/// `madvise` (SDK `SYS_madvise 75`). Modelled by advice since M47, never forwarded.
+pub const SYS_MADVISE: u64 = 75;
+/// `fork` (SDK `SYS_fork 2`). Refused since M47, never forwarded (`fork_refusal_errno`).
+pub const SYS_FORK: u64 = 2;
+/// `MADV_FREE_REUSABLE` (`sys/mman.h:217`): libmalloc marks a freed span reusable.
+pub const MADV_FREE_REUSABLE: u32 = 7;
+/// `MADV_FREE_REUSE` (`sys/mman.h:218`): libmalloc takes a reusable span back.
+pub const MADV_FREE_REUSE: u32 = 8;
+/// `MADV_ZERO` (`sys/mman.h:221`): "zero pages without faulting in additional pages" — libmalloc
+/// zeroing a span in place (git `commit`, the probe's g33).
+pub const MADV_ZERO: u32 = 11;
+
+/// What a modelled `madvise` advice does to guest memory (M47 §3c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MadviseEffect {
+    /// Nothing. Kernel-faithful for these values: a kernel may keep a reusable or freed page's
+    /// contents indefinitely, and native reclamation depends on memory pressure, so no guest can
+    /// depend on it. A deterministic "never reclaims" is one legal kernel.
+    NoOp,
+    /// Every resident page of the range reads as zero afterwards. A page never touched already
+    /// reads as zero, which is why `MADV_ZERO` need not fault one in.
+    Zero,
+}
+
+/// The effect of `madvise` advice `advice`, the `int behav` the kernel reads (the caller passes the
+/// register's low 32 bits). The accepted set is EXACTLY t0 M1(a)'s census (M47 §3c); every other
+/// value is refused by value, naming it, because a guessed effect is either a lie about memory or a
+/// forward onto retrace's own backing.
+pub fn madvise_effect(advice: u32) -> Result<MadviseEffect, String> {
+    match advice {
+        MADV_FREE_REUSABLE | MADV_FREE_REUSE => Ok(MadviseEffect::NoOp),
+        MADV_ZERO => Ok(MadviseEffect::Zero),
+        _ => Err(format!(
+            "M47: unmeasured madvise advice {advice}. Modelled, from t0 M1(a)'s census: \
+             FREE_REUSABLE (7) and FREE_REUSE (8) as no-ops and ZERO (11) as a zero-fill (M47 §3c). \
+             Measure its native effect before modelling it; forwarded, an advice acts on retrace's \
+             own backing of the guest range")),
+    }
+}
+
+/// `__mac_syscall` (SDK `SYS___mac_syscall 381`). Modelled per `(policy, call)` since M47, never
+/// forwarded; `MAC_SYSCALL_MAGIC` (0x8000_0000) is dyld's inline spelling, serviced separately.
+pub const SYS_MAC_SYSCALL: u64 = 381;
+/// `MAC_MAX_POLICY_NAME` (xnu `security/mac.h`): the buffer `__mac_syscall` `copyinstr`s the policy
+/// name into, NUL included (security/mac_base.c `__mac_syscall`).
+pub const MAC_MAX_POLICY_NAME: usize = 32;
+/// AMFI's dyld-policy call: `arg` is `{u64 inFlags; u64 *outFlags}`, and AMFI writes `*outFlags`
+/// (the M47 probe's amfi-disasm.txt). Two measured callers issue it with that same struct: dyld's
+/// `amfi_check_dyld_policy_self`, and a libsystem_trace caller in six Apple binaries (t0 M2(a)).
+pub const AMFI_DYLD_POLICY_SELF: u32 = 0x5a;
+/// Sandbox's call 2, a sandbox check, issued by dyld's `sandbox_check_common` and libsystem_sandbox's
+/// `rootless_check_trusted_internal`. Its struct holds guest pointers at +0 and +16; the operation
+/// name is at `*(arg + 16)` (the M47 probe's sandbox-call2.txt).
+pub const SANDBOX_CHECK: u32 = 2;
+/// M47's own cap on a Sandbox operation name, NUL included: four times the longest measured one
+/// (`file-write-data`, 15 bytes). A longer name is refused, not truncated.
+pub const SANDBOX_OPERATION_MAX: usize = 64;
+/// Sandbox's call 4, issued by libsystem_sandbox's `sandbox_container_path_for_pid`: `arg` is
+/// `{u64 pid; u64 0; char *buf; u64 len}`, and the policy writes the container's path through the
+/// nested `buf` (M47 t0, after H7: the xcrun trio's six calls, h7-call4.txt).
+pub const SANDBOX_CONTAINER_PATH: u32 = 4;
+/// `ENOTSUP` (SDK `sys/errno.h`): Sandbox call 4's answer for a process with no container (t0, H7).
+pub const ENOTSUP: u64 = 45;
+
+/// A modelled `__mac_syscall` (M47 §3d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacCall {
+    /// `("AMFI", 0x5a)`: answered by the host, about retrace's own process (R4). Both measured
+    /// callers, dyld's `amfi_check_dyld_policy_self` and libsystem_trace's, pass the same struct.
+    AmfiDyldPolicy,
+    /// `("Sandbox", 2)`: answered with the errno the pre-M47 forward returned (R7).
+    SandboxCheck,
+    /// `("Sandbox", 4)`: answered ENOTSUP (45) with no write — what the pre-M47 forward returned and
+    /// what native returns for an unsandboxed process (t0, H7; the operator's ruling, 2026-10-01).
+    SandboxContainerPath,
+}
+
+/// Classify `__mac_syscall(policy, call, …)`. `call` is the `int` the kernel reads (the caller
+/// passes the register's low 32 bits). Exactly the three measured pairs are modelled; every other is
+/// refused, naming both, because its struct may carry a pointer the policy writes through.
+pub fn mac_syscall_model(policy: &[u8], call: u32) -> Result<MacCall, String> {
+    match (policy, call) {
+        (b"AMFI", AMFI_DYLD_POLICY_SELF) => Ok(MacCall::AmfiDyldPolicy),
+        (b"Sandbox", SANDBOX_CHECK) => Ok(MacCall::SandboxCheck),
+        (b"Sandbox", SANDBOX_CONTAINER_PATH) => Ok(MacCall::SandboxContainerPath),
+        _ => Err(format!(
+            "M47: unmodelled __mac_syscall policy {:?} call {call:#x}. Modelled: (\"AMFI\", 0x5a), \
+             (\"Sandbox\", 0x2) and (\"Sandbox\", 0x4) (M47 §3d). A policy's argument struct may carry \
+             pointers the policy writes through, so it is never forwarded (ArgKind::NestedDest); \
+             measure this one's struct and its native answer before modelling it", String::from_utf8_lossy(policy))),
+    }
+}
+
+/// R7: Sandbox call 2's answer is the errno the pre-M47 forward returned, which the corpus passes
+/// with. It is keyed by the operation name at `*(arg + 16)`, the one field that tells the two
+/// measured callers apart (the M47 probe's sandbox-call2.txt; t0 M2(a) re-measured it across the
+/// corpus). The forward's errno was the host kernel's verdict on a struct whose nested guest
+/// pointers it could not follow — continuity, not fidelity; t0 M2(b) has the native answers.
+pub fn sandbox_check_continuity(operation: &[u8]) -> Result<u64, String> {
+    match operation {
+        b"syscall-unix" => Ok(14),
+        b"file-write-data" => Ok(22),
+        _ => Err(format!(
+            "M47: unmeasured Sandbox operation {:?}. Measured: \"syscall-unix\" (dyld's \
+             sandbox_check_common, EFAULT 14) and \"file-write-data\" (libsystem_sandbox's \
+             rootless_check_trusted_internal, EINVAL 22) (t0 M2, R7). Measure what the pre-M47 \
+             forward returned for this one before adding it", String::from_utf8_lossy(operation))),
+    }
+}
+
 // ---- M12-signal-delivery ---------------------------------------------------------------------
 // Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here
 // was read out of the live SDK by spikes/sigabi.c, not from memory.
@@ -2124,7 +2284,7 @@ mod tests {
     // its own measurement.
     #[test]
     fn the_nested_pointer_family_is_pinned_by_number() {
-        for num in [120u64, 411, 27, 401, 540, 480] {
+        for num in [120u64, 411, 27, 401, 540, 480, 381, 0x8000_0000] {
             assert!(writes_via_nested_pointer(num), "syscall {num} must be refused");
         }
         for num in [SYS_READ, SYS_PREAD, SYS_SYSCTL, SYS_WRITE] {

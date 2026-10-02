@@ -68,7 +68,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0a"; // "RT" + format version 0x000a (M38: `Event::Syscall` gained `ret1`, the second return register — `pipe`'s write end; pre-M38 traces are refused whole)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0b"; // "RT" + format version 0x000b (M47 for `mach_vm_map`'s mask: an ANYWHERE placement now honours it, so a pre-M47 recording's addresses mean something different; pre-M47 traces are refused whole)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -137,6 +137,20 @@ impl Reader {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Vec<Event>> {
         Ok(Self::open_checked(path)?.0)
     }
+    /// M47: why a file that `open_checked` kept nothing from was refused, when the reason is
+    /// version skew rather than damage. Its header is an `RT` magic of ANOTHER format version, so a
+    /// different retrace wrote it (every older one, since M47's bump changed what a recorded
+    /// placement means). Returns a refusal naming both magics. Returns `None` for the current magic
+    /// and for anything that is not a 4-byte `RT` header (empty, short, foreign), which stays
+    /// `open_checked`'s keep-nothing case. Reads only the header; `open_checked` is unchanged.
+    pub fn format_skew<P: AsRef<Path>>(path: P) -> io::Result<Option<String>> {
+        let mut h = Vec::with_capacity(4);
+        File::open(path)?.take(4).read_to_end(&mut h)?;
+        if h.len() < 4 || h[0..2] != TRACE_MAGIC[0..2] || h[..] == TRACE_MAGIC[..] { return Ok(None); }
+        Ok(Some(format!(
+            r"trace format RT\x{:02x}\x{:02x}, but this retrace reads RT\x{:02x}\x{:02x}: recorded by a different retrace trace format (not torn); record it again with this retrace",
+            h[2], h[3], TRACE_MAGIC[2], TRACE_MAGIC[3])))
+    }
 }
 
 #[cfg(test)]
@@ -162,10 +176,11 @@ mod tests {
     }
     #[test]
     fn rejects_prior_format_version() {
-        // A genuine prior-version trace (RT\x00\x02, and the immediately-prior RT\x00\x09 that
-        // M38's `ret1` bump retired) with an otherwise well-formed, correctly CRC'd record: proves
-        // rejection is by MAGIC, not by CRC/framing.
-        for prior_magic in [b"RT\x00\x02", b"RT\x00\x09"] {
+        // A genuine prior-version trace (RT\x00\x02, RT\x00\x09 that M38's `ret1` bump retired,
+        // and the immediately-prior RT\x00\x0a that M47's `mach_vm_map` mask bump retired) with an
+        // otherwise well-formed, correctly CRC'd record: proves rejection is by MAGIC, not by
+        // CRC/framing.
+        for prior_magic in [b"RT\x00\x02", b"RT\x00\x09", b"RT\x00\x0a"] {
             let f = tempfile();
             let body = b"plausible record body bytes";
             let crc = crc32(body);
@@ -271,9 +286,9 @@ mod tests {
         std::fs::remove_file(&p).ok();
     }
 
-    // M11's magic assertion moved to `magic_bumped_for_the_m24_trampoline_vector_padding` (now
-    // asserting v9, M24's bump). What is left here is the half that does not go stale: a v4 trace
-    // stays rejected.
+    // M11's magic assertion moved to `magic_bumped_for_the_m24_trampoline_vector_padding`, renamed
+    // at each bump since (now `magic_bumped_for_the_m47_vm_map_mask`). What is left here is the
+    // half that does not go stale: a v4 trace stays rejected.
     #[test]
     fn rejects_v4_traces() {
         let p = named_tempfile("oldmagic");
@@ -308,14 +323,37 @@ mod tests {
     }
 
     #[test]
-    fn magic_bumped_for_the_m38_second_return_register() {
+    fn magic_bumped_for_the_m47_vm_map_mask() {
         // M24: the trampoline page's vector padding changed from `UDF #0` to `hvc #1` (M23),
         // which is snapshot *content*, not `Event` shape — a pre-M24 snapshot is not merely
         // older, it means something different at the bytes `Box_::restore` re-applies. Two
         // tests, because "forgot to bump" and "bumped to the wrong value" are different mistakes.
         // M38: `Event::Syscall` gained `ret1`; a pre-M38 record deserialises with its fields
         // shifted, so the version, not the CRC, is what refuses it.
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0a");
+        // M47: `mach_vm_map`'s alignment mask is honoured, the M24 kind of change — no shape
+        // moved, but a pre-M47 recording's placements are no longer what replay recomputes, so it
+        // would replay as a false divergence at its first masked map instead of being refused.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0b");
+    }
+
+    #[test]
+    fn another_format_version_is_refused_by_name_not_as_torn() {
+        // M47: the bump exists so a pre-M47 recording is refused AS AN OLDER FORMAT. "Torn" would
+        // misreport it as corruption, as the divergence it replaced misreported it as
+        // nondeterminism. An `RT` header of another version must name both magics. The current
+        // magic, an empty or short file and a foreign header are not version skew; they stay
+        // `open_checked`'s keep-nothing case.
+        let p = named_tempfile("skewmagic");
+        std::fs::write(&p, b"RT\x00\x0arest-of-a-pre-M47-trace").unwrap();
+        let msg = Reader::format_skew(&p).unwrap().expect("an older RT magic is version skew");
+        let current = format!(r"RT\x{:02x}\x{:02x}", TRACE_MAGIC[2], TRACE_MAGIC[3]);
+        assert!(msg.contains(r"RT\x00\x0a") && msg.contains(&current) && msg.contains("different"),
+            "the refusal must name both magics and say the format differs: {msg}");
+        for not_skew in [&b""[..], b"RT\x00", b"XX\x00\x01junk", &TRACE_MAGIC[..]] {
+            std::fs::write(&p, not_skew).unwrap();
+            assert_eq!(Reader::format_skew(&p).unwrap(), None, "{not_skew:?} is not version skew");
+        }
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]

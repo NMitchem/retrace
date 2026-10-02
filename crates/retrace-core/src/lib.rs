@@ -38,10 +38,11 @@ const MACH_TASK_SELF: u64 = (-28i64) as u64; // task_self_trap: its result names
 const VM_FLAGS_ANYWHERE:  u64 = 0x1;
 const PROT_EXEC:          u64 = 0x4;
 
-// Extract (address-pointer, size, flags, cur_prot) for an anonymous mach_vm_map/allocate trap.
-fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64) {
-    if num == MACH_VM_MAP { (args[1], args[2], args[4], args[5]) }
-    else                  { (args[1], args[2], args[3], 0x3 /*RW*/) } // allocate: always RW anon
+// Extract (address-pointer, size, mask, flags, cur_prot) for an anonymous mach_vm_map/allocate
+// trap. `mask` is mach_vm_map's alignment mask (Box_::guest_vm_map_masked); allocate has none.
+fn vm_map_args(num: u64, args: &[u64; 8]) -> (u64, u64, u64, u64, u64) {
+    if num == MACH_VM_MAP { (args[1], args[2], args[3], args[4], args[5]) }
+    else                  { (args[1], args[2], 0, args[3], 0x3 /*RW*/) } // allocate: always RW anon
 }
 
 /// True if this `sysctl` is `{CTL_KERN, KERN_USRSTACK64}` — a 2-element mib read out of guest
@@ -410,7 +411,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // kernel writes the chosen address into *args[1]; we allocate a deterministic guest IPA
             // and store it there, returning KERN_SUCCESS.
             Stop::Syscall { num, args } if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP => {
-                let (addr_ptr, size, flags, prot) = vm_map_args(num, &args);
+                let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                 let exec = prot & PROT_EXEC != 0;
                 if exec { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
@@ -420,10 +421,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // else is an eagerly-backed map. Mirrors the MIG 4811 split below (guest_vm_reserve
                 // vs guest_vm_map) so a reservation arriving via the trap route genuinely reserves
                 // and is never eager-backed (fatal at 24 GiB). MACH_VM_ALLOCATE always carries RW.
+                // Both honour `mask` (see guest_vm_map_masked); replay passes the same one.
                 let ipa = if prot == 0 {
-                    b.guest_vm_reserve(req, size, anywhere)
+                    b.guest_vm_reserve_masked(req, size, mask, anywhere)
                 } else {
-                    b.guest_vm_map(req, size, anywhere, exec)
+                    b.guest_vm_map_masked(req, size, mask, anywhere, exec)
                 };
                 let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
@@ -462,12 +464,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
                         // cur_protection == 0 => a PROT_NONE address-space reservation (no backing,
                         // e.g. libmalloc's 24 GiB nano pointer range); anything else is a real
-                        // backed map. See guest_vm_reserve / guest_vm_map.
+                        // backed map. See guest_vm_reserve / guest_vm_map. Both honour `mask`.
                         let ipa = if req.cur_protection == 0 {
-                            b.guest_vm_reserve(req.address, req.size, anywhere)
+                            b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
                         } else {
                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                            b.guest_vm_map(req.address, req.size, anywhere, exec)
+                            b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
                         };
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_vm_map_reply(m.reply_port, ipa) }];
@@ -549,6 +551,23 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
                             err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 set_special_port: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
+                    machmsg::Route::ServicePortsRegister => {
+                        // M47 §3e: mach_ports_register (3403), libxpc's xpc_atfork_prepare in fork's
+                        // prepare handlers. It sets the port array a CHILD would inherit; the fork is
+                        // refused, so no child exists and the parent observes only the reply. A
+                        // mig_reply_error KERN_SUCCESS, never forwarded (it would register retrace's
+                        // own). Deterministic → the standard symmetric posture: replay recomputes and
+                        // byte-compares (the 3410 shape).
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        machmsg::decode_ports_register(&buf)
+                            .unwrap_or_else(|e| panic!("mach_ports_register (3403) decode: {e}"));
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 ports_register: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
                     machmsg::Route::StubMigReply(retcode) => {
@@ -1235,6 +1254,54 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.apply_and_return(e, true, &[]);
             }
 
+            // M47 §3e: fork is refused, never forwarded — a forwarded fork would start a real child
+            // of retrace. The exec arm's posture (M38): constant return, no writes; replay
+            // recomputes and compares. EAGAIN is fork's documented process-limit failure (R2), and
+            // libc's fork then runs its parent handlers and returns -1, a path it already has.
+            Stop::Syscall { num, args } if retrace_arch::fork_refusal_errno(num).is_some() => {
+                let e = retrace_arch::fork_refusal_errno(num).unwrap();
+                eprintln!("[retrace] refusing fork (syscall {num}): process creation is unmodelled; returning errno {e} without forwarding");
+                w.append(&Event::Syscall { num, args, ret: e, ret1: 0, err: true, writes: vec![], thread })
+                    .map_err(|e| format!("append fork refusal: {e}"))?; count += 1;
+                b.apply_and_return(e, true, &[]);
+            }
+
+            // M47 §3c: madvise is MODELLED, never forwarded (see Box_::guest_madvise). The zeros a
+            // MADV_ZERO makes are applied here and recomputed by the mirror, never recorded (R3), so
+            // the event carries no writes. A refusal panics before anything is appended (R5).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MADVISE => {
+                let zeros = b.guest_madvise(args).unwrap_or_else(|m| panic!("{m}"));
+                w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append madvise: {e}"))?; count += 1;
+                b.apply_and_return(0, false, &zeros);
+            }
+
+            // M47 §3d: __mac_syscall is MODELLED per (policy, call), never forwarded: a policy may
+            // write through a pointer INSIDE `arg` (AMFI's outFlags), which a forward hands the host
+            // as a host address (NestedDest). This arm refuses an unmodelled pair by value
+            // (`mac_syscall_model`); the generic arm's `writes_via_nested_pointer` assert is the
+            // backstop if the arm is ever removed.
+            // AMFI's answer is the host's, about retrace's own process (R4), asked with host-owned
+            // pointers and recorded as the one 8-byte write at outFlags — the task_info posture. A
+            // host error is recorded as that error with no write, which is what a native failure
+            // looks like to dyld. Sandbox's call 2 keeps the errno the pre-M47 forward returned (R7);
+            // its call 4 answers ENOTSUP with no write, as native and the forward both did (t0, H7).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_MAC_SYSCALL => {
+                let call = b.guest_mac_syscall(args).unwrap_or_else(|m| panic!("{m}"));
+                let (ret, err, writes) = match call {
+                    retrace_box::MacSyscall::AmfiDyldPolicy { in_flags, out_ipa } =>
+                        match retrace_box::host_amfi_dyld_policy(in_flags) {
+                            Ok(flags) => (0, false, vec![Region { ipa: out_ipa, bytes: flags.to_le_bytes().to_vec() }]),
+                            Err(errno) => (errno, true, vec![]),
+                        },
+                    retrace_box::MacSyscall::SandboxCheck { errno } => (errno, true, vec![]),
+                    retrace_box::MacSyscall::SandboxContainerPath { errno } => (errno, true, vec![]),
+                };
+                w.append(&Event::Syscall { num, args, ret, ret1: 0, err, writes: writes.clone(), thread })
+                    .map_err(|e| format!("append __mac_syscall: {e}"))?; count += 1;
+                b.apply_and_return(ret, err, &writes);
+            }
+
             // Every other syscall goes through the general memory-diff engine (forwarded once).
             Stop::Syscall { num, args } => {
                 // M11 correctness invariant: no signal syscall may reach forward_and_diff, which
@@ -1262,6 +1329,20 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 assert!(num != retrace_arch::SYS_KEVENT_QOS,
                     "kevent_qos (374) reached the generic forward arm — it must be emulated above \
                      (M45). Forwarded, KEVENT_FLAG_WORKQ acts on retrace's own workqueue kqueue.");
+                // M47 §3c: madvise joins them. Forwarded, the advice acts on RETRACE's backing of
+                // the guest range: a MADV_FREE_REUSABLE there lets the host reclaim pages the guest
+                // may later write through stage 2, and a MADV_ZERO wrote 512 KiB past the diff
+                // window. The arm above models it; this assert makes "never forwarded" a checked
+                // fact rather than an arm-ordering accident.
+                assert!(num != retrace_arch::SYS_MADVISE,
+                    "madvise (75) reached the generic forward arm — it must be modelled above (M47). \
+                     Forwarded, its advice acts on retrace's own backing of the guest range.");
+                // M47 §3e: fork's row exists for the census and the views, which makes
+                // `forwarded_shape` accept it; this assert is what keeps a missing refusal arm from
+                // forwarding it and starting a real child of the recorder.
+                assert!(retrace_arch::fork_refusal_errno(num).is_none(),
+                    "fork ({num}) reached the generic forward arm — it must be refused above (M47). \
+                     Forwarded, it starts a real child of the recorder.");
                 // M27: the destination sits behind a pointer INSIDE a guest struct, which
                 // forward_and_diff never translates — so forwarding hands the host kernel a guest
                 // IPA as a host address. No guest in the gate calls these (measured: absent from
@@ -1359,6 +1440,13 @@ impl DecodedTrace {
     pub fn load(trace_path: &Path) -> Result<Self, String> {
         let (events, truncated) = retrace_trace::Reader::open_checked(trace_path)
             .map_err(|e| format!("cannot open trace: {e}"))?;
+        // M47: nothing kept because the header names ANOTHER format version means a different
+        // retrace wrote the trace. Refuse it by name, not as `open_decoded`'s "empty/torn". A trace
+        // that kept records never reaches this check.
+        if events.is_empty() {
+            if let Some(skew) = retrace_trace::Reader::format_skew(trace_path)
+                .map_err(|e| format!("cannot open trace: {e}"))? { return Err(skew); }
+        }
         Ok(DecodedTrace { events: events.into(), truncated })
     }
     pub fn events(&self) -> &[Event] { &self.events }
@@ -1908,6 +1996,64 @@ impl ReplaySession {
                                 self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
+                            // M47 mirror of record's fork refusal: recompute the constant, compare.
+                            if let Some(e) = retrace_arch::fork_refusal_errno(num) {
+                                if *ret != e || !*err || *ret1 != 0 || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "fork refusal mismatch: recorded ret {ret} ret1 {ret1} err {err} with {} write(s), \
+                                         expected errno {e}, err, no writes", writes.len()) });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
+                                return self.finish_event();
+                            }
+                            // M47 §3c: the madvise arm's mirror (symmetry rule 1). The zeros are
+                            // recomputed from the same box state and applied; the recording carries
+                            // none (R3), so a recorded write, return or error is a trace this build
+                            // did not write.
+                            if num == retrace_arch::SYS_MADVISE {
+                                let zeros = match self.b.guest_madvise(args) {
+                                    Ok(z) => z,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "madvise refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                if *ret != 0 || *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "madvise recorded ret={ret:#x} ret1={ret1:#x} err={err} with {} write(s); \
+                                         the model records 0, 0, false and none (R3)", writes.len()) });
+                                }
+                                self.b.apply_and_return(0, false, &zeros);
+                                return self.finish_event();
+                            }
+                            // M47 §3d: the __mac_syscall arm's mirror (symmetry rule 1). The
+                            // classification is recomputed from guest memory. AMFI's answer is host
+                            // data, so the recorded write is applied rather than recomputed, once its
+                            // address is checked against the outFlags replay reads; Sandbox's errno
+                            // is recomputed and compared.
+                            if num == retrace_arch::SYS_MAC_SYSCALL {
+                                let call = match self.b.guest_mac_syscall(args) {
+                                    Ok(c) => c,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "__mac_syscall refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                let ok = *ret1 == 0 && match call {
+                                    retrace_box::MacSyscall::AmfiDyldPolicy { out_ipa, .. } =>
+                                        (!*err && *ret == 0 && writes.len() == 1 && writes[0].ipa == out_ipa
+                                            && writes[0].bytes.len() == 8)
+                                        || (*err && writes.is_empty()),
+                                    retrace_box::MacSyscall::SandboxCheck { errno } => *err && *ret == errno && writes.is_empty(),
+                                    retrace_box::MacSyscall::SandboxContainerPath { errno } => *err && *ret == errno && writes.is_empty(),
+                                };
+                                if !ok {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "__mac_syscall recorded ret={ret:#x} ret1={ret1:#x} err={err} with {} write(s) {:x?}; \
+                                         replay classifies it as {call:?}",
+                                        writes.len(), writes.iter().map(|r| (r.ipa, r.bytes.len())).collect::<Vec<_>>()) });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
+                                return self.finish_event();
+                            }
                             // M11 mirror of record's serviced-signal arms. Recompute the SAME table
                             // transition and the SAME writeback bytes, then byte-compare against
                             // the recording — that comparison IS the divergence check (symmetry
@@ -2027,10 +2173,10 @@ impl ReplaySession {
                                         // Same reservation/commit split as record (must reproduce the
                                         // identical returned address for the byte-equality check below).
                                         let ipa = if req.cur_protection == 0 {
-                                            self.b.guest_vm_reserve(req.address, req.size, anywhere)
+                                            self.b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
                                         } else {
                                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                                            self.b.guest_vm_map(req.address, req.size, anywhere, exec)
+                                            self.b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
                                         };
                                         let reply = machmsg::encode_vm_map_reply(m.reply_port, ipa);
                                         if writes.len() != 1 || writes[0].bytes != reply {
@@ -2102,6 +2248,19 @@ impl ReplaySession {
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
                                                 detail: "task_set_special_port reply mismatch".into() });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::ServicePortsRegister => {
+                                        // M47 §3e: deterministic mig_reply_error → the standard
+                                        // symmetric posture, as ServiceSetSpecialPort above.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        machmsg::decode_ports_register(&buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay mach_ports_register decode: {e}") })?;
+                                        let reply = machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS);
+                                        if writes.len() != 1 || writes[0].bytes != reply {
+                                            return Err(Divergence { landmark: self.idx, pc,
+                                                detail: "mach_ports_register reply mismatch".into() });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
@@ -2202,7 +2361,7 @@ impl ReplaySession {
                             // then apply the recorded IPA write + KERN_SUCCESS. The recomputed IPA must
                             // equal what was recorded (bump allocator is deterministic).
                             if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP {
-                                let (addr_ptr, size, flags, prot) = vm_map_args(num, &args);
+                                let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
                                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                                 let exec = prot & PROT_EXEC != 0;
                                 let req = if self.b.is_mapped(addr_ptr) { self.b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
@@ -2210,9 +2369,9 @@ impl ReplaySession {
                                 // reserve, else eagerly back); must reproduce the identical returned IPA
                                 // for the byte-equality check below.
                                 let ipa = if prot == 0 {
-                                    self.b.guest_vm_reserve(req, size, anywhere)
+                                    self.b.guest_vm_reserve_masked(req, size, mask, anywhere)
                                 } else {
-                                    self.b.guest_vm_map(req, size, anywhere, exec)
+                                    self.b.guest_vm_map_masked(req, size, mask, anywhere, exec)
                                 };
                                 let recorded_ipa = writes.first()
                                     .map(|w| u64::from_le_bytes(w.bytes[..8].try_into().unwrap())).unwrap_or(ipa);
