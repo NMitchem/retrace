@@ -150,6 +150,10 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     // have no Fd/Dest/nested-pointer/reader kind, so neither differs and neither has an entry.
     (461, View::FdOperands, "getattrlistbulk(dirfd, …) — M44; exercised (/bin/ls)"),
     (461, View::DestBuffer, "getattrlistbulk's attrBuf is a Dest of x3 bytes (t0 M2: no cap below the window) — M44; exercised (/bin/ls)"),
+    // M47: __mac_syscall's policy writes through `outFlags` inside `arg` (AMFI 0x5a), so its row and
+    // the MAC_SYSCALL_MAGIC band's are NestedDest; the legacy nested table predates both.
+    (381, View::NestedPointer, "__mac_syscall(policy, call, arg): a policy writes through a pointer inside arg — M47; exercised (every dynamic guest)"),
+    (0x8000_0000, View::NestedPointer, "MAC_SYSCALL_MAGIC: __mac_syscall's shape, NestedDest since M47 — exercised (every dynamic guest, dyld's inline Sandbox check)"),
 ];
 
 /// The BSD numbers, the mach traps (negative, as the two's-complement `u64` the trap carries), and

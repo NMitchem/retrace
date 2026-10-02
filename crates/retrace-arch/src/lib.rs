@@ -290,11 +290,15 @@ pub enum ArgKind {
     /// unenumerated opcode — never forwarded. Translating them properly needs the
     /// `translate_mwl_regions` treatment plus its own measurement of the struct layout.
     ///
-    /// The six rows are the MEASURED family, not a proof of exhaustiveness — all header-derived
-    /// from `sys/syscall.h`. `aio_read` (216, via `aiocb.aio_buf`) has the same nested-write shape
-    /// and no row, because no guest this repo runs is measured to call it (`forwarded_shape` names
-    /// it if one does); `sendfile` (337, via `sf_hdtr`'s iovecs) has the nested shape on the READ
-    /// side and is `NestedSource` on its row.
+    /// The iovec and msghdr rows are the MEASURED family, not a proof of exhaustiveness — all
+    /// header-derived from `sys/syscall.h`. `aio_read` (216, via `aiocb.aio_buf`) has the same
+    /// nested-write shape and no row, because no guest this repo runs is measured to call it
+    /// (`forwarded_shape` names it if one does); `sendfile` (337, via `sf_hdtr`'s iovecs) has the
+    /// nested shape on the READ side and is `NestedSource` on its row.
+    ///
+    /// M47 added `__mac_syscall` (381) and its `MAC_SYSCALL_MAGIC` band: a policy may write through
+    /// a pointer inside `arg` (AMFI's `outFlags`). Those two are modelled above the generic arm per
+    /// `(policy, call)`, so the generic arm's assert refuses only an unmodelled pair.
     NestedDest,
     /// A pointer modelled no further than the flat window and the guard band: a read the kernel
     /// itself bounds far inside the window (a `sockaddr`, an `ioctl` parameter), a fixed struct it
@@ -910,19 +914,23 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // `syscall_csr_get_active_config`) — the cited bound.
         483 => row!(P, [Scalar, Ptr, Scalar]),
         // __mac_syscall(char *policy, int call, void *arg): policy is `copyinstr`'d into a
-        // MAC_MAX_POLICY_NAME (32) buffer (security/mac_base.c `__mac_syscall`) — NUL-terminated
-        // and kernel-stopped, so Path. arg: xnu itself never copies it — it hands the raw pointer
-        // to the policy's `mpo_policy_syscall(p, call, arg)`, and Sandbox.kext (closed) reads a
-        // per-`call` struct of ITS choosing. No argument carries a length, so rule 4's
-        // precondition (a caller-chosen length that can cross the window) is structurally
-        // absent; the size is the callee's, fixed per call — Ptr, on that reasoning rather than
-        // on a number nobody outside Apple can cite.
-        381 => row!(P, [Path, Scalar, Ptr]),
+        // MAC_MAX_POLICY_NAME (32) buffer (security/mac_base.c `__mac_syscall`) — Path. arg: xnu
+        // hands the raw pointer to the policy's `mpo_policy_syscall(p, call, arg)`, and the policy
+        // reads a per-call struct of ITS choosing, which may carry pointers the policy WRITES
+        // through. AMFI's dyld-policy call (0x5a) takes `{u64 inFlags; u64 *outFlags}` and writes
+        // `*outFlags` (the M47 probe's amfi-disasm.txt); Sandbox's call 2 struct holds guest stack
+        // pointers at +0 and +16 (sandbox-call2.txt). So NestedDest since M47. Forwarded (M2–M46), a
+        // guest address reached the host as a host address; the EFAULT every dyld guest got was
+        // luck, because the stack VA fell in retrace's own __PAGEZERO. MODELLED per (policy, call)
+        // above the generic forward (`Box_::guest_mac_syscall`), and the generic arm's
+        // `writes_via_nested_pointer` assert refuses any other pair.
+        381 => row!(P, [Path, Scalar, NestedDest]),
         // MAC_SYSCALL_MAGIC (0x8000_0000): not a syscall number. dyld's inline
         // `__mac_syscall("Sandbox", …)` loads this magic into x16 (`movz x16, #0x8000, lsl #16`);
         // only a platform binary may issue it, so retrace-core synthesizes the reply and never
-        // forwards it (its `MAC_SYSCALL_MAGIC` arm). The argument shape is __mac_syscall's.
-        0x8000_0000 => row!(P, [Path, Scalar, Ptr]),
+        // forwards it (its `MAC_SYSCALL_MAGIC` arm). The argument shape is __mac_syscall's,
+        // NestedDest included since M47.
+        0x8000_0000 => row!(P, [Path, Scalar, NestedDest]),
         // proc_info(int32_t callnum, int32_t pid, uint32_t flavor, uint64_t arg, void *buffer,
         //           int32_t buffersize): `proc_info_internal` (bsd/kern/proc_info.c) dispatches on
         // callnum (sys/proc_info_private.h). LISTPIDS (1) copies out min(nprocs+20, buffersize/4)
@@ -1855,6 +1863,76 @@ pub fn madvise_effect(advice: u32) -> Result<MadviseEffect, String> {
     }
 }
 
+/// `__mac_syscall` (SDK `SYS___mac_syscall 381`). Modelled per `(policy, call)` since M47, never
+/// forwarded; `MAC_SYSCALL_MAGIC` (0x8000_0000) is dyld's inline spelling, serviced separately.
+pub const SYS_MAC_SYSCALL: u64 = 381;
+/// `MAC_MAX_POLICY_NAME` (xnu `security/mac.h`): the buffer `__mac_syscall` `copyinstr`s the policy
+/// name into, NUL included (security/mac_base.c `__mac_syscall`).
+pub const MAC_MAX_POLICY_NAME: usize = 32;
+/// AMFI's dyld-policy call: `arg` is `{u64 inFlags; u64 *outFlags}`, and AMFI writes `*outFlags`
+/// (the M47 probe's amfi-disasm.txt). Two measured callers issue it with that same struct: dyld's
+/// `amfi_check_dyld_policy_self`, and a libsystem_trace caller in six Apple binaries (t0 M2(a)).
+pub const AMFI_DYLD_POLICY_SELF: u32 = 0x5a;
+/// Sandbox's call 2, a sandbox check, issued by dyld's `sandbox_check_common` and libsystem_sandbox's
+/// `rootless_check_trusted_internal`. Its struct holds guest pointers at +0 and +16; the operation
+/// name is at `*(arg + 16)` (the M47 probe's sandbox-call2.txt).
+pub const SANDBOX_CHECK: u32 = 2;
+/// M47's own cap on a Sandbox operation name, NUL included: four times the longest measured one
+/// (`file-write-data`, 15 bytes). A longer name is refused, not truncated.
+pub const SANDBOX_OPERATION_MAX: usize = 64;
+/// Sandbox's call 4, issued by libsystem_sandbox's `sandbox_container_path_for_pid`: `arg` is
+/// `{u64 pid; u64 0; char *buf; u64 len}`, and the policy writes the container's path through the
+/// nested `buf` (M47 t0, after H7: the xcrun trio's six calls, h7-call4.txt).
+pub const SANDBOX_CONTAINER_PATH: u32 = 4;
+/// `ENOTSUP` (SDK `sys/errno.h`): Sandbox call 4's answer for a process with no container (t0, H7).
+pub const ENOTSUP: u64 = 45;
+
+/// A modelled `__mac_syscall` (M47 §3d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacCall {
+    /// `("AMFI", 0x5a)`: answered by the host, about retrace's own process (R4). Both measured
+    /// callers, dyld's `amfi_check_dyld_policy_self` and libsystem_trace's, pass the same struct.
+    AmfiDyldPolicy,
+    /// `("Sandbox", 2)`: answered with the errno the pre-M47 forward returned (R7).
+    SandboxCheck,
+    /// `("Sandbox", 4)`: answered ENOTSUP (45) with no write — what the pre-M47 forward returned and
+    /// what native returns for an unsandboxed process (t0, H7; the operator's ruling, 2026-10-01).
+    SandboxContainerPath,
+}
+
+/// Classify `__mac_syscall(policy, call, …)`. `call` is the `int` the kernel reads (the caller
+/// passes the register's low 32 bits). Exactly the three measured pairs are modelled; every other is
+/// refused, naming both, because its struct may carry a pointer the policy writes through.
+pub fn mac_syscall_model(policy: &[u8], call: u32) -> Result<MacCall, String> {
+    match (policy, call) {
+        (b"AMFI", AMFI_DYLD_POLICY_SELF) => Ok(MacCall::AmfiDyldPolicy),
+        (b"Sandbox", SANDBOX_CHECK) => Ok(MacCall::SandboxCheck),
+        (b"Sandbox", SANDBOX_CONTAINER_PATH) => Ok(MacCall::SandboxContainerPath),
+        _ => Err(format!(
+            "M47: unmodelled __mac_syscall policy {:?} call {call:#x}. Modelled: (\"AMFI\", 0x5a), \
+             (\"Sandbox\", 0x2) and (\"Sandbox\", 0x4) (M47 §3d). A policy's argument struct may carry \
+             pointers the policy writes through, so it is never forwarded (ArgKind::NestedDest); \
+             measure this one's struct and its native answer before modelling it", String::from_utf8_lossy(policy))),
+    }
+}
+
+/// R7: Sandbox call 2's answer is the errno the pre-M47 forward returned, which the corpus passes
+/// with. It is keyed by the operation name at `*(arg + 16)`, the one field that tells the two
+/// measured callers apart (the M47 probe's sandbox-call2.txt; t0 M2(a) re-measured it across the
+/// corpus). The forward's errno was the host kernel's verdict on a struct whose nested guest
+/// pointers it could not follow — continuity, not fidelity; t0 M2(b) has the native answers.
+pub fn sandbox_check_continuity(operation: &[u8]) -> Result<u64, String> {
+    match operation {
+        b"syscall-unix" => Ok(14),
+        b"file-write-data" => Ok(22),
+        _ => Err(format!(
+            "M47: unmeasured Sandbox operation {:?}. Measured: \"syscall-unix\" (dyld's \
+             sandbox_check_common, EFAULT 14) and \"file-write-data\" (libsystem_sandbox's \
+             rootless_check_trusted_internal, EINVAL 22) (t0 M2, R7). Measure what the pre-M47 \
+             forward returned for this one before adding it", String::from_utf8_lossy(operation))),
+    }
+}
+
 // ---- M12-signal-delivery ---------------------------------------------------------------------
 // Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here
 // was read out of the live SDK by spikes/sigabi.c, not from memory.
@@ -2185,7 +2263,7 @@ mod tests {
     // its own measurement.
     #[test]
     fn the_nested_pointer_family_is_pinned_by_number() {
-        for num in [120u64, 411, 27, 401, 540, 480] {
+        for num in [120u64, 411, 27, 401, 540, 480, 381, 0x8000_0000] {
             assert!(writes_via_nested_pointer(num), "syscall {num} must be refused");
         }
         for num in [SYS_READ, SYS_PREAD, SYS_SYSCTL, SYS_WRITE] {

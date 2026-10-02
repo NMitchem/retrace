@@ -2,7 +2,9 @@
 //! `mac_syscall_model` with `sandbox_check_continuity`, and `fork_refusal_errno`. VM-free. Every
 //! number is read from the SDK's headers at test time (M44 R5's method), so a value typed from
 //! memory cannot satisfy these.
-use retrace_arch::{arg_kinds, madvise_effect, ArgKind, MadviseEffect, Ret, MADV_FREE_REUSABLE, MADV_FREE_REUSE, MADV_ZERO, SYS_MADVISE};
+use retrace_arch::{arg_kinds, mac_syscall_model, madvise_effect, sandbox_check_continuity, ArgKind, MacCall, MadviseEffect, Ret,
+                   AMFI_DYLD_POLICY_SELF, ENOTSUP, MADV_FREE_REUSABLE, MADV_FREE_REUSE, MADV_ZERO, SANDBOX_CHECK,
+                   SANDBOX_CONTAINER_PATH, SYS_MADVISE, SYS_MAC_SYSCALL};
 
 fn sdk_header(rel: &str) -> String {
     let out = std::process::Command::new("xcrun").arg("--show-sdk-path").output().expect("run xcrun");
@@ -75,5 +77,60 @@ fn every_other_advice_value_is_refused_naming_it() {
         if accepted.contains(&v) { continue; }
         let e = madvise_effect(v).unwrap_err();
         assert!(e.starts_with(&format!("M47: unmeasured madvise advice {v}.")), "{v}: {e}");
+    }
+}
+
+/// M47 §3d: the three modelled pairs, `__mac_syscall`'s number from the SDK, and the errno Sandbox
+/// call 4 answers (t0, after H7).
+#[test]
+fn the_three_modelled_mac_syscalls_are_classified() {
+    assert_eq!(define(&sdk_header("sys/syscall.h"), "SYS___mac_syscall"), Some(SYS_MAC_SYSCALL as i64));
+    assert_eq!(define(&sdk_header("sys/errno.h"), "ENOTSUP"), Some(ENOTSUP as i64));
+    assert_eq!(mac_syscall_model(b"AMFI", AMFI_DYLD_POLICY_SELF), Ok(MacCall::AmfiDyldPolicy));
+    assert_eq!(mac_syscall_model(b"Sandbox", SANDBOX_CHECK), Ok(MacCall::SandboxCheck));
+    assert_eq!(mac_syscall_model(b"Sandbox", SANDBOX_CONTAINER_PATH), Ok(MacCall::SandboxContainerPath));
+}
+
+/// M47 §3d: a policy with any bit flipped or any byte missing, or a call with any bit flipped, is a
+/// different call, and is refused naming what it got. No single-bit flip of 2 is 4, or of 4 is 2, so
+/// the two Sandbox pairs cannot satisfy each other's sweep.
+#[test]
+fn every_flipped_or_truncated_policy_or_call_is_refused() {
+    for (policy, call) in [(&b"AMFI"[..], AMFI_DYLD_POLICY_SELF), (&b"Sandbox"[..], SANDBOX_CHECK),
+                           (&b"Sandbox"[..], SANDBOX_CONTAINER_PATH)] {
+        for i in 0..policy.len() {
+            for bit in 0..8 {
+                let mut p = policy.to_vec();
+                p[i] ^= 1 << bit;
+                let e = mac_syscall_model(&p, call).unwrap_err();
+                assert!(e.starts_with(&format!("M47: unmodelled __mac_syscall policy {:?} call {call:#x}", String::from_utf8_lossy(&p))), "{e}");
+            }
+        }
+        for n in 0..policy.len() { assert!(mac_syscall_model(&policy[..n], call).is_err(), "{policy:?} cut to {n}"); }
+        for bit in 0..32 { assert!(mac_syscall_model(policy, call ^ (1 << bit)).is_err(), "{policy:?} call bit {bit}"); }
+    }
+    assert!(mac_syscall_model(b"AMFI", SANDBOX_CHECK).is_err() && mac_syscall_model(b"Sandbox", AMFI_DYLD_POLICY_SELF).is_err());
+    assert!(mac_syscall_model(b"AMFI", SANDBOX_CONTAINER_PATH).is_err());
+}
+
+/// R7 (t0 M2(b)): Sandbox call 2 keeps the errno the pre-M47 forward returned, by operation name.
+#[test]
+fn sandbox_continuity_is_by_operation_and_refuses_the_rest() {
+    assert_eq!(sandbox_check_continuity(b"syscall-unix"), Ok(14));
+    assert_eq!(sandbox_check_continuity(b"file-write-data"), Ok(22));
+    for op in [&b"syscall-uni"[..], b"syscall-unix2", b"file-read-data", b"", b"SYSCALL-UNIX"] {
+        let e = sandbox_check_continuity(op).unwrap_err();
+        assert!(e.starts_with(&format!("M47: unmeasured Sandbox operation {:?}", String::from_utf8_lossy(op))), "{e}");
+    }
+}
+
+/// M47 §3d: both spellings of `__mac_syscall` are nested destinations, so the generic arm's
+/// `writes_via_nested_pointer` assert refuses an unmodelled pair.
+#[test]
+fn the_mac_syscall_rows_are_nested_destinations() {
+    use ArgKind::*;
+    for n in [SYS_MAC_SYSCALL, 0x8000_0000] {
+        assert_eq!(arg_kinds(n).unwrap().args, &[Path, Scalar, NestedDest], "{n:#x}");
+        assert!(retrace_arch::writes_via_nested_pointer(n), "{n:#x}");
     }
 }

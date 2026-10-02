@@ -437,6 +437,35 @@ fn main() {
         .status().expect("clang madv_dyn");
     assert!(status.success(), "madv_dyn guest build failed");
 
+    // rpath_dyn + librpath_dyn.dylib: the M47 AMFI fixture. The dylib's install name is @rpath/…
+    // and the exe's LC_RPATH is @executable_path, so dyld expands @rpath only if AMFI's dyld policy
+    // allows it. Both land in OUT_DIR side by side.
+    let lib_src = format!("{}/c/librpath_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let lib = format!("{out}/librpath_dyn.dylib");
+    println!("cargo:rerun-if-changed={lib_src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-dynamiclib","-install_name","@rpath/librpath_dyn.dylib","-o",&lib,&lib_src])
+        .status().expect("clang librpath_dyn");
+    assert!(status.success(), "librpath_dyn build failed");
+    let src = format!("{}/c/rpath_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/rpath_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src,&lib,"-Wl,-rpath,@executable_path"])
+        .status().expect("clang rpath_dyn");
+    assert!(status.success(), "rpath_dyn guest build failed");
+
+    // sbxpath_dyn: the M47 Sandbox call-4 fixture (t0, after H7) — libsystem_sandbox's
+    // sandbox_container_path_for_pid, reached through libSystem's re-export, so no -lsandbox. Same
+    // recipe as hello_dyn.
+    let src = format!("{}/c/sbxpath_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sbxpath_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang sbxpath_dyn");
+    assert!(status.success(), "sbxpath_dyn guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));

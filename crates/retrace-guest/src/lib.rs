@@ -227,6 +227,10 @@ pub const TIMER_DYN: &str = concat!(env!("OUT_DIR"), "/timer_dyn");
 pub const FSOPS_DYN: &str = concat!(env!("OUT_DIR"), "/fsops_dyn");
 /// M47: `madvise` by mode — `zero`, `reuse`, `bad` (spec §3f).
 pub const MADV_DYN: &str = concat!(env!("OUT_DIR"), "/madv_dyn");
+/// M47: links `librpath_dyn.dylib` by `@rpath`, so it loads only if AMFI allows `@`-path expansion.
+pub const RPATH_DYN: &str = concat!(env!("OUT_DIR"), "/rpath_dyn");
+/// M47 (t0, after H7): `sandbox_container_path_for_pid` on its own pid — Sandbox's call 4.
+pub const SBXPATH_DYN: &str = concat!(env!("OUT_DIR"), "/sbxpath_dyn");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
@@ -436,6 +440,20 @@ mod tests {
     fn madv_guest_parses() {
         // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
         let l = parse_macho(&std::fs::read(MADV_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn rpath_guest_parses() {
+        // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
+        let l = parse_macho(&std::fs::read(RPATH_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn sbxpath_guest_parses() {
+        // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
+        let l = parse_macho(&std::fs::read(SBXPATH_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
