@@ -2209,6 +2209,8 @@ impl Box_ {
         let (host, rlen) = alloc_pages(size as usize);
         let m = mask | (GRANULE as u64 - 1);
         let ipa = if anywhere {
+            assert!(mask < 1 << 36,
+                "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
             // Kernel-faithful VM_FLAGS_ANYWHERE-with-hint: search FORWARD from a non-zero hint for
             // the first free gap, treating reservations as occupied (what vm_map_enter does). When
             // the hint's own range is free, first_fit returns the hint verbatim (the common case);
@@ -2265,6 +2267,8 @@ impl Box_ {
         // Page-granular extent: commit_reserved_page backs whole pages, so track whole pages.
         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
         let base = if anywhere {
+            assert!(mask < 1 << 36,
+                "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
             if mask != 0 {
                 let m = mask | (GRANULE as u64 - 1);
                 self.mmap_next = (self.mmap_next + m) & !m;
