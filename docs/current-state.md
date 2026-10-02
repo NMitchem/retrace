@@ -763,7 +763,10 @@ from one background script (`gate.sh` in the milestone's ledger directory), ever
 clippy over `--workspace --all-targets` with `-D warnings`. It ran at `abcb591`, M47's last code
 commit, on 2026-10-02 from 00:55 to 01:49 at a starting 1-minute load of 2.07, and it was the first
 gate run: the count matched the prediction made from source before it. The status log's M47 section
-has the tally chunk by chunk. The testing note below says how the chunks are assembled. The "test
+has the tally chunk by chunk. The final review's fix wave landed after the gate (one assert and
+comments, then docs; head `c1ca15b` plus its docs commit), and these chunks re-ran green on it:
+`retrace-box` 371/0/0 over 46 binaries, `vmalign_e2e` 1, `git_e2e` 7, `hello_dyn_e2e` 1, `gitshapes`
+10 and clippy; the full gate was not re-run. The testing note below says how the chunks are assembled. The "test
 binaries" figure is test executables plus the `Doc-tests` harnesses cargo reports, each of which
 runs zero tests — the convention every milestone since M14 has counted by, kept for comparability
 and written out here so nobody has to re-derive it. One `#[ignore]` line was added (nine at M46's
@@ -1430,7 +1433,9 @@ These are real and current, not aspirational gaps.
   refused too, although native `madvise` returns 0 for one (M47 t0 M1(d)), because no corpus call
   is unaligned and the model will not guess. The model never reclaims a reusable page, which is one
   legal kernel; a guest that depends on reclamation cannot exist, since native reclamation depends
-  on memory pressure.
+  on memory pressure. "Backed" includes retrace's own infrastructure backings (page tables, the
+  trampoline, the sign stub), so a wild low-address `MADV_ZERO` would zero them where native
+  answers an errno; no corpus call is near one.
 - **`fork` fails with `EAGAIN`; there is no process creation** (M47 R2). A guest sees what it would
   natively at a process limit. libc's own `fork` and its handlers run, so a caller that handles
   the failure carries on: `git commit` prints `error: cannot fork() for maintenance: Resource

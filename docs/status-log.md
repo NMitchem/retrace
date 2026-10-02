@@ -15469,6 +15469,13 @@ requires, every test chunk `--no-fail-fast` and each chunk's exit code written t
 00:55–01:49 at a starting 1-minute load of 2.07, and it was the only gate run: nothing failed, so
 nothing was re-run.
 
+The final review's fix wave landed after the gate (one assert and comments, then docs), head
+`c1ca15b` for the code and comment commits and the docs commit on top of it. These chunks re-ran
+green on it: `retrace-box` whole package 371 passed / 0 failed / 0 ignored over 46 binaries,
+`vmalign_e2e` 1, `git_e2e` 7, `hello_dyn_e2e` 1, `retrace-arch --test gitshapes` 10, and clippy over
+`--workspace --all-targets` with `-D warnings`, each exit 0 with no `SKIPPED`. The full gate was not
+re-run.
+
 The tally, chunk by chunk (`tally.sh`, ANSI stripped; every one of the 87 chunk lines in
 `gate-summary.txt` reads `exit=0`: `ws`, `box`, `bins`, 83 `e2e`, `clippy`):
 
@@ -15601,6 +15608,15 @@ Written as measured, not as spec §4 wrote it:
 * **AMFI's answer for a platform-binary guest.**
 * **`dddiagnose`'s third face**, seen once on the base binary, unattributed.
 * **The parked review minors** (see the final review).
+* **A single "guest-owned IPA" predicate** shared by `guest_madvise`, `place_fixed` and
+  `guest_mprotect`, so that retrace's own infrastructure backings (the trampoline, page tables,
+  sign stub and table, the TLBI stub, the frozen commpage) are refused rather than treated as the
+  guest's (final review M3, and Task 2's `guest_munmap` minor).
+* **A family-wide `ret`/`err` check on the serviced `mach_msg2` mirrors**: compare
+  `ret == MACH_MSG_SUCCESS && !err` before each `apply_and_return` in the serviced routes (final
+  review M4).
+* **A seek across `madv_dyn zero` and `vmalign_dyn`**, turning the no-new-state argument for the
+  zero-fill and the masked map into a measurement (final review M6).
 * **M46's owed items M47 did not touch**, by reference to M46's "What stays owed"
   (`:15080–15153`): every item except the unloaded re-sweep (paid) and the forwarded-`madvise`
   hazard (retired). Its `kevent` and timed-wait items are restated above.
