@@ -298,7 +298,8 @@ pub enum ArgKind {
     ///
     /// M47 added `__mac_syscall` (381) and its `MAC_SYSCALL_MAGIC` band: a policy may write through
     /// a pointer inside `arg` (AMFI's `outFlags`). Those two are modelled above the generic arm per
-    /// `(policy, call)`, so the generic arm's assert refuses only an unmodelled pair.
+    /// `(policy, call)`: the arm refuses an unmodelled pair by value (`mac_syscall_model`), and the
+    /// generic arm's `writes_via_nested_pointer` assert is the backstop if the arm is ever removed.
     NestedDest,
     /// A pointer modelled no further than the flat window and the guard band: a read the kernel
     /// itself bounds far inside the window (a `sockaddr`, an `ioctl` parameter), a fixed struct it
@@ -928,8 +929,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // pointers at +0 and +16 (sandbox-call2.txt). So NestedDest since M47. Forwarded (M2–M46), a
         // guest address reached the host as a host address; the EFAULT every dyld guest got was
         // luck, because the stack VA fell in retrace's own __PAGEZERO. MODELLED per (policy, call)
-        // above the generic forward (`Box_::guest_mac_syscall`), and the generic arm's
-        // `writes_via_nested_pointer` assert refuses any other pair.
+        // above the generic forward (`Box_::guest_mac_syscall`); the arm refuses an unmodelled pair
+        // by value (`mac_syscall_model`), and the generic arm's `writes_via_nested_pointer` assert
+        // is the backstop if the arm is ever removed.
         381 => row!(P, [Path, Scalar, NestedDest]),
         // MAC_SYSCALL_MAGIC (0x8000_0000): not a syscall number. dyld's inline
         // `__mac_syscall("Sandbox", …)` loads this magic into x16 (`movz x16, #0x8000, lsl #16`);

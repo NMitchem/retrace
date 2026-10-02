@@ -125,7 +125,8 @@ fn sandbox_continuity_is_by_operation_and_refuses_the_rest() {
 }
 
 /// M47 §3d: both spellings of `__mac_syscall` are nested destinations, so the generic arm's
-/// `writes_via_nested_pointer` assert refuses an unmodelled pair.
+/// `writes_via_nested_pointer` assert is the backstop if the record arm (which refuses an
+/// unmodelled pair by value, `mac_syscall_model`) is ever removed.
 #[test]
 fn the_mac_syscall_rows_are_nested_destinations() {
     use ArgKind::*;
