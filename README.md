@@ -8,9 +8,10 @@ and land on the instruction, and the thread, that last wrote it. It serves the r
 lldb, so `process continue -R` works.
 
 It is a **technical preview**. It runs real programs (full-`std` Rust, C, stock Homebrew `jq`,
-the CPython interpreter, and most of the Apple binaries in `/bin` and `/usr/bin`), but it is not
-yet "rr for macOS": no preemptive thread scheduling, no `fork` or `exec`, and nothing that needs
-system services, I/O Kit, or a GUI. [Limits](#limits) has the list.
+the CPython interpreter, Xcode's `git` for its local workflow, and most of the Apple binaries in
+`/bin` and `/usr/bin`), but it is not yet "rr for macOS": no preemptive thread scheduling, no
+`fork` or `exec`, and nothing that needs system services, I/O Kit, or a GUI. [Limits](#limits) has
+the list.
 
 ## Demo: running a crash backwards in lldb
 
@@ -87,15 +88,18 @@ has every limit with the measurement behind it.
   schedule replayable without recording it, and it means **races that need preemption will not
   reproduce**. Parallel programs also run serially.
 - **No `fork`, `exec` or `posix_spawn`.** `exec` and `posix_spawn` are refused with a message, and
-  `fork` stops at a named wall. Record the program that does the work, not a launcher or wrapper:
-  Homebrew's `python3`, for example, is a launcher that re-executes the real interpreter.
+  `fork` fails with `EAGAIN`, as it does natively at a process limit, so a program that must fork
+  cannot (`git commit` still commits, after git's own `cannot fork() for maintenance` error).
+  Record the program that does the work, not a launcher or wrapper: Homebrew's `python3`, for
+  example, is a launcher that re-executes the real interpreter, and `/usr/bin/git` is an `xcrun`
+  shim for Xcode's `git`.
 - **Command-line programs only.** Service lookups over XPC, I/O Kit, and GUI frameworks are not
   modelled. A program that needs one stops at a named wall.
 - **Unmodelled syscalls are refused, never guessed at.** A program that reaches a syscall or Mach
   message retrace has no model for stops with a `RECORD ERROR` naming it. Of the 54 Apple binaries
-  in the committed sample, 49 record and replay identically, three of those by reaching the
-  refused `posix_spawn` identically on both sides. The count moves by a row or two between runs
-  with host state (`/bin/ps`'s `MADV_FREE` reclaim, `dddiagnose`'s bimodal fault); see
+  in the committed sample, 49 record and replay identically on an idle host, three of those by
+  reaching the refused `posix_spawn` identically on both sides. The count moves by a row between
+  runs with host state, `dddiagnose`'s bimodal fault (the latest run counted 50); see
   [`docs/current-state.md`](docs/current-state.md#known-limits).
 - **Traces are large and the format is not stable.** Tens to hundreds of MiB, uncompressed, and
   recordings from an older retrace are rejected rather than misread.
@@ -103,8 +107,6 @@ has every limit with the measurement behind it.
   backtraces, and names functions from the program's own symbols and dyld's, not the shared
   cache's. Under lldb you get at most six breakpoints and four watchpoints (the hardware's), the
   watchpoints are writes only, and `process interrupt` cannot stop a long reverse motion.
-- **jq aborts building a 300,000-element array** under retrace (not natively). Not yet diagnosed;
-  large allocations in general work.
 
 ## Performance
 
