@@ -68,8 +68,8 @@ impl Msg2 {
 /// RefuseMqRecv is a message-queue RECEIVE; the box hosts no senders, so nothing can ever arrive
 /// on it, and it is answered `MACH_RCV_REFUSAL` — deterministic, no host contact (M38 t5).
 #[derive(Debug)]
-pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceGetSpecialPort, ServiceSetSpecialPort, StubMigReply(i32),
-                 RefuseMqSend, RefuseMqRecv, Forward(&'static str), Unsupported(String) }
+pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceGetSpecialPort, ServiceSetSpecialPort, ServicePortsRegister,
+                 StubMigReply(i32), RefuseMqSend, RefuseMqRecv, Forward(&'static str), Unsupported(String) }
 
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
 /// msgh_id alone: these are kernel-subsystem ids, unambiguous under the KOBJECT options shape.
@@ -150,6 +150,13 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
             // mig_reply_error KERN_SUCCESS (no out-params) — never forwarded (that would set
             // retrace's OWN debug-control port). `which` is decoded in dispatch and asserted == 10 (M2-setport).
             3410 => return Route::ServiceSetSpecialPort,
+            // mach_ports_register (task subsystem base 3400, slot 3): libxpc's xpc_atfork_prepare,
+            // in fork's prepare handlers (M47 t0 M3(a); backtrace in apple_walls_e2e's csh/tcsh
+            // reasons). It sets the port array a CHILD would inherit; M47 refuses the fork, so no
+            // child exists and the parent observes only the reply. Answered with a mig_reply_error
+            // KERN_SUCCESS — never forwarded (that would register retrace's own). Decoded and
+            // checked by value in dispatch.
+            3403 => return Route::ServicePortsRegister,
             // vm_reclaim (deferred reclamation): optional. Report unavailable so libmalloc takes
             // its no-reclaim fallback.
             4822 => return Route::StubMigReply(KERN_NOT_SUPPORTED),
@@ -296,6 +303,26 @@ pub fn decode_set_special_port(buf: &[u8]) -> Result<u32, String> {
     let id = u32_at(buf, 20);
     if id != 3410 { return Err(format!("msgh_id {id} != 3410")); }
     Ok(u32_at(buf, 48)) // which_port = header(24) + desc_count(4) + descriptor(12) + NDR(8)
+}
+
+/// mach_ports_register (3403) request, as libxpc's `xpc_atfork_prepare` sends it before `fork`
+/// (M47 t0 M3(a)): a COMPLEX message of header(24) + descriptor count(4) + three
+/// mach_msg_port_descriptor_t (12 each, type byte at offset 11) = 64 bytes, with no NDR and no inline
+/// data. Checked by value: the length, the COMPLEX bit, the id, the count and each descriptor's type.
+/// The names and dispositions are the guest's and are not modelled: the registration sets what a
+/// child would inherit, and M47 never creates one (§3e).
+pub fn decode_ports_register(buf: &[u8]) -> Result<(), String> {
+    if buf.len() != 64 { return Err(format!("mach_ports_register request is {} bytes, measured 64", buf.len())); }
+    if u32_at(buf, 0) & MACH_MSGH_BITS_COMPLEX == 0 { return Err("mach_ports_register request is not COMPLEX".into()); }
+    let id = u32_at(buf, 20);
+    if id != 3403 { return Err(format!("msgh_id {id} != 3403")); }
+    let n = u32_at(buf, 24);
+    if n != 3 { return Err(format!("descriptor count {n}, measured 3")); }
+    for i in 0..3 {
+        let ty = buf[28 + 12 * i + 11];
+        if ty != 0 { return Err(format!("descriptor {i} has type {ty}, measured MACH_MSG_PORT_DESCRIPTOR (0)")); }
+    }
+    Ok(())
 }
 
 /// host_get_special_port (412) request body: header(24) + NDR(8) + `node: int`(4) +
@@ -685,6 +712,43 @@ mod tests {
     fn decode_set_special_port_rejects_malformed() {
         assert!(decode_set_special_port(&set_special_port_req(3410, 10)[..51]).is_err()); // short (<52)
         assert!(decode_set_special_port(&set_special_port_req(3411, 10)).is_err());       // wrong id
+    }
+
+    // --- mach_ports_register (3403) — M47 ---
+
+    /// 3403 to the guest task port is libxpc's `xpc_atfork_prepare`, in fork's prepare handlers.
+    #[test]
+    fn routes_mach_ports_register_to_the_task_port_only() {
+        assert!(matches!(route(&msg(3403, 0x203, KOBJ), Some(0x203)), Route::ServicePortsRegister));
+        assert!(matches!(route(&msg(3403, 0x999, KOBJ), Some(0x203)), Route::Unsupported(_)));
+    }
+
+    /// Hand-built from t0 M3(a)'s 64 bytes: header(24, COMPLEX) + descriptor count(4) = 3 + three
+    /// port descriptors(12 each), type byte at descriptor offset 11 = 0 (MACH_MSG_PORT_DESCRIPTOR);
+    /// disposition byte at offset 10 measured 0x13 = 19 (COPY_SEND).
+    fn ports_register_req() -> Vec<u8> {
+        let mut b = vec![0u8; 64];
+        b[0..4].copy_from_slice(&MACH_MSGH_BITS_COMPLEX.to_le_bytes());
+        b[4..8].copy_from_slice(&64u32.to_le_bytes());
+        b[20..24].copy_from_slice(&3403u32.to_le_bytes());
+        b[24..28].copy_from_slice(&3u32.to_le_bytes());
+        for i in 0..3 { b[28 + 12 * i + 10] = 19; } // disposition COPY_SEND; type 0
+        b
+    }
+    #[test]
+    fn decodes_ports_register_and_rejects_malformed() {
+        assert_eq!(decode_ports_register(&ports_register_req()), Ok(()));
+        assert!(decode_ports_register(&ports_register_req()[..63]).is_err(), "short");
+        let mut b = ports_register_req(); b.push(0);
+        assert!(decode_ports_register(&b).is_err(), "long");
+        let mut b = ports_register_req(); b[0..4].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_ports_register(&b).is_err(), "not COMPLEX");
+        let mut b = ports_register_req(); b[20..24].copy_from_slice(&3404u32.to_le_bytes());
+        assert!(decode_ports_register(&b).is_err(), "wrong id");
+        let mut b = ports_register_req(); b[24..28].copy_from_slice(&2u32.to_le_bytes());
+        assert!(decode_ports_register(&b).is_err(), "two descriptors");
+        let mut b = ports_register_req(); b[28 + 12 + 11] = 1;
+        assert!(decode_ports_register(&b).is_err(), "an OOL descriptor");
     }
 
     // --- host_get_special_port (412) — M23 t3 ---

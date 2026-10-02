@@ -2,9 +2,9 @@
 //! `mac_syscall_model` with `sandbox_check_continuity`, and `fork_refusal_errno`. VM-free. Every
 //! number is read from the SDK's headers at test time (M44 R5's method), so a value typed from
 //! memory cannot satisfy these.
-use retrace_arch::{arg_kinds, mac_syscall_model, madvise_effect, sandbox_check_continuity, ArgKind, MacCall, MadviseEffect, Ret,
+use retrace_arch::{arg_kinds, fork_refusal_errno, mac_syscall_model, madvise_effect, sandbox_check_continuity, ArgKind, MacCall, MadviseEffect, Ret,
                    AMFI_DYLD_POLICY_SELF, ENOTSUP, MADV_FREE_REUSABLE, MADV_FREE_REUSE, MADV_ZERO, SANDBOX_CHECK,
-                   SANDBOX_CONTAINER_PATH, SYS_MADVISE, SYS_MAC_SYSCALL};
+                   SANDBOX_CONTAINER_PATH, SYS_FORK, SYS_MADVISE, SYS_MAC_SYSCALL};
 
 fn sdk_header(rel: &str) -> String {
     let out = std::process::Command::new("xcrun").arg("--show-sdk-path").output().expect("run xcrun");
@@ -133,4 +133,15 @@ fn the_mac_syscall_rows_are_nested_destinations() {
         assert_eq!(arg_kinds(n).unwrap().args, &[Path, Scalar, NestedDest], "{n:#x}");
         assert!(retrace_arch::writes_via_nested_pointer(n), "{n:#x}");
     }
+}
+
+/// M47 §3e, R2: fork, and only fork, is refused, with the errno `fork(2)` documents for a process
+/// limit reached. Its row exists for the census and says it takes no arguments.
+#[test]
+fn fork_alone_is_refused_with_eagain() {
+    assert_eq!(define(&sdk_header("sys/syscall.h"), "SYS_fork"), Some(SYS_FORK as i64));
+    assert_eq!(define(&sdk_header("sys/errno.h"), "EAGAIN"), Some(35));
+    assert_eq!(fork_refusal_errno(SYS_FORK), Some(35));
+    for n in (0..=1023u64).filter(|&n| n != SYS_FORK) { assert_eq!(fork_refusal_errno(n), None, "{n}"); }
+    assert_eq!(arg_kinds(SYS_FORK).map(|s| (s.args.len(), s.ret)), Some((0, Ret::Plain)));
 }

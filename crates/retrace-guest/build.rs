@@ -477,6 +477,16 @@ fn main() {
         .status().expect("clang vmalign_dyn");
     assert!(status.success(), "vmalign_dyn guest build failed");
 
+    // forkfail_dyn: the M47 fork fixture — fork() with RLIMIT_NPROC lowered to 1; prints the errno.
+    // Same recipe as hello_dyn.
+    let src = format!("{}/c/forkfail_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/forkfail_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang forkfail_dyn");
+    assert!(status.success(), "forkfail_dyn guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));

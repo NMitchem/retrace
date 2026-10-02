@@ -828,6 +828,12 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // (bsd/vfs/vfs_syscalls.c `getutimes`, one `copyin` of `sizeof(tv)`), the cited bound —
         // Ptr. NULL means "now".
         138 => row!(P, [Path, Ptr]),
+        // fork(void): REFUSED since M47, never forwarded. The record arm ahead of the generic
+        // forward answers `fork_refusal_errno` (EAGAIN) and writes nothing, on both sides, and the
+        // generic arm asserts it never arrives: this row makes `forwarded_shape` accept 2, so the
+        // assert is what stands between a missing arm and a real child of retrace. Documentation of
+        // the prototype only, as 59's and 244's are.
+        2 => row!(P, []),
         // execve(char *fname, char **argp, char **envp): the kernel reads every argv/envp string
         // through the nested pointers — rule 1, NestedSource (EXPECTED_DIFFS; exercised by /bin/sh).
         // REFUSED since M38, never forwarded: the record arm ahead of the generic forward answers
@@ -1442,6 +1448,17 @@ pub fn exec_refusal_errno(num: u64) -> Option<u64> {
     match num { SYS_EXECVE | SYS_POSIX_SPAWN => Some(14), _ => None }
 }
 
+/// M47 §3e: `fork` (2) is REFUSED, never forwarded, with `EAGAIN` (35), the errno `fork(2)`
+/// documents for a process limit reached, so the guest takes a failure path libc and its callers
+/// already have (R2): libc's `fork` calls `cerror`, then its parent handlers, and returns −1
+/// (the M47 probe's fork-disasm.txt). Fidelity, not continuity: before M47 a fork never returned,
+/// because its prepare handler's `mach_ports_register` (3403) stopped the recorder first. `vfork`
+/// (66) and the other process-creation calls have no row. `Some` doubles as the predicate the record
+/// arm, the replay mirror and the generic arm's assert share, as `exec_refusal_errno`'s does.
+pub fn fork_refusal_errno(num: u64) -> Option<u64> {
+    match num { SYS_FORK => Some(35), _ => None }
+}
+
 // ---- M45-kqinit: libdispatch's workqueue-kqueue initialisation ------------------------------------
 // Flag and filter values from the macOS 26 SDK's `sys/event.h`, which tests/kqinit.rs re-reads at
 // test time. The exception is `KEVENT_FLAG_WORKQ`, which the SDK does not ship: it is xnu's
@@ -1827,6 +1844,8 @@ pub const USER_WAKE_EVENT: KeventQos = KeventQos {
 // tests/gitshapes.rs re-reads at test time.
 /// `madvise` (SDK `SYS_madvise 75`). Modelled by advice since M47, never forwarded.
 pub const SYS_MADVISE: u64 = 75;
+/// `fork` (SDK `SYS_fork 2`). Refused since M47, never forwarded (`fork_refusal_errno`).
+pub const SYS_FORK: u64 = 2;
 /// `MADV_FREE_REUSABLE` (`sys/mman.h:217`): libmalloc marks a freed span reusable.
 pub const MADV_FREE_REUSABLE: u32 = 7;
 /// `MADV_FREE_REUSE` (`sys/mman.h:218`): libmalloc takes a reusable span back.

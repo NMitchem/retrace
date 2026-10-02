@@ -553,6 +553,23 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append mach_msg2 set_special_port: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
+                    machmsg::Route::ServicePortsRegister => {
+                        // M47 §3e: mach_ports_register (3403), libxpc's xpc_atfork_prepare in fork's
+                        // prepare handlers. It sets the port array a CHILD would inherit; the fork is
+                        // refused, so no child exists and the parent observes only the reply. A
+                        // mig_reply_error KERN_SUCCESS, never forwarded (it would register retrace's
+                        // own). Deterministic → the standard symmetric posture: replay recomputes and
+                        // byte-compares (the 3410 shape).
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        machmsg::decode_ports_register(&buf)
+                            .unwrap_or_else(|e| panic!("mach_ports_register (3403) decode: {e}"));
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 ports_register: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
                     machmsg::Route::StubMigReply(retcode) => {
                         // Optional/no-op kernel routine (no out-params): reply with a mig_reply_error
                         // carrying `retcode` (chosen in route() — 4822 vm_reclaim => KERN_NOT_SUPPORTED
@@ -1237,6 +1254,18 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.apply_and_return(e, true, &[]);
             }
 
+            // M47 §3e: fork is refused, never forwarded — a forwarded fork would start a real child
+            // of retrace. The exec arm's posture (M38): constant return, no writes; replay
+            // recomputes and compares. EAGAIN is fork's documented process-limit failure (R2), and
+            // libc's fork then runs its parent handlers and returns -1, a path it already has.
+            Stop::Syscall { num, args } if retrace_arch::fork_refusal_errno(num).is_some() => {
+                let e = retrace_arch::fork_refusal_errno(num).unwrap();
+                eprintln!("[retrace] refusing fork (syscall {num}): process creation is unmodelled; returning errno {e} without forwarding");
+                w.append(&Event::Syscall { num, args, ret: e, ret1: 0, err: true, writes: vec![], thread })
+                    .map_err(|e| format!("append fork refusal: {e}"))?; count += 1;
+                b.apply_and_return(e, true, &[]);
+            }
+
             // M47 §3c: madvise is MODELLED, never forwarded (see Box_::guest_madvise). The zeros a
             // MADV_ZERO makes are applied here and recomputed by the mirror, never recorded (R3), so
             // the event carries no writes. A refusal panics before anything is appended (R5).
@@ -1306,6 +1335,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 assert!(num != retrace_arch::SYS_MADVISE,
                     "madvise (75) reached the generic forward arm — it must be modelled above (M47). \
                      Forwarded, its advice acts on retrace's own backing of the guest range.");
+                // M47 §3e: fork's row exists for the census and the views, which makes
+                // `forwarded_shape` accept it; this assert is what keeps a missing refusal arm from
+                // forwarding it and starting a real child of the recorder.
+                assert!(retrace_arch::fork_refusal_errno(num).is_none(),
+                    "fork ({num}) reached the generic forward arm — it must be refused above (M47). \
+                     Forwarded, it starts a real child of the recorder.");
                 // M27: the destination sits behind a pointer INSIDE a guest struct, which
                 // forward_and_diff never translates — so forwarding hands the host kernel a guest
                 // IPA as a host address. No guest in the gate calls these (measured: absent from
@@ -1959,6 +1994,16 @@ impl ReplaySession {
                                 self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
+                            // M47 mirror of record's fork refusal: recompute the constant, compare.
+                            if let Some(e) = retrace_arch::fork_refusal_errno(num) {
+                                if *ret != e || !*err || *ret1 != 0 || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "fork refusal mismatch: recorded ret {ret} ret1 {ret1} err {err} with {} write(s), \
+                                         expected errno {e}, err, no writes", writes.len()) });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
+                                return self.finish_event();
+                            }
                             // M47 §3c: the madvise arm's mirror (symmetry rule 1). The zeros are
                             // recomputed from the same box state and applied; the recording carries
                             // none (R3), so a recorded write, return or error is a trace this build
@@ -2201,6 +2246,19 @@ impl ReplaySession {
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
                                                 detail: "task_set_special_port reply mismatch".into() });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::ServicePortsRegister => {
+                                        // M47 §3e: deterministic mig_reply_error → the standard
+                                        // symmetric posture, as ServiceSetSpecialPort above.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        machmsg::decode_ports_register(&buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay mach_ports_register decode: {e}") })?;
+                                        let reply = machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS);
+                                        if writes.len() != 1 || writes[0].bytes != reply {
+                                            return Err(Divergence { landmark: self.idx, pc,
+                                                detail: "mach_ports_register reply mismatch".into() });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }

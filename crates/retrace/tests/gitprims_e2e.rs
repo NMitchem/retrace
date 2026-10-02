@@ -182,3 +182,25 @@ fn sandbox_container_path_is_answered_enotsup_without_forwarding() {
     }).collect();
     assert!(!calls.is_empty() && calls.iter().all(|&c| c == (45, true, 0)), "Sandbox call 4 landmarks: {calls:?}");
 }
+
+/// RED at `427fa0a`: `RECORD ERROR: unsupported mach_msg2 … msgh_id 3403`, the prepare handler's
+/// message. The difference: the guest's own errno line, which only a fork that RETURNED can print;
+/// the recorder's refusal line, which a forwarded fork cannot fake; and in the trace, one refused
+/// fork and one answered 3403 (its 3503 reply).
+#[test]
+fn fork_is_refused_with_eagain_after_the_prepare_handlers_message_is_answered() {
+    let (rec, trace) = records_and_replays_twice(retrace_guest::FORKFAIL_DYN, &[]);
+    assert_eq!(String::from_utf8_lossy(&rec.stdout), "fork failed errno=35\n");
+    assert!(rec.stderr.contains("[retrace] refusing fork (syscall 2): process creation is unmodelled; returning errno 35 without forwarding"),
+        "the recorder's refusal line: {}", rec.stderr);
+    let ev: Vec<Event> = retrace_trace::Reader::open(&trace).unwrap().into_iter().collect();
+    let forks: Vec<_> = ev.iter().filter_map(|e| match e {
+        Event::Syscall { num, ret, err, writes, .. } if *num == retrace_arch::SYS_FORK => Some((*ret, *err, writes.len())),
+        _ => None,
+    }).collect();
+    assert_eq!(forks, vec![(35, true, 0)], "one refused fork, no writes");
+    const MACH_MSG2: u64 = -47i64 as u64;
+    let replies = ev.iter().filter(|e| matches!(e, Event::Syscall { num, writes, .. } if *num == MACH_MSG2
+        && writes.iter().any(|r| r.bytes.len() >= 24 && u32::from_le_bytes(r.bytes[20..24].try_into().unwrap()) == 3503))).count();
+    assert_eq!(replies, 1, "the prepare handler's mach_ports_register (3403) answered once, with its 3503 reply");
+}

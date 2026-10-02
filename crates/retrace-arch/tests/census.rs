@@ -39,10 +39,14 @@
 //! (`docs/sweep-evidence/2026-09-30-m47-probe/git-runs.txt`). M47 t0 M4 dispatched 9, 12 and 136
 //! again; 333 was reached on the default-config commit's fork path (t0 M3(b)); 138 is reached by
 //! the repo-owned `fsops_dyn`. All five are forwarded.
+//!
+//! M47 also adds 2 `fork`, reached by `forkfail_dyn`, by default-config `git commit` and by
+//! `/bin/csh`/`/bin/tcsh` once the prepare handler's `mach_ports_register` (3403) is answered
+//! (M47 t0 M3); it is refused, never forwarded.
 use retrace_arch::arg_kinds;
 
 pub const CENSUS: &[i64] = &[
-    -89, -70, -50, -47, -36, -33, -29, -28, -27, -26, -24, -19, -18, -15, -14, -12, -10, 1, 3, 4,
+    -89, -70, -50, -47, -36, -33, -29, -28, -27, -26, -24, -19, -18, -15, -14, -12, -10, 1, 2, 3, 4,
     5, 6, 9, 10, 12, 13, 20, 24, 25, 33, 36, 37, 38, 39, 41, 42, 43, 46, 47, 48, 49, 52, 53, 54,
     58, 59, 60, 73, 74, 75, 81, 90, 92, 97, 98, 116, 117, 128, 133, 136, 138, 153, 169, 170, 184,
     189, 191, 194, 195, 197, 199, 202, 220, 228, 244, 266, 286, 294, 327, 328, 329, 331, 333, 336,
