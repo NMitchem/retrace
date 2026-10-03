@@ -1,0 +1,34 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling glob v0.3.4
+   Compiling unicode-ident v1.0.26
+   Compiling libc v0.2.190
+   Compiling prettyplease v0.2.37
+   Compiling minimal-lexical v0.2.1
+   Compiling cfg-if v1.0.5
+   Compiling memchr v2.8.3
+   Compiling regex-syntax v0.8.11
+   Compiling either v1.18.0
+   Compiling bindgen v0.70.1
+   Compiling libloading v0.8.9
+   Compiling rustc-hash v1.1.0
+   Compiling itertools v0.13.0
+   Compiling bitflags v2.13.2
+   Compiling log v0.4.34
+   Compiling shlex v1.3.0
+   Compiling nom v7.1.3
+   Compiling clang-sys v1.9.1
+   Compiling regex-automata v0.4.18
+   Compiling cexpr v0.6.0
+   Compiling syn v2.0.119
+   Compiling regex v1.13.1
+   Compiling hv-sys v0.0.0 (/private/tmp/claude-501/m48-t0-simdtest/hv-sys-fixed)
+   Compiling simdtest-fixed v0.0.0 (/private/tmp/claude-501/m48-t0-simdtest/fixed)
+    Finished `release` profile [optimized] target(s) in 4.26s
+     Running tests/simd.rs (target/aarch64-apple-darwin/release/deps/simd-1d274aa79757633b)
+
+running 1 test
+test set_simd_installs_the_passed_value_not_what_the_host_left_in_v0 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

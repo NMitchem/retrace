@@ -1,0 +1,3 @@
+(lldb) target create "./kqprobe"
+Current executable set to '/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m48-node/.superpowers/sdd/2026-10-02-retrace-m48-node/t0/kqprobe' (arm64).
+(lldb) run

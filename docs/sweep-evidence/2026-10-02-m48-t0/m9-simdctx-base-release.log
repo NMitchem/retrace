@@ -1,0 +1,75 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling glob v0.3.3
+   Compiling prettyplease v0.2.37
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling regex-syntax v0.8.11
+   Compiling memchr v2.8.2
+   Compiling minimal-lexical v0.2.1
+   Compiling either v1.16.0
+   Compiling bindgen v0.70.1
+   Compiling libloading v0.8.9
+   Compiling serde_core v1.0.228
+   Compiling itertools v0.13.0
+   Compiling shlex v1.3.0
+   Compiling nom v7.1.3
+   Compiling clang-sys v1.8.1
+   Compiling serde v1.0.228
+   Compiling bitflags v2.13.0
+   Compiling log v0.4.33
+   Compiling rustc-hash v1.1.0
+   Compiling retrace-guest v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/retrace-guest)
+   Compiling retrace-arch v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/retrace-arch)
+   Compiling regex-automata v0.4.14
+   Compiling retrace-sim v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/retrace-sim)
+   Compiling cexpr v0.6.0
+   Compiling regex v1.12.4
+   Compiling syn v2.0.118
+   Compiling serde_derive v1.0.228
+   Compiling bincode v1.3.3
+   Compiling retrace-trace v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/retrace-trace)
+   Compiling hv-sys v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/hv-sys)
+   Compiling retrace-box v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/retrace-box)
+    Finished `release` profile [optimized] target(s) in 8.29s
+     Running tests/simdctx.rs (target/aarch64-apple-darwin/release/deps/simdctx-88ba0749f8ac42e8)
+
+running 3 tests
+test a_checkpoint_restore_installs_the_captured_simd_registers ... FAILED
+test a_thread_switch_installs_the_incoming_threads_simd_registers ... FAILED
+test the_debuggers_register_write_installs_its_value_in_every_q_register ... FAILED
+
+failures:
+
+---- a_checkpoint_restore_installs_the_captured_simd_registers stdout ----
+
+thread 'a_checkpoint_restore_installs_the_captured_simd_registers' (23302819) panicked at crates/retrace-box/tests/simdctx.rs:47:46:
+assertion `left == right` failed: q0 after from_checkpoint
+  left: 18446744073709568000
+ right: 263088509887049645952473006860140609793
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_thread_switch_installs_the_incoming_threads_simd_registers stdout ----
+
+thread 'a_thread_switch_installs_the_incoming_threads_simd_registers' (23302823) panicked at crates/retrace-box/tests/simdctx.rs:33:46:
+assertion `left == right` failed: thread 1 q0 after the switch
+  left: 0
+ right: 155633926399671388180034385326930723073
+
+---- the_debuggers_register_write_installs_its_value_in_every_q_register stdout ----
+
+thread 'the_debuggers_register_write_installs_its_value_in_every_q_register' (23302825) panicked at crates/retrace-box/tests/simdctx.rs:22:43:
+assertion `left == right` failed: q0
+  left: 0
+ right: 127502062020129692088656156215216242945
+
+
+failures:
+    a_checkpoint_restore_installs_the_captured_simd_registers
+    a_thread_switch_installs_the_incoming_threads_simd_registers
+    the_debuggers_register_write_installs_its_value_in_every_q_register
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p retrace-box --test simdctx`

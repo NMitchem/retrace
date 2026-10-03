@@ -1,0 +1,9 @@
+[m4] tid=23157188 __psynch_cvwait enter x0=0x102ac4040 x1=0x100000100 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0x1
+[m4]   frame #0 0x102ad8640 m4interpose.dylib`my___psynch_cvwait + 64
+[m4]   frame #1 0x181df2154 libsystem_pthread.dylib`_pthread_cond_wait + 1024
+[m4]   frame #2 0x102abc714 cvprobe`main + 460
+[m4]   frame #3 0x181a33e00 dyld`start + 6992
+[m4] tid=23157188 __psynch_cvwait return x0=0x13c carry=1
+onens rc=60
+after: 454e4f43 00000000 00000000 00000080 00000000 00000000 00010000 01010000 00000000 00000000 00000000 00000000
+onens done

@@ -1,0 +1,50 @@
+== t2000: t2000 record rc=0 secs=4 trace=530151961 traps=1482
+t2000 replay1 rc=0 secs=4 same_stdout=yes
+t2000 replay2 rc=0 secs=4 same_stdout=yes
+-- syscall histogram (top 40)
+ 152 197  143 92  129 73   85 5   74 6   70 338   65 -14   63 46   44 339   42 153   37 -10   35 -12   34 74   34 116   32 75   32 -15   26 381   22 202   21 550   20 25   19 54   18 305   18 -47   17 43   17 24   16 47   14 363   13 396   12 399   11 194   10 336   10 304    9 220    8 372    7 483    7 327    6 38    6 360    6 169    5 516 
+-- bsdthread_create (360): 6  workq_kernreturn(368): 0  sem_wait(-36): 2  sem_signal(-33): 1  ulock_wait(515): 5  ulock_wake(516): 5
+-- kevent calls: 14; changes by (kq,filter,flags,fflags):
+   1 tid=0 kq=10 filter=-10 flags=0x0 fflags=0x1000000 nev=0 timeout=None
+   1 tid=0 kq=10 filter=-10 flags=0x21 fflags=0x0 nev=0 timeout=None
+   1 tid=0 kq=13 filter=-1 flags=0x5 fflags=0x0 nev=1 timeout=Some((0, 1))
+   1 tid=0 kq=4 filter=-10 flags=0x21 fflags=0x0 nev=0 timeout=None
+   1 tid=0 kq=7 filter=-10 flags=0x0 fflags=0x1000000 nev=1 timeout=Some((0, 0))
+   1 tid=0 kq=7 filter=-10 flags=0x21 fflags=0x0 nev=1 timeout=Some((0, 0))
+   1 tid=0 kq=8 filter=-10 flags=0x0 fflags=0x1000000 nev=0 timeout=None
+   1 tid=1 kq=8 filter=-10 flags=0x21 fflags=0x0 nev=0 timeout=None
+-- kevent call shapes (tid,kq,nch,nev,timeout,immediate):
+   3 tid=0 kq=10 nch=0 nev=1024 timeout=Some((0, 0)) -> immediate n=0
+   1 tid=0 kq=10 nch=0 nev=1024 timeout=Some((0, 0)) -> immediate n=1
+   1 tid=0 kq=10 nch=0 nev=1024 timeout=Some((1, 984000000)) -> immediate n=0
+   2 tid=0 kq=10 nch=1 nev=0 timeout=None -> immediate n=0
+   1 tid=0 kq=13 nch=1 nev=1 timeout=Some((0, 1)) -> immediate n=0
+   1 tid=0 kq=4 nch=0 nev=1024 timeout=Some((0, 0)) -> immediate n=0
+   1 tid=0 kq=4 nch=1 nev=0 timeout=None -> immediate n=0
+   1 tid=0 kq=7 nch=2 nev=1 timeout=Some((0, 0)) -> immediate n=1
+   1 tid=0 kq=8 nch=1 nev=0 timeout=None -> immediate n=0
+   1 tid=1 kq=8 nch=0 nev=1024 timeout=None -> immediate n=0
+   1 tid=1 kq=8 nch=1 nev=0 timeout=None -> immediate n=0
+-- kevent blocks/wakes/timeouts: BLOCK 3 wake 1 timeout 2
+-- psynch by op:    1 cvbroad   10 cvsignal   18 cvwait 
+-- psynch cvwait shapes (cv,flags,sec,nsec,mutex):
+   4 tid=0 cv=0x27ff448 mutex=0x0 flags=0xa0 sec=0 nsec=0
+   1 tid=0 cv=0x27ff448 mutex=0x0 flags=0xa0 sec=0 nsec=1
+   1 tid=0 cv=0x70107a218 mutex=0x0 flags=0xa0 sec=0 nsec=1
+   1 tid=0 cv=0x70107a248 mutex=0x0 flags=0xa0 sec=0 nsec=1
+   1 tid=0 cv=0x7b808 mutex=0x0 flags=0xa0 sec=0 nsec=1
+   1 tid=0 cv=0x7ba60 mutex=0x0 flags=0xa0 sec=0 nsec=1
+   1 tid=0 cv=0x7ba90 mutex=0x0 flags=0xa0 sec=0 nsec=1
+   2 tid=2 cv=0x70107a218 mutex=0x0 flags=0xa0 sec=0 nsec=0
+   2 tid=3 cv=0x70107a218 mutex=0x0 flags=0xa0 sec=0 nsec=0
+   2 tid=4 cv=0x70107a218 mutex=0x0 flags=0xa0 sec=0 nsec=0
+   2 tid=5 cv=0x70107a218 mutex=0x0 flags=0xa0 sec=0 nsec=0
+-- cvwait timeouts: 6  prepost consumed: 0  cvsignal-no-waiter: 0
+-- idle jumps: 1
+-- MAP_JIT: MAP_JIT mmap ipa=0xa2d050000 len=0x10000000 prot=0x0 flags=0x41842;
+-- mprotect over JIT: 1  munmap over JIT: 1 non-JIT exec mmaps: 0
+-- sprr writes logged (first 20 + every 1000th): last [probe] sprr write #20 tid=2 RX pc=0x1804f2a60
+-- view flips: last [probe] view flip #20 -> RX (tid 2)
+-- partial munmaps: 56
+-- refusals/warnings:    2 [retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+   1 [retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1103 send_size 248): the box hosts no message-queue receivers

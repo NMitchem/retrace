@@ -1,0 +1,3 @@
+t2000 record rc=0 secs=4 trace=530151961 traps=1482
+t2000 replay1 rc=0 secs=4 same_stdout=yes
+t2000 replay2 rc=0 secs=4 same_stdout=yes

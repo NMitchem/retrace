@@ -1,0 +1,158 @@
+[probe] kevent#1 tid=0 kq=7 change ident=0x1e7e7711 filter=-10 flags=0x21 fflags=0x0 data=0x0 udata=0x0 nev=1 timeout=Some((0, 0))
+[probe] kevent#1 tid=0 kq=7 change ident=0x1e7e7711 filter=-10 flags=0x0 fflags=0x1000000 data=0x0 udata=0x0 nev=1 timeout=Some((0, 0))
+[probe] kevent deliver kq=7 n=1
+[probe] kevent#1 call tid=0 kq=7 nch=2 nev=1 timeout=Some((0, 0)) -> immediate n=1
+[probe] kevent#2 tid=0 kq=4 change ident=0x7 filter=-10 flags=0x21 fflags=0x0 data=0x0 udata=0x0 nev=0 timeout=None
+[probe] kevent#2 call tid=0 kq=4 nch=1 nev=0 timeout=None -> immediate n=0
+[probe] kevent#3 tid=1 kq=8 change ident=0x9 filter=-10 flags=0x21 fflags=0x0 data=0x0 udata=0x0 nev=0 timeout=None
+[probe] kevent#3 call tid=1 kq=8 nch=1 nev=0 timeout=None -> immediate n=0
+[probe] kevent#4 call tid=1 kq=8 nch=0 nev=1024 timeout=None -> immediate n=0
+[probe] kevent#4 BLOCK tid=1 kq=8 timeout=None deadline=None now=0x71e4da9110a
+[probe] psynch#1 cvwait tid=0 cv=0x27ff458 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#2 cvsignal tid=2 cv=0x27ff458 lsgen=0x100 ugen=0x0 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+[probe] psynch#3 cvwait tid=2 cv=0x7ba78 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#4 cvwait tid=0 cv=0x27ff458 lsgen=0x10000000200 ugen=0x100 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#5 cvsignal tid=3 cv=0x27ff458 lsgen=0x10000000200 ugen=0x100 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+[probe] psynch#6 cvwait tid=3 cv=0x7ba78 lsgen=0x200 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#7 cvwait tid=0 cv=0x27ff458 lsgen=0x20000000300 ugen=0x200 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#8 cvsignal tid=4 cv=0x27ff458 lsgen=0x20000000300 ugen=0x200 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+[probe] psynch#9 cvwait tid=4 cv=0x7ba78 lsgen=0x300 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#10 cvwait tid=0 cv=0x27ff458 lsgen=0x30000000400 ugen=0x300 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#11 cvsignal tid=5 cv=0x27ff458 lsgen=0x30000000400 ugen=0x300 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+[probe] psynch#12 cvwait tid=5 cv=0x7ba78 lsgen=0x400 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#13 cvwait tid=0 cv=0x27ff458 lsgen=0x40000000500 ugen=0x400 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+[probe] cvwait timeout tid=0 cv=0x27ff458
+[probe] kevent#5 tid=0 kq=10 change ident=0xb filter=-10 flags=0x21 fflags=0x0 data=0x0 udata=0x0 nev=0 timeout=None
+[probe] kevent#5 call tid=0 kq=10 nch=1 nev=0 timeout=None -> immediate n=0
+[probe] MAP_JIT mmap ipa=0xa2cfac000 len=0x10000000 prot=0x0 flags=0x41842
+[probe] view flip #1 -> RX (tid 0)
+[probe] mprotect over MAP_JIT ipa=0xa2cfc0000 len=0xffc0000 prot=0x7
+[probe] view flip #2 -> RX (tid 0)
+[probe] partial munmap 0xa3cfac000+0x14000 of backing 0xa3cfac000..0xa3d028000
+[probe] partial munmap 0xa3d000000+0x28000 of backing 0xa3cfc0000..0xa3d028000
+[probe] partial munmap 0xa3d028000+0x18000 of backing 0xa3d028000..0xa3d0a4000
+[probe] partial munmap 0xa3d080000+0x24000 of backing 0xa3d040000..0xa3d0a4000
+[probe] partial munmap 0xa3d05c000+0x24000 of backing 0xa3d040000..0xa3d080000
+[probe] partial munmap 0xa3d0a4000+0x1c000 of backing 0xa3d0a4000..0xa3d120000
+[probe] partial munmap 0xa3d100000+0x20000 of backing 0xa3d0c0000..0xa3d120000
+[probe] partial munmap 0xa3d120000+0x20000 of backing 0xa3d120000..0xa3d19c000
+[probe] partial munmap 0xa3d180000+0x1c000 of backing 0xa3d140000..0xa3d19c000
+[probe] partial munmap 0xa3d19c000+0x24000 of backing 0xa3d19c000..0xa3d218000
+[probe] partial munmap 0xa3d200000+0x18000 of backing 0xa3d1c0000..0xa3d218000
+[probe] partial munmap 0xa3d218000+0x28000 of backing 0xa3d218000..0xa3d294000
+[probe] partial munmap 0xa3d280000+0x14000 of backing 0xa3d240000..0xa3d294000
+[probe] psynch#14 cvsignal tid=0 cv=0x7ba78 lsgen=0x400 ugen=0x0 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+[probe] partial munmap 0xa3d294000+0x2c000 of backing 0xa3d294000..0xa3d310000
+[probe] partial munmap 0xa3d300000+0x10000 of backing 0xa3d2c0000..0xa3d310000
+[probe] partial munmap 0xa3d310000+0x30000 of backing 0xa3d310000..0xa3d38c000
+[probe] partial munmap 0xa3d380000+0xc000 of backing 0xa3d340000..0xa3d38c000
+[probe] psynch#15 cvsignal tid=0 cv=0x7ba78 lsgen=0x10000000400 ugen=0x100 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+[probe] partial munmap 0xa3d38c000+0x34000 of backing 0xa3d38c000..0xa3d408000
+[probe] partial munmap 0xa3d400000+0x8000 of backing 0xa3d3c0000..0xa3d408000
+[probe] kevent#6 tid=0 kq=10 change ident=0xb filter=-10 flags=0x0 fflags=0x1000000 data=0x0 udata=0x0 nev=0 timeout=None
+[probe] kevent#6 call tid=0 kq=10 nch=1 nev=0 timeout=None -> immediate n=0
+[probe] partial munmap 0xa3d408000+0x38000 of backing 0xa3d408000..0xa3d484000
+[probe] partial munmap 0xa3d480000+0x4000 of backing 0xa3d440000..0xa3d484000
+[probe] psynch#16 cvsignal tid=0 cv=0x7ba78 lsgen=0x20000000400 ugen=0x200 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+[probe] partial munmap 0xa3d484000+0x3c000 of backing 0xa3d484000..0xa3d500000
+[probe] psynch#17 cvsignal tid=0 cv=0x7ba78 lsgen=0x30000000400 ugen=0x300 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+[probe] sprr write #1 tid=0 RW pc=0x1804f2ab0
+[probe] view flip #3 -> RW (tid 0)
+[probe] sprr write #2 tid=0 RX pc=0x1804f2a60
+[probe] view flip #4 -> RX (tid 0)
+[probe] sprr write #3 tid=0 RW pc=0x1804f2ab0
+[probe] view flip #5 -> RW (tid 0)
+[probe] sprr write #4 tid=0 RX pc=0x1804f2a60
+[probe] view flip #6 -> RX (tid 0)
+[probe] sprr write #5 tid=0 RW pc=0x1804f2ab0
+[probe] view flip #7 -> RW (tid 0)
+[probe] sprr write #6 tid=0 RX pc=0x1804f2a60
+[probe] view flip #8 -> RX (tid 0)
+[probe] sprr write #7 tid=0 RW pc=0x1804f2ab0
+[probe] view flip #9 -> RW (tid 0)
+[probe] sprr write #8 tid=0 RX pc=0x1804f2a60
+[probe] view flip #10 -> RX (tid 0)
+[probe] partial munmap 0xa3d540000+0x3c000 of backing 0xa3d500000..0xa3d57c000
+[probe] partial munmap 0xa3d57c000+0x4000 of backing 0xa3d57c000..0xa3d5f8000
+[probe] partial munmap 0xa3d5c0000+0x38000 of backing 0xa3d580000..0xa3d5f8000
+[probe] partial munmap 0xa3d5f8000+0x8000 of backing 0xa3d5f8000..0xa3d674000
+[probe] partial munmap 0xa3d640000+0x34000 of backing 0xa3d600000..0xa3d674000
+[probe] sprr write #9 tid=0 RW pc=0x1804f2ab0
+[probe] view flip #11 -> RW (tid 0)
+[probe] sprr write #10 tid=0 RX pc=0x1804f2a60
+[probe] view flip #12 -> RX (tid 0)
+[probe] partial munmap 0xa3d674000+0xc000 of backing 0xa3d674000..0xa3d6f0000
+[probe] partial munmap 0xa3d6c0000+0x30000 of backing 0xa3d680000..0xa3d6f0000
+[probe] sprr write #11 tid=0 RW pc=0x1804f2ab0
+[probe] view flip #13 -> RW (tid 0)
+[probe] sprr write #12 tid=0 RX pc=0x1804f2a60
+[probe] view flip #14 -> RX (tid 0)
+[probe] sprr write #13 tid=0 RW pc=0x1804f2ab0
+[probe] view flip #15 -> RW (tid 0)
+[probe] sprr write #14 tid=0 RX pc=0x1804f2a60
+[probe] view flip #16 -> RX (tid 0)
+[probe] partial munmap 0xa3d6f0000+0x10000 of backing 0xa3d6f0000..0xa3d76c000
+[probe] partial munmap 0xa3d740000+0x2c000 of backing 0xa3d700000..0xa3d76c000
+[probe] partial munmap 0xa3d76c000+0x14000 of backing 0xa3d76c000..0xa3d7cc000
+[probe] partial munmap 0xa3d7a4000+0x28000 of backing 0xa3d780000..0xa3d7cc000
+[probe] partial munmap 0xa3d7cc000+0x34000 of backing 0xa3d7cc000..0xa3d848000
+[probe] partial munmap 0xa3d840000+0x8000 of backing 0xa3d800000..0xa3d848000
+[probe] sprr write #15 tid=0 RW pc=0x1804f2ab0
+[probe] view flip #17 -> RW (tid 0)
+[probe] sprr write #16 tid=0 RX pc=0x1804f2a60
+[probe] view flip #18 -> RX (tid 0)
+[probe] partial munmap 0xa3d848000+0x38000 of backing 0xa3d848000..0xa3d8c4000
+[probe] partial munmap 0xa3d8c0000+0x4000 of backing 0xa3d880000..0xa3d8c4000
+[probe] partial munmap 0xa3d8c4000+0x3c000 of backing 0xa3d8c4000..0xa3d940000
+[probe] partial munmap 0xa3d980000+0x3c000 of backing 0xa3d940000..0xa3d9bc000
+[probe] partial munmap 0xa3d9bc000+0x4000 of backing 0xa3d9bc000..0xa3da38000
+[probe] partial munmap 0xa3da00000+0x38000 of backing 0xa3d9c0000..0xa3da38000
+[probe] partial munmap 0xa3da38000+0x8000 of backing 0xa3da38000..0xa3da74000
+[probe] partial munmap 0xa3da60000+0x14000 of backing 0xa3da40000..0xa3da74000
+[probe] partial munmap 0xa3da74000+0xc000 of backing 0xa3da74000..0xa3daf0000
+[probe] partial munmap 0xa3dac0000+0x30000 of backing 0xa3da80000..0xa3daf0000
+[probe] partial munmap 0xa3daf0000+0x10000 of backing 0xa3daf0000..0xa3db6c000
+[probe] partial munmap 0xa3db40000+0x2c000 of backing 0xa3db00000..0xa3db6c000
+[probe] kevent#7 tid=0 kq=13 change ident=0x1 filter=-1 flags=0x5 fflags=0x0 data=0x0 udata=0x0 nev=1 timeout=Some((0, 1))
+[probe] kevent#7 call tid=0 kq=13 nch=1 nev=1 timeout=Some((0, 1)) -> immediate n=0
+[probe] kevent#7 BLOCK tid=0 kq=13 timeout=Some((0, 1)) deadline=Some(7826760092938) now=0x71e4f414d0a
+[probe] kevent timeout tid=0
+[probe] psynch#18 cvwait tid=0 cv=0x7baa8 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#19 cvbroad tid=2 cv=0x7baa8 lsgen=0x100 udgen=0x100 flags=0x0 mutex=0x0 mugen=0x0 waiters=1
+[probe] partial munmap 0xa3db6c000+0x14000 of backing 0xa3db6c000..0xa3dbe8000
+[probe] partial munmap 0xa3dbc0000+0x28000 of backing 0xa3db80000..0xa3dbe8000
+[probe] sprr write #17 tid=2 RW pc=0x1804f2ab0
+[probe] view flip #19 -> RW (tid 2)
+[probe] sprr write #18 tid=2 RX pc=0x1804f2a60
+[probe] view flip #20 -> RX (tid 2)
+[probe] sprr write #19 tid=2 RW pc=0x1804f2ab0
+[probe] sprr write #20 tid=2 RX pc=0x1804f2a60
+[probe] partial munmap 0xa3dbe8000+0x18000 of backing 0xa3dbe8000..0xa3dc64000
+[probe] partial munmap 0xa3dc40000+0x24000 of backing 0xa3dc00000..0xa3dc64000
+[probe] psynch#20 cvwait tid=2 cv=0x7ba78 lsgen=0x40000000500 ugen=0x400 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+[probe] psynch#21 cvsignal tid=0 cv=0x7ba78 lsgen=0x40000000500 ugen=0x400 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+[probe] kevent deliver kq=10 n=1
+[probe] kevent#8 call tid=0 kq=10 nch=0 nev=1024 timeout=Some((0, 0)) -> immediate n=1
+[probe] kevent#9 call tid=0 kq=10 nch=0 nev=1024 timeout=Some((0, 0)) -> immediate n=0
+[probe] munmap over MAP_JIT ipa=0xa2cfac000 len=0x10000000
+[probe] kevent#10 tid=0 kq=8 change ident=0x9 filter=-10 flags=0x0 fflags=0x1000000 data=0x0 udata=0x0 nev=0 timeout=None
+[probe] kevent deliver kq=8 n=1
+[probe] kevent wake tid=1 kq=8 n=1
+[probe] kevent#10 call tid=0 kq=8 nch=1 nev=0 timeout=None -> immediate n=0
+[probe] partial munmap 0x30044000+0x8000 of backing 0x30000000..0x3004c000
+[probe] partial munmap 0x30090000+0x8000 of backing 0x3004c000..0x30098000
+[probe] partial munmap 0x300dc000+0x8000 of backing 0x30098000..0x300e4000
+[probe] partial munmap 0x30128000+0x8000 of backing 0x300e4000..0x30130000
+[probe] partial munmap 0x30174000+0x8000 of backing 0x30130000..0x3017c000
+[probe] psynch#22 cvwait tid=0 cv=0x7bbe0 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+[probe] cvwait timeout tid=0 cv=0x7bbe0
+[probe] psynch#23 cvwait tid=0 cv=0x7bbb0 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+[probe] cvwait timeout tid=0 cv=0x7bbb0
+[probe] psynch#24 cvwait tid=0 cv=0x7baa8 lsgen=0x10000000200 ugen=0x100 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+[probe] cvwait timeout tid=0 cv=0x7baa8
+[probe] psynch#25 cvwait tid=0 cv=0x7ba78 lsgen=0x50000000600 ugen=0x500 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+[probe] cvwait timeout tid=0 cv=0x7ba78
+[probe] kevent#11 call tid=0 kq=4 nch=0 nev=1024 timeout=Some((0, 0)) -> immediate n=0
+[probe] psynch#26 cvwait tid=0 cv=0x7b818 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+[probe] cvwait timeout tid=0 cv=0x7b818
+[retrace] fall-throughs: 6

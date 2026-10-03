@@ -1,0 +1,21 @@
+$ xcrun dyld_info -arch arm64e -load_commands /usr/lib/system/libsystem_pthread.dylib | grep -A4 ID_DYLIB
+             cmd: LC_ID_DYLIB
+         cmdsize: 0x40
+            name: "/usr/lib/system/libsystem_pthread.dylib"
+        cur-vers: 539.100.4
+     compat-vers: 1.0
+
+$ git clone --depth 1 --branch libpthread-539.100.4 https://github.com/apple-oss-distributions/libpthread.git; git log -1; shasum -a 256 ...
+1f4f5265b319111142f1bf3a27d4484ef5a98314 Fri Apr 17 00:41:55 2026 +0000 libpthread-539.100.4
+99f1445afa395a714fbc82c178dbbbdce662fdf8bdc393aaaca714226032f067  kern/kern_synch.c
+0ef6d51c695deb9adccc65c6b13277d722a3739124caae32354d262b73b23564  kern/synch_internal.h
+1ae8db5b479ad2a7314fc5c5d61b765a0a88be5c9521a2db64448f40b1232a0b  src/pthread_cond.c
+
+$ sw_vers; uname -v; sysctl hw.tbfrequency kern.pthread_mutex_default_policy machdep.cpu.brand_string
+ProductName:		macOS
+ProductVersion:		26.5.2
+BuildVersion:		25F84
+Darwin Kernel Version 25.5.0: Tue Jun  9 22:28:34 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6041
+hw.tbfrequency: 24000000
+kern.pthread_mutex_default_policy: 0
+machdep.cpu.brand_string: Apple M4 Pro

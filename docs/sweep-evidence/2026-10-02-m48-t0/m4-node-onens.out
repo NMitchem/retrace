@@ -1,0 +1,206 @@
+[m4] tid=23168942 __psynch_mutexwait enter x0=0x16f4de278 x1=0x102 x2=0 x3=0x16187ac x4=0x20a0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvwait enter x0=0x16f4de248 x1=0x100000100 x2=0 x3=0x16f4de278 x4=0x10000000300 x5=0x10a0 x6=0 x7=0
+[m4] tid=23168944 __psynch_mutexwait enter x0=0x16f4de278 x1=0x302 x2=0 x3=0x16187ac x4=0x20a0 x5=0xd x6=0 x7=0
+[m4] tid=23168945 __psynch_cvsignal enter x0=0x16f4de248 x1=0x100 x2=0 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168942 __psynch_mutexwait return x0=0x103 carry=0
+[m4] tid=23168945 __psynch_cvsignal return x0=0x101 carry=0
+[m4] tid=23168942 __psynch_mutexwait enter x0=0x16f4de278 x1=0x10000000402 x2=0x100 x3=0x16187b1 x4=0x20a0 x5=0x1704eab30 x6=0xa x7=0
+[m4] tid=23168943 __psynch_mutexwait enter x0=0x16f4de278 x1=0x202 x2=0 x3=0x16187ac x4=0x20a0 x5=0xd x6=0 x7=0
+[m4] tid=23168945 __psynch_mutexdrop enter x0=0x16f4de278 x1=0x20000000400 x2=0x200 x3=0 x4=0x30a0 x5=0x10100000100 x6=0xa x7=0
+[m4] tid=23168945 __psynch_mutexdrop return x0=0 carry=0
+[m4] tid=23168945 __psynch_cvwait enter x0=0x10219d058 x1=0x100000100 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168940 __psynch_cvwait enter x0=0x16f4de248 x1=0x10100000200 x2=0x100 x3=0x16f4de278 x4=0x30000000400 x5=0x10a0 x6=0 x7=0
+[m4] tid=23168944 __psynch_mutexwait return x0=0x403 carry=0
+[m4] tid=23168944 __psynch_cvsignal enter x0=0x16f4de248 x1=0x10000000200 x2=0x100 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168944 __psynch_cvsignal return x0=0x101 carry=0
+[m4] tid=23168944 __psynch_mutexdrop enter x0=0x16f4de278 x1=0x40000000400 x2=0x400 x3=0 x4=0x30a0 x5=0x20100000200 x6=0xa x7=0
+[m4] tid=23168942 __psynch_mutexwait return x0=0x403 carry=0
+[m4] tid=23168943 __psynch_mutexwait return x0=0x203 carry=0
+[m4] tid=23168940 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168943 __psynch_cvwait enter x0=0x10219d058 x1=0x300 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168944 __psynch_mutexdrop return x0=0 carry=0
+[m4] tid=23168944 __psynch_cvwait enter x0=0x10219d058 x1=0x400 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168942 __psynch_cvwait enter x0=0x10219d058 x1=0x200 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvwait enter x0=0x16f4de248 x1=0x20100000300 x2=0x200 x3=0 x4=0 x5=0xa0 x6=0 x7=0x1
+[m4]   frame #0 0x100940640 m4interpose.dylib`my___psynch_cvwait + 64
+[m4]   frame #1 0x181df2154 libsystem_pthread.dylib`_pthread_cond_wait + 1024
+[m4]   frame #2 0x1009c2364 libuv.1.0.0.dylib`uv_cond_destroy + 92
+[m4]   frame #3 0x104cf9840 libnode.141.dylib`_ZN4node23WorkerThreadsTaskRunnerC2EiNS_21PlatformDebugLogLevelE + 436
+[m4]   frame #4 0x104cfade0 libnode.141.dylib`_ZN4node12NodePlatformC2EiPN2v817TracingControllerEPNS1_13PageAllocatorE + 240
+[m4]   frame #5 0x104c7eba0 libnode.141.dylib`_ZN4node10V8Platform10InitializeEi + 272
+[m4]   frame #6 0x104c7d728 libnode.141.dylib`_ZN4nodeL32InitializeOncePerProcessInternalERKNSt3__16vectorINS0_12basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEENS5_IS7_EEEENS_26ProcessInitializationFlags5FlagsE + 4752
+[m4]   frame #7 0x104c7e408 libnode.141.dylib`_ZN4node5StartEiPPc + 92
+[m4] tid=23168940 __psynch_cvwait return x0=0x13c carry=1
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x400 x2=0 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168945 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168945 __psynch_cvwait enter x0=0x10219d058 x1=0x10000000500 x2=0x100 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x10000000500 x2=0x100 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168942 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x20000000500 x2=0x200 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168943 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168940 __psynch_cvwait enter x0=0x100d8c180 x1=0x100000100 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168943 __psynch_cvsignal enter x0=0x100d8c180 x1=0x100 x2=0 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168943 __psynch_cvsignal return x0=0x101 carry=0
+[m4] tid=23168940 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168943 __psynch_cvwait enter x0=0x10219d058 x1=0x30000000600 x2=0x300 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvwait enter x0=0x100d8c180 x1=0x10100000200 x2=0x100 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168942 __psynch_cvsignal enter x0=0x100d8c180 x1=0x10000000200 x2=0x100 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168942 __psynch_cvsignal return x0=0x101 carry=0
+[m4] tid=23168940 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168942 __psynch_cvwait enter x0=0x10219d058 x1=0x30000000700 x2=0x300 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x30000000700 x2=0x300 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168944 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168944 __psynch_cvwait enter x0=0x10219d058 x1=0x40000000800 x2=0x400 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x40000000800 x2=0x400 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168945 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168940 __psynch_cvwait enter x0=0x100d8c180 x1=0x20100000300 x2=0x200 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168945 __psynch_cvsignal enter x0=0x100d8c180 x1=0x20000000300 x2=0x200 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168945 __psynch_cvsignal return x0=0x101 carry=0
+[m4] tid=23168940 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168945 __psynch_cvwait enter x0=0x10219d058 x1=0x50000000900 x2=0x500 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x50000000900 x2=0x500 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168943 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168940 __psynch_cvwait enter x0=0x100d8c180 x1=0x30100000400 x2=0x300 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168943 __psynch_cvsignal enter x0=0x100d8c180 x1=0x30000000400 x2=0x300 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168943 __psynch_cvsignal return x0=0x101 carry=0
+[m4] tid=23168940 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168943 __psynch_cvwait enter x0=0x10219d058 x1=0x60000000a00 x2=0x600 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x60000000a00 x2=0x600 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168942 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168942 __psynch_cvwait enter x0=0x10219d058 x1=0x70000000b00 x2=0x700 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x70000000b00 x2=0x700 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168944 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168944 __psynch_cvwait enter x0=0x10219d058 x1=0x80000000c00 x2=0x800 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x80000000c00 x2=0x800 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168945 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168945 __psynch_cvwait enter x0=0x10219d058 x1=0x90000000d00 x2=0x900 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x90000000d00 x2=0x900 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168943 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168943 __psynch_cvwait enter x0=0x10219d058 x1=0xa0000000e00 x2=0xa00 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0xa0000000e00 x2=0xa00 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168942 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168942 __psynch_cvwait enter x0=0x10219d058 x1=0xb0000000f00 x2=0xb00 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0xb0000000f00 x2=0xb00 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168944 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168944 __psynch_cvwait enter x0=0x10219d058 x1=0xc0000001000 x2=0xc00 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0xc0000001000 x2=0xc00 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168945 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168945 __psynch_cvwait enter x0=0x10219d058 x1=0xd0000001100 x2=0xd00 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0xd0000001100 x2=0xd00 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168943 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168943 __psynch_cvwait enter x0=0x10219d058 x1=0xe0000001200 x2=0xe00 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0xe0000001200 x2=0xe00 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168942 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168942 __psynch_cvwait enter x0=0x10219d058 x1=0xf0000001300 x2=0xf00 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0xf0000001300 x2=0xf00 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168944 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168944 __psynch_cvwait enter x0=0x10219d058 x1=0x100000001400 x2=0x1000 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x100000001400 x2=0x1000 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168945 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168945 __psynch_cvwait enter x0=0x10219d058 x1=0x110000001500 x2=0x1100 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x110000001500 x2=0x1100 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168943 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168943 __psynch_cvwait enter x0=0x10219d058 x1=0x120000001600 x2=0x1200 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x120000001600 x2=0x1200 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168942 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168942 __psynch_cvwait enter x0=0x10219d058 x1=0x130000001700 x2=0x1300 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x130000001700 x2=0x1300 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168944 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168944 __psynch_cvwait enter x0=0x10219d058 x1=0x140000001800 x2=0x1400 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x140000001800 x2=0x1400 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168945 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x150000001800 x2=0x1500 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168943 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168943 __psynch_cvwait enter x0=0x10219d058 x1=0x160000001900 x2=0x1600 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168945 __psynch_cvwait enter x0=0x10219d058 x1=0x160000001a00 x2=0x1600 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x160000001a00 x2=0x1600 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168942 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168942 __psynch_cvwait enter x0=0x10219d058 x1=0x170000001b00 x2=0x1700 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal enter x0=0x10219d058 x1=0x170000001b00 x2=0x1700 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvsignal return x0=0x100 carry=0
+[m4] tid=23168944 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168944 __psynch_cvwait enter x0=0x10219d058 x1=0x180000001c00 x2=0x1800 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23168940 __psynch_cvbroad enter x0=0x10219d058 x1=0x180000001c00 x2=0x180000000400 x3=0 x4=0 x5=0 x6=0 x7=0xfffff0003ffff800
+[m4] tid=23168943 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168940 __psynch_cvbroad return x0=0x401 carry=0
+[m4] tid=23168944 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168943 __psynch_mutexwait enter x0=0x10219d018 x1=0x102 x2=0 x3=0x16187ac x4=0x20a0 x5=0x170cf2a90 x6=0xa x7=0
+[m4] tid=23168940 __psynch_mutexdrop enter x0=0x10219d018 x1=0x10000000100 x2=0x100 x3=0 x4=0x30a0 x5=0x1c0100001c00 x6=0xa x7=0xfffff0003ffff800
+[m4] tid=23168945 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168942 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23168943 __psynch_mutexwait return x0=0x103 carry=0
+[m4] tid=23168940 __psynch_mutexdrop return x0=0 carry=0
+[m4] tid=23168940 __psynch_cvwait enter x0=0x10219d1c0 x1=0x100000100 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0x1
+[m4]   frame #0 0x100940640 m4interpose.dylib`my___psynch_cvwait + 64
+[m4]   frame #1 0x181df2154 libsystem_pthread.dylib`_pthread_cond_wait + 1024
+[m4]   frame #2 0x1009c2364 libuv.1.0.0.dylib`uv_cond_destroy + 92
+[m4]   frame #3 0x104cfc9b4 libnode.141.dylib`_ZN4node9TaskQueueIN2v84TaskEED2Ev + 44
+[m4]   frame #4 0x104cfc96c libnode.141.dylib`_ZNSt3__110unique_ptrIN4node23WorkerThreadsTaskRunner20DelayedTaskSchedulerENS_14default_deleteIS3_EEE5resetB8nn200100EPS3_ + 40
+[m4]   frame #5 0x104cfcd38 libnode.141.dylib`_ZNSt3__112__destroy_atB8nn200100IN4node23WorkerThreadsTaskRunnerELi0EEEvPT_ + 48
+[m4]   frame #6 0x104c07ae0 libnode.141.dylib`_ZNSt3__110shared_ptrIN4node8builtins13BuiltinLoader16BuiltinCodeCacheEED2B8nn200100Ev + 56
+[m4]   frame #7 0x104cfae70 libnode.141.dylib`_ZN4node12NodePlatformD2Ev + 44
+[m4] tid=23168940 __psynch_cvwait return x0=0x13c carry=1
+[m4] tid=23168940 __psynch_cvwait enter x0=0x10219d190 x1=0x100000100 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0x1
+[m4]   frame #0 0x100940640 m4interpose.dylib`my___psynch_cvwait + 64
+[m4]   frame #1 0x181df2154 libsystem_pthread.dylib`_pthread_cond_wait + 1024
+[m4]   frame #2 0x1009c2364 libuv.1.0.0.dylib`uv_cond_destroy + 92
+[m4]   frame #3 0x104cfc9bc libnode.141.dylib`_ZN4node9TaskQueueIN2v84TaskEED2Ev + 52
+[m4]   frame #4 0x104cfc96c libnode.141.dylib`_ZNSt3__110unique_ptrIN4node23WorkerThreadsTaskRunner20DelayedTaskSchedulerENS_14default_deleteIS3_EEE5resetB8nn200100EPS3_ + 40
+[m4]   frame #5 0x104cfcd38 libnode.141.dylib`_ZNSt3__112__destroy_atB8nn200100IN4node23WorkerThreadsTaskRunnerELi0EEEvPT_ + 48
+[m4]   frame #6 0x104c07ae0 libnode.141.dylib`_ZNSt3__110shared_ptrIN4node8builtins13BuiltinLoader16BuiltinCodeCacheEED2B8nn200100Ev + 56
+[m4]   frame #7 0x104cfae70 libnode.141.dylib`_ZN4node12NodePlatformD2Ev + 44
+[m4] tid=23168940 __psynch_cvwait return x0=0x13c carry=1
+[m4] tid=23168940 __psynch_cvwait enter x0=0x10219d088 x1=0x100000100 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0x1
+[m4]   frame #0 0x100940640 m4interpose.dylib`my___psynch_cvwait + 64
+[m4]   frame #1 0x181df2154 libsystem_pthread.dylib`_pthread_cond_wait + 1024
+[m4]   frame #2 0x1009c2364 libuv.1.0.0.dylib`uv_cond_destroy + 92
+[m4]   frame #3 0x104cfc470 libnode.141.dylib`_ZN4node9TaskQueueINS_14TaskQueueEntryEED2Ev + 44
+[m4]   frame #4 0x104cfcd40 libnode.141.dylib`_ZNSt3__112__destroy_atB8nn200100IN4node23WorkerThreadsTaskRunnerELi0EEEvPT_ + 56
+[m4]   frame #5 0x104c07ae0 libnode.141.dylib`_ZNSt3__110shared_ptrIN4node8builtins13BuiltinLoader16BuiltinCodeCacheEED2B8nn200100Ev + 56
+[m4]   frame #6 0x104cfae70 libnode.141.dylib`_ZN4node12NodePlatformD2Ev + 44
+[m4]   frame #7 0x104cfaeec libnode.141.dylib`_ZN4node12NodePlatformD0Ev + 12
+[m4] tid=23168940 __psynch_cvwait return x0=0x13c carry=1
+[m4] tid=23168940 __psynch_cvwait enter x0=0x10219d058 x1=0x1c0100001d00 x2=0x1c00 x3=0 x4=0 x5=0xa0 x6=0 x7=0x1
+[m4]   frame #0 0x100940640 m4interpose.dylib`my___psynch_cvwait + 64
+[m4]   frame #1 0x181df2154 libsystem_pthread.dylib`_pthread_cond_wait + 1024
+[m4]   frame #2 0x1009c2364 libuv.1.0.0.dylib`uv_cond_destroy + 92
+[m4]   frame #3 0x104cfc478 libnode.141.dylib`_ZN4node9TaskQueueINS_14TaskQueueEntryEED2Ev + 52
+[m4]   frame #4 0x104cfcd40 libnode.141.dylib`_ZNSt3__112__destroy_atB8nn200100IN4node23WorkerThreadsTaskRunnerELi0EEEvPT_ + 56
+[m4]   frame #5 0x104c07ae0 libnode.141.dylib`_ZNSt3__110shared_ptrIN4node8builtins13BuiltinLoader16BuiltinCodeCacheEED2B8nn200100Ev + 56
+[m4]   frame #6 0x104cfae70 libnode.141.dylib`_ZN4node12NodePlatformD2Ev + 44
+[m4]   frame #7 0x104cfaeec libnode.141.dylib`_ZN4node12NodePlatformD0Ev + 12
+[m4] tid=23168940 __psynch_cvwait return x0=0x13c carry=1
+[m4] tid=23168940 __psynch_cvwait enter x0=0x10219cdf8 x1=0x100000100 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0x1
+[m4]   frame #0 0x100940640 m4interpose.dylib`my___psynch_cvwait + 64
+[m4]   frame #1 0x181df2154 libsystem_pthread.dylib`_pthread_cond_wait + 1024
+[m4]   frame #2 0x1009c2364 libuv.1.0.0.dylib`uv_cond_destroy + 92
+[m4]   frame #3 0x104d826dc libnode.141.dylib`_ZN4node7tracing5AgentD2Ev + 108
+[m4]   frame #4 0x104c0bf2c libnode.141.dylib`_ZNSt3__110unique_ptrIN4node7tracing5AgentENS_14default_deleteIS3_EEE5resetB8nn200100EPS3_ + 28
+[m4]   frame #5 0x104c7d900 libnode.141.dylib`_ZN4node22TearDownOncePerProcessEv + 188
+[m4]   frame #6 0x104c7e540 libnode.141.dylib`_ZN4node5StartEiPPc + 404
+[m4]   frame #7 0x181a33e00 dyld`start + 6992
+[m4] tid=23168940 __psynch_cvwait return x0=0x13c carry=1

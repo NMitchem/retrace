@@ -1,0 +1,9 @@
+detect n=1 [ident=0x1e7e7711 filter=-10 flags=0x21 fflags=0 data=0 udata=0x0]
+detect slot 1 afterwards n=1 [ident=0x1e7e7711 filter=-10 flags=0 fflags=0x1000000 data=0 udata=0x0]
+read on a pipe write end, 1 ns n=0
+read on fd 1, 1 ns n=0
+write-ready on an empty pipe n=1 [ident=0x4 filter=-2 flags=0x1 fflags=0 data=16384 udata=0x0]
+read-ready after 3 bytes n=1 [ident=0x3 filter=-1 flags=0x1 fflags=0 data=3 udata=0x0]
+write-ready after 3 bytes n=1 [ident=0x4 filter=-2 flags=0x1 fflags=0 data=16381 udata=0x0]
+read on the write end, reader closed n=1 [ident=0x4 filter=-1 flags=0x8005 fflags=0 data=0 udata=0x0]
+write on the write end, reader closed n=1 [ident=0x4 filter=-2 flags=0x8001 fflags=0 data=0 udata=0x0]

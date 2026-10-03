@@ -1,0 +1,24 @@
+___psynch_mutexwait:
+0x0000039D4   mov      x16, #0x12d          
+0x0000039D8   svc      #0x80                
+0x0000039DC   b.lo     0x39fc               
+--
+___psynch_mutexdrop:
+0x000003BA0   mov      x16, #0x12e          
+0x000003BA4   svc      #0x80                
+0x000003BA8   b.lo     0x3bc8               
+--
+___psynch_cvwait:
+0x000004504   mov      x16, #0x131          
+0x000004508   svc      #0x80                
+0x00000450C   b.lo     0x452c               
+--
+___psynch_cvbroad:
+0x000004530   mov      x16, #0x12f          
+0x000004534   svc      #0x80                
+0x000004538   b.lo     0x4558               
+--
+___psynch_cvsignal:
+0x000005A5C   mov      x16, #0x130          
+0x000005A60   svc      #0x80                
+0x000005A64   b.lo     0x5a84               

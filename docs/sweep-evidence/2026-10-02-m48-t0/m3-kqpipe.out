@@ -1,0 +1,2 @@
+EVFILT_READ on this fd 1, 1ns: rc=0
+EVFILT_READ on pipe write end, 1ns: rc=0

@@ -1,0 +1,35 @@
+   Compiling hv-sys v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/hv-sys)
+   Compiling retrace-box v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/retrace-box)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.06s
+     Running tests/simdctx.rs (target/aarch64-apple-darwin/debug/deps/simdctx-5ad2f6635c6951f2)
+
+running 3 tests
+test a_checkpoint_restore_installs_the_captured_simd_registers ... FAILED
+test a_thread_switch_installs_the_incoming_threads_simd_registers ... FAILED
+test the_debuggers_register_write_installs_its_value_in_every_q_register ... ok
+
+failures:
+
+---- a_checkpoint_restore_installs_the_captured_simd_registers stdout ----
+
+thread 'a_checkpoint_restore_installs_the_captured_simd_registers' (23289585) panicked at crates/retrace-box/tests/simdctx.rs:47:46:
+assertion `left == right` failed: q0 after from_checkpoint
+  left: 14262056698775666945
+ right: 263088509887049645952473006860140609793
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_thread_switch_installs_the_incoming_threads_simd_registers stdout ----
+
+thread 'a_thread_switch_installs_the_incoming_threads_simd_registers' (23289601) panicked at crates/retrace-box/tests/simdctx.rs:33:46:
+assertion `left == right` failed: thread 1 q0 after the switch
+  left: 8436932055748641025
+ right: 155633926399671388180034385326930723073
+
+
+failures:
+    a_checkpoint_restore_installs_the_captured_simd_registers
+    a_thread_switch_installs_the_incoming_threads_simd_registers
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p retrace-box --test simdctx`

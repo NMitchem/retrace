@@ -1,0 +1,7 @@
+   Compiling retrace-arch v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace-arch)
+   Compiling hv-sys v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/hv-sys)
+   Compiling retrace-guest v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace-guest)
+   Compiling retrace-box v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace-box)
+   Compiling retrace-core v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace-core)
+   Compiling retrace v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace)
+    Finished `release` profile [optimized] target(s) in 2.89s

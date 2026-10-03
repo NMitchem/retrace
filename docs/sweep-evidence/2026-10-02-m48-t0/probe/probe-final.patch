@@ -1,0 +1,830 @@
+diff --git a/crates/hv-sys/src/lib.rs b/crates/hv-sys/src/lib.rs
+index 31a1187..7e2e705 100644
+--- a/crates/hv-sys/src/lib.rs
++++ b/crates/hv-sys/src/lib.rs
+@@ -132,7 +132,21 @@ impl Vcpu {
+         Ok(v)
+     }
+     pub fn set_simd(&self, r: SimdReg, v: u128) -> Result<(), HvError> {
+-        check(unsafe { hv_vcpu_set_simd_fp_reg(self.id, r.0, v) })
++        // M48 PROBE: hv_simd_fp_uchar16_t is a 16-byte VECTOR, passed in v0 under AAPCS64; bindgen's
++        // u128 is passed in a GPR pair, so the framework read whatever the host had in v0. Call it
++        // by hand with the value in v0.
++        let (lo, hi) = (v as u64, (v >> 64) as u64);
++        let f = hv_vcpu_set_simd_fp_reg as *const () as usize;
++        let ret: u64;
++        unsafe {
++            core::arch::asm!(
++                "fmov d0, {lo}", "mov v0.d[1], {hi}", "blr {f}",
++                lo = in(reg) lo, hi = in(reg) hi, f = in(reg) f,
++                inlateout("x0") self.id => ret, in("x1") r.0 as u64,
++                clobber_abi("C"),
++            );
++        }
++        check(ret as u32 as i32 as hv_return_t)
+     }
+     pub fn set_trap_debug_exceptions(&self, on: bool) -> Result<(), HvError> { check(unsafe { hv_vcpu_set_trap_debug_exceptions(self.id, on) }) }
+     /// Run until VMEXIT. Returns (reason, esr_el2, far/ipa) copied out of the exit struct.
+diff --git a/crates/retrace-arch/src/lib.rs b/crates/retrace-arch/src/lib.rs
+index 6f1d8da..3a99d8f 100644
+--- a/crates/retrace-arch/src/lib.rs
++++ b/crates/retrace-arch/src/lib.rs
+@@ -393,6 +393,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
+         // write(int fd, const void *buf, size_t nbyte) / write_nocancel: x1 is read for x2 bytes,
+         // and x2 is the caller's. This is M30's reproduced canary case.
+         SYS_WRITE | SYS_WRITE_NOCANCEL => row!(P, [Fd, Source, Scalar]),
++        // M48 PROBE: setsockopt(int s, int level, int name, const void *val, socklen_t len).
++        105 => row!(P, [Fd, Scalar, Scalar, Source, Scalar]),
+         // pwrite(int fd, const void *buf, size_t nbyte, off_t offset) / pwrite_nocancel. M30
+         // tabled both as readers; fd_operands never had either (EXPECTED_DIFFS).
+         154 | 415 => row!(P, [Fd, Source, Scalar, Scalar]),
+diff --git a/crates/retrace-box/src/lib.rs b/crates/retrace-box/src/lib.rs
+index 3836fbb..6590847 100644
+--- a/crates/retrace-box/src/lib.rs
++++ b/crates/retrace-box/src/lib.rs
+@@ -13,6 +13,7 @@ mod sig;
+ pub mod thread;
+ pub mod kq;
+ mod excl;
++pub mod probe;
+ pub use excl::{Excl, SetBy};
+ pub use sig::{
+     build_frame, choose_frame_base, decode_act, decode_stack, encode_oldact, encode_oldstack,
+@@ -205,7 +206,7 @@ const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
+ // allocator hits that threshold at startup (M25-cpython). UCT(15) and UCI(26) are deliberately
+ // left CLEAR pending measurement: nothing has measured a guest issuing `DC CVAU` / `IC IVAU` or
+ // reading `CTR_EL0` from EL0, and the existing EC 0x18 exit already fails loud on that case.
+-const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000;
++const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000 | (1 << 26); // M48 PROBE: +UCI
+ // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
+ const SCTLR_PAC_EN: u64 = 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
+ 
+@@ -642,6 +643,7 @@ pub struct Box_ {
+     /// Declared last. It holds a `Vec`, so it has Drop, but it comes after `vcpu`/`vm`, so the
+     /// load-bearing vcpu-before-vm drop order is unaffected.
+     excl: Option<Excl>,
++    pub probe: probe::Probe,
+ }
+ 
+ /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
+@@ -1074,6 +1076,7 @@ pub struct BoxState {
+     // happened behind the checkpoint. Dropping it would make a seek past a fire replay a manager
+     // whose knote table is empty (gcdtimer_e2e's seek test, and its control).
+     pub kq: kq::WorkqKqueue,
++    pub probe: probe::Probe,
+     // M42: carried because a mid-pair capture cannot re-derive it. The load-exclusive that set it
+     // retired behind the checkpoint, and the hardware monitor never survives an exit. Resetting it
+     // would make a seek past a stepped load-exclusive fail that pair's store, which is the bug M42
+@@ -1410,8 +1413,21 @@ impl Box_ {
+         let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+         if self.host_span(elr).is_none() { return false; }
+         let insn = u32::from_le_bytes(self.read_guest(elr, 4).try_into().unwrap());
++        // M48 SCRATCH PROBE: MSR S3_6_C15_C1_5, Xt (bits[31:20] == 0xD51).
++        if insn & 0xFFFF_FFE0 == 0xD51E_F1A0 {
++            let rt = insn & 0x1f;
++            let v = if rt == 31 { 0 } else { self.vcpu.get_reg(reg::x(rt)).unwrap() };
++            let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
++            self.vcpu.set_reg(reg::PC, elr + 4).unwrap();
++            self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
++            self.probe_sprr_write(v, elr);
++            return true;
++        }
+         // MRS: bits[31:20] == 0xD53. Decode the sysreg selector (op0,op1,CRn,CRm,op2).
+-        if insn & 0xFFF0_0000 != 0xD530_0000 { return false; }
++        if insn & 0xFFF0_0000 != 0xD530_0000 {
++            if probe::log_on() { eprintln!("[probe] undef insn {insn:#010x} at {elr:#x}"); }
++            return false;
++        }
+         let o0  = (insn >> 19) & 1;         // op0 = 0b10 | o0  => 2 or 3
+         let op1 = (insn >> 16) & 0x7;
+         let crn = (insn >> 12) & 0xf;
+@@ -1421,7 +1437,8 @@ impl Box_ {
+         // S3_6_C15_C1_5: op0=3 (o0=1), op1=6, CRn=15, CRm=1, op2=5.
+         let is_apple_feat = o0 == 1 && op1 == 6 && crn == 15 && crm == 1 && op2 == 5;
+         if !is_apple_feat { return false; }
+-        if rt != 31 { self.vcpu.set_reg(reg::x(rt), 0).unwrap(); } // x31 = XZR: value discarded
++        let v = self.probe_sprr_read();
++        if rt != 31 { self.vcpu.set_reg(reg::x(rt), v).unwrap(); } // x31 = XZR: value discarded
+         let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+         self.vcpu.set_reg(reg::PC, elr + 4).unwrap();
+         self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
+@@ -1515,7 +1532,7 @@ impl Box_ {
+         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
+         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
+         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
+-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None }
++        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, probe: Default::default() }
+     }
+ 
+     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
+@@ -1953,6 +1970,13 @@ impl Box_ {
+     /// both sides (symmetry rule 2) and never surfaces to the record/replay loop.
+     pub fn flush_guest_tlb(&mut self) {
+         self.ensure_tlbi_stub();
++        // M48 PROBE: a JIT view flip can run this inside step(); the stub must not single-step.
++        let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
++        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr & !MDSCR_SS & !MDSCR_MDE).unwrap();
++        self.flush_guest_tlb_inner();
++        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr).unwrap();
++    }
++    fn flush_guest_tlb_inner(&mut self) {
+         let saved = self.save_state();
+         self.vcpu.set_reg(reg::PC, TLBI_STUB_IPA).expect("set PC (tlbi stub)");
+         self.vcpu.set_reg(reg::CPSR, TLBI_STUB_CPSR).expect("set CPSR (tlbi stub)");
+@@ -2117,7 +2141,7 @@ impl Box_ {
+         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
+         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
+         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
+-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None };
++        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, probe: Default::default() };
+         b.reserve_believed_stack();
+         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
+         // it with the real startup state just written to the vCPU so it reflects reality from the
+@@ -2679,6 +2703,7 @@ impl Box_ {
+         // M13: a PROT_NONE mmap is protected once its backing exists — which is why the invariant
+         // "no-access => backed" costs nothing on this path.
+         if prot == 0 { self.protect_none(ipa, rlen as u64); }
++        self.probe_note_mmap(ipa, rlen as u64, prot, flags);
+         Ok(ipa)
+     }
+     /// RECORD: anon-alloc, stage the fd's bytes into it (SPTM: never map the file page itself), map,
+@@ -2742,12 +2767,36 @@ impl Box_ {
+     /// `hv_vm_unmap` its stage-2 range, releasing the anon host allocation. The reservation subtract
+     /// runs even when nothing is backed (the carveout case: a PROT_NONE reservation has no backing).
+     pub fn guest_munmap(&mut self, ipa: u64, len: u64) {
++        self.probe_note_munmap(ipa, len);
+         self.subtract_reservations(ipa, len);
+         // M13: the pages are gone, so the protection goes with them — otherwise the next mapping at
+         // this address inherits a no-access extent its guest never asked for. Runs BEFORE the
+         // stage-2 unmap below so the pages are still backed while their leaves are reset.
+         self.drop_protection(ipa, len);
++        // M48 SCRATCH PROBE: a partial munmap (V8's aligned-reservation trim) splits the backing.
+         if let Some(pos) = self.backings.iter().position(|b| ipa >= b.ipa && ipa < b.ipa + b.len as u64) {
++            let (bs, be) = (self.backings[pos].ipa, self.backings[pos].ipa + self.backings[pos].len as u64);
++            let ue = (ipa.saturating_add(len) + GRANULE as u64 - 1 & !(GRANULE as u64 - 1)).min(be);
++            if ipa != bs || ue != be {
++                let bk = self.backings.remove(pos);
++                let (host, blen) = (bk.host, bk.len);
++                std::mem::forget(bk);
++                let _ = self.vm.unmap(bs, blen);
++                if probe::log_on() { eprintln!("[probe] partial munmap {ipa:#x}+{len:#x} of backing {bs:#x}..{be:#x}"); }
++                if ipa > bs {
++                    let l = (ipa - bs) as usize;
++                    self.vm.map(host, bs, l, MemFlags::RWX).expect("probe remap head");
++                    self.backings.push(Backing { host, ipa: bs, len: l });
++                }
++                if ue < be {
++                    let h = unsafe { host.add((ue - bs) as usize) };
++                    let l = (be - ue) as usize;
++                    self.vm.map(h, ue, l, MemFlags::RWX).expect("probe remap tail");
++                    self.backings.push(Backing { host: h, ipa: ue, len: l });
++                }
++                unsafe { free_pages(host.add((ipa - bs) as usize), (ue - ipa) as usize); }
++                return;
++            }
+             let bk = self.backings.remove(pos);
+             let _ = self.vm.unmap(bk.ipa, bk.len);       // stage-1 identity block stays; stage-2 removed
+             // The anon host backing is no longer mapped into the guest; release it. M40: the Backing
+@@ -2770,6 +2819,10 @@ impl Box_ {
+     /// `mach_vm_protect`(−14) dispatch arms on both record and replay, so there is one
+     /// implementation and no mirror to keep in step.
+     pub fn guest_mprotect(&mut self, ipa: u64, len: u64, prot: u64) {
++        self.guest_mprotect_inner(ipa, len, prot);
++        self.probe_note_mprotect(ipa, len, prot);
++    }
++    fn guest_mprotect_inner(&mut self, ipa: u64, len: u64, prot: u64) {
+         if prot == 0 {
+             self.protect_none(ipa, len);
+             return;
+@@ -3397,7 +3450,7 @@ impl Box_ {
+         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
+         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
+         // That one entry is re-established below.
+-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None };
++        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, probe: Default::default() };
+         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
+         // would not exist here and the first stack-growth fault would go unserviced and report as a
+         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
+@@ -5715,6 +5768,7 @@ impl Box_ {
+     /// counter the timebase `MRS` last returned plus the commpage's timebase offset, which is what
+     /// the guest's own `mach_absolute_time` computes (t0 M1(c)). Every input is box state that
+     /// record and replay hold identically.
++    pub fn now_guest_pub(&self) -> u64 { self.now_guest() }
+     fn now_guest(&self) -> u64 {
+         self.synthetic_tsc.wrapping_add(self.timebase_offset())
+     }
+@@ -6347,22 +6401,26 @@ impl Box_ {
+     /// one fire: the cooperative scheduler's limit, extended to time (`docs/current-state.md`).
+     pub fn schedule_after_block(&mut self) {
+         self.fire_due_timers();
++        self.probe_fire_deadlines();
+         let mut next = self.threads.pick_next();
+         if next.is_none() {
+-            if let Some(deadline) = self.kq.earliest_deadline() {
++            let d = [self.kq.earliest_deadline(), self.probe_earliest_deadline()].into_iter().flatten().min();
++            if let Some(deadline) = d {
++                if probe::log_on() { eprintln!("[probe] idle jump to {deadline:#x} (now {:#x})", self.now_guest_pub()); }
+                 self.synthetic_tsc = kq::tsc_for_deadline(self.synthetic_tsc, self.timebase_offset(), deadline);
+                 self.fire_due_timers();
++                self.probe_fire_deadlines();
+                 next = self.threads.pick_next();
+             }
+         }
+         match next {
+             Some(tid) => self.switch_to_thread(tid),
+             None => panic!(
+-                "M14: DEADLOCK — no runnable thread. {} live of {} total. States: {:?}. Knotes: {:?}",
++                "M14: DEADLOCK — no runnable thread. {} live of {} total. States: {:?}. Knotes: {:?} PROBE waits: {:?} kqs: {:?}",
+                 self.threads.live(),
+                 self.threads.len(),
+                 (0..self.threads.len()).map(|i| self.threads.state_of(i)).collect::<Vec<_>>(),
+-                self.kq
++                self.kq, self.probe.waits, self.probe.kqs
+             ),
+         }
+     }
+@@ -6381,6 +6439,11 @@ impl Box_ {
+         self.threads.switch_to(tid);
+         let next = self.threads.ctx_of(tid).clone();
+         self.load_ctx(&next);
++        let f0 = self.probe.flips;
++        self.probe_apply_view(false);
++        if self.probe.flips != f0 { self.probe.switch_flips += 1; }
++        let nr = (0..self.threads.len()).filter(|&i| matches!(self.threads.state_of(i), thread::ThreadState::Runnable)).count();
++        self.probe.max_runnable = self.probe.max_runnable.max(nr);
+     }
+ 
+     /// Capture all backings + architectural registers as an Event::Snapshot.
+@@ -6572,6 +6635,7 @@ impl Box_ {
+             sigtable: self.sigtable.clone(),
+             fall_throughs: self.fall_throughs,
+             kq: self.kq.clone(),
++            probe: self.probe.clone(),
+             excl: self.excl.clone(),
+         }
+     }
+@@ -6696,6 +6760,7 @@ impl Box_ {
+             // M42: RESTORED from the capture, never reset (spec §3f); see the `BoxState` field.
+             kq: state.kq.clone(),
+             excl: state.excl.clone(),
++            probe: state.probe.clone(),
+         };
+         if state.cache_installed { b.install_cache_pager(); }
+         b
+diff --git a/crates/retrace-box/src/probe.rs b/crates/retrace-box/src/probe.rs
+new file mode 100644
+index 0000000..fe7c0d4
+--- /dev/null
++++ b/crates/retrace-box/src/probe.rs
+@@ -0,0 +1,434 @@
++//! M48 SCRATCH PROBE ONLY. Crude stubs for kevent / psynch / SPRR so node can be walked past each
++//! wall. Never lands. Everything here is box state driven by the guest's own syscalls, so record
++//! and replay run it identically, but nothing is faithful beyond what the walk needed.
++use std::collections::BTreeMap;
++use crate::{thread, Box_};
++
++#[derive(Clone, Debug, Default)]
++pub struct Knote { pub ident: u64, pub filter: i16, pub flags: u16, pub fflags: u32, pub data: i64, pub udata: u64,
++                   pub active: bool, pub enabled: bool, pub seq: u64 }
++
++#[derive(Clone, Debug)]
++pub enum Wait {
++    Kevent { kq: u64, elist: u64, nev: u64, deadline: Option<u64> },
++    Cv { addr: u64, deadline: Option<u64>, seq: u64 },
++    Mtx { addr: u64 },
++}
++
++#[derive(Clone, Debug, Default)]
++pub struct Probe {
++    pub kqs: BTreeMap<u64, Vec<Knote>>,
++    pub seq: u64,
++    pub waits: BTreeMap<usize, Wait>,
++    pub sprr: BTreeMap<usize, u64>,
++    pub jit: Vec<(u64, u64)>,
++    pub view_rw: bool,
++    pub toggles: u64,
++    pub flips: u64,
++    pub kevents: u64,
++    pub psynch: u64,
++    /// cv addr -> pending (unconsumed) signals with no waiter.
++    pub cv_prepost: BTreeMap<u64, u32>,
++    pub toggles_by_tid: BTreeMap<usize, u64>,
++    pub switch_flips: u64,
++    pub max_runnable: usize,
++}
++
++pub fn log_on() -> bool { std::env::var_os("RETRACE_PROBE").is_some() }
++
++const EV_ADD: u16 = 1; const EV_DELETE: u16 = 2; const EV_ENABLE: u16 = 4; const EV_DISABLE: u16 = 8;
++const EV_ONESHOT: u16 = 0x10; const EV_CLEAR: u16 = 0x20; const EV_RECEIPT: u16 = 0x40; const EV_ERROR: u16 = 0x4000;
++const NOTE_TRIGGER: u32 = 0x0100_0000;
++
++fn rd(b: &Box_, a: u64, n: usize) -> Option<Vec<u8>> { b.read_guest_checked(a, n) }
++fn u64le(v: &[u8], o: usize) -> u64 { u64::from_le_bytes(v[o..o + 8].try_into().unwrap()) }
++
++impl Box_ {
++    fn probe_tid(&self) -> usize { self.threads.current() }
++
++    /// Ticks per ns on the guest timebase: 24 MHz (125/3 ns per tick).
++    fn probe_deadline(&self, sec: i64, nsec: i64) -> u64 {
++        let ns = (sec as i128) * 1_000_000_000 + nsec as i128;
++        let ticks = (ns.max(0) as u128 * 3 / 125) as u64;
++        self.now_guest_pub().wrapping_add(ticks)
++    }
++
++    fn write_events(&mut self, kq: u64, elist: u64, nev: u64) -> u64 {
++        let mut kn = self.probe.kqs.remove(&kq).unwrap_or_default();
++        let mut idx: Vec<usize> = (0..kn.len()).filter(|&i| kn[i].active && kn[i].enabled).collect();
++        idx.sort_by_key(|&i| kn[i].seq);
++        idx.truncate(nev as usize);
++        let mut out = Vec::new();
++        let mut del = Vec::new();
++        for &i in &idx {
++            let k = &mut kn[i];
++            let mut e = Vec::with_capacity(32);
++            e.extend_from_slice(&k.ident.to_le_bytes());
++            e.extend_from_slice(&k.filter.to_le_bytes());
++            e.extend_from_slice(&k.flags.to_le_bytes());
++            e.extend_from_slice(&k.fflags.to_le_bytes());
++            e.extend_from_slice(&k.data.to_le_bytes());
++            e.extend_from_slice(&k.udata.to_le_bytes());
++            out.push(e);
++            if k.flags & EV_CLEAR != 0 || k.filter == -10 && k.flags & EV_CLEAR != 0 {
++                k.active = false; if k.filter == -10 { k.fflags = 0; k.data = 0; }
++            }
++            if k.flags & EV_ONESHOT != 0 { del.push(i); }
++        }
++        del.sort(); for i in del.into_iter().rev() { kn.remove(i); }
++        self.probe.kqs.insert(kq, kn);
++        let n = out.len() as u64;
++        for (j, e) in out.into_iter().enumerate() { self.write_guest(elist + 32 * j as u64, &e); }
++        if log_on() && n > 0 { eprintln!("[probe] kevent deliver kq={kq} n={n}"); }
++        n
++    }
++
++    /// Wake the blocked kevent waiters of `kq` that now have events: deliver into their saved ctx.
++    fn wake_kq(&mut self, kq: u64) {
++        let ws: Vec<(usize, u64, u64)> = self.probe.waits.iter().filter_map(|(&t, w)| match w {
++            Wait::Kevent { kq: k, elist, nev, .. } if *k == kq => Some((t, *elist, *nev)), _ => None }).collect();
++        for (t, elist, nev) in ws {
++            let n = self.write_events(kq, elist, nev);
++            if n == 0 { continue; }
++            self.probe.waits.remove(&t);
++            self.probe_finish(t, n, false);
++            if log_on() { eprintln!("[probe] kevent wake tid={t} kq={kq} n={n}"); }
++        }
++    }
++
++    /// Make `t` runnable with x0 = rc (carry = err).
++    fn probe_finish(&mut self, t: usize, rc: u64, err: bool) {
++        self.threads.wake_probe(t);
++        if t == self.threads.current() {
++            self.vcpu.set_reg(hv_sys::reg::x(0), rc).unwrap();
++            let c = self.vcpu.get_reg(hv_sys::reg::CPSR).unwrap();
++            let c = (c & !retrace_arch::PSTATE_C) | if err { retrace_arch::PSTATE_C } else { 0 };
++            self.vcpu.set_reg(hv_sys::reg::CPSR, c).unwrap();
++        } else {
++            let ctx = self.threads.ctx_mut(t);
++            ctx.regs.x[0] = rc;
++            ctx.regs.cpsr = (ctx.regs.cpsr & !retrace_arch::PSTATE_C) | if err { retrace_arch::PSTATE_C } else { 0 };
++        }
++    }
++
++    /// kevent(kq, changes, nchanges, events, nevents, timeout). Returns (rc, err).
++    pub fn probe_kevent(&mut self, a: [u64; 8]) -> (u64, bool) {
++        self.probe.kevents += 1;
++        let (kq, ch, nch, el, nev, to) = (a[0], a[1], a[2], a[3], a[4], a[5]);
++        let tid = self.probe_tid();
++        let timeout = if to == 0 { None } else {
++            let t = rd(self, to, 16).expect("kevent timeout unmapped");
++            Some((u64le(&t, 0) as i64, u64le(&t, 8) as i64)) };
++        let chb = if nch > 0 { rd(self, ch, 32 * nch as usize).expect("kevent changes unmapped") } else { vec![] };
++        let mut errs: Vec<Vec<u8>> = Vec::new();
++        let mut kn = self.probe.kqs.remove(&kq).unwrap_or_default();
++        let mut activated = false;
++        for i in 0..nch as usize {
++            let c = &chb[32 * i..32 * i + 32];
++            let ident = u64le(c, 0);
++            let filter = i16::from_le_bytes([c[8], c[9]]);
++            let flags = u16::from_le_bytes([c[10], c[11]]);
++            let fflags = u32::from_le_bytes(c[12..16].try_into().unwrap());
++            let data = u64le(c, 16) as i64; let udata = u64le(c, 24);
++            if log_on() { eprintln!("[probe] kevent#{} tid={tid} kq={kq} change ident={ident:#x} filter={filter} flags={flags:#x} fflags={fflags:#x} data={data:#x} udata={udata:#x} nev={nev} timeout={timeout:?}", self.probe.kevents); }
++            if !matches!(filter, -10 | -1 | -2) {
++                panic!("[probe] kevent: unmodelled filter {filter} (ident {ident:#x} flags {flags:#x} fflags {fflags:#x}) kq={kq} tid={tid}");
++            }
++            let pos = kn.iter().position(|k| k.ident == ident && k.filter == filter);
++            if flags & EV_DELETE != 0 {
++                match pos { Some(p) => { kn.remove(p); } None => {
++                    let mut e = c.to_vec(); e[10..12].copy_from_slice(&(flags | EV_ERROR).to_le_bytes());
++                    e[16..24].copy_from_slice(&2u64.to_le_bytes()); errs.push(e); } }
++                continue;
++            }
++            let p = match pos {
++                Some(p) => p,
++                None if flags & EV_ADD != 0 => {
++                    kn.push(Knote { ident, filter, flags: flags & !(EV_ENABLE | EV_DISABLE | EV_RECEIPT), fflags: 0, data: 0, udata, active: false, enabled: true, seq: 0 });
++                    kn.len() - 1
++                }
++                None => {
++                    let mut e = c.to_vec(); e[10..12].copy_from_slice(&(flags | EV_ERROR).to_le_bytes());
++                    e[16..24].copy_from_slice(&2u64.to_le_bytes()); errs.push(e); continue;
++                }
++            };
++            let k = &mut kn[p];
++            k.udata = udata;
++            if flags & EV_ADD != 0 { k.flags = flags & !(EV_ENABLE | EV_DISABLE | EV_RECEIPT); }
++            if flags & EV_DISABLE != 0 { k.enabled = false; }
++            if flags & EV_ENABLE != 0 { k.enabled = true; }
++            match filter {
++                -10 => {
++                    let ffl = fflags & 0x00ff_ffff;
++                    match fflags & 0xc000_0000 { 0x4000_0000 => k.fflags &= ffl, 0x8000_0000 => k.fflags |= ffl, 0xc000_0000 => k.fflags = ffl, _ => {} }
++                    if fflags & NOTE_TRIGGER != 0 && !k.active { self.probe.seq += 1; k.seq = self.probe.seq; k.active = true; activated = true; }
++                }
++                -2 => { // EVFILT_WRITE: crude, always writable
++                    if !k.active { self.probe.seq += 1; k.seq = self.probe.seq; k.active = true; k.data = 0x4000; }
++                }
++                _ => { // EVFILT_READ: crude, never ready (logged)
++                }
++            }
++            if flags & EV_RECEIPT != 0 {
++                let mut e = c.to_vec(); e[10..12].copy_from_slice(&(flags | EV_ERROR).to_le_bytes());
++                e[16..24].copy_from_slice(&0u64.to_le_bytes()); errs.push(e);
++            }
++        }
++        self.probe.kqs.insert(kq, kn);
++        if !errs.is_empty() {
++            assert!(nev as usize >= errs.len(), "[probe] kevent error events exceed nevents");
++            for (j, e) in errs.iter().enumerate() { self.write_guest(el + 32 * j as u64, e); }
++            if log_on() { eprintln!("[probe] kevent#{} returns {} error/receipt events", self.probe.kevents, errs.len()); }
++            return (errs.len() as u64, false);
++        }
++        if activated { self.wake_kq(kq); }
++        let n = self.write_events(kq, el, nev);
++        if log_on() { eprintln!("[probe] kevent#{} call tid={tid} kq={kq} nch={nch} nev={nev} timeout={timeout:?} -> immediate n={n}", self.probe.kevents); }
++        if n > 0 || nev == 0 { return (n, false); }
++        match timeout {
++            Some((0, 0)) => (0, false),
++            t => {
++                let deadline = t.map(|(s, ns)| self.probe_deadline(s, ns));
++                if log_on() { eprintln!("[probe] kevent#{} BLOCK tid={tid} kq={kq} timeout={t:?} deadline={deadline:?} now={:#x}", self.probe.kevents, self.now_guest_pub()); }
++                self.probe.waits.insert(tid, Wait::Kevent { kq, elist: el, nev, deadline });
++                self.threads.block(thread::BlockReason::Probe);
++                (0, false)
++            }
++        }
++    }
++
++    /// Earliest probe deadline (kevent timeouts, timed cvwaits).
++    pub fn probe_earliest_deadline(&self) -> Option<u64> {
++        self.probe.waits.values().filter_map(|w| match w {
++            Wait::Kevent { deadline, .. } | Wait::Cv { deadline, .. } => *deadline, _ => None }).min()
++    }
++
++    /// Wake every probe waiter whose deadline is reached.
++    pub fn probe_fire_deadlines(&mut self) {
++        if !self.probe.waits.values().any(|w| matches!(w, Wait::Kevent { deadline: Some(_), .. } | Wait::Cv { deadline: Some(_), .. })) { return; }
++        let now = self.now_guest_pub();
++        let due: Vec<usize> = self.probe.waits.iter().filter_map(|(&t, w)| match w {
++            Wait::Kevent { deadline: Some(d), .. } | Wait::Cv { deadline: Some(d), .. } if *d <= now => Some(t), _ => None }).collect();
++        for t in due {
++            let w = self.probe.waits.remove(&t).unwrap();
++            match w {
++                Wait::Kevent { .. } => { if log_on() { eprintln!("[probe] kevent timeout tid={t}"); } self.probe_finish(t, 0, false) }
++                Wait::Cv { addr, .. } => { if log_on() { eprintln!("[probe] cvwait timeout tid={t} cv={addr:#x}"); } self.probe_finish(t, 60, true) } // ETIMEDOUT
++                _ => unreachable!(),
++            }
++        }
++    }
++
++    // ---------------- psynch (crude) ----------------
++
++    /// __psynch_cvwait(cv, cvlsgen, cvugen, mutex, mugen, flags, sec, nsec)
++    pub fn probe_cvwait(&mut self, a: [u64; 8]) -> (u64, bool) {
++        self.probe.psynch += 1;
++        let tid = self.probe_tid();
++        if log_on() { eprintln!("[probe] psynch#{} cvwait tid={tid} cv={:#x} lsgen={:#x} ugen={:#x} mutex={:#x} mugen={:#x} flags={:#x} sec={} nsec={}", self.probe.psynch, a[0], a[1], a[2], a[3], a[4], a[5], a[6] as i64, a[7] as u32); }
++        if a[3] != 0 { self.probe_wake_mtx(a[3]); }
++        if let Some(c) = self.probe.cv_prepost.get_mut(&a[0]) {
++            if *c > 0 { *c -= 1; if log_on() { eprintln!("[probe] cvwait consumes prepost"); } return (0x100, false); }
++        }
++        let deadline = if a[6] != 0 || a[7] as u32 != 0 { Some(self.probe_deadline(a[6] as i64, a[7] as u32 as i64)) } else { None };
++        self.probe.seq += 1;
++        self.probe.waits.insert(tid, Wait::Cv { addr: a[0], deadline, seq: self.probe.seq });
++        self.threads.block(thread::BlockReason::Probe);
++        (0, false)
++    }
++
++    fn probe_cv_waiters(&self, cv: u64) -> Vec<usize> {
++        let mut v: Vec<(u64, usize)> = self.probe.waits.iter().filter_map(|(&t, w)| match w {
++            Wait::Cv { addr, seq, .. } if *addr == cv => Some((*seq, t)), _ => None }).collect();
++        v.sort(); v.into_iter().map(|(_, t)| t).collect()
++    }
++
++    /// __psynch_cvsignal(cv, cvlsgen, cvugen, thread_port, mutex, mugen, tid, flags)
++    pub fn probe_cvsignal(&mut self, a: [u64; 8]) -> (u64, bool) {
++        self.probe.psynch += 1;
++        if log_on() { eprintln!("[probe] psynch#{} cvsignal tid={} cv={:#x} lsgen={:#x} ugen={:#x} port={:#x} mutex={:#x} mugen={:#x} thr={:#x} flags={:#x}", self.probe.psynch, self.probe_tid(), a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]); }
++        assert!(a[3] as u32 == 0, "[probe] targeted cvsignal (thread port {:#x})", a[3]);
++        let w = self.probe_cv_waiters(a[0]);
++        if let Some(&t) = w.first() {
++            self.probe.waits.remove(&t);
++            self.probe_finish(t, 0, false);
++            (0x100, false)
++        } else {
++            *self.probe.cv_prepost.entry(a[0]).or_default() += 1;
++            if log_on() { eprintln!("[probe] cvsignal: no waiter, prepost"); }
++            (0, false)
++        }
++    }
++
++    /// __psynch_cvbroad(cv, cvlsgen, cvudgen, flags, mutex, mugen, tid)
++    pub fn probe_cvbroad(&mut self, a: [u64; 8]) -> (u64, bool) {
++        self.probe.psynch += 1;
++        let w = self.probe_cv_waiters(a[0]);
++        if log_on() { eprintln!("[probe] psynch#{} cvbroad tid={} cv={:#x} lsgen={:#x} udgen={:#x} flags={:#x} mutex={:#x} mugen={:#x} waiters={}", self.probe.psynch, self.probe_tid(), a[0], a[1], a[2], a[3], a[4], a[5], w.len()); }
++        for &t in &w { self.probe.waits.remove(&t); self.probe_finish(t, 0, false); }
++        ((w.len() as u64) * 0x100, false)
++    }
++
++    /// __psynch_mutexwait(mutex, mgen, ugen, tid, flags)
++    pub fn probe_mutexwait(&mut self, a: [u64; 8]) -> (u64, bool) {
++        self.probe.psynch += 1;
++        let tid = self.probe_tid();
++        if log_on() { eprintln!("[probe] psynch#{} mutexwait tid={tid} m={:#x} mgen={:#x} ugen={:#x} thr={:#x} flags={:#x}", self.probe.psynch, a[0], a[1], a[2], a[3], a[4]); }
++        self.probe.waits.insert(tid, Wait::Mtx { addr: a[0] });
++        self.threads.block(thread::BlockReason::Probe);
++        (a[1], false)
++    }
++
++    fn probe_wake_mtx(&mut self, m: u64) -> usize {
++        let w: Vec<usize> = self.probe.waits.iter().filter_map(|(&t, w)| match w { Wait::Mtx { addr } if *addr == m => Some(t), _ => None }).collect();
++        for &t in &w { self.probe.waits.remove(&t); self.probe_finish(t, 0, false); }
++        w.len()
++    }
++
++    /// __psynch_mutexdrop(mutex, mgen, ugen, tid, flags)
++    pub fn probe_mutexdrop(&mut self, a: [u64; 8]) -> (u64, bool) {
++        self.probe.psynch += 1;
++        let n = self.probe_wake_mtx(a[0]);
++        if log_on() { eprintln!("[probe] psynch#{} mutexdrop tid={} m={:#x} mgen={:#x} ugen={:#x} thr={:#x} flags={:#x} woke={n}", self.probe.psynch, self.probe_tid(), a[0], a[1], a[2], a[3], a[4]); }
++        (0, false)
++    }
++
++    /// __psynch_cvclrprepost(cv, cvgen, cvugen, cvsgen, prepocnt, preposeq, flags)
++    pub fn probe_cvclrprepost(&mut self, a: [u64; 8]) -> (u64, bool) {
++        self.probe.psynch += 1;
++        if log_on() { eprintln!("[probe] psynch#{} cvclrprepost tid={} cv={:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}", self.probe.psynch, self.probe_tid(), a[0], a[1], a[2], a[3], a[4], a[5], a[6]); }
++        self.probe.cv_prepost.remove(&a[0]);
++        (0, false)
++    }
++
++    pub fn probe_dispatch(&mut self, num: u64, a: [u64; 8]) -> Option<(u64, bool)> {
++        Some(match num {
++            363 => self.probe_kevent(a),
++            305 => self.probe_cvwait(a),
++            304 => self.probe_cvsignal(a),
++            303 => self.probe_cvbroad(a),
++            301 => self.probe_mutexwait(a),
++            302 => self.probe_mutexdrop(a),
++            312 => self.probe_cvclrprepost(a),
++            _ => return None,
++        })
++    }
++}
++
++// ---------------- JIT write-protect (crude J1) ----------------
++impl Box_ {
++    fn sprr_vals(&self) -> (u64, u64) {
++        let we = u64::from_le_bytes(self.read_guest(crate::COMMPAGE_IPA + 0x110, 8).try_into().unwrap());
++        let pr = u64::from_le_bytes(self.read_guest(crate::COMMPAGE_IPA + 0x118, 8).try_into().unwrap());
++        (we, pr)
++    }
++
++    /// Called from try_emulate_undef_mrs for `msr S3_6_C15_C1_5, Xt` (value already read).
++    pub fn probe_sprr_write(&mut self, v: u64, pc: u64) {
++        let (we, pr) = self.sprr_vals();
++        assert!(v == we || v == pr, "[probe] msr S3_6_C15_C1_5 value {v:#x} at pc {pc:#x}: neither +0x110 {we:#x} nor +0x118 {pr:#x}");
++        let tid = self.threads.current();
++        self.probe.sprr.insert(tid, v);
++        self.probe.toggles += 1;
++        *self.probe.toggles_by_tid.entry(tid).or_default() += 1;
++        if log_on() && (self.probe.toggles <= 20 || self.probe.toggles % 1000 == 0) {
++            eprintln!("[probe] sprr write #{} tid={tid} {} pc={pc:#x}", self.probe.toggles, if v == we { "RW" } else { "RX" });
++        }
++        self.probe_apply_view(false);
++    }
++
++    pub fn probe_sprr_read(&self) -> u64 { *self.probe.sprr.get(&self.threads.current()).unwrap_or(&0) }
++
++    fn probe_want_rw(&self) -> bool {
++        let v = self.probe_sprr_read();
++        v != 0 && v == self.sprr_vals().0
++    }
++
++    /// Stamp every MAP_JIT range (minus PROT_NONE extents) with the running thread's view.
++    pub fn probe_apply_view(&mut self, force: bool) {
++        if self.probe.jit.is_empty() { return; }
++        let rw = self.probe_want_rw();
++        if !force && rw == self.probe.view_rw { return; }
++        self.probe.view_rw = rw;
++        let attr = if rw { crate::ATTR_DATA } else { crate::ATTR_CODE };
++        let ranges = self.probe.jit.clone();
++        for (s, l) in ranges {
++            // subtract noaccess extents
++            let mut cur = s; let end = s + l;
++            let mut na: Vec<(u64, u64)> = self.noaccess.iter().copied().filter(|&(a, b)| a < end && a + b > s).collect();
++            na.sort();
++            for (a, b) in na {
++                if a > cur { self.set_region_attr(cur, a - cur, attr); }
++                cur = cur.max(a + b);
++            }
++            if cur < end { self.set_region_attr(cur, end - cur, attr); }
++        }
++        self.flush_guest_tlb();
++        self.probe.flips += 1;
++        if log_on() && (self.probe.flips <= 20 || self.probe.flips % 1000 == 0) {
++            eprintln!("[probe] view flip #{} -> {} (tid {})", self.probe.flips, if rw { "RW" } else { "RX" }, self.threads.current());
++        }
++    }
++
++    pub fn probe_note_mmap(&mut self, ipa: u64, len: u64, prot: u64, flags: u64) {
++        if flags & 0x800 != 0 {
++            if log_on() { eprintln!("[probe] MAP_JIT mmap ipa={ipa:#x} len={len:#x} prot={prot:#x} flags={flags:#x}"); }
++            self.probe.jit.push((ipa, len));
++            self.probe_apply_view(true);
++        } else if prot & 4 != 0 && log_on() {
++            eprintln!("[probe] non-JIT exec mmap ipa={ipa:#x} len={len:#x} prot={prot:#x} flags={flags:#x}");
++        }
++    }
++
++    pub fn probe_note_mprotect(&mut self, ipa: u64, len: u64, prot: u64) {
++        if self.probe.jit.iter().any(|&(s, l)| ipa < s + l && s < ipa + len) {
++            if log_on() { eprintln!("[probe] mprotect over MAP_JIT ipa={ipa:#x} len={len:#x} prot={prot:#x}"); }
++            self.probe_apply_view(true);
++        }
++    }
++
++    pub fn probe_note_munmap(&mut self, ipa: u64, len: u64) {
++        if self.probe.jit.iter().any(|&(s, l)| ipa < s + l && s < ipa + len) {
++            if log_on() { eprintln!("[probe] munmap over MAP_JIT ipa={ipa:#x} len={len:#x}"); }
++        }
++    }
++}
++
++impl Box_ {
++    /// Diagnostic: FNV hash of live regs (GPR, SIMD, FPCR/FPSR) and of the main stack.
++    pub fn probe_state_hash(&self) -> String {
++        fn fnv(h: &mut u64, b: &[u8]) { for &x in b { *h ^= x as u64; *h = h.wrapping_mul(0x100000001b3); } }
++        let mut hr = 0xcbf29ce484222325u64;
++        let r = self.regs_snapshot();
++        for x in r.x { fnv(&mut hr, &x.to_le_bytes()); }
++        fnv(&mut hr, &r.pc.to_le_bytes()); fnv(&mut hr, &r.sp_el0.to_le_bytes()); fnv(&mut hr, &r.cpsr.to_le_bytes());
++        let mut hf = 0xcbf29ce484222325u64;
++        for i in 0..32u32 { fnv(&mut hf, &self.vcpu.get_simd(hv_sys::simd::q(i)).unwrap().to_le_bytes()); }
++        fnv(&mut hf, &self.vcpu.get_reg(hv_sys::reg::FPCR).unwrap().to_le_bytes());
++        fnv(&mut hf, &self.vcpu.get_reg(hv_sys::reg::FPSR).unwrap().to_le_bytes());
++        let mut hm = 0xcbf29ce484222325u64;
++        if let Some(m) = self.read_guest_checked(0x27c0000, 0x40000) { fnv(&mut hm, &m); }
++        format!("r={hr:016x} f={hf:016x} m={hm:016x} pc={:#x}", r.pc)
++    }
++}
++
++impl Box_ {
++    /// Diagnostic: per-backing FNV hashes, one line each.
++    pub fn probe_mem_hashes(&self) -> String {
++        fn fnv(b: &[u8]) -> u64 { let mut h = 0xcbf29ce484222325u64; for &x in b { h ^= x as u64; h = h.wrapping_mul(0x100000001b3); } h }
++        let mut v: Vec<(u64, usize, u64)> = self.backings.iter().map(|bk| (bk.ipa, bk.len, fnv(unsafe { std::slice::from_raw_parts(bk.host, bk.len) }))).collect();
++        v.sort();
++        let mut s = String::new();
++        for (a, l, h) in v { s += &format!("{a:#x}+{l:#x} {h:016x}\n"); }
++        s
++    }
++}
++
++impl Box_ {
++    pub fn probe_summary(&self) -> String {
++        let states: Vec<String> = (0..self.threads.len()).map(|i| format!("{i}:{:?}", self.threads.state_of(i))).collect();
++        format!("threads={} states=[{}] waits={:?} sprr_writes={} by_tid={:?} view_flips={} switch_flips={} max_runnable={} kevents={} psynch={} jit={:x?} kqs={:?}",
++            self.threads.len(), states.join(", "), self.probe.waits, self.probe.toggles, self.probe.toggles_by_tid, self.probe.flips, self.probe.switch_flips, self.probe.max_runnable, self.probe.kevents, self.probe.psynch,
++            self.probe.jit, self.probe.kqs.iter().map(|(k, v)| (*k, v.len())).collect::<Vec<_>>())
++    }
++}
+diff --git a/crates/retrace-box/src/thread.rs b/crates/retrace-box/src/thread.rs
+index 2f6a6f4..68c0a11 100644
+--- a/crates/retrace-box/src/thread.rs
++++ b/crates/retrace-box/src/thread.rs
+@@ -97,6 +97,8 @@ pub enum BlockReason {
+     /// the wake belongs here — re-entering at `_start_wqthread` with a fresh register block (flags
+     /// bit 17 SET, the reused path), not resuming the park trap's return.
+     Parked,
++    /// M48 scratch probe: blocked in a probe-emulated call (see probe.rs).
++    Probe,
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -193,6 +195,10 @@ impl ThreadTable {
+         self.threads[tid].state = ThreadState::Runnable;
+     }
+ 
++    pub fn wake_probe(&mut self, tid: usize) {
++        assert_eq!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Probe), "probe wake of non-probe-blocked {tid}");
++        self.threads[tid].state = ThreadState::Runnable;
++    }
+     pub fn ctx_of(&self, tid: usize) -> &ThreadCtx { &self.threads[tid].ctx }
+     pub fn ctx_mut(&mut self, tid: usize) -> &mut ThreadCtx { &mut self.threads[tid].ctx }
+ 
+diff --git a/crates/retrace-core/src/lib.rs b/crates/retrace-core/src/lib.rs
+index fa3d57a..aa8de30 100644
+--- a/crates/retrace-core/src/lib.rs
++++ b/crates/retrace-core/src/lib.rs
+@@ -141,6 +141,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
+     // identically on record (forwarded result) and replay (recorded result).
+     let mut guest_task_port: Option<u64> = None;
+     loop {
++        if let Some(a) = std::env::var("RETRACE_WATCHBYTE").ok().map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).unwrap()) {
++            let v = b.read_guest_checked(a, 8);
++            eprintln!("[wb] L{count} {:x?} tid={}", v, b.threads().current());
++        }
+         let stop = b.run();
+         // M42 §3f: record never steps and never arms a debug register, so no debug exit reaches it
+         // and the exclusive shadow can never be set here. A shadow would mean an exit path skipped
+@@ -182,12 +186,14 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
+             if let Stop::Fault { pc, esr, far } = &stop {
+                 // The terminal trap. CLAUDE.md advertises this flag as logging every dispatched
+                 // trap, and a crash is the one an M7-style bring-up most needs to see.
++                eprintln!("[probe-summary] {}", b.probe_summary());
+                 eprintln!("[fault] pc={:#x} esr={:#x} far={:#x} ec={:#x}",
+                     *pc, *esr, *far, (*esr >> 26) & 0x3f);
+             }
+         }
+         match stop {
+             Stop::Syscall { num, args } if num == SYS_EXIT => {
++                eprintln!("[probe-summary] {}", b.probe_summary());
+                 let final_snap = b.snapshot();          // final-memory landmark
+                 // M17: the clean-exit path only — see `assert_no_stranded_signals`. The crash path
+                 // deliberately does not call this: a guest already dying must be diagnosed by its
+@@ -1302,6 +1308,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
+                 b.apply_and_return(ret, err, &writes);
+             }
+ 
++            // M48 SCRATCH PROBE: kevent + psynch emulated crudely (retrace-box/src/probe.rs).
++            Stop::Syscall { num, args } if matches!(num, 363 | 301..=305 | 312) => {
++                let (rc, err) = b.probe_dispatch(num, args).unwrap();
++                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err, writes: vec![], thread })
++                    .map_err(|e| format!("append probe {num}: {e}"))?; count += 1;
++                b.set_x0_err_and_return(rc, err);
++            }
+             // Every other syscall goes through the general memory-diff engine (forwarded once).
+             Stop::Syscall { num, args } => {
+                 // M11 correctness invariant: no signal syscall may reach forward_and_diff, which
+@@ -1674,6 +1687,19 @@ impl ReplaySession {
+     /// past its final landmark) — callers must not.
+     pub fn advance(&mut self) -> Result<Advance, Divergence> {
+         loop {
++            if let Some(a) = std::env::var("RETRACE_WATCHBYTE").ok().map(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).unwrap()) {
++                let v = self.b.read_guest_checked(a, 8);
++                eprintln!("[wb] L{} {:x?} tid={}", self.idx, v, self.b.threads().current());
++            }
++            if let Some(n) = std::env::var("RETRACE_DUMPAT").ok().and_then(|v| v.parse::<usize>().ok()) {
++                if n == self.idx { std::fs::write(std::env::var("RETRACE_DUMPFILE").unwrap(), self.b.probe_mem_hashes()).unwrap(); }
++            }
++            if std::env::var("RETRACE_REGSAT").ok().and_then(|v| v.parse::<usize>().ok()) == Some(self.idx) {
++                eprintln!("[regs@{}]\n{}\n{}", self.idx, self.b.dbg_regs(), self.b.dbg_fp_regs());
++            }
++            if std::env::var_os("RETRACE_HASH").is_some() {
++                eprintln!("[h] L{} tid={} {}", self.idx, self.b.threads().current(), self.b.probe_state_hash());
++            }
+             match self.b.run() {
+                 Stop::Syscall { num, args } => {
+                     let pc = self.b.position();
+@@ -2460,6 +2486,15 @@ impl ReplaySession {
+                             // own. While the return is a constant this compare is vacuous on an
+                             // honest trace; kqinit_e2e's rewritten-return test is what makes it
+                             // observable.
++                            if matches!(num, 363 | 301..=305 | 312) {
++                                let (rc, rerr) = self.b.probe_dispatch(num, args).unwrap();
++                                if rc != *ret || rerr != *err {
++                                    return Err(Divergence { landmark: self.idx, pc,
++                                        detail: format!("probe {num} mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
++                                }
++                                self.b.set_x0_err_and_return(*ret, *err);
++                                return self.finish_event();
++                            }
+                             if num == retrace_arch::SYS_KEVENT_QOS {
+                                 let rc = match self.b.guest_kevent_qos(args) {
+                                     Ok(rc) => rc,
+diff --git a/crates/retrace-core/src/machmsg.rs b/crates/retrace-core/src/machmsg.rs
+index c5972e2..d4f4669 100644
+--- a/crates/retrace-core/src/machmsg.rs
++++ b/crates/retrace-core/src/machmsg.rs
+@@ -74,7 +74,7 @@ pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceGetSpecialPort, ServiceSet
+ /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
+ /// msgh_id alone: these are kernel-subsystem ids, unambiguous under the KOBJECT options shape.
+ const FORWARD_ALLOWLIST: &[(u32, &str)] =
+-    &[(200, "host_info"), (206, "host_get_clock_service"), (3418, "semaphore_create"),
++    &[(200, "host_info"), (206, "host_get_clock_service"), (3418, "semaphore_create"), (3419, "semaphore_destroy"),
+       // task_info (task subsystem base 3400, slot 5): libsecinit's app-sandbox check reads the
+       // process's audit token (flavor 15 = TASK_AUDIT_TOKEN). A read-only DATA query with no ports —
+       // forwarded to retrace's own task (== the process) and recorded (forward-and-record; the token
