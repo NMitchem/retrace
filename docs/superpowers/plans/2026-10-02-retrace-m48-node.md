@@ -150,7 +150,7 @@ These come from the controller's scratch probe (`walls.md`, 2026-10-02), measure
 These are the five inputs or failure modes the spec implies but no fixture is sure to reach, most likely first. Each is pinned by a test in the task that owns the code.
 
 1. **An event list that aliases the change list.** libuv's `uv__kqueue_runtime_detection` passes the same address for both. The model must read every change before it writes any event, as the kernel's copyin loop does. Native leaves the second change slot untouched.
-   - Pinned in Task 4: `an_event_list_aliasing_the_change_list_is_read_before_it_is_written` (`gkq.rs` unit), and `kq_e2e`'s `the_runtime_detection_probe_returns_natives_one_event`.
+   - Pinned in Task 4: `an_event_list_aliasing_the_change_list_is_read_before_it_is_written` (`crates/retrace-box/tests/gkq.rs`: the pure `gkq.rs` module never sees guest memory), and `kq_e2e`'s `the_runtime_detection_probe_returns_natives_one_event`.
 2. **A deadline wake whose thread is the one on the vCPU.** This is node's *common* case: every 1 ns wait blocks and is woken in the same `schedule_after_block` while it is still the current thread. When `pick_next` returns that thread again, `switch_to_thread` returns early, so a delivery written only to the saved context is lost.
    - Pinned in Task 4: `a_wake_of_the_current_thread_writes_the_vcpu` (`crates/retrace-box/tests/gkq.rs`) and `kq_e2e`'s `a_timeout_on_the_only_thread_answers_on_the_vcpu`.
    - Pinned in Task 5: `condvar_e2e`'s `a_timed_wait_on_the_only_waiter_answers_on_the_vcpu`.
@@ -1556,14 +1556,14 @@ M48 §3c and §3d, with §11a item 6 and §11b item 8 and the header's "Delivery
     3. `x0 = ret`, and PSTATE.C set iff `err`. When `tid == self.threads.current()` these go onto the live vCPU (`reg::x(0)`, the C bit of `reg::CPSR`); otherwise into `self.threads.ctx_mut(tid).regs.x[0]` and the C bit of `….regs.cpsr`.
 
     It never touches PC, ELR or SPSR: the blocking landmark's `set_x0_err_and_return(0, false)` already made the context a post-return one. Task 5 calls it with `events = &[]`.
-  - **`Box_::wake_due_threads(&mut self)`** (private). Reads the clock only when `self.threads.earliest_deadline().is_some()`, so a static box and every pre-M48 guest never reach it. For each tid of `due_waiters(now_guest())`, in order, it dispatches on the thread's reason:
+  - **`Box_::wake_due_threads(&mut self)`** (private). Reads the clock only when `self.threads.earliest_deadline().is_some()`, so a static box and every pre-M48 guest never reach it. For each tid of `due_waiters(now_guest())`, in order, it first skips a thread that is no longer `Blocked`, because an earlier wake in the same pass may have woken it (Task 5's psynch timeout can). Then it dispatches on the thread's reason:
     ```rust
     match self.threads.state_of(tid) {
-        ThreadState::Blocked(BlockReason::Kevent { kq, .. }) => self.kevent_timed_out(tid, kq),
+        thread::ThreadState::Blocked(thread::BlockReason::Kevent { kq, .. }) => self.kevent_timed_out(tid, kq),
         s => unreachable!("M48: due_waiters returned thread {tid} in {s:?}, which has no deadline"),
     }
     ```
-    A refusal panics with its text (below the trace, R5). Task 5 adds `ThreadState::Blocked(BlockReason::Cv { .. }) => self.cv_timed_out(tid, …)` before the `unreachable!`.
+    Each arm returns `()` and panics with a refusal's text itself (below the trace, R5): `fn kevent_timed_out(&mut self, tid: usize, kq: u64)`. Task 5 adds `thread::ThreadState::Blocked(thread::BlockReason::Cv { addr, .. }) => self.cv_timed_out(tid, addr),` as the second arm, directly before the `s => unreachable!` arm. Deadlines are guest-clock values (`now_guest()`), never raw `synthetic_tsc`.
   - **`schedule_after_block`, in order:**
     1. `fire_due_timers()` (M46);
     2. `wake_due_threads()`;
@@ -1571,7 +1571,7 @@ M48 §3c and §3d, with §11a item 6 and §11b item 8 and the header's "Delivery
 
     With nothing runnable, the one idle jump goes to `min(self.kq.earliest_deadline(), self.threads.earliest_deadline())` (either may be `None`) through `kq::tsc_for_deadline`, then 1–2 run again and the pick is retried once. Otherwise the deadlock panic lists every thread's state, which names each reason and its deadline, plus `kq` and `gkq`.
   - **`Box_::guest_kevent(&mut self, args: [u64; 8]) -> Result<(u64, bool), String>`.** `(ret, err)`: the immediate count, or `0` when the caller blocks, or `(EFAULT, true)` for a pointer argument that does not translate. `Err` is the refusal text, starting `M48: kevent ` or `M48: pipe `.
-  - **`Box_::note_fd_effects(&mut self, num: u64, args: [u64; 8], ret: u64, ret1: u64, err: bool) -> Result<(), String>`.** The fd-lifecycle hook (Step 7 lists what it does per call). Called after the call's return is set: on record by the generic forward arm (with the forward's `(ret, ret1, err)`) **and by the console-close arm** (`(0, 0, false)`), and on replay by the generic mirror (with the recorded values). The console-close arm is the one record arm whose landmark replay finishes through the generic mirror (its own comment says so), so without its call the two sides would see different closes (Ruling K6). `Err` starts `M48: kevent ` or `M48: pipe `.
+  - **`Box_::note_fd_effects(&mut self, num: u64, args: [u64; 8], ret: u64, ret1: u64, err: bool) -> Result<(), String>`.** The fd-lifecycle hook (Step 7 lists what it does per call). Called after the call's return is set, from three sites: on record by the generic forward arm (with the forward's `(ret, ret1, err)`) **and by the console-close arm** (`(0, 0, false)`), and on replay by the generic mirror (with the recorded values). The console-close arm is the one record arm whose landmark replay finishes through the generic mirror (its own comment says so), so without its call the two sides would see different closes (Ruling K6). `Err` starts `M48: kevent ` or `M48: pipe `.
   - **`Box_::gkq: gkq::GuestKqueues`**, declared after `excl`, and `#[doc(hidden)] pub fn dbg_gkq(&self) -> &gkq::GuestKqueues`.
   - **The field-through-every-path pattern** (Tasks 5 and 6 copy it for `psynch` and `jit`). A new `Box_` field `f` appears at exactly six sites:
     1. the `Box_` struct, after `excl`, so the `vcpu`-before-`vm` drop order is untouched;
@@ -1599,7 +1599,7 @@ M48 §3c and §3d, with §11a item 6 and §11b item 8 and the header's "Delivery
 - **K5. Which bad pointers are `EFAULT`.** The kernel copies the timeout in before it looks the kqueue up, and each change in before applying it. So an unmapped timeout, or an unmapped first change, answers `(EFAULT, carry set)` with nothing applied, as native does. Two cases are refused by value instead, because the kernel applies changes before its `EFAULT` and the model does not reproduce a partial application:
   - a change list that maps only in part;
   - an event list that does not translate in full.
-- **K6. The console-close arm calls the hook.** Record's console-close arm is the one arm whose landmark replay finishes through the generic mirror. Without the call there, replay alone would see that close. It matters only if a kqueue watches fd 0–2, but a one-sided hook is an asymmetry by construction (symmetry rule 1). Header amendment 1 records it.
+- **K6. The console-close arm calls the hook.** Record's console-close arm is the one arm whose landmark replay finishes through the generic mirror. Without the call there, replay alone would see that close. It matters only if a kqueue watches fd 0–2, but symmetry rule 1 wants the same `Box_` method with the same arguments on both sides by construction, not by an argument that the difference is unobservable. So `.note_fd_effects(` has three call sites in `retrace-core`: the console-close arm and the generic arm on record, and the generic mirror on replay. The header (line 59 and the `retrace-core` row) and Task 10's audit check 2 expect exactly those three.
 - **K7. A deadline wake scans once more.** `kevent_timed_out` takes whatever the kqueue holds, up to the waiter's `nevents`. That is ordinarily nothing, because every activation path wakes the waiter at once. If a path ever missed a wake, the event is still delivered rather than silently left behind.
 - **K8. A wake with a signal pending is refused** (`M48: a signal is pending on thread `). The kernel interrupts a `kevent` wait with `EINTR`, and that answer is unmeasured. A reply written over the blocked context would make the signal vanish where `assert_no_stranded_signals` cannot see it. This is M46's `unpark` posture.
 - **K9. A touch.** A change on a registered knote:
@@ -1781,25 +1781,26 @@ mod tests {
         g
     }
 
-    /// Review Focus 1. libuv's `uv__kqueue_runtime_detection` passes ONE buffer as the change list
-    /// and the event list (M47 `node.entry.txt`). Both changes are read before any event exists,
-    /// as the kernel's copyin loop reads them; then one event is written over slot 0, and slot 1
-    /// keeps the trigger native leaves there (`native/kqdetect.out`).
+    /// `kern_event.c:knote_fdclose`: a close drops the descriptor's READ and WRITE knotes in every
+    /// kqueue, and a kqueue's own close drops its table. An `EVFILT_USER` knote names no descriptor
+    /// and stays. Closing a kqueue a thread is blocked on is refused, because the kernel's answer
+    /// to that thread is unmeasured.
     #[test]
-    fn an_event_list_aliasing_the_change_list_is_read_before_it_is_written() {
+    fn a_close_drops_the_descriptors_knotes_and_a_waited_kqueue_is_refused() {
         let mut g = kq();
-        let mut buf = [0u8; 2 * KEVENT_BYTES];
-        buf[..KEVENT_BYTES].copy_from_slice(&user(EV_ADD | EV_CLEAR, 0).to_bytes());
-        buf[KEVENT_BYTES..].copy_from_slice(&user(0, NOTE_TRIGGER).to_bytes());
-        let changes: Vec<Kevent> = buf.chunks_exact(KEVENT_BYTES)
-            .map(|c| Kevent::from_bytes(c.try_into().unwrap())).collect();
-        g.apply(KQ, &changes).unwrap();
-        let ev = g.take_events(KQ, 1).unwrap();
-        assert_eq!(ev, vec![ch(ID, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0)], "native's one event (walls.md §1 row 1)");
-        buf[..KEVENT_BYTES].copy_from_slice(&ev[0].to_bytes());
-        assert_eq!(Kevent::from_bytes(buf[KEVENT_BYTES..].try_into().unwrap()), user(0, NOTE_TRIGGER),
-            "one event is one slot: the second change stays as native leaves it");
-        assert!(g.take_events(KQ, 1).unwrap().is_empty(), "EV_CLEAR reset the knote at its delivery");
+        g.create(4).unwrap();
+        g.apply(KQ, &[ch(9, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0), user(EV_ADD, 0)]).unwrap();
+        g.apply(4, &[ch(9, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0)]).unwrap();
+        g.close(9).unwrap();
+        assert!(g.knote(KQ, 9, EVFILT_READ).is_none() && g.knote(4, 9, EVFILT_READ).is_none(),
+            "every kqueue loses fd 9's knote");
+        assert!(g.knote(KQ, ID, EVFILT_USER).is_some(), "an EVFILT_USER knote names no descriptor and stays");
+        g.set_waiter(4, Waiter { tid: 1, events: 0x1000, nevents: 1 });
+        let e = g.close(4).unwrap_err();
+        assert!(e.starts_with("M48: kevent on kq 4: closed while thread 1 is blocked on it"), "{e}");
+        assert!(g.is_kqueue(4), "the refused close changed nothing");
+        g.close(KQ).unwrap();
+        assert!(!g.is_kqueue(KQ) && g.knote(KQ, ID, EVFILT_USER).is_none(), "a kqueue's close drops its table");
     }
 
     /// K4: the kernel answers these with an ENOENT `EV_ERROR` event, which the model never makes.
@@ -2420,7 +2421,8 @@ Expected: 11 passed and clippy exit 0. Every item is `pub` in a `pub mod` of a l
 
 ```rust
 //! M48 §3c–§3d, box level: guest kqueues and the deadline queue, with the kernel's side driven by
-//! hand as `kqmanager.rs` drives M46's manager. Review Focus 2 is pinned here with a reply that
+//! hand as `kqmanager.rs` drives M46's manager. Review Focus 1 is pinned here against guest
+//! memory, which the pure `gkq.rs` never sees. Review Focus 2 is pinned here with a reply that
 //! differs from the 0 a blocking landmark writes: a kevent deadline wake always answers 0, so no
 //! fixture can show a reply lost to a stale saved context.
 //!
@@ -2509,26 +2511,32 @@ fn a_wake_of_the_current_thread_writes_the_vcpu() {
         "the pick returns the same thread and the switch returns early: the reply survives");
 }
 
-/// The other half of `deliver_wake`'s contract: a thread that is not on the vCPU gets its reply in
-/// its saved context, and the running thread's registers are untouched.
+/// Review Focus 1. libuv's `uv__kqueue_runtime_detection` passes ONE buffer as the change list and
+/// the event list (M47 `node.entry.txt`), so the call must read both changes before it writes an
+/// event, as the kernel's copyin loop does. Native then holds one event over slot 0 and the
+/// untouched trigger in slot 1 (`native/kqdetect.out`; walls.md §1 row 1).
 #[test]
-fn a_wake_of_another_thread_writes_its_saved_context_and_leaves_the_vcpu() {
+fn an_event_list_aliasing_the_change_list_is_read_before_it_is_written() {
+    const ID: u64 = 0x1e7e_7711;
     let mut b = tb();
-    let t1 = spawn(&mut b);
-    b.switch_to_thread(t1);
-    b.threads_mut().block(BlockReason::Kevent { kq: KQ, deadline: None });
-    b.switch_to_thread(0);
-    b.threads_mut().ctx_mut(t1).regs.cpsr |= PSTATE_C;
-    b.vcpu_set_x(0, 0x77);
-    b.deliver_wake(t1, 3, false, &[]).unwrap();
-    let ctx = b.threads().ctx_of(t1);
-    assert_eq!((ctx.regs.x[0], ctx.regs.cpsr & PSTATE_C), (3, 0), "x0 and a cleared carry, in the saved context");
-    assert_eq!(b.vcpu_get_x(0), 0x77, "the running thread's registers are untouched");
-    assert_eq!(b.threads().state_of(t1), ThreadState::Runnable);
+    let base = setup(&mut b);
+    let add = kev(ID, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0);
+    let trig = kev(ID, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0);
+    b.poke_guest(base, &add.to_bytes());
+    b.poke_guest(base + 32, &trig.to_bytes());
+    let zero = timespec(&mut b, base + 0x200, 0, 0);
+    assert_eq!(b.guest_kevent([KQ, base, 2, base, 1, zero, 0, 0]), Ok((1, false)), "native's one event");
+    assert_eq!(b.read_bytes_for_test(base, 32), add.to_bytes(),
+        "slot 0 holds the event: the add's flags, kn_sfflags 0, kn_sdata 0 and the trigger's udata 0 (F8)");
+    assert_eq!(b.read_bytes_for_test(base + 32, 32), trig.to_bytes(), "one event is one slot: slot 1 keeps the trigger");
+    assert!(!b.dbg_gkq().has_events(KQ), "the trigger was read and applied, and EV_CLEAR reset the knote at its delivery");
 }
 
 /// §3c: a `NOTE_TRIGGER` from another thread, in `uv_async_send`'s shape (one change, no event
-/// list), wakes the waiter with its event (F8) at the trigger, not at a later switch.
+/// list), wakes the waiter with its event (F8) at the trigger, not at a later switch. It is also
+/// the other half of `deliver_wake`'s contract: a thread that is not on the vCPU gets its reply in
+/// its saved context (a carry set there is cleared), and the running thread's registers are
+/// untouched.
 #[test]
 fn a_trigger_from_another_thread_wakes_the_waiter_with_its_event() {
     let mut b = tb();
@@ -2540,11 +2548,14 @@ fn a_trigger_from_another_thread_wakes_the_waiter_with_its_event() {
     b.set_x0_err_and_return(0, false);
     b.schedule_after_block();
     assert_eq!(b.threads().current(), t1);
+    b.threads_mut().ctx_mut(0).regs.cpsr |= PSTATE_C;
+    b.vcpu_set_x(0, 0x77);
     let trig = kev(7, EVFILT_USER, 0, NOTE_TRIGGER | NOTE_FFCOPY | 5, 9, 0x5678);
     assert_eq!(kevent(&mut b, base + 0x1000, &[trig], 0, 0), Ok((0, false)));
     assert_eq!(b.threads().state_of(0), ThreadState::Runnable);
     let ctx = b.threads().ctx_of(0);
-    assert_eq!((ctx.regs.x[0], ctx.regs.cpsr & PSTATE_C), (1, 0), "one event, carry clear, in main's saved context");
+    assert_eq!((ctx.regs.x[0], ctx.regs.cpsr & PSTATE_C), (1, 0), "one event, carry cleared, in main's saved context");
+    assert_eq!(b.vcpu_get_x(0), 0x77, "the waker's registers are untouched: its own return is the arm's to set");
     assert_eq!(b.read_bytes_for_test(base + 0x100, 32), kev(7, EVFILT_USER, EV_ADD | EV_CLEAR, 5, 9, 0x5678).to_bytes(),
         "the creating flags, kn_sfflags after NOTE_FFCOPY, kn_sdata, and the trigger's udata (F8, K9)");
     assert_eq!(b.dbg_gkq().waiter(KQ), None);
@@ -2633,7 +2644,9 @@ fn the_idle_jump_lands_on_the_earliest_thread_deadline_before_a_later_timer() {
 }
 
 /// R4: a write's return, seen by the hook after the generic arm, makes a watched read end readable
-/// and wakes its waiter with `data` the count (F9). The read's return drains it.
+/// and wakes its waiter with `data` the count (F9). The read's return drains it. A read past the
+/// count means a write reached the pipe by a path the hook does not see, and a watched pipe whose
+/// count is lost is refused by value (K1), not answered from a wrong count.
 #[test]
 fn a_pipe_write_wakes_a_reader_blocked_on_its_read_end() {
     let mut b = tb();
@@ -2652,6 +2665,8 @@ fn a_pipe_write_wakes_a_reader_blocked_on_its_read_end() {
     assert_eq!(b.read_bytes_for_test(base + 0x100, 32), kev(r, EVFILT_READ, EV_ADD, 0, 5, 0xabc).to_bytes());
     b.note_fd_effects(SYS_READ, [r, base + 0x800, 64, 0, 0, 0, 0, 0], 5, 0, false).unwrap();
     assert_eq!(b.dbg_gkq().pipe_count(r), Some(0));
+    let e = b.note_fd_effects(SYS_READ, [r, base + 0x800, 64, 0, 0, 0, 0, 0], 1, 0, false).unwrap_err();
+    assert!(e.starts_with(&format!("M48: pipe {r}: the byte count is unknown")), "{e}");
 }
 
 /// K8, box level: a trigger that would wake a thread with a signal pending is refused by value and
@@ -2706,7 +2721,7 @@ Expected: exit 101, with E0599 for `guest_kevent`, `deliver_wake`, `note_fd_effe
 
 - [ ] **Step 7: The box.** In `crates/retrace-box/src/lib.rs`:
 
-**(a) The field, through every path** (the six-site pattern in Interfaces). Add the field to the `Box_` struct after `excl`:
+**(a) The field, through every path** (the six-site pattern in Interfaces). `excl`'s doc says "Declared last.", which the new field makes false. Replace its sentence "Declared last. It holds a `Vec`, so it has Drop, but it comes after `vcpu`/`vm`, so the load-bearing vcpu-before-vm drop order is unaffected." with "It holds a `Vec`, so it has Drop, but it is declared after `vcpu`/`vm`, so the load-bearing vcpu-before-vm drop order is unaffected." Then add the field to the `Box_` struct after `excl`:
 
 ```rust
     /// M48 §3c (K1): the guest's own kqueues and its pipes' byte counts. Box state, not trace state:
@@ -2933,21 +2948,24 @@ const SYS_WRITEV_NOCANCEL: u64 = 412;
         if self.threads.earliest_deadline().is_none() { return; }
         let now = self.now_guest();
         for tid in self.threads.due_waiters(now) {
-            let woken = match self.threads.state_of(tid) {
+            // An earlier wake in this pass may already have made it runnable: one timeout can wake
+            // other waiters too (a psynch timeout does).
+            if !matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_)) { continue; }
+            match self.threads.state_of(tid) {
                 thread::ThreadState::Blocked(thread::BlockReason::Kevent { kq, .. }) => self.kevent_timed_out(tid, kq),
                 s => unreachable!("M48: due_waiters returned thread {tid} in {s:?}, which has no deadline"),
-            };
-            woken.unwrap_or_else(|m| panic!("{m}"));
+            }
         }
     }
 
     /// M48 §3c: `tid`'s `kevent` on `kq` reached its deadline. It takes what the kqueue holds for it,
     /// which is nothing unless an activation path missed its wake (K7), so it ordinarily returns 0,
-    /// as `kern_event.c:kqueue_scan` does at its deadline.
-    fn kevent_timed_out(&mut self, tid: usize, kq: u64) -> Result<(), String> {
+    /// as `kern_event.c:kqueue_scan` does at its deadline. Below the trace, so a refusal (K8)
+    /// panics with its text on both sides (R5).
+    fn kevent_timed_out(&mut self, tid: usize, kq: u64) {
         let w = self.gkq.take_waiter(kq).filter(|w| w.tid == tid).unwrap_or_else(|| panic!(
             "M48: thread {tid} is blocked in kevent on kq {kq}, which records no such waiter"));
-        self.deliver_kevent(kq, w)
+        self.deliver_kevent(kq, w).unwrap_or_else(|m| panic!("{m}"));
     }
 
     /// M48 §3c: wake every thread blocked in `kevent` whose kqueue now holds an event, in kqueue fd
@@ -3673,7 +3691,8 @@ Expected: exit 101 and 12 failed. Every recording stops at Task 2's assert, so t
 
 ```rust
                 // M48 K6: replay finishes this landmark through the generic mirror, which calls the
-                // hook, so record calls it too. A one-sided hook is an asymmetry by construction.
+                // hook, so record calls it too: the same method with the same arguments on both
+                // sides (symmetry rule 1).
                 b.note_fd_effects(num, args, 0, 0, false).unwrap_or_else(|m| panic!("{m}"));
 ```
 
@@ -3712,9 +3731,9 @@ Expected: exit 101 and 12 failed. Every recording stops at Task 2's assert, so t
 **(e) The hook in replay's generic mirror.** Between its `self.b.apply_and_return(*ret, *err, writes);` and `return self.finish_event();`, add:
 
 ```rust
-                            // M48 §3c: record's generic arm and console-close arm call the same
-                            // hook with the same values. Replay reaches a refusal only after an
-                            // earlier divergence, so it is reported as one.
+                            // M48 §3c: record's generic arm and console-close arm (K6) call the
+                            // same hook with the same values. Replay reaches a refusal only after
+                            // an earlier divergence, so it is reported as one.
                             if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
                                 return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                     "syscall {num} refused on replay, though the recording accepted it \
@@ -3722,7 +3741,7 @@ Expected: exit 101 and 12 failed. Every recording stops at Task 2's assert, so t
                             }
 ```
 
-The `verify_thread` count stays seven: the mirror is inside the chain the arm-top call already covers (header, Global Constraints).
+The `verify_thread` count stays seven: the mirror is inside the chain the arm-top call already covers (header, Global Constraints). `.guest_kevent(` now appears exactly twice in this file, once before `pub fn advance(&mut self)` and once after it. `.note_fd_effects(` appears exactly three times: the console-close arm and the generic arm, both before `advance`, and the generic mirror after it. Those are the counts Task 10's audit check 2 expects. Do not add another call or route any of them through a helper. The record arm's guard is the single condition `num == retrace_arch::SYS_KEVENT`, which Task 10's control replaces with `false`.
 
 Build the workspace, then run the gate green:
 
