@@ -1168,7 +1168,7 @@ cargo test -p retrace-arch --test nodeshapes -- --test-threads=1 > $L/t2-red.log
 - [ ] **Step 3: The constants and the `Kevent` struct.** In `crates/retrace-arch/src/lib.rs`'s M48 section, add the following.
   - **The syscall numbers.** `SYS_KEVENT: u64 = 363` (unless it exists), `SYS_SETSOCKOPT: u64 = 105`, `SYS_PSYNCH_CVBROAD = 303`, `SYS_PSYNCH_CVSIGNAL = 304` and `SYS_PSYNCH_CVWAIT = 305`, each with a doc line citing the SDK.
   - **`pub fn is_psynch(num: u64) -> bool { matches!(num, 297..=309 | 312) }`.** Its doc says this is every `SYS_psynch_*` in the SDK, the set that must never be forwarded: forwarded, a psynch call acts on the HOST's psynch state keyed by retrace's own addresses. Task 5 models 303–305 and refuses the rest by value. The record arm, the replay mirror and the generic-arm assert share it, as `is_fcntl_dupfd` is shared.
-  - **The `struct kevent` layout as a decoder,** 32 bytes little-endian (SDK `sys/event.h`): `ident u64 @0`, `filter i16 @8`, `flags u16 @10`, `fflags u32 @12`, `data i64 @16`, `udata u64 @24`. Model it as `pub struct Kevent { ident, filter, flags, fflags, data, udata }` with `from_bytes(&[u8; 32])` and `to_bytes()`, beside the existing `KeventQos`.
+  - **The `struct kevent` layout as a decoder,** 32 bytes little-endian (SDK `sys/event.h`): `ident u64 @0`, `filter i16 @8`, `flags u16 @10`, `fflags u32 @12`, `data i64 @16`, `udata u64 @24`. Model it as `pub struct Kevent { ident, filter, flags, fflags, data, udata }` with `from_bytes(&[u8; 32]) -> Kevent` and `to_bytes(&self) -> [u8; 32]`, deriving `Debug, Clone, Copy, PartialEq, Eq` as `KeventQos` does (Task 4 and the tests that follow it rely on `Copy` and on that exact signature), beside the existing `KeventQos`.
   - **The flag constants `sys/event.h` gives and the crate lacks:** `EVFILT_READ -1`, `EVFILT_WRITE -2`, `EV_RECEIPT 0x40`, `EV_ERROR 0x4000`, `EV_EOF 0x8000`, `EV_SYSFLAGS 0xF000`, `NOTE_FFAND 0x40000000`, `NOTE_FFOR 0x80000000`, `NOTE_FFCOPY 0xc0000000`, `NOTE_FFCTRLMASK 0xc0000000` and `NOTE_FFLAGSMASK 0x00ffffff`. Reuse the existing `EVFILT_USER`, `EV_ADD`, `EV_ENABLE`, `EV_CLEAR`, `EV_ONESHOT`, `EV_DELETE`, `EVFILT_TIMER` and `NOTE_TRIGGER`.
   - **The psynch constants Task 5 needs,** from `synch_internal.h` at the F1 tag, each with a source comment: `PTHRW_INC 0x100`, `PTHRW_COUNT_SHIFT 8`, `PTHRW_COUNT_MASK 0xffffff00`, `PTHRW_MAX_READERS 0xffffff00`, `PTH_RWL_MTX_WAIT 0x20`, `PTH_RWS_CV_CBIT 1`, `PTH_RWS_CV_PBIT 2`, `PTH_RWS_CV_MBIT 0x40` and `PTH_RWS_CV_BITSALL 3`. From `kern_internal.h`: `ECVCLEARED 0x100` and `ECVPREPOST 0x200`. Neither `ETIMEDOUT` nor `EINTR` exists in `retrace-arch`, so define both there, beside `EINVAL` and `ENOTSUP` and with their type: `pub const ETIMEDOUT: u64 = 60;` and `pub const EINTR: u64 = 4;`, each with a doc line citing `sys/errno.h`. The psynch sequence-word constants (`PTHRW_*`, `PTH_RWL_*`, `PTH_RWS_*`) are `u32`, the kernel's `uint32_t`; `ECVCLEARED` and `ECVPREPOST` are `u64`, because they are ORed into a returned errno word.
 
@@ -1358,7 +1358,7 @@ fn a_split_backing_survives_a_checkpoint() {
 }
 ```
 
-Run red. Every test but `a_tail_trim_…` fails on the whole-backing unmap, and that one fails on its first assert.
+Run red. Five of the six fail: every test but `a_tail_trim_…` and `a_split_then_full_teardown_returns_every_byte` fails on the whole-backing unmap, and `a_tail_trim_…` fails on its first assert. `a_split_then_full_teardown_returns_every_byte` is green before and after the fix: before it, the first `guest_munmap` drops the whole backing, so `live_backing_bytes` is back at its base and the three later calls find nothing to do. It is a regression guard for the split's page accounting, not a red-first test, so the expected red is 5 failed / 1 passed.
 
 - [ ] **Step 3: The split.** First give `Backings` an insert. `unmap_range` puts a cut backing's head and tail back at the cut backing's own Vec position, so `snapshot` and `checkpoint` walk them where they walked it (M44 R2: the Vec's order is what they iterate). `Backings` has no insert today, only `push`, `extend` and `remove`, and its index is keyed by Vec position, so an insert must shift every later position up by one, as `remove` shifts them down. In `crates/retrace-box/src/backings.rs`, add to `impl SpanIndex`, after `remove`:
 
@@ -1571,7 +1571,7 @@ M48 §3c and §3d, with §11a item 6 and §11b item 8 and the header's "Delivery
 
     With nothing runnable, the one idle jump goes to `min(self.kq.earliest_deadline(), self.threads.earliest_deadline())` (either may be `None`) through `kq::tsc_for_deadline`, then 1–2 run again and the pick is retried once. Otherwise the deadlock panic lists every thread's state, which names each reason and its deadline, plus `kq` and `gkq`.
   - **`Box_::guest_kevent(&mut self, args: [u64; 8]) -> Result<(u64, bool), String>`.** `(ret, err)`: the immediate count, or `0` when the caller blocks, or `(EFAULT, true)` for a pointer argument that does not translate. `Err` is the refusal text, starting `M48: kevent ` or `M48: pipe `.
-  - **`Box_::note_fd_effects(&mut self, num: u64, args: [u64; 8], ret: u64, ret1: u64, err: bool) -> Result<(), String>`.** The fd-lifecycle hook (Step 7 lists what it does per call). Called after the call's return is set, from three sites: on record by the generic forward arm (with the forward's `(ret, ret1, err)`) **and by the console-close arm** (`(0, 0, false)`), and on replay by the generic mirror (with the recorded values). The console-close arm is the one record arm whose landmark replay finishes through the generic mirror (its own comment says so), so without its call the two sides would see different closes (Ruling K6). `Err` starts `M48: kevent ` or `M48: pipe `.
+  - **`Box_::note_fd_effects(&mut self, num: u64, args: [u64; 8], ret: u64, ret1: u64, err: bool) -> Result<(), String>`.** The fd-lifecycle hook (Step 7 lists what it does per call). Called after the call's return is set, from three sites: on record by the generic forward arm (with the forward's `(ret, ret1, err)`) **and by the console-close arm** (`(0, 0, false)`), and on replay by the generic mirror (with the recorded values). Two record arms have landmarks that replay finishes through the generic mirror: the console-close arm and the console-write arm. Without a call in the close arm, replay alone would see that close (Ruling K6). A console write cannot reach the model, so replay's hook site skips it with the same `is_console_write` predicate that gates record's arm, and neither side calls the hook for it (pre-flight F3). `Err` starts `M48: kevent ` or `M48: pipe `.
   - **`Box_::gkq: gkq::GuestKqueues`**, declared after `excl`, and `#[doc(hidden)] pub fn dbg_gkq(&self) -> &gkq::GuestKqueues`.
   - **The field-through-every-path pattern** (Tasks 5 and 6 copy it for `psynch` and `jit`). A new `Box_` field `f` appears at exactly six sites:
     1. the `Box_` struct, after `excl`, so the `vcpu`-before-`vm` drop order is untouched;
@@ -1599,7 +1599,7 @@ M48 §3c and §3d, with §11a item 6 and §11b item 8 and the header's "Delivery
 - **K5. Which bad pointers are `EFAULT`.** The kernel copies the timeout in before it looks the kqueue up, and each change in before applying it. So an unmapped timeout, or an unmapped first change, answers `(EFAULT, carry set)` with nothing applied, as native does. Two cases are refused by value instead, because the kernel applies changes before its `EFAULT` and the model does not reproduce a partial application:
   - a change list that maps only in part;
   - an event list that does not translate in full.
-- **K6. The console-close arm calls the hook.** Record's console-close arm is the one arm whose landmark replay finishes through the generic mirror. Without the call there, replay alone would see that close. It matters only if a kqueue watches fd 0–2, but symmetry rule 1 wants the same `Box_` method with the same arguments on both sides by construction, not by an argument that the difference is unobservable. So `.note_fd_effects(` has three call sites in `retrace-core`: the console-close arm and the generic arm on record, and the generic mirror on replay. The header (line 59 and the `retrace-core` row) and Task 10's audit check 2 expect exactly those three.
+- **K6. The console-close arm calls the hook.** Two record arms have landmarks that replay finishes through the generic mirror: the console-close arm and the console-write arm (pre-flight F3). Without a call in the close arm, replay alone would see that close. A console write, by contrast, cannot reach the model: `is_console_write` holds only while the slot is still the identity console, which is never a guest pipe end, so the hook's write branch would see `FdKind::Other` and do nothing. Replay's hook site therefore skips a console write with that same predicate (M9's idiom for keeping a record arm and its mirror from drifting), and neither side calls the hook for it. It matters only if a kqueue watches fd 0–2, but symmetry rule 1 wants the same `Box_` method with the same arguments on both sides by construction, not by an argument that the difference is unobservable. So `.note_fd_effects(` has three call sites in `retrace-core`: the console-close arm and the generic arm on record, and the generic mirror on replay. The header (line 59 and the `retrace-core` row) and Task 10's audit check 2 expect exactly those three.
 - **K7. A deadline wake scans once more.** `kevent_timed_out` takes whatever the kqueue holds, up to the waiter's `nevents`. That is ordinarily nothing, because every activation path wakes the waiter at once. If a path ever missed a wake, the event is still delivered rather than silently left behind.
 - **K8. A wake with a signal pending is refused** (`M48: a signal is pending on thread `). The kernel interrupts a `kevent` wait with `EINTR`, and that answer is unmeasured. A reply written over the blocked context would make the signal vanish where `assert_no_stranded_signals` cannot see it. This is M46's `unpark` posture.
 - **K9. A touch.** A change on a registered knote:
@@ -3284,7 +3284,7 @@ Run the native answers once by hand and keep them for the report. Stdout must be
 export L=/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m48-node/.superpowers/sdd/2026-10-02-retrace-m48-node
 cd /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m48-node
 cargo test -p retrace-guest --lib kq_dyn_guest_parses -- --test-threads=1 > $L/t4-guest.log 2>&1; echo "exit=$?"
-K=$(ls -t target/debug/build/retrace-guest-*/out/kq_dyn | head -1)
+K=$(ls -t target/aarch64-apple-darwin/debug/build/retrace-guest-*/out/kq_dyn | head -1)
 for m in probe wake timeout tryselect pipe oneshot; do echo "== $m"; bash -c '"$0" "$1" | cat; echo "exit=${PIPESTATUS[0]}"' "$K" "$m"; done > $L/t4-native.log 2>&1
 cat $L/t4-native.log
 ```
@@ -3732,12 +3732,16 @@ Expected: exit 101 and 12 failed. Every recording stops at Task 2's assert, so t
 
 ```rust
                             // M48 §3c: record's generic arm and console-close arm (K6) call the
-                            // same hook with the same values. Replay reaches a refusal only after
-                            // an earlier divergence, so it is reported as one.
-                            if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
-                                return Err(Divergence { landmark: self.idx, pc, detail: format!(
-                                    "syscall {num} refused on replay, though the recording accepted it \
-                                     — replay diverged before this landmark: {m}") });
+                            // same hook with the same values. A console write is not one of them:
+                            // record's console-write arm never calls it, and the predicate that
+                            // gates that arm skips it here (pre-flight F3). Replay reaches a
+                            // refusal only after an earlier divergence, so it is reported as one.
+                            if !self.b.is_console_write(num, args[0]) {
+                                if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "syscall {num} refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") });
+                                }
                             }
 ```
 
@@ -3823,7 +3827,7 @@ Expected: clippy exit 0. Note the commit hash for Step 14.
      - **Expect:** every test that replays red. Replay never creates a kqueue, so its first `kevent` mirror is a divergence, `kevent refused on replay … which is not a guest kqueue`, and replay exits 3.
      - **Restore:** `crates/retrace-core/src/lib.rs`.
 
-     The console-close arm's call (K6) has no control. Deleting it changes only a K3 knote on fd 0–2, which never activates, so no kq_dyn mode can observe the difference; it holds by construction. Say so in the report rather than claim a guard.
+     The console-close arm's call (K6) has no control. Deleting it changes only a K3 knote on fd 0–2, which never activates, so no kq_dyn mode can observe the difference; it holds by construction. The replay-side `is_console_write` skip has no control either: a console write reaches the model only as `FdKind::Other`, which is a no-op, so no mode can observe it. Say so in the report rather than claim a guard.
 
 ---
 
@@ -5246,7 +5250,7 @@ pub const CONDVAR_DYN: &str = concat!(env!("OUT_DIR"), "/condvar_dyn");
 export L=/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m48-node/.superpowers/sdd/2026-10-02-retrace-m48-node
 cd /Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m48-node
 cargo test -p retrace-guest condvar_dyn_guest_parses -- --test-threads=1 > $L/t5-guest.log 2>&1; echo "exit=$?"
-G=$(ls -t target/debug/build/retrace-guest-*/out/condvar_dyn | head -1)
+G=$(ls -t target/aarch64-apple-darwin/debug/build/retrace-guest-*/out/condvar_dyn | head -1)
 for mode in pingpong broadcast timedout timedsignal onens mutex; do for n in 1 2 3; do perl -e 'alarm 30; exec @ARGV' "$G" $mode > $L/t5-native-$mode-$n.out 2>&1; echo "$mode run $n exit=$?"; done; cmp $L/t5-native-$mode-1.out $L/t5-native-$mode-2.out && cmp $L/t5-native-$mode-1.out $L/t5-native-$mode-3.out && echo "$mode stable"; done
 cat $L/t5-native-timedout-1.out $L/t5-native-onens-1.out
 ```
@@ -7842,7 +7846,6 @@ cargo test -p retrace --test stackoverflow_rust_e2e --no-fail-fast -- --ignored 
 cargo test -p retrace --test symbols_e2e --no-fail-fast -- --ignored --test-threads=1 > $L/t9-parked-symbols.log 2>&1; echo "symbols_e2e exit=$?"
 grep -a -h -E '^test .* (ok|FAILED)$' $L/t9-parked-*.log
 grep -a -h -A3 -E "panicked at|^---- " $L/t9-parked-*.log | cut -c1-300
-SH
 ```
 
 ```bash
