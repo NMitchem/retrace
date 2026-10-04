@@ -652,6 +652,10 @@ pub struct Box_ {
     /// record and replay rebuild it from the guest's own syscalls, and every rebuild path carries it
     /// (`BoxState`). Declared after `vcpu`/`vm`, so the drop order is unaffected.
     gkq: gkq::GuestKqueues,
+    /// M48 §3e: the guest's psynch condition variables, keyed by guest cv address (`psynch.rs`). Box
+    /// state, not trace state: record and replay rebuild it from the guest's own syscalls, and every
+    /// rebuild path carries it (`BoxState`).
+    psynch: psynch::Psynch,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -1101,6 +1105,11 @@ pub struct BoxState {
     // their knotes registered and their waiters blocked behind the checkpoint. Dropped, a seek into
     // a blocked kevent would replay the trigger against no kqueue (kq_e2e's seek tests).
     pub gkq: gkq::GuestKqueues,
+    // M48 §3e: carried because a mid-run capture cannot re-derive it: the waits, signals and
+    // preposts happened behind the checkpoint. Dropping it would make a seek into a blocked
+    // `cvwait` restore a thread blocked on a cv the model has forgotten, so the signal meant to wake
+    // it would prepost instead (condvar_e2e's seek test; box test `psynch.rs`).
+    pub psynch: psynch::Psynch,
 }
 
 /// M40: bytes of guest backing currently mapped by `alloc_pages` and not yet released — a
@@ -1538,7 +1547,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default() }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -2147,7 +2156,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default() };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -3465,7 +3474,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default() };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -5643,6 +5652,76 @@ impl Box_ {
         Ok(())
     }
 
+    /// M48 §3e (P1): the psynch condition-variable calls, emulated and never forwarded. Forwarded, a
+    /// psynch call acts on the HOST's psynch state keyed by retrace's own addresses, blocking or
+    /// waking the recorder. The semantics are `psynch.rs`'s port of libpthread-539.100.4 (plan F1).
+    /// This method dispatches by number, gives a timed `cvwait` its deadline on the queue
+    /// `schedule_after_block` serves (`BlockReason::Cv`), blocks the caller, and writes each woken
+    /// thread's word where that thread will read it (`deliver_wake`).
+    ///
+    /// Returns the caller's own `x0`, with carry always clear: the word a call answers at once, or 0
+    /// for a `cvwait` that blocks, whose real answer comes at its wake. `Err` is the refusal,
+    /// `M48: psynch …` (T5-d) or `M48: a signal is pending on thread …` (T5-e), raised before the
+    /// model or the thread table changes. Both dispatch arms call this with the same `(num, args)`
+    /// (symmetry rule 1), and nothing is recorded (R3): every word is a pure function of box state.
+    pub fn guest_psynch(&mut self, num: u64, args: [u64; 8]) -> Result<u64, String> {
+        let tid = self.threads.current();
+        let mut next = self.psynch.clone();
+        let (out, deadline) = match num {
+            retrace_arch::SYS_PSYNCH_CVWAIT => {
+                // The clock is read only for a timed wait, at the call
+                // (kern_synch.c:_psynch_cvwait's clock_absolutetime_interval_to_deadline).
+                let ticks = psynch::timeout_ticks(args[6], args[7])?;
+                let out = next.cvwait(args, tid)?;
+                (out, ticks.map(|t| self.now_guest().saturating_add(t)))
+            }
+            retrace_arch::SYS_PSYNCH_CVSIGNAL => (next.cvsignal(args)?, None),
+            retrace_arch::SYS_PSYNCH_CVBROAD => (next.cvbroad(args, self.threads.len())?, None),
+            _ => return Err(format!(
+                "M48: psynch {} ({num}) is not modelled: only psynch_cvwait, psynch_cvsignal and \
+                 psynch_cvbroad are, the calls the walks measured (plan P4). args {}",
+                psynch::call_name(num), Self::fmt_args(args))),
+        };
+        // T5-e: a woken thread with a signal pending would leave it where assert_no_stranded_signals
+        // cannot see it, M18's semaphore posture. Checked for every woken thread before anything
+        // changes; `deliver_wake` re-checks each as it wakes it.
+        for w in &out.woken {
+            let pending = self.threads.pending_of(w.tid);
+            if pending != 0 {
+                return Err(format!(
+                    "M48: a signal is pending on thread {} (set {pending:#x}), which this {} would wake. The \
+                     saved context of a thread blocked in psynch_cvwait is unmeasured, so a delivery there \
+                     would be a guess; measure it (the blockedctx.rs shape) before allowing this.",
+                    w.tid, psynch::call_name(num)));
+            }
+        }
+        self.psynch = next;
+        for w in &out.woken {
+            self.deliver_wake(w.tid, w.word as u64, false, &[])?;
+        }
+        match out.ret {
+            psynch::Ret::Word(word) => Ok(word as u64),
+            psynch::Ret::Block => {
+                self.threads.block(thread::BlockReason::Cv { addr: args[0], deadline });
+                Ok(0)
+            }
+        }
+    }
+
+    /// M48 §3e: thread `tid`'s timed `psynch_cvwait` on `addr` reached its deadline. The answer is
+    /// the port's timeout branch (`Psynch::time_out`): the waiter leaves the queue, S counts it, and
+    /// the errno word carries `ECVCLEARED` or `ECVPREPOST` when that balances or empties the queue.
+    /// It is delivered with carry set, onto the vCPU when `tid` is the current thread (Review Focus
+    /// 2: node's `{0, 1 ns}` waits are woken in the very schedule that blocked them). Below the
+    /// trace, so a refusal panics with its text on both sides (R5).
+    fn cv_timed_out(&mut self, tid: usize, addr: u64) {
+        let out = self.psynch.time_out(addr, tid);
+        self.deliver_wake(tid, out.word, true, &[]).unwrap_or_else(|m| panic!("{m}"));
+        for w in &out.woken {
+            self.deliver_wake(w.tid, w.word as u64, false, &[]).unwrap_or_else(|m| panic!("{m}"));
+        }
+    }
+
     /// M47 §3c: `madvise(addr, len, behav)` (75), **modelled, never forwarded**. Forwarded, the
     /// host applied the advice to RETRACE's backing of the guest range: a `MADV_FREE_REUSABLE`
     /// there lets the host reclaim pages the guest may later write through stage 2 (the hazard M37
@@ -5991,6 +6070,7 @@ impl Box_ {
             if !matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_)) { continue; }
             match self.threads.state_of(tid) {
                 thread::ThreadState::Blocked(thread::BlockReason::Kevent { kq, .. }) => self.kevent_timed_out(tid, kq),
+                thread::ThreadState::Blocked(thread::BlockReason::Cv { addr, .. }) => self.cv_timed_out(tid, addr),
                 s => unreachable!("M48: due_waiters returned thread {tid} in {s:?}, which has no deadline"),
             }
         }
@@ -6901,6 +6981,7 @@ impl Box_ {
             kq: self.kq.clone(),
             excl: self.excl.clone(),
             gkq: self.gkq.clone(),
+            psynch: self.psynch.clone(),
         }
     }
 
@@ -7025,6 +7106,7 @@ impl Box_ {
             kq: state.kq.clone(),
             excl: state.excl.clone(),
             gkq: state.gkq.clone(),
+            psynch: state.psynch.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b
@@ -7048,10 +7130,10 @@ impl Box_ {
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
             self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
-            self.pac_enabled, self.kq, self.gkq)
+            self.pac_enabled, self.kq, self.gkq, self.psynch)
     }
 
     /// Test-only (M46): the workqueue kqueue, for `checkpointparity.rs` and the box-level manager
@@ -7067,6 +7149,15 @@ impl Box_ {
     /// Test-only (M48): the guest kqueues, for the box tests and the restore-parity checks.
     #[doc(hidden)]
     pub fn dbg_gkq(&self) -> &gkq::GuestKqueues { &self.gkq }
+
+    /// Test-only (M48): the psynch model, for `tests/psynch.rs`.
+    #[doc(hidden)]
+    pub fn dbg_psynch(&self) -> &psynch::Psynch { &self.psynch }
+
+    /// Test-only (M48 Review Focus 5, T5-f): the psynch model, writable, so a test can plant the
+    /// state an earlier silent divergence would leave.
+    #[doc(hidden)]
+    pub fn dbg_psynch_mut(&mut self) -> &mut psynch::Psynch { &mut self.psynch }
 
     /// Test-only (M46): write guest memory by VA, page by page, as the box's own event writes do.
     /// `gcdtimer_e2e` tampers an entry at its `svc` with this, to reach the replay-side validators.
