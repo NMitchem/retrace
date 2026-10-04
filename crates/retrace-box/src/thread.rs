@@ -155,6 +155,11 @@ pub struct Thread {
     /// A second signal arriving now would stack a frame on a context that never ran the first —
     /// fail loud rather than guess at the kernel's queueing order.
     pub redirected: bool,
+    /// M48 §3f: this thread's `S3_6_C15_C1_5`, the JIT write-protect register. Per thread, as
+    /// native's is (§2c). It starts at 0 for every thread, main included (R1), and is never
+    /// inherited: native starts a thread protected even when its creator is write-enabled. Only
+    /// `Box_::sprr_write` changes it, with an admitted value.
+    pub sprr: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +181,7 @@ impl ThreadTable {
                 pending: 0,
                 altstack: None,
                 redirected: false,
+                sprr: 0,
             }],
             current: 0,
         }
@@ -317,6 +323,13 @@ impl ThreadTable {
         std::mem::replace(&mut self.threads[tid].altstack, ss)
     }
 
+    /// M48 §3f: `tid`'s `S3_6_C15_C1_5` (R1: 0 until written).
+    pub fn sprr_of(&self, tid: usize) -> u64 { self.threads[tid].sprr }
+
+    /// M48 §3f: set `tid`'s register. `Box_::sprr_write` is the only production caller, with an
+    /// admitted value, and it syncs the view after.
+    pub fn set_sprr_of(&mut self, tid: usize, value: u64) { self.threads[tid].sprr = value; }
+
     /// Threads that have not exited.
     pub fn live(&self) -> usize {
         self.threads.iter().filter(|t| !matches!(t.state, ThreadState::Exited(_))).count()
@@ -337,6 +350,7 @@ impl ThreadTable {
             pending: 0,
             altstack: None,
             redirected: false,
+            sprr: 0,
         });
         self.threads.len() - 1
     }
@@ -678,5 +692,17 @@ mod tests {
         assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Kevent { kq: 3, deadline: None }));
         assert_eq!(BlockReason::Kevent { kq: 3, deadline: Some(7) }.deadline(), Some(7));
         assert_eq!(BlockReason::Wait { addr: 8 }.deadline(), None, "only a timed wait carries a deadline");
+    }
+
+    #[test]
+    fn a_spawned_thread_starts_protected_whatever_its_creator_wrote() {
+        // M48 R1, §2c (sprr.out): native's main thread starts protected, and so does a thread
+        // created while its parent is write-enabled. retrace's protected initial value is 0.
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        assert_eq!(t.sprr_of(0), 0, "main starts at R1's 0");
+        t.set_sprr_of(0, 0x2010_0020_3030_0000); // the probe host's +0x110: write-enabled
+        let child = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        assert_eq!(t.sprr_of(child), 0, "a child is never write-enabled by inheritance");
+        assert_eq!(t.sprr_of(0), 0x2010_0020_3030_0000, "the creator keeps its own value");
     }
 }
