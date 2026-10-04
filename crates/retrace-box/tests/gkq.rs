@@ -169,6 +169,35 @@ fn an_unmapped_timeout_answers_efault_and_applies_no_change() {
     assert_eq!(b.threads().state_of(0), ThreadState::Runnable);
 }
 
+/// K5, fix round 1 (review Minor 1): the event list is probed with the condition the write itself
+/// uses. A reserved page the guest has not touched yet is demand-committed by the write, as a guest
+/// store would commit it, so a list reaching into one is accepted, as native accepts it (libuv's
+/// 1024-entry list is a 32 KiB stack local). A page that is neither backed nor reserved is still
+/// refused, naming the address.
+#[test]
+fn an_event_list_reaching_into_an_untouched_reserved_page_is_accepted_and_an_unmapped_one_refused() {
+    // Inside the IPA space, backed by nothing and inside no reservation (reservecommit.rs's WILD).
+    const WILD: u64 = 0xB_0000_0000;
+    let mut b = tb();
+    let base = setup(&mut b);
+    let res = b.guest_vm_reserve(0, 0x8000, true);
+    assert!(b.commit_reserved_page(res), "the list's first page, touched by the guest");
+    assert!(!b.is_mapped(res + 0x4000), "its second page is reserved and untouched");
+    let changes = [kev(1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0x11), kev(2, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0x22),
+                   kev(1, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0x11), kev(2, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0x22)];
+    for (i, c) in changes.iter().enumerate() { b.poke_guest(base + 32 * i as u64, &c.to_bytes()); }
+    let zero = timespec(&mut b, base + 0x200, 0, 0);
+    let list = res + 0x4000 - 32;
+    assert_eq!(b.guest_kevent([KQ, base, 4, list, 2, zero, 0, 0]), Ok((2, false)), "both events, across the page boundary");
+    assert_eq!(b.read_bytes_for_test(list, 32), kev(1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0x11).to_bytes());
+    assert_eq!(b.read_bytes_for_test(res + 0x4000, 32), kev(2, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0x22).to_bytes(),
+        "the second event, in the page the write committed");
+    assert!(b.is_mapped(res + 0x4000), "the write committed it, as a guest store would");
+    let e = b.guest_kevent([KQ, 0, 0, WILD, 1, zero, 0, 0]).unwrap_err();
+    assert!(e.starts_with("M48: kevent event list at 0xb00000000 ")
+            && e.contains("0xb00000000 (ipa 0xb00000000) is neither backed nor reserved"), "{e}");
+}
+
 /// Review Focus 2's path, and the header's "not special-cased" rule: node's 1 ns wait converts to
 /// 0 ticks (F6), so it blocks with its deadline already reached and is woken by the deadline queue
 /// in the same `schedule_after_block`, with no idle jump.

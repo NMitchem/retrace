@@ -1725,7 +1725,7 @@ impl Box_ {
         let page_base = ipa & !(GRANULE as u64 - 1);
         // Strict gate: only pages inside a tracked reservation are demand-committable. Everything
         // else stays fatal (the dispatch surfaces it via describe_stop) — no wild materialization.
-        if !self.reservations.iter().any(|&(start, len)| page_base >= start && page_base < start + len) {
+        if !self.in_reservation(page_base) {
             return false;
         }
         // Already backed (host_span hit): don't double-map. Returning false here is the refault
@@ -1740,6 +1740,13 @@ impl Box_ {
         self.vm.map(host, page_base, rlen, MemFlags::RWX).expect("hv_vm_map (commit reserved page)");
         self.backings.push(Backing { host, ipa: page_base, len: rlen });
         true
+    }
+
+    /// Is the page holding `ipa` inside a tracked reservation? `commit_reserved_page`'s gate, shared
+    /// with `check_writable_va` (M48) so a probe and the committing write cannot disagree.
+    fn in_reservation(&self, ipa: u64) -> bool {
+        let page_base = ipa & !(GRANULE as u64 - 1);
+        self.reservations.iter().any(|&(start, len)| page_base >= start && page_base < start + len)
     }
 
     /// The faulting guest-physical address (FAR/IPA) of the most recent non-syscall VM exit
@@ -5521,11 +5528,12 @@ impl Box_ {
                                         c.filter, c.ident)));
             }
         }
-        let room = nevents * gkq::KEVENT_BYTES;
-        if room > 0 && self.read_va_prefix(elist, room).len() < room {
+        // Probed with the write's own condition (`check_writable_va`), not by reading: an event list
+        // the guest has not written yet may reach into a reserved page no store has committed.
+        if let Err(why) = self.check_writable_va(elist, nevents * gkq::KEVENT_BYTES) {
             return Err(fail(format!("M48: kevent event list at {elist:#x} does not translate for {nevents} \
-                                     entries: the kernel applies the changes before its EFAULT, which is not \
-                                     modelled (K5)")));
+                                     entries: {why}: the kernel applies the changes before its EFAULT, which \
+                                     is not modelled (K5)")));
         }
         let cur = self.threads.current();
         if let Some(w) = self.gkq.waiter(kq).filter(|_| nevents > 0) {
@@ -5871,6 +5879,24 @@ impl Box_ {
             }
             self.write_guest(ipa, &bytes[done..done + n]);
             done += n;
+        }
+        Ok(())
+    }
+
+    /// M48 K5: would `write_va_committing` write all of `[va, va + len)`? `Err` names the first VA it
+    /// could not, in that method's own words: one with no stage-1 translation, or one whose page is
+    /// neither backed nor inside a reservation. Pure: it commits nothing, so `guest_kevent` can probe
+    /// an event list at the call and refuse it before any change is applied. A reserved page the
+    /// guest has not touched yet passes, because the write will commit it as a guest store would.
+    fn check_writable_va(&self, va: u64, len: usize) -> Result<(), String> {
+        let end = va.checked_add(len as u64).ok_or_else(|| format!("{va:#x}+{len:#x} overflows"))?;
+        let mut a = va;
+        while a < end {
+            let ipa = self.va_to_ipa(a).ok_or_else(|| format!("{a:#x} does not translate"))?;
+            if self.host_span(ipa).is_none() && !self.in_reservation(ipa) {
+                return Err(format!("{a:#x} (ipa {ipa:#x}) is neither backed nor reserved"));
+            }
+            a = (a | (GRANULE as u64 - 1)).saturating_add(1);
         }
         Ok(())
     }
