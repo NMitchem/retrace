@@ -1,0 +1,81 @@
+M48 Task 10: the deliberate-breakage controls, 2026-10-04, each run on the committed tree 397ff1a
+(the brief's Step 5 and the controller's addendum A), each restored with
+`git checkout 397ff1a -- <file>` and `git status --short` confirmed empty (only the untracked
+sweep/*.bin traces) before the next. Every node run was under `caffeinate -s -i` and a perl alarm;
+the traces the failing runs kept were deleted. Logs: the ledger's t10-ctl{1,2,3}.log,
+t10-a1{a,c}.log, t10-a1b-instr.{out,err} and t10-a2.log.
+
+== Step 5 control 1: the arm-top oracle (spec §11a item 1)
+Mutation: crates/retrace-core/src/lib.rs, the `self.verify_thread(*rthread, pc)?;` directly below
+`// M15 Task 4: the thread oracle` (line 2042) deleted.
+Run: cargo test -p retrace --test thread_oracle a_wrong_thread_on_a -- --test-threads=1
+Result: RED as designed. 1 passed; 2 failed (28.13 s).
+  a_wrong_thread_on_a_kevent_landmark_is_a_divergence ... FAILED
+  a_wrong_thread_on_a_psynch_cvwait_landmark_is_a_divergence ... FAILED
+  both at thread_oracle.rs:355: "CLI exit 3 is the Divergence convention; stderr:
+  [retrace] fall-throughs: 0 ... left: 0 right: 3"
+  (replay ACCEPTED each retagged trace and exited 0).
+  The filter also selected a_wrong_thread_on_a_wake_materialised_delivery_is_a_divergence, which
+  stayed ok: it is guarded by mirror_delivery's inline check, not by this call.
+
+== Step 5 control 2: no kevent record arm
+Mutation: record_box's `Stop::Syscall { num, args } if num == retrace_arch::SYS_KEVENT =>` guard
+replaced with `if false`.
+Run: cargo test -p retrace --test kq_e2e the_runtime_detection_probe_returns_natives_one_event -- --test-threads=1
+Result: RED as designed (0.75 s). kq_e2e.rs:41 `["probe"]: record: ...` carrying the recorder's
+  panic at crates/retrace-core/src/lib.rs:1375:17:
+  "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c)."
+
+== Step 5 control 3: no psynch record arm
+Mutation: record_box's `Stop::Syscall { num, args } if retrace_arch::is_psynch(num) =>` guard
+replaced with `if false`.
+Run: cargo test -p retrace --test condvar_e2e a_timed_wait_on_the_only_waiter_answers_on_the_vcpu -- --test-threads=1
+Result: RED as designed (0.99 s). condvar_e2e.rs:24 `["onens"]: record: ...` carrying the
+  recorder's panic at crates/retrace-core/src/lib.rs:1380:17:
+  "psynch syscall 305 reached the generic forward arm — it must be emulated above (M48 §3e)."
+
+== Addendum A3: the generic-arm asserts cover kevent AND psynch
+Controls 2 and 3 above between them drive 363 (kq_dyn) and 305 (condvar_dyn) into the generic
+arm, and each assert fires with its own text. No further run was needed.
+
+== Addendum A1: node_timer_replays's exactness assertions
+(a) The idle jump lands ONE tick past the earliest deadline.
+  Mutation: crates/retrace-box/src/kq.rs, tsc_for_deadline's jump branch
+    `if deadline > now { tsc.wrapping_add(deadline - now) } else { tsc }` ->
+    `if deadline > now { tsc.wrapping_add(deadline - now).wrapping_add(1) } else { tsc }`
+    (one tick past only when it jumps; schedule_after_block is its only caller).
+  Run: cargo test -p retrace --test node_e2e node_timer_replays -- --test-threads=1 (alarm 1200)
+  Result: RED as designed (165.70 s), the rung passing first (util::assert_rung_records_and_replays,
+    node_e2e.rs:83), then node_e2e.rs:119:
+    "the jump at landmark 1333 must land exactly on main's kevent deadline (landmark 1320, timeout
+     47592000 ticks): 0x4801 ticks past it is not K's own window's timebase reads"
+    (0x4801 = two STRIDEs of K's own window plus the one tick).
+(b) The idle jump goes to another pending deadline than the earliest: NOT APPLICABLE.
+  Measured, not assumed: a one-line eprintln at the jump in schedule_after_block (instrumentation
+  only, restored), then one debug record of `node -e 'setTimeout(() => console.log(2), 2000)'`
+  (exit 0, stdout "2"). Node's timer walk makes exactly ONE idle jump, and at it exactly ONE
+  deadline is pending:
+  [t10 jump] cur=6 now=0xd03f987d749 earliest=0xd03fc5c1189 kq_timers=None kq=WorkqKqueue { user: None, memstatus: None, timers: {}, manager: None } threads=[Blocked(Kevent { kq: 10, deadline: Some(14310769955209) }), Blocked(Kevent { kq: 8, deadline: None }), Blocked(Cv { addr: 506856, deadline: None }), Blocked(Cv { addr: 506856, deadline: None }), Blocked(Cv { addr: 506856, deadline: None }), Blocked(Cv { addr: 506856, deadline: None }), Blocked(Sem { port: 5127 })]
+  main's kevent on kq 10 is the only candidate (the workqueue kqueue holds no timer; every other
+  thread waits with no deadline), so `.max()` for `.min()` would be the identity. Jump size
+  47 462 976 ticks (1.978 s).
+(c) After the jump, the vCPU goes to the wrong thread.
+  Mutation (one line): schedule_after_block's post-jump `next = self.threads.pick_next();` ->
+    `next = Some(1);` (thread 1, blocked in kevent on kq 8 at the jump, instead of main).
+  Run: as (a).
+  Result: RED, but EARLIER than the assertion it targets (27.13 s): the RECORDER panicked at
+    crates/retrace-box/src/lib.rs:3069:9, "M15 R1: a reschedule is still pending after
+    schedule_after_block — a mid-window switch would make position->thread ambiguous" (a
+    debug_assert in run()), so the rung failed at util/mod.rs:253 (record exit 101) and
+    node_e2e.rs:122's `current_thread() == 0` was never reached. Any one-line pick of a thread that
+    is not runnable trips M15 R1 first; a runnable wrong thread after the jump needs a second
+    deadline, which (b) measured node does not have.
+
+== Addendum A2: node_crash_e2e's delivery assertion
+Mutation: crates/retrace/tests/node_crash_e2e.rs, `Event::SignalDelivery { sig: 11, ...` ->
+`sig: 10` in the delivery match (the test file only).
+Run: cargo test -p retrace --test node_crash_e2e -- --test-threads=1 (alarm 1800)
+Result: RED as designed (183.86 s), at node_crash_e2e.rs:102:10:
+  "node's own SIGSEGV handler must be delivered the fault before the terminal crash (walls.md §2)"
+  after assertion 1 (marker, target, rows, opt=, no UNREACHED) and assertion 2's crash checks
+  (FAR, DFSC, the marker's thread) had passed.
