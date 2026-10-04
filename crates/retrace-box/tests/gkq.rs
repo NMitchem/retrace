@@ -1,8 +1,9 @@
 //! M48 §3c–§3d, box level: guest kqueues and the deadline queue, with the kernel's side driven by
 //! hand as `kqmanager.rs` drives M46's manager. Review Focus 1 is pinned here against guest
 //! memory, which the pure `gkq.rs` never sees. Review Focus 2 is pinned here with a reply that
-//! differs from the 0 a blocking landmark writes: a kevent deadline wake always answers 0, so no
-//! fixture can show a reply lost to a stale saved context.
+//! differs from the 0 a blocking landmark writes, or with a sentinel left in the live registers: a
+//! kevent deadline wake always answers 0, so without one no fixture can show a reply lost to a
+//! stale saved context.
 //!
 //! K10: a static box has no commpage and so no guest clock, so the static tests use NULL or zero
 //! timeouts only. The two deadline tests load `hello_dyn` (the `stackgrow.rs` pattern); its stage 1
