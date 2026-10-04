@@ -1,7 +1,7 @@
 # Sweep evidence — M48 Task 9, run 2026-10-04
 
 The directory keeps the plan's 2026-10-02 name. **Every file here was produced on 2026-10-04,
-between 05:37 and 06:17 (-03)**, on this machine:
+between 05:37 and 06:17 (-03), and fix round 1's `echo` measurement ran at 06:37**, on this machine:
 - Apple M4 Pro, 12 CPUs, 24 GiB;
 - macOS 26.5.2 (25F84), kernel `xnu-12377.121.10~1/RELEASE_ARM64_T6041`;
 - Homebrew node 25.6.1 (`/opt/homebrew/Cellar/node/25.6.1/bin/node`).
@@ -34,8 +34,9 @@ range, the cell reads 2 and then the target. The nine parked gates all still fai
 its `#[ignore]` reason names. The bench timed all seven rows, node's included. **The Apple sweep
 tallied `pass=49 fail=5 skip=0` on an idle host**, the expected figure; its only moved outcome is
 `dddiagnose`'s known coin flip, attributed to host state by the controls. One finding: in the
-controls, `dddiagnose` showed a **third face**, once in 16 runs on the M48 binary and never in 16 on
-the base binary (below, Verdicts).
+controls, `dddiagnose` showed a **third face** (a libswiftCore data abort), once in 16 runs on the M48
+binary and never in 16 on the base binary. It is **a second sighting of a documented, unattributed
+class**: M47 saw the same class once, on M46's code (below, Verdicts).
 
 ## Files
 
@@ -55,6 +56,7 @@ the base binary (below, Verdicts).
 | `moved-rows.txt` | written by hand from `rowdiff-norm.txt`, plus `dddiagnose` always (Step 6) | — | 06:12 |
 | `t9-controls.sh`, `controls.txt` | `caffeinate -s -i bash t9-controls.sh > controls.txt` (Step 6) | base and debug | 06:12:19–06:13:43 |
 | `ctl-d5-t9/` | t9 addition: the kept `rec.err`, `rp.err` and `rp.out` of `controls.txt`'s round `d5-t9` (the third face) | debug | 06:13 |
+| (no file; the figures are inline under The bench) | fix round 1: two `record-dyn /bin/echo … -- hi` runs per binary, to attribute `echo`'s trace size | base and release | 06:37 |
 | `t9-controls-extra.sh`, `controls-extra.txt` | t9 addition: `caffeinate -s -i bash t9-controls-extra.sh > controls-extra.txt`, ten more `dddiagnose` rounds per binary | base and debug | 06:15:02–06:16:49 |
 
 ## The walk
@@ -179,8 +181,28 @@ Every row was timed: no `FAILED`, no `SKIPPED`. **The node row is new.** Against
 Every record and replay figure is 3–23% faster than on 2026-09-28, and every native figure is
 faster too (2–14% for the four workloads above 10 ms; `echo` and `ls` are at the script's
 millisecond resolution). Since the native column moves with the rest, the move is not evidence that
-retrace got faster. The `echo` trace shrank 32 → 28
-MiB; which commit since 2026-09-28 did that was not traced. Node's trace (502 MiB) is the
+retrace got faster.
+
+**The `echo` trace size, 32 → 28 MiB, is run-to-run variation, not a binary difference** (fix
+round 1).
+- **The measurement.** At 06:37, under `caffeinate -s -i`, I recorded `echo` twice with each binary,
+  using the bench's own shape: `<binary> record-dyn /bin/echo -o <trace> -- hi`, with stdin, stdout
+  and stderr on `/dev/null`. The two binaries were the base `m48-base-retrace` (M47's code) and
+  `m48-t9-release-retrace`. Every record exited 0.
+
+  | binary | first record | second record |
+  |---|---|---|
+  | base (M47's code) | 29 212 331 B (27.9 MiB) | 33 303 042 B (31.8 MiB) |
+  | t9 release (M48's code) | 29 165 051 B (27.8 MiB) | 33 375 268 B (31.8 MiB) |
+
+- **The reading.** Both binaries write both sizes, about 28 MiB and about 32 MiB. The bench reports
+  the trace of its last record only, one sample. So the 2026-09-28 table's 32 MiB and this run's
+  28 MiB are two draws from the same spread. The difference is neither M48's nor a difference
+  between these two binaries.
+- **Not measured:** what makes the size vary.
+- **Clean-up:** I deleted the four traces.
+
+Node's trace (502 MiB) is the
 `console.log(1)` walk's ~525 MB, and its record RSS 733 MiB; its 3.45 s record is about 3.4 s of
 retrace over a 0.04 s native run (P10: V8's reservations are backed in full, so they are in both
 snapshots).
@@ -271,8 +293,9 @@ wall is the same.)
   panic's source line differs, which is the code's line numbering, not an outcome. Not a moved row.
 - **`dddiagnose`: host state.** Both faces occur on both binaries: base 4 PASS (`mfm_alloc`) / 2 FAIL
   at 205; t9 3 PASS / 2 FAIL at 205 / 1 third face. The sweep's FAIL at 205 is M45's coin flip.
-- **The third face (finding).** `controls-extra.txt` (a t9 addition) ran ten more rounds per binary:
-  base 5 PASS / 5 at 205, t9 4 PASS / 6 at 205, no third face. Over 16 samples per binary:
+- **The third face: a second sighting of a documented, unattributed class.** `controls-extra.txt` (a
+  t9 addition) ran ten more rounds per binary: base 5 PASS / 5 at 205, t9 4 PASS / 6 at 205, no third
+  face. Over 16 samples per binary:
 
   | binary | PASS 139 (`mfm_alloc`) | FAIL 4/3 at msgh_id 205 | FAIL 4: data abort at far `0x10` |
   |---|---|---|---|
@@ -280,19 +303,60 @@ wall is the same.)
   | t9 (`4e37b88`) | 7 | 8 | **1** |
 
   Counting the parked run (205) and both sweep attempts (attempt 1 `mfm_alloc`, attempt 2 205), the
-  M48 binary met the third face once in 19 runs. Symbolicated with lldb against the host's shared
-  cache (`target create /usr/bin/dddiagnose; image lookup -a`), its pc `0x193bc20ec` is
-  **libswiftCore `swift::RefCounts<…>::incrementSlow + 88`**: a load at `0x10`, a null side-table
-  pointer. (`elr=0x1804ae10c` is `mach_absolute_time + 108`, presumably a stale `ELR_EL1`.) It
-  occurs at landmark 393; the last line the recorder printed before it is the refused
-  message-queue receive, the region where M45 placed the `mfm_alloc` face ("about 9 landmarks after
-  the refused receive"). The record ends with a recorder error (exit 4), not an `Event::Crash`:
-  retrace's own label, `far/ipa=0x10 (UNMAPPED)`, says the address reached the VMM as an unmapped
-  IPA rather than as a guest fault (read off the label, not traced). Replay reports
-  `DIVERGENCE at landmark 393 … data abort …` (`ctl-d5-t9/`). By the
-  brief's rule this is **unattributed**: it was not on both t9 rounds, and 1 of 16 against 0 of 16
-  cannot tell a rare host-state face from an M48 one. The sweep's own row did not take it. Its trace
-  is kept, not committed, at `/private/tmp/claude-501/m48-t9-ctl/ctl/d5-t9/dddiagnose.bin`.
+  M48 binary met the third face once in 19 runs.
+
+  **What it is.** Symbolicated with lldb against the host's shared cache
+  (`target create /usr/bin/dddiagnose; image lookup -a`), its pc `0x193bc20ec` is **libswiftCore
+  `swift::RefCounts<…>::incrementSlow + 88`**: a load at `0x10`, read here as a null side-table
+  pointer. (`elr=0x1804ae10c` is `mach_absolute_time + 108`, presumably a stale `ELR_EL1`.) It occurs
+  at landmark 393; the last line the recorder printed before it is the refused message-queue
+  receive, the region where M45 placed the `mfm_alloc` face ("about 9 landmarks after the refused
+  receive"). The record ends with a recorder error (exit 4), not an `Event::Crash`. Replay reports
+  `DIVERGENCE at landmark 393 … data abort …` (`ctl-d5-t9/`), so it reproduces the abort.
+
+  **M47 recorded the same class, on pre-M47 code.** `docs/sweep-evidence/2026-09-30-m47/README.md:126`
+  (the table row "d5: a third face") and `:135-143` ("A third face, on the base binary only, once"),
+  with `dddiagnose.face3.txt`, `dddiagnose.d5-base.rec.err` and `controls.txt:45` there. It was a data
+  abort at far `0x1bf0` in libswiftCore `_swift_release_dealloc+48` (a Swift object whose isa read as
+  `0x1c00`), on the base binary `427fa0a` (M46's code), in 1 of 6 runs at a 1-minute load of 11.60.
+  M47 wrote that whether it is the heap-corruption class its `mach_vm_map` mask fix removed "was not
+  measured" (also `docs/current-state.md:1116-1119`, `docs/status-log.md:15440-15441` and `:15609`).
+  This sighting is the same class at a different site. By generation:
+
+  | code | runs | third-class faces |
+  |---|---|---|
+  | M46 (`427fa0a`, M47's base) | 6 | 1 (`_swift_release_dealloc+48`, far `0x1bf0`) |
+  | M47 (`a8a1ecd` 7, `50e716f` 16) | 23 | 0 |
+  | M48 (`4e37b88`) | 19 | 1 (`incrementSlow+88`, far `0x10`) |
+
+  About 2 in 48 runs overall. This one occurred at a 1-minute load of about 1.8 (round `d5-t9`
+  started at 1.83), so load alone does not explain the class. And it occurred after M47's mask fix,
+  so that fix did not remove the class.
+
+  **What its trace shows** (parsed by the Task 9 reviewer, from the kept trace):
+  - 1 `Snapshot` and 392 `Syscall` landmarks, all on thread 0;
+  - none of 360/361, 303–305, 363, 515/516, −36/−33, 367/368 or 374/375;
+  - its two mmaps are not `MAP_JIT`.
+
+  So M48's SIMD restore at thread switches (Task 1), `kevent` (Task 4), psynch (Task 5) and the
+  `MAP_JIT`/SPRR paths (Tasks 6–7) were never exercised in this run. The M48 changes it did run
+  through are the global ones:
+  - SCTLR UCI;
+  - Task 3's trimming, on dyld's piecewise unmap of its executable, the partial-`munmap` path every
+    dyld guest runs. The abort is at VA `0x10`, not at a released page.
+
+  `getpid` appears at landmarks 15, 40 and 195, exactly as in the 205-face trace, so it is not the
+  lost-store-exclusive class.
+
+  **What it does not show:**
+  - the face's rate on either binary: 1 of 16 against 0 of 16 is not a significant difference;
+  - its root cause;
+  - the guest memory at the fault;
+  - anything beyond lldb's symbol for the pc.
+
+  By the brief's rule it is **unattributed**. It was not on both t9 rounds, and the sweep's own row
+  did not take it. Its trace is kept, not committed, at
+  `/private/tmp/claude-501/m48-t9-ctl/ctl/d5-t9/dddiagnose.bin`.
 
 ## Verdicts
 
@@ -310,16 +374,43 @@ wall is the same.)
      only). It was re-run under `caffeinate -s -i`; the walks (05:39–05:40) and the bench
      (05:41:44–05:43:34) finished before the sleep. Every run here ran in DarkWake with the lid
      closed; nothing in the figures suggests throttling (the bench is faster than 2026-09-28's).
-  2. **`dddiagnose`'s third face**: libswiftCore `incrementSlow + 88` loads from `0x10`, once in 16
-     control runs on the M48 binary, never in 16 on the base binary; unattributed (above).
+  2. **`dddiagnose`'s third face is a second sighting of a documented, unattributed class.**
+     - **This sighting:** libswiftCore `incrementSlow + 88` loads from `0x10`, once in 16 control
+       runs on the M48 binary and never in 16 on the base binary. That is not a significant
+       difference.
+     - **The class:** M47 saw it once on M46's code (`_swift_release_dealloc+48`, far `0x1bf0`;
+       `docs/sweep-evidence/2026-09-30-m47/README.md:126`, `:135-143`). By generation it is M46
+       1/6, M47 0/23 and M48 1/19.
+     - **What the trace rules out:** it exercised none of M48's thread, `kevent`, psynch or
+       `MAP_JIT` paths, and it is not the lost-store-exclusive class.
+     - **What stays unknown:** its root cause and its rate.
+     - Unattributed (above).
   3. **A guest's null-page load ended the record with a recorder error, not a crash.** The third
      face shows it: a load at `0x10` ends the record with `RECORD ERROR … far/ipa=0x10 (UNMAPPED)`,
-     exit 4, where a native process would take SIGSEGV. It looks like the class Task 3 ledgered for a
-     touch of an unmapped page; it is observed here, not measured further.
+     exit 4, where a native process would take SIGSEGV. The stage-2 behaviour behind it **predates
+     M48**: `crates/retrace/tests/trim_e2e.rs:55-63` says a stage-2 translation fault has been a
+     recorder error (exit 4) and never an `Event::Crash` since M2, and is not what Task 3 changes.
+     `0x10` is not a released page. It is observed here, not measured further.
   4. **The `#[ignore]` reasons quote stale source lines.** `csh`'s and `tcsh`'s quote
      `lib.rs:1036:38` (the panic is now at `:1069:38`), `automationmodetool`'s `:1002:38` and
      `:1036:38`, and the stack-overflow reason `retrace-core/src/lib.rs:203` (now `:216`, a drift
      that predates M48). Each wall is the same, so Step 7 does not apply.
   5. **The bench moved every row by 2–23%**, natives included, so the table moves to one date
-     (Ruling T9-b) without implying retrace got faster; `echo`'s trace shrank 32 → 28 MiB, not
-     attributed.
+     (Ruling T9-b) without implying retrace got faster. `echo`'s trace (32 → 28 MiB) is run-to-run
+     variation: both the base and the M48 binary write about 28 MiB on one record and about 32 MiB
+     on another (The bench, fix round 1).
+  6. **Walk `e` counted 6 EL1 vector fall-throughs where t0 and the other walks count 5.** The count
+     was the same on `e`'s record and both its replays, so it is deterministic per recording (a
+     difference would be a divergence, `Box_::fall_throughs`). It varies between recordings and is
+     not a divergence.
+  7. **Five untracked traces sit in this directory, and they are not committed.** They are
+     `sweep/automationmodetool.bin`, `csh.bin`, `dddiagnose.bin`, `tcsh.bin` and `yes.bin`: 402 384 068
+     bytes (383.7 MiB), of which `yes.bin` is 369 929 439. The sweep keeps them
+     (`RETRACE_SWEEP_KEEP`), and the evidence commits exclude `*.bin`. **They are to be deleted at the
+     milestone close.**
+
+**Open questions (not conclusions):**
+- **The crash demo's store offset.** The release walk's own hit is at `0xa2d000948`, and the
+  `MAP_JIT` RWX `mprotect` base is `0xa2d000000`, so the offset is `+0x948`. That equals Task 8's
+  debug-build figure and differs from t0's release `+0x9a8` (§M7). So "release vs debug" is unlikely
+  to explain the difference. Nothing documents the offset as a fact, and nothing here does either.
