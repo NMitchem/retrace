@@ -292,7 +292,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // Minor (b): an anonymous PROT_EXEC (JIT) mmap would need exec promotion but
                 // guest_mmap installs plain RW+non-exec data pages. JIT is out of M2 scope; warn
                 // loudly rather than silently hand back a non-exec page the guest can't run.
-                if args[2] & 0x4 != 0 {
+                // M48 §3f exempts MAP_JIT: the box keeps such a range and stamps the running thread's
+                // view over it, so it is executable whenever that thread is protected. Every other
+                // anonymous exec map keeps this warning (§11a item 2).
+                if args[2] & 0x4 != 0 && args[3] & retrace_arch::MAP_JIT == 0 {
                     eprintln!("[retrace warn] anon PROT_EXEC mmap (len {:#x}) not promoted to exec (JIT out of M2 scope)", args[1]);
                 }
                 // A MAP_FIXED address the guest's own space cannot hold is refused with an errno —
