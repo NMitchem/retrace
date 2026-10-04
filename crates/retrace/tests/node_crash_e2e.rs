@@ -15,6 +15,7 @@
 //!      holds the warm-up value 2 before it and the target one stepi later;
 //!   5. the store's pc lies inside a MAP_JIT mapping of the recording. An interpreter store passes
 //!      1–4 too (spec §4).
+//!
 //! The cell and the MAP_JIT ranges are DISCOVERED from the recording (the M6 marker convention).
 //!
 //! Neither node nor its headers are repo artifacts, so the test announces a skip naming what is
