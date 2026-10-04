@@ -275,6 +275,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append close: {e}"))?; count += 1;
                 b.fds_mut().close(args[0]);
                 b.set_x0_err_and_return(0, false);
+                // M48 K6: replay finishes this landmark through the generic mirror, which calls the
+                // hook, so record calls it too: the same method with the same arguments on both
+                // sides (symmetry rule 1).
+                b.note_fd_effects(num, args, 0, 0, false).unwrap_or_else(|m| panic!("{m}"));
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
             // stores (no syscall), so it cannot go through forward_and_diff. guest_mmap maps a
@@ -1097,6 +1101,20 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     .map_err(|e| format!("append kevent_qos: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
+            // M48 §3c (K1): kevent on a guest kqueue is MODELLED, never forwarded (see
+            // Box_::guest_kevent). Forwarded, it would act on a host kqueue holding none of the
+            // guest's knotes, and a wait would block the recorder. This arm may PANIC by design:
+            // every unmodelled shape is refused by value before anything is appended.
+            //
+            // `writes` is empty and that is deliberate (R3): the event list the call fills, now or
+            // at a later wake, is box output the mirror recomputes from the same guest memory and
+            // box state. The exit-time full-memory comparison still covers every byte of it.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_KEVENT => {
+                let (rc, err) = b.guest_kevent(args).unwrap_or_else(|m| panic!("{m}"));
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err, writes: vec![], thread })
+                    .map_err(|e| format!("append kevent: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, err);
+            }
             // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
             // real thread inside retrace's own process at a guest address (see
             // Box_::guest_bsdthread_create).
@@ -1380,6 +1398,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 }
                 w.append(&Event::Syscall { num, args, ret, ret1, err, writes, thread }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
+                // M48 §3c: what the call did to the guest's kqueues and pipes (Box_::note_fd_effects),
+                // after its return is set, as replay's generic mirror does. A refusal stops the
+                // recorder after this landmark: the forward has already happened.
+                b.note_fd_effects(num, args, ret, ret1, err).unwrap_or_else(|m| panic!("{m}"));
             }
             // A cache-window stage-2 fault: stage/fixup/re-sign/map the page (page_in_cache) and
             // re-run. Regenerated deterministically here on record AND replay, so nothing about the
@@ -2498,6 +2520,33 @@ impl ReplaySession {
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
+                            // M48 §3c: the record arm's mirror (symmetry rule 1): the same method
+                            // with the same arguments, beside M45's so it inherits the arm-top
+                            // `verify_thread` and adds none of its own. The model is a function of
+                            // guest memory, the guest clock and box state, so the recomputed answer
+                            // must equal the recording's. A refusal here is a divergence, never a
+                            // panic: replay reaches one only after an earlier silent divergence
+                            // (Review Focus 5).
+                            if num == retrace_arch::SYS_KEVENT {
+                                let (rc, e) = match self.b.guest_kevent(args) {
+                                    Ok(r) => r,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "kevent refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                if (rc, e) != (*ret, *err) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "kevent rc mismatch: replay {rc:#x} (err={e}) != recorded {ret:#x} (err={err})") });
+                                }
+                                // Record fixes `ret1: 0, writes: []`. A recording carrying either is
+                                // not one this arm produced (M45's stance).
+                                if *ret1 != 0 || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "kevent recorded ret1={ret1:#x} with {} writes; the model records neither", writes.len()) });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
                             // M14 Task 7: the record arm's mirror (symmetry rule 1). Record and
                             // replay must call `guest_bsdthread_create` with IDENTICAL args so both
                             // build an identical thread table — omit this and replay runs a
@@ -2886,6 +2935,18 @@ impl ReplaySession {
                             if retrace_arch::returns_fd_pair(num) { self.b.set_ret1(*ret1); }
                             // Apply recorded kernel writes + feed ret; NO real syscall executes.
                             self.b.apply_and_return(*ret, *err, writes);
+                            // M48 §3c: record's generic arm and console-close arm (K6) call the
+                            // same hook with the same values. A console write is not one of them:
+                            // record's console-write arm never calls it, and the predicate that
+                            // gates that arm skips it here (pre-flight F3). Replay reaches a
+                            // refusal only after an earlier divergence, so it is reported as one.
+                            if !self.b.is_console_write(num, args[0]) {
+                                if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "syscall {num} refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") });
+                                }
+                            }
                             return self.finish_event();
                         }
                         other => return Err(Divergence { landmark: self.idx, pc,
