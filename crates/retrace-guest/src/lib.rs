@@ -227,6 +227,8 @@ pub const TIMER_DYN: &str = concat!(env!("OUT_DIR"), "/timer_dyn");
 pub const FSOPS_DYN: &str = concat!(env!("OUT_DIR"), "/fsops_dyn");
 /// M47: `madvise` by mode — `zero`, `reuse`, `bad` (spec §3f).
 pub const MADV_DYN: &str = concat!(env!("OUT_DIR"), "/madv_dyn");
+/// M48: callee-saved `d8`-`d15` across a thread switch (`thread`) and a `sigreturn` (`signal`).
+pub const SIMD_DYN: &str = concat!(env!("OUT_DIR"), "/simd_dyn");
 /// M47: links `librpath_dyn.dylib` by `@rpath`, so it loads only if AMFI allows `@`-path expansion.
 pub const RPATH_DYN: &str = concat!(env!("OUT_DIR"), "/rpath_dyn");
 /// M47 (t0, after H7): `sandbox_container_path_for_pid` on its own pid — Sandbox's call 4.
@@ -446,6 +448,13 @@ mod tests {
     fn madv_guest_parses() {
         // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
         let l = parse_macho(&std::fs::read(MADV_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn simd_dyn_guest_parses() {
+        // M48: proves the build.rs wiring and the path constant; behaviour is simd_e2e's.
+        let l = parse_macho(&std::fs::read(SIMD_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 

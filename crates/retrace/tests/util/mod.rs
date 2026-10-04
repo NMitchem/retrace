@@ -99,6 +99,13 @@ pub fn replay(trace: &std::path::Path) -> RunOut {
     run(&["replay", trace.to_str().unwrap()])
 }
 
+/// M48: `replay` with extra environment set on the REPLAYER (see `run_env`). The SIMD bug made a
+/// replay's outcome depend on the host environment (walls.md §4 item 1), so `simd_e2e` replays one
+/// trace under several environments and asserts they agree.
+pub fn replay_env(trace: &std::path::Path, env: &[(&str, &str)]) -> RunOut {
+    run_env(&["replay", trace.to_str().unwrap()], env)
+}
+
 /// M42: `retrace debug <trace> --script <script>`, killed after `secs` seconds. `None` for the
 /// exit code means the bound fired. t0 measured hangs on exactly these scripts, and a hang must
 /// fail its test rather than stall the gate.
