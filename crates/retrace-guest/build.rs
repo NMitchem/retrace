@@ -457,6 +457,16 @@ fn main() {
         .status().expect("clang trim_dyn");
     assert!(status.success(), "trim_dyn guest build failed");
 
+    // kq_dyn: the M48 guest-kqueue fixture — modes probe, wake, timeout, tryselect, pipe, oneshot
+    // and bad (spec §3h). Same recipe as hello_dyn; pthreads are in libSystem.
+    let src = format!("{}/c/kq_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/kq_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang kq_dyn");
+    assert!(status.success(), "kq_dyn guest build failed");
+
     // rpath_dyn + librpath_dyn.dylib: the M47 AMFI fixture. The dylib's install name is @rpath/…
     // and the exe's LC_RPATH is @executable_path, so dyld expands @rpath only if AMFI's dyld policy
     // allows it. Both land in OUT_DIR side by side.
