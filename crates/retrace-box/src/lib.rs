@@ -12,6 +12,7 @@ use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 mod sig;
 pub mod thread;
 pub mod kq;
+pub mod gkq;
 mod excl;
 pub use excl::{Excl, SetBy};
 pub use sig::{
