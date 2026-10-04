@@ -232,6 +232,9 @@ pub const SIMD_DYN: &str = concat!(env!("OUT_DIR"), "/simd_dyn");
 /// M48: V8's aligned-reservation trim — a head and an unaligned-length tail munmapped (`trim`),
 /// then the released parts touched (`head`, `tail`).
 pub const TRIM_DYN: &str = concat!(env!("OUT_DIR"), "/trim_dyn");
+/// M48: the guest's own kqueues by mode — `probe`, `wake`, `timeout`, `tryselect`, `pipe`,
+/// `oneshot`, `bad filter`, `bad notkq` (spec §3h; see the source's header).
+pub const KQ_DYN: &str = concat!(env!("OUT_DIR"), "/kq_dyn");
 /// M47: links `librpath_dyn.dylib` by `@rpath`, so it loads only if AMFI allows `@`-path expansion.
 pub const RPATH_DYN: &str = concat!(env!("OUT_DIR"), "/rpath_dyn");
 /// M47 (t0, after H7): `sandbox_container_path_for_pid` on its own pid — Sandbox's call 4.
@@ -465,6 +468,13 @@ mod tests {
     fn trim_dyn_guest_parses() {
         // M48: proves the build.rs wiring and the path constant; behaviour is trim_e2e's.
         let l = parse_macho(&std::fs::read(TRIM_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn kq_dyn_guest_parses() {
+        // M48: proves the build.rs wiring and the path constant; behaviour is kq_e2e's.
+        let l = parse_macho(&std::fs::read(KQ_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
