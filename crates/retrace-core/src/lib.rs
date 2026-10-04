@@ -276,8 +276,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.fds_mut().close(args[0]);
                 b.set_x0_err_and_return(0, false);
                 // M48 K6: replay finishes this landmark through the generic mirror, which calls the
-                // hook, so record calls it too: the same method with the same arguments on both
-                // sides (symmetry rule 1).
+                // hook, and a close is in the hook's fd set, so record calls it too: the same method
+                // with the same arguments on both sides (symmetry rule 1). The other hook-less arms
+                // whose landmarks replay finishes there are outside the fd set, where the hook does
+                // nothing by construction (Box_::note_fd_effects).
                 b.note_fd_effects(num, args, 0, 0, false).unwrap_or_else(|m| panic!("{m}"));
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
@@ -2936,10 +2938,17 @@ impl ReplaySession {
                             // Apply recorded kernel writes + feed ret; NO real syscall executes.
                             self.b.apply_and_return(*ret, *err, writes);
                             // M48 §3c: record's generic arm and console-close arm (K6) call the
-                            // same hook with the same values. A console write is not one of them:
-                            // record's console-write arm never calls it, and the predicate that
-                            // gates that arm skips it here (pre-flight F3). Replay reaches a
-                            // refusal only after an earlier divergence, so it is reported as one.
+                            // same hook with the same values. They are not the only landmarks
+                            // that finish here: so do those of several record arms that never
+                            // call the hook (the console write, the forwarded mach traps,
+                            // `sigaction`, `sigaltstack`, `sigpending`, a pended or ignored
+                            // `kill`/`__pthread_kill`, and any other arm that appends a plain
+                            // landmark). The hook does nothing outside its fd set, by
+                            // construction, so for all but one of them this call is a no-op.
+                            // The console write is the one in the fd set, and the predicate that
+                            // gates record's console-write arm skips it here (pre-flight F3).
+                            // Replay reaches a refusal only after an earlier divergence, so it is
+                            // reported as one.
                             if !self.b.is_console_write(num, args[0]) {
                                 if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
                                     return Err(Divergence { landmark: self.idx, pc, detail: format!(

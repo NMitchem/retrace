@@ -5566,7 +5566,8 @@ impl Box_ {
     ///   values;
     /// - on replay, by the generic mirror, with the recorded ones.
     ///
-    /// The same method with the same arguments on both sides (symmetry rule 1). It reads these calls:
+    /// The same method with the same arguments on both sides (symmetry rule 1). It reads these calls,
+    /// its fd set:
     /// - `kqueue` creates the returned fd's table, and `pipe` (`Ret::FdPair`) the pair's count (R4);
     /// - `close`/`close_nocancel` drop a table, the closed fd's knotes and a pipe end;
     /// - `dup`, `dup2` and `F_DUPFD`/`F_DUPFD_CLOEXEC` copy a pipe end, and refuse a kqueue;
@@ -5576,6 +5577,15 @@ impl Box_ {
     /// Then it wakes any `kevent` waiter a pipe change made ready. A failed call changed nothing.
     /// `Err` is a refusal by value. On record the forward has already happened, so the recorder
     /// stops after the call's landmark.
+    ///
+    /// **Outside its fd set it does nothing, by construction: it returns before the wake.** That is
+    /// what keeps replay's single call site symmetric with record's two. Several record arms append
+    /// a plain landmark without calling the hook, and replay finishes every one of them through the
+    /// generic mirror, which does call it: the console write, the forwarded mach traps, `sigaction`,
+    /// `sigaltstack`, `sigpending`, a pended or ignored `kill`/`__pthread_kill`, and any other arm of
+    /// that shape. Only the console write is in the fd set, and replay's call site skips it with the
+    /// predicate that gates record's arm (`is_console_write`). Every other such landmark reaches this
+    /// hook on replay alone and changes nothing.
     pub fn note_fd_effects(&mut self, num: u64, args: [u64; 8], ret: u64, ret1: u64, err: bool) -> Result<(), String> {
         if err { return Ok(()); }
         let fail = |why: String| format!("{why}. syscall {num} args=[{}] ret={ret:#x}", Self::fmt_args(args));
@@ -5589,7 +5599,8 @@ impl Box_ {
             retrace_arch::SYS_READ | retrace_arch::SYS_READ_NOCANCEL => self.gkq.note_read(args[0], ret),
             n if retrace_arch::is_write_syscall(n) || n == SYS_WRITEV || n == SYS_WRITEV_NOCANCEL =>
                 self.gkq.note_write(args[0], ret),
-            _ => Ok(()),
+            // Not in the fd set: no effect, and no wake (see the doc above).
+            _ => return Ok(()),
         };
         effect.map_err(fail)?;
         self.wake_kevent_waiters().map_err(fail)
