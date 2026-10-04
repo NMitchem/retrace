@@ -257,6 +257,16 @@ pub const CONDVAR_DYN: &str = concat!(env!("OUT_DIR"), "/condvar_dyn");
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
 pub const CRASH_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.json");
+/// M48 (spec §3g, D1): node's crash demo. `crash.js` reads `crash.json` beside it, computes the
+/// target, has TurboFan compile a store of it synchronously (`--allow-natives-syntax`, R6), prints
+/// the `CRASHJS` marker and loads through the pointer with the addon. node reads both at run time,
+/// so these are repo paths, like `CRASH_PY`.
+pub const CRASH_JS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/node/crash.js");
+pub const CRASH_JS_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/node/crash.json");
+/// M48: the demo's N-API addon (`node/crash_addon.c`). `build.rs` builds it only where
+/// `/opt/homebrew/include/node/node_api.h` exists; elsewhere it is `None`, and `node_crash_e2e`
+/// announces its skip.
+pub const NODE_CRASH_ADDON: Option<&str> = option_env!("RETRACE_NODE_CRASH_ADDON");
 /// M39 wall-1 guard: two shared, `FIXED|OVERWRITE` `mach_vm_remap`s (own text page, called
 /// through the alias; `libffi-trampolines.dylib`'s `__TEXT`, compared through it) — the exact
 /// shape `import ctypes` triggers via libffi, minus CPython. Also the native protections probe
@@ -407,6 +417,42 @@ mod tests {
         assert!(json.contains("\"scratch\"") && json.contains("\"0x400000000000\"")
                 && json.contains("\"0xdead0000\""),
                 "crash.json must carry base 0x400000000000 + offset 0xdead0000 under `scratch`");
+    }
+
+    /// One line past libtest's capture: `util::announce`'s body (CLAUDE.md, honest-gate rule 2).
+    fn announce(line: &str) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "{line}");
+    }
+
+    #[test]
+    fn node_crash_demo_is_wired() {
+        // M48 Task 8: the repo paths point at the demo, the data file carries the target the tests
+        // assert by name, and the addon constant is Some exactly when node's headers exist, so a
+        // build that silently failed to make the addon cannot pass as a machine without node.
+        let js = std::fs::read_to_string(CRASH_JS).unwrap();
+        assert!(js.contains("%OptimizeFunctionOnNextCall(store)"), "crash.js must force TurboFan on `store` (R6)");
+        assert!(js.contains("CRASHJS cell="), "crash.js must print the M6-style marker");
+        assert!(js.contains("'crash.json'"), "crash.js must read the data file beside it");
+        let json = std::fs::read_to_string(CRASH_JS_JSON).unwrap();
+        assert!(json.contains("\"0x400000000000\"") && json.contains("\"0xdead0000\""),
+                "crash.json must carry base 0x400000000000 + offset 0xdead0000");
+        let napi = std::path::Path::new("/opt/homebrew/include/node/node_api.h").exists();
+        match NODE_CRASH_ADDON {
+            Some(p) => {
+                assert!(napi, "an addon was built though node_api.h is missing");
+                let b = std::fs::read(p).unwrap();
+                // mach_header_64: MH_MAGIC_64, CPU_TYPE_ARM64, and filetype MH_BUNDLE (8).
+                assert_eq!(b[0..4], 0xfeed_facfu32.to_le_bytes(), "{p} is not a 64-bit Mach-O");
+                assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 0x0100_000c, "{p} is not arm64");
+                assert_eq!(u32::from_le_bytes(b[12..16].try_into().unwrap()), 8, "{p} is not a bundle");
+            }
+            None => {
+                assert!(!napi, "node_api.h exists but build.rs built no addon");
+                announce("SKIPPED node_crash_demo_is_wired's addon half: /opt/homebrew/include/node/node_api.h \
+                          not found (`brew install node`). The addon was NOT checked.");
+            }
+        }
     }
 
     #[test]
