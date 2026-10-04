@@ -175,6 +175,17 @@ pub fn record_dynamic_args(guest: &str, args: &[&str]) -> (RunOut, std::path::Pa
     (run(&argv), trace)
 }
 
+// M48: `record_dynamic_args` with extra environment set on the RECORDER (see `run_env`), for a
+// channel the recorder prints only when asked: node_e2e's `RETRACE_SPRR`.
+pub fn record_dynamic_args_env(guest: &str, args: &[&str], env: &[(&str, &str)]) -> (RunOut, std::path::PathBuf) {
+    static NEXT: AtomicU64 = AtomicU64::new(3_000_000);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let trace = std::env::temp_dir().join(format!("retrace-argvenv-{}-{n}.bin", std::process::id()));
+    let mut argv = vec!["record-dyn", guest, "-o", trace.to_str().unwrap()];
+    if !args.is_empty() { argv.push("--"); argv.extend_from_slice(args); }
+    (run_env(&argv, env), trace)
+}
+
 /// (&g.st, &g.ptr) of the crashy.c fixture, discovered from the recorded marker convention —
 /// see c/crashy.c's header comment. Shared by crashy_e2e / watch_dyn / crashy_cli.
 pub fn discover_crashy_addrs(trace: &std::path::Path) -> (u64, u64) {
@@ -224,6 +235,21 @@ pub struct RungOut { pub trace: std::path::PathBuf, pub stdout: Vec<u8> }
 /// both polarities.
 pub fn assert_rung_records_and_replays(guest: &str, argv: &[&str], expect_stdout: &[u8]) -> RungOut {
     let (rec, trace) = record_dynamic_args(guest, argv);
+    assert_rung(rec, trace, expect_stdout).0
+}
+
+/// M48: `assert_rung_records_and_replays` with extra environment on the RECORDER (see `run_env`),
+/// returning the recorder's stderr beside the rung output, for a channel the recorder prints only
+/// when asked (node_e2e's `RETRACE_SPRR`). The assertions are the same function's.
+pub fn assert_rung_records_and_replays_env(guest: &str, argv: &[&str], expect_stdout: &[u8],
+                                           env: &[(&str, &str)]) -> (RungOut, String) {
+    let (rec, trace) = record_dynamic_args_env(guest, argv, env);
+    assert_rung(rec, trace, expect_stdout)
+}
+
+/// The rung assertions both entry points above share, moved unchanged from
+/// `assert_rung_records_and_replays` at M48. Returns the recorder's stderr too.
+fn assert_rung(rec: RunOut, trace: std::path::PathBuf, expect_stdout: &[u8]) -> (RungOut, String) {
     assert_eq!(rec.code, 0,
         "rung guest must reach a clean exit(0); 139 means it CRASHED (M6 records that as a \
          successful recording, which is exactly what this assertion exists to reject). stderr:\n{}",
@@ -236,7 +262,19 @@ pub fn assert_rung_records_and_replays(guest: &str, argv: &[&str], expect_stdout
         assert_eq!(rep.code, 0, "replay {i} must exit 0. stderr:\n{}", rep.stderr);
         assert_eq!(rep.stdout, rec.stdout, "replay {i} stdout diverged from the recording");
     }
-    RungOut { trace, stdout: rec.stdout }
+    (RungOut { trace, stdout: rec.stdout }, rec.stderr)
+}
+
+/// M48: every `MAP_JIT` mapping a recording made, as `[start, end)`: the `mmap` (197) landmarks
+/// whose flags carry `MAP_JIT` (Task 6's `retrace_arch::MAP_JIT`) and that succeeded, at the
+/// address they returned. It takes decoded events, so a test over a node trace (526 MB to 1.2 GB,
+/// walls.md §2) decodes it once.
+pub fn map_jit_ranges(events: &[retrace_trace::Event]) -> Vec<(u64, u64)> {
+    events.iter().filter_map(|e| match e {
+        retrace_trace::Event::Syscall { num, args, ret, err: false, .. }
+            if *num == retrace_arch::SYS_MMAP && args[3] & retrace_arch::MAP_JIT != 0 => Some((*ret, *ret + args[1])),
+        _ => None,
+    }).collect()
 }
 
 /// Record `guest` TWICE and assert the two traces are byte-identical.
