@@ -113,6 +113,16 @@ fn main() {
         .status().expect("clang scalarprobe");
     assert!(status.success(), "scalarprobe guest build failed");
 
+    // M48: the static SPRR / cache-maintenance probe, with no commpage (§11a item 8). Task 0 Step 3
+    // measured this exact text on the base binary.
+    let src = format!("{}/asm/sprrprobe.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sprrprobe");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang sprrprobe");
+    assert!(status.success(), "sprrprobe guest build failed");
+
     // M29: a guest issuing a legal NULL-oldp sysctl (size query) followed by one whose *oldlenp
     // (1 TiB) is far larger than any backing — the fixture for the DerefU64 refusal.
     let src = format!("{}/asm/oldlensysctl.s", env!("CARGO_MANIFEST_DIR"));
@@ -436,6 +446,16 @@ fn main() {
         .args(["-arch","arm64","-o",&bin,&src])
         .status().expect("clang madv_dyn");
     assert!(status.success(), "madv_dyn guest build failed");
+
+    // jitwp_dyn: the M48 JIT write-protect fixture — modes basic, v8, twothreads and fault. Same
+    // recipe as madv_dyn.
+    let src = format!("{}/c/jitwp_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/jitwp_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang jitwp_dyn");
+    assert!(status.success(), "jitwp_dyn guest build failed");
 
     // simd_dyn: the M48 SIMD fixture — callee-saved d8-d15 across a thread switch and a sigreturn.
     // Same recipe as hello_dyn.
