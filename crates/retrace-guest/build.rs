@@ -937,4 +937,27 @@ fn main() {
         .args(["-arch","arm64","-o",&bin,&src])
         .status().expect("clang dispatch_dyn");
     assert!(status.success(), "dispatch_dyn guest build failed");
+
+    // M48 Task 8 (spec §3g, D1): the N-API addon of node's crash demo, built only where Homebrew's
+    // node headers are. Elsewhere it is skipped with a warning and `NODE_CRASH_ADDON` is `None`,
+    // so the crate builds clean and `node_crash_e2e` announces its skip. The header is registered
+    // for re-runs only when it exists: cargo re-runs a build script on every build while a
+    // rerun-if-changed path is missing, which would rebuild every fixture each time. So a machine
+    // that installs node later rebuilds the addon at the next change to this crate.
+    let napi = "/opt/homebrew/include/node/node_api.h";
+    let src = format!("{}/node/crash_addon.c", env!("CARGO_MANIFEST_DIR"));
+    println!("cargo:rerun-if-changed={src}");
+    if std::path::Path::new(napi).exists() {
+        println!("cargo:rerun-if-changed={napi}");
+        let bin = format!("{out}/crash_addon.node");
+        let status = Command::new("clang")
+            .args(["-arch", "arm64", "-bundle", "-undefined", "dynamic_lookup",
+                   "-I", "/opt/homebrew/include/node", "-o", &bin, &src])
+            .status().expect("clang crash_addon");
+        assert!(status.success(), "the node crash addon failed to build against {napi}");
+        println!("cargo:rustc-env=RETRACE_NODE_CRASH_ADDON={bin}");
+    } else {
+        println!("cargo:warning=SKIPPED the node crash addon: {napi} not found (`brew install node`); \
+                  NODE_CRASH_ADDON is None and node_crash_e2e will announce its skip");
+    }
 }
