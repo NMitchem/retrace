@@ -201,6 +201,11 @@ fn an_event_list_reaching_into_an_untouched_reserved_page_is_accepted_and_an_unm
 /// Review Focus 2's path, and the header's "not special-cased" rule: node's 1 ns wait converts to
 /// 0 ticks (F6), so it blocks with its deadline already reached and is woken by the deadline queue
 /// in the same `schedule_after_block`, with no idle jump.
+///
+/// Fix round 1 (review Minor 2): it also pins the integrated deadline path, `wake_due_threads` ->
+/// `kevent_timed_out` -> `deliver_kevent` -> `deliver_wake`, on the vCPU. A kevent deadline answers
+/// 0 with the carry clear, which is what the blocking landmark writes, so a sentinel `x0` and a set
+/// carry go on the vCPU between the two, and only a reply delivered to the vCPU clears them.
 #[test]
 fn a_one_nanosecond_wait_is_woken_in_the_same_settle_without_a_jump() {
     let mut b = dynbox();
@@ -211,10 +216,15 @@ fn a_one_nanosecond_wait_is_woken_in_the_same_settle_without_a_jump() {
         panic!("blocked with a deadline: {:?}", b.threads().state_of(0));
     };
     b.set_x0_err_and_return(0, false);
+    // The sentinel: the same post-return PC, with x0 0x77 and the carry set on the vCPU.
+    b.set_x0_err_and_return(0x77, true);
+    assert_ne!(b.regs_snapshot().cpsr & PSTATE_C, 0, "the sentinel carry is set");
     let before = synthetic_tsc(&b);
     b.schedule_after_block();
     assert_eq!(b.threads().state_of(0), ThreadState::Runnable, "the deadline {d:#x} was already due");
     assert_eq!(b.threads().current(), 0);
+    assert_eq!((b.vcpu_get_x(0), b.regs_snapshot().cpsr & PSTATE_C), (0, 0),
+        "the deadline's reply, 0 with the carry clear, was delivered to the vCPU, over the sentinel");
     assert_eq!(synthetic_tsc(&b), before, "no idle jump: the deadline queue's own pass woke it");
     assert_eq!(b.dbg_gkq().waiter(KQ), None);
 }
