@@ -4426,13 +4426,13 @@ impl Kwq {
     /// S is read before the caller adds this call's count, as in the kernel.
     fn broadcast(&mut self, upto: u32, updatebits: &mut u32, woken: &mut Vec<Wake>) -> Result<(), String> {
         let mut bits = 0;
-        let mut i = 0;
-        while i < self.queue.len() {
-            let kwe = self.queue[i];
+        // Each entry it takes leaves the queue (`ksyn_signal` removes a waiter), so the scan always
+        // reads the head.
+        while let Some(&kwe) = self.queue.first() {
             if is_seqhigher(kwe.lockseq, upto) {
                 break;
             }
-            self.queue.remove(i);
+            self.queue.remove(0);
             match kwe.state {
                 KweState::InWait => {
                     woken.push(Wake { tid: kwe.thread.expect("an InWait entry names its thread"), word: woken_word(PTH_RWL_MTX_WAIT) });
@@ -5392,6 +5392,7 @@ fn a_seek_into_a_blocked_cvwait_matches_a_cold_seek() {
     let at = retrace_core::seek(&trace, w + 1, 0).unwrap();
     assert!(at.dbg_internal_state().contains("InWait"), "the checkpoint holds the queued waiter:\n{}", at.dbg_internal_state());
     let cp = at.checkpoint();
+    drop(at); // one VM per process: from_checkpoint below creates the next
     let warm = {
         let mut r = retrace_core::ReplaySession::from_checkpoint(&trace, &cp).unwrap();
         r.advance_to_landmark(s + 1).unwrap_or_else(|d| panic!("warm: diverged at {}: {}", d.landmark, d.detail));
