@@ -245,6 +245,9 @@ pub const SBXPATH_DYN: &str = concat!(env!("OUT_DIR"), "/sbxpath_dyn");
 pub const VMALIGN_DYN: &str = concat!(env!("OUT_DIR"), "/vmalign_dyn");
 /// M47: `fork()` with `RLIMIT_NPROC` lowered to 1; prints the errno the fork failed with.
 pub const FORKFAIL_DYN: &str = concat!(env!("OUT_DIR"), "/forkfail_dyn");
+/// M48: psynch condition variables by mode — `pingpong`, `broadcast`, `timedout`, `timedsignal`,
+/// `onens` and `mutex` (spec §3h, Ruling T5-a; see the source's header).
+pub const CONDVAR_DYN: &str = concat!(env!("OUT_DIR"), "/condvar_dyn");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
@@ -503,6 +506,13 @@ mod tests {
     fn forkfail_guest_parses() {
         // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
         let l = parse_macho(&std::fs::read(FORKFAIL_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn condvar_dyn_guest_parses() {
+        // M48: proves the build.rs wiring and the path constant; behaviour is condvar_e2e's.
+        let l = parse_macho(&std::fs::read(CONDVAR_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
