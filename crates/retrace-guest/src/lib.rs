@@ -227,6 +227,11 @@ pub const TIMER_DYN: &str = concat!(env!("OUT_DIR"), "/timer_dyn");
 pub const FSOPS_DYN: &str = concat!(env!("OUT_DIR"), "/fsops_dyn");
 /// M47: `madvise` by mode — `zero`, `reuse`, `bad` (spec §3f).
 pub const MADV_DYN: &str = concat!(env!("OUT_DIR"), "/madv_dyn");
+/// M48: a freestanding probe with no commpage: `mrs S3_6_C15_C1_5` must read 0, EL0 `ic ivau` must
+/// run (SCTLR.UCI), and the `msr` must be refused by value (§11a item 8).
+pub const SPRRPROBE: &str = concat!(env!("OUT_DIR"), "/sprrprobe");
+/// M48: `MAP_JIT` write-protect by mode — `basic`, `v8`, `twothreads`, `fault` (spec §3h).
+pub const JITWP_DYN: &str = concat!(env!("OUT_DIR"), "/jitwp_dyn");
 /// M48: callee-saved `d8`-`d15` across a thread switch (`thread`) and a `sigreturn` (`signal`).
 pub const SIMD_DYN: &str = concat!(env!("OUT_DIR"), "/simd_dyn");
 /// M48: V8's aligned-reservation trim — a head and an unaligned-length tail munmapped (`trim`),
@@ -513,6 +518,30 @@ mod tests {
     fn condvar_dyn_guest_parses() {
         // M48: proves the build.rs wiring and the path constant; behaviour is condvar_e2e's.
         let l = parse_macho(&std::fs::read(CONDVAR_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn sprrprobe_guest_parses_and_carries_both_sprr_encodings() {
+        // M48: proves the build.rs wiring and the path constant, and pins retrace-arch's SPRR
+        // decode to clang's own words: the probe opens with `mrs x0, S3_6_C15_C1_5` and holds one
+        // `msr S3_6_C15_C1_5, x1` and one `ic ivau, x3`. Behaviour is jitwp_e2e's.
+        let l = parse_macho(&std::fs::read(SPRRPROBE).unwrap());
+        let seg = l.segments.iter().find(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64)
+            .expect("the entry lies inside a segment");
+        let words: Vec<u32> = seg.data[(l.entry - seg.vaddr) as usize..].chunks_exact(4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+        use retrace_arch::{decode_sprr_access, SprrAccess};
+        assert_eq!(decode_sprr_access(words[0]), Some(SprrAccess::Read { rt: 0 }), "{:#010x}", words[0]);
+        assert_eq!(words.iter().filter(|&&w| decode_sprr_access(w) == Some(SprrAccess::Write { rt: 1 })).count(), 1,
+            "exactly one msr S3_6_C15_C1_5, x1");
+        assert!(words.contains(&0xd50b_7523), "the probe's ic ivau, x3 (nodeshapes.rs's neighbour word)");
+    }
+
+    #[test]
+    fn jitwp_guest_parses() {
+        // M48: proves the build.rs wiring and the path constant; behaviour is jitwp_e2e's.
+        let l = parse_macho(&std::fs::read(JITWP_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
