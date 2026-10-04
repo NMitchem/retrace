@@ -75,6 +75,12 @@ pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceGetSpecialPort, ServiceSet
 /// msgh_id alone: these are kernel-subsystem ids, unambiguous under the KOBJECT options shape.
 const FORWARD_ALLOWLIST: &[(u32, &str)] =
     &[(200, "host_info"), (206, "host_get_clock_service"), (3418, "semaphore_create"),
+      // semaphore_destroy (task subsystem base 3400, slot 19): M48 (walls.md §1 row 2), libuv's
+      // `uv_sem_destroy`, issued by node after the loop thread's `uv_sem_post` (t0 M2: walk `e`, to
+      // task self, 0x203). A COMPLEX message moving the semaphore's send right in one MOVE_SEND
+      // descriptor. Forwarded and recorded like its create, 3418 (the semaphore is a port in
+      // retrace's own IPC space, which is the guest's); replay applies the recorded reply.
+      (3419, "semaphore_destroy"),
       // task_info (task subsystem base 3400, slot 5): libsecinit's app-sandbox check reads the
       // process's audit token (flavor 15 = TASK_AUDIT_TOKEN). A read-only DATA query with no ports —
       // forwarded to retrace's own task (== the process) and recorded (forward-and-record; the token
@@ -495,6 +501,12 @@ mod tests {
         assert!(matches!(route(&msg(206,  0x1f03, KOBJ), Some(0x203)), Route::Forward("host_get_clock_service")));
         assert!(matches!(route(&msg(3418, 0x203,  KOBJ), Some(0x203)), Route::Forward("semaphore_create")));
         assert!(matches!(route(&msg(3405, 0x203,  KOBJ), Some(0x203)), Route::Forward("task_info")));
+    }
+    #[test]
+    fn semaphore_destroy_is_forwarded_as_semaphore_create_is() {
+        // M48 (walls.md §1 row 2): libuv's uv_sem_destroy, the mirror of 3418.
+        assert!(matches!(route(&msg(3419, 0x203, KOBJ), Some(0x203)), Route::Forward("semaphore_destroy")));
+        assert!(check_forward_body(3419, &[]).is_ok(), "3419 has no body-level check");
     }
     #[test]
     fn everything_else_fails_loudly() {
