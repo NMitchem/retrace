@@ -32,7 +32,8 @@ mod util;
             capability M21 does not have and did not set out to build. libstd HAS a handler \
             installed for the signal the guard fault maps to — signal 10, SIGBUS — so the \
             disposition check passes, but the faulting thread has that signal BLOCKED, and \
-            retrace-core/src/lib.rs:203 asserts rather than guessing: 'raising blocked signal 10 \
+            the assert in retrace-core's `record_box` (retrace-core/src/lib.rs:216 as of M48's close) \
+            asserts rather than guessing: 'raising blocked signal 10 \
             synchronously is not modelled: a fault cannot be deferred, POSIX leaves it undefined, \
             and Darwin force-delivers. M11 models no pending set, so implement one — and revisit \
             sigpending's always-empty answer — before a guest needs this.' A guest now needs it. \
