@@ -1,0 +1,111 @@
+audit of 579ebf9 on 2026-10-04 06:43:59 -03
+== 1. No trace-format change (H3)
+VERDICT crates/retrace-trace diff lines since e6caa65: ok (0)
+VERDICT TRACE_MAGIC is RT\x00\x0b: ok (1)
+== 2. Symmetry rule 1: guest_kevent and guest_psynch once in record_box and once in ReplaySession::advance, the record call before the generic arm; note_fd_effects twice in record_box (Task 4 Ruling K6) and once in advance
+ReplaySession::advance starts at line 1729; the generic arm's first assert is at line 1349
+1118:                let (rc, err) = b.guest_kevent(args).unwrap_or_else(|m| panic!("{m}"));
+1119-                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err, writes: vec![], thread })
+1120-                    .map_err(|e| format!("append kevent: {e}"))?; count += 1;
+--
+2552:                                let (rc, e) = match self.b.guest_kevent(args) {
+2553-                                    Ok(r) => r,
+2554-                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+VERDICT guest_kevent sides: ok (record 1118, replay 2552)
+1134:                let rc = b.guest_psynch(num, args).unwrap_or_else(|m| panic!("{m}"));
+1135-                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+1136-                    .map_err(|e| format!("append psynch: {e}"))?; count += 1;
+--
+2578:                                let rc = match self.b.guest_psynch(num, args) {
+2579-                                    Ok(rc) => rc,
+2580-                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+VERDICT guest_psynch sides: ok (record 1134, replay 2578)
+283:                b.note_fd_effects(num, args, 0, 0, false).unwrap_or_else(|m| panic!("{m}"));
+284-            }
+285-            // mmap is special-cased: it creates guest memory the program then writes with plain
+--
+1425:                b.note_fd_effects(num, args, ret, ret1, err).unwrap_or_else(|m| panic!("{m}"));
+1426-            }
+1427-            // A cache-window stage-2 fault: stage/fixup/re-sign/map the page (page_in_cache) and
+--
+2999:                                if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
+3000-                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+3001-                                        "syscall {num} refused on replay, though the recording accepted it \
+VERDICT note_fd_effects sides: ok (record 283 and 1425, replay 2999)
+VERDICT guest_kevent before the generic arm: ok (1118 < 1349)
+VERDICT guest_psynch before the generic arm: ok (1134 < 1349)
+(compare the argument lists printed above by eye: the same Box_ method with the same arguments on both sides)
+== 3. The generic forward arm asserts every new number
+1349:                    "signal syscall {num} reached the generic forward arm — it must be serviced or \
+1360:                    "workq syscall {num} reached the generic forward arm — it must be emulated \
+1369:                    "kevent_qos (374) reached the generic forward arm — it must be emulated above \
+1376:                    "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c).");
+1381:                    "psynch syscall {num} reached the generic forward arm — it must be emulated above (M48 §3e).");
+1388:                    "madvise (75) reached the generic forward arm — it must be modelled above (M47). \
+1394:                    "fork ({num}) reached the generic forward arm — it must be refused above (M47). \
+VERDICT the kevent assert: ok (1)
+VERDICT the psynch assert: ok (1)
+== 4. Symmetry rule 2: the SPRR register and the JIT view live below the trace
+292:                // Minor (b): an anonymous PROT_EXEC (JIT) mmap would need exec promotion but
+293:                // guest_mmap installs plain RW+non-exec data pages. JIT is out of M2 scope; warn
+295:                // M48 §3f exempts MAP_JIT: the box keeps such a range and stamps the running thread's
+298:                if args[2] & 0x4 != 0 && args[3] & retrace_arch::MAP_JIT == 0 {
+299:                    eprintln!("[retrace warn] anon PROT_EXEC mmap (len {:#x}) not promoted to exec (JIT out of M2 scope)", args[1]);
+VERDICT SPRR in retrace-core code (comments aside): ok (0)
+== 5. Every new Box_ field at Task 4's six sites (Ruling T10-a); kq, M46's field, is the patterns' control
+VERDICT kq: Box_ and BoxState, the three literals, checkpoint(), from_checkpoint, dbg_internal_state: ok (decl=2 lit=3 ckpt=1 from=1 dbg=1)
+VERDICT gkq: Box_ and BoxState, the three literals, checkpoint(), from_checkpoint, dbg_internal_state: ok (decl=2 lit=3 ckpt=1 from=1 dbg=1)
+VERDICT psynch: Box_ and BoxState, the three literals, checkpoint(), from_checkpoint, dbg_internal_state: ok (decl=2 lit=3 ckpt=1 from=1 dbg=1)
+VERDICT jit: Box_ and BoxState, the three literals, checkpoint(), from_checkpoint, dbg_internal_state: ok (decl=2 lit=3 ckpt=1 from=1 dbg=1)
+== 6. verify_thread keeps seven call sites (§11a item 1)
+VERDICT verify_thread call sites: ok (7)
+== 7. Restore parity: each new state has a seek test, and checkpointparity has M48's
+258:fn a_seek_into_a_blocked_kevent_matches_a_cold_seek() {
+271:fn a_seek_inside_a_timed_kevent_matches_a_cold_seek() {
+VERDICT kq_e2e seek tests: ok (2)
+124:fn a_seek_into_a_blocked_cvwait_matches_a_cold_seek() {
+VERDICT condvar_e2e seek tests: ok (1)
+177:fn a_seek_into_a_write_enabled_window_matches_a_cold_seek() {
+VERDICT jitwp_e2e seek tests: ok (1)
+219:    assert_eq!(r.dbg_jit(), &jit, "{label}: the MAP_JIT set and its view (M48)");
+427:/// M48: the write-enabled JIT tier. It stages a commpage (a static guest has none), a V8-shaped
+450:    // PRECONDITIONS. Without these the M48 rows compare Default == Default.
+== 8. Review Focus: every pinned test is defined exactly once
+VERDICT an_event_list_aliasing_the_change_list_is_read_before_it_is_written: ok (1)
+VERDICT the_runtime_detection_probe_returns_natives_one_event: ok (1)
+VERDICT a_wake_of_the_current_thread_writes_the_vcpu: ok (1)
+VERDICT a_timeout_on_the_only_thread_answers_on_the_vcpu: ok (1)
+VERDICT a_timed_wait_on_the_only_waiter_answers_on_the_vcpu: ok (1)
+VERDICT the_sequence_window_wraps_as_synch_internal_h_computes: ok (1)
+VERDICT a_signal_across_the_sequence_wrap_wakes_the_waiter: ok (1)
+VERDICT the_stamped_extents_are_the_ranges_minus_their_noaccess_extents: ok (1)
+VERDICT an_unprotect_inside_a_jit_range_is_restamped_by_the_view_not_left_data: ok (1)
+VERDICT the_v8_shape_none_mapped_then_mprotected_rwx_runs_its_code: ok (1)
+VERDICT a_kevent_refused_on_replay_is_a_divergence_naming_it_not_a_panic: ok (1)
+VERDICT a_cvwait_refused_on_replay_is_a_divergence_naming_it_not_a_panic: ok (1)
+== 9. Every refusal prefix has a test file that names it
+prefix [M48: kevent ]: source lines 20, test files 2
+VERDICT [M48: kevent ] tested: ok
+prefix [M48: pipe ]: source lines 3, test files 1
+VERDICT [M48: pipe ] tested: ok
+prefix [M48: psynch ]: source lines 19, test files 2
+VERDICT [M48: psynch ] tested: ok
+prefix [M48: SPRR ]: source lines 2, test files 2
+VERDICT [M48: SPRR ] tested: ok
+prefix [M48: MAP_JIT ]: source lines 11, test files 1
+VERDICT [M48: MAP_JIT ] tested: ok
+prefix [M48: a signal is pending on thread ]: source lines 4, test files 2
+VERDICT [M48: a signal is pending on thread ] tested: ok
+== 10. Spec §1 part 5: every syscall number the final node walks reached is in CENSUS
+walk numbers: 87; CENSUS: 125
+VERDICT walk numbers missing from CENSUS: ok (0)
+psynch numbers the walks reached (only 303, 304 and 305 are modelled):
+   4 num 303: 1
+   1 num 304: 10
+   1 num 304: 8
+   3 num 304: 9
+   3 num 305: 16
+   1 num 305: 18
+   1 num 305: 9
+== 11. Nine #[ignore] lines, none new (H2)
+VERDICT #[ignore] lines: ok (9)
