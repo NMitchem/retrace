@@ -1,0 +1,32 @@
+walk=t2000 traps=1474
+nums=-89 -70 -50 -47 -36 -33 -29 -28 -27 -26 -24 -19 -18 -15 -14 -12 -10 1 4 5 6 20 24 25 33 38 41 42 43 46 47 54 73 74 75 92 97 98 105 116 133 153 169 170 194 195 197 202 220 228 266 286 294 303 304 305 327 329 331 336 338 339 347 360 361 362 363 366 372 381 396 398 399 406 427 463 470 483 500 515 516 550 2147483648 
+num 363: 14
+num 303: 1
+num 304: 10
+num 305: 18
+num 297: 0
+num 298: 0
+num 299: 0
+num 300: 0
+num 301: 0
+num 302: 0
+num 306: 0
+num 307: 0
+num 308: 0
+num 309: 0
+num 312: 0
+num 360: 6
+num 361: 5
+num 105: 1
+num 32: 0
+num 73: 127
+num 74: 34
+num 75: 32
+map_jit len=0x10000000 prot=0x0 flags=0x41842
+map_jit=1
+sprr writes=264
+sprr thread 0: 16
+sprr thread 2: 248
+sprr value 0x2010002030100000: 132
+sprr value 0x2010002030300000: 132
+msgh_ids=msgh_id=1073742031 msgh_id=200 msgh_id=206 msgh_id=3405 msgh_id=3409 msgh_id=3410 msgh_id=3418 msgh_id=3419 msgh_id=412 msgh_id=4811 msgh_id=4822 msgh_id=8000 msgh_id=8001 

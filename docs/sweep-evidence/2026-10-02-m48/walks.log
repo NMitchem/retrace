@@ -1,0 +1,18 @@
+start 2026-10-04 05:39:16 -03 commit=f5789bb load={ 2.05 1.61 1.47 } sha256=b420e90a114b55749f150fa0c9fcd66ce54987c3e2885adec8f18ef8eda3a637
+e record rc=0 secs=3 trace=525662853 traps=1470
+e replay1 rc=0 secs=4 same_stdout=yes
+e replay2 rc=0 secs=3 same_stdout=yes
+t10 record rc=0 secs=4 trace=526120779 traps=1476
+t10 replay1 rc=0 secs=4 same_stdout=yes
+t10 replay2 rc=0 secs=3 same_stdout=yes
+t2000 record rc=0 secs=4 trace=525741881 traps=1474
+t2000 replay1 rc=0 secs=3 same_stdout=yes
+t2000 replay2 rc=0 secs=4 same_stdout=yes
+natives record rc=0 secs=3 trace=526105443 traps=1476
+natives replay1 rc=0 secs=4 same_stdout=yes
+natives replay2 rc=0 secs=4 same_stdout=yes
+crash record rc=139 secs=8 trace=1203946763 traps=1407
+crash replay1 rc=139 secs=9 same_stdout=yes
+crash replay2 rc=139 secs=8 same_stdout=yes
+debug rc=0
+walks done 2026-10-04 05:40:36 -03 load={ 1.52 1.56 1.46 }

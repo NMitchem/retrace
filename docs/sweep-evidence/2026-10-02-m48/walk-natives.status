@@ -1,0 +1,3 @@
+natives record rc=0 secs=3 trace=526105443 traps=1476
+natives replay1 rc=0 secs=4 same_stdout=yes
+natives replay2 rc=0 secs=4 same_stdout=yes
