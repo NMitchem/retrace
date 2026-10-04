@@ -131,10 +131,10 @@ release build, 2026-10-04:
 | node `-e 'console.log(1)'` | 0.041 s | 3.45 s | 3.53 s | 733 MiB | 502 MiB |
 
 There is a **fixed start-up of about 0.2 s** (0.6 s for CPython) to build the VM and page in the
-shared cache. node's is about 3.4 s, because its V8 reserves hundreds of MiB of address space,
-which retrace backs in full. After that, **compute runs within about 10% of native**, because the
-guest executes natively on the CPU. **Syscalls that move a lot of memory are the slow case**: each
-one is diffed and kept in the trace. [`docs/current-state.md`](docs/current-state.md#performance) has the full table
+shared cache. node's is about 3.4 s; its V8 reserves hundreds of MiB of address space, which
+retrace backs in full and keeps in the trace. After that, **compute runs within about 10% of
+native**, because the guest executes natively on the CPU. **Syscalls that move a lot of memory are
+the slow case**: each one is diffed and kept in the trace. [`docs/current-state.md`](docs/current-state.md#performance) has the full table
 and how to read it.
 
 ## Getting started

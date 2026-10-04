@@ -882,8 +882,9 @@ source before it. One chunk, `hitorder_e2e` (08:00:30–08:38:45), spanned four 
 08:00:52 and 08:38:20 (`pmset -g log`: the host was on battery, where `caffeinate -s` does not
 hold), so it was re-run alone at 09:59:20–10:00:33 under the same load and disk gates, 23 passed;
 the replaced run, kept and labelled in the ledger, had also passed 23. No other chunk overlapped a
-sleep. The status log's M48 section has the tally chunk by chunk, and the final review and its
-outcome. The testing note below says how the chunks are assembled. The "test
+sleep. The final review's fix wave changed documentation only, so no chunk was re-run; the figures
+above are as measured at `bfd1172`, and `82cc888`'s and the wave's crates are identical. The status
+log's M48 section has the tally chunk by chunk, and the final review and its outcome. The testing note below says how the chunks are assembled. The "test
 binaries" figure is test executables plus the `Doc-tests` harnesses cargo reports, each of which
 runs zero tests — the convention every milestone since M14 has counted by, kept for comparability
 and written out here so nobody has to re-derive it. One `#[ignore]` line was removed (ten at M47's
@@ -923,7 +924,7 @@ twenty-two files changed their `#[test]` count, and every other file's count is 
 | `retrace-guest/src/lib.rs` | 28 | 35 | **+7** (`simd_dyn`, `trim_dyn`, `kq_dyn`, `condvar_dyn`, `sprrprobe` with both SPRR encodings, `jitwp_dyn` parse, and the node crash demo is wired) |
 | `retrace/tests/condvar_e2e.rs` | — | 8 | **+8**, new binary (ping-pong alternates strictly; a broadcast wakes three; a timed wait that expires returns the kernel's word after the idle jump; one signalled first returns 0; the only waiter's timed wait answers on the vCPU; a seek into a blocked `cvwait`; a replay-side refusal is a divergence; the mutex pair is refused and never forwarded) |
 | `retrace/tests/jitwp_e2e.rs` | — | 8 | **+8**, new binary (native's toggle sequence replays; V8's none-then-RWX shape runs its code; one thread runs the page while another is write-enabled; a store to a protected page is the recorded crash native takes; a seek into a write-enabled window; a step across a toggle; `reverse-continue` lands on the JIT code write; `sprrprobe` reads 0, runs `ic ivau` and is refused at its write) |
-| `retrace/tests/kq_e2e.rs` | — | 12 | **+12**, new binary (libuv's probe gets native's one event; a cross-thread trigger wakes the waiter after the waker's landmark; a 5 ms timeout reached by the idle jump; a timeout on the only thread answers on the vCPU; a pipe write wakes the reader with native's byte count and `EOF`; `EV_ONESHOT` delivered once; an unmodelled filter stops the recorder; two seeks; a replay-side refusal and a rewritten return each a divergence; a non-kqueue descriptor refused) |
+| `retrace/tests/kq_e2e.rs` | — | 12 | **+12**, new binary (libuv's probe gets native's one event; a cross-thread trigger wakes the waiter after the waker's landmark; a 5 ms timeout reached by the idle jump; a 1 ns timeout on the only thread wakes in its own settle; a pipe write wakes the reader with native's byte count and `EOF`; `EV_ONESHOT` delivered once; an unmodelled filter stops the recorder; two seeks; a replay-side refusal and a rewritten return each a divergence; a non-kqueue descriptor refused) |
 | `retrace/tests/node_crash_e2e.rs` | — | 1 | **+1**, new binary (rung 10: node crashes in `crash.js` and `reverse-continue` reaches the store in its JIT code) |
 | `retrace/tests/node_e2e.rs` | 1 | 2 | **+1**, and un-`#[ignore]`d (`node_prints_one_and_replays` runs; `node_timer_replays` lands the idle jump exactly on main's deadline) |
 | `retrace/tests/simd_e2e.rs` | — | 3 | **+3**, new binary (callee-saved SIMD registers across a thread switch and a `sigreturn`; a threaded replay under three host environments) |
@@ -1155,8 +1156,10 @@ Read it as three costs, not one ratio:
 - **A fixed start-up of about 0.2 s** (0.6 s for CPython): building the VM, demand-paging and
   re-signing the shared-cache pages the guest touches, and the opening snapshot. It dominates every
   short run, which is why `echo` shows 132×. **node's is about 3.4 s** (3.453 s record over a
-  0.041 s native run), because V8 reserves about 640 MB of `PROT_NONE` address space (M48 spec §11
-  item 14) that retrace backs in full and snapshots at both ends of the recording (Known limits).
+  0.041 s native run). V8 reserves about 640 MB of `PROT_NONE` address space (M48 spec §11 item 14),
+  which retrace backs in full and keeps in the recording's final snapshot (the opening one precedes
+  the guest's first `mmap`), and that is what makes node's trace large (Known limits); how the 3.4 s
+  divides between that and the rest of the run is not measured.
 - **Near-native compute.** The guest runs natively on the vCPU between traps. The 30M-step loop
   adds 0.68 s over native, and 0.59 s of that is the same start-up `print(1)` pays, so the loop
   itself runs within about 10% of native.
@@ -1644,7 +1647,8 @@ These are real and current, not aspirational gaps.
 - **node's costs and fidelity (M48).** node records and replays (What works today), at a cost
   that comes from one modelling choice: retrace backs a `PROT_NONE` mmap in full, so V8's
   reservations (256 MiB, 256 MiB, 128 MiB and `0x80000`, M48 plan P10; about 640 MB, M48 spec §11b
-  item 14) sit in both snapshots and in every checkpoint. Lazy `PROT_NONE` backing is not
+  item 14) sit in the recording's final snapshot and in every checkpoint taken after them (the
+  opening snapshot precedes them). Lazy `PROT_NONE` backing is not
   modelled. A `--jitless` recording is the same size as a JIT one (525 765 498 B against
   525 714 637 B, M48 Task 7), so the size is V8's other reservations, not the `MAP_JIT` range.
   - **Traces:** 525 662 853 B for `console.log(1)` and 1 203 946 763 B for the crash demo, on the
@@ -1694,10 +1698,10 @@ These are real and current, not aspirational gaps.
   that re-executes a window prints its writes again. Only `node_e2e`'s recorder child sets it, and
   the guest's environment never carries it.
 - **A box-side write never reaches the debugger's software watch detection.** `deliver_wake` writes
-  a woken thread's `kevent` event list from box state, as M46's manager list and
-  `bsdthread_create`'s kport write do, and `syscall_watch_hit` is set only in `apply_and_return`. So
-  a `watch` on a `kevent` event-list cell followed by `reverse-continue` does not stop at the waking
-  write (M48 Task 4 review).
+  a woken thread's `kevent` event list from box state, and `Box_::guest_kevent` the list of a
+  `kevent` that returns at once, as M46's manager list and `bsdthread_create`'s kport write do, and
+  `syscall_watch_hit` is set only in `apply_and_return`. So a `watch` on a `kevent` event-list cell
+  followed by `reverse-continue` does not stop at either write (M48 Task 4 review).
 - **A guest that touches a page it unmapped ends the record with a recorder error, not a crash.**
   The record stops with `RECORD ERROR: non-syscall exit: data abort … (UNMAPPED)`, exit 4, and no
   `Event::Crash`, where native takes `SIGSEGV` (139). A stage-2 translation fault has been a
@@ -1720,8 +1724,10 @@ These are real and current, not aspirational gaps.
   byte-identical). A gate red with this signature is classified against this entry, re-run once
   alone, and reported. The successor owed: run exclusive pairs on the shadow monitor in plain record
   and replay too, or emulate every discarded-status pair.
-- **Every M48 refusal, by its message prefix.** Each is raised before the model or the thread table
-  changes, and identically on both sides (R5): a `kevent` or psynch refusal stops the recorder
+- **Every M48 refusal, by its message prefix.** Each is raised before the thread table changes, and
+  before the model changes except a `kevent` wake's signal-pending refusal (it follows the kqueue's
+  update, which the stopped recorder and the debugger's reseek discard), and identically on both
+  sides (R5): a `kevent` or psynch refusal stops the recorder
   naming it and is a `DIVERGENCE` naming it on replay, never a panic there, and an SPRR or
   `MAP_JIT` refusal sits in the box's shared path, so record and replay stop with the same text.
   - **`M48: kevent …`**: a descriptor that is not a guest kqueue (native `EBADF`); a timeout that

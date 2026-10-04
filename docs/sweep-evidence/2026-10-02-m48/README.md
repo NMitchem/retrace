@@ -204,8 +204,8 @@ round 1).
 
 Node's trace (502 MiB) is the
 `console.log(1)` walk's ~525 MB, and its record RSS 733 MiB; its 3.45 s record is about 3.4 s of
-retrace over a 0.04 s native run (P10: V8's reservations are backed in full, so they are in both
-snapshots).
+retrace over a 0.04 s native run (P10: V8's reservations are backed in full, so they are in the
+final snapshot; the opening one precedes them. What the 3.4 s is spent on is not measured).
 
 ## The parked gates
 
