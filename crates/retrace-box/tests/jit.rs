@@ -22,10 +22,13 @@ fn tb() -> Box_ {
     b
 }
 
-/// Review Focus item 4 (box half). V8 maps its code range `PROT_NONE` with `MAP_JIT`, then
-/// `mprotect`s a sub-range RWX. `guest_mprotect` routes that through `unprotect`, which stamps
-/// `ATTR_DATA` unconditionally: without the view's restamp the committed range would be writable and
-/// non-executable under the protected view, and V8's first call into it would fault.
+/// Review Focus item 4, and its primary pin. V8 maps its code range `PROT_NONE` with `MAP_JIT`,
+/// then `mprotect`s a sub-range RWX. `guest_mprotect` routes that through `unprotect`, which stamps
+/// `ATTR_DATA` unconditionally: without the view's restamp the committed range is writable and
+/// non-executable under the protected view until the next toggle restamps it. No natively valid flow
+/// calls into it before that toggle (a committed MAP_JIT page is never re-protected, t6-jitprobe, so
+/// its code is written after a write-enable toggle), so `jitwp_e2e`'s `v8` mode cannot go red when
+/// the restamp is missing. This test does.
 #[test]
 fn an_unprotect_inside_a_jit_range_is_restamped_by_the_view_not_left_data() {
     let mut b = tb();
