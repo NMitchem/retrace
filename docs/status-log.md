@@ -15980,7 +15980,8 @@ under perl alarms of 1800 s and 3000 s, where exit 142 would be a hang, never a 
 (`jitwp_e2e`, at 2.68 → under 3), no chunk started above 2.68, no alarm fired, and the data volume
 never had less than 41 994 MiB free. Every one of the 93 chunk lines reads `exit=0`. `node_e2e`
 took 337.97 s (2 passed) and `node_crash_e2e` 504.11 s (1 passed) by libtest's clock. It was the
-only gate run.
+only gate run. The final review's fix wave changed documentation only, so no chunk was re-run; the
+figures above are as measured at `bfd1172`, and `82cc888`'s and the wave's crates are identical.
 
 **One chunk spanned a host sleep and was re-run.** `pmset -g log` shows the host asleep 08:00:52–
 08:18:29, 08:18:31–08:19:45, 08:20:09–08:35:43 and 08:35:45–08:38:20, on battery, where
@@ -16018,8 +16019,39 @@ each file's tests named.
 
 ### The final review
 
-Pending: the controller's final review over `git diff a7365da..HEAD` (excluding the evidence
-directories) and its fix wave, if any, are recorded here at the close.
+The final review (Opus, read-only, over `git diff a7365da..82cc888` excluding evidence and
+`docs/superpowers`, 8,477 lines, plus the docs and evidence): verdict "merge after a fix wave": 0
+Critical, 1 Important, 4 Minor. Verified:
+- the five Review Focus pins assert the difference they claim;
+- the record arms sit before the generic arm and the mirrors after the arm-top `verify_thread` (7
+  sites, counts 2/2/3);
+- the SPRR arm admits only the two commpage words and advances PC once under `run()` and `step()`;
+- `flush_guest_tlb`'s MDSCR guard is restored on every path, with no recursion;
+- the field pattern at the six sites;
+- `deliver_wake`'s single vCPU-or-saved-context decision for `kevent`, psynch and both timeout paths;
+- every doc figure traced to a log (gate 1069/0/9 over 172, +118 per file, sweep 49/5, bench rows,
+  durations, trace sizes);
+- the status log append-only;
+- 37 citations checked (13 SDK, 22 libpthread-539.100.4, the `#[ignore]` reasons);
+- the invariants at the head.
+
+Cross-task interactions examined clean: the deadline queue shared by M46 timers and `kevent`/cv
+deadlines (one idle jump, nothing fires twice), a psynch-blocked thread with a signal, a JIT view
+flip with `deliver_wake`, `flush_guest_tlb` at a toggle under `step()`, a checkpoint with JIT, the fd
+hook with the console arms, and partial `munmap` with JIT.
+
+Findings:
+- **Important 1 (docs only):** the docs said V8's reservations were in "both snapshots", but the
+  opening snapshot (`retrace-core/src/lib.rs:132`) precedes the guest's first instruction, so they
+  are in the final snapshot and in checkpoints taken after them, and nothing measured where node's
+  3.4 s goes (the 264 SPRR toggles, each restamping up to a 256 MiB range and flushing, are an
+  equally unmeasured candidate). Fixed in current-state, the README and the evidence README.
+- **Minor:** the watch limit also covers `guest_kevent`'s immediate event-list write (fixed); "raised
+  before the model changes" did not hold for the `kevent` wake's signal-pending refusal (fixed); the
+  `kq_e2e` row overclaimed (fixed); this placeholder (filled).
+
+The fix wave was documentation only: no `crates/` change, so no chunk was re-run and the gate stands
+as measured at `bfd1172`.
 
 ### What measurement changed
 
@@ -16189,15 +16221,37 @@ Spec §7's not-done list:
 Then:
 * **The timed waits left**: `sleep()`, `__semwait_signal` (334), `setitimer` (83) and `__ulock_wait2`
   (544).
-* **Lazy `PROT_NONE` backing**: V8's reservations are backed and snapshotted in full, hence the
-  526 MB and 1.2 GB traces and the 4.2 GB session.
+* **Lazy `PROT_NONE` backing**: V8's reservations are backed in full and kept in the final snapshot
+  and in every later checkpoint, hence the 526 MB and 1.2 GB traces and the 4.2 GB session; where
+  node's 3.4 s start-up goes is not measured.
 * **The lost store-exclusive in plain record and replay**: run exclusive pairs on the shadow monitor
   there too, or emulate every discarded-status pair (a new subsystem, the ledger's M49 candidate).
 * **A touch of an unmapped page as an `Event::Crash`** rather than a recorder error (since M2).
-* **The parked review minors**, by task, in the ledger: Task 0's six, Task 1's five, Task 2's five,
-  Task 3's four, Task 4's six, Task 5's two, Task 6's zero-length `mprotect` refused as `EACCES`,
-  Task 7's review minors not routed to Tasks 10 and 11, Task 8's four diagnostics minors (native
-  stderr in the failure message, `DEBUG_SECS`'s doc comment, the stale-build hint, one `.ips` crash
-  report per run), and Task 10's six; and the final review's (above).
+* **The parked review minors** (the ledger, `progress.md`), by task:
+  - Task 0: the M9 runs' exit codes are prose only; the `otool` disassembly behind "correct by
+    accident" and the D2 host-state outputs are not committed; the interposer's build command is not
+    reproducible from the committed directory.
+  - Task 1: `hv-sys/tests/simd.rs:23-25` says the old test passes by accident; `simd_e2e`'s
+    environment loop was never seen to fail; `simdctx`'s switch-back half compares against probably
+    zero registers; the `set_simd` safety comment understates the clobber set.
+  - Task 2: `machmsg.rs` comments still list four allowlisted ids; no control that 3417/3420 stay
+    `Unsupported`; one comment cites §3b for §3c.
+  - Task 3: `guest_munmap(ipa, 0)` releases one granule when `ipa` is unaligned; the
+    `saturating_add` hardening never runs for `munmap(addr, ~0)` in a debug build; `trim_e2e` test 3
+    checks memory in one direction only; the unmap/re-map cost per trim is unmeasured.
+  - Task 4: two panics reachable after an earlier silent divergence (`deliver_wake`,
+    `kevent_timed_out`); K1's stated reason is imprecise; the 1 ns test's first reply is redundant.
+  - Task 5: no unit row reaches `time_out`'s `ECVPREPOST` branch; a timed wait a prepost satisfies
+    at once can still be refused for a bad timeout.
+  - Task 6: a zero-length `mprotect` strictly inside a committed extent is refused as `EACCES`, where
+    native likely answers 0.
+  - Task 7: `sprr_write`'s doc comment does not mention the witness; its `eprintln!` re-calls
+    `threads.current()`; `node_e2e`'s `STRIDE` duplicates `SYNTH_TSC_STRIDE`.
+  - Task 8: `node_crash_e2e.rs:63-66` drops the native run's stderr and does not say "native";
+    `node_crash_demo_is_wired`'s failure should say "touch `crates/retrace-guest/build.rs`";
+    `DEBUG_SECS`'s doc comment omits the measured 108.77 s; one `.ips` crash report per run.
+  - Task 9: the 64-round `dddiagnose` rate measurement was not run.
+  - Task 10: check 10 prints `ok (0)` on empty inputs; check 4 is absence-only; check 9 can match a
+    comment; the anchors pick the Nth match.
 * **M47's owed items M48 did not touch**, by reference to M47's "What stays owed" (`:15599–15622`):
   every item except `kevent` on a guest `kqueue()` (paid) and the timed waits (partly paid, above).
