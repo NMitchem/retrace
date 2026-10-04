@@ -9,7 +9,7 @@ Signs a copy of the release binary with `retrace.entitlements` (the cargo runner
 of a freshly signed binary can stall in codesign validation for minutes, and would otherwise be
 measured as retrace), then N timed runs of each phase, and prints the median of each. Record and
 replay must both exit with the native exit code or the workload is reported as failed, never
-timed. Workloads that need Homebrew (`jq`, `python@3.14`) are skipped with a line that says so.
+timed. Workloads that need Homebrew (`jq`, `python@3.14`, `node`) are skipped with a line that says so.
 """
 import argparse
 import json
@@ -26,6 +26,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JQ = "/opt/homebrew/bin/jq"
 PY = ("/opt/homebrew/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/"
       "Contents/MacOS/Python")
+NODE = os.path.realpath("/opt/homebrew/bin/node")
 
 
 def workloads(data):
@@ -36,6 +37,7 @@ def workloads(data):
         ("jq, compute", JQ, ["-n", "[range(0;100000)] | add"]),
         ("python -c 'print(1)'", PY, ["-c", "print(1)"]),
         ("python, 30M-step loop", PY, ["-c", "print(sum(i*i for i in range(30_000_000)))"]),
+        ("node -e 'console.log(1)'", NODE, ["-e", "console.log(1)"]),
     ]
 
 

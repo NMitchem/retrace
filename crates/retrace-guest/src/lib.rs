@@ -227,6 +227,19 @@ pub const TIMER_DYN: &str = concat!(env!("OUT_DIR"), "/timer_dyn");
 pub const FSOPS_DYN: &str = concat!(env!("OUT_DIR"), "/fsops_dyn");
 /// M47: `madvise` by mode — `zero`, `reuse`, `bad` (spec §3f).
 pub const MADV_DYN: &str = concat!(env!("OUT_DIR"), "/madv_dyn");
+/// M48: a freestanding probe with no commpage: `mrs S3_6_C15_C1_5` must read 0, EL0 `ic ivau` must
+/// run (SCTLR.UCI), and the `msr` must be refused by value (§11a item 8).
+pub const SPRRPROBE: &str = concat!(env!("OUT_DIR"), "/sprrprobe");
+/// M48: `MAP_JIT` write-protect by mode — `basic`, `v8`, `twothreads`, `fault` (spec §3h).
+pub const JITWP_DYN: &str = concat!(env!("OUT_DIR"), "/jitwp_dyn");
+/// M48: callee-saved `d8`-`d15` across a thread switch (`thread`) and a `sigreturn` (`signal`).
+pub const SIMD_DYN: &str = concat!(env!("OUT_DIR"), "/simd_dyn");
+/// M48: V8's aligned-reservation trim — a head and an unaligned-length tail munmapped (`trim`),
+/// then the released parts touched (`head`, `tail`).
+pub const TRIM_DYN: &str = concat!(env!("OUT_DIR"), "/trim_dyn");
+/// M48: the guest's own kqueues by mode — `probe`, `wake`, `timeout`, `tryselect`, `pipe`,
+/// `oneshot`, `bad filter`, `bad notkq` (spec §3h; see the source's header).
+pub const KQ_DYN: &str = concat!(env!("OUT_DIR"), "/kq_dyn");
 /// M47: links `librpath_dyn.dylib` by `@rpath`, so it loads only if AMFI allows `@`-path expansion.
 pub const RPATH_DYN: &str = concat!(env!("OUT_DIR"), "/rpath_dyn");
 /// M47 (t0, after H7): `sandbox_container_path_for_pid` on its own pid — Sandbox's call 4.
@@ -237,10 +250,23 @@ pub const SBXPATH_DYN: &str = concat!(env!("OUT_DIR"), "/sbxpath_dyn");
 pub const VMALIGN_DYN: &str = concat!(env!("OUT_DIR"), "/vmalign_dyn");
 /// M47: `fork()` with `RLIMIT_NPROC` lowered to 1; prints the errno the fork failed with.
 pub const FORKFAIL_DYN: &str = concat!(env!("OUT_DIR"), "/forkfail_dyn");
+/// M48: psynch condition variables by mode — `pingpong`, `broadcast`, `timedout`, `timedsignal`,
+/// `onens` and `mutex` (spec §3h, Ruling T5-a; see the source's header).
+pub const CONDVAR_DYN: &str = concat!(env!("OUT_DIR"), "/condvar_dyn");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
 pub const CRASH_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.json");
+/// M48 (spec §3g, D1): node's crash demo. `crash.js` reads `crash.json` beside it, computes the
+/// target, has TurboFan compile a store of it synchronously (`--allow-natives-syntax`, R6), prints
+/// the `CRASHJS` marker and loads through the pointer with the addon. node reads both at run time,
+/// so these are repo paths, like `CRASH_PY`.
+pub const CRASH_JS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/node/crash.js");
+pub const CRASH_JS_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/node/crash.json");
+/// M48: the demo's N-API addon (`node/crash_addon.c`). `build.rs` builds it only where
+/// `/opt/homebrew/include/node/node_api.h` exists; elsewhere it is `None`, and `node_crash_e2e`
+/// announces its skip.
+pub const NODE_CRASH_ADDON: Option<&str> = option_env!("RETRACE_NODE_CRASH_ADDON");
 /// M39 wall-1 guard: two shared, `FIXED|OVERWRITE` `mach_vm_remap`s (own text page, called
 /// through the alias; `libffi-trampolines.dylib`'s `__TEXT`, compared through it) — the exact
 /// shape `import ctypes` triggers via libffi, minus CPython. Also the native protections probe
@@ -393,6 +419,42 @@ mod tests {
                 "crash.json must carry base 0x400000000000 + offset 0xdead0000 under `scratch`");
     }
 
+    /// One line past libtest's capture: `util::announce`'s body (CLAUDE.md, honest-gate rule 2).
+    fn announce(line: &str) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "{line}");
+    }
+
+    #[test]
+    fn node_crash_demo_is_wired() {
+        // M48 Task 8: the repo paths point at the demo, the data file carries the target the tests
+        // assert by name, and the addon constant is Some exactly when node's headers exist, so a
+        // build that silently failed to make the addon cannot pass as a machine without node.
+        let js = std::fs::read_to_string(CRASH_JS).unwrap();
+        assert!(js.contains("%OptimizeFunctionOnNextCall(store)"), "crash.js must force TurboFan on `store` (R6)");
+        assert!(js.contains("CRASHJS cell="), "crash.js must print the M6-style marker");
+        assert!(js.contains("'crash.json'"), "crash.js must read the data file beside it");
+        let json = std::fs::read_to_string(CRASH_JS_JSON).unwrap();
+        assert!(json.contains("\"0x400000000000\"") && json.contains("\"0xdead0000\""),
+                "crash.json must carry base 0x400000000000 + offset 0xdead0000");
+        let napi = std::path::Path::new("/opt/homebrew/include/node/node_api.h").exists();
+        match NODE_CRASH_ADDON {
+            Some(p) => {
+                assert!(napi, "an addon was built though node_api.h is missing");
+                let b = std::fs::read(p).unwrap();
+                // mach_header_64: MH_MAGIC_64, CPU_TYPE_ARM64, and filetype MH_BUNDLE (8).
+                assert_eq!(b[0..4], 0xfeed_facfu32.to_le_bytes(), "{p} is not a 64-bit Mach-O");
+                assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 0x0100_000c, "{p} is not arm64");
+                assert_eq!(u32::from_le_bytes(b[12..16].try_into().unwrap()), 8, "{p} is not a bundle");
+            }
+            None => {
+                assert!(!napi, "node_api.h exists but build.rs built no addon");
+                announce("SKIPPED node_crash_demo_is_wired's addon half: /opt/homebrew/include/node/node_api.h \
+                          not found (`brew install node`). The addon was NOT checked.");
+            }
+        }
+    }
+
     #[test]
     fn vmremap_guest_parses() {
         // M39: proves the build.rs wiring and the path constant; behaviour is vmremap_e2e's.
@@ -450,6 +512,27 @@ mod tests {
     }
 
     #[test]
+    fn simd_dyn_guest_parses() {
+        // M48: proves the build.rs wiring and the path constant; behaviour is simd_e2e's.
+        let l = parse_macho(&std::fs::read(SIMD_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn trim_dyn_guest_parses() {
+        // M48: proves the build.rs wiring and the path constant; behaviour is trim_e2e's.
+        let l = parse_macho(&std::fs::read(TRIM_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn kq_dyn_guest_parses() {
+        // M48: proves the build.rs wiring and the path constant; behaviour is kq_e2e's.
+        let l = parse_macho(&std::fs::read(KQ_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
     fn rpath_guest_parses() {
         // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
         let l = parse_macho(&std::fs::read(RPATH_DYN).unwrap());
@@ -474,6 +557,37 @@ mod tests {
     fn forkfail_guest_parses() {
         // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
         let l = parse_macho(&std::fs::read(FORKFAIL_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn condvar_dyn_guest_parses() {
+        // M48: proves the build.rs wiring and the path constant; behaviour is condvar_e2e's.
+        let l = parse_macho(&std::fs::read(CONDVAR_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn sprrprobe_guest_parses_and_carries_both_sprr_encodings() {
+        // M48: proves the build.rs wiring and the path constant, and pins retrace-arch's SPRR
+        // decode to clang's own words: the probe opens with `mrs x0, S3_6_C15_C1_5` and holds one
+        // `msr S3_6_C15_C1_5, x1` and one `ic ivau, x3`. Behaviour is jitwp_e2e's.
+        let l = parse_macho(&std::fs::read(SPRRPROBE).unwrap());
+        let seg = l.segments.iter().find(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64)
+            .expect("the entry lies inside a segment");
+        let words: Vec<u32> = seg.data[(l.entry - seg.vaddr) as usize..].chunks_exact(4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+        use retrace_arch::{decode_sprr_access, SprrAccess};
+        assert_eq!(decode_sprr_access(words[0]), Some(SprrAccess::Read { rt: 0 }), "{:#010x}", words[0]);
+        assert_eq!(words.iter().filter(|&&w| decode_sprr_access(w) == Some(SprrAccess::Write { rt: 1 })).count(), 1,
+            "exactly one msr S3_6_C15_C1_5, x1");
+        assert!(words.contains(&0xd50b_7523), "the probe's ic ivau, x3 (nodeshapes.rs's neighbour word)");
+    }
+
+    #[test]
+    fn jitwp_guest_parses() {
+        // M48: proves the build.rs wiring and the path constant; behaviour is jitwp_e2e's.
+        let l = parse_macho(&std::fs::read(JITWP_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 

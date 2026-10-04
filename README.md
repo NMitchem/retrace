@@ -8,10 +8,10 @@ and land on the instruction, and the thread, that last wrote it. It serves the r
 lldb, so `process continue -R` works.
 
 It is a **technical preview**. It runs real programs (full-`std` Rust, C, stock Homebrew `jq`,
-the CPython interpreter, Xcode's `git` for its local workflow, and most of the Apple binaries in
-`/bin` and `/usr/bin`), but it is not yet "rr for macOS": no preemptive thread scheduling, no
-`fork` or `exec`, and nothing that needs system services, I/O Kit, or a GUI. [Limits](#limits) has
-the list.
+the CPython interpreter, Homebrew's `node` with its JIT on, Xcode's `git` for its local workflow,
+and most of the Apple binaries in `/bin` and `/usr/bin`), but it is not yet "rr for macOS": no
+preemptive thread scheduling, no `fork` or `exec`, and nothing that needs system services, I/O Kit,
+or a GUI. [Limits](#limits) has the list.
 
 ## Demo: running a crash backwards in lldb
 
@@ -68,11 +68,16 @@ at (245, 70) pc=0x10000059c thread=0  in _main+0xa4
   breakpoint or watchpoint hit. Checkpoints make backward seeks fast.
 - **Watchpoints that name the writer.** A hardware watchpoint plus reverse-continue finds the last
   store to an address, and says which thread made it.
-- **Threads and signals.** Multi-threaded guests (`std::thread`, pthreads, GCD's global queues,
-  and GCD timers on the uptime clock: `dispatch_after` and timer sources) record and replay, and
-  signals reach the thread they were sent to, through the handler the program installed.
+- **Threads, timers and signals.** Multi-threaded guests (`std::thread`, pthreads with their
+  condition variables, GCD's global queues, GCD timers on the uptime clock, and kqueues with
+  timeouts) record and replay; every timed wait runs on a synthetic clock, so a 2-second timer costs
+  no wall-clock time. Signals reach the thread they were sent to, through the handler the program
+  installed.
 - **Crashes.** A crashing run is a normal recording that ends at the fault, so you can debug it
   backwards.
+- **JIT code.** node's V8 compiles JavaScript at run time; retrace models Apple's per-thread JIT
+  write-protect, so a recording can be reverse-continued into JIT-compiled code, to the store that
+  wrote a bad pointer.
 - **lldb.** `retrace gdbserver` speaks gdb-remote: continue and step both ways, breakpoints,
   watchpoints, `bt`, registers, memory, threads. `rsi` (reverse step) ships as a small lldb script.
 - **arm64e and PAC.** Apple's own binaries run with pointer authentication on.
@@ -94,14 +99,17 @@ has every limit with the measurement behind it.
   example, is a launcher that re-executes the real interpreter, and `/usr/bin/git` is an `xcrun`
   shim for Xcode's `git`.
 - **Command-line programs only.** Service lookups over XPC, I/O Kit, and GUI frameworks are not
-  modelled. A program that needs one stops at a named wall.
+  modelled. A program that needs one stops at a named wall. kqueue readiness is modelled for a
+  program's own pipes, so nothing that waits on a socket, a terminal or an inherited descriptor
+  runs (no network, no interactive node).
 - **Unmodelled syscalls are refused, never guessed at.** A program that reaches a syscall or Mach
   message retrace has no model for stops with a `RECORD ERROR` naming it. Of the 54 Apple binaries
   in the committed sample, 49 record and replay identically on an idle host, three of those by
   reaching the refused `posix_spawn` identically on both sides. The count moves by a row between
-  runs with host state, `dddiagnose`'s bimodal fault (the latest run counted 50); see
-  [`docs/current-state.md`](docs/current-state.md#known-limits).
-- **Traces are large and the format is not stable.** Tens to hundreds of MiB, uncompressed, and
+  runs with host state, `dddiagnose`'s bimodal fault (the latest run, on an idle host, counted 49;
+  the one before it, 50); see [`docs/current-state.md`](docs/current-state.md#known-limits).
+- **Traces are large and the format is not stable.** Tens of MiB to over a GiB, uncompressed
+  (node's V8 reserves address space retrace backs in full: about 501 MiB for `console.log(1)`), and
   recordings from an older retrace are rejected rather than misread.
 - **Debugging is instruction-level.** The built-in debugger has no DWARF, line numbers or
   backtraces, and names functions from the program's own symbols and dyld's, not the shared
@@ -111,20 +119,22 @@ has every limit with the measurement behind it.
 ## Performance
 
 `tools/bench.py` measures native vs record vs replay. Median of 5 runs, Apple M4 Pro, macOS 26.5.2,
-release build, 2026-09-28:
+release build, 2026-10-04:
 
 | workload | native | record | replay | recorder RSS | trace |
 |---|---|---|---|---|---|
-| `/bin/echo hi` | 0.002 s | 0.24 s | 0.26 s | 104 MiB | 32 MiB |
-| `/bin/ls /usr/bin` | 0.006 s | 0.27 s | 0.27 s | 107 MiB | 32 MiB |
-| `jq` filtering a 5 MB JSON file | 0.09 s | 2.25 s | 2.30 s | 435 MiB | 282 MiB |
-| CPython `-c 'print(1)'` | 0.014 s | 0.69 s | 0.68 s | 215 MiB | 84 MiB |
-| CPython, a 30M-step loop | 0.97 s | 1.74 s | 1.70 s | 215 MiB | 85 MiB |
+| `/bin/echo hi` | 0.001 s | 0.20 s | 0.20 s | 104 MiB | 28 MiB |
+| `/bin/ls /usr/bin` | 0.004 s | 0.23 s | 0.24 s | 107 MiB | 33 MiB |
+| `jq` filtering a 5 MB JSON file | 0.08 s | 1.98 s | 2.05 s | 446 MiB | 286 MiB |
+| CPython `-c 'print(1)'` | 0.012 s | 0.60 s | 0.62 s | 214 MiB | 85 MiB |
+| CPython, a 30M-step loop | 0.95 s | 1.63 s | 1.64 s | 215 MiB | 85 MiB |
+| node `-e 'console.log(1)'` | 0.041 s | 3.45 s | 3.53 s | 733 MiB | 502 MiB |
 
-There is a **fixed start-up of about 0.25 s** (0.7 s for CPython) to build the VM and page in the
-shared cache. After that, **compute runs within about 10% of native**, because the guest executes
-natively on the CPU. **Syscalls that move a lot of memory are the slow case**: each one is diffed and
-kept in the trace. [`docs/current-state.md`](docs/current-state.md#performance) has the full table
+There is a **fixed start-up of about 0.2 s** (0.6 s for CPython) to build the VM and page in the
+shared cache. node's is about 3.4 s; its V8 reserves hundreds of MiB of address space, which
+retrace backs in full and keeps in the trace. After that, **compute runs within about 10% of
+native**, because the guest executes natively on the CPU. **Syscalls that move a lot of memory are
+the slow case**: each one is diffed and kept in the trace. [`docs/current-state.md`](docs/current-state.md#performance) has the full table
 and how to read it.
 
 ## Getting started

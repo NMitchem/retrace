@@ -275,6 +275,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append close: {e}"))?; count += 1;
                 b.fds_mut().close(args[0]);
                 b.set_x0_err_and_return(0, false);
+                // M48 K6: replay finishes this landmark through the generic mirror, which calls the
+                // hook, and a close is in the hook's fd set, so record calls it too: the same method
+                // with the same arguments on both sides (symmetry rule 1). The other hook-less arms
+                // whose landmarks replay finishes there are outside the fd set, where the hook does
+                // nothing by construction (Box_::note_fd_effects).
+                b.note_fd_effects(num, args, 0, 0, false).unwrap_or_else(|m| panic!("{m}"));
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
             // stores (no syscall), so it cannot go through forward_and_diff. guest_mmap maps a
@@ -286,7 +292,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // Minor (b): an anonymous PROT_EXEC (JIT) mmap would need exec promotion but
                 // guest_mmap installs plain RW+non-exec data pages. JIT is out of M2 scope; warn
                 // loudly rather than silently hand back a non-exec page the guest can't run.
-                if args[2] & 0x4 != 0 {
+                // M48 §3f exempts MAP_JIT: the box keeps such a range and stamps the running thread's
+                // view over it, so it is executable whenever that thread is protected. Every other
+                // anonymous exec map keeps this warning (§11a item 2).
+                if args[2] & 0x4 != 0 && args[3] & retrace_arch::MAP_JIT == 0 {
                     eprintln!("[retrace warn] anon PROT_EXEC mmap (len {:#x}) not promoted to exec (JIT out of M2 scope)", args[1]);
                 }
                 // A MAP_FIXED address the guest's own space cannot hold is refused with an errno —
@@ -1097,6 +1106,36 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     .map_err(|e| format!("append kevent_qos: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
+            // M48 §3c (K1): kevent on a guest kqueue is MODELLED, never forwarded (see
+            // Box_::guest_kevent). Forwarded, it would act on a host kqueue holding none of the
+            // guest's knotes, and a wait would block the recorder. This arm may PANIC by design:
+            // every unmodelled shape is refused by value before anything is appended.
+            //
+            // `writes` is empty and that is deliberate (R3): the event list the call fills, now or
+            // at a later wake, is box output the mirror recomputes from the same guest memory and
+            // box state. The exit-time full-memory comparison still covers every byte of it.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_KEVENT => {
+                let (rc, err) = b.guest_kevent(args).unwrap_or_else(|m| panic!("{m}"));
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err, writes: vec![], thread })
+                    .map_err(|e| format!("append kevent: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, err);
+            }
+            // M48 §3e: every SDK psynch number is EMULATED, never forwarded (see Box_::guest_psynch).
+            // Forwarded, a psynch call acts on the HOST's psynch state keyed by retrace's own
+            // addresses, blocking or waking the recorder. One arm serves them all: cvwait, cvsignal and
+            // cvbroad are the port, and the box refuses every other number by value. This arm may
+            // PANIC by design, with the refusal's text, before anything is appended (R5).
+            //
+            // `writes` is empty and `err` false, deliberately: the call writes no guest memory, the
+            // mirror recomputes the caller's word identically, and a woken thread's word is written at
+            // its wake into a context both sides rebuild (R3). A blocked cvwait returns 0 here and
+            // gets its real answer at the wake (Global Constraints).
+            Stop::Syscall { num, args } if retrace_arch::is_psynch(num) => {
+                let rc = b.guest_psynch(num, args).unwrap_or_else(|m| panic!("{m}"));
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append psynch: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
             // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
             // real thread inside retrace's own process at a guest address (see
             // Box_::guest_bsdthread_create).
@@ -1329,6 +1368,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 assert!(num != retrace_arch::SYS_KEVENT_QOS,
                     "kevent_qos (374) reached the generic forward arm — it must be emulated above \
                      (M45). Forwarded, KEVENT_FLAG_WORKQ acts on retrace's own workqueue kqueue.");
+                // M48 §3b: kevent (363) on a guest kqueue is emulated above. Forwarded, it acts on a
+                // kqueue retrace never created, and a filter that blocks would block the RECORDER.
+                // This assert makes "never forwarded" a checked fact (the bsdthread_create gap M37
+                // measured).
+                assert!(num != retrace_arch::SYS_KEVENT,
+                    "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c).");
+                // M48 §3e: every psynch call is handled above, modelled or refused by value. Forwarded,
+                // it acts on the HOST's psynch state keyed by retrace's own addresses, blocking or
+                // waking the recorder.
+                assert!(!retrace_arch::is_psynch(num),
+                    "psynch syscall {num} reached the generic forward arm — it must be emulated above (M48 §3e).");
                 // M47 §3c: madvise joins them. Forwarded, the advice acts on RETRACE's backing of
                 // the guest range: a MADV_FREE_REUSABLE there lets the host reclaim pages the guest
                 // may later write through stage 2, and a MADV_ZERO wrote 512 KiB past the diff
@@ -1369,6 +1419,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 }
                 w.append(&Event::Syscall { num, args, ret, ret1, err, writes, thread }).map_err(|e| format!("append syscall: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
+                // M48 §3c: what the call did to the guest's kqueues and pipes (Box_::note_fd_effects),
+                // after its return is set, as replay's generic mirror does. A refusal stops the
+                // recorder after this landmark: the forward has already happened.
+                b.note_fd_effects(num, args, ret, ret1, err).unwrap_or_else(|m| panic!("{m}"));
             }
             // A cache-window stage-2 fault: stage/fixup/re-sign/map the page (page_in_cache) and
             // re-run. Regenerated deterministically here on record AND replay, so nothing about the
@@ -2487,6 +2541,60 @@ impl ReplaySession {
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
+                            // M48 §3c: the record arm's mirror (symmetry rule 1): the same method
+                            // with the same arguments, beside M45's so it inherits the arm-top
+                            // `verify_thread` and adds none of its own. The model is a function of
+                            // guest memory, the guest clock and box state, so the recomputed answer
+                            // must equal the recording's. A refusal here is a divergence, never a
+                            // panic: replay reaches one only after an earlier silent divergence
+                            // (Review Focus 5).
+                            if num == retrace_arch::SYS_KEVENT {
+                                let (rc, e) = match self.b.guest_kevent(args) {
+                                    Ok(r) => r,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "kevent refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                if (rc, e) != (*ret, *err) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "kevent rc mismatch: replay {rc:#x} (err={e}) != recorded {ret:#x} (err={err})") });
+                                }
+                                // Record fixes `ret1: 0, writes: []`. A recording carrying either is
+                                // not one this arm produced (M45's stance).
+                                if *ret1 != 0 || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "kevent recorded ret1={ret1:#x} with {} writes; the model records neither", writes.len()) });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M48 §3e: the psynch arm's mirror (symmetry rule 1), in the M45
+                            // kevent_qos mirror's shape: the same call with the same arguments, the
+                            // word compared, and a refusal reported as a divergence naming the call,
+                            // never a panic (Review Focus 5). It inherits the arm-top
+                            // `verify_thread` and adds none (§11a item 1).
+                            if retrace_arch::is_psynch(num) {
+                                let call = retrace_box::psynch::call_name(num);
+                                let rc = match self.b.guest_psynch(num, args) {
+                                    Ok(rc) => rc,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{call} refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("{call} rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                // Record fixes `ret1: 0, err: false, writes: []`, so a recording
+                                // carrying any other is not one this arm produced.
+                                if *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{call} recorded ret1={ret1:#x} err={err} with {} write(s); the emulation \
+                                         records 0, false and none", writes.len()) });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
                             // M14 Task 7: the record arm's mirror (symmetry rule 1). Record and
                             // replay must call `guest_bsdthread_create` with IDENTICAL args so both
                             // build an identical thread table — omit this and replay runs a
@@ -2875,6 +2983,25 @@ impl ReplaySession {
                             if retrace_arch::returns_fd_pair(num) { self.b.set_ret1(*ret1); }
                             // Apply recorded kernel writes + feed ret; NO real syscall executes.
                             self.b.apply_and_return(*ret, *err, writes);
+                            // M48 §3c: record's generic arm and console-close arm (K6) call the
+                            // same hook with the same values. They are not the only landmarks
+                            // that finish here: so do those of several record arms that never
+                            // call the hook (the console write, the forwarded mach traps,
+                            // `sigaction`, `sigaltstack`, `sigpending`, a pended or ignored
+                            // `kill`/`__pthread_kill`, and any other arm that appends a plain
+                            // landmark). The hook does nothing outside its fd set, by
+                            // construction, so for all but one of them this call is a no-op.
+                            // The console write is the one in the fd set, and the predicate that
+                            // gates record's console-write arm skips it here (pre-flight F3).
+                            // Replay reaches a refusal only after an earlier divergence, so it is
+                            // reported as one.
+                            if !self.b.is_console_write(num, args[0]) {
+                                if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "syscall {num} refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") });
+                                }
+                            }
                             return self.finish_event();
                         }
                         other => return Err(Divergence { landmark: self.idx, pc,
@@ -3036,6 +3163,10 @@ impl ReplaySession {
     /// reach, because the mirror compares recorded fields first.
     #[doc(hidden)]
     pub fn dbg_write_mem(&mut self, va: u64, bytes: &[u8]) -> Result<(), String> { self.b.dbg_write_va(va, bytes) }
+    /// Test-only (M48 Review Focus 5): the box's psynch model, so a test can plant the state an
+    /// earlier silent divergence would leave (`Psynch::dbg_plant_waiter`).
+    #[doc(hidden)]
+    pub fn dbg_psynch_mut(&mut self) -> &mut retrace_box::psynch::Psynch { self.b.dbg_psynch_mut() }
     /// M16 Task 4: `Box_::thread_of_port`, for the port->tid resolution gate. Test-only, like
     /// `dbg_kport_of`.
     #[doc(hidden)]

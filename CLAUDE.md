@@ -132,8 +132,22 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   Sandbox container-path call answered `ENOTSUP`, `forkfail_dyn`'s fork refused with `EAGAIN`, and
   two tampered-trace divergences), `git_e2e` (M47: Xcode's `git` — read commands against native,
   `add`, default-config `commit` through the refused maintenance fork, and `branch`, `tag`,
-  `switch -c`, `mv` and `rm --cached`; skips loudly without Xcode), `node_e2e` (M47: node parked at
-  its measured wall; skips loudly without Homebrew node). Run one with
+  `switch -c`, `mv` and `rm --cached`; skips loudly without Xcode), `simd_e2e` (M48: callee-saved
+  SIMD registers across a thread switch and a `sigreturn`, and a threaded replay independent of the
+  host environment — the hv-sys `set_simd` ABI fix), `trim_e2e` (M48: V8's aligned-reservation
+  trim, a partial `munmap` that splits its backing), `kq_e2e` (M48: guest kqueues — libuv's
+  runtime-detection probe, a cross-thread `EVFILT_USER` wake, a timeout reached by the idle jump, a
+  pipe's readiness, `EV_ONESHOT`, the refusals by value, and seeks into a blocked `kevent` and
+  inside a timed one), `condvar_e2e` (M48: psynch condition variables — ping-pong, broadcast, a
+  timed wait that expires and one signalled first, node's {0, 1 ns} wait on the only thread, the
+  refused mutex pair, a replay-side refusal, and a seek across a blocked `cvwait`), `jitwp_e2e`
+  (M48: `MAP_JIT` write-protect per thread — native's toggle sequence, two threads in opposite
+  modes, a store to a protected page recorded as the crash it is, V8's none-then-RWX shape, and a
+  step across a toggle), `node_e2e` (M48 rung 9: node prints 1 with a `MAP_JIT` mapping in the
+  recording and an SPRR write on the recorder's `RETRACE_SPRR` line, and a 2-second `setTimeout`
+  lands exactly on its deadline by the idle jump; skips loudly without Homebrew node),
+  `node_crash_e2e` (M48 rung 10: node's crash demo, reverse-continued from the crash to a store
+  whose pc is in a `MAP_JIT` range; skips loudly without Homebrew node or its headers). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -221,7 +235,8 @@ and threads.
    recording — that comparison *is* the divergence check, so an asymmetry surfaces as a divergence,
    not silent corruption.
 2. Deterministic instruction emulation is better done **below the trace**, inside `Box_::run()`
-   (as with the timebase MRS, the Apple-IMPDEF undef-MRS, and the B-family FPAC strip): `run()` is
+   (as with the timebase MRS, the Apple-IMPDEF undef-MRS, the B-family FPAC strip, and since M48
+   the per-thread SPRR register `S3_6_C15_C1_5` with the `MAP_JIT` view it selects): `run()` is
    shared by record and replay, so such an arm fires identically on both sides and never surfaces
    to the record/replay loop — determinism is then automatic.
 
@@ -240,6 +255,10 @@ and threads.
   oracle's save/restore discipline. `place_fixed` promotes-then-flushes on the FIXED-exec-over-live-
   backing path (dyld's non-cache-dylib strategy). Non-FIXED exec mmaps are still placed in fresh
   32 MiB-exclusive blocks — now an optimisation (a flush avoided), no longer a correctness rule.
+  Since M48 a `MAP_JIT` range is the one region whose stamp changes at run time: the running
+  thread's SPRR value selects `ATTR_CODE` or `ATTR_DATA` for its pages, never both, and the flip
+  flushes through `flush_guest_tlb`, which disarms `MDSCR_EL1.SS` and `MDE` around its stub so a
+  single step can cross it.
 - **SPTM / anon-only memory.** A *file-backed* `hv_vm_map` hard-panics macOS 26
   (`VIOLATION_ILLEGAL_MAPPING_TYPE`). All guest memory is anonymous; file bytes (the shared cache,
   file-backed mmap) are staged via `pread` into anon pages and, on record, captured as writes.
@@ -272,7 +291,7 @@ recorded** and no trace-format change — symmetry rule 2 doing its job. Since M
 boundary shows the thread that runs next: `finish_event` settles the switch
 (`Box_::settle_schedule`) instead of leaving it to the next `run()`/`step()` entry. The switch
 reuses the save/restore discipline the PAC signing oracle and `flush_guest_tlb` already
-established. A thread blocks for **three** reasons, and the correlation key is not the same for
+established. A thread blocks for **five** reasons, and the correlation key is not the same for
 all of them: `__ulock_wait` (515) / `__ulock_wake` (516) are correlated by **address equality**
 on `pthread + 0x34` — measured in both `__pthread_join` and `__pthread_joiner_wake`, so no
 address→thread-index mapping is needed; the mach semaphore pair `semaphore_wait_trap` (`-36`) / `semaphore_signal_trap`
@@ -280,12 +299,18 @@ address→thread-index mapping is needed; the mach semaphore pair `semaphore_wai
 space and never a guest address (M18 Stage 2b); and a workqueue worker parked at `workq_kernreturn`
 opcode `0x4` (`BlockReason::Parked`) has **no waker at all** — libpthread `brk`s if that call ever
 returns. The event manager, parked at opcode `0x40` since M46, is the one exception: a knote
-activation re-enters it (`ThreadTable::unpark`). Forwarding `bsdthread_create` would be not merely
+activation re-enters it (`ThreadTable::unpark`). Since M48 a thread also blocks in `kevent` on a
+guest kqueue (`BlockReason::Kevent`), woken by a knote activation or its deadline, and in
+`psynch_cvwait` (`BlockReason::Cv`), correlated by the condition variable's **guest address** and
+woken by `cvsignal`/`cvbroad` or its deadline. Every deadline is on `synthetic_tsc`,
+`schedule_after_block` makes one idle jump to the earliest of all of them, and a woken thread's
+return is written at the wake (`deliver_wake`). Forwarding `bsdthread_create` would be not merely
 wrong but whole-process fatal (the host would start a real thread on retrace's own `_pthread_start`,
 which PAC-fails on the guest's pthread struct) — and **nothing asserts against it**: the emulating
 arm in `record_box` (`crates/retrace-core/src/lib.rs`) sits before the generic forward arm and that ordering is
 the only guard. The generic arm's asserts are `is_signal_syscall`, the workq pair, `kevent_qos`
-(M45), `writes_via_nested_pointer`, and since M47 `madvise` and `fork` only; the claim that it
+(M45), `writes_via_nested_pointer`, since M47 `madvise` and `fork`, and since M48 `kevent` (363)
+and every SDK psynch number (`retrace_arch::is_psynch`) only; the claim that it
 "asserts" stood here from M14 to M37 and was measured false at M37. Since M45 libdispatch's
 workqueue-kqueue init, `kevent_qos` (374) with `KEVENT_FLAG_WORKQ`, is emulated beside the workq
 pair for the same reason (forwarded, it acts on retrace's own workqueue kqueue): M45 emulated
@@ -342,7 +367,9 @@ does *not* materialise:
 sites, one in each arm that consumes a landmark and `return`s, each placed *after* that arm's own
 field comparison so a genuine argument divergence still reports as itself; the `SignalDelivery`
 landmark is checked by an eighth, inline comparison in `mirror_delivery`, deliberately not
-`verify_thread`, because its tag is the **receiving** thread rather than the current one. That
+`verify_thread`, because its tag is the **receiving** thread rather than the current one. M48's
+`kevent` and psynch mirrors sit inside the `Syscall` chain after its arm-top check, so the count
+stays seven; `thread_oracle.rs` retags one landmark of each. That
 count is the thing to check when adding an arm: each site exists because a mirror `return`s
 before reaching the generic dispatch, so **every new mirror silently creates a new hole until its
 oracle call is added** — nothing structural couples the two. Without

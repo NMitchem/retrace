@@ -97,6 +97,34 @@ pub enum BlockReason {
     /// the wake belongs here — re-entering at `_start_wqthread` with a fresh register block (flags
     /// bit 17 SET, the reused path), not resuming the park trap's return.
     Parked,
+    /// M48 §3c: blocked in `kevent` on the guest kqueue `kq` (its guest fd).
+    ///
+    /// `deadline` is on the guest clock (`Box_::now_guest`'s domain, the same as M46's timer
+    /// deadlines), or `None` for a NULL timeout. A 1 ns timeout converts to 0 ticks, so its deadline
+    /// is the call's own "now": it blocks and is woken in the same `schedule_after_block` (§11b item
+    /// 8). Woken by a change that activates one of the kqueue's knotes, by a pipe write it watches,
+    /// or by its deadline (`Box_::wake_due_threads`). The waiter's event list lives in `gkq`, not
+    /// here, so the variant stays `Copy`.
+    Kevent { kq: u64, deadline: Option<u64> },
+    /// M48 §3e: blocked in `psynch_cvwait` on the condition variable at guest address `addr`. The
+    /// key is the address for the reason `Wait`'s is: the kernel keys a cv's wait queue by it, and
+    /// so does `psynch.rs`. Woken by a `psynch_cvsignal` or `psynch_cvbroad` the port says reaches
+    /// it (`Box_::guest_psynch`), or at `deadline`, a guest-clock value in `Kevent`'s domain, which
+    /// is `None` for an untimed wait (`Box_::cv_timed_out`).
+    Cv { addr: u64, deadline: Option<u64> },
+}
+
+impl BlockReason {
+    /// M48 §3d: the guest-clock deadline a timed wait ends at. `None` for a wait with no timeout and
+    /// for every reason that is not a timed wait. The match names every variant, so a new blocking
+    /// primitive must say here whether it carries one.
+    pub fn deadline(&self) -> Option<u64> {
+        match *self {
+            BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. } => deadline,
+            BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Sem { .. }
+            | BlockReason::Parked => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +155,11 @@ pub struct Thread {
     /// A second signal arriving now would stack a frame on a context that never ran the first —
     /// fail loud rather than guess at the kernel's queueing order.
     pub redirected: bool,
+    /// M48 §3f: this thread's `S3_6_C15_C1_5`, the JIT write-protect register. Per thread, as
+    /// native's is (§2c). It starts at 0 for every thread, main included (R1), and is never
+    /// inherited: native starts a thread protected even when its creator is write-enabled. Only
+    /// `Box_::sprr_write` changes it, with an admitted value.
+    pub sprr: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +181,7 @@ impl ThreadTable {
                 pending: 0,
                 altstack: None,
                 redirected: false,
+                sprr: 0,
             }],
             current: 0,
         }
@@ -289,6 +323,13 @@ impl ThreadTable {
         std::mem::replace(&mut self.threads[tid].altstack, ss)
     }
 
+    /// M48 §3f: `tid`'s `S3_6_C15_C1_5` (R1: 0 until written).
+    pub fn sprr_of(&self, tid: usize) -> u64 { self.threads[tid].sprr }
+
+    /// M48 §3f: set `tid`'s register. `Box_::sprr_write` is the only production caller, with an
+    /// admitted value, and it syncs the view after.
+    pub fn set_sprr_of(&mut self, tid: usize, value: u64) { self.threads[tid].sprr = value; }
+
     /// Threads that have not exited.
     pub fn live(&self) -> usize {
         self.threads.iter().filter(|t| !matches!(t.state, ThreadState::Exited(_))).count()
@@ -309,6 +350,7 @@ impl ThreadTable {
             pending: 0,
             altstack: None,
             redirected: false,
+            sprr: 0,
         });
         self.threads.len() - 1
     }
@@ -426,6 +468,50 @@ impl ThreadTable {
             }
         }
         woken
+    }
+
+    /// M48 §3c–§3d: make `tid`, blocked in a timed-wait primitive, runnable. Its caller writes the
+    /// reply (`Box_::deliver_wake`).
+    ///
+    /// **Refuses, with nothing changed, when a signal is pending on it, masked or not** (K8). The
+    /// kernel interrupts these waits with `EINTR`, which is unmeasured. A reply written over the
+    /// blocked context would make the signal vanish where `assert_no_stranded_signals` cannot see
+    /// it, with record and replay agreeing: `unpark`'s posture, as a `Result` because a wake can
+    /// be reached above the trace (a trigger) as well as below it (a deadline).
+    pub fn wake(&mut self, tid: usize) -> Result<(), String> {
+        let pending = self.threads[tid].pending;
+        if pending != 0 {
+            return Err(format!(
+                "M48: a signal is pending on thread {tid} (set {pending:#x}; bit n is signal n+1, \
+                 masked or not), and this wake would write its reply over the blocked context. \
+                 Measure the kernel's EINTR answer for a thread blocked in kevent or psynch_cvwait, \
+                 as blockedctx.rs does for __ulock_wait, before modelling it."));
+        }
+        assert!(matches!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. })),
+            "M48: wake of thread {tid}, which is {:?}, not blocked in a timed-wait primitive",
+            self.threads[tid].state);
+        self.threads[tid].state = ThreadState::Runnable;
+        Ok(())
+    }
+
+    /// M48 §3d: every blocked thread whose deadline `now` has reached, in deadline order with ties
+    /// by thread index (R7). Pure: it wakes nobody.
+    pub fn due_waiters(&self, now: u64) -> Vec<usize> {
+        let mut due: Vec<(u64, usize)> = self.threads.iter().enumerate()
+            .filter_map(|(tid, t)| match t.state {
+                ThreadState::Blocked(r) => r.deadline().filter(|&d| d <= now).map(|d| (d, tid)),
+                _ => None,
+            })
+            .collect();
+        due.sort_unstable();
+        due.into_iter().map(|(_, tid)| tid).collect()
+    }
+
+    /// M48 §3d: the earliest deadline over blocked threads, which the idle jump may land on.
+    pub fn earliest_deadline(&self) -> Option<u64> {
+        self.threads.iter()
+            .filter_map(|t| match t.state { ThreadState::Blocked(r) => r.deadline(), _ => None })
+            .min()
     }
 
     /// Does the vCPU need to be moved to a different thread before it can run again?
@@ -573,5 +659,50 @@ mod tests {
         assert_eq!(t.set_altstack_of(0, Some((0x9000, 0x4000, 0))), None);
         assert_eq!(t.altstack_of(0), Some((0x9000, 0x4000, 0)));
         assert_eq!(t.set_altstack_of(0, None), Some((0x9000, 0x4000, 0)));
+    }
+
+    // M48 §3d, R7: the queue's order is the deadline, then the thread index, and a deadline equal
+    // to now is due. A wait with no timeout carries no deadline and is never due.
+    #[test]
+    fn due_waiters_are_in_deadline_order_with_ties_by_thread_index() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        for _ in 0..3 { t.spawn(ThreadCtx::zeroed(), (0, 0)); }
+        // `block` acts on the current thread, so switch to each one first.
+        for (tid, deadline) in [(0, Some(300)), (1, Some(100)), (2, None), (3, Some(100))] {
+            t.switch_to(tid);
+            t.block(BlockReason::Kevent { kq: 3 + tid as u64, deadline });
+        }
+        assert_eq!(t.earliest_deadline(), Some(100));
+        assert!(t.due_waiters(99).is_empty());
+        assert_eq!(t.due_waiters(100), vec![1, 3], "a deadline equal to now is due; ties by thread index");
+        assert_eq!(t.due_waiters(u64::MAX), vec![1, 3, 0], "deadline order; the NULL timeout is never due");
+        t.wake(1).unwrap();
+        assert_eq!(t.state_of(1), ThreadState::Runnable);
+        assert_eq!(t.earliest_deadline(), Some(100), "thread 3's, now that 1 is awake");
+    }
+
+    // M48 K8: a wake refuses a thread with a signal pending, masked or not, and changes nothing.
+    #[test]
+    fn a_wake_refuses_a_thread_with_a_signal_pending_and_changes_nothing() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        t.block(BlockReason::Kevent { kq: 3, deadline: None });
+        t.pend(0, 30);
+        let e = t.wake(0).unwrap_err();
+        assert!(e.starts_with("M48: a signal is pending on thread 0 (set 0x20000000"), "{e}");
+        assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Kevent { kq: 3, deadline: None }));
+        assert_eq!(BlockReason::Kevent { kq: 3, deadline: Some(7) }.deadline(), Some(7));
+        assert_eq!(BlockReason::Wait { addr: 8 }.deadline(), None, "only a timed wait carries a deadline");
+    }
+
+    #[test]
+    fn a_spawned_thread_starts_protected_whatever_its_creator_wrote() {
+        // M48 R1, §2c (sprr.out): native's main thread starts protected, and so does a thread
+        // created while its parent is write-enabled. retrace's protected initial value is 0.
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        assert_eq!(t.sprr_of(0), 0, "main starts at R1's 0");
+        t.set_sprr_of(0, 0x2010_0020_3030_0000); // the probe host's +0x110: write-enabled
+        let child = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        assert_eq!(t.sprr_of(child), 0, "a child is never write-enabled by inheritance");
+        assert_eq!(t.sprr_of(0), 0x2010_0020_3030_0000, "the creator keeps its own value");
     }
 }

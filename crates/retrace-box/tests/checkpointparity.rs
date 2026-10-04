@@ -179,6 +179,7 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     let fts = b.fall_throughs();
     let excl = b.dbg_excl();
     let kq = b.dbg_kq().clone();
+    let jit = b.dbg_jit().clone();
     let mut live_backings = b.dbg_backings();
     live_backings.sort_unstable();
     let next_l3 = b.dbg_next_l3();
@@ -215,6 +216,7 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     assert_eq!(r.fall_throughs(), fts, "{label}: fall-through counter");
     assert_eq!(r.dbg_excl(), excl, "{label}: exclusive-monitor shadow (M42)");
     assert_eq!(r.dbg_kq(), &kq, "{label}: the workqueue kqueue (M46)");
+    assert_eq!(r.dbg_jit(), &jit, "{label}: the MAP_JIT set and its view (M48)");
     let mut restored_backings = r.dbg_backings();
     restored_backings.sort_unstable();
     assert_eq!(restored_backings.len(), live_backings.len(), "{label}: backing count");
@@ -420,4 +422,38 @@ fn a_checkpointed_box_inside_an_exclusive_pair_matches_the_box_it_came_from() {
     for i in 1..=4 { assert!(matches!(b.step(), Stop::Step), "step {i}"); }
     assert!(b.dbg_excl().is_some(), "precondition: the stepped ldxr set the shadow");
     assert_checkpoint_parity(b, "mid-pair");
+}
+
+/// M48: the write-enabled JIT tier. It stages a commpage (a static guest has none), a V8-shaped
+/// MAP_JIT range (PROT_NONE whole, a sub-range committed RWX), a second thread, and main
+/// write-enabled, so the view is `Rw` and the two threads' registers differ. No other tier makes
+/// `jit` or `Thread.sprr` non-default, so without this one both compare Default == Default. The
+/// restore also runs `assert_jit_stamped` (Ruling T6-g), which fails loud if the stamps carried in
+/// `mem` and the carried view disagree.
+#[test]
+fn a_checkpointed_box_in_a_write_enabled_jit_window_matches_the_box_it_came_from() {
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    let _ = b.run(); // mid-run
+    let (we, pr) = (0x2010_0020_3030_0000u64, 0x2010_0020_3010_0000u64); // sprr.out's +0x110, +0x118
+    let cp = retrace_box::COMMPAGE_IPA;
+    assert_eq!(b.guest_mmap(cp, 0x4000, 3, 0x1012), Ok(cp), "stage a commpage (MAP_ANON|MAP_PRIVATE|MAP_FIXED)");
+    b.poke_guest(cp + 0x110, &we.to_le_bytes());
+    b.poke_guest(cp + 0x118, &pr.to_le_bytes());
+    let a = b.guest_mmap(0, 0x10_0000, 0, 0x41842).unwrap(); // V8's MAP_JIT reservation (P5)
+    b.guest_mprotect(a + 0x4_0000, 0xc_0000, 7);
+    let mut child = b.save_ctx();
+    child.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(child, (0, 0));
+    b.sprr_write(we);
+
+    // PRECONDITIONS. Without these the M48 rows compare Default == Default.
+    assert_eq!(b.dbg_jit().view(), retrace_box::jit::View::Rw, "precondition: main write-enabled the view");
+    assert_eq!(b.dbg_jit().ranges(), &[(a, 0x10_0000)], "precondition: a MAP_JIT range");
+    assert_eq!((b.threads().sprr_of(0), b.threads().sprr_of(tid)), (we, 0),
+        "precondition: the two threads' registers differ, or an index swap is invisible");
+    assert!(b.ipa_is_el0_writable(a + 0x4_0000) && b.ipa_is_noaccess(a),
+        "precondition: stamps the restore must agree with, and a no-access head it must not stamp");
+
+    assert_checkpoint_parity(b, "jit");
 }

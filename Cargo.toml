@@ -6,3 +6,9 @@ members = ["crates/*"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
+
+# M48 Task 1 / Ruling T0-SIMD: at opt-level 0 the pre-fix `set_simd` binding is correct by accident
+# (the u128 argument happens to be left in v0), so the SIMD guards could not fail at the gate's
+# profile. One level of optimisation makes the unfixed binding wrong, which keeps the guards live.
+[profile.dev.package.hv-sys]
+opt-level = 1
