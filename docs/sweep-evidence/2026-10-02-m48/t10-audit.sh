@@ -101,3 +101,39 @@ grep -a -h -E '^num (29[7-9]|30[0-9]|312): [1-9]' $E/walk-*.census | sort | uniq
 
 echo "== 11. Nine #[ignore] lines, none new (H2)"
 v "$(git grep -c -E '^\s*#\[ignore' -- crates | awk -F: '{s+=$2} END {print s}')" 9 "#[ignore] lines"
+
+echo "== Known soft spots (Task 10 addendum B): stated with the file and line of each, not fixed here"
+NC=crates/retrace/tests/node_crash_e2e.rs
+NE=crates/retrace/tests/node_e2e.rs
+U=crates/retrace/tests/util/mod.rs
+# The file:line of the Nth (default first) line of $1 holding the literal $2, or a FINDING naming the
+# anchor that was lost, so an edit that moves a cited line moves the citation and one that removes it fails.
+at() { n=$(grep -n -F -- "$2" "$1" | sed -n "${3:-1}p" | cut -d: -f1); if [ -n "$n" ]; then echo "$1:$n"; else echo "$1:? (anchor [$2] #${3:-1} not found: FINDING)"; fi; }
+k1=$(at $C 'self.b.guest_kevent(args)'); k2=$(at $X 'self.wake_kevent_waiters().map_err(fail)' 1)
+k3=$(at $X 'self.wake_kevent_waiters().map_err(fail)' 2)
+k4=$(at $X 'M48: kevent event list of thread'); k5=$(at $X 'which records no such waiter')
+j1=$(at $NC '// 5. The store is JIT code.'); j2=$(at $NC 'assert_eq!(field(m, "opt="), native_opt')
+d1=$(at $NC 'Event::SignalDelivery { sig: 11'); d2=$(at $NC 'let (di, si_addr, dthread) = delivery'); d3=$(at $NC 're-raises')
+u1=$(at $NE 'util::assert_rung_records_and_replays_env('); u2=$(at $NE 'util::assert_rung_records_and_replays(&exe')
+u3=$(at $NC 'util::record_dynamic_args(exe, &args)'); u4=$(at $NC 'let rp = util::replay(&trace);')
+u5=$(at $U 'let out = Command::new(bin()).args(args).output().unwrap();'); u6=$(at $U 'let out = c.output().unwrap();')
+u7=$(at $NC 'const DEBUG_SECS: u64'); u8=$(at $U 'pub fn debug_bounded(')
+echo "1. Two panics are reachable from the replay mirror after an EARLIER silent divergence (Task 4 review minor 3)."
+echo "   The kevent mirror ($k1) calls Box_::guest_kevent, whose wake_kevent_waiters ($k2; the generic"
+echo "   mirror's Box_::note_fd_effects reaches it too, $k3) goes through deliver_kevent to deliver_wake, which"
+echo "   panics if a waiter's event list stopped translating ($k4); kevent_timed_out panics on a missing"
+echo "   waiter ($k5). Review Focus 5's 'never a panic' holds for a shape the recording accepted and replay"
+echo "   refuses, not for an earlier silent divergence: the full-memory comparison at exit is what would"
+echo "   have caught that."
+echo "2. Assertion 5 of node_crash_e2e proves JIT code, not TurboFan (Task 8 review minor 2). It ($j1)"
+echo "   passes for any store whose pc lies in a MAP_JIT range, Sparkplug or Maglev code included;"
+echo "   assertion 1 ($j2) compares the marker's opt= bits only with native's own, and nothing decodes them."
+echo "3. The delivery assertion is node-version-specific (Task 8 review minor 3). The match ($d1) and its"
+echo "   expect ($d2) rely on node 25.6.1's own SIGSEGV handler returning and the instruction re-faulting;"
+echo "   the module doc's 're-raises' ($d3) is looser than measured, and no sigreturn or resume_pc is asserted."
+echo "4. Record and replay are unbounded for every node gate (Task 8 review minor 5). node_e2e's rungs"
+echo "   ($u1, $u2) and node_crash_e2e's record ($u3) and replays ($u4) end in util's run and run_env, an"
+echo "   unbounded Command::output() ($u5, $u6). Only node_crash_e2e's debug session is bounded"
+echo "   ($u7, through $u8). A hang in record or replay stalls the gate instead of failing it."
+lost=$(printf '%s\n' "$k1" "$k2" "$k3" "$k4" "$k5" "$j1" "$j2" "$d1" "$d2" "$d3" "$u1" "$u2" "$u3" "$u4" "$u5" "$u6" "$u7" "$u8" | grep -c 'FINDING')
+v "$lost" 0 "Known soft spots: anchors not found (of 18)"

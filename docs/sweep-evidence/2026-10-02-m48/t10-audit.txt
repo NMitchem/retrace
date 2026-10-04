@@ -1,4 +1,4 @@
-audit of 579ebf9 on 2026-10-04 06:43:59 -03
+audit of 397ff1a on 2026-10-04 07:19:16 -03
 == 1. No trace-format change (H3)
 VERDICT crates/retrace-trace diff lines since e6caa65: ok (0)
 VERDICT TRACE_MAGIC is RT\x00\x0b: ok (1)
@@ -109,3 +109,22 @@ psynch numbers the walks reached (only 303, 304 and 305 are modelled):
    1 num 305: 9
 == 11. Nine #[ignore] lines, none new (H2)
 VERDICT #[ignore] lines: ok (9)
+== Known soft spots (Task 10 addendum B): stated with the file and line of each, not fixed here
+1. Two panics are reachable from the replay mirror after an EARLIER silent divergence (Task 4 review minor 3).
+   The kevent mirror (crates/retrace-core/src/lib.rs:2552) calls Box_::guest_kevent, whose wake_kevent_waiters (crates/retrace-box/src/lib.rs:5729; the generic
+   mirror's Box_::note_fd_effects reaches it too, crates/retrace-box/src/lib.rs:5798) goes through deliver_kevent to deliver_wake, which
+   panics if a waiter's event list stopped translating (crates/retrace-box/src/lib.rs:5814); kevent_timed_out panics on a missing
+   waiter (crates/retrace-box/src/lib.rs:6259). Review Focus 5's 'never a panic' holds for a shape the recording accepted and replay
+   refuses, not for an earlier silent divergence: the full-memory comparison at exit is what would
+   have caught that.
+2. Assertion 5 of node_crash_e2e proves JIT code, not TurboFan (Task 8 review minor 2). It (crates/retrace/tests/node_crash_e2e.rs:133)
+   passes for any store whose pc lies in a MAP_JIT range, Sparkplug or Maglev code included;
+   assertion 1 (crates/retrace/tests/node_crash_e2e.rs:77) compares the marker's opt= bits only with native's own, and nothing decodes them.
+3. The delivery assertion is node-version-specific (Task 8 review minor 3). The match (crates/retrace/tests/node_crash_e2e.rs:90) and its
+   expect (crates/retrace/tests/node_crash_e2e.rs:101) rely on node 25.6.1's own SIGSEGV handler returning and the instruction re-faulting;
+   the module doc's 're-raises' (crates/retrace/tests/node_crash_e2e.rs:11) is looser than measured, and no sigreturn or resume_pc is asserted.
+4. Record and replay are unbounded for every node gate (Task 8 review minor 5). node_e2e's rungs
+   (crates/retrace/tests/node_e2e.rs:51, crates/retrace/tests/node_e2e.rs:83) and node_crash_e2e's record (crates/retrace/tests/node_crash_e2e.rs:68) and replays (crates/retrace/tests/node_crash_e2e.rs:110) end in util's run and run_env, an
+   unbounded Command::output() (crates/retrace/tests/util/mod.rs:61, crates/retrace/tests/util/mod.rs:80). Only node_crash_e2e's debug session is bounded
+   (crates/retrace/tests/node_crash_e2e.rs:33, through crates/retrace/tests/util/mod.rs:117). A hang in record or replay stalls the gate instead of failing it.
+VERDICT Known soft spots: anchors not found (of 18): ok (0)
