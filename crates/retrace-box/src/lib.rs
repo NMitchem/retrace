@@ -1499,6 +1499,12 @@ impl Box_ {
              {we:#x} (+0x110) nor its protect word {pr:#x} (+0x118) (R2)");
         let tid = self.threads.current();
         self.threads.set_sprr_of(tid, value);
+        // M48 Task 7: the witness node_e2e reads (spec §1 part 1). The register is below the trace
+        // (R3), so no recording shows a write, and a run that never reached V8's code space prints
+        // 1 as well. `RETRACE_REGCLAMP`'s shape: one line per admitted write, nothing when unset.
+        if std::env::var_os("RETRACE_SPRR").is_some() {
+            eprintln!("[M48 SPRR] thread {} wrote {:#x}", self.threads.current(), value);
+        }
         self.sync_jit_view();
     }
 
