@@ -1,5 +1,5 @@
 use hv_sys::{Vm, Vcpu, reg, sysreg, simd, MemFlags, EXIT_EXCEPTION};
-use retrace_arch::{decode_excl, ec_of, Ec, ExclInsn};
+use retrace_arch::{decode_excl, ec_of, Ec, ExclInsn, SprrAccess};
 use retrace_guest::Loaded;
 use retrace_trace::{Regs, Region};
 
@@ -160,6 +160,11 @@ pub const COMMPAGE_IPA: u64 = 0x0000_000F_FFFF_C000;
 /// `mach_absolute_time` adds to the counter it reads (t0 M1(c)). The commpage is a copy frozen at
 /// load and restored from the snapshot, so this word is identical on every rebuild path.
 const COMMPAGE_TIMEBASE_OFFSET_IPA: u64 = COMMPAGE_IPA + 0x88;
+/// M48 §2c: the two commpage words `pthread_jit_write_protect_np` loads and `msr`s into
+/// `S3_6_C15_C1_5` (`pthread-jit-disasm.txt`): `+0x110` write-enables the thread's `MAP_JIT`
+/// pages and `+0x118`, eight bytes on, protects them (t0 M1(c)). Frozen with the rest of the
+/// commpage, so record and replay admit the same two values (R2).
+const COMMPAGE_SPRR_IPA: u64 = COMMPAGE_IPA + 0x110;
 // A second commpage-region page the kernel maps just below the data commpage (dyld reads it in
 // early init). Same treatment: freeze a host copy. Both pages are one granule each.
 pub const COMMPAGE2_IPA: u64 = 0x0000_000F_FFFF_4000;
@@ -202,13 +207,15 @@ const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 // validateAlreadyRealizedClass fatal. See docs/.../2026-07-14-retrace-m2-tbi-design.md.
 const TCR_EL1_V:  u64 = 0x8_0021_0080_B511;    // +TBI0+TBID0. T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
-// base 0x30d00800 + M(1) + C(4) + I(0x1000) + DZE(0x4000). PAC is NOT in the base: it is per-guest
-// (see below). DZE(14) is SET so EL0 `DC ZVA` executes natively instead of trapping to EL1 with
-// EC 0x18: Apple's `_platform_memset` issues `DC ZVA` above a size threshold, and CPython's
-// allocator hits that threshold at startup (M25-cpython). UCT(15) and UCI(26) are deliberately
-// left CLEAR pending measurement: nothing has measured a guest issuing `DC CVAU` / `IC IVAU` or
-// reading `CTR_EL0` from EL0, and the existing EC 0x18 exit already fails loud on that case.
-const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000;
+// base 0x30d00800 + M(1) + C(4) + I(0x1000) + DZE(0x4000) + UCI(0x0400_0000). PAC is NOT in the
+// base: it is per-guest (see below). DZE(14) is SET so EL0 `DC ZVA` executes natively instead of
+// trapping to EL1 with EC 0x18: Apple's `_platform_memset` issues `DC ZVA` above a size threshold,
+// and CPython's allocator hits that threshold at startup (M25-cpython). UCI(26) is SET for the
+// same reason (M48 §11b item 3, R8): `sys_icache_invalidate` issues EL0 `IC IVAU` per 64-byte line
+// after V8 writes JIT code (walls.md §1 row 5, t0 M1(b)). UCT(15) stays CLEAR: t0 M1(b) found no
+// `CTR_EL0` read in it and no `DC CVAU`, and the EC 0x18 exit still fails loud on a guest that
+// needs either.
+const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000 | 0x0400_0000;
 // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
 const SCTLR_PAC_EN: u64 = 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
 
@@ -657,6 +664,11 @@ pub struct Box_ {
     /// state, not trace state: record and replay rebuild it from the guest's own syscalls, and every
     /// rebuild path carries it (`BoxState`).
     psynch: psynch::Psynch,
+    /// M48 §3f: every `MAP_JIT` range and the view stamped over them. Box state, rebuilt on both
+    /// sides from the guest's own `mmap`/`mprotect`/`munmap` and its own `msr`s, and carried
+    /// through every rebuild path (`BoxState`). It holds a `Vec`, but it comes after `vcpu`/`vm`,
+    /// so the load-bearing vcpu-before-vm drop order is unaffected.
+    jit: jit::JitSet,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -1111,6 +1123,10 @@ pub struct BoxState {
     // `cvwait` restore a thread blocked on a cv the model has forgotten, so the signal meant to wake
     // it would prepost instead (condvar_e2e's seek test; box test `psynch.rs`).
     pub psynch: psynch::Psynch,
+    // M48 §3f: carried because a mid-run capture cannot re-derive it. The MAP_JIT maps and the
+    // toggles that set the view happened behind the checkpoint. The stamps ride in `mem`, and
+    // `from_checkpoint` asserts that they agree with this set (Ruling T6-g).
+    pub jit: jit::JitSet,
 }
 
 /// M40: bytes of guest backing currently mapped by `alloc_pages` and not yet released — a
@@ -1431,34 +1447,127 @@ impl Box_ {
         true
     }
 
-    /// Emulate a trapped Apple IMPDEF `MRS` that surfaces as an UNDEFINED instruction (EC=0x00,
-    /// not the EC=0x18 sysreg-trap path) because HVF does not expose the register to the guest.
-    /// Reads the instruction at ELR_EL1; if it is `MRS Xt, S3_6_C15_C1_5` (an Apple CPU
-    /// feature/config register libdyld probes), writes a deterministic 0 into Xt (the guest tests a
-    /// bit and, seeing it clear, takes its normal PAC-authenticated path) and skips the instruction.
-    /// Returns true iff emulated. Deterministic and identical on record & replay (both re-execute
-    /// the same probe), so no clock/CPU state leaks into memory. Any other undefined instruction
-    /// returns false → surfaced as `Stop::Other` for diagnosis.
+    /// Emulate a trapped Apple IMPDEF system-register access that surfaces as an UNDEFINED
+    /// instruction (EC=0x00, not the EC=0x18 sysreg-trap path) because HVF does not expose the
+    /// register to the guest: `S3_6_C15_C1_5`, the SPRR register, in both directions (M48 §3f,
+    /// §11b item 2).
+    /// - `mrs Xt` answers the running thread's value (`Thread.sprr`). That is 0 until the thread
+    ///   writes it (R1), which is what this arm answered for every read before M48: libdyld probes
+    ///   bit 36 and, seeing it clear, takes its normal PAC-authenticated path (§2d).
+    /// - `msr S3_6_C15_C1_5, Xt` is [`sprr_write`](Self::sprr_write): admitted by value or refused.
+    ///
+    /// Either way the instruction is skipped. Deterministic and identical on record and replay (both
+    /// re-execute the same instructions), so nothing is recorded (R3). Any other undefined
+    /// instruction returns false → surfaced as `Stop::Other` for diagnosis.
     fn try_emulate_undef_mrs(&mut self) -> bool {
         let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
         if self.host_span(elr).is_none() { return false; }
         let insn = u32::from_le_bytes(self.read_guest(elr, 4).try_into().unwrap());
-        // MRS: bits[31:20] == 0xD53. Decode the sysreg selector (op0,op1,CRn,CRm,op2).
-        if insn & 0xFFF0_0000 != 0xD530_0000 { return false; }
-        let o0  = (insn >> 19) & 1;         // op0 = 0b10 | o0  => 2 or 3
-        let op1 = (insn >> 16) & 0x7;
-        let crn = (insn >> 12) & 0xf;
-        let crm = (insn >> 8) & 0xf;
-        let op2 = (insn >> 5) & 0x7;
-        let rt  = insn & 0x1f;
-        // S3_6_C15_C1_5: op0=3 (o0=1), op1=6, CRn=15, CRm=1, op2=5.
-        let is_apple_feat = o0 == 1 && op1 == 6 && crn == 15 && crm == 1 && op2 == 5;
-        if !is_apple_feat { return false; }
-        if rt != 31 { self.vcpu.set_reg(reg::x(rt), 0).unwrap(); } // x31 = XZR: value discarded
+        let Some(access) = retrace_arch::decode_sprr_access(insn) else { return false };
+        // Skip it first: a write may run the TLBI stub, which saves and restores this resume state.
         let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
         self.vcpu.set_reg(reg::PC, elr + 4).unwrap();
         self.vcpu.set_reg(reg::CPSR, spsr).unwrap();
+        match access {
+            SprrAccess::Read { rt } => {
+                let v = self.threads.sprr_of(self.threads.current());
+                if rt != 31 { self.vcpu.set_reg(reg::x(rt), v).unwrap(); } // x31 = XZR: value discarded
+            }
+            // x31 = XZR: a write of 0, which R2 refuses by value.
+            SprrAccess::Write { rt } => { let v = self.xreg(rt); self.sprr_write(v); }
+        }
         true
+    }
+
+    /// M48 §3f: the running thread's `msr S3_6_C15_C1_5, Xt`, emulated below the trace through
+    /// `try_emulate_undef_mrs`, from `run()` and `step()` alike. It admits exactly the two words
+    /// `pthread_jit_write_protect_np` loads from the commpage (R2): `+0x110` write-enables the
+    /// thread's `MAP_JIT` pages and `+0x118` protects them. Anything else, and any write by a guest
+    /// with no SPRR commpage (Ruling T6-f), is refused by value and pc, with the same panic on
+    /// record and replay (R5). An admitted value is stored on the current thread, so pthread's
+    /// read-back (`mrs`, then `brk #1` on a mismatch) sees it, and the view is synced last.
+    pub fn sprr_write(&mut self, value: u64) {
+        let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        let Some((we, pr)) = self.sprr_admitted() else {
+            panic!("M48: SPRR write {value:#x} at pc {pc:#x}: this guest has no SPRR commpage \
+                    (+0x110 and +0x118 absent or equal), so no value is admissible (R2, Ruling T6-f)");
+        };
+        assert!(value == we || value == pr,
+            "M48: SPRR write {value:#x} at pc {pc:#x} is neither the commpage's write-enable word \
+             {we:#x} (+0x110) nor its protect word {pr:#x} (+0x118) (R2)");
+        let tid = self.threads.current();
+        self.threads.set_sprr_of(tid, value);
+        self.sync_jit_view();
+    }
+
+    /// M48 §3f (R2): `(write_enable, protect)`, the commpage's `+0x110` and `+0x118` words. None
+    /// when the guest has no commpage (a static guest) or the two words cannot tell the modes apart
+    /// (Ruling T6-f).
+    fn sprr_admitted(&self) -> Option<(u64, u64)> {
+        let b = self.read_guest_checked(COMMPAGE_SPRR_IPA, 16)?;
+        let we = u64::from_le_bytes(b[..8].try_into().unwrap());
+        let pr = u64::from_le_bytes(b[8..].try_into().unwrap());
+        (we != pr).then_some((we, pr))
+    }
+
+    /// M48 §3f: the running thread's mode (Ruling T6-e).
+    fn jit_mode(&self) -> jit::View {
+        jit::View::of_sprr(self.threads.sprr_of(self.threads.current()), self.sprr_admitted().map(|(we, _)| we))
+    }
+
+    /// M48 §3f "Flips": make the view the running thread's mode. Called after that thread's own
+    /// write and after every thread switch, the only two events that change either side, so the
+    /// view always equals the running thread's mode (`assert_jit_stamped` checks it at a restore).
+    fn sync_jit_view(&mut self) {
+        let mode = self.jit_mode();
+        if mode != self.jit.view() { self.restamp_jit(mode); }
+    }
+
+    /// M48 §3f: stamp `view` over every `MAP_JIT` range minus its no-access extents (§11b item 4),
+    /// record it, and flush the guest TLB once. Called on a flip, when a range is mapped, and after
+    /// `guest_mprotect` touches a range. W^X holds by construction: `Rx` is `ATTR_CODE`, `Rw` is
+    /// `ATTR_DATA`, never both. The flush is a correctness requirement, as in `protect_none`: the
+    /// guest may already hold a translation for these pages.
+    fn restamp_jit(&mut self, view: jit::View) {
+        let attr = match view { jit::View::Rx => ATTR_CODE, jit::View::Rw => ATTR_DATA };
+        let extents = self.jit.stamped_extents(&self.noaccess);
+        for &(s, l) in &extents { self.set_region_attr(s, l, attr); }
+        self.jit.set_view(view);
+        if !extents.is_empty() { self.flush_guest_tlb(); }
+    }
+
+    /// M48 §3f (Ruling T6-d): drop page-aligned `[start, end)` from the `MAP_JIT` set and put its
+    /// pages back to `ATTR_DATA`, the identity default every anonymous mapping starts from.
+    /// Otherwise the next mapping there inherits an `ATTR_CODE` leaf its guest never asked for:
+    /// M13's `drop_protection` argument, for the view. `drop_protection` has already reset any
+    /// no-access part. Under a write-enabled view the leaves are `ATTR_DATA` already.
+    fn unmap_jit(&mut self, start: u64, end: u64) {
+        let gone = self.jit.remove(start, end);
+        if gone.is_empty() || self.jit.view() == jit::View::Rw { return; }
+        for &(s, l) in &gone { self.set_region_attr(s, l, ATTR_DATA); }
+        self.flush_guest_tlb();
+    }
+
+    /// M48 §3f, Ruling T6-g: a restored box's view must already be what stage 1 holds over every
+    /// stamped page, and its current thread's mode. The stamps ride in `mem`, so a mismatch means
+    /// `BoxState` lost the set or the view: a restore that replays fine and diverges on a seek
+    /// (M24's class). Asserted, never repaired. A fresh vCPU's TLB is empty, so nothing needs a
+    /// flush (§11a item 3).
+    fn assert_jit_stamped(&self) {
+        let (view, mode) = (self.jit.view(), self.jit_mode());
+        assert_eq!(view, mode, "M48: a restored MAP_JIT view {view:?} is not thread {}'s mode {mode:?}",
+            self.threads.current());
+        let attr = match view { jit::View::Rx => ATTR_CODE, jit::View::Rw => ATTR_DATA };
+        for (s, l) in self.jit.stamped_extents(&self.noaccess) {
+            // Both ends of each extent. `restamp_jit` writes an extent whole, so a lost or stale
+            // stamp shows at its ends, and walking all 16 Ki pages of node's code range on every
+            // debugger restore would cost one linear backing search per page (`leaf_desc`).
+            for p in [s, s + l - GRANULE as u64] {
+                let got = self.leaf_desc(p).map(|d| d & !PT_ADDR & !0x3);
+                assert_eq!(got, Some(attr),
+                    "M48: restored MAP_JIT page {p:#x} carries stage-1 attributes {got:x?}, not the {view:?} view's {attr:#x}");
+            }
+        }
     }
 
     /// Emulate a B-family pointer authentication that FEAT_FPAC-faulted (ESR EC=0x1C). objc
@@ -1548,7 +1657,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default() }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -1885,6 +1994,14 @@ impl Box_ {
         leaf & 0x3 != 0 && leaf & 0xC0 == 0x00
     }
 
+    /// Test/diagnostic observable (M48): does the stage-1 leaf for `ipa` give EL0 read and write
+    /// (`ATTR_DATA`: AP `0b01`)? The twin of [`ipa_is_noaccess`](Self::ipa_is_noaccess), exact for
+    /// the same reason: the AP field names each of the four attributes this box installs.
+    pub fn ipa_is_el0_writable(&self, ipa: u64) -> bool {
+        let Some(leaf) = self.leaf_desc(ipa) else { return false };
+        leaf & 0x3 != 0 && leaf & 0xC0 == 0x40
+    }
+
     /// Lazy-init the signing scratch on first use: a stub CODE page (RO+exec, ATTR_CODE) and an I/O
     /// TABLE page (RW+non-exec) at fixed reserved IPAs. W^X: the stub is code, so it is promoted to
     /// ATTR_CODE via the live-page-table path (`set_region_exec`) — never mapped writable+exec at
@@ -1991,13 +2108,23 @@ impl Box_ {
     ///
     /// Below the trace: called from paths shared by record and replay, so it fires identically on
     /// both sides (symmetry rule 2) and never surfaces to the record/replay loop.
+    ///
+    /// M48: safe inside `step()`: the step and debug bits are cleared for the stub's run and
+    /// restored after.
     pub fn flush_guest_tlb(&mut self) {
         self.ensure_tlbi_stub();
+        // M48 (P9, walls.md §1): a JIT view flip runs this inside `step()`, with MDSCR_EL1.SS armed,
+        // and the EL1 stub then takes a software-step exception (`tlbi stub faulted at EL1:
+        // EC=SoftStep`). Clear SS, and MDE with it, for the stub's run, and restore both after.
+        // `save_state` restores PSTATE.SS with the rest of the caller's state.
+        let mdscr = self.vcpu.get_sys(sysreg::MDSCR_EL1).unwrap();
+        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr & !(MDSCR_SS | MDSCR_MDE)).unwrap();
         let saved = self.save_state();
         self.vcpu.set_reg(reg::PC, TLBI_STUB_IPA).expect("set PC (tlbi stub)");
         self.vcpu.set_reg(reg::CPSR, TLBI_STUB_CPSR).expect("set CPSR (tlbi stub)");
         self.run_tlbi_stub();
         self.restore_state(&saved);
+        self.vcpu.set_sys(sysreg::MDSCR_EL1, mdscr).unwrap();
     }
 
     /// Lazy-init the TLBI scratch on first use: one stub CODE page at a fixed reserved IPA, RO +
@@ -2157,7 +2284,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default() };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -2400,6 +2527,11 @@ impl Box_ {
         let g = GRANULE as u64;
         assert!(size > 0 && size.is_multiple_of(g), "vm_remap: size {size:#x} is not a page multiple");
         assert!(target.is_multiple_of(g) && src.is_multiple_of(g), "vm_remap: unaligned target {target:#x} / src {src:#x}");
+        // M48 §3f (Ruling T6-c): an alias copies one moment's stamp, so an alias of a MAP_JIT page
+        // would stop following the toggles, and a target inside a range would be restamped by them.
+        for (a, what) in [(src, "a mach_vm_remap source"), (target, "a mach_vm_remap target")] {
+            if let Err(m) = self.jit.refuse_overlap(a, size, what) { panic!("{m}"); }
+        }
         // Ensure every target page has a page-granular entry (promotes an unpromoted block,
         // identity-filled with ATTR_DATA — what the block already meant), then alias.
         self.set_region_attr(target, size, ATTR_DATA);
@@ -2515,6 +2647,9 @@ impl Box_ {
         assert!(Self::fixed_fits(addr, rlen),
             "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's 36-bit \
              IPA space", addr.saturating_add(rlen as u64));
+        // M48 §3f (Ruling T6-c): every FIXED path funnels through here, and none may land on a
+        // MAP_JIT range, whose view would stay stamped over the new mapping's pages.
+        if let Err(m) = self.jit.refuse_overlap(addr, rlen as u64, "a FIXED mapping") { panic!("{m}"); }
         let end = addr + rlen as u64;
         let covers_all = self.backings.iter()
             .filter(|b| addr < b.ipa + b.len as u64 && b.ipa < end)   // the overlapping ones
@@ -2682,6 +2817,10 @@ impl Box_ {
     ///    No guest exercises it; fail-loud beats guessing at split semantics (this project's posture).
     fn map_mmap_region(&mut self, host: *mut u8, rlen: usize, addr: u64, prot: u64, flags: u64)
         -> Result<u64, u64> {
+        // M48 §3f: a MAP_JIT request is admitted by value before anything is placed (Rulings T6-a,
+        // T6-b), refused identically on record and replay (R5). Every admitted one is non-FIXED, so
+        // it leaves through the tail below, never through the FIXED branch's early return.
+        let is_jit = jit::JitSet::admit_mmap(prot, flags).unwrap_or_else(|m| panic!("{m}"));
         if flags & Self::MAP_FIXED == 0 && prot & Self::PROT_EXEC != 0 {
             self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1);
         }
@@ -2719,6 +2858,13 @@ impl Box_ {
         // M13: a PROT_NONE mmap is protected once its backing exists — which is why the invariant
         // "no-access => backed" costs nothing on this path.
         if prot == 0 { self.protect_none(ipa, rlen as u64); }
+        // M48 §3f: a new MAP_JIT range carries the current view, the running thread's mode, from
+        // its first instruction. A PROT_NONE one (V8's reservation, P5) stamps nothing until an
+        // mprotect commits part of it.
+        if is_jit {
+            self.jit.add(ipa, rlen as u64);
+            self.restamp_jit(self.jit.view());
+        }
         Ok(ipa)
     }
     /// RECORD: anon-alloc, stage the fd's bytes into it (SPTM: never map the file page itself), map,
@@ -2794,7 +2940,12 @@ impl Box_ {
         // this address inherits a no-access extent its guest never asked for. Runs BEFORE the
         // stage-2 unmap below so the pages are still backed while their leaves are reset.
         self.drop_protection(ipa, len);
-        if end > start { self.unmap_range(start, end); }
+        if end > start {
+            // M48 §3f (Ruling T6-d): leave the MAP_JIT set first, so its leaves are back to
+            // ATTR_DATA before the backings go.
+            self.unmap_jit(start, end);
+            self.unmap_range(start, end);
+        }
     }
 
     /// M48 Task 3: release `[start, end)` (page-aligned) from every backing it overlaps. A backing
@@ -2847,17 +2998,23 @@ impl Box_ {
     /// is how a guest takes its guard page back. Shared by the `mprotect`(74) and
     /// `mach_vm_protect`(−14) dispatch arms on both record and replay, so there is one
     /// implementation and no mirror to keep in step.
+    ///
+    /// M48 §3f: an `mprotect` touching a `MAP_JIT` range is admitted by value first (Ruling
+    /// T6-a), and the view is restamped after it (Review Focus item 4).
     pub fn guest_mprotect(&mut self, ipa: u64, len: u64, prot: u64) {
+        let in_jit = self.jit.admit_mprotect(ipa, len, prot).unwrap_or_else(|m| panic!("{m}"));
+        let end = ipa.saturating_add(len);
         if prot == 0 {
             self.protect_none(ipa, len);
-            return;
-        }
-        let end = ipa.saturating_add(len);
-        if self.noaccess.iter().any(|&(s, l)| ipa < s + l && s < end) {
+        } else if self.noaccess.iter().any(|&(s, l)| ipa < s + l && s < end) {
             self.unprotect(ipa, len);
-            return;
+        } else {
+            let _ = self.vm.protect(ipa, len as usize, MemFlags::RWX);
         }
-        let _ = self.vm.protect(ipa, len as usize, MemFlags::RWX);
+        // Review Focus item 4: `unprotect` stamps ATTR_DATA unconditionally, so V8's RWX commit of
+        // its PROT_NONE code range (P5) would leave the range writable and non-executable under the
+        // protected view, and V8's first call into it would fault.
+        if in_jit { self.restamp_jit(self.jit.view()); }
     }
 
     /// Sum of tracked backing lengths (test observability: proves mmap grows / munmap shrinks
@@ -3475,7 +3632,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default() };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -6789,6 +6946,10 @@ impl Box_ {
         self.threads.switch_to(tid);
         let next = self.threads.ctx_of(tid).clone();
         self.load_ctx(&next);
+        // M48 §3f: the view follows the running thread. Native gives each thread its own SPRR
+        // register, and with one vCPU a switch is when the register the hardware consults changes
+        // (`jitwp_dyn twothreads`).
+        self.sync_jit_view();
     }
 
     /// Capture all backings + architectural registers as an Event::Snapshot.
@@ -6983,6 +7144,7 @@ impl Box_ {
             excl: self.excl.clone(),
             gkq: self.gkq.clone(),
             psynch: self.psynch.clone(),
+            jit: self.jit.clone(),
         }
     }
 
@@ -7108,8 +7270,10 @@ impl Box_ {
             excl: state.excl.clone(),
             gkq: state.gkq.clone(),
             psynch: state.psynch.clone(),
+            jit: state.jit.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
+        b.assert_jit_stamped();
         b
     }
 
@@ -7131,10 +7295,10 @@ impl Box_ {
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
             self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
-            self.pac_enabled, self.kq, self.gkq, self.psynch)
+            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit)
     }
 
     /// Test-only (M46): the workqueue kqueue, for `checkpointparity.rs` and the box-level manager
@@ -7146,6 +7310,11 @@ impl Box_ {
     /// stages every other field through a public method.
     #[doc(hidden)]
     pub fn dbg_kq_mut(&mut self) -> &mut kq::WorkqKqueue { &mut self.kq }
+
+    /// Test-only (M48): the `MAP_JIT` set and its view, for `checkpointparity.rs` and the box-level
+    /// JIT tests, which read its fields rather than `dbg_internal_state`'s string.
+    #[doc(hidden)]
+    pub fn dbg_jit(&self) -> &jit::JitSet { &self.jit }
 
     /// Test-only (M48): the guest kqueues, for the box tests and the restore-parity checks.
     #[doc(hidden)]
@@ -7340,27 +7509,29 @@ mod pac_posture_tests {
     }
 }
 
-// M25-cpython. EL0 `DC ZVA` traps to EL1 (EC 0x18) when SCTLR_EL1.DZE is clear; Apple's
-// `_platform_memset` issues it above a size threshold, and CPython's allocator hits that threshold
-// at startup. `sctlr_mmu_on` is the one derivation all four SCTLR install sites route through, so
-// pinning DZE there fixes every guest, not just CPython's.
+// M25-cpython, M48. EL0 `DC ZVA` traps to EL1 (EC 0x18) when SCTLR_EL1.DZE is clear, and EL0
+// `IC IVAU` does when UCI is clear. Apple's `_platform_memset` issues the first above a size
+// threshold (CPython hits it at startup), and `sys_icache_invalidate` the second after V8 writes
+// JIT code. `sctlr_mmu_on` is the one derivation all four SCTLR install sites route through, so
+// pinning both there fixes every guest, not just CPython's or node's.
 #[cfg(test)]
 mod sctlr_dze_tests {
     use super::*;
 
-    // DZE(14) must be SET so `DC ZVA` executes natively at EL0 instead of trapping. UCT(15) and
-    // UCI(26) stay CLEAR deliberately: nothing has measured a guest issuing `DC CVAU` / `IC IVAU`
-    // or reading `CTR_EL0` from EL0, and the existing EC 0x18 non-syscall exit is already the
-    // fail-loud path for that case — setting them speculatively would be exactly the "right
-    // conclusion resting on an unmeasured supporting fact" this repo keeps catching. If a later
-    // wall needs one of them, that is a new measured finding with its own task.
+    // DZE(14) and UCI(26) must be SET. UCT(15) stays CLEAR: t0 M1(b) measured
+    // `sys_icache_invalidate` and found no `CTR_EL0` read, so nothing needs it, and the EC 0x18
+    // exit is the fail-loud path for a guest that does. "Nothing else" is asserted as the whole
+    // value, because a bit set speculatively is the "right conclusion resting on an unmeasured
+    // supporting fact" this repo keeps catching.
     #[test]
-    fn sctlr_enables_dc_zva_for_el0_and_nothing_else() {
+    fn sctlr_enables_dc_zva_and_ic_ivau_for_el0_and_nothing_else() {
         for pac_enabled in [false, true] {
             let sctlr = sctlr_mmu_on(pac_enabled);
             assert!(sctlr & 0x4000 != 0, "DZE (bit 14) must be SET: {sctlr:#x}");
+            assert!(sctlr & 0x0400_0000 != 0, "UCI (bit 26) must be SET: {sctlr:#x}");
             assert!(sctlr & 0x8000 == 0, "UCT (bit 15) must stay CLEAR: {sctlr:#x}");
-            assert!(sctlr & 0x0400_0000 == 0, "UCI (bit 26) must stay CLEAR: {sctlr:#x}");
+            assert_eq!(sctlr & !SCTLR_PAC_EN, 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000 | 0x0400_0000,
+                "the base is M, C, I, DZE and UCI over 0x30d00800, and nothing else: {sctlr:#x}");
         }
     }
 }
