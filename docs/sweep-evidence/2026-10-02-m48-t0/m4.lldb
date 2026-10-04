@@ -1,0 +1,9 @@
+break set -n __psynch_cvwait -C "register read x0 x1 x2 x3 x4 x5 x6 x7" -G true
+break set -n __psynch_cvwait -R 8 -C "register read x0 cpsr" -G true
+break set -n __psynch_cvsignal -C "register read x0 x1 x2 x3 x4 x5 x6 x7" -G true
+break set -n __psynch_cvsignal -R 8 -C "register read x0 cpsr" -G true
+break set -n __psynch_cvbroad -C "register read x0 x1 x2 x3 x4 x5 x6" -G true
+break set -n __psynch_cvbroad -R 8 -C "register read x0 cpsr" -G true
+break set -n __psynch_mutexwait -C "register read x0" -G true
+break set -n __psynch_mutexdrop -C "register read x0" -G true
+break list

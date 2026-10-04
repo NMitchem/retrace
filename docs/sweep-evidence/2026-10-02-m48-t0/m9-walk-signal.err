@@ -1,0 +1,10 @@
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace] forwarding mach_msg2 host_info (msgh_id 200) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_clock_service (msgh_id 206) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_create (msgh_id 3418) to host (decided allowlist)
+[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided allowlist)
+
+thread 'main' (23025585) panicked at crates/retrace-box/src/sig.rs:300:5:
+a non-SA_SIGINFO handler is not modelled. Its infostyle is 0x1 (measured, vs 0x1e for SA_SIGINFO) and the frame layout is identical, so supporting it is small — but no gate guest exercises it, so it is asserted rather than shipped untested.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

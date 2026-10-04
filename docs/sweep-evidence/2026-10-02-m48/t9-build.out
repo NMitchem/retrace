@@ -1,0 +1,14 @@
+start 2026-10-04 05:37:39 -03 commit=4e37b88
+debug build exit=0
+release build exit=0
+test build exit=0
+/private/tmp/claude-501/m48-t9-debug-retrace: replacing existing signature
+debug sign=0
+debug warm-up rc=2 (2 is the usage exit)
+0eece64c8cf6c2c9311f3d2015b95f083e65af32061073af39a9893a80070487  /private/tmp/claude-501/m48-t9-debug-retrace
+/private/tmp/claude-501/m48-t9-release-retrace: replacing existing signature
+release sign=0
+release warm-up rc=2 (2 is the usage exit)
+b420e90a114b55749f150fa0c9fcd66ce54987c3e2885adec8f18ef8eda3a637  /private/tmp/claude-501/m48-t9-release-retrace
+addon=0
+end 2026-10-04 05:37:54 -03

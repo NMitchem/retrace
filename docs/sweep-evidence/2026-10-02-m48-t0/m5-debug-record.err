@@ -1,0 +1,33 @@
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace] forwarding mach_msg2 host_info (msgh_id 200) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_clock_service (msgh_id 206) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_create (msgh_id 3418) to host (decided allowlist)
+[retrace] forwarding mach_msg2 task_info (msgh_id 3405) to host (decided allowlist)
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1703 send_size 248): the box hosts no message-queue receivers
+[retrace] forwarding mach_msg2 semaphore_create (msgh_id 3418) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_create (msgh_id 3418) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_destroy (msgh_id 3419) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_create (msgh_id 3418) to host (decided allowlist)
+[retrace] forwarding mach_msg2 semaphore_destroy (msgh_id 3419) to host (decided allowlist)
+[probe-summary] threads=7 states=[0:Runnable, 1:Exited(0), 2:Exited(0), 3:Exited(0), 4:Exited(0), 5:Exited(0), 6:Runnable] waits={} sprr_writes=268 by_tid={0: 16, 2: 252} view_flips=270 switch_flips=0 max_runnable=6 kevents=11 psynch=26 jit=[(a2cf8c000, 10000000)] kqs=[(4, 1), (7, 1), (8, 1), (10, 1), (13, 1)]
+[retrace] fall-throughs: 5
+       42.57 real        41.92 user         0.24 sys
+           773455872  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               71325  page reclaims
+                   8  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   1  messages sent
+                   0  messages received
+                   0  signals received
+                 127  voluntary context switches
+                 972  involuntary context switches
+        850592157114  instructions retired
+        171344791122  cycles elapsed
+           769494568  peak memory footprint

@@ -309,3 +309,50 @@ fn a_wrong_thread_on_the_crash_landmark_is_a_divergence() {
          it — if the crash compare fired, the retag touched more than the tag; stderr:\n{}",
         rep.stderr);
 }
+
+/// M48 Task 10 (spec §3j as corrected by §11a item 1). The `kevent` mirror sits inside the
+/// `Syscall` chain after the arm-top `verify_thread`, so that one call is what guards it, and a
+/// `kevent` landmark retagged to another live thread must diverge as the schedule. `kq_dyn wake`:
+/// thread A blocks in `kevent` and thread B triggers it, so two live threads issue syscalls and the
+/// retag target is real.
+#[test]
+fn a_wrong_thread_on_a_kevent_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::KQ_DYN, &["wake"], retrace_arch::SYS_KEVENT);
+}
+
+/// M48 Task 10: the same for `psynch_cvwait`, on `condvar_dyn pingpong`, whose two threads each wait.
+#[test]
+fn a_wrong_thread_on_a_psynch_cvwait_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::CONDVAR_DYN, &["pingpong"], retrace_arch::SYS_PSYNCH_CVWAIT);
+}
+
+/// `retag_and_expect_divergence` over any fixture and argv: retag the first `Syscall` landmark for
+/// `num_wanted` to another thread id that genuinely appears in the same trace, and assert replay
+/// refuses it as the schedule. The reasoning for a live id, not a constant, is
+/// `a_wrong_thread_on_replay_is_a_divergence`'s.
+fn retag_fixture_and_expect_divergence(guest: &str, argv: &[&str], num_wanted: u64) {
+    let (rec, trace) = util::record_dynamic_args(guest, argv);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let mut ids: Vec<u32> = events.iter().filter_map(|e| match e {
+        Event::Syscall { thread, .. } => Some(*thread), _ => None }).collect();
+    ids.sort_unstable(); ids.dedup();
+    assert!(ids.len() >= 2, "{guest} {argv:?} must schedule two threads that issue syscalls; got {ids:?}");
+
+    let i = events.iter().position(|e| matches!(e, Event::Syscall { num, .. } if *num == num_wanted))
+        .unwrap_or_else(|| panic!("no Syscall landmark for num {num_wanted} — {guest} {argv:?} no \
+                                   longer reaches the mirror this test exists to cover"));
+    let orig = match &events[i] { Event::Syscall { thread, .. } => *thread, _ => unreachable!() };
+    let other = *ids.iter().find(|&&t| t != orig).expect("a genuinely live second id, not a constant");
+    if let Event::Syscall { thread, .. } = &mut events[i] { *thread = other; }
+
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+    assert!(rep.stderr.contains("the schedule diverged"),
+        "the divergence must be the THREAD oracle's, not merely some divergence; stderr:\n{}", rep.stderr);
+}

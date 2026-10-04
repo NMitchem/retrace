@@ -1,0 +1,78 @@
+T1095 tid=0 kevent#1 tid=0 kq=7 change ident=0x1e7e7711 filter=-10 flags=0x21 fflags=0x0 data=0x0 udata=0x0 nev=1 timeout=
+T1095 tid=0 kevent#1 tid=0 kq=7 change ident=0x1e7e7711 filter=-10 flags=0x0 fflags=0x1000000 data=0x0 udata=0x0 nev=1 tim
+T1095 tid=0 kevent#1 call tid=0 kq=7 nch=2 nev=1 timeout=Some((0, 0)) -> immediate n=1
+T1098 tid=0 kevent#2 tid=0 kq=4 change ident=0x7 filter=-10 flags=0x21 fflags=0x0 data=0x0 udata=0x0 nev=0 timeout=None
+T1098 tid=0 kevent#2 call tid=0 kq=4 nch=1 nev=0 timeout=None -> immediate n=0
+T1103 tid=? bsdthread_create args=0xa08057bec,0x7ae10
+T1104 tid=? semaphore_wait args=0x1303,0x0
+T1110 tid=1 kevent#3 tid=1 kq=8 change ident=0x9 filter=-10 flags=0x21 fflags=0x0 data=0x0 udata=0x0 nev=0 timeout=None
+T1110 tid=1 kevent#3 call tid=1 kq=8 nch=1 nev=0 timeout=None -> immediate n=0
+T1111 tid=? semaphore_signal args=0x1303,0x7b318
+T1112 tid=1 kevent#4 call tid=1 kq=8 nch=0 nev=1024 timeout=None -> immediate n=0
+T1112 tid=1 kevent#4 BLOCK tid=1 kq=8 timeout=None deadline=None now=0x71914afd9f3
+T1117 tid=? bsdthread_create args=0xa080559f0,0x700c151d0
+T1121 tid=? bsdthread_create args=0xa080559f0,0x700c15260
+T1125 tid=? bsdthread_create args=0xa080559f0,0x700c15230
+T1129 tid=? bsdthread_create args=0xa080559f0,0x700c152c0
+T1130 tid=0 psynch#1 cvwait tid=0 cv=0x27ff458 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+T1133 tid=2 psynch#2 cvsignal tid=2 cv=0x27ff458 lsgen=0x100 ugen=0x0 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+T1134 tid=2 psynch#3 cvwait tid=2 cv=0x700c7a5d8 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+T1135 tid=0 psynch#4 cvwait tid=0 cv=0x27ff458 lsgen=0x10000000200 ugen=0x100 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+T1138 tid=3 psynch#5 cvsignal tid=3 cv=0x27ff458 lsgen=0x10000000200 ugen=0x100 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags
+T1139 tid=3 psynch#6 cvwait tid=3 cv=0x700c7a5d8 lsgen=0x200 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+T1140 tid=0 psynch#7 cvwait tid=0 cv=0x27ff458 lsgen=0x20000000300 ugen=0x200 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+T1143 tid=4 psynch#8 cvsignal tid=4 cv=0x27ff458 lsgen=0x20000000300 ugen=0x200 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags
+T1144 tid=4 psynch#9 cvwait tid=4 cv=0x700c7a5d8 lsgen=0x300 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+T1145 tid=0 psynch#10 cvwait tid=0 cv=0x27ff458 lsgen=0x30000000400 ugen=0x300 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+T1148 tid=5 psynch#11 cvsignal tid=5 cv=0x27ff458 lsgen=0x30000000400 ugen=0x300 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flag
+T1149 tid=5 psynch#12 cvwait tid=5 cv=0x700c7a5d8 lsgen=0x400 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+T1150 tid=0 psynch#13 cvwait tid=0 cv=0x27ff458 lsgen=0x40000000500 ugen=0x400 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+T1150 tid=0 cvwait timeout tid=0 cv=0x27ff458
+T1176 tid=0 kevent#5 tid=0 kq=10 change ident=0xb filter=-10 flags=0x21 fflags=0x0 data=0x0 udata=0x0 nev=0 timeout=None
+T1176 tid=0 kevent#5 call tid=0 kq=10 nch=1 nev=0 timeout=None -> immediate n=0
+T1221 tid=0 psynch#14 cvsignal tid=0 cv=0x700c7a5d8 lsgen=0x400 ugen=0x0 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 flags=0x0
+T1227 tid=0 psynch#15 cvsignal tid=0 cv=0x700c7a5d8 lsgen=0x10000000400 ugen=0x100 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 fl
+T1230 tid=0 kevent#6 tid=0 kq=10 change ident=0xb filter=-10 flags=0x0 fflags=0x1000000 data=0x0 udata=0x0 nev=0 timeout=N
+T1230 tid=0 kevent#6 call tid=0 kq=10 nch=1 nev=0 timeout=None -> immediate n=0
+T1235 tid=? bsdthread_create args=0xa080f8eac,0x0
+T1242 tid=0 psynch#16 cvsignal tid=0 cv=0x700c7a5d8 lsgen=0x20000000400 ugen=0x200 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 fl
+T1246 tid=0 psynch#17 cvsignal tid=0 cv=0x700c7a5d8 lsgen=0x30000000400 ugen=0x300 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 fl
+T1326 tid=0 kevent#7 tid=0 kq=13 change ident=0x1 filter=-1 flags=0x5 fflags=0x0 data=0x0 udata=0x0 nev=1 timeout=Some((0,
+T1326 tid=0 kevent#7 call tid=0 kq=13 nch=1 nev=1 timeout=Some((0, 1)) -> immediate n=0
+T1326 tid=0 kevent#7 BLOCK tid=0 kq=13 timeout=Some((0, 1)) deadline=Some(7804341306867) now=0x71916fdc5f3
+T1326 tid=0 kevent timeout tid=0
+T1333 tid=0 psynch#18 cvwait tid=0 cv=0x700c7a608 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=0
+T1334 tid=2 psynch#19 cvbroad tid=2 cv=0x700c7a608 lsgen=0x100 udgen=0x100 flags=0x0 mutex=0x0 mugen=0x0 waiters=1
+T1341 tid=2 psynch#20 cvwait tid=2 cv=0x700c7a5d8 lsgen=0x40000000500 ugen=0x400 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec
+T1342 tid=0 psynch#21 cvsignal tid=0 cv=0x700c7a5d8 lsgen=0x40000000500 ugen=0x400 port=0x0 mutex=0x0 mugen=0x0 thr=0x0 fl
+T1343 tid=0 kevent#8 call tid=0 kq=10 nch=0 nev=1024 timeout=Some((0, 0)) -> immediate n=1
+T1344 tid=0 kevent#9 call tid=0 kq=10 nch=0 nev=1024 timeout=Some((0, 0)) -> immediate n=0
+T1424 tid=0 kevent#10 tid=0 kq=8 change ident=0x9 filter=-10 flags=0x0 fflags=0x1000000 data=0x0 udata=0x0 nev=0 timeout=N
+T1424 tid=1 kevent wake tid=1 kq=8 n=1
+T1424 tid=0 kevent#10 call tid=0 kq=8 nch=1 nev=0 timeout=None -> immediate n=0
+T1425 tid=? ulock_wait args=0x1020002,0x30047034
+T1429 tid=? ulock_wake args=0x1000002,0x30047034
+T1430 tid=? bsdthread_terminate args=0x30000000,0x44000
+T1432 tid=? ulock_wait args=0x1020002,0x30093034
+T1434 tid=? ulock_wake args=0x1000002,0x30093034
+T1435 tid=? bsdthread_terminate args=0x3004c000,0x44000
+T1437 tid=? ulock_wait args=0x1020002,0x300df034
+T1439 tid=? ulock_wake args=0x1000002,0x300df034
+T1440 tid=? bsdthread_terminate args=0x30098000,0x44000
+T1442 tid=? ulock_wait args=0x1020002,0x3012b034
+T1444 tid=? ulock_wake args=0x1000002,0x3012b034
+T1445 tid=? bsdthread_terminate args=0x300e4000,0x44000
+T1447 tid=? ulock_wait args=0x1020002,0x30177034
+T1449 tid=? ulock_wake args=0x1000002,0x30177034
+T1450 tid=? bsdthread_terminate args=0x30130000,0x44000
+T1452 tid=0 psynch#22 cvwait tid=0 cv=0x7ae90 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+T1452 tid=0 cvwait timeout tid=0 cv=0x7ae90
+T1453 tid=0 psynch#23 cvwait tid=0 cv=0x7ae60 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+T1453 tid=0 cvwait timeout tid=0 cv=0x7ae60
+T1454 tid=0 psynch#24 cvwait tid=0 cv=0x700c7a608 lsgen=0x10000000200 ugen=0x100 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec
+T1454 tid=0 cvwait timeout tid=0 cv=0x700c7a608
+T1455 tid=0 psynch#25 cvwait tid=0 cv=0x700c7a5d8 lsgen=0x50000000600 ugen=0x500 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec
+T1455 tid=0 cvwait timeout tid=0 cv=0x700c7a5d8
+T1456 tid=0 kevent#11 call tid=0 kq=4 nch=0 nev=1024 timeout=Some((0, 0)) -> immediate n=0
+T1459 tid=0 psynch#26 cvwait tid=0 cv=0x7ace8 lsgen=0x100000100 ugen=0x0 mutex=0x0 mugen=0x0 flags=0xa0 sec=0 nsec=1
+T1459 tid=0 cvwait timeout tid=0 cv=0x7ace8

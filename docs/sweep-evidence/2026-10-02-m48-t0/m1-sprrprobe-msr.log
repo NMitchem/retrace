@@ -1,0 +1,1 @@
+RECORD ERROR: non-syscall exit: unknown/uncategorized (EC=0x00 ISS=0x0 FSC=0x0) far/ipa=0x0 (UNMAPPED) pc=0x4404 elr=0x100000300

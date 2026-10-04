@@ -43,15 +43,25 @@
 //! M47 also adds 2 `fork`, reached by `forkfail_dyn`, by default-config `git commit` and by
 //! `/bin/csh`/`/bin/tcsh` once the prepare handler's `mach_ports_register` (3403) is answered
 //! (M47 t0 M3); it is refused, never forwarded.
+//!
+//! M48 adds 105 `setsockopt`, 303 `psynch_cvbroad`, 304 `psynch_cvsignal`, 305 `psynch_cvwait` and 363
+//! `kevent`, measured on 2026-10-02 from the same `[trap] num=` lines in t0's five walks of
+//! `node -e 'console.log(1)'` and its variants (`docs/sweep-evidence/2026-10-02-m48-t0/`, the
+//! `m2-*.census` files and the measurements file's M2 and M4): node's kqueues (363), its condition
+//! variables (303-305), and libuv's `SO_OOBINLINE` on the stdout pipe (105). 363 and the psynch calls
+//! are emulated above the generic forward, so their rows document the prototype; 105 is forwarded.
+//! `getsockname` (32) is NOT here: libuv issues it only when stdin is a socket, and under a null stdin
+//! it was reached 0 times in all five walks.
 use retrace_arch::arg_kinds;
 
 pub const CENSUS: &[i64] = &[
     -89, -70, -50, -47, -36, -33, -29, -28, -27, -26, -24, -19, -18, -15, -14, -12, -10, 1, 2, 3, 4,
     5, 6, 9, 10, 12, 13, 20, 24, 25, 33, 36, 37, 38, 39, 41, 42, 43, 46, 47, 48, 49, 52, 53, 54,
-    58, 59, 60, 73, 74, 75, 81, 90, 92, 97, 98, 116, 117, 128, 133, 136, 138, 153, 169, 170, 184,
-    189, 191, 194, 195, 197, 199, 202, 220, 228, 244, 266, 286, 294, 327, 328, 329, 331, 333, 336,
-    338, 339, 340, 344, 345, 346, 347, 360, 361, 362, 366, 367, 368, 372, 374, 381, 396, 397, 398,
-    399, 406, 412, 427, 461, 463, 464, 470, 478, 483, 500, 515, 516, 539, 550, 2147483648,
+    58, 59, 60, 73, 74, 75, 81, 90, 92, 97, 98, 105, 116, 117, 128, 133, 136, 138, 153, 169, 170,
+    184, 189, 191, 194, 195, 197, 199, 202, 220, 228, 244, 266, 286, 294, 303, 304, 305, 327, 328,
+    329, 331, 333, 336, 338, 339, 340, 344, 345, 346, 347, 360, 361, 362, 363, 366, 367, 368, 372,
+    374, 381, 396, 397, 398, 399, 406, 412, 427, 461, 463, 464, 470, 478, 483, 500, 515, 516, 539,
+    550, 2147483648,
 ];
 
 #[test]

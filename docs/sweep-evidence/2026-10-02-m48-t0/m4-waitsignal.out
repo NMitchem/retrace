@@ -1,0 +1,5 @@
+[m4] tid=23157176 __psynch_cvwait enter x0=0x102fac040 x1=0x100000100 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23157175 __psynch_cvsignal enter x0=0x102fac040 x1=0x100 x2=0 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23157175 __psynch_cvsignal return x0=0x101 carry=0
+[m4] tid=23157176 __psynch_cvwait return x0=0 carry=0
+waitsignal done

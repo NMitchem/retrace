@@ -1,0 +1,114 @@
+pidstart=36374
+binary=/private/tmp/claude-501/m48-t9-debug-retrace sha256=0eece64c8cf6c2c9311f3d2015b95f083e65af32061073af39a9893a80070487 commit=dc43f4b date=2026-10-04 05:43:55 -03
+load-start:  5:43  up 10 days,  8:27, 10 users, load averages: 1.60 1.60 1.50 vm.loadavg={ 1.60 1.60 1.50 }
+PASS /bin/[
+ROW	/bin/[	PASS	2	2	36406	n/a		
+PASS /bin/bash
+ROW	/bin/bash	PASS	0	0	36440	n/a		
+PASS /bin/cat
+ROW	/bin/cat	PASS	0	0	36477	n/a		
+PASS /bin/chmod
+ROW	/bin/chmod	PASS	1	1	36519	n/a		
+PASS /bin/cp
+ROW	/bin/cp	PASS	64	64	36548	n/a		
+FAIL /bin/csh (recorder panicked: thread 'main' (28013437) panicked at crates/retrace-arch/src/lib.rs:1069:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from th)
+ROW	/bin/csh	FAIL	101	n/a	36579	n/a	thread 'main' (28013437) panicked at crates/retrace-arch/src/lib.rs:1069:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from th	
+PASS /bin/dash
+ROW	/bin/dash	PASS	0	0	36600	n/a		
+PASS /bin/date
+ROW	/bin/date	PASS	0	0	36641	n/a		
+PASS /bin/dd
+ROW	/bin/dd	PASS	0	0	36689	n/a		
+PASS /bin/df
+ROW	/bin/df	PASS	0	0	36722	n/a		
+PASS /bin/echo
+ROW	/bin/echo	PASS	0	0	36777	n/a		
+PASS /bin/ed
+ROW	/bin/ed	PASS	0	0	36821	n/a		
+PASS /bin/expr
+ROW	/bin/expr	PASS	2	2	36855	n/a		
+PASS /bin/hostname
+ROW	/bin/hostname	PASS	0	0	36881	n/a		
+PASS /bin/kill
+ROW	/bin/kill	PASS	2	2	36915	n/a		
+PASS /bin/ksh
+ROW	/bin/ksh	PASS	0	0	36959	n/a		
+PASS /bin/launchctl
+ROW	/bin/launchctl	PASS	1	1	36990	n/a		
+PASS /bin/link
+ROW	/bin/link	PASS	1	1	37018	n/a		
+PASS /bin/ln
+ROW	/bin/ln	PASS	1	1	37052	n/a		
+PASS /bin/ls
+ROW	/bin/ls	PASS	0	0	37091	n/a		
+PASS /bin/mkdir
+ROW	/bin/mkdir	PASS	64	64	37128	n/a		
+PASS /bin/mv
+ROW	/bin/mv	PASS	64	64	37156	n/a		
+PASS /bin/pax
+ROW	/bin/pax	PASS	1	1	37189	n/a		
+PASS /bin/ps
+ROW	/bin/ps	PASS	0	0	37217	n/a		
+PASS /bin/pwd
+ROW	/bin/pwd	PASS	0	0	37274	n/a		
+PASS /bin/realpath
+ROW	/bin/realpath	PASS	0	0	37300	n/a		
+PASS /bin/rm
+ROW	/bin/rm	PASS	64	64	37336	n/a		
+PASS /bin/rmdir
+ROW	/bin/rmdir	PASS	1	1	37362	n/a		
+PASS /bin/sh
+ROW	/bin/sh	PASS	1	1	37400	n/a		
+PASS /bin/sleep
+ROW	/bin/sleep	PASS	1	1	37426	n/a		
+PASS /bin/stty
+ROW	/bin/stty	PASS	1	1	37459	n/a		
+PASS /bin/sync
+ROW	/bin/sync	PASS	0	0	37487	n/a		
+FAIL /bin/tcsh (recorder panicked: thread 'main' (28018460) panicked at crates/retrace-arch/src/lib.rs:1069:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from th)
+ROW	/bin/tcsh	FAIL	101	n/a	37520	n/a	thread 'main' (28018460) panicked at crates/retrace-arch/src/lib.rs:1069:38: M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from th	
+PASS /bin/test
+ROW	/bin/test	PASS	1	1	37541	n/a		
+PASS /bin/unlink
+ROW	/bin/unlink	PASS	64	64	37569	n/a		
+PASS /bin/wait4path
+ROW	/bin/wait4path	PASS	1	1	37600	n/a		
+PASS /bin/zsh
+ROW	/bin/zsh	PASS	0	0	37633	n/a		
+FAIL /usr/bin/automationmodetool (recorder panicked: thread 'main' (28018896) panicked at crates/retrace-arch/src/lib.rs:1069:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument fro)
+ROW	/usr/bin/automationmodetool	FAIL	101	n/a	37661	n/a	thread 'main' (28018896) panicked at crates/retrace-arch/src/lib.rs:1069:38: M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument fro	
+PASS /usr/bin/desdp
+ROW	/usr/bin/desdp	PASS	71	71	37687	n/a		
+PASS /usr/bin/dyld_info
+ROW	/usr/bin/dyld_info	PASS	71	71	37717	n/a		
+PASS /usr/bin/flex
+ROW	/usr/bin/flex	PASS	71	71	37752	n/a		
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+ROW	/usr/bin/dddiagnose	PASS	139	139	37808	n/a		
+PASS /usr/bin/basename
+ROW	/usr/bin/basename	PASS	1	1	37848	n/a		
+PASS /usr/bin/dirname
+ROW	/usr/bin/dirname	PASS	1	1	37881	n/a		
+PASS /usr/bin/env
+ROW	/usr/bin/env	PASS	0	0	37909	n/a		
+PASS /usr/bin/head
+ROW	/usr/bin/head	PASS	0	0	37946	n/a		
+PASS /usr/bin/tail
+ROW	/usr/bin/tail	PASS	0	0	37975	n/a		
+PASS /usr/bin/sort
+ROW	/usr/bin/sort	PASS	0	0	38003	n/a		
+PASS /usr/bin/uniq
+ROW	/usr/bin/uniq	PASS	0	0	38036	n/a		
+PASS /usr/bin/cut
+ROW	/usr/bin/cut	PASS	1	1	38069	n/a		
+PASS /usr/bin/tr
+ROW	/usr/bin/tr	PASS	1	1	38098	n/a		
+FAIL /usr/bin/yes (timed out after 30s recording)
+ROW	/usr/bin/yes	FAIL	137	n/a	38129	n/a		
+PASS /usr/bin/true
+ROW	/usr/bin/true	PASS	0	0	38181	n/a		
+PASS /usr/bin/printenv
+ROW	/usr/bin/printenv	PASS	0	0	38214	n/a		
+TALLY pass=50 fail=4 skip=0
+SWEEP_EXIT=0
+load-end:  6:06  up 10 days,  8:50, 10 users, load averages: 1.81 1.86 1.66 vm.loadavg={ 1.81 1.86 1.66 } date=2026-10-04 06:06:13 -03

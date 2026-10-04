@@ -1,0 +1,43 @@
+_sys_icache_invalidate:
+0x000004654   cbz      x1, 0x46a8           
+0x000004658   and      x9, x0, #0xffffffffffffffc0 
+0x00000465C   and      x10, x0, #0x3f       
+0x000004660   add      x10, x1, x10         
+0x000004664   sub      x10, x10, #0x1       
+0x000004668   mov      x11, #-0x1           
+0x00000466C   eor      x10, x11, x10, lsr #6 
+0x000004670   dsb      ish                  
+0x000004674   mov      x2, #0x14            
+0x000004678   mov      x3, #0x0             
+0x00000467C   ic       ivau, x9             
+0x000004680   add      x9, x9, #0x40        
+0x000004684   subs     x2, x2, #0x1         
+0x000004688   b.ne     0x4698               
+0x00000468C   cbz      x3, 0x46ac           
+0x000004690   dsb      ish                  
+0x000004694   mov      x2, #0x14            
+0x000004698   adds     x10, x10, #0x1       
+0x00000469C   b.ne     0x467c               
+0x0000046A0   dsb      ish                  
+0x0000046A4   isb                           
+0x0000046A8   ret                           
+0x0000046AC   movk     x8, #0x0, lsl #48    
+0x0000046B0   movk     x8, #0xf, lsl #32    
+0x0000046B4   movk     x8, #0xffff, lsl #16 
+0x0000046B8   movk     x8, #0xc080          
+0x0000046BC   ldr      w8, [x8]             
+0x0000046C0   adrp     x2, 0                ; 0x4000
+0x0000046C4   add      x2, x2, #0x6e8       ; _cpus_that_need_dsb_for_ic_ivau
+0x0000046C8   ldr      w3, [x2], #0x4       
+0x0000046CC   cbz      w3, 0x46dc           
+0x0000046D0   cmp      w3, w8               
+0x0000046D4   b.eq     0x4690               
+0x0000046D8   b        0x46c8               
+0x0000046DC   mov      x2, #0x0             
+0x0000046E0   mov      x3, #0x1             
+0x0000046E4   b        0x4698               
+_cpus_that_need_dsb_for_ic_ivau:
+0x0000046F8   ldnp     w21, w29, [x13, #-0x4c] 
+0x0000046FC   ands     w18, w1, #0x803fffff 
+0x000004704   udf      #0x0                 
+_sys_dcache_flush:

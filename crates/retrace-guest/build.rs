@@ -113,6 +113,16 @@ fn main() {
         .status().expect("clang scalarprobe");
     assert!(status.success(), "scalarprobe guest build failed");
 
+    // M48: the static SPRR / cache-maintenance probe, with no commpage (§11a item 8). Task 0 Step 3
+    // measured this exact text on the base binary.
+    let src = format!("{}/asm/sprrprobe.s", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sprrprobe");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-nostdlib","-static","-Wl,-e,_start","-o",&bin,&src])
+        .status().expect("clang sprrprobe");
+    assert!(status.success(), "sprrprobe guest build failed");
+
     // M29: a guest issuing a legal NULL-oldp sysctl (size query) followed by one whose *oldlenp
     // (1 TiB) is far larger than any backing — the fixture for the DerefU64 refusal.
     let src = format!("{}/asm/oldlensysctl.s", env!("CARGO_MANIFEST_DIR"));
@@ -437,6 +447,46 @@ fn main() {
         .status().expect("clang madv_dyn");
     assert!(status.success(), "madv_dyn guest build failed");
 
+    // jitwp_dyn: the M48 JIT write-protect fixture — modes basic, v8, twothreads and fault. Same
+    // recipe as madv_dyn.
+    let src = format!("{}/c/jitwp_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/jitwp_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang jitwp_dyn");
+    assert!(status.success(), "jitwp_dyn guest build failed");
+
+    // simd_dyn: the M48 SIMD fixture — callee-saved d8-d15 across a thread switch and a sigreturn.
+    // Same recipe as hello_dyn.
+    let src = format!("{}/c/simd_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/simd_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang simd_dyn");
+    assert!(status.success(), "simd_dyn guest build failed");
+
+    // trim_dyn: the M48 partial-munmap fixture — V8's aligned-reservation trim; modes trim, head
+    // and tail. Same recipe as hello_dyn.
+    let src = format!("{}/c/trim_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/trim_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang trim_dyn");
+    assert!(status.success(), "trim_dyn guest build failed");
+
+    // kq_dyn: the M48 guest-kqueue fixture — modes probe, wake, timeout, tryselect, pipe, oneshot
+    // and bad (spec §3h). Same recipe as hello_dyn; pthreads are in libSystem.
+    let src = format!("{}/c/kq_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/kq_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang kq_dyn");
+    assert!(status.success(), "kq_dyn guest build failed");
+
     // rpath_dyn + librpath_dyn.dylib: the M47 AMFI fixture. The dylib's install name is @rpath/…
     // and the exe's LC_RPATH is @executable_path, so dyld expands @rpath only if AMFI's dyld policy
     // allows it. Both land in OUT_DIR side by side.
@@ -486,6 +536,17 @@ fn main() {
         .args(["-arch","arm64","-o",&bin,&src])
         .status().expect("clang forkfail_dyn");
     assert!(status.success(), "forkfail_dyn guest build failed");
+
+    // condvar_dyn: the M48 condition-variable fixture — modes pingpong, broadcast, timedout,
+    // timedsignal, onens and mutex (see its header). Same recipe as hello_dyn; pthreads live in
+    // libSystem, so no -lpthread.
+    let src = format!("{}/c/condvar_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/condvar_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang condvar_dyn");
+    assert!(status.success(), "condvar_dyn guest build failed");
 
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
@@ -876,4 +937,27 @@ fn main() {
         .args(["-arch","arm64","-o",&bin,&src])
         .status().expect("clang dispatch_dyn");
     assert!(status.success(), "dispatch_dyn guest build failed");
+
+    // M48 Task 8 (spec §3g, D1): the N-API addon of node's crash demo, built only where Homebrew's
+    // node headers are. Elsewhere it is skipped with a warning and `NODE_CRASH_ADDON` is `None`,
+    // so the crate builds clean and `node_crash_e2e` announces its skip. The header is registered
+    // for re-runs only when it exists: cargo re-runs a build script on every build while a
+    // rerun-if-changed path is missing, which would rebuild every fixture each time. So a machine
+    // that installs node later rebuilds the addon at the next change to this crate.
+    let napi = "/opt/homebrew/include/node/node_api.h";
+    let src = format!("{}/node/crash_addon.c", env!("CARGO_MANIFEST_DIR"));
+    println!("cargo:rerun-if-changed={src}");
+    if std::path::Path::new(napi).exists() {
+        println!("cargo:rerun-if-changed={napi}");
+        let bin = format!("{out}/crash_addon.node");
+        let status = Command::new("clang")
+            .args(["-arch", "arm64", "-bundle", "-undefined", "dynamic_lookup",
+                   "-I", "/opt/homebrew/include/node", "-o", &bin, &src])
+            .status().expect("clang crash_addon");
+        assert!(status.success(), "the node crash addon failed to build against {napi}");
+        println!("cargo:rustc-env=RETRACE_NODE_CRASH_ADDON={bin}");
+    } else {
+        println!("cargo:warning=SKIPPED the node crash addon: {napi} not found (`brew install node`); \
+                  NODE_CRASH_ADDON is None and node_crash_e2e will announce its skip");
+    }
 }

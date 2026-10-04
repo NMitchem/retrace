@@ -1,0 +1,20 @@
+> continue
+guest crashed: pc=0xa3da94738 far=0x4000dead0000 esr=0x92000005
+> where
+at (1404, 0) pc=0xa3da94738 thread=0
+> threads
+* thread 0: Runnable
+  thread 1: Blocked(Probe)
+  thread 2: Runnable
+  thread 3: Runnable
+  thread 4: Runnable
+  thread 5: Runnable
+  thread 6: Runnable
+> watch 0x701394930
+watch at 0x701394930 len 8
+> reverse-continue
+hit watch 0x701394930 (write at 0xa2d0009a8) at (1373, 1404642)
+> where
+at (1373, 1404642) pc=0xa2d0009a8 thread=0
+> x 0x701394930 8
+0x701394930: 02 00 00 00 00 00 00 00

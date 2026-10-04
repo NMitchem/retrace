@@ -1,0 +1,10 @@
+commpage +0x10c=3 +0x110=0x2010002030300000 +0x118=0x2010002030100000
+supported_np=1
+main   initial  sprr=0x2010002030100000
+map_jit=0x102f90000
+main   write-en sprr=0x2010002030300000
+main   protect  sprr=0x2010002030100000
+main   protect2 sprr=0x2010002030100000
+jit call=42
+child  initial  sprr=0x2010002030100000
+main   after-child sprr=0x2010002030300000

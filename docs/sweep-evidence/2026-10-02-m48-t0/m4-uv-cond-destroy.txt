@@ -1,0 +1,32 @@
+$ otool -tV /opt/homebrew/Cellar/libuv/1.52.1/lib/libuv.1.0.0.dylib -p _uv_cond_destroy | sed -n 1,30p
+_uv_cond_destroy:
+0000000000012308	sub	sp, sp, #0x80
+000000000001230c	stp	x20, x19, [sp, #0x60]
+0000000000012310	stp	x29, x30, [sp, #0x70]
+0000000000012314	add	x29, sp, #0x70
+0000000000012318	mov	x19, x0
+000000000001231c	adrp	x8, 10 ; 0x1c000
+0000000000012320	ldr	x8, [x8, #0x48] ; literal pool symbol address: ___stack_chk_guard
+0000000000012324	ldr	x8, [x8]
+0000000000012328	stur	x8, [x29, #-0x18]
+000000000001232c	add	x0, sp, #0x18
+0000000000012330	mov	x1, #0x0
+0000000000012334	bl	0x17718 ; symbol stub for: _pthread_mutex_init
+0000000000012338	cbnz	w0, 0x123bc
+000000000001233c	add	x0, sp, #0x18
+0000000000012340	bl	0x17724 ; symbol stub for: _pthread_mutex_lock
+0000000000012344	cbnz	w0, 0x123bc
+0000000000012348	adrp	x8, 7 ; 0x19000
+000000000001234c	ldr	q0, [x8, #0x60]
+0000000000012350	str	q0, [sp]
+0000000000012354	add	x1, sp, #0x18
+0000000000012358	mov	x2, sp
+000000000001235c	mov	x0, x19
+0000000000012360	bl	0x17688 ; symbol stub for: _pthread_cond_timedwait_relative_np
+0000000000012364	cbz	w0, 0x12370
+0000000000012368	cmp	w0, #0x3c
+000000000001236c	b.ne	0x123bc
+0000000000012370	add	x0, sp, #0x18
+
+The 16-byte constant ldr q0 loads (vmaddr 0x19060, section __TEXT,__const): 00000000000000000100000000000000 = struct timespec { tv_sec 0, tv_nsec 1 }
+(decoded with a python read of the file at that section offset; see the t0 report)

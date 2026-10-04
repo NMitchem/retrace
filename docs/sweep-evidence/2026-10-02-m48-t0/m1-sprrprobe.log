@@ -1,0 +1,1 @@
+RECORD ERROR: non-syscall exit: MSR/MRS/sysreg trap (EC=0x18 ISS=0x12dc6a FSC=0x2a) far/ipa=0x0 (UNMAPPED) pc=0x4404 elr=0x1000002f4

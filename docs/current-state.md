@@ -38,6 +38,10 @@ sends. It is the first thing to reach for on a bring-up failure. Each `[trap]` l
 (since M44: `kevent_qos` carries its flags in `x7`). **Record-only** — `ReplaySession` carries no
 trace instrumentation, so no `[trap]` line is ever printed on replay.
 
+`RETRACE_SPRR=1` on a `record`/`record-dyn` run prints one `[M48 SPRR] thread <n> wrote <value>`
+line per guest write of `S3_6_C15_C1_5`. The register is below the trace, so nothing in a recording
+shows a write; `node_e2e`'s JIT assertion reads this line.
+
 `replay` exits **3** on a divergence, naming the landmark, PC, and what mismatched.
 
 ### Debugger commands
@@ -62,8 +66,9 @@ there, plus one retrace ships, `rsi` (*Debugging with lldb*, below).
 ## What works today
 
 **Guest breadth.** In short: anything you compile yourself (C or Rust), stock Homebrew arm64
-binaries, since M22 most of the Apple binaries already on your machine, and since M47 Xcode's `git`
-for its local workflow. Each rung below records and replays byte-identically, twice:
+binaries, since M22 most of the Apple binaries already on your machine, since M47 Xcode's `git`
+for its local workflow, and since M48 Homebrew's `node` with its JIT on. Each rung below records
+and replays byte-identically, twice:
 
 | Rung | Guest | Notes |
 |---|---|---|
@@ -77,6 +82,8 @@ for its local workflow. Each rung below records and replays byte-identically, tw
 | 6 | `/bin/echo` | an **Apple system binary**, arm64e with PAC on, straight from `/bin` |
 | 7 | the real **CPython** interpreter | `-c 'print(1)'` — the 2026-07-05 vision spec's headline target |
 | 8 | real CPython on a real script that crashes | `crash.py`: json/os/sys work on a data file, then a ctypes deref; recorded, replayed, and reverse-continued from the crash to the store of the pointer |
+| 9 | Homebrew **node** (v25.6.1), JIT on | `-e 'console.log(1)'`, and a 2-second `setTimeout` whose deadline the idle jump reaches; V8's `MAP_JIT` code range and its per-thread write-protect are modelled (below) |
+| 10 | real node on a real script that crashes | `crash.js`: an N-API addon and a TurboFan-compiled store of a computed pointer; recorded, replayed, and reverse-continued from the crash into V8's JIT code, to the store |
 | — | Xcode's **`git`** | since M47, its local workflow: seven read commands byte-identical to native, and `add`, default-config `commit`, `branch`, `tag`, `switch -c`, `mv` and `rm --cached`, each checked on the repository it leaves (below) |
 
 **Apple's own binaries, measured — and, since M29, re-measurable; since M36, with the reason each
@@ -89,7 +96,17 @@ record and replay paths are Task 2's `28fddc4`, one run at recorder pids `0xc649
 **confirmed on an idle host** on 2026-09-30, on the M46 merge `427fa0a` at a 1-minute load of 1.93
 → 1.85 (recorder pids `0x9ffb`–`0xaa85`): the re-sweep M46 owed, and M47's row baseline
 (`docs/sweep-evidence/2026-09-30-m47-probe/sweep-427fa0a.log`). Its five non-clean rows are `csh`,
-`tcsh`, `automationmodetool`, `dddiagnose` (at msgh_id 205) and `yes`. **M47's run tallied 50/4,
+`tcsh`, `automationmodetool`, `dddiagnose` (at msgh_id 205) and `yes`. **M48's run tallied 49/5 on
+an idle host, and no row's outcome is M48's, so the figure stays 49** (M47's T7-a convention: it
+moves only on a row the milestone caused). M48 ran it once on 2026-10-04, 06:06:32–06:11:41, on a
+debug build of its branch commit `4e37b88` (recorder pids `0x95ba`–`0x9c2c`), under `caffeinate -s
+-i` with no `cargo` running, at a 1-minute load of 1.67 at the start, 1.21–2.27 during it and 2.02
+at the end (`docs/sweep-evidence/2026-10-02-m48/`). Against M47's run its one moved outcome is
+`dddiagnose`, PASS as an identical fault → FAIL at msgh_id 205: host state, since both faces occur
+on both binaries in its controls. `csh`, `tcsh` and `automationmodetool` differ only in their
+panic's source line, `lib.rs:1036:38` → `:1069:38`, because M48's rows sit above
+`forwarded_shape`. An earlier attempt that morning tallied 50/4 but spanned a 17-minute host sleep,
+so it is kept, labelled, and not counted. **M47's run tallied 50/4,
 but no row's outcome is M47's, so the figure stays 49.** M47 ran it once on 2026-10-01, on its
 branch commit `a8a1ecd`, while an unrelated project's tests shared the host (a 1-minute load of
 6.23 at the start and 2.78–6.88 during it). Its one moved outcome is `dddiagnose`, FAIL at
@@ -136,13 +153,13 @@ run the sweep three times on 2026-09-13 with the recorder's pid steered into the
 had measured (below `0x4000`; inside `[0x4000, 0x10000)`; inside `[0x10000, 0x18000)`) and tallied
 45/9 in all three with the same nine labels in every regime — the pid-collision defect that once
 selected a wall is gone, and every single-run sweep since (M38's, M39's, M44's, M45's, M46's,
-the idle re-sweep and M47's) rests on that. The four rows M47's run left not clean are read off
-kept evidence, one class each, with `dddiagnose`'s other face.
+the idle re-sweep, M47's and M48's) rests on that. The four rows M47's run left not clean are read off
+kept evidence, one class each, with `dddiagnose`'s other face, the one M48's run took.
 **Seven parked gates** (`crates/retrace/tests/apple_walls_e2e.rs`) stand for three of them that
 are retrace's to model (`csh`, `tcsh`, `automationmodetool`), for `dddiagnose`, whose gate stays
 parked although M45's and M47's runs counted it a PASS, and for the xcrun trio, each `#[ignore]`
 reason the measurement that parks it. `ls`, `ed` and `launchctl` have gates in the same file that
-run. `ps` has no parked gate: it passes in the idle re-sweep and in M47's run, the forwarded
+run. `ps` has no parked gate: it passes in the idle re-sweep and in M47's and M48's runs, the forwarded
 `madvise` behind M45's class-E row no longer exists, and `sysbin_e2e`'s `ps_records_and_replays`
 runs. Among the 49: `cat`, `cp`, `mv`, `rm`,
 `chmod`, `mkdir`, `ln`, `df`, `sh`, `dash`, `bash`, `zsh`, `expr`, `ps`, and since
@@ -353,9 +370,11 @@ reconstruction caveat in full.
   CPython's allocator reaches at startup — zeroes its cache line instead of trapping to EL1 as an
   unhandled `MSR/MRS` exit. And `retrace_arch::fd_operands` now knows `getdirentries64` (344) and
   `fstatfs64` (346), so a guest that lists a directory has its own fd translated instead of handing
-  the host a number that means a different file there. `UCT` (15) and `UCI` (26) stay deliberately
-  **clear**: nothing has measured a guest issuing `dc cvau` / `ic ivau` or reading `CTR_EL0` from
-  EL0, and the existing exit fails loud if one does. Both changes sit below the trace or beside it —
+  the host a number that means a different file there. Since M48 `UCI` (26) is **set** for every
+  guest (M48 R8, the DZE precedent), because `sys_icache_invalidate`, which node's walk reaches,
+  issues `ic ivau` at EL0 (M48 t0 M1(a)–(b)); `UCI` also un-traps EL0 `dc cvau`/`civac`/`cvac`/`cvap`,
+  which is harmless. `UCT` (15) stays deliberately **clear**: nothing measured reads `CTR_EL0` from EL0, and
+  the existing exit fails loud if one does. These changes sit below the trace or beside it —
   nothing new is recorded and `TRACE_MAGIC` did not move.
 - **The record-side diff window covers what the kernel may write, and an overrun that reaches past
   it now fails loud rather than surfacing later or not at all.** `forward_and_diff` captures the
@@ -755,67 +774,176 @@ reconstruction caveat in full.
   format*, below). AMFI's answer is an ordinary recorded `Region`, and everything else M47 models
   is recomputed on both sides. `verify_thread` keeps its seven call sites: the `madvise` and
   `__mac_syscall` mirrors sit inside the existing `Syscall` chain, after its check.
+- **Homebrew `node` records and replays with its JIT on; guest kqueues, psynch condition
+  variables, deadline-bounded waits, partial `munmap` and `MAP_JIT` write-protect are modelled;
+  every SIMD restore installs its value.** Since M48, which makes `node` the third of the vision
+  spec's three workloads. `node_e2e` drives Homebrew's node (`/opt/homebrew/bin/node`, the Cellar's
+  v25.6.1, libuv 1.52.1) with V8's JIT on, its default: `-e 'console.log(1)'` records to exit 0,
+  printing `1`, and replays with identical stdout twice; the test also asserts that the recording
+  holds a `MAP_JIT` mapping and that the guest wrote the JIT write-protect register (the
+  `RETRACE_SPRR` line, Usage), since a `--jitless` run prints `1` too (measured: its control fails
+  at the `MAP_JIT` assertion). `node_timer_replays` runs a 2-second `setTimeout`, which blocks main
+  in `kevent` on its loop's kqueue, and asserts that the idle jump lands exactly on that deadline,
+  on main. `node_crash_e2e` is rung 10, `crates/retrace-guest/node/crash.js`: an N-API addon
+  (`crash_addon.c`) hands the script a cell's address, a function forced through TurboFan with
+  `--allow-natives-syntax` (R6) stores a pointer computed from `crash.json` into it, and the addon
+  dereferences it. The test asserts the marker line and its `opt=` bits equal native's, the
+  terminal `Event::Crash` at the computed target with a translation DFSC on the marker's thread,
+  node's own `SIGSEGV` handler delivered the fault first, two byte-identical replays, and that
+  `watch <cell>; reverse-continue` from the crash stops at a store whose pc lies inside a `MAP_JIT`
+  range, with the cell holding the warm-up value `2` there and the target one `stepi` later. Both
+  skip loudly without Homebrew node (the crash demo also without its `node_api.h`). Below them,
+  each mechanism has a repo-owned fixture, so it is guarded on a machine without node:
 
-**Gate:** 950 passed / 0 failed / 10 ignored across 160 test binaries. The close ran the full chunked gate
-from one background script (`gate.sh` in the milestone's ledger directory), every test chunk
-`--no-fail-fast` and every exit code captured before any pipe: `ws`, `box`, `--bins`, one
-`--test <name>` invocation for each of the eighty-three files in `crates/retrace/tests/`, and
-clippy over `--workspace --all-targets` with `-D warnings`. It ran at `abcb591`, M47's last code
-commit, on 2026-10-02 from 00:55 to 01:49 at a starting 1-minute load of 2.07, and it was the first
-gate run: the count matched the prediction made from source before it. The status log's M47 section
-has the tally chunk by chunk. The final review's fix wave landed after the gate (one assert and
-comments, then docs; head `c1ca15b` plus its docs commit), and these chunks re-ran green on it:
-`retrace-box` 371/0/0 over 46 binaries, `vmalign_e2e` 1, `git_e2e` 7, `hello_dyn_e2e` 1, `gitshapes`
-10 and clippy; the full gate was not re-run. The testing note below says how the chunks are assembled. The "test
+  **Every SIMD restore installs its value** (`simd_e2e`). `hv_vcpu_set_simd_fp_reg` takes a 16-byte
+  vector, which AAPCS64 passes in `v0`; bindgen maps it to `u128`, which Rust passes in a register
+  pair, so every `hv_sys::Vcpu::set_simd` installed the host's `v0`: on every thread switch
+  (`load_ctx`), at `from_checkpoint`, at `sigreturn` and at a debugger register write. Node's replay
+  diverged at its final memory compare under some host environments and not others. `set_simd` now
+  calls the framework through inline asm with the vector in `v0`. At the debug build's opt-level 0
+  the old binding was right by accident, so the workspace builds `hv-sys` at opt-level 1 in the dev
+  profile (Ruling T0-SIMD), which keeps the guards live at the gate's profile: the hv-sys `simd`
+  test, `crates/retrace-box/tests/simdctx.rs` and `simd_e2e` (`simd_dyn.c`: callee-saved `d8`–`d15`
+  across a thread switch and across a `sigreturn`, and a threaded replay under three host
+  environments).
+
+  **A partial `munmap` splits the backing it cuts** (`trim_e2e`). V8 over-allocates and trims each
+  reservation to a 256 KiB boundary, head and tail (57 partial `munmap`s in t0's `console.log(1)`
+  walk, none interior). `guest_munmap` rounds the range out to 16 KiB pages and, where it cuts a
+  backing, keeps the head and the tail mapped as backings of their own over the same host pages and
+  releases only the cut pages; before M48 it dropped the whole backing. dyld's unmaps with unaligned
+  lengths are whole-backing, and the round-up keeps them whole. `crates/retrace-box/tests/trim.rs`
+  guards the split, the round-up, a two-backing range and a checkpoint across a split.
+
+  **Guest kqueues** (`kq_e2e`). `kevent` (363) is emulated in the box and never forwarded (K1): a
+  pure `gkq.rs` holds each guest `kqueue()`'s knotes, and `Box_::guest_kevent` reads every change
+  before it writes any event (libuv's runtime-detection probe passes one buffer as both lists),
+  applies them, then returns at once or blocks the caller. Modelled: `EVFILT_USER` (`EV_ADD`,
+  `EV_CLEAR`, `EV_ONESHOT`, `NOTE_TRIGGER` and the `NOTE_FF*` operations), returning the flags the
+  knote was added with; `EVFILT_READ`/`EVFILT_WRITE` on a guest pipe, whose readiness comes from
+  byte accounting over the trace's own returns (R4) against native's measured 16384-byte capacity,
+  with `EV_EOF` once the peer closes (t0 M3, measured natively); one answer for a descriptor that
+  is not a guest pipe, `EVFILT_READ` with `EV_ADD|EV_ENABLE` registering a knote that never
+  activates, which is what native answers libuv's `uv__stream_try_select` on the inherited stdout;
+  timeouts; and a call with no event list, which applies its changes and never blocks. One waiter
+  per kqueue (K2). The generic forward arm asserts that 363 never reaches it.
+
+  **One deadline queue** (R7). `BlockReason::Kevent` and `BlockReason::Cv` carry an optional
+  deadline on `synthetic_tsc`. `schedule_after_block` wakes every waiter whose deadline has passed,
+  then, with nothing runnable, makes one idle jump of the clock to the earliest of all deadlines,
+  M46's workqueue timers included, ties broken by thread index. A deadline already past at the call
+  is not special-cased: node's `{0, 1 ns}` waits (libuv's `uv_cond_destroy`, t0 M4) convert to 0
+  ticks, block with the deadline at now and are woken in the same pass. A woken thread's return
+  word, carry and event-list bytes are written at the wake (`Box_::deliver_wake`), onto the live
+  vCPU when the woken thread is the current one, which is node's common case.
+
+  **psynch condition variables** (`condvar_e2e`). `psynch_cvwait` (305), `psynch_cvsignal` (304)
+  and `psynch_cvbroad` (303) are a port of libpthread-539.100.4's `kern/kern_synch.c` condition-
+  variable paths and `kern/synch_internal.h`'s sequence arithmetic (`psynch.rs`, P1), keyed by the
+  cv's guest address and never forwarded; the return words are the kernel's, measured natively
+  through an interposer (t0 M4): a `cvsignal` that wakes the last waiter answers `0x101`, a
+  `cvbroad` to n waiters n × `0x100` | `CBIT`, a woken `cvwait` 0, and a lone `cvwait` that times out
+  `0x13c` (`ETIMEDOUT | ECVCLEARED`) with the carry set. The mutex calls, the rwlock calls and
+  `cvclrprepost` are refused by value, and the generic forward arm asserts that no SDK psynch
+  number reaches it (`retrace_arch::is_psynch`).
+
+  **`MAP_JIT` write-protect, per thread** (`jitwp_e2e`). `S3_6_C15_C1_5`, the register
+  `pthread_jit_write_protect_np` writes, is emulated per thread below the trace, in the EC 0x00 path
+  beside `try_emulate_undef_mrs`: it reads 0 until the thread writes it (R1, a named deviation,
+  Known limits), and a write is admitted only if it is the commpage's write-enable word (`+0x110`)
+  or protect word (`+0x118`) (R2). The `MAP_JIT` ranges (`jit.rs`) minus their no-access extents
+  are stamped from the running thread's mode, `ATTR_DATA` while it is write-enabled and `ATTR_CODE`
+  while it is protected, never both, restamped at every toggle and every thread switch and flushed
+  through `flush_guest_tlb`, which now clears `MDSCR_EL1.SS` and `MDE` around its stub so a single
+  step can cross a toggle (it had faulted at EL1 with `EC=SoftStep`). SCTLR UCI is set (above). A
+  `MAP_JIT` mapping is admitted only `PROT_NONE` or RWX, and `jitwp_dyn` covers native's toggle
+  sequence, V8's shape (a `PROT_NONE` reservation, a sub-range made RWX, a write-enabled write, a
+  protected call, a whole `munmap`), two threads in opposite modes, a store to a protected page
+  recorded as the crash native takes, a seek into a write-enabled window, a step across a toggle and
+  a `reverse-continue` into the page; `sprrprobe` reads 0, runs `ic ivau` at EL0 and is refused at
+  its write by value. `RETRACE_SPRR=1` prints each write (Usage).
+
+  Two forwards joined them: `setsockopt` (105) has a row (libuv sets `SO_OOBINLINE` on stdout and
+  ignores the `ENOTSOCK`), and `mach_msg2` msgh_id 3419, `semaphore_destroy`, joins
+  `FORWARD_ALLOWLIST` beside 3418. Nothing new is recorded and `TRACE_MAGIC` did not move;
+  `verify_thread` keeps its seven call sites, because the `kevent` and psynch mirrors sit inside the
+  `Syscall` chain after its check (`thread_oracle.rs` retags one landmark of each).
+
+**Gate:** 1069 passed / 0 failed / 9 ignored across 172 test binaries. The close ran the full
+chunked gate from one background script (`gate.sh` in the milestone's ledger directory, M47's
+retargeted) under `caffeinate -s -i`, every test chunk `--no-fail-fast` and every exit code
+captured before any pipe: `ws`, `box`, `--bins`, one `--test <name>` invocation for each of the
+eighty-nine files in `crates/retrace/tests/`, and clippy over `--workspace --all-targets` with
+`-D warnings`. Each chunk started only at a 1-minute load below 3 and with at least 8 GiB free, and
+`node_e2e` and `node_crash_e2e` ran under alarms of 1800 s and 3000 s (Testing). It ran at
+`bfd1172`, M48's last `crates/` commit, on 2026-10-04 from 07:37:55 to 09:11:35 at a starting
+1-minute load of 2.20, and it was the first gate run: the count matched the prediction made from
+source before it. One chunk, `hitorder_e2e` (08:00:30–08:38:45), spanned four host sleeps between
+08:00:52 and 08:38:20 (`pmset -g log`: the host was on battery, where `caffeinate -s` does not
+hold), so it was re-run alone at 09:59:20–10:00:33 under the same load and disk gates, 23 passed;
+the replaced run, kept and labelled in the ledger, had also passed 23. No other chunk overlapped a
+sleep. The final review's fix wave changed documentation only, so no chunk was re-run; the figures
+above are as measured at `bfd1172`, and `82cc888`'s and the wave's crates are identical. The status
+log's M48 section has the tally chunk by chunk, and the final review and its outcome. The testing note below says how the chunks are assembled. The "test
 binaries" figure is test executables plus the `Doc-tests` harnesses cargo reports, each of which
 runs zero tests — the convention every milestone since M14 has counted by, kept for comparability
-and written out here so nobody has to re-derive it. One `#[ignore]` line was added (nine at M46's
-close and ten now, by `git grep` over `crates/`), so ten gates are parked: the two long-standing —
+and written out here so nobody has to re-derive it. One `#[ignore]` line was removed (ten at M47's
+close and nine now, by `git grep` over `crates/`), so nine gates are parked: the two long-standing —
 `stackoverflow_rust_e2e` (re-parked by M21 at a signal-model wall, **not** the M8 risk R3 wall it
-stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall) — the
-seven in `apple_walls_e2e`, each reason the measurement that parks it, and `node_e2e`, new in M47
-and parked at `kevent` (363) on a guest `kqueue()`. **M47 re-parked `csh` and `tcsh` at a new,
-measured wall** — past the 3403 answer and the refused `fork`, at `wait4` (7), the wait for a child
-the refused fork never made — and amended `automationmodetool`'s reason with the line its panic
-moved to; `ls`, `ed` and `launchctl` run. Known limits has each. `lldb_e2e` needs `/usr/bin/lldb`
+stood at from M8 through M20) and `cache_symbol_e2e` (the M19 shared-cache symbol wall) — and the
+seven in `apple_walls_e2e`, each reason the measurement that parks it. **M48 un-parked `node_e2e`**,
+M47's gate at `kevent` (363) on a guest `kqueue()`, which now runs with `node_timer_replays` beside
+it, and M48 rewrote the source lines four reasons quote and added `dddiagnose`'s libswiftCore
+outcome; `ls`, `ed` and `launchctl` run. Known limits has each. `lldb_e2e` needs `/usr/bin/lldb`
 (never the one on `PATH`): each of its tests skips loudly (`SKIPPED …: This gate did NOT run.`)
 when `/usr/bin/lldb --version` does not run, and its CPython test also skips without Homebrew
-Python. `git_e2e` skips loudly without Xcode's `git`, and `node_e2e` without Homebrew `node`. A
-skipped test is counted as passed, as `jq_e2e`'s are, and since M44 every skip line reaches the
-ordinary gate log (Testing, below), so grep the logs for `SKIPP` before reading a count as the
-gate having run. M47's close found none.
+Python. `git_e2e` skips loudly without Xcode's `git`, and `node_e2e` and `node_crash_e2e` without
+Homebrew `node`. A skipped test is counted as passed, as `jq_e2e`'s are, and since M44 every skip
+line reaches the ordinary gate log (Testing, below), so grep the logs for `SKIPP` before reading a
+count as the gate having run. M48's close found none.
 
-Reconciled against M46's 898 / 0 / 9 over 152 **file-by-file rather than by sum**, by source:
-eleven files changed their `#[test]` count, and every other file's count is M46's (counting
-`^\s*#\[test\]` per file at `39e0d8d`, whose code is M46's, and at the branch head):
+Reconciled against M47's 950 / 0 / 10 over 160 **file-by-file rather than by sum**, by source:
+twenty-two files changed their `#[test]` count, and every other file's count is M47's (counting
+`^\s*#\[test\]` per file at `e6caa65`, M47's merge, and at `bfd1172`):
 
-| file | M46 | M47 | delta |
+| file | M47 | M48 | delta |
 |---|---|---|---|
-| `retrace-arch/tests/gitshapes.rs` | — | 10 | **+10**, new binary (the path rows are the SDK's numbers and written from their prototypes; the `madvise` values are the SDK's, the measured advice is modelled and every other value refused naming it; the three modelled `__mac_syscall` pairs are classified, every flipped or truncated policy or call is refused, Sandbox continuity is by operation and refuses the rest, and the rows are nested destinations; `fork` alone is refused with `EAGAIN`) |
-| `retrace-box/tests/madvise.rs` | — | 6 | **+6**, new binary (`MADV_ZERO` writes every backed page and no reserved one, and a length short of a page zeroes the whole last page as xnu rounds it; a no-op advice writes nothing; a range past the guest's mappings is refused naming the page, and so is an address off a 16 KiB page; the advice int's upper half is ignored as the kernel ignores it) |
-| `retrace-box/tests/macsyscall.rs` | — | 6 | **+6**, new binary (AMFI is classified with its flags and the IPA of its out-flags, and the host answers it for this process with `@path` allowed; Sandbox call 2 is answered by its operation and call 4 `ENOTSUP`; an unterminated policy is refused as `copyinstr` would, and an unmodelled policy or operation by name) |
-| `retrace-box/tests/vmalign.rs` | — | 4 | **+4**, new binary (a masked ANYWHERE map from the bump cursor, a masked reservation and a masked hinted map come back aligned, the last clearing its occupied hint; mask zero keeps the old contiguous placement) |
-| `retrace-core/src/machmsg.rs` | 32 | 34 | **+2** (`mach_ports_register` routes to the task port only; its decoder rejects every malformed field) |
-| `retrace-guest/src/lib.rs` | 22 | 28 | **+6** (`fsops`, `madv`, `rpath`, `sbxpath`, `vmalign` and `forkfail`: the new fixtures build and parse) |
-| `retrace-trace/src/lib.rs` | 14 | 15 | **+1** (another format version is refused by name, not as a torn trace) |
-| `retrace/tests/gitprims_e2e.rs` | — | 9 | **+9**, new binary (the forwarded path rows land on disk; `MADV_ZERO` is recomputed and records no bytes; the reuse pair keeps the bytes; an unmeasured advice stops the recorder naming it; replay refuses a `madvise` landmark carrying writes; an `@rpath` guest loads because AMFI is answered by the host, and replay refuses an AMFI answer recorded at another address; Sandbox's container-path call is answered `ENOTSUP`; `fork` is refused with `EAGAIN` after its prepare handler's 3403 is answered) |
-| `retrace/tests/git_e2e.rs` | — | 7 | **+7**, new binary (every read command matches native and replays identically; `add`, `branch` with `tag`, `switch -c`, `mv` and `rm --cached` are read back by native git; a default-config `commit` refuses the maintenance fork and writes the native tree) |
-| `retrace/tests/vmalign_e2e.rs` | — | 1 | **+1**, new binary (every masked ANYWHERE map, over the trap and the 4811 route, comes back aligned and replays) |
-| `retrace/tests/node_e2e.rs` | — | 1 | **+1**, new binary, `#[ignore]`d at `kevent` (363) |
+| `hv-sys/tests/simd.rs` | 1 | 2 | **+1** (`set_simd` installs the value it is passed, not what the host left in `v0`) |
+| `retrace-arch/tests/nodeshapes.rs` | — | 6 | **+6**, new binary (the `kevent`, `setsockopt` and psynch numbers are the SDK's; `is_psynch` is exactly the SDK's psynch set; the `kevent`, psynch and `setsockopt` rows are their prototypes; the SPRR decode reads `S3_6_C15_C1_5` both ways and refuses every neighbour) |
+| `retrace-box/src/gkq.rs` | — | 11 | **+11**, new module (a close drops a descriptor's knotes and a waited kqueue is refused; a change to an unregistered knote is refused and applies nothing; `EV_CLEAR`, `EV_ONESHOT`, the `NOTE_FF*` operations, a touch, a disabled knote and `EV_DELETE`; activation order up to the list's size; a pipe's read and write readiness and its `EV_EOF`; an unmodelled filter, flag, descriptor or kqueue dup refused by value) |
+| `retrace-box/src/jit.rs` | — | 9 | **+9**, new module (`MAP_JIT` admitted only `PROT_NONE` or RWX, never FIXED, shared or file-backed; the stamped extents are the ranges minus their no-access extents; `mprotect` admission and the committed-extent refusal; a partial `munmap` trims and splits; a FIXED or remap overlap refused; write-enabled only at the commpage's `+0x110` word) |
+| `retrace-box/src/psynch.rs` | — | 11 | **+11**, new module (the sequence window wraps as `synch_internal.h` computes, and a signal across the wrap wakes; a signal answers one increment with the C bit; a broadcast wakes every waiter in sequence order; the lowest sequence first; a lone deadline answers `ETIMEDOUT | ECVCLEARED` and one beside another waiter plain `ETIMEDOUT`; a prepost; a signal below every waiter becomes a broadcast; the timeout decodes as `kern_synch` does; every unmeasured shape refused) |
+| `retrace-box/src/thread.rs` | 10 | 13 | **+3** (due waiters in deadline order, ties by thread index; a wake refuses a thread with a signal pending; a spawned thread starts protected whatever its creator wrote) |
+| `retrace-box/tests/checkpointparity.rs` | 4 | 5 | **+1** (a box checkpointed in a write-enabled JIT window matches the box it came from) |
+| `retrace-box/tests/gkq.rs` | — | 11 | **+11**, new binary (a wake of the current thread writes the vCPU; an event list aliasing the change list is read first; a cross-thread trigger wakes the waiter; no event list never blocks; an unmapped timeout answers `EFAULT`; a reserved-page event list is accepted and an unmapped one refused; a 1 ns wait woken in the same settle; the idle jump lands on the earliest thread deadline before a later timer; a pipe write wakes a reader; a wake with a signal pending refused; a blocked `kevent` survives a checkpoint) |
+| `retrace-box/tests/jit.rs` | — | 6 | **+6**, new binary (an unprotect inside a range is restamped by the view; the view follows the running thread; a flush with the step bits armed does not step the stub; an inadmissible SPRR value is refused; a `munmap` trims a range and a FIXED map over one is refused; an `mprotect` over a committed page is refused and changes nothing) |
+| `retrace-box/tests/psynch.rs` | — | 4 | **+4**, new binary (a `cvsignal` wakes the waiter and writes its saved context; a `cvbroad` wakes every waiter; every unmodelled psynch call is refused with nothing changed; a blocked `cvwait` survives a checkpoint) |
+| `retrace-box/tests/simdctx.rs` | — | 3 | **+3**, new binary (the debugger's register write, a thread switch and a checkpoint restore each install their SIMD values) |
+| `retrace-box/tests/trim.rs` | — | 6 | **+6**, new binary (a head trim, a tail trim with an unaligned length, an interior punch, a range spanning two backings, a split then a full teardown, a split backing across a checkpoint) |
+| `retrace-core/src/machmsg.rs` | 34 | 35 | **+1** (`semaphore_destroy` is forwarded as `semaphore_create` is) |
+| `retrace-guest/src/lib.rs` | 28 | 35 | **+7** (`simd_dyn`, `trim_dyn`, `kq_dyn`, `condvar_dyn`, `sprrprobe` with both SPRR encodings, `jitwp_dyn` parse, and the node crash demo is wired) |
+| `retrace/tests/condvar_e2e.rs` | — | 8 | **+8**, new binary (ping-pong alternates strictly; a broadcast wakes three; a timed wait that expires returns the kernel's word after the idle jump; one signalled first returns 0; the only waiter's timed wait answers on the vCPU; a seek into a blocked `cvwait`; a replay-side refusal is a divergence; the mutex pair is refused and never forwarded) |
+| `retrace/tests/jitwp_e2e.rs` | — | 8 | **+8**, new binary (native's toggle sequence replays; V8's none-then-RWX shape runs its code; one thread runs the page while another is write-enabled; a store to a protected page is the recorded crash native takes; a seek into a write-enabled window; a step across a toggle; `reverse-continue` lands on the JIT code write; `sprrprobe` reads 0, runs `ic ivau` and is refused at its write) |
+| `retrace/tests/kq_e2e.rs` | — | 12 | **+12**, new binary (libuv's probe gets native's one event; a cross-thread trigger wakes the waiter after the waker's landmark; a 5 ms timeout reached by the idle jump; a 1 ns timeout on the only thread wakes in its own settle; a pipe write wakes the reader with native's byte count and `EOF`; `EV_ONESHOT` delivered once; an unmodelled filter stops the recorder; two seeks; a replay-side refusal and a rewritten return each a divergence; a non-kqueue descriptor refused) |
+| `retrace/tests/node_crash_e2e.rs` | — | 1 | **+1**, new binary (rung 10: node crashes in `crash.js` and `reverse-continue` reaches the store in its JIT code) |
+| `retrace/tests/node_e2e.rs` | 1 | 2 | **+1**, and un-`#[ignore]`d (`node_prints_one_and_replays` runs; `node_timer_replays` lands the idle jump exactly on main's deadline) |
+| `retrace/tests/simd_e2e.rs` | — | 3 | **+3**, new binary (callee-saved SIMD registers across a thread switch and a `sigreturn`; a threaded replay under three host environments) |
+| `retrace/tests/thread_oracle.rs` | 7 | 9 | **+2** (a wrong thread on a `kevent` landmark, and on a `psynch_cvwait` landmark, is a divergence) |
+| `retrace/tests/trim_e2e.rs` | — | 3 | **+3**, new binary (a trimmed reservation keeps its middle and replays; the trimmed head and the rounded tail are gone; a seek across the trim matches a cold seek) |
 
-+53 `#[test]` attributes, `--bins` unchanged at **32**, and **eight new test binaries**:
-`gitshapes` (in `retrace-arch`), `madvise`, `macsyscall` and `vmalign` (in `retrace-box`), and
-`gitprims_e2e`, `git_e2e`, `vmalign_e2e` and `node_e2e`. The tree holds **958** `#[test]`
-attributes by the same per-file pattern (M46 held 905). The run still reports the 2 census tests
-twice (`census.rs` executes in its own binary and again inside `legacy_equivalence`'s `#[path]`
-include), so 958 + 2 = 960 = 950 + 10, and a bare `grep -c '#\[test\]'` over-counts by one,
-because a comment in `legacy_equivalence.rs` mentions the attribute in prose. The plan predicted
-+39 + k, +44 with t0's k = 5; the measured +53 adds Task 3's three Sandbox call-4 tests, Task 3b's
-six mask-fix guards and its older-format test (none in the plan), and takes away one `git_e2e`
-test: the out-list dropped `stash` and `merge`, and `branch` with `tag` stayed one test.
++118 `#[test]` attributes, `--bins` unchanged at **32**, and **twelve new test binaries**:
+`nodeshapes` (in `retrace-arch`), `gkq`, `jit`, `psynch`, `simdctx` and `trim` (in
+`retrace-box`), and `condvar_e2e`, `jitwp_e2e`, `kq_e2e`, `node_crash_e2e`, `simd_e2e` and
+`trim_e2e`. The tree holds **1076** `#[test]` attributes by the same per-file pattern (M47 held
+958). The run still reports the 2 census tests twice (`census.rs` executes in its own binary and
+again inside `legacy_equivalence`'s `#[path]` include), so 1076 + 2 = 1078 = 1069 + 9, and a bare
+`grep -c '#\[test\]'` over-counts by one, because a comment in `legacy_equivalence.rs` mentions the
+attribute in prose. The plan predicted 1073; the measured 1076 adds three tests a review or a ruling
+added after it was written: Task 4 review Minor 1's event-list test in `tests/gkq.rs`, and Ruling
+T6-EACCES's unit test in `jit.rs` and box test in `tests/jit.rs`.
 
 `retrace-box` ran as a **whole package**, so its `Doc-tests` harness could not be dropped (M24's
-lesson). `retrace` ran **per-target** — eighty-three `--test <name>` invocations, one after another
+lesson). `retrace` ran **per-target** — eighty-nine `--test <name>` invocations, one after another
 from a single background script, because the whole package exceeds the tool ceiling, over the
 target list `ls crates/retrace/tests/*.rs` wrote — **plus the `--bins` chunk**, which is the only
 place the 32 unit tests inside the `retrace` binary run: 20 in `crates/retrace/src/debug.rs` and
@@ -1008,30 +1136,38 @@ and skips loudly without lldb. Known limits lists what the server does not do.
 
 ## Performance
 
-Measured 2026-09-28 by `tools/bench.py --runs 5` (median wall time, peak RSS of the recorder, trace
-size) on an Apple M4 Pro, 24 GiB, macOS 26.5.2 (25F84), release build of branch `readme-launch`:
+Measured 2026-10-04 by `tools/bench.py --runs 5` (median wall time, peak RSS of the recorder, trace
+size) on an Apple M4 Pro, 12 CPUs, 24 GiB, macOS 26.5.2 (25F84), release build of M48's `4e37b88`,
+05:41:44–05:43:34 at a 1-minute load of 1.45 → 1.52 (`docs/sweep-evidence/2026-10-02-m48/bench.txt`
+and its README):
 
 | workload | native | record | replay | record ÷ native | recorder RSS | trace |
 |---|---|---|---|---|---|---|
-| `/bin/echo hi` | 0.002 s | 0.238 s | 0.262 s | 134× | 104 MiB | 32 MiB |
-| `/bin/ls /usr/bin` | 0.006 s | 0.273 s | 0.269 s | 47× | 107 MiB | 32 MiB |
-| `jq` filtering a 5 MB JSON file | 0.089 s | 2.246 s | 2.299 s | 25× | 435 MiB | 282 MiB |
-| `jq -n '[range(0;100000)] \| add'` | 0.022 s | 0.344 s | 0.351 s | 16× | 126 MiB | 40 MiB |
-| CPython `-c 'print(1)'` | 0.014 s | 0.692 s | 0.681 s | 48× | 215 MiB | 84 MiB |
-| CPython, a 30M-step loop | 0.973 s | 1.739 s | 1.696 s | 1.8× | 215 MiB | 85 MiB |
+| `/bin/echo hi` | 0.001 s | 0.196 s | 0.202 s | 132× | 104 MiB | 28 MiB |
+| `/bin/ls /usr/bin` | 0.004 s | 0.231 s | 0.236 s | 53× | 107 MiB | 33 MiB |
+| `jq` filtering a 5 MB JSON file | 0.080 s | 1.979 s | 2.050 s | 25× | 446 MiB | 286 MiB |
+| `jq -n '[range(0;100000)] \| add'` | 0.019 s | 0.297 s | 0.306 s | 15× | 127 MiB | 40 MiB |
+| CPython `-c 'print(1)'` | 0.012 s | 0.600 s | 0.616 s | 50× | 214 MiB | 85 MiB |
+| CPython, a 30M-step loop | 0.954 s | 1.633 s | 1.644 s | 1.7× | 215 MiB | 85 MiB |
+| node `-e 'console.log(1)'` | 0.041 s | 3.453 s | 3.533 s | 85× | 733 MiB | 502 MiB |
 
 Read it as three costs, not one ratio:
 
-- **A fixed start-up of about 0.25 s** (0.7 s for CPython): building the VM, demand-paging and
+- **A fixed start-up of about 0.2 s** (0.6 s for CPython): building the VM, demand-paging and
   re-signing the shared-cache pages the guest touches, and the opening snapshot. It dominates every
-  short run, which is why `echo` shows 134×.
+  short run, which is why `echo` shows 132×. **node's is about 3.4 s** (3.453 s record over a
+  0.041 s native run). V8 reserves about 640 MB of `PROT_NONE` address space (M48 spec §11 item 14),
+  which retrace backs in full and keeps in the recording's final snapshot (the opening one precedes
+  the guest's first `mmap`), and that is what makes node's trace large (Known limits); how the 3.4 s
+  divides between that and the rest of the run is not measured.
 - **Near-native compute.** The guest runs natively on the vCPU between traps. The 30M-step loop
-  adds 0.77 s over native, and 0.68 s of that is the same start-up `print(1)` pays, so the loop
+  adds 0.68 s over native, and 0.59 s of that is the same start-up `print(1)` pays, so the loop
   itself runs within about 10% of native.
 - **Syscalls that move memory are the expensive case.** Each forwarded syscall diffs the guest
   memory it may have written, and the trace keeps what changed: `jq` over 5 MB is 25× and writes a
-  282 MiB trace. Traces are uncompressed and carry a full-memory snapshot at each end, so even
-  `echo` writes 32 MiB.
+  286 MiB trace. Traces are uncompressed and carry a full-memory snapshot at each end, so even
+  `echo` writes about 28–32 MiB (both sizes occur on one binary, run to run: the bench reports its
+  last record's trace only).
 
 Replay costs the same as record: it re-runs the guest and applies the recorded writes instead of
 forwarding. Reverse execution adds a forward replay from the nearest checkpoint plus single-steps
@@ -1039,15 +1175,18 @@ forwarding. Reverse execution adds a forward replay from the nearest checkpoint 
 each workload once untimed first, because the first run of a freshly signed binary can stall in
 codesign validation (see Testing). A workload whose record or replay exit code differs from
 native's is reported as failed, not timed. The jq workload stops at 100000 because 300000 aborted
-under retrace when the table was measured; M47's `mach_vm_map` fix cleared that abort (What works
-today), and the table has not been re-measured since.
+under retrace when the table was first measured (2026-09-28); M47's `mach_vm_map` fix cleared that
+abort (What works today), and the row keeps 100000 for comparability. M48 re-measured every row on
+2026-10-04 (Ruling T9-b). Every record and replay figure moved 3–23% faster than 2026-09-28's, and
+every native figure moved with them (2–14% for the four workloads above 10 ms), so the move is not
+evidence that retrace got faster.
 
 ## Known limits
 
 These are real and current, not aspirational gaps.
 
-- **Five rows of 54 sampled Apple system binaries are not clean on an idle host (the 427fa0a
-  re-sweep; M47's run counted four, `dddiagnose` taking its identical-fault face, and M46's loaded
+- **Five rows of 54 sampled Apple system binaries are not clean on an idle host (M48's run and the
+  427fa0a re-sweep; M47's run counted four, `dddiagnose` taking its identical-fault face, and M46's loaded
   run seven, two of them watchdog kills attributed to load), and since M36 the sweep says
   why each one is not — since M37, the same why from any recorder pid.** `tools/apple-sweep.sh`,
   over the committed 54-entry corpus `tools/apple-sweep-binaries.txt`, records and replays each binary and prints a `TALLY` line, so
@@ -1059,7 +1198,12 @@ These are real and current, not aspirational gaps.
   rc=4: …)` rather than `replay diverged`; an identical crash on both sides is labelled
   `PASS … (identical fault, rc=N)` rather than a bare PASS; `RETRACE_SWEEP_KEEP=<dir>` keeps
   each non-clean row's stderr and trace, and since M37 `RETRACE_SWEEP_KEEP_ALL=1` keeps every
-  row's, PASS rows included — what the M37 audits were run over. **M47 ran it once on 2026-10-01**
+  row's, PASS rows included — what the M37 audits were run over. **M48 ran it once on 2026-10-04**
+  (a debug build of branch commit `4e37b88`, M48's Task 8, from a signed scratchpad copy under
+  `caffeinate -s -i` with no `cargo` running; `pidstart` 38302, recorder pids 38330–39980) and
+  tallied **`pass=49 fail=5 skip=0`** on an idle host: a 1-minute load of 1.67 at the sweep's start,
+  1.21–2.27 during it and 2.02 at its end (`docs/sweep-evidence/2026-10-02-m48/sweep.log`,
+  `sweep-load.txt`). **M47 ran it once on 2026-10-01**
   (branch commit `a8a1ecd`, M47's Task 5, from a signed scratchpad copy with no `cargo` running;
   `pidstart` 99787, and the pid counter wrapped during it, recorder pids 99814 → 5459) and
   tallied **`pass=50 fail=4 skip=0`**, while an unrelated project's tests (two processes at 100%
@@ -1102,7 +1246,38 @@ These are real and current, not aspirational gaps.
   | M45 | 50761–56189 (`0xc649`–`0xdb7d`) | inside `[0x4000, 0x10000)` again — irrelevant since M37 | `pass=49 fail=5 skip=0` |
   | M46 | 12468–19096 (`0x30b4`–`0x4a98`) | below `0x4000`, then inside `[0x4000, 0x10000)` — irrelevant since M37 | `pass=47 fail=7 skip=0` |
   | `427fa0a`, idle | 40955–43653 (`0x9ffb`–`0xaa85`) | inside `[0x4000, 0x10000)` again — irrelevant since M37 | `pass=49 fail=5 skip=0` |
-  | **M47** | 99814 → 5459 (`0x185e6` → `0x1553`, the counter wrapped) | above `0x18000`, then below `0x4000` — irrelevant since M37 | `pass=50 fail=4 skip=0` |
+  | M47 | 99814 → 5459 (`0x185e6` → `0x1553`, the counter wrapped) | above `0x18000`, then below `0x4000` — irrelevant since M37 | `pass=50 fail=4 skip=0` |
+  | **M48** | 38330–39980 (`0x95ba`–`0x9c2c`) | inside `[0x4000, 0x10000)` again — irrelevant since M37 | `pass=49 fail=5 skip=0` |
+
+  M48's run, against M47's: **50 rows unchanged and 4 differ**
+  (`docs/sweep-evidence/2026-10-02-m48/README.md` has the row-by-row diff, `rowdiff-norm.txt`).
+  Each was re-swept with `tools/apple-sweep.sh` itself on t0's base binary (`50e716f`, M47's code),
+  alternating with the swept one (`controls.txt`, then ten more `dddiagnose` rounds per binary in
+  `controls-extra.txt`), and **no row's outcome is M48's**, so the capability figure stays 49/5:
+
+  - **`dddiagnose`** went `PASS` 139/139 (identical fault) → `FAIL` 4/3 at msgh_id 205, landmark
+    456, host state: over 16 samples per binary both faces occur on both (base 9 `PASS` / 7 at 205,
+    M48's 7 `PASS` / 8 at 205). M48's binary also met a **third face**, once in its 16 control runs
+    (once in 19 counting both sweep attempts and the parked run) and never in the base binary's 16:
+    `RECORD ERROR: non-syscall exit: data abort … far/ipa=0x10 (UNMAPPED)`, rc 4, at landmark 393,
+    its pc in libswiftCore `swift::RefCounts<…>::incrementSlow + 88` (lldb, against the host's
+    cache). It is **a second sighting of the class M47's controls saw once on M46's code** (below):
+    by generation, M46's code 1 in 6 runs, M47's 0 in 23 and M48's 1 in 19, the M48 one at a
+    1-minute load of about 1.8, so load alone does not explain it, and it came after M47's
+    `mach_vm_map` fix, so that fix did not remove it. Its kept trace has one thread, none of the
+    syscalls M48's subsystems handle (360/361, 303–305, 363, 515/516, −36/−33, 367/368, 374/375) and
+    no `MAP_JIT` mmap, and `getpid` sits at the landmarks the 205 face's trace has it, so it is not
+    the lost-store-exclusive class (below). One in 16 against none in 16 is not a significant
+    difference; its root cause and its rate are not measured, and it is **not attributed**.
+  - **`csh`**, **`tcsh`** and **`automationmodetool`** differ only in the panic's source line,
+    `crates/retrace-arch/src/lib.rs:1036:38` → `:1069:38`, because M48's rows sit above
+    `forwarded_shape`; every control stops each at the same wall on both binaries (`wait4` (7) and
+    `kevent_id` (375)).
+
+  The xcrun trio passes 71/71 and `ps` passes, as in M47's run. An earlier attempt the same morning
+  (05:43:55–06:06:13) spanned a 17-minute host sleep (05:44:24–06:01:34 by `pmset -g log`, with
+  only `caffeinate -i` held) and tallied 50/4 with `dddiagnose` on its identical-fault face; it is
+  kept, labelled, in `sweep-attempt1-slept/` and counts for nothing.
 
   M47's run, against the idle `427fa0a` re-sweep: **50 rows unchanged and 4 differ**
   (`docs/sweep-evidence/2026-09-30-m47/README.md` has the row-by-row diff, `rowdiff-norm.txt`).
@@ -1115,9 +1290,10 @@ These are real and current, not aspirational gaps.
     binaries (the fault in 3 of 6 base runs and 4 of 7 swept ones, counting the sweep's), more
     often than M45's "about one run in four", on a small sample. One base run showed a third face
     once, a data abort at `far` `0x1bf0` in libswiftCore `_swift_release_dealloc+48` (lldb, against
-    the host's cache), seen in none of the swept binary's runs; whether it is the class M47's
-    `mach_vm_map` fix removed was not measured (`dddiagnose.face3.txt`). The controls ran at
-    1-minute loads of 4.33–12.37, and that run started at 11.60.
+    the host's cache), seen in none of the swept binary's runs (`dddiagnose.face3.txt`). The
+    controls ran at 1-minute loads of 4.33–12.37, and that run started at 11.60. M47 did not measure
+    whether it was the class its `mach_vm_map` fix removed; M48's second sighting of the class, on
+    M48's binary after that fix (above), shows the fix did not remove it.
   - **`csh`** and **`tcsh`** moved their wall and stayed `FAIL`, **M47's**: past the answered
     `mach_ports_register` and the refused `fork`, each now panics at `wait4` (7), rc 101 (the face
     below). Every control stops both at the 3403 on the base binary and at `wait4` on the swept one.
@@ -1348,6 +1524,11 @@ These are real and current, not aspirational gaps.
   precedes the receive is M23's *serviced* refusal of the SEND|RCV shape, survived by every guest
   that reaches it and unseparated from the receive (no run reaches the receive without it); since
   M38 a second line, `refusing mach_msg2 message-queue receive`, follows it on the six rows. Evidence:
+  `docs/sweep-evidence/2026-10-02-m48/` — M48's sweep log with its 30 s load samples, the slept
+  first attempt kept and labelled, every non-clean row's stderr under `sweep/`, the normalised row
+  diff against M47's run, the alternating controls against t0's base binary (`dddiagnose`'s third
+  face among them), the five node walks with their censuses and the crash session, the parked
+  gates' run and the bench (its README says what each file is);
   `docs/sweep-evidence/2026-09-30-m47/` — M47's sweep log with its 30 s load samples, every
   non-clean row's stderr under `sweep/`, the normalised row diff against the idle re-sweep, the
   alternating controls against t0's base binary, `dddiagnose`'s third face, the walks of `node`,
@@ -1463,14 +1644,137 @@ These are real and current, not aspirational gaps.
   (allowed) (M47 t0 M2(b)). The corpus passes with the forward's answers, which is why they were
   kept, but a guest that branches on the result sees the forward's verdict, not native's. Any other
   operation stops the recorder by name.
-- **Homebrew `node` stops at `kevent` (363), libuv's `EVFILT_USER` probe.** Since M47 node
-  (v25.6.1, libuv 1.52.1) loads its `@rpath` dylibs and records 1,100 landmarks in 47 s, a 355 MB
-  trace, with no thread created and no `MAP_JIT` mapping among its 121 `mmap`s. Then, at landmark
-  1,101, libuv's `uv__kqueue_runtime_detection` issues `kevent(7, …, 2, …, 1, …)` on a throwaway
-  `kqueue`, adding and triggering one `EVFILT_USER` event, and `kevent` has no row (`M33: syscall
-  363 (363) has no arg_kinds row`). It is the `kevent` on a guest `kqueue()` that M46 owed, routed
-  by M47's spec to node's own milestone. `node_e2e` is parked there, class C
-  (`docs/sweep-evidence/2026-09-30-m47/`).
+- **node's costs and fidelity (M48).** node records and replays (What works today), at a cost
+  that comes from one modelling choice: retrace backs a `PROT_NONE` mmap in full, so V8's
+  reservations (256 MiB, 256 MiB, 128 MiB and `0x80000`, M48 plan P10; about 640 MB, M48 spec §11b
+  item 14) sit in the recording's final snapshot and in every checkpoint taken after them (the
+  opening snapshot precedes them). Lazy `PROT_NONE` backing is not
+  modelled. A `--jitless` recording is the same size as a JIT one (525 765 498 B against
+  525 714 637 B, M48 Task 7), so the size is V8's other reservations, not the `MAP_JIT` range.
+  - **Traces:** 525 662 853 B for `console.log(1)` and 1 203 946 763 B for the crash demo, on the
+    release build (`docs/sweep-evidence/2026-10-02-m48/walk-e.status`, `walk-crash.status`).
+  - **Debug-build times**, the gate's build: `console.log(1)` records in 42.22 s (max RSS 757 MB)
+    and replays in 43.14 s (1.30 GB), and `node_e2e`'s two tests take 349.93 s (M48 Task 7); the
+    crash demo records in 94.98 s (2.80 GB), replays in 101.97 s (3.35 GB), and its
+    `reverse-continue` session takes 108.77 s at 4.21 GB, and `node_crash_e2e` takes 495.16 s (M48
+    Task 8). The release build takes about 3.5 s each way for `console.log(1)` (Performance), and
+    its crash session took 12.14 s at a peak memory footprint of 4 214 478 944 B
+    (`walk-crash.dbg.err`).
+  - **The cooperative scheduler runs V8's helper threads only when main blocks.** Background
+    compilation and the GC helpers get the vCPU only at a block, so a recording's interleaving is
+    not native's. That is fidelity, not determinism: record and replay schedule identically. It is
+    why rung 10's `crash.js` forces synchronous optimisation with `--allow-natives-syntax` (M48
+    R6): left to its own heuristics, TurboFan would compile on a worker that runs only when main
+    blocks, and main never blocks in the store loop.
+  - **The JIT toggle cost.** Every write of `S3_6_C15_C1_5` is a trap, a restamp of the `MAP_JIT`
+    view and a guest TLB flush. `console.log(1)` makes 264 (main 16, tid 2 248), the two timer
+    walks 264 each, the `--allow-natives-syntax` walk 274 and the crash demo 20, each equal to t0's
+    count (M48 Task 9's census, `walk-*.census`). The whole release record takes about 3.5 s, so
+    M48 R9's trigger, ten minutes for `console.log(1)`, did not fire.
+  - **node's `{0, 1 ns}` timed waits are libuv's own.** `uv_cond_destroy` (libuv 1.52.1) calls
+    `pthread_cond_timedwait_relative_np` with a constant `{0, 1}`, its Darwin workaround for
+    destroying a condvar that was signalled but never waited on (M48 t0 M4), six times per walk.
+    Each blocks with its deadline at now and is woken in the same pass (What works today).
+- **`S3_6_C15_C1_5` reads 0 until a thread writes it** (M48 R1, a named deviation). Native reads
+  its protected value, `0x2010002030100000` (commpage `+0x118`). 0 is what retrace always
+  answered, so libdyld's path is unchanged, and 0 maps to protected in the view, so every
+  JIT-relevant state is native's; node only reads the register back after writing it. `jitwp_e2e`'s
+  `basic_runs_natives_jit_sequence_and_replays` and the `sprrprobe` guest pin it. A write is
+  admitted only if it is commpage `+0x110` or `+0x118` (R2).
+- **`MAP_JIT` is modelled for V8's shape and refused outside it.** V8 makes one `MAP_JIT` mmap per
+  run (256 MiB, `PROT_NONE`, flags `0x41842`, not FIXED), one RWX `mprotect` over a sub-range and
+  one whole-range `munmap` at exit (M48 Task 9's census). The committed sub-range starts at the
+  first 256 KiB boundary past the mapping's base, with a `PROT_NONE` head (measured `0x4000` to
+  `0x34000` bytes) and a `PROT_NONE` tail, not at the spec's `+0x40000` (M48 Ruling T6-LAYOUT); the
+  view stamps the ranges minus their no-access extents, so it is right for either. A `MAP_JIT`
+  mmap other than `PROT_NONE` or RWX, or with `MAP_FIXED`, with `MAP_SHARED` or without `MAP_ANON`,
+  is refused by value, and so is a FIXED map or a remap over a `MAP_JIT` range. **An `mprotect`
+  over a committed `MAP_JIT` page is refused by value**, its message saying "native answers EACCES
+  (measured, t6-jitprobe), unmodelled": macOS refuses any `mprotect` touching an RWX `MAP_JIT` page
+  with `EACCES`, and retrace does not model that return (M48 Ruling T6-EACCES). node never does it:
+  its one `mprotect` is over the `PROT_NONE` reservation. A zero-length `mprotect` strictly inside a
+  committed extent is refused the same way, where native likely answers 0 (it fails loud).
+- **The `RETRACE_SPRR=1` witness prints under record, replay and `step()`**, so a debugger seek
+  that re-executes a window prints its writes again. Only `node_e2e`'s recorder child sets it, and
+  the guest's environment never carries it.
+- **A box-side write never reaches the debugger's software watch detection.** `deliver_wake` writes
+  a woken thread's `kevent` event list from box state, and `Box_::guest_kevent` the list of a
+  `kevent` that returns at once, as M46's manager list and `bsdthread_create`'s kport write do, and
+  `syscall_watch_hit` is set only in `apply_and_return`. So a `watch` on a `kevent` event-list cell
+  followed by `reverse-continue` does not stop at either write (M48 Task 4 review).
+- **A guest that touches a page it unmapped ends the record with a recorder error, not a crash.**
+  The record stops with `RECORD ERROR: non-syscall exit: data abort … (UNMAPPED)`, exit 4, and no
+  `Event::Crash`, where native takes `SIGSEGV` (139). A stage-2 translation fault has been a
+  recorder error since M2; M48 Task 3 found it, and `trim_e2e`'s second test pins the recorder's
+  behaviour (the error text with the released address, and native's 139). `dddiagnose`'s third
+  face (the sweep entry above) is the same behaviour on a load at `0x10`.
+- **A lost store-exclusive can make any dynamic guest's recording or replay diverge, at a `getpid`
+  or `csops` landmark.** It predates M48. libsystem_kernel's `getpid` caches the pid with `ldxr
+  w10,[x9]; cbnz; stxr wzr,w0,[x9]` (pcs `0x1804ae1b8`–`0x1804ae1c0`), whose status register is
+  discarded. An exception the box does not see between the `ldxr` and the `stxr`, such as a
+  first-touch stage-2 page fault, clears the monitor and loses the store silently, so a later
+  `getpid()` issues a real syscall the other run does not. M41 documented the class for stepping
+  (the status log's M41 section); M42's shadow monitor is debugger-only, and plain record and
+  replay run the pair on the hardware monitor. Measured by M48's flake probe
+  (`.superpowers/sdd/2026-10-02-retrace-m48-node-plans/flake-probe-report.md` in the milestone's
+  ledger): `git_e2e`'s read-commands test failed 0 of 24 runs on M47's code and 1 of 24 on M48's
+  Task 4 head, a bad recording whose kept trace diverges in 20 of 20 replays on M48's binary and 3
+  of 3 on M47's; a scratch guest copying the pid cache diverged on replay 1 of 30 on M47's code and
+  2 of 30 on M48's, under load. M48 neither touched nor worsened the path (`excl.rs` is
+  byte-identical). A gate red with this signature is classified against this entry, re-run once
+  alone, and reported. The successor owed: run exclusive pairs on the shadow monitor in plain record
+  and replay too, or emulate every discarded-status pair.
+- **Every M48 refusal, by its message prefix.** Each is raised before the thread table changes, and
+  before the model changes except a `kevent` wake's signal-pending refusal (it follows the kqueue's
+  update, which the stopped recorder and the debugger's reseek discard), and identically on both
+  sides (R5): a `kevent` or psynch refusal stops the recorder
+  naming it and is a `DIVERGENCE` naming it on replay, never a panic there, and an SPRR or
+  `MAP_JIT` refusal sits in the box's shared path, so record and replay stop with the same text.
+  - **`M48: kevent …`**: a descriptor that is not a guest kqueue (native `EBADF`); a timeout that
+    is not a valid timespec (`EINVAL`); a negative count or more than 1024 changes or events; a
+    change list or event list that does not translate (native applies a prefix before its
+    `EFAULT`, K5); a change naming a closed fd (native's `EBADF` `EV_ERROR` event, K4); a change to
+    an unregistered knote without `EV_ADD`, or an unmodelled filter or flag; readiness on a
+    descriptor that is not a guest pipe end, other than `uv__stream_try_select`'s stdout shape (M48
+    §7); a second thread scanning a kqueue another is blocked on (K2); a guest kqueue closed while
+    a thread is blocked on it; a dup of a guest kqueue; a `kqueue()` result the model still holds.
+    Pinned by `kq_e2e`'s `an_unmodelled_filter_stops_the_recorder_naming_it`,
+    `a_kevent_on_a_descriptor_that_is_not_a_kqueue_is_refused_by_value` and
+    `a_kevent_refused_on_replay_is_a_divergence_naming_it_not_a_panic`, `tests/gkq.rs`'s
+    `an_event_list_reaching_into_an_untouched_reserved_page_is_accepted_and_an_unmapped_one_refused`,
+    and `gkq.rs`'s unit tests (`a_close_drops_the_descriptors_knotes_and_a_waited_kqueue_is_refused`,
+    `a_change_to_an_unregistered_knote_is_refused_and_applies_nothing`,
+    `an_unmodelled_filter_flag_descriptor_or_kqueue_dup_is_refused_by_value`).
+  - **`M48: pipe …`**: a read that returns more bytes than the model counted (a write by a path the
+    fd hook does not see); unread bytes past the measured 16384-byte buffer, which the kernel grows
+    and the model does not; a `pipe()` result the model still holds. Pinned by `tests/gkq.rs`'s
+    `a_pipe_write_wakes_a_reader_blocked_on_its_read_end`.
+  - **`M48: psynch …`**: every psynch number but 303–305 (the mutex pair, the rwlock calls,
+    `cvclrprepost`); a process-shared cv; a `cvwait` that would drop a firstfit mutex with a kernel
+    waiter, which needs the unmodelled mutex pair; the kernel's `EINVAL` and `EBUSY` shapes
+    (sequence words out of order, a second waiter at one sequence, a broadcast releasing more
+    waiters than the guest has threads); a targeted `cvsignal` (`pthread_cond_signal_thread_np`); a
+    timeout that is negative or past 2^64 ns. Pinned by `condvar_e2e`'s
+    `the_mutex_pair_is_refused_by_value_and_never_forwarded` and
+    `a_cvwait_refused_on_replay_is_a_divergence_naming_it_not_a_panic`, `tests/psynch.rs`'s
+    `every_unmodelled_psynch_call_is_refused_by_value_with_nothing_changed`, and `psynch.rs`'s
+    `every_unmeasured_shape_is_refused_by_value_and_changes_nothing`.
+  - **`M48: a signal is pending on thread …`**: a `kevent` trigger or psynch wake that would wake a
+    thread with a signal pending, because the saved context of a thread blocked there is unmeasured
+    (M18's semaphore posture). Pinned by `thread.rs`'s
+    `a_wake_refuses_a_thread_with_a_signal_pending_and_changes_nothing`, `tests/gkq.rs`'s
+    `a_wake_with_a_signal_pending_is_refused_and_wakes_nobody`, and `tests/psynch.rs`.
+  - **`M48: SPRR write …`**: a value that is not commpage `+0x110` or `+0x118`, or any write by a
+    guest with no SPRR commpage (a static guest). Pinned by `tests/jit.rs`'s
+    `an_inadmissible_sprr_value_is_refused_by_value` and `jitwp_e2e`'s
+    `sprrprobe_reads_zero_runs_ic_ivau_and_is_refused_at_its_write_by_value`.
+  - **`M48: MAP_JIT …`**: the shapes in the `MAP_JIT` entry above. Pinned by `tests/jit.rs`'s
+    `a_munmap_trims_a_jit_range_to_data_pages_and_a_fixed_map_over_one_is_refused` and
+    `an_mprotect_over_a_committed_jit_page_is_refused_by_value_and_changes_nothing`, and `jit.rs`'s
+    unit tests for each `mmap`, `mprotect` and overlap shape.
+
+  The other `"M48: ` strings in the source are internal invariants (an `unreachable!`, a restore's
+  `assert!`, a waiter the model must hold), not refusals of guest input.
 - **A guest must be arm64 or arm64e.** `slice_native` picks the slice this machine would execute —
   arm64e if the file has one, else plain arm64 — so universal files work, but an `x86_64`-only
   binary is refused by name. There is no emulation of another ISA and none is planned.
@@ -1827,8 +2131,9 @@ These are real and current, not aspirational gaps.
   `0xf0000037` (its `udata` read, not compared), or −10 `EVFILT_USER` with flags 0 and fflags
   `NOTE_TRIGGER`, every field compared. Any other shape is **refused by value**: the recorder
   panics with `M46: unmeasured kevent_qos shape: …`, naming the argument or change-entry field
-  that differs, its measured value and its actual one. `kevent` (363), `kevent64` (369) and
-  `kevent_id` (375) have **no row**, so each still stops at the M33 panic, and since M46
+  that differs, its measured value and its actual one. `kevent64` (369) and `kevent_id` (375) have
+  **no row**, so each still stops at the M33 panic; `kevent` (363) is modelled on a guest kqueue
+  since M48 (What works today), and its row is the census's, never forwarded. Since M46
   `automationmodetool` reaches 375 (the sweep entry above). 468 is `fchownat`; `getattrlistat` is
   476; neither is reached, and neither has a row (M44 R1). **Two `_nocancel` twins escape their
   plain forms' arms**: `sigsuspend_nocancel` (410) and `__sigwait_nocancel` (422) are in neither
@@ -1896,8 +2201,9 @@ These are real and current, not aspirational gaps.
   calls `host_request_notification` (t0 M3), and the recorder stops at that registration,
   `M46: unmeasured kevent_qos shape: changelist[0].filter is 0xfff8`, with no timer armed (M46
   Ruling T0-b; `gcdtimer_e2e`). Also outside M46 (M46 spec §7): workloops and `kevent_id` (375,
-  no row, so the M33 panic; `automationmodetool`'s wall), `kevent`, `kevent64` or `kevent_qos` on
-  a guest `kqueue()` descriptor, `sleep()` and every other timed wait, thread reuse for plain
+  no row, so the M33 panic; `automationmodetool`'s wall), `kevent64` or `kevent_qos` on a guest
+  `kqueue()` descriptor (M48 models `kevent` on one), and every timed wait but `kevent`'s timeout
+  and `psynch_cvwait`'s deadline (M48), `sleep()` among them, thread reuse for plain
   workers, and preemptive firing (below). `__ulock_wait2` (544), whose arguments
   carry a timeout, has no row and no model: M46 met it once, as an unfair lock waiting on itself
   under the old thread port names (the entry on those, below), and contended unfair locks across
@@ -2176,13 +2482,11 @@ These are real and current, not aspirational gaps.
   diagnosed by its crash instead. **At most one signal materialises per wake**, and a second
   deliverable one aborts loudly rather than being dropped: queueing at a wake is unmodelled because
   no guest in the tree measures it.
-- **Ten gates are parked `#[ignore]`d** at documented, *measured* walls, and the reason is on each
-  test itself. Two are long-standing, and one is M47's: `node_e2e`'s
-  `node_prints_one_and_replays`, at `kevent` (363), libuv's `EVFILT_USER` probe (above), class C
-  and un-parked when the box models `kevent` on a guest `kqueue()` and whatever node reaches next is
-  cleared. `stackoverflow_rust_e2e` — but **no longer for the reason it
-  carried from M8 through
-  M20**. M8 risk R3 is CLEARED: the recursion now grows through M21's reservation and strikes its own
+- **Nine gates are parked `#[ignore]`d** at documented, *measured* walls, and the reason is on each
+  test itself. Two are long-standing. **M48 un-parked M47's `node_e2e`**: its
+  `node_prints_one_and_replays` had stood at `kevent` (363), libuv's `EVFILT_USER` probe, and since
+  M48 it runs, beside `node_timer_replays` (What works today). `stackoverflow_rust_e2e` — but
+  **no longer for the reason it carried from M8 through M20**. M8 risk R3 is CLEARED: the recursion now grows through M21's reservation and strikes its own
   guard page at stage 1. It is re-parked one wall further on, at the blocked-signal limit below, and
   the progress it used to stand for is gated by a *running* test beside it so it cannot regress in
   silence. And `cache_symbol_e2e` since M19, at the shared-cache
@@ -2214,7 +2518,9 @@ These are real and current, not aspirational gaps.
   its init-failed path. M45 also gave `dddiagnose`'s reason its second, faulting outcome
   (`mfm_alloc+0x230`, about one run in four), and it is now un-parked only when msgh_id 205 is
   serviced **and** that face is explained or measured absent, because servicing 205 alone would
-  leave a gate that fails about one run in four. **M47 answered `csh`/`tcsh`'s
+  leave a gate that fails about one run in four. M48 added the third outcome to its reason: the
+  libswiftCore small-address abort seen once on M46's code and once on M48's (the sweep entry
+  above), not attributed. **M47 answered `csh`/`tcsh`'s
   `mach_ports_register` and refused their `fork`, and re-parked both at `wait4` (7)**, the wait
   their `remotehost` issues after the refused fork, which has no row (class C, process creation;
   un-parked when the box models process creation). Through M46 they stood at `fork` itself
@@ -2229,8 +2535,12 @@ These are real and current, not aspirational gaps.
   on one line; M46: `automationmodetool`, `0 passed; 1 failed`, its panic naming `M33: syscall 375
   (375) has no arg_kinds row`; M47: `csh` and `tcsh`, `0 passed; 2 failed`, each panicking on `M33:
   syscall 7 (7) has no arg_kinds row`, and `node_e2e`, `0 passed; 1 failed`, on `M33: syscall 363
-  (363)`). **M39 moved none of them**: its one wall was cleared inside the
-  milestone, so no gate was parked, un-parked or re-worded, and M39's sweep changed no row's label.
+  (363)`; M48: all nine, `parked.txt` in `docs/sweep-evidence/2026-10-02-m48/`, each at the wall its
+  reason names, `csh`, `tcsh` and `automationmodetool` at the panic's new source line,
+  `crates/retrace-arch/src/lib.rs:1069:38`, which M48 wrote into their reasons with the
+  stack-overflow reason's `retrace-core/src/lib.rs:216`). **M39 moved none of them**: its one wall
+  was cleared inside the milestone, so no gate was parked, un-parked or re-worded, and M39's sweep
+  changed no row's label.
   `ls` and `ed`, non-clean from M38 to M44, got gates at M44 (spec R6: a wall with no gate is
   invisible to the gate log), and both run: `ls_records_and_replays` and `ed_records_and_replays`.
   Before M36 the two long-standing ones were the whole count, and the `brk` wall M23 found had
@@ -2364,10 +2674,20 @@ Some end-to-end gates depend on `/opt/homebrew/bin/jq`, which is not a repo arti
 rather than fail when it is absent, and print a `SKIPPED` line, because a silent skip would read as a
 green it did not earn. The same applies to the Homebrew CPython gates, to `lldb_e2e` (which needs
 `/usr/bin/lldb`, and Homebrew Python for its CPython test), since M47 to `git_e2e` (Xcode's
-`/Applications/Xcode.app/Contents/Developer/usr/bin/git`) and the parked `node_e2e`
-(`/opt/homebrew/bin/node`), and to the gates that record binaries
+`/Applications/Xcode.app/Contents/Developer/usr/bin/git`), since M48 to `node_e2e` and
+`node_crash_e2e` (`/opt/homebrew/bin/node`; the crash demo also needs node's `node_api.h` to build
+its addon), and to the gates that record binaries
 out of `/bin` and `/usr/bin`: those are OS artifacts, present on any macOS 26 machine, but announced
 rather than skipped silently if absent.
+
+**The node gates run for minutes and need disk and memory.** On the debug build `node_e2e`'s two
+tests take 349.93 s and `node_crash_e2e` 495.16 s (M48 Tasks 7 and 8). Each records into the temp
+directory, up to 1.2 GB per trace (the crash demo's 1 203 946 763 B), and deletes it on a pass; a
+failed test leaves its trace behind. A gate run therefore needs that much free disk, and about
+4.2 GB of RAM for `node_crash_e2e`'s debug session (4.21 GB measured). Record and replay are not
+bounded inside these tests (only the crash demo's debug session is), so M48's gate wrapped each
+target in an alarm of at least three times its measured run (`perl -e 'alarm N; exec @ARGV'`,
+1800 s and 3000 s), where an exit of 142 is the alarm, a hang, and never a red test.
 
 **Since M44 every skip line reaches the ordinary gate log.** libtest captures `eprintln!` in a test
 that passes, and a skip passes, so an `eprintln!` skip line never reached a gate log (measured at

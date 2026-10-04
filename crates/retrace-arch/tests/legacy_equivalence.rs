@@ -154,6 +154,15 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     // the MAC_SYSCALL_MAGIC band's are NestedDest; the legacy nested table predates both.
     (381, View::NestedPointer, "__mac_syscall(policy, call, arg): a policy writes through a pointer inside arg — M47; exercised (every dynamic guest)"),
     (0x8000_0000, View::NestedPointer, "MAC_SYSCALL_MAGIC: __mac_syscall's shape, NestedDest since M47 — exercised (every dynamic guest, dyld's inline Sandbox check)"),
+    // M48: the three views node's two new rows differ in. kevent's descriptor is operand 0, so the
+    // fd view differs from the legacy table; but kevent is emulated above the forward, so the view
+    // is never consulted for it. setsockopt is forwarded: its descriptor is one the legacy table
+    // never had, and its optval is a caller-sized read (the `write` convention, Source). The psynch
+    // rows (303-305) carry only Scalar/Ptr kinds, so by this file's own rule they differ in no view
+    // and need no entry.
+    (363, View::FdOperands, "kevent(kq, …): the kqueue fd is operand 0 — emulated above the forward (M48), so the view is moot; exercised (node, kq_dyn)"),
+    (105, View::FdOperands, "setsockopt(s, …): a descriptor the legacy table never had — M48; exercised (node: libuv SO_OOBINLINE on the stdout pipe)"),
+    (105, View::ReadsGuestBuffer, "setsockopt reads optval for optlen bytes — M48; exercised (node)"),
 ];
 
 /// The BSD numbers, the mach traps (negative, as the two's-complement `u64` the trap carries), and

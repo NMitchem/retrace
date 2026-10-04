@@ -1,0 +1,72 @@
+base sha256=7b309adc92652421aff14ac8345c5a6adc324cc901471f0d03479c714df5027c
+t9   sha256=0eece64c8cf6c2c9311f3d2015b95f083e65af32061073af39a9893a80070487
+== x7-base start 06:15:02 load={ 1.31 1.66 1.64 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1b03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x7-t9 start 06:15:04 load={ 1.28 1.65 1.64 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x4000050070 esr=0x92000045
+== x8-base start 06:15:14 load={ 1.26 1.64 1.63 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x6000050050 esr=0x92000045
+== x8-t9 start 06:15:23 load={ 1.22 1.62 1.63 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xa03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x9-base start 06:15:25 load={ 1.20 1.61 1.62 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x9-t9 start 06:15:27 load={ 1.20 1.61 1.62 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x4000050050 esr=0x92000045
+== x10-base start 06:15:36 load={ 1.17 1.59 1.61 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1d03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x10-t9 start 06:15:38 load={ 1.17 1.59 1.61 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1b03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x11-base start 06:15:40 load={ 1.16 1.58 1.61 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x4000050050 esr=0x92000045
+== x11-t9 start 06:15:50 load={ 1.13 1.56 1.60 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x12-base start 06:15:52 load={ 1.13 1.56 1.60 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xd03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x12-t9 start 06:15:54 load={ 1.13 1.56 1.60 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xb03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x13-base start 06:15:56 load={ 1.12 1.55 1.60 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x4000050040 esr=0x92000045
+== x13-t9 start 06:16:05 load={ 1.18 1.55 1.60 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xa03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x14-base start 06:16:07 load={ 1.18 1.55 1.60 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+== x14-t9 start 06:16:09 load={ 1.25 1.55 1.60 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x2000050040 esr=0x92000045
+== x15-base start 06:16:19 load={ 1.23 1.54 1.59 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x2000050040 esr=0x92000045
+== x15-t9 start 06:16:28 load={ 1.19 1.53 1.59 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x2000050070 esr=0x92000045
+== x16-base start 06:16:38 load={ 1.86 1.66 1.63 }
+PASS /usr/bin/dddiagnose (identical fault, rc=139)
+TALLY pass=1 fail=0 skip=0
+   dddiagnose: guest crashed: pc=0x180302eb0 far=0x4000050070 esr=0x92000045
+== x16-t9 start 06:16:47 load={ 1.73 1.63 1.62 }
+FAIL /usr/bin/dddiagnose (record error, rc=4: RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0x1c03 (guest task port Some(515)) send_size 24)
+TALLY pass=0 fail=1 skip=0
+end 06:16:49 load={ 1.73 1.63 1.62 }

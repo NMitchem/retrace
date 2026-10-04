@@ -131,8 +131,36 @@ impl Vcpu {
         check(unsafe { hv_vcpu_get_simd_fp_reg(self.id, r.0, &mut v) })?;
         Ok(v)
     }
+    /// Install `v` in SIMD/FP register `r`.
+    ///
+    /// M48 Task 1. `hv_vcpu_set_simd_fp_reg` takes `hv_simd_fp_uchar16_t`, a 16-byte
+    /// `ext_vector_type`, BY VALUE, and AAPCS64 passes a short vector in `v0`. bindgen maps the
+    /// type to `u128`, which Rust passes in a general-register pair, so the framework installed
+    /// whatever the host process last left in `v0`. That gave host-environment-dependent guest
+    /// state: a node replay that diverged under one login environment and not another (walls.md
+    /// §4 item 1). This calls the function by hand, with the value where the ABI puts it. Stable
+    /// Rust has no vector FFI (`simd_ffi` is unstable), hence the asm. `get_simd` takes a pointer
+    /// and was always right.
     pub fn set_simd(&self, r: SimdReg, v: u128) -> Result<(), HvError> {
-        check(unsafe { hv_vcpu_set_simd_fp_reg(self.id, r.0, v) })
+        let (lo, hi) = (v as u64, (v >> 64) as u64);
+        let f = hv_vcpu_set_simd_fp_reg as *const () as usize;
+        let ret: u64;
+        // SAFETY: a call to the framework function under its C signature: the vCPU in x0, the
+        // register in w1, the vector in v0, the result in w0. `clobber_abi("C")` declares every
+        // caller-saved register the callee may use (x0-x17, x30, v0-v7, v16-v31, and the upper
+        // halves of v8-v15) clobbered. The block is not `nostack`, so the compiler keeps nothing
+        // below sp and sp is call-aligned on entry.
+        unsafe {
+            core::arch::asm!(
+                "fmov d0, {lo}",
+                "mov v0.d[1], {hi}",
+                "blr {f}",
+                lo = in(reg) lo, hi = in(reg) hi, f = in(reg) f,
+                inlateout("x0") self.id => ret, in("x1") r.0 as u64,
+                clobber_abi("C"),
+            );
+        }
+        check(ret as u32 as i32 as hv_return_t)
     }
     pub fn set_trap_debug_exceptions(&self, on: bool) -> Result<(), HvError> { check(unsafe { hv_vcpu_set_trap_debug_exceptions(self.id, on) }) }
     /// Run until VMEXIT. Returns (reason, esr_el2, far/ipa) copied out of the exit struct.

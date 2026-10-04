@@ -1,0 +1,89 @@
+#[ignore] lines: 9
+apple_walls_e2e exit=101
+stackoverflow_rust_e2e exit=101
+symbols_e2e exit=101
+test automationmodetool_records_and_replays ... FAILED
+test csh_records_and_replays ... FAILED
+test dddiagnose_records_and_replays ... FAILED
+test desdp_records_and_replays ... FAILED
+test dyld_info_records_and_replays ... FAILED
+test flex_records_and_replays ... FAILED
+test tcsh_records_and_replays ... FAILED
+test a_rust_stack_overflow_strikes_its_own_guard_page ... FAILED
+test cache_symbol_e2e ... FAILED
+---- automationmodetool_records_and_replays stdout ----
+
+thread 'automationmodetool_records_and_replays' (28004218) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/automationmodetool: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (28004235) panicked at crates/retrace-arch/src/lib.rs:1069:38:
+M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a g
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+--
+---- csh_records_and_replays stdout ----
+
+thread 'csh_records_and_replays' (28004243) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /bin/csh: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (28004244) panicked at crates/retrace-arch/src/lib.rs:1069:38:
+M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+--
+---- dddiagnose_records_and_replays stdout ----
+
+thread 'dddiagnose_records_and_replays' (28004249) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/dddiagnose: record exited 4 — the wall this gate is parked at, in the recorder's own words:
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1703 send_size 248): the box hosts no message-queue receivers
+--
+---- desdp_records_and_replays stdout ----
+
+thread 'desdp_records_and_replays' (28004253) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/desdp: record exited 71 — the wall this gate is parked at, in the recorder's own words:
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0xf03 send_size 248): the box hosts no message-queue receivers
+[retrace] refusing mach_msg2 message-queue receive (rcv_name 0x1003 rcv_size 108 options 0x404000102): the box hosts no message-queue senders
+--
+---- dyld_info_records_and_replays stdout ----
+
+thread 'dyld_info_records_and_replays' (28004322) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/dyld_info: record exited 71 — the wall this gate is parked at, in the recorder's own words:
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1503 send_size 248): the box hosts no message-queue receivers
+[retrace] refusing mach_msg2 message-queue receive (rcv_name 0x1103 rcv_size 108 options 0x404000102): the box hosts no message-queue senders
+--
+---- flex_records_and_replays stdout ----
+
+thread 'flex_records_and_replays' (28004341) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/flex: record exited 71 — the wall this gate is parked at, in the recorder's own words:
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1203 send_size 248): the box hosts no message-queue receivers
+[retrace] refusing mach_msg2 message-queue receive (rcv_name 0x1603 rcv_size 108 options 0x404000102): the box hosts no message-queue senders
+--
+---- tcsh_records_and_replays stdout ----
+
+thread 'tcsh_records_and_replays' (28004358) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /bin/tcsh: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (28004359) panicked at crates/retrace-arch/src/lib.rs:1069:38:
+M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+--
+---- a_rust_stack_overflow_strikes_its_own_guard_page stdout ----
+
+thread 'a_rust_stack_overflow_strikes_its_own_guard_page' (28004463) panicked at crates/retrace/tests/stackoverflow_rust_e2e.rs:46:5:
+libstd's handler must recognize the fault as a stack overflow by comparing si_addr against its own guard range; stderr:
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)
+--
+thread 'main' (28004480) panicked at crates/retrace-core/src/lib.rs:216:21:
+raising blocked signal 10 synchronously is not modelled: a fault cannot be deferred, POSIX leaves it undefined, and Darwin force-delivers. M11 models no pending set, so implement one — and revisit sigpending's always-empty answer — before a guest needs this.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+--
+---- cache_symbol_e2e stdout ----
+
+thread 'cache_symbol_e2e' (28004527) panicked at crates/retrace/tests/symbols_e2e.rs:214:10:
+a shared-cache pc must resolve once the cache's local symbols reach the recording
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+

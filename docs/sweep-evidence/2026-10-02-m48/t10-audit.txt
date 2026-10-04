@@ -1,0 +1,140 @@
+audit of 705f813 on 2026-10-04 07:32:00 -03
+== 1. No trace-format change (H3)
+VERDICT crates/retrace-trace diff lines since e6caa65: ok (0)
+VERDICT TRACE_MAGIC is RT\x00\x0b: ok (1)
+== 2. Symmetry rule 1: guest_kevent and guest_psynch once in record_box and once in ReplaySession::advance, the record call before the generic arm; note_fd_effects twice in record_box (Task 4 Ruling K6) and once in advance
+ReplaySession::advance starts at line 1729; the generic arm's first assert is at line 1349
+1118:                let (rc, err) = b.guest_kevent(args).unwrap_or_else(|m| panic!("{m}"));
+1119-                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err, writes: vec![], thread })
+1120-                    .map_err(|e| format!("append kevent: {e}"))?; count += 1;
+--
+2552:                                let (rc, e) = match self.b.guest_kevent(args) {
+2553-                                    Ok(r) => r,
+2554-                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+VERDICT guest_kevent sides: ok (record 1118, replay 2552)
+1134:                let rc = b.guest_psynch(num, args).unwrap_or_else(|m| panic!("{m}"));
+1135-                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+1136-                    .map_err(|e| format!("append psynch: {e}"))?; count += 1;
+--
+2578:                                let rc = match self.b.guest_psynch(num, args) {
+2579-                                    Ok(rc) => rc,
+2580-                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+VERDICT guest_psynch sides: ok (record 1134, replay 2578)
+283:                b.note_fd_effects(num, args, 0, 0, false).unwrap_or_else(|m| panic!("{m}"));
+284-            }
+285-            // mmap is special-cased: it creates guest memory the program then writes with plain
+--
+1425:                b.note_fd_effects(num, args, ret, ret1, err).unwrap_or_else(|m| panic!("{m}"));
+1426-            }
+1427-            // A cache-window stage-2 fault: stage/fixup/re-sign/map the page (page_in_cache) and
+--
+2999:                                if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
+3000-                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+3001-                                        "syscall {num} refused on replay, though the recording accepted it \
+VERDICT note_fd_effects sides: ok (record 283 and 1425, replay 2999)
+VERDICT guest_kevent before the generic arm: ok (1118 < 1349)
+VERDICT guest_psynch before the generic arm: ok (1134 < 1349)
+(compare the argument lists printed above by eye: the same Box_ method with the same arguments on both sides)
+== 3. The generic forward arm asserts every new number
+1349:                    "signal syscall {num} reached the generic forward arm — it must be serviced or \
+1360:                    "workq syscall {num} reached the generic forward arm — it must be emulated \
+1369:                    "kevent_qos (374) reached the generic forward arm — it must be emulated above \
+1376:                    "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c).");
+1381:                    "psynch syscall {num} reached the generic forward arm — it must be emulated above (M48 §3e).");
+1388:                    "madvise (75) reached the generic forward arm — it must be modelled above (M47). \
+1394:                    "fork ({num}) reached the generic forward arm — it must be refused above (M47). \
+VERDICT the kevent assert: ok (1)
+VERDICT the psynch assert: ok (1)
+== 4. Symmetry rule 2: the SPRR register and the JIT view live below the trace
+292:                // Minor (b): an anonymous PROT_EXEC (JIT) mmap would need exec promotion but
+293:                // guest_mmap installs plain RW+non-exec data pages. JIT is out of M2 scope; warn
+295:                // M48 §3f exempts MAP_JIT: the box keeps such a range and stamps the running thread's
+298:                if args[2] & 0x4 != 0 && args[3] & retrace_arch::MAP_JIT == 0 {
+299:                    eprintln!("[retrace warn] anon PROT_EXEC mmap (len {:#x}) not promoted to exec (JIT out of M2 scope)", args[1]);
+VERDICT SPRR in retrace-core code (comments aside): ok (0)
+== 5. Every new Box_ field at Task 4's six sites (Ruling T10-a); kq, M46's field, is the patterns' control
+VERDICT kq: Box_ and BoxState, the three literals, checkpoint(), from_checkpoint, dbg_internal_state: ok (decl=2 lit=3 ckpt=1 from=1 dbg=1)
+VERDICT gkq: Box_ and BoxState, the three literals, checkpoint(), from_checkpoint, dbg_internal_state: ok (decl=2 lit=3 ckpt=1 from=1 dbg=1)
+VERDICT psynch: Box_ and BoxState, the three literals, checkpoint(), from_checkpoint, dbg_internal_state: ok (decl=2 lit=3 ckpt=1 from=1 dbg=1)
+VERDICT jit: Box_ and BoxState, the three literals, checkpoint(), from_checkpoint, dbg_internal_state: ok (decl=2 lit=3 ckpt=1 from=1 dbg=1)
+== 6. verify_thread keeps seven call sites (§11a item 1)
+VERDICT verify_thread call sites: ok (7)
+== 7. Restore parity: each new state has a seek test, and checkpointparity has M48's
+258:fn a_seek_into_a_blocked_kevent_matches_a_cold_seek() {
+271:fn a_seek_inside_a_timed_kevent_matches_a_cold_seek() {
+VERDICT kq_e2e seek tests: ok (2)
+124:fn a_seek_into_a_blocked_cvwait_matches_a_cold_seek() {
+VERDICT condvar_e2e seek tests: ok (1)
+177:fn a_seek_into_a_write_enabled_window_matches_a_cold_seek() {
+VERDICT jitwp_e2e seek tests: ok (1)
+219:    assert_eq!(r.dbg_jit(), &jit, "{label}: the MAP_JIT set and its view (M48)");
+427:/// M48: the write-enabled JIT tier. It stages a commpage (a static guest has none), a V8-shaped
+450:    // PRECONDITIONS. Without these the M48 rows compare Default == Default.
+== 8. Review Focus: every pinned test is defined exactly once
+VERDICT an_event_list_aliasing_the_change_list_is_read_before_it_is_written: ok (1)
+VERDICT the_runtime_detection_probe_returns_natives_one_event: ok (1)
+VERDICT a_wake_of_the_current_thread_writes_the_vcpu: ok (1)
+VERDICT a_timeout_on_the_only_thread_answers_on_the_vcpu: ok (1)
+VERDICT a_timed_wait_on_the_only_waiter_answers_on_the_vcpu: ok (1)
+VERDICT the_sequence_window_wraps_as_synch_internal_h_computes: ok (1)
+VERDICT a_signal_across_the_sequence_wrap_wakes_the_waiter: ok (1)
+VERDICT the_stamped_extents_are_the_ranges_minus_their_noaccess_extents: ok (1)
+VERDICT an_unprotect_inside_a_jit_range_is_restamped_by_the_view_not_left_data: ok (1)
+VERDICT the_v8_shape_none_mapped_then_mprotected_rwx_runs_its_code: ok (1)
+VERDICT a_kevent_refused_on_replay_is_a_divergence_naming_it_not_a_panic: ok (1)
+VERDICT a_cvwait_refused_on_replay_is_a_divergence_naming_it_not_a_panic: ok (1)
+== 9. Every refusal prefix has a test file that names it
+prefix [M48: kevent ]: source lines 20, test files 2
+VERDICT [M48: kevent ] tested: ok
+prefix [M48: pipe ]: source lines 3, test files 1
+VERDICT [M48: pipe ] tested: ok
+prefix [M48: psynch ]: source lines 19, test files 2
+VERDICT [M48: psynch ] tested: ok
+prefix [M48: SPRR ]: source lines 2, test files 2
+VERDICT [M48: SPRR ] tested: ok
+prefix [M48: MAP_JIT ]: source lines 11, test files 1
+VERDICT [M48: MAP_JIT ] tested: ok
+prefix [M48: a signal is pending on thread ]: source lines 4, test files 2
+VERDICT [M48: a signal is pending on thread ] tested: ok
+== 10. Spec §1 part 5: every syscall number the final node walks reached is in CENSUS
+walk numbers: 87; CENSUS: 125
+VERDICT walk numbers missing from CENSUS: ok (0)
+psynch numbers the walks reached (only 303, 304 and 305 are modelled):
+   4 num 303: 1
+   1 num 304: 10
+   1 num 304: 8
+   3 num 304: 9
+   3 num 305: 16
+   1 num 305: 18
+   1 num 305: 9
+== 11. Nine #[ignore] lines, none new (H2)
+VERDICT #[ignore] lines: ok (9)
+== Known soft spots (Task 10 addendum B): stated with the file and line of each, not fixed here
+1. Two panics are reachable on replay after an EARLIER silent divergence (Task 4 review minor 3): one
+   from the kevent mirror, one below the trace. From the mirror (crates/retrace-core/src/lib.rs:2552): Box_::guest_kevent's
+   wake_kevent_waiters (crates/retrace-box/src/lib.rs:5729; the generic mirror's Box_::note_fd_effects reaches it too, crates/retrace-box/src/lib.rs:5798) goes
+   through deliver_kevent to deliver_wake, which panics if a waiter's event list stopped translating
+   (crates/retrace-box/src/lib.rs:5814). Not from the mirror: schedule_after_block's wake_due_threads (crates/retrace-box/src/lib.rs:6926) calls kevent_timed_out
+   (crates/retrace-box/src/lib.rs:6246), which panics on a missing waiter (crates/retrace-box/src/lib.rs:6259). Review Focus 5's 'never a panic' holds for a shape
+   the recording accepted and replay refuses, not for an earlier silent divergence: the full-memory
+   comparison at exit is what would have caught that.
+2. Assertion 5 of node_crash_e2e proves JIT code, not TurboFan (Task 8 review minor 2). It (crates/retrace/tests/node_crash_e2e.rs:133)
+   passes for any store whose pc lies in a MAP_JIT range, Sparkplug or Maglev code included;
+   assertion 1 (crates/retrace/tests/node_crash_e2e.rs:77) compares the marker's opt= bits only with native's own, and nothing decodes them.
+3. The delivery assertion is node-version-specific (Task 8 review minor 3). The match (crates/retrace/tests/node_crash_e2e.rs:90) and its
+   expect (crates/retrace/tests/node_crash_e2e.rs:101) rely on node 25.6.1's own SIGSEGV handler returning and the instruction re-faulting;
+   the module doc's 're-raises' (crates/retrace/tests/node_crash_e2e.rs:11) is looser than measured, and no sigreturn or resume_pc is asserted.
+4. Record and replay are unbounded for every node gate (Task 8 review minor 5). node_e2e's rungs
+   (crates/retrace/tests/node_e2e.rs:51, crates/retrace/tests/node_e2e.rs:83) and node_crash_e2e's record (crates/retrace/tests/node_crash_e2e.rs:68) and replays (crates/retrace/tests/node_crash_e2e.rs:110) end in util's run and run_env, an
+   unbounded Command::output() (crates/retrace/tests/util/mod.rs:61, crates/retrace/tests/util/mod.rs:80). Only node_crash_e2e's debug session is bounded
+   (crates/retrace/tests/node_crash_e2e.rs:33, through crates/retrace/tests/util/mod.rs:117). A hang in record or replay stalls the gate instead of failing it.
+5. node_timer_replays has three assertions no control reaches (Task 10 controls A1(c); fix round 1).
+   current_thread() == 0 (crates/retrace/tests/node_e2e.rs:122) is redundant with the exactness assertion, and the recorder's M15 R1
+   debug_assert (crates/retrace-box/src/lib.rs:3069, debug builds only) fires first under a wrong-thread pick (A1(c), measured).
+   'stopped short' (crates/retrace/tests/node_e2e.rs:117) is shadowed by the recorder's M14 DEADLOCK panic (crates/retrace-box/src/lib.rs:6940): a jump short of the
+   deadline wakes nobody. BY READING of schedule_after_block, not measured. write > j (crates/retrace/tests/node_e2e.rs:126) is shadowed
+   by the test's own earlier panics, 'no landmark moved the clock by a second' (crates/retrace/tests/node_e2e.rs:97) and 'the clock
+   jumped ... with no timed kevent' (crates/retrace/tests/node_e2e.rs:112). BY READING, not measured. None is proven able to fail; they
+   are defence in depth behind the exactness assertion (crates/retrace/tests/node_e2e.rs:119, proven live by A1(a): the jump
+   0x4801 = 2 x STRIDE + 1 ticks past fails there), M14 DEADLOCK, the test's earlier panics and M15 R1.
+VERDICT Known soft spots: anchors not found (of 28): ok (0)

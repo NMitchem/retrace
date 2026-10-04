@@ -1,0 +1,36 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling glob v0.3.3
+   Compiling libc v0.2.186
+   Compiling prettyplease v0.2.37
+   Compiling cfg-if v1.0.4
+   Compiling regex-syntax v0.8.11
+   Compiling minimal-lexical v0.2.1
+   Compiling memchr v2.8.2
+   Compiling either v1.16.0
+   Compiling serde_core v1.0.228
+   Compiling libloading v0.8.9
+   Compiling bindgen v0.70.1
+   Compiling itertools v0.13.0
+   Compiling log v0.4.33
+   Compiling serde v1.0.228
+   Compiling clang-sys v1.8.1
+   Compiling nom v7.1.3
+   Compiling rustc-hash v1.1.0
+   Compiling shlex v1.3.0
+   Compiling bitflags v2.13.0
+   Compiling retrace-guest v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace-guest)
+   Compiling regex-automata v0.4.14
+   Compiling retrace-arch v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace-arch)
+   Compiling cexpr v0.6.0
+   Compiling regex v1.12.4
+   Compiling syn v2.0.118
+   Compiling serde_derive v1.0.228
+   Compiling bincode v1.3.3
+   Compiling retrace-trace v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace-trace)
+   Compiling hv-sys v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/hv-sys)
+   Compiling retrace-box v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace-box)
+   Compiling retrace-core v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace-core)
+   Compiling retrace v0.0.0 (/private/tmp/claude-501/m48-t0-walk/crates/retrace)
+    Finished `release` profile [optimized] target(s) in 11.76s

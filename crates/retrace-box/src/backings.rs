@@ -33,6 +33,12 @@ impl SpanIndex {
         self.e.remove(i);
         for x in &mut self.e { if x.2 > pos { x.2 -= 1; } }
     }
+    /// Index a span inserted at Vec position `pos`: every later position shifts up by one, as
+    /// `Vec::insert` does, then the span is indexed as `insert` does. Panics if it overlaps.
+    pub(crate) fn insert_at(&mut self, start: u64, len: usize, pos: usize) {
+        for x in &mut self.e { if x.2 >= pos { x.2 += 1; } }
+        self.insert(start, len, pos);
+    }
     /// The backing holding all of `[ipa, ipa + len)` — `read_guest`'s test, `ipa >= start &&
     /// ipa + len <= end`. With `len == 0` that admits `ipa == end`, as the scan did. `checked_add`
     /// answers `None` where the scan's `ipa + len` would have overflowed.
@@ -71,6 +77,13 @@ impl Backings {
     pub(crate) fn remove(&mut self, pos: usize) -> Backing {
         self.idx.remove(pos);
         self.v.remove(pos)
+    }
+    // Vec first, index second, as `push`: if the overlap assert fires, the Backing is already in the
+    // Vec and drops with it after `vm` (the field order).
+    pub(crate) fn insert(&mut self, pos: usize, b: Backing) {
+        let (ipa, len) = (b.ipa, b.len);
+        self.v.insert(pos, b);
+        self.idx.insert_at(ipa, len, pos);
     }
     pub(crate) fn holding(&self, ipa: u64, len: usize) -> Option<&Backing> { self.idx.holding(ipa, len).map(|p| &self.v[p]) }
     pub(crate) fn containing(&self, ipa: u64) -> Option<&Backing> { self.idx.containing(ipa).map(|p| &self.v[p]) }

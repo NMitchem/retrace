@@ -1,0 +1,19 @@
+[retrace] fall-throughs: 5
+       44.91 real        43.98 user         0.77 sys
+           962265088  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              160087  page reclaims
+                  15  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 184  voluntary context switches
+                9265  involuntary context switches
+        804278874717  instructions retired
+        178480248623  cycles elapsed
+          1316310952  peak memory footprint

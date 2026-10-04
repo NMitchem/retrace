@@ -1,0 +1,3 @@
+crash record rc=139 secs=10 trace=1203864923 traps=1407
+crash replay1 rc=139 secs=9 same_stdout=yes
+crash replay2 rc=139 secs=9 same_stdout=yes

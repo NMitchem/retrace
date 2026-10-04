@@ -1,0 +1,25 @@
+   Compiling hv-sys v0.0.0 (/Users/noahmitchem/Documents/GitHub/retrace/.claude/worktrees/m48-node/crates/hv-sys)
+   Compiling simdtest-base v0.0.0 (/private/tmp/claude-501/m48-t0-simdtest/base)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.31s
+     Running tests/simd.rs (target/aarch64-apple-darwin/debug/deps/simd-c8dc04b0294ab843)
+
+running 1 test
+test set_simd_installs_the_passed_value_not_what_the_host_left_in_v0 ... FAILED
+
+failures:
+
+---- set_simd_installs_the_passed_value_not_what_the_host_left_in_v0 stdout ----
+
+thread 'set_simd_installs_the_passed_value_not_what_the_host_left_in_v0' (23186270) panicked at tests/simd.rs:17:9:
+assertion `left == right` failed: Q0: set_simd installed something other than its argument
+  left: 340282366920938463463374607431768211455
+ right: 127502062020129692088656156215216242945
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    set_simd_installs_the_passed_value_not_what_the_host_left_in_v0
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test simd`

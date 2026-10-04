@@ -1,0 +1,27 @@
+diff --git a/crates/hv-sys/src/lib.rs b/crates/hv-sys/src/lib.rs
+index 31a1187..7e2e705 100644
+--- a/crates/hv-sys/src/lib.rs
++++ b/crates/hv-sys/src/lib.rs
+@@ -132,7 +132,21 @@ impl Vcpu {
+         Ok(v)
+     }
+     pub fn set_simd(&self, r: SimdReg, v: u128) -> Result<(), HvError> {
+-        check(unsafe { hv_vcpu_set_simd_fp_reg(self.id, r.0, v) })
++        // M48 PROBE: hv_simd_fp_uchar16_t is a 16-byte VECTOR, passed in v0 under AAPCS64; bindgen's
++        // u128 is passed in a GPR pair, so the framework read whatever the host had in v0. Call it
++        // by hand with the value in v0.
++        let (lo, hi) = (v as u64, (v >> 64) as u64);
++        let f = hv_vcpu_set_simd_fp_reg as *const () as usize;
++        let ret: u64;
++        unsafe {
++            core::arch::asm!(
++                "fmov d0, {lo}", "mov v0.d[1], {hi}", "blr {f}",
++                lo = in(reg) lo, hi = in(reg) hi, f = in(reg) f,
++                inlateout("x0") self.id => ret, in("x1") r.0 as u64,
++                clobber_abi("C"),
++            );
++        }
++        check(ret as u32 as i32 as hv_return_t)
+     }
+     pub fn set_trap_debug_exceptions(&self, on: bool) -> Result<(), HvError> { check(unsafe { hv_vcpu_set_trap_debug_exceptions(self.id, on) }) }
+     /// Run until VMEXIT. Returns (reason, esr_el2, far/ipa) copied out of the exit struct.

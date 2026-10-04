@@ -1,0 +1,9 @@
+[m4] tid=23157181 __psynch_cvwait enter x0=0x104d38040 x1=0x200 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23157180 __psynch_cvwait enter x0=0x104d38040 x1=0x100000100 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23157182 __psynch_cvwait enter x0=0x104d38040 x1=0x300 x2=0 x3=0 x4=0 x5=0xa0 x6=0 x7=0
+[m4] tid=23157179 __psynch_cvbroad enter x0=0x104d38040 x1=0x300 x2=0x300 x3=0 x4=0 x5=0 x6=0 x7=0
+[m4] tid=23157179 __psynch_cvbroad return x0=0x301 carry=0
+[m4] tid=23157180 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23157181 __psynch_cvwait return x0=0 carry=0
+[m4] tid=23157182 __psynch_cvwait return x0=0 carry=0
+broad3 done

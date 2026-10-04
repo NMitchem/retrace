@@ -1,0 +1,11 @@
+detect rc=1
+out[0] ident=0x1e7e7711 filter=-10 flags=0x21 fflags=0 data=0 udata=0x0
+out[1] ident=0x1e7e7711 filter=-10 flags=0 fflags=0x1000000 data=0 udata=0x0
+repoll rc=0
+retrigger rc=1
+out[0] ident=0x1e7e7711 filter=-10 flags=0x21 fflags=0 data=0 udata=0x55
+del-unknown rc=1
+out[0] ident=0x999 filter=-10 flags=0x4002 fflags=0 data=0x2 udata=0x0
+pipe-add rc=0
+pipe-ready rc=1
+out[0] ident=0x4 filter=-1 flags=0x1 fflags=0 data=0x3 udata=0x0

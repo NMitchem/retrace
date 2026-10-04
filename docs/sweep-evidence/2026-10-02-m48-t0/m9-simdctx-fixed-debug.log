@@ -1,0 +1,12 @@
+   Compiling hv-sys v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/hv-sys)
+   Compiling retrace-box v0.0.0 (/private/tmp/claude-501/m48-t0-simdctx/crates/retrace-box)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running tests/simdctx.rs (target/aarch64-apple-darwin/debug/deps/simdctx-7899a19abfca3f3b)
+
+running 3 tests
+test a_checkpoint_restore_installs_the_captured_simd_registers ... ok
+test a_thread_switch_installs_the_incoming_threads_simd_registers ... ok
+test the_debuggers_register_write_installs_its_value_in_every_q_register ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

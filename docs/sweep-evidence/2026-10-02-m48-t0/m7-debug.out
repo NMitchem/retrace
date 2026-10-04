@@ -1,0 +1,11 @@
+> continue
+guest crashed: pc=0xa3da68738 far=0x4000dead0000 esr=0x92000005
+> watch 0x700c142f0
+watch at 0x700c142f0 len 8
+> reverse-continue
+hit watch 0x700c142f0 (write at 0xa2cfc09a8) at (1378, 1403315)
+> x 0x700c142f0 8
+0x700c142f0: 02 00 00 00 00 00 00 00
+> stepi
+> x 0x700c142f0 8
+0x700c142f0: 00 00 ad de 00 40 00 00
