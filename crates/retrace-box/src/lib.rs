@@ -212,9 +212,11 @@ const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // trapping to EL1 with EC 0x18: Apple's `_platform_memset` issues `DC ZVA` above a size threshold,
 // and CPython's allocator hits that threshold at startup (M25-cpython). UCI(26) is SET for the
 // same reason (M48 §11b item 3, R8): `sys_icache_invalidate` issues EL0 `IC IVAU` per 64-byte line
-// after V8 writes JIT code (walls.md §1 row 5, t0 M1(b)). UCT(15) stays CLEAR: t0 M1(b) found no
-// `CTR_EL0` read in it and no `DC CVAU`, and the EC 0x18 exit still fails loud on a guest that
-// needs either.
+// after V8 writes JIT code (walls.md §1 row 5, t0 M1(b)). UCI also un-traps EL0 `DC CVAU`,
+// `DC CIVAC`, `DC CVAC` and `DC CVAP`; a guest issuing them is harmless, since they run natively on
+// the vCPU and need no emulation. UCT(15) stays CLEAR: t0 M1(b) found no `CTR_EL0` read in
+// `sys_icache_invalidate`, so an EL0 `CTR_EL0` read still traps with EC 0x18 and fails loud, and
+// none was measured.
 const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000 | 0x0400_0000;
 // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
 const SCTLR_PAC_EN: u64 = 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
@@ -3017,9 +3019,11 @@ impl Box_ {
         } else {
             let _ = self.vm.protect(ipa, len as usize, MemFlags::RWX);
         }
-        // Review Focus item 4: `unprotect` stamps ATTR_DATA unconditionally, so V8's RWX commit of
-        // its PROT_NONE code range (P5) would leave the range writable and non-executable under the
-        // protected view, and V8's first call into it would fault.
+        // Review Focus item 4: `unprotect` stamps ATTR_DATA unconditionally, so without this V8's RWX
+        // commit of its PROT_NONE code range (P5) would leave the range writable and non-executable
+        // under the protected view until the next toggle restamps it. No natively valid flow calls
+        // into it before that toggle, so the e2e `v8` mode cannot see a missing restamp; the box test
+        // `an_unprotect_inside_a_jit_range_is_restamped_by_the_view_not_left_data` pins it.
         if in_jit { self.restamp_jit(self.jit.view()); }
     }
 

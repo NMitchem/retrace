@@ -3,7 +3,11 @@
 //! exit code a weaker failure also produces:
 //! - `basic`: native's register sequence and 42 from JIT code. A flip-on-fault model (J2) returns 42
 //!   too, which is why `fault` exists.
-//! - `v8`: V8's shape, `PROT_NONE` then an RWX commit inside it (Review Focus item 4).
+//! - `v8`: V8's valid native shape: a `PROT_NONE` reservation, one RWX commit inside it, a
+//!   write-enabled write, the protect toggle, the call. It cannot go red when the restamp after
+//!   `unprotect` is missing, since no natively valid flow depends on it (the toggles restamp before
+//!   the call); `retrace-box`'s `an_unprotect_inside_a_jit_range_is_restamped_by_the_view_not_left_data`
+//!   pins that restamp (Review Focus item 4).
 //! - `twothreads`: B runs the page while A is write-enabled; a process-wide view would fault.
 //! - `fault`: a store to a protected page is the crash native takes, where J2 would exit 0.
 //! - a seek into a write-enabled window, a single-step across a toggle (P9), and a
