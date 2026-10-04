@@ -3000,9 +3000,15 @@ impl Box_ {
     /// implementation and no mirror to keep in step.
     ///
     /// M48 §3f: an `mprotect` touching a `MAP_JIT` range is admitted by value first (Ruling
-    /// T6-a), and the view is restamped after it (Review Focus item 4).
+    /// T6-a), refused whole if it touches a committed page (Ruling T6-EACCES), and the view is
+    /// restamped after it (Review Focus item 4).
     pub fn guest_mprotect(&mut self, ipa: u64, len: u64, prot: u64) {
         let in_jit = self.jit.admit_mprotect(ipa, len, prot).unwrap_or_else(|m| panic!("{m}"));
+        // Ruling T6-EACCES: natively a committed MAP_JIT page refuses every mprotect (t6-jitprobe).
+        // Raised before anything changes, identically on record and replay (R5).
+        if in_jit {
+            if let Err(m) = self.jit.refuse_committed(ipa, len, prot, &self.noaccess) { panic!("{m}"); }
+        }
         let end = ipa.saturating_add(len);
         if prot == 0 {
             self.protect_none(ipa, len);

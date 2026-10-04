@@ -120,3 +120,23 @@ fn a_munmap_trims_a_jit_range_to_data_pages_and_a_fixed_map_over_one_is_refused(
     assert!(b.ipa_is_el0_writable(a + 0xc000) && !b.ipa_is_exec(a + 0xc000),
         "a data map over the old range is plain data");
 }
+
+/// Ruling T6-EACCES (t6-jitprobe): natively a committed MAP_JIT page refuses every `mprotect` with
+/// EACCES and nothing changes. Retrace refuses it by value, before anything changes, rather than
+/// answer 0 where native answers EACCES.
+#[test]
+fn an_mprotect_over_a_committed_jit_page_is_refused_by_value_and_changes_nothing() {
+    let mut b = tb();
+    let a = b.guest_mmap(0, 0x10_0000, 0, V8_FLAGS).unwrap();
+    b.guest_mprotect(a + 0x4_0000, 0xc_0000, 7); // the commit, over PROT_NONE: admitted (T6-a)
+    let noaccess = b.noaccess().to_vec();
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        b.guest_mprotect(a + 0x8_0000, 0x4000, 0)
+    })).expect_err("an mprotect over a committed MAP_JIT page must be refused");
+    let msg = refused.downcast_ref::<String>().expect("a formatted refusal");
+    assert!(msg.starts_with(&format!("M48: MAP_JIT mprotect [{:#x}, +0x4000) prot 0x0 over the committed extent \
+        [{:#x}, {:#x}): native answers EACCES (measured, t6-jitprobe), unmodelled", a + 0x8_0000, a + 0x4_0000,
+        a + 0x10_0000)), "{msg}");
+    assert_eq!(b.noaccess(), noaccess.as_slice(), "a refusal changes nothing: no page went PROT_NONE");
+    assert!(b.ipa_is_exec(a + 0x8_0000), "and the committed page keeps the protected view");
+}
