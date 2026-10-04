@@ -2110,6 +2110,35 @@ pub const ECVCLEARED: u64 = 0x100;
 /// `ECVPREPOST` (`kern_internal.h:105`): a failed condvar call's "a prepost was consumed".
 pub const ECVPREPOST: u64 = 0x200;
 
+/// M48 §3f: `mmap`'s `MAP_JIT` flag (SDK `sys/mman.h`, `0x0800`): a region V8 writes code into and
+/// executes, toggled per thread through `S3_6_C15_C1_5` (§2c). The box keeps every such range
+/// (`retrace_box::jit`), and the anonymous-exec warning in `retrace-core` exempts it.
+pub const MAP_JIT: u64 = 0x800;
+
+/// M48 §3f: an EL0 access to `S3_6_C15_C1_5`, the SPRR register `pthread_jit_write_protect_np`
+/// writes (`pthread-jit-disasm.txt`). HVF exposes neither direction, so both arrive as undefined
+/// instructions (EC 0x00; §2d, §11b item 2). `rt` is raw: 31 is XZR in both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SprrAccess {
+    /// `mrs Xt, S3_6_C15_C1_5`.
+    Read { rt: u32 },
+    /// `msr S3_6_C15_C1_5, Xt`.
+    Write { rt: u32 },
+}
+
+/// M48 §3f: decode `insn` as an access to `S3_6_C15_C1_5`, or None. The system-register class is
+/// `1101010100 L 1 o0 op1 CRn CRm op2 Rt`; this register is op0 3 (`o0` 1), op1 6, CRn 15, CRm 1,
+/// op2 5. `L` 1 is `mrs` (`0xd53ef1a0`) and `L` 0 is `msr` (`0xd51ef1a0`). Every other register and
+/// every other instruction is None, so a neighbour keeps failing loud as `Stop::Other`.
+pub fn decode_sprr_access(insn: u32) -> Option<SprrAccess> {
+    let rt = insn & 0x1f;
+    match insn & !0x1f {
+        0xd53e_f1a0 => Some(SprrAccess::Read { rt }),
+        0xd51e_f1a0 => Some(SprrAccess::Write { rt }),
+        _ => None,
+    }
+}
+
 // ---- M12-signal-delivery ---------------------------------------------------------------------
 // Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here
 // was read out of the live SDK by spikes/sigabi.c, not from memory.
