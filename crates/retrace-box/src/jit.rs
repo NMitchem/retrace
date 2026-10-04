@@ -87,6 +87,22 @@ impl JitSet {
         Ok(true)
     }
 
+    /// `Err` naming the extent when an `mprotect(ipa, len, prot)` touches a committed `MAP_JIT` page:
+    /// one inside a range and outside every no-access extent, so RWX under T6-a. xnu refuses every
+    /// `mprotect` that touches such a page with EACCES, whatever the new protection, and changes
+    /// nothing, the range's PROT_NONE pages included (measured, `t6-jitprobe`). Ruling T6-EACCES
+    /// refuses it by value rather than answer 0 where native answers EACCES. An `mprotect` over only
+    /// the PROT_NONE part of a range stays admitted (T6-a): that is V8's one commit (t0 M5).
+    pub fn refuse_committed(&self, ipa: u64, len: u64, prot: u64, noaccess: &[(u64, u64)]) -> Result<(), String> {
+        match self.stamped_extents(noaccess).into_iter().find(|&(s, l)| overlap(ipa, len, s, l)) {
+            None => Ok(()),
+            Some((s, l)) => Err(format!(
+                "M48: MAP_JIT mprotect [{ipa:#x}, +{len:#x}) prot {prot:#x} over the committed extent \
+                 [{s:#x}, {:#x}): native answers EACCES (measured, t6-jitprobe), unmodelled \
+                 (Ruling T6-EACCES)", s + l)),
+        }
+    }
+
     /// `Err` naming the range when `[addr, addr+len)` overlaps one (Ruling T6-c). `what` names the
     /// request ("a FIXED mapping", "a mach_vm_remap source", "a mach_vm_remap target").
     pub fn refuse_overlap(&self, addr: u64, len: u64, what: &str) -> Result<(), String> {
@@ -205,6 +221,24 @@ mod tests {
         assert_eq!(j.admit_mprotect(B - 0x4000, 0x4000, 1), Ok(false), "outside every range: not ours to judge");
         let e = j.admit_mprotect(B + 0x8000, 0x4000, 5).unwrap_err();
         assert!(e.starts_with(&format!("M48: MAP_JIT mprotect [{:#x}, +0x4000) prot 0x5 ", B + 0x8000)), "{e}");
+    }
+
+    /// Ruling T6-EACCES (t6-jitprobe): natively a committed MAP_JIT page refuses every `mprotect`,
+    /// and a straddle of a PROT_NONE and a committed page is refused whole.
+    #[test]
+    fn an_mprotect_touching_a_committed_extent_is_refused_and_one_over_none_is_not() {
+        let mut j = JitSet::default();
+        j.add(B, 0x10_0000);
+        let noaccess = [(B, 0x4_0000), (B + 0xc_0000, 0x4_0000)]; // committed: [B+0x40000, B+0xc0000)
+        assert_eq!(j.refuse_committed(B, 0x4_0000, 7, &noaccess), Ok(()), "wholly PROT_NONE: V8's commit");
+        assert_eq!(j.refuse_committed(B + 0xc_0000, 0x4000, 0, &noaccess), Ok(()), "the PROT_NONE tail");
+        assert_eq!(j.refuse_committed(B + 0x20_0000, 0x4000, 0, &noaccess), Ok(()), "outside every range");
+        let e = j.refuse_committed(B + 0x8_0000, 0x4000, 0, &noaccess).unwrap_err();
+        assert!(e.starts_with(&format!("M48: MAP_JIT mprotect [{:#x}, +0x4000) prot 0x0 over the committed \
+            extent [{:#x}, {:#x}): native answers EACCES", B + 0x8_0000, B + 0x4_0000, B + 0xc_0000)), "{e}");
+        let e = j.refuse_committed(B + 0x3_c000, 0x8000, 7, &noaccess).unwrap_err();
+        assert!(e.starts_with(&format!("M48: MAP_JIT mprotect [{:#x}, +0x8000) prot 0x7 over the committed ",
+            B + 0x3_c000)), "a straddle of a PROT_NONE and a committed page is refused whole: {e}");
     }
 
     #[test]
