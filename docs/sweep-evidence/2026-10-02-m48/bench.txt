@@ -1,0 +1,13 @@
+start 2026-10-04 05:41:44 -03 commit=c695111 load={ 1.45 1.55 1.47 }
+runs=5 (median; peak RSS is the max over runs)
+| workload | native | record | replay | rec x | rep x | rec RSS | trace |
+|---|---|---|---|---|---|---|---|
+| echo | 0.001 s | 0.196 s | 0.202 s | 131.8x | 136.0x | 104 MiB | 28 MiB |
+| ls /usr/bin | 0.004 s | 0.231 s | 0.236 s | 53.1x | 54.2x | 107 MiB | 33 MiB |
+| jq, 5 MB file | 0.080 s | 1.979 s | 2.050 s | 24.8x | 25.7x | 446 MiB | 286 MiB |
+| jq, compute | 0.019 s | 0.297 s | 0.306 s | 15.3x | 15.7x | 127 MiB | 40 MiB |
+| python -c 'print(1)' | 0.012 s | 0.600 s | 0.616 s | 49.9x | 51.2x | 214 MiB | 85 MiB |
+| python, 30M-step loop | 0.954 s | 1.633 s | 1.644 s | 1.7x | 1.7x | 215 MiB | 85 MiB |
+| node -e 'console.log(1)' | 0.041 s | 3.453 s | 3.533 s | 85.0x | 87.0x | 733 MiB | 502 MiB |
+bench exit=0
+end 2026-10-04 05:43:34 -03 load={ 1.52 1.59 1.49 }
