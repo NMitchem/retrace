@@ -8,10 +8,9 @@
 //               1 MiB MAP_JIT reservation mapped PROT_NONE, the part from +0x40000 mprotected RWX, code
 //               written write-enabled and run protected. The +0x40000 head is this fixture's: V8's own
 //               offset is the first 256 KiB boundary past the base, so a head of 0x4000-0x34000 and a
-//               PROT_NONE tail follow in the six measured walks (t0 M5). Then the code page is
-//               decommitted (PROT_NONE) and recommitted (RWX) while protected, and called again with no
-//               toggle in between: only the view's restamp after `unprotect` makes that call executable
-//               (Review Focus item 4). Then a whole munmap.
+//               PROT_NONE tail follow in the six measured walks (t0 M5). Then a whole munmap. Natively a
+//               committed (RWX) MAP_JIT page refuses every further mprotect with EACCES, NONE included
+//               (t6-jitprobe), so V8 never decommits one and neither does this mode.
 //   twothreads  thread A stays write-enabled while thread B, protected, runs the page A writes. They
 //               hand off through dispatch semaphores, so each hand-off blocks one thread and the
 //               cooperative scheduler switches to the other: the view must follow the running thread.
@@ -72,11 +71,6 @@ static int v8(void) {
     pthread_jit_write_protect_np(1);
     sys_icache_invalidate(p, 8);
     printf("v8 call=%d\n", ((int (*)(void))p)());
-    if (mprotect(p, 0x4000, PROT_NONE) != 0 || mprotect(p, 0x4000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        puts("recommit failed");
-        return 2;
-    }
-    printf("v8 recommit call=%d\n", ((int (*)(void))p)());
     if (munmap(r, R) != 0) { puts("munmap failed"); return 2; }
     puts("v8 unmapped");
     return 0;
