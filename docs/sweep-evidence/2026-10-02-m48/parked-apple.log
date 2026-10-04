@@ -1,0 +1,107 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/apple_walls_e2e.rs (target/aarch64-apple-darwin/debug/deps/apple_walls_e2e-7943e698f94f4bc2)
+
+running 7 tests
+test automationmodetool_records_and_replays ... FAILED
+test csh_records_and_replays ... FAILED
+test dddiagnose_records_and_replays ... FAILED
+test desdp_records_and_replays ... FAILED
+test dyld_info_records_and_replays ... FAILED
+test flex_records_and_replays ... FAILED
+test tcsh_records_and_replays ... FAILED
+
+failures:
+
+---- automationmodetool_records_and_replays stdout ----
+
+thread 'automationmodetool_records_and_replays' (28004218) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/automationmodetool: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (28004235) panicked at crates/retrace-arch/src/lib.rs:1069:38:
+M33: syscall 375 (375) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- csh_records_and_replays stdout ----
+
+thread 'csh_records_and_replays' (28004243) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /bin/csh: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (28004244) panicked at crates/retrace-arch/src/lib.rs:1069:38:
+M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+
+---- dddiagnose_records_and_replays stdout ----
+
+thread 'dddiagnose_records_and_replays' (28004249) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/dddiagnose: record exited 4 — the wall this gate is parked at, in the recorder's own words:
+[retrace] forwarding mach_msg2 host_get_special_port (msgh_id 412) to host (decided allowlist)
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1703 send_size 248): the box hosts no message-queue receivers
+[retrace] refusing mach_msg2 message-queue receive (rcv_name 0x1603 rcv_size 108 options 0x404000102): the box hosts no message-queue senders
+RECORD ERROR: unsupported mach_msg2 at pc 0x1804adc34: msgh_id 205 dest 0xc03 (guest task port Some(515)) send_size 24
+  left: 4
+ right: 0
+
+---- desdp_records_and_replays stdout ----
+
+thread 'desdp_records_and_replays' (28004253) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/desdp: record exited 71 — the wall this gate is parked at, in the recorder's own words:
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0xf03 send_size 248): the box hosts no message-queue receivers
+[retrace] refusing mach_msg2 message-queue receive (rcv_name 0x1003 rcv_size 108 options 0x404000102): the box hosts no message-queue senders
+[retrace] refusing posix_spawn (syscall 244): exec-in-place is unmodelled; returning errno 14 without forwarding
+[retrace] fall-throughs: 9
+  left: 71
+ right: 0
+
+---- dyld_info_records_and_replays stdout ----
+
+thread 'dyld_info_records_and_replays' (28004322) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/dyld_info: record exited 71 — the wall this gate is parked at, in the recorder's own words:
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1503 send_size 248): the box hosts no message-queue receivers
+[retrace] refusing mach_msg2 message-queue receive (rcv_name 0x1103 rcv_size 108 options 0x404000102): the box hosts no message-queue senders
+[retrace] refusing posix_spawn (syscall 244): exec-in-place is unmodelled; returning errno 14 without forwarding
+[retrace] fall-throughs: 9
+  left: 71
+ right: 0
+
+---- flex_records_and_replays stdout ----
+
+thread 'flex_records_and_replays' (28004341) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /usr/bin/flex: record exited 71 — the wall this gate is parked at, in the recorder's own words:
+[retrace] refusing mach_msg2 message-queue send (msgh_id 0x400000cf dest 0x1203 send_size 248): the box hosts no message-queue receivers
+[retrace] refusing mach_msg2 message-queue receive (rcv_name 0x1603 rcv_size 108 options 0x404000102): the box hosts no message-queue senders
+[retrace] refusing posix_spawn (syscall 244): exec-in-place is unmodelled; returning errno 14 without forwarding
+[retrace] fall-throughs: 9
+  left: 71
+ right: 0
+
+---- tcsh_records_and_replays stdout ----
+
+thread 'tcsh_records_and_replays' (28004358) panicked at crates/retrace/tests/apple_walls_e2e.rs:34:5:
+assertion `left == right` failed: /bin/tcsh: record exited 101 — the wall this gate is parked at, in the recorder's own words:
+
+thread 'main' (28004359) panicked at crates/retrace-arch/src/lib.rs:1069:38:
+M33: syscall 7 (7) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own descriptor of that number). Classify each argument from the SDK prototype under the rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the number to tests/census.rs too.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  left: 101
+ right: 0
+
+
+failures:
+    automationmodetool_records_and_replays
+    csh_records_and_replays
+    dddiagnose_records_and_replays
+    desdp_records_and_replays
+    dyld_info_records_and_replays
+    flex_records_and_replays
+    tcsh_records_and_replays
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 3 filtered out; finished in 15.27s
+
+error: test failed, to rerun pass `-p retrace --test apple_walls_e2e`
+error: 1 target failed:
+    `-p retrace --test apple_walls_e2e`

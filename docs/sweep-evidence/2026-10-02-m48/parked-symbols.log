@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/symbols_e2e.rs (target/aarch64-apple-darwin/debug/deps/symbols_e2e-b39a8bff59f8e30f)
+
+running 1 test
+test cache_symbol_e2e ... FAILED
+
+failures:
+
+---- cache_symbol_e2e stdout ----
+
+thread 'cache_symbol_e2e' (28004527) panicked at crates/retrace/tests/symbols_e2e.rs:214:10:
+a shared-cache pc must resolve once the cache's local symbols reach the recording
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    cache_symbol_e2e
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 4.71s
+
+error: test failed, to rerun pass `-p retrace --test symbols_e2e`
+error: 1 target failed:
+    `-p retrace --test symbols_e2e`
