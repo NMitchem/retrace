@@ -1,0 +1,7 @@
+# M48 Task 9: every row whose normalised ROW differs from M47's a8a1ecd sweep (rowdiff-norm.txt),
+# plus /usr/bin/dddiagnose always. Only dddiagnose moved its OUTCOME (rowdiff.txt); csh, tcsh and
+# automationmodetool moved only their panic line's source line number (lib.rs:1036:38 -> 1069:38).
+/bin/csh
+/bin/tcsh
+/usr/bin/automationmodetool
+/usr/bin/dddiagnose
