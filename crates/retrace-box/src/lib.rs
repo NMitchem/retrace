@@ -13,6 +13,7 @@ mod sig;
 pub mod thread;
 pub mod kq;
 pub mod gkq;
+pub mod psynch;
 mod excl;
 pub use excl::{Excl, SetBy};
 pub use sig::{
