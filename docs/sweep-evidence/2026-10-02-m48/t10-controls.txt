@@ -5,6 +5,14 @@ sweep/*.bin traces) before the next. Every node run was under `caffeinate -s -i`
 the traces the failing runs kept were deleted. Logs: the ledger's t10-ctl{1,2,3}.log,
 t10-a1{a,c}.log, t10-a1b-instr.{out,err} and t10-a2.log.
 
+== Audit check 5's control (Ruling T10-a): the six-site patterns, run on e6caa65 (M47)
+Each pattern of t10-audit.sh check 5 run over `git show e6caa65:crates/retrace-box/src/lib.rs`:
+  kq   (M46's field, the positive control): decl=2 lit=3 ckpt=1 from=1 dbg=1
+  excl (the negative control: not in the three literals, not in the format string):
+       decl=2 lit=0 ckpt=1 from=1 dbg=0
+`excl` reads the same at HEAD, so the patterns can read other than the expected
+`decl=2 lit=3 ckpt=1 from=1 dbg=1`.
+
 == Step 5 control 1: the arm-top oracle (spec §11a item 1)
 Mutation: crates/retrace-core/src/lib.rs, the `self.verify_thread(*rthread, pc)?;` directly below
 `// M15 Task 4: the thread oracle` (line 2042) deleted.
@@ -70,6 +78,20 @@ arm, and each assert fires with its own text. No further run was needed.
     node_e2e.rs:122's `current_thread() == 0` was never reached. Any one-line pick of a thread that
     is not runnable trips M15 R1 first; a runnable wrong thread after the jump needs a second
     deadline, which (b) measured node does not have.
+  Three assertions of node_timer_replays no control reaches (by reading, not measured, except
+  where marked). None is proven able to fail; they are defence in depth behind the exactness
+  assertion (node_e2e.rs:119, proven live by (a): 0x4801 = 2 x STRIDE + 1 ticks past fails there),
+  M14 DEADLOCK, the test's earlier panics and M15 R1:
+  - `current_thread() == 0` (node_e2e.rs:122) is redundant with the exactness assertion, and the
+    recorder's M15 R1 debug_assert (retrace-box/src/lib.rs:3069, debug builds only) fires first
+    under a wrong-thread pick (measured, above).
+  - `stopped short` (node_e2e.rs:117) is shadowed by the recorder's `M14: DEADLOCK` panic
+    (retrace-box/src/lib.rs:6940): a jump short of the deadline wakes nobody, so the retried pick
+    finds no runnable thread. By reading of schedule_after_block, not measured; the short-jump
+    mutation was deliberately not run (about 6 minutes for a defence-in-depth assertion either way).
+  - `write > j` (node_e2e.rs:126) is shadowed by the test's own earlier panics, 'no landmark moved
+    the clock by a second' (:97) and 'the clock jumped ... with no timed kevent' (:112): a callback
+    written before any jump means no landmark moves the clock by a second. By reading, not measured.
 
 == Addendum A2: node_crash_e2e's delivery assertion
 Mutation: crates/retrace/tests/node_crash_e2e.rs, `Event::SignalDelivery { sig: 11, ...` ->

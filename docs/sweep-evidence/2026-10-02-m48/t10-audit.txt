@@ -1,4 +1,4 @@
-audit of 397ff1a on 2026-10-04 07:19:16 -03
+audit of 705f813 on 2026-10-04 07:32:00 -03
 == 1. No trace-format change (H3)
 VERDICT crates/retrace-trace diff lines since e6caa65: ok (0)
 VERDICT TRACE_MAGIC is RT\x00\x0b: ok (1)
@@ -110,13 +110,14 @@ psynch numbers the walks reached (only 303, 304 and 305 are modelled):
 == 11. Nine #[ignore] lines, none new (H2)
 VERDICT #[ignore] lines: ok (9)
 == Known soft spots (Task 10 addendum B): stated with the file and line of each, not fixed here
-1. Two panics are reachable from the replay mirror after an EARLIER silent divergence (Task 4 review minor 3).
-   The kevent mirror (crates/retrace-core/src/lib.rs:2552) calls Box_::guest_kevent, whose wake_kevent_waiters (crates/retrace-box/src/lib.rs:5729; the generic
-   mirror's Box_::note_fd_effects reaches it too, crates/retrace-box/src/lib.rs:5798) goes through deliver_kevent to deliver_wake, which
-   panics if a waiter's event list stopped translating (crates/retrace-box/src/lib.rs:5814); kevent_timed_out panics on a missing
-   waiter (crates/retrace-box/src/lib.rs:6259). Review Focus 5's 'never a panic' holds for a shape the recording accepted and replay
-   refuses, not for an earlier silent divergence: the full-memory comparison at exit is what would
-   have caught that.
+1. Two panics are reachable on replay after an EARLIER silent divergence (Task 4 review minor 3): one
+   from the kevent mirror, one below the trace. From the mirror (crates/retrace-core/src/lib.rs:2552): Box_::guest_kevent's
+   wake_kevent_waiters (crates/retrace-box/src/lib.rs:5729; the generic mirror's Box_::note_fd_effects reaches it too, crates/retrace-box/src/lib.rs:5798) goes
+   through deliver_kevent to deliver_wake, which panics if a waiter's event list stopped translating
+   (crates/retrace-box/src/lib.rs:5814). Not from the mirror: schedule_after_block's wake_due_threads (crates/retrace-box/src/lib.rs:6926) calls kevent_timed_out
+   (crates/retrace-box/src/lib.rs:6246), which panics on a missing waiter (crates/retrace-box/src/lib.rs:6259). Review Focus 5's 'never a panic' holds for a shape
+   the recording accepted and replay refuses, not for an earlier silent divergence: the full-memory
+   comparison at exit is what would have caught that.
 2. Assertion 5 of node_crash_e2e proves JIT code, not TurboFan (Task 8 review minor 2). It (crates/retrace/tests/node_crash_e2e.rs:133)
    passes for any store whose pc lies in a MAP_JIT range, Sparkplug or Maglev code included;
    assertion 1 (crates/retrace/tests/node_crash_e2e.rs:77) compares the marker's opt= bits only with native's own, and nothing decodes them.
@@ -127,4 +128,13 @@ VERDICT #[ignore] lines: ok (9)
    (crates/retrace/tests/node_e2e.rs:51, crates/retrace/tests/node_e2e.rs:83) and node_crash_e2e's record (crates/retrace/tests/node_crash_e2e.rs:68) and replays (crates/retrace/tests/node_crash_e2e.rs:110) end in util's run and run_env, an
    unbounded Command::output() (crates/retrace/tests/util/mod.rs:61, crates/retrace/tests/util/mod.rs:80). Only node_crash_e2e's debug session is bounded
    (crates/retrace/tests/node_crash_e2e.rs:33, through crates/retrace/tests/util/mod.rs:117). A hang in record or replay stalls the gate instead of failing it.
-VERDICT Known soft spots: anchors not found (of 18): ok (0)
+5. node_timer_replays has three assertions no control reaches (Task 10 controls A1(c); fix round 1).
+   current_thread() == 0 (crates/retrace/tests/node_e2e.rs:122) is redundant with the exactness assertion, and the recorder's M15 R1
+   debug_assert (crates/retrace-box/src/lib.rs:3069, debug builds only) fires first under a wrong-thread pick (A1(c), measured).
+   'stopped short' (crates/retrace/tests/node_e2e.rs:117) is shadowed by the recorder's M14 DEADLOCK panic (crates/retrace-box/src/lib.rs:6940): a jump short of the
+   deadline wakes nobody. BY READING of schedule_after_block, not measured. write > j (crates/retrace/tests/node_e2e.rs:126) is shadowed
+   by the test's own earlier panics, 'no landmark moved the clock by a second' (crates/retrace/tests/node_e2e.rs:97) and 'the clock
+   jumped ... with no timed kevent' (crates/retrace/tests/node_e2e.rs:112). BY READING, not measured. None is proven able to fail; they
+   are defence in depth behind the exactness assertion (crates/retrace/tests/node_e2e.rs:119, proven live by A1(a): the jump
+   0x4801 = 2 x STRIDE + 1 ticks past fails there), M14 DEADLOCK, the test's earlier panics and M15 R1.
+VERDICT Known soft spots: anchors not found (of 28): ok (0)

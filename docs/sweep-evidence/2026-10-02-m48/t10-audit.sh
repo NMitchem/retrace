@@ -118,13 +118,19 @@ u1=$(at $NE 'util::assert_rung_records_and_replays_env('); u2=$(at $NE 'util::as
 u3=$(at $NC 'util::record_dynamic_args(exe, &args)'); u4=$(at $NC 'let rp = util::replay(&trace);')
 u5=$(at $U 'let out = Command::new(bin()).args(args).output().unwrap();'); u6=$(at $U 'let out = c.output().unwrap();')
 u7=$(at $NC 'const DEBUG_SECS: u64'); u8=$(at $U 'pub fn debug_bounded(')
-echo "1. Two panics are reachable from the replay mirror after an EARLIER silent divergence (Task 4 review minor 3)."
-echo "   The kevent mirror ($k1) calls Box_::guest_kevent, whose wake_kevent_waiters ($k2; the generic"
-echo "   mirror's Box_::note_fd_effects reaches it too, $k3) goes through deliver_kevent to deliver_wake, which"
-echo "   panics if a waiter's event list stopped translating ($k4); kevent_timed_out panics on a missing"
-echo "   waiter ($k5). Review Focus 5's 'never a panic' holds for a shape the recording accepted and replay"
-echo "   refuses, not for an earlier silent divergence: the full-memory comparison at exit is what would"
-echo "   have caught that."
+k6=$(at $X 'self.wake_due_threads();' 1); k7=$(at $X '=> self.kevent_timed_out(tid, kq),')
+t1=$(at $NE 'assert_eq!(s.current_thread(), 0,'); t2=$(at $NE 'stopped short of main'); t3=$(at $NE 'assert!(write > j,')
+t4=$(at $NE 'assert!(excess.is_multiple_of(STRIDE)'); t5=$(at $NE 'no landmark moved the clock by a second')
+t6=$(at $NE 'with no timed kevent of a second or more')
+r1=$(at $X 'debug_assert!(!self.threads.needs_reschedule(),' 1); r2=$(at $X 'M14: DEADLOCK — no runnable thread.')
+echo "1. Two panics are reachable on replay after an EARLIER silent divergence (Task 4 review minor 3): one"
+echo "   from the kevent mirror, one below the trace. From the mirror ($k1): Box_::guest_kevent's"
+echo "   wake_kevent_waiters ($k2; the generic mirror's Box_::note_fd_effects reaches it too, $k3) goes"
+echo "   through deliver_kevent to deliver_wake, which panics if a waiter's event list stopped translating"
+echo "   ($k4). Not from the mirror: schedule_after_block's wake_due_threads ($k6) calls kevent_timed_out"
+echo "   ($k7), which panics on a missing waiter ($k5). Review Focus 5's 'never a panic' holds for a shape"
+echo "   the recording accepted and replay refuses, not for an earlier silent divergence: the full-memory"
+echo "   comparison at exit is what would have caught that."
 echo "2. Assertion 5 of node_crash_e2e proves JIT code, not TurboFan (Task 8 review minor 2). It ($j1)"
 echo "   passes for any store whose pc lies in a MAP_JIT range, Sparkplug or Maglev code included;"
 echo "   assertion 1 ($j2) compares the marker's opt= bits only with native's own, and nothing decodes them."
@@ -135,5 +141,15 @@ echo "4. Record and replay are unbounded for every node gate (Task 8 review mino
 echo "   ($u1, $u2) and node_crash_e2e's record ($u3) and replays ($u4) end in util's run and run_env, an"
 echo "   unbounded Command::output() ($u5, $u6). Only node_crash_e2e's debug session is bounded"
 echo "   ($u7, through $u8). A hang in record or replay stalls the gate instead of failing it."
-lost=$(printf '%s\n' "$k1" "$k2" "$k3" "$k4" "$k5" "$j1" "$j2" "$d1" "$d2" "$d3" "$u1" "$u2" "$u3" "$u4" "$u5" "$u6" "$u7" "$u8" | grep -c 'FINDING')
-v "$lost" 0 "Known soft spots: anchors not found (of 18)"
+echo "5. node_timer_replays has three assertions no control reaches (Task 10 controls A1(c); fix round 1)."
+echo "   current_thread() == 0 ($t1) is redundant with the exactness assertion, and the recorder's M15 R1"
+echo "   debug_assert ($r1, debug builds only) fires first under a wrong-thread pick (A1(c), measured)."
+echo "   'stopped short' ($t2) is shadowed by the recorder's M14 DEADLOCK panic ($r2): a jump short of the"
+echo "   deadline wakes nobody. BY READING of schedule_after_block, not measured. write > j ($t3) is shadowed"
+echo "   by the test's own earlier panics, 'no landmark moved the clock by a second' ($t5) and 'the clock"
+echo "   jumped ... with no timed kevent' ($t6). BY READING, not measured. None is proven able to fail; they"
+echo "   are defence in depth behind the exactness assertion ($t4, proven live by A1(a): the jump"
+echo "   0x4801 = 2 x STRIDE + 1 ticks past fails there), M14 DEADLOCK, the test's earlier panics and M15 R1."
+lost=$(printf '%s\n' "$k1" "$k2" "$k3" "$k4" "$k5" "$k6" "$k7" "$j1" "$j2" "$d1" "$d2" "$d3" "$u1" "$u2" "$u3" "$u4" "$u5" "$u6" "$u7" "$u8" \
+  "$t1" "$t2" "$t3" "$t4" "$t5" "$t6" "$r1" "$r2" | grep -c 'FINDING')
+v "$lost" 0 "Known soft spots: anchors not found (of 28)"
