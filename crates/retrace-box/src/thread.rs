@@ -106,6 +106,12 @@ pub enum BlockReason {
     /// or by its deadline (`Box_::wake_due_threads`). The waiter's event list lives in `gkq`, not
     /// here, so the variant stays `Copy`.
     Kevent { kq: u64, deadline: Option<u64> },
+    /// M48 §3e: blocked in `psynch_cvwait` on the condition variable at guest address `addr`. The
+    /// key is the address for the reason `Wait`'s is: the kernel keys a cv's wait queue by it, and
+    /// so does `psynch.rs`. Woken by a `psynch_cvsignal` or `psynch_cvbroad` the port says reaches
+    /// it (`Box_::guest_psynch`), or at `deadline`, a guest-clock value in `Kevent`'s domain, which
+    /// is `None` for an untimed wait (`Box_::cv_timed_out`).
+    Cv { addr: u64, deadline: Option<u64> },
 }
 
 impl BlockReason {
@@ -114,7 +120,7 @@ impl BlockReason {
     /// primitive must say here whether it carries one.
     pub fn deadline(&self) -> Option<u64> {
         match *self {
-            BlockReason::Kevent { deadline, .. } => deadline,
+            BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. } => deadline,
             BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Sem { .. }
             | BlockReason::Parked => None,
         }
@@ -467,7 +473,7 @@ impl ThreadTable {
                  Measure the kernel's EINTR answer for a thread blocked in kevent or psynch_cvwait, \
                  as blockedctx.rs does for __ulock_wait, before modelling it."));
         }
-        assert!(matches!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Kevent { .. })),
+        assert!(matches!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. })),
             "M48: wake of thread {tid}, which is {:?}, not blocked in a timed-wait primitive",
             self.threads[tid].state);
         self.threads[tid].state = ThreadState::Runnable;
