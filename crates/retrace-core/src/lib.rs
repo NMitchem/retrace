@@ -1329,6 +1329,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 assert!(num != retrace_arch::SYS_KEVENT_QOS,
                     "kevent_qos (374) reached the generic forward arm — it must be emulated above \
                      (M45). Forwarded, KEVENT_FLAG_WORKQ acts on retrace's own workqueue kqueue.");
+                // M48 §3b: kevent (363) on a guest kqueue is emulated above. Forwarded, it acts on a
+                // kqueue retrace never created, and a filter that blocks would block the RECORDER.
+                // This assert makes "never forwarded" a checked fact (the bsdthread_create gap M37
+                // measured).
+                assert!(num != retrace_arch::SYS_KEVENT,
+                    "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c).");
+                // M48 §3e: every psynch call is handled above, modelled or refused by value. Forwarded,
+                // it acts on the HOST's psynch state keyed by retrace's own addresses, blocking or
+                // waking the recorder.
+                assert!(!retrace_arch::is_psynch(num),
+                    "psynch syscall {num} reached the generic forward arm — it must be emulated above (M48 §3e).");
                 // M47 §3c: madvise joins them. Forwarded, the advice acts on RETRACE's backing of
                 // the guest range: a MADV_FREE_REUSABLE there lets the host reclaim pages the guest
                 // may later write through stage 2, and a MADV_ZERO wrote 512 KiB past the diff

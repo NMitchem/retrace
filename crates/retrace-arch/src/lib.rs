@@ -446,6 +446,12 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // socket(int domain, int type, int protocol) → a NEW descriptor: guest fds are not
         // files-only.
         SYS_SOCKET => row!(F, [Scalar, Scalar, Scalar]),
+        // setsockopt(int s, int level, int name, const void *val, socklen_t valsize): `val` is read
+        // for `valsize` bytes, the `write` row's convention (Source: the caller chooses the length).
+        // M48 (walls.md §1 row 6): libuv's `uv__stream_open` issues SOL_SOCKET/SO_OOBINLINE on the
+        // inherited stdout PIPE — an Apple-only call the host answers ENOTSOCK, which libuv ignores.
+        // Forwarded, the descriptor translated like any other.
+        SYS_SETSOCKOPT => row!(P, [Fd, Scalar, Scalar, Source, Scalar]),
         // sendfile(int fd, int s, off_t offset, off_t *len, struct sf_hdtr *hdtr, int flags).
         // No guest in this repo issues 337 (M32 §2, by grep) — every kind here is header truth,
         // unexercised. The bulk data comes from a FILE, but `hdtr`'s header and trailer iovecs are
@@ -473,12 +479,13 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // `send_size` to `machmsg::SEND_SIZE_MAX` (4 KiB) by assert, before `route()` even runs.
         //
         // The receive buffer is the SAME pointer and a live destination: `machmsg.rs`'s
-        // `FORWARD_ALLOWLIST` sends five ids through `forward_and_diff`, and `3405 task_info` and
-        // `412 host_get_special_port` are there *precisely because* the kernel writes a reply into
-        // guest memory which is then captured as `writes` — a path the corpus exercises on every
-        // jq and CPython run, not a hypothetical. So M30's "no destination worth canarying" claim
-        // is FALSE here too, and the reader listing costs destination-side coverage on live
-        // traffic. It stays `Source`, unwidened, and the reason is now a measurement:
+        // `FORWARD_ALLOWLIST` sends six ids (five until M48 added 3419) through `forward_and_diff`,
+        // and `3405 task_info` and `412 host_get_special_port` are there *precisely because* the
+        // kernel writes a reply into guest memory which is then captured as `writes` — a path the
+        // corpus exercises on every jq and CPython run, not a hypothetical. So M30's "no
+        // destination worth canarying" claim is FALSE here too, and the reader listing costs
+        // destination-side coverage on live traffic. It stays `Source`, unwidened, and the reason
+        // is now a measurement:
         //
         // **M32 measured the reason this entry used to give, and disproved it.** That reason was:
         // "a band lands wherever some register points, and nothing relates that to the message's
@@ -764,6 +771,12 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // that ever forwards a descriptor-based kevent_qos must make x0 an Fd, or it silently
         // forwards a raw guest fd (the M10 class).
         SYS_KEVENT_QOS => row!(P, [Scalar, Ptr, Scalar, Ptr, Scalar, Ptr, Ptr, Scalar]),
+        // kevent(int kq, const struct kevent *changelist, int nchanges, struct kevent *eventlist,
+        //   int nevents, const struct timespec *timeout) (SDK sys/event.h). M48 §3b: emulated, never
+        // forwarded. The model reads and writes nchanges/nevents × 32 bytes through the stage-1 walk,
+        // the M45 kevent_qos row's precedent; the generic-arm assert keeps it off the forward path.
+        // Unlike 374, x0 IS a descriptor: a guest kqueue() fd, so Fd (EXPECTED_DIFFS).
+        SYS_KEVENT => row!(P, [Fd, Ptr, Scalar, Ptr, Scalar, Ptr]),
         // bsdthread_ctl(user_addr_t cmd, arg1, arg2, arg3): xnu-private, cmd-dependent
         // (bsd/pthread/pthread_workqueue.c `bsdthread_ctl`). arg1/arg2 are port names, priorities
         // or resource keys the kernel never dereferences; arg3 is, for QOS_OVERRIDE_DISPATCH
@@ -781,6 +794,24 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // per SYS_ULOCK_WAKE's doc. addr is a wait-queue KEY (`ulock_wake`, bsd/kern/sys_ulock.c
         // — no copyin), so Scalar. Emulated (M14).
         SYS_ULOCK_WAKE => row!(P, [Scalar, Scalar, Scalar]),
+        // ---- psynch condition variables (M48 §3e): modelled above the trace, never forwarded -----
+        // The prototypes are libpthread-539.100.4 `kern/kern_synch.c`'s `_psynch_cvbroad`,
+        // `_psynch_cvsignal` and `_psynch_cvwait` (xnu-private; the SDK ships only the numbers),
+        // checked against that tag's source. Forwarded, a psynch call acts on the HOST's psynch
+        // state keyed by retrace's own addresses and can block or wake the recorder; the generic
+        // forward arm asserts every SDK psynch number away (`is_psynch`). `cv` and `mutex` are
+        // guest addresses the model uses as KEYS (the box's psynch state is keyed by guest address),
+        // never data it reads through the host. Every other psynch number (297–302, 306–309, 312)
+        // stays rowless on purpose: M48 refuses them by value before any row is consulted.
+        // psynch_cvbroad(user_addr_t cv, uint64_t cvlsgen, uint64_t cvudgen, uint32_t flags,
+        //                user_addr_t mutex, uint64_t mugen, uint64_t tid)
+        SYS_PSYNCH_CVBROAD => row!(P, [Ptr, Scalar, Scalar, Scalar, Ptr, Scalar, Scalar]),
+        // psynch_cvsignal(user_addr_t cv, uint64_t cvlsgen, uint32_t cvugen, int thread_port,
+        //                 user_addr_t mutex, uint64_t mugen, uint64_t tid, uint32_t flags)
+        SYS_PSYNCH_CVSIGNAL => row!(P, [Ptr, Scalar, Scalar, Scalar, Ptr, Scalar, Scalar, Scalar]),
+        // psynch_cvwait(user_addr_t cv, uint64_t cvlsgen, uint32_t cvugen, user_addr_t mutex,
+        //               uint64_t mugen, uint32_t flags, int64_t sec, uint32_t nsec)
+        SYS_PSYNCH_CVWAIT => row!(P, [Ptr, Scalar, Scalar, Ptr, Scalar, Scalar, Scalar, Scalar]),
         // ---- paths (the kernel stops at PATH_MAX) ---------------------------------------------
         // access(const char *path, int flags)
         33 => row!(P, [Path, Scalar]),
@@ -856,9 +887,9 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // read end first) and `x1` is captured as the event's `ret1`; `Ret::FdPair`'s doc has it.
         42 => row!(Ret::FdPair, []),
         // kqueue(void) → a NEW descriptor (bsd/kern/kern_event.c `kqueue`). Bound like open's
-        // (EXPECTED_DIFFS; exercised by /bin/wait4path). Nothing yet consumes the bound slot: 374
-        // is emulated only for the workqueue kqueue (M45), never on a descriptor, and 363/369/375
-        // have no row.
+        // (EXPECTED_DIFFS; exercised by /bin/wait4path). 374 is emulated only for the workqueue
+        // kqueue (M45), never on a descriptor; 363 has a row since M48 and is emulated on this
+        // descriptor (§3b); 369/375 have no row.
         362 => row!(F, []),
         // ---- memory ---------------------------------------------------------------------------
         // munmap(void *addr, size_t len) / mprotect(addr, len, prot): emulated above the trace
@@ -1134,6 +1165,11 @@ pub const RLIMIT_POSIX_FLAG: u64 = 0x1000;
 
 /// BSD errno: an argument the kernel rejects (a MAP_FIXED address outside the address space).
 pub const EINVAL: u64 = 22;
+/// `EINTR` (SDK `sys/errno.h:91`): an interrupted wait. M48's `psynch_cvwait` model names it.
+pub const EINTR: u64 = 4;
+/// `ETIMEDOUT` (SDK `sys/errno.h:177`): a timed `psynch_cvwait` whose deadline passed. libpthread
+/// reads a failed wait's errno as `err & 0xff`, so the kernel ORs `ECVCLEARED`/`ECVPREPOST` into it.
+pub const ETIMEDOUT: u64 = 60;
 
 pub const LC_LOAD_DYLINKER: u32 = 0xe;
 pub const FAT_MAGIC: u32 = 0xcafe_babe;      // big-endian on disk; read with from_be
@@ -1549,6 +1585,50 @@ impl KeventQos {
     }
 }
 
+/// `sizeof(struct kevent)` (SDK `sys/event.h`, LP64): the 32-byte record `kevent(2)` reads and
+/// writes, unlike `kevent_qos`'s 72. The struct has no padding.
+pub const KEVENT_SIZE: usize = 32;
+
+/// `struct kevent` (SDK `sys/event.h`), little-endian, the record the plain `kevent` (363) takes in
+/// its change list and returns in its event list (M48 §3b). Offsets: `ident` 0, `filter` 8, `flags`
+/// 10, `fflags` 12, `data` 16, `udata` 24.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kevent {
+    pub ident: u64,
+    pub filter: i16,
+    pub flags: u16,
+    pub fflags: u32,
+    pub data: i64,
+    pub udata: u64,
+}
+
+impl Kevent {
+    pub fn from_bytes(b: &[u8; KEVENT_SIZE]) -> Kevent {
+        let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let u16_at = |o: usize| u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+        Kevent {
+            ident: u64_at(0),
+            filter: u16_at(8) as i16,
+            flags: u16_at(10),
+            fflags: u32_at(12),
+            data: u64_at(16) as i64,
+            udata: u64_at(24),
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; KEVENT_SIZE] {
+        let mut b = [0u8; KEVENT_SIZE];
+        b[0..8].copy_from_slice(&self.ident.to_le_bytes());
+        b[8..10].copy_from_slice(&self.filter.to_le_bytes());
+        b[10..12].copy_from_slice(&self.flags.to_le_bytes());
+        b[12..16].copy_from_slice(&self.fflags.to_le_bytes());
+        b[16..24].copy_from_slice(&self.data.to_le_bytes());
+        b[24..32].copy_from_slice(&self.udata.to_le_bytes());
+        b
+    }
+}
+
 /// The one entry M45 models: libdispatch's `_dispatch_kq_init` (`event_kevent.c:689-699`).
 /// `ident`, `filter`, `flags`, `qos` and `udata` were measured by M44 t0 M1, and the other seven
 /// fields (all zero) by M45 t0 M1.
@@ -1953,6 +2033,82 @@ pub fn sandbox_check_continuity(operation: &[u8]) -> Result<u64, String> {
              forward returned for this one before adding it", String::from_utf8_lossy(operation))),
     }
 }
+
+// ---- M48-node: kqueues, psynch condition variables and libuv's stdout setsockopt --------------------
+// The numbers are the macOS 26 SDK's `sys/syscall.h`, the flag values its `sys/event.h`, and
+// `tests/nodeshapes.rs` re-reads both at test time. The psynch values are libpthread-539.100.4's
+// (the guest's own version, M48 plan fact F1): `kern/synch_internal.h` and `kern/kern_internal.h`.
+
+/// `kevent` (SDK `SYS_kevent 363`). Emulated since M48 (§3b), never forwarded: forwarded, it acts
+/// on a kqueue retrace never created, and a filter that blocks would block the RECORDER. The
+/// generic forward arm asserts it away, as it does `kevent_qos`.
+pub const SYS_KEVENT: u64 = 363;
+/// `setsockopt` (SDK `SYS_setsockopt 105`). Forwarded: libuv's `uv__stream_open` issues
+/// `SO_OOBINLINE` on the inherited stdout pipe, which the host answers `ENOTSOCK` and libuv ignores.
+pub const SYS_SETSOCKOPT: u64 = 105;
+/// `psynch_cvbroad` (SDK `SYS_psynch_cvbroad 303`). Modelled since M48 (§3e), never forwarded.
+pub const SYS_PSYNCH_CVBROAD: u64 = 303;
+/// `psynch_cvsignal` (SDK `SYS_psynch_cvsignal 304`). Modelled since M48 (§3e), never forwarded.
+pub const SYS_PSYNCH_CVSIGNAL: u64 = 304;
+/// `psynch_cvwait` (SDK `SYS_psynch_cvwait 305`). Modelled since M48 (§3e), never forwarded.
+pub const SYS_PSYNCH_CVWAIT: u64 = 305;
+
+/// Is `num` one of the SDK's `SYS_psynch_*` — 297 through 309 and 312, fourteen numbers? These are
+/// the calls that must NEVER be forwarded: forwarded, a psynch call acts on the HOST's psynch state,
+/// keyed by retrace's own addresses, and can block or wake the recorder. M48 models 303–305 (the
+/// condition-variable calls) and refuses every other by value; the record arm, the replay mirror and
+/// the generic forward arm's assert all share this predicate, as `is_fcntl_dupfd` is shared.
+pub fn is_psynch(num: u64) -> bool { matches!(num, 297..=309 | 312) }
+
+/// `EVFILT_READ` (`sys/event.h:68`).
+pub const EVFILT_READ: i16 = -1;
+/// `EVFILT_WRITE` (`sys/event.h:69`).
+pub const EVFILT_WRITE: i16 = -2;
+/// `EV_RECEIPT` (`sys/event.h:144`): force immediate event output.
+pub const EV_RECEIPT: u16 = 0x0040;
+/// `EV_SYSFLAGS` (`sys/event.h:161`): reserved by the system; the kernel strips it from input flags.
+pub const EV_SYSFLAGS: u16 = 0xF000;
+/// `EV_EOF` (`sys/event.h:166`): EOF detected.
+pub const EV_EOF: u16 = 0x8000;
+/// `EV_ERROR` (`sys/event.h:167`): error, `data` contains the errno.
+pub const EV_ERROR: u16 = 0x4000;
+/// `NOTE_FFAND` (`sys/event.h:214`): `EVFILT_USER`'s "and fflags" operation.
+pub const NOTE_FFAND: u32 = 0x4000_0000;
+/// `NOTE_FFOR` (`sys/event.h:215`): "or fflags".
+pub const NOTE_FFOR: u32 = 0x8000_0000;
+/// `NOTE_FFCOPY` (`sys/event.h:216`): "copy fflags".
+pub const NOTE_FFCOPY: u32 = 0xc000_0000;
+/// `NOTE_FFCTRLMASK` (`sys/event.h:217`): the mask of the operation bits.
+pub const NOTE_FFCTRLMASK: u32 = 0xc000_0000;
+/// `NOTE_FFLAGSMASK` (`sys/event.h:218`): the mask of the user flags.
+pub const NOTE_FFLAGSMASK: u32 = 0x00ff_ffff;
+
+// The psynch sequence words are `uint32_t` in the kernel, so these are `u32`.
+/// `PTHRW_COUNT_SHIFT` (libpthread-539.100.4 `kern/synch_internal.h:39`).
+pub const PTHRW_COUNT_SHIFT: u32 = 8;
+/// `PTHRW_INC` (`synch_internal.h:40`): one waiter's step in a sequence word.
+pub const PTHRW_INC: u32 = 0x100;
+/// `PTHRW_COUNT_MASK` (`synch_internal.h:42`): the count bits of a sequence word.
+pub const PTHRW_COUNT_MASK: u32 = 0xffff_ff00;
+/// `PTHRW_MAX_READERS` (`synch_internal.h:43`), which is `PTHRW_COUNT_MASK`.
+pub const PTHRW_MAX_READERS: u32 = 0xffff_ff00;
+/// `PTH_RWL_MTX_WAIT` (`synch_internal.h:51`): "in cvar in mutex wait".
+pub const PTH_RWL_MTX_WAIT: u32 = 0x20;
+/// `PTH_RWS_CV_CBIT` (`synch_internal.h:63`, `PTH_RWS_SBIT`): the kernel has cleared all CV info.
+pub const PTH_RWS_CV_CBIT: u32 = 1;
+/// `PTH_RWS_CV_PBIT` (`synch_internal.h:64`, `PTH_RWS_IBIT`): prepost/fake structs only, no waiters.
+pub const PTH_RWS_CV_PBIT: u32 = 2;
+/// `PTH_RWS_CV_MBIT` (`synch_internal.h:66`, `PTH_RWL_MBIT`): a prepost return from the kernel.
+pub const PTH_RWS_CV_MBIT: u32 = 0x40;
+/// `PTH_RWS_CV_BITSALL` (`synch_internal.h:65`): `CBIT | PBIT`.
+pub const PTH_RWS_CV_BITSALL: u32 = 3;
+
+// These two are ORed into a returned errno word, so they are `u64` like the errnos.
+/// `ECVCLEARED` (libpthread-539.100.4 `kern/kern_internal.h:104`): a failed condvar call's "the
+/// kernel cleared the condvar", returned beside the errno.
+pub const ECVCLEARED: u64 = 0x100;
+/// `ECVPREPOST` (`kern_internal.h:105`): a failed condvar call's "a prepost was consumed".
+pub const ECVPREPOST: u64 = 0x200;
 
 // ---- M12-signal-delivery ---------------------------------------------------------------------
 // Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here
