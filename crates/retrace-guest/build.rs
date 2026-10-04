@@ -447,6 +447,16 @@ fn main() {
         .status().expect("clang simd_dyn");
     assert!(status.success(), "simd_dyn guest build failed");
 
+    // trim_dyn: the M48 partial-munmap fixture — V8's aligned-reservation trim; modes trim, head
+    // and tail. Same recipe as hello_dyn.
+    let src = format!("{}/c/trim_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/trim_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang trim_dyn");
+    assert!(status.success(), "trim_dyn guest build failed");
+
     // rpath_dyn + librpath_dyn.dylib: the M47 AMFI fixture. The dylib's install name is @rpath/…
     // and the exe's LC_RPATH is @executable_path, so dyld expands @rpath only if AMFI's dyld policy
     // allows it. Both land in OUT_DIR side by side.

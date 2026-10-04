@@ -459,19 +459,23 @@ const BLK: u64 = 1 << 25;                     // 32 MiB per L2 entry
 const PT_ADDR: u64 = 0x0000_FFFF_FFFF_C000; // descriptor output-address bits 47:14
 
 // A page-aligned host allocation mapped 1:1 into the guest at `ipa`. M40: the Backing OWNS its host
-// pages. Dropping it releases them, so `backings` must never hold two Backings over one
-// allocation, and every Backing must carry exactly the length `alloc_pages` returned (audited at
-// M40: all 17 construction sites do). `pub(crate)`: nothing outside this crate constructs or names
-// a Backing, and a public safe constructor/drop pair would let outside code munmap arbitrary host
-// memory (M40 review).
+// pages. Dropping it releases them. Each Backing owns exactly the host pages `[host, host+len)`, a
+// whole number of host pages. `alloc_pages` returns one such range; `unmap_range` (M48) splits one
+// into disjoint pieces. No two Backings ever cover one host page. M40 audited the construction and
+// removal sites: all 17 construction sites carry exactly the length `alloc_pages` returned, and
+// the removal sites are `unmap_overlapping` and `unmap_range` (M48's `guest_munmap`), each of which
+// `vm.unmap`s before the Backing drops. `pub(crate)`: nothing outside this crate constructs or
+// names a Backing, and a public safe constructor/drop pair would let outside code munmap arbitrary
+// host memory (M40 review).
 pub(crate) struct Backing { pub host: *mut u8, pub ipa: u64, pub len: usize }
 
 impl Drop for Backing {
     fn drop(&mut self) {
-        // SAFETY: `self.host`/`self.len` are exactly what the `alloc_pages` call that built this
-        // Backing returned (audited above), and by the time a Backing drops its stage-2 mapping is
+        // SAFETY: `self.host`/`self.len` are a page-aligned range of live `alloc_pages` memory that
+        // no other Backing owns (the contract above: a whole `alloc_pages` result, or a piece
+        // `unmap_range` cut from one), and by the time a Backing drops its stage-2 mapping is
         // already gone: `vm.unmap` ran first at the two removal sites (`unmap_overlapping`,
-        // `guest_munmap`), or `hv_vm_destroy` already ran. That second case rests on two opposite
+        // `unmap_range`), or `hv_vm_destroy` already ran. That second case rests on two opposite
         // declaration orders, each giving the same drop order: in `Box_` itself `backings` is
         // declared AFTER `vm` (struct fields drop in declaration order), while every constructor
         // declares its `backings` local BEFORE `vm` (locals drop in reverse, so a panic unwinding
@@ -1088,12 +1092,13 @@ static LIVE_BACKING_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::A
 /// M40: see `LIVE_BACKING_BYTES`.
 pub fn live_backing_bytes() -> usize { LIVE_BACKING_BYTES.load(std::sync::atomic::Ordering::Relaxed) }
 
-/// M40: release an `alloc_pages` allocation.
+/// M40: release `alloc_pages` memory. M48: a page-aligned part of one allocation, not only the
+/// whole of it.
 ///
 /// # Safety
-/// `host` must be a live `alloc_pages` result of exactly `len` bytes, no longer mapped into the
-/// guest (its stage-2 mapping, if any, must already be `vm.unmap`ped), and never touched again
-/// after this call.
+/// `host`/`len` must be a page-aligned range of live `alloc_pages` memory that no Backing owns, no
+/// longer mapped into the guest (its stage-2 mapping, if any, must already be `vm.unmap`ped), and
+/// never touched again after this call.
 unsafe fn free_pages(host: *mut u8, len: usize) {
     // SAFETY: the caller's guarantee above (this fn's own contract).
     unsafe { libc::munmap(host as *mut _, len); }
@@ -2738,23 +2743,61 @@ impl Box_ {
     }
 
     /// Honor munmap (debt #2): punch the deallocated range out of any overlapping reservation
-    /// (`subtract_reservations` — the carveout), then drop the backing covering `ipa` and
-    /// `hv_vm_unmap` its stage-2 range, releasing the anon host allocation. The reservation subtract
-    /// runs even when nothing is backed (the carveout case: a PROT_NONE reservation has no backing).
+    /// (`subtract_reservations` — the carveout), then release `[ipa, ipa+len)` from every backing it
+    /// overlaps (`unmap_range`, M48: a backing the range cuts keeps the part outside it). The
+    /// reservation subtract runs even when nothing is backed (the carveout case: a PROT_NONE
+    /// reservation has no backing).
     pub fn guest_munmap(&mut self, ipa: u64, len: u64) {
+        let g = GRANULE as u64;
+        // The kernel's rounding (`mach_vm_deallocate`: start down, end up). Nothing in V8's trim
+        // measured an unaligned length (t0 M2: the `0x10b20`s are dyld's whole-backing unmaps, which
+        // this rounding keeps whole), but the kernel rounds, so the box does.
+        let start = ipa & !(g - 1);
+        let end = ipa.saturating_add(len).saturating_add(g - 1) & !(g - 1);
         self.subtract_reservations(ipa, len);
         // M13: the pages are gone, so the protection goes with them — otherwise the next mapping at
         // this address inherits a no-access extent its guest never asked for. Runs BEFORE the
         // stage-2 unmap below so the pages are still backed while their leaves are reset.
         self.drop_protection(ipa, len);
-        if let Some(pos) = self.backings.iter().position(|b| ipa >= b.ipa && ipa < b.ipa + b.len as u64) {
-            let bk = self.backings.remove(pos);
-            let _ = self.vm.unmap(bk.ipa, bk.len);       // stage-1 identity block stays; stage-2 removed
-            // The anon host backing is no longer mapped into the guest; release it. M40: the Backing
-            // owns its pages (see `impl Drop for Backing`'s own SAFETY comment) — this is a safe
-            // call, not an unsafe block, because the unsafe munmap lives inside that Drop impl.
-            drop(bk);
-            let _ = len; // whole-backing unmap for M2's page-granular guests
+        if end > start { self.unmap_range(start, end); }
+    }
+
+    /// M48 Task 3: release `[start, end)` (page-aligned) from every backing it overlaps. A backing
+    /// wholly inside the range is dropped, as before M48. A backing the range cuts keeps the part
+    /// outside it: its stage-2 mapping is removed, the head and tail are re-mapped as Backings of
+    /// their own over the same host pages, and only the cut pages go back to the host. That is
+    /// V8's aligned-reservation trim (walls.md §1 row 3), which the whole-backing unmap broke by
+    /// releasing the middle V8 keeps. The stage-1 identity block stays, as it always has.
+    fn unmap_range(&mut self, start: u64, end: u64) {
+        let mut i = 0;
+        while i < self.backings.len() {
+            let (bs, be) = (self.backings[i].ipa, self.backings[i].ipa + self.backings[i].len as u64);
+            if be <= start || end <= bs { i += 1; continue; }
+            let bk = self.backings.remove(i);
+            let _ = self.vm.unmap(bs, bk.len);
+            if start <= bs && be <= end { drop(bk); continue; } // wholly inside: the pre-M48 path
+            // Cut. The host pages pass from `bk` to its pieces, so forget `bk`, whose Drop would
+            // release them all.
+            let host = bk.host;
+            std::mem::forget(bk);
+            let (cs, ce) = (start.max(bs), end.min(be));
+            if cs > bs {
+                let l = (cs - bs) as usize;
+                self.vm.map(host, bs, l, MemFlags::RWX).expect("hv_vm_map (munmap head)");
+                self.backings.insert(i, Backing { host, ipa: bs, len: l });
+                i += 1;
+            }
+            if ce < be {
+                // SAFETY: `ce - bs` lies inside this allocation, which is `be - bs` bytes long.
+                let h = unsafe { host.add((ce - bs) as usize) };
+                let l = (be - ce) as usize;
+                self.vm.map(h, ce, l, MemFlags::RWX).expect("hv_vm_map (munmap tail)");
+                self.backings.insert(i, Backing { host: h, ipa: ce, len: l });
+                i += 1;
+            }
+            // SAFETY: the cut pages `[cs, ce)` are page-aligned, inside this allocation, unmapped
+            // at stage 2 just above, and owned by no Backing, which is `free_pages`'s contract.
+            unsafe { free_pages(host.add((cs - bs) as usize), (ce - cs) as usize); }
         }
     }
 
