@@ -52,6 +52,13 @@
 //! are emulated above the generic forward, so their rows document the prototype; 105 is forwarded.
 //! `getsockname` (32) is NOT here: libuv issues it only when stdin is a socket, and under a null stdin
 //! it was reached 0 times in all five walks.
+//!
+//! M49 adds 334 `__semwait_signal`, measured on 2026-10-06 from the same `[trap] num=` lines in the
+//! sleep investigation's `usleep`, `nanosleep(…, NULL)` and Swift `Thread.sleep` records
+//! (`docs/sweep-evidence/2026-10-06-m49-static/sleep-*.log.tail.txt`), and dispatched by the
+//! repo-owned `sleep_dyn` and the tier-1 sleep fixtures. It is emulated above the generic forward, so
+//! its row documents the prototype. Its `_nocancel` twin 423 carries the same row by the `_nocancel`
+//! rule but no guest dispatched it, so it is not here.
 use retrace_arch::arg_kinds;
 
 pub const CENSUS: &[i64] = &[
@@ -59,7 +66,7 @@ pub const CENSUS: &[i64] = &[
     5, 6, 9, 10, 12, 13, 20, 24, 25, 33, 36, 37, 38, 39, 41, 42, 43, 46, 47, 48, 49, 52, 53, 54,
     58, 59, 60, 73, 74, 75, 81, 90, 92, 97, 98, 105, 116, 117, 128, 133, 136, 138, 153, 169, 170,
     184, 189, 191, 194, 195, 197, 199, 202, 220, 228, 244, 266, 286, 294, 303, 304, 305, 327, 328,
-    329, 331, 333, 336, 338, 339, 340, 344, 345, 346, 347, 360, 361, 362, 363, 366, 367, 368, 372,
+    329, 331, 333, 334, 336, 338, 339, 340, 344, 345, 346, 347, 360, 361, 362, 363, 366, 367, 368, 372,
     374, 381, 396, 397, 398, 399, 406, 412, 427, 461, 463, 464, 470, 478, 483, 500, 515, 516, 539,
     550, 2147483648,
 ];

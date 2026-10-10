@@ -1384,6 +1384,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // waking the recorder.
                 assert!(!retrace_arch::is_psynch(num),
                     "psynch syscall {num} reached the generic forward arm — it must be emulated above (M48 §3e).");
+                // M49 §3f: `__semwait_signal` and its `_nocancel` twin are handled above, modelled or
+                // refused by value. Forwarded, the recorder itself would sleep on a host semaphore.
+                assert!(num != retrace_arch::SYS___SEMWAIT_SIGNAL && num != retrace_arch::SYS___SEMWAIT_SIGNAL_NOCANCEL,
+                    "__semwait_signal ({num}) reached the generic forward arm — it must be emulated above (M49 §3f).");
                 // M47 §3c: madvise joins them. Forwarded, the advice acts on RETRACE's backing of
                 // the guest range: a MADV_FREE_REUSABLE there lets the host reclaim pages the guest
                 // may later write through stage 2, and a MADV_ZERO wrote 512 KiB past the diff

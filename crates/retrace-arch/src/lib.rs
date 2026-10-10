@@ -812,6 +812,13 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // psynch_cvwait(user_addr_t cv, uint64_t cvlsgen, uint32_t cvugen, user_addr_t mutex,
         //               uint64_t mugen, uint32_t flags, int64_t sec, uint32_t nsec)
         SYS_PSYNCH_CVWAIT => row!(P, [Ptr, Scalar, Scalar, Ptr, Scalar, Scalar, Scalar, Scalar]),
+        // ---- __semwait_signal (M49 §3f): modelled above the trace, never forwarded ------------------
+        // __semwait_signal(int cond_sem, int mutex_sem, int timeout, int relative, int64_t tv_sec,
+        //                  int32_t tv_nsec) (SDK sys/syscall.h 334; xnu-private prototype). Every
+        // argument is a value: two semaphore port NAMES (keys in retrace's own IPC space, never data
+        // the host reads through), two flags and a timespec passed by value. 423 is its `_nocancel`
+        // twin and shares the row by the `_nocancel` rule; the box refuses 423 by value.
+        SYS___SEMWAIT_SIGNAL | SYS___SEMWAIT_SIGNAL_NOCANCEL => row!(P, [Scalar, Scalar, Scalar, Scalar, Scalar, Scalar]),
         // ---- paths (the kernel stops at PATH_MAX) ---------------------------------------------
         // access(const char *path, int flags)
         33 => row!(P, [Path, Scalar]),
@@ -2138,6 +2145,24 @@ pub fn decode_sprr_access(insn: u32) -> Option<SprrAccess> {
         _ => None,
     }
 }
+
+// ---- M49-firstcontact: sleep ----------------------------------------------------------------------
+// The numbers are the macOS 26 SDK's `sys/syscall.h`; `tests/sleepshapes.rs` re-reads them at test
+// time. libc's `nanosleep` issues 334 (`sleep-report.md` §1); no measured sleep path issues 423.
+
+/// `__semwait_signal` (SDK `SYS___semwait_signal 334`). Modelled since M49 (§3f) in its
+/// relative-timeout shape, never forwarded: forwarded, it sleeps the RECORDER for real on a host
+/// semaphore while the guest's synthetic clock stands still (R6). The generic forward arm asserts
+/// it away, as it does `kevent` and every psynch number.
+pub const SYS___SEMWAIT_SIGNAL: u64 = 334;
+/// `__semwait_signal_nocancel` (SDK `SYS___semwait_signal_nocancel 423`). It shares 334's row
+/// (the `_nocancel` rule, `tests/nocancel.rs`), and the box refuses it by value: no measured sleep
+/// path issues it (M49 §2e).
+pub const SYS___SEMWAIT_SIGNAL_NOCANCEL: u64 = 423;
+
+/// Is `num` `__semwait_signal` or its `_nocancel` twin? The record arm, the replay mirror and the
+/// generic forward arm's assert share this predicate, as they share `is_psynch`.
+pub fn is_semwait(num: u64) -> bool { num == SYS___SEMWAIT_SIGNAL || num == SYS___SEMWAIT_SIGNAL_NOCANCEL }
 
 // ---- M12-signal-delivery ---------------------------------------------------------------------
 // Signal numbers and si_codes from sys/signal.h; SA_*/SS_* from the same header. Every value here
