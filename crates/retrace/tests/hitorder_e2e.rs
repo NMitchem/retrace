@@ -399,14 +399,18 @@ fn oracle_watchsweep_hits_in_the_exit_window() {
                        &hits);
 }
 
-// ---- M42 (the dynamic path) ----------------------------------------------------------------------
+// ---- M42 (the dynamic path), re-aimed by M49 X5 ---------------------------------------------------
 
-/// M42 (spec §4, "the dynamic path"): M41's Q3, flipped.
+/// M42 (spec §4, "the dynamic path"): M41's Q3, flipped. M49 X5 (spec §3e) re-aims it.
 ///
 /// dyld's `_getpid` fills its pid cache right after the first `getpid` (20) syscall, at
-/// (g+1, 1)..(g+1, 3): `ldxr w10, [x9]; cbnz w10, …; stxr wzr, w0, [x9]`. A seek that stepped the
-/// `ldxr` used to fail the `stxr`, and the next image's `getpid()` then issued a syscall the
-/// recording does not hold (M41 t1: a divergence six landmarks later).
+/// (g+1, 1)..(g+1, 3). Until M49 that was `ldxr w10, [x9]; cbnz w10, …; stxr wzr, w0, [x9]`, and a
+/// seek that stepped the `ldxr` used to fail the `stxr`, so the next image's `getpid()` issued a
+/// syscall the recording does not hold (M41 t1: a divergence six landmarks later). Since M49 the
+/// box rewrites that discarded-status pair as `load_dynamic` stages dyld (X2, X3), so it is a
+/// plain `ldr`/`str`: stepping it sets no shadow, and a seek to any K inside it replays to the end.
+/// M42's real exclusive under a seek is guarded on the static path instead (R4), by
+/// `llsc_e2e::a_seek_into_shape_a_on_the_static_path_steps_a_real_exclusive`.
 #[test]
 fn a_seek_into_dylds_getpid_pair_replays_to_the_end() {
     let tp = tr_trace();
@@ -419,15 +423,17 @@ fn a_seek_into_dylds_getpid_pair_replays_to_the_end() {
     };
     {
         let s = retrace_core::seek(tp, g + 1, 1).unwrap();
-        let w = s.read_mem(s.pc(), 4).expect("the pc maps");
-        assert_eq!(u32::from_le_bytes(w.try_into().unwrap()), 0x885f_7d2a,
-            "(g+1, 1) must be dyld's getpid `ldxr w10, [x9]` (M41 t1); if the OS moved it, re-measure");
+        let w = s.read_mem(s.pc(), 12).expect("the pc maps");
+        let words: Vec<u32> = w.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(words, [0xb940_012a, 0x3500_004a, 0xb900_0120],
+            "(g+1, 1) must be dyld's getpid pair, rewritten plain by M49 X2: `ldr w10, [x9]; cbnz w10; \
+             str w0, [x9]`. A first word of 0x885f7d2a means the rewrite did not run; any other words \
+             mean the OS moved the pair, so re-measure");
     }
     let want = retrace_core::replay(tp).expect("plain replay").outcome;
     for j in [2u64, 3, 4] {
         let mut s = retrace_core::seek(tp, g + 1, j).unwrap();
-        assert_eq!(s.dbg_excl().is_some(), j < 4,
-            "(g+1, {j}): the stepped ldxr sets the shadow, and the emulated stxr clears it");
+        assert_eq!(s.dbg_excl(), None, "(g+1, {j}): a plain pair sets no shadow");
         loop {
             let adv = s.advance().unwrap_or_else(|d| panic!("(g+1, {j}): diverged at landmark {}: {}", d.landmark, d.detail));
             if let Advance::Exited(r) = adv {

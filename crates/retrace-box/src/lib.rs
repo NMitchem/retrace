@@ -17,6 +17,8 @@ pub mod gkq;
 pub mod psynch;
 mod excl;
 pub use excl::{Excl, SetBy};
+/// M49 §3e: the store-exclusive rewrite (X1, X2), applied where the box stages code (X3).
+mod xrewrite;
 pub use sig::{
     build_frame, choose_frame_base, decode_act, decode_stack, encode_oldact, encode_oldstack,
     sigreturn_token, Disposition, EntryRegs, FrameInput, NeonState, SigAction, SigTable,
@@ -1198,6 +1200,32 @@ fn alloc_pages(len: usize) -> (*mut u8, usize) {
     (p as *mut u8, len)
 }
 
+/// M49 §3e X3: rewrite the discarded-status exclusive pairs (`xrewrite`) in `len` bytes of code
+/// just staged at `host`. Every caller stages code bound for a 16 KiB-aligned guest address, so
+/// `host`'s 16 KiB chunks are the guest's pages, and X1's no-pair-across-a-page rule holds by
+/// construction.
+///
+/// Below the trace (symmetry rule 2). Its four calls, in three functions, each reach replay
+/// identically:
+/// - `page_in_cache`'s TEXT branch runs on both sides, a pure function of the cache file;
+/// - `load_dynamic`'s executable and dyld segments reach replay through `record_box`'s opening
+///   snapshot, which replay restores instead of calling `load_dynamic`;
+/// - `guest_mmap_file` runs on record only, and its recorded writes carry the rewritten bytes
+///   to replay's `guest_mmap_replay` and `apply_and_return`.
+///
+/// The static `load` path is not a site (R4), so M42's `llsc.s` keeps its real exclusives. Code
+/// a guest writes and then makes executable (JIT) is never rewritten (spec §3e, Left as limits).
+///
+/// # Safety
+/// `host` must be an `alloc_pages` allocation (page-aligned, so `u32`-aligned) of at least `len`
+/// bytes, with no other reference into those bytes during the call.
+unsafe fn rewrite_staged_code(host: *mut u8, len: usize) {
+    // SAFETY: the caller's guarantee above. The host is little-endian, as A64 instruction words
+    // are, so each `u32` is one instruction.
+    let words = unsafe { std::slice::from_raw_parts_mut(host.cast::<u32>(), len / 4) };
+    xrewrite::rewrite_code_pages(words);
+}
+
 // Raw macOS BSD syscall: x16 = number, args in x0..x7, `svc #0x80`. Returns (x0, x1, carry).
 // Carry set => error (x0 = errno); clear => success (x0 = full 64-bit result, e.g. an mmap ptr).
 // x1 is the kernel's retval[1] — meaningful for `pipe` (the write end) and captured for every
@@ -1788,9 +1816,10 @@ impl Box_ {
     ///   in place and collects the auth slots → [`sign_slots`](Self::sign_slots) re-signs them with
     ///   the guest keys → write each signed pointer back at its slot offset → map at the cache IPA
     ///   under the default RW+non-exec stage-1 (the identity block map already covers the window).
-    /// - **TEXT** (no slide-info): `pread` → map + [`set_region_exec`](Self::set_region_exec)
-    ///   (RO+exec `ATTR_CODE`), no fixups. Sound without a TLBI: the cache window's blocks are
-    ///   pristine (never translated) until the guest first faults them in here.
+    /// - **TEXT** (no slide-info): `pread` → M49's exclusive rewrite (`rewrite_staged_code`) →
+    ///   map + [`set_region_exec`](Self::set_region_exec) (RO+exec `ATTR_CODE`), no fixups. Sound
+    ///   without a TLBI: the cache window's blocks are pristine (never translated) until the guest
+    ///   first faults them in here.
     pub fn page_in_cache(&mut self, ipa: u64) -> bool {
         // Move the routing table out so its borrows don't collide with `&mut self` (sign_slots /
         // vm.map / set_region_exec); restore it before returning. `CacheMeta` never references
@@ -1844,7 +1873,7 @@ impl Box_ {
             Some(region) => {
                 if self.host_span(page_base).is_none() {
                     if region.is_exec {
-                        // TEXT: stage pristine bytes (no fixups), then ensure RO+exec (`ATTR_CODE`)
+                        // TEXT: stage the file's bytes (no fixups), then ensure RO+exec (`ATTR_CODE`)
                         // stage-1. In the dynamic path this is a NO-OP: load_dynamic pre-promotes
                         // every cache exec mapping to ATTR_CODE from the cache's OWN mappings BEFORE
                         // the guest translates them (so a text fault is a pure stage-2 fault with no
@@ -1853,6 +1882,11 @@ impl Box_ {
                         // load-bearing only for a pager driven without that pre-promotion (tests).
                         let (host, rlen) = alloc_pages(GRANULE);
                         unsafe { std::ptr::copy_nonoverlapping(page.as_ptr(), host, GRANULE); }
+                        // M49 §3e X3: the page's discarded-status exclusive pairs (the cache's
+                        // dyld and libsystem_kernel getpid pairs, t0 M3) become plain accesses
+                        // before the guest can fetch them. Replay pages the same file bytes here.
+                        // SAFETY: `host` is the fresh GRANULE-byte allocation just filled.
+                        unsafe { rewrite_staged_code(host, GRANULE); }
                         self.vm.map(host, page_base, rlen, MemFlags::RWX).expect("hv_vm_map (cache text page)");
                         self.backings.push(Backing { host, ipa: page_base, len: rlen });
                         self.set_region_exec(page_base, GRANULE as u64);
@@ -2329,10 +2363,23 @@ impl Box_ {
             vm.map(host, ipa, len, MemFlags::RWX).expect("hv_vm_map");
             backings.push(Backing { host, ipa, len });
         };
+        // M49 §3e X3: each executable segment's discarded-status exclusive pairs are rewritten in
+        // the backing `map` just pushed, before the guest runs and before `record_box`'s opening
+        // snapshot captures it. Replay restores that snapshot and never calls this (R4: the
+        // static `load` above stages its segments untouched).
         // exe at its own vmaddrs (arm64 PIE: __PAGEZERO skipped, __TEXT at 4 GiB).
-        for s in &exe.segments  { map(&vm, &mut backings, s.vaddr, &s.data, s.memsz); }
-        // dyld slid to DYLD_BASE (it is PIE at vmaddr 0 and self-relocates from PC — map raw bytes).
-        for s in &dyld.segments { map(&vm, &mut backings, s.vaddr + DYLD_BASE, &s.data, s.memsz); }
+        for s in &exe.segments {
+            map(&vm, &mut backings, s.vaddr, &s.data, s.memsz);
+            // SAFETY: the last backing is the fresh allocation `map` just filled; no guest ran.
+            if s.exec { unsafe { rewrite_staged_code(backings.last().expect("map pushed it").host, s.data.len()); } }
+        }
+        // dyld slid to DYLD_BASE (it is PIE at vmaddr 0 and self-relocates from PC, so its bytes
+        // map as they are, apart from the rewrite).
+        for s in &dyld.segments {
+            map(&vm, &mut backings, s.vaddr + DYLD_BASE, &s.data, s.memsz);
+            // SAFETY: as for the exe's segments.
+            if s.exec { unsafe { rewrite_staged_code(backings.last().expect("map pushed it").host, s.data.len()); } }
+        }
         // Dynamic stack (anon, zero-filled). Capture its index NOW, before build_tables pushes the
         // page-table backings, so build_start_stack can address the stack backing by index.
         let stack_idx = backings.len();
@@ -2994,6 +3041,8 @@ impl Box_ {
     /// `mmap`, not `pread`), fall back to mapping the fd read-only in RETRACE's own address space and
     /// copying the bytes out (a deterministic snapshot, captured in the trace). Either way the guest
     /// gets an anon page, never a file/shm page.
+    /// M49 §3e X3: an executable mapping's discarded-status exclusive pairs are rewritten before the
+    /// bytes are mapped, so what is recorded, and what replay maps, is the rewritten code.
     pub fn guest_mmap_file(&mut self, addr: u64, len: u64, prot: u64, flags: u64, fd: i32, off: u64)
         -> Result<(u64, Vec<Region>), u64> {
         // M10: `fd` arrives as a GUEST descriptor. This is the second consumer of a guest fd (the
@@ -3011,6 +3060,14 @@ impl Box_ {
             let src = unsafe { libc::mmap(std::ptr::null_mut(), copy_len, libc::PROT_READ, libc::MAP_SHARED, fd, off as libc::off_t) };
             assert!(src != libc::MAP_FAILED, "guest_mmap_file: neither pread nor mmap works on fd {fd}");
             unsafe { std::ptr::copy_nonoverlapping(src as *const u8, host, copy_len); libc::munmap(src, copy_len); }
+        }
+        // M49 §3e X3: an executable file mapping is code the box stages: dyld maps a non-cache
+        // dylib's __TEXT FIXED, `PROT_READ|PROT_EXEC`, from the file (M9). Rewrite it here, before
+        // `map_mmap_region` maps it and before `read_guest` below captures it for the trace.
+        if prot & Self::PROT_EXEC != 0 {
+            // SAFETY: `host` is this function's `alloc_pages` result of `rlen` bytes, not yet mapped
+            // or published anywhere.
+            unsafe { rewrite_staged_code(host, rlen); }
         }
         // `?`: a rejected FIXED address frees `host` inside map_mmap_region, so there is nothing to
         // clean up here — the staged bytes simply never reach the guest, exactly as with a real

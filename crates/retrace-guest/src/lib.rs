@@ -246,6 +246,12 @@ pub const FAULTCASE_DYN: &str = concat!(env!("OUT_DIR"), "/faultcase_dyn");
 pub const KQ_DYN: &str = concat!(env!("OUT_DIR"), "/kq_dyn");
 /// M47: links `librpath_dyn.dylib` by `@rpath`, so it loads only if AMFI allows `@`-path expansion.
 pub const RPATH_DYN: &str = concat!(env!("OUT_DIR"), "/rpath_dyn");
+/// M49: a discarded-status exclusive pair with a trapped timebase read between its halves (spec
+/// §3e), in this executable's own __TEXT (no arguments) or in `MRSPAIR_LIB`, dlopen'd by path
+/// (`dlopen <path>`). Plus a retry-loop control, whose status is read.
+pub const MRSPAIR_DYN: &str = concat!(env!("OUT_DIR"), "/mrspair_dyn");
+/// M49: mrspair_dyn's pair in a dylib, for the exec-mmap staging site (X3).
+pub const MRSPAIR_LIB: &str = concat!(env!("OUT_DIR"), "/mrspair_lib.dylib");
 /// M47 (t0, after H7): `sandbox_container_path_for_pid` on its own pid — Sandbox's call 4.
 pub const SBXPATH_DYN: &str = concat!(env!("OUT_DIR"), "/sbxpath_dyn");
 /// M47 (t3b): the mach_vm_map alignment-mask guard: five 4 MiB ANYWHERE maps with mask `0x3fffff`, one per
@@ -610,6 +616,23 @@ mod tests {
         // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
         let l = parse_macho(&std::fs::read(RPATH_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn mrspair_guests_parse_and_carry_the_pinned_pairs() {
+        // M49: proves the build.rs wiring, the path constants, and that clang kept the registers
+        // the fixtures pin, so xrewrite_e2e can find each pair by its words. A dylib has no entry
+        // point for parse_macho, so the library is searched as raw bytes. Behaviour is
+        // xrewrite_e2e's.
+        let bytes = |w: [u32; 4]| -> Vec<u8> { w.iter().flat_map(|x| x.to_le_bytes()).collect() };
+        let pair = bytes([0x885f_7d2a, 0xd53b_e04b, 0x3500_004a, 0x881f_7d20]);
+        let retry = bytes([0x885f_7d2a, 0xd53b_e04b, 0x1100_054a, 0x880c_7d2a]);
+        let l = parse_macho(&std::fs::read(MRSPAIR_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+        let text = |n: &[u8]| l.segments.iter().filter(|s| s.exec).any(|s| s.data.windows(n.len()).any(|w| w == n));
+        assert!(text(&pair) && text(&retry), "mrspair_dyn's __TEXT carries both pinned sequences");
+        let lib = std::fs::read(MRSPAIR_LIB).unwrap();
+        assert!(lib.windows(pair.len()).any(|w| w == pair), "mrspair_lib carries the pinned pair");
     }
 
     #[test]

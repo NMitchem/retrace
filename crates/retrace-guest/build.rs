@@ -516,6 +516,24 @@ fn main() {
         .status().expect("clang rpath_dyn");
     assert!(status.success(), "rpath_dyn guest build failed");
 
+    // mrspair_dyn + mrspair_lib.dylib: the M49 store-exclusive fixture (spec §3e). Mode `dlopen`
+    // loads the dylib by absolute path, so its install name is never resolved; both land in
+    // OUT_DIR side by side. The rpath_dyn recipe, minus the link.
+    let lib_src = format!("{}/c/mrspair_lib.c", env!("CARGO_MANIFEST_DIR"));
+    let lib = format!("{out}/mrspair_lib.dylib");
+    println!("cargo:rerun-if-changed={lib_src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-dynamiclib","-install_name","@rpath/mrspair_lib.dylib","-o",&lib,&lib_src])
+        .status().expect("clang mrspair_lib");
+    assert!(status.success(), "mrspair_lib build failed");
+    let src = format!("{}/c/mrspair_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/mrspair_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang mrspair_dyn");
+    assert!(status.success(), "mrspair_dyn guest build failed");
+
     // sbxpath_dyn: the M47 Sandbox call-4 fixture (t0, after H7) — libsystem_sandbox's
     // sandbox_container_path_for_pid, reached through libSystem's re-export, so no -lsandbox. Same
     // recipe as hello_dyn.

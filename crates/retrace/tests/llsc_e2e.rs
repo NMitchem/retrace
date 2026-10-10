@@ -348,6 +348,30 @@ fn the_shadow_outlives_a_branch_out_until_the_next_syscall() {
     assert_eq!(s.dbg_excl(), None, "the syscall exit clears it");
 }
 
+/// M49 X5 (spec §3e, R4): the static path keeps M42's real exclusive under a seek. The dynamic
+/// path's getpid pairs are rewritten plain since M49, so the seek
+/// `hitorder_e2e::a_seek_into_dylds_getpid_pair_replays_to_the_end` makes no longer reaches an
+/// exclusive. (a) is the same discarded-status shape, staged by the static `load`, which X3
+/// never touches: stepping its `ldxr` still sets the shadow, and the emulated `stxr` still clears
+/// it and lands its store.
+#[test]
+fn a_seek_into_shape_a_on_the_static_path_steps_a_real_exclusive() {
+    let word = |s: &ReplaySession, at: &str| u32::from_le_bytes(s.read_mem(sym(at), 4).unwrap().try_into().unwrap());
+    let mut s = retrace_core::seek(trace(), 1, 4).unwrap(); // (a)'s ldxr (K = 3) has retired
+    assert_eq!(s.pc(), sym("a_ldx") + 4, "at (a)'s cbnz");
+    assert_eq!((word(&s, "a_ldx"), word(&s, "a_stx")), (0x885f_7d2a, 0x881f_7d20),
+        "R4: the static loader stages (a) unrewritten");
+    let ex = s.dbg_excl().expect("set by the stepped ldxr");
+    assert_eq!((ex.va, ex.size, ex.pair, ex.by), (sym("cella"), 4, false, SetBy::Stepped));
+    s.step_insns(1).unwrap(); // cbnz, not taken: the cell is empty
+    assert_eq!(s.pc(), sym("a_stx"));
+    s.step_insns(1).unwrap(); // the emulated stxr
+    assert_eq!(s.dbg_excl(), None, "the emulated store-exclusive clears the shadow");
+    assert_eq!(s.read_mem(sym("cella"), 4).unwrap(), 0x4242u32.to_le_bytes(), "and its store landed");
+    let r = replay_to_end(s);
+    assert_eq!((r.outcome, r.stdout.as_slice()), (Outcome::Exit { code: 0 }, STDOUT));
+}
+
 /// (g): a syscall between the halves clears the shadow, so the store in window 8 fails as it did
 /// natively.
 #[test]
