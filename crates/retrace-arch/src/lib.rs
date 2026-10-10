@@ -2176,24 +2176,23 @@ pub const UC_FLAVOR: u64 = 30;
 
 /// Classify a guest fault into the `(signal, si_code)` a real kernel would deliver.
 ///
-/// Pure: a function of the ESR alone. The DFSC (`ISS[5:0]`) distinguishes "nothing is mapped there"
-/// (translation fault → `SEGV_MAPERR`) from "mapped, but not for that" — and that second case splits
-/// again on Darwin: an access-flag fault still reads as `SEGV_ACCERR`, but a permission fault
-/// (M13, measured by `spikes/protnone.c`) is `SIGBUS`/`BUS_ADRALN` — Darwin's `ux_exception` maps
+/// Pure: a function of the ESR alone. The DFSC (`ISS[5:0]`) separates the abort classes, and on
+/// Darwin the split is not the Linux one. A translation fault ("nothing is mapped there") and an
+/// access-flag fault are both `SIGSEGV`/`SEGV_ACCERR`. A permission fault (M13, measured by
+/// `spikes/protnone.c`) is `SIGBUS`/`BUS_ADRALN`: Darwin's `ux_exception` maps
 /// `KERN_PROTECTION_FAILURE` to `SIGBUS`, not `SIGSEGV`.
 ///
-/// **A deliberate divergence from one host observation.** `spikes/sigtramp.c` recorded the host
-/// delivering `SEGV_ACCERR` for a store to a wholly unmapped address, where the DFSC says
-/// `MAPERR`. The host's answer reflects its own VM regime (a Mach protection failure on a submap
-/// retrace does not reproduce); the guest's fault is described completely by its ESR, so the ESR is
-/// what retrace derives from. Nothing in the gate set depends on the choice — libstd keys on
-/// `si_addr` — which is exactly why it is made deliberately here rather than by accident.
+/// **The translation row is native's measured answer (M49 R1).** Until M49 it answered
+/// `SEGV_MAPERR`, derived from the DFSC, and called the host's `SEGV_ACCERR` (`spikes/sigtramp.c`)
+/// a one-off on a submap. M49 measured eight NULL, low, released and wild accesses natively
+/// (`docs/sweep-evidence/2026-10-06-m49-static/faults-native.txt`), and every one delivers
+/// `SEGV_ACCERR` (2). A guest that keys on `si_code` now sees what it sees natively.
 pub fn signal_of_esr(esr: u64) -> (u64, u64) {
     let ec = (esr >> 26) & 0x3f;
     match ec {
         // Instruction / data abort from a lower EL: the guest touched something it could not.
         0x20 | 0x24 => match esr & 0x3f {
-            0x04..=0x07 => (SIGSEGV, SEGV_MAPERR), // translation fault, levels 0..3
+            0x04..=0x07 => (SIGSEGV, SEGV_ACCERR), // translation fault, levels 0..3: native's answer (M49 R1)
             0x08..=0x0b => (SIGSEGV, SEGV_ACCERR), // access-flag fault
             // M13, MEASURED (spikes/protnone.c): Darwin's ux_exception translates EXC_BAD_ACCESS by
             // code — KERN_INVALID_ADDRESS to SIGSEGV, and everything else, including
@@ -2711,9 +2710,9 @@ mod tests {
     #[test]
     fn signal_of_esr_maps_the_fault_classes_by_dfsc() {
         // EC 0x24 = data abort from a lower EL. DFSC lives in ISS[5:0].
-        // 0b0001LL (0x04..0x07) = translation fault  -> SEGV_MAPERR (nothing is mapped there)
-        assert_eq!(signal_of_esr(0x9200_0006), (SIGSEGV, SEGV_MAPERR), "translation fault, level 2");
-        assert_eq!(signal_of_esr(0x9200_0005), (SIGSEGV, SEGV_MAPERR), "translation fault, level 1");
+        // 0b0001LL (0x04..0x07) = translation fault  -> SEGV_ACCERR, native's measured answer (M49 R1)
+        assert_eq!(signal_of_esr(0x9200_0006), (SIGSEGV, SEGV_ACCERR), "translation fault, level 2");
+        assert_eq!(signal_of_esr(0x9200_0005), (SIGSEGV, SEGV_ACCERR), "translation fault, level 1");
         // 0b0011LL (0x0C..0x0F) = permission fault -> SIGBUS/BUS_ADRALN on Darwin (M13, measured by
         // spikes/protnone.c) rather than the Linux-shaped SEGV_ACCERR this row used to assert.
         assert_eq!(signal_of_esr(0x9200_000f), (SIGBUS, BUS_ADRALN), "permission fault, level 3");
@@ -2735,15 +2734,27 @@ mod tests {
         assert_eq!(signal_of_esr(0x9200_000f), (SIGBUS, BUS_ADRALN), "permission fault, load");
         assert_eq!(signal_of_esr(0x9200_004f), (SIGBUS, BUS_ADRALN), "permission fault, store");
         // The control that must NOT move: an unmapped address is a TRANSLATION fault and stays
-        // SIGSEGV/SEGV_MAPERR, which is what crashy_e2e and segv_rust_e2e rest on.
-        assert_eq!(signal_of_esr(0x9200_0006), (SIGSEGV, SEGV_MAPERR), "translation fault, level 2");
+        // SIGSEGV (since M49 with SEGV_ACCERR, R1), which is what crashy_e2e and segv_rust_e2e rest
+        // on.
+        assert_eq!(signal_of_esr(0x9200_0006), (SIGSEGV, SEGV_ACCERR), "translation fault, level 2");
     }
 
     #[test]
     fn signal_of_esr_maps_instruction_aborts_the_same_way() {
         // EC 0x20 = instruction abort from a lower EL; same DFSC encoding.
-        assert_eq!(signal_of_esr(0x8200_0006), (SIGSEGV, SEGV_MAPERR));
+        assert_eq!(signal_of_esr(0x8200_0006), (SIGSEGV, SEGV_ACCERR));
         assert_eq!(signal_of_esr(0x8200_000f), (SIGBUS, BUS_ADRALN));
+    }
+
+    // M49 R1: native delivers SEGV_ACCERR for every translation fault it was measured on
+    // (`docs/sweep-evidence/2026-10-06-m49-static/faults-native.txt`): page 0, a store at 0, a
+    // released page, 1 GiB, the TSD page, a wild pointer and a call through NULL. These are the
+    // ESRs native's own handler read out of its mcontext in those runs.
+    #[test]
+    fn a_translation_fault_is_segv_accerr_as_native_measures_it() {
+        for esr in [0x9200_0006, 0x9200_0046, 0x9200_0007, 0x9200_0005, 0x8200_0006] {
+            assert_eq!(signal_of_esr(esr), (SIGSEGV, SEGV_ACCERR), "native's ESR {esr:#x}");
+        }
     }
 
     #[test]
@@ -2757,8 +2768,8 @@ mod tests {
     // The measured ESR from spikes/sigtramp.c, end to end. A store to an unmapped page.
     #[test]
     fn signal_of_esr_classifies_the_measured_probe_esr() {
-        assert_eq!(signal_of_esr(0x9200_0046), (SIGSEGV, SEGV_MAPERR),
-            "0x92000046 is what the host kernel put in the probe's mcontext: EC 0x24, WnR set, DFSC 0x06");
+        assert_eq!(signal_of_esr(0x9200_0046), (SIGSEGV, SEGV_ACCERR),
+            "0x92000046 is what the host kernel put in the probe's mcontext: EC 0x24, WnR set, DFSC 0x06; the host delivered SEGV_ACCERR, which M49 R1 now matches");
     }
 
     /// Covers the outer match's fail-loud fallback. EC 0x01 (trapped WFI/WFE) is a real AArch64

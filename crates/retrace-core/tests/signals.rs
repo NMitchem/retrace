@@ -155,7 +155,7 @@ fn a_fault_with_a_handler_installed_delivers_instead_of_crashing() {
         unreachable!()
     };
     assert_eq!(*sig, 11, "a store to an unmapped address is SIGSEGV");
-    assert_eq!(*si_code, retrace_arch::SEGV_MAPERR, "nothing is mapped there: a translation fault");
+    assert_eq!(*si_code, retrace_arch::SEGV_ACCERR, "a translation fault: native's SEGV_ACCERR (M49 R1)");
     assert_ne!(*handler, 0);
     assert!(!events.iter().any(|e| matches!(e, retrace_trace::Event::Crash { .. })),
         "the handler ran, so this is NOT a crash");

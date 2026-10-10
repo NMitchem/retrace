@@ -68,7 +68,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0b"; // "RT" + format version 0x000b (M47 for `mach_vm_map`'s mask: an ANYWHERE placement now honours it, so a pre-M47 recording's addresses mean something different; pre-M47 traces are refused whole)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0c"; // "RT" + format version 0x000c (M49: a translation fault's SignalDelivery frame now carries SEGV_ACCERR (F4, R1), and Task 4's store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence; refused whole. 0x000b was M47's, for `mach_vm_map`'s mask)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn magic_bumped_for_the_m47_vm_map_mask() {
+    fn magic_bumped_for_m49s_si_code_and_exclusive_rewrite() {
         // M24: the trampoline page's vector padding changed from `UDF #0` to `hvc #1` (M23),
         // which is snapshot *content*, not `Event` shape — a pre-M24 snapshot is not merely
         // older, it means something different at the bytes `Box_::restore` re-applies. Two
@@ -333,7 +333,10 @@ mod tests {
         // M47: `mach_vm_map`'s alignment mask is honoured, the M24 kind of change — no shape
         // moved, but a pre-M47 recording's placements are no longer what replay recomputes, so it
         // would replay as a false divergence at its first masked map instead of being refused.
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0b");
+        // M49: F4 changes a translation fault's frame (si_code 2, not 1) and X3 changes staged code
+        // bytes, the M24 kind of change, so a pre-M49 recording is refused, not replayed into a
+        // false divergence.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0c");
     }
 
     #[test]
@@ -353,6 +356,18 @@ mod tests {
             std::fs::write(&p, not_skew).unwrap();
             assert_eq!(Reader::format_skew(&p).unwrap(), None, "{not_skew:?} is not version skew");
         }
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_pre_m49_trace_is_refused_by_name() {
+        // M49's bump: an M47 or M48 recording (RT\x00\x0b) carries SEGV_MAPERR in its fault frames
+        // and unrewritten store-exclusives in its snapshots, so replay would diverge on it. It is
+        // refused as an older format, naming both magics.
+        let p = named_tempfile("m47magic");
+        std::fs::write(&p, b"RT\x00\x0brest-of-a-pre-M49-trace").unwrap();
+        let msg = Reader::format_skew(&p).unwrap().expect(r"a pre-M49 RT\x00\x0b header is version skew");
+        assert!(msg.contains(r"RT\x00\x0b") && msg.contains(r"RT\x00\x0c"), "{msg}");
         std::fs::remove_file(&p).ok();
     }
 
