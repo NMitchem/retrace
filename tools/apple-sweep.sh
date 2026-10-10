@@ -39,6 +39,21 @@
 #                               <dir>/<basename>.{rec.err,rp.err,bin} (identical faults included)
 #   RETRACE_SWEEP_KEEP_ALL=1   with KEEP: keep PASS rows too (the M37 audit's full-corpus baseline)
 #   RETRACE_SWEEP_TIMEOUT=<s>   per-phase watchdog, default 30
+#   RETRACE_SWEEP_NATIVE=1      M49: also run each row natively, outside retrace, first. A row then
+#                               passes only if the recording also exits as native did and prints
+#                               what native printed; one whose record and replay agree but differ
+#                               from native prints `FAIL … (differs from native: record=N native=…)`.
+#                               Every ROW line gains a tenth field, native: `<native rc>:same` or
+#                               `<native rc>:differs` (the recording's stdout against native's), or
+#                               `timeout:n/a`.
+#
+# M49 (spec §3c): a list line may carry arguments after the path, each preceded by a TAB. They are
+# passed verbatim: the line is split on TAB only, with globbing off, and never evaluated by a shell,
+# so an argument may hold spaces, quotes or `$` but not a TAB, and an empty argument cannot be
+# written. A row with arguments is named `<path> <args…>` on its PASS/FAIL and ROW lines, and its
+# kept evidence carries its list line number. Every row runs from the repo root, so a relative path
+# in an argument names a repo file. A line with no TAB is a row with no arguments, which is every
+# line of apple-sweep-binaries.txt, and its record command is the one this script always ran.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -50,7 +65,13 @@ LIST=$ROOT/tools/apple-sweep-binaries.txt
 LIST=${RETRACE_SWEEP_LIST:-$LIST}
 KEEP=${RETRACE_SWEEP_KEEP:-}
 KEEP_ALL=${RETRACE_SWEEP_KEEP_ALL:-}
+NATIVE=${RETRACE_SWEEP_NATIVE:-}
 if [ -n "$KEEP" ]; then mkdir -p "$KEEP" || { echo "TALLY ABORTED (cannot create $KEEP)"; exit 2; }; fi
+# M49: the loop `cd`s to the repo root before every row, so each path it uses after that is made
+# absolute here, against the caller's directory. ROOT and TMP are absolute already, and so is every
+# default.
+case "$LIST" in /*) ;; *) LIST=$PWD/$LIST ;; esac
+case "$KEEP" in ''|/*) ;; *) KEEP=$PWD/$KEEP ;; esac
 
 # A pre-loop setup failure below exits before any per-binary line or the closing TALLY
 # is ever printed. A consumer that only greps its captured output for "TALLY" would see
@@ -67,6 +88,7 @@ if [ -n "$KEEP" ]; then mkdir -p "$KEEP" || { echo "TALLY ABORTED (cannot create
 # does not have it — .cargo/config.toml's runner only signs what cargo itself invokes.
 # Sign a copy rather than the original: two concurrent users must never write one path.
 BIN=$RAW-sweep-$$
+case "$BIN" in /*) ;; *) BIN=$PWD/$BIN ;; esac
 cp "$RAW" "$BIN"
 codesign -s - -f --entitlements "$ROOT/retrace.entitlements" "$BIN" >/dev/null 2>&1 || {
     echo "codesign failed for $BIN" >&2
@@ -129,15 +151,22 @@ run_timeout() {
 keep_row() {
     if [ -n "$KEEP" ] && { [ -n "$KEEP_ALL" ] || [ "$1" != "PASS" ] || [ -n "${2:-}" ]; }; then
         b=$(basename "$g")
+        # M49: two rows may run one path with different arguments; their evidence must not collide.
+        [ "$nargs" -gt 0 ] && b="$b.$lno"
         cp "$TMP/rec.err" "$KEEP/$b.rec.err"
         [ -f "$TMP/rp.err" ] && cp "$TMP/rp.err" "$KEEP/$b.rp.err"
         [ -e "$TMP/rp.out" ] && cp "$TMP/rp.out" "$KEEP/$b.rp.out"
         [ -f "$TMP/t.bin" ] && cp "$TMP/t.bin" "$KEEP/$b.bin"
+        [ -n "$NATIVE" ] && [ -e "$TMP/nat.out" ] && cp "$TMP/nat.out" "$KEEP/$b.nat.out"
     fi
-    printf 'ROW\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$g" "$1" "$rc" "$rp" "$recpid" "$landmark" "$rec_reason" "$rp_line"
+    if [ -n "$NATIVE" ]; then
+        printf 'ROW\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$row" "$1" "$rc" "$rp" "$recpid" "$landmark" "$rec_reason" "$rp_line" "$native"
+    else
+        printf 'ROW\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$row" "$1" "$rc" "$rp" "$recpid" "$landmark" "$rec_reason" "$rp_line"
+    fi
 }
 
-pass=0; fail=0; skip=0
+pass=0; fail=0; skip=0; lno=0; OLDIFS=$IFS; TAB=$(printf '\t')
 # The list is read on fd 3, not fd 0: several sweep guests (bash, csh, dash, ksh, sh,
 # tcsh, zsh) run with no arguments and, non-interactively, read a *script* from stdin.
 # If the loop's `read` shared fd 0 with those children, a shell guest would consume
@@ -153,7 +182,14 @@ pass=0; fail=0; skip=0
 # it the old way ("never visible to any child") would leave the next person believing
 # inheritance was prevented, and reaching for fd 3 elsewhere on that belief.
 while IFS= read -r g <&3; do
+    lno=$((lno+1))
     case "$g" in ''|\#*) continue ;; esac
+    # M49 (spec §3c): split off the row's arguments (see the header). `set --` reuses the
+    # positional parameters, which nothing reads after `RAW` above.
+    IFS=$TAB; set -f; set -- $g; set +f; IFS=$OLDIFS
+    g=$1; shift; nargs=$#
+    row=$g; [ "$nargs" -gt 0 ] && row="$g $*"
+    cd "$ROOT" || { echo "TALLY ABORTED (cannot cd to $ROOT)"; exit 2; }
     if [ ! -x "$g" ]; then echo "SKIP $g (not present)"; skip=$((skip+1)); continue; fi
 
     # A previous iteration's trace must not survive to this one: if record fails via a
@@ -174,8 +210,27 @@ while IFS= read -r g <&3; do
     # from the shell that becomes the recorder — M34's probe shape. run_timeout launches "$@"
     # verbatim, so the `sh` it backgrounds is the process that `exec`s into the recorder: the pid
     # it printed IS the recorder's, and the watchdog's kill still lands on the recorder.
-    run_timeout sh -c 'echo "recpid=$$" >&2; exec "$0" record-dyn "$1" -o "$2"' "$BIN" "$g" "$TMP/t.bin" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+    # M49: with RETRACE_SWEEP_NATIVE, the row runs natively first, under the same watchdog and
+    # with the same /dev/null stdin; its exit code is the shell's (128 + signo for a signal death,
+    # the CLI's own convention for a recorded one).
+    if [ -n "$NATIVE" ]; then
+        rm -f "$TMP/nat.out" "$TMP/nat.err"
+        run_timeout "$g" "$@" >"$TMP/nat.out" 2>"$TMP/nat.err" </dev/null; nrc=$?
+        [ -e "$TMP/.timedout" ] && nrc=timeout
+    fi
+    if [ "$nargs" -eq 0 ]; then
+        run_timeout sh -c 'echo "recpid=$$" >&2; exec "$0" record-dyn "$1" -o "$2"' "$BIN" "$g" "$TMP/t.bin" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+    else
+        # M49: the same shape, with the row's arguments after `--`, the CLI's guest-argv separator.
+        run_timeout sh -c 'echo "recpid=$$" >&2; b=$0; g=$1; t=$2; shift 2; exec "$b" record-dyn "$g" -o "$t" -- "$@"' "$BIN" "$g" "$TMP/t.bin" "$@" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+    fi
     recpid=$(grep -a '^recpid=' "$TMP/rec.err" | head -1 | cut -d= -f2)
+    native=""
+    if [ -n "$NATIVE" ]; then
+        if [ "$nrc" = timeout ]; then native="timeout:n/a"
+        elif cmp -s "$TMP/rec.out" "$TMP/nat.out"; then native="$nrc:same"
+        else native="$nrc:differs"; fi
+    fi
     # M29 fix round 1 (Critical): the recorder's stderr goes to $TMP/rec.err, grepped only
     # for "panicked at" below and destroyed by this script's own EXIT trap — so a caller
     # capturing only this script's OWN stdout/stderr (as the M29 measurement did) never sees
@@ -219,10 +274,10 @@ while IFS= read -r g <&3; do
     fi
     rp_line=""; landmark="n/a"; rp="n/a"
     if [ -e "$TMP/.timedout" ]; then
-        echo "FAIL $g (timed out after ${TIMEOUT_SECS}s recording)"; fail=$((fail+1)); keep_row FAIL; continue
+        echo "FAIL $row (timed out after ${TIMEOUT_SECS}s recording)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     if grep -qa "panicked at crates/" "$TMP/rec.err"; then
-        echo "FAIL $g (recorder panicked: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue
+        echo "FAIL $row (recorder panicked: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     run_timeout "$BIN" replay "$TMP/t.bin" >"$TMP/rp.out" 2>"$TMP/rp.err" </dev/null; rp=$?
     rp_line=$(grep -a -m1 'DIVERGENCE at landmark' "$TMP/rp.err" | cut -c1-200)
@@ -244,18 +299,23 @@ while IFS= read -r g <&3; do
     # the cause, whatever the replay of its truncated trace then did; the ROW line still carries rp.
     case "$rec_reason" in
         'RECORD ERROR:'*)
-            echo "FAIL $g (record error, rc=$rc: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue ;;
+            echo "FAIL $row (record error, rc=$rc: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue ;;
     esac
     if [ -e "$TMP/.timedout" ]; then
-        echo "FAIL $g (timed out after ${TIMEOUT_SECS}s replaying)"; fail=$((fail+1)); keep_row FAIL; continue
+        echo "FAIL $row (timed out after ${TIMEOUT_SECS}s replaying)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     # Divergence detection is structural, not inferred from exit codes alone: retrace
     # always prints this on a divergence, so check for it directly rather than relying
     # on the exit-code compare below to happen to disagree.
     if [ -n "$rp_line" ]; then
-        echo "FAIL $g (replay diverged at landmark $landmark)"; fail=$((fail+1)); keep_row FAIL; continue
+        echo "FAIL $row (replay diverged at landmark $landmark)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     if [ "$rc" -eq "$rp" ] && cmp -s "$TMP/rec.out" "$TMP/rp.out"; then
+        # M49: with RETRACE_SWEEP_NATIVE, agreeing with itself is not enough: the recording must
+        # also exit as native did and print what native printed.
+        if [ -n "$NATIVE" ] && [ "$native" != "$rc:same" ]; then
+            echo "FAIL $row (differs from native: record=$rc native=$native)"; fail=$((fail+1)); keep_row FAIL; continue
+        fi
         if [ "$rc" -ge 128 ]; then
             # M36: an identical FAULT on both sides is still counted a pass (the tally stays
             # comparable with M33–M35's), but it is said on the line: M35 found dddiagnose's
@@ -263,11 +323,11 @@ while IFS= read -r g <&3; do
             # means signal death — the CLI exits 128+signo when the guest dies of one (139 =
             # SIGSEGV) — so the threshold is 128: a designed non-zero exit (/bin/false's 1, a
             # usage error's 64) is the guest's own status and stays a bare PASS, as before M36.
-            echo "PASS $g (identical fault, rc=$rc)"; pass=$((pass+1)); keep_row PASS fault; continue
+            echo "PASS $row (identical fault, rc=$rc)"; pass=$((pass+1)); keep_row PASS fault; continue
         fi
-        echo "PASS $g"; pass=$((pass+1)); keep_row PASS; continue
+        echo "PASS $row"; pass=$((pass+1)); keep_row PASS; continue
     fi
-    echo "FAIL $g (record=$rc replay=$rp)"; fail=$((fail+1)); keep_row FAIL
+    echo "FAIL $row (record=$rc replay=$rp)"; fail=$((fail+1)); keep_row FAIL
 done 3< "$LIST"
 
 echo "TALLY pass=$pass fail=$fail skip=$skip"

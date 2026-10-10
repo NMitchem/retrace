@@ -144,6 +144,48 @@ pub fn debug_bounded(trace: &str, script: &str, secs: u64) -> (Option<i32>, Stri
     (code, read(&out_p), read(&err_p))
 }
 
+/// What a bounded run left (M49): `code` is the exit status, `128 + signo` for a death by signal
+/// (the shell's convention, and the CLI's for a recorded crash), or `None` when the bound fired.
+pub struct Bounded { pub code: Option<i32>, pub stdout: Vec<u8>, pub stderr: String }
+
+/// M49: run `prog` with `args` and with `env` added to this process's environment, stdin
+/// `/dev/null`, killed after `secs` seconds. `debug_bounded`'s polling and temp files, for any
+/// program: `bin()` for the CLI, or a guest run natively. `RETRACE_TRACE` is cleared first, as
+/// `run_env` clears it.
+pub fn run_bounded(prog: &str, args: &[&str], env: &[(&str, &str)], secs: u64) -> Bounded {
+    use std::os::unix::process::ExitStatusExt;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let base = std::env::temp_dir().join(format!("retrace-bounded-{}-{n}", std::process::id()));
+    let (out_p, err_p) = (base.with_extension("out"), base.with_extension("err"));
+    let mut c = Command::new(prog);
+    c.args(args).env_remove("RETRACE_TRACE").stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(&out_p).expect("create stdout file"))
+        .stderr(std::fs::File::create(&err_p).expect("create stderr file"));
+    for (k, v) in env { c.env(k, v); }
+    let mut child = c.spawn().unwrap_or_else(|e| panic!("spawn {prog}: {e}"));
+    let mut code = None;
+    for _ in 0..secs * 20 {
+        if let Some(st) = child.try_wait().expect("try_wait") {
+            code = Some(st.code().unwrap_or_else(|| 128 + st.signal().unwrap_or(0)));
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if code.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let read = |p: &std::path::Path| {
+        let b = std::fs::read(p).unwrap_or_default();
+        let _ = std::fs::remove_file(p);
+        b
+    };
+    let stdout = read(&out_p);
+    let stderr = String::from_utf8_lossy(&read(&err_p)).into_owned();
+    Bounded { code, stdout, stderr }
+}
+
 // Record a dynamically-linked guest through real dyld via the CLI's `record-dyn` path.
 pub fn record_dynamic(guest: &str) -> (RunOut, std::path::PathBuf) {
     static NEXT: AtomicU64 = AtomicU64::new(1_000_000);

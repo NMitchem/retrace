@@ -1,0 +1,24 @@
+# M49 tier 2 (spec §3c): the real tools a newcomer reaches for first. Not gated; swept by
+#   export RETRACE_SWEEP_LIST=tools/firstcontact-sweep.txt
+#   export RETRACE_SWEEP_NATIVE=1
+#   export RETRACE_SWEEP_TIMEOUT=600
+#   tools/apple-sweep.sh
+# One row per line: an absolute path, then each argument preceded by a TAB (never a space).
+# apple-sweep.sh runs every row from the repo root, so a relative argument names a repo file.
+# Every row's native output was deterministic over two runs at plan time; its tally goes in the
+# measurements file (t0 M2) and the status log (Task 7).
+/opt/homebrew/bin/rg	--sort	path	-c	stxr	docs/sweep-evidence/2026-10-06-m49-static
+/opt/homebrew/bin/just	--version
+/usr/bin/sqlite3	:memory:	select 6*7, upper('first contact');
+/usr/bin/perl	-le	print join ",", map { $_ * $_ } 1 .. 5
+/usr/bin/ruby	-e	puts (1..5).map { |i| i * i }.join(",")
+/opt/homebrew/bin/jq	-n	1+1
+/opt/homebrew/bin/jq	.name	crates/retrace/tests/fixtures/rung3.json
+/opt/homebrew/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python	-c	print(1)
+/opt/homebrew/bin/python3	-c	print(1)
+/usr/bin/python3	-c	print(1)
+/opt/homebrew/Cellar/node/25.6.1/bin/node	-e	console.log(1)
+/opt/homebrew/bin/node	-e	console.log(1)
+/Applications/Xcode.app/Contents/Developer/usr/bin/git	log	-1	--format=%s	77ec233
+/usr/bin/git	--version
+/usr/bin/swift	--version

@@ -960,4 +960,67 @@ fn main() {
         println!("cargo:warning=SKIPPED the node crash addon: {napi} not found (`brew install node`); \
                   NODE_CRASH_ADDON is None and node_crash_e2e will announce its skip");
     }
+
+    // M49 Task 1 (spec §3b): the first-contact corpus, tier 1 — what a newcomer tries first, one
+    // fixture each, every one's outcome pinned by firstcontact_e2e. C takes the hello_dyn recipe and
+    // C++ the same with -std=c++17 (plain -arch arm64, the real toolchain, libSystem through real
+    // dyld; no -O, so every volatile fault and fc_stack_overflow's recursion survive).
+    let dir = env!("CARGO_MANIFEST_DIR");
+    for name in ["fc_null_load", "fc_null_store", "fc_null_call", "fc_munmapped", "fc_low_store",
+                 "fc_stack_overflow", "fc_uaf", "fc_assert", "fc_sleep", "fc_usleep", "fc_nanosleep",
+                 "fc_mutex", "fc_fileio", "fc_env"] {
+        let src = format!("{dir}/c/{name}.c");
+        let bin = format!("{out}/{name}");
+        println!("cargo:rerun-if-changed={src}");
+        let status = Command::new("clang")
+            .args(["-arch", "arm64", "-o", &bin, &src])
+            .status().expect("clang first-contact fixture");
+        assert!(status.success(), "{name} guest build failed");
+    }
+    for name in ["fc_cpp_hello", "fc_cpp_throw", "fc_cpp_terminate", "fc_cpp_thread", "fc_cpp_sleep"] {
+        let src = format!("{dir}/cpp/{name}.cpp");
+        let bin = format!("{out}/{name}");
+        println!("cargo:rerun-if-changed={src}");
+        let status = Command::new("clang++")
+            .args(["-std=c++17", "-arch", "arm64", "-o", &bin, &src])
+            .status().expect("clang++ first-contact fixture");
+        assert!(status.success(), "{name} guest build failed");
+    }
+    // Rust takes the hello_rust recipe (cargo's own RUSTC, plain aarch64-apple-darwin). The two
+    // harnesses are `rustc --test` builds, which firstcontact_e2e runs with no arguments, as `cargo
+    // test` runs the binary it builds.
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    for (name, harness) in [("fc_rs_null", false), ("fc_rs_sleep", false),
+                            ("fc_rs_tests", true), ("fc_rs_tests_fail", true)] {
+        let src = format!("{dir}/rs/{name}.rs");
+        let bin = format!("{out}/{name}");
+        println!("cargo:rerun-if-changed={src}");
+        let mut rc = Command::new(&rustc);
+        if harness { rc.arg("--test"); }
+        let status = rc.args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+            .status().expect("rustc first-contact fixture");
+        assert!(status.success(), "{name} guest build failed");
+    }
+    // Swift (R11): built only where `swiftc --version` runs; elsewhere each FC_SW_* constant names a
+    // file that does not exist and firstcontact_e2e announces `SKIPPED (no swiftc)` for its row. The
+    // target is pinned to arm64-apple-macosx26.0, what swiftc 6.3.3 chose on the probe host, so the
+    // runtime paths a fixture takes do not move with the SDK. The sources are registered either way,
+    // so an edit to one rebuilds on a machine that has swiftc.
+    let swift = ["fc_sw_hello", "fc_sw_throw", "fc_sw_oob", "fc_sw_unwrap", "fc_sw_sleep", "fc_sw_gcd",
+                 "fc_sw_async"];
+    for name in swift { println!("cargo:rerun-if-changed={dir}/swift/{name}.swift"); }
+    let swiftc = Command::new("swiftc").arg("--version").output().is_ok_and(|o| o.status.success());
+    if swiftc {
+        for name in swift {
+            let src = format!("{dir}/swift/{name}.swift");
+            let bin = format!("{out}/{name}");
+            let status = Command::new("swiftc")
+                .args(["-target", "arm64-apple-macosx26.0", "-o", &bin, &src])
+                .status().expect("swiftc first-contact fixture");
+            assert!(status.success(), "{name} guest build failed");
+        }
+    } else {
+        println!("cargo:warning=SKIPPED the Swift first-contact fixtures: `swiftc --version` did not run; \
+                  firstcontact_e2e will announce SKIPPED (no swiftc) for each Swift row");
+    }
 }

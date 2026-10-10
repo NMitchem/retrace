@@ -343,6 +343,68 @@ pub const TLBIEXEC: &str = concat!(env!("OUT_DIR"), "/tlbiexec");
 pub const TLBIEXEC_FIXTURE: &str = concat!(env!("OUT_DIR"), "/tlbiexec_fixture.bin");
 /// M18 rung 5: a dynamically-linked C guest that `dispatch_async`es onto a global queue.
 pub const DISPATCH_DYN: &str = concat!(env!("OUT_DIR"), "/dispatch_dyn");
+// M49 (spec §3b): the first-contact corpus, tier 1. Each is a program a newcomer tries first;
+// `firstcontact_e2e` pins what retrace does with each one. Sources in `c/`, `cpp/`, `rs/`, `swift/`.
+/// A load at 0x10, a NULL struct-member read (F).
+pub const FC_NULL_LOAD: &str = concat!(env!("OUT_DIR"), "/fc_null_load");
+/// A store through NULL (F).
+pub const FC_NULL_STORE: &str = concat!(env!("OUT_DIR"), "/fc_null_store");
+/// A call through a NULL function pointer (F).
+pub const FC_NULL_CALL: &str = concat!(env!("OUT_DIR"), "/fc_null_call");
+/// A load from a page the program unmapped itself (F).
+pub const FC_MUNMAPPED: &str = concat!(env!("OUT_DIR"), "/fc_munmapped");
+/// A store to 0x8000, retrace's own L2 page table before M49 (F).
+pub const FC_LOW_STORE: &str = concat!(env!("OUT_DIR"), "/fc_low_store");
+/// Unbounded recursion into the main thread's guard page (F).
+pub const FC_STACK_OVERFLOW: &str = concat!(env!("OUT_DIR"), "/fc_stack_overflow");
+/// A write through a freed pointer, then a read of it.
+pub const FC_UAF: &str = concat!(env!("OUT_DIR"), "/fc_uaf");
+/// A failing `assert()`: SIGABRT, 134.
+pub const FC_ASSERT: &str = concat!(env!("OUT_DIR"), "/fc_assert");
+/// `sleep(1)` (S).
+pub const FC_SLEEP: &str = concat!(env!("OUT_DIR"), "/fc_sleep");
+/// `usleep(20000)` (S).
+pub const FC_USLEEP: &str = concat!(env!("OUT_DIR"), "/fc_usleep");
+/// `nanosleep(&30 ms, NULL)` (S).
+pub const FC_NANOSLEEP: &str = concat!(env!("OUT_DIR"), "/fc_nanosleep");
+/// A `pthread_mutex` held across a `pthread_join` while another thread contends for it.
+pub const FC_MUTEX: &str = concat!(env!("OUT_DIR"), "/fc_mutex");
+/// stdio file I/O on a `mkstemp` file.
+pub const FC_FILEIO: &str = concat!(env!("OUT_DIR"), "/fc_fileio");
+/// argv and `getenv("FC_ENV_PROBE")`.
+pub const FC_ENV: &str = concat!(env!("OUT_DIR"), "/fc_env");
+/// iostream hello.
+pub const FC_CPP_HELLO: &str = concat!(env!("OUT_DIR"), "/fc_cpp_hello");
+/// A C++ exception thrown and caught.
+pub const FC_CPP_THROW: &str = concat!(env!("OUT_DIR"), "/fc_cpp_throw");
+/// An uncaught C++ exception: `std::terminate`, SIGABRT, 134.
+pub const FC_CPP_TERMINATE: &str = concat!(env!("OUT_DIR"), "/fc_cpp_terminate");
+/// `std::thread` and `std::mutex`, joined.
+pub const FC_CPP_THREAD: &str = concat!(env!("OUT_DIR"), "/fc_cpp_thread");
+/// `std::this_thread::sleep_for(50 ms)` (S).
+pub const FC_CPP_SLEEP: &str = concat!(env!("OUT_DIR"), "/fc_cpp_sleep");
+/// A Rust `read_volatile` at 0x10, through libstd's SIGSEGV handler (F).
+pub const FC_RS_NULL: &str = concat!(env!("OUT_DIR"), "/fc_rs_null");
+/// `std::thread::sleep(50 ms)` (S).
+pub const FC_RS_SLEEP: &str = concat!(env!("OUT_DIR"), "/fc_rs_sleep");
+/// A `rustc --test` harness: three passing tests and one `should_panic`.
+pub const FC_RS_TESTS: &str = concat!(env!("OUT_DIR"), "/fc_rs_tests");
+/// A `rustc --test` harness with one failing test: exit 101.
+pub const FC_RS_TESTS_FAIL: &str = concat!(env!("OUT_DIR"), "/fc_rs_tests_fail");
+/// Swift hello. This and every `FC_SW_*` file exists only where `swiftc` ran (R11).
+pub const FC_SW_HELLO: &str = concat!(env!("OUT_DIR"), "/fc_sw_hello");
+/// A Swift error thrown and caught.
+pub const FC_SW_THROW: &str = concat!(env!("OUT_DIR"), "/fc_sw_throw");
+/// An array index out of range: a `brk` trap, SIGTRAP, 133.
+pub const FC_SW_OOB: &str = concat!(env!("OUT_DIR"), "/fc_sw_oob");
+/// A force-unwrap of nil: a `brk` trap, SIGTRAP, 133.
+pub const FC_SW_UNWRAP: &str = concat!(env!("OUT_DIR"), "/fc_sw_unwrap");
+/// Foundation's `Thread.sleep(forTimeInterval: 0.05)` (S).
+pub const FC_SW_SLEEP: &str = concat!(env!("OUT_DIR"), "/fc_sw_sleep");
+/// `DispatchQueue.async` onto a serial queue, then a `DispatchGroup` wait.
+pub const FC_SW_GCD: &str = concat!(env!("OUT_DIR"), "/fc_sw_gcd");
+/// async/await with a task group.
+pub const FC_SW_ASYNC: &str = concat!(env!("OUT_DIR"), "/fc_sw_async");
 
 #[cfg(test)]
 mod tests {
@@ -616,6 +678,31 @@ mod tests {
                    "hello_rust must be retrace_arch::CPU_SUBTYPE_ARM64_ALL, got {:#x}", l.cpusubtype);
         assert_ne!(l.cpusubtype & 0x00ff_ffff, retrace_arch::CPU_SUBTYPE_ARM64E,
                    "hello_rust is not arm64e — the ladder's premise is self-built arm64 binaries");
+    }
+
+    #[test]
+    fn first_contact_fixtures_are_built() {
+        // M49 Task 1: proves the build.rs wiring and the path constants; behaviour is
+        // firstcontact_e2e's. Every fixture is a plain-arm64 executable that loads through real
+        // dyld; the Swift ones exist exactly where swiftc runs (R11).
+        let built = |p: &str| {
+            let l = parse_macho(&std::fs::read(p).unwrap_or_else(|e| panic!("{p}: {e}")));
+            assert_eq!(l.dylinker.as_deref(), Some(DYLD_PATH), "{p} must load through real dyld");
+            assert_eq!(l.cpusubtype & 0x00ff_ffff, retrace_arch::CPU_SUBTYPE_ARM64_ALL, "{p} must be plain arm64");
+        };
+        for p in [FC_NULL_LOAD, FC_NULL_STORE, FC_NULL_CALL, FC_MUNMAPPED, FC_LOW_STORE, FC_STACK_OVERFLOW,
+                  FC_UAF, FC_ASSERT, FC_SLEEP, FC_USLEEP, FC_NANOSLEEP, FC_MUTEX, FC_FILEIO, FC_ENV,
+                  FC_CPP_HELLO, FC_CPP_THROW, FC_CPP_TERMINATE, FC_CPP_THREAD, FC_CPP_SLEEP,
+                  FC_RS_NULL, FC_RS_SLEEP, FC_RS_TESTS, FC_RS_TESTS_FAIL] {
+            built(p);
+        }
+        let swift = [FC_SW_HELLO, FC_SW_THROW, FC_SW_OOB, FC_SW_UNWRAP, FC_SW_SLEEP, FC_SW_GCD, FC_SW_ASYNC];
+        if std::process::Command::new("swiftc").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            for p in swift { built(p); }
+        } else {
+            announce("SKIPPED first_contact_fixtures_are_built's Swift half: `swiftc --version` did not \
+                      run, so build.rs built no Swift fixture. The Swift fixtures were NOT checked.");
+        }
     }
 
     #[test]
