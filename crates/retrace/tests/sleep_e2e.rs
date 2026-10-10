@@ -431,6 +431,23 @@ fn a_polling_loop_with_a_short_sleep_waits_for_its_worker_and_terminates() {
     }
 }
 
+/// Ruling T5-I1, where Review Focus 1's two halves meet: a polling loop on a 0-tick sleep. Each
+/// `nanosleep` of 1 ns is due in the very settle that blocked it, so without the yield rule the
+/// poller, the lowest-indexed runnable thread, is picked again at once and the worker it waits on
+/// never runs: the recorder livelocks, and the bound turns that into this test's failure. With it,
+/// the sleeper yields to the next runnable thread after it, and the loop ends as it does natively.
+#[test]
+fn a_polling_loop_on_a_zero_tick_sleep_yields_to_its_worker_and_terminates() {
+    let (out, trace) = records_and_replays_as_native(&["pollzero"], &[]);
+    assert_eq!(out, "pollzero done sum=5000050000\n");
+    let sleeps = semwaits(&trace);
+    assert!(!sleeps.is_empty(), "the loop slept at least once");
+    for l in &sleeps {
+        assert_eq!(l.1, 0, "only main sleeps");
+        assert_sleep_landmark(l, 0, 1);
+    }
+}
+
 /// Review Focus 5: a sleep while a sibling thread is runnable. Main sleeps 1 s; the worker runs
 /// (it prints and exits without blocking) before the clock jumps, so `worker ran` precedes main's
 /// line. The guest's delta across main's sleep is still exactly 1 s: the deadline is fixed at the

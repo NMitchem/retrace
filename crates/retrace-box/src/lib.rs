@@ -7184,7 +7184,12 @@ impl Box_ {
     ///    deadline wakes, in deadline order with ties by thread index, with its primitive's timeout
     ///    answer. A deadline already past at the call (node's 1 ns waits) wakes here, in the settle
     ///    that blocked it.
-    /// 3. **The pick.**
+    /// 3. **The pick.** One exception (M49 Ruling T5-I1): a thread whose sleep
+    ///    (`BlockReason::Sleep`) was due in the very settle that blocked it, a 0-tick or past
+    ///    deadline, yields. The pick is then the next runnable thread after it in index order,
+    ///    wrapping around (`pick_after`), and the sleeper itself only when nothing else can run.
+    ///    Without it, a polling loop on a 0-tick sleep re-picks the poller forever and the thread it
+    ///    waits on never runs (sleep_e2e's `pollzero`). Kevent and Cv waits keep M48's pick.
     /// 4. **The idle jump.** If nothing is runnable and any deadline exists, `synthetic_tsc` jumps so
     ///    that the guest clock reads the earliest of ALL deadlines, workqueue timers and thread
     ///    deadlines alike. Rules 1–2 then run again, and the pick is retried, exactly once. The
@@ -7196,9 +7201,14 @@ impl Box_ {
     /// lets a timer fire or a timed wait end. This is the cooperative scheduler's limit, extended to
     /// time (`docs/current-state.md`).
     pub fn schedule_after_block(&mut self) {
+        // M49 Ruling T5-I1 (rule 3): the thread that blocked was asleep, and rule 2 woke it in this
+        // same settle, so it yields.
+        let cur = self.threads.current();
+        let asleep = matches!(self.threads.state_of(cur), thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. }));
         self.fire_due_timers();
         self.wake_due_threads();
-        let mut next = self.threads.pick_next();
+        let yields = asleep && self.threads.state_of(cur) == thread::ThreadState::Runnable;
+        let mut next = if yields { self.threads.pick_after(cur) } else { self.threads.pick_next() };
         if next.is_none() {
             let earliest = [self.kq.earliest_deadline(), self.threads.earliest_deadline()].into_iter().flatten().min();
             if let Some(deadline) = earliest {

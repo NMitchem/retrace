@@ -540,6 +540,16 @@ impl ThreadTable {
     pub fn pick_next(&self) -> Option<usize> {
         self.threads.iter().position(|t| matches!(t.state, ThreadState::Runnable))
     }
+
+    /// M49 Ruling T5-I1: the next runnable thread AFTER `tid` in index order, wrapping around, with
+    /// `tid` itself last. `Box_::schedule_after_block` picks with this, not `pick_next`, when `tid`'s
+    /// sleep was due in the very settle that blocked it: a poller on a 0-tick sleep is the
+    /// lowest-indexed thread whenever it created the thread it waits on, so `pick_next` would take
+    /// it again at once and the worker would never run. Pure, like `pick_next`.
+    pub fn pick_after(&self, tid: usize) -> Option<usize> {
+        let n = self.threads.len();
+        (1..=n).map(|k| (tid + k) % n).find(|&i| matches!(self.threads[i].state, ThreadState::Runnable))
+    }
 }
 
 #[cfg(test)]

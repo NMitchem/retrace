@@ -264,8 +264,8 @@ pub const FORKFAIL_DYN: &str = concat!(env!("OUT_DIR"), "/forkfail_dyn");
 /// `onens` and `mutex` (spec §3h, Ruling T5-a; see the source's header).
 pub const CONDVAR_DYN: &str = concat!(env!("OUT_DIR"), "/condvar_dyn");
 /// M49: sleep on the synthetic clock by mode — `sleep1`, `usleep`, `nanosleep_null`, `usleep1`,
-/// `onens`, `raw`, `twosleepers`, `pollloop`, `sleepwhilework`, `sigsleeper` and `refuse <what>`
-/// (spec §3f, §4; see the source's header).
+/// `onens`, `raw`, `twosleepers`, `pollloop`, `pollzero`, `sleepwhilework`, `sigsleeper` and
+/// `refuse <what>` (spec §3f, §4; see the source's header).
 pub const SLEEP_DYN: &str = concat!(env!("OUT_DIR"), "/sleep_dyn");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.

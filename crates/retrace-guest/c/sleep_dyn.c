@@ -10,6 +10,7 @@
 //   raw             __semwait_signal on a fresh semaphore for 5 ms, issued by hand: the stub's -1/errno
 //   twosleepers     a 2 s sleeper created first and a 1 s sleeper second; the order they wake in
 //   pollloop        while (!done) usleep(100), waiting on a worker (Review Focus 1)
+//   pollzero        the same loop on nanosleep({0, 1 ns}, NULL), a 0-tick sleep (Ruling T5-I1)
 //   sleepwhilework  main sleeps 1 s while a runnable worker prints and exits (Review Focus 5)
 //   sigsleeper      main signals a thread that sleeps (S5: retrace refuses it at the wake)
 //   refuse <what>   one hand-issued shape the model refuses (S4, R8): relative0, timeout0, mutex,
@@ -80,7 +81,7 @@ static void *sleeper(void *arg) {
     return NULL;
 }
 
-// pollloop: a worker that never blocks; main polls with a short usleep until it is done.
+// pollloop and pollzero: a worker that never blocks; main polls with a short sleep until it is done.
 static atomic_int done;
 static unsigned long long sum;
 static void *summer(void *arg) {
@@ -176,6 +177,12 @@ int main(int argc, char **argv) {
         while (!atomic_load_explicit(&done, memory_order_acquire)) usleep(100);
         pthread_join(t[0], NULL);
         printf("pollloop done sum=%llu\n", sum);
+    } else if (!strcmp(mode, "pollzero")) {
+        pthread_create(&t[0], NULL, summer, NULL);
+        struct timespec z = { 0, 1 };
+        while (!atomic_load_explicit(&done, memory_order_acquire)) nanosleep(&z, NULL);
+        pthread_join(t[0], NULL);
+        printf("pollzero done sum=%llu\n", sum);
     } else if (!strcmp(mode, "sleepwhilework")) {
         pthread_create(&t[0], NULL, printer, NULL);
         uint64_t cost = read_cost();
