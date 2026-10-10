@@ -326,11 +326,33 @@ fn a_wrong_thread_on_a_psynch_cvwait_landmark_is_a_divergence() {
     retag_fixture_and_expect_divergence(retrace_guest::CONDVAR_DYN, &["pingpong"], retrace_arch::SYS_PSYNCH_CVWAIT);
 }
 
+/// M49 Task 5: the same for `__semwait_signal` (334), on `sleep_dyn twosleepers`, whose two
+/// sleeper threads each sleep. Its mirror sits inside the `Syscall` chain after the arm-top
+/// `verify_thread`, so the site count stays seven.
+#[test]
+fn a_wrong_thread_on_a_semwait_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::SLEEP_DYN, &["twosleepers"], retrace_arch::SYS___SEMWAIT_SIGNAL);
+}
+
+/// M49 Task 5: the same for `clock_get_time` (mach_msg2 msgh_id 1000), each sleeper's clock read
+/// before its `sleep`. The mach_msg2 mirror also sits after the arm-top `verify_thread`.
+#[test]
+fn a_wrong_thread_on_a_clock_get_time_landmark_is_a_divergence() {
+    retag_fixture_where_and_expect_divergence(retrace_guest::SLEEP_DYN, &["twosleepers"], "mach_msg2 msgh_id 1000",
+        |num, args| num == (-47i64) as u64 && args[4] >> 32 == 1000);
+}
+
 /// `retag_and_expect_divergence` over any fixture and argv: retag the first `Syscall` landmark for
 /// `num_wanted` to another thread id that genuinely appears in the same trace, and assert replay
 /// refuses it as the schedule. The reasoning for a live id, not a constant, is
 /// `a_wrong_thread_on_replay_is_a_divergence`'s.
 fn retag_fixture_and_expect_divergence(guest: &str, argv: &[&str], num_wanted: u64) {
+    retag_fixture_where_and_expect_divergence(guest, argv, &format!("num {num_wanted}"), |num, _| num == num_wanted);
+}
+
+/// The same, retagging the first `Syscall` landmark `pick(num, args)` selects (M49: a mach_msg2 is
+/// told apart by its `msgh_id`, not its number). `what` names the landmark in the failure text.
+fn retag_fixture_where_and_expect_divergence(guest: &str, argv: &[&str], what: &str, pick: impl Fn(u64, &[u64; 8]) -> bool) {
     let (rec, trace) = util::record_dynamic_args(guest, argv);
     assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
 
@@ -340,8 +362,8 @@ fn retag_fixture_and_expect_divergence(guest: &str, argv: &[&str], num_wanted: u
     ids.sort_unstable(); ids.dedup();
     assert!(ids.len() >= 2, "{guest} {argv:?} must schedule two threads that issue syscalls; got {ids:?}");
 
-    let i = events.iter().position(|e| matches!(e, Event::Syscall { num, .. } if *num == num_wanted))
-        .unwrap_or_else(|| panic!("no Syscall landmark for num {num_wanted} — {guest} {argv:?} no \
+    let i = events.iter().position(|e| matches!(e, Event::Syscall { num, args, .. } if pick(*num, args)))
+        .unwrap_or_else(|| panic!("no Syscall landmark for {what} — {guest} {argv:?} no \
                                    longer reaches the mirror this test exists to cover"));
     let orig = match &events[i] { Event::Syscall { thread, .. } => *thread, _ => unreachable!() };
     let other = *ids.iter().find(|&&t| t != orig).expect("a genuinely live second id, not a constant");
