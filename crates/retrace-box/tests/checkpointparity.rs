@@ -16,6 +16,7 @@
 // current state, not an absence of effort, and it is bounded exactly by what the fixtures reach —
 // the bound is stated under "What this deliberately does NOT do" below, and the guard was proven
 // able to fail by the two M31 t4 mutations recorded there.
+use retrace_box::thread::BlockReason;
 use retrace_box::{Box_, Stop};
 use retrace_guest::{parse_macho, HELLO, LLSC};
 
@@ -180,6 +181,7 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     let excl = b.dbg_excl();
     let kq = b.dbg_kq().clone();
     let jit = b.dbg_jit().clone();
+    let sleep = b.dbg_sleep().clone();
     let mut live_backings = b.dbg_backings();
     live_backings.sort_unstable();
     let next_l3 = b.dbg_next_l3();
@@ -217,6 +219,7 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     assert_eq!(r.dbg_excl(), excl, "{label}: exclusive-monitor shadow (M42)");
     assert_eq!(r.dbg_kq(), &kq, "{label}: the workqueue kqueue (M46)");
     assert_eq!(r.dbg_jit(), &jit, "{label}: the MAP_JIT set and its view (M48)");
+    assert_eq!(r.dbg_sleep(), &sleep, "{label}: the sleep model (M49)");
     let mut restored_backings = r.dbg_backings();
     restored_backings.sort_unstable();
     assert_eq!(restored_backings.len(), live_backings.len(), "{label}: backing count");
@@ -456,4 +459,30 @@ fn a_checkpointed_box_in_a_write_enabled_jit_window_matches_the_box_it_came_from
         "precondition: stamps the restore must agree with, and a no-access head it must not stamp");
 
     assert_checkpoint_parity(b, "jit");
+}
+
+/// M49: the sleeping tier. The sleep model holds a learned clock port, a semaphore port and an
+/// admitted sleep's `cond_sem`, and a second thread is Blocked in `BlockReason::Sleep`. No other
+/// tier makes `sleep` or that block reason non-default, so without this one the `sleep` row
+/// compares Default == Default and a thread table that dropped the deadline would pass.
+#[test]
+fn a_checkpointed_box_with_a_sleeping_thread_matches_the_box_it_came_from() {
+    let loaded = parse_macho(&std::fs::read(HELLO).unwrap());
+    let mut b = Box_::load(&loaded);
+    let _ = b.run(); // mid-run
+    b.learn_clock_port(0x903, retrace_box::sleep::SYSTEM_CLOCK);
+    b.guest_sem_signal([0x1303, 0, 0, 0, 0, 0, 0, 0]);
+    b.dbg_sleep_mut().note_sleep(0x1203);
+    let mut child = b.save_ctx();
+    child.regs.sp_el0 -= 0x2000;
+    let tid = b.threads_mut().spawn(child, (0, 0));
+    b.threads_mut().switch_to(tid);
+    b.threads_mut().block(BlockReason::Sleep { deadline: 0x1234_5678 });
+    b.threads_mut().switch_to(0);
+
+    assert!(b.dbg_sleep().clock_of(0x903).is_some() && format!("{:?}", b.dbg_sleep()).contains(&0x1203u32.to_string()),
+        "precondition: a non-default sleep model");
+    assert_eq!(b.threads().state_of(tid), retrace_box::thread::ThreadState::Blocked(BlockReason::Sleep { deadline: 0x1234_5678 }),
+        "precondition: a thread asleep on its deadline");
+    assert_checkpoint_parity(b, "sleep");
 }
