@@ -54,7 +54,7 @@ fn hinted_anywhere_map_lands_in_the_carveout_hole() {
 }
 
 // (c) touch in the remaining reserved band still demand-commits; (d) a touch in the punched hole
-// outside the new backing is refused (the fatal path is preserved — deallocated space is not memory).
+// outside the new backing is refused (the fault path is preserved — deallocated space is not memory).
 #[test]
 fn hole_outside_backing_is_fatal_reserved_remnants_still_commit() {
     let mut b = boxed();
@@ -64,9 +64,9 @@ fn hole_outside_backing_is_fatal_reserved_remnants_still_commit() {
     // Map only the FRONT of the hole (ANYWHERE hint=base, len 0x10000) -> lands at the hole start.
     let got = b.guest_vm_map(base, 0x10000, true, false);
     assert_eq!(got, base + 0x10000);
-    // (d) the REST of the hole [base+0x20000, base+0x30000) is neither reserved nor backed -> fatal.
+    // (d) the REST of the hole [base+0x20000, base+0x30000) is neither reserved nor backed -> a fault.
     assert!(!b.commit_reserved_page(base + 0x20000),
-        "a hole page outside the new backing must stay fatal (not demand-committable)");
+        "a hole page outside the new backing must stay a fault (not demand-committable)");
     // (c) pages in the surviving reserved remnants still demand-commit.
     assert!(b.commit_reserved_page(base), "a head-remnant page still demand-commits");
     assert!(b.commit_reserved_page(base + 0x30000), "a tail-remnant page still demand-commits");

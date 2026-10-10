@@ -1225,8 +1225,10 @@ fn alloc_pages(len: usize) -> (*mut u8, usize) {
 /// - `guest_mmap_file` runs on record only, and its recorded writes carry the rewritten bytes
 ///   to replay's `guest_mmap_replay` and `apply_and_return`.
 ///
-/// The static `load` path is not a site (R4), so M42's `llsc.s` keeps its real exclusives. Code
-/// a guest writes and then makes executable (JIT) is never rewritten (spec §3e, Left as limits).
+/// The static `load` path is not a site (R4), so M42's `llsc.s` keeps its real exclusives. The
+/// executable-`mmap` hook is shared by both record paths, though: `record_box` serves the static
+/// `record` as well, so a static guest's executable file `mmap` is rewritten too. Code a guest
+/// writes and then makes executable (JIT) is never rewritten (spec §3e, Left as limits).
 ///
 /// # Safety
 /// `host` must be an `alloc_pages` allocation (page-aligned, so `u32`-aligned) of at least `len`
@@ -1936,8 +1938,9 @@ impl Box_ {
     /// [`guest_vm_reserve`](Self::guest_vm_reserve) and is not already backed, back exactly that one
     /// page with a fresh zeroed anon page (`MemFlags::RWX`; stage-1 `ATTR_DATA` governs — a data
     /// page, W^X preserved) and return `true`. A fault outside every reservation (a genuine wild
-    /// pointer) returns `false` and stays fatal: the committer must never materialize untracked
-    /// memory. No TLBI — a fresh IPA the guest never translated (same soundness as the cache pager).
+    /// pointer) returns `false`, and the access stays a fault (since M49, `resolve_stage2`'s F2
+    /// makes it the guest's own): the committer must never materialize untracked memory. No TLBI —
+    /// a fresh IPA the guest never translated (same soundness as the cache pager).
     ///
     /// Deterministic and trace-free: record and replay re-execute the guest's own stores, fault at
     /// the same IPAs in the same order, and commit identical all-zero pages, so nothing about a
@@ -1945,7 +1948,8 @@ impl Box_ {
     pub fn commit_reserved_page(&mut self, ipa: u64) -> bool {
         let page_base = ipa & !(GRANULE as u64 - 1);
         // Strict gate: only pages inside a tracked reservation are demand-committable. Everything
-        // else stays fatal (the dispatch surfaces it via describe_stop) — no wild materialization.
+        // else stays a fault (`resolve_stage2` converts it under M49 F2 or surfaces it via
+        // describe_stop) — no wild materialization.
         if !self.in_reservation(page_base) {
             return false;
         }
@@ -3106,7 +3110,7 @@ impl Box_ {
     /// cover removes the entry; a head/tail overlap trims it; a strictly-interior punch SPLITS it into
     /// two entries — libmalloc's guarded-metadata carveout. The punched pages become genuinely
     /// free-and-unreserved: [`commit_reserved_page`](Self::commit_reserved_page) no longer materializes
-    /// them (a touch there is fatal again, matching deallocated address space) and first-fit placement
+    /// them (a touch there faults again, as deallocated address space does) and first-fit placement
     /// stops treating them as occupied. Deterministic: an identical `(addr, len)` sequence rebuilds the
     /// identical table on record & replay.
     fn subtract_reservations(&mut self, addr: u64, len: u64) {
@@ -6683,8 +6687,9 @@ impl Box_ {
     /// `commit_reserved_page` would back it on first touch because it lies inside a tracked
     /// reservation. A worker-2 stack overrun would then corrupt worker 1's struct in silence. With
     /// the bump the page falls in a hole no reservation covers, so `commit_reserved_page` returns
-    /// `false` for it and the access stays a fatal stage-2 fault — which is the whole point: an
-    /// overrun that faults is a bug you can find.
+    /// `false` for it and the access stays a stage-2 fault (since M49 F2, the guest's own SIGSEGV
+    /// rather than a recorder error) — which is the whole point: an overrun that faults is a bug
+    /// you can find.
     ///
     /// That hole is a gap, not a claim on the address space: nothing marks it forbidden, so a later
     /// ANYWHERE-with-hint placement (`first_fit`) could still fit a small mapping into it, after
@@ -7190,7 +7195,8 @@ impl Box_ {
 
     /// Pick and switch after the running thread blocked or exited.
     ///
-    /// The pick is `ThreadTable::pick_next` — lowest-indexed runnable — which is a pure function of
+    /// The pick is `ThreadTable::pick_next` — lowest-indexed runnable — or, for a sleep due in the
+    /// settle that blocked it, `ThreadTable::pick_after` (rule 3 below). Both are pure functions of
     /// the guest's own syscall sequence. That is what lets record and replay schedule identically
     /// with NOTHING recorded and no trace-format change (symmetry rule 2).
     ///

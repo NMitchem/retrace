@@ -49,6 +49,6 @@ fn the_believed_stack_window_is_reserved_and_the_guard_page_is_not() {
         "libstd's guard page at {guard:#x} must NOT be demand-committable — it must stay unbacked \
          free space so libstd's own PROT_NONE mmap lands there and faults at STAGE 1");
     assert!(!b.commit_reserved_page(guard - GRANULE),
-        "the page below the guard at {:#x} must stay fatal — a frame that vaults the guard is the \
-         documented residual wall, not something to silently back", guard - GRANULE);
+        "the page below the guard at {:#x} must stay uncommittable — a frame that vaults the \
+         guard is the documented residual wall, not something to silently back", guard - GRANULE);
 }

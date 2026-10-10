@@ -735,6 +735,23 @@ mod tests {
         assert_eq!(t.state_of(2), ThreadState::Runnable, "wake takes a sleeper");
     }
 
+    // M49 Ruling T5-I1: `pick_after` wraps. A 0-tick poller ABOVE its worker has nothing runnable
+    // at a higher index, so a `pick_after` that stopped at the end of the table would answer the
+    // poller (or `None`), and the poller would re-pick itself forever. sleep_e2e's `pollzero` has
+    // its poller below the worker, so only this test reaches the wrap.
+    #[test]
+    fn pick_after_wraps_to_a_runnable_thread_at_a_lower_index() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        for _ in 0..2 { t.spawn(ThreadCtx::zeroed(), (0, 0)); }
+        // Main joins the poller (thread 2); thread 1 is the worker. The poller's sleep was due in
+        // the settle that blocked it, so it is runnable again when the pick runs.
+        t.block(BlockReason::Join { target: 2 });
+        assert_eq!(t.pick_after(2), Some(1), "past the poller, wrap to the worker below it");
+        t.switch_to(1);
+        t.block(BlockReason::Wait { addr: 8 });
+        assert_eq!(t.pick_after(2), Some(2), "the poller itself only when nothing else can run");
+    }
+
     #[test]
     fn a_spawned_thread_starts_protected_whatever_its_creator_wrote() {
         // M48 R1, §2c (sprr.out): native's main thread starts protected, and so does a thread

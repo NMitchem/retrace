@@ -44,11 +44,13 @@ const ROWS: &[Row] = &[
           expect: Expect::Pass },
     Row { name: "fc_munmapped", bin: retrace_guest::FC_MUNMAPPED, args: &[],
           expect: Expect::Pass },
-    // Any wall, by design: the store rewrites retrace's L2 table, and whether that is silent
-    // (`MISMATCH record exit 0, native 139`) or loud (`RECORD ERROR: … instruction abort … far/ipa=
-    // 0x4400`) depends on the TLB; 17 and 3 of 20 at plan time, 13 and 7 of 20 at t0 (t0 M1). The empty prefix still
-    // refuses `Pass`, the one outcome only Task 3's A-narrow can produce.
-    Row { name: "fc_low_store", bin: retrace_guest::FC_LOW_STORE, args: &[], expect: Expect::Pass },
+    // Before Task 3 any wall, by design: the store rewrote retrace's L2 table, and whether that
+    // was silent (`MISMATCH record exit 0, native 139`) or loud (`RECORD ERROR: … instruction
+    // abort … far/ipa= 0x4400`) depended on the TLB; 17 and 3 of 20 at plan time, 13 and 7 of 20
+    // at t0 (t0 M1). Task 3's A-narrow (F3) unmaps the table pages at stage 1, so the store is
+    // the crash native takes, and `Pass` is the one outcome only A-narrow can produce.
+    Row { name: "fc_low_store", bin: retrace_guest::FC_LOW_STORE, args: &[],
+          expect: Expect::Pass },
     Row { name: "fc_stack_overflow", bin: retrace_guest::FC_STACK_OVERFLOW, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_uaf", bin: retrace_guest::FC_UAF, args: &[], expect: Expect::Pass },

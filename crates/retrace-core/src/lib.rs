@@ -3310,7 +3310,6 @@ impl ReplaySession {
     /// earlier silent divergence would leave (`Psynch::dbg_plant_waiter`).
     #[doc(hidden)]
     pub fn dbg_psynch_mut(&mut self) -> &mut retrace_box::psynch::Psynch { self.b.dbg_psynch_mut() }
-
     /// Test-only (M49 §4): the sleep model, writable, so `sleep_e2e` can plant the state an earlier
     /// silent divergence would leave and reach the mirrors' refusal paths.
     #[doc(hidden)]
@@ -3427,10 +3426,9 @@ impl ReplaySession {
     /// Single-step exactly `k` instructions into the current landmark's window. Deterministic replay
     /// faults inside the window are resolved by `Box_::resolve_stage2` (a cache-window page-in or a
     /// reservation commit) and the instruction re-stepped, counting zero steps — the method
-    /// `advance` calls. Errs,
-    /// NAMING the window length, if the window-ending trap arrives before `k` retire (no silent
-    /// clamp; the length substring is a UX contract the reverse-stepi relies on). The session is
-    /// spent on Err — the guest is parked mid-window with `k` unsatisfied.
+    /// `advance` calls. Errs, NAMING the window length, if the window-ending trap arrives before
+    /// `k` retire (no silent clamp; the length substring is a UX contract the reverse-stepi relies
+    /// on). The session is spent on Err — the guest is parked mid-window with `k` unsatisfied.
     pub fn step_insns(&mut self, k: u64) -> Result<(), String> {
         for done in 0..k {
             loop {
@@ -3477,7 +3475,8 @@ impl ReplaySession {
                     }
                     // The contract above, enforced (M40 final review): an armed breakpoint fires
                     // before retire, so this is a caller bug, not a fault — its FAR is no IPA, and
-                    // handing it to `page_in_cache` would misread it.
+                    // handing it to `resolve_stage2`, whose pagers read the FAR as one, would
+                    // misread it.
                     if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Breakpoint) {
                         return Err(format!(
                             "breakpoint stop during a watch-aware step at pc {:#x}: breakpoints must \
@@ -3530,8 +3529,8 @@ impl ReplaySession {
 
     /// Single-step to the window-ending trap, returning the window length (instructions retired
     /// before the trap). Faults inside the window are resolved by `Box_::resolve_stage2` and
-    /// re-stepped, exactly as `step_insns` does. Deterministic per (trace, landmark). The session is spent (parked at
-    /// the trap).
+    /// re-stepped, exactly as `step_insns` does. Deterministic per (trace, landmark). The session
+    /// is spent (parked at the trap).
     pub fn window_len_here(&mut self) -> Result<u64, String> {
         let mut n = 0u64;
         loop {

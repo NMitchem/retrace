@@ -287,7 +287,7 @@ mod tests {
     }
 
     // M11's magic assertion moved to `magic_bumped_for_the_m24_trampoline_vector_padding`, renamed
-    // at each bump since (now `magic_bumped_for_the_m47_vm_map_mask`). What is left here is the
+    // at each bump since (now `magic_bumped_for_m49s_si_code_and_exclusive_rewrite`). What is left here is the
     // half that does not go stale: a v4 trace stays rejected.
     #[test]
     fn rejects_v4_traces() {

@@ -11,7 +11,7 @@ use retrace_guest::{parse_macho, HELLO, WILDSTORE};
 const WILD: u64 = 0xB_0000_0000;
 
 // A real guest store to a wild, unreserved, unbacked address must surface as Stop::Other and be
-// REFUSED by commit_reserved_page — proving the fatal data-abort path is preserved (no wild
+// REFUSED by commit_reserved_page — proving the data-abort path is preserved (no wild
 // materialization). This mirrors what Box_::resolve_stage2 does: page_in_cache=false,
 // commit_reserved_page=false, and only then (M49 F2) the conversion.
 #[test]
@@ -30,7 +30,7 @@ fn wild_store_outside_any_reservation_stays_fatal() {
         // The wild store is stage-1-mapped (identity) but stage-2-unbacked => an OUTER abort
         // (Stop::Other), NEVER the INNER stage-1 crash arm — this guards that classification.
         Stop::Fault { pc, esr, far } =>
-            panic!("wild store must stay a fatal stage-2 abort (Stop::Other), not Stop::Fault: pc={pc:#x} esr={esr:#x} far={far:#x}"),
+            panic!("wild store must stay a stage-2 abort (Stop::Other), not Stop::Fault: pc={pc:#x} esr={esr:#x} far={far:#x}"),
         Stop::Step => unreachable!("run() does not single-step"),
     }
 }
@@ -54,6 +54,6 @@ fn commit_reserved_page_gates_strictly_to_tracked_reservations() {
     assert!(!b.commit_reserved_page(base + 0x40000), "an already-committed page must not double-map");
     // A DIFFERENT page inside commits independently (per-page, not per-reservation, granularity).
     assert!(b.commit_reserved_page(base + 0x8000), "a different page in the same reservation commits separately");
-    // A page at/after the reservation end is a wild pointer -> stays fatal.
+    // A page at/after the reservation end is a wild pointer -> stays a fault (M49 F2's to convert).
     assert!(!b.commit_reserved_page(base + 0x100000), "a page outside the reservation must not be materialized");
 }
