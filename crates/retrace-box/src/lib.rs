@@ -6119,8 +6119,12 @@ impl Box_ {
     /// Returns 0, the landmark's own return: the real answer comes at the wake. Both dispatch arms
     /// call this with the same `(num, args)` (symmetry rule 1), and nothing is recorded: the
     /// deadline and the wake are pure functions of box state (rule 2).
+    ///
+    /// An admitted call's `cond_sem` is remembered (Ruling T5-I2): a semaphore trap or a
+    /// `semaphore_destroy` on it is refused from then on (`check_sleep_semaphore`).
     pub fn guest_semwait_signal(&mut self, num: u64, args: [u64; 8]) -> Result<u64, String> {
         let ticks = self.sleep.admit(num, args)?;
+        self.sleep.note_sleep(args[0] as u32);
         let deadline = self.now_guest().saturating_add(ticks);
         self.threads.block(thread::BlockReason::Sleep { deadline });
         Ok(0)
@@ -6130,6 +6134,13 @@ impl Box_ {
     /// `host_get_clock_service` (206) reply. Both Forward arms call this after the reply lands, with
     /// the clock id read from the request before the forward and the port read from the reply.
     pub fn learn_clock_port(&mut self, port: u64, clock_id: u32) { self.sleep.learn_clock_port(port, clock_id); }
+
+    /// M49 Ruling T5-I2: refuse `call` on `port` if an admitted `__semwait_signal` used it as its
+    /// `cond_sem` (`SleepModel::check_sleep_semaphore`). Both Forward arms call this for a
+    /// `semaphore_destroy` (3419) before the forward; the semaphore traps call it themselves.
+    pub fn check_sleep_semaphore(&self, call: &str, port: u32) -> Result<(), String> {
+        self.sleep.check_sleep_semaphore(call, port)
+    }
 
     /// M49 §3f S2 (R7): `clock_get_time` (Mach message 1000) on `port`, answered from the guest
     /// clock as `(tv_sec, tv_nsec)`. Only a SYSTEM_CLOCK port the guest learned from a 206 reply is
@@ -7097,9 +7108,13 @@ impl Box_ {
     /// seven of the family's stubs off libsystem_kernel and they are seven distinct numbers — and
     /// `args[0]` is the port. There is no operation word here to guard.
     pub fn guest_sem_wait(&mut self, args: [u64; 8]) -> u64 {
+        // M49 Ruling T5-I2: a port an admitted sleep used as its cond_sem is refused, by value and
+        // before anything moves, panicking below the trace like this trap's other refusals.
+        self.sleep.check_sleep_semaphore("semaphore_wait_trap (-36)", args[0] as u32)
+            .unwrap_or_else(|m| panic!("{m}"));
         // M49 S4: a port the semaphore traps touched is a semaphore a signal could wake early, so
         // `__semwait_signal` refuses it (`SleepModel::admit`).
-        self.sleep.note_semaphore(args[0]);
+        self.sleep.note_semaphore(args[0] as u32);
         self.threads.block(thread::BlockReason::Sem { port: args[0] });
         0
     }
@@ -7125,7 +7140,10 @@ impl Box_ {
     /// Reads and writes no guest memory, so the recorded event carries no writes and replay's mirror
     /// recomputes this identically from the same `(num, args)`.
     pub fn guest_sem_signal(&mut self, args: [u64; 8]) -> (u64, Vec<usize>) {
-        self.sleep.note_semaphore(args[0]);   // M49 S4, as in `guest_sem_wait`
+        // M49 Ruling T5-I2 and S4, as in `guest_sem_wait`.
+        self.sleep.check_sleep_semaphore("semaphore_signal_trap (-33)", args[0] as u32)
+            .unwrap_or_else(|m| panic!("{m}"));
+        self.sleep.note_semaphore(args[0] as u32);
         let woken = self.threads.unblock_sem_waiters_on(args[0]);
         // **`-33` wakes exactly ONE waiter; the plural case is a DIFFERENT TRAP.** Task 1 §3a read
         // the whole family off libsystem_kernel's own stubs, and `-34` is `_semaphore_signal_all_trap`

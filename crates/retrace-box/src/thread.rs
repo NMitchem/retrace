@@ -115,8 +115,10 @@ pub enum BlockReason {
     /// M49 §3f S3: asleep in `__semwait_signal`'s relative-timeout shape until `deadline`, a
     /// guest-clock value in `Kevent`'s domain (R6). **Keyed by thread, not by port**: every sleeper
     /// passes libc's one `clock_sem`, so a port key would make every sleeper one waiter. Nothing
-    /// signals the semaphore (the model refuses a `cond_sem` the semaphore traps have touched), so
-    /// the deadline is the only wake (`Box_::sleep_timed_out`), and a sleep always has one.
+    /// signals the semaphore, in either order: the model refuses a `cond_sem` the semaphore traps
+    /// touched before the sleep (`SleepModel::admit`), and a semaphore trap or `semaphore_destroy`
+    /// on one an admitted sleep used (`SleepModel::check_sleep_semaphore`, Ruling T5-I2). So the
+    /// deadline is the only wake (`Box_::sleep_timed_out`), and a sleep always has one.
     Sleep { deadline: u64 },
 }
 

@@ -146,6 +146,17 @@ fn learn_clock_service(b: &mut Box_, m: &machmsg::Msg2, clock_id: Option<u32>, r
     }
 }
 
+/// M49 Ruling T5-I2: refuse a `semaphore_destroy` (3419) that names the `cond_sem` of an admitted
+/// `__semwait_signal`, read from the guest's own request before the forward (record) or before the
+/// recorded reply lands (replay). Ok for every other id. Both Forward arms call this with the same
+/// `m`; record panics on an Err and replay reports it as a divergence.
+fn semaphore_destroy_guard(b: &Box_, m: &machmsg::Msg2) -> Result<(), String> {
+    if m.msgh_id != machmsg::SEMAPHORE_DESTROY { return Ok(()); }
+    let port = machmsg::decode_semaphore_destroy(&b.read_guest(m.data, m.send_size as usize))
+        .map_err(|e| format!("semaphore_destroy (3419) decode: {e}"))?;
+    b.check_sleep_semaphore("semaphore_destroy (3419)", port)
+}
+
 fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
@@ -680,6 +691,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             machmsg::check_forward_body(m.msgh_id, &buf)
                                 .unwrap_or_else(|e| panic!("mach_msg2 forward guard: {e}"));
                         }
+                        semaphore_destroy_guard(&b, &m).unwrap_or_else(|e| panic!("{e}"));
                         let clock_id = clock_service_request(&b, &m)
                             .unwrap_or_else(|e| panic!("host_get_clock_service (206) decode: {e}"));
                         eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id);
@@ -2454,6 +2466,12 @@ impl ReplaySession {
                                             machmsg::check_forward_body(m.msgh_id, &buf).map_err(|e| Divergence {
                                                 landmark: self.idx, pc, detail: format!("replay forward guard: {e}") })?;
                                         }
+                                        // M49 Ruling T5-I2: the record arm's destroy guard, the same
+                                        // call before the reply lands.
+                                        semaphore_destroy_guard(&self.b, &m).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!(
+                                                "semaphore_destroy refused on replay, though the recording accepted it \
+                                                 — replay diverged before this landmark: {e}") })?;
                                         // M49 §3f S2: the record arm's clock-port learning, the same
                                         // two calls around the reply landing.
                                         let clock_id = clock_service_request(&self.b, &m).map_err(|e| Divergence {

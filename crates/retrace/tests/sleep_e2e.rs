@@ -308,7 +308,7 @@ fn a_sleep_refused_on_replay_is_a_divergence_naming_it_not_a_panic() {
     let (_, trace) = records_and_replays_as_native(&["usleep"], &[1_000_000]);
     let (i, _, args, ..) = semwaits(&trace).remove(0);
     let mut s = retrace_core::seek(&trace, i, 0).unwrap();
-    s.dbg_sleep_mut().note_semaphore(args[0]);
+    s.dbg_sleep_mut().note_semaphore(args[0] as u32);
     let d = match s.advance() { Err(d) => d, Ok(_) => panic!("the sleep at landmark {i} replayed over a planted semaphore") };
     assert_eq!(d.landmark, i);
     assert!(d.detail.starts_with("__semwait_signal refused on replay, though the recording accepted it")

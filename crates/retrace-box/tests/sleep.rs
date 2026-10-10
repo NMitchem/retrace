@@ -1,8 +1,12 @@
 //! M49 Task 5, box level: `Box_::guest_semwait_signal`, `Box_::guest_clock_get_time` and the sleep
 //! model's field on a static box. A static box has no commpage, so any read of the guest clock
 //! panics with M46's "the guest clock was read on a box with no commpage": that is what lets these
-//! tests prove a refusal comes before the clock is read. The sleep's arithmetic is `sleep.rs`'s
-//! unit tests; the wake, the idle jump and the clock's values are `sleep_e2e`'s, on a dynamic guest.
+//! tests prove a refusal comes before the clock is read. The one test that needs a sleep admitted
+//! loads `hello_dyn` instead (the `gkq.rs` pattern), because admitting one reads the clock. The
+//! sleep's arithmetic is `sleep.rs`'s unit tests; the wake, the idle jump and the clock's values
+//! are `sleep_e2e`'s, on a dynamic guest.
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
 use retrace_arch::{SYS___SEMWAIT_SIGNAL, SYS___SEMWAIT_SIGNAL_NOCANCEL};
 use retrace_box::sleep::{CALENDAR_CLOCK, SYSTEM_CLOCK};
 use retrace_box::thread::{BlockReason, ThreadCtx, ThreadState};
@@ -11,6 +15,12 @@ use retrace_box::Box_;
 fn tb() -> Box_ {
     let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::SPINLOOP).unwrap());
     Box_::load(&loaded)
+}
+
+fn dynbox() -> Box_ {
+    let exe = retrace_guest::parse_macho(&std::fs::read(retrace_guest::HELLO_DYN).unwrap());
+    let dyld = retrace_guest::parse_macho(retrace_guest::slice_arm64e(&std::fs::read(retrace_guest::DYLD_PATH).unwrap()));
+    Box_::load_dynamic(&exe, &dyld, &["hello_dyn".to_string()])
 }
 
 /// libc `nanosleep`'s call for 1 µs on `cond` (sleep-report.md §1).
@@ -57,6 +67,37 @@ fn a_port_either_semaphore_trap_touched_is_refused_as_a_sleep() {
     assert_eq!(b.dbg_sleep().admit(SYS___SEMWAIT_SIGNAL, nanosleep_on(0x1203)), Ok(24), "libc's clock_sem is admitted");
 }
 
+/// Ruling T5-I2, S4's converse: once an admitted sleep has used a `cond_sem`, either semaphore trap
+/// on it is refused by value, naming the trap and the port, before anything moves: the sleep has
+/// no semaphore wake, so the trap's effect on it would be lost with record and replay agreeing.
+/// `semaphore_destroy` (3419) is refused through the same check, which both Forward arms call. A
+/// port no sleep used is untouched.
+#[test]
+fn a_semaphore_trap_on_a_cond_sem_an_admitted_sleep_used_is_refused_by_value() {
+    let mut b = dynbox();
+    assert_eq!(b.guest_semwait_signal(SYS___SEMWAIT_SIGNAL, nanosleep_on(0x1203)), Ok(0));
+    assert!(matches!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Sleep { .. })), "main sleeps");
+    let model = b.dbg_sleep().clone();
+    let refusal = |call: &str| format!(
+        "M49: semwait {call} on port 0x1203, the cond_sem of an admitted __semwait_signal: the model's \
+         sleep has no semaphore wake, so what this does to the sleep is not modelled.");
+    for call in ["semaphore_signal_trap (-33)", "semaphore_wait_trap (-36)"] {
+        let args = [0x1203, 0, 0, 0, 0, 0, 0, 0];
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            if call.starts_with("semaphore_wait") { b.guest_sem_wait(args); } else { b.guest_sem_signal(args); }
+        }));
+        let e = r.expect_err(call);
+        assert_eq!(e.downcast_ref::<String>().map(String::as_str), Some(refusal(call).as_str()), "{call}");
+        assert_eq!(b.dbg_sleep(), &model, "{call}: the model is unchanged");
+        assert!(matches!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Sleep { .. })),
+                "{call}: the sleeper is untouched");
+    }
+    assert_eq!(b.check_sleep_semaphore("semaphore_destroy (3419)", 0x1203),
+               Err(refusal("semaphore_destroy (3419)")));
+    assert_eq!(b.check_sleep_semaphore("semaphore_destroy (3419)", 0x1303), Ok(()), "a port no sleep used");
+    assert_eq!(b.guest_sem_signal([0x1303, 0, 0, 0, 0, 0, 0, 0]), (0, vec![]), "a port no sleep used");
+}
+
 /// S2 (R7): `clock_get_time` answers only a SYSTEM_CLOCK port a 206 reply named. Each refusal
 /// comes before the clock is read (a static box would panic reading it).
 #[test]
@@ -83,6 +124,7 @@ fn the_learned_ports_and_semaphores_survive_a_checkpoint() {
     b.learn_clock_port(0x903, SYSTEM_CLOCK);
     b.learn_clock_port(0xa03, CALENDAR_CLOCK);
     b.guest_sem_signal([0x1303, 0, 0, 0, 0, 0, 0, 0]);
+    b.dbg_sleep_mut().note_sleep(0x1203);   // as an admitted sleep would (Ruling T5-I2)
     let model = b.dbg_sleep().clone();
     let st = b.checkpoint();
     drop(b); // one VM per process
@@ -90,6 +132,7 @@ fn the_learned_ports_and_semaphores_survive_a_checkpoint() {
     assert_eq!(r.dbg_sleep(), &model, "the model is carried (BoxState::sleep)");
     assert_eq!(r.dbg_sleep().clock_of(0x903), Some(SYSTEM_CLOCK));
     assert!(r.dbg_sleep().admit(SYS___SEMWAIT_SIGNAL, nanosleep_on(0x1303)).is_err(), "the semaphore is remembered");
+    assert!(r.check_sleep_semaphore("semaphore_wait_trap (-36)", 0x1203).is_err(), "the sleep's cond_sem is remembered");
     assert!(r.dbg_internal_state().contains("sleep=SleepModel"), "{}", r.dbg_internal_state());
 }
 

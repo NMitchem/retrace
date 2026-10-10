@@ -1,6 +1,7 @@
 //! M49 §3f (S2–S4): the pure half of the sleep model. It holds `__semwait_signal`'s accepted shape
 //! and its refusals by value, the clock ports learned from `host_get_clock_service` replies, the
-//! ports the guest has used with the mach semaphore traps, and the 24 MHz arithmetic the sleep and
+//! ports the guest has used with the mach semaphore traps, the `cond_sem`s its admitted sleeps
+//! named (refused to those traps and to `semaphore_destroy`), and the 24 MHz arithmetic the sleep and
 //! `clock_get_time` share. No guest memory and no clock: `Box_::guest_semwait_signal` and
 //! `Box_::guest_clock_get_time` add `now_guest()` and the thread table.
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,8 +43,12 @@ pub struct SleepModel {
     clock_ports: BTreeMap<u64, u32>,
     /// Every port the guest has passed to `semaphore_wait_trap` (-36) or `semaphore_signal_trap`
     /// (-33). A `__semwait_signal` on one of these is a real semaphore wait that a signal could
-    /// end early, which the model does not have (S4).
-    sem_ports: BTreeSet<u64>,
+    /// end early, which the model does not have (S4). Keyed by the 32-bit name `admit` reads.
+    sem_ports: BTreeSet<u32>,
+    /// M49 Ruling T5-I2, S4's converse: every `cond_sem` an admitted `__semwait_signal` named. The
+    /// model's sleep has no semaphore wake, so a semaphore trap or a `semaphore_destroy` (3419) on
+    /// one of these is refused by value (`check_sleep_semaphore`) rather than losing its effect.
+    sleep_sems: BTreeSet<u32>,
 }
 
 impl SleepModel {
@@ -54,7 +59,21 @@ impl SleepModel {
     pub fn clock_of(&self, port: u64) -> Option<u32> { self.clock_ports.get(&port).copied() }
 
     /// M49 S4: the guest used `port` with a mach semaphore trap.
-    pub fn note_semaphore(&mut self, port: u64) { self.sem_ports.insert(port); }
+    pub fn note_semaphore(&mut self, port: u32) { self.sem_ports.insert(port); }
+
+    /// M49 Ruling T5-I2: an admitted `__semwait_signal` slept on `cond`.
+    pub fn note_sleep(&mut self, cond: u32) { self.sleep_sems.insert(cond); }
+
+    /// M49 Ruling T5-I2: refuse `call` (a semaphore trap or `semaphore_destroy`, named with its
+    /// number) on a `port` an admitted sleep used as its `cond_sem`. The sleep never waits on the
+    /// semaphore, so a signal meant to wake it would be lost, a wait would not consume what the
+    /// sleep left, and a destroy would not end it, with record and replay agreeing.
+    pub fn check_sleep_semaphore(&self, call: &str, port: u32) -> Result<(), String> {
+        if !self.sleep_sems.contains(&port) { return Ok(()); }
+        Err(format!("M49: semwait {call} on port {port:#x}, the cond_sem of an admitted __semwait_signal: \
+                     the model's sleep has no semaphore wake, so what this does to the sleep is not \
+                     modelled."))
+    }
 
     /// M49 S3–S4 (R8): admit a `__semwait_signal` (334) or refuse it by value. The accepted shape
     /// is libc `nanosleep`'s (`sleep-report.md` §1): `mutex_sem` 0, `timeout` 1, `relative` 1,
@@ -101,7 +120,7 @@ impl SleepModel {
             return Err(format!("M49: semwait tv_nsec {nsec}: outside 0..{NSEC_PER_SEC}; native answers \
                                 EINVAL (sleep_dyn `refuse nsec`), which is not modelled. {shown}"));
         }
-        if self.sem_ports.contains(&(cond as u64)) {
+        if self.sem_ports.contains(&cond) {
             return Err(format!("M49: semwait cond_sem {cond:#x} was used with semaphore_wait_trap (-36) or \
                                 semaphore_signal_trap (-33): a semaphore a signal could wake early, which \
                                 is not modelled. {shown}"));

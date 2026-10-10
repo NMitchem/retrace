@@ -469,6 +469,25 @@ pub fn decode_clock_service_request(buf: &[u8]) -> Result<u32, String> {
     Ok(u32_at(buf, 32))
 }
 
+/// `semaphore_destroy` (task subsystem base 3400, slot 19), forwarded (`FORWARD_ALLOWLIST`).
+pub const SEMAPHORE_DESTROY: u32 = 3419;
+
+/// M49 Ruling T5-I2: the semaphore a `semaphore_destroy` (3419) request names, so both Forward arms
+/// can refuse one an admitted sleep used before it is forwarded. Measured (task-5-report.md, Fix
+/// round 1): 40 bytes, COMPLEX, header(24) + descriptor_count 1 at 24 + one PORT descriptor
+/// (type byte 0 at offset 39, MOVE_SEND) whose name is at offset 28 — the 206 reply's layout.
+pub fn decode_semaphore_destroy(buf: &[u8]) -> Result<u32, String> {
+    if buf.len() < 40 { return Err(format!("semaphore_destroy request is {} bytes, < 40", buf.len())); }
+    if u32_at(buf, 20) != SEMAPHORE_DESTROY {
+        return Err(format!("msgh_id {} is not semaphore_destroy (3419)", u32_at(buf, 20)));
+    }
+    if u32_at(buf, 0) & MACH_MSGH_BITS_COMPLEX == 0 || u32_at(buf, 24) != 1 || buf[39] != 0 {
+        return Err(format!("semaphore_destroy request is not one PORT descriptor: bits {:#x}, count {}, type {}",
+                           u32_at(buf, 0), u32_at(buf, 24), buf[39]));
+    }
+    Ok(u32_at(buf, 28))
+}
+
 /// M49 S2: the clock port a successful 206 reply carries: COMPLEX, `msgh_id` 306, one PORT
 /// descriptor (type byte 0 at offset 39) whose name is at offset 28. None for anything else, such
 /// as the 36-byte mig_reply_error a failed 206 answers with.
@@ -567,7 +586,22 @@ mod tests {
     fn semaphore_destroy_is_forwarded_as_semaphore_create_is() {
         // M48 (walls.md §1 row 2): libuv's uv_sem_destroy, the mirror of 3418.
         assert!(matches!(route(&msg(3419, 0x203, KOBJ), Some(0x203)), Route::Forward("semaphore_destroy")));
-        assert!(check_forward_body(3419, &[]).is_ok(), "3419 has no body-level check");
+        assert!(check_forward_body(3419, &[]).is_ok(), "3419 has no box-free body-level check");
+    }
+    /// M49 Ruling T5-I2: the 3419 request as measured (task-5-report.md, Fix round 1), naming the
+    /// semaphore 0x1203, and each field the decoder refuses on.
+    #[test]
+    fn decode_semaphore_destroy_reads_the_measured_request() {
+        let req: [u8; 40] = [0x13, 0x15, 0x00, 0x80, 0x28, 0, 0, 0, 0x03, 0x02, 0, 0, 0x03, 0x17, 0, 0,
+                             0, 0, 0, 0, 0x5b, 0x0d, 0, 0, 0x01, 0, 0, 0, 0x03, 0x12, 0, 0,
+                             0, 0, 0, 0, 0, 0, 0x11, 0x00];
+        assert_eq!(decode_semaphore_destroy(&req), Ok(0x1203));
+        assert!(decode_semaphore_destroy(&req[..39]).unwrap_err().contains("39 bytes, < 40"));
+        let with = |o: usize, v: u8| { let mut r = req; r[o] = v; r };
+        assert!(decode_semaphore_destroy(&with(20, 0x5a)).unwrap_err().contains("msgh_id 3418 is not"));
+        assert!(decode_semaphore_destroy(&with(3, 0)).unwrap_err().contains("not one PORT descriptor"));
+        assert!(decode_semaphore_destroy(&with(24, 2)).unwrap_err().contains("count 2"));
+        assert!(decode_semaphore_destroy(&with(39, 1)).unwrap_err().contains("type 1"));
     }
     #[test]
     fn everything_else_fails_loudly() {
