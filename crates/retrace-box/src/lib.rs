@@ -2020,12 +2020,20 @@ impl Box_ {
     /// The next `run()` executes that slot's `hvc #0` and returns `Stop::Fault` through the arm a
     /// stage-1 fault takes, so `signal_of_esr`, `deliver_signal_to` and `Event::Crash` run as they
     /// do for any stage-1 fault. `Err` names why the stop stays loud.
+    ///
+    /// A FAR with a top-byte tag (a TBI0 pointer) is refused before the lookup (M49 final review
+    /// M1). Both pagers were handed the raw FAR and decline a tagged address they would own
+    /// untagged, so converting it could turn a reservation the committer should have backed into a
+    /// SIGSEGV native never takes. The stop stays the recorder error it was before M49; stripping
+    /// the tag for the pagers is owed.
     fn convert_stage2_abort(&mut self, esr: u64) -> Result<Stage2, String> {
         let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
         let esr1 = retrace_arch::stage2_abort_as_stage1(esr, cpsr)?;
         let far = self.last_far;
-        // A tagged pointer's top byte is not part of the walk (TBI0), so strip it for the lookup.
-        let ipa = self.va_to_ipa(far & excl::TAG_MASK).ok_or_else(|| format!(
+        if far & !excl::TAG_MASK != 0 {
+            return Err(format!("FAR {far:#x} carries a top-byte tag, which the pagers did not strip"));
+        }
+        let ipa = self.va_to_ipa(far).ok_or_else(|| format!(
             "stage 1 has no leaf for {far:#x}, so the walk that missed stage 2 was not the guest's"))?;
         if self.host_span(ipa).is_some() {
             return Err(format!("IPA {ipa:#x} is backed, so stage 2 and the box's backings disagree"));

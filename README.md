@@ -59,7 +59,9 @@ script.
   a synthetic clock, so a 2-second timer or `sleep(2)` takes no wall-clock time.
 - Signals reach the thread they were sent to, through the handler the program installed.
 - A crash is an ordinary recording that ends at the fault, a NULL dereference included, and a
-  handler the program installed gets the signal, code and address it would get natively.
+  handler the program installed gets the signal, code and address it would get natively, except
+  after a jump into unbacked memory below 64 GiB, where it gets SIGBUS for native's SIGSEGV
+  ([Known limits](docs/current-state.md#known-limits) has this and the other edge cases).
 - JIT code: retrace models Apple's per-thread JIT write protection, so you can reverse-continue into
   code V8 compiled at run time.
 - `retrace gdbserver` speaks gdb-remote to lldb: continue and step in both directions, breakpoints,

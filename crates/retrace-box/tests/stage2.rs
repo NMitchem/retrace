@@ -44,6 +44,25 @@ fn a_wild_el0_store_converts_to_the_stage1_fault_native_takes() {
     }
 }
 
+/// M49 final review M1: a store through a top-byte-tagged pointer to the same unbacked address is
+/// not converted. `wildstore.s`'s `mov w1, #0x99` is patched to `movk x0, #0x5a00, lsl #48`, so
+/// the `strb` goes through 0x5a00_000B_0000_0000; TBI0 lets stage 1 ignore the tag, and stage 2
+/// misses at 0xB_0000_0000 as before. The pagers see the tagged FAR, so F2 must leave the stop the
+/// loud recorder error it was before M49 rather than a SIGSEGV.
+#[test]
+fn a_stage2_abort_through_a_tagged_pointer_stays_loud() {
+    const TAGGED: u64 = 0x5a00_0000_0000_0000 | WILD;
+    let mut b = boxed(WILDSTORE);
+    let entry = b.pc();
+    b.dbg_write_va(entry + 4, &0xf2eb_4000u32.to_le_bytes()).unwrap(); // movk x0, #0x5a00, lsl #48
+    let Stop::Other { esr } = b.run() else { panic!("the tagged wild store must be a stage-2 abort") };
+    match b.resolve_stage2(esr) {
+        Stage2::Unhandled(why) => assert!(why.contains(&format!("FAR {TAGGED:#x} carries a top-byte tag")),
+            "the refusal names the tagged FAR: {why}"),
+        other => panic!("a tagged FAR must stay loud, got {other:?}"),
+    }
+}
+
 /// Task 3 (F3, R3): stage 1 leaves page 0, the L2 and L1 table pages and the L3 window unmapped,
 /// and keeps everything else in block 0 (the TSD, the stack's neighbourhood) as it was.
 #[test]
