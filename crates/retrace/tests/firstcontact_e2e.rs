@@ -5,8 +5,10 @@
 //! - the recording exits as native did and prints what native printed (through `canonical`, which
 //!   masks libtest's run-dependent figures, Ruling A1);
 //! - both replays reproduce the recording's exit status and stdout byte for byte;
-//! - when native dies by a signal, the trace's terminal event carries that signal: `Event::Crash`
-//!   (through `signal_of_esr`) for a fault, `Event::Signal` for a raise (CLAUDE.md's distinction).
+//! - when native dies by a signal, the trace's terminal event is of the right kind and carries that
+//!   signal (spec §3b, CLAUDE.md's distinction): `Event::Signal` only for SIGABRT (6, raised by
+//!   `abort`), `Event::Crash` (through `signal_of_esr`) for every other signal, which is a hardware
+//!   fault. The wrong kind is a named `MISMATCH terminal kind`, never a pass.
 //!
 //! Otherwise the outcome is the first difference, as one line (`judge`): the recorder's `RECORD
 //! ERROR` line, `PANIC` and the recorder's or replayer's panic message, `DIVERGENCE` and a replay's
@@ -190,15 +192,19 @@ fn panic_message(stderr: &str) -> Option<String> {
 
 /// `None` when the recording's terminal event carries native's signal `want`, else what it carries.
 fn terminal_mismatch(trace: &Path, want: i32) -> Option<String> {
+    // Only abort() raises (SIGABRT); every other fatal signal a fixture dies of is a hardware fault.
+    let raised = want == 6;
     let (events, torn) = retrace_trace::Reader::open_checked(trace).expect("read the recording");
     let got = match events.iter().rev().find(|e| !matches!(e, Event::Snapshot { .. })) {
         _ if torn => "a torn trace".to_owned(),
         Some(Event::Crash { esr, .. }) => {
             let sig = retrace_arch::signal_of_esr(*esr).0;
+            if raised { return Some(format!("MISMATCH terminal kind: native {want} (expected Signal), trace Crash {sig} esr={esr:#x}")); }
             if sig as i32 == want { return None; }
             format!("Crash {sig} esr={esr:#x}")
         }
         Some(Event::Signal { sig, .. }) => {
+            if !raised { return Some(format!("MISMATCH terminal kind: native {want} (expected Crash), trace Signal {sig}")); }
             if *sig as i32 == want { return None; }
             format!("Signal {sig}")
         }
