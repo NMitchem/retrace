@@ -37,20 +37,20 @@ struct Row { name: &'static str, bin: &'static str, args: &'static [&'static str
 const ROWS: &[Row] = &[
     // C (the hello_dyn recipe).
     Row { name: "fc_null_load", bin: retrace_guest::FC_NULL_LOAD, args: &[],
-          expect: Expect::Wall("RECORD ERROR: non-syscall exit: data abort (EC=0x24 ISS=0x1c88007 FSC=0x7)") },
+          expect: Expect::Pass },
     Row { name: "fc_null_store", bin: retrace_guest::FC_NULL_STORE, args: &[],
-          expect: Expect::Wall("RECORD ERROR: non-syscall exit: data abort (EC=0x24 ISS=0x1c88047 FSC=0x7)") },
+          expect: Expect::Pass },
     Row { name: "fc_null_call", bin: retrace_guest::FC_NULL_CALL, args: &[],
-          expect: Expect::Wall("MISMATCH terminal signal: native 11, trace Crash 10 esr=0x8200000f") },
+          expect: Expect::Pass },
     Row { name: "fc_munmapped", bin: retrace_guest::FC_MUNMAPPED, args: &[],
-          expect: Expect::Wall("RECORD ERROR: non-syscall exit: data abort (EC=0x24 ISS=0x1080007 FSC=0x7)") },
+          expect: Expect::Pass },
     // Any wall, by design: the store rewrites retrace's L2 table, and whether that is silent
     // (`MISMATCH record exit 0, native 139`) or loud (`RECORD ERROR: … instruction abort … far/ipa=
     // 0x4400`) depends on the TLB; 17 and 3 of 20 at plan time, 13 and 7 of 20 at t0 (t0 M1). The empty prefix still
     // refuses `Pass`, the one outcome only Task 3's A-narrow can produce.
-    Row { name: "fc_low_store", bin: retrace_guest::FC_LOW_STORE, args: &[], expect: Expect::Wall("") },
+    Row { name: "fc_low_store", bin: retrace_guest::FC_LOW_STORE, args: &[], expect: Expect::Pass },
     Row { name: "fc_stack_overflow", bin: retrace_guest::FC_STACK_OVERFLOW, args: &[],
-          expect: Expect::Wall("RECORD ERROR: non-syscall exit: data abort (EC=0x24 ISS=0x1c88047 FSC=0x7)") },
+          expect: Expect::Pass },
     Row { name: "fc_uaf", bin: retrace_guest::FC_UAF, args: &[], expect: Expect::Pass },
     Row { name: "fc_assert", bin: retrace_guest::FC_ASSERT, args: &[],
           expect: Expect::Wall("MISMATCH record stdout at line 2: native <eof>, record \"Assertion failed:") },
@@ -75,7 +75,7 @@ const ROWS: &[Row] = &[
           expect: Expect::Wall("RECORD ERROR: unsupported mach_msg2 at pc <addr>: msgh_id 1000 ") },
     // Rust (cargo's own rustc).
     Row { name: "fc_rs_null", bin: retrace_guest::FC_RS_NULL, args: &[],
-          expect: Expect::Wall("RECORD ERROR: non-syscall exit: data abort (EC=0x24 ISS=0x1c88007 FSC=0x7)") },
+          expect: Expect::Pass },
     Row { name: "fc_rs_sleep", bin: retrace_guest::FC_RS_SLEEP, args: &[],
           expect: Expect::Wall("RECORD ERROR: unsupported mach_msg2 at pc <addr>: msgh_id 1000 ") },
     Row { name: "fc_rs_tests", bin: retrace_guest::FC_RS_TESTS, args: &[],

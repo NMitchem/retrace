@@ -207,12 +207,17 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // never consulted sigtable at all, so a guest that installed a SIGSEGV handler and then
             // faulted was recorded as a terminal crash with its handler silently skipped.
             //
-            // Only Stop::Fault is touched. Demand paging (page_in_cache, commit_reserved_page)
-            // arrives as Stop::Other — a stage-2 abort — so this cannot steal a demand-paging case,
-            // for exactly the reason M6's arm couldn't.
+            // Only Stop::Fault is touched. Demand paging arrives as Stop::Other, a stage-2 abort,
+            // and `Box_::resolve_stage2` (M49 F1) settles it before any Stop::Fault exists: a
+            // page-in or a commit re-runs the instruction, and only a touch both pagers declined is
+            // converted (M49 F2) into the stage-1 fault this arm then sees. So this still cannot
+            // steal a demand-paging case, for exactly the reason M6's arm couldn't.
             Stop::Fault { pc, esr, far } => {
                 let (sig, si_code) = retrace_arch::signal_of_esr(esr);
-                if let retrace_box::Disposition::Handler(handler) = b.sigtable().action(sig).disp {
+                // M49 Ruling T3-b: the box answers the disposition AND whether the handler's frame
+                // can be pushed. A frame on memory nothing backs is native's kill, so the fault is
+                // then a crash (`faultcase_dyn deeprec h`).
+                if let Some(handler) = b.fault_handler(thread as usize, sig) {
                     assert!(!b.threads().is_blocked_for(thread as usize, sig),
                         "raising blocked signal {sig} synchronously is not modelled: a fault cannot \
                          be deferred, POSIX leaves it undefined, and Darwin force-delivers. M11 \
@@ -3027,13 +3032,13 @@ impl ReplaySession {
                     // serviced sigaction mirror keeps in step; that is what makes a guest which
                     // installed a handler take this branch on both sides.
                     let (sig, si_code) = retrace_arch::signal_of_esr(esr);
-                    if matches!(self.b.sigtable().action(sig).disp,
-                                retrace_box::Disposition::Handler(_)) {
-                        // M16 Task 8: a hardware fault has no target port to resolve — it is always
-                        // attributed to whichever thread's vCPU context trapped — so `current` is
-                        // permanently correct here, matching record's fault arm, which tags its
-                        // SignalDelivery with the live `thread`.
-                        let cur = self.b.threads().current();
+                    // M16 Task 8: a hardware fault has no target port to resolve — it is always
+                    // attributed to whichever thread's vCPU context trapped — so `current` is
+                    // permanently correct here, matching record's fault arm, which tags its
+                    // SignalDelivery with the live `thread`.
+                    let cur = self.b.threads().current();
+                    // M49 Ruling T3-b: the question record's arm asks, of the same box state.
+                    if self.b.fault_handler(cur, sig).is_some() {
                         return self.mirror_delivery(cur, sig, si_code, far, esr, far, pc);
                     }
                     // M6 mirror of record's crash arm. The triple compare IS the divergence check

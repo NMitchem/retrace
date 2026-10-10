@@ -6,10 +6,10 @@
 // there, so this is the guest that proves the frame retrace builds satisfies the trampoline that
 // actually ships.
 //
-// GARBAGE_VA has bit 46 set, exactly as crashy.c's does (L1 index 0x400, never mapped; < 2^47).
-// Only a STAGE-1 translation fault reaches Stop::Fault, the stop the delivery arm consults. A VA
-// below 2^36 is stage-1-mapped but stage-2-unbacked => an OUTER abort => Stop::Other, which is
-// fatal and would kill the recording before any handler could run.
+// GARBAGE_VA has bit 46 set, exactly as crashy.c's does (L1 index 0x400, never mapped; < 2^47), so
+// the store takes a STAGE-1 translation fault and reaches Stop::Fault, the stop the delivery arm
+// consults. (Before M49 a VA below 2^36 took a stage-2 abort instead and killed the recording;
+// M49 F2 converts that into the same stop, but this fixture keeps the address it was written for.)
 #include <stdio.h>
 #include <signal.h>
 #include <stdint.h>

@@ -4854,6 +4854,36 @@ impl Box_ {
     /// must not — see `choose_frame_base`, which is the only real consumer.
     pub fn on_altstack(&self) -> bool { self.on_altstack_of(self.threads.current()) }
 
+    /// M49 Ruling T3-b: the handler a hardware fault on thread `tid` runs, or `None` when the fault
+    /// is terminal. A handler runs only if its frame can be pushed. When a page of
+    /// `[frame_base, frame_base + FRAME_LEN)` is neither backed nor inside a reservation, the kernel
+    /// cannot build the frame and the process dies of the signal. Native shows this:
+    /// `faultcase_dyn deeprec h`, a stack overflow with a handler and no alternate stack, exits 139.
+    /// Before M49 that fault never got here (it was a recorder error). F2 brings it, and
+    /// `deliver_signal_to` would panic in `write_guest` on the unbacked frame.
+    ///
+    /// `frame_base` is `choose_frame_base`'s, computed as `deliver_signal_to` computes it, from the
+    /// live SP_EL0 for the running thread and the saved one otherwise (`on_altstack_of`'s
+    /// discipline). A reservation page counts as pushable, which leaves `write_guest`'s existing
+    /// panic on an uncommitted one as it was: unmeasured, and unchanged by M49.
+    pub fn fault_handler(&self, tid: usize, sig: u64) -> Option<u64> {
+        let act = self.sigtable.action(sig);
+        let Disposition::Handler(handler) = act.disp else { return None };
+        let sp = if tid == self.threads.current() {
+            self.vcpu.get_sys(sysreg::SP_EL0).unwrap()
+        } else {
+            self.threads.ctx_of(tid).regs.sp_el0
+        };
+        let (base, _) = choose_frame_base(sp, act, self.threads.altstack_of(tid), self.on_altstack_of(tid));
+        let g = GRANULE as u64;
+        let mut page = base & !(g - 1);
+        while page < base + FRAME_LEN as u64 {
+            if self.host_span(page).is_none() && !self.in_reservation(page) { return None; }
+            page += g;
+        }
+        Some(handler)
+    }
+
     /// The saved PSTATE at the current trap (SPSR_EL1) — the sibling of `position()`'s ELR_EL1.
     pub fn spsr(&self) -> u64 { self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap() }
 
