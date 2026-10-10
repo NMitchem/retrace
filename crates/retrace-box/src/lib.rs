@@ -798,6 +798,26 @@ const WQ_MAX_WORKERS_PER_REQUEST: u64 = 64;
 #[derive(Debug)]
 pub enum Stop { Syscall { num: u64, args: [u64;8] }, Fault { pc: u64, esr: u64, far: u64 }, Other { esr: u64 }, Step }
 
+/// M49 §3d F1: what [`Box_::resolve_stage2`] made of a `Stop::Other`. Record, replay and the four
+/// step loops in `retrace-core` all ask that one method, so they decide alike by construction
+/// (symmetry rule 1) rather than by six copies of a chain agreeing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stage2 {
+    /// A pager handled it: `page_in_cache` staged a shared-cache page (`committed: false`), or
+    /// `commit_reserved_page` committed a reservation page (`committed: true`). Nothing retired;
+    /// the caller re-runs or re-steps the instruction.
+    Resolved { committed: bool },
+    /// M49 F2: an EL0 translation fault at an address nothing backs, turned into the stage-1 abort
+    /// native takes. The guest is parked at its EL1 vector (`VBAR_EL1 + 0x400`) with ELR, SPSR, FAR
+    /// and ESR_EL1 written, exactly as a stepped stage-1 fault leaves it (spike F2), so the next
+    /// `run()` returns `Stop::Fault { pc, esr, far }` with these values. M49 Task 3 makes this
+    /// reachable; until then it is never returned.
+    Converted { pc: u64, esr: u64, far: u64 },
+    /// Nothing handled it. The string is the caller's error text: `describe_stop`, plus M49 F2's
+    /// reason when F2 looked at the stop and declined it.
+    Unhandled(String),
+}
+
 /// A complete, in-memory-only capture of `Box_`'s internal state at an ARBITRARY position — unlike
 /// `Event::Snapshot` (the trace format), which is only correct to restore from at landmark 0.
 /// Never persisted, never enters a trace file. See the M4 design spec for why each field is here.
@@ -1881,6 +1901,19 @@ impl Box_ {
     /// (`Stop::Other`). The record/replay dispatch feeds this to [`page_in_cache`](Self::page_in_cache)
     /// to service cache-window stage-2 faults.
     pub fn fault_ipa(&self) -> u64 { self.last_far }
+
+    /// M49 §3d F1: resolve a `Stop::Other` that is a stage-2 abort. This is the one copy of the
+    /// chain the record loop, replay's `advance` and the four step loops each used to spell out. In
+    /// order: the shared-cache pager, then the reservation committer; each declines what is not its
+    /// own. `esr` is the stop's own syndrome (HVF's ESR_EL2), which the box does not keep. Below the
+    /// trace: every input is box state rebuilt identically on both sides, so nothing about the
+    /// decision is recorded.
+    pub fn resolve_stage2(&mut self, esr: u64) -> Stage2 {
+        let ipa = self.fault_ipa();
+        if self.page_in_cache(ipa) { return Stage2::Resolved { committed: false }; }
+        if self.commit_reserved_page(ipa) { return Stage2::Resolved { committed: true }; }
+        Stage2::Unhandled(self.describe_stop(esr))
+    }
 
     /// The live stage-1 leaf descriptor for `ipa`, walking the L2/L3 the box maintains: an L3 page
     /// descriptor where the block has been promoted, otherwise the L2 block descriptor itself.

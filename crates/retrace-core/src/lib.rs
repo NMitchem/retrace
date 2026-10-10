@@ -3,7 +3,7 @@ pub mod symbols;
 
 use std::path::Path;
 use std::rc::Rc;
-use retrace_box::{Box_, Stop};
+use retrace_box::{Box_, Stage2, Stop};
 use retrace_trace::{Writer, Event, Region};
 use retrace_arch::SYS_EXIT;
 pub use retrace_box::thread::{BlockReason, ThreadState, ThreadCtx};
@@ -1424,22 +1424,30 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // recorder after this landmark: the forward has already happened.
                 b.note_fd_effects(num, args, ret, ret1, err).unwrap_or_else(|m| panic!("{m}"));
             }
-            // A cache-window stage-2 fault: stage/fixup/re-sign/map the page (page_in_cache) and
-            // re-run. Regenerated deterministically here on record AND replay, so nothing about the
-            // cache page goes into the trace. A non-cache fault (page_in_cache returns false) is a
-            // real bring-up failure — decode the ESR class + faulting IPA so it names itself.
-            Stop::Other { esr } => {
-                if b.page_in_cache(b.fault_ipa()) { continue; }
-                if b.commit_reserved_page(b.fault_ipa()) {
+            // A stage-2 abort. `Box_::resolve_stage2` (M49 F1) is the one copy of the chain: the
+            // cache pager and the reservation committer, regenerated identically here and on replay
+            // so nothing about either page enters the trace, then (M49 F2) the conversion of an EL0
+            // touch of unbacked memory into the stage-1 fault native takes. Anything else is a real
+            // bring-up failure, and its text names the ESR class and the faulting address.
+            Stop::Other { esr } => match b.resolve_stage2(esr) {
+                Stage2::Resolved { committed } => {
                     // M13 t2: the retained PROT_NONE-reservation deviation is quantified rather
                     // than hand-waved (see the M13 spec). Record-only, like every other
                     // RETRACE_TRACE line.
-                    if trace_log { eprintln!("[commit] ipa={:#x}", b.fault_ipa()); }
+                    if committed && trace_log { eprintln!("[commit] ipa={:#x}", b.fault_ipa()); }
                     continue;
                 }
-                if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
-                return Err(b.describe_stop(esr));
-            }
+                // M49 F2: the guest is parked at its EL1 vector, and the next `run()` returns the
+                // `Stop::Fault` the arm above records or delivers. Record-only line.
+                Stage2::Converted { pc, esr, far } => {
+                    if trace_log { eprintln!("[convert] pc={pc:#x} far={far:#x} esr={esr:#x}"); }
+                    continue;
+                }
+                Stage2::Unhandled(why) => {
+                    if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
+                    return Err(why);
+                }
+            },
             // Stop::Step is only produced by Box_::step(); record_box drives run(), never step().
             Stop::Step => unreachable!("record_box drives run(), which never single-steps"),
         }
@@ -3072,10 +3080,15 @@ impl ReplaySession {
                     if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Watchpoint) {
                         return Ok(Advance::Watch { thread: self.current_thread() });
                     }
-                    // Cache-window fault: page it in (regenerated identically to record) and re-run.
-                    if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
-                    if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
-                    return Err(Divergence { landmark: self.idx, pc: self.b.pc(), detail: self.b.describe_stop(esr) });
+                    // A stage-2 abort: the same `resolve_stage2` record calls (M49 F1), so a page-in,
+                    // a commit or (M49 F2) a conversion happens here exactly where it happened on
+                    // record. A conversion parks the guest at its EL1 vector, and the next `run()`
+                    // returns the `Stop::Fault` the arm above mirrors.
+                    match self.b.resolve_stage2(esr) {
+                        Stage2::Resolved { .. } | Stage2::Converted { .. } => continue,
+                        Stage2::Unhandled(why) =>
+                            return Err(Divergence { landmark: self.idx, pc: self.b.pc(), detail: why }),
+                    }
                 }
                 // Stop::Step is only produced by Box_::step(); advance drives run(), never step().
                 Stop::Step => unreachable!("replay drives run(), which never single-steps"),
@@ -3277,8 +3290,9 @@ impl ReplaySession {
     }
 
     /// Single-step exactly `k` instructions into the current landmark's window. Deterministic replay
-    /// faults inside the window (a cache-window page-in or a reservation commit) are handled and the
-    /// instruction re-stepped, counting zero steps — identical to `advance`'s fault handling. Errs,
+    /// faults inside the window are resolved by `Box_::resolve_stage2` (a cache-window page-in or a
+    /// reservation commit) and the instruction re-stepped, counting zero steps — the method
+    /// `advance` calls. Errs,
     /// NAMING the window length, if the window-ending trap arrives before `k` retire (no silent
     /// clamp; the length substring is a UX contract the reverse-stepi relies on). The session is
     /// spent on Err — the guest is parked mid-window with `k` unsatisfied.
@@ -3287,11 +3301,15 @@ impl ReplaySession {
             loop {
                 match self.b.step() {
                     Stop::Step => break,
-                    Stop::Other { esr } => {
-                        if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
-                        if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
-                        return Err(format!("fault during step {done}/{k}: {}", self.b.describe_stop(esr)));
-                    }
+                    Stop::Other { esr } => match self.b.resolve_stage2(esr) {
+                        Stage2::Resolved { .. } => continue,
+                        // M49 F2 (Ruling T3-c): the guest is parked at its EL1 vector, as a stepped
+                        // stage-1 fault leaves it (spike F2). Stepping again would execute the
+                        // vector's `hvc`, so this reports what the `Stop::Fault` arm below reports.
+                        Stage2::Converted { pc, far, .. } => return Err(format!(
+                            "guest crashed at step {done}/{k}: pc={pc:#x} far={far:#x}")),
+                        Stage2::Unhandled(why) => return Err(format!("fault during step {done}/{k}: {why}")),
+                    },
                     // The window ends after exactly `done` instructions — name that length; the
                     // window-ending trap is left unconsumed (the guest stays parked at it).
                     Stop::Syscall { .. } => return Err(format!(
@@ -3308,7 +3326,7 @@ impl ReplaySession {
 
     /// M40: single-step one instruction with whatever watchpoints are armed, and REPORT a
     /// watchpoint stop rather than treating it as a fault. `step_insns` hands every `Stop::Other`
-    /// to `page_in_cache`/`commit_reserved_page`, which read the FAR as an IPA; a watchpoint's FAR
+    /// to `Box_::resolve_stage2`, whose pagers read the FAR as an IPA; a watchpoint's FAR
     /// is the watched VA, so the class is checked FIRST here. Measured clean at t0 M6: a
     /// pre-retire `EC=0x34` stop at exactly the write, a clean retire once disarmed, and clean
     /// stepping after re-arming. Breakpoints must NOT be armed (one fires before retire at the
@@ -3330,9 +3348,13 @@ impl ReplaySession {
                             "breakpoint stop during a watch-aware step at pc {:#x}: breakpoints must \
                              NOT be armed while calling step_watched", self.b.pc()));
                     }
-                    if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
-                    if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
-                    return Err(format!("fault during a watch-aware step: {}", self.b.describe_stop(esr)));
+                    match self.b.resolve_stage2(esr) {
+                        Stage2::Resolved { .. } => continue,
+                        // M49 F2 (Ruling T3-c): as `step_insns`.
+                        Stage2::Converted { pc, far, .. } => return Err(format!(
+                            "guest crashed during a watch-aware step: pc={pc:#x} far={far:#x}")),
+                        Stage2::Unhandled(why) => return Err(format!("fault during a watch-aware step: {why}")),
+                    }
                 }
                 Stop::Syscall { .. } => return Ok(Stepped::AtTrap),
                 Stop::Fault { pc, far, .. } => return Err(format!(
@@ -3358,9 +3380,12 @@ impl ReplaySession {
                         retrace_arch::Ec::Watchpoint => return Ok(Armed::Watch),
                         _ => {}
                     }
-                    if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
-                    if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
-                    return Err(format!("fault during an armed step: {}", self.b.describe_stop(esr)));
+                    match self.b.resolve_stage2(esr) {
+                        Stage2::Resolved { .. } => continue,
+                        // M49 F2 (Ruling T3-c): a converted fault is a real guest fault; nothing retired.
+                        Stage2::Converted { .. } => return Ok(Armed::Fault),
+                        Stage2::Unhandled(why) => return Err(format!("fault during an armed step: {why}")),
+                    }
                 }
                 Stop::Syscall { .. } => return Ok(Armed::AtTrap),
                 Stop::Fault { .. } => return Ok(Armed::Fault),
@@ -3369,19 +3394,20 @@ impl ReplaySession {
     }
 
     /// Single-step to the window-ending trap, returning the window length (instructions retired
-    /// before the trap). Faults inside the window are paged in / committed and re-stepped, exactly
-    /// as `step_insns` does. Deterministic per (trace, landmark). The session is spent (parked at
+    /// before the trap). Faults inside the window are resolved by `Box_::resolve_stage2` and
+    /// re-stepped, exactly as `step_insns` does. Deterministic per (trace, landmark). The session is spent (parked at
     /// the trap).
     pub fn window_len_here(&mut self) -> Result<u64, String> {
         let mut n = 0u64;
         loop {
             match self.b.step() {
                 Stop::Step => n += 1,
-                Stop::Other { esr } => {
-                    if self.b.page_in_cache(self.b.fault_ipa()) { continue; }
-                    if self.b.commit_reserved_page(self.b.fault_ipa()) { continue; }
-                    return Err(format!("fault at step {n}: {}", self.b.describe_stop(esr)));
-                }
+                Stop::Other { esr } => match self.b.resolve_stage2(esr) {
+                    Stage2::Resolved { .. } => continue,
+                    // M49 F2 (Ruling T3-c): a converted fault ends the window as a stage-1 crash does.
+                    Stage2::Converted { .. } => return Ok(n),
+                    Stage2::Unhandled(why) => return Err(format!("fault at step {n}: {why}")),
+                },
                 Stop::Syscall { .. } => return Ok(n),
                 // window_len_here: the crash ENDS the final window — its length is the count of
                 // retired instructions before the fault (the fault itself never retires).
