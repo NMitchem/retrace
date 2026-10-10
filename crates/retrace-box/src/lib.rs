@@ -200,6 +200,15 @@ pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under th
 // L3-promoted for the trampoline). ~1500 tables' worth of room; bump by GRANULE per promoted block.
 pub const PT_L3_BASE: u64 = 0x0080_0000;
 const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
+// M49 F3 (spec §3d, R3): the IPA ranges stage 1 does not map: page 0 (a NULL access then takes the
+// stage-1 fault native takes, so a call through NULL is SIGSEGV, not a permission fault's SIGBUS),
+// retrace's L2 and L1 table pages (a guest store there used to rewrite retrace's own tables:
+// `faults-retrace.txt`, store @0x8000), and the L3 window. All three sit in block 0, whose L3 table
+// `build_tables` creates for the trampoline. The hardware walker reads the tables by IPA, never
+// through stage 1, so unmapping them at stage 1 costs nothing (t0 M4). `range_is_free` keeps every
+// placement out of them, and `set_region_attr` refuses to map them again.
+const STAGE1_UNMAPPED: [(u64, u64); 3] =
+    [(0, TRAMPOLINE_IPA), (PT_L2_IPA, PT_L1_IPA + GRANULE as u64), (PT_L3_BASE, PT_L3_CEIL)];
 // arm64e data-pointer PAC placement: TBI0(bit37)+TBID0(bit51) match Apple's user TCR so a signed
 // DATA pointer's PAC lands in [54:47] with the top byte (incl. bit 63) preserved = 0. Without TBI
 // the 47-bit-VA PAC field spans [63:56]∪[54:47]; a re-signed class_data_bits pointer then sets
@@ -1392,6 +1401,16 @@ impl Box_ {
             };
             backings.extend(created);
         }
+        // M49 F3: invalidate STAGE1_UNMAPPED's pages. Block 0 is always promoted here: both loaders'
+        // exec lists start with the trampoline (`load_with_pac`, `load_dynamic`).
+        assert!(l2[0] & 0x3 == DESC_TABLE, "M49 F3: block 0 must be promoted (the trampoline is the first exec range)");
+        let l3_ipa = l2[0] & PT_ADDR;
+        let l3_host = backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host)
+            .expect("M49 F3: block 0's L3 table backing");
+        let l3 = unsafe { std::slice::from_raw_parts_mut(l3_host as *mut u64, 2048) };
+        for &(s, e) in &STAGE1_UNMAPPED {
+            for p in (s..e).step_by(GRANULE) { l3[(p / GRANULE as u64) as usize] = 0; }
+        }
         (PT_L1_IPA, l2_host, next_l3)
     }
 
@@ -1416,6 +1435,9 @@ impl Box_ {
     /// already have translated (M9 t3's live-backing case) are responsible for their own
     /// [`flush_guest_tlb`](Self::flush_guest_tlb) after promoting.
     pub fn set_region_attr(&mut self, ipa: u64, len: u64, attr: u64) {
+        assert!(!STAGE1_UNMAPPED.iter().any(|&(s, e)| ipa < e && s < ipa + len),
+            "M49 F3: set_region_attr over [{ipa:#x}, {:#x}) would map a page stage 1 leaves unmapped \
+             (page 0, retrace's page tables, the L3 window)", ipa + len);
         let l2_host = self.l2_host;
         assert!(!l2_host.is_null(), "set_region_attr: no live L2 table (restore had no PT_L2 region)");
         let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
@@ -2662,6 +2684,9 @@ impl Box_ {
         if ipa < SHARED_REGION_END && SHARED_REGION_START < end { return false; } // shared-cache window
         // The VMM's lazily-mapped scratch pages: forbidden even while still absent from `backings`.
         if ipa < SCRATCH_RESERVED_END && SCRATCH_RESERVED_START < end { return false; }
+        // M49 F3: stage 1 maps none of these, so a placement there would hand the guest memory it
+        // faults on; and an L3-window page would later be mapped over by `alloc_l3`.
+        if STAGE1_UNMAPPED.iter().any(|&(s, e)| ipa < e && s < end) { return false; }
         if self.backings.iter().any(|b| ipa < b.ipa + b.len as u64 && b.ipa < end) { return false; }
         if self.reservations.iter().any(|&(s, l)| ipa < s + l && s < end) { return false; }
         true
@@ -2697,6 +2722,7 @@ impl Box_ {
         }
         if round_up(SHARED_REGION_END) > base { cands.push(round_up(SHARED_REGION_END)); }
         if round_up(SCRATCH_RESERVED_END) > base { cands.push(round_up(SCRATCH_RESERVED_END)); }
+        for &(_, e) in &STAGE1_UNMAPPED { if round_up(e) > base { cands.push(round_up(e)); } }
         cands.sort_unstable();
         cands.dedup();
         cands.into_iter().find(|&a| self.range_is_free(a, len))
