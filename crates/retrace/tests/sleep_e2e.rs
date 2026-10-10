@@ -9,7 +9,7 @@
 // on), and a hang must fail the test, not stall the gate.
 mod util;
 
-use retrace_core::{Advance, ReplaySession};
+use retrace_core::{Advance, BlockReason, ReplaySession, ThreadState};
 use retrace_trace::Event;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +20,13 @@ const BOUND: u64 = 120;
 
 /// `mach_msg2_trap`'s number, as the trace keys it.
 const MACH_MSG2: u64 = (-47i64) as u64;
+
+/// The 24 MHz guest clock: ticks per second (M48 plan F6).
+const TICKS_PER_SEC: u64 = 24_000_000;
+
+/// SDK `mach/clock_types.h` (`retrace_box::sleep::CALENDAR_CLOCK`, which this crate does not
+/// depend on).
+const CALENDAR_CLOCK: u32 = 1;
 
 /// `retrace <args>`, bounded: (code, stdout, stderr). `None` for the code means the bound fired.
 fn cli(args: &[&str]) -> (Option<i32>, Vec<u8>, String) {
@@ -123,6 +130,14 @@ fn synthetic_tsc(state: &str) -> u64 {
     let v = state.split("synthetic_tsc=0x").nth(1).and_then(|r| r.split_whitespace().next())
         .unwrap_or_else(|| panic!("no synthetic_tsc in {state}"));
     u64::from_str_radix(v, 16).unwrap()
+}
+
+/// The guest clock at a session's position: the synthetic counter plus the commpage's timebase
+/// offset (`_COMM_PAGE_TIMEBASE_OFFSET`, commpage + 0x88), as the guest's `mach_absolute_time`
+/// computes it.
+fn guest_clock(s: &ReplaySession) -> u64 {
+    let off = s.read_mem_prefix(0xf_ffff_c088, 8);
+    synthetic_tsc(&s.dbg_internal_state()).wrapping_add(u64::from_le_bytes(off.try_into().expect("the commpage is mapped")))
 }
 
 /// A session at landmark `i`'s `svc`, not yet retired (`kq_e2e`'s helper).
@@ -250,4 +265,133 @@ fn a_signal_to_a_sleeping_thread_is_refused_at_the_wake_on_both_sides() {
     let (code, _, err) = cli(&["replay", trace.to_str().unwrap()]);
     assert_eq!(code, Some(101), "replay reaches the same wake (below the trace): {err}");
     assert!(err.contains("M49: sleep of thread 1 reached its deadline with a signal pending"), "{err}");
+}
+
+/// §4 S3 (two sleepers): a 2 s sleeper created first and a 1 s sleeper created second wake in
+/// deadline order, as native's ranks show, each by one idle jump to its own deadline, and each with
+/// ETIMEDOUT and the carry in its own context. A queue in blocking order wakes the 2 s sleeper
+/// first.
+#[test]
+fn two_sleepers_wake_in_deadline_order_each_on_its_own_deadline() {
+    let (out, trace) = records_and_replays_as_native(&["twosleepers"], &[]);
+    assert_eq!(out, "twosleepers 2s rank=1 1s rank=0\n");
+    let sleeps = semwaits(&trace);
+    assert_eq!(sleeps.len(), 2, "{sleeps:x?}");
+    let two = sleeps.iter().find(|l| l.2[4] == 2).expect("the 2 s sleep");
+    let one = sleeps.iter().find(|l| l.2[4] == 1).expect("the 1 s sleep");
+    assert!(two.0 < one.0 && two.1 != one.1 && two.1 != 0 && one.1 != 0, "two sleeper threads, the 2 s one first");
+    let (at_two, clock_two) = {
+        let s = session_at_svc(&trace, two.0);
+        (synthetic_tsc(&s.dbg_internal_state()), guest_clock(&s))
+    }; // one VM per process: this session is dropped before the next is made
+    let s = session_at_svc(&trace, one.0);
+    let at_one = synthetic_tsc(&s.dbg_internal_state());
+    let (n, after, s) = the_idle_jump(s);
+    assert_eq!((n, after), (one.0, at_one + TICKS_PER_SEC), "the first jump is to the 1 s deadline");
+    assert_eq!(s.current_thread(), one.1, "the 1 s sleeper runs first");
+    assert_woken_with_etimedout(&s, one.1 as usize);
+    let blocked = s.thread_summaries()[two.1 as usize].state;
+    assert_eq!(blocked, ThreadState::Blocked(BlockReason::Sleep { deadline: clock_two + 2 * TICKS_PER_SEC }),
+        "the 2 s sleeper still sleeps, until its own deadline");
+    let (_, after, s) = the_idle_jump(s);
+    assert_eq!(after, at_two + 2 * TICKS_PER_SEC, "the second jump is to the 2 s deadline");
+    assert_eq!(s.current_thread(), two.1);
+    assert_woken_with_etimedout(&s, two.1 as usize);
+}
+
+/// Review Focus 5 for the sleep: a `__semwait_signal` the recording accepted but replay refuses is
+/// reachable only after an earlier silent divergence, so replay names it as a `Divergence`, never a
+/// panic. The trace cannot carry that divergence (the arguments are compared before the mirror
+/// runs), so the test plants its effect in the box: the sleep's `cond_sem` noted as a semaphore.
+#[test]
+fn a_sleep_refused_on_replay_is_a_divergence_naming_it_not_a_panic() {
+    let (_, trace) = records_and_replays_as_native(&["usleep"], &[1_000_000]);
+    let (i, _, args, ..) = semwaits(&trace).remove(0);
+    let mut s = retrace_core::seek(&trace, i, 0).unwrap();
+    s.dbg_sleep_mut().note_semaphore(args[0]);
+    let d = match s.advance() { Err(d) => d, Ok(_) => panic!("the sleep at landmark {i} replayed over a planted semaphore") };
+    assert_eq!(d.landmark, i);
+    assert!(d.detail.starts_with("__semwait_signal refused on replay, though the recording accepted it")
+            && d.detail.contains(&format!("M49: semwait cond_sem {:#x} was used", args[0] as u32)), "{}", d.detail);
+}
+
+/// The same for `clock_get_time`: its port planted as a CALENDAR_CLOCK port before the 1000.
+#[test]
+fn a_clock_read_refused_on_replay_is_a_divergence_naming_it_not_a_panic() {
+    let (_, trace) = records_and_replays_as_native(&["sleep1"], &[1_000_000_000]);
+    let (i, _, args, ..) = msgs(&trace, 1000).remove(0);
+    let mut s = retrace_core::seek(&trace, i, 0).unwrap();
+    s.dbg_sleep_mut().learn_clock_port(args[3] & 0xffff_ffff, CALENDAR_CLOCK);
+    let d = match s.advance() { Err(d) => d, Ok(_) => panic!("the clock read at landmark {i} replayed on a CALENDAR port") };
+    assert_eq!(d.landmark, i);
+    assert!(d.detail.starts_with("clock_get_time refused on replay, though the recording accepted it")
+            && d.detail.contains("a CALENDAR_CLOCK (1) port"), "{}", d.detail);
+}
+
+/// S2 (R7): the 1000's reply is SYSTEM_CLOCK's reading of the guest clock at the call, `ticks ×
+/// 125/3` ns, byte for byte; the mirror recomputes it, so a rewritten reply is a divergence naming
+/// the call. The 334's mirror compares its return and its empty answer the same way.
+#[test]
+fn the_clock_reply_is_the_guest_clock_and_rewritten_answers_are_divergences() {
+    let (_, trace) = records_and_replays_as_native(&["sleep1"], &[1_000_000_000]);
+    let (r, _, args, _, _, _, writes) = msgs(&trace, 1000).remove(0);
+    let ns = guest_clock(&session_at_svc(&trace, r)) as u128 * 125 / 3;
+    let reply = retrace_core::machmsg::encode_clock_get_time_reply((args[3] >> 32) as u32,
+        (ns / 1_000_000_000) as u32, (ns % 1_000_000_000) as i32);
+    assert_eq!(writes.len(), 1);
+    assert_eq!((writes[0].ipa, &writes[0].bytes), (args[0], &reply), "the reply is the guest clock, at the message buffer");
+    let i = semwaits(&trace)[0].0;
+    for (ext, at, why) in [
+        ("rc.bin", i, "__semwait_signal rc mismatch: replay 0x0 != recorded 0x1"),
+        ("ret1.bin", i, "__semwait_signal recorded ret1=0x1 err=false with 0 write(s)"),
+        ("reply.bin", r, "clock_get_time reply mismatch"),
+    ] {
+        let mut ev = retrace_trace::Reader::open(&trace).unwrap();
+        if let Event::Syscall { ret, ret1, writes, .. } = &mut ev[at] {
+            match ext { "rc.bin" => *ret = 1, "ret1.bin" => *ret1 = 1, _ => writes[0].bytes[40] ^= 1 }
+        }
+        let bad = trace.with_extension(ext);
+        let mut w = retrace_trace::Writer::create(&bad).unwrap();
+        for e in &ev { w.append(e).unwrap(); }
+        drop(w);
+        let (code, _, err) = cli(&["replay", bad.to_str().unwrap()]);
+        assert_eq!(code, Some(3), "{ext}: replay of the rewritten trace must diverge (exit 3): {err}");
+        assert!(err.contains(&format!("DIVERGENCE at landmark {at} ")) && err.contains(why),
+            "{ext}: the divergence must be the mirror's {why:?}, at landmark {at}: {err}");
+    }
+}
+
+/// A seek across a sleep. A checkpoint taken while the 2 s sleeper is asleep and before the 1 s
+/// sleeper's clock read, continued past both wakes, must equal a cold seek in every register, both
+/// sleepers' saved contexts, box state and memory. The checkpoint must carry the learned clock port
+/// (`BoxState::sleep`): without it, the 1 s sleeper's clock read is refused on the warm side.
+#[test]
+fn a_seek_across_a_sleep_matches_a_cold_seek() {
+    let (_, trace) = records_and_replays_as_native(&["twosleepers"], &[]);
+    let sleeps = semwaits(&trace);
+    let two = sleeps.iter().find(|l| l.2[4] == 2).unwrap();
+    let reads = msgs(&trace, 1000);
+    assert!(reads.iter().any(|r| r.0 > two.0), "a clock read comes after the checkpoint");
+    let from = retrace_core::seek(&trace, two.0 + 1, 0).unwrap();
+    let state = from.dbg_internal_state();
+    assert!(state.contains("sleep=SleepModel { clock_ports: {") && !state.contains("clock_ports: {}"),
+        "the checkpoint holds the learned clock port:\n{state}");
+    assert!(matches!(from.thread_summaries()[two.1 as usize].state, ThreadState::Blocked(BlockReason::Sleep { .. })),
+        "the checkpoint is inside the 2 s sleep");
+    let (n, _, _) = the_idle_jump(the_idle_jump(from).2);
+    let to = n + 2;
+    let cp = retrace_core::seek(&trace, two.0 + 1, 0).unwrap().checkpoint();
+    let warm = {
+        let mut s = ReplaySession::from_checkpoint(&trace, &cp).unwrap();
+        s.advance_to_landmark(to).unwrap_or_else(|d| panic!("warm: diverged at {}: {}", d.landmark, d.detail));
+        (s.current_thread(), s.dbg_regs(), s.dbg_regs_of(1), s.dbg_regs_of(2), s.dbg_fp_regs(), s.dbg_internal_state(), s.snapshot().1)
+    };
+    let cold = retrace_core::seek(&trace, to, 0).unwrap();
+    assert_eq!(warm.0, cold.current_thread(), "thread: checkpointed vs cold");
+    assert_eq!(warm.1, cold.dbg_regs(), "registers: checkpointed vs cold");
+    assert_eq!(warm.2, cold.dbg_regs_of(1), "thread 1's context: checkpointed vs cold");
+    assert_eq!(warm.3, cold.dbg_regs_of(2), "thread 2's context: checkpointed vs cold");
+    assert_eq!(warm.4, cold.dbg_fp_regs(), "FP/SIMD: checkpointed vs cold");
+    assert_eq!(warm.5, cold.dbg_internal_state(), "the sleep model and the clock: checkpointed vs cold");
+    assert!(cold.diff_memory(&warm.6).is_none(), "memory: checkpointed vs cold");
 }

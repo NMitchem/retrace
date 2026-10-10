@@ -3292,6 +3292,11 @@ impl ReplaySession {
     /// earlier silent divergence would leave (`Psynch::dbg_plant_waiter`).
     #[doc(hidden)]
     pub fn dbg_psynch_mut(&mut self) -> &mut retrace_box::psynch::Psynch { self.b.dbg_psynch_mut() }
+
+    /// Test-only (M49 §4): the sleep model, writable, so `sleep_e2e` can plant the state an earlier
+    /// silent divergence would leave and reach the mirrors' refusal paths.
+    #[doc(hidden)]
+    pub fn dbg_sleep_mut(&mut self) -> &mut retrace_box::sleep::SleepModel { self.b.dbg_sleep_mut() }
     /// M16 Task 4: `Box_::thread_of_port`, for the port->tid resolution gate. Test-only, like
     /// `dbg_kport_of`.
     #[doc(hidden)]
