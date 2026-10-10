@@ -15,6 +15,7 @@ pub mod kq;
 pub mod jit;
 pub mod gkq;
 pub mod psynch;
+pub mod sleep;
 mod excl;
 pub use excl::{Excl, SetBy};
 /// M49 §3e: the store-exclusive rewrite (X1, X2), applied where the box stages code (X3).
