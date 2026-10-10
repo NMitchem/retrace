@@ -577,6 +577,18 @@ fn main() {
         .status().expect("clang condvar_dyn");
     assert!(status.success(), "condvar_dyn guest build failed");
 
+    // sleep_dyn: the M49 sleep fixture — sleep, usleep and nanosleep on the synthetic clock, two
+    // sleepers, a polling loop, a sleep beside a runnable thread, a signalled sleeper and the refused
+    // shapes, by mode (see its header). Same recipe as condvar_dyn; the raw `__semwait_signal` stubs
+    // it declares are libsystem_kernel exports, so it links with no extra flag.
+    let src = format!("{}/c/sleep_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sleep_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang sleep_dyn");
+    assert!(status.success(), "sleep_dyn guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));
