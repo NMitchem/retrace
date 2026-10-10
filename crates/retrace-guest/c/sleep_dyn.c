@@ -10,6 +10,7 @@
 //   raw             __semwait_signal on a fresh semaphore for 5 ms, issued by hand: the stub's -1/errno
 //   twosleepers     a 2 s sleeper created first and a 1 s sleeper second; the order they wake in
 //   pollloop        while (!done) usleep(100), waiting on a worker (Review Focus 1)
+//   sleepwhilework  main sleeps 1 s while a runnable worker prints and exits (Review Focus 5)
 //   sigsleeper      main signals a thread that sleeps (S5: retrace refuses it at the wake)
 //   refuse <what>   one hand-issued shape the model refuses (S4, R8): relative0, timeout0, mutex,
 //                   nsec, semtrap, nosem, nocancel, calendar
@@ -91,6 +92,15 @@ static void *summer(void *arg) {
     return NULL;
 }
 
+// sleepwhilework: a worker that is runnable while main sleeps. It writes with write(2), not stdio,
+// so its line is its own landmark, issued while main sleeps (stdout is a pipe under test, and a
+// printf would sit in the buffer until main's exit).
+static void *printer(void *arg) {
+    (void)arg;
+    write(1, "worker ran\n", 11);
+    return NULL;
+}
+
 // sigsleeper: a thread that sleeps and is signalled.
 static volatile sig_atomic_t got;
 static void on_usr1(int s) { (void)s; got = 1; }
@@ -166,6 +176,16 @@ int main(int argc, char **argv) {
         while (!atomic_load_explicit(&done, memory_order_acquire)) usleep(100);
         pthread_join(t[0], NULL);
         printf("pollloop done sum=%llu\n", sum);
+    } else if (!strcmp(mode, "sleepwhilework")) {
+        pthread_create(&t[0], NULL, printer, NULL);
+        uint64_t cost = read_cost();
+        uint64_t t0 = mach_absolute_time();
+        unsigned left = sleep(1);
+        uint64_t t1 = mach_absolute_time();
+        char line[80];
+        int n = snprintf(line, sizeof line, "main slept left=%u delta_ns=%llu\n", left, ns(t1 - t0 - cost));
+        write(1, line, n);               // at once, like the worker's line: the order is the guard
+        pthread_join(t[0], NULL);
     } else if (!strcmp(mode, "sigsleeper")) {
         signal(SIGUSR1, on_usr1);
         pthread_create(&t[0], NULL, sleeper1, NULL);

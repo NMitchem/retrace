@@ -430,3 +430,21 @@ fn a_polling_loop_with_a_short_sleep_waits_for_its_worker_and_terminates() {
         assert_sleep_landmark(l, 0, 100_000);
     }
 }
+
+/// Review Focus 5: a sleep while a sibling thread is runnable. Main sleeps 1 s; the worker runs
+/// (it prints and exits without blocking) before the clock jumps, so `worker ran` precedes main's
+/// line. The guest's delta across main's sleep is still exactly 1 s: the deadline is fixed at the
+/// call, the worker's timebase reads move the clock by 9216 ticks each and only before the jump,
+/// and the jump lands on the deadline itself. Only a worker reading the clock more than
+/// 24000000 / 9216 = 2604 times could carry it past the deadline; this one makes one write.
+#[test]
+fn a_sleep_beside_a_runnable_thread_lets_it_run_and_still_lasts_exactly_one_second() {
+    let (out, trace) = records_and_replays_as_native(&["sleepwhilework"], &[1_000_000_000]);
+    assert_eq!(out, "worker ran\nmain slept left=0 delta_ns=1000000000\n");
+    let sleeps = semwaits(&trace);
+    assert_eq!(sleeps.len(), 1, "{sleeps:x?}");
+    assert_eq!(sleeps[0].1, 0, "main sleeps");
+    let worker_write = events(&trace).into_iter().position(|(_, e)| matches!(e,
+        Event::Syscall { num: 4, thread, .. } if thread != 0)).expect("the worker's write");
+    assert!(worker_write > sleeps[0].0, "the worker writes while main sleeps");
+}
