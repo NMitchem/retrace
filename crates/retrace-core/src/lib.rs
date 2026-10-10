@@ -1178,6 +1178,21 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     .map_err(|e| format!("append psynch: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
+            // M49 §3f S3 (R6): `__semwait_signal` (334) in libc `nanosleep`'s relative-timeout shape,
+            // emulated and never forwarded. Forwarded, it sleeps the RECORDER for real on a host
+            // semaphore while the guest clock stands still. The box admits the call or refuses it by
+            // value (S4), then blocks the thread until its deadline on the guest clock; the idle
+            // jump reaches it, and the wake writes ETIMEDOUT with the carry set. This arm may PANIC
+            // by design, with the refusal's text, before anything is appended (R8).
+            //
+            // `ret` 0, `err` false and no writes, deliberately, as psynch's: the landmark is the
+            // call, and its real answer comes at the wake into a context both sides rebuild.
+            Stop::Syscall { num, args } if retrace_arch::is_semwait(num) => {
+                let rc = b.guest_semwait_signal(num, args).unwrap_or_else(|m| panic!("{m}"));
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append __semwait_signal: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
             // M14 Task 7: bsdthread_create is EMULATED, never forwarded — the host would create a
             // real thread inside retrace's own process at a guest address (see
             // Box_::guest_bsdthread_create).
@@ -2668,6 +2683,30 @@ impl ReplaySession {
                                 }
                                 // Record fixes `ret1: 0, err: false, writes: []`, so a recording
                                 // carrying any other is not one this arm produced.
+                                if *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{call} recorded ret1={ret1:#x} err={err} with {} write(s); the emulation \
+                                         records 0, false and none", writes.len()) });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M49 §3f S3: the `__semwait_signal` arm's mirror (symmetry rule 1), in the
+                            // psynch mirror's shape: the same call with the same arguments, the return
+                            // compared, and a refusal reported as a divergence naming the call, never a
+                            // panic. It inherits the arm-top `verify_thread` and adds none.
+                            if retrace_arch::is_semwait(num) {
+                                let call = retrace_box::sleep::call_name(num);
+                                let rc = match self.b.guest_semwait_signal(num, args) {
+                                    Ok(rc) => rc,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{call} refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("{call} rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
                                 if *ret1 != 0 || *err || !writes.is_empty() {
                                     return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                         "{call} recorded ret1={ret1:#x} err={err} with {} write(s); the emulation \
