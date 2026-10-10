@@ -55,10 +55,11 @@ script.
 - Reverse execution: seek to any instruction, reverse-step, or reverse-continue to the previous
   breakpoint or watchpoint hit. Checkpoints keep backward seeks fast.
 - Multi-threaded programs record and replay, including pthreads and their condition variables,
-  `std::thread`, GCD queues and timers, and kqueues with timeouts. Timed waits run on a synthetic
-  clock, so a 2-second timer takes no wall-clock time.
+  `std::thread`, GCD queues and timers, and kqueues with timeouts. Timed waits and `sleep()` run on
+  a synthetic clock, so a 2-second timer or `sleep(2)` takes no wall-clock time.
 - Signals reach the thread they were sent to, through the handler the program installed.
-- A crash is an ordinary recording that ends at the fault.
+- A crash is an ordinary recording that ends at the fault, a NULL dereference included, and a
+  handler the program installed gets the signal, code and address it would get natively.
 - JIT code: retrace models Apple's per-thread JIT write protection, so you can reverse-continue into
   code V8 compiled at run time.
 - `retrace gdbserver` speaks gdb-remote to lldb: continue and step in both directions, breakpoints,
@@ -82,9 +83,14 @@ behind it. These are the ones you'll hit first:
   kqueue readiness covers only a program's own pipes, so nothing that waits on a socket, a terminal
   or an inherited descriptor runs.
 - A syscall or Mach message retrace has no model for stops the recording with a `RECORD ERROR`
-  naming it. In the latest sweep, 49 of the 54 Apple binaries in the committed sample recorded and
-  replayed identically (three of them by reaching the refused `posix_spawn` on both sides). The
-  count moves by one between runs with host state.
+  naming it. In the latest sweeps, 49 of the 54 Apple binaries in the committed sample recorded and
+  replayed identically (three of them by reaching the refused `posix_spawn` on both sides), and a
+  50th does or does not from run to run with host state.
+- Of the 30 small C, C++, Rust and Swift programs in the first-contact corpus
+  (`firstcontact_e2e`), the kind a newcomer tries first, 20 record and replay as they run natively
+  (up from 7). Most of the rest stop because the program's stderr lands in the recorded stdout, its
+  environment is empty, it is a `cargo test` binary (a timed semaphore wait), or it is a Swift
+  program that traps.
 - Traces are big: tens of MiB to over a GiB, uncompressed. node's `console.log(1)` is about 501 MiB
   because retrace backs V8's address-space reservations in full. The format isn't stable, and
   recordings from an older retrace are rejected.

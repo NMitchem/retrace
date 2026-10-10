@@ -147,7 +147,21 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   recording and an SPRR write on the recorder's `RETRACE_SPRR` line, and a 2-second `setTimeout`
   lands exactly on its deadline by the idle jump; skips loudly without Homebrew node),
   `node_crash_e2e` (M48 rung 10: node's crash demo, reverse-continued from the crash to a store
-  whose pc is in a `MAP_JIT` range; skips loudly without Homebrew node or its headers). Run one with
+  whose pc is in a `MAP_JIT` range; skips loudly without Homebrew node or its headers),
+  `firstcontact_e2e` (M49: the tier-1 corpus — 30 repo-owned C, C++, Rust and Swift fixtures, each
+  run native, recorded and replayed twice, with every fixture's outcome pinned by value in an
+  outcome table, so a wall that moves fails the gate; Swift rows skip loudly without `swiftc`),
+  `nullfault_e2e` (M49: NULL, unmapped and low-address faults recorded as crashes with native's
+  signal, `si_code` and `si_addr`, with and without a handler, on a worker thread, as a stage-2
+  instruction abort, a stack overflow on an alternate stack and one without, under single-step and
+  across a seek; the `jump1g` UXN deviation and the readable TSD page pinned by value as named
+  limits), `xrewrite_e2e` (M49: discarded-status store-exclusives rewritten at every dynamic staging
+  site — the executable, a `dlopen`ed dylib, and the census sites in dyld and libsystem_kernel —
+  with the retry loop's documented limit pinned), `sleep_e2e` (M49: `sleep`, `usleep` and
+  `nanosleep` on the synthetic clock, `clock_get_time` answered from the guest clock, two sleepers
+  in deadline order, a polling loop on a short and on a 0-tick sleep, a sleep beside a runnable
+  sibling, the refusals by value, a signal to a sleeper refused at the wake, replay-side refusals as
+  divergences, and a seek across a wake). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -192,7 +206,8 @@ are gitignored); build/run recipes and findings are in `spikes/README.md`.
   format break — bump `TRACE_MAGIC`.** **So is changing what a snapshot's bytes _mean_**: M23 changed
   the trampoline's vector padding without bumping, and a pre-M23 trace then restored its old padding
   under code that assumed the new — M24 bumped for it (to `RT\x00\x09` then; moved again by M38
-  for `ret1` and by M47 for the `mach_vm_map` alignment mask, so it is `RT\x00\x0b` now).
+  for `ret1`, by M47 for the `mach_vm_map` alignment mask, and by M49 for the store-exclusive
+  rewrite and native's `si_code`, so it is `RT\x00\x0c` now).
   `open_checked` drops a torn/corrupt tail rather than panicking, and since M47 a trace whose header
   is another `RT` version is refused by name ("recorded by a different retrace trace format (not
   torn)") rather than as torn.
@@ -235,8 +250,10 @@ and threads.
    recording — that comparison *is* the divergence check, so an asymmetry surfaces as a divergence,
    not silent corruption.
 2. Deterministic instruction emulation is better done **below the trace**, inside `Box_::run()`
-   (as with the timebase MRS, the Apple-IMPDEF undef-MRS, the B-family FPAC strip, and since M48
-   the per-thread SPRR register `S3_6_C15_C1_5` with the `MAP_JIT` view it selects): `run()` is
+   (as with the timebase MRS, the Apple-IMPDEF undef-MRS, the B-family FPAC strip, since M48
+   the per-thread SPRR register `S3_6_C15_C1_5` with the `MAP_JIT` view it selects, and since M49
+   the stage-2 fault conversion, the A-narrow tables and the discarded-status store-exclusive
+   rewrite): `run()` is
    shared by record and replay, so such an arm fires identically on both sides and never surfaces
    to the record/replay loop — determinism is then automatic.
 
@@ -291,7 +308,7 @@ recorded** and no trace-format change — symmetry rule 2 doing its job. Since M
 boundary shows the thread that runs next: `finish_event` settles the switch
 (`Box_::settle_schedule`) instead of leaving it to the next `run()`/`step()` entry. The switch
 reuses the save/restore discipline the PAC signing oracle and `flush_guest_tlb` already
-established. A thread blocks for **five** reasons, and the correlation key is not the same for
+established. A thread blocks for **six** reasons, and the correlation key is not the same for
 all of them: `__ulock_wait` (515) / `__ulock_wake` (516) are correlated by **address equality**
 on `pthread + 0x34` — measured in both `__pthread_join` and `__pthread_joiner_wake`, so no
 address→thread-index mapping is needed; the mach semaphore pair `semaphore_wait_trap` (`-36`) / `semaphore_signal_trap`
@@ -302,15 +319,19 @@ returns. The event manager, parked at opcode `0x40` since M46, is the one except
 activation re-enters it (`ThreadTable::unpark`). Since M48 a thread also blocks in `kevent` on a
 guest kqueue (`BlockReason::Kevent`), woken by a knote activation or its deadline, and in
 `psynch_cvwait` (`BlockReason::Cv`), correlated by the condition variable's **guest address** and
-woken by `cvsignal`/`cvbroad` or its deadline. Every deadline is on `synthetic_tsc`,
+woken by `cvsignal`/`cvbroad` or its deadline. Since M49 a thread also blocks in
+`__semwait_signal`'s relative-timeout shape (`BlockReason::Sleep`), correlated by **thread** (every
+sleeper shares libc's one `clock_sem`) and woken only by its deadline. Every deadline is on
+`synthetic_tsc`,
 `schedule_after_block` makes one idle jump to the earliest of all of them, and a woken thread's
 return is written at the wake (`deliver_wake`). Forwarding `bsdthread_create` would be not merely
 wrong but whole-process fatal (the host would start a real thread on retrace's own `_pthread_start`,
 which PAC-fails on the guest's pthread struct) — and **nothing asserts against it**: the emulating
 arm in `record_box` (`crates/retrace-core/src/lib.rs`) sits before the generic forward arm and that ordering is
 the only guard. The generic arm's asserts are `is_signal_syscall`, the workq pair, `kevent_qos`
-(M45), `writes_via_nested_pointer`, since M47 `madvise` and `fork`, and since M48 `kevent` (363)
-and every SDK psynch number (`retrace_arch::is_psynch`) only; the claim that it
+(M45), `writes_via_nested_pointer`, since M47 `madvise` and `fork`, since M48 `kevent` (363)
+and every SDK psynch number (`retrace_arch::is_psynch`), and since M49 `__semwait_signal` (334)
+and its `_nocancel` twin (423) only; the claim that it
 "asserts" stood here from M14 to M37 and was measured false at M37. Since M45 libdispatch's
 workqueue-kqueue init, `kevent_qos` (374) with `KEVENT_FLAG_WORKQ`, is emulated beside the workq
 pair for the same reason (forwarded, it acts on retrace's own workqueue kqueue): M45 emulated
@@ -361,15 +382,17 @@ does *not* materialise:
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (which bumped
-`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0b`, moved again by M24, then by M38 for
-`ret1` and by M47 for the `mach_vm_map` alignment mask, so every pre-M47 recording is unreadable)
+`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0c`, moved again by M24, then by M38 for
+`ret1`, by M47 for the `mach_vm_map` alignment mask, and by M49 for the store-exclusive rewrite and
+native's `si_code`, so every pre-M49 recording is unreadable)
 — and replay recomputes the current thread and compares it. `verify_thread` has **seven** call
 sites, one in each arm that consumes a landmark and `return`s, each placed *after* that arm's own
 field comparison so a genuine argument divergence still reports as itself; the `SignalDelivery`
 landmark is checked by an eighth, inline comparison in `mirror_delivery`, deliberately not
 `verify_thread`, because its tag is the **receiving** thread rather than the current one. M48's
 `kevent` and psynch mirrors sit inside the `Syscall` chain after its arm-top check, so the count
-stays seven; `thread_oracle.rs` retags one landmark of each. That
+stays seven; `thread_oracle.rs` retags one landmark of each. M49's 334 mirror and 1000 route sit
+inside the same chain; `thread_oracle.rs` retags one landmark of each. That
 count is the thing to check when adding an arm: each site exists because a mirror `return`s
 before reaching the generic dispatch, so **every new mirror silently creates a new hole until its
 oracle call is added** — nothing structural couples the two. Without
