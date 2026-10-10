@@ -689,6 +689,11 @@ pub struct Box_ {
     /// through every rebuild path (`BoxState`). It holds a `Vec`, but it comes after `vcpu`/`vm`,
     /// so the load-bearing vcpu-before-vm drop order is unaffected.
     jit: jit::JitSet,
+    /// M49 §3f: the clock ports learned from `host_get_clock_service` replies and the ports the
+    /// guest used with the semaphore traps (`sleep.rs`). Box state, rebuilt on both sides from the
+    /// guest's own calls and carried through every rebuild path (`BoxState`). Declared after
+    /// `vcpu`/`vm`, so the drop order is unaffected.
+    sleep: sleep::SleepModel,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -1166,6 +1171,12 @@ pub struct BoxState {
     // toggles that set the view happened behind the checkpoint. The stamps ride in `mem`, and
     // `from_checkpoint` asserts that they agree with this set (Ruling T6-g).
     pub jit: jit::JitSet,
+    // M49 §3f: carried because a mid-run capture cannot re-derive it: the 206 replies and the
+    // semaphore traps happened behind the checkpoint. Dropping it would make a seek past libc's init
+    // restore a guest whose clock port the model has forgotten, so its next `sleep`'s
+    // `clock_get_time` would be refused on replay though the recording accepted it (sleep_e2e's seek
+    // test; box test `sleep.rs`).
+    pub sleep: sleep::SleepModel,
 }
 
 /// M40: bytes of guest backing currently mapped by `alloc_pages` and not yet released — a
@@ -1741,7 +1752,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default() }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -2449,7 +2460,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default() };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -3819,7 +3830,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default() };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -6097,6 +6108,63 @@ impl Box_ {
         }
     }
 
+    /// M49 §3f S3 (R6): `__semwait_signal` (334), emulated and never forwarded. Forwarded, it sleeps
+    /// the recorder for real on a host semaphore while the guest clock stands still. Admits the call
+    /// or refuses it by value (`SleepModel::admit`, S4) before reading the clock, then blocks the
+    /// current thread until `now_guest() + ticks` (`BlockReason::Sleep`). `schedule_after_block`
+    /// runs any runnable thread first and otherwise jumps the clock to the earliest deadline, so a
+    /// sleep takes no host time; the wake (`sleep_timed_out`) writes `ETIMEDOUT` with the carry set,
+    /// which libc's `nanosleep` reads as a completed sleep.
+    ///
+    /// Returns 0, the landmark's own return: the real answer comes at the wake. Both dispatch arms
+    /// call this with the same `(num, args)` (symmetry rule 1), and nothing is recorded: the
+    /// deadline and the wake are pure functions of box state (rule 2).
+    pub fn guest_semwait_signal(&mut self, num: u64, args: [u64; 8]) -> Result<u64, String> {
+        let ticks = self.sleep.admit(num, args)?;
+        let deadline = self.now_guest().saturating_add(ticks);
+        self.threads.block(thread::BlockReason::Sleep { deadline });
+        Ok(0)
+    }
+
+    /// M49 §3f S2: `port` answers for clock `clock_id`, learned from a successful
+    /// `host_get_clock_service` (206) reply. Both Forward arms call this after the reply lands, with
+    /// the clock id read from the request before the forward and the port read from the reply.
+    pub fn learn_clock_port(&mut self, port: u64, clock_id: u32) { self.sleep.learn_clock_port(port, clock_id); }
+
+    /// M49 §3f S2 (R7): `clock_get_time` (Mach message 1000) on `port`, answered from the guest
+    /// clock as `(tv_sec, tv_nsec)`. Only a SYSTEM_CLOCK port the guest learned from a 206 reply is
+    /// answered. The reading moves no clock: the 1000 is a message, not a timebase read.
+    pub fn guest_clock_get_time(&self, port: u64) -> Result<(u32, i32), String> {
+        match self.sleep.clock_of(port) {
+            Some(sleep::SYSTEM_CLOCK) => Ok(sleep::timespec_of_ticks(self.now_guest())),
+            Some(sleep::CALENDAR_CLOCK) => Err(format!(
+                "M49: clock_get_time on port {port:#x}, a CALENDAR_CLOCK (1) port: wall time is not \
+                 modelled (R7); only SYSTEM_CLOCK (0) is answered, from the guest clock")),
+            Some(id) => Err(format!(
+                "M49: clock_get_time on port {port:#x}, clock id {id}: only SYSTEM_CLOCK (0) is answered (R7)")),
+            None => Err(format!(
+                "M49: clock_get_time to port {port:#x}, which no host_get_clock_service (206) reply \
+                 named. Only a SYSTEM_CLOCK port the guest learned is answered (R7)")),
+        }
+    }
+
+    /// M49 §3f S3: thread `tid`'s sleep reached its deadline. The answer is the kernel's for an
+    /// unsignalled timeout, `ETIMEDOUT` (60) with the carry set (native, `sleep_dyn raw`), onto
+    /// the vCPU when `tid` is the current thread (a 0-tick sleep wakes in the schedule that blocked
+    /// it). A signal pending on the sleeper aborts here instead (S5, R9), as M18's semaphore and
+    /// M48's psynch waits do: the saved context of a thread blocked in `__semwait_signal` is
+    /// unmeasured, and EINTR is M50's. Below the trace, so it panics on both sides alike.
+    fn sleep_timed_out(&mut self, tid: usize) {
+        let pending = self.threads.pending_of(tid);
+        if pending != 0 {
+            panic!("M49: sleep of thread {tid} reached its deadline with a signal pending (set \
+                    {pending:#x}), which this wake would deliver. The saved context of a thread \
+                    blocked in __semwait_signal is unmeasured, and the EINTR answer with the time \
+                    left is M50's (R9); measure it (the blockedctx.rs shape) before allowing this.");
+        }
+        self.deliver_wake(tid, retrace_arch::ETIMEDOUT, true, &[]).unwrap_or_else(|m| panic!("{m}"));
+    }
+
     /// M47 §3c: `madvise(addr, len, behav)` (75), **modelled, never forwarded**. Forwarded, the
     /// host applied the advice to RETRACE's backing of the guest range: a `MADV_FREE_REUSABLE`
     /// there lets the host reclaim pages the guest may later write through stage 2 (the hazard M37
@@ -6446,6 +6514,7 @@ impl Box_ {
             match self.threads.state_of(tid) {
                 thread::ThreadState::Blocked(thread::BlockReason::Kevent { kq, .. }) => self.kevent_timed_out(tid, kq),
                 thread::ThreadState::Blocked(thread::BlockReason::Cv { addr, .. }) => self.cv_timed_out(tid, addr),
+                thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. }) => self.sleep_timed_out(tid),
                 s => unreachable!("M48: due_waiters returned thread {tid} in {s:?}, which has no deadline"),
             }
         }
@@ -7028,6 +7097,9 @@ impl Box_ {
     /// seven of the family's stubs off libsystem_kernel and they are seven distinct numbers — and
     /// `args[0]` is the port. There is no operation word here to guard.
     pub fn guest_sem_wait(&mut self, args: [u64; 8]) -> u64 {
+        // M49 S4: a port the semaphore traps touched is a semaphore a signal could wake early, so
+        // `__semwait_signal` refuses it (`SleepModel::admit`).
+        self.sleep.note_semaphore(args[0]);
         self.threads.block(thread::BlockReason::Sem { port: args[0] });
         0
     }
@@ -7053,6 +7125,7 @@ impl Box_ {
     /// Reads and writes no guest memory, so the recorded event carries no writes and replay's mirror
     /// recomputes this identically from the same `(num, args)`.
     pub fn guest_sem_signal(&mut self, args: [u64; 8]) -> (u64, Vec<usize>) {
+        self.sleep.note_semaphore(args[0]);   // M49 S4, as in `guest_sem_wait`
         let woken = self.threads.unblock_sem_waiters_on(args[0]);
         // **`-33` wakes exactly ONE waiter; the plural case is a DIFFERENT TRAP.** Task 1 §3a read
         // the whole family off libsystem_kernel's own stubs, and `-34` is `_semaphore_signal_all_trap`
@@ -7362,6 +7435,7 @@ impl Box_ {
             gkq: self.gkq.clone(),
             psynch: self.psynch.clone(),
             jit: self.jit.clone(),
+            sleep: self.sleep.clone(),
         }
     }
 
@@ -7488,6 +7562,7 @@ impl Box_ {
             gkq: state.gkq.clone(),
             psynch: state.psynch.clone(),
             jit: state.jit.clone(),
+            sleep: state.sleep.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b.assert_jit_stamped();
@@ -7512,10 +7587,10 @@ impl Box_ {
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
             self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
-            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit)
+            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep)
     }
 
     /// Test-only (M46): the workqueue kqueue, for `checkpointparity.rs` and the box-level manager
@@ -7545,6 +7620,15 @@ impl Box_ {
     /// state an earlier silent divergence would leave.
     #[doc(hidden)]
     pub fn dbg_psynch_mut(&mut self) -> &mut psynch::Psynch { &mut self.psynch }
+
+    /// Test-only (M49): the sleep model, for `tests/sleep.rs`.
+    #[doc(hidden)]
+    pub fn dbg_sleep(&self) -> &sleep::SleepModel { &self.sleep }
+
+    /// Test-only (M49 §4): the sleep model, writable, so a test can plant the state an earlier
+    /// silent divergence would leave (`dbg_psynch_mut`'s posture).
+    #[doc(hidden)]
+    pub fn dbg_sleep_mut(&mut self) -> &mut sleep::SleepModel { &mut self.sleep }
 
     /// Test-only (M46): write guest memory by VA, page by page, as the box's own event writes do.
     /// `gcdtimer_e2e` tampers an entry at its `svc` with this, to reach the replay-side validators.
