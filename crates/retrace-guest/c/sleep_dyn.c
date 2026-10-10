@@ -5,8 +5,11 @@
 //   sleep1          sleep(1): the 1000, then the 334
 //   usleep          usleep(1000): the 334 alone
 //   nanosleep_null  nanosleep({0, 5 ms}, NULL)
+//   usleep1         usleep(1): 1000 ns, 24 ticks at 24 MHz
+//   onens           nanosleep({0, 1 ns}, NULL): 0 ticks, a deadline already reached at the call
 //   raw             __semwait_signal on a fresh semaphore for 5 ms, issued by hand: the stub's -1/errno
 //   twosleepers     a 2 s sleeper created first and a 1 s sleeper second; the order they wake in
+//   pollloop        while (!done) usleep(100), waiting on a worker (Review Focus 1)
 //   sigsleeper      main signals a thread that sleeps (S5: retrace refuses it at the wake)
 //   refuse <what>   one hand-issued shape the model refuses (S4, R8): relative0, timeout0, mutex,
 //                   nsec, semtrap, nosem, nocancel, calendar
@@ -55,7 +58,9 @@ static void timed(const char *mode, int (*f)(void)) {
 
 static int do_sleep1(void) { return (int)sleep(1); }
 static int do_usleep(void) { return usleep(1000); }
+static int do_usleep1(void) { return usleep(1); }
 static int do_nanosleep_null(void) { struct timespec t = { 0, 5000000 }; return nanosleep(&t, NULL); }
+static int do_onens(void) { struct timespec t = { 0, 1 }; return nanosleep(&t, NULL); }
 
 static semaphore_t fresh_semaphore(void) {
     semaphore_t s;
@@ -71,6 +76,18 @@ static void *sleeper(void *arg) {
     int k = (int)(intptr_t)arg;
     sleep(k == 0 ? 2 : 1);
     rank[k] = atomic_fetch_add(&woke, 1);
+    return NULL;
+}
+
+// pollloop: a worker that never blocks; main polls with a short usleep until it is done.
+static atomic_int done;
+static unsigned long long sum;
+static void *summer(void *arg) {
+    (void)arg;
+    unsigned long long s = 0;
+    for (unsigned i = 1; i <= 100000; i++) s += i;
+    sum = s;
+    atomic_store_explicit(&done, 1, memory_order_release);
     return NULL;
 }
 
@@ -131,6 +148,8 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "sleep1")) timed("sleep1", do_sleep1);
     else if (!strcmp(mode, "usleep")) timed("usleep", do_usleep);
     else if (!strcmp(mode, "nanosleep_null")) timed("nanosleep_null", do_nanosleep_null);
+    else if (!strcmp(mode, "usleep1")) timed("usleep1", do_usleep1);
+    else if (!strcmp(mode, "onens")) timed("onens", do_onens);
     else if (!strcmp(mode, "raw")) {
         semaphore_t s = fresh_semaphore();
         errno = 0;
@@ -142,6 +161,11 @@ int main(int argc, char **argv) {
         pthread_join(t[0], NULL);
         pthread_join(t[1], NULL);
         printf("twosleepers 2s rank=%d 1s rank=%d\n", rank[0], rank[1]);
+    } else if (!strcmp(mode, "pollloop")) {
+        pthread_create(&t[0], NULL, summer, NULL);
+        while (!atomic_load_explicit(&done, memory_order_acquire)) usleep(100);
+        pthread_join(t[0], NULL);
+        printf("pollloop done sum=%llu\n", sum);
     } else if (!strcmp(mode, "sigsleeper")) {
         signal(SIGUSR1, on_usr1);
         pthread_create(&t[0], NULL, sleeper1, NULL);

@@ -395,3 +395,38 @@ fn a_seek_across_a_sleep_matches_a_cold_seek() {
     assert_eq!(warm.5, cold.dbg_internal_state(), "the sleep model and the clock: checkpointed vs cold");
     assert!(cold.diff_memory(&warm.6).is_none(), "memory: checkpointed vs cold");
 }
+
+/// Review Focus 1's short shapes. `usleep(1)` is 1000 ns, 24 ticks; `nanosleep` of 1 ns is 0
+/// ticks, a deadline already reached at the call, which wakes in the settle of its own landmark
+/// with no jump, on the vCPU (the only thread is the current one). A wake lost to the saved context
+/// leaves x0 0, which `nanosleep` returns as -1.
+#[test]
+fn a_one_microsecond_and_a_zero_tick_sleep_wake_exactly_and_on_the_vcpu() {
+    let (_, trace) = records_and_replays_as_native(&["usleep1"], &[1_000]);
+    assert_sleep_landmark(&semwaits(&trace)[0], 0, 1_000);
+    let (_, trace) = records_and_replays_as_native(&["onens"], &[0]);
+    let sleeps = semwaits(&trace);
+    assert_sleep_landmark(&sleeps[0], 0, 1);
+    let mut s = session_at_svc(&trace, sleeps[0].0);
+    let at_call = synthetic_tsc(&s.dbg_internal_state());
+    s.advance().unwrap_or_else(|d| panic!("diverged at landmark {}: {}", d.landmark, d.detail));
+    assert_eq!((s.landmark(), s.current_thread()), (sleeps[0].0 + 1, 0), "woken in its own settle");
+    assert_eq!(synthetic_tsc(&s.dbg_internal_state()), at_call, "no idle jump: the deadline was due at the call");
+    assert_woken_with_etimedout(&s, 0);
+}
+
+/// Review Focus 1: a polling loop with a short sleep, waiting on another thread. Main sleeps 100 µs
+/// at a time until a worker that never blocks sets its flag. The worker runs only while main
+/// sleeps, so a sleep that does not block (or never wakes) hangs the recorder, and the bound turns
+/// that hang into this test's failure. The output carries no count, so native's is matched exactly.
+#[test]
+fn a_polling_loop_with_a_short_sleep_waits_for_its_worker_and_terminates() {
+    let (out, trace) = records_and_replays_as_native(&["pollloop"], &[]);
+    assert_eq!(out, "pollloop done sum=5000050000\n");
+    let sleeps = semwaits(&trace);
+    assert!(!sleeps.is_empty(), "the loop slept at least once");
+    for l in &sleeps {
+        assert_eq!(l.1, 0, "only main sleeps");
+        assert_sleep_landmark(l, 0, 100_000);
+    }
+}
