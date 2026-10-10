@@ -1,23 +1,22 @@
 # retrace
 
-**Reverse debugging for command-line programs on macOS (Apple Silicon).**
+An rr-style reverse debugger for macOS on Apple Silicon.
 
-`retrace` records a run of a real macOS binary, replays it bit-for-bit as many times as you like,
-and lets you run it **backwards**. Set a watchpoint on the memory a crash tripped over, reverse-continue,
-and land on the instruction, and the thread, that last wrote it. It serves the recording to
-lldb, so `process continue -R` works.
+retrace records a run of a macOS command-line program, replays it exactly, and lets you debug the
+replay backwards in lldb. Set a watchpoint on the memory a crash tripped over, run
+`process continue -R`, and lldb stops on the instruction that last wrote it, in the thread that
+wrote it.
 
-It is a **technical preview**. It runs real programs (full-`std` Rust, C, stock Homebrew `jq`,
-the CPython interpreter, Homebrew's `node` with its JIT on, Xcode's `git` for its local workflow,
-and most of the Apple binaries in `/bin` and `/usr/bin`), but it is not yet "rr for macOS": no
-preemptive thread scheduling, no `fork` or `exec`, and nothing that needs system services, I/O Kit,
-or a GUI. [Limits](#limits) has the list.
+It's a technical preview. It runs Rust and C programs, Homebrew's `jq`, the CPython interpreter,
+Homebrew's `node` with its JIT on, Xcode's `git` for local work, and most of `/bin` and `/usr/bin`.
+The big differences from rr: threads only switch when one blocks, so races that need preemption
+won't reproduce, and there's no `fork` or `exec`. See [Limits](#limits).
 
-## Demo: running a crash backwards in lldb
+## Example
 
-[`crashy.c`](crates/retrace-guest/c/crashy.c), a test fixture in this repo, overruns an array
-into the pointer next to it, then dereferences that pointer. Build it and record it once (the
-recording exits 139, the crash):
+[`crashy.c`](crates/retrace-guest/c/crashy.c) overruns an array into the pointer stored next to it,
+then dereferences that pointer. Record it once (the recording exits 139, the crash) and serve it to
+lldb:
 
 ```sh
 $ clang -o crashy crates/retrace-guest/c/crashy.c
@@ -26,8 +25,7 @@ $ retrace gdbserver t.bin --port 5555
 listening on 127.0.0.1:5555
 ```
 
-Then debug the recording in stock lldb. This is abridged from the session `lldb_e2e` drives
-against lldb-2100; it runs it twice and checks the transcripts match. `0x1000080b0` is `&g.ptr`:
+Then, in stock lldb (`0x1000080b0` is `&g.ptr`):
 
 ```
 (lldb) gdb-remote 127.0.0.1:5555
@@ -46,80 +44,57 @@ Watchpoint 1 hit:
     frame #0: 0x0000000100000598 crashy`main + 160
 ```
 
-That is the program run to its crash, then run **backwards** to the `str` that wrote the bad
-pointer, then stepped back one more instruction. `lldb_e2e` runs the same session on the real
-CPython interpreter crashing inside a script, too. A scriptable debugger is built in as well:
+lldb runs to the crash, goes back to the `str` that wrote the bad pointer, then steps back one more
+instruction. The `lldb_e2e` test drives this session, and the same one on CPython crashing inside a
+script.
 
-```
-$ retrace debug t.bin --script 'continue; watch 0x1000080b0 8; reverse-continue; where'
-…
-> reverse-continue
-hit watch 0x1000080b0 (write at 0x10000059c) at (245, 70)  in _main+0xa4
-> where
-at (245, 70) pc=0x10000059c thread=0  in _main+0xa4
-```
+## Features
 
-## What it does
-
-- **Record and replay.** `record-dyn` runs the program through the real `/usr/lib/dyld`; `replay`
-  re-runs it without executing a single syscall and checks every step against the recording. A
-  mismatch fails loudly, naming the event and pc.
-- **Run backwards.** Seek to any instruction, `reverse-stepi`, `reverse-continue` to the previous
-  breakpoint or watchpoint hit. Checkpoints make backward seeks fast.
-- **Watchpoints that name the writer.** A hardware watchpoint plus reverse-continue finds the last
-  store to an address, and says which thread made it.
-- **Threads, timers and signals.** Multi-threaded guests (`std::thread`, pthreads with their
-  condition variables, GCD's global queues, GCD timers on the uptime clock, and kqueues with
-  timeouts) record and replay; every timed wait runs on a synthetic clock, so a 2-second timer costs
-  no wall-clock time. Signals reach the thread they were sent to, through the handler the program
-  installed.
-- **Crashes.** A crashing run is a normal recording that ends at the fault, so you can debug it
-  backwards.
-- **JIT code.** node's V8 compiles JavaScript at run time; retrace models Apple's per-thread JIT
-  write-protect, so a recording can be reverse-continued into JIT-compiled code, to the store that
-  wrote a bad pointer.
-- **lldb.** `retrace gdbserver` speaks gdb-remote: continue and step both ways, breakpoints,
-  watchpoints, `bt`, registers, memory, threads. `rsi` (reverse step) ships as a small lldb script.
-- **arm64e and PAC.** Apple's own binaries run with pointer authentication on.
+- Replay re-runs the program without executing a single syscall, checks every step against the
+  recording, and fails loudly at the first mismatch.
+- Reverse execution: seek to any instruction, reverse-step, or reverse-continue to the previous
+  breakpoint or watchpoint hit. Checkpoints keep backward seeks fast.
+- Multi-threaded programs record and replay, including pthreads and their condition variables,
+  `std::thread`, GCD queues and timers, and kqueues with timeouts. Timed waits run on a synthetic
+  clock, so a 2-second timer takes no wall-clock time.
+- Signals reach the thread they were sent to, through the handler the program installed.
+- A crash is an ordinary recording that ends at the fault.
+- JIT code: retrace models Apple's per-thread JIT write protection, so you can reverse-continue into
+  code V8 compiled at run time.
+- `retrace gdbserver` speaks gdb-remote to lldb: continue and step in both directions, breakpoints,
+  watchpoints, `bt`, registers, memory and threads.
+- Apple's own binaries run as arm64e, with pointer authentication on.
 
 ## Limits
 
-These are the ones you will meet first. [`docs/current-state.md`](docs/current-state.md#known-limits)
-has every limit with the measurement behind it.
+[`docs/current-state.md`](docs/current-state.md#known-limits) has every limit and the measurement
+behind it. These are the ones you'll hit first:
 
-- **macOS 26 on Apple Silicon only.** retrace depends on measured behaviour of macOS 26 internals
-  (dyld, libpthread, libdispatch, the shared cache), so a macOS update can break it.
-- **Threads run one at a time and switch only when one blocks or exits.** That is what makes the
-  schedule replayable without recording it, and it means **races that need preemption will not
-  reproduce**. Parallel programs also run serially.
-- **No `fork`, `exec` or `posix_spawn`.** `exec` and `posix_spawn` are refused with a message, and
-  `fork` fails with `EAGAIN`, as it does natively at a process limit, so a program that must fork
-  cannot (`git commit` still commits, after git's own `cannot fork() for maintenance` error).
-  Record the program that does the work, not a launcher or wrapper: Homebrew's `python3`, for
-  example, is a launcher that re-executes the real interpreter, and `/usr/bin/git` is an `xcrun`
-  shim for Xcode's `git`.
-- **Command-line programs only.** Service lookups over XPC, I/O Kit, and GUI frameworks are not
-  modelled. A program that needs one stops at a named wall. kqueue readiness is modelled for a
-  program's own pipes, so nothing that waits on a socket, a terminal or an inherited descriptor
-  runs (no network, no interactive node).
-- **Unmodelled syscalls are refused, never guessed at.** A program that reaches a syscall or Mach
-  message retrace has no model for stops with a `RECORD ERROR` naming it. Of the 54 Apple binaries
-  in the committed sample, 49 record and replay identically on an idle host, three of those by
-  reaching the refused `posix_spawn` identically on both sides. The count moves by a row between
-  runs with host state, `dddiagnose`'s bimodal fault (the latest run, on an idle host, counted 49;
-  the one before it, 50); see [`docs/current-state.md`](docs/current-state.md#known-limits).
-- **Traces are large and the format is not stable.** Tens of MiB to over a GiB, uncompressed
-  (node's V8 reserves address space retrace backs in full: about 501 MiB for `console.log(1)`), and
-  recordings from an older retrace are rejected rather than misread.
-- **Debugging is instruction-level.** The built-in debugger has no DWARF, line numbers or
-  backtraces, and names functions from the program's own symbols and dyld's, not the shared
-  cache's. Under lldb you get at most six breakpoints and four watchpoints (the hardware's), the
-  watchpoints are writes only, and `process interrupt` cannot stop a long reverse motion.
+- macOS 26 on Apple Silicon only. retrace depends on measured behaviour of macOS 26 internals (dyld,
+  libpthread, libdispatch, the shared cache), so an OS update can break it.
+- Threads run one at a time and switch only when one blocks or exits. That keeps the schedule
+  replayable without recording it, but races that need preemption won't reproduce and parallel
+  programs run serially.
+- No `fork`, `exec` or `posix_spawn`. `exec` and `posix_spawn` are refused with a message; `fork`
+  fails with `EAGAIN`. Record the program that does the work, not a launcher: Homebrew's `python3`
+  re-executes the real interpreter, and `/usr/bin/git` is an `xcrun` shim for Xcode's `git`.
+- Command-line programs only. XPC service lookups, I/O Kit and GUI frameworks aren't modelled, and
+  kqueue readiness covers only a program's own pipes, so nothing that waits on a socket, a terminal
+  or an inherited descriptor runs.
+- A syscall or Mach message retrace has no model for stops the recording with a `RECORD ERROR`
+  naming it. In the latest sweep, 49 of the 54 Apple binaries in the committed sample recorded and
+  replayed identically (three of them by reaching the refused `posix_spawn` on both sides). The
+  count moves by one between runs with host state.
+- Traces are big: tens of MiB to over a GiB, uncompressed. node's `console.log(1)` is about 501 MiB
+  because retrace backs V8's address-space reservations in full. The format isn't stable, and
+  recordings from an older retrace are rejected.
+- Debugging is instruction-level. The built-in debugger has no DWARF, line numbers or backtraces.
+  Under lldb you get at most six breakpoints and four watchpoints (the hardware's), watchpoints
+  trigger on writes only, and `process interrupt` can't stop a long reverse motion.
 
 ## Performance
 
-`tools/bench.py` measures native vs record vs replay. Median of 5 runs, Apple M4 Pro, macOS 26.5.2,
-release build, 2026-10-04:
+Median of 5 runs with `tools/bench.py`, Apple M4 Pro, macOS 26.5.2, release build, 2026-10-04:
 
 | workload | native | record | replay | recorder RSS | trace |
 |---|---|---|---|---|---|
@@ -130,119 +105,102 @@ release build, 2026-10-04:
 | CPython, a 30M-step loop | 0.95 s | 1.63 s | 1.64 s | 215 MiB | 85 MiB |
 | node `-e 'console.log(1)'` | 0.041 s | 3.45 s | 3.53 s | 733 MiB | 502 MiB |
 
-There is a **fixed start-up of about 0.2 s** (0.6 s for CPython) to build the VM and page in the
-shared cache. node's is about 3.4 s; its V8 reserves hundreds of MiB of address space, which
-retrace backs in full and keeps in the trace. After that, **compute runs within about 10% of
-native**, because the guest executes natively on the CPU. **Syscalls that move a lot of memory are
-the slow case**: each one is diffed and kept in the trace. [`docs/current-state.md`](docs/current-state.md#performance) has the full table
-and how to read it.
+Building the VM and paging in the shared cache costs about 0.2 s at startup (0.6 s for CPython,
+3.4 s for node). After that, compute runs within about 10% of native, since the guest executes
+directly on the CPU. Syscalls that move a lot of memory are the slow case: each one is diffed and
+stored in the trace.
 
 ## Getting started
 
-**Requirements:** macOS 26 on Apple Silicon and a Rust toolchain (pinned by `rust-toolchain.toml`).
-No root, SIP can stay on, and no Apple developer account is needed.
+You need macOS 26 on Apple Silicon and a Rust toolchain (`rust-toolchain.toml` pins the version).
+No root, no Apple developer account, and SIP can stay on.
 
 ```sh
 git clone https://github.com/NMitchem/retrace && cd retrace
 cargo build --release
-```
-
-Every binary that uses Hypervisor.framework needs the `com.apple.security.hypervisor` entitlement,
-which an ad-hoc signature can carry. `cargo run` signs for you (`.cargo/config.toml` sets
-`tools/codesign-run.sh` as the runner). A binary you run directly must be signed once after each
-build:
-
-```sh
 codesign -s - -f --entitlements retrace.entitlements target/aarch64-apple-darwin/release/retrace
 ```
 
-The first run of a freshly signed binary can pause for a while in macOS's code-signing check. That
-is not a hang. The examples here call that binary `retrace`: put its directory on your `PATH`, or
-use the full path.
+Anything that uses Hypervisor.framework needs the `com.apple.security.hypervisor` entitlement, which
+an ad-hoc signature can carry. Re-sign after every build. `cargo run` signs for you through the
+runner in `.cargo/config.toml`. The first run of a freshly signed binary can pause for a while in
+macOS's code-signing check; it isn't hung. The examples call that binary `retrace`, so put its
+directory on your `PATH` or use the full path.
 
 | Command | What it does |
 |---|---|
 | `retrace record-dyn <exe> -o <trace> [-- <args…>]` | record a program, running it through the real dyld |
 | `retrace replay <trace>` | replay and verify; exits 3 on a divergence |
-| `retrace debug <trace> --script '<cmds>'` | the built-in debugger (`continue`, `reverse-continue`, `stepi`, `reverse-stepi`, `break`, `watch`, `where`, `regs`, `threads`, `x`) |
 | `retrace gdbserver <trace> [--port <n>] [--exe <path>]` | serve the recording to lldb |
+| `retrace debug <trace> --script '<cmds>'` | the built-in debugger (`continue`, `reverse-continue`, `stepi`, `reverse-stepi`, `break`, `watch`, `where`, `regs`, `threads`, `x`) |
 | `retrace record <macho> -o <trace>` | record a freestanding static binary |
 
-Pass the program an absolute path when you record, so lldb can find its symbols later. For lldb,
-load the reverse-step command with
-`command script import <repo>/crates/retrace/lldb/retrace.py`. `RETRACE_TRACE=1` on a recording
-logs every trap, which is the first thing to look at when a program hits a wall.
+Record with an absolute path to the program so lldb can find its symbols later. In lldb, load the
+reverse-step command with `command script import <repo>/crates/retrace/lldb/retrace.py`. If a
+recording stops at a wall, rerun it with `RETRACE_TRACE=1` to log every trap.
 [`docs/current-state.md`](docs/current-state.md#usage) has the full CLI and debugger reference.
 
 ## How it works
 
-The program runs **natively, on one virtual CPU**, inside a Hypervisor.framework VM that retrace
-builds itself: page tables, pointer-authentication keys, the dyld process-start stack. There is no
-kernel in the VM. Every syscall traps out to retrace.
+The program runs natively on one virtual CPU, in a Hypervisor.framework VM that retrace builds
+itself: page tables, pointer-authentication keys, the dyld process-start stack. There's no kernel in
+the VM, so every syscall traps out to retrace.
 
-- **Recording** forwards each syscall to the real macOS kernel, diffs the guest memory the kernel
-  could have written, and appends the result to the trace. Mach messages are serviced or forwarded
-  one known message type at a time.
-- **Replay** restores the opening snapshot and runs the same instructions again, but **never
-  executes a syscall**: it checks each one against the recording, applies the recorded memory
-  writes and return values, and compares the final memory byte for byte.
-- **Nothing nondeterministic enters the trace.** What would (the shared cache, the clock,
-  pointer-authentication signatures, the thread schedule) is regenerated identically on both
-  sides instead. The shared cache is paged in from disk and re-signed with fixed keys, the timebase
-  is synthetic, and the scheduler switches threads only at points that follow from the program's
-  own syscalls.
-- **Running backwards** is replaying forwards to the right place. Apple Silicon has no
-  retired-instruction counter, so a position is a syscall landmark plus a single-stepped
-  instruction offset, and checkpoints bound how far any seek has to replay.
+While recording, retrace forwards each syscall to the real macOS kernel, diffs the guest memory the
+kernel could have written, and appends the result to the trace. Replay starts from the opening
+snapshot and runs the same instructions, but never executes a syscall: it checks each one against
+the recording, applies the recorded writes and return values, and compares the final memory byte
+for byte.
+
+Anything nondeterministic is regenerated identically on both sides instead of recorded. The shared
+cache is paged in from disk and re-signed with fixed keys, the clock is synthetic, and the scheduler
+switches threads only at points that follow from the program's own syscalls.
+
+Running backwards means replaying forwards to the right place. Apple Silicon has no
+retired-instruction counter, so a position is a syscall plus a single-stepped instruction offset,
+and checkpoints limit how far any seek has to replay.
 
 The original design is in
-[`docs/superpowers/specs/2026-07-05-retrace-macos-record-replay-design.md`](docs/superpowers/specs/2026-07-05-retrace-macos-record-replay-design.md);
-`CLAUDE.md` holds the platform invariants (violating them hangs or panics the machine).
+[`docs/superpowers/specs/2026-07-05-retrace-macos-record-replay-design.md`](docs/superpowers/specs/2026-07-05-retrace-macos-record-replay-design.md).
 
 ## Prior art
 
-- **Warpspeed** (REcon 2023: [talk](https://nickgregory.me/files/talks/warpspeed.pdf),
-  [write-up by Nick Gregory](https://nickgregory.me/post/2024/06/23/warpspeed/),
-  [code](https://github.com/kallsyms/warpspeed)) is the earlier macOS record/replay debugger, and
-  retrace is built on its idea: box the program in Hypervisor.framework, forward its syscalls, and
-  record the kernel's writes by diffing memory. Its 2024 write-up calls it a proof of concept, with
-  thread-switch and signal replay still to be built and no debugger front end. retrace shares no
-  code with it (Warpspeed's repository carries no license), and adds those pieces:
-  thread and signal replay, instruction-exact reverse execution, arm64e/PAC, and lldb.
-- **[rr](https://rr-project.org/)** is the model for all of this, on Linux. It needs hardware
-  performance counters, which Apple's hypervisor does not give a Linux VM; **[rr.soft](https://github.com/sidkshatriya/rr.soft)**
-  works around that to run rr in a Linux VM on a Mac, for Linux programs.
-- **WinDbg's Time Travel Debugging** on Windows and Undo's **UDB** on Linux are the equivalents
-  elsewhere.
-- **lldb** gained reverse execution over gdb-remote, the `bc`/`bs` packets rr's gdbserver speaks
-  ([llvm-project#123945](https://github.com/llvm/llvm-project/pull/123945)). `retrace gdbserver`
-  is a macOS backend for that same client.
+- [Warpspeed](https://github.com/kallsyms/warpspeed) ([talk](https://nickgregory.me/files/talks/warpspeed.pdf),
+  [write-up](https://nickgregory.me/post/2024/06/23/warpspeed/)) is the earlier macOS record/replay
+  debugger, and retrace is built on its idea: run the program in Hypervisor.framework, forward its
+  syscalls, and capture the kernel's writes by diffing memory. retrace shares no code with it, and
+  adds thread and signal replay, instruction-exact reverse execution, arm64e/PAC and lldb support.
+- [rr](https://rr-project.org/) is the model for all of this, on Linux. It needs hardware
+  performance counters that Apple's hypervisor doesn't expose to a Linux VM;
+  [rr.soft](https://github.com/sidkshatriya/rr.soft) works around that to run rr on Linux programs
+  in a VM on a Mac.
+- WinDbg's Time Travel Debugging and Undo's UDB do the same job on Windows and Linux.
+- lldb's reverse execution over gdb-remote
+  ([llvm-project#123945](https://github.com/llvm/llvm-project/pull/123945)) uses the same packets
+  rr's gdbserver speaks. `retrace gdbserver` is a macOS backend for it.
 
 ## Documentation
 
-- [`docs/current-state.md`](docs/current-state.md): what works today and what does not, in full,
-  with measurements, plus the test gate. Edited in place; trust it over anything else.
-- [`docs/status-log.md`](docs/status-log.md): the milestone-by-milestone engineering history,
-  append-only.
-- `docs/superpowers/specs/` and `docs/superpowers/plans/`: per-milestone designs and plans.
-- `docs/sweep-evidence/`: the kept evidence behind the Apple-binary figures.
-- `CLAUDE.md`: architecture, invariants, and working rules for contributors.
+- [`docs/current-state.md`](docs/current-state.md): what works and what doesn't, with
+  measurements, and the test gate. Trust it over anything else.
+- [`docs/status-log.md`](docs/status-log.md): the milestone-by-milestone history.
+- [`CLAUDE.md`](CLAUDE.md): architecture and the platform invariants for contributors.
 
 ## Contributing
 
-There is no CI, and there cannot be: the test suite needs macOS 26 on Apple Silicon and a working
-`hv_vm_create`, which hosted macOS runners (themselves VMs) do not provide. Run the gate locally
-(`just gate`; [`docs/current-state.md`](docs/current-state.md#testing) explains why it has to be
-chunked and why `--test-threads=1` is mandatory) and paste the counts.
+There's no CI: the tests need macOS 26 on Apple Silicon and a working `hv_vm_create`, which hosted
+macOS runners (themselves VMs) don't provide. Run `just gate` locally and paste the counts;
+[`docs/current-state.md`](docs/current-state.md#testing) explains why it has to be chunked and why
+`--test-threads=1` is required.
 
-The one rule that matters most: **walls are documented honestly.** A test parked `#[ignore]` at a
-measured limit, with the reason written on it, is worth more than a green bought by loosening an
-assertion. Assert on the difference your change makes, and make a skipped test say so.
+When a test hits a real limit, park it with `#[ignore]` and write the reason on it rather than
+loosening an assertion to make it pass. Assert on the difference your change makes, and make a
+skipped test say it skipped.
 
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
 
-`hv-sys` binds Hypervisor.framework by running `bindgen` against the macOS SDK on your machine at
-build time. No Apple headers, source or binaries are redistributed, and no dyld or shared-cache
-bytes are vendored; they are read from the host at runtime.
+`hv-sys` generates its Hypervisor.framework bindings with `bindgen` against the macOS SDK on your
+machine at build time. No Apple headers, source or binaries are redistributed, and dyld and
+shared-cache bytes are read from the host at runtime.
