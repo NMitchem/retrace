@@ -5,7 +5,7 @@
 // ever valid (the identity map covers just the 36-bit IPA space), so the store takes a STAGE-1
 // translation fault, delivered via the EL1 trampoline (run()'s INNER match) => Stop::Fault with
 // FAR == this VA. Contrast asm/wildstore.s: a VA < 2^36 is stage-1-mapped but stage-2-unbacked
-// => OUTER abort, which stays fatal (the M6 classification negative).
+// => an OUTER abort, which M49 F2 converts into this same stage-1 fault (a recorded crash).
 _start:
     movz x0, #0x4000, lsl #32    // 0x4000_0000_0000
     movk x0, #0xDEAD, lsl #16    // | 0xDEAD_0000

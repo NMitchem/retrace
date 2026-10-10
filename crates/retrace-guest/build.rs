@@ -635,8 +635,8 @@ fn main() {
         .status().expect("clang reservecommit");
     assert!(status.success(), "reservecommit guest build failed");
 
-    // wildstore: stores to a wild unbacked, unreserved address (0xB_0000_0000). The fault must stay
-    // fatal — the M2-mmapcommit fail-loud negative guest (commit_reserved_page must refuse it).
+    // wildstore: stores to a wild unbacked, unreserved address (0xB_0000_0000). commit_reserved_page
+    // must refuse it (the M2-mmapcommit negative guest); since M49, F2 converts it into a crash.
     let src = format!("{}/asm/wildstore.s", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/wildstore");
     println!("cargo:rerun-if-changed={src}");
@@ -713,7 +713,7 @@ fn main() {
 
     // crash: stores to VA 0x4000_DEAD_0000 (bit 46 set), which no stage-1 table entry covers => a
     // stage-1 translation fault delivered via the EL1 trampoline => Stop::Fault (a recordable crash,
-    // not a retrace bug). The M6 data-abort crash guest. Contrast wildstore.s (stage-2, stays fatal).
+    // not a retrace bug). The M6 data-abort crash guest. Contrast wildstore.s (stage-2, which M49 F2 converts).
     let src = format!("{}/asm/crash.s", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/crash");
     println!("cargo:rerun-if-changed={src}");

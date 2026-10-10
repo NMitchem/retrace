@@ -2227,6 +2227,53 @@ pub fn signal_of_esr(esr: u64) -> (u64, u64) {
     }
 }
 
+/// M49 F2 (spec §3d): the stage-1 abort a stage-2 translation fault stands for, or why it must
+/// stay loud.
+///
+/// retrace's stage 1 identity-maps [0, 64 GiB) (`build_tables`), so a guest access to an address
+/// nothing backs passes stage 1 and misses stage 2. The abort goes to EL2 (HVF) and the guest's own
+/// EL1 vector never runs. Native macOS has no stage 2: the same access is a stage-1 translation
+/// fault, which the kernel delivers as SIGSEGV (`faults-native.txt`). This computes the ESR_EL1 a
+/// stage-1 fault would carry from the ESR_EL2 HVF reported, so the box can emulate the exception
+/// entry and the crash and signal path runs as it does for a stage-1 fault.
+///
+/// `Err` names why the stop stays a `non-syscall exit`, unless every condition holds:
+/// - EC 0x24 or 0x20, a data or instruction abort from a lower EL;
+/// - `guest_cpsr` at EL0. To EL2, EL1 is a lower EL too, so the EC cannot tell the guest from
+///   retrace's own trampoline and stubs, which run at EL1;
+/// - DFSC 0x04..=0x07, a translation fault. A stage-2 permission or access-flag fault means
+///   retrace's stage-2 map is wrong, not the guest;
+/// - S1PTW (ISS bit 7) clear. Set, the stage-1 table walk itself missed stage 2: retrace's own
+///   tables are broken;
+/// - FnV (ISS bit 10) clear. Set, the FAR is not valid, and the FAR is what the guest is told.
+///
+/// The result keeps the EC and IL, and for a data abort WnR (bit 6) and CM (bit 8). It drops ISV
+/// and the instruction syndrome, which a stage-1 abort taken to EL1 does not report (every native
+/// ESR M49 measured has ISV clear), and its DFSC is 0x07, a level-3 translation fault. Native
+/// reports the level of its own walk, which retrace's tables do not reproduce (R2).
+pub fn stage2_abort_as_stage1(esr_el2: u64, guest_cpsr: u64) -> Result<u64, String> {
+    let ec = (esr_el2 >> 26) & 0x3f;
+    if ec != 0x24 && ec != 0x20 {
+        return Err(format!("EC {ec:#x} is not a lower-EL data or instruction abort"));
+    }
+    let el = (guest_cpsr >> 2) & 3;
+    if el != 0 {
+        return Err(format!("taken at EL{el} (cpsr {guest_cpsr:#x}), so it is retrace's own code"));
+    }
+    let dfsc = esr_el2 & 0x3f;
+    if !(0x04..=0x07).contains(&dfsc) {
+        return Err(format!("DFSC {dfsc:#x} is not a translation fault"));
+    }
+    if esr_el2 & (1 << 7) != 0 {
+        return Err("S1PTW is set: the stage-1 table walk missed stage 2, so retrace's tables are broken".into());
+    }
+    if esr_el2 & (1 << 10) != 0 {
+        return Err("FnV is set: the FAR is not valid".into());
+    }
+    let keep = if ec == 0x24 { (1 << 25) | (1 << 8) | (1 << 6) } else { 1 << 25 };
+    Ok((ec << 26) | (esr_el2 & keep) | 0x07)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2754,6 +2801,73 @@ mod tests {
     fn a_translation_fault_is_segv_accerr_as_native_measures_it() {
         for esr in [0x9200_0006, 0x9200_0046, 0x9200_0007, 0x9200_0005, 0x8200_0006] {
             assert_eq!(signal_of_esr(esr), (SIGSEGV, SEGV_ACCERR), "native's ESR {esr:#x}");
+        }
+    }
+
+    // M49 F2 (§3d): the stage-1 ESR a stage-2 translation fault stands for. The inputs are
+    // syndromes HVF reported for guest aborts (`faults-retrace.txt` and the plan's probes); each
+    // output is what a stage-1 level-3 translation fault reports to EL1 (R2).
+    #[test]
+    fn a_stage2_data_abort_at_el0_becomes_a_level3_stage1_translation_fault() {
+        let el0t = 0;
+        // ISV and the instruction syndrome (SAS, SRT, SF) go: a stage-1 abort taken to EL1 never
+        // reports them (every native ESR measured has ISV clear). IL stays; the DFSC becomes 0x07.
+        assert_eq!(stage2_abort_as_stage1(0x93c8_8007, el0t), Ok(0x9200_0007), "a load at 0x10 (null10)");
+        assert_eq!(stage2_abort_as_stage1(0x93c8_8006, el0t), Ok(0x9200_0007), "a load at 1 GiB, level 2 at stage 2");
+        // WnR (bit 6) stays: a store is reported as a store.
+        assert_eq!(stage2_abort_as_stage1(0x93c8_8047, el0t), Ok(0x9200_0047), "a store (null0st, deeprec)");
+        assert_eq!(stage2_abort_as_stage1(0x9301_0046, el0t), Ok(0x9200_0047), "wildstore.s's strb");
+        // CM (bit 8) stays: a cache-maintenance access is reported as one.
+        assert_eq!(stage2_abort_as_stage1(0x9200_0146, el0t), Ok(0x9200_0147), "a cache-maintenance fault");
+        // Only the EL is read from the PSTATE: flags do not change the answer.
+        assert_eq!(stage2_abort_as_stage1(0x93c8_8007, 0x6000_0000), Ok(0x9200_0007), "NZCV set");
+    }
+
+    #[test]
+    fn a_stage2_instruction_abort_at_el0_keeps_only_its_class_and_length() {
+        // `jumpgone`: a call into a released PROT_EXEC page (HVF reported 0x82000006).
+        assert_eq!(stage2_abort_as_stage1(0x8200_0006, 0), Ok(0x8200_0007));
+        // Bit 6 is RES0 in an instruction abort's ISS, and bit 8 too: neither is carried.
+        assert_eq!(stage2_abort_as_stage1(0x8200_0146, 0), Ok(0x8200_0007));
+    }
+
+    #[test]
+    fn a_stage2_abort_taken_at_el1_stays_loud() {
+        // To EL2, EL1 is a lower EL too, so the EC cannot tell retrace's trampoline or a stub from
+        // the guest; the PSTATE's EL can. 0x3c5 is EL1h, what the vector and the stubs run at.
+        let why = stage2_abort_as_stage1(0x93c8_8007, 0x3c5).unwrap_err();
+        assert!(why.contains("EL1"), "{why}");
+    }
+
+    #[test]
+    fn a_stage2_abort_on_a_stage1_table_walk_stays_loud() {
+        // S1PTW (ISS bit 7): the walk itself missed stage 2, so retrace's own tables are broken.
+        let why = stage2_abort_as_stage1(0x93c8_8087, 0).unwrap_err();
+        assert!(why.contains("S1PTW"), "{why}");
+    }
+
+    #[test]
+    fn a_stage2_abort_with_an_invalid_far_stays_loud() {
+        // FnV (ISS bit 10): the FAR is not valid, and it is what the guest would be told.
+        let why = stage2_abort_as_stage1(0x93c8_8407, 0).unwrap_err();
+        assert!(why.contains("FnV"), "{why}");
+    }
+
+    #[test]
+    fn a_stage2_abort_that_is_not_a_translation_fault_stays_loud() {
+        // A stage-2 permission or access-flag fault means retrace's stage-2 map is wrong.
+        for esr in [0x9200_000f, 0x9200_000b, 0x8200_000f] {
+            let why = stage2_abort_as_stage1(esr, 0).unwrap_err();
+            assert!(why.contains("not a translation fault"), "{esr:#x}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_syndrome_that_is_not_a_lower_el_abort_is_never_converted() {
+        // EC 0x25 (a same-EL data abort), 0x18 (a trapped sysreg access), 0x16 (an HVC).
+        for esr in [0x9600_0007, 0x6200_0000, 0x5a00_0000] {
+            let why = stage2_abort_as_stage1(esr, 0).unwrap_err();
+            assert!(why.contains("not a lower-EL data or instruction abort"), "{esr:#x}: {why}");
         }
     }
 

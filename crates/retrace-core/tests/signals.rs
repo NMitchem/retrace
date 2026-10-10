@@ -169,15 +169,33 @@ fn an_uncaught_fault_is_still_a_crash() {
     // The M6 regression. No handler installed => the Event::Crash path is untouched.
     //
     // CRASH, not WILDSTORE. Both store to a bad address, but only CRASH's has bit 46 set, so only
-    // CRASH takes the STAGE-1 fault that reaches Stop::Fault. WILDSTORE is M2's stage-2 negative:
-    // it is fatal by design, record() returns Err for it, and reservecommit.rs asserts it must
-    // never become a Stop::Fault at all. Using it here would have tested the wrong classification.
+    // CRASH takes the STAGE-1 fault that reaches Stop::Fault directly. WILDSTORE is a stage-2 abort,
+    // which M49 F2 converts into a Stop::Fault on the next run(); its own test is below.
     let (outcome, trace) = record_asm(retrace_guest::CRASH);
     assert!(matches!(outcome, retrace_core::Outcome::Crash { .. }), "got {outcome:?}");
     let (events, _) = retrace_trace::Reader::open_checked(&trace).unwrap();
     assert!(events.iter().any(|e| matches!(e, retrace_trace::Event::Crash { .. })),
         "an uncaught fault must still record as Crash, not a delivery");
     assert!(!events.iter().any(|e| matches!(e, retrace_trace::Event::SignalDelivery { .. })));
+    std::fs::remove_file(&trace).ok();
+}
+
+// M49 F2: WILDSTORE's store to 0xB_0000_0000 is stage-1-mapped and stage-2-unbacked. Before M49
+// it ended the recording with a recorder error; it is now the stage-1 fault native takes, recorded
+// as a crash and replayed as one.
+#[test]
+fn a_wild_store_below_the_ipa_ceiling_records_and_replays_as_a_crash() {
+    let (outcome, trace) = record_asm(retrace_guest::WILDSTORE);
+    let Outcome::Crash { pc, esr, far } = outcome else { panic!("expected a crash, got {outcome:?}") };
+    assert_eq!((esr, far), (0x9200_0047, 0xB_0000_0000), "a level-3 translation fault, a store, at the wild address");
+    let (events, torn) = retrace_trace::Reader::open_checked(&trace).unwrap();
+    assert!(!torn, "the recording must be complete");
+    assert!(matches!(events[events.len() - 2], retrace_trace::Event::Crash { thread: 0, .. }));
+    assert!(matches!(events[events.len() - 1], retrace_trace::Event::Snapshot { .. }));
+    for _ in 0..2 {
+        let rep = retrace_core::replay(&trace).expect("the crash replays");
+        assert_eq!(rep.outcome, Outcome::Crash { pc, esr, far });
+    }
     std::fs::remove_file(&trace).ok();
 }
 

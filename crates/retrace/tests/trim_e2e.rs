@@ -52,15 +52,13 @@ fn a_trimmed_reservation_keeps_its_middle_and_replays() {
     let _ = std::fs::remove_file(&trace);
 }
 
-// Native takes SIGSEGV on a released page (139). retrace does not reproduce that: the box removes a
-// released page's STAGE-2 mapping and leaves its stage-1 identity block ("stage-1 identity block
-// stays", `guest_munmap`), so the touch is a stage-2 translation fault straight to EL2, which the
-// record loop reports as `describe_stop`'s "non-syscall exit" and a recorder exit of 4, never as a
-// `Stop::Fault` and an `Event::Crash` (a stage-1 fault, which crashy takes at 0x4000dead0000). That
-// is `munmap`'s behaviour since M2 and is not what Task 3 changes, so these assert on what the
-// recorder says about the ADDRESS: the faulting IPA is exactly the released word, and the box
-// itself calls it UNMAPPED. When a touch of a released page becomes a recorded crash, this is the
-// test to move to the trace's terminal `Crash` and a replayed 139.
+// Native takes SIGSEGV on a released page (139), and since M49 so does a recording. The box
+// removes a released page's STAGE-2 mapping and leaves its stage-1 identity block ("stage-1
+// identity block stays", `guest_munmap`), so the touch is a stage-2 translation fault straight to
+// EL2. Until M49 the record loop reported that as `describe_stop`'s "non-syscall exit" and a
+// recorder exit of 4. M49 F2 (`Box_::resolve_stage2`) converts it into the stage-1 fault native
+// takes, so the trace ends in `Event::Crash` at exactly the released word, and both replays crash
+// there too. The ESR is a level-3 translation fault on a load (R2: native's level differs).
 #[test]
 fn the_trimmed_head_and_the_rounded_tail_are_gone() {
     for mode in ["head", "tail"] {
@@ -72,10 +70,19 @@ fn the_trimmed_head_and_the_rounded_tail_are_gone() {
         // UP to the page releases: the second `munmap` ends at +0x7bb20, mid-page. Were the end
         // rounded down instead, the tail word would stay mapped and this record would exit 0.
         let target = if mode == "head" { head } else { tail_start + 0x2c000 - 8 };
-        assert_eq!(rec.code, 4, "{mode}: the touch of a released page stops the recorder: {}", rec.stderr);
-        assert!(rec.stderr.contains("RECORD ERROR: non-syscall exit: data abort"), "{mode}: {}", rec.stderr);
-        assert!(rec.stderr.contains(&format!("far/ipa={target:#x} (UNMAPPED)")),
-            "{mode}: the fault is at the released word {target:#x}: {}", rec.stderr);
+        assert_eq!(rec.code, 139, "{mode}: the touch of a released page is a recorded crash: {}", rec.stderr);
+        let ev = Reader::open(&trace).unwrap();
+        assert!(matches!(ev[ev.len() - 1], Event::Snapshot { .. }), "{mode}: the final snapshot last");
+        match &ev[ev.len() - 2] {
+            Event::Crash { esr, far, .. } => assert_eq!((*esr, *far), (0x9200_0007, target),
+                "{mode}: a load fault at the released word {target:#x}"),
+            other => panic!("{mode}: expected the terminal Crash, got {other:?}"),
+        }
+        for i in 1..=2 {
+            let rp = util::replay(&trace);
+            assert_eq!(rp.code, 139, "{mode} replay {i}: {}", rp.stderr);
+            assert!(rp.stderr.contains(&format!("far={target:#x} esr=0x92000007")), "{mode} replay {i}: {}", rp.stderr);
+        }
         let _ = std::fs::remove_file(&trace);
     }
 }

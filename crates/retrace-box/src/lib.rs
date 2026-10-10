@@ -431,6 +431,12 @@ const TLBI_STUB_BOUND: u32 = 4;
 const TLBI_STUB: [u32; 4] = [0xd508_871f, 0xd503_3b9f, 0xd503_3fdf, 0xd400_0002];
 // EL1h with DAIF masked — the exception level `tlbi` requires.
 const TLBI_STUB_CPSR: u64 = 0x3C5;
+// M49 F2: PSTATE on an exception entry from EL0 to EL1 — EL1h with DAIF masked, PAN unchanged
+// (SCTLR_EL1.SPAN is set). Measured rather than derived: the plan's probe read CPSR 0x3c5 at the
+// vector after `crash.s`'s stage-1 fault, both through `run()` (after the slot's `hvc`) and through
+// `step()` (parked before it). It equals TLBI_STUB_CPSR; the two stay apart because they mean
+// different things.
+const EXC_ENTRY_CPSR: u64 = 0x3C5;
 
 // The full architectural state save_state/restore_state capture around an in-guest stub run, so a
 // mid-run caller sees no disturbance — shared by both guest oracles: sign_slots's EL0 `svc` (the
@@ -810,8 +816,7 @@ pub enum Stage2 {
     /// M49 F2: an EL0 translation fault at an address nothing backs, turned into the stage-1 abort
     /// native takes. The guest is parked at its EL1 vector (`VBAR_EL1 + 0x400`) with ELR, SPSR, FAR
     /// and ESR_EL1 written, exactly as a stepped stage-1 fault leaves it (spike F2), so the next
-    /// `run()` returns `Stop::Fault { pc, esr, far }` with these values. M49 Task 3 makes this
-    /// reachable; until then it is never returned.
+    /// `run()` returns `Stop::Fault { pc, esr, far }` with these values.
     Converted { pc: u64, esr: u64, far: u64 },
     /// Nothing handled it. The string is the caller's error text: `describe_stop`, plus M49 F2's
     /// reason when F2 looked at the stop and declined it.
@@ -1903,16 +1908,65 @@ impl Box_ {
     pub fn fault_ipa(&self) -> u64 { self.last_far }
 
     /// M49 §3d F1: resolve a `Stop::Other` that is a stage-2 abort. This is the one copy of the
-    /// chain the record loop, replay's `advance` and the four step loops each used to spell out. In
-    /// order: the shared-cache pager, then the reservation committer; each declines what is not its
-    /// own. `esr` is the stop's own syndrome (HVF's ESR_EL2), which the box does not keep. Below the
+    /// chain the record loop, replay's `advance` and the four step loops each used to spell out, so
+    /// they decide alike by construction (symmetry rule 1). In order:
+    /// 1. the shared-cache pager;
+    /// 2. the reservation committer (each of the two declines what is not its own);
+    /// 3. M49 F2: the conversion of an EL0 touch of unbacked memory into the stage-1 fault native
+    ///    takes.
+    ///
+    /// `esr` is the stop's own syndrome (HVF's ESR_EL2), which the box does not keep. Below the
     /// trace: every input is box state rebuilt identically on both sides, so nothing about the
     /// decision is recorded.
     pub fn resolve_stage2(&mut self, esr: u64) -> Stage2 {
         let ipa = self.fault_ipa();
         if self.page_in_cache(ipa) { return Stage2::Resolved { committed: false }; }
         if self.commit_reserved_page(ipa) { return Stage2::Resolved { committed: true }; }
-        Stage2::Unhandled(self.describe_stop(esr))
+        // F2 looks only at aborts. A breakpoint, a watchpoint or any other class keeps exactly the
+        // text it had before M49.
+        if !matches!(ec_of(esr), Ec::DataAbort | Ec::InstrAbort) {
+            return Stage2::Unhandled(self.describe_stop(esr));
+        }
+        match self.convert_stage2_abort(esr) {
+            Ok(converted) => converted,
+            Err(why) => Stage2::Unhandled(format!("{}; M49 F2 left it loud: {why}", self.describe_stop(esr))),
+        }
+    }
+
+    /// M49 §3d F2: emulate the exception entry a stage-1 translation fault makes, for an EL0 access
+    /// that passed retrace's identity stage 1 and missed stage 2 at an IPA nothing backs, after both
+    /// pagers declined it. Field by field (t0 M5, and the plan's probe on `wildstore.s`):
+    /// - ELR_EL1 is the faulting pc. At a stage-2 exit the vCPU's PC is the faulting instruction,
+    ///   while ELR_EL1 still holds the last syscall's return (`faults-report.md` §2).
+    /// - SPSR_EL1 is the guest's PSTATE (EL0t), with `PSTATE_SS` cleared. On the stepping path
+    ///   `step()` has already cleared it, so a later delivery's frame carries the PSTATE record saw.
+    /// - FAR_EL1 is the faulting VA, HVF's `virtual_address`, valid because FnV is clear.
+    /// - ESR_EL1 is `retrace_arch::stage2_abort_as_stage1`'s answer: EC, IL, WnR and CM, with DFSC
+    ///   0x07 (R2).
+    /// - CPSR is `EXC_ENTRY_CPSR`, and the pc is VBAR_EL1 + 0x400, the lower-EL synchronous vector.
+    ///
+    /// The next `run()` executes that slot's `hvc #0` and returns `Stop::Fault` through the arm a
+    /// stage-1 fault takes, so `signal_of_esr`, `deliver_signal_to` and `Event::Crash` run as they
+    /// do for any stage-1 fault. `Err` names why the stop stays loud.
+    fn convert_stage2_abort(&mut self, esr: u64) -> Result<Stage2, String> {
+        let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
+        let esr1 = retrace_arch::stage2_abort_as_stage1(esr, cpsr)?;
+        let far = self.last_far;
+        // A tagged pointer's top byte is not part of the walk (TBI0), so strip it for the lookup.
+        let ipa = self.va_to_ipa(far & excl::TAG_MASK).ok_or_else(|| format!(
+            "stage 1 has no leaf for {far:#x}, so the walk that missed stage 2 was not the guest's"))?;
+        if self.host_span(ipa).is_some() {
+            return Err(format!("IPA {ipa:#x} is backed, so stage 2 and the box's backings disagree"));
+        }
+        let pc = self.pc();
+        let vbar = self.vcpu.get_sys(sysreg::VBAR_EL1).unwrap();
+        self.vcpu.set_sys(sysreg::ELR_EL1, pc).unwrap();
+        self.vcpu.set_sys(sysreg::SPSR_EL1, cpsr & !PSTATE_SS).unwrap();
+        self.vcpu.set_sys(sysreg::FAR_EL1, far).unwrap();
+        self.vcpu.set_sys(sysreg::ESR_EL1, esr1).unwrap();
+        self.vcpu.set_reg(reg::CPSR, EXC_ENTRY_CPSR).unwrap();
+        self.vcpu.set_reg(reg::PC, vbar + 0x400).unwrap();
+        Ok(Stage2::Converted { pc, esr: esr1, far })
     }
 
     /// The live stage-1 leaf descriptor for `ipa`, walking the L2/L3 the box maintains: an L3 page

@@ -1,7 +1,8 @@
 // M2-mmapcommit Task 1 fail-loud negative + gating tests. commit_reserved_page must demand-commit
-// pages ONLY inside a tracked reservation; a wild pointer (no reservation, no backing) must stay
-// fatal — the committer must never materialize untracked memory. Run under --test-threads=1
-// (one HVF VM per process).
+// pages ONLY inside a tracked reservation; a wild pointer (no reservation, no backing) must never
+// be committed — the committer must never materialize untracked memory. Since M49 the record loop
+// converts such a touch into a stage-1 crash (`stage2.rs`); this refusal is what lets it. Run under
+// --test-threads=1 (one HVF VM per process).
 use retrace_box::{Box_, Stop, MMAP_BASE};
 use retrace_guest::{parse_macho, HELLO, WILDSTORE};
 
@@ -11,8 +12,8 @@ const WILD: u64 = 0xB_0000_0000;
 
 // A real guest store to a wild, unreserved, unbacked address must surface as Stop::Other and be
 // REFUSED by commit_reserved_page — proving the fatal data-abort path is preserved (no wild
-// materialization). This mirrors what the record/replay dispatch does: page_in_cache=false,
-// commit_reserved_page=false => describe_stop (fatal).
+// materialization). This mirrors what Box_::resolve_stage2 does: page_in_cache=false,
+// commit_reserved_page=false, and only then (M49 F2) the conversion.
 #[test]
 fn wild_store_outside_any_reservation_stays_fatal() {
     let loaded = parse_macho(&std::fs::read(WILDSTORE).unwrap());
