@@ -69,6 +69,7 @@ impl Msg2 {
 /// on it, and it is answered `MACH_RCV_REFUSAL` — deterministic, no host contact (M38 t5).
 #[derive(Debug)]
 pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceGetSpecialPort, ServiceSetSpecialPort, ServicePortsRegister,
+                 ServiceClockGetTime,
                  StubMigReply(i32), RefuseMqSend, RefuseMqRecv, Forward(&'static str), Unsupported(String) }
 
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
@@ -137,6 +138,12 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     if let Some((_, name)) = FORWARD_ALLOWLIST.iter().find(|(id, _)| *id == m.msgh_id) {
         return Route::Forward(name);
     }
+    // clock_get_time (clock subsystem base 1000, slot 0): libc's `nanosleep` reads SYSTEM_CLOCK
+    // before a sleep with a `rem` pointer (M49 §3f S2, sleep-report.md §1). Sent to the clock port a
+    // forwarded 206 reply named, never to the task port, so it is routed by id alone and the box
+    // checks the port (`Box_::guest_clock_get_time`). Answered from the guest clock, never
+    // forwarded: the host's answer is host uptime, which disagrees with the synthetic clock.
+    if m.msgh_id == CLOCK_GET_TIME { return Route::ServiceClockGetTime; }
     if guest_task_port == Some(m.dest as u64) {
         match m.msgh_id {
             4811 => return Route::ServiceVmMap,
@@ -439,6 +446,60 @@ pub fn encode_mig_error(request_msgh_id: u32, reply_port: u32, retcode: i32) -> 
     reply_header(&mut out, 36, reply_port, request_msgh_id + 100);
     out.extend_from_slice(&NDR);
     out.extend_from_slice(&retcode.to_le_bytes());
+    out.extend_from_slice(&TRAILER);
+    out
+}
+
+/// `host_get_clock_service` (host subsystem base 200, slot 6): forwarded (FORWARD_ALLOWLIST), and
+/// since M49 its reply teaches the box which clock each port answers for.
+pub const HOST_GET_CLOCK_SERVICE: u32 = 206;
+/// `clock_get_time` (clock subsystem base 1000, slot 0): `Route::ServiceClockGetTime`.
+pub const CLOCK_GET_TIME: u32 = 1000;
+/// The bytes of a successful 206 reply the decoder reads: header(24) + descriptor_count(4) +
+/// mach_msg_port_descriptor_t(12), the 3409 reply's layout (`encode_get_special_port_reply`).
+pub const CLOCK_SERVICE_REPLY_LEN: usize = 40;
+
+/// M49 S2: the clock id a `host_get_clock_service` (206) request asks for: header(24) + NDR(8) +
+/// `clock_id`(4) at offset 32 (`sleep-report.md`: "clock_id at send+0x20").
+pub fn decode_clock_service_request(buf: &[u8]) -> Result<u32, String> {
+    if buf.len() < 36 { return Err(format!("host_get_clock_service request is {} bytes, < 36", buf.len())); }
+    if u32_at(buf, 20) != HOST_GET_CLOCK_SERVICE {
+        return Err(format!("msgh_id {} is not host_get_clock_service (206)", u32_at(buf, 20)));
+    }
+    Ok(u32_at(buf, 32))
+}
+
+/// M49 S2: the clock port a successful 206 reply carries: COMPLEX, `msgh_id` 306, one PORT
+/// descriptor (type byte 0 at offset 39) whose name is at offset 28. None for anything else, such
+/// as the 36-byte mig_reply_error a failed 206 answers with.
+pub fn decode_clock_service_reply(buf: &[u8]) -> Option<u32> {
+    if buf.len() < CLOCK_SERVICE_REPLY_LEN { return None; }
+    let ok = u32_at(buf, 0) & MACH_MSGH_BITS_COMPLEX != 0 && u32_at(buf, 20) == HOST_GET_CLOCK_SERVICE + 100
+        && u32_at(buf, 24) == 1 && buf[39] == 0;
+    ok.then(|| u32_at(buf, 28))
+}
+
+/// M49 S2: the one `clock_get_time` shape libc sends (sleep-sleep1.log.tail.txt): a bare 24-byte
+/// header, simple, with room for the 52-byte reply.
+pub fn check_clock_get_time(m: &Msg2) -> Result<(), String> {
+    if m.send_size != 24 || m.bits & MACH_MSGH_BITS_COMPLEX != 0 || m.rcv_size < 52 {
+        return Err(format!(
+            "M49: clock_get_time with send_size {} bits {:#x} rcv_size {}: only libc's shape (a bare \
+             24-byte simple header, room for the 52-byte reply) is modelled", m.send_size, m.bits, m.rcv_size));
+    }
+    Ok(())
+}
+
+/// M49 S2: `clock_get_time`'s KERN_SUCCESS reply: header(24, id 1100) + NDR(8) + RetCode(4) +
+/// `mach_timespec_t { unsigned int tv_sec; clock_res_t tv_nsec }`(8) = 44, + trailer(8) = 52, the
+/// request's rcv_size (sleep-report.md).
+pub fn encode_clock_get_time_reply(reply_port: u32, sec: u32, nsec: i32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(52);
+    reply_header(&mut out, 44, reply_port, CLOCK_GET_TIME + 100);
+    out.extend_from_slice(&NDR);
+    out.extend_from_slice(&0i32.to_le_bytes());            // KERN_SUCCESS
+    out.extend_from_slice(&sec.to_le_bytes());
+    out.extend_from_slice(&nsec.to_le_bytes());
     out.extend_from_slice(&TRAILER);
     out
 }
@@ -880,6 +941,69 @@ mod tests {
             Route::Unsupported(s) => assert!(s.contains("one-way"), "{s}"),
             other => panic!("expected Unsupported, got {other:?}"),
         }
+    }
+
+    // --- clock_get_time (1000) and host_get_clock_service (206) — M49 §3f S2 ---
+    #[test]
+    fn routes_clock_get_time_by_id_to_any_port_and_keeps_206_forwarded() {
+        // The clock port is not the task port, and its name varies run to run (0x903, 0xd03, 0x1c03
+        // measured): the box checks it, not route().
+        for dest in [0x903, 0x1c03, 0x203] {
+            assert!(matches!(route(&msg(1000, dest, KOBJ), Some(0x203)), Route::ServiceClockGetTime));
+        }
+        assert!(matches!(route(&msg(206, 0x1f03, KOBJ), Some(0x203)), Route::Forward("host_get_clock_service")));
+        // clock_get_attributes (1001) and clock_alarm (1002) stay loud.
+        for id in [1001, 1002] {
+            assert!(matches!(route(&msg(id, 0x903, KOBJ), Some(0x203)), Route::Unsupported(_)));
+        }
+    }
+
+    /// The request libc sends: clock_id at offset 32, after the header and the NDR.
+    #[test]
+    fn decodes_the_206_request_and_reply() {
+        let mut req = vec![0u8; 36];
+        req[0..4].copy_from_slice(&0x1513u32.to_le_bytes());
+        req[20..24].copy_from_slice(&206u32.to_le_bytes());
+        req[24..32].copy_from_slice(&NDR);
+        req[32..36].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(decode_clock_service_request(&req), Ok(1));
+        assert!(decode_clock_service_request(&req[..35]).is_err(), "short");
+        req[20..24].copy_from_slice(&200u32.to_le_bytes());
+        assert!(decode_clock_service_request(&req).is_err(), "wrong id");
+        // A successful reply has the 3409 reply's layout with id 306.
+        let mut reply = encode_get_special_port_reply(0x1103, 0x903);
+        reply[20..24].copy_from_slice(&306u32.to_le_bytes());
+        assert_eq!(decode_clock_service_reply(&reply), Some(0x903));
+        assert_eq!(decode_clock_service_reply(&encode_mig_error(206, 0x1103, 5)), None, "a failed 206");
+        assert_eq!(decode_clock_service_reply(&encode_get_special_port_reply(0x1103, 0x903)), None, "id 3509");
+    }
+
+    #[test]
+    fn checks_libcs_clock_get_time_shape_by_value() {
+        // sleep-sleep1.log.tail.txt: bits 0x1513, send_size 24, rcv_size 52.
+        let ok = Msg2::unpack(&[0x16d0, KOBJ, 0x18_0000_1513, 0x1103_0000_0903, 0x3e8_0000_0000,
+                                0x1103_0000_0000, 0x34, 0]);
+        assert_eq!((ok.msgh_id, ok.send_size, ok.rcv_size), (1000, 24, 52));
+        assert_eq!(check_clock_get_time(&ok), Ok(()));
+        for (bits, send, rcv) in [(0x8000_1513, 24, 52), (0x1513, 28, 52), (0x1513, 24, 44)] {
+            let mut m = Msg2::unpack(&[0x16d0, KOBJ, 0x18_0000_1513, 0x1103_0000_0903, 0x3e8_0000_0000, 0, 0x34, 0]);
+            (m.bits, m.send_size, m.rcv_size) = (bits, send, rcv);
+            assert!(check_clock_get_time(&m).unwrap_err().starts_with("M49: clock_get_time "), "{bits:#x} {send} {rcv}");
+        }
+    }
+
+    #[test]
+    fn encodes_a_byte_identical_clock_get_time_reply() {
+        // 52 bytes built by hand from the layout (reply_port 0x1103, 1.5 s):
+        //   header(24): bits 0x1200 | size 44 | remote 0 | local 0x1103 | voucher 0 | id 1100
+        //   NDR(8) | RetCode 0 | tv_sec 1 | tv_nsec 500 000 000 (0x1dcd6500) | trailer(8)
+        const EXPECTED: [u8; 52] = [
+            0x00, 0x12, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x11, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x4c, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x65, 0xcd, 0x1d, 0x00, 0x00, 0x00, 0x00,
+            0x08, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(encode_clock_get_time_reply(0x1103, 1, 500_000_000), EXPECTED.to_vec());
     }
 
     #[test]

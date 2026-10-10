@@ -126,6 +126,26 @@ fn take_pending_delivery(b: &mut Box_, tid: usize) -> Option<(u64, u64)> {
     }
 }
 
+/// M49 §3f S2: the clock id a `host_get_clock_service` (206) request asks for, read from the guest's
+/// own request before the forward (record) or the recorded reply (replay) overwrites the buffer.
+/// None for every other id. Both Forward arms call this with the same `m`, before the reply lands.
+fn clock_service_request(b: &Box_, m: &machmsg::Msg2) -> Result<Option<u32>, String> {
+    if m.msgh_id != machmsg::HOST_GET_CLOCK_SERVICE { return Ok(None); }
+    machmsg::decode_clock_service_request(&b.read_guest(m.data, m.send_size as usize)).map(Some)
+}
+
+/// M49 §3f S2: after a 206's reply has landed in guest memory (forwarded on record, applied on
+/// replay), teach the box the port it names for `clock_id`. A failed call names no port. Both
+/// Forward arms call this with the same arguments, so both sides learn the same name (the name is
+/// the host's, recorded in the reply and applied verbatim on replay).
+fn learn_clock_service(b: &mut Box_, m: &machmsg::Msg2, clock_id: Option<u32>, ret: u64, err: bool) {
+    let Some(id) = clock_id else { return };
+    if ret != machmsg::MACH_MSG_SUCCESS || err { return; }
+    if let Some(port) = machmsg::decode_clock_service_reply(&b.read_guest(m.data, machmsg::CLOCK_SERVICE_REPLY_LEN)) {
+        b.learn_clock_port(port as u64, id);
+    }
+}
+
 fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
@@ -632,6 +652,20 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             .map_err(|e| format!("append mach_msg2 mq receive refusal: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_RCV_REFUSAL, false, &[]);
                     }
+                    machmsg::Route::ServiceClockGetTime => {
+                        // M49 §3f S2 (R7): clock_get_time (1000) on a SYSTEM_CLOCK port, answered
+                        // from the guest clock and never forwarded (the host answers host uptime).
+                        // Deterministic, so the standard symmetric posture (the 3410 shape): replay
+                        // recomputes and byte-compares. A refusal panics before anything is appended.
+                        machmsg::check_clock_get_time(&m).unwrap_or_else(|e| panic!("{e}"));
+                        let (sec, nsec) = b.guest_clock_get_time(m.dest as u64).unwrap_or_else(|e| panic!("{e}"));
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_clock_get_time_reply(m.reply_port, sec, nsec) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 clock_get_time: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
                     machmsg::Route::Forward(name) => {
                         // Body-level guard. `route()` is handed only the packed register file — the
                         // message HEADER — so a check that depends on the request BODY runs here,
@@ -646,8 +680,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                             machmsg::check_forward_body(m.msgh_id, &buf)
                                 .unwrap_or_else(|e| panic!("mach_msg2 forward guard: {e}"));
                         }
+                        let clock_id = clock_service_request(&b, &m)
+                            .unwrap_or_else(|e| panic!("host_get_clock_service (206) decode: {e}"));
                         eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id);
                         let (ret, _ret1, err, writes) = b.forward_and_diff(num, args);
+                        learn_clock_service(&mut b, &m, clock_id, ret, err);
                         if trace_log {
                             eprintln!("[mach_msg2] host ret={ret:#x} err={err}");
                             for w_ in &writes {
@@ -2369,6 +2406,28 @@ impl ReplaySession {
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
+                                    machmsg::Route::ServiceClockGetTime => {
+                                        // M49 §3f S2: the standard symmetric posture, as 3410's: the
+                                        // same check and the same Box_ call, the reply recomputed and
+                                        // byte-compared, and a refusal reported as a divergence naming
+                                        // the call, never a panic.
+                                        let reading = machmsg::check_clock_get_time(&m)
+                                            .and_then(|()| self.b.guest_clock_get_time(m.dest as u64));
+                                        let (sec, nsec) = reading.map_err(|e| Divergence { landmark: self.idx, pc, detail: format!(
+                                            "clock_get_time refused on replay, though the recording accepted it \
+                                             — replay diverged before this landmark: {e}") })?;
+                                        let reply = machmsg::encode_clock_get_time_reply(m.reply_port, sec, nsec);
+                                        if writes.len() != 1 || writes[0].bytes != reply {
+                                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                                "clock_get_time reply mismatch: replay {sec}.{nsec:09} s") });
+                                        }
+                                        if *ret != machmsg::MACH_MSG_SUCCESS || *err {
+                                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                                "clock_get_time rc mismatch: replay {:#x} != recorded {ret:#x} (err {err})",
+                                                machmsg::MACH_MSG_SUCCESS) });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
                                     machmsg::Route::Forward(_) => {
                                         // The mirror of record's body guard, same function, same
                                         // bytes — read here out of replay's OWN re-executed guest
@@ -2380,7 +2439,12 @@ impl ReplaySession {
                                             machmsg::check_forward_body(m.msgh_id, &buf).map_err(|e| Divergence {
                                                 landmark: self.idx, pc, detail: format!("replay forward guard: {e}") })?;
                                         }
-                                        self.b.apply_and_return(*ret, *err, writes)
+                                        // M49 §3f S2: the record arm's clock-port learning, the same
+                                        // two calls around the reply landing.
+                                        let clock_id = clock_service_request(&self.b, &m).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay host_get_clock_service decode: {e}") })?;
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                        learn_clock_service(&mut self.b, &m, clock_id, *ret, *err);
                                     }
                                     machmsg::Route::Unsupported(why) => {
                                         return Err(Divergence { landmark: self.idx, pc,
