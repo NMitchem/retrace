@@ -112,6 +112,12 @@ pub enum BlockReason {
     /// it (`Box_::guest_psynch`), or at `deadline`, a guest-clock value in `Kevent`'s domain, which
     /// is `None` for an untimed wait (`Box_::cv_timed_out`).
     Cv { addr: u64, deadline: Option<u64> },
+    /// M49 §3f S3: asleep in `__semwait_signal`'s relative-timeout shape until `deadline`, a
+    /// guest-clock value in `Kevent`'s domain (R6). **Keyed by thread, not by port**: every sleeper
+    /// passes libc's one `clock_sem`, so a port key would make every sleeper one waiter. Nothing
+    /// signals the semaphore (the model refuses a `cond_sem` the semaphore traps have touched), so
+    /// the deadline is the only wake (`Box_::sleep_timed_out`), and a sleep always has one.
+    Sleep { deadline: u64 },
 }
 
 impl BlockReason {
@@ -121,6 +127,7 @@ impl BlockReason {
     pub fn deadline(&self) -> Option<u64> {
         match *self {
             BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. } => deadline,
+            BlockReason::Sleep { deadline } => Some(deadline),
             BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Sem { .. }
             | BlockReason::Parked => None,
         }
@@ -487,7 +494,8 @@ impl ThreadTable {
                  Measure the kernel's EINTR answer for a thread blocked in kevent or psynch_cvwait, \
                  as blockedctx.rs does for __ulock_wait, before modelling it."));
         }
-        assert!(matches!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. })),
+        assert!(matches!(self.threads[tid].state,
+                ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. })),
             "M48: wake of thread {tid}, which is {:?}, not blocked in a timed-wait primitive",
             self.threads[tid].state);
         self.threads[tid].state = ThreadState::Runnable;
@@ -692,6 +700,27 @@ mod tests {
         assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Kevent { kq: 3, deadline: None }));
         assert_eq!(BlockReason::Kevent { kq: 3, deadline: Some(7) }.deadline(), Some(7));
         assert_eq!(BlockReason::Wait { addr: 8 }.deadline(), None, "only a timed wait carries a deadline");
+    }
+
+    // M49 §3f S3 (R6): a sleeper joins the one deadline queue. A sleep always carries its deadline,
+    // equal deadlines wake by thread index as every timed wait's do (M48 R7), and `wake` takes a
+    // sleeper. sleep_e2e's two sleepers pin deadline order end to end; ties are pinned only here,
+    // because no native run orders two equal sleeps deterministically.
+    #[test]
+    fn a_sleep_joins_the_deadline_queue_with_ties_by_thread_index() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        for _ in 0..2 { t.spawn(ThreadCtx::zeroed(), (0, 0)); }
+        for (tid, deadline) in [(0, 200), (1, 100), (2, 100)] {
+            t.switch_to(tid);
+            t.block(BlockReason::Sleep { deadline });
+        }
+        assert_eq!(BlockReason::Sleep { deadline: 9 }.deadline(), Some(9), "a sleep always has its deadline");
+        assert_eq!(t.earliest_deadline(), Some(100));
+        assert!(t.due_waiters(99).is_empty());
+        assert_eq!(t.due_waiters(100), vec![1, 2], "equal deadlines wake by thread index");
+        assert_eq!(t.due_waiters(200), vec![1, 2, 0], "then by deadline");
+        t.wake(2).unwrap();
+        assert_eq!(t.state_of(2), ThreadState::Runnable, "wake takes a sleeper");
     }
 
     #[test]
