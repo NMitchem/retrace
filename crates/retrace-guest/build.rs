@@ -477,6 +477,17 @@ fn main() {
         .status().expect("clang trim_dyn");
     assert!(status.success(), "trim_dyn guest build failed");
 
+    // faultcase_dyn: the M49 fault fixture — one NULL, low, unmapped, wild or overflowing access
+    // per argv-selected case, with an optional SA_SIGINFO handler (`h`, or `a` on an alternate
+    // stack); see the source's header. Same recipe as hello_dyn; pthreads are in libSystem.
+    let src = format!("{}/c/faultcase_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/faultcase_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang faultcase_dyn");
+    assert!(status.success(), "faultcase_dyn guest build failed");
+
     // kq_dyn: the M48 guest-kqueue fixture — modes probe, wake, timeout, tryselect, pipe, oneshot
     // and bad (spec §3h). Same recipe as hello_dyn; pthreads are in libSystem.
     let src = format!("{}/c/kq_dyn.c", env!("CARGO_MANIFEST_DIR"));

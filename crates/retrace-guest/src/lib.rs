@@ -237,6 +237,10 @@ pub const SIMD_DYN: &str = concat!(env!("OUT_DIR"), "/simd_dyn");
 /// M48: V8's aligned-reservation trim — a head and an unaligned-length tail munmapped (`trim`),
 /// then the released parts touched (`head`, `tail`).
 pub const TRIM_DYN: &str = concat!(env!("OUT_DIR"), "/trim_dyn");
+/// M49: one fault per case — `null10`, `null0st`, `unmapped`, `garbage`, `call0`, `low8000`,
+/// `low1g`, `tsd`, `thread1g`, `jump1g`, `jumpgone`, `deeprec` — with an optional handler, `h`, or
+/// `a` on an alternate stack (spec §3d; see the source's header).
+pub const FAULTCASE_DYN: &str = concat!(env!("OUT_DIR"), "/faultcase_dyn");
 /// M48: the guest's own kqueues by mode — `probe`, `wake`, `timeout`, `tryselect`, `pipe`,
 /// `oneshot`, `bad filter`, `bad notkq` (spec §3h; see the source's header).
 pub const KQ_DYN: &str = concat!(env!("OUT_DIR"), "/kq_dyn");
@@ -584,6 +588,13 @@ mod tests {
     fn trim_dyn_guest_parses() {
         // M48: proves the build.rs wiring and the path constant; behaviour is trim_e2e's.
         let l = parse_macho(&std::fs::read(TRIM_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn faultcase_dyn_guest_parses() {
+        // M49: proves the build.rs wiring and the path constant; behaviour is nullfault_e2e's.
+        let l = parse_macho(&std::fs::read(FAULTCASE_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
