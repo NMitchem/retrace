@@ -5,6 +5,7 @@
 //! No test reaches `read_guest_cstr`'s shared-cache page-in, kept per spec §11 item 4: t0 M2(c)
 //! found every policy and operation string resident at the trap, and M47 t3 measured 0 page-ins
 //! recording rpath_dyn, sbxpath_dyn, hello_dyn and madv_dyn.
+use retrace_arch::Unmark;
 use retrace_box::{Box_, MacSyscall};
 
 fn tb() -> Box_ {
@@ -62,7 +63,7 @@ fn an_unterminated_policy_is_refused_as_copyinstr_would() {
     let mut b = tb();
     let t = b.stack_top();
     b.poke_guest(t - 0x400, &[b'A'; 40]);
-    let e = b.guest_mac_syscall(args(t - 0x400, 0x5a, t - 0x300)).unwrap_err();
+    let e = b.guest_mac_syscall(args(t - 0x400, 0x5a, t - 0x300)).unwrap_err().unmark();
     assert!(e.starts_with("M47: __mac_syscall policy name: no NUL within 32 bytes"), "{e}");
 }
 
@@ -72,10 +73,10 @@ fn an_unmodelled_policy_or_operation_is_refused_by_name() {
     let mut b = tb();
     let t = b.stack_top();
     b.poke_guest(t - 0x400, b"Quarantine\0");
-    let e = b.guest_mac_syscall(args(t - 0x400, 2, t - 0x300)).unwrap_err();
+    let e = b.guest_mac_syscall(args(t - 0x400, 2, t - 0x300)).unwrap_err().unmark();
     assert!(e.starts_with("M47: unmodelled __mac_syscall policy \"Quarantine\" call 0x2"), "{e}");
     let t = sandbox(&mut b, b"file-read-data");
-    let e = b.guest_mac_syscall(args(t - 0x400, 2, t - 0x300)).unwrap_err();
+    let e = b.guest_mac_syscall(args(t - 0x400, 2, t - 0x300)).unwrap_err().unmark();
     assert!(e.starts_with("M47: unmeasured Sandbox operation \"file-read-data\""), "{e}");
 }
 

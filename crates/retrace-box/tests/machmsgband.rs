@@ -108,6 +108,7 @@ fn the_serviced_vm_map_calls_band_is_measured_zero_and_out_of_scope() {
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }

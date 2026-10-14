@@ -5,10 +5,11 @@ use std::path::Path;
 use std::rc::Rc;
 use retrace_box::{Box_, Stage2, Stop};
 use retrace_trace::{Writer, Event, Region};
-use retrace_arch::SYS_EXIT;
+use retrace_arch::{wall, Unsupported, WallCategory, SYS_EXIT};
 pub use retrace_box::thread::{BlockReason, ThreadState, ThreadCtx};
 pub use retrace_box::{Excl, SetBy};
 pub use retrace_box::EXE_BASE;
+pub use retrace_box::hypervisor_check;
 
 /// M15: one row of the debugger's thread listing.
 #[derive(Clone, Debug, PartialEq)]
@@ -59,13 +60,21 @@ fn is_usrstack64_mib(b: &retrace_box::Box_, args: [u64; 8]) -> bool {
 
 /// How a recorded (or replayed) run ended: a clean exit, or a guest synchronous fault (M6). The
 /// triple is deterministic — identical guest state faults identically — so replay byte-compares it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// M50: not `Copy`, since it can carry a wall's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Exit { code: u64 },
     Crash { pc: u64, esr: u64, far: u64 },
     /// M11: terminated by a signal the guest raised on itself, whose disposition resolved to the
     /// default fatal action. Terminal in the same shape M6 gave a fault.
     Signal { sig: u64 },
+    /// M50 (spec §3b, C1): the recording stopped at a wall. The trace has every landmark before it
+    /// and no terminal event; the summary carries the guest's output up to the wall. Record only.
+    Refused(Unsupported),
+    /// M50 (C2): replay reached the end of a recording that has no terminal event, which stopped
+    /// there at a wall or because its recorder was killed. The string says where: the wall's `what`
+    /// when replay met the wall there itself, else `landmark <n> (pc <hex>)`. Replay only.
+    Incomplete(String),
 }
 
 /// `fall_throughs` is the EL1 vector fall-through count (M23 t1/t2). It is carried out here rather
@@ -117,8 +126,7 @@ fn take_pending_delivery(b: &mut Box_, tid: usize) -> Option<(u64, u64)> {
             // process death into a clean exit — the worst possible failure for a determinism
             // oracle, because the recording and the replay would agree with each other and both be
             // wrong. Both sides reach this panic at the same landmark.
-            retrace_arch::DefaultAction::Terminate => panic!(
-                "signal {sig} became deliverable at an unmask or a wake and its default action is \
+            retrace_arch::DefaultAction::Terminate => retrace_arch::refuse!(Signals, "signal {sig} became deliverable at an unmask or a wake and its default action is \
                  Terminate: the process must die here, and the terminal path (Event::Signal + final \
                  snapshot + break, plus its replay mirror) is not modelled at either landmark. \
                  Implement it before a guest needs this; do not drop the signal."),
@@ -153,16 +161,30 @@ fn learn_clock_service(b: &mut Box_, m: &machmsg::Msg2, clock_id: Option<u32>, r
 fn semaphore_destroy_guard(b: &Box_, m: &machmsg::Msg2) -> Result<(), String> {
     if m.msgh_id != machmsg::SEMAPHORE_DESTROY { return Ok(()); }
     let port = machmsg::decode_semaphore_destroy(&b.read_guest(m.data, m.send_size as usize))
-        .map_err(|e| format!("semaphore_destroy (3419) decode: {e}"))?;
+        .map_err(|e| retrace_arch::in_context("semaphore_destroy (3419) decode", e))?;
     b.check_sleep_semaphore("semaphore_destroy (3419)", port)
 }
 
-fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
+/// M50 §3c (B1): a box refusal reaching the record loop. A wall, marked at its site (Task 4 marks
+/// M2's wall rows), passes through so `?` ends the recording with it; any other text is a retrace
+/// bug and panics, as every one of these sites did before M50.
+fn wall_or_bug(m: String) -> String {
+    if Unsupported::from_marked(&m).is_some() { m } else { panic!("{m}") }
+}
+
+fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
     w.append(&b.snapshot()).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
 
     let mut stdout = Vec::new();
+    // M50 §3c (C1): the record loop runs inside this catch. A wall ends it either as a marked `Err`
+    // (a record arm, a box method) or as a marked panic (a `refuse!` in code record and replay share),
+    // and both become `Outcome::Refused` here, so the guest's output so far travels in the summary and
+    // the trace keeps every landmark before the wall. Anything unmarked is no wall: an `Err` is trace
+    // I/O, which returns as before, and a panic is a retrace bug, which resumes unwinding to the CLI's
+    // hook and exit 70. The body keeps its pre-M50 indentation so the diff is the boundary alone.
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Outcome, String> {
     let outcome;
     // Bring-up diagnostic (RETRACE_TRACE=1): log every trap the record loop dispatches, so a
     // forwarded syscall/mach-trap that misbehaves is identifiable from the last line printed.
@@ -249,11 +271,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // can be pushed. A frame on memory nothing backs is native's kill, so the fault is
                 // then a crash (`faultcase_dyn deeprec h`).
                 if let Some(handler) = b.fault_handler(thread as usize, sig) {
-                    assert!(!b.threads().is_blocked_for(thread as usize, sig),
-                        "raising blocked signal {sig} synchronously is not modelled: a fault cannot \
-                         be deferred, POSIX leaves it undefined, and Darwin force-delivers. M11 \
-                         models no pending set, so implement one — and revisit sigpending's \
-                         always-empty answer — before a guest needs this.");
+                    if b.threads().is_blocked_for(thread as usize, sig) {
+                        return Err(wall(WallCategory::Signals, format!("raising blocked signal {sig} \
+                            synchronously is not modelled: a fault cannot be deferred, POSIX leaves it \
+                            undefined, and Darwin force-delivers. M11 models no pending set, so \
+                            implement one — and revisit sigpending's always-empty answer — before a \
+                            guest needs this.")));
+                    }
                     // C9: `deliver_signal_to(thread, …)`, not the `deliver_signal(…)` shorthand it
                     // delegates to. Behaviourally identical — the shorthand IS
                     // `deliver_signal_to(current)` — but replay's mirror spells the thread out, and
@@ -316,7 +340,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // with the same arguments on both sides (symmetry rule 1). The other hook-less arms
                 // whose landmarks replay finishes there are outside the fd set, where the hook does
                 // nothing by construction (Box_::note_fd_effects).
-                b.note_fd_effects(num, args, 0, 0, false).unwrap_or_else(|m| panic!("{m}"));
+                b.note_fd_effects(num, args, 0, 0, false).map_err(wall_or_bug)?;
             }
             // mmap is special-cased: it creates guest memory the program then writes with plain
             // stores (no syscall), so it cannot go through forward_and_diff. guest_mmap maps a
@@ -499,13 +523,15 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // anything unrecognized fails loudly with its decoded name (spec §Mechanism).
             Stop::Syscall { num, args } if num == MACH_MSG2 => {
                 let m = machmsg::Msg2::unpack(&args);
-                assert!(m.send_size as usize <= machmsg::SEND_SIZE_MAX,
-                    "mach_msg2 send_size {:#x} implausibly large", m.send_size);
+                if m.send_size as usize > machmsg::SEND_SIZE_MAX {
+                    return Err(wall(WallCategory::MachMessages,
+                        format!("mach_msg2 send_size {:#x} implausibly large", m.send_size)));
+                }
                 match machmsg::route(&m, guest_task_port) {
                     machmsg::Route::ServiceVmMap => {
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let req = machmsg::decode_vm_map(&buf)
-                            .unwrap_or_else(|e| panic!("mach_vm_map (4811) decode: {e}"));
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_map (4811) decode", e)))?;
                         let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
                         // cur_protection == 0 => a PROT_NONE address-space reservation (no backing,
                         // e.g. libmalloc's 24 GiB nano pointer range); anything else is a real
@@ -533,15 +559,24 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         // the source's attribute and band, never chosen (spec R7, t2's two lines).
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let req = machmsg::decode_vm_remap(&buf)
-                            .unwrap_or_else(|e| panic!("mach_vm_remap (4813) decode: {e}"));
-                        assert_eq!(req.copy, 0, "mach_vm_remap: copy=TRUE is unmodelled (spec §3f)");
-                        assert_eq!(req.flags as u64 & VM_FLAGS_ANYWHERE, 0,
-                            "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled (spec §3f)");
-                        assert_eq!(Some(req.src_task as u64), guest_task_port,
-                            "mach_vm_remap: src_task {:#x} is not the guest's own task port", req.src_task);
-                        assert!(req.target + req.size <= req.src || req.src + req.size <= req.target,
-                            "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
-                            req.target, req.size, req.src);
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_remap (4813) decode", e)))?;
+                        if req.copy != 0 {
+                            return Err(wall(WallCategory::Memory,
+                                "mach_vm_remap: copy=TRUE is unmodelled (spec §3f)"));
+                        }
+                        if req.flags as u64 & VM_FLAGS_ANYWHERE != 0 {
+                            return Err(wall(WallCategory::Memory,
+                                "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled (spec §3f)"));
+                        }
+                        if Some(req.src_task as u64) != guest_task_port {
+                            return Err(wall(WallCategory::Memory, format!(
+                                "mach_vm_remap: src_task {:#x} is not the guest's own task port", req.src_task)));
+                        }
+                        if !(req.target + req.size <= req.src || req.src + req.size <= req.target) {
+                            return Err(wall(WallCategory::Memory, format!(
+                                "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
+                                req.target, req.size, req.src)));
+                        }
                         let (target, cur, max) = b.guest_vm_remap(req.target, req.size, req.src);
                         let writes = vec![Region { ipa: m.data, bytes: machmsg::encode_vm_remap_reply(
                             m.reply_port, target, cur, max) }];
@@ -566,12 +601,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         //   deterministic, so replay recomputes and byte-compares it.
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let which = machmsg::decode_get_special_port(&buf)
-                            .unwrap_or_else(|e| panic!("task_get_special_port (3409) decode: {e}"));
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("task_get_special_port (3409) decode", e)))?;
                         let name = match which {
                             machmsg::TASK_BOOTSTRAP_PORT => b.mint_bootstrap_port(),
                             machmsg::TASK_DEBUG_CONTROL_PORT => 0,
-                            other => panic!("only TASK_BOOTSTRAP_PORT (4) and TASK_DEBUG_CONTROL_PORT (10) \
-                                             are modeled; got which={other}"),
+                            other => return Err(wall(WallCategory::MachMessages, format!(
+                                "only TASK_BOOTSTRAP_PORT (4) and TASK_DEBUG_CONTROL_PORT (10) \
+                                 are modeled; got which={other}"))),
                         };
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_get_special_port_reply(m.reply_port, name) }];
@@ -588,9 +624,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         // DETERMINISTIC → STANDARD symmetric posture (replay recomputes + byte-compares).
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let which = machmsg::decode_set_special_port(&buf)
-                            .unwrap_or_else(|e| panic!("task_set_special_port (3410) decode: {e}"));
-                        assert_eq!(which, machmsg::TASK_DEBUG_CONTROL_PORT,
-                            "only TASK_DEBUG_CONTROL_PORT (10) is modeled; got which={which}");
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("task_set_special_port (3410) decode", e)))?;
+                        if which != machmsg::TASK_DEBUG_CONTROL_PORT {
+                            return Err(wall(WallCategory::MachMessages, format!(
+                                "only TASK_DEBUG_CONTROL_PORT (10) is modeled; got which={which}")));
+                        }
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
@@ -607,7 +645,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         // byte-compares (the 3410 shape).
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         machmsg::decode_ports_register(&buf)
-                            .unwrap_or_else(|e| panic!("mach_ports_register (3403) decode: {e}"));
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_ports_register (3403) decode", e)))?;
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
@@ -638,9 +676,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         // Writes NOTHING: the guest's receive buffer is left exactly as it was, so
                         // both the return and the (empty) write set are constants, which is what
                         // lets replay recompute and byte-compare them instead of trusting them.
-                        eprintln!("[retrace] refusing mach_msg2 message-queue send (msgh_id {:#x} \
-                            dest {:#x} send_size {}): the box hosts no message-queue receivers",
-                            m.msgh_id, m.dest, m.send_size);
+                        // M50 §3b: a refusal the program survives, in the wall line's format.
+                        eprintln!("{}", retrace_arch::refused_line(&format!("mach_msg2 message-queue send \
+                            (msgh_id {:#x} dest {:#x} send_size {})", m.msgh_id, m.dest, m.send_size),
+                            "MACH_SEND_INVALID_DEST"));
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_SEND_INVALID_DEST, ret1: 0,
                             err: false, writes: vec![], thread })
                             .map_err(|e| format!("append mach_msg2 mq refusal: {e}"))?; count += 1;
@@ -655,9 +694,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         // queue only a daemon could fill. Writes NOTHING — the receive buffer is
                         // untouched — so both the return and the empty write set are constants
                         // replay recomputes (the RefuseMqSend posture).
-                        eprintln!("[retrace] refusing mach_msg2 message-queue receive (rcv_name {:#x} \
-                            rcv_size {} options {:#x}): the box hosts no message-queue senders",
-                            m.rcv_name, m.rcv_size, m.options);
+                        // M50 §3b: a refusal the program survives, in the wall line's format.
+                        eprintln!("{}", retrace_arch::refused_line(&format!("mach_msg2 message-queue receive \
+                            (rcv_name {:#x} rcv_size {} options {:#x})", m.rcv_name, m.rcv_size, m.options),
+                            "MACH_RCV_INVALID_NAME"));
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_RCV_REFUSAL, ret1: 0,
                             err: false, writes: vec![], thread })
                             .map_err(|e| format!("append mach_msg2 mq receive refusal: {e}"))?; count += 1;
@@ -668,8 +708,8 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         // from the guest clock and never forwarded (the host answers host uptime).
                         // Deterministic, so the standard symmetric posture (the 3410 shape): replay
                         // recomputes and byte-compares. A refusal panics before anything is appended.
-                        machmsg::check_clock_get_time(&m).unwrap_or_else(|e| panic!("{e}"));
-                        let (sec, nsec) = b.guest_clock_get_time(m.dest as u64).unwrap_or_else(|e| panic!("{e}"));
+                        machmsg::check_clock_get_time(&m).map_err(wall_or_bug)?;
+                        let (sec, nsec) = b.guest_clock_get_time(m.dest as u64).map_err(wall_or_bug)?;
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_clock_get_time_reply(m.reply_port, sec, nsec) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
@@ -689,11 +729,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                         if machmsg::forward_body_is_checked(m.msgh_id) {
                             let buf = b.read_guest(m.data, m.send_size as usize);
                             machmsg::check_forward_body(m.msgh_id, &buf)
-                                .unwrap_or_else(|e| panic!("mach_msg2 forward guard: {e}"));
+                                .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_msg2 forward guard", e)))?;
                         }
-                        semaphore_destroy_guard(&b, &m).unwrap_or_else(|e| panic!("{e}"));
+                        semaphore_destroy_guard(&b, &m).map_err(wall_or_bug)?;
                         let clock_id = clock_service_request(&b, &m)
-                            .unwrap_or_else(|e| panic!("host_get_clock_service (206) decode: {e}"));
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("host_get_clock_service (206) decode", e)))?;
                         eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id);
                         let (ret, _ret1, err, writes) = b.forward_and_diff(num, args);
                         learn_clock_service(&mut b, &m, clock_id, ret, err);
@@ -713,7 +753,8 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     }
                     machmsg::Route::Unsupported(why) => {
                         if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
-                        return Err(format!("unsupported mach_msg2 at pc {:#x}: {why}", b.position()));
+                        // M50 §3c: a message retrace does not route is a wall in `mach-messages`.
+                        return Err(wall(WallCategory::MachMessages, format!("mach_msg2 at pc {:#x}: {why}", b.position())));
                     }
                 }
             }
@@ -757,36 +798,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // outcome here, not a lost wake, and neither this arm nor its mirror may read it as one.
             Stop::Syscall { num, args } if num == retrace_arch::MACH_SEMAPHORE_SIGNAL => {
                 let (rc, woken) = b.guest_sem_signal(args);
-                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
-                    .map_err(|e| format!("append sem_signal: {e}"))?; count += 1;
-                b.set_x0_err_and_return(rc, false);
-
-                // M17 materialisation at this wake: **ASSERTED, not mirrored** — the deliberate
-                // choice, made identically on both sides so record and replay cannot drift on it.
-                //
-                // `woken` may not simply be dropped. `Box_::should_pend_for` pends a signal on ANY
-                // `Blocked(_)` target, `Sem { .. }` included, while `assert_no_stranded_signals`
-                // scans `Blocked` threads ONLY — so a signal pended on a semaphore waiter that this
-                // arm wakes would leave the thread Runnable with the bit still set and vanish, while
-                // record and replay agreed with each other. That is the one failure class a
-                // determinism oracle cannot see, which is why it gets a guard and not a comment.
-                //
-                // Why a guard rather than a copy of the `SYS_ULOCK_WAKE` arm below: that arm does
-                // not merely deliver, it calls `complete_saved_syscall_before_delivery(wtid, false)`
-                // against the woken thread's SAVED context, and that `false` is a MEASUREMENT — M17
-                // Task 4b measured a `__ulock_wait`-blocked thread's saved x0 as 0 with its saved
-                // SPSR left C-SET (`crates/retrace/tests/blockedctx.rs`). Nothing has measured the
-                // equivalent for a thread parked in `semaphore_wait_trap`, and no fixture in this
-                // tree pends a signal on one. Copying M17's correction here would be guessing at
-                // unmeasured saved state — the thing this file refuses BY VALUE everywhere else
-                // (`guest_workq_kernreturn`'s opcode refusal, the `writes_via_nested_pointer`
-                // refusal — and the dup2 guard, until M37 modelled dup2 — the
-                // `deliver_to.len() <= 1` bound). So it fails loud the day a fixture produces it,
-                // naming the measurement that is owed first.
+                // M50 (T0-d): checked before the append, so a walled recording never holds this landmark and replay ends at the lookup (C2).
                 let deliverable: Vec<usize> = woken.iter().copied()
                     .filter(|&t| b.threads().peek_deliverable(t).is_some())
                     .collect();
-                assert!(deliverable.is_empty(),
+                if !deliverable.is_empty() {
+                    return Err(wall(WallCategory::Signals, format!(
                     "semaphore signal woke thread(s) {deliverable:?} carrying a pending deliverable \
                      signal. M18 Stage 2b deliberately does NOT materialise at this wake: unlike \
                      __ulock_wake, the saved context of a semaphore-parked thread is unmeasured, so \
@@ -794,7 +811,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                      waking the thread without materialising strands the signal where \
                      assert_no_stranded_signals cannot see it. Measure the parked thread's saved \
                      x0/SPSR (the blockedctx.rs shape) and mirror the SYS_ULOCK_WAKE arm on BOTH \
-                     sides before allowing this.");
+                     sides before allowing this.")));
+                }
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append sem_signal: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
             }
             // Mach traps arrive as `svc #0x80` with a NEGATIVE trap number in x16. They forward +
             // memory-diff exactly like a BSD syscall (a negative x16 is a valid mach-trap selector
@@ -803,6 +824,10 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // kernel state the diff can't reproduce (ports mapped into the guest, allocations that
             // must land in guest IPA space) are added here as they are discovered.
             Stop::Syscall { num, args } if (num as i64) < 0 => {
+                // M50 §3c (B3): a trap with no row, or a semaphore trap no arm above models, ends the
+                // recording here as a wall. The M18 assert below and `forwarded_shape`'s panic stay as
+                // backstops; past this check no guest can reach either.
+                if let Some(u) = retrace_arch::refusal_before_forward(num) { return Err(u.marked()); }
                 // M18 Stage 2b: no mach semaphore trap may reach here. Forwarding one is not
                 // whole-process-fatal the way forwarding the workq pair is, but it is
                 // whole-process-HANGING, which is just as fatal to a recording: both Stage 2a
@@ -963,11 +988,12 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     // host process. getpid is not intercepted, so the guest's pid IS retrace's --
                     // measured, not assumed (M11 Task 1 Step 0 answer 2).
                     let self_pid = std::process::id() as u64;
-                    assert_eq!(args[0], self_pid,
-                        "kill to a pid other than the guest's own ({} != {self_pid}) is not \
-                         modelled: the guest has no children and no other process it may signal, \
-                         and forwarding would signal a REAL host process. Implement a guest pid \
-                         namespace before a guest needs this.", args[0]);
+                    if args[0] != self_pid {
+                        return Err(wall(WallCategory::Signals, format!("kill to a pid other than the guest's \
+                            own ({} != {self_pid}) is not modelled: the guest has no children and no other \
+                            process it may signal, and forwarding would signal a REAL host process. \
+                            Implement a guest pid namespace before a guest needs this.", args[0])));
+                    }
                 }
                 // M16: __pthread_kill's thread-port operand IS validated now, by `thread_of_port`,
                 // which reads each live thread's own kport out of its own pthread struct — main
@@ -1089,17 +1115,15 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 b.sigreturn_restore(args[0], args[2]);
             }
             Stop::Syscall { num, .. }
-                if num == retrace_arch::SYS_SIGSUSPEND || num == retrace_arch::SYS_SIGWAIT => panic!(
-                "syscall {num} (sigsuspend/__sigwait) blocks until a signal arrives, and the guest \
-                 has ONE thread on ONE vCPU with nothing to wake it — servicing it would deadlock. \
-                 Implement threads before a guest needs this."),
+                if num == retrace_arch::SYS_SIGSUSPEND || num == retrace_arch::SYS_SIGWAIT =>
+                return Err(wall(WallCategory::Signals, format!("{} waits for a signal, and retrace cannot \
+                    deliver one to a waiting program yet", retrace_arch::syscall_display(num)))),
             Stop::Syscall { num, .. }
                 if num == retrace_arch::SYS_TERMINATE_WITH_PAYLOAD
-                || num == retrace_arch::SYS_ABORT_WITH_PAYLOAD => panic!(
-                "syscall {num} (terminate/abort_with_payload) is a terminal path that bypasses \
-                 signal disposition entirely and is not modelled (measured: unexercised by any gate \
-                 guest). It is asserted rather than forwarded because forwarding it kills the \
-                 RECORDER. Model it as a second terminal event shape if a guest needs it."),
+                || num == retrace_arch::SYS_ABORT_WITH_PAYLOAD =>
+                return Err(wall(WallCategory::Signals, format!("{} ends the process without a signal, which \
+                    retrace does not record yet (forwarded, it would kill the recorder)",
+                    retrace_arch::syscall_display(num)))),
 
             // M18 t5: bsdthread_register is EMULATED, never forwarded (see
             // Box_::guest_bsdthread_register for both reasons — the guest's registration is the
@@ -1140,7 +1164,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // used to name; that opcode now builds the worker.)
             Stop::Syscall { num, args } if num == retrace_arch::SYS_WORKQ_KERNRETURN => {
                 // M46: the Result form both arms share; a refusal still stops the recorder here.
-                let rc = b.try_workq_kernreturn(args).unwrap_or_else(|m| panic!("{m}"));
+                let rc = b.try_workq_kernreturn(args).map_err(wall_or_bug)?;
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append workq_kernreturn: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
@@ -1155,7 +1179,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // the event manager's list, but that is a box write both sides recompute (M46 R3), not
             // one this call records.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_KEVENT_QOS => {
-                let rc = b.guest_kevent_qos(args).unwrap_or_else(|m| panic!("{m}"));
+                let rc = b.guest_kevent_qos(args).map_err(wall_or_bug)?;
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append kevent_qos: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
@@ -1169,7 +1193,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // at a later wake, is box output the mirror recomputes from the same guest memory and
             // box state. The exit-time full-memory comparison still covers every byte of it.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_KEVENT => {
-                let (rc, err) = b.guest_kevent(args).unwrap_or_else(|m| panic!("{m}"));
+                let (rc, err) = b.guest_kevent(args).map_err(wall_or_bug)?;
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err, writes: vec![], thread })
                     .map_err(|e| format!("append kevent: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, err);
@@ -1185,7 +1209,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // its wake into a context both sides rebuild (R3). A blocked cvwait returns 0 here and
             // gets its real answer at the wake (Global Constraints).
             Stop::Syscall { num, args } if retrace_arch::is_psynch(num) => {
-                let rc = b.guest_psynch(num, args).unwrap_or_else(|m| panic!("{m}"));
+                let rc = b.guest_psynch(num, args).map_err(wall_or_bug)?;
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append psynch: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
@@ -1200,7 +1224,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // `ret` 0, `err` false and no writes, deliberately, as psynch's: the landmark is the
             // call, and its real answer comes at the wake into a context both sides rebuild.
             Stop::Syscall { num, args } if retrace_arch::is_semwait(num) => {
-                let rc = b.guest_semwait_signal(num, args).unwrap_or_else(|m| panic!("{m}"));
+                let rc = b.guest_semwait_signal(num, args).map_err(wall_or_bug)?;
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append __semwait_signal: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
@@ -1272,9 +1296,6 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // guest memory (it only moves thread-table state), so the event carries no writes.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_ULOCK_WAKE => {
                 let (rc, woken) = b.guest_ulock_wake(args);
-                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
-                    .map_err(|e| format!("append ulock_wake: {e}"))?; count += 1;
-                b.set_x0_err_and_return(rc, false);
 
                 // M17: THE ANCHOR. A signal pended on a thread because it could not run is
                 // materialised HERE, at the wake landmark that made it runnable — the same argument
@@ -1300,11 +1321,27 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 let deliver_to: Vec<usize> = woken.iter().copied()
                     .filter(|&t| b.threads().peek_deliverable(t).is_some())
                     .collect();
-                assert!(deliver_to.len() <= 1,
-                    "one wake made {} threads deliverable at once ({deliver_to:?}); that needs N+1 \
-                     landmarks at a single stop and a decision about their order, which M17 does \
-                     not model. No fixture produces it — measure the guest before modelling it.",
-                    deliver_to.len());
+                // M50 (T0-d): checked before the append, so a walled recording never holds this landmark and replay ends at the lookup (C2).
+                if deliver_to.len() > 1 {
+                    return Err(wall(WallCategory::Signals, format!(
+                        "one wake made {} threads deliverable at once ({deliver_to:?}); that needs N+1 \
+                         landmarks at a single stop and a decision about their order, which M17 does \
+                         not model. No fixture produces it — measure the guest before modelling it.",
+                        deliver_to.len())));
+                }
+                // M50 (T0-d): likewise for a second deliverable signal on the one receiving thread.
+                if let Some(&t) = deliver_to.first() {
+                    if (b.threads().pending_of(t) & !b.threads().mask_of(t)).count_ones() > 1 {
+                        return Err(wall(WallCategory::Signals, format!(
+                            "woken thread {t} has more than one deliverable signal at this wake: M17 \
+                             materialises at most ONE signal per wake, so the second would be silently \
+                             swallowed. Queueing at a wake is deliberately unmodelled because no guest in \
+                             the tree measures it; measure one before modelling it.")));
+                    }
+                }
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append ulock_wake: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
                 if let Some(&wtid) = deliver_to.first() {
                     // M17 fix round 5: the sibling of the `deliver_to.len() <= 1` bound above, on
                     // the other axis, and it is there for the same reason. That one bounds how many
@@ -1326,6 +1363,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     // LOUD rather than guessed.
                     let taken = take_pending_delivery(&mut b, wtid);
                     let second = b.threads().peek_deliverable(wtid);
+                    // M50 (T0-d): the wall check above runs first; this assert is the bug backstop.
                     assert!(second.is_none(),
                         "woken thread {wtid} still has deliverable signal {second:?} after this \
                          wake materialised one: M17 materialises at most ONE signal per wake, so \
@@ -1355,8 +1393,8 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // errno is the one the forward produced before M38, for continuity (spec R4).
             Stop::Syscall { num, args } if retrace_arch::exec_refusal_errno(num).is_some() => {
                 let e = retrace_arch::exec_refusal_errno(num).unwrap();
-                eprintln!("[retrace] refusing {} (syscall {num}): exec-in-place is unmodelled; returning errno {e} without forwarding",
-                    if num == retrace_arch::SYS_EXECVE { "execve" } else { "posix_spawn" });
+                // exec_refusal_errno is EFAULT (14) for both execve and posix_spawn (M38 R4).
+                eprintln!("{}", retrace_arch::refused_line(&retrace_arch::syscall_display(num), "EFAULT"));
                 w.append(&Event::Syscall { num, args, ret: e, ret1: 0, err: true, writes: vec![], thread })
                     .map_err(|e| format!("append exec refusal: {e}"))?; count += 1;
                 b.apply_and_return(e, true, &[]);
@@ -1368,7 +1406,8 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // libc's fork then runs its parent handlers and returns -1, a path it already has.
             Stop::Syscall { num, args } if retrace_arch::fork_refusal_errno(num).is_some() => {
                 let e = retrace_arch::fork_refusal_errno(num).unwrap();
-                eprintln!("[retrace] refusing fork (syscall {num}): process creation is unmodelled; returning errno {e} without forwarding");
+                // fork_refusal_errno is EAGAIN (35), fork's documented process-limit failure (M47 R2).
+                eprintln!("{}", retrace_arch::refused_line(&retrace_arch::syscall_display(num), "EAGAIN"));
                 w.append(&Event::Syscall { num, args, ret: e, ret1: 0, err: true, writes: vec![], thread })
                     .map_err(|e| format!("append fork refusal: {e}"))?; count += 1;
                 b.apply_and_return(e, true, &[]);
@@ -1378,7 +1417,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // MADV_ZERO makes are applied here and recomputed by the mirror, never recorded (R3), so
             // the event carries no writes. A refusal panics before anything is appended (R5).
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MADVISE => {
-                let zeros = b.guest_madvise(args).unwrap_or_else(|m| panic!("{m}"));
+                let zeros = b.guest_madvise(args).map_err(wall_or_bug)?;
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append madvise: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &zeros);
@@ -1395,7 +1434,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
             // looks like to dyld. Sandbox's call 2 keeps the errno the pre-M47 forward returned (R7);
             // its call 4 answers ENOTSUP with no write, as native and the forward both did (t0, H7).
             Stop::Syscall { num, args } if num == retrace_arch::SYS_MAC_SYSCALL => {
-                let call = b.guest_mac_syscall(args).unwrap_or_else(|m| panic!("{m}"));
+                let call = b.guest_mac_syscall(args).map_err(wall_or_bug)?;
                 let (ret, err, writes) = match call {
                     retrace_box::MacSyscall::AmfiDyldPolicy { in_flags, out_ipa } =>
                         match retrace_box::host_amfi_dyld_policy(in_flags) {
@@ -1466,6 +1505,11 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 assert!(retrace_arch::fork_refusal_errno(num).is_none(),
                     "fork ({num}) reached the generic forward arm — it must be refused above (M47). \
                      Forwarded, it starts a real child of the recorder.");
+                // M50 §3c (B3): an unrowed syscall, or one that writes through a nested pointer, ends
+                // the recording here as a wall. It comes after the "never forwarded" asserts above,
+                // which guard arms that must exist, and before the M27 assert below, which is now a
+                // backstop, like `forwarded_shape`'s panic inside `forward_and_diff`.
+                if let Some(u) = retrace_arch::refusal_before_forward(num) { return Err(u.marked()); }
                 // M27: the destination sits behind a pointer INSIDE a guest struct, which
                 // forward_and_diff never translates — so forwarding hands the host kernel a guest
                 // IPA as a host address. No guest in the gate calls these (measured: absent from
@@ -1495,7 +1539,7 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                 // M48 §3c: what the call did to the guest's kqueues and pipes (Box_::note_fd_effects),
                 // after its return is set, as replay's generic mirror does. A refusal stops the
                 // recorder after this landmark: the forward has already happened.
-                b.note_fd_effects(num, args, ret, ret1, err).unwrap_or_else(|m| panic!("{m}"));
+                b.note_fd_effects(num, args, ret, ret1, err).map_err(wall_or_bug)?;
             }
             // A stage-2 abort. `Box_::resolve_stage2` (M49 F1) is the one copy of the chain: the
             // cache pager and the reservation committer, regenerated identically here and on replay
@@ -1516,15 +1560,34 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     if trace_log { eprintln!("[convert] pc={pc:#x} far={far:#x} esr={esr:#x}"); }
                     continue;
                 }
-                Stage2::Unhandled(why) => {
+                Stage2::Wall(u) => {
                     if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
-                    return Err(why);
+                    return Err(u.marked());
+                }
+                // M50 §3c: an exception only retrace's own code takes is a bug, with the banner.
+                Stage2::Bug(why) => {
+                    if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
+                    panic!("{why}");
                 }
             },
             // Stop::Step is only produced by Box_::step(); record_box drives run(), never step().
+            Stop::Unsupported(u) => return Err(u.marked()),
             Stop::Step => unreachable!("record_box drives run(), which never single-steps"),
         }
     }
+    Ok(outcome)
+    }));
+    let outcome = match ran {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(e)) => match Unsupported::from_marked(&e) {
+            Some(u) => Outcome::Refused(u),
+            None => return Err(e),
+        },
+        Err(payload) => match Unsupported::from_panic(payload.as_ref()) {
+            Some(u) => Outcome::Refused(u),
+            None => std::panic::resume_unwind(payload),
+        },
+    };
     Ok(RecordSummary { stdout, outcome, events: count, fall_throughs: b.fall_throughs() })
 }
 
@@ -1585,6 +1648,14 @@ impl DecodedTrace {
         Ok(DecodedTrace { events: events.into(), truncated })
     }
     pub fn events(&self) -> &[Event] { &self.events }
+    /// M50 §3c (R5): whether the recording has its end. See `trace_complete`.
+    pub fn is_complete(&self) -> bool { trace_complete(&self.events) }
+}
+
+/// M50 §3c (R5, C2): whether a recording has its end, a terminal event (an exit, a crash or a fatal
+/// signal). A recording that stopped at a wall, or whose recorder was killed, has none.
+fn trace_complete(events: &[Event]) -> bool {
+    events.iter().any(|e| matches!(e, Event::Exit { .. } | Event::Crash { .. } | Event::Signal { .. }))
 }
 
 /// A resumable replay engine. `open` restores the guest from a trace's leading snapshot; `advance`
@@ -1636,6 +1707,31 @@ pub enum Advance {
 }
 
 impl ReplaySession {
+    /// M50 §3c (C2): what replay makes of a stop it cannot continue past. At the end of a recording
+    /// with no terminal event the recording itself stopped here, at a wall or because its recorder
+    /// was killed, so replay ends here too, as `Outcome::Incomplete`. Anywhere else it is a
+    /// divergence (exit 3), as it always was, with a wall's marker made readable.
+    fn end_or_diverge(&mut self, mut d: Divergence) -> Result<ReplayReport, Divergence> {
+        let wall = Unsupported::from_marked(&d.detail);
+        // M50 (C2): a wall met while replaying the recording's LAST landmark is where the recording
+        // stopped too. Some record arms append their landmark and refuse after it (the unmask arm's
+        // `take_pending_delivery`), so replay meets the same wall one step before the end.
+        let at_end = self.idx >= self.events.len()
+            || (wall.is_some() && self.idx + 1 == self.events.len());
+        if at_end && !trace_complete(&self.events) {
+            let at = match wall {
+                Some(u) => u.what,
+                None => format!("landmark {} (pc {:#x})", d.landmark, d.pc),
+            };
+            return Ok(ReplayReport { stdout: std::mem::take(&mut self.stdout), outcome: Outcome::Incomplete(at),
+                                     fall_throughs: self.b.fall_throughs() });
+        }
+        if let Some(u) = wall {
+            d.detail = format!("refused on replay, though the recording continued past it: {}", u.what);
+        }
+        Err(d)
+    }
+
     pub fn open(trace_path: &Path) -> Result<Self, String> {
         Self::open_decoded(&DecodedTrace::load(trace_path)?)
     }
@@ -1796,7 +1892,11 @@ impl ReplaySession {
             Some((watched, _ipa)) => Advance::WatchSyscall { watched, thread: self.current_thread() },
             None => Advance::Event,
         };
-        self.b.settle_schedule();
+        // M50 (B5): a deadlock after the last landmark is where an incomplete recording stopped, which
+        // `replay()` reads from the marker; anywhere else it is a divergence.
+        if let Err(u) = self.b.settle_schedule() {
+            return Err(Divergence { landmark: self.idx, pc: self.b.position(), detail: u.marked() });
+        }
         Ok(adv)
     }
 
@@ -3135,9 +3235,9 @@ impl ReplaySession {
                             // reported as one.
                             if !self.b.is_console_write(num, args[0]) {
                                 if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
-                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    return Err(Divergence { landmark: self.idx, pc, detail: if retrace_arch::Unsupported::from_marked(&m).is_some() { m } else { format!(
                                         "syscall {num} refused on replay, though the recording accepted it \
-                                         — replay diverged before this landmark: {m}") });
+                                         — replay diverged before this landmark: {m}") } });
                                 }
                             }
                             return self.finish_event();
@@ -3216,11 +3316,16 @@ impl ReplaySession {
                     // returns the `Stop::Fault` the arm above mirrors.
                     match self.b.resolve_stage2(esr) {
                         Stage2::Resolved { .. } | Stage2::Converted { .. } => continue,
-                        Stage2::Unhandled(why) =>
+                        // M50 C2: at the end of an incomplete recording `replay()` reads the marker as
+                        // where the recording stopped; anywhere else it is the divergence it always was.
+                        Stage2::Wall(u) =>
+                            return Err(Divergence { landmark: self.idx, pc: self.b.pc(), detail: u.marked() }),
+                        Stage2::Bug(why) =>
                             return Err(Divergence { landmark: self.idx, pc: self.b.pc(), detail: why }),
                     }
                 }
                 // Stop::Step is only produced by Box_::step(); advance drives run(), never step().
+                Stop::Unsupported(u) => return Err(Divergence { landmark: self.idx, pc: self.b.position(), detail: u.marked() }),
                 Stop::Step => unreachable!("replay drives run(), which never single-steps"),
             }
         }
@@ -3433,6 +3538,7 @@ impl ReplaySession {
         for done in 0..k {
             loop {
                 match self.b.step() {
+                    Stop::Unsupported(u) => return Err(u.line()),
                     Stop::Step => break,
                     Stop::Other { esr } => match self.b.resolve_stage2(esr) {
                         Stage2::Resolved { .. } => continue,
@@ -3441,7 +3547,8 @@ impl ReplaySession {
                         // vector's `hvc`, so this reports what the `Stop::Fault` arm below reports.
                         Stage2::Converted { pc, far, .. } => return Err(format!(
                             "guest crashed at step {done}/{k}: pc={pc:#x} far={far:#x}")),
-                        Stage2::Unhandled(why) => return Err(format!("fault during step {done}/{k}: {why}")),
+                        Stage2::Wall(u) => { let why = u.line(); return Err(format!("fault during step {done}/{k}: {why}")) }
+                        Stage2::Bug(why) => return Err(format!("fault during step {done}/{k}: {why}")),
                     },
                     // The window ends after exactly `done` instructions — name that length; the
                     // window-ending trap is left unconsumed (the guest stays parked at it).
@@ -3468,6 +3575,7 @@ impl ReplaySession {
     pub fn step_watched(&mut self) -> Result<Stepped, String> {
         loop {
             match self.b.step() {
+                Stop::Unsupported(u) => return Err(u.line()),
                 Stop::Step => return Ok(Stepped::Retired),
                 Stop::Other { esr } => {
                     if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Watchpoint) {
@@ -3487,7 +3595,8 @@ impl ReplaySession {
                         // M49 F2 (Ruling T3-c): as `step_insns`.
                         Stage2::Converted { pc, far, .. } => return Err(format!(
                             "guest crashed during a watch-aware step: pc={pc:#x} far={far:#x}")),
-                        Stage2::Unhandled(why) => return Err(format!("fault during a watch-aware step: {why}")),
+                        Stage2::Wall(u) => { let why = u.line(); return Err(format!("fault during a watch-aware step: {why}")) }
+                        Stage2::Bug(why) => return Err(format!("fault during a watch-aware step: {why}")),
                     }
                 }
                 Stop::Syscall { .. } => return Ok(Stepped::AtTrap),
@@ -3507,6 +3616,7 @@ impl ReplaySession {
     pub fn step_armed(&mut self) -> Result<Armed, String> {
         loop {
             match self.b.step() {
+                Stop::Unsupported(u) => return Err(u.line()),
                 Stop::Step => return Ok(Armed::Retired),
                 Stop::Other { esr } => {
                     match retrace_arch::ec_of(esr) {
@@ -3518,7 +3628,8 @@ impl ReplaySession {
                         Stage2::Resolved { .. } => continue,
                         // M49 F2 (Ruling T3-c): a converted fault is a real guest fault; nothing retired.
                         Stage2::Converted { .. } => return Ok(Armed::Fault),
-                        Stage2::Unhandled(why) => return Err(format!("fault during an armed step: {why}")),
+                        Stage2::Wall(u) => { let why = u.line(); return Err(format!("fault during an armed step: {why}")) }
+                        Stage2::Bug(why) => return Err(format!("fault during an armed step: {why}")),
                     }
                 }
                 Stop::Syscall { .. } => return Ok(Armed::AtTrap),
@@ -3535,12 +3646,14 @@ impl ReplaySession {
         let mut n = 0u64;
         loop {
             match self.b.step() {
+                Stop::Unsupported(u) => return Err(u.line()),
                 Stop::Step => n += 1,
                 Stop::Other { esr } => match self.b.resolve_stage2(esr) {
                     Stage2::Resolved { .. } => continue,
                     // M49 F2 (Ruling T3-c): a converted fault ends the window as a stage-1 crash does.
                     Stage2::Converted { .. } => return Ok(n),
-                    Stage2::Unhandled(why) => return Err(format!("fault at step {n}: {why}")),
+                    Stage2::Wall(u) => { let why = u.line(); return Err(format!("fault at step {n}: {why}")) }
+                    Stage2::Bug(why) => return Err(format!("fault at step {n}: {why}")),
                 },
                 Stop::Syscall { .. } => return Ok(n),
                 // window_len_here: the crash ENDS the final window — its length is the count of
@@ -3743,7 +3856,19 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
     let mut s = ReplaySession::open(trace_path)
         .map_err(|e| Divergence { landmark: 0, pc: 0, detail: e })?;
     loop {
-        let adv = s.advance()?;
+        // M50 §3c (C2): a wall's panic in code record and replay share is caught here, as
+        // `record_box` catches it, and every stop replay cannot continue past goes to `end_or_diverge`.
+        let adv = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.advance())) {
+            Ok(Ok(adv)) => adv,
+            Ok(Err(d)) => return s.end_or_diverge(d),
+            Err(payload) => match Unsupported::from_panic(payload.as_ref()) {
+                Some(u) => {
+                    let d = Divergence { landmark: s.landmark(), pc: s.pc(), detail: u.marked() };
+                    return s.end_or_diverge(d);
+                }
+                None => std::panic::resume_unwind(payload),
+            },
+        };
         // M42 §3f: plain replay never arms a debug register either; see record_box's twin assert.
         assert!(s.dbg_excl().is_none(), "M42: plain replay set the exclusive shadow at landmark {}", s.landmark());
         if let Advance::Exited(report) = adv { return Ok(report); }

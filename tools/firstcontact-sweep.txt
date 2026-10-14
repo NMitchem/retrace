@@ -7,11 +7,14 @@
 # apple-sweep.sh runs every row from the repo root, so a relative argument names a repo file.
 # Every row's native output was deterministic over two runs at plan time; its tally goes in the
 # measurements file (t0 M2) and the status log (Task 7).
+# M50 (spec §3g): `out:` before a path marks a row out of scope (charter §3: Ruby, Perl and the other
+# script runtimes beyond python3 and node). It passes by matching native or by refusing cleanly, and
+# fails on anything else, a retrace bug included.
 /opt/homebrew/bin/rg	--sort	path	-c	stxr	docs/sweep-evidence/2026-10-06-m49-static
 /opt/homebrew/bin/just	--version
 /usr/bin/sqlite3	:memory:	select 6*7, upper('first contact');
-/usr/bin/perl	-le	print join ",", map { $_ * $_ } 1 .. 5
-/usr/bin/ruby	-e	puts (1..5).map { |i| i * i }.join(",")
+out:/usr/bin/perl	-le	print join ",", map { $_ * $_ } 1 .. 5
+out:/usr/bin/ruby	-e	puts (1..5).map { |i| i * i }.join(",")
 /opt/homebrew/bin/jq	-n	1+1
 /opt/homebrew/bin/jq	.name	crates/retrace/tests/fixtures/rung3.json
 /opt/homebrew/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python	-c	print(1)

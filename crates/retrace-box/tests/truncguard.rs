@@ -73,6 +73,7 @@ fn the_band_fires_when_the_kernel_writes_past_the_window() {
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
@@ -462,6 +463,7 @@ fn the_same_fixture_and_cap_that_fooled_the_old_comparison_now_aborts() {
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
@@ -521,6 +523,7 @@ fn the_canary_catches_zeros_written_over_zeros() {
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
@@ -586,6 +589,7 @@ fn a_failing_syscall_still_restores_the_canary() {
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
@@ -630,6 +634,7 @@ fn a_duplicated_pointer_argument_does_not_manufacture_a_disturbance() {
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }

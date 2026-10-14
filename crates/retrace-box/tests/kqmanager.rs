@@ -86,7 +86,7 @@ fn a_kevent_return_with_nothing_pending_parks_the_manager_on_its_svc() {
     assert_eq!(b.threads().state_of(1), ThreadState::Blocked(BlockReason::Parked));
     assert_eq!(b.dbg_kq().manager(), Manager::Unbound(1));
     b.set_x0_err_and_return(0, false);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(b.threads().current(), 0, "the park hands the vCPU back to main");
     assert_eq!(b.threads().ctx_of(1).elr, ENTRY - 4, "parked on its svc, never resumable into a return");
 }
@@ -97,7 +97,7 @@ fn a_poke_to_a_parked_manager_reenters_it_with_the_reuse_flags() {
     b.switch_to_thread(1);
     b.try_workq_kernreturn(kevent_return(pthread - 0x480, 0)).unwrap();
     b.set_x0_err_and_return(0, false);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(poke(&mut b, e), Ok(0));
     assert_eq!(b.threads().state_of(1), ThreadState::Runnable, "unparked");
     assert_eq!(b.threads().len(), 2, "re-entered, not replaced");
@@ -180,7 +180,7 @@ fn parked() -> (Box_, u64) {
     b.switch_to_thread(1);
     b.try_workq_kernreturn(kevent_return(pthread - 0x480, 0)).unwrap();
     b.set_x0_err_and_return(0, false);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     (b, e)
 }
 

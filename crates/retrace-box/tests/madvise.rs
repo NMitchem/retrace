@@ -2,6 +2,7 @@
 //! pin the paths the fixtures may not reach (Review Focus 1–3): a zero-fill over committed and
 //! reserved pages together, a range past the guest's mappings, an unaligned address, an `int`'s
 //! upper half, and xnu's rounding of `len`. `gitprims_e2e`'s `madv_dyn` covers the arms end to end.
+use retrace_arch::Unmark;
 use retrace_arch::{MADV_FREE_REUSABLE, MADV_ZERO};
 use retrace_box::Box_;
 
@@ -41,7 +42,7 @@ fn a_noop_advice_writes_nothing_over_a_backed_range() {
 fn a_range_that_runs_past_the_guests_mappings_is_refused_naming_the_page() {
     let mut b = tb();
     let base = b.guest_vm_map(0, 2 * G, true, false);
-    let e = b.guest_madvise(args(base, 3 * G, MADV_ZERO.into())).unwrap_err();
+    let e = b.guest_madvise(args(base, 3 * G, MADV_ZERO.into())).unwrap_err().unmark();
     assert!(e.starts_with(&format!("M47: madvise range page {:#x} is neither backed nor reserved", base + 2 * G)), "{e}");
 }
 
@@ -51,7 +52,7 @@ fn a_range_that_runs_past_the_guests_mappings_is_refused_naming_the_page() {
 fn an_address_off_a_16k_page_is_refused() {
     let mut b = tb();
     let base = b.guest_vm_map(0, 2 * G, true, false);
-    let e = b.guest_madvise(args(base + 0x1000, G, MADV_FREE_REUSABLE.into())).unwrap_err();
+    let e = b.guest_madvise(args(base + 0x1000, G, MADV_FREE_REUSABLE.into())).unwrap_err().unmark();
     assert!(e.starts_with(&format!("M47: madvise range starts at {:#x}, not on a 16 KiB page", base + 0x1000)), "{e}");
 }
 

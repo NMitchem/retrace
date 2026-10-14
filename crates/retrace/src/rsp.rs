@@ -220,6 +220,8 @@ pub(crate) fn terminal_kind(o: &Outcome) -> StopKind {
         },
         Outcome::Signal { sig } => StopKind::Exception { signal: sig as u8,
             text: format!("guest terminated by signal {sig}") },
+        Outcome::Refused(_) | Outcome::Incomplete(_) =>
+            unreachable!("M50 R5: a debugger opens only a complete recording, and replay never refuses one"),
     }
 }
 

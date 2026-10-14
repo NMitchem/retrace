@@ -161,7 +161,11 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   `nanosleep` on the synthetic clock, `clock_get_time` answered from the guest clock, two sleepers
   in deadline order, a polling loop on a short and on a 0-tick sleep, a sleep beside a runnable
   sibling, the refusals by value, a signal to a sleeper refused at the wake, replay-side refusals as
-  divergences, and a seek across a wake). Run one with
+  divergences, and a seek across a wake), `cleanfail_e2e` (M50: one row per newcomer-reachable wall,
+each asserting the program's output first, exactly one `retrace: unsupported:` line naming the call
+with its docs anchor, exit 4, and a replay ending at the incomplete-recording line; plus bad input
+with exit 2, an incomplete recording refused by `debug` and `gdbserver`, the bug banner's control
+with exit 70, and `RUST_BACKTRACE=1` printing no frames for a wall). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -261,6 +265,15 @@ and threads.
    `step()` and `run()`'s pair prologue, engages only when single-stepping or at a debug stop, and
    record and plain replay assert its shadow is never set.
 
+**A guest-reachable refusal is a wall, never a plain panic (M50).** A box method refuses with
+`Err(retrace_arch::wall(category, …))`, which `record_box` ends the recording on; a deep shared
+helper with no error channel panics through `retrace_arch::refuse!(Category, …)`, and every
+`refuse!` site is listed in `crates/retrace-box/tests/refuse-sites.txt`, which `refuse_audit.rs`
+checks against the source. Decide the class at the site, never by matching message text afterwards:
+internal asserts share prefixes with walls. Anything else that stops retrace is a bug, which prints
+the bug banner and exits 70. Below the trace, a wall returns `Stop::Unsupported` from `run()` and
+`step()`.
+
 ### Hard platform invariants (encoded in the box; violating them hangs or panics the machine)
 
 - **W^X.** Executing a *writable* guest page hangs the vCPU on Apple Silicon. Code pages are RO+exec
@@ -331,7 +344,12 @@ arm in `record_box` (`crates/retrace-core/src/lib.rs`) sits before the generic f
 the only guard. The generic arm's asserts are `is_signal_syscall`, the workq pair, `kevent_qos`
 (M45), `writes_via_nested_pointer`, since M47 `madvise` and `fork`, since M48 `kevent` (363)
 and every SDK psynch number (`retrace_arch::is_psynch`), and since M49 `__semwait_signal` (334)
-and its `_nocancel` twin (423) only; the claim that it
+and its `_nocancel` twin (423) only; since M50 both generic arms call
+`retrace_arch::refusal_before_forward`, which ends the recording at a wall for an unrowed number, a
+nested-pointer write or an unmodelled semaphore trap. In the mach arm it is the first statement, so
+the M18 semaphore assert and `forwarded_shape`'s panic are backstops no guest reaches; in the BSD arm
+it sits after the eight "never forwarded" asserts (they guard arms that must exist) and before the M27
+assert, which with `forwarded_shape`'s panic is the backstop there; the claim that it
 "asserts" stood here from M14 to M37 and was measured false at M37. Since M45 libdispatch's
 workqueue-kqueue init, `kevent_qos` (374) with `KEVENT_FLAG_WORKQ`, is emulated beside the workq
 pair for the same reason (forwarded, it acts on retrace's own workqueue kqueue): M45 emulated

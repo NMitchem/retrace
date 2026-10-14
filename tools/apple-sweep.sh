@@ -3,20 +3,22 @@
 #
 # PASS means: both commands completed, their exit codes are equal, and their stdout
 # is byte-identical. Exit codes are compared to each other, NOT to zero — /bin/false
-# exits 1 on both runs and is a pass. A recorder panic is a FAIL even if the codes
-# happen to match, so stderr is checked for it explicitly.
+# exits 1 on both runs and is a pass. A retrace bug, on record or replay, is a FAIL even if the codes
+# happen to match, so both stderr files are checked for it explicitly.
 #
 # M36: the human line says WHY a row failed, and every row that ran is followed by one
 # machine-readable line. Labels, in evaluation order (spec §3a):
 #   FAIL … (timed out after Ns recording)              unchanged
-#   FAIL … (recorder panicked: <line>)                 <line> = rec.err's first `panicked at crates/` line
-#       joined with the line after it (Rust prints the panic message on its own line)
-#   FAIL … (record error, rc=N: <line>)                new; <line> = rec.err's first `RECORD ERROR:`
-#       line, and that line is the test (fix wave: exit 4 is what the CLI exits after printing
-#       it, but the CLI also passes a guest's own exit status through, so rc is printed as
-#       corroboration, never tested). The recorder leaves a trace with no terminal event, so its
-#       replay ALWAYS prints a DIVERGENCE line; replay is still run (that line is evidence, kept
-#       on the ROW line) but the label is the record error, not "replay diverged".
+#   FAIL … (retrace bug on record: <line>)            M50: rec.err has retrace's bug banner, or a Rust
+#       panic located in retrace's own crates (`panicked at crates/(retrace|hv-sys)`); <line> is the
+#       banner's message line, or the panic line joined with the message after it. A Rust guest's own
+#       panic prints its own path and never matches.
+#   FAIL … (wall, rc=N: <line>)                      M50: an in-scope row stopped at a wall; <line> is
+#       rec.err's `retrace: unsupported:` line, and the line is the test, never rc (a guest may exit 4).
+#   REFUSED … (<line>)                               M50: an out-of-scope row (see the list format)
+#       refused cleanly: exactly one wall line, exit 4, and a replay that ends at the
+#       incomplete-recording line with exit 4 and the recording's stdout. Counted in `refused`.
+#   FAIL … (retrace bug on replay: <line>)           M50: the bug check on rp.err, right after replay.
 #   FAIL … (timed out after Ns replaying)              unchanged
 #   FAIL … (replay diverged at landmark N)             the landmark added
 #   PASS … (identical fault, rc=N)                     new; rc = rp ≥ 128 (a signal death on both
@@ -28,9 +30,8 @@
 #   ROW<TAB>path<TAB>result<TAB>rc<TAB>rp<TAB>recpid<TAB>landmark<TAB>rec_reason<TAB>rp_line
 #       rp/landmark are `n/a` when there was no replay/divergence; recpid is the recorder's own
 #       pid (see the record invocation); rec_reason/rp_line are the stderr lines the labels quote
-#       (rec_reason: the `RECORD ERROR:` line, else the `panicked at crates/` line joined with the
-#       message line after it, cut to 200 chars for a RECORD ERROR line and 300 for a panic pair),
-#       empty when none. TALLY is unchanged in shape.
+#       (rec_reason: the bug line if there is one, else the wall line, else empty; the result field is
+#       PASS, FAIL or REFUSED). TALLY gains `refused=` after `pass=`.
 #
 # Usage: tools/apple-sweep.sh [path-to-retrace-binary]
 #        defaults to target/aarch64-apple-darwin/debug/retrace
@@ -54,6 +55,9 @@
 # kept evidence carries its list line number. Every row runs from the repo root, so a relative path
 # in an argument names a repo file. A line with no TAB is a row with no arguments, which is every
 # line of apple-sweep-binaries.txt, and its record command is the one this script always ran.
+# M50 (spec §3g): a list line whose path starts `out:` is a row out of scope (charter §3). It passes by
+# matching native, like any row, or by refusing cleanly (REFUSED above); anything else fails it. The
+# mark is not part of the row's name, so its PASS/FAIL/ROW lines stay comparable with older sweeps.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -166,7 +170,21 @@ keep_row() {
     fi
 }
 
-pass=0; fail=0; skip=0; lno=0; OLDIFS=$IFS; TAB=$(printf '\t')
+# M50 §3g: retrace's own bug in a stderr file, as the line to quote, or nothing. Since M50 the CLI
+# prints a banner whose third line is the message; a panic before the hook is installed, or a build
+# without it, still prints Rust's `panicked at <file>` with the message on the next line. Anchored on
+# retrace's own crates, because a guest's own stderr can carry a Rust panic of its own (fc_rs_tests_fail
+# prints one natively), and a tool built from a `crates/` workspace would print `panicked at crates/`.
+bug_reason() {
+    [ -f "$1" ] || return 0
+    if grep -qa '^retrace: internal error' "$1"; then
+        grep -a -m1 -A2 '^retrace: internal error' "$1" | tail -1 | sed 's/^ *//' | cut -c1-300
+    elif grep -qaE 'panicked at crates/(retrace|hv-sys)' "$1"; then
+        grep -a -m1 -A1 -E 'panicked at crates/(retrace|hv-sys)' "$1" | tr '\n' ' ' | sed 's/ *$//' | cut -c1-300
+    fi
+}
+
+pass=0; refused=0; fail=0; skip=0; lno=0; OLDIFS=$IFS; TAB=$(printf '\t')
 # The list is read on fd 3, not fd 0: several sweep guests (bash, csh, dash, ksh, sh,
 # tcsh, zsh) run with no arguments and, non-interactively, read a *script* from stdin.
 # If the loop's `read` shared fd 0 with those children, a shell guest would consume
@@ -188,6 +206,8 @@ while IFS= read -r g <&3; do
     # positional parameters, which nothing reads after `RAW` above.
     IFS=$TAB; set -f; set -- $g; set +f; IFS=$OLDIFS
     g=$1; shift; nargs=$#
+    scope=in
+    case "$g" in out:*) scope=out; g=${g#out:} ;; esac
     row=$g; [ "$nargs" -gt 0 ] && row="$g $*"
     cd "$ROOT" || { echo "TALLY ABORTED (cannot cd to $ROOT)"; exit 2; }
     if [ ! -x "$g" ]; then echo "SKIP $g (not present)"; skip=$((skip+1)); continue; fi
@@ -268,39 +288,39 @@ while IFS= read -r g <&3; do
     # paths — because the guest's stderr shares rec.err, so a Rust guest's own panic must never be
     # labelled a recorder panic (fix wave); a recorder panic located in a dependency would print a
     # registry path and miss the anchor — unobserved on the corpus.
-    rec_reason=$(grep -a -m1 'RECORD ERROR:' "$TMP/rec.err" | cut -c1-200)
-    if [ -z "$rec_reason" ]; then
-        rec_reason=$(grep -a -m1 -A1 'panicked at crates/' "$TMP/rec.err" | tr '\n' ' ' | sed 's/ *$//' | cut -c1-300)
-    fi
+    # M50: the bug line first (a bug is never a wall), else the wall line; empty when neither.
+    rec_bug=$(bug_reason "$TMP/rec.err")
+    rec_wall=$(grep -a -m1 '^retrace: unsupported: ' "$TMP/rec.err" | cut -c1-300)
+    rec_reason=${rec_bug:-$rec_wall}
     rp_line=""; landmark="n/a"; rp="n/a"
     if [ -e "$TMP/.timedout" ]; then
         echo "FAIL $row (timed out after ${TIMEOUT_SECS}s recording)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
-    if grep -qa "panicked at crates/" "$TMP/rec.err"; then
-        echo "FAIL $row (recorder panicked: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue
+    if [ -n "$rec_bug" ]; then
+        echo "FAIL $row (retrace bug on record: $rec_bug)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
     run_timeout "$BIN" replay "$TMP/t.bin" >"$TMP/rp.out" 2>"$TMP/rp.err" </dev/null; rp=$?
     rp_line=$(grep -a -m1 'DIVERGENCE at landmark' "$TMP/rp.err" | cut -c1-200)
     case "$rp_line" in
         'DIVERGENCE at landmark '*) landmark=$(printf '%s' "$rp_line" | sed 's/^DIVERGENCE at landmark \([0-9]*\).*/\1/') ;;
     esac
-    # M36: a recorder that printed `RECORD ERROR:` wrote a trace with no terminal event, so its
-    # replay ALWAYS prints a DIVERGENCE line (it runs out of events, or reports the exception the
-    # recorder could not record). That line is evidence, not the label: M35 measured dddiagnose's
-    # "replay diverged" this way, and M36 measured all five long-standing "replay diverged" rows
-    # as recorder-side RECORD ERRORs of the same shape (the libdispatch brk with a colliding pid,
-    # the RCV-shaped mach_msg2 without). Label the record error.
-    # The test is the LINE, not the exit code (fix wave): the CLI exits 4 after printing it, but
-    # it also passes a guest's own exit status straight through (main.rs `Outcome::Exit { code }
-    # => exit(code)`), so exit 4 is not exclusively the CLI's, and a guest that exits 4 by design
-    # on both sides would otherwise be labelled a record error with an empty reason. Same
-    # structural shape as the DIVERGENCE check below; rc is printed as corroboration.
-    # Checked before the replay-timeout marker (spec §3a's evaluation order): the record error is
-    # the cause, whatever the replay of its truncated trace then did; the ROW line still carries rp.
-    case "$rec_reason" in
-        'RECORD ERROR:'*)
-            echo "FAIL $row (record error, rc=$rc: $rec_reason)"; fail=$((fail+1)); keep_row FAIL; continue ;;
-    esac
+    rp_bug=$(bug_reason "$TMP/rp.err")
+    if [ -n "$rp_bug" ]; then
+        echo "FAIL $row (retrace bug on replay: $rp_bug)"; fail=$((fail+1)); keep_row FAIL; continue
+    fi
+    # M50: a wall ends the recording with one line and exit 4, and its replay ends at the
+    # incomplete-recording line with exit 4 (C2), so record and replay AGREE; without this check an
+    # in-scope wall would pass (measured, ctl-before.log). The line is the test; rc is corroboration,
+    # since a guest may exit 4 by design. Checked before the replay-timeout marker, as M36 ordered it:
+    # the wall is the cause, whatever its replay then did, and the ROW line still carries rp.
+    if [ -n "$rec_wall" ]; then
+        if [ "$scope" = out ] && [ "$(grep -ac '^retrace: unsupported: ' "$TMP/rec.err")" -eq 1 ] \
+            && [ "$rc" -eq 4 ] && [ "$rp" -eq 4 ] && grep -qa '^retrace: incomplete recording: ' "$TMP/rp.err" \
+            && cmp -s "$TMP/rec.out" "$TMP/rp.out"; then
+            echo "REFUSED $row ($rec_wall)"; refused=$((refused+1)); keep_row REFUSED; continue
+        fi
+        echo "FAIL $row (wall, rc=$rc: $rec_wall)"; fail=$((fail+1)); keep_row FAIL; continue
+    fi
     if [ -e "$TMP/.timedout" ]; then
         echo "FAIL $row (timed out after ${TIMEOUT_SECS}s replaying)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
@@ -330,4 +350,4 @@ while IFS= read -r g <&3; do
     echo "FAIL $row (record=$rc replay=$rp)"; fail=$((fail+1)); keep_row FAIL
 done 3< "$LIST"
 
-echo "TALLY pass=$pass fail=$fail skip=$skip"
+echo "TALLY pass=$pass refused=$refused fail=$fail skip=$skip"

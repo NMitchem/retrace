@@ -84,8 +84,9 @@ behind it. These are the ones you'll hit first:
 - Command-line programs only. XPC service lookups, I/O Kit and GUI frameworks aren't modelled, and
   kqueue readiness covers only a program's own pipes, so nothing that waits on a socket, a terminal
   or an inherited descriptor runs.
-- A syscall or Mach message retrace has no model for stops the recording with a `RECORD ERROR`
-  naming it. In the latest sweeps, 49 of the 54 Apple binaries in the committed sample recorded and
+- A syscall or Mach message retrace has no model for stops the recording with one line naming
+  it, `retrace: unsupported: …`, and exit status 4; [`docs/walls.md`](docs/walls.md) explains each
+  kind. In the latest sweeps, 49 of the 54 Apple binaries in the committed sample recorded and
   replayed identically (three of them by reaching the refused `posix_spawn` on both sides), and a
   50th does or does not from run to run with host state.
 - Of the 30 small C, C++, Rust and Swift programs in the first-contact corpus

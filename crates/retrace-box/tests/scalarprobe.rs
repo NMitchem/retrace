@@ -26,6 +26,7 @@ fn a_scalar_register_holding_a_mapped_ipa_is_forwarded_verbatim() {
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }

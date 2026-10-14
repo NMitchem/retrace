@@ -6,13 +6,27 @@ pub struct Loaded { pub segments: Vec<Segment>, pub entry: u64, pub dylinker: Op
 fn u32le(b: &[u8], o: usize) -> u32 { u32::from_le_bytes(b[o..o+4].try_into().unwrap()) }
 fn u64le(b: &[u8], o: usize) -> u64 { u64::from_le_bytes(b[o..o+8].try_into().unwrap()) }
 
-pub fn parse_macho(b: &[u8]) -> Loaded {
+/// M50 (spec §3b, R2): the loaded image, or why `b` is not a program retrace can run, worded to
+/// follow the file's path in the CLI's one line (`retrace: <path> <why>`).
+pub fn try_parse_macho(b: &[u8]) -> Result<Loaded, String> {
     // A universal (fat) file is the normal shape for a macOS system binary and for dyld itself,
     // so pick the slice this machine would execute before reading a mach_header out of it. A thin
-    // file passes through, and so does a non-Mach-O — the assert below stays the single place a
-    // file that is neither is rejected, with the message that says so.
-    let b = slice_native(b);
-    assert_eq!(u32le(b, 0), 0xfeed_facf, "not a 64-bit Mach-O (MH_MAGIC_64)");
+    // file passes through, and so does a non-Mach-O, which the magic check below rejects.
+    let b = try_slice_native(b)?;
+    if b.starts_with(b"#!") {
+        return Err("is a script, not a Mach-O executable; record its interpreter, with the script as \
+                    the interpreter's argument".into());
+    }
+    if b.len() < 32 || u32le(b, 0) != 0xfeed_facf {
+        return Err("is not a Mach-O executable".into());
+    }
+    // mach_header_64: magic(0) cputype(4). A thin file of another architecture passed the magic
+    // check before M50 and was loaded as arm64.
+    match u32le(b, 4) {
+        retrace_arch::CPU_TYPE_ARM64 => {}
+        0x0100_0007 => return Err("is an x86_64 program, and retrace runs arm64 programs only".into()),
+        t => return Err(format!("is a Mach-O for CPU type {t:#x}, and retrace runs arm64 programs only")),
+    }
     // mach_header_64: magic(0) cputype(4) cpusubtype(8). The low 24 bits are the subtype proper;
     // the top 8 are capability bits (arm64e carries a ptrauth ABI version there). The box derives
     // the guest's PAC posture from this — macOS enables PAC per process, only for arm64e mains.
@@ -61,7 +75,15 @@ pub fn parse_macho(b: &[u8]) -> Loaded {
         }
         off += cmdsize;
     }
-    Loaded { segments, entry: entry.expect("no LC_MAIN/LC_UNIXTHREAD entry point"), dylinker, cpusubtype }
+    let entry = entry.ok_or("has no entry point (LC_MAIN or LC_UNIXTHREAD): it is a library or a \
+                             bundle, not a program")?;
+    Ok(Loaded { segments, entry, dylinker, cpusubtype })
+}
+
+/// `try_parse_macho` for the images retrace itself chose (dyld, a test's own guest), where a
+/// failure is a retrace bug and stays a panic.
+pub fn parse_macho(b: &[u8]) -> Loaded {
+    try_parse_macho(b).unwrap_or_else(|why| panic!("parse_macho: the image {why}"))
 }
 
 /// True for a thin 64-bit Mach-O — the shape every slice picker passes through untouched.
@@ -104,16 +126,22 @@ pub fn slice_arm64e(fat: &[u8]) -> &[u8] {
 
 /// The slice this machine would actually execute: arm64e if the file carries one, else plain
 /// arm64. A thin Mach-O — and anything that is not a fat file at all — passes through unchanged,
-/// so a caller never has to know which shape it holds.
+/// so a caller never has to know which shape it holds. M50: Err, worded for the CLI's line, for a
+/// file too short to hold a magic or a fat file with no arm64 slice.
 ///
 /// The preference order is load-bearing, not cosmetic. `cpusubtype` is what `pac_posture` reads,
 /// so taking the plain-arm64 slice of a file that carries both would run an arm64e guest with PAC
 /// turned off — M7's wall, reached by a different road.
-pub fn slice_native(fat: &[u8]) -> &[u8] {
-    if is_thin(fat) || !is_fat(fat) { return fat; }
+pub fn try_slice_native(fat: &[u8]) -> Result<&[u8], String> {
+    if fat.len() < 8 { return Err("is empty or too short to be a Mach-O executable".into()); }
+    if is_thin(fat) || !is_fat(fat) { return Ok(fat); }
     fat_find(fat, retrace_arch::CPU_SUBTYPE_ARM64E)
         .or_else(|| fat_find(fat, retrace_arch::CPU_SUBTYPE_ARM64_ALL))
-        .expect("fat binary carries no arm64e or arm64 slice (retrace runs arm64 guests only)")
+        .ok_or_else(|| "is a universal binary with no arm64 slice, and retrace runs arm64 programs only".into())
+}
+
+pub fn slice_native(fat: &[u8]) -> &[u8] {
+    try_slice_native(fat).unwrap_or_else(|why| panic!("slice_native: the image {why}"))
 }
 
 pub const HELLO: &str = concat!(env!("OUT_DIR"), "/hello");
@@ -387,6 +415,12 @@ pub const FC_MUTEX: &str = concat!(env!("OUT_DIR"), "/fc_mutex");
 pub const FC_FILEIO: &str = concat!(env!("OUT_DIR"), "/fc_fileio");
 /// argv and `getenv("FC_ENV_PROBE")`.
 pub const FC_ENV: &str = concat!(env!("OUT_DIR"), "/fc_env");
+/// M50 (spec §3f): one mode per newcomer-reachable wall, picked by argv[1] (see the source).
+pub const CF_WALLS: &str = concat!(env!("OUT_DIR"), "/cf_walls");
+/// The source of `CF_WALLS`, which cleanfail_e2e builds for x86_64 to test the arm64-only refusal.
+pub const CF_WALLS_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/c/cf_walls.c");
+/// M50 Review Focus 1: a Rust program that calls fsync(2).
+pub const CF_RS_FSYNC: &str = concat!(env!("OUT_DIR"), "/cf_rs_fsync");
 /// iostream hello.
 pub const FC_CPP_HELLO: &str = concat!(env!("OUT_DIR"), "/fc_cpp_hello");
 /// A C++ exception thrown and caught.
@@ -423,6 +457,26 @@ pub const FC_SW_ASYNC: &str = concat!(env!("OUT_DIR"), "/fc_sw_async");
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// M50 (spec §3b, R2): what the CLI refuses as bad input, each by name. Before M50 an empty file
+    /// panicked slicing its magic, a script failed an assert, and a thin x86_64 Mach-O passed the
+    /// magic check and was loaded as if it were arm64.
+    #[test]
+    fn a_file_retrace_cannot_run_is_refused_by_name() {
+        assert_eq!(try_parse_macho(b"").unwrap_err(), "is empty or too short to be a Mach-O executable");
+        assert!(try_parse_macho(b"#!/bin/sh\necho hi\n").unwrap_err().starts_with("is a script, not a Mach-O executable"));
+        assert_eq!(try_parse_macho(b"just some text, long enough").unwrap_err(), "is not a Mach-O executable");
+        let mut x86 = vec![0u8; 64];
+        x86[0..4].copy_from_slice(&0xfeed_facfu32.to_le_bytes());
+        x86[4..8].copy_from_slice(&0x0100_0007u32.to_le_bytes()); // CPU_TYPE_X86_64
+        assert_eq!(try_parse_macho(&x86).unwrap_err(), "is an x86_64 program, and retrace runs arm64 programs only");
+        let mut fat = vec![0u8; 64]; // a universal header with one x86_64 slice
+        fat[0..4].copy_from_slice(&retrace_arch::FAT_MAGIC.to_be_bytes());
+        fat[4..8].copy_from_slice(&1u32.to_be_bytes());
+        fat[8..12].copy_from_slice(&0x0100_0007u32.to_be_bytes());
+        assert_eq!(try_parse_macho(&fat).unwrap_err(),
+            "is a universal binary with no arm64 slice, and retrace runs arm64 programs only");
+        assert!(try_parse_macho(&std::fs::read(HELLO).unwrap()).is_ok(), "an arm64 program still loads");
+    }
     #[test]
     fn parses_the_hello_guest() {
         let bytes = std::fs::read(HELLO).unwrap();

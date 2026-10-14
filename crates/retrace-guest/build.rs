@@ -1042,6 +1042,21 @@ fn main() {
             .status().expect("rustc first-contact fixture");
         assert!(status.success(), "{name} guest build failed");
     }
+    // M50 (spec §3f): the clean-failure fixtures cleanfail_e2e drives. cf_walls takes the hello_dyn
+    // recipe (plain -arch arm64, libSystem through real dyld) and cf_rs_fsync the hello_rust one.
+    // Named cf_, not fc_: firstcontact_e2e's one-row-per-fixture check reads every fc_ source.
+    let src = format!("{dir}/c/cf_walls.c");
+    let bin = format!("{out}/cf_walls");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang").args(["-arch", "arm64", "-o", &bin, &src])
+        .status().expect("clang cf_walls");
+    assert!(status.success(), "cf_walls guest build failed");
+    let src = format!("{dir}/rs/cf_rs_fsync.rs");
+    let bin = format!("{out}/cf_rs_fsync");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new(&rustc).args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc cf_rs_fsync");
+    assert!(status.success(), "cf_rs_fsync guest build failed");
     // Swift (R11): built only where `swiftc --version` runs; elsewhere each FC_SW_* constant names a
     // file that does not exist and firstcontact_e2e announces `SKIPPED (no swiftc)` for its row. The
     // target is pinned to arm64-apple-macosx26.0, what swiftc 6.3.3 chose on the probe host, so the

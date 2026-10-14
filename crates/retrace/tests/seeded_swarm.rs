@@ -1,14 +1,18 @@
 use std::process::Command;
-use retrace_sim::{Rng, pick_fault, apply_fault};
+use retrace_sim::{Rng, Fault, pick_fault, apply_fault};
 
 mod util;
 
 // The M1 exit gate: record a general-syscall guest, inject a seeded trace-IO fault, replay.
-// Every seed must end in a byte-identical replay of the guest's known output (exit 0) OR a
-// clean, named divergence (exit 3) — never a panic, a silent wrong answer, or any other exit
-// code. Run over both M1 guests: the static file-I/O guest (open/fstat/read/write/close,
-// exercising the memory-diff engine on a real kernel-filled buffer) and the anonymous-mmap
-// guest (exercising the mmap special case + the final full-memory divergence oracle).
+// Every seed must end in one of three outcomes: a byte-identical replay of the guest's known
+// output (exit 0), a clean, named divergence (exit 3), or an incomplete recording (exit 4) -
+// never a panic, a silent wrong answer, or any other exit code. Since M50, a fault that removes
+// the terminal event replays as an incomplete recording (exit 4), the same as a killed recorder's
+// trace; that outcome is allowed only for a real fault, with one named line, no panic or bug
+// banner, and output that is a prefix of the expected output. Run over both M1 guests: the static
+// file-I/O guest (open/fstat/read/write/close, exercising the memory-diff engine on a real
+// kernel-filled buffer) and the anonymous-mmap guest (exercising the mmap special case + the
+// final full-memory divergence oracle).
 fn swarm_over(bin: &str, tag: &str, guest: &str, expected_stdout: &[u8]) {
     const N: u64 = 200;
     for seed in 0..N {
@@ -43,20 +47,31 @@ fn swarm_over(bin: &str, tag: &str, guest: &str, expected_stdout: &[u8]) {
         apply_fault(&mut bytes, &fault, &offsets);
         std::fs::write(&trace, &bytes).unwrap();
 
-        // Replay must exit 0 (identical) OR 3 (named divergence) — never anything else, never a panic.
+        // Replay must exit 0 (identical), 3 (named divergence) or 4 (incomplete recording) - never
+        // anything else, never a panic.
         let rep = Command::new(bin).args(["replay", trace.to_str().unwrap()]).output().unwrap();
         let code = rep.status.code().unwrap_or(-1);
-        assert!(code == 0 || code == 3,
-            "guest {guest} seed {seed} fault {fault:?}: replay exit {code} (expected 0 or 3)\nstderr: {}",
-            String::from_utf8_lossy(&rep.stderr));
+        let stderr = String::from_utf8_lossy(&rep.stderr);
+        assert!(code == 0 || code == 3 || code == 4,
+            "guest {guest} seed {seed} fault {fault:?}: replay exit {code} (expected 0, 3 or 4)\nstderr: {stderr}");
         if code == 0 {
             assert_eq!(rep.stdout, expected_stdout, "guest {guest} seed {seed} fault {fault:?}: exit 0 but wrong output");
         }
         if code == 3 {
-            assert!(String::from_utf8_lossy(&rep.stderr).contains("DIVERGENCE"),
-                "guest {guest} seed {seed}: exit 3 but stderr did not name the divergence: {}", String::from_utf8_lossy(&rep.stderr));
+            assert!(stderr.contains("DIVERGENCE"),
+                "guest {guest} seed {seed}: exit 3 but stderr did not name the divergence: {stderr}");
         }
-
+        if code == 4 {
+            assert!(!matches!(fault, Fault::None),
+                "guest {guest} seed {seed}: exit 4 with no fault injected\nstderr: {stderr}");
+            let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with("retrace: incomplete recording:")).collect();
+            assert!(lines.len() == 1 && lines[0].contains("#incomplete-recordings"),
+                "guest {guest} seed {seed} fault {fault:?}: exit 4 without exactly one incomplete-recording line: {stderr}");
+            assert!(!stderr.contains("panicked at") && !stderr.contains("retrace: internal error"),
+                "guest {guest} seed {seed} fault {fault:?}: exit 4 with a panic or the bug banner: {stderr}");
+            assert!(expected_stdout.starts_with(&rep.stdout),
+                "guest {guest} seed {seed} fault {fault:?}: exit 4 but stdout is not a prefix of the expected output");
+        }
         let _ = std::fs::remove_file(&trace);
     }
 }

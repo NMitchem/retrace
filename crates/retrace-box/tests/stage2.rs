@@ -2,6 +2,7 @@
 //! stores to 0xB_0000_0000 (44 GiB), which stage 1 identity-maps and nothing backs: a stage-2
 //! translation fault at EL0, straight to EL2. It also covers the stage-1 map it resolves against
 //! (F3). Run under --test-threads=1 (one HVF VM per process).
+use retrace_arch::WallCategory;
 use retrace_box::{Box_, Stage2, Stop, PT_L3_BASE, TRAMPOLINE_IPA, TSD_IPA};
 use retrace_guest::{parse_macho, HELLO, WILDSTORE};
 
@@ -57,8 +58,11 @@ fn a_stage2_abort_through_a_tagged_pointer_stays_loud() {
     b.dbg_write_va(entry + 4, &0xf2eb_4000u32.to_le_bytes()).unwrap(); // movk x0, #0x5a00, lsl #48
     let Stop::Other { esr } = b.run() else { panic!("the tagged wild store must be a stage-2 abort") };
     match b.resolve_stage2(esr) {
-        Stage2::Unhandled(why) => assert!(why.contains(&format!("FAR {TAGGED:#x} carries a top-byte tag")),
-            "the refusal names the tagged FAR: {why}"),
+        Stage2::Wall(u) => {
+            assert!(u.what.contains(&format!("FAR {TAGGED:#x} carries a top-byte tag")),
+                "the refusal names the tagged FAR: {}", u.what);
+            assert_eq!(u.category, WallCategory::Memory);
+        }
         other => panic!("a tagged FAR must stay loud, got {other:?}"),
     }
 }

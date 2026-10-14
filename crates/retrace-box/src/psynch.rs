@@ -78,8 +78,8 @@ pub fn timeout_ticks(sec: u64, nsec: u64) -> Result<Option<u64>, String> {
     let ns = ((sec as i64) >= 0).then_some(sec)
         .and_then(|s| s.checked_mul(1_000_000_000))
         .and_then(|n| n.checked_add(nsec as u64))
-        .ok_or_else(|| format!("M48: psynch psynch_cvwait timeout sec {} nsec {nsec:#x}: negative or past \
-                                2^64 ns, which no guest was measured to pass", sec as i64))?;
+        .ok_or_else(|| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait timeout sec {} nsec {nsec:#x}: negative or past \
+                                2^64 ns, which no guest was measured to pass", sec as i64)))?;
     Ok(Some((ns as u128 * 3 / 125) as u64))
 }
 
@@ -184,9 +184,9 @@ fn woken_word(psynchretval: u32) -> u32 {
 
 fn refuse_shared(call: &str, cv: u64, flags: u32) -> Result<(), String> {
     if flags & PSHARED_MASK == PSHARED {
-        return Err(format!("M48: psynch {call} on cv {cv:#x} with flags {flags:#x}: a process-shared cv is keyed \
+        return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch {call} on cv {cv:#x} with flags {flags:#x}: a process-shared cv is keyed \
                             by its VM object (ksyn_findobj), not its address; every measured flags word is 0xa0 \
-                            (plan P4)"));
+                            (plan P4)")));
     }
     Ok(())
 }
@@ -398,15 +398,15 @@ impl Psynch {
         let (csgen, cgen) = ((args[1] >> 32) as u32, args[1] as u32);
         refuse_shared("psynch_cvwait", cv, flags)?;
         if mutex != 0 {
-            return Err(format!("M48: psynch psynch_cvwait on cv {cv:#x} with mutex {mutex:#x} (mugen {:#x}): the \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait on cv {cv:#x} with mutex {mutex:#x} (mugen {:#x}): the \
                                 cv would drop a firstfit mutex that has a kernel waiter (plan F3), which needs the \
                                 unmodelled psynch_mutexwait/psynch_mutexdrop pair; every measured cvwait passes \
-                                mutex 0 (plan P4)", args[4]));
+                                mutex 0 (plan P4)", args[4])));
         }
         let lockseq = cgen & PTHRW_COUNT_MASK;
         if is_seqhigher_eq(csgen, lockseq) {
-            return Err(format!("M48: psynch psynch_cvwait on cv {cv:#x}: S {csgen:#x} is not below L {cgen:#x}, \
-                                which _psynch_cvwait answers EINVAL; no guest was measured to pass it"));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait on cv {cv:#x}: S {csgen:#x} is not below L {cgen:#x}, \
+                                which _psynch_cvwait answers EINVAL; no guest was measured to pass it")));
         }
         let mut kwq = self.find(cv, cgen, cvugen, csgen);
         kwq.update(cgen, cvugen, csgen);
@@ -414,17 +414,17 @@ impl Psynch {
         let ret = match kwq.find_cvpreposeq(lockseq) {
             None => {
                 kwq.insert(Kwe { state: KweState::InWait, lockseq, count: 1, thread: Some(tid) })
-                    .map_err(|e| format!("M48: psynch psynch_cvwait on cv {cv:#x} by thread {tid}: {e}"))?;
+                    .map_err(|e| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait on cv {cv:#x} by thread {tid}: {e}")))?;
                 Ret::Block
             }
             Some(i) => {
                 let mut updatebits = 0;
                 let kwe = kwq.queue[i];
                 match kwe.state {
-                    KweState::InWait => return Err(format!(
+                    KweState::InWait => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
                         "M48: psynch psynch_cvwait on cv {cv:#x} by thread {tid}: thread {} already waits at \
                          sequence {lockseq:#x}, which _psynch_cvwait answers EBUSY",
-                        kwe.thread.expect("an InWait entry names its thread"))),
+                        kwe.thread.expect("an InWait entry names its thread")))),
                     // A prepost at our own sequence: consume one of its references.
                     KweState::Prepost if kwe.lockseq == lockseq => {
                         kwq.queue[i].count -= 1;
@@ -436,7 +436,7 @@ impl Psynch {
                     // A prepost above our sequence can leave its own waiter unmatched, so the kernel
                     // converts it to a broadcast (kern_synch.c:1233-1244).
                     KweState::Prepost => kwq.broadcast(kwe.lockseq, &mut updatebits, &mut woken)
-                        .map_err(|e| format!("M48: psynch psynch_cvwait on cv {cv:#x} by thread {tid}: {e}"))?,
+                        .map_err(|e| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait on cv {cv:#x} by thread {tid}: {e}")))?,
                     KweState::Broadcast => {}
                 }
                 updatebits |= PTHRW_INC;
@@ -455,8 +455,8 @@ impl Psynch {
         let (cv, port, flags) = (args[0], args[3] as u32, args[7] as u32);
         refuse_shared("psynch_cvsignal", cv, flags)?;
         if port != 0 {
-            return Err(format!("M48: psynch psynch_cvsignal on cv {cv:#x} targets thread port {port:#x} \
-                                (pthread_cond_signal_thread_np): the targeted form was never measured (plan P4)"));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvsignal on cv {cv:#x} targets thread port {port:#x} \
+                                (pthread_cond_signal_thread_np): the targeted form was never measured (plan P4)")));
         }
         self.signal("psynch_cvsignal", cv, args[1] as u32, args[2] as u32, (args[1] >> 32) as u32, false)
     }
@@ -471,8 +471,8 @@ impl Psynch {
         // guest's count is its unreleased waiters, fewer than its threads, so the guest's own thread
         // count refuses only a count no guest can produce (T5-d).
         if count as usize > nthreads {
-            return Err(format!("M48: psynch psynch_cvbroad on cv {cv:#x} releases {count} waiters, more than the \
-                                guest's {nthreads} threads (the kernel answers EBUSY above task_threadmax)"));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvbroad on cv {cv:#x} releases {count} waiters, more than the \
+                                guest's {nthreads} threads (the kernel answers EBUSY above task_threadmax)")));
         }
         self.signal("psynch_cvbroad", cv, args[1] as u32, (args[2] >> 32) as u32, (args[1] >> 32) as u32, true)
     }
@@ -483,10 +483,10 @@ impl Psynch {
         let uptoseq = cgen & PTHRW_COUNT_MASK;
         let fromseq = (cugen & PTHRW_COUNT_MASK).wrapping_add(PTHRW_INC);
         if is_seqhigher(fromseq, uptoseq) || is_seqhigher(csgen, uptoseq) {
-            return Err(format!("M48: psynch {call} on cv {cv:#x}: L {cgen:#x}, U {cugen:#x}, S {csgen:#x} are out \
-                                of order, which __psynch_cvsignal answers EINVAL; no guest was measured to pass them"));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch {call} on cv {cv:#x}: L {cgen:#x}, U {cugen:#x}, S {csgen:#x} are out \
+                                of order, which __psynch_cvsignal answers EINVAL; no guest was measured to pass them")));
         }
-        let at = |e: String| format!("M48: psynch {call} on cv {cv:#x}: {e}");
+        let at = |e: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch {call} on cv {cv:#x}: {e}"));
         let mut kwq = self.find(cv, cgen, cugen, csgen);
         kwq.update(cgen, cugen, csgen);
         let (mut updatebits, mut woken) = (0, Vec::new());
@@ -546,6 +546,7 @@ impl Psynch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use retrace_arch::Unmark;
 
     const CV: u64 = 0x1_0000_8000;
 
@@ -709,7 +710,7 @@ mod tests {
         assert_eq!(timeout_ticks(1, 986_000_000), Ok(Some(47_664_000)), "1.986 s");
         assert_eq!(timeout_ticks(0, 0x4000_0000), Ok(None), "nsec loses its top two bits before the zero test");
         assert_eq!(timeout_ticks(0, 0xffff_ffff_0000_0001), Ok(Some(0)), "the kernel's nsec is 32 bits");
-        let e = timeout_ticks(u64::MAX, 0).unwrap_err();
+        let e = timeout_ticks(u64::MAX, 0).unwrap_err().unmark();
         assert!(e.starts_with("M48: psynch ") && e.contains("sec -1"), "{e}");
     }
 
@@ -736,7 +737,7 @@ mod tests {
             ("thread 1 already waits at sequence 0x100", p.cvwait(wait(0x100, 1, 0), 2)),
         ];
         for (want, got) in cases {
-            let e = got.expect_err(want);
+            let e = got.expect_err(want).unmark();
             assert!(e.starts_with("M48: psynch ") && e.contains(want), "{want}: {e}");
         }
         assert_eq!(p, before, "a refusal leaves the model untouched");

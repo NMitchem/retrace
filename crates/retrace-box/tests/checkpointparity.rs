@@ -448,7 +448,7 @@ fn a_checkpointed_box_in_a_write_enabled_jit_window_matches_the_box_it_came_from
     let mut child = b.save_ctx();
     child.regs.sp_el0 -= 0x2000;
     let tid = b.threads_mut().spawn(child, (0, 0));
-    b.sprr_write(we);
+    b.sprr_write(we).unwrap();
 
     // PRECONDITIONS. Without these the M48 rows compare Default == Default.
     assert_eq!(b.dbg_jit().view(), retrace_box::jit::View::Rw, "precondition: main write-enabled the view");
