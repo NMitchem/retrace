@@ -234,8 +234,9 @@ fn every_unmodelled_sleep_shape_stops_the_recorder_naming_it() {
         let (code, out) = native(&["refuse", what]);
         assert_eq!((code, out), (0, format!("{native_line}\nrefuse {what} done\n")), "{what}: native returns");
         let (code, out, err, trace) = record(&["refuse", what]);
-        assert_eq!(code, Some(70), "{what}: the recorder must stop at the refusal (70: the bug banner, until M50 makes it a wall; None: the bound fired). stderr:\n{err}");
-        assert!(err.contains(why), "{what}: {why:?} in stderr:\n{err}");
+        assert_eq!(code, Some(4), "{what}: the recorder stops at the wall (None: the bound fired). stderr:\n{err}");
+        let line = err.lines().find(|l| l.starts_with("retrace: unsupported: ")).unwrap_or_else(|| panic!("{what}: no wall line:\n{err}"));
+        assert!(line.contains(why), "{what}: {why:?} in the wall line: {line}");
         assert!(out.is_empty(), "{what}: the guest must not run past the refusal: {}", String::from_utf8_lossy(&out));
         assert!(semwaits(&trace).is_empty(), "{what}: a refused call is never recorded");
         if what == "calendar" {

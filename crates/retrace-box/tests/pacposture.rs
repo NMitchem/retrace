@@ -24,6 +24,7 @@ fn pacguest_exit_arg(mut b: Box_) -> u64 {
         Stop::Syscall { .. } => panic!("unexpected syscall"),
         Stop::Other { esr } => panic!("guest faulted esr={esr:#x}"),
         Stop::Fault { pc, esr, far } => panic!("guest crashed pc={pc:#x} esr={esr:#x} far={far:#x}"),
+        Stop::Unsupported(u) => panic!("{u:?}"),
         Stop::Step => unreachable!("run() does not single-step"),
     }
 }

@@ -64,6 +64,7 @@ fn a_failing_sysctl_is_measured_for_writes() {
             }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }

@@ -152,6 +152,7 @@ fn a_protected_page_faults_on_the_stage_one_route() {
                 "a protected page must fault at STAGE 1 (Stop::Fault), not stage 2 (Stop::Other, \
                  esr={esr:#x}) — stage 2 is commit_reserved_page's route and would silently \
                  materialize the page"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
@@ -184,6 +185,7 @@ fn an_unprotected_page_is_usable_again() {
                 "the post-restore store must NOT fault (esr={esr:#x} far={far:#x}) — a stale \
                  restrictive TLB entry is what this looks like"),
             Stop::Other { esr } => panic!("unexpected stage-2 abort esr={esr:#x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
@@ -301,6 +303,7 @@ fn mach_vm_protect_denies_access_too() {
                 return;
             }
             Stop::Other { esr } => panic!("expected a stage-1 fault, got stage-2 esr={esr:#x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
@@ -356,6 +359,7 @@ fn a_guest_cannot_protect_a_page_it_never_committed() {
                 "no fault expected — the box must assert before the guest runs again \
                  (esr={esr:#x} far={far:#x})"),
             Stop::Other { esr } => panic!("unexpected stage-2 abort esr={esr:#x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }

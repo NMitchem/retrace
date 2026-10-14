@@ -33,6 +33,7 @@ fn munmap_removes_the_backing() {
             }
             Stop::Other { esr } => panic!("faulted esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }

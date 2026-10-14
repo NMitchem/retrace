@@ -13,6 +13,7 @@ fn el0_svc_reaches_vmm_via_trampoline() {
         }
         Stop::Other { esr } => panic!("expected SVC-via-trampoline, got esr=0x{esr:x}"),
         Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+        Stop::Unsupported(u) => panic!("{u:?}"),
         Stop::Step => unreachable!("run() does not single-step"),
     }
 }
@@ -145,6 +146,7 @@ fn a_fall_through_still_dispatches_the_exception_it_interrupted() {
             panic!("fall-through dropped the guest's exception: Stop::Other esr=0x{esr:x}"),
         Stop::Fault { pc, esr, far } =>
             panic!("fall-through faulted: pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+        Stop::Unsupported(u) => panic!("{u:?}"),
         Stop::Step => unreachable!("run() does not single-step"),
     }
     assert_eq!(b.fall_throughs(), 1, "and the fall-through must still be counted");

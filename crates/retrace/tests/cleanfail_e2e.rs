@@ -300,6 +300,15 @@ fn a_sched_yield_stops_at_one_clean_line() {
     assert_guest_wall(retrace_guest::CF_WALLS, &["yield"], "cf: yield\n", "swtch_pri (mach trap -59)", "syscalls");
 }
 
+/// D1: every thread blocked with nothing left to wake one. Natively this program hangs forever; under
+/// retrace it is a wall in `threads` whose line says so, and says to report it if it does not hang.
+#[test]
+fn a_deadlock_is_a_wall_that_says_natively_the_program_would_hang() {
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["deadlock"], "cf: deadlock\n",
+        "M14: DEADLOCK - every thread is blocked", "threads");
+    assert!(line.contains("Natively this program would hang here; if it does not, this is a bug in retrace"), "{line}");
+}
+
 /// Spec §2d corrected M49's note: `clock_sleep_trap` reaches the M33 panic before any forward, so it
 /// is a refusal target, not a hang.
 #[test]

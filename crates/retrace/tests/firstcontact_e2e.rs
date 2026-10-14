@@ -70,7 +70,7 @@ const ROWS: &[Row] = &[
     Row { name: "fc_nanosleep", bin: retrace_guest::FC_NANOSLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_mutex", bin: retrace_guest::FC_MUTEX, args: &[],
-          expect: Expect::Wall("BUG record: M48: psynch psynch_mutexwait (301) is not modelled") },
+          expect: Expect::Wall("retrace: unsupported: M48: psynch psynch_mutexwait (301) is not modelled") },
     Row { name: "fc_fileio", bin: retrace_guest::FC_FILEIO, args: &[], expect: Expect::Pass },
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"],
           expect: Expect::Wall("MISMATCH record stdout at line 4: native \"FC_ENV_PROBE=firstcontact\\n\", record \"FC_ENV_PROBE=(unset)\\n\"") },
@@ -103,7 +103,7 @@ const ROWS: &[Row] = &[
     Row { name: "fc_sw_gcd", bin: retrace_guest::FC_SW_GCD, args: &[],
           expect: Expect::Refused("retrace: unsupported: kevent_id (syscall 375)") },
     Row { name: "fc_sw_async", bin: retrace_guest::FC_SW_ASYNC, args: &[],
-          expect: Expect::Wall("BUG record: M18 Stage 2b: unmeasured workq_kernreturn opcode 0x30") },
+          expect: Expect::Refused("retrace: unsupported: M18 Stage 2b: unmeasured workq_kernreturn opcode 0x30") },
 ];
 
 /// Each run's bound. A phase that hangs fails its row rather than stalling the gate; t0 M1 measured
@@ -337,8 +337,6 @@ fn every_corpus_row_meets_its_pinned_outcome() {
             (Outcome::Refused(line), Expect::Refused(prefix)) => line.starts_with(prefix),
             // An in-scope wall pins its first difference, which since M50 may be a clean wall line.
             (Outcome::Wall(line) | Outcome::Refused(line), Expect::Wall(prefix)) => line.starts_with(prefix),
-            // M50 C6: until Task 4 converts the last of them, a row may still pin its bug banner.
-            (Outcome::Bug(line), Expect::Wall(prefix)) => line.starts_with(prefix),
             _ => false,
         };
         match (&got, want) {

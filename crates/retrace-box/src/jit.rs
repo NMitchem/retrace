@@ -57,15 +57,15 @@ impl JitSet {
     pub fn admit_mmap(prot: u64, flags: u64) -> Result<bool, String> {
         if flags & retrace_arch::MAP_JIT == 0 { return Ok(false); }
         if flags & (MAP_FIXED | MAP_SHARED) != 0 || flags & MAP_ANON == 0 {
-            return Err(format!(
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!(
                 "M48: MAP_JIT mmap flags {flags:#x}: MAP_JIT with MAP_FIXED, with MAP_SHARED or \
                  without MAP_ANON is unmodelled. xnu's mmap answers EINVAL (kern_mman.c:mmap), and \
-                 no measured guest issues one (Ruling T6-b)"));
+                 no measured guest issues one (Ruling T6-b)")));
         }
         if prot != 0 && prot != PROT_RWX {
-            return Err(format!(
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!(
                 "M48: MAP_JIT mmap prot {prot:#x}: only PROT_NONE (V8's code-range reservation, \
-                 t0 M5) and RWX (sprr.c's page) are measured on a MAP_JIT mapping (Ruling T6-a)"));
+                 t0 M5) and RWX (sprr.c's page) are measured on a MAP_JIT mapping (Ruling T6-a)")));
         }
         Ok(true)
     }
@@ -79,10 +79,10 @@ impl JitSet {
             return Ok(false);
         };
         if prot != 0 && prot != PROT_RWX {
-            return Err(format!(
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!(
                 "M48: MAP_JIT mprotect [{ipa:#x}, +{len:#x}) prot {prot:#x} over the range \
                  [{s:#x}, {:#x}): only PROT_NONE and RWX are measured on a MAP_JIT page \
-                 (Ruling T6-a)", s + l));
+                 (Ruling T6-a)", s + l)));
         }
         Ok(true)
     }
@@ -96,10 +96,10 @@ impl JitSet {
     pub fn refuse_committed(&self, ipa: u64, len: u64, prot: u64, noaccess: &[(u64, u64)]) -> Result<(), String> {
         match self.stamped_extents(noaccess).into_iter().find(|&(s, l)| overlap(ipa, len, s, l)) {
             None => Ok(()),
-            Some((s, l)) => Err(format!(
+            Some((s, l)) => Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!(
                 "M48: MAP_JIT mprotect [{ipa:#x}, +{len:#x}) prot {prot:#x} over the committed extent \
                  [{s:#x}, {:#x}): native answers EACCES (measured, t6-jitprobe), unmodelled \
-                 (Ruling T6-EACCES)", s + l)),
+                 (Ruling T6-EACCES)", s + l))),
         }
     }
 
@@ -108,10 +108,10 @@ impl JitSet {
     pub fn refuse_overlap(&self, addr: u64, len: u64, what: &str) -> Result<(), String> {
         match self.ranges.iter().find(|&&(s, l)| overlap(addr, len, s, l)) {
             None => Ok(()),
-            Some(&(s, l)) => Err(format!(
+            Some(&(s, l)) => Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!(
                 "M48: MAP_JIT range [{s:#x}, {:#x}) overlapped by {what} at [{addr:#x}, +{len:#x}): \
                  unmodelled, since the view would stay stamped over pages the new mapping owns \
-                 (Ruling T6-c)", s + l)),
+                 (Ruling T6-c)", s + l))),
         }
     }
 
@@ -158,6 +158,7 @@ fn overlap(a: u64, alen: u64, b: u64, blen: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use retrace_arch::Unmark;
 
     const B: u64 = 0x4_0000_0000;      // a range base, page-aligned
     const WE: u64 = 0x2010_0020_3030_0000; // the probe host's commpage +0x110 (sprr.out)
@@ -175,7 +176,7 @@ mod tests {
     #[test]
     fn a_map_jit_mmap_with_another_prot_is_refused_by_value() {
         for prot in [1u64, 3, 5] {
-            let e = JitSet::admit_mmap(prot, 0x1802).unwrap_err();
+            let e = JitSet::admit_mmap(prot, 0x1802).unwrap_err().unmark();
             assert!(e.starts_with(&format!("M48: MAP_JIT mmap prot {prot:#x}:")), "{e}");
         }
     }
@@ -183,7 +184,7 @@ mod tests {
     #[test]
     fn a_fixed_shared_or_file_map_jit_mmap_is_refused_by_value() {
         for flags in [0x1812u64 /* FIXED */, 0x1801 /* SHARED */, 0x802 /* no MAP_ANON */] {
-            let e = JitSet::admit_mmap(7, flags).unwrap_err();
+            let e = JitSet::admit_mmap(7, flags).unwrap_err().unmark();
             assert!(e.starts_with(&format!("M48: MAP_JIT mmap flags {flags:#x}:")), "{e}");
         }
     }
@@ -219,7 +220,7 @@ mod tests {
         assert_eq!(j.admit_mprotect(B, 0x4000, 0), Ok(true), "a guard page inside the range");
         assert_eq!(j.admit_mprotect(B - 0x4000, 0x8000, 7), Ok(true), "a straddle still touches the range");
         assert_eq!(j.admit_mprotect(B - 0x4000, 0x4000, 1), Ok(false), "outside every range: not ours to judge");
-        let e = j.admit_mprotect(B + 0x8000, 0x4000, 5).unwrap_err();
+        let e = j.admit_mprotect(B + 0x8000, 0x4000, 5).unwrap_err().unmark();
         assert!(e.starts_with(&format!("M48: MAP_JIT mprotect [{:#x}, +0x4000) prot 0x5 ", B + 0x8000)), "{e}");
     }
 
@@ -233,10 +234,10 @@ mod tests {
         assert_eq!(j.refuse_committed(B, 0x4_0000, 7, &noaccess), Ok(()), "wholly PROT_NONE: V8's commit");
         assert_eq!(j.refuse_committed(B + 0xc_0000, 0x4000, 0, &noaccess), Ok(()), "the PROT_NONE tail");
         assert_eq!(j.refuse_committed(B + 0x20_0000, 0x4000, 0, &noaccess), Ok(()), "outside every range");
-        let e = j.refuse_committed(B + 0x8_0000, 0x4000, 0, &noaccess).unwrap_err();
+        let e = j.refuse_committed(B + 0x8_0000, 0x4000, 0, &noaccess).unwrap_err().unmark();
         assert!(e.starts_with(&format!("M48: MAP_JIT mprotect [{:#x}, +0x4000) prot 0x0 over the committed \
             extent [{:#x}, {:#x}): native answers EACCES", B + 0x8_0000, B + 0x4_0000, B + 0xc_0000)), "{e}");
-        let e = j.refuse_committed(B + 0x3_c000, 0x8000, 7, &noaccess).unwrap_err();
+        let e = j.refuse_committed(B + 0x3_c000, 0x8000, 7, &noaccess).unwrap_err().unmark();
         assert!(e.starts_with(&format!("M48: MAP_JIT mprotect [{:#x}, +0x8000) prot 0x7 over the committed ",
             B + 0x3_c000)), "a straddle of a PROT_NONE and a committed page is refused whole: {e}");
     }
@@ -261,7 +262,7 @@ mod tests {
         j.add(B, 0x10_0000);
         assert_eq!(j.refuse_overlap(B + 0x10_0000, 0x4000, "a FIXED mapping"), Ok(()), "adjacent above");
         assert_eq!(j.refuse_overlap(B - 0x4000, 0x4000, "a FIXED mapping"), Ok(()), "adjacent below");
-        let e = j.refuse_overlap(B + 0xf_c000, 0x8000, "a FIXED mapping").unwrap_err();
+        let e = j.refuse_overlap(B + 0xf_c000, 0x8000, "a FIXED mapping").unwrap_err().unmark();
         assert!(e.starts_with(&format!("M48: MAP_JIT range [{B:#x}, {:#x}) overlapped by a FIXED mapping at ",
             B + 0x10_0000)), "{e}");
     }

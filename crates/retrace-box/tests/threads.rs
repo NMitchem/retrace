@@ -644,7 +644,7 @@ fn run_switches_to_the_child_when_main_blocks() {
     b.guest_bsdthread_create([0x1_0002_4e00, 0, pth(&b, 0), pth(&b, 0), 0, 0, 0, 0]);
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
 
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
 
     assert_eq!(b.threads().current(), 1, "the box must switch to the only runnable thread");
     assert_eq!(b.position(), 0x0001_804b_2000, "…and the vCPU must actually be running its context");
@@ -689,7 +689,7 @@ fn a_created_thread_resumes_with_the_creating_threads_el0_pstate() {
 
     // And the switch must actually install it, or the field above is bookkeeping nobody reads.
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(b.regs_snapshot().cpsr, creator_spsr, "the vCPU must be running with that PSTATE");
 }
 
@@ -788,7 +788,7 @@ fn step_reschedules_off_a_blocked_thread_before_arming_the_step_bit() {
          reschedule placed after the arming");
 }
 
-/// A deadlock must be a loud panic, never a spin. The plan's Task 9 Step 1 test.
+/// A deadlock must be a wall (M50 D1), never a spin. The plan's Task 9 Step 1 test.
 #[test]
 fn a_deadlock_fails_loud_instead_of_hanging() {
     let mut b = tb();   // see `fn tb()` at the top of this file
@@ -798,8 +798,9 @@ fn a_deadlock_fails_loud_instead_of_hanging() {
     b.switch_to_thread(1);
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 0 });
 
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.schedule_after_block()));
-    assert!(r.is_err(), "every thread blocked must panic, never spin");
+    let r = b.schedule_after_block();
+    assert!(matches!(&r, Err(u) if u.category == retrace_arch::WallCategory::Threads
+        && u.what.starts_with("M14: DEADLOCK")), "every thread blocked must be a wall, never a spin: {r:?}");
 }
 
 /// **M14 Task 10, F-1: the switch's WIRING into `run()`, not just its logic.**
@@ -918,7 +919,7 @@ fn current_thread_follows_the_scheduler_across_a_switch() {
 
     // Block thread 0 so the scheduler has somewhere to go, then take the switch.
     b.threads_mut().block(retrace_box::thread::BlockReason::Wait { addr: 0xdead_0000 });
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(b.threads().current(), 1, "the scheduler must have switched to the child");
 }
 
@@ -965,7 +966,7 @@ fn dbg_regs_of_reads_the_table_for_a_blocked_non_current_thread() {
     b.switch_to_thread(1);
     b.set_elr(0xcafe_babe_0000_0000); // a distinctive LIVE value; only a real switch-away folds it into the table
     b.threads_mut().block(BlockReason::Wait { addr: 0xdead_0000 }); // blocks the CURRENT thread, i.e. 1
-    b.schedule_after_block(); // picks the lowest-indexed runnable thread — main (0) — switching away from 1
+    b.schedule_after_block().unwrap(); // picks the lowest-indexed runnable thread — main (0) — switching away from 1
 
     assert_eq!(b.threads().current(), 0, "main must be the thread picked back up");
     assert!(matches!(b.threads().state_of(1), ThreadState::Blocked(_)),
@@ -1022,7 +1023,7 @@ fn an_armed_watchpoint_survives_a_context_switch() {
     // Force a real switch — block main, then let the scheduler take it, the same idiom
     // `run_switches_to_the_child_when_main_blocks` above uses, not a table-only shortcut.
     b.threads_mut().block(retrace_box::thread::BlockReason::Join { target: 1 });
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(b.threads().current(), 1, "the switch must actually have happened");
 
     let (wvr1, wcr1, mdscr1) = b.dbg_watch0_hw();
@@ -1427,7 +1428,7 @@ fn workq_kernreturn_park_blocks_the_worker_and_leaves_it_unresumable() {
     // Now exactly what happens next in production: the dispatch arm completes the syscall return,
     // then the next `Box_::run()` entry sees `needs_reschedule()` and switches.
     b.set_x0_err_and_return(rc, false);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
 
     assert_eq!(b.threads().current(), 0, "the park hands the vCPU back to main");
     // The teeth. Without the ELR rewind in `guest_workq_park` this is ENTRY — the return address,
@@ -1438,13 +1439,12 @@ fn workq_kernreturn_park_blocks_the_worker_and_leaves_it_unresumable() {
 }
 
 /// The park must not be reachable as a way to strand the guest: if the parking worker is the last
-/// runnable thread, that is a deadlock and it must be LOUD rather than a silent hang — the same
+/// runnable thread, that is a deadlock and it must be a wall (M50 D1) rather than a silent hang — the same
 /// posture `a_deadlock_fails_loud_instead_of_hanging` pins for a mutual join. This is also why
 /// `guest_workq_park` needs no "only a worker may park" assert: the harmful case already fails by
 /// name here.
 #[test]
-#[should_panic(expected = "DEADLOCK")]
-fn a_park_that_strands_the_guest_fails_loud_rather_than_hanging() {
+fn a_park_that_strands_the_guest_is_a_wall_rather_than_a_hang() {
     let mut b = tb();
     b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
     b.guest_workq_kernreturn([0x20, 0x0, 0x1, 0x40008ff, 0x0, 0x20, 0, 0]);
@@ -1452,7 +1452,9 @@ fn a_park_that_strands_the_guest_fails_loud_rather_than_hanging() {
     b.guest_sem_wait([0x1403, 0, 0, 0, 0, 0, 0, 0]);
     b.switch_to_thread(1);
     b.guest_workq_kernreturn([0x4, 0x0, 0x0, 0x0, 0, 0, 0, 0]);
-    b.schedule_after_block();
+    let r = b.schedule_after_block();
+    assert!(matches!(&r, Err(u) if u.category == retrace_arch::WallCategory::Threads
+        && u.what.starts_with("M14: DEADLOCK")), "every thread blocked must be a wall, never a spin: {r:?}");
 }
 
 /// The park's own refuse-by-value guard, pinned the way its neighbours are: the panic must NAME

@@ -174,8 +174,9 @@ fn the_mutex_pair_is_refused_by_value_and_never_forwarded() {
     let (code, out) = native(&["mutex"]);
     assert_eq!((code, String::from_utf8_lossy(&out).into_owned()), (0, "mutex ok flag=1\n".to_string()), "native completes");
     let (rec, trace) = util::record_dynamic_args(retrace_guest::CONDVAR_DYN, &["mutex"]);
-    assert_eq!(rec.code, 70, "the recorder must stop at the refusal (70: the bug banner, until M50 makes it a wall). stderr:\n{}", rec.stderr);
-    assert!(rec.stderr.contains("M48: psynch psynch_mutexwait (301) is not modelled"), "stderr:\n{}", rec.stderr);
+    assert_eq!(rec.code, 4, "the recorder must stop at the wall. stderr:\n{}", rec.stderr);
+    let line = rec.stderr.lines().find(|l| l.starts_with("retrace: unsupported: ")).unwrap_or_else(|| panic!("no wall line:\n{}", rec.stderr));
+    assert!(line.contains("M48: psynch psynch_mutexwait (301) is not modelled"), "wall line: {line}");
     assert!(!String::from_utf8_lossy(&rec.stdout).contains("mutex ok"), "the guest must not run past the refusal");
     // The refused call appends no landmark; main's timed wait, which let the locker run, did.
     assert!(calls(&trace, 301).is_empty(), "a refused call is never recorded");

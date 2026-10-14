@@ -5,6 +5,7 @@
 //! loads `hello_dyn` instead (the `gkq.rs` pattern), because admitting one reads the clock. The
 //! sleep's arithmetic is `sleep.rs`'s unit tests; the wake, the idle jump and the clock's values
 //! are `sleep_e2e`'s, on a dynamic guest.
+use retrace_arch::Unmark;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use retrace_arch::{SYS___SEMWAIT_SIGNAL, SYS___SEMWAIT_SIGNAL_NOCANCEL};
@@ -42,7 +43,7 @@ fn every_refusal_changes_nothing_and_reads_no_clock() {
         (SYS___SEMWAIT_SIGNAL, with(1, 0x1403), "M49: semwait mutex_sem 0x1403"),
         (SYS___SEMWAIT_SIGNAL, with(5, 1_000_000_000), "M49: semwait tv_nsec 1000000000"),
     ] {
-        let e = b.guest_semwait_signal(num, args).expect_err(want);
+        let e = b.guest_semwait_signal(num, args).expect_err(want).unmark();
         assert!(e.starts_with(want), "{want}: {e}");
         assert_eq!(b.threads().state_of(0), ThreadState::Runnable, "{want}: the caller never blocked");
         assert_eq!(b.dbg_sleep(), &model, "{want}: the model is unchanged");
@@ -61,7 +62,7 @@ fn a_port_either_semaphore_trap_touched_is_refused_as_a_sleep() {
     assert_eq!(b.guest_sem_signal([0x1403, 0, 0, 0, 0, 0, 0, 0]), (0, vec![tid]));
     assert_eq!(b.guest_sem_signal([0x1303, 0, 0, 0, 0, 0, 0, 0]), (0, vec![]), "a signal nobody waits for");
     for port in [0x1403, 0x1303] {
-        let e = b.guest_semwait_signal(SYS___SEMWAIT_SIGNAL, nanosleep_on(port)).unwrap_err();
+        let e = b.guest_semwait_signal(SYS___SEMWAIT_SIGNAL, nanosleep_on(port)).unwrap_err().unmark();
         assert!(e.starts_with(&format!("M49: semwait cond_sem {port:#x} was used with semaphore_wait_trap (-36)")), "{e}");
     }
     assert_eq!(b.dbg_sleep().admit(SYS___SEMWAIT_SIGNAL, nanosleep_on(0x1203)), Ok(24), "libc's clock_sem is admitted");
@@ -87,12 +88,12 @@ fn a_semaphore_trap_on_a_cond_sem_an_admitted_sleep_used_is_refused_by_value() {
             if call.starts_with("semaphore_wait") { b.guest_sem_wait(args); } else { b.guest_sem_signal(args); }
         }));
         let e = r.expect_err(call);
-        assert_eq!(e.downcast_ref::<String>().map(String::as_str), Some(refusal(call).as_str()), "{call}");
+        assert_eq!(retrace_arch::Unsupported::from_panic(e.as_ref()).map(|u| u.what), Some(refusal(call)), "{call}");
         assert_eq!(b.dbg_sleep(), &model, "{call}: the model is unchanged");
         assert!(matches!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Sleep { .. })),
                 "{call}: the sleeper is untouched");
     }
-    assert_eq!(b.check_sleep_semaphore("semaphore_destroy (3419)", 0x1203),
+    assert_eq!(b.check_sleep_semaphore("semaphore_destroy (3419)", 0x1203).map_err(|e| e.unmark()),
                Err(refusal("semaphore_destroy (3419)")));
     assert_eq!(b.check_sleep_semaphore("semaphore_destroy (3419)", 0x1303), Ok(()), "a port no sleep used");
     assert_eq!(b.guest_sem_signal([0x1303, 0, 0, 0, 0, 0, 0, 0]), (0, vec![]), "a port no sleep used");
@@ -103,13 +104,13 @@ fn a_semaphore_trap_on_a_cond_sem_an_admitted_sleep_used_is_refused_by_value() {
 #[test]
 fn clock_get_time_refuses_every_port_but_a_learned_system_clock_one() {
     let mut b = tb();
-    let e = b.guest_clock_get_time(0x903).unwrap_err();
+    let e = b.guest_clock_get_time(0x903).unwrap_err().unmark();
     assert!(e.starts_with("M49: clock_get_time to port 0x903, which no host_get_clock_service (206) reply named"), "{e}");
     b.learn_clock_port(0x903, CALENDAR_CLOCK);
-    let e = b.guest_clock_get_time(0x903).unwrap_err();
+    let e = b.guest_clock_get_time(0x903).unwrap_err().unmark();
     assert!(e.starts_with("M49: clock_get_time on port 0x903, a CALENDAR_CLOCK (1) port"), "{e}");
     b.learn_clock_port(0x903, 2);
-    let e = b.guest_clock_get_time(0x903).unwrap_err();
+    let e = b.guest_clock_get_time(0x903).unwrap_err().unmark();
     assert!(e.starts_with("M49: clock_get_time on port 0x903, clock id 2"), "{e}");
     b.learn_clock_port(0x903, SYSTEM_CLOCK);
     assert_eq!(b.dbg_sleep().clock_of(0x903), Some(SYSTEM_CLOCK), "a name learned again takes its latest clock");

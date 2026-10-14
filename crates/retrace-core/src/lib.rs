@@ -162,7 +162,7 @@ fn learn_clock_service(b: &mut Box_, m: &machmsg::Msg2, clock_id: Option<u32>, r
 fn semaphore_destroy_guard(b: &Box_, m: &machmsg::Msg2) -> Result<(), String> {
     if m.msgh_id != machmsg::SEMAPHORE_DESTROY { return Ok(()); }
     let port = machmsg::decode_semaphore_destroy(&b.read_guest(m.data, m.send_size as usize))
-        .map_err(|e| format!("semaphore_destroy (3419) decode: {e}"))?;
+        .map_err(|e| retrace_arch::in_context("semaphore_destroy (3419) decode", e))?;
     b.check_sleep_semaphore("semaphore_destroy (3419)", port)
 }
 
@@ -532,7 +532,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                     machmsg::Route::ServiceVmMap => {
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let req = machmsg::decode_vm_map(&buf)
-                            .map_err(|e| wall_or_bug(format!("mach_vm_map (4811) decode: {e}")))?;
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_map (4811) decode", e)))?;
                         let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
                         // cur_protection == 0 => a PROT_NONE address-space reservation (no backing,
                         // e.g. libmalloc's 24 GiB nano pointer range); anything else is a real
@@ -560,7 +560,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                         // the source's attribute and band, never chosen (spec R7, t2's two lines).
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let req = machmsg::decode_vm_remap(&buf)
-                            .map_err(|e| wall_or_bug(format!("mach_vm_remap (4813) decode: {e}")))?;
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_remap (4813) decode", e)))?;
                         if req.copy != 0 {
                             return Err(wall(WallCategory::Memory,
                                 "mach_vm_remap: copy=TRUE is unmodelled (spec §3f)"));
@@ -602,7 +602,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                         //   deterministic, so replay recomputes and byte-compares it.
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let which = machmsg::decode_get_special_port(&buf)
-                            .map_err(|e| wall_or_bug(format!("task_get_special_port (3409) decode: {e}")))?;
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("task_get_special_port (3409) decode", e)))?;
                         let name = match which {
                             machmsg::TASK_BOOTSTRAP_PORT => b.mint_bootstrap_port(),
                             machmsg::TASK_DEBUG_CONTROL_PORT => 0,
@@ -625,7 +625,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                         // DETERMINISTIC → STANDARD symmetric posture (replay recomputes + byte-compares).
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let which = machmsg::decode_set_special_port(&buf)
-                            .map_err(|e| wall_or_bug(format!("task_set_special_port (3410) decode: {e}")))?;
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("task_set_special_port (3410) decode", e)))?;
                         if which != machmsg::TASK_DEBUG_CONTROL_PORT {
                             return Err(wall(WallCategory::MachMessages, format!(
                                 "only TASK_DEBUG_CONTROL_PORT (10) is modeled; got which={which}")));
@@ -646,7 +646,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                         // byte-compares (the 3410 shape).
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         machmsg::decode_ports_register(&buf)
-                            .map_err(|e| wall_or_bug(format!("mach_ports_register (3403) decode: {e}")))?;
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_ports_register (3403) decode", e)))?;
                         let writes = vec![Region { ipa: m.data,
                             bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, machmsg::KERN_SUCCESS) }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
@@ -730,11 +730,11 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                         if machmsg::forward_body_is_checked(m.msgh_id) {
                             let buf = b.read_guest(m.data, m.send_size as usize);
                             machmsg::check_forward_body(m.msgh_id, &buf)
-                                .map_err(|e| wall_or_bug(format!("mach_msg2 forward guard: {e}")))?;
+                                .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_msg2 forward guard", e)))?;
                         }
                         semaphore_destroy_guard(&b, &m).map_err(wall_or_bug)?;
                         let clock_id = clock_service_request(&b, &m)
-                            .map_err(|e| wall_or_bug(format!("host_get_clock_service (206) decode: {e}")))?;
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("host_get_clock_service (206) decode", e)))?;
                         eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id);
                         let (ret, _ret1, err, writes) = b.forward_and_diff(num, args);
                         learn_clock_service(&mut b, &m, clock_id, ret, err);
@@ -1572,6 +1572,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                 }
             },
             // Stop::Step is only produced by Box_::step(); record_box drives run(), never step().
+            Stop::Unsupported(u) => return Err(u.marked()),
             Stop::Step => unreachable!("record_box drives run(), which never single-steps"),
         }
     }
@@ -1892,7 +1893,11 @@ impl ReplaySession {
             Some((watched, _ipa)) => Advance::WatchSyscall { watched, thread: self.current_thread() },
             None => Advance::Event,
         };
-        self.b.settle_schedule();
+        // M50 (B5): a deadlock after the last landmark is where an incomplete recording stopped, which
+        // `replay()` reads from the marker; anywhere else it is a divergence.
+        if let Err(u) = self.b.settle_schedule() {
+            return Err(Divergence { landmark: self.idx, pc: self.b.position(), detail: u.marked() });
+        }
         Ok(adv)
     }
 
@@ -3231,9 +3236,9 @@ impl ReplaySession {
                             // reported as one.
                             if !self.b.is_console_write(num, args[0]) {
                                 if let Err(m) = self.b.note_fd_effects(num, args, *ret, *ret1, *err) {
-                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    return Err(Divergence { landmark: self.idx, pc, detail: if retrace_arch::Unsupported::from_marked(&m).is_some() { m } else { format!(
                                         "syscall {num} refused on replay, though the recording accepted it \
-                                         — replay diverged before this landmark: {m}") });
+                                         — replay diverged before this landmark: {m}") } });
                                 }
                             }
                             return self.finish_event();
@@ -3321,6 +3326,7 @@ impl ReplaySession {
                     }
                 }
                 // Stop::Step is only produced by Box_::step(); advance drives run(), never step().
+                Stop::Unsupported(u) => return Err(Divergence { landmark: self.idx, pc: self.b.position(), detail: u.marked() }),
                 Stop::Step => unreachable!("replay drives run(), which never single-steps"),
             }
         }
@@ -3533,6 +3539,7 @@ impl ReplaySession {
         for done in 0..k {
             loop {
                 match self.b.step() {
+                    Stop::Unsupported(u) => return Err(u.line()),
                     Stop::Step => break,
                     Stop::Other { esr } => match self.b.resolve_stage2(esr) {
                         Stage2::Resolved { .. } => continue,
@@ -3569,6 +3576,7 @@ impl ReplaySession {
     pub fn step_watched(&mut self) -> Result<Stepped, String> {
         loop {
             match self.b.step() {
+                Stop::Unsupported(u) => return Err(u.line()),
                 Stop::Step => return Ok(Stepped::Retired),
                 Stop::Other { esr } => {
                     if matches!(retrace_arch::ec_of(esr), retrace_arch::Ec::Watchpoint) {
@@ -3609,6 +3617,7 @@ impl ReplaySession {
     pub fn step_armed(&mut self) -> Result<Armed, String> {
         loop {
             match self.b.step() {
+                Stop::Unsupported(u) => return Err(u.line()),
                 Stop::Step => return Ok(Armed::Retired),
                 Stop::Other { esr } => {
                     match retrace_arch::ec_of(esr) {
@@ -3638,6 +3647,7 @@ impl ReplaySession {
         let mut n = 0u64;
         loop {
             match self.b.step() {
+                Stop::Unsupported(u) => return Err(u.line()),
                 Stop::Step => n += 1,
                 Stop::Other { esr } => match self.b.resolve_stage2(esr) {
                     Stage2::Resolved { .. } => continue,

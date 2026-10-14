@@ -250,11 +250,11 @@ fn u32_at(b: &[u8], o: usize) -> u32 { u32::from_le_bytes(b[o..o + 4].try_into()
 fn u64_at(b: &[u8], o: usize) -> u64 { u64::from_le_bytes(b[o..o + 8].try_into().unwrap()) }
 
 pub fn decode_vm_map(buf: &[u8]) -> Result<VmMapReq, String> {
-    if buf.len() < 100 { return Err(format!("vm_map request short: {} < 100", buf.len())); }
+    if buf.len() < 100 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("vm_map request short: {} < 100", buf.len()))); }
     let (bits, id, descs) = (u32_at(buf, 0), u32_at(buf, 20), u32_at(buf, 24));
     if id != 4811 { return Err(format!("msgh_id {id} != 4811")); }
-    if bits & MACH_MSGH_BITS_COMPLEX == 0 { return Err("complex bit clear".into()); }
-    if descs != 1 { return Err(format!("descriptor count {descs} != 1")); }
+    if bits & MACH_MSGH_BITS_COMPLEX == 0 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, "complex bit clear")); }
+    if descs != 1 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("descriptor count {descs} != 1"))); }
     Ok(VmMapReq {
         address: u64_at(buf, 48), size: u64_at(buf, 56), mask: u64_at(buf, 64),
         flags: u32_at(buf, 72), offset: u64_at(buf, 76), copy: u32_at(buf, 84),
@@ -273,11 +273,11 @@ pub struct VmRemapReq {
 }
 
 pub fn decode_vm_remap(buf: &[u8]) -> Result<VmRemapReq, String> {
-    if buf.len() < 92 { return Err(format!("vm_remap request short: {} < 92", buf.len())); }
+    if buf.len() < 92 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("vm_remap request short: {} < 92", buf.len()))); }
     let (bits, id, descs) = (u32_at(buf, 0), u32_at(buf, 20), u32_at(buf, 24));
     if id != 4813 { return Err(format!("msgh_id {id} != 4813")); }
-    if bits & MACH_MSGH_BITS_COMPLEX == 0 { return Err("complex bit clear".into()); }
-    if descs != 1 { return Err(format!("descriptor count {descs} != 1")); }
+    if bits & MACH_MSGH_BITS_COMPLEX == 0 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, "complex bit clear")); }
+    if descs != 1 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("descriptor count {descs} != 1"))); }
     Ok(VmRemapReq {
         src_task: u32_at(buf, 28),
         target: u64_at(buf, 48), size: u64_at(buf, 56), mask: u64_at(buf, 64),
@@ -299,7 +299,7 @@ pub const TASK_DEBUG_CONTROL_PORT: u32 = 10;
 /// TASK_DEBUG_CONTROL_PORT (10), and panics on any other. Validates the length and msgh_id so a
 /// malformed/mis-routed request fails loud.
 pub fn decode_get_special_port(buf: &[u8]) -> Result<u32, String> {
-    if buf.len() < 36 { return Err(format!("get_special_port request short: {} < 36", buf.len())); }
+    if buf.len() < 36 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("get_special_port request short: {} < 36", buf.len()))); }
     let id = u32_at(buf, 20);
     if id != 3409 { return Err(format!("msgh_id {id} != 3409")); }
     Ok(u32_at(buf, 32)) // which_port = header(24) + NDR(8)
@@ -312,9 +312,9 @@ pub fn decode_get_special_port(buf: &[u8]) -> Result<u32, String> {
 /// msgh_id so a malformed/mis-routed request fails loud. The inbound COPY_SEND descriptor (offset 28)
 /// is ignored — never consumed or forwarded.
 pub fn decode_set_special_port(buf: &[u8]) -> Result<u32, String> {
-    if buf.len() < 52 { return Err(format!("set_special_port request short: {} < 52", buf.len())); }
+    if buf.len() < 52 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("set_special_port request short: {} < 52", buf.len()))); }
     let id = u32_at(buf, 20);
-    if id != 3410 { return Err(format!("msgh_id {id} != 3410")); }
+    if id != 3410 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("msgh_id {id} != 3410"))); }
     Ok(u32_at(buf, 48)) // which_port = header(24) + desc_count(4) + descriptor(12) + NDR(8)
 }
 
@@ -325,15 +325,15 @@ pub fn decode_set_special_port(buf: &[u8]) -> Result<u32, String> {
 /// The names and dispositions are the guest's and are not modelled: the registration sets what a
 /// child would inherit, and M47 never creates one (§3e).
 pub fn decode_ports_register(buf: &[u8]) -> Result<(), String> {
-    if buf.len() != 64 { return Err(format!("mach_ports_register request is {} bytes, measured 64", buf.len())); }
-    if u32_at(buf, 0) & MACH_MSGH_BITS_COMPLEX == 0 { return Err("mach_ports_register request is not COMPLEX".into()); }
+    if buf.len() != 64 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("mach_ports_register request is {} bytes, measured 64", buf.len()))); }
+    if u32_at(buf, 0) & MACH_MSGH_BITS_COMPLEX == 0 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, "mach_ports_register request is not COMPLEX")); }
     let id = u32_at(buf, 20);
-    if id != 3403 { return Err(format!("msgh_id {id} != 3403")); }
+    if id != 3403 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("msgh_id {id} != 3403"))); }
     let n = u32_at(buf, 24);
-    if n != 3 { return Err(format!("descriptor count {n}, measured 3")); }
+    if n != 3 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("descriptor count {n}, measured 3"))); }
     for i in 0..3 {
         let ty = buf[28 + 12 * i + 11];
-        if ty != 0 { return Err(format!("descriptor {i} has type {ty}, measured MACH_MSG_PORT_DESCRIPTOR (0)")); }
+        if ty != 0 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("descriptor {i} has type {ty}, measured MACH_MSG_PORT_DESCRIPTOR (0)"))); }
     }
     Ok(())
 }
@@ -344,10 +344,10 @@ pub fn decode_ports_register(buf: &[u8]) -> Result<(), String> {
 /// admissible. Validates the length and msgh_id so a malformed/mis-routed request fails loud.
 pub fn decode_host_get_special_port(buf: &[u8]) -> Result<(i32, i32), String> {
     if buf.len() < 40 {
-        return Err(format!("host_get_special_port request short: {} < 40", buf.len()));
+        return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("host_get_special_port request short: {} < 40", buf.len())));
     }
     let id = u32_at(buf, 20);
-    if id != 412 { return Err(format!("msgh_id {id} != 412")); }
+    if id != 412 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("msgh_id {id} != 412"))); }
     Ok((u32_at(buf, 32) as i32, u32_at(buf, 36) as i32)) // node = header(24)+NDR(8); which = +4
 }
 
@@ -378,11 +378,11 @@ pub fn check_forward_body(msgh_id: u32, buf: &[u8]) -> Result<(), String> {
     // same reason: a silent wrong answer here is agreed upon by record and replay alike, so the
     // determinism oracle structurally cannot see it.
     if (node, which) != (HOST_LOCAL_NODE, HOST_PORT) {
-        return Err(format!(
+        return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!(
             "host_get_special_port (412): only (node, which) == ({HOST_LOCAL_NODE}, {HOST_PORT}) \
              (HOST_LOCAL_NODE, HOST_PORT) is modeled; got ({node}, {which})\
              {}",
-            if which == HOST_PRIV_PORT { " — HOST_PRIV_PORT is deliberately refused" } else { "" }));
+            if which == HOST_PRIV_PORT { " — HOST_PRIV_PORT is deliberately refused" } else { "" })));
     }
     Ok(())
 }
@@ -462,7 +462,7 @@ pub const CLOCK_SERVICE_REPLY_LEN: usize = 40;
 /// M49 S2: the clock id a `host_get_clock_service` (206) request asks for: header(24) + NDR(8) +
 /// `clock_id`(4) at offset 32 (`sleep-report.md`: "clock_id at send+0x20").
 pub fn decode_clock_service_request(buf: &[u8]) -> Result<u32, String> {
-    if buf.len() < 36 { return Err(format!("host_get_clock_service request is {} bytes, < 36", buf.len())); }
+    if buf.len() < 36 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("host_get_clock_service request is {} bytes, < 36", buf.len()))); }
     if u32_at(buf, 20) != HOST_GET_CLOCK_SERVICE {
         return Err(format!("msgh_id {} is not host_get_clock_service (206)", u32_at(buf, 20)));
     }
@@ -477,13 +477,13 @@ pub const SEMAPHORE_DESTROY: u32 = 3419;
 /// round 1): 40 bytes, COMPLEX, header(24) + descriptor_count 1 at 24 + one PORT descriptor
 /// (type byte 0 at offset 39, MOVE_SEND) whose name is at offset 28 — the 206 reply's layout.
 pub fn decode_semaphore_destroy(buf: &[u8]) -> Result<u32, String> {
-    if buf.len() < 40 { return Err(format!("semaphore_destroy request is {} bytes, < 40", buf.len())); }
+    if buf.len() < 40 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("semaphore_destroy request is {} bytes, < 40", buf.len()))); }
     if u32_at(buf, 20) != SEMAPHORE_DESTROY {
-        return Err(format!("msgh_id {} is not semaphore_destroy (3419)", u32_at(buf, 20)));
+        return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("msgh_id {} is not semaphore_destroy (3419)", u32_at(buf, 20))));
     }
     if u32_at(buf, 0) & MACH_MSGH_BITS_COMPLEX == 0 || u32_at(buf, 24) != 1 || buf[39] != 0 {
-        return Err(format!("semaphore_destroy request is not one PORT descriptor: bits {:#x}, count {}, type {}",
-                           u32_at(buf, 0), u32_at(buf, 24), buf[39]));
+        return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("semaphore_destroy request is not one PORT descriptor: bits {:#x}, count {}, type {}",
+                           u32_at(buf, 0), u32_at(buf, 24), buf[39])));
     }
     Ok(u32_at(buf, 28))
 }
@@ -502,9 +502,9 @@ pub fn decode_clock_service_reply(buf: &[u8]) -> Option<u32> {
 /// header, simple, with room for the 52-byte reply.
 pub fn check_clock_get_time(m: &Msg2) -> Result<(), String> {
     if m.send_size != 24 || m.bits & MACH_MSGH_BITS_COMPLEX != 0 || m.rcv_size < 52 {
-        return Err(format!(
+        return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!(
             "M49: clock_get_time with send_size {} bits {:#x} rcv_size {}: only libc's shape (a bare \
-             24-byte simple header, room for the 52-byte reply) is modelled", m.send_size, m.bits, m.rcv_size));
+             24-byte simple header, room for the 52-byte reply) is modelled", m.send_size, m.bits, m.rcv_size)));
     }
     Ok(())
 }
@@ -1022,7 +1022,7 @@ mod tests {
         for (bits, send, rcv) in [(0x8000_1513, 24, 52), (0x1513, 28, 52), (0x1513, 24, 44)] {
             let mut m = Msg2::unpack(&[0x16d0, KOBJ, 0x18_0000_1513, 0x1103_0000_0903, 0x3e8_0000_0000, 0, 0x34, 0]);
             (m.bits, m.send_size, m.rcv_size) = (bits, send, rcv);
-            assert!(check_clock_get_time(&m).unwrap_err().starts_with("M49: clock_get_time "), "{bits:#x} {send} {rcv}");
+            assert!(retrace_arch::Unsupported::from_marked(&check_clock_get_time(&m).unwrap_err()).unwrap().what.starts_with("M49: clock_get_time "), "{bits:#x} {send} {rcv}");
         }
     }
 

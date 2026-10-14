@@ -19,6 +19,7 @@ fn forward_and_diff_captures_read_bytes() {
             Stop::Syscall { num, args } => { let (ret, _ret1, _err, _) = b.forward_and_diff(num, args); b.set_x0_and_return(ret); }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }
@@ -63,6 +64,7 @@ fn forward_and_diff_captures_a_read_larger_than_the_window() {
             Stop::Syscall { num, args } => { let (ret, _ret1, _err, _) = b.forward_and_diff(num, args); b.set_x0_and_return(ret); }
             Stop::Other { esr } => panic!("unexpected exit esr=0x{esr:x}"),
             Stop::Fault { pc, esr, far } => panic!("guest crashed pc=0x{pc:x} esr=0x{esr:x} far=0x{far:x}"),
+            Stop::Unsupported(u) => panic!("{u:?}"),
             Stop::Step => unreachable!("run() does not single-step"),
         }
     }

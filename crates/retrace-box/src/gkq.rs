@@ -117,9 +117,9 @@ impl Pipes {
     /// Is `filter` on descriptor `fd`, which `watch` describes, ready, and with what `EV_EOF` bit
     /// and `data`? `sys_pipe.c:filt_piperead_common` and `:filt_pipewrite_common` (F9).
     pub fn ready(&self, fd: u64, watch: FdKind, filter: i16) -> Result<Option<(u16, i64)>, String> {
-        let lost = || format!(
+        let lost = || retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
             "M48: pipe {fd}: the byte count is unknown: a read returned more bytes than the model \
-             counted, so a write reached the pipe by a path note_fd_effects does not see");
+             counted, so a write reached the pipe by a path note_fd_effects does not see"));
         match (watch, filter) {
             (FdKind::PipeRead(id), EVFILT_READ) => {
                 let p = self.pipes[&id];
@@ -135,9 +135,9 @@ impl Pipes {
                 if p.readers == 0 { return Ok(Some((EV_EOF, 0))); }
                 let count = p.count.ok_or_else(lost)?;
                 if count > PIPE_CAPACITY {
-                    return Err(format!(
+                    return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
                         "M48: pipe {fd}: {count} unread bytes exceed the measured {PIPE_CAPACITY}-byte \
-                         buffer: the kernel grows a pipe's buffer, which the model does not (t0 M3)"));
+                         buffer: the kernel grows a pipe's buffer, which the model does not (t0 M3)")));
                 }
                 let room = PIPE_CAPACITY - count;
                 Ok((room >= PIPE_BUF).then_some((0, room as i64)))
@@ -198,8 +198,8 @@ impl GuestKqueues {
     /// thread is blocked on is refused, because the kernel's answer to that thread is unmeasured.
     pub fn close(&mut self, fd: u64) -> Result<(), String> {
         if let Some(w) = self.kqs.get(&fd).and_then(|k| k.waiter) {
-            return Err(format!("M48: kevent on kq {fd}: closed while thread {} is blocked on it; the \
-                                kernel's answer to the waiter is unmeasured", w.tid));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent on kq {fd}: closed while thread {} is blocked on it; the \
+                                kernel's answer to the waiter is unmeasured", w.tid)));
         }
         self.kqs.remove(&fd);
         for k in self.kqs.values_mut() {
@@ -215,8 +215,8 @@ impl GuestKqueues {
     pub fn dup(&mut self, old: u64, new: u64) -> Result<(), String> {
         if old == new { return Ok(()); }
         if self.is_kqueue(old) {
-            return Err(format!("M48: kevent on fd {old}: a dup of a guest kqueue to fd {new}: the \
-                                kernel's kqueue is per open file and sharing one is unmeasured (M48 §3c)"));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent on fd {old}: a dup of a guest kqueue to fd {new}: the \
+                                kernel's kqueue is per open file and sharing one is unmeasured (M48 §3c)")));
         }
         self.close(new)?;
         if let Some(&(id, write)) = self.pipes.ends.get(&old) { self.pipes.bind(new, id, write); }
@@ -281,49 +281,49 @@ impl GuestKqueues {
                          c.ident, c.filter, c.fflags, c.data);
         const MODELLED: u16 = EV_ADD | EV_DELETE | EV_ENABLE | EV_DISABLE | EV_CLEAR | EV_ONESHOT;
         if flags & !MODELLED != 0 {
-            return Err(format!("{at}: flags {:#x} are not modelled (EV_RECEIPT, EV_DISPATCH, \
-                                EV_UDATA_SPECIFIC and the rest are unmeasured)", flags & !MODELLED));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: flags {:#x} are not modelled (EV_RECEIPT, EV_DISPATCH, \
+                                EV_UDATA_SPECIFIC and the rest are unmeasured)", flags & !MODELLED)));
         }
         if flags & (EV_ADD | EV_DELETE) == EV_ADD | EV_DELETE || flags & (EV_ENABLE | EV_DISABLE) == EV_ENABLE | EV_DISABLE {
-            return Err(format!("{at}: contradictory flags are not modelled"));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: contradictory flags are not modelled")));
         }
         if !matches!(c.filter, EVFILT_USER | EVFILT_READ | EVFILT_WRITE) {
-            return Err(format!("{at}: filter {} is not modelled: only EVFILT_USER and the pipe filters \
-                                are (M48 §3c)", c.filter));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: filter {} is not modelled: only EVFILT_USER and the pipe filters \
+                                are (M48 §3c)", c.filter)));
         }
         let key = (c.ident, c.filter);
         if flags & EV_DELETE != 0 {
             return match k.knotes.remove(&key) {
                 Some(_) => Ok(()),
-                None => Err(format!("{at}: EV_DELETE of a knote that is not registered: the kernel \
-                                     answers an ENOENT EV_ERROR event, which is not modelled")),
+                None => Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: EV_DELETE of a knote that is not registered: the kernel \
+                                     answers an ENOENT EV_ERROR event, which is not modelled"))),
             };
         }
         let fd_filter = c.filter != EVFILT_USER;
         if fd_filter && (c.fflags != 0 || c.data != 0) {
-            return Err(format!("{at}: a pipe filter with fflags or data (NOTE_LOWAT and the rest) is not modelled"));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: a pipe filter with fflags or data (NOTE_LOWAT and the rest) is not modelled")));
         }
         let Some(n) = k.knotes.get_mut(&key) else {
             if flags & EV_ADD == 0 {
-                return Err(format!("{at}: the knote is not registered and the change has no EV_ADD: \
-                                    the kernel answers an ENOENT EV_ERROR event, which is not modelled"));
+                return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: the knote is not registered and the change has no EV_ADD: \
+                                    the kernel answers an ENOENT EV_ERROR event, which is not modelled")));
             }
             let mut n = Knote { flags, sfflags: 0, sdata: c.data, udata: c.udata,
                                 enabled: flags & EV_DISABLE == 0, active: None, watch: None };
             if fd_filter {
                 if flags & (EV_CLEAR | EV_ONESHOT) != 0 {
-                    return Err(format!("{at}: EV_CLEAR or EV_ONESHOT on a pipe filter is not modelled"));
+                    return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: EV_CLEAR or EV_ONESHOT on a pipe filter is not modelled")));
                 }
                 let watch = self.kind_of(c.ident);
                 match (watch, c.filter) {
                     (FdKind::PipeRead(_), EVFILT_READ) | (FdKind::PipeWrite(_), EVFILT_READ | EVFILT_WRITE) => {}
                     (FdKind::Other, EVFILT_READ) if flags == EV_ADD | EV_ENABLE => {}
-                    (FdKind::Other, f) => return Err(format!(
+                    (FdKind::Other, f) => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
                         "M48: kevent on fd {}: change {i}'s filter {f} with flags {flags:#x} asks about a \
                          descriptor that is not a guest pipe end: readiness of a file, socket, tty or \
                          inherited descriptor is not modelled (M48 §7); only uv__stream_try_select's \
-                         EVFILT_READ, EV_ADD|EV_ENABLE is answered, never ready (K3)", c.ident)),
-                    (w, f) => return Err(format!("{at}: filter {f} on {w:?} is not modelled")),
+                         EVFILT_READ, EV_ADD|EV_ENABLE is answered, never ready (K3)", c.ident))),
+                    (w, f) => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: filter {f} on {w:?} is not modelled"))),
                 }
                 n.active = match self.pipes.ready(c.ident, watch, c.filter)? {
                     Some(_) => { *seq += 1; Some(*seq) }
@@ -332,8 +332,8 @@ impl GuestKqueues {
                 n.watch = Some(watch);
             } else {
                 if c.fflags & !NOTE_FFLAGSMASK != 0 {
-                    return Err(format!("{at}: an EV_ADD whose fflags carry NOTE_TRIGGER or a NOTE_FF* \
-                                        operation: what the kernel then delivers as fflags is unmeasured"));
+                    return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: an EV_ADD whose fflags carry NOTE_TRIGGER or a NOTE_FF* \
+                                        operation: what the kernel then delivers as fflags is unmeasured")));
                 }
                 n.sfflags = c.fflags;
             }
@@ -343,8 +343,8 @@ impl GuestKqueues {
         // A touch (K9).
         let kind = flags & (EV_CLEAR | EV_ONESHOT);
         if kind != 0 && kind != n.flags & (EV_CLEAR | EV_ONESHOT) {
-            return Err(format!("{at}: a touch that changes EV_CLEAR or EV_ONESHOT on a registered knote \
-                                is not modelled"));
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: a touch that changes EV_CLEAR or EV_ONESHOT on a registered knote \
+                                is not modelled")));
         }
         n.udata = c.udata;
         if flags & EV_ENABLE != 0 { n.enabled = true; }
@@ -434,6 +434,7 @@ impl GuestKqueues {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use retrace_arch::Unmark;
     use retrace_arch::{EVFILT_TIMER, EV_RECEIPT};
 
     const KQ: u64 = 3;
@@ -464,7 +465,7 @@ mod tests {
             "every kqueue loses fd 9's knote");
         assert!(g.knote(KQ, ID, EVFILT_USER).is_some(), "an EVFILT_USER knote names no descriptor and stays");
         g.set_waiter(4, Waiter { tid: 1, events: 0x1000, nevents: 1 });
-        let e = g.close(4).unwrap_err();
+        let e = g.close(4).unwrap_err().unmark();
         assert!(e.starts_with("M48: kevent on kq 4: closed while thread 1 is blocked on it"), "{e}");
         assert!(g.is_kqueue(4), "the refused close changed nothing");
         g.close(KQ).unwrap();
@@ -476,11 +477,11 @@ mod tests {
     #[test]
     fn a_change_to_an_unregistered_knote_is_refused_and_applies_nothing() {
         let mut g = kq();
-        let e = g.apply(KQ, &[user(0, NOTE_TRIGGER)]).unwrap_err();
+        let e = g.apply(KQ, &[user(0, NOTE_TRIGGER)]).unwrap_err().unmark();
         assert!(e.starts_with("M48: kevent change 0: ") && e.contains("not registered and the change has no EV_ADD"), "{e}");
-        let e = g.apply(KQ, &[user(EV_DELETE, 0)]).unwrap_err();
+        let e = g.apply(KQ, &[user(EV_DELETE, 0)]).unwrap_err().unmark();
         assert!(e.contains("EV_DELETE of a knote that is not registered"), "{e}");
-        let e = g.apply(KQ, &[user(EV_ADD, 0), ch(9, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0)]).unwrap_err();
+        let e = g.apply(KQ, &[user(EV_ADD, 0), ch(9, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0)]).unwrap_err().unmark();
         assert!(e.starts_with("M48: kevent change 1: "), "{e}");
         assert!(g.knote(KQ, ID, EVFILT_USER).is_none(), "the refused call's first change was not applied");
     }
@@ -616,12 +617,12 @@ mod tests {
             (ch(1, EVFILT_READ, EV_ADD, 0, 0, 0), "not a guest pipe end"),
             (ch(KQ, EVFILT_READ, EV_ADD, 0, 0, 0), "filter -1 on Kqueue is not modelled"),
         ] {
-            let e = g.apply(KQ, &[c]).unwrap_err();
+            let e = g.apply(KQ, &[c]).unwrap_err().unmark();
             assert!(e.starts_with("M48: kevent ") && e.contains(why), "{why}: {e}");
         }
         g.apply(KQ, &[ch(1, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0)]).unwrap();
         assert!(!g.has_events(KQ), "§11b item 7: registered, never ready");
-        let e = g.dup(KQ, 9).unwrap_err();
+        let e = g.dup(KQ, 9).unwrap_err().unmark();
         assert!(e.starts_with("M48: kevent on fd 3: a dup of a guest kqueue"), "{e}");
     }
 }

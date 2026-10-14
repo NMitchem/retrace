@@ -8,6 +8,7 @@
 //! K10: a static box has no commpage and so no guest clock, so the static tests use NULL or zero
 //! timeouts only. The two deadline tests load `hello_dyn` (the `stackgrow.rs` pattern); its stage 1
 //! is identity-mapped, so a `guest_mmap` IPA is also the VA `guest_kevent` reads.
+use retrace_arch::Unmark;
 use retrace_arch::{Kevent, EVFILT_READ, EVFILT_USER, EV_ADD, EV_CLEAR, NOTE_FFCOPY, NOTE_TRIGGER,
                    PSTATE_C, SYS_READ, SYS_WRITE, TIMER_IDENT_BASE};
 use retrace_box::thread::{BlockReason, ThreadCtx, ThreadState};
@@ -85,7 +86,7 @@ fn a_wake_of_the_current_thread_writes_the_vcpu() {
     assert_ne!(b.regs_snapshot().cpsr & PSTATE_C, 0, "err sets the carry in the live CPSR");
     assert_eq!(b.threads().ctx_of(0).regs.x[0], stale, "the current thread's table entry is stale, and not where the reply goes");
     assert_eq!(b.read_bytes_for_test(base, 32), ev);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!((b.threads().current(), b.vcpu_get_x(0)), (0, 0x2a),
         "the pick returns the same thread and the switch returns early: the reply survives");
 }
@@ -125,7 +126,7 @@ fn a_trigger_from_another_thread_wakes_the_waiter_with_its_event() {
     assert_eq!(kevent(&mut b, base, &[], 1, 0), Ok((0, false)), "a block records 0");
     assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Kevent { kq: KQ, deadline: None }));
     b.set_x0_err_and_return(0, false);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(b.threads().current(), t1);
     b.threads_mut().ctx_mut(0).regs.cpsr |= PSTATE_C;
     b.vcpu_set_x(0, 0x77);
@@ -194,7 +195,7 @@ fn an_event_list_reaching_into_an_untouched_reserved_page_is_accepted_and_an_unm
     assert_eq!(b.read_bytes_for_test(res + 0x4000, 32), kev(2, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0x22).to_bytes(),
         "the second event, in the page the write committed");
     assert!(b.is_mapped(res + 0x4000), "the write committed it, as a guest store would");
-    let e = b.guest_kevent([KQ, 0, 0, WILD, 1, zero, 0, 0]).unwrap_err();
+    let e = b.guest_kevent([KQ, 0, 0, WILD, 1, zero, 0, 0]).unwrap_err().unmark();
     assert!(e.starts_with("M48: kevent event list at 0xb00000000 ")
             && e.contains("0xb00000000 (ipa 0xb00000000) is neither backed nor reserved"), "{e}");
 }
@@ -221,7 +222,7 @@ fn a_one_nanosecond_wait_is_woken_in_the_same_settle_without_a_jump() {
     b.set_x0_err_and_return(0x77, true);
     assert_ne!(b.regs_snapshot().cpsr & PSTATE_C, 0, "the sentinel carry is set");
     let before = synthetic_tsc(&b);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(b.threads().state_of(0), ThreadState::Runnable, "the deadline {d:#x} was already due");
     assert_eq!(b.threads().current(), 0);
     assert_eq!((b.vcpu_get_x(0), b.regs_snapshot().cpsr & PSTATE_C), (0, 0),
@@ -243,7 +244,7 @@ fn the_idle_jump_lands_on_the_earliest_thread_deadline_before_a_later_timer() {
     let ms1 = timespec(&mut b, base + 0x200, 0, 1_000_000);
     assert_eq!(kevent(&mut b, base, &[], 1, ms1), Ok((0, false)));
     b.set_x0_err_and_return(0, false);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(b.threads().current(), t1, "1 ms is not reached: thread 1 runs");
     let ms3 = timespec(&mut b, base + 0x300, 0, 3_000_000);
     assert_eq!(b.guest_kevent([KQ + 1, 0, 0, base + 0x400, 1, ms3, 0, 0]), Ok((0, false)));
@@ -253,7 +254,7 @@ fn the_idle_jump_lands_on_the_earliest_thread_deadline_before_a_later_timer() {
     b.dbg_kq_mut().add_timer(TIMER_IDENT_BASE, d1 + 168_000, 0, 0).unwrap();
     b.set_x0_err_and_return(0, false);
     let before = synthetic_tsc(&b);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(synthetic_tsc(&b) - before, 24_000, "F6: exactly to thread 0's 1 ms deadline (24000 ticks), no further");
     assert_eq!((b.threads().current(), b.threads().state_of(0)), (0, ThreadState::Runnable));
     assert_eq!(b.threads().state_of(t1), ThreadState::Blocked(BlockReason::Kevent { kq: KQ + 1, deadline: Some(d1) }),
@@ -275,7 +276,7 @@ fn a_pipe_write_wakes_a_reader_blocked_on_its_read_end() {
     assert_eq!(kevent(&mut b, base, &[kev(r, EVFILT_READ, EV_ADD, 0, 0, 0xabc)], 0, 0), Ok((0, false)));
     assert_eq!(kevent(&mut b, base, &[], 1, 0), Ok((0, false)), "an empty pipe: it blocks");
     b.set_x0_err_and_return(0, false);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(b.threads().current(), t1);
     b.note_fd_effects(SYS_WRITE, [w, base + 0x800, 5, 0, 0, 0, 0, 0], 5, 0, false).unwrap();
     assert_eq!(b.threads().state_of(0), ThreadState::Runnable);
@@ -283,7 +284,7 @@ fn a_pipe_write_wakes_a_reader_blocked_on_its_read_end() {
     assert_eq!(b.read_bytes_for_test(base + 0x100, 32), kev(r, EVFILT_READ, EV_ADD, 0, 5, 0xabc).to_bytes());
     b.note_fd_effects(SYS_READ, [r, base + 0x800, 64, 0, 0, 0, 0, 0], 5, 0, false).unwrap();
     assert_eq!(b.dbg_gkq().pipe_count(r), Some(0));
-    let e = b.note_fd_effects(SYS_READ, [r, base + 0x800, 64, 0, 0, 0, 0, 0], 1, 0, false).unwrap_err();
+    let e = b.note_fd_effects(SYS_READ, [r, base + 0x800, 64, 0, 0, 0, 0, 0], 1, 0, false).unwrap_err().unmark();
     assert!(e.starts_with(&format!("M48: pipe {r}: the byte count is unknown")), "{e}");
 }
 
@@ -297,7 +298,7 @@ fn a_wake_with_a_signal_pending_is_refused_and_wakes_nobody() {
     assert_eq!(kevent(&mut b, base, &[kev(7, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0)], 1, 0), Ok((0, false)));
     b.set_x0_err_and_return(0, false);
     b.threads_mut().pend(0, 30);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     assert_eq!(b.threads().current(), t1);
     let e = kevent(&mut b, base + 0x1000, &[kev(7, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0)], 0, 0).unwrap_err();
     assert!(e.starts_with("M48: a signal is pending on thread 0 (set 0x20000000"), "{e}");
@@ -313,7 +314,7 @@ fn a_blocked_kevent_survives_a_checkpoint() {
     let t1 = spawn(&mut b);
     assert_eq!(kevent(&mut b, base, &[kev(7, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0x1234)], 1, 0), Ok((0, false)));
     b.set_x0_err_and_return(0, false);
-    b.schedule_after_block();
+    b.schedule_after_block().unwrap();
     let gkq = b.dbg_gkq().clone();
     let st = b.checkpoint();
     drop(b); // one VM per process

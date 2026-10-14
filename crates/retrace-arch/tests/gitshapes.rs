@@ -68,6 +68,11 @@ fn the_measured_advice_values_are_modelled() {
     assert_eq!(madvise_effect(MADV_ZERO), Ok(MadviseEffect::Zero));
 }
 
+/// M50: each of these refusals is a wall, so its text travels marked; the assertions read what it says.
+fn marked_what(e: String) -> String {
+    retrace_arch::Unsupported::from_marked(&e).unwrap_or_else(|| panic!("not a marked wall: {e}")).what
+}
+
 /// M47 §3c: every other value is refused by value, naming it — the kernel's whole `int` range is
 /// swept at its edges and densely where `sys/mman.h` defines values.
 #[test]
@@ -75,7 +80,7 @@ fn every_other_advice_value_is_refused_naming_it() {
     let accepted = [MADV_FREE_REUSABLE, MADV_FREE_REUSE, MADV_ZERO];
     for v in (0..=64u32).chain([0x7fff_ffff, 0x8000_0000, 0xffff_fff9, u32::MAX]) {
         if accepted.contains(&v) { continue; }
-        let e = madvise_effect(v).unwrap_err();
+        let e = marked_what(madvise_effect(v).unwrap_err());
         assert!(e.starts_with(&format!("M47: unmeasured madvise advice {v}.")), "{v}: {e}");
     }
 }
@@ -102,7 +107,7 @@ fn every_flipped_or_truncated_policy_or_call_is_refused() {
             for bit in 0..8 {
                 let mut p = policy.to_vec();
                 p[i] ^= 1 << bit;
-                let e = mac_syscall_model(&p, call).unwrap_err();
+                let e = marked_what(mac_syscall_model(&p, call).unwrap_err());
                 assert!(e.starts_with(&format!("M47: unmodelled __mac_syscall policy {:?} call {call:#x}", String::from_utf8_lossy(&p))), "{e}");
             }
         }
@@ -119,7 +124,7 @@ fn sandbox_continuity_is_by_operation_and_refuses_the_rest() {
     assert_eq!(sandbox_check_continuity(b"syscall-unix"), Ok(14));
     assert_eq!(sandbox_check_continuity(b"file-write-data"), Ok(22));
     for op in [&b"syscall-uni"[..], b"syscall-unix2", b"file-read-data", b"", b"SYSCALL-UNIX"] {
-        let e = sandbox_check_continuity(op).unwrap_err();
+        let e = marked_what(sandbox_check_continuity(op).unwrap_err());
         assert!(e.starts_with(&format!("M47: unmeasured Sandbox operation {:?}", String::from_utf8_lossy(op))), "{e}");
     }
 }

@@ -43,11 +43,11 @@ fn an_unprotect_inside_a_jit_range_is_restamped_by_the_view_not_left_data() {
     assert!(b.ipa_is_exec(a + 0x4_0000) && b.ipa_is_exec(a + 0xf_c000),
         "protected view: the committed range is ATTR_CODE, not the ATTR_DATA unprotect stamped");
     assert!(!b.ipa_is_el0_writable(a + 0x4_0000), "and not writable");
-    b.sprr_write(WE);
+    b.sprr_write(WE).unwrap();
     assert_eq!(b.dbg_jit().view(), View::Rw, "the write-enable flipped the view");
     assert!(b.ipa_is_el0_writable(a + 0x4_0000) && !b.ipa_is_exec(a + 0x4_0000), "write-enabled: ATTR_DATA");
     assert!(b.ipa_is_noaccess(a + 0x3_c000), "the view never stamps a no-access page");
-    b.sprr_write(PR);
+    b.sprr_write(PR).unwrap();
     assert!(b.ipa_is_exec(a + 0x4_0000) && !b.ipa_is_el0_writable(a + 0x4_0000), "protected again");
     assert_eq!(b.threads().sprr_of(0), PR, "the register holds what was written, for the read-back");
 }
@@ -63,7 +63,7 @@ fn the_view_follows_the_running_thread_across_a_switch() {
     let mut child = b.save_ctx();
     child.regs.sp_el0 -= 0x2000;
     let tid = b.threads_mut().spawn(child, (0, 0));
-    b.sprr_write(WE);
+    b.sprr_write(WE).unwrap();
     assert!(b.ipa_is_el0_writable(a), "main's own write flips the view");
     b.switch_to_thread(tid);
     assert_eq!(b.threads().sprr_of(tid), 0, "the child was never write-enabled (R1)");
@@ -85,12 +85,14 @@ fn a_flush_with_the_step_bits_armed_does_not_step_the_stub() {
     assert_eq!(b.dbg_watch0_hw().2 & 1, 1, "MDSCR_EL1.SS restored for the step that armed it");
 }
 
-/// R2: only the commpage's two words are admitted. The refusal names the value and the pc.
+/// R2: only the commpage's two words are admitted. The refusal names the value and the pc. M50
+/// (B5): a wall in `memory`, returned below the trace as `Stop::Unsupported`, no longer a panic.
 #[test]
-#[should_panic(expected = "M48: SPRR write 0x1 at pc ")]
 fn an_inadmissible_sprr_value_is_refused_by_value() {
     let mut b = tb();
-    b.sprr_write(1);
+    let u = b.sprr_write(1).unwrap_err();
+    assert_eq!(u.category, retrace_arch::WallCategory::Memory);
+    assert!(u.what.starts_with("M48: SPRR write 0x1 at pc "), "{}", u.what);
 }
 
 /// Ruling T6-d: a munmap of a JIT range trims it, and the released pages go back to `ATTR_DATA`,
@@ -112,7 +114,7 @@ fn a_munmap_trims_a_jit_range_to_data_pages_and_a_fixed_map_over_one_is_refused(
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         b.guest_mmap(a + 0x4000, 0x4000, 3, ANON | FIXED)
     })).expect_err("a FIXED map over a MAP_JIT range must be refused");
-    let msg = refused.downcast_ref::<String>().expect("a formatted refusal");
+    let msg = retrace_arch::Unsupported::from_panic(refused.as_ref()).expect("a marked wall").what;
     assert!(msg.starts_with(&format!("M48: MAP_JIT range [{:#x}, {:#x}) overlapped by a FIXED mapping at ",
         a + 0x4000, a + 0x1_0000)), "{msg}");
     assert_eq!(b.dbg_jit().ranges(), &[(a + 0x4000, 0xc000)], "a refusal changes nothing");
@@ -136,7 +138,7 @@ fn an_mprotect_over_a_committed_jit_page_is_refused_by_value_and_changes_nothing
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         b.guest_mprotect(a + 0x8_0000, 0x4000, 0)
     })).expect_err("an mprotect over a committed MAP_JIT page must be refused");
-    let msg = refused.downcast_ref::<String>().expect("a formatted refusal");
+    let msg = retrace_arch::Unsupported::from_panic(refused.as_ref()).expect("a marked wall").what;
     assert!(msg.starts_with(&format!("M48: MAP_JIT mprotect [{:#x}, +0x4000) prot 0x0 over the committed extent \
         [{:#x}, {:#x}): native answers EACCES (measured, t6-jitprobe), unmodelled", a + 0x8_0000, a + 0x4_0000,
         a + 0x10_0000)), "{msg}");

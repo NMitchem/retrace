@@ -1998,11 +1998,11 @@ pub fn madvise_effect(advice: u32) -> Result<MadviseEffect, String> {
     match advice {
         MADV_FREE_REUSABLE | MADV_FREE_REUSE => Ok(MadviseEffect::NoOp),
         MADV_ZERO => Ok(MadviseEffect::Zero),
-        _ => Err(format!(
+        _ => Err(wall(WallCategory::Memory, format!(
             "M47: unmeasured madvise advice {advice}. Modelled, from t0 M1(a)'s census: \
              FREE_REUSABLE (7) and FREE_REUSE (8) as no-ops and ZERO (11) as a zero-fill (M47 §3c). \
              Measure its native effect before modelling it; forwarded, an advice acts on retrace's \
-             own backing of the guest range")),
+             own backing of the guest range"))),
     }
 }
 
@@ -2051,11 +2051,11 @@ pub fn mac_syscall_model(policy: &[u8], call: u32) -> Result<MacCall, String> {
         (b"AMFI", AMFI_DYLD_POLICY_SELF) => Ok(MacCall::AmfiDyldPolicy),
         (b"Sandbox", SANDBOX_CHECK) => Ok(MacCall::SandboxCheck),
         (b"Sandbox", SANDBOX_CONTAINER_PATH) => Ok(MacCall::SandboxContainerPath),
-        _ => Err(format!(
+        _ => Err(wall(WallCategory::Syscalls, format!(
             "M47: unmodelled __mac_syscall policy {:?} call {call:#x}. Modelled: (\"AMFI\", 0x5a), \
              (\"Sandbox\", 0x2) and (\"Sandbox\", 0x4) (M47 §3d). A policy's argument struct may carry \
              pointers the policy writes through, so it is never forwarded (ArgKind::NestedDest); \
-             measure this one's struct and its native answer before modelling it", String::from_utf8_lossy(policy))),
+             measure this one's struct and its native answer before modelling it", String::from_utf8_lossy(policy)))),
     }
 }
 
@@ -2068,11 +2068,11 @@ pub fn sandbox_check_continuity(operation: &[u8]) -> Result<u64, String> {
     match operation {
         b"syscall-unix" => Ok(14),
         b"file-write-data" => Ok(22),
-        _ => Err(format!(
+        _ => Err(wall(WallCategory::Syscalls, format!(
             "M47: unmeasured Sandbox operation {:?}. Measured: \"syscall-unix\" (dyld's \
              sandbox_check_common, EFAULT 14) and \"file-write-data\" (libsystem_sandbox's \
              rootless_check_trusted_internal, EINVAL 22) (t0 M2, R7). Measure what the pre-M47 \
-             forward returned for this one before adding it", String::from_utf8_lossy(operation))),
+             forward returned for this one before adding it", String::from_utf8_lossy(operation)))),
     }
 }
 

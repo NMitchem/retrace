@@ -31,6 +31,7 @@ fn wild_store_outside_any_reservation_stays_fatal() {
         // (Stop::Other), NEVER the INNER stage-1 crash arm — this guards that classification.
         Stop::Fault { pc, esr, far } =>
             panic!("wild store must stay a stage-2 abort (Stop::Other), not Stop::Fault: pc={pc:#x} esr={esr:#x} far={far:#x}"),
+        Stop::Unsupported(u) => panic!("{u:?}"),
         Stop::Step => unreachable!("run() does not single-step"),
     }
 }

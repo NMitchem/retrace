@@ -235,8 +235,9 @@ fn a_oneshot_knote_is_delivered_once_then_nothing() {
 /// landmark readable before it (so the empty-kevent check below is not vacuous).
 fn refused(what: &str, why: &str) {
     let (rec, trace) = util::record_dynamic_args(retrace_guest::KQ_DYN, &["bad", what]);
-    assert_eq!(rec.code, 70, "{what}: the recorder must stop at the refusal (70: the bug banner, until M50 makes it a wall). stderr:\n{}", rec.stderr);
-    assert!(rec.stderr.contains(why), "{what}: the refusal must say {why:?}. stderr:\n{}", rec.stderr);
+    assert_eq!(rec.code, 4, "{what}: the recorder must stop at the wall. stderr:\n{}", rec.stderr);
+    let line = rec.stderr.lines().find(|l| l.starts_with("retrace: unsupported: ")).unwrap_or_else(|| panic!("{what}: no wall line:\n{}", rec.stderr));
+    assert!(line.contains(why), "{what}: the refusal must say {why:?}. stderr:\n{}", rec.stderr);
     let evs = events(&trace);
     assert!(evs.iter().any(|(_, e)| matches!(e, Event::Syscall { num: 362, .. })),
         "{what}: the kqueue() landmark before the refusal must be readable ({} events)", evs.len());

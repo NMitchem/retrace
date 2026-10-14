@@ -84,6 +84,25 @@ pub fn wall(category: WallCategory, what: impl Into<String>) -> String {
     Unsupported::new(category, what).marked()
 }
 
+/// `<ctx>: <e>`, keeping a wall a wall: context added to a marked string goes inside the marker, so
+/// the record loop still reads the category. Every `map_err` that adds context on a wall row's path
+/// uses it.
+pub fn in_context(ctx: &str, e: String) -> String {
+    match Unsupported::from_marked(&e) {
+        Some(u) => wall(u.category, format!("{ctx}: {}", u.what)),
+        None => format!("{ctx}: {e}"),
+    }
+}
+
+/// Test support: the text of a marked wall, for assertions that read what a refusal says. Panics on
+/// an unmarked string, so a test that expects a wall fails if its site was never marked.
+pub trait Unmark { fn unmark(self) -> String; }
+impl Unmark for String {
+    fn unmark(self) -> String {
+        Unsupported::from_marked(&self).unwrap_or_else(|| panic!("not a marked wall: {self}")).what
+    }
+}
+
 /// A deep shared helper's refusal (spec §3c B4): a panic whose payload is the marked string, so
 /// every `#[should_panic(expected = …)]` that names the message still matches it. Every call site
 /// is on `crates/retrace-box/tests/refuse-sites.txt`.
@@ -183,6 +202,9 @@ mod tests {
         assert_eq!(Unsupported::from_marked(&format!("refused on replay: {m}")), None,
             "the marker must start the string: context added in front makes it a bug's text");
         assert_eq!(Unsupported::from_marked("[retrace-wall:nonsense] x"), None, "an unknown anchor is no wall");
+        assert_eq!(Unsupported::from_marked(&in_context("decode", m.clone())),
+            Some(Unsupported::new(WallCategory::MachMessages, "decode: mach_msg2 msgh_id 205")));
+        assert_eq!(in_context("decode", "short read".into()), "decode: short read");
     }
 
     #[test]

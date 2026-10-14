@@ -4,6 +4,7 @@
 //! context a wake writes, that a refusal changes nothing, and the checkpoint carry. No wait here is
 //! timed, because a deadline reads the guest clock and a static box has no commpage; `condvar_e2e`
 //! covers deadlines end to end.
+use retrace_arch::Unmark;
 use retrace_arch::{PSTATE_C, SYS_PSYNCH_CVBROAD, SYS_PSYNCH_CVSIGNAL, SYS_PSYNCH_CVWAIT};
 use retrace_box::thread::{BlockReason, ThreadCtx, ThreadState};
 use retrace_box::Box_;
@@ -38,7 +39,7 @@ fn block_in_cvwait(b: &mut Box_, l: u32, s: u32) {
     assert_eq!(b.guest_psynch(SYS_PSYNCH_CVWAIT, wait(l, s)), Ok(0));
     b.set_x0_err_and_return(0, false);
     assert_eq!(b.threads().state_of(tid), ThreadState::Blocked(BlockReason::Cv { addr: CV, deadline: None }));
-    b.settle_schedule();
+    b.settle_schedule().unwrap();
 }
 
 /// A saved context that already reads 0 with carry clear cannot show whether a wake wrote it, so
@@ -91,15 +92,15 @@ fn every_unmodelled_psynch_call_is_refused_by_value_with_nothing_changed() {
     let model = b.dbg_psynch().clone();
     for (num, name) in [(301, "psynch_mutexwait"), (302, "psynch_mutexdrop"), (312, "psynch_cvclrprepost"),
                         (306, "psynch_rw_rdlock"), (297, "psynch_rw_longrdlock")] {
-        let e = b.guest_psynch(num, [CV, 0x100, 0, 0, 0, 0, 0, 0]).unwrap_err();
+        let e = b.guest_psynch(num, [CV, 0x100, 0, 0, 0, 0, 0, 0]).unwrap_err().unmark();
         assert!(e.starts_with(&format!("M48: psynch {name} ({num}) is not modelled")), "{e}");
     }
     let mut mutexed = wait(0x200, 0);
     mutexed[3] = 0x6000_1000;
-    let e = b.guest_psynch(SYS_PSYNCH_CVWAIT, mutexed).unwrap_err();
+    let e = b.guest_psynch(SYS_PSYNCH_CVWAIT, mutexed).unwrap_err().unmark();
     assert!(e.starts_with("M48: psynch psynch_cvwait") && e.contains("with mutex 0x60001000"), "{e}");
     b.threads_mut().pend(0, 30);
-    let e = b.guest_psynch(SYS_PSYNCH_CVSIGNAL, signal(0x100, 0, 0)).unwrap_err();
+    let e = b.guest_psynch(SYS_PSYNCH_CVSIGNAL, signal(0x100, 0, 0)).unwrap_err().unmark();
     assert!(e.starts_with("M48: a signal is pending on thread 0"), "{e}");
     assert_eq!(b.dbg_psynch(), &model, "no refusal touched the model");
     assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Cv { addr: CV, deadline: None }));
