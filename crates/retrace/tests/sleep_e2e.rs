@@ -234,7 +234,7 @@ fn every_unmodelled_sleep_shape_stops_the_recorder_naming_it() {
         let (code, out) = native(&["refuse", what]);
         assert_eq!((code, out), (0, format!("{native_line}\nrefuse {what} done\n")), "{what}: native returns");
         let (code, out, err, trace) = record(&["refuse", what]);
-        assert_eq!(code, Some(101), "{what}: the recorder must stop at the refusal (None: the bound fired). stderr:\n{err}");
+        assert_eq!(code, Some(70), "{what}: the recorder must stop at the refusal (70: the bug banner, until M50 makes it a wall; None: the bound fired). stderr:\n{err}");
         assert!(err.contains(why), "{what}: {why:?} in stderr:\n{err}");
         assert!(out.is_empty(), "{what}: the guest must not run past the refusal: {}", String::from_utf8_lossy(&out));
         assert!(semwaits(&trace).is_empty(), "{what}: a refused call is never recorded");
@@ -256,14 +256,14 @@ fn a_signal_to_a_sleeping_thread_is_refused_at_the_wake_on_both_sides() {
     let (code, out) = native(&["sigsleeper"]);
     assert_eq!((code, out.as_str()), (0, "sigsleeper woke left=1 got=1\nsigsleeper done\n"), "native");
     let (code, out, err, trace) = record(&["sigsleeper"]);
-    assert_eq!(code, Some(101), "the recorder must stop at the wake (None: the bound fired). stderr:\n{err}");
+    assert_eq!(code, Some(70), "the recorder must stop at the wake (70: the bug banner, until M50 makes it a wall; None: the bound fired). stderr:\n{err}");
     assert!(err.contains("M49: sleep of thread 1 reached its deadline with a signal pending (set 0x20000000)"), "{err}");
     assert!(out.is_empty(), "nothing ran past the refusal: {}", String::from_utf8_lossy(&out));
     let sleeps = semwaits(&trace);
     assert_eq!(sleeps.iter().map(|l| (l.1, l.2[4], l.2[5])).collect::<Vec<_>>(), [(0, 0, 100_000_000), (1, 1, 0)],
         "main's 100 ms, then the sleeper's 1 s");
     let (code, _, err) = cli(&["replay", trace.to_str().unwrap()]);
-    assert_eq!(code, Some(101), "replay reaches the same wake (below the trace): {err}");
+    assert_eq!(code, Some(70), "replay reaches the same wake (70: the bug banner, until M50 makes it a wall; below the trace): {err}");
     assert!(err.contains("M49: sleep of thread 1 reached its deadline with a signal pending"), "{err}");
 }
 

@@ -65,7 +65,7 @@ fn an_unmeasured_shape_stops_the_recorder_naming_what_differs() {
         ("badptr", "the change list's entry read 0 of 72 bytes: it does not fully translate"),
     ] {
         let (rec, trace) = util::record_dynamic_args(retrace_guest::KQINIT_DYN, &[mode]);
-        assert_eq!(rec.code, 101, "{mode}: the recorder must stop at the refusal (a panic). stderr:\n{}", rec.stderr);
+        assert_eq!(rec.code, 70, "{mode}: the recorder must stop at the refusal (70: the bug banner, until M50 makes it a wall). stderr:\n{}", rec.stderr);
         assert!(rec.stderr.contains(&format!("M46: unmeasured kevent_qos shape: {why}")),
             "{mode}: the refusal must name {why:?}. stderr:\n{}", rec.stderr);
         assert!(kevent_events(&trace).is_empty(), "{mode}: a refused call appends no landmark");

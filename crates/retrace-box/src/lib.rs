@@ -1355,6 +1355,18 @@ pub fn subtract_range_for_test(table: &mut Vec<(u64, u64)>, addr: u64, len: u64)
 /// fifth field pushed the inline tuple over clippy's type-complexity threshold.
 type Window = (u64, usize, Vec<u8>, Vec<u8>, usize);
 
+/// M50 (spec §3b, R2): whether this process may create a VM. The CLI asks before it loads a guest
+/// or opens a trace, so a missing `com.apple.security.hypervisor` entitlement is one line and exit
+/// 2, not a panic in `Vm::create().expect`. The VM is destroyed before this returns: one VM per
+/// process, and the caller's own comes next.
+pub fn hypervisor_check() -> Result<(), String> {
+    match Vm::create() {
+        Ok(vm) => { drop(vm); Ok(()) }
+        Err(e) => Err(format!("hv_vm_create returned {:#x}{}", e.0,
+            if e.0 == hv_sys::raw::HV_DENIED as u32 { " (HV_DENIED)" } else { "" })),
+    }
+}
+
 impl Box_ {
     // Promote every 32 MiB L2 block covering [ipa, ipa+len) from a data BLOCK to an L3 TABLE
     // (identity-filled with ATTR_DATA), then set the pages this range covers to `attr`. A block

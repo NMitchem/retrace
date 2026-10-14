@@ -11,7 +11,7 @@
 //!   fault. The wrong kind is a named `MISMATCH terminal kind`, never a pass.
 //!
 //! Otherwise the outcome is the first difference, as one line (`judge`): the recorder's `RECORD
-//! ERROR` line, `PANIC` and the recorder's or replayer's panic message, `DIVERGENCE` and a replay's
+//! ERROR` line, `BUG` and the bug banner's message, `DIVERGENCE` and a replay's
 //! detail, `TIMEOUT`, or `MISMATCH` and what differed, with its addresses masked (`mask_addresses`).
 //! `Expect::Wall` pins a prefix of that line.
 //!
@@ -63,7 +63,7 @@ const ROWS: &[Row] = &[
     Row { name: "fc_nanosleep", bin: retrace_guest::FC_NANOSLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_mutex", bin: retrace_guest::FC_MUTEX, args: &[],
-          expect: Expect::Wall("PANIC record: M48: psynch psynch_mutexwait (301) is not modelled") },
+          expect: Expect::Wall("BUG record: M48: psynch psynch_mutexwait (301) is not modelled") },
     Row { name: "fc_fileio", bin: retrace_guest::FC_FILEIO, args: &[], expect: Expect::Pass },
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"],
           expect: Expect::Wall("MISMATCH record stdout at line 4: native \"FC_ENV_PROBE=firstcontact\\n\", record \"FC_ENV_PROBE=(unset)\\n\"") },
@@ -81,9 +81,9 @@ const ROWS: &[Row] = &[
     Row { name: "fc_rs_sleep", bin: retrace_guest::FC_RS_SLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_rs_tests", bin: retrace_guest::FC_RS_TESTS, args: &[],
-          expect: Expect::Wall("PANIC record: M18 Stage 2b: mach semaphore trap 0xffffffffffffffda (-38) reached the generic forward arm") },
+          expect: Expect::Wall("BUG record: M18 Stage 2b: mach semaphore trap 0xffffffffffffffda (-38) reached the generic forward arm") },
     Row { name: "fc_rs_tests_fail", bin: retrace_guest::FC_RS_TESTS_FAIL, args: &[],
-          expect: Expect::Wall("PANIC record: M18 Stage 2b: mach semaphore trap 0xffffffffffffffda (-38) reached the generic forward arm") },
+          expect: Expect::Wall("BUG record: M18 Stage 2b: mach semaphore trap 0xffffffffffffffda (-38) reached the generic forward arm") },
     // Swift (swiftc, only where it runs: R11).
     Row { name: "fc_sw_hello", bin: retrace_guest::FC_SW_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_throw", bin: retrace_guest::FC_SW_THROW, args: &[], expect: Expect::Pass },
@@ -94,9 +94,9 @@ const ROWS: &[Row] = &[
     Row { name: "fc_sw_sleep", bin: retrace_guest::FC_SW_SLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_sw_gcd", bin: retrace_guest::FC_SW_GCD, args: &[],
-          expect: Expect::Wall("PANIC record: M33: syscall 375 (375) has no arg_kinds row") },
+          expect: Expect::Wall("BUG record: M33: syscall 375 (375) has no arg_kinds row") },
     Row { name: "fc_sw_async", bin: retrace_guest::FC_SW_ASYNC, args: &[],
-          expect: Expect::Wall("PANIC record: M18 Stage 2b: unmeasured workq_kernreturn opcode 0x30") },
+          expect: Expect::Wall("BUG record: M18 Stage 2b: unmeasured workq_kernreturn opcode 0x30") },
 ];
 
 /// Each run's bound. A phase that hangs fails its row rather than stalling the gate; t0 M1 measured
@@ -183,6 +183,16 @@ fn first_difference(a: &str, b: &str, la: &str, lb: &str) -> Option<String> {
     Some(format!("at line {}: {la} {}, {lb} {}", n + 1, show(x.get(n)), show(y.get(n))))
 }
 
+/// The message of a retrace bug: the line after the banner's "please report" line (M50 §3b), which
+/// is the panic's own message and location. Since M50's hook the banner replaces Rust's
+/// `panicked at` line, which `panic_message` still reads for a panic the hook never saw.
+fn bug_message(stderr: &str) -> Option<String> {
+    let mut lines = stderr.lines();
+    lines.find(|l| l.starts_with("retrace: internal error"))?;
+    lines.next()?;
+    Some(lines.next().unwrap_or("").trim().to_owned())
+}
+
 /// The message of a recorder or replayer panic: the line after `panicked at crates/`, which is
 /// anchored on retrace's own sources so a Rust guest's own panic is never taken for one (the
 /// apple-sweep's anchor).
@@ -221,7 +231,7 @@ fn judge(ncode: i32, nout: &[u8], rec: &util::Bounded, trace: &str) -> Outcome {
     let wall = Outcome::Wall;
     let Some(rcode) = rec.code else { return wall("TIMEOUT record".into()) };
     if let Some(l) = rec.stderr.lines().find(|l| l.starts_with("RECORD ERROR: ")) { return wall(l.to_owned()); }
-    if let Some(m) = panic_message(&rec.stderr) { return wall(format!("PANIC record: {m}")); }
+    if let Some(m) = bug_message(&rec.stderr).or_else(|| panic_message(&rec.stderr)) { return wall(format!("BUG record: {m}")); }
     if rcode != ncode { return wall(format!("MISMATCH record exit {rcode}, native {ncode}")); }
     if let Some(d) = first_difference(&canonical(nout), &canonical(&rec.stdout), "native", "record") {
         return wall(format!("MISMATCH record stdout {d}"));
@@ -236,7 +246,7 @@ fn judge(ncode: i32, nout: &[u8], rec: &util::Bounded, trace: &str) -> Outcome {
         if let Some(l) = rp.stderr.lines().find(|l| l.starts_with("DIVERGENCE at landmark ")) {
             return wall(format!("DIVERGENCE replay {i}: {}", l.split_once(": ").map_or(l, |(_, d)| d)));
         }
-        if let Some(m) = panic_message(&rp.stderr) { return wall(format!("PANIC replay {i}: {m}")); }
+        if let Some(m) = bug_message(&rp.stderr).or_else(|| panic_message(&rp.stderr)) { return wall(format!("BUG replay {i}: {m}")); }
         if pcode != rcode { return wall(format!("MISMATCH replay {i} exit {pcode}, record {rcode}")); }
         if let Some(d) = first_difference(&rout, &String::from_utf8_lossy(&rp.stdout), "record", "replay") {
             return wall(format!("MISMATCH replay {i} stdout {d}"));

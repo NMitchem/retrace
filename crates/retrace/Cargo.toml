@@ -14,6 +14,8 @@ retrace-guest = { path = "../retrace-guest" }
 # M19: the debug CLI reads the recording's opening Snapshot to build its symbol table, so the trace
 # format is now a real dependency of the binary and not only of its tests.
 retrace-trace = { path = "../retrace-trace" }
+# M50: the CLI's panic hook and its top-level catch tell a wall from a bug by `Unsupported`.
+retrace-arch = { path = "../retrace-arch" }
 
 [dev-dependencies]
 retrace-guest = { path = "../retrace-guest" }

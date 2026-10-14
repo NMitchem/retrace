@@ -1,3 +1,8 @@
+// M50 (spec §3c): the wall types and the lines a user sees, and the SDK's syscall names.
+mod sysnames;
+mod wall;
+pub use wall::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ec { Svc, Hvc, SysReg, SoftStep, Breakpoint, Watchpoint, DataAbort, InstrAbort, Other(u8) }
 

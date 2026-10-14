@@ -131,7 +131,7 @@ fn a_repeating_timer_ticks_three_times_and_replays() {
 #[test]
 fn a_wall_clock_timer_is_refused_before_it_arms() {
     let (rec, trace) = util::record_dynamic_args(retrace_guest::AFTER_DYN, &["wall"]);
-    assert_eq!(rec.code, 101, "the recorder must stop at the refusal. stderr:\n{}", rec.stderr);
+    assert_eq!(rec.code, 70, "the recorder must stop at the refusal (70: the bug banner, until M50 makes it a wall). stderr:\n{}", rec.stderr);
     assert!(rec.stderr.contains("M46: unmeasured kevent_qos shape: changelist[0].filter is 0xfff8"),
         "the refusal must name the calendar-change registration's filter, -8 EVFILT_MACHPORT (t0 M3). \
          stderr:\n{}", rec.stderr);

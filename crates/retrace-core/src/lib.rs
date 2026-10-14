@@ -9,6 +9,7 @@ use retrace_arch::SYS_EXIT;
 pub use retrace_box::thread::{BlockReason, ThreadState, ThreadCtx};
 pub use retrace_box::{Excl, SetBy};
 pub use retrace_box::EXE_BASE;
+pub use retrace_box::hypervisor_check;
 
 /// M15: one row of the debugger's thread listing.
 #[derive(Clone, Debug, PartialEq)]
