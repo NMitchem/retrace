@@ -33,10 +33,12 @@ mod util;
             installed for the signal the guard fault maps to — signal 10, SIGBUS — so the \
             disposition check passes, but the faulting thread has that signal BLOCKED, and \
             the assert in retrace-core's `record_box` (retrace-core/src/lib.rs:216 as of M48's close) \
-            asserts rather than guessing: 'raising blocked signal 10 \
-            synchronously is not modelled: a fault cannot be deferred, POSIX leaves it undefined, \
-            and Darwin force-delivers. M11 models no pending set, so implement one — and revisit \
-            sigpending's always-empty answer — before a guest needs this.' A guest now needs it. \
+            refuses rather than guessing, and since M50 the recorder prints that refusal as one line and exits 4: \
+            'retrace: unsupported: raising blocked signal 10 synchronously is not modelled: a fault \
+            cannot be deferred, POSIX leaves it undefined, and Darwin force-delivers. M11 models no \
+            pending set, so implement one — and revisit sigpending's always-empty answer — before a \
+            guest needs this. - see …#signals' (measured at M50 Task 6, \
+            docs/sweep-evidence/2026-10-14-m50/parked-stackoverflow_rust_e2e.log). A guest now needs it. \
             Clearing this means giving M11 a pending set for synchronously-raised blocked signals \
             and revisiting sigpending, which is a signal-model milestone and not a stack one. \
             UN-IGNORE when that lands. The progress M21 did make is not left ungated — see \
