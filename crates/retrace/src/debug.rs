@@ -394,6 +394,15 @@ impl<'a> Exec<'a> {
     /// Open at the recording start: P = (1, 0), the first landmark's window, step 0.
     pub(crate) fn new(trace: &'a Path) -> Result<Self, String> {
         let mut cache = CheckpointCache::new(CHECKPOINT_BYTE_BUDGET, CHECKPOINT_COST_GATE_STEPS);
+        // M50 R5: an incomplete recording (no exit, crash or fatal signal at its end: it stopped at a
+        // wall, or its recorder was killed) is refused at the door, for `debug` and `gdbserver` alike,
+        // rather than failing somewhere inside the session.
+        if !cache.decoded(trace)?.is_complete() {
+            return Err(format!("{} is an incomplete recording: it has no exit, crash or fatal signal at \
+                its end, because it stopped at a wall or its recorder was killed. Debugging an incomplete \
+                recording is not supported yet - see {}#incomplete-recordings",
+                trace.display(), retrace_arch::WALLS_URL));
+        }
         let session = checkpointed_seek(trace, &mut cache, 1, 0)?;
         // M19: build the symbol table from the OPENING snapshot, once. It is the image as loaded,
         // which is what every pc in the session refers to. Any failure here — unreadable trace, no
@@ -733,6 +742,7 @@ impl<'a> Exec<'a> {
             // presented as one. Calling a SIGABRT a fault is the same lie that got Event::Crash
             // reuse rejected in the spec, and the debug output would carry it forever.
             Outcome::Signal { sig } => line(out, format_args!("guest terminated by signal {sig}"))?,
+            Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("M50 R5: a debugger opens only a complete recording, and replay never refuses one"),
         }
         let t = self.sess().landmark();
         let kf = self.probe_window_len(t)?; // drops the live session (one VM per process)
@@ -1087,6 +1097,7 @@ impl<'a> Exec<'a> {
                     Outcome::Exit { code } => format!("the guest exited (code {code}) on thread {by}"),
                     Outcome::Crash { pc, esr, far } => format!("thread {by} crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"),
                     Outcome::Signal { sig } => format!("the guest was terminated by signal {sig} on thread {by}"),
+                    Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("M50 R5: a debugger opens only a complete recording, and replay never refuses one"),
                 };
                 Halt::Refused(format!("the recording ended ({what}) before thread {} ran{}",
                     t + 1, if again { " again" } else { "" }))

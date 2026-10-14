@@ -5,7 +5,7 @@ use std::path::Path;
 use std::rc::Rc;
 use retrace_box::{Box_, Stage2, Stop};
 use retrace_trace::{Writer, Event, Region};
-use retrace_arch::SYS_EXIT;
+use retrace_arch::{wall, Unsupported, WallCategory, SYS_EXIT};
 pub use retrace_box::thread::{BlockReason, ThreadState, ThreadCtx};
 pub use retrace_box::{Excl, SetBy};
 pub use retrace_box::EXE_BASE;
@@ -60,13 +60,21 @@ fn is_usrstack64_mib(b: &retrace_box::Box_, args: [u64; 8]) -> bool {
 
 /// How a recorded (or replayed) run ended: a clean exit, or a guest synchronous fault (M6). The
 /// triple is deterministic — identical guest state faults identically — so replay byte-compares it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// M50: not `Copy`, since it can carry a wall's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Exit { code: u64 },
     Crash { pc: u64, esr: u64, far: u64 },
     /// M11: terminated by a signal the guest raised on itself, whose disposition resolved to the
     /// default fatal action. Terminal in the same shape M6 gave a fault.
     Signal { sig: u64 },
+    /// M50 (spec §3b, C1): the recording stopped at a wall. The trace has every landmark before it
+    /// and no terminal event; the summary carries the guest's output up to the wall. Record only.
+    Refused(Unsupported),
+    /// M50 (C2): replay reached the end of a recording that has no terminal event, which stopped
+    /// there at a wall or because its recorder was killed. The string says where: the wall's `what`
+    /// when replay met the wall there itself, else `landmark <n> (pc <hex>)`. Replay only.
+    Incomplete(String),
 }
 
 /// `fall_throughs` is the EL1 vector fall-through count (M23 t1/t2). It is carried out here rather
@@ -164,6 +172,13 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
     w.append(&b.snapshot()).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
 
     let mut stdout = Vec::new();
+    // M50 §3c (C1): the record loop runs inside this catch. A wall ends it either as a marked `Err`
+    // (a record arm, a box method) or as a marked panic (a `refuse!` in code record and replay share),
+    // and both become `Outcome::Refused` here, so the guest's output so far travels in the summary and
+    // the trace keeps every landmark before the wall. Anything unmarked is no wall: an `Err` is trace
+    // I/O, which returns as before, and a panic is a retrace bug, which resumes unwinding to the CLI's
+    // hook and exit 70. The body keeps its pre-M50 indentation so the diff is the boundary alone.
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Outcome, String> {
     let outcome;
     // Bring-up diagnostic (RETRACE_TRACE=1): log every trap the record loop dispatches, so a
     // forwarded syscall/mach-trap that misbehaves is identifiable from the last line printed.
@@ -714,7 +729,8 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     }
                     machmsg::Route::Unsupported(why) => {
                         if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
-                        return Err(format!("unsupported mach_msg2 at pc {:#x}: {why}", b.position()));
+                        // M50 §3c: a message retrace does not route is a wall in `mach-messages`.
+                        return Err(wall(WallCategory::MachMessages, format!("mach_msg2 at pc {:#x}: {why}", b.position())));
                     }
                 }
             }
@@ -1517,15 +1533,33 @@ fn record_box(mut b: Box_, trace_path: &Path) -> Result<RecordSummary, String> {
                     if trace_log { eprintln!("[convert] pc={pc:#x} far={far:#x} esr={esr:#x}"); }
                     continue;
                 }
-                Stage2::Unhandled(why) => {
+                Stage2::Wall(u) => {
                     if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
-                    return Err(why);
+                    return Err(u.marked());
+                }
+                // M50 §3c: an exception only retrace's own code takes is a bug, with the banner.
+                Stage2::Bug(why) => {
+                    if trace_log { eprintln!("[regs]\n{}\n[bt]\n{}", b.dbg_regs(), b.dbg_backtrace(24)); }
+                    panic!("{why}");
                 }
             },
             // Stop::Step is only produced by Box_::step(); record_box drives run(), never step().
             Stop::Step => unreachable!("record_box drives run(), which never single-steps"),
         }
     }
+    Ok(outcome)
+    }));
+    let outcome = match ran {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(e)) => match Unsupported::from_marked(&e) {
+            Some(u) => Outcome::Refused(u),
+            None => return Err(e),
+        },
+        Err(payload) => match Unsupported::from_panic(payload.as_ref()) {
+            Some(u) => Outcome::Refused(u),
+            None => std::panic::resume_unwind(payload),
+        },
+    };
     Ok(RecordSummary { stdout, outcome, events: count, fall_throughs: b.fall_throughs() })
 }
 
@@ -1586,6 +1620,14 @@ impl DecodedTrace {
         Ok(DecodedTrace { events: events.into(), truncated })
     }
     pub fn events(&self) -> &[Event] { &self.events }
+    /// M50 §3c (R5): whether the recording has its end. See `trace_complete`.
+    pub fn is_complete(&self) -> bool { trace_complete(&self.events) }
+}
+
+/// M50 §3c (R5, C2): whether a recording has its end, a terminal event (an exit, a crash or a fatal
+/// signal). A recording that stopped at a wall, or whose recorder was killed, has none.
+fn trace_complete(events: &[Event]) -> bool {
+    events.iter().any(|e| matches!(e, Event::Exit { .. } | Event::Crash { .. } | Event::Signal { .. }))
 }
 
 /// A resumable replay engine. `open` restores the guest from a trace's leading snapshot; `advance`
@@ -1637,6 +1679,31 @@ pub enum Advance {
 }
 
 impl ReplaySession {
+    /// M50 §3c (C2): what replay makes of a stop it cannot continue past. At the end of a recording
+    /// with no terminal event the recording itself stopped here, at a wall or because its recorder
+    /// was killed, so replay ends here too, as `Outcome::Incomplete`. Anywhere else it is a
+    /// divergence (exit 3), as it always was, with a wall's marker made readable.
+    fn end_or_diverge(&mut self, mut d: Divergence) -> Result<ReplayReport, Divergence> {
+        let wall = Unsupported::from_marked(&d.detail);
+        // M50 (C2): a wall met while replaying the recording's LAST landmark is where the recording
+        // stopped too. Some record arms append their landmark and refuse after it (the unmask arm's
+        // `take_pending_delivery`), so replay meets the same wall one step before the end.
+        let at_end = self.idx >= self.events.len()
+            || (wall.is_some() && self.idx + 1 == self.events.len());
+        if at_end && !trace_complete(&self.events) {
+            let at = match wall {
+                Some(u) => u.what,
+                None => format!("landmark {} (pc {:#x})", d.landmark, d.pc),
+            };
+            return Ok(ReplayReport { stdout: std::mem::take(&mut self.stdout), outcome: Outcome::Incomplete(at),
+                                     fall_throughs: self.b.fall_throughs() });
+        }
+        if let Some(u) = wall {
+            d.detail = format!("refused on replay, though the recording continued past it: {}", u.what);
+        }
+        Err(d)
+    }
+
     pub fn open(trace_path: &Path) -> Result<Self, String> {
         Self::open_decoded(&DecodedTrace::load(trace_path)?)
     }
@@ -3217,7 +3284,11 @@ impl ReplaySession {
                     // returns the `Stop::Fault` the arm above mirrors.
                     match self.b.resolve_stage2(esr) {
                         Stage2::Resolved { .. } | Stage2::Converted { .. } => continue,
-                        Stage2::Unhandled(why) =>
+                        // M50 C2: at the end of an incomplete recording `replay()` reads the marker as
+                        // where the recording stopped; anywhere else it is the divergence it always was.
+                        Stage2::Wall(u) =>
+                            return Err(Divergence { landmark: self.idx, pc: self.b.pc(), detail: u.marked() }),
+                        Stage2::Bug(why) =>
                             return Err(Divergence { landmark: self.idx, pc: self.b.pc(), detail: why }),
                     }
                 }
@@ -3442,7 +3513,8 @@ impl ReplaySession {
                         // vector's `hvc`, so this reports what the `Stop::Fault` arm below reports.
                         Stage2::Converted { pc, far, .. } => return Err(format!(
                             "guest crashed at step {done}/{k}: pc={pc:#x} far={far:#x}")),
-                        Stage2::Unhandled(why) => return Err(format!("fault during step {done}/{k}: {why}")),
+                        Stage2::Wall(u) => { let why = u.line(); return Err(format!("fault during step {done}/{k}: {why}")) }
+                        Stage2::Bug(why) => return Err(format!("fault during step {done}/{k}: {why}")),
                     },
                     // The window ends after exactly `done` instructions — name that length; the
                     // window-ending trap is left unconsumed (the guest stays parked at it).
@@ -3488,7 +3560,8 @@ impl ReplaySession {
                         // M49 F2 (Ruling T3-c): as `step_insns`.
                         Stage2::Converted { pc, far, .. } => return Err(format!(
                             "guest crashed during a watch-aware step: pc={pc:#x} far={far:#x}")),
-                        Stage2::Unhandled(why) => return Err(format!("fault during a watch-aware step: {why}")),
+                        Stage2::Wall(u) => { let why = u.line(); return Err(format!("fault during a watch-aware step: {why}")) }
+                        Stage2::Bug(why) => return Err(format!("fault during a watch-aware step: {why}")),
                     }
                 }
                 Stop::Syscall { .. } => return Ok(Stepped::AtTrap),
@@ -3519,7 +3592,8 @@ impl ReplaySession {
                         Stage2::Resolved { .. } => continue,
                         // M49 F2 (Ruling T3-c): a converted fault is a real guest fault; nothing retired.
                         Stage2::Converted { .. } => return Ok(Armed::Fault),
-                        Stage2::Unhandled(why) => return Err(format!("fault during an armed step: {why}")),
+                        Stage2::Wall(u) => { let why = u.line(); return Err(format!("fault during an armed step: {why}")) }
+                        Stage2::Bug(why) => return Err(format!("fault during an armed step: {why}")),
                     }
                 }
                 Stop::Syscall { .. } => return Ok(Armed::AtTrap),
@@ -3541,7 +3615,8 @@ impl ReplaySession {
                     Stage2::Resolved { .. } => continue,
                     // M49 F2 (Ruling T3-c): a converted fault ends the window as a stage-1 crash does.
                     Stage2::Converted { .. } => return Ok(n),
-                    Stage2::Unhandled(why) => return Err(format!("fault at step {n}: {why}")),
+                    Stage2::Wall(u) => { let why = u.line(); return Err(format!("fault at step {n}: {why}")) }
+                    Stage2::Bug(why) => return Err(format!("fault at step {n}: {why}")),
                 },
                 Stop::Syscall { .. } => return Ok(n),
                 // window_len_here: the crash ENDS the final window — its length is the count of
@@ -3744,7 +3819,19 @@ pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
     let mut s = ReplaySession::open(trace_path)
         .map_err(|e| Divergence { landmark: 0, pc: 0, detail: e })?;
     loop {
-        let adv = s.advance()?;
+        // M50 §3c (C2): a wall's panic in code record and replay share is caught here, as
+        // `record_box` catches it, and every stop replay cannot continue past goes to `end_or_diverge`.
+        let adv = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.advance())) {
+            Ok(Ok(adv)) => adv,
+            Ok(Err(d)) => return s.end_or_diverge(d),
+            Err(payload) => match Unsupported::from_panic(payload.as_ref()) {
+                Some(u) => {
+                    let d = Divergence { landmark: s.landmark(), pc: s.pc(), detail: u.marked() };
+                    return s.end_or_diverge(d);
+                }
+                None => std::panic::resume_unwind(payload),
+            },
+        };
         // M42 §3f: plain replay never arms a debug register either; see record_box's twin assert.
         assert!(s.dbg_excl().is_none(), "M42: plain replay set the exclusive shadow at landmark {}", s.landmark());
         if let Advance::Exited(report) = adv { return Ok(report); }

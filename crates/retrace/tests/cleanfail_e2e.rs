@@ -8,12 +8,12 @@
 //! through, so every assertion pins the line too. Fixtures: `cf_walls` (one mode per wall),
 //! `cf_rs_fsync`, and `tests/fixtures/cf_script.sh`.
 mod util;
-use std::path::PathBuf;
+use retrace_trace::Event;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The docs every wall line links to (spec §3b). Spelled out, not taken from retrace_arch, so a
 /// wrong constant cannot agree with itself.
-#[allow(dead_code)] // used from Task 2 on
 const WALLS: &str = "https://github.com/NMitchem/retrace/blob/main/docs/walls.md";
 /// Each run's bound. A run the bound kills fails its test rather than stalling the gate.
 const BOUND: u64 = 300;
@@ -145,4 +145,119 @@ fn an_unreadable_guest_path_is_one_clean_line() {
     let t = scratch("missing.bin");
     let r = cli(&["record-dyn", "/no/such/program", "-o", t.to_str().unwrap()]);
     assert_bad_input(&r, "missing guest", &["cannot read /no/such/program"]);
+}
+
+/// A guest wall (spec §3f). The recording prints the guest's output, then exactly one wall line that
+/// starts `retrace: unsupported: <what>` and links `#<anchor>`, as the last line, and exits 4. Its
+/// replay prints the same output, ends with the incomplete-recording line (C2), and exits 4.
+/// Returns the wall line for a test's own further checks.
+fn assert_guest_wall(guest: &str, args: &[&str], stdout: &str, what: &str, anchor: &str) -> String {
+    let t = scratch("wall.bin");
+    let tp = t.to_str().unwrap();
+    let mut argv = vec!["record-dyn", guest, "-o", tp];
+    if !args.is_empty() { argv.push("--"); argv.extend_from_slice(args); }
+    let rec = cli(&argv);
+    assert_no_panic(&rec, what);
+    assert_eq!(String::from_utf8_lossy(&rec.stdout), stdout, "{what}: the output before the wall is printed first");
+    let lines = retrace_lines(&rec.stderr);
+    assert_eq!(lines.len(), 1, "{what}: exactly one retrace: line. stderr:\n{}", rec.stderr);
+    let line = lines[0].to_owned();
+    assert!(line.starts_with(&format!("retrace: unsupported: {what}")), "{line}");
+    assert!(line.ends_with(&format!(" - see {WALLS}#{anchor}")), "{line}");
+    assert!(line.is_ascii(), "R1: the line is ASCII: {line}");
+    assert_eq!(rec.stderr.lines().last(), Some(line.as_str()), "{what}: the wall line is the last line");
+    assert_eq!(rec.code, Some(4), "{what}: a wall exits 4. stderr:\n{}", rec.stderr);
+    let rp = cli(&["replay", tp]);
+    assert_no_panic(&rp, what);
+    assert_eq!(rp.stdout, rec.stdout, "{what}: replay prints what the recording printed");
+    let rlines = retrace_lines(&rp.stderr);
+    assert_eq!(rlines.len(), 1, "{what}: replay's one retrace: line. stderr:\n{}", rp.stderr);
+    assert!(rlines[0].starts_with("retrace: incomplete recording: it ends at ")
+            && rlines[0].ends_with(&format!(" - see {WALLS}#incomplete-recordings")), "{}", rlines[0]);
+    assert!(!rp.stderr.contains("DIVERGENCE"), "{what}: the end of a walled recording is not a divergence");
+    assert_eq!(rp.code, Some(4), "{what}: replay of a walled recording exits 4. stderr:\n{}", rp.stderr);
+    let _ = std::fs::remove_file(&t);
+    line
+}
+
+/// A recording cut before its terminal event, as a killed recorder leaves it.
+fn cut_before_end(full: &Path, cut: &Path) {
+    let (events, torn) = retrace_trace::Reader::open_checked(full).unwrap();
+    assert!(!torn, "the full recording is whole");
+    let end = events.iter().position(|e| matches!(e, Event::Exit { .. })).expect("the recording exits");
+    let mut w = retrace_trace::Writer::create(cut).unwrap();
+    for e in &events[..end] { w.append(e).unwrap(); }
+}
+
+/// `hello_dyn` recorded whole, then cut before its exit: a recording whose recorder was killed.
+fn killed_recording() -> PathBuf {
+    let full = scratch("hello.bin");
+    let rec = cli(&["record-dyn", retrace_guest::HELLO_DYN, "-o", full.to_str().unwrap()]);
+    assert_eq!((rec.code, rec.stdout.as_slice()), (Some(0), &b"hi\n"[..]), "{}", rec.stderr);
+    let cut = scratch("hello-cut.bin");
+    cut_before_end(&full, &cut);
+    let _ = std::fs::remove_file(&full);
+    cut
+}
+
+/// Review Focus 5: a newcomer's typo in `-o` was a recorder error before M50; it is bad input.
+#[test]
+fn an_unwritable_trace_path_is_one_clean_line() {
+    let r = cli(&["record-dyn", retrace_guest::CF_WALLS, "-o", "/no/such/dir/t.bin", "--", "fsync"]);
+    assert_bad_input(&r, "unwritable", &["cannot write the trace /no/such/dir/t.bin"]);
+}
+
+/// Review Focus 4: no terminal event and no wall. Replay says the recording is incomplete, with the
+/// output it has, and exits 4; before M50 it was `DIVERGENCE … got None` and exit 3.
+#[test]
+fn replaying_a_recording_whose_recorder_was_killed_reports_it_incomplete() {
+    let cut = killed_recording();
+    let rp = cli(&["replay", cut.to_str().unwrap()]);
+    assert_no_panic(&rp, "killed");
+    assert_eq!(rp.stdout, b"hi\n", "replay prints what the program printed before the cut");
+    let lines = retrace_lines(&rp.stderr);
+    assert_eq!(lines.len(), 1, "{}", rp.stderr);
+    assert!(lines[0].starts_with("retrace: incomplete recording: it ends at landmark ")
+            && lines[0].ends_with(&format!(" - see {WALLS}#incomplete-recordings")), "{}", lines[0]);
+    assert!(!rp.stderr.contains("DIVERGENCE"), "{}", rp.stderr);
+    assert_eq!(rp.code, Some(4), "{}", rp.stderr);
+    let _ = std::fs::remove_file(&cut);
+}
+
+/// Review Focus 4, R5: `debug` and `gdbserver` refuse an incomplete recording at the door, with one
+/// line and exit 5, before any socket. Without the check, `gdbserver` would listen until the bound.
+#[test]
+fn debug_and_gdbserver_refuse_an_incomplete_recording() {
+    let cut = killed_recording();
+    let c = cut.to_str().unwrap();
+    for (args, prefix) in [(vec!["debug", c, "--script", "continue"], "DEBUG ERROR: "),
+                           (vec!["gdbserver", c], "GDBSERVER ERROR: ")] {
+        let r = util::run_bounded(util::bin(), &args, &[], 60);
+        assert_no_panic(&r, prefix);
+        let said: Vec<&str> = r.stderr.lines().filter(|l| l.contains("is an incomplete recording")).collect();
+        assert_eq!(said.len(), 1, "{prefix}: one line. stderr:\n{}", r.stderr);
+        assert!(said[0].starts_with(prefix) && said[0].ends_with(&format!(" - see {WALLS}#incomplete-recordings")),
+            "{}", said[0]);
+        assert!(!r.stderr.contains("listening on"), "{prefix}: refused before the socket");
+        assert_eq!(r.code, Some(5), "{prefix}: exit 5. stderr:\n{}", r.stderr);
+    }
+    let _ = std::fs::remove_file(&cut);
+}
+
+/// D4: a trap instruction is a wall in `exceptions` until M51 records it as a crash. The line names
+/// the instruction and its pc. Before M50 it was a `RECORD ERROR` naming only the exception class.
+#[test]
+fn a_trap_instruction_is_a_wall_in_exceptions() {
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["brk"], "cf: brk\n",
+        "brk #0xf000 at pc 0x", "exceptions");
+    assert!(line.contains("(exception class 0x3c, instruction 0x"), "{line}");
+}
+
+/// `Route::Unsupported`: a Mach message retrace does not answer (`host_get_io_main`, msgh_id 205,
+/// dddiagnose's wall) is a wall in `mach-messages`.
+#[test]
+fn a_mach_message_retrace_does_not_answer_is_a_wall_in_mach_messages() {
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["iomain"], "cf: iomain\n", "mach_msg2 at pc 0x",
+        "mach-messages");
+    assert!(line.contains("msgh_id 205"), "{line}");
 }

@@ -10,10 +10,12 @@
 //!   `abort`), `Event::Crash` (through `signal_of_esr`) for every other signal, which is a hardware
 //!   fault. The wrong kind is a named `MISMATCH terminal kind`, never a pass.
 //!
-//! Otherwise the outcome is the first difference, as one line (`judge`): the recorder's `RECORD
-//! ERROR` line, `BUG` and the bug banner's message, `DIVERGENCE` and a replay's
-//! detail, `TIMEOUT`, or `MISMATCH` and what differed, with its addresses masked (`mask_addresses`).
-//! `Expect::Wall` pins a prefix of that line.
+//! Otherwise the outcome is `Refused` (the recording ended at a clean wall line and both replays end
+//! at the same place, M50), `Bug` (the bug banner's message), or the first difference as one line
+//! (`judge`): `DIVERGENCE` and a replay's detail, `TIMEOUT`, or `MISMATCH` and what differed, with
+//! its addresses masked (`mask_addresses`), or `Toolchain`. `Expect::Wall` pins a prefix of that
+//! line, an in-scope row's clean wall line included; `Expect::Refused` is for an out-of-scope row
+//! (charter §6).
 //!
 //! The gate asserts every row's outcome equals its pinned outcome (R10): a wall that is fixed, or
 //! that moves, fails here until the task that moved it edits its row. One `#[test]` runs the whole
@@ -28,7 +30,13 @@ use retrace_trace::Event;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Expect { Pass, Wall(&'static str), Toolchain }
+enum Expect {
+    Pass,
+    #[allow(dead_code)] // M50: constructed from Task 3 on
+    Refused(&'static str),
+    Wall(&'static str),
+    Toolchain,
+}
 
 struct Row { name: &'static str, bin: &'static str, args: &'static [&'static str], expect: Expect }
 
@@ -88,9 +96,9 @@ const ROWS: &[Row] = &[
     Row { name: "fc_sw_hello", bin: retrace_guest::FC_SW_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_throw", bin: retrace_guest::FC_SW_THROW, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_oob", bin: retrace_guest::FC_SW_OOB, args: &[],
-          expect: Expect::Wall("RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1)") },
+          expect: Expect::Wall("retrace: unsupported: brk #0x1 at pc <addr> (exception class 0x3c, instruction 0x") },
     Row { name: "fc_sw_unwrap", bin: retrace_guest::FC_SW_UNWRAP, args: &[],
-          expect: Expect::Wall("RECORD ERROR: non-syscall exit: exception (EC=0x3c ISS=0x1 FSC=0x1)") },
+          expect: Expect::Wall("retrace: unsupported: brk #0x1 at pc <addr> (exception class 0x3c, instruction 0x") },
     Row { name: "fc_sw_sleep", bin: retrace_guest::FC_SW_SLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_sw_gcd", bin: retrace_guest::FC_SW_GCD, args: &[],
@@ -107,10 +115,14 @@ const ENV: &[(&str, &str)] = &[("FC_ENV_PROBE", "firstcontact")];
 
 /// What a row did: `Pass`, its first difference as one line, or nothing to run (a Swift row where
 /// swiftc does not run).
-enum Outcome { Pass, Wall(String), Toolchain }
+enum Outcome { Pass, Refused(String), Wall(String), Bug(String), Toolchain }
 
 fn describe(o: &Outcome) -> &str {
-    match o { Outcome::Pass => "Pass", Outcome::Wall(l) => l, Outcome::Toolchain => "Toolchain" }
+    match o {
+        Outcome::Pass => "Pass",
+        Outcome::Refused(l) | Outcome::Wall(l) | Outcome::Bug(l) => l,
+        Outcome::Toolchain => "Toolchain",
+    }
 }
 
 /// What a row is expected to do here: its pinned outcome, or `Toolchain` for a Swift row whose
@@ -226,12 +238,41 @@ fn terminal_mismatch(trace: &Path, want: i32) -> Option<String> {
     Some(format!("MISMATCH terminal signal: native {want}, trace {got}"))
 }
 
+/// A recording that ended at a clean wall line (spec §3e). It must exit 4 with exactly one such line,
+/// and both replays must end at the same place: the incomplete-recording line (C2), exit 4, and the
+/// recording's stdout. The first thing that fails is the row's outcome.
+fn refused(rec: &util::Bounded, rcode: i32, line: &str, trace: &str) -> Outcome {
+    let wall = Outcome::Wall;
+    let n = rec.stderr.lines().filter(|l| l.starts_with("retrace: unsupported: ")).count();
+    if n != 1 { return wall(format!("MISMATCH record printed {n} wall lines")); }
+    if rcode != 4 { return wall(format!("MISMATCH record exit {rcode} after a wall line, not 4")); }
+    for i in 1..=2 {
+        let rp = util::run_bounded(util::bin(), &["replay", trace], &[], PHASE_SECS);
+        let Some(pcode) = rp.code else { return wall(format!("TIMEOUT replay {i}")) };
+        if let Some(m) = bug_message(&rp.stderr).or_else(|| panic_message(&rp.stderr)) {
+            return Outcome::Bug(format!("BUG replay {i}: {m}"));
+        }
+        if let Some(l) = rp.stderr.lines().find(|l| l.starts_with("DIVERGENCE at landmark ")) {
+            return wall(format!("DIVERGENCE replay {i}: {}", l.split_once(": ").map_or(l, |(_, d)| d)));
+        }
+        if pcode != 4 || !rp.stderr.lines().any(|l| l.starts_with("retrace: incomplete recording: ")) {
+            return wall(format!("MISMATCH replay {i} of a walled recording: exit {pcode} without the incomplete-recording line"));
+        }
+        if rp.stdout != rec.stdout { return wall(format!("MISMATCH replay {i} stdout of a walled recording")); }
+    }
+    Outcome::Refused(line.to_owned())
+}
+
 /// The first difference between native's run and the recording's, then the two replays' (spec §3b).
 fn judge(ncode: i32, nout: &[u8], rec: &util::Bounded, trace: &str) -> Outcome {
     let wall = Outcome::Wall;
     let Some(rcode) = rec.code else { return wall("TIMEOUT record".into()) };
-    if let Some(l) = rec.stderr.lines().find(|l| l.starts_with("RECORD ERROR: ")) { return wall(l.to_owned()); }
-    if let Some(m) = bug_message(&rec.stderr).or_else(|| panic_message(&rec.stderr)) { return wall(format!("BUG record: {m}")); }
+    if let Some(m) = bug_message(&rec.stderr).or_else(|| panic_message(&rec.stderr)) {
+        return Outcome::Bug(format!("BUG record: {m}"));
+    }
+    if let Some(line) = rec.stderr.lines().find(|l| l.starts_with("retrace: unsupported: ")) {
+        return refused(rec, rcode, line, trace);
+    }
     if rcode != ncode { return wall(format!("MISMATCH record exit {rcode}, native {ncode}")); }
     if let Some(d) = first_difference(&canonical(nout), &canonical(&rec.stdout), "native", "record") {
         return wall(format!("MISMATCH record stdout {d}"));
@@ -246,7 +287,9 @@ fn judge(ncode: i32, nout: &[u8], rec: &util::Bounded, trace: &str) -> Outcome {
         if let Some(l) = rp.stderr.lines().find(|l| l.starts_with("DIVERGENCE at landmark ")) {
             return wall(format!("DIVERGENCE replay {i}: {}", l.split_once(": ").map_or(l, |(_, d)| d)));
         }
-        if let Some(m) = bug_message(&rp.stderr).or_else(|| panic_message(&rp.stderr)) { return wall(format!("BUG replay {i}: {m}")); }
+        if let Some(m) = bug_message(&rp.stderr).or_else(|| panic_message(&rp.stderr)) {
+            return Outcome::Bug(format!("BUG replay {i}: {m}"));
+        }
         if pcode != rcode { return wall(format!("MISMATCH replay {i} exit {pcode}, record {rcode}")); }
         if let Some(d) = first_difference(&rout, &String::from_utf8_lossy(&rp.stdout), "record", "replay") {
             return wall(format!("MISMATCH replay {i} stdout {d}"));
@@ -269,7 +312,9 @@ fn measure(row: &Row) -> Outcome {
     if !row.args.is_empty() { argv.push("--"); argv.extend_from_slice(row.args); }
     let rec = util::run_bounded(util::bin(), &argv, ENV, PHASE_SECS);
     let got = match judge(ncode, &native.stdout, &rec, t) {
-        Outcome::Wall(line) => Outcome::Wall(mask_addresses(&line)),
+        Outcome::Wall(l) => Outcome::Wall(mask_addresses(&l)),
+        Outcome::Refused(l) => Outcome::Refused(mask_addresses(&l)),
+        Outcome::Bug(l) => Outcome::Bug(mask_addresses(&l)),
         o => o,
     };
     let _ = std::fs::remove_file(&trace);
@@ -278,7 +323,7 @@ fn measure(row: &Row) -> Outcome {
 
 #[test]
 fn every_corpus_row_meets_its_pinned_outcome() {
-    let (mut pass, mut wall, mut toolchain) = (0, 0, 0);
+    let (mut pass, mut refused, mut wall, mut toolchain) = (0, 0, 0, 0);
     let mut moved = Vec::new();
     for row in ROWS {
         // A harness panic (a spawn that failed, an unreadable trace) is that row's outcome, so it is
@@ -290,22 +335,30 @@ fn every_corpus_row_meets_its_pinned_outcome() {
         let want = expected(row);
         let ok = match (&got, want) {
             (Outcome::Pass, Expect::Pass) | (Outcome::Toolchain, Expect::Toolchain) => true,
-            (Outcome::Wall(line), Expect::Wall(prefix)) => line.starts_with(prefix),
+            (Outcome::Refused(line), Expect::Refused(prefix)) => line.starts_with(prefix),
+            // An in-scope wall pins its first difference, which since M50 may be a clean wall line.
+            (Outcome::Wall(line) | Outcome::Refused(line), Expect::Wall(prefix)) => line.starts_with(prefix),
+            // M50 C6: until Task 4 converts the last of them, a row may still pin its bug banner.
+            (Outcome::Bug(line), Expect::Wall(prefix)) => line.starts_with(prefix),
             _ => false,
         };
-        match got {
-            Outcome::Pass => pass += 1,
-            Outcome::Wall(_) => wall += 1,
-            Outcome::Toolchain => {
+        match (&got, want) {
+            (Outcome::Pass, _) => pass += 1,
+            // Charter §6: `refused` counts the out-of-scope rows that refused cleanly. An in-scope
+            // row's clean wall line is still a wall, which is what L1 measures.
+            (Outcome::Refused(_), Expect::Refused(_)) => refused += 1,
+            (Outcome::Toolchain, _) => {
                 toolchain += 1;
                 util::announce(&format!("SKIPPED {} (no swiftc): {} was not built, so this row did NOT run \
                     and is not evidence of anything.", row.name, row.bin));
             }
+            _ => wall += 1,
         }
         util::announce(&format!("FIRSTCONTACT row {} {}: {}", row.name, if ok { "as pinned" } else { "MOVED" }, describe(&got)));
         if !ok { moved.push(format!("{}: expected {:?}, got {}", row.name, want, describe(&got))); }
     }
-    util::announce(&format!("FIRSTCONTACT pass={pass} wall={wall} toolchain={toolchain}"));
+    util::announce(&format!("FIRSTCONTACT pass={pass} refused={refused} wall={wall} toolchain={toolchain}"));
+    util::announce(&format!("LAUNCH t1 pass={pass} refused={refused} wall={wall} toolchain={toolchain}"));
     assert!(moved.is_empty(), "{} row(s) moved off their pinned outcome; the task that moved each one edits its \
         row (R10):\n{}", moved.len(), moved.join("\n"));
 }

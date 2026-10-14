@@ -115,7 +115,7 @@ fn record(a: &[String], dynamic: bool) -> i32 {
     };
     match summary {
         Ok(s) => finish(&s.stdout, s.fall_throughs, &s.outcome),
-        Err(e) => { eprintln!("RECORD ERROR: {e}"); 4 }
+        Err(e) => bad_input(&format!("cannot write the trace {out}: {e}")),
     }
 }
 
@@ -158,6 +158,9 @@ fn finish(stdout: &[u8], fall_throughs: u64, outcome: &retrace_core::Outcome) ->
             // SIGABRT therefore exits 134.
             128 + sig as i32
         }
+        // M50 §3b: the guest's output is already printed above; the wall's line comes last.
+        retrace_core::Outcome::Refused(ref u) => { eprintln!("{}", u.line()); 4 }
+        retrace_core::Outcome::Incomplete(ref at) => { eprintln!("{}", retrace_arch::incomplete_line(at)); 4 }
     }
 }
 

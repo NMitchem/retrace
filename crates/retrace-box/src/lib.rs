@@ -1,5 +1,5 @@
 use hv_sys::{Vm, Vcpu, reg, sysreg, simd, MemFlags, EXIT_EXCEPTION};
-use retrace_arch::{decode_excl, ec_of, Ec, ExclInsn, SprrAccess};
+use retrace_arch::{decode_excl, ec_of, Ec, ExclInsn, SprrAccess, Unsupported, WallCategory};
 use retrace_guest::Loaded;
 use retrace_trace::{Regs, Region};
 
@@ -835,9 +835,13 @@ pub enum Stage2 {
     /// and ESR_EL1 written, exactly as a stepped stage-1 fault leaves it (spike F2), so the next
     /// `run()` returns `Stop::Fault { pc, esr, far }` with these values.
     Converted { pc: u64, esr: u64, far: u64 },
-    /// Nothing handled it. The string is the caller's error text: `describe_stop`, plus M49 F2's
-    /// reason when F2 looked at the stop and declined it.
-    Unhandled(String),
+    /// M50 (spec §3c): nothing handled it, and it is the guest's own: a trap instruction or another
+    /// synchronous exception retrace does not record yet (`exception_wall`), or an abort whose
+    /// decline M2 classed a wall. The recording ends at its line.
+    Wall(Unsupported),
+    /// Nothing handled it, and only a fault in retrace itself explains it. The string is
+    /// `describe_stop`, plus M49 F2's reason when F2 looked at the stop and declined it.
+    Bug(String),
 }
 
 /// A complete, in-memory-only capture of `Box_`'s internal state at an ARBITRARY position — unlike
@@ -2006,14 +2010,21 @@ impl Box_ {
         let ipa = self.fault_ipa();
         if self.page_in_cache(ipa) { return Stage2::Resolved { committed: false }; }
         if self.commit_reserved_page(ipa) { return Stage2::Resolved { committed: true }; }
-        // F2 looks only at aborts. A breakpoint, a watchpoint or any other class keeps exactly the
-        // text it had before M49.
+        // F2 looks only at aborts. Any other class is the guest's own exception (a wall, M50 D4) or
+        // one only retrace's own code takes (a bug), and keeps the text it had before M49 if a bug.
         if !matches!(ec_of(esr), Ec::DataAbort | Ec::InstrAbort) {
-            return Stage2::Unhandled(self.describe_stop(esr));
+            return match self.exception_wall(esr) {
+                Some(u) => Stage2::Wall(u),
+                None => Stage2::Bug(self.describe_stop(esr)),
+            };
         }
         match self.convert_stage2_abort(esr) {
             Ok(converted) => converted,
-            Err(why) => Stage2::Unhandled(format!("{}; M49 F2 left it loud: {why}", self.describe_stop(esr))),
+            // M50: a decline M2 classed a wall carries the marker from its site; every other is a bug.
+            Err(why) => match Unsupported::from_marked(&why) {
+                Some(u) => Stage2::Wall(Unsupported::new(u.category, format!("{} ({})", u.what, self.describe_stop(esr)))),
+                None => Stage2::Bug(format!("{}; M49 F2 left it loud: {why}", self.describe_stop(esr))),
+            },
         }
     }
 
@@ -2043,7 +2054,8 @@ impl Box_ {
         let esr1 = retrace_arch::stage2_abort_as_stage1(esr, cpsr)?;
         let far = self.last_far;
         if far & !excl::TAG_MASK != 0 {
-            return Err(format!("FAR {far:#x} carries a top-byte tag, which the pagers did not strip"));
+            return Err(retrace_arch::wall(WallCategory::Memory,
+                format!("FAR {far:#x} carries a top-byte tag, which the pagers did not strip")));
         }
         let ipa = self.va_to_ipa(far).ok_or_else(|| format!(
             "stage 1 has no leaf for {far:#x}, so the walk that missed stage 2 was not the guest's"))?;
@@ -7409,6 +7421,41 @@ impl Box_ {
             fp = saved_fp;
         }
         s
+    }
+
+    /// M50 (spec §3c, D4): a guest's own synchronous exception that retrace does not record yet, as
+    /// a wall in `exceptions`; None for one only retrace's own code takes (a same-EL abort, a debug
+    /// exception outside the debugger), which stays a bug. Trap instructions are walls until M51
+    /// records them as the crashes native has. The line names the instruction word and its pc. A
+    /// vector-relayed exception's pc is ELR_EL1, because the live PC is parked in the trampoline.
+    fn exception_wall(&self, esr: u64) -> Option<Unsupported> {
+        let ec = (esr >> 26) & 0x3f;
+        let name = match ec {
+            0x00 => "an undefined instruction".to_owned(),
+            0x01 => "a trapped wfi or wfe".to_owned(),
+            0x07 => "a trapped SIMD or floating-point access".to_owned(),
+            0x0e => "an illegal execution state".to_owned(),
+            0x18 => "a trapped system register access".to_owned(),
+            0x1c => "a pointer authentication failure".to_owned(),
+            0x22 => "a misaligned pc".to_owned(),
+            0x26 => "a misaligned stack pointer".to_owned(),
+            0x2c => "a trapped floating-point exception".to_owned(),
+            0x3c => format!("brk #{:#x}", esr & 0xffff),
+            _ => return None,
+        };
+        let pc = self.pc();
+        let pc = if (TRAMPOLINE_IPA..TRAMPOLINE_IPA + 0x800).contains(&pc) {
+            self.vcpu.get_sys(sysreg::ELR_EL1).unwrap()
+        } else {
+            pc
+        };
+        let w = self.read_va_prefix(pc, 4);
+        let word = match w[..] {
+            [a, b, c, d] => format!("{:#010x}", u32::from_le_bytes([a, b, c, d])),
+            _ => "unreadable".to_owned(),
+        };
+        Some(Unsupported::new(WallCategory::Exceptions,
+            format!("{name} at pc {pc:#x} (exception class {ec:#04x}, instruction {word})")))
     }
 
     /// Decode a non-syscall VM exit into a legible one-line diagnostic: the ESR exception class,
