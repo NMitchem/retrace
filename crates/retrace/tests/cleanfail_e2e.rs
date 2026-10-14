@@ -152,6 +152,11 @@ fn an_unreadable_guest_path_is_one_clean_line() {
 /// replay prints the same output, ends with the incomplete-recording line (C2), and exits 4.
 /// Returns the wall line for a test's own further checks.
 fn assert_guest_wall(guest: &str, args: &[&str], stdout: &str, what: &str, anchor: &str) -> String {
+    assert_guest_wall_both(guest, args, stdout, what, anchor).0
+}
+
+/// `assert_guest_wall`, returning the replay's incomplete line as well, for a row that pins its text.
+fn assert_guest_wall_both(guest: &str, args: &[&str], stdout: &str, what: &str, anchor: &str) -> (String, String) {
     let t = scratch("wall.bin");
     let tp = t.to_str().unwrap();
     let mut argv = vec!["record-dyn", guest, "-o", tp];
@@ -177,7 +182,7 @@ fn assert_guest_wall(guest: &str, args: &[&str], stdout: &str, what: &str, ancho
     assert!(!rp.stderr.contains("DIVERGENCE"), "{what}: the end of a walled recording is not a divergence");
     assert_eq!(rp.code, Some(4), "{what}: replay of a walled recording exits 4. stderr:\n{}", rp.stderr);
     let _ = std::fs::remove_file(&t);
-    line
+    (line, rlines[0].to_owned())
 }
 
 /// A recording cut before its terminal event, as a killed recorder leaves it.
@@ -266,8 +271,12 @@ fn a_mach_message_retrace_does_not_answer_is_a_wall_in_mach_messages() {
 /// number. Before M50 it was the M33 panic.
 #[test]
 fn a_program_that_calls_fsync_stops_at_one_clean_line() {
-    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["fsync"], "cf: fsync\n", "fsync (syscall 95)", "syscalls");
+    let (line, replay) = assert_guest_wall_both(retrace_guest::CF_WALLS, &["fsync"], "cf: fsync\n",
+        "fsync (syscall 95)", "syscalls");
     assert_eq!(line, format!("retrace: unsupported: fsync (syscall 95) - see {WALLS}#syscalls"));
+    // The wall is raised by a record arm, so replay has nothing to meet and names the last landmark
+    // (walls.md's Incomplete recordings section quotes this form).
+    assert!(replay.contains("it ends at landmark"), "{replay}");
 }
 
 /// Review Focus 2: the wall on a thread that is not main. The output main printed still comes first,

@@ -63,7 +63,8 @@ The program used a signal in a way retrace does not model yet. These reach it to
 - `pause()` or `sigsuspend()`, which wait for a signal;
 - a signal raised while blocked, whose default action ends the process when it is unblocked;
 - a hardware fault on a thread that has its signal blocked, such as a Rust stack overflow;
-- `kill` to another process.
+- `kill` to another process;
+- `abort_with_payload` or `terminate_with_payload`, which dyld calls when a library is missing.
 
 ## Threads
 
@@ -90,7 +91,10 @@ wall clock, which would make recordings differ from run to run.
 
 The program asked for a kind of memory mapping retrace does not support yet, such as an unmodelled
 use of `MAP_JIT` memory, or a write to the per-thread JIT protection register with a value retrace
-does not admit.
+does not admit. Other memory walls are a `vm_remap` or `mach_vm_map` option retrace does not model, a
+fixed mapping that straddles an existing one, and a bad pointer the program passes to a call, which
+retrace cannot read or write. If the pointer is one the program believes valid, this may be a bug in
+retrace, and it is worth reporting.
 
 ## Exceptions
 
@@ -104,10 +108,15 @@ A recording that stopped at a wall, or whose recorder was killed, has no end: no
 fatal signal. `retrace replay` runs it to where it stops, prints the program's output up to there,
 then one line, and exits with status 4:
 
-    retrace: incomplete recording: it ends at fsync (syscall 95) - see https://github.com/NMitchem/retrace/blob/main/docs/walls.md#incomplete-recordings
+    retrace: incomplete recording: it ends at landmark 342 (pc 0x1804b5478) - see https://github.com/NMitchem/retrace/blob/main/docs/walls.md#incomplete-recordings
 
-The line names the wall when replay reaches it too, or the last landmark of a recording whose
-recorder was killed. A difference before that point is still a divergence, with exit status 3.
+The line names the wall when replay meets it itself, in code the recording and the replay share, such as:
+
+    retrace: incomplete recording: it ends at signal 0 out of range 1..32 - the guest passed a signal number the table cannot represent; widen NSIG or reject it at the syscall arm - see https://github.com/NMitchem/retrace/blob/main/docs/walls.md#incomplete-recordings
+
+Otherwise it names the last landmark it replayed and that landmark's address, as it does for a
+recording whose recorder was killed. A call that stops at the first form is `fsync`: the recording
+ended before it, so replay has nothing to meet. A difference before that point is still a divergence, with exit status 3.
 
 A recording whose tail was torn, because the recorder was killed in the middle of a write or the
 disk filled up, is the same case: retrace drops the torn tail, the recording then has no terminal

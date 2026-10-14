@@ -256,7 +256,7 @@ fn reverse_continue_lands_on_the_jit_code_write_by_its_effect() {
 fn sprrprobe_reads_zero_runs_ic_ivau_and_is_refused_at_its_write_by_value() {
     let (rec, trace) = util::record(retrace_guest::SPRRPROBE);
     let _ = std::fs::remove_file(&trace);
-    assert!(!rec.stderr.contains("non-syscall exit"), "the ic ivau must run at EL0, not trap:\n{}", rec.stderr);
+    assert!(!rec.stderr.contains("retrace: unsupported: exceptions") && !rec.stderr.contains("retrace: internal error"), "the ic ivau must run at EL0, not trap:\n{}", rec.stderr);
     assert!(rec.stderr.contains("M48: SPRR write 0x1 at pc ") && rec.stderr.contains("no SPRR commpage"),
         "the msr must be refused by value (code {}):\n{}", rec.code, rec.stderr);
     assert!(rec.code != 0 && rec.code != 2, "exit 2 would mean the mrs read nonzero; 0 that nothing was refused: {}", rec.code);

@@ -36,7 +36,7 @@ mod util;
             refuses rather than guessing, and since M50 the recorder prints that refusal as one line and exits 4: \
             'retrace: unsupported: raising blocked signal 10 synchronously is not modelled: a fault \
             cannot be deferred, POSIX leaves it undefined, and Darwin force-delivers. M11 models no \
-            pending set, so implement one — and revisit sigpending's always-empty answer — before a \
+            pending set, so implement one - and revisit sigpending's always-empty answer - before a \
             guest needs this. - see …#signals' (measured at M50 Task 6, \
             docs/sweep-evidence/2026-10-14-m50/parked-stackoverflow_rust_e2e.log). A guest now needs it. \
             Clearing this means giving M11 a pending set for synchronously-raised blocked signals \

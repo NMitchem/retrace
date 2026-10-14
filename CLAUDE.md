@@ -344,10 +344,12 @@ arm in `record_box` (`crates/retrace-core/src/lib.rs`) sits before the generic f
 the only guard. The generic arm's asserts are `is_signal_syscall`, the workq pair, `kevent_qos`
 (M45), `writes_via_nested_pointer`, since M47 `madvise` and `fork`, since M48 `kevent` (363)
 and every SDK psynch number (`retrace_arch::is_psynch`), and since M49 `__semwait_signal` (334)
-and its `_nocancel` twin (423) only; since M50 both generic arms first call
+and its `_nocancel` twin (423) only; since M50 both generic arms call
 `retrace_arch::refusal_before_forward`, which ends the recording at a wall for an unrowed number, a
-nested-pointer write or an unmodelled semaphore trap, so those asserts and `forwarded_shape`'s panic
-are backstops no guest reaches; the claim that it
+nested-pointer write or an unmodelled semaphore trap. In the mach arm it is the first statement, so
+the M18 semaphore assert and `forwarded_shape`'s panic are backstops no guest reaches; in the BSD arm
+it sits after the eight "never forwarded" asserts (they guard arms that must exist) and before the M27
+assert, which with `forwarded_shape`'s panic is the backstop there; the claim that it
 "asserts" stood here from M14 to M37 and was measured false at M37. Since M45 libdispatch's
 workqueue-kqueue init, `kevent_qos` (374) with `KEVENT_FLAG_WORKQ`, is emulated beside the workq
 pair for the same reason (forwarded, it acts on retrace's own workqueue kqueue): M45 emulated

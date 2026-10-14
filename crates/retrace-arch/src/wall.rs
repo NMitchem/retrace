@@ -96,6 +96,7 @@ pub fn in_context(ctx: &str, e: String) -> String {
 
 /// Test support: the text of a marked wall, for assertions that read what a refusal says. Panics on
 /// an unmarked string, so a test that expects a wall fails if its site was never marked.
+#[doc(hidden)]
 pub trait Unmark { fn unmark(self) -> String; }
 impl Unmark for String {
     fn unmark(self) -> String {

@@ -150,7 +150,7 @@ fn a_stripped_guest_errors_cleanly_instead_of_guessing() {
     assert_eq!(out.status.code(), Some(5), "an unresolvable name is an error, not a panic");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no symbol"), "and it says so plainly:\n{stderr}");
-    assert!(!stderr.contains("panicked"), "a debug session must never panic on a missing name:\n{stderr}");
+    assert!(!stderr.contains("retrace: internal error"), "a debug session must never panic on a missing name:\n{stderr}");
 
     // jq DOES define _main (M3's 7 symbols include it), so the thin table still works — which is
     // what makes the assertion above about absence rather than about a broken reader.
