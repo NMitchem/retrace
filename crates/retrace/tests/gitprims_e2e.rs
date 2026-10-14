@@ -191,7 +191,7 @@ fn sandbox_container_path_is_answered_enotsup_without_forwarding() {
 fn fork_is_refused_with_eagain_after_the_prepare_handlers_message_is_answered() {
     let (rec, trace) = records_and_replays_twice(retrace_guest::FORKFAIL_DYN, &[]);
     assert_eq!(String::from_utf8_lossy(&rec.stdout), "fork failed errno=35\n");
-    assert!(rec.stderr.contains("[retrace] refusing fork (syscall 2): process creation is unmodelled; returning errno 35 without forwarding"),
+    assert!(rec.stderr.contains("retrace: refused: fork (syscall 2), returned EAGAIN to the program"),
         "the recorder's refusal line: {}", rec.stderr);
     let ev: Vec<Event> = retrace_trace::Reader::open(&trace).unwrap().into_iter().collect();
     let forks: Vec<_> = ev.iter().filter_map(|e| match e {

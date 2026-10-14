@@ -116,15 +116,19 @@ fn two_recordings_of_the_raise_guest_are_byte_identical() {
     std::fs::remove_file(&t2).ok();
 }
 
+/// M50 §3h: was `#[should_panic]` on the same text. A kill to another pid is a wall in `signals`,
+/// which ends the recording with its line, and still never signals a host process.
 #[test]
-#[should_panic(expected = "kill to a pid other than the guest's own")]
-fn killing_another_process_fails_loud_instead_of_signalling_the_host() {
+fn killing_another_process_is_a_wall_instead_of_signalling_the_host() {
     let dir = std::env::temp_dir().join(format!("retrace-m11-ko-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let trace = dir.join("killother.bin");
     let bytes = std::fs::read(retrace_guest::KILLOTHER).expect("read killother guest");
     let loaded = retrace_guest::parse_macho(&bytes);
-    let _ = retrace_core::record(&loaded, &trace);
+    let s = retrace_core::record(&loaded, &trace).expect("a wall ends the recording; it is not an I/O error");
+    let Outcome::Refused(u) = &s.outcome else { panic!("expected a wall, got {:?}", s.outcome) };
+    assert_eq!(u.category, retrace_arch::WallCategory::Signals);
+    assert!(u.what.starts_with("kill to a pid other than the guest's own"), "{}", u.what);
 }
 
 // ---- M12: delivery. The dispositions above decide WHETHER a handler runs; these decide that it
@@ -234,13 +238,13 @@ fn a_caught_self_raise_records_the_syscalls_success_in_the_frame() {
     std::fs::remove_file(&trace).ok();
 }
 
-// The expected substring says "synchronously", which appears ONLY in the fault arm's message. The
-// raise arm has carried its own "raising blocked signal" assert since M11, so matching the shorter
-// prefix would green this test even if the fault arm never gained a blocked check at all.
+/// M50 §3h: was `#[should_panic]`. The expected text says "synchronously", which appears ONLY in the
+/// fault arm's message: the raise arm has carried its own "raising blocked signal" refusal since M11,
+/// so matching the shorter prefix would pass even if the fault arm never gained a blocked check.
 #[test]
-#[should_panic(expected = "raising blocked signal 11 synchronously")]
-fn a_blocked_synchronous_fault_asserts_rather_than_guessing() {
-    // POSIX leaves this undefined and Darwin force-delivers. M11 models no pending set, so
-    // guessing here would be a plausible lie.
-    record_asm(retrace_guest::BLOCKEDFAULT);
+fn a_blocked_synchronous_fault_is_a_wall_rather_than_a_guess() {
+    // POSIX leaves this undefined and Darwin force-delivers. Guessing would be a plausible lie.
+    let (outcome, _) = record_asm(retrace_guest::BLOCKEDFAULT);
+    assert!(matches!(&outcome, Outcome::Refused(u) if u.category == retrace_arch::WallCategory::Signals
+        && u.what.starts_with("raising blocked signal 11 synchronously")), "{outcome:?}");
 }

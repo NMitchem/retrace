@@ -12,6 +12,11 @@ use retrace_guest::UNENUM;
 #[test]
 fn an_unenumerated_syscall_is_refused_by_name() {
     let (out, _trace) = util::record(UNENUM);
-    assert!(out.stderr.contains("M33: syscall 8 (8) has no arg_kinds row"),
+    // M50 §3c (B3): the pre-forward check's line, before the M33 panic could fire. The arch unit test
+    // an_unenumerated_syscall_panics_by_name keeps guarding that panic as the backstop. 8 is the
+    // kernel's nosys slot, which the SDK does not name.
+    assert!(out.stderr.lines().any(|l| l == "retrace: unsupported: syscall 8 - see \
+        https://github.com/NMitchem/retrace/blob/main/docs/walls.md#syscalls"),
         "recorder did not refuse syscall 8 by name; code={} stderr=\n{}", out.code, out.stderr);
+    assert_eq!(out.code, 4, "a wall exits 4: {}", out.stderr);
 }

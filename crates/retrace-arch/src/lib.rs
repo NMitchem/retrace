@@ -1086,6 +1086,36 @@ pub fn forwarded_shape(num: u64) -> &'static Shape {
          number to tests/census.rs too.", num as i64))
 }
 
+/// M50 §3c (B3): the one check both generic forward arms in `record_box` make before
+/// `forward_and_diff`, so no guest reaches `forwarded_shape`'s panic, which stays behind it as a
+/// backstop (a retrace bug, should it ever fire). It refuses, as a wall:
+/// - a syscall or mach trap with no `arg_kinds` row: 325 of the SDK's 458 numbers at M50, until M53
+///   adds rows;
+/// - a call that writes through a pointer nested in a guest struct (M27), which forwarding would
+///   hand the host kernel as a guest address;
+/// - a mach semaphore trap the dedicated arms do not model (M18), which forwarded would hang the
+///   recorder.
+pub fn refusal_before_forward(num: u64) -> Option<Unsupported> {
+    let what = syscall_display(num);
+    if is_mach_semaphore_trap(num) { return Some(Unsupported::new(WallCategory::Threads, what)); }
+    match arg_kinds(num) {
+        None => Some(Unsupported::new(unrowed_category(num), what)),
+        Some(s) if s.writes_via_nested_pointer() => Some(Unsupported::new(WallCategory::Syscalls,
+            format!("{what}, which writes through a pointer inside a struct"))),
+        Some(_) => None,
+    }
+}
+
+/// The wall an unrowed number is (spec §3b). Waiting for another process, or starting one without
+/// `fork`'s refusal, is `process-creation`: wait4 (7), vfork (66) and waitid (173), from the SDK's
+/// `sys/syscall.h`. Anything else is a syscall retrace has no row for yet.
+fn unrowed_category(num: u64) -> WallCategory {
+    match num {
+        7 | 66 | 173 => WallCategory::ProcessCreation,
+        _ => WallCategory::Syscalls,
+    }
+}
+
 // fcntl(2) commands (sys/fcntl.h) and the two argument-less ioctl(2) requests (sys/ioctl.h,
 // `_IO('f', 1)` / `_IO('f', 2)`) whose third argument's KIND the row cannot state. Numbers from
 // the macOS 26 SDK headers; the fcntl set is the M33 census's (jq, CPython, the Apple sweep)
@@ -2307,6 +2337,25 @@ pub fn stage2_abort_as_stage1(esr_el2: u64, guest_cpsr: u64) -> Result<u64, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M50 §3c (B3): the check refuses exactly the numbers `forwarded_shape` cannot forward, and
+    /// nothing it can, so its panic is unreachable from a guest.
+    #[test]
+    fn refusal_before_forward_refuses_exactly_what_cannot_be_forwarded() {
+        assert_eq!(refusal_before_forward(3), None, "read (3) has a row and forwards");
+        assert_eq!(refusal_before_forward(95), Some(Unsupported::new(WallCategory::Syscalls, "fsync (syscall 95)")));
+        assert_eq!(refusal_before_forward(7).map(|u| u.category), Some(WallCategory::ProcessCreation), "wait4");
+        assert_eq!(refusal_before_forward((-38i64) as u64),
+            Some(Unsupported::new(WallCategory::Threads, "semaphore_timedwait_trap (mach trap -38)")));
+        let nested = (0..600u64).find(|&n| writes_via_nested_pointer(n)).expect("a nested-pointer row (M27)");
+        let u = refusal_before_forward(nested).unwrap();
+        assert!(u.category == WallCategory::Syscalls && u.what.ends_with(", which writes through a pointer inside a struct"),
+            "{u:?}");
+        // The backstop: every number the check lets through has a row.
+        for n in (0..600u64).chain((1..=128i64).map(|t| (-t) as u64)) {
+            if refusal_before_forward(n).is_none() { let _ = forwarded_shape(n); }
+        }
+    }
 
     #[test]
     fn decode_excl_reads_t0s_words() {

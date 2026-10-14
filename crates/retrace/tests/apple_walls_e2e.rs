@@ -72,7 +72,7 @@ fn launchctl_records_and_replays() {
     assert_eq!(rec.code, 1, "{path}: record exited {} — its own no-argument usage exit is 1; the recorder's last lines:\n{tail}", rec.code);
     assert!(rec.stdout.starts_with(b"Usage: launchctl "),
         "{path}: stdout does not start with launchctl's usage text — the guest did not reach main:\n{tail}");
-    assert_eq!(rec.stderr.matches("[retrace] refusing mach_msg2 message-queue receive").count(), 1,
+    assert_eq!(rec.stderr.matches("retrace: refused: mach_msg2 message-queue receive").count(), 1,
         "{path}: expected exactly one RCV-only message-queue refusal on the recorder's stderr:\n{tail}");
     let rp = util::replay(&trace);
     assert_eq!(rp.code, rec.code, "{path}: replay exited {}: {}", rp.code, rp.stderr.lines().last().unwrap_or(""));

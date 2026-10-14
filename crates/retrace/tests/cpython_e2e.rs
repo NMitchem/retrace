@@ -107,6 +107,6 @@ fn the_launcher_records_and_replays_its_own_posix_spawn_failure() {
 
     // M38: the posix_spawn is REFUSED now, not forwarded — the refusal line is the only thing
     // that distinguishes the two, since the errno the guest reads was chosen to match (spec R4).
-    assert!(rec.stderr.contains("[retrace] refusing posix_spawn"),
+    assert!(rec.stderr.contains("retrace: refused: posix_spawn (syscall 244), returned EFAULT"),
         "the launcher's posix_spawn must be refused by the M38 arm, not forwarded. stderr:\n{}", rec.stderr);
 }

@@ -19,7 +19,8 @@ fn exec_is_refused_and_says_so() {
     assert_eq!(rec.code, 0, "the fixture must run to its own exit(0); a replaced image or a crash \
         cannot print anything. stderr:\n{}", rec.stderr);
     // The difference M38 makes.
-    assert!(rec.stderr.contains("[retrace] refusing execve") && rec.stderr.contains("[retrace] refusing posix_spawn"),
+    assert!(rec.stderr.contains("retrace: refused: execve (syscall 59), returned EFAULT to the program")
+        && rec.stderr.contains("retrace: refused: posix_spawn (syscall 244), returned EFAULT to the program"),
         "both refusal lines must be on the recorder's stderr; a FORWARDED exec prints none. stderr:\n{}", rec.stderr);
     // Continuity (spec R4): what the guest reads is what the pre-M38 forward returned.
     assert_eq!(rec.stdout, expect_stdout(), "got {:?}", String::from_utf8_lossy(&rec.stdout));

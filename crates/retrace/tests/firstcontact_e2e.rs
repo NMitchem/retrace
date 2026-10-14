@@ -32,7 +32,6 @@ use std::path::Path;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Expect {
     Pass,
-    #[allow(dead_code)] // M50: constructed from Task 3 on
     Refused(&'static str),
     Wall(&'static str),
     Toolchain,
@@ -89,9 +88,9 @@ const ROWS: &[Row] = &[
     Row { name: "fc_rs_sleep", bin: retrace_guest::FC_RS_SLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_rs_tests", bin: retrace_guest::FC_RS_TESTS, args: &[],
-          expect: Expect::Wall("BUG record: M18 Stage 2b: mach semaphore trap 0xffffffffffffffda (-38) reached the generic forward arm") },
+          expect: Expect::Wall("retrace: unsupported: semaphore_timedwait_trap (mach trap -38)") },
     Row { name: "fc_rs_tests_fail", bin: retrace_guest::FC_RS_TESTS_FAIL, args: &[],
-          expect: Expect::Wall("BUG record: M18 Stage 2b: mach semaphore trap 0xffffffffffffffda (-38) reached the generic forward arm") },
+          expect: Expect::Wall("retrace: unsupported: semaphore_timedwait_trap (mach trap -38)") },
     // Swift (swiftc, only where it runs: R11).
     Row { name: "fc_sw_hello", bin: retrace_guest::FC_SW_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_throw", bin: retrace_guest::FC_SW_THROW, args: &[], expect: Expect::Pass },
@@ -102,7 +101,7 @@ const ROWS: &[Row] = &[
     Row { name: "fc_sw_sleep", bin: retrace_guest::FC_SW_SLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_sw_gcd", bin: retrace_guest::FC_SW_GCD, args: &[],
-          expect: Expect::Wall("BUG record: M33: syscall 375 (375) has no arg_kinds row") },
+          expect: Expect::Refused("retrace: unsupported: kevent_id (syscall 375)") },
     Row { name: "fc_sw_async", bin: retrace_guest::FC_SW_ASYNC, args: &[],
           expect: Expect::Wall("BUG record: M18 Stage 2b: unmeasured workq_kernreturn opcode 0x30") },
 ];

@@ -261,3 +261,56 @@ fn a_mach_message_retrace_does_not_answer_is_a_wall_in_mach_messages() {
         "mach-messages");
     assert!(line.contains("msgh_id 205"), "{line}");
 }
+
+/// Spec §3b's own example shape: an unrowed syscall is one line naming it by the SDK's name and
+/// number. Before M50 it was the M33 panic.
+#[test]
+fn a_program_that_calls_fsync_stops_at_one_clean_line() {
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["fsync"], "cf: fsync\n", "fsync (syscall 95)", "syscalls");
+    assert_eq!(line, format!("retrace: unsupported: fsync (syscall 95) - see {WALLS}#syscalls"));
+}
+
+/// Review Focus 2: the wall on a thread that is not main. The output main printed still comes first,
+/// and the line is the same line: it names the call, never the thread.
+#[test]
+fn a_worker_threads_fsync_stops_the_recording_cleanly() {
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["threadfsync"], "cf: threadfsync\n",
+        "fsync (syscall 95)", "syscalls");
+    assert_eq!(line, format!("retrace: unsupported: fsync (syscall 95) - see {WALLS}#syscalls"));
+}
+
+/// Review Focus 1: a Rust program, whose runtime installs SIGSEGV and SIGBUS handlers and an
+/// alternate stack before main, stops at the same one line.
+#[test]
+fn a_rust_program_that_calls_fsync_stops_at_one_clean_line() {
+    let line = assert_guest_wall(retrace_guest::CF_RS_FSYNC, &[], "cf: rs_fsync\n", "fsync (syscall 95)", "syscalls");
+    assert_eq!(line, format!("retrace: unsupported: fsync (syscall 95) - see {WALLS}#syscalls"));
+}
+
+/// `pause()` waits for a signal nothing in retrace can deliver to a waiting program.
+#[test]
+fn a_program_that_pauses_for_a_signal_stops_at_one_clean_line() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["pause"], "cf: pause\n",
+        "sigsuspend (syscall 111) waits for a signal", "signals");
+}
+
+/// `sched_yield()` is the mach trap `swtch_pri`, which has no row.
+#[test]
+fn a_sched_yield_stops_at_one_clean_line() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["yield"], "cf: yield\n", "swtch_pri (mach trap -59)", "syscalls");
+}
+
+/// Spec §2d corrected M49's note: `clock_sleep_trap` reaches the M33 panic before any forward, so it
+/// is a refusal target, not a hang.
+#[test]
+fn a_clock_sleep_trap_stops_at_one_clean_line() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["clocksleep"], "cf: clocksleep\n",
+        "clock_sleep_trap (mach trap -62)", "syscalls");
+}
+
+/// The same for `mach_wait_until`.
+#[test]
+fn a_mach_wait_until_stops_at_one_clean_line() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["waituntil"], "cf: waituntil\n",
+        "mach_wait_until (mach trap -90)", "syscalls");
+}
