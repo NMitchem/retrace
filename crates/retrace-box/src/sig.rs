@@ -58,11 +58,10 @@ impl Default for SigTable {
 
 impl SigTable {
     fn idx(sig: u64) -> usize {
-        assert!(
-            sig >= 1 && (sig as usize) < NSIG,
-            "signal {sig} out of range 1..{NSIG} — the guest passed a signal number the table \
-             cannot represent; widen NSIG or reject it at the syscall arm"
-        );
+        if sig < 1 || sig as usize >= NSIG {
+            retrace_arch::refuse!(Signals, "signal {sig} out of range 1..{NSIG} — the guest passed a signal number the table \
+                 cannot represent; widen NSIG or reject it at the syscall arm");
+        }
         sig as usize
     }
 
@@ -297,12 +296,11 @@ pub fn build_frame(inp: &FrameInput) -> (Vec<u8>, EntryRegs) {
     // (Task 1 Step 0, spikes/sigtramp.c). Only the SA_SIGINFO shape is MODELLED — the frame layout
     // is identical either way, but no guest in the gate set installs a non-SA_SIGINFO handler, so
     // delivering to one would ship an untested path. Assert rather than guess.
-    assert!(
-        inp.act.flags & SA_SIGINFO != 0,
-        "a non-SA_SIGINFO handler is not modelled. Its infostyle is 0x1 (measured, vs 0x1e for \
-         SA_SIGINFO) and the frame layout is identical, so supporting it is small — but no gate \
-         guest exercises it, so it is asserted rather than shipped untested."
-    );
+    if inp.act.flags & SA_SIGINFO == 0 {
+        retrace_arch::refuse!(Signals, "a non-SA_SIGINFO handler is not modelled. Its infostyle is 0x1 (measured, vs 0x1e for \
+             SA_SIGINFO) and the frame layout is identical, so supporting it is small — but no gate \
+             guest exercises it, so it is asserted rather than shipped untested.");
+    }
     let regs = EntryRegs {
         x: [catcher, UC_FLAVOR, inp.sig, base, uc, sigreturn_token(uc)],
         sp: base,

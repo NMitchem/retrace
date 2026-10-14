@@ -249,7 +249,7 @@ fn every_unmodelled_sleep_shape_stops_the_recorder_naming_it() {
 
 /// S5 (R9): a signal to a sleeping thread is refused, not delivered. `sigsleeper`'s main signals a
 /// thread asleep in `sleep(1)`; natively the handler runs and `sleep` returns the 1 s left. Under
-/// retrace the signal pends (the target is blocked) and the wake that would deliver it aborts by
+/// retrace the signal pends (the target is blocked) and the wake that would deliver it stops at a wall, by
 /// name, on record and on replay of what was recorded alike: the saved context of a thread blocked
 /// in `__semwait_signal` is unmeasured, and EINTR is M50's.
 #[test]
@@ -257,15 +257,21 @@ fn a_signal_to_a_sleeping_thread_is_refused_at_the_wake_on_both_sides() {
     let (code, out) = native(&["sigsleeper"]);
     assert_eq!((code, out.as_str()), (0, "sigsleeper woke left=1 got=1\nsigsleeper done\n"), "native");
     let (code, out, err, trace) = record(&["sigsleeper"]);
-    assert_eq!(code, Some(70), "the recorder must stop at the wake (70: the bug banner, until M50 makes it a wall; None: the bound fired). stderr:\n{err}");
-    assert!(err.contains("M49: sleep of thread 1 reached its deadline with a signal pending (set 0x20000000)"), "{err}");
+    assert_eq!(code, Some(4), "the recorder stops at the wake's wall (None: the bound fired). stderr:\n{err}");
+    let line = err.lines().find(|l| l.starts_with("retrace: unsupported: "))
+        .unwrap_or_else(|| panic!("no wall line:\n{err}"));
+    assert!(line.contains("M49: sleep of thread 1 reached its deadline with a signal pending (set 0x20000000)")
+            && line.ends_with("#threads"), "{line}");
     assert!(out.is_empty(), "nothing ran past the refusal: {}", String::from_utf8_lossy(&out));
     let sleeps = semwaits(&trace);
     assert_eq!(sleeps.iter().map(|l| (l.1, l.2[4], l.2[5])).collect::<Vec<_>>(), [(0, 0, 100_000_000), (1, 1, 0)],
         "main's 100 ms, then the sleeper's 1 s");
     let (code, _, err) = cli(&["replay", trace.to_str().unwrap()]);
-    assert_eq!(code, Some(70), "replay reaches the same wake (70: the bug banner, until M50 makes it a wall; below the trace): {err}");
-    assert!(err.contains("M49: sleep of thread 1 reached its deadline with a signal pending"), "{err}");
+    assert_eq!(code, Some(4), "replay reaches the same wake (below the trace) at the recording's end: {err}");
+    let line = err.lines().find(|l| l.starts_with("retrace: incomplete recording: "))
+        .unwrap_or_else(|| panic!("no incomplete-recording line:\n{err}"));
+    // C2: the `at` is the wall replay met there itself, which is what this test has always guarded.
+    assert!(line.contains("M49: sleep of thread 1 reached its deadline with a signal pending"), "{line}");
 }
 
 /// §4 S3 (two sleepers): a 2 s sleeper created first and a 1 s sleeper created second wake in

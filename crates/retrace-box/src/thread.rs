@@ -224,13 +224,14 @@ impl ThreadTable {
     /// the owed measurement. Below the trace, so it fires identically on record and replay.
     pub fn unpark(&mut self, tid: usize) {
         let pending = self.threads[tid].pending;
-        assert!(pending == 0,
-            "M46: unpark of parked workqueue thread {tid} with signal set {pending:#x} pending (bit n \
-             is signal n+1, masked or not). The re-entry replaces its context with a fresh upcall \
-             block, so the signal would vanish where assert_no_stranded_signals cannot see it. \
-             Measure the kernel's register state for a parked workqueue manager that a signal \
-             interrupts, as blockedctx.rs does for a __ulock_wait-blocked thread, and model the \
-             delivery on both sides before allowing this.");
+        if pending != 0 {
+            retrace_arch::refuse!(Threads, "M46: unpark of parked workqueue thread {tid} with signal set {pending:#x} pending (bit n \
+                 is signal n+1, masked or not). The re-entry replaces its context with a fresh upcall \
+                 block, so the signal would vanish where assert_no_stranded_signals cannot see it. \
+                 Measure the kernel's register state for a parked workqueue manager that a signal \
+                 interrupts, as blockedctx.rs does for a __ulock_wait-blocked thread, and model the \
+                 delivery on both sides before allowing this.");
+        }
         assert_eq!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Parked),
             "M46: unpark of thread {tid}, which is not parked");
         self.threads[tid].state = ThreadState::Runnable;
@@ -269,10 +270,8 @@ impl ThreadTable {
             retrace_arch::SIG_BLOCK => old | set,
             retrace_arch::SIG_UNBLOCK => old & !set,
             retrace_arch::SIG_SETMASK => set,
-            _ => panic!(
-                "sigprocmask how={how} is not BLOCK(1)/UNBLOCK(2)/SETMASK(3) — an unmodelled \
-                 value, not a guest error to swallow"
-            ),
+            _ => retrace_arch::refuse!(Signals, "sigprocmask how={how} is not BLOCK(1)/UNBLOCK(2)/SETMASK(3) — an unmodelled \
+                 value, not a guest error to swallow"),
         };
         old
     }
@@ -482,7 +481,8 @@ impl ThreadTable {
     /// M48 §3c–§3d: make `tid`, blocked in a timed-wait primitive, runnable. Its caller writes the
     /// reply (`Box_::deliver_wake`).
     ///
-    /// **Refuses, with nothing changed, when a signal is pending on it, masked or not** (K8). The
+    /// **Refuses, with nothing changed, when a signal is pending on it, masked or not** (K8), as a
+    /// `refuse!` wall (M50 C3: a deadline reaches this below the trace, where no `Err` can travel). The
     /// kernel interrupts these waits with `EINTR`, which is unmeasured. A reply written over the
     /// blocked context would make the signal vanish where `assert_no_stranded_signals` cannot see
     /// it, with record and replay agreeing: `unpark`'s posture, as a `Result` because a wake can
@@ -490,11 +490,10 @@ impl ThreadTable {
     pub fn wake(&mut self, tid: usize) -> Result<(), String> {
         let pending = self.threads[tid].pending;
         if pending != 0 {
-            return Err(format!(
-                "M48: a signal is pending on thread {tid} (set {pending:#x}; bit n is signal n+1, \
+            retrace_arch::refuse!(Threads, "M48: a signal is pending on thread {tid} (set {pending:#x}; bit n is signal n+1, \
                  masked or not), and this wake would write its reply over the blocked context. \
                  Measure the kernel's EINTR answer for a thread blocked in kevent or psynch_cvwait, \
-                 as blockedctx.rs does for __ulock_wait, before modelling it."));
+                 as blockedctx.rs does for __ulock_wait, before modelling it.");
         }
         assert!(matches!(self.threads[tid].state,
                 ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. })),
@@ -707,8 +706,9 @@ mod tests {
         let mut t = ThreadTable::new(ThreadCtx::zeroed());
         t.block(BlockReason::Kevent { kq: 3, deadline: None });
         t.pend(0, 30);
-        let e = t.wake(0).unwrap_err();
-        assert!(e.starts_with("M48: a signal is pending on thread 0 (set 0x20000000"), "{e}");
+        let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.wake(0))).unwrap_err();
+        let u = retrace_arch::Unsupported::from_panic(e.as_ref()).expect("the refusal is a wall");
+        assert!(u.what.starts_with("M48: a signal is pending on thread 0 (set 0x20000000"), "{}", u.what);
         assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Kevent { kq: 3, deadline: None }));
         assert_eq!(BlockReason::Kevent { kq: 3, deadline: Some(7) }.deadline(), Some(7));
         assert_eq!(BlockReason::Wait { addr: 8 }.deadline(), None, "only a timed wait carries a deadline");

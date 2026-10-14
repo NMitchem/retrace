@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/event.h>
 #include <unistd.h>
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -70,6 +71,9 @@ int main(int argc, char **argv) {
         sigprocmask(SIG_BLOCK, &s, NULL);
         raise(SIGUSR1);
         sigprocmask(SIG_UNBLOCK, &s, NULL);
+    } else if (!strcmp(mode, "kqdup")) {
+        int kq = kqueue();
+        dup(kq);
     } else {
         printf("cf: unknown mode\n");
         return 2;

@@ -300,8 +300,10 @@ fn a_wake_with_a_signal_pending_is_refused_and_wakes_nobody() {
     b.threads_mut().pend(0, 30);
     b.schedule_after_block().unwrap();
     assert_eq!(b.threads().current(), t1);
-    let e = kevent(&mut b, base + 0x1000, &[kev(7, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0)], 0, 0).unwrap_err();
-    assert!(e.starts_with("M48: a signal is pending on thread 0 (set 0x20000000"), "{e}");
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+        kevent(&mut b, base + 0x1000, &[kev(7, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0)], 0, 0))).unwrap_err();
+    let u = retrace_arch::Unsupported::from_panic(refused.as_ref()).expect("the refusal is a wall");
+    assert!(u.what.starts_with("M48: a signal is pending on thread 0 (set 0x20000000"), "{}", u.what);
     assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Kevent { kq: KQ, deadline: None }), "woke nobody");
 }
 

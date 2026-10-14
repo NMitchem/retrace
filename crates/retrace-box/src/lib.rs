@@ -747,12 +747,13 @@ const GUEST_THREAD_PORT_BASE: u32 = 0x0BAD_7000;
 /// takes the first live match, and two lock owners would merge into one. The bound is reachable,
 /// because M18 never reuses a parked worker, so every workqueue request spawns a new tid. A guest
 /// that spawns more than 1023 threads stops here by design, rather than aliasing.
-const fn guest_thread_kport(tid: usize) -> u32 {
-    assert!(tid < 0x400,
-        "M46: a box-spawned thread id past 0x3ff reaches GUEST_THREAD_PORT_BASE's bits 12-14, so its \
+fn guest_thread_kport(tid: usize) -> u32 {
+    if tid >= 0x400 {
+        retrace_arch::refuse!(Threads, "M46: a box-spawned thread id past 0x3ff reaches GUEST_THREAD_PORT_BASE's bits 12-14, so its \
          mach port name would alias an earlier thread's (tid 0x401 would get tid 1's 0x0BAD7007) and \
          two threads would share one name. M18 never reuses a parked worker, so a guest that spawns \
          more than 1023 threads stops here by design; widen the name scheme before raising this bound.");
+    }
     GUEST_THREAD_PORT_BASE | ((tid as u32) << 2) | 3
 }
 
@@ -1511,7 +1512,9 @@ impl Box_ {
         let mut next_l3 = self.next_l3;
         let created = {
             let mut alloc_l3 = || {
-                assert!(next_l3 + GRANULE as u64 <= PT_L3_CEIL, "set_region_attr: too many exec blocks; L3 window exhausted");
+                if next_l3 + GRANULE as u64 > PT_L3_CEIL {
+                    retrace_arch::refuse!(Memory, "set_region_attr: too many exec blocks; L3 window exhausted");
+                }
                 let (h, hlen) = alloc_pages(GRANULE);
                 // M40: promote_and_set's created Backing hardcodes `len: GRANULE` for this L3 —
                 // true by construction only if alloc_pages actually returned GRANULE bytes here.
@@ -2141,11 +2144,12 @@ impl Box_ {
         if end <= start { return; }
         let mut p = start;
         while p < end {
-            assert!(self.host_span(p).is_some(),
-                "protect_none: no backing for {p:#x} (in [{start:#x},{end:#x})). M13 models \
+            if self.host_span(p).is_none() {
+                retrace_arch::refuse!(Memory, "protect_none: no backing for {p:#x} (in [{start:#x},{end:#x})). M13 models \
                  no-access only on BACKED pages: an unbacked protected page would fault at stage 2, \
                  where commit_reserved_page would silently materialize it instead of faulting. \
                  Model the reservation-protect case deliberately before a guest needs it.");
+            }
             p += g;
         }
         self.set_region_attr(start, end - start, ATTR_NONE);
@@ -2599,8 +2603,9 @@ impl Box_ {
         let (host, rlen) = alloc_pages(size as usize);
         let m = mask | (GRANULE as u64 - 1);
         let ipa = if anywhere {
-            assert!(mask < 1 << 36,
-                "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
+            if mask >= 1 << 36 {
+                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
+            }
             // Kernel-faithful VM_FLAGS_ANYWHERE-with-hint: search FORWARD from a non-zero hint for
             // the first free gap, treating reservations as occupied (what vm_map_enter does). When
             // the hint's own range is free, first_fit returns the hint verbatim (the common case);
@@ -2657,15 +2662,17 @@ impl Box_ {
         // Page-granular extent: commit_reserved_page backs whole pages, so track whole pages.
         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
         let base = if anywhere {
-            assert!(mask < 1 << 36,
-                "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
+            if mask >= 1 << 36 {
+                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
+            }
             if mask != 0 {
                 let m = mask | (GRANULE as u64 - 1);
                 self.mmap_next = (self.mmap_next + m) & !m;
             }
             let end = self.mmap_next + rounded;
-            assert!(end <= (1u64 << 36),
-                "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
+            if end > (1u64 << 36) {
+                retrace_arch::refuse!(Memory, "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
+            }
             let a = self.mmap_next;
             self.mmap_next = end;
             a
@@ -2748,8 +2755,12 @@ impl Box_ {
     /// differ in protection. `copy`, `ANYWHERE` and a foreign `src_task` are dispatch's asserts.
     pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64) -> (u64, u32, u32) {
         let g = GRANULE as u64;
-        assert!(size > 0 && size.is_multiple_of(g), "vm_remap: size {size:#x} is not a page multiple");
-        assert!(target.is_multiple_of(g) && src.is_multiple_of(g), "vm_remap: unaligned target {target:#x} / src {src:#x}");
+        if size == 0 || !size.is_multiple_of(g) {
+            retrace_arch::refuse!(Memory, "vm_remap: size {size:#x} is not a page multiple");
+        }
+        if !target.is_multiple_of(g) || !src.is_multiple_of(g) {
+            retrace_arch::refuse!(Memory, "vm_remap: unaligned target {target:#x} / src {src:#x}");
+        }
         // M48 §3f (Ruling T6-c): an alias copies one moment's stamp, so an alias of a MAP_JIT page
         // would stop following the toggles, and a target inside a range would be restamped by them.
         for (a, what) in [(src, "a mach_vm_remap source"), (target, "a mach_vm_remap target")] {
@@ -2761,16 +2772,18 @@ impl Box_ {
         let mut cur: Option<u32> = None;
         let mut off = 0;
         while off < size {
-            let sdesc = self.l3_desc(src + off).unwrap_or_else(|| panic!(
-                "vm_remap: source page {:#x} has no page-granular stage-1 entry (unpromoted block)", src + off));
-            assert!(sdesc & 0x3 == DESC_PAGE, "vm_remap: source page {:#x} descriptor {sdesc:#x} is not a page", src + off);
+            let sdesc = self.l3_desc(src + off).unwrap_or_else(|| retrace_arch::refuse!(Memory, "vm_remap: source page {:#x} has no page-granular stage-1 entry (unpromoted block)", src + off));
+            if sdesc & 0x3 != DESC_PAGE {
+                retrace_arch::refuse!(Memory, "vm_remap: source page {:#x} descriptor {sdesc:#x} is not a page", src + off);
+            }
             let attr = sdesc & !PT_ADDR & !0x3;
             let prot = if attr == ATTR_CODE { 5 }        // r-x
                        else if attr == ATTR_DATA { 3 }   // rw-
                        else if attr == ATTR_NONE { 0 }   // ---
-                       else { panic!("vm_remap: source page {:#x} has an unmodelled attribute {attr:#x}", src + off) };
-            assert!(cur.is_none_or(|c| c == prot),
-                "vm_remap: source pages differ in protection ({cur:?} vs {prot}) — unmodelled");
+                       else { retrace_arch::refuse!(Memory, "vm_remap: source page {:#x} has an unmodelled attribute {attr:#x}", src + off) };
+            if cur.is_some_and(|c| c != prot) {
+                retrace_arch::refuse!(Memory, "vm_remap: source pages differ in protection ({cur:?} vs {prot}) — unmodelled");
+            }
             cur = Some(prot);
             self.write_l3_desc(target + off, sdesc);
             off += g;
@@ -2871,9 +2884,10 @@ impl Box_ {
         // itself first and answers the guest EINVAL, so it never trips this; the Mach path has no
         // errno channel plumbed to its four call sites and no guest exercises it, so it fails loud
         // with a diagnosis instead of an opaque `HvError(0xfae94003)` recorder abort.
-        assert!(Self::fixed_fits(addr, rlen),
-            "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's 36-bit \
-             IPA space", addr.saturating_add(rlen as u64));
+        if !Self::fixed_fits(addr, rlen) {
+            retrace_arch::refuse!(Memory, "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's 36-bit \
+                 IPA space", addr.saturating_add(rlen as u64));
+        }
         // M48 §3f (Ruling T6-c): every FIXED path funnels through here, and none may land on a
         // MAP_JIT range, whose view would stay stamped over the new mapping's pages.
         if let Err(m) = self.jit.refuse_overlap(addr, rlen as u64, "a FIXED mapping") { panic!("{m}"); }
@@ -2916,7 +2930,7 @@ impl Box_ {
             return Some(addr);
         }
         // Case 3: overlaps something but is neither contained nor covering.
-        panic!("FIXED map at {addr:#x}..{end:#x} partially straddles a live backing: splitting a \
+        retrace_arch::refuse!(Memory, "FIXED map at {addr:#x}..{end:#x} partially straddles a live backing: splitting a \
                 backing is unimplemented (no guest exercises it) and dropping it wholesale would \
                 destroy guest memory the kernel keeps");
     }
@@ -3117,7 +3131,9 @@ impl Box_ {
             let sz = if unsafe { libc::fstat(fd, &mut st) } == 0 { st.st_size as usize } else { rlen };
             let copy_len = rlen.min(((sz + GRANULE - 1) & !(GRANULE - 1)).max(GRANULE));
             let src = unsafe { libc::mmap(std::ptr::null_mut(), copy_len, libc::PROT_READ, libc::MAP_SHARED, fd, off as libc::off_t) };
-            assert!(src != libc::MAP_FAILED, "guest_mmap_file: neither pread nor mmap works on fd {fd}");
+            if src == libc::MAP_FAILED {
+                retrace_arch::refuse!(Memory, "guest_mmap_file: neither pread nor mmap works on fd {fd}");
+            }
             unsafe { std::ptr::copy_nonoverlapping(src as *const u8, host, copy_len); libc::munmap(src, copy_len); }
         }
         // M49 §3e X3: an executable file mapping is code the box stages: dyld maps a non-cache
@@ -4956,9 +4972,10 @@ impl Box_ {
     /// would make a watchpoint fire with a syscall's provenance for a write no syscall made.
     fn write_guest(&mut self, ipa: u64, bytes: &[u8]) {
         let (hp, avail) = self.host_span(ipa)
-            .unwrap_or_else(|| panic!("write_guest: ipa {ipa:#x} outside any mapped region"));
-        assert!(bytes.len() <= avail,
-            "write_guest at {ipa:#x} ({} bytes) overruns backing ({avail} avail)", bytes.len());
+            .unwrap_or_else(|| retrace_arch::refuse!(Memory, "write_guest: ipa {ipa:#x} outside any mapped region"));
+        if bytes.len() > avail {
+            retrace_arch::refuse!(Memory, "write_guest at {ipa:#x} ({} bytes) overruns backing ({avail} avail)", bytes.len());
+        }
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), hp, bytes.len()); }
     }
 
@@ -5046,10 +5063,11 @@ impl Box_ {
     /// overwrite the `x0` just restored from the frame.
     pub fn sigreturn_restore(&mut self, uctx_ipa: u64, token: u64) {
         let expected = sigreturn_token(uctx_ipa);
-        assert_eq!(token, expected,
-            "sigreturn token mismatch: got {token:#x}, expected {expected:#x} for uctx {uctx_ipa:#x}. \
+        if token != expected {
+            retrace_arch::refuse!(Signals, "sigreturn token mismatch: got {token:#x}, expected {expected:#x} for uctx {uctx_ipa:#x}. \
              The token is a pure function of the ucontext address, so a mismatch means a corrupted \
              frame or a sigreturn the guest reached without a delivery.");
+        }
 
         let uc = self.read_guest(uctx_ipa, 56);
         let mask = u32::from_le_bytes(uc[4..8].try_into().unwrap());
@@ -5122,7 +5140,7 @@ impl Box_ {
         for tid in 0..self.threads.len() {
             if !matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_)) { continue; }
             if let Some(sig) = self.threads.peek_deliverable(tid) {
-                panic!("thread {tid} is exiting still Blocked with pending signal {sig}, which it \
+                retrace_arch::refuse!(Signals, "thread {tid} is exiting still Blocked with pending signal {sig}, which it \
                         can therefore never take: M17 materialises a pended signal at the WAKE, and \
                         this thread was never woken. Either the guest deadlocked, or the signal \
                         needs the wait to be interrupted (EINTR) rather than deferred — which M17 \
@@ -5189,11 +5207,10 @@ impl Box_ {
         // frame the kernel's queueing semantics would order — unmodelled, so fail loud rather than
         // guess. A self-signal (tid == cur) runs its handler immediately, so there is no un-run
         // frame to stack on and this does not apply.
-        if tid != cur {
-            assert!(!self.threads.is_redirected(tid),
-                "thread {tid} was already redirected into a handler and has not run since; a \
-                 second signal here would stack frames without the kernel's queueing semantics. \
-                 Nested delivery is unmodelled — implement queueing before a guest needs this.");
+        if tid != cur && self.threads.is_redirected(tid) {
+            retrace_arch::refuse!(Signals, "thread {tid} was already redirected into a handler and has not run since; a \
+             second signal here would stack frames without the kernel's queueing semantics. \
+             Nested delivery is unmodelled — implement queueing before a guest needs this.");
         }
 
         let ctx = self.threads.ctx_of(tid).clone();
@@ -5310,7 +5327,7 @@ impl Box_ {
             let off = (ipa - bk.ipa) as usize;
             return unsafe { std::slice::from_raw_parts(bk.host.add(off), len) }.to_vec();
         }
-        panic!("read_guest: ipa 0x{ipa:x} len {len} not mapped");
+        retrace_arch::refuse!(Memory, "read_guest: ipa 0x{ipa:x} len {len} not mapped");
     }
 
     /// Like `read_guest`, but returns None instead of panicking when the full `[ipa, ipa+len)` span
@@ -5594,10 +5611,11 @@ impl Box_ {
     /// `kernreturn(0x400)` -> `open` -> `kernreturn(0x20)`: the first `workq_kernreturn` fires
     /// BEFORE `workq_open`. A plausible-looking ordering assert would fire on the real sequence.
     pub fn guest_workq_open(&mut self, _args: [u64; 8]) -> u64 {
-        assert!(self.wq_thread_pc.is_some(),
-            "M18 Stage 2a: workq_open before bsdthread_register — refusing to bring up a workqueue \
+        if self.wq_thread_pc.is_none() {
+            retrace_arch::refuse!(Threads, "M18 Stage 2a: workq_open before bsdthread_register — refusing to bring up a workqueue \
              with no registered wqthread entry point. Every dynamic guest registers one at startup \
              (measured, M14 Task 2), so this means the guest took a path no measurement covers.");
+        }
         0
     }
 
@@ -5723,12 +5741,13 @@ impl Box_ {
         // guest takes. A kevent-carrying park means "hand these events back AND park" — parking
         // while dropping the events on the floor is exactly the silent corruption the refuse-by-
         // value posture exists to prevent.
-        assert_eq!((args[1], args[2], args[3]), (0, 0, 0),
-            "M18 Stage 2b: workq_kernreturn THREAD_RETURN with unmeasured arguments \
+        if (args[1], args[2], args[3]) != (0, 0, 0) {
+            retrace_arch::refuse!(Threads, "M18 Stage 2b: workq_kernreturn THREAD_RETURN with unmeasured arguments \
              {:#x?} — the only measured park is (0x4, 0, 0, 0) (Task 1 §3d). Non-zero args here \
              are XNU's kevent-carrying variant, which must return events rather than merely park; \
              measure it before modelling it. args={args:#x?}",
             (args[1], args[2], args[3]));
+        }
         self.park_on_svc();
         0
     }
@@ -5775,22 +5794,22 @@ impl Box_ {
     /// sequence, and both dispatch arms reach this through the same `guest_workq_kernreturn(args)`
     /// call — symmetry rule 1 holding by construction, exactly as it does for `bsdthread_create`.
     fn guest_workq_reqthreads(&mut self, args: [u64; 8]) -> u64 {
-        let entry = self.wq_thread_pc.expect(
-            "M18 Stage 2b: REQTHREADS with no registered wqthread entry point — refusing to build \
+        let entry = self.wq_thread_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "M18 Stage 2b: REQTHREADS with no registered wqthread entry point — refusing to build \
              a worker that would enter an invented address. Every dynamic guest registers one at \
              startup (measured, M14 Task 2), so this means the guest took a path no measurement \
-             covers.");
+             covers."));
         let pthsize = self.pthread_size.expect(
             "M18 Stage 2b: REQTHREADS with no registered pthread size — captured by the same \
              bsdthread_register that captures the entry point, so this cannot happen without the \
              assert above firing first.") as u64;
         let count = args[2];
-        assert!((1..=WQ_MAX_WORKERS_PER_REQUEST).contains(&count),
-            "M18 Stage 2b: REQTHREADS for {count} threads, outside 1..={WQ_MAX_WORKERS_PER_REQUEST}. \
+        if !(1..=WQ_MAX_WORKERS_PER_REQUEST).contains(&count) {
+            retrace_arch::refuse!(Threads, "M18 Stage 2b: REQTHREADS for {count} threads, outside 1..={WQ_MAX_WORKERS_PER_REQUEST}. \
              `args[2]` is numthreads (§5 item 5). Zero is meaningless — libdispatch would wait \
              forever on work no worker was built to run — and anything near the ceiling means this \
              box is reading the wrong argument, not that the guest wants that many workers; each \
              one costs a stack reservation. Every observed request asks for 1. args={args:#x?}");
+        }
         // The flags word is the same for every worker in one request: it encodes the request's own
         // QoS, and `args[3]` is a property of the request, not of the individual thread.
         let flags = WQ_ENTRY_FLAGS_FRESH | Self::wq_qos_index(args[3]);
@@ -6230,7 +6249,7 @@ impl Box_ {
     fn sleep_timed_out(&mut self, tid: usize) {
         let pending = self.threads.pending_of(tid);
         if pending != 0 {
-            panic!("M49: sleep of thread {tid} reached its deadline with a signal pending (set \
+            retrace_arch::refuse!(Threads, "M49: sleep of thread {tid} reached its deadline with a signal pending (set \
                     {pending:#x}), which this wake would deliver. The saved context of a thread \
                     blocked in __semwait_signal is unmeasured, and the EINTR answer with the time \
                     left is M50's (R9); measure it (the blockedctx.rs shape) before allowing this.");
@@ -6802,17 +6821,19 @@ impl Box_ {
     fn wq_qos_index(priority: u64) -> u64 {
         let byte = ((priority >> 8) & 0xff) as u32;
         // `is_power_of_two()` is false for 0, so this rejects "no QoS bit" as well as "several".
-        assert!(byte.is_power_of_two(),
-            "M18 Stage 2b: REQTHREADS priority {priority:#x} has QoS byte {byte:#x}, which is not a \
+        if !byte.is_power_of_two() {
+            retrace_arch::refuse!(Threads, "M18 Stage 2b: REQTHREADS priority {priority:#x} has QoS byte {byte:#x}, which is not a \
              single set bit. Every measured request carries exactly one (§1e), and the flags word \
              libpthread demands encodes exactly one index — measure what issues this before \
              modelling it rather than picking a bit.");
+        }
         let idx = byte.trailing_zeros() as u64 + 1;
-        assert!((1..=6).contains(&idx),
-            "M18 Stage 2b: REQTHREADS priority {priority:#x} decodes to QoS index {idx}, outside \
+        if !(1..=6).contains(&idx) {
+            retrace_arch::refuse!(Threads, "M18 Stage 2b: REQTHREADS priority {priority:#x} decodes to QoS index {idx}, outside \
              the 1..=6 libpthread accepts (`0x2e34 cmp w9, #0x5` after a `sub w9,w9,#1`). Outside \
              that range libpthread silently leaves the worker's priority 0 rather than failing, so \
              this refuses by value instead of shipping a worker at a priority nobody asked for.");
+        }
         idx
     }
 
@@ -6826,11 +6847,9 @@ impl Box_ {
     /// page PROT_NONE (M13's first real caller) two traps before this one. M14 places no IPAs.
     pub fn guest_bsdthread_create(&mut self, args: [u64; 8]) -> u64 {
         let (func, arg, stack, pthread, flags) = (args[0], args[1], args[2], args[3], args[4]);
-        let start = self.thread_start_pc.expect(
-            "M14: bsdthread_create before bsdthread_register — refusing to invent a thread entry \
+        let start = self.thread_start_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "M14: bsdthread_create before bsdthread_register — refusing to invent a thread entry \
              point. Every dynamic guest registers one at startup (measured, M14 Task 2), so this \
-             means the guest took a path no measurement covers.",
-        );
+             means the guest took a path no measurement covers."));
 
         let mut ctx = thread::ThreadCtx::zeroed();
         // The entry point is written to BOTH `elr` and `regs.pc`, not just one. `switch_to_thread`'s
@@ -6940,7 +6959,7 @@ impl Box_ {
         // resurface as the very "join returns without waiting" bug this write exists to prevent.
         let port = guest_thread_kport(tid);
         let ipa = self.va_to_ipa(pthread + PTHREAD_KPORT_OFF).unwrap_or_else(|| {
-            panic!("M14: bsdthread_create pthread struct {pthread:#x} has no mapping for +0xf8")
+            retrace_arch::refuse!(Threads, "M14: bsdthread_create pthread struct {pthread:#x} has no mapping for +0xf8")
         });
         self.write_guest(ipa, &port.to_le_bytes());
         0
@@ -7063,10 +7082,11 @@ impl Box_ {
         // would silently degrade to this arm's 32-bit read below, making equality MORE likely and
         // therefore blocking where the real kernel would not: a manufactured deadlock. Fail loud
         // on an unmeasured operation instead of guessing its width.
-        assert!(matches!(args[0] as u32, 0x1000002 | 0x1020002),
-            "guest_ulock_wait: unmeasured operation word {:#x} — only __pthread_join's plain \
+        if !matches!(args[0] as u32, 0x1000002 | 0x1020002) {
+            retrace_arch::refuse!(Threads, "guest_ulock_wait: unmeasured operation word {:#x} — only __pthread_join's plain \
              32-bit compare-and-wait is modelled; a 64-bit compare would silently degrade to a \
              32-bit read here and could deadlock", args[0]);
+        }
         let addr = args[1];
         let expect = args[2] as u32;
         // Fix round 1, M-3: `addr` is guest-controlled and a bad pointer is LEGAL guest behaviour
@@ -7127,10 +7147,11 @@ impl Box_ {
         // treating it as an address-wake would wake the WRONG thread. The wait side's
         // `0x1020002` is deliberately NOT accepted here: `ULF_WAIT_CANCEL_POINT` (0x20000) is a
         // wait-only flag and has no meaning on a wake.
-        assert!(args[0] as u32 == 0x1000002,
-            "guest_ulock_wake: unmeasured operation word {:#x} — only __pthread_joiner_wake's plain \
+        if args[0] as u32 != 0x1000002 {
+            retrace_arch::refuse!(Threads, "guest_ulock_wake: unmeasured operation word {:#x} — only __pthread_joiner_wake's plain \
              address wake is modelled; ULF_WAKE_THREAD names a thread port in x2 and would wake the \
              wrong thread if treated as an address wake", args[0]);
+        }
         let woken = self.threads.unblock_waiters_on(args[1]);
         (0, woken)
     }
@@ -7228,8 +7249,8 @@ impl Box_ {
         // whether `-33` should wake the LONGEST-parked waiter rather than the lowest-indexed one
         // (`unblock_sem_waiters_on` imposes table order, which is arbitrary once there are two), and
         // a guest that measures either.
-        assert!(woken.len() <= 1,
-            "semaphore_signal_trap (-33) on port {:#x} found {} waiters parked ({woken:?}), but \
+        if woken.len() > 1 {
+            retrace_arch::refuse!(Threads, "semaphore_signal_trap (-33) on port {:#x} found {} waiters parked ({woken:?}), but \
              -33 wakes exactly ONE. Waking all of them is _semaphore_signal_all_trap (-34), a \
              separate trap this box does not service — it is still refused by name by \
              retrace_arch::is_mach_semaphore_trap. Servicing the plural case owes a -34 arm in \
@@ -7237,6 +7258,7 @@ impl Box_ {
              parked; table order is arbitrary. Measure a guest that parks two threads on one \
              semaphore before modelling this.",
             args[0], woken.len());
+        }
         (0, woken)
     }
 

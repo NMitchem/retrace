@@ -323,3 +323,55 @@ fn a_mach_wait_until_stops_at_one_clean_line() {
     assert_guest_wall(retrace_guest::CF_WALLS, &["waituntil"], "cf: waituntil\n",
         "mach_wait_until (mach trap -90)", "syscalls");
 }
+
+/// Spec §2c: `kill(getpid(), 0)`, the usual way to ask whether a process exists. Signal 0 is not one
+/// the signal table models.
+#[test]
+fn a_kill_with_signal_0_stops_at_one_clean_line() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["kill0"], "cf: kill0\n", "signal 0 out of range 1..32", "signals");
+}
+
+/// Spec §2c: `signal(SIGINT, h); raise(SIGINT)`. `signal()` installs its handler without
+/// `SA_SIGINFO`, a frame shape retrace does not deliver yet.
+#[test]
+fn a_handler_installed_with_signal_stops_at_one_clean_line_when_its_signal_is_raised() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["signal"], "cf: signal\n",
+        "a non-SA_SIGINFO handler is not modelled", "signals");
+}
+
+/// Spec §2c: block SIGUSR1, raise it, unblock it. Its default action ends the process at the unblock,
+/// which retrace does not record yet; dropping the signal would turn a death into a clean exit.
+#[test]
+fn a_signal_raised_while_blocked_stops_at_one_clean_line_when_it_is_unblocked() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["unblock"], "cf: unblock\n",
+        "signal 30 became deliverable at an unmask or a wake and its default action is Terminate", "signals");
+}
+
+/// Review Focus 3: `RUST_BACKTRACE=1` is common among Rust developers. A wall reached by a `refuse!`
+/// panic still prints exactly one line and no backtrace, on record and on replay: the hook is silent
+/// for a wall, and Rust's default hook, which would print `panicked at` and the frames, is replaced.
+#[test]
+fn a_wall_prints_no_backtrace_even_with_rust_backtrace_set() {
+    let t = scratch("bt.bin");
+    let tp = t.to_str().unwrap();
+    let env = [("RUST_BACKTRACE", "1")];
+    let rec = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::CF_WALLS, "-o", tp, "--", "kill0"], &env, BOUND);
+    let rp = util::run_bounded(util::bin(), &["replay", tp], &env, BOUND);
+    for (r, side) in [(&rec, "record"), (&rp, "replay")] {
+        assert_no_panic(r, side);
+        assert!(!r.stderr.contains("stack backtrace") && !r.stderr.lines().any(|l| l.trim_start().starts_with("0: ")),
+            "{side}: no backtrace for a wall. stderr:\n{}", r.stderr);
+        assert_eq!(retrace_lines(&r.stderr).len(), 1, "{side}: one retrace: line. stderr:\n{}", r.stderr);
+        assert_eq!(r.code, Some(4), "{side}: exit 4. stderr:\n{}", r.stderr);
+    }
+    assert!(retrace_lines(&rec.stderr)[0].starts_with("retrace: unsupported: "), "{}", rec.stderr);
+    let _ = std::fs::remove_file(&t);
+}
+
+/// T4-c: a wall raised after record appended its landmark, through `note_fd_effects` (a dup of a
+/// guest kqueue). Replay meets it at the recording's last landmark, so it must reach the incomplete
+/// line, which needs the mirror to pass the marked refusal through unchanged.
+#[test]
+fn a_dup_of_a_kqueue_stops_at_one_clean_line_and_replays_to_its_end() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["kqdup"], "cf: kqdup\n", "M48: kevent on fd ", "threads");
+}

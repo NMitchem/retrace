@@ -1,0 +1,41 @@
+# M50 (spec §3c B4): every refuse! site, <file>\t<fn>\t<Category>\t<message prefix>. The audit in
+# refuse_audit.rs fails unless this list and the source agree. Edit it in the same commit as a site.
+crates/retrace-box/src/lib.rs	assert_no_stranded_signals	Signals	thread
+crates/retrace-box/src/lib.rs	deliver_signal_to	Signals	thread
+crates/retrace-box/src/lib.rs	guest_bsdthread_create	Threads	M14: bsdthread_create before bsdthread_r
+crates/retrace-box/src/lib.rs	guest_bsdthread_create	Threads	M14: bsdthread_create pthread struct
+crates/retrace-box/src/lib.rs	guest_mmap_file	Memory	guest_mmap_file: neither pread nor mmap
+crates/retrace-box/src/lib.rs	guest_sem_signal	Threads	semaphore_signal_trap (-33) on port
+crates/retrace-box/src/lib.rs	guest_thread_kport	Threads	M46: a box-spawned thread id past 0x3ff
+crates/retrace-box/src/lib.rs	guest_ulock_wait	Threads	guest_ulock_wait: unmeasured operation w
+crates/retrace-box/src/lib.rs	guest_ulock_wake	Threads	guest_ulock_wake: unmeasured operation w
+crates/retrace-box/src/lib.rs	guest_vm_map_masked	Memory	M47: unmeasured mach_vm_map mask
+crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: size
+crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source page
+crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source page
+crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source page
+crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source pages differ in protect
+crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: unaligned target
+crates/retrace-box/src/lib.rs	guest_vm_reserve_masked	Memory	M47: unmeasured mach_vm_map mask
+crates/retrace-box/src/lib.rs	guest_vm_reserve_masked	Memory	guest_vm_reserve ANYWHERE overflowed 36-
+crates/retrace-box/src/lib.rs	guest_workq_open	Threads	M18 Stage 2a: workq_open before bsdthrea
+crates/retrace-box/src/lib.rs	guest_workq_park	Threads	M18 Stage 2b: workq_kernreturn THREAD_RE
+crates/retrace-box/src/lib.rs	guest_workq_reqthreads	Threads	M18 Stage 2b: REQTHREADS for
+crates/retrace-box/src/lib.rs	guest_workq_reqthreads	Threads	M18 Stage 2b: REQTHREADS with no registe
+crates/retrace-box/src/lib.rs	place_fixed	Memory	FIXED map at
+crates/retrace-box/src/lib.rs	place_fixed	Memory	FIXED map at
+crates/retrace-box/src/lib.rs	protect_none	Memory	protect_none: no backing for
+crates/retrace-box/src/lib.rs	read_guest	Memory	read_guest: ipa 0x
+crates/retrace-box/src/lib.rs	set_region_attr	Memory	set_region_attr: too many exec blocks; L
+crates/retrace-box/src/lib.rs	sigreturn_restore	Signals	sigreturn token mismatch: got
+crates/retrace-box/src/lib.rs	sleep_timed_out	Threads	M49: sleep of thread
+crates/retrace-box/src/lib.rs	wq_qos_index	Threads	M18 Stage 2b: REQTHREADS priority
+crates/retrace-box/src/lib.rs	wq_qos_index	Threads	M18 Stage 2b: REQTHREADS priority
+crates/retrace-box/src/lib.rs	write_guest	Memory	write_guest at
+crates/retrace-box/src/lib.rs	write_guest	Memory	write_guest: ipa
+crates/retrace-box/src/sig.rs	build_frame	Signals	a non-SA_SIGINFO handler is not modelled
+crates/retrace-box/src/sig.rs	idx	Signals	signal
+crates/retrace-box/src/thread.rs	set_mask_of	Signals	sigprocmask how=
+crates/retrace-box/src/thread.rs	unpark	Threads	M46: unpark of parked workqueue thread
+crates/retrace-box/src/thread.rs	wake	Threads	M48: a signal is pending on thread
+crates/retrace-core/src/lib.rs	take_pending_delivery	Signals	signal

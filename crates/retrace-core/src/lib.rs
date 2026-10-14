@@ -126,8 +126,7 @@ fn take_pending_delivery(b: &mut Box_, tid: usize) -> Option<(u64, u64)> {
             // process death into a clean exit — the worst possible failure for a determinism
             // oracle, because the recording and the replay would agree with each other and both be
             // wrong. Both sides reach this panic at the same landmark.
-            retrace_arch::DefaultAction::Terminate => panic!(
-                "signal {sig} became deliverable at an unmask or a wake and its default action is \
+            retrace_arch::DefaultAction::Terminate => retrace_arch::refuse!(Signals, "signal {sig} became deliverable at an unmask or a wake and its default action is \
                  Terminate: the process must die here, and the terminal path (Event::Signal + final \
                  snapshot + break, plus its replay mirror) is not modelled at either landmark. \
                  Implement it before a guest needs this; do not drop the signal."),
