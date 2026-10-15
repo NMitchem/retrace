@@ -23,11 +23,8 @@ extern "C" {
 #[repr(C)]
 struct SigAction { handler: usize, mask: u32, flags: i32 }
 const SIGUSR1: i32 = 30;
-// SA_SIGINFO is MANDATORY, not stylistic. `signal(3)` installs a handler WITHOUT it, and
-// sig.rs's build_frame asserts fail-loud that a non-SA_SIGINFO handler is unmodelled. A guest
-// that trips that assert would park this gate at the wrong wall — documenting an SA_SIGINFO
-// limitation instead of the blocked-target one this gate exists to record. Same shape as
-// sigthread.rs, deliberately.
+// SA_SIGINFO, as in sigthread.rs, deliberately: the shape this gate was written against. (`signal(3)`
+// installs a handler without it, which the box has modelled since M51.)
 const SA_SIGINFO: i32 = 0x0040;
 static A_PT: AtomicU64 = AtomicU64::new(0);
 extern "C" fn on_usr1(_sig: i32, _info: *mut u8, _uap: *mut u8) {}

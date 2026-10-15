@@ -5,7 +5,6 @@
 // had nowhere to go. An absent stack now answers SS_DISABLE as natively, libstd builds the stack,
 // the handler runs on it, and the gate is un-ignored at native's 134.
 //
-//
 // M8 R3, now cleared: libstd computes its stack-overflow guard page at pthread_get_stackaddr_np() -
 // pthread_get_stacksize_np(); macOS 26's libpthread reports a CONSTANT 0x7fc000 that retrace cannot
 // influence (M8 measured that a different getrlimit(RLIMIT_STACK) answer left the computed address

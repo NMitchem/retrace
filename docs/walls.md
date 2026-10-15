@@ -65,7 +65,7 @@ The program used a signal in a way retrace does not model yet. These reach it to
 
 - `pause()` or `sigsuspend()`, which wait for a signal;
 - a signal raised while blocked, whose default action ends the process when it is unblocked;
-- a hardware fault on a thread that has its signal blocked, such as a Rust stack overflow;
+- a hardware fault on a thread that has its signal blocked, which the program did not survive natively either;
 - `kill` with a signal other than 0 to another process;
 - `terminate_with_payload`, which ends a process by its pid.
 
@@ -120,7 +120,7 @@ then one line, and exits with status 4:
 
 The line names the wall when replay meets it itself, in code the recording and the replay share, such as:
 
-    retrace: incomplete recording: it ends at <the refusal's own message> - see https://github.com/NMitchem/retrace/blob/main/docs/walls.md#incomplete-recordings
+    retrace: incomplete recording: it ends at semaphore_signal_trap (-33) on port 0x1003 found 2 waiters parked ([1, 2]), but -33 wakes exactly ONE. ... - see https://github.com/NMitchem/retrace/blob/main/docs/walls.md#incomplete-recordings
 
 Otherwise it names the last landmark it replayed and that landmark's address, as it does for a
 recording whose recorder was killed. A call that stops at the first form is `fsync`: the recording

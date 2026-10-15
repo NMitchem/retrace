@@ -62,13 +62,10 @@ extern "C" {
 const SIG_BLOCK: i32 = 1;
 const SIG_UNBLOCK: i32 = 2;
 
-// SA_SIGINFO, installed via `sigaction` — NOT `signal(3)`. MEASURED: a `signal()`-installed
-// handler is non-SA_SIGINFO, and `build_frame` (sig.rs:262) asserts fail-loud on exactly that:
-// "a non-SA_SIGINFO handler is not modelled. Its infostyle is 0x1 (measured, vs 0x1e for
-// SA_SIGINFO) and the frame layout is identical, so supporting it is small — but no gate guest
-// exercises it." That wall is real and is NOT M16's to clear: infostyle is unrelated to thread
-// attribution, and clearing it here would be scope creep into a different modelling gap. The
-// assert stays honest and untouched; this guest simply installs the shape the box models.
+// SA_SIGINFO, installed via `sigaction` — NOT `signal(3)`. A `signal()`-installed handler is
+// non-SA_SIGINFO; since M51 the box models that shape too (infostyle 0x1, measured, vs 0x1e for
+// SA_SIGINFO). This guest still installs the SA_SIGINFO shape it was written against: its gate is
+// about thread attribution, which has nothing to do with the infostyle.
 //
 // macOS `struct sigaction`: 8-byte handler union, 4-byte sigset_t mask, 4-byte flags. libc's
 // wrapper fills in sa_tramp itself, so the guest never declares it.

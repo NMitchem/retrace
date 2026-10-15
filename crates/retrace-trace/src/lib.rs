@@ -72,7 +72,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0d"; // "RT" + format version 0x000d (M51: `Event::Crash` gained `sig`, and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's, for the store-exclusive rewrite and native's si_code; (M49: a translation fault's SignalDelivery frame now carries SEGV_ACCERR (F4, R1), and Task 4's store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence; refused whole. 0x000b was M47's, for `mach_vm_map`'s mask)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0d"; // "RT" + format version 0x000d. M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {

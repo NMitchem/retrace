@@ -31,7 +31,8 @@ fn agree(prog: &str, args: &[&str], t: &Path) -> (i32, Vec<Event>) {
 }
 
 /// Spec §4 "Signals": `signal(SIGUSR1, h)` then two raises. The handler runs both times, with the
-/// infostyle a handler without `SA_SIGINFO` receives (1, `UC_TRAD`). Then the same handler for a
+/// infostyle a handler without `SA_SIGINFO` receives. The `sig.rs` unit test pins that infostyle (1,
+/// `UC_TRAD`); this test pins that the handler runs each time. Then the same handler for a
 /// fault, which it ends with `_exit(42)`.
 #[test]
 fn a_handler_installed_with_signal_runs_each_time_its_signal_is_raised() {

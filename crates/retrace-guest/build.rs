@@ -1059,8 +1059,6 @@ fn main() {
     assert!(status.success(), "cf_rs_fsync guest build failed");
     // M51: the fidelity fixtures, the hello_dyn recipe. Named fid_, not fc_: firstcontact_e2e's
     // one-row-per-fixture check reads every fc_ source.
-    // One name today; Tasks 3-7 append theirs, so the loop stays.
-    #[allow(clippy::single_element_loop)]
     for name in ["fid_output", "fid_traps", "fid_frames", "fid_env", "fid_signals", "fid_badptr"] {
         let src = format!("{dir}/c/{name}.c");
         let bin = format!("{out}/{name}");

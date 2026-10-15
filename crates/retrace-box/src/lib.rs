@@ -5173,6 +5173,8 @@ impl Box_ {
         };
         let (base, on_alt) = choose_frame_base(sp, act, self.threads.altstack_of(tid), self.on_altstack_of(tid));
         if self.frame_pushable(base) { return FaultAction::Deliver { handler }; }
+        // Main is always thread index 0 (the only thread whose frame failure keeps the fault's signal); any other thread, or a fault on
+        // the alternate stack, ends in SIGILL.
         FaultAction::Crash { sig: if !on_alt && tid == 0 { sig } else { retrace_arch::SIGILL } }
     }
 
@@ -7856,8 +7858,9 @@ impl Box_ {
 
     /// M50 (spec §3c, D4): a guest's own synchronous exception that retrace does not record yet, as
     /// a wall in `exceptions`; None for one only retrace's own code takes (a same-EL abort, a debug
-    /// exception outside the debugger), which stays a bug. Trap instructions are walls until M51
-    /// records them as the crashes native has. The line names the instruction word and its pc. A
+    /// exception outside the debugger), which stays a bug. Since M51 an EL0 trap instruction the program
+    /// executes converts to the crash native has before it gets here, so the trap rows are backstops; AMX
+    /// (0x3f) and 0x18 remain walls. The line names the instruction word and its pc. A
     /// vector-relayed exception's pc is ELR_EL1, because the live PC is parked in the trampoline.
     fn exception_wall(&self, esr: u64) -> Option<Unsupported> {
         let ec = (esr >> 26) & 0x3f;

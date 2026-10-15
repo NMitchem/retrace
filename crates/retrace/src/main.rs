@@ -55,7 +55,6 @@ fn write_failure_line(e: &std::io::Error) -> Option<String> {
         .then(|| format!("retrace: cannot write the program's output: {e}"))
 }
 
-
 /// The options every CLI recording takes: the live sink, and the program's environment.
 fn live(envp: Vec<Vec<u8>>) -> retrace_core::RecordOpts {
     retrace_core::RecordOpts { sink: Some(Box::new(LiveOutput::default())), envp }
