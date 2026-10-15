@@ -415,6 +415,8 @@ pub const FC_MUTEX: &str = concat!(env!("OUT_DIR"), "/fc_mutex");
 pub const FC_FILEIO: &str = concat!(env!("OUT_DIR"), "/fc_fileio");
 /// argv and `getenv("FC_ENV_PROBE")`.
 pub const FC_ENV: &str = concat!(env!("OUT_DIR"), "/fc_env");
+/// M51 (R8): `__builtin_trap()`; natively SIGTRAP (133) after one line.
+pub const FC_C_TRAP: &str = concat!(env!("OUT_DIR"), "/fc_c_trap");
 /// M50 (spec §3f): one mode per newcomer-reachable wall, picked by argv[1] (see the source).
 pub const CF_WALLS: &str = concat!(env!("OUT_DIR"), "/cf_walls");
 /// The source of `CF_WALLS`, which cleanfail_e2e builds for x86_64 to test the arm64-only refusal.
@@ -423,6 +425,8 @@ pub const CF_WALLS_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/c/cf_walls.
 pub const CF_RS_FSYNC: &str = concat!(env!("OUT_DIR"), "/cf_rs_fsync");
 /// M51 (spec §3e): the output modes (see the source).
 pub const FID_OUTPUT: &str = concat!(env!("OUT_DIR"), "/fid_output");
+/// M51 (spec §3b): one trap per mode (see the source).
+pub const FID_TRAPS: &str = concat!(env!("OUT_DIR"), "/fid_traps");
 /// iostream hello.
 pub const FC_CPP_HELLO: &str = concat!(env!("OUT_DIR"), "/fc_cpp_hello");
 /// A C++ exception thrown and caught.
@@ -792,7 +796,7 @@ mod tests {
             assert_eq!(l.cpusubtype & 0x00ff_ffff, retrace_arch::CPU_SUBTYPE_ARM64_ALL, "{p} must be plain arm64");
         };
         for p in [FC_NULL_LOAD, FC_NULL_STORE, FC_NULL_CALL, FC_MUNMAPPED, FC_LOW_STORE, FC_STACK_OVERFLOW,
-                  FC_UAF, FC_ASSERT, FC_SLEEP, FC_USLEEP, FC_NANOSLEEP, FC_MUTEX, FC_FILEIO, FC_ENV,
+                  FC_UAF, FC_ASSERT, FC_SLEEP, FC_USLEEP, FC_NANOSLEEP, FC_MUTEX, FC_FILEIO, FC_ENV, FC_C_TRAP,
                   FC_CPP_HELLO, FC_CPP_THROW, FC_CPP_TERMINATE, FC_CPP_THREAD, FC_CPP_SLEEP,
                   FC_RS_NULL, FC_RS_SLEEP, FC_RS_TESTS, FC_RS_TESTS_FAIL] {
             built(p);

@@ -249,13 +249,14 @@ fn debug_and_gdbserver_refuse_an_incomplete_recording() {
     let _ = std::fs::remove_file(&cut);
 }
 
-/// D4: a trap instruction is a wall in `exceptions` until M51 records it as a crash. The line names
-/// the instruction and its pc. Before M50 it was a `RECORD ERROR` naming only the exception class.
+/// D4, narrowed by M51 (R6): an Apple implementation-defined instruction (AMX) native runs is still
+/// a wall in `exceptions`. The line names the instruction and its pc. The `brk` this row pinned until
+/// M51 is now the crash native reports (traps_e2e).
 #[test]
-fn a_trap_instruction_is_a_wall_in_exceptions() {
-    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["brk"], "cf: brk\n",
-        "brk #0xf000 at pc 0x", "exceptions");
-    assert!(line.contains("(exception class 0x3c, instruction 0x"), "{line}");
+fn an_instruction_native_runs_and_retrace_cannot_is_a_wall_in_exceptions() {
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["amx"], "cf: amx\n",
+        "an implementation-defined instruction (such as Apple's AMX) at pc 0x", "exceptions");
+    assert!(line.contains("(exception class 0x3f, instruction 0x00201220)"), "{line}");
 }
 
 /// `Route::Unsupported`: a Mach message retrace does not answer (`host_get_io_main`, msgh_id 205,

@@ -41,7 +41,7 @@ struct Row { name: &'static str, bin: &'static str, args: &'static [&'static str
 
 /// The outcome table (spec §3b), pinned from t0 M1 (Task 1's addendum). A row flips only in the
 /// task that changes it (R10): M49's F rows in its Task 3 and S rows in its Task 5; M51's fc_assert
-/// and fc_cpp_terminate in its Task 1, the brk rows in Task 3, fc_env in Task 5.
+/// and fc_cpp_terminate in its Task 1, the brk rows in Task 3 (fc_c_trap joins there), fc_env in Task 5.
 const ROWS: &[Row] = &[
     // C (the hello_dyn recipe).
     Row { name: "fc_null_load", bin: retrace_guest::FC_NULL_LOAD, args: &[],
@@ -75,6 +75,8 @@ const ROWS: &[Row] = &[
     Row { name: "fc_fileio", bin: retrace_guest::FC_FILEIO, args: &[], expect: Expect::Pass },
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"],
           expect: Expect::Wall("MISMATCH record stdout at line 4: native \"FC_ENV_PROBE=firstcontact\\n\", record \"FC_ENV_PROBE=(unset)\\n\"") },
+    // M51 (R8): __builtin_trap(), the brk class without swiftc. Joins in Task 3, where it passes (C9).
+    Row { name: "fc_c_trap", bin: retrace_guest::FC_C_TRAP, args: &[], expect: Expect::Pass },
     // C++ (clang++ -std=c++17).
     Row { name: "fc_cpp_hello", bin: retrace_guest::FC_CPP_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_cpp_throw", bin: retrace_guest::FC_CPP_THROW, args: &[], expect: Expect::Pass },
@@ -95,10 +97,8 @@ const ROWS: &[Row] = &[
     // Swift (swiftc, only where it runs: R11).
     Row { name: "fc_sw_hello", bin: retrace_guest::FC_SW_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_throw", bin: retrace_guest::FC_SW_THROW, args: &[], expect: Expect::Pass },
-    Row { name: "fc_sw_oob", bin: retrace_guest::FC_SW_OOB, args: &[],
-          expect: Expect::Wall("retrace: unsupported: brk #0x1 at pc <addr> (exception class 0x3c, instruction 0x") },
-    Row { name: "fc_sw_unwrap", bin: retrace_guest::FC_SW_UNWRAP, args: &[],
-          expect: Expect::Wall("retrace: unsupported: brk #0x1 at pc <addr> (exception class 0x3c, instruction 0x") },
+    Row { name: "fc_sw_oob", bin: retrace_guest::FC_SW_OOB, args: &[], expect: Expect::Pass },
+    Row { name: "fc_sw_unwrap", bin: retrace_guest::FC_SW_UNWRAP, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_sleep", bin: retrace_guest::FC_SW_SLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_sw_gcd", bin: retrace_guest::FC_SW_GCD, args: &[],

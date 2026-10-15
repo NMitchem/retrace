@@ -2214,6 +2214,7 @@ pub const BUS_ADRALN: u64 = 1;
 pub const BUS_ADRERR: u64 = 2;
 pub const BUS_OBJERR: u64 = 3;
 pub const ILL_ILLOPC: u64 = 1;
+pub const ILL_ILLTRP: u64 = 2;
 pub const TRAP_BRKPT: u64 = 1;
 /// `si_code` a kernel-synthesized signal never has: it marks one raised by `kill`/`pthread_kill`
 /// instead of a hardware trap. Not yet consumed by `signal_of_esr` (that function only ever sees a
@@ -2274,9 +2275,11 @@ pub fn signal_of_esr(esr: u64) -> (u64, u64) {
             // with the closest access-error code, not a fail-loud abort.
             _ => (SIGSEGV, SEGV_ACCERR),
         },
-        0x26 => (SIGBUS, BUS_ADRALN),  // SP alignment fault
-        0x00 | 0x0e => (SIGILL, ILL_ILLOPC), // unknown reason / illegal execution state
-        0x3c => (SIGTRAP, TRAP_BRKPT), // BRK instruction
+        0x22 | 0x26 => (SIGBUS, BUS_ADRALN), // PC / SP alignment fault (M51 §3b, native's rows)
+        // M51 §3b: native gives ILL_ILLTRP for udf, hlt and 0xffffffff (static native-traps.txt),
+        // and si_code 0 for brk, not the Linux-shaped ILL_ILLOPC and TRAP_BRKPT before M51.
+        0x00 | 0x0e => (SIGILL, ILL_ILLTRP), // undefined instruction / illegal execution state
+        0x3c => (SIGTRAP, 0),                // BRK instruction
         // Unlike the DFSC fallback above, THIS one stays fail-loud: an unmodelled EC means retrace
         // cannot even name which signal this is, not merely which si_code — there is nothing
         // "closest" to default to without risking a plausible lie about the signal itself.
@@ -2284,6 +2287,35 @@ pub fn signal_of_esr(esr: u64) -> (u64, u64) {
             "signal_of_esr: EC {ec:#x} (esr={esr:#x}) has no modelled signal mapping. It reached \
              the fault path, so it is a real guest fault retrace cannot name — add the class here \
              deliberately rather than defaulting it to SIGSEGV, which would be a plausible lie."),
+    }
+}
+
+/// M51 §3b: a fault's `(signal, si_code, si_addr)` as native delivers it. `si_addr` is the FAR for
+/// an abort and for a misaligned pc (whose FAR is the pc), the pc for a trap (`brk`, an undefined
+/// instruction), and 0 for a misaligned SP (static `native-traps.txt`). An unmodelled class panics
+/// in `signal_of_esr`, its fail-loud rule (C10): the box converts only a class `convertible_trap`
+/// admits, so a class that reaches here unmodelled is a retrace bug.
+pub fn siginfo_of(esr: u64, pc: u64, far: u64) -> (u64, u64, u64) {
+    let (sig, si_code) = signal_of_esr(esr);
+    let si_addr = match (esr >> 26) & 0x3f {
+        0x00 | 0x0e | 0x3c => pc,
+        0x26 => 0,
+        _ => far,
+    };
+    (sig, si_code, si_addr)
+}
+
+/// M51 §3b (R6): whether an EL0 exception of this class is one native turns into a signal, so the
+/// box records it as the crash native reports rather than stopping at a wall. `brk` (0x3c) and the
+/// PC and SP alignment faults (0x22, 0x26) always are. An undefined instruction (0x00) is only when
+/// its word is one of the three native measured as SIGILL `ILL_ILLTRP`: `udf #imm`, `hlt #imm` and
+/// `0xffffffff`. Any other undefined word stays a wall (t0 M2: `rndr`'s word walls with EC 0x00; an
+/// AMX word arrives as EC 0x3f, not here).
+pub fn convertible_trap(esr: u64, word: Option<u32>) -> bool {
+    match (esr >> 26) & 0x3f {
+        0x3c | 0x22 | 0x26 => true,
+        0x00 => matches!(word, Some(w) if w >> 16 == 0 || (w & 0xffe0_001f) == 0xd440_0000 || w == 0xffff_ffff),
+        _ => false,
     }
 }
 
@@ -2965,10 +2997,38 @@ mod tests {
 
     #[test]
     fn signal_of_esr_maps_the_non_abort_classes() {
-        assert_eq!(signal_of_esr(0x9800_0000), (SIGBUS, BUS_ADRALN), "EC 0x26: SP alignment");
-        assert_eq!(signal_of_esr(0x0000_0000), (SIGILL, ILL_ILLOPC), "EC 0x00: unknown/undefined");
-        assert_eq!(signal_of_esr(0x3800_0000), (SIGILL, ILL_ILLOPC), "EC 0x0e: illegal execution state");
-        assert_eq!(signal_of_esr(0xf000_0000), (SIGTRAP, TRAP_BRKPT), "EC 0x3c: BRK");
+        // M51 §3b: native's rows (static native-traps.txt), not the Linux-shaped ones before M51.
+        assert_eq!(signal_of_esr(0x9a00_0000), (SIGBUS, BUS_ADRALN), "EC 0x26: SP alignment");
+        assert_eq!(signal_of_esr(0x8a00_0000), (SIGBUS, BUS_ADRALN), "EC 0x22: PC alignment");
+        assert_eq!(signal_of_esr(0x0200_0000), (SIGILL, ILL_ILLTRP), "EC 0x00: udf, hlt, 0xffffffff");
+        assert_eq!(signal_of_esr(0x3a00_0000), (SIGILL, ILL_ILLTRP), "EC 0x0e: illegal execution state");
+        assert_eq!(signal_of_esr(0xf200_f000), (SIGTRAP, 0), "EC 0x3c: brk, si_code 0 natively");
+    }
+
+    #[test]
+    fn siginfo_of_puts_si_addr_where_native_does() {
+        // M51 §3b: si_addr is the FAR for an abort and a misaligned pc, the pc for a trap, and 0 for a
+        // misaligned SP (static native-traps.txt).
+        let (pc, far) = (0x1_0000_0a0c, 0x4000_dead_0000);
+        assert_eq!(siginfo_of(0x9200_0007, pc, far), (SIGSEGV, SEGV_ACCERR, far), "a data abort");
+        assert_eq!(siginfo_of(0x8a00_0000, pc + 2, pc + 2), (SIGBUS, BUS_ADRALN, pc + 2), "a misaligned pc");
+        assert_eq!(siginfo_of(0x9a00_0000, pc, 0), (SIGBUS, BUS_ADRALN, 0), "a misaligned SP");
+        assert_eq!(siginfo_of(0x0200_0000, pc, 0), (SIGILL, ILL_ILLTRP, pc), "udf");
+        assert_eq!(siginfo_of(0xf200_f000, pc, 0), (SIGTRAP, 0, pc), "brk");
+    }
+
+    #[test]
+    fn convertible_trap_admits_only_what_native_defines() {
+        // M51 R6: brk, the alignment faults, and the three undefined words native gives SIGILL for.
+        for esr in [0xf200_0001, 0x8a00_0000, 0x9a00_0000] { assert!(convertible_trap(esr, None), "{esr:#x}"); }
+        for w in [0x0000_0000, 0x0000_1234, 0xd440_0000, 0xd45f_ffe0, 0xffff_ffff] {
+            assert!(convertible_trap(0x0200_0000, Some(w)), "{w:#010x}");
+        }
+        for w in [0x0020_1220, 0xd400_0001, 0xd440_0001] {
+            assert!(!convertible_trap(0x0200_0000, Some(w)), "{w:#010x}: native does not define it as SIGILL");
+        }
+        assert!(!convertible_trap(0x0200_0000, None), "an unreadable word is not judged");
+        assert!(!convertible_trap(0x6200_0000, None), "EC 0x18: a trapped system register stays a wall");
     }
 
     #[test]

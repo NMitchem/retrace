@@ -345,7 +345,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             // converted (M49 F2) into the stage-1 fault this arm then sees. So this still cannot
             // steal a demand-paging case, for exactly the reason M6's arm couldn't.
             Stop::Fault { pc, esr, far } => {
-                let (sig, si_code) = retrace_arch::signal_of_esr(esr);
+                // M51 §3b: native's signal, si_code and si_addr for every class the box converts.
+                let (sig, si_code, si_addr) = retrace_arch::siginfo_of(esr, pc, far);
                 // M49 Ruling T3-b: the box answers the disposition AND whether the handler's frame
                 // can be pushed. A frame on memory nothing backs is native's kill, so the fault is
                 // then a crash (`faultcase_dyn deeprec h`).
@@ -364,12 +365,12 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     // see symmetry rule 1 holding rather than having to chase a delegation to
                     // confirm it.
                     let (writes, resume_pc) =
-                        b.deliver_signal_to(thread as usize, sig, si_code, far, esr, far);
+                        b.deliver_signal_to(thread as usize, sig, si_code, si_addr, esr, far);
                     // A hardware fault has no target port to resolve — it is always attributed to
                     // whichever thread's vCPU context trapped — so `current` is permanently correct
                     // on this path. Contrast the __pthread_kill delivery below, which resolves its
                     // target thread from the port the guest named (M16).
-                    w.append(&Event::SignalDelivery { sig, si_code, si_addr: far, handler,
+                    w.append(&Event::SignalDelivery { sig, si_code, si_addr, handler,
                                                       resume_pc, writes, thread })
                         .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
                     continue;
@@ -3342,7 +3343,7 @@ impl ReplaySession {
                     // The recomputed disposition comes from the REPLAY-side table, which the
                     // serviced sigaction mirror keeps in step; that is what makes a guest which
                     // installed a handler take this branch on both sides.
-                    let (sig, si_code) = retrace_arch::signal_of_esr(esr);
+                    let (sig, si_code, si_addr) = retrace_arch::siginfo_of(esr, pc, far);
                     // M16 Task 8: a hardware fault has no target port to resolve — it is always
                     // attributed to whichever thread's vCPU context trapped — so `current` is
                     // permanently correct here, matching record's fault arm, which tags its
@@ -3350,7 +3351,7 @@ impl ReplaySession {
                     let cur = self.b.threads().current();
                     // M49 Ruling T3-b: the question record's arm asks, of the same box state.
                     if self.b.fault_handler(cur, sig).is_some() {
-                        return self.mirror_delivery(cur, sig, si_code, far, esr, far, pc);
+                        return self.mirror_delivery(cur, sig, si_code, si_addr, esr, far, pc);
                     }
                     // M6 mirror of record's crash arm. The triple compare IS the divergence check
                     // (symmetry rule 1); then the final-memory landmark, exactly like Exit.

@@ -408,7 +408,10 @@ impl<'a> Server<'a> {
 
     /// §3c's terminal list (t0 L4d, L4e), on the current thread.
     fn terminal(&mut self, o: &Outcome) -> String {
-        self.stop(rsp::terminal_kind(o), None)
+        // M51 §3b (T0-k): a misaligned SP's stop shows the SP, which only the thread's context has.
+        let t = self.ex.sess().current_thread();
+        let sp = self.ex.sess().thread_ctx(t as usize).expect("a stop names a thread in the table").regs.sp_el0;
+        self.stop(rsp::terminal_kind(o, sp), None)
     }
 
     /// §3f. `Z<t>,<addr>,<kind|len>` / `z…`. 0 and 1 are hardware breakpoints, capped at the

@@ -228,8 +228,9 @@ const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // `DC CIVAC`, `DC CVAC` and `DC CVAP`; a guest issuing them is harmless, since they run natively on
 // the vCPU and need no emulation. UCT(15) stays CLEAR: t0 M1(b) found no `CTR_EL0` read in
 // `sys_icache_invalidate`, so an EL0 `CTR_EL0` read still traps with EC 0x18 and fails loud, and
-// none was measured.
-const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000 | 0x0400_0000;
+// none was measured. SA0(4) is SET (M51 §3b, t0 M10): an EL0 load or store through a misaligned SP
+// faults with EC 0x26, as natively (SIGBUS); clear, the vCPU ran it.
+const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x10 | 0x1000 | 0x4000 | 0x0400_0000;
 // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
 const SCTLR_PAC_EN: u64 = 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
 
@@ -2023,19 +2024,17 @@ impl Box_ {
     ///
     /// `esr` is the stop's own syndrome (HVF's ESR_EL2), which the box does not keep. Below the
     /// trace: every input is box state rebuilt identically on both sides, so nothing about the
-    /// decision is recorded.
+    /// decision is recorded. M51: a stop that is not an abort skips the pagers and goes to
+    /// `resolve_exception` (C13).
     pub fn resolve_stage2(&mut self, esr: u64) -> Stage2 {
+        // M51 C13: only an abort's FAR is an address the pagers may own. Any other class's FAR is
+        // UNKNOWN (a `brk`'s, an undefined instruction's), so paging at it would act on junk.
+        if !matches!(ec_of(esr), Ec::DataAbort | Ec::InstrAbort) {
+            return self.resolve_exception(esr);
+        }
         let ipa = self.fault_ipa();
         if self.page_in_cache(ipa) { return Stage2::Resolved { committed: false }; }
         if self.commit_reserved_page(ipa) { return Stage2::Resolved { committed: true }; }
-        // F2 looks only at aborts. Any other class is the guest's own exception (a wall, M50 D4) or
-        // one only retrace's own code takes (a bug), and keeps the text it had before M49 if a bug.
-        if !matches!(ec_of(esr), Ec::DataAbort | Ec::InstrAbort) {
-            return match self.exception_wall(esr) {
-                Some(u) => Stage2::Wall(u),
-                None => Stage2::Bug(self.describe_stop(esr)),
-            };
-        }
         match self.convert_stage2_abort(esr) {
             Ok(converted) => converted,
             // M50: a decline M2 classed a wall carries the marker from its site; every other is a bug.
@@ -2060,7 +2059,7 @@ impl Box_ {
     ///
     /// The next `run()` executes that slot's `hvc #0` and returns `Stop::Fault` through the arm a
     /// stage-1 fault takes, so `signal_of_esr`, `deliver_signal_to` and `Event::Crash` run as they
-    /// do for any stage-1 fault. `Err` names why the stop stays loud.
+    /// do for any stage-1 fault. `Err` names why the stop stays loud. M51: the writes are `enter_el1`'s.
     ///
     /// A FAR with a top-byte tag (a TBI0 pointer) is refused before the lookup (M49 final review
     /// M1). Both pagers were handed the raw FAR and decline a tagged address they would own
@@ -2080,6 +2079,17 @@ impl Box_ {
         if self.host_span(ipa).is_some() {
             return Err(format!("IPA {ipa:#x} is backed, so stage 2 and the box's backings disagree"));
         }
+        let pc = self.enter_el1(esr1, far);
+        Ok(Stage2::Converted { pc, esr: esr1, far })
+    }
+
+    /// The exception entry the hardware makes for an EL0 exception taken to EL1: ELR_EL1 the pc,
+    /// SPSR_EL1 the PSTATE with `PSTATE_SS` cleared, FAR_EL1, ESR_EL1, CPSR `EXC_ENTRY_CPSR`, and the
+    /// pc VBAR_EL1 + 0x400, the lower-EL synchronous vector. Returns the pc it entered from. M49's
+    /// stage-2 conversion and M51's `brk` (which `MDCR_EL2.TDE` sends to EL2 instead) share it; the
+    /// next `run()` executes that slot's `hvc #0`.
+    fn enter_el1(&mut self, esr1: u64, far: u64) -> u64 {
+        let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
         let pc = self.pc();
         let vbar = self.vcpu.get_sys(sysreg::VBAR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::ELR_EL1, pc).unwrap();
@@ -2088,7 +2098,62 @@ impl Box_ {
         self.vcpu.set_sys(sysreg::ESR_EL1, esr1).unwrap();
         self.vcpu.set_reg(reg::CPSR, EXC_ENTRY_CPSR).unwrap();
         self.vcpu.set_reg(reg::PC, vbar + 0x400).unwrap();
-        Ok(Stage2::Converted { pc, esr: esr1, far })
+        pc
+    }
+
+    /// M51 §3b: a stop that is not an abort. An EL0 trap native defines that went straight to EL2
+    /// (a `brk`: `MDCR_EL2.TDE` routes it there) enters the guest's EL1 vector as it would have
+    /// without TDE, and the next `run()` returns it as the `Stop::Fault` every other converted trap
+    /// is (C7). Any other class taken from EL0 is the guest's own exception and a wall (M50 D4); one
+    /// taken from EL1 is retrace's own code, a bug.
+    fn resolve_exception(&mut self, esr: u64) -> Stage2 {
+        let (el0, direct) = self.exception_origin();
+        if el0 && direct {
+            let pc = self.pc();
+            let w = self.read_va_prefix(pc, 4);
+            if retrace_arch::convertible_trap(esr, <[u8; 4]>::try_from(&w[..]).ok().map(u32::from_le_bytes)) {
+                let far = if (esr >> 26) & 0x3f == 0x22 { pc } else { 0 };
+                let pc = self.enter_el1(esr, far);
+                return Stage2::Converted { pc, esr, far };
+            }
+        }
+        match self.exception_wall(esr) {
+            Some(u) if el0 => Stage2::Wall(u),
+            _ => Stage2::Bug(self.describe_stop(esr)),
+        }
+    }
+
+    /// M51 §3b: where the exception a non-abort stop reports was taken from, as `(el0, direct)`.
+    /// `direct` is a stop that went straight to EL2, leaving the vCPU in the guest's own context, so
+    /// CPSR holds the PSTATE it was taken from. Otherwise the EL1 vector took it, the trampoline's
+    /// `hvc` reported it (the pc is inside the vector table, as `exception_wall` reads it), and
+    /// SPSR_EL1 holds that PSTATE. `el0` is whether that PSTATE's EL is 0.
+    fn exception_origin(&self) -> (bool, bool) {
+        let direct = !(TRAMPOLINE_IPA..TRAMPOLINE_IPA + 0x800).contains(&self.pc());
+        let pstate = if direct {
+            self.vcpu.get_reg(reg::CPSR).unwrap()
+        } else {
+            self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap()
+        };
+        ((pstate >> 2) & 3 == 0, direct)
+    }
+
+    /// M51 §3b (C7): an EL0 exception the EL1 vector took that native defines (`convertible_trap`)
+    /// is the `Stop::Fault` a stage-1 abort is. Its pc is ELR_EL1, and its FAR is FAR_EL1 for a
+    /// misaligned pc and 0 otherwise: FAR_EL1 is UNKNOWN for the other classes, and native reports 0.
+    /// `None` leaves the stop the `Stop::Other` it was. `run()` and `run_one_for_step()` both ask
+    /// here, so record, replay and the step loops convert alike (symmetry rule 2).
+    fn trap_fault(&mut self, esr1: u64) -> Option<Stop> {
+        let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+        if (spsr >> 2) & 3 != 0 { return None; }
+        let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        let w = self.read_va_prefix(pc, 4);
+        if !retrace_arch::convertible_trap(esr1, <[u8; 4]>::try_from(&w[..]).ok().map(u32::from_le_bytes)) {
+            return None;
+        }
+        let far = if (esr1 >> 26) & 0x3f == 0x22 { self.vcpu.get_sys(sysreg::FAR_EL1).unwrap() } else { 0 };
+        self.last_far = far;
+        Some(Stop::Fault { pc, esr: esr1, far })
     }
 
     /// The live stage-1 leaf descriptor for `ipa`, walking the L2/L3 the box maintains: an L3 page
@@ -3396,6 +3461,8 @@ impl Box_ {
                         Ec::Other(0) => match self.try_emulate_undef_mrs() {
                             Ok(true) => continue,
                             Ok(false) => {
+                                // M51 §3b: an undefined word native defines is the crash native reports.
+                                if let Some(f) = self.trap_fault(esr1) { return f; }
                                 self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                                 return Stop::Other { esr: esr1 };
                             }
@@ -3418,6 +3485,9 @@ impl Box_ {
                             return Stop::Fault { pc, esr: esr1, far };
                         }
                         _ => {
+                            // M51 §3b: a misaligned pc or SP, or a `brk` `resolve_exception` entered
+                            // EL1 for, is the crash native reports.
+                            if let Some(f) = self.trap_fault(esr1) { return f; }
                             self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             return Stop::Other { esr: esr1 };
                         }
@@ -3707,6 +3777,8 @@ impl Box_ {
                         Ec::Other(0) => match self.try_emulate_undef_mrs() {
                             Ok(true) => return Stop::Step,
                             Ok(false) => {
+                                // M51 §3b: an undefined word native defines is the crash native reports.
+                                if let Some(f) = self.trap_fault(esr1) { return f; }
                                 self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                                 return Stop::Other { esr: esr1 };
                             }
@@ -3721,6 +3793,9 @@ impl Box_ {
                             return Stop::Fault { pc, esr: esr1, far };
                         }
                         _ => {
+                            // M51 §3b: a misaligned pc or SP, or a `brk` `resolve_exception` entered
+                            // EL1 for, is the crash native reports.
+                            if let Some(f) = self.trap_fault(esr1) { return f; }
                             self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             return Stop::Other { esr: esr1 };
                         }
@@ -7509,6 +7584,7 @@ impl Box_ {
             0x26 => "a misaligned stack pointer".to_owned(),
             0x2c => "a trapped floating-point exception".to_owned(),
             0x3c => format!("brk #{:#x}", esr & 0xffff),
+            0x3f => "an implementation-defined instruction (such as Apple's AMX)".to_owned(),
             _ => return None,
         };
         let pc = self.pc();
@@ -7994,14 +8070,15 @@ mod sctlr_dze_tests {
     // value, because a bit set speculatively is the "right conclusion resting on an unmeasured
     // supporting fact" this repo keeps catching.
     #[test]
-    fn sctlr_enables_dc_zva_and_ic_ivau_for_el0_and_nothing_else() {
+    fn sctlr_enables_dc_zva_ic_ivau_and_sp_alignment_for_el0_and_nothing_else() {
         for pac_enabled in [false, true] {
             let sctlr = sctlr_mmu_on(pac_enabled);
+            assert!(sctlr & 0x10 != 0, "SA0 (bit 4) must be SET: {sctlr:#x}");
             assert!(sctlr & 0x4000 != 0, "DZE (bit 14) must be SET: {sctlr:#x}");
             assert!(sctlr & 0x0400_0000 != 0, "UCI (bit 26) must be SET: {sctlr:#x}");
             assert!(sctlr & 0x8000 == 0, "UCT (bit 15) must stay CLEAR: {sctlr:#x}");
-            assert_eq!(sctlr & !SCTLR_PAC_EN, 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000 | 0x0400_0000,
-                "the base is M, C, I, DZE and UCI over 0x30d00800, and nothing else: {sctlr:#x}");
+            assert_eq!(sctlr & !SCTLR_PAC_EN, 0x30d0_0800 | 1 | 4 | 0x10 | 0x1000 | 0x4000 | 0x0400_0000,
+                "the base is M, C, SA0, I, DZE and UCI over 0x30d00800, and nothing else: {sctlr:#x}");
         }
     }
 }
