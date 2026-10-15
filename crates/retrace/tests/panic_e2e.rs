@@ -4,6 +4,11 @@
 // at all — the trace ended with no terminal event and replay could only diverge on it.
 mod util;
 
+/// A run's stderr with retrace's own `retrace:` lines set aside: what the program wrote.
+fn program_stderr(s: &str) -> String {
+    s.lines().filter(|l| !l.starts_with("retrace:")).collect::<Vec<_>>().join("\n")
+}
+
 #[test]
 fn a_panicking_rust_guest_records_and_replays_its_own_death() {
     let (rec, trace) = util::record_dynamic(retrace_guest::PANICKY);
@@ -25,6 +30,7 @@ fn a_panicking_rust_guest_records_and_replays_its_own_death() {
         assert_eq!(rep.code, 134, "replay {i}; stderr:\n{}", rep.stderr);
         assert!(rep.stderr.contains("retrace: the program was killed by SIGABRT"), "replay {i}:\n{}", rep.stderr);
         assert_eq!(rep.stdout, rec.stdout, "replay {i} stdout diverged");
+        assert_eq!(program_stderr(&rep.stderr), program_stderr(&rec.stderr), "replay {i} reproduces libstd's panic text");
     }
 }
 

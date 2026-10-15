@@ -99,6 +99,10 @@ fn the_launcher_records_and_replays_its_own_posix_spawn_failure() {
     assert_eq!(rep.code, rec.code, "replay exit code diverged from the recording");
     assert_eq!(rep.stdout, rec.stdout, "replay stdout diverged from the recording");
     assert!(rep.stderr.contains("posix_spawn"), "replay must reproduce the guest's stderr text, got: {}", rep.stderr);
+    // The program's whole stderr, not only the word, with retrace's own `retrace:` lines set aside (replay
+    // prints no refusal line, and the closing line is retrace's).
+    let program = |s: &str| s.lines().filter(|l| !l.starts_with("retrace:")).collect::<Vec<_>>().join("\n");
+    assert_eq!(program(&rep.stderr), program(&rec.stderr), "replay must reproduce the program's stderr in full");
 
     // M38: the posix_spawn is REFUSED now, not forwarded — the refusal line is the only thing
     // that distinguishes the two, since the errno the guest reads was chosen to match (spec R4).
