@@ -8,7 +8,7 @@ mod util;
 fn a_panicking_rust_guest_records_and_replays_its_own_death() {
     let (rec, trace) = util::record_dynamic(retrace_guest::PANICKY);
     assert_eq!(rec.code, 134, "134 == 128 + SIGABRT; stderr:\n{}", rec.stderr);
-    assert!(rec.stderr.contains("guest terminated by signal 6"), "stderr:\n{}", rec.stderr);
+    assert!(rec.stderr.contains("retrace: the program was killed by SIGABRT"), "stderr:\n{}", rec.stderr);
 
     // The first stdout line pins that the guest reached its OWN code rather than dying inside dyld.
     let out = String::from_utf8_lossy(&rec.stdout);
@@ -23,7 +23,7 @@ fn a_panicking_rust_guest_records_and_replays_its_own_death() {
     for i in 0..2 {
         let rep = util::replay(&trace);
         assert_eq!(rep.code, 134, "replay {i}; stderr:\n{}", rep.stderr);
-        assert!(rep.stderr.contains("guest terminated by signal 6"), "replay {i}:\n{}", rep.stderr);
+        assert!(rep.stderr.contains("retrace: the program was killed by SIGABRT"), "replay {i}:\n{}", rep.stderr);
         assert_eq!(rep.stdout, rec.stdout, "replay {i} stdout diverged");
     }
 }

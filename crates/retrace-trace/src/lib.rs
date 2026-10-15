@@ -23,7 +23,11 @@ pub enum Event {
     Exit { code: u64, thread: u32 },
     /// M16: `thread` is the thread that faulted — always the current thread; permanent, not a
     /// placeholder (the vCPU that trapped IS the thread that faulted).
-    Crash { pc: u64, esr: u64, far: u64, thread: u32 },
+    ///
+    /// M51 §3c: `sig` is the signal the process died of: the fault's own (`siginfo_of`), or, for a
+    /// handler whose frame could not be pushed, the one the kernel kills with instead (§3d). The exit
+    /// code is `128 + sig`.
+    Crash { pc: u64, esr: u64, far: u64, sig: u64, thread: u32 },
     /// M11: the guest raised a signal on itself whose disposition is the default fatal action.
     /// Terminal, exactly like `Crash` — followed by the final full-memory `Snapshot`.
     ///
@@ -68,7 +72,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0c"; // "RT" + format version 0x000c (M49: a translation fault's SignalDelivery frame now carries SEGV_ACCERR (F4, R1), and Task 4's store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence; refused whole. 0x000b was M47's, for `mach_vm_map`'s mask)
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0d"; // "RT" + format version 0x000d (M51: `Event::Crash` gained `sig`, and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's, for the store-exclusive rewrite and native's si_code; (M49: a translation fault's SignalDelivery frame now carries SEGV_ACCERR (F4, R1), and Task 4's store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence; refused whole. 0x000b was M47's, for `mach_vm_map`'s mask)
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -223,7 +227,7 @@ mod tests {
         vec![
             Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000000, sp_el0:0x2000_0000, cpsr:0 },
                               mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,4] }] },
-            Event::Crash { pc: 0x100000010, esr: 0x92000005, far: 0x4000DEAD0000, thread: 0 },
+            Event::Crash { pc: 0x100000010, esr: 0x92000005, far: 0x4000DEAD0000, sig: 11, thread: 0 },
             Event::Snapshot { regs: Regs { x:[0;31], pc:0x100000010, sp_el0:0x2000_0000, cpsr:0 },
                               mem: vec![Region{ ipa:0x100000000, bytes: vec![1,2,3,9] }] },
         ]
@@ -287,7 +291,7 @@ mod tests {
     }
 
     // M11's magic assertion moved to `magic_bumped_for_the_m24_trampoline_vector_padding`, renamed
-    // at each bump since (now `magic_bumped_for_m49s_si_code_and_exclusive_rewrite`). What is left here is the
+    // at each bump since (now `magic_bumped_for_m51s_crash_signal`). What is left here is the
     // half that does not go stale: a v4 trace stays rejected.
     #[test]
     fn rejects_v4_traces() {
@@ -323,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn magic_bumped_for_m49s_si_code_and_exclusive_rewrite() {
+    fn magic_bumped_for_m51s_crash_signal() {
         // M24: the trampoline page's vector padding changed from `UDF #0` to `hvc #1` (M23),
         // which is snapshot *content*, not `Event` shape — a pre-M24 snapshot is not merely
         // older, it means something different at the bytes `Box_::restore` re-applies. Two
@@ -336,7 +340,9 @@ mod tests {
         // M49: F4 changes a translation fault's frame (si_code 2, not 1) and X3 changes staged code
         // bytes, the M24 kind of change, so a pre-M49 recording is refused, not replayed into a
         // false divergence.
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0c");
+        // M51: `Event::Crash` gained `sig` (a shape change, the M38 kind), and J1 rewrites a recorded
+        // instruction abort's IFSC (the M24 kind).
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0d");
     }
 
     #[test]
@@ -367,7 +373,18 @@ mod tests {
         let p = named_tempfile("m47magic");
         std::fs::write(&p, b"RT\x00\x0brest-of-a-pre-M49-trace").unwrap();
         let msg = Reader::format_skew(&p).unwrap().expect(r"a pre-M49 RT\x00\x0b header is version skew");
-        assert!(msg.contains(r"RT\x00\x0b") && msg.contains(r"RT\x00\x0c"), "{msg}");
+        assert!(msg.contains(r"RT\x00\x0b") && msg.contains(&format!(r"RT\x{:02x}\x{:02x}", TRACE_MAGIC[2], TRACE_MAGIC[3])), "{msg}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_pre_m51_trace_is_refused_by_name() {
+        // M51's bump: an M49 or M50 recording (RT\x00\x0c) has no `sig` in its `Crash`, so it would
+        // deserialise with the thread tag read as the signal. It is refused as an older format.
+        let p = named_tempfile("m50magic");
+        std::fs::write(&p, b"RT\x00\x0crest-of-a-pre-M51-trace").unwrap();
+        let msg = Reader::format_skew(&p).unwrap().expect(r"a pre-M51 RT\x00\x0c header is version skew");
+        assert!(msg.contains(r"RT\x00\x0c") && msg.contains(&format!(r"RT\x{:02x}\x{:02x}", TRACE_MAGIC[2], TRACE_MAGIC[3])), "{msg}");
         std::fs::remove_file(&p).ok();
     }
 
@@ -396,7 +413,7 @@ mod tests {
     fn the_four_new_thread_tags_round_trip() {
         let evs = vec![
             Event::Exit { code: 7, thread: 3 },
-            Event::Crash { pc: 0x1000, esr: 0x24, far: 0x2000, thread: 1 },
+            Event::Crash { pc: 0x1000, esr: 0x24, far: 0x2000, sig: 10, thread: 1 },
             Event::Signal { sig: 6, pc: 0x3000, thread: 2 },
             Event::SignalDelivery { sig: 30, si_code: 0x10001, si_addr: 0, handler: 0x4000,
                                     resume_pc: 0x5000, writes: vec![], thread: 1 },

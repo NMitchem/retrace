@@ -153,3 +153,71 @@ fn retrace_verbose_prints_retraces_diagnostic_lines_on_record_and_replay() {
     assert!(rp.stderr.lines().any(|l| l.starts_with("[retrace] fall-throughs: ")), "replay:\n{}", rp.stderr);
     let _ = std::fs::remove_file(&t);
 }
+
+/// The program's crash from the recording's terminal event: its `sig`.
+fn crash_sig(trace: &str) -> u64 {
+    let (events, torn) = retrace_trace::Reader::open_checked(std::path::Path::new(trace)).unwrap();
+    assert!(!torn, "a complete recording");
+    match &events[events.len() - 2] {
+        retrace_trace::Event::Crash { sig, .. } => *sig,
+        other => panic!("the second-to-last event must be the Crash, got {other:?}"),
+    }
+}
+
+/// The `retrace:` lines a run printed.
+fn retrace_lines(stderr: &str) -> Vec<&str> { stderr.lines().filter(|l| l.starts_with("retrace:")).collect() }
+
+/// Spec §3c: a crash ends with one closing line, after the program's output, naming the signal, the
+/// fault and the function, and the exit code is native's. On record and on both replays.
+#[test]
+fn a_crash_ends_with_one_closing_line_naming_the_signal_and_the_function() {
+    let native = util::run_bounded(retrace_guest::FID_OUTPUT, &["crash"], &[], BOUND);
+    assert_eq!((native.code, native.stdout.as_slice()), (Some(139), &b"before\n"[..]), "native");
+    let t = scratch("crash.bin");
+    let tp = t.to_str().unwrap();
+    let rec = record("crash", tp, &[]);
+    assert_eq!(crash_sig(tp), 11, "the recording's Crash carries the signal it died of");
+    for (what, run) in [("record", rec), ("replay 1", replay(tp, &[])), ("replay 2", replay(tp, &[]))] {
+        assert_eq!((run.code, run.stdout.as_slice()), (Some(139), &b"before\n"[..]), "{what}: {}", run.stderr);
+        let lines = retrace_lines(&run.stderr);
+        assert_eq!(lines.len(), 1, "{what}: one closing line. stderr:\n{}", run.stderr);
+        assert_eq!(run.stderr.lines().last(), Some(lines[0]), "{what}: the closing line is the last line");
+        assert!(lines[0].starts_with("retrace: the program was killed by SIGSEGV (fault at 0x0, pc 0x")
+            && lines[0].contains(" in _fid_store_null") && lines[0].ends_with(')') && lines[0].is_ascii(),
+            "{what}: {}", lines[0]);
+    }
+    let _ = std::fs::remove_file(&t);
+}
+
+/// Spec §3c: a fatal signal the program raised ends with the same line, without a place.
+#[test]
+fn a_fatal_abort_ends_with_one_closing_line_naming_sigabrt() {
+    let t = scratch("abort.bin");
+    let tp = t.to_str().unwrap();
+    let rec = record("abort", tp, &[]);
+    for (what, run) in [("record", rec), ("replay 1", replay(tp, &[])), ("replay 2", replay(tp, &[]))] {
+        assert_eq!((run.code, run.stdout.as_slice()), (Some(134), &b"before\n"[..]), "{what}: {}", run.stderr);
+        assert_eq!(retrace_lines(&run.stderr), ["retrace: the program was killed by SIGABRT"], "{what}");
+    }
+    let _ = std::fs::remove_file(&t);
+}
+
+/// Review Focus 3: `strlen(NULL)` faults inside the shared cache, whose symbols the recording does
+/// not hold (C2). The line says "a system library" rather than guess a name, and the exit code is
+/// native's.
+#[test]
+fn a_crash_inside_a_system_library_says_so() {
+    let native = util::run_bounded(retrace_guest::FID_OUTPUT, &["crashlib"], &[], BOUND);
+    assert_eq!(native.code, Some(139), "native: {}", native.stderr);
+    let t = scratch("crashlib.bin");
+    let tp = t.to_str().unwrap();
+    let rec = record("crashlib", tp, &[]);
+    for (what, run) in [("record", rec), ("replay", replay(tp, &[]))] {
+        assert_eq!(run.code, native.code, "{what}: {}", run.stderr);
+        let lines = retrace_lines(&run.stderr);
+        assert_eq!(lines.len(), 1, "{what}: {}", run.stderr);
+        assert!(lines[0].starts_with("retrace: the program was killed by SIGSEGV (fault at 0x0, pc 0x")
+            && lines[0].ends_with(" in a system library)"), "{what}: {}", lines[0]);
+    }
+    let _ = std::fs::remove_file(&t);
+}

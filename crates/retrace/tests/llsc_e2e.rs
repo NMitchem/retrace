@@ -48,7 +48,7 @@ fn edge_trace() -> &'static Path {
     static C: OnceLock<PathBuf> = OnceLock::new();
     C.get_or_init(|| {
         let (rec, t) = util::record(retrace_guest::LLSC_EDGE);
-        assert_eq!(rec.code, 139, "llscedge must record to the read-only store's fault: {}", rec.stderr);
+        assert_eq!(rec.code, 138, "llscedge must record to the read-only store's fault: {}", rec.stderr);
         t
     })
 }
@@ -454,7 +454,7 @@ fn the_edge_fixture_records_and_replays_its_crash_natively() {
     // Native record and replay take no step exit, so none of §3i's code runs here: this pins the
     // fixture's own shape (window 2 ends in the store's fault) before the stepped tests lean on it.
     let r = util::replay(edge_trace());
-    assert_eq!(r.code, 139, "replay: {}", r.stderr);
+    assert_eq!(r.code, 138, "replay: {}", r.stderr);
     let end = replay_to_end(ReplaySession::open(edge_trace()).unwrap());
     assert!(matches!(end.outcome, Outcome::Crash { pc, .. } if pc == edge_sym("edge_ro_stx")),
         "{:?}", end.outcome);

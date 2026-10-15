@@ -2287,6 +2287,19 @@ pub fn signal_of_esr(esr: u64) -> (u64, u64) {
     }
 }
 
+/// M51 §3c: Darwin's name for a signal (`<sys/signal.h>`), for the closing line. A number with no
+/// name is spelled `signal N`.
+pub fn signal_name(sig: u64) -> String {
+    const NAMES: [&str; 32] = ["", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGEMT",
+        "SIGFPE", "SIGKILL", "SIGBUS", "SIGSEGV", "SIGSYS", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGURG",
+        "SIGSTOP", "SIGTSTP", "SIGCONT", "SIGCHLD", "SIGTTIN", "SIGTTOU", "SIGIO", "SIGXCPU", "SIGXFSZ",
+        "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGINFO", "SIGUSR1", "SIGUSR2"];
+    match usize::try_from(sig).ok().and_then(|i| NAMES.get(i)) {
+        Some(n) if !n.is_empty() => (*n).to_owned(),
+        _ => format!("signal {sig}"),
+    }
+}
+
 /// M49 F2 (spec §3d): the stage-1 abort a stage-2 translation fault stands for, or why it must
 /// stay loud.
 ///
@@ -2956,6 +2969,17 @@ mod tests {
         assert_eq!(signal_of_esr(0x0000_0000), (SIGILL, ILL_ILLOPC), "EC 0x00: unknown/undefined");
         assert_eq!(signal_of_esr(0x3800_0000), (SIGILL, ILL_ILLOPC), "EC 0x0e: illegal execution state");
         assert_eq!(signal_of_esr(0xf000_0000), (SIGTRAP, TRAP_BRKPT), "EC 0x3c: BRK");
+    }
+
+    #[test]
+    fn signal_name_spells_darwins_names() {
+        // <sys/signal.h>: the closing line's names (M51 §3c).
+        for (sig, name) in [(4, "SIGILL"), (5, "SIGTRAP"), (6, "SIGABRT"), (7, "SIGEMT"), (8, "SIGFPE"),
+                            (10, "SIGBUS"), (11, "SIGSEGV"), (12, "SIGSYS"), (29, "SIGINFO"), (31, "SIGUSR2")] {
+            assert_eq!(signal_name(sig), name, "{sig}");
+        }
+        assert_eq!(signal_name(0), "signal 0", "no signal 0");
+        assert_eq!(signal_name(32), "signal 32", "past NSIG");
     }
 
     // The measured ESR from spikes/sigtramp.c, end to end. A store to an unmapped page.

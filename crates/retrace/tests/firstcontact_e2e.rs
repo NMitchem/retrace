@@ -7,7 +7,7 @@
 //! - both replays reproduce the recording's exit status and stdout byte for byte;
 //! - when native dies by a signal, the trace's terminal event is of the right kind and carries that
 //!   signal (spec §3b, CLAUDE.md's distinction): `Event::Signal` only for SIGABRT (6, raised by
-//!   `abort`), `Event::Crash` (through `signal_of_esr`) for every other signal, which is a hardware
+//!   `abort`), `Event::Crash` (its `sig`, since M51) for every other signal, which is a hardware
 //!   fault. The wrong kind is a named `MISMATCH terminal kind`, never a pass.
 //!
 //! Otherwise the outcome is `Refused` (the recording ended at a clean wall line and both replays end
@@ -221,8 +221,8 @@ fn terminal_mismatch(trace: &Path, want: i32) -> Option<String> {
     let (events, torn) = retrace_trace::Reader::open_checked(trace).expect("read the recording");
     let got = match events.iter().rev().find(|e| !matches!(e, Event::Snapshot { .. })) {
         _ if torn => "a torn trace".to_owned(),
-        Some(Event::Crash { esr, .. }) => {
-            let sig = retrace_arch::signal_of_esr(*esr).0;
+        Some(Event::Crash { esr, sig, .. }) => {
+            let sig = *sig;
             if raised { return Some(format!("MISMATCH terminal kind: native {want} (expected Signal), trace Crash {sig} esr={esr:#x}")); }
             if sig as i32 == want { return None; }
             format!("Crash {sig} esr={esr:#x}")

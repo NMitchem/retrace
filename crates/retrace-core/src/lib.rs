@@ -65,7 +65,9 @@ fn is_usrstack64_mib(b: &retrace_box::Box_, args: [u64; 8]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Exit { code: u64 },
-    Crash { pc: u64, esr: u64, far: u64 },
+    /// M6: a guest synchronous fault. M51 §3c: `sig` is what the process died of (the recorded
+    /// `Event::Crash.sig`), and `site` is where its pc is, for the closing line (`symbols::crash_site`).
+    Crash { pc: u64, esr: u64, far: u64, sig: u64, site: String },
     /// M11: terminated by a signal the guest raised on itself, whose disposition resolved to the
     /// default fatal action. Terminal in the same shape M6 gave a fault.
     Signal { sig: u64 },
@@ -76,6 +78,34 @@ pub enum Outcome {
     /// there at a wall or because its recorder was killed. The string says where: the wall's `what`
     /// when replay met the wall there itself, else `landmark <n> (pc <hex>)`. Replay only.
     Incomplete(String),
+}
+
+/// M51 §3c (R7): the one line retrace prints after a program killed by a signal, on record and on
+/// replay, after the program's output. `None` for an outcome that is not a death by signal.
+pub fn closing_line(o: &Outcome) -> Option<String> {
+    match o {
+        Outcome::Crash { pc, esr, far, sig, site } => {
+            let what = match (esr >> 26) & 0x3f {
+                0x3c => format!("brk at pc {pc:#x}"),
+                0x00 | 0x0e => format!("undefined instruction at pc {pc:#x}"),
+                0x22 => format!("misaligned pc {pc:#x}"),
+                0x26 => format!("misaligned stack pointer at pc {pc:#x}"),
+                _ => format!("fault at {far:#x}, pc {pc:#x}"),
+            };
+            let at = if site.is_empty() { String::new() } else { format!(" in {site}") };
+            Some(format!("retrace: the program was killed by {} ({what}{at})", retrace_arch::signal_name(*sig)))
+        }
+        Outcome::Signal { sig } => Some(format!("retrace: the program was killed by {}", retrace_arch::signal_name(*sig))),
+        _ => None,
+    }
+}
+
+/// The closing line's place for a crash at `pc`, from the final snapshot record appends after it.
+fn crash_site_of(final_snap: &Event, pc: u64) -> String {
+    match final_snap {
+        Event::Snapshot { mem, .. } => symbols::crash_site(mem, pc),
+        _ => String::new(),
+    }
 }
 
 /// `fall_throughs` is the EL1 vector fall-through count (M23 t1/t2). It is carried out here rather
@@ -345,9 +375,10 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     continue;
                 }
                 let final_snap = b.snapshot();
-                w.append(&Event::Crash { pc, esr, far, thread }).map_err(|e| format!("append crash: {e}"))?; count += 1;
+                let site = crash_site_of(&final_snap, pc);
+                w.append(&Event::Crash { pc, esr, far, sig, thread }).map_err(|e| format!("append crash: {e}"))?; count += 1;
                 w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
-                outcome = Outcome::Crash { pc, esr, far };
+                outcome = Outcome::Crash { pc, esr, far, sig, site };
                 break;
             }
             // Console writes are mirrored + faked (NOT forwarded) so record doesn't emit to the
@@ -3324,10 +3355,10 @@ impl ReplaySession {
                     // M6 mirror of record's crash arm. The triple compare IS the divergence check
                     // (symmetry rule 1); then the final-memory landmark, exactly like Exit.
                     match self.events.get(self.idx) {
-                        Some(Event::Crash { pc: rpc, esr: resr, far: rfar, thread: rthread }) => {
-                            if pc != *rpc || esr != *resr || far != *rfar {
+                        Some(Event::Crash { pc: rpc, esr: resr, far: rfar, sig: rsig, thread: rthread }) => {
+                            if pc != *rpc || esr != *resr || far != *rfar || sig != *rsig {
                                 return Err(Divergence { landmark: self.idx, pc,
-                                    detail: format!("crash mismatch: live (pc={pc:#x}, esr={esr:#x}, far={far:#x}) != recorded (pc={rpc:#x}, esr={resr:#x}, far={rfar:#x})") });
+                                    detail: format!("crash mismatch: live (pc={pc:#x}, esr={esr:#x}, far={far:#x}, sig={sig}) != recorded (pc={rpc:#x}, esr={resr:#x}, far={rfar:#x}, sig={rsig})") });
                             }
                             // M16 Task 11: the thread oracle (see `verify_thread`'s doc). Placed
                             // AFTER the (pc, esr, far) compare above, not before, for the usual
@@ -3339,8 +3370,9 @@ impl ReplaySession {
                                     if let Some(d) = self.b.diff_memory(final_mem) {
                                         return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
                                     }
+                                    let site = symbols::crash_site(final_mem, pc);
                                     return Ok(Advance::Exited(replay_report(&mut self.console, &self.b,
-                                        Outcome::Crash { pc, esr, far })));
+                                        Outcome::Crash { pc, esr, far, sig, site })));
                                 }
                                 other => return Err(Divergence { landmark: self.idx + 1, pc,
                                     detail: format!("expected final memory Snapshot after Crash, got {other:?}") }),

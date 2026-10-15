@@ -193,14 +193,9 @@ fn finish(fall_throughs: u64, outcome: &retrace_core::Outcome) -> i32 {
     if retrace_arch::verbose() { say(&format!("[retrace] fall-throughs: {fall_throughs}")); }
     match *outcome {
         retrace_core::Outcome::Exit { code } => code as i32,
-        retrace_core::Outcome::Crash { pc, esr, far } => {
-            say(&format!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"));
-            139
-        }
-        retrace_core::Outcome::Signal { sig } => {
-            say(&format!("guest terminated by signal {sig}"));
-            // 128 + sig: the convention M6 already uses for a crash (139 == 128 + SIGSEGV).
-            // SIGABRT therefore exits 134.
+        retrace_core::Outcome::Crash { sig, .. } | retrace_core::Outcome::Signal { sig } => {
+            // M51 §3c: the program's output is already printed; one closing line, and native's code.
+            if let Some(l) = retrace_core::closing_line(outcome) { say(&l); }
             128 + sig as i32
         }
         // M50 §3b: the guest's output is already printed; the wall's line comes last.

@@ -80,7 +80,7 @@ fn check_addr(case: &str, addr: &Addr, got: u64, events: &[Event]) {
 fn terminal_crash(case: &str, events: &[Event]) -> (u64, u64, u64, u32) {
     assert!(matches!(events[events.len() - 1], Event::Snapshot { .. }), "{case}: the final snapshot last");
     match &events[events.len() - 2] {
-        Event::Crash { pc, esr, far, thread } => (*pc, *esr, *far, *thread),
+        Event::Crash { pc, esr, far, thread, .. } => (*pc, *esr, *far, *thread),
         other => panic!("{case}: the second-to-last event must be the Crash, got {other:?}"),
     }
 }
@@ -106,7 +106,7 @@ fn each_fault_case_records_a_terminal_crash_and_replays_it_twice() {
             let rp = util::replay(&trace);
             assert_eq!(rp.code, 139, "{} replay {i}: {}", c.name, rp.stderr);
             assert_eq!(rp.stdout, rec.stdout, "{} replay {i} stdout", c.name);
-            assert!(rp.stderr.contains(&format!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}")),
+            assert!(rp.stderr.contains(&format!("(fault at {far:#x}, pc {pc:#x}")),
                 "{} replay {i}: {}", c.name, rp.stderr);
         }
         let _ = std::fs::remove_file(&trace);
@@ -274,7 +274,7 @@ fn a_jump_into_unbacked_data_memory_is_still_a_stage1_permission_fault() {
     let _ = std::fs::remove_file(&trace);
 
     let (rec, trace) = util::record_dynamic_args(FAULTCASE_DYN, &["jump1g"]);
-    assert_eq!(rec.code, 139, "{}", rec.stderr);
+    assert_eq!(rec.code, 138, "{}", rec.stderr); // M51 Task 2: a permission fault's SIGBUS, until J1 (Task 4)
     let ev = Reader::open(&trace).unwrap();
     let (pc, esr, far, _) = terminal_crash("jump1g", &ev);
     assert_eq!((pc, esr, far), (0x4000_0000, 0x8200_000e, 0x4000_0000), "a stage-1 permission fault at level 2");
@@ -430,7 +430,7 @@ fn stepping_onto_a_converted_fault_reports_the_crash_at_the_faulting_pc() {
         let mut s = retrace_core::seek(&trace, ci, n).unwrap();
         assert_eq!(s.step_armed(), Ok(Armed::Fault));
         match s.advance().unwrap_or_else(|d| panic!("after the step: diverged at {}: {}", d.landmark, d.detail)) {
-            Advance::Exited(r) => assert_eq!(r.outcome, Outcome::Crash { pc, esr, far }),
+            Advance::Exited(r) => assert!(matches!(r.outcome, Outcome::Crash { pc: p, esr: e, far: f, .. } if (p, e, f) == (pc, esr, far)), "{:?}", r.outcome),
             _ => panic!("the session parked on the converted fault must end in the recorded crash"),
         }
     }
