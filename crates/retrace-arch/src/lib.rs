@@ -2992,7 +2992,7 @@ mod tests {
         for cmd in [F_PREALLOCATE, F_GETPATH, F_ADDFILESIGS_RETURN, F_CHECK_LV] {
             assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Ptr, "fcntl cmd {cmd}");
         }
-        // FW-R: commands with no argument at all, and any command outside the pointer list, are integers.
+        // FW-R/FW-R2: the header's int and no-argument commands, and an FS-specific command carrying no data, are integers.
         for cmd in [5, 51, 85, 40, 107, 106, 110, 70, 0x1_0000 | 0x2000_0000] {
             assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Scalar, "fcntl cmd {cmd}");
         }
