@@ -162,6 +162,15 @@ int main(int argc, char **argv) {
         unlink(path);
         report("fcntl(F_FULLFSYNC, 0x12345678)", rc, e);
     }
+    else if (!strcmp(m, "getlease")) {
+        // FW-R2: F_GETLEASE takes no argument; a wild third word is not a pointer.
+        char path[] = "/tmp/retrace-getlease-XXXXXX";
+        int tfd = mkstemp(path);
+        rc = raw3(92, tfd, 107, 0x12345678);
+        int e = errno;
+        unlink(path);
+        report("fcntl(F_GETLEASE, 0x12345678)", rc, e);
+    }
     else if (!strcmp(m, "setown")) {
         // FW-3: F_SETOWN's argument is a pid, an integer; one past 16 KiB must not be judged as an address.
         int p[2];

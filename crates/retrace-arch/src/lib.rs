@@ -1164,18 +1164,26 @@ pub fn shape_of(num: u64, args: &[u64; 8]) -> &'static Shape {
     static CSRCTL_COPYIN: Shape = Shape { args: &[Scalar, Source, Scalar], ret: Ret::Plain };
     match num {
         SYS_FCNTL | SYS_FCNTL_NOCANCEL => match args[1] {
-            // FW-R: the third argument is a pointer only for the commands whose argument is a struct or a
-            // buffer in `<sys/fcntl.h>` (the commands libc's `fcntl` hands `va_arg(ap, void *)` rather than
-            // `(long)va_arg(ap, int)`): the lock family, F_PREALLOCATE, F_SETSIZE, F_RDADVISE, the log2phys
-            // pair, the path getters, the signature commands, F_PUNCHHOLE, the lease and tag commands and
-            // the rest listed here. Every other command takes an int or nothing at all, and for the
-            // no-argument ones (F_GETOWN, F_FULLFSYNC, F_BARRIERFSYNC, F_FLUSH_DATA, ...) the third word is
-            // whatever the caller's register held, which must not be judged as an address. libc's source is
-            // not in the SDK; the list is from the header's comments, and errs toward `Ptr` where a command's
-            // argument is not stated.
-            7..=10 | 42..=44 | 49 | 50 | 52 | 59 | 61 | 65 | 66 | 70 | 71 | 72 | 75 | 78 | 83 | 90..=93
-            | 97..=111 | 113 => forwarded_shape(num),
-            _ => &FCNTL_INT,
+            // FW-R2, three ways. (a) Scalar: every `<sys/fcntl.h>` command whose argument is an int or
+            // nothing: the descriptor and file flags (0-4), the owner (5, 6), F_FLUSH_DATA and F_CHKCLEAN
+            // (40, 41), F_RDAHEAD, F_NOCACHE, F_FULLFSYNC, the freeze pair, F_GLOBAL_NOCACHE (45, 48, 51,
+            // 53-55), F_NODIRECT, the protection class pair, F_DUPFD_CLOEXEC, F_SETBACKINGSTORE (a flag),
+            // the SIGPIPE pair, F_SINGLE_WRITER, F_GETPROTECTIONLEVEL, F_BARRIERFSYNC, F_SETLEASE (an int),
+            // F_GETLEASE (no argument), F_TRANSFEREXTENTS (an fd) and F_NOCACHE_EXT. For a no-argument
+            // command the third word is whatever the caller's register held and is not an address.
+            0..=6 | 40 | 41 | 45 | 48 | 51 | 53..=55 | 62..=64 | 67 | 70 | 73 | 74 | 76 | 77 | 85 | 106 | 107
+            | 110 | 112 => &FCNTL_INT,
+            // (b) The file-system-specific base (0x10000 and up) follows the ioctl encoding rule, as the
+            // pre-forward check applies to `ioctl`: a pointer when the command carries IOC_IN or IOC_OUT and
+            // a length, else an integer.
+            c if c >= 0x1_0000 => {
+                if c & (IOC_IN | IOC_OUT) != 0 && iocparm_len(c) > 0 { forwarded_shape(num) } else { &FCNTL_INT }
+            }
+            // (c) Every other command keeps the row's `Ptr`: the header's struct and buffer commands, and any
+            // command the header does not list (xnu-private ones). An unknown command that writes through a
+            // pointer must never reach the host untranslated (a silent copyout into retrace's own memory);
+            // a false EFAULT on a private integer command is the visible, lesser failure, named in Known limits.
+            _ => forwarded_shape(num),
         },
         336 => match args[0] {
             PROC_INFO_CALL_SETCONTROL => &PROC_INFO_COPYIN,
@@ -2985,8 +2993,12 @@ mod tests {
             assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Ptr, "fcntl cmd {cmd}");
         }
         // FW-R: commands with no argument at all, and any command outside the pointer list, are integers.
-        for cmd in [5, 51, 85, 40, 999] {
+        for cmd in [5, 51, 85, 40, 107, 106, 110, 70, 0x1_0000 | 0x2000_0000] {
             assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Scalar, "fcntl cmd {cmd}");
+        }
+        // FW-R2: an unlisted command keeps the row's Ptr, and the FS-specific base follows the ioctl encoding.
+        for cmd in [56, 999, 0x1_0000 | IOC_IN | (8 << 16)] {
+            assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Ptr, "fcntl cmd {cmd:#x}");
         }
         for cmd in [FIOCLEX, FIONCLEX] {
             assert_eq!(shape_of(SYS_IOCTL, &args(cmd)).args[2], Scalar, "ioctl cmd {cmd:#x}");

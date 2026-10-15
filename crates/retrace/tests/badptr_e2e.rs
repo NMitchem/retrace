@@ -114,7 +114,8 @@ fn an_emulated_call_with_a_bad_pointer_returns_natives_error() {
                          ("setnamelit", "rc=0 name=\"worker\"\n"),
                          // FW-3: F_SETOWN's argument is an integer pid; native reads it back negated.
                          // FW-R: a no-argument command's third word is not a pointer; native succeeds.
-                         ("fullfsync", "fcntl(F_FULLFSYNC, 0x12345678): rc=0 errno=0\n"),
+                         ("getlease", "fcntl(F_GETLEASE, 0x12345678): rc=2 errno=0\n"),
+                         ("fullfsync","fcntl(F_FULLFSYNC, 0x12345678): rc=0 errno=0\n"),
                          ("setown","setown: rc=0 errno=0 own=-70000\n")] {
         let t = scratch(&format!("{mode}.bin"));
         let (out, _) = agree(mode, &t);
