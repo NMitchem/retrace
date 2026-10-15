@@ -1129,6 +1129,12 @@ pub const F_PREALLOCATE: u64 = 42;
 pub const F_NOCACHE: u64 = 48;
 pub const F_GETPATH: u64 = 50;
 pub const F_DUPFD_CLOEXEC: u64 = 67;
+pub const F_SETOWN: u64 = 6;
+pub const F_NODIRECT: u64 = 62;
+pub const F_RDAHEAD: u64 = 45;
+pub const F_SINGLE_WRITER: u64 = 76;
+pub const F_SETNOSIGPIPE: u64 = 73;
+pub const F_SETPROTECTIONCLASS: u64 = 64;
 pub const F_ADDFILESIGS_RETURN: u64 = 97;
 pub const F_CHECK_LV: u64 = 98;
 pub const FIOCLEX: u64 = 0x2000_6601;
@@ -1150,17 +1156,64 @@ pub fn shape_of(num: u64, args: &[u64; 8]) -> &'static Shape {
     // and the row-identity argument want one address).
     static FCNTL_INT: Shape = Shape { args: &[Fd, Scalar, Scalar], ret: Ret::Plain };
     static IOCTL_INT: Shape = Shape { args: &[Fd, Scalar, Scalar], ret: Ret::Plain };
+    // FW-2: the rows whose buffer direction follows an op word, as the op's own shape.
+    static PROC_INFO_COPYIN: Shape = Shape { args: &[Scalar, Scalar, Scalar, Scalar, Source, Scalar], ret: Ret::Plain };
+    static PROC_INFO_NOBUF: Shape = Shape { args: &[Scalar, Scalar, Scalar, Scalar, Scalar, Scalar], ret: Ret::Plain };
+    static CSOPS_COPYIN: Shape = Shape { args: &[Scalar, Scalar, Source, Scalar], ret: Ret::Plain };
+    static CSOPS_AT_COPYIN: Shape = Shape { args: &[Scalar, Scalar, Source, Scalar, Ptr], ret: Ret::Plain };
+    static CSRCTL_COPYIN: Shape = Shape { args: &[Scalar, Source, Scalar], ret: Ret::Plain };
     match num {
         SYS_FCNTL | SYS_FCNTL_NOCANCEL => match args[1] {
-            F_DUPFD | F_GETFD | F_SETFD | F_GETFL | F_SETFL | F_NOCACHE | F_DUPFD_CLOEXEC => &FCNTL_INT,
+            // FW-3: every `fcntl` command whose argument is an `int` (`sys/fcntl.h`): descriptor and file
+            // flags, the owner pid (F_SETOWN: a pid of 16 KiB or more must not be judged as an address),
+            // read-ahead, no-cache, single-writer, the SIGPIPE switch, the protection class and the
+            // dup commands. F_SETLKWTIMEOUT, F_PREALLOCATE, F_GETPATH and the rest take a pointer.
+            F_DUPFD | F_GETFD | F_SETFD | F_GETFL | F_SETFL | F_NOCACHE | F_DUPFD_CLOEXEC | F_SETOWN
+            | F_RDAHEAD | F_NODIRECT | F_SINGLE_WRITER | F_SETNOSIGPIPE | F_SETPROTECTIONCLASS => &FCNTL_INT,
             _ => forwarded_shape(num),
         },
+        336 => match args[0] {
+            PROC_INFO_CALL_SETCONTROL => &PROC_INFO_COPYIN,
+            PROC_INFO_CALL_SET_DYLD_IMAGES => &PROC_INFO_NOBUF,
+            _ => forwarded_shape(num),
+        },
+        169 if csops_copies_in(args[1]) => &CSOPS_COPYIN,
+        170 if csops_copies_in(args[1]) => &CSOPS_AT_COPYIN,
+        483 if args[0] == CSR_SYSCALL_CHECK => &CSRCTL_COPYIN,
         SYS_IOCTL => match args[1] {
             FIOCLEX | FIONCLEX => &IOCTL_INT,
             _ => forwarded_shape(num),
         },
         _ => forwarded_shape(num),
     }
+}
+
+/// `sys/proc_info.h`: `PROC_INFO_CALL_SETCONTROL`. `proc_info_internal` copies the buffer IN for
+/// `PROC_SELFSET_THREADNAME` (`copyin(buffer, name, min(buffersize, MAXTHREADNAMESIZE - 1))`, bsd/kern/proc_info.c).
+pub const PROC_INFO_CALL_SETCONTROL: u64 = 5;
+/// `PROC_INFO_CALL_SET_DYLD_IMAGES`: "don't need to copyin the buffer. just setting the buffer range in the
+/// task struct" (`proc_set_dyld_images`): nothing is transferred.
+pub const PROC_INFO_CALL_SET_DYLD_IMAGES: u64 = 15;
+/// `sys/csr.h`: `CSR_SYSCALL_CHECK` is op 0, which `copyin`s a `csr_config_t`; op 1
+/// (`CSR_SYSCALL_GET_ACTIVE_CONFIG`) copies out. Measured native, a read-only buffer: op 0 passes the copyin
+/// (EPERM past it), op 1 answers EFAULT. The fix brief called the copy-in op 1; native says 0.
+pub const CSR_SYSCALL_CHECK: u64 = 0;
+
+/// `csops`' ops (`sys/codesign.h`) that copy their buffer IN: `CS_OPS_SET_STATUS` (1), a 4-byte flags word,
+/// and `CS_OPS_SETEXECSEG` (9), a `csops_exec_seg` struct (`csops_internal`, bsd/kern/kern_proc.c). Not
+/// measured natively: `SET_STATUS` on the probe's own pid killed the probe.
+pub fn csops_copies_in(op: u64) -> bool { matches!(op, 1 | 9) }
+
+/// `dest_buffer`, keyed on the op word the way `shape_of` is: the rows whose buffer the kernel only reads
+/// (proc_info `SETCONTROL`, csops `SET_STATUS`/`SETEXECSEG`) or never touches (proc_info `SET_DYLD_IMAGES`)
+/// have no destination to size a diff window by or to clamp a length against.
+pub fn dest_buffer_for(num: u64, args: &[u64; 8]) -> Option<(usize, DestLen)> {
+    let in_only = match num {
+        336 => matches!(args[0], PROC_INFO_CALL_SETCONTROL | PROC_INFO_CALL_SET_DYLD_IMAGES),
+        169 | 170 => csops_copies_in(args[1]),
+        _ => false,
+    };
+    if in_only { None } else { dest_buffer(num) }
 }
 
 /// M51 §3h (C3): is argument `i` of `num` an address range the call acts on, rather than a buffer the
@@ -1272,6 +1325,16 @@ pub fn fixed_span(num: u64, i: usize) -> Option<usize> {
         (SYS_SIGALTSTACK, 0 | 1) => Some(24),
         _ => None,
     }
+}
+
+/// Is position `i` of `num` a pointer retrace itself dereferences to answer the call (FW-1)? Those arms
+/// read or write through it with no host kernel behind them to answer a bad one, so
+/// `Box_::prepare_forward_pointers` must judge every nonzero value, near-NULL and tagged ones included.
+/// Everywhere else a value below 16 KiB or with a tag byte may be an integer argument (an `ioctl` or `fcntl`
+/// operand) and goes to the host, which answers it.
+pub fn serviced_pointer(num: u64, i: usize) -> bool {
+    fixed_span(num, i).is_some()
+        || matches!((num, i), (SYS_SIGPROCMASK, 1 | 2) | (SYS_SIGPENDING, 0) | (SYS_GETRLIMIT, 1))
 }
 
 /// `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)` — the descriptor-producing fcntl commands, which
@@ -2908,7 +2971,8 @@ mod tests {
     fn fcntl_and_ioctl_third_argument_kind_follows_the_command() {
         use ArgKind::*;
         let args = |cmd: u64| { let mut a = [0u64; 8]; a[1] = cmd; a };
-        for cmd in [F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_NOCACHE, F_DUPFD_CLOEXEC] {
+        for cmd in [F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_NOCACHE, F_DUPFD_CLOEXEC, F_SETOWN, F_RDAHEAD,
+                    F_NODIRECT, F_SINGLE_WRITER, F_SETNOSIGPIPE, F_SETPROTECTIONCLASS] {
             assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Scalar, "fcntl cmd {cmd}");
             assert_eq!(shape_of(SYS_FCNTL_NOCANCEL, &args(cmd)).args[2], Scalar, "fcntl_nocancel cmd {cmd}");
         }
@@ -2922,6 +2986,39 @@ mod tests {
         // Every position but the third is the row's, and a non-fcntl number is the row itself.
         assert_eq!(shape_of(SYS_FCNTL, &args(F_SETFD)).args[0], Fd);
         assert!(std::ptr::eq(shape_of(SYS_READ, &args(0)), forwarded_shape(SYS_READ)));
+    }
+
+    // FW-2: the buffer's direction follows the op word, in every view that names a destination.
+    #[test]
+    fn a_buffer_the_kernel_only_reads_is_not_a_destination() {
+        use ArgKind::*;
+        let a = |n: u64, w: usize, op: u64| { let mut a = [0u64; 8]; a[w] = op; let _ = n; a };
+        assert_eq!(shape_of(336, &a(336, 0, PROC_INFO_CALL_SETCONTROL)).args[4], Source);
+        assert_eq!(shape_of(336, &a(336, 0, PROC_INFO_CALL_SET_DYLD_IMAGES)).args[4], Scalar);
+        assert!(matches!(shape_of(336, &a(336, 0, 2)).args[4], Dest(_)), "PIDINFO still fills its buffer");
+        assert_eq!(dest_buffer_for(336, &a(336, 0, 5)), None);
+        assert_eq!(dest_buffer_for(336, &a(336, 0, 15)), None);
+        assert_eq!(dest_buffer_for(336, &a(336, 0, 2)), dest_buffer(336));
+        for num in [169, 170] {
+            assert_eq!(shape_of(num, &a(num, 1, 1)).args[2], Source, "csops {num} SET_STATUS");
+            assert_eq!(shape_of(num, &a(num, 1, 9)).args[2], Source, "csops {num} SETEXECSEG");
+            assert!(matches!(shape_of(num, &a(num, 1, 0)).args[2], Dest(_)), "csops {num} STATUS fills");
+            assert_eq!(dest_buffer_for(num, &a(num, 1, 1)), None);
+            assert_eq!(dest_buffer_for(num, &a(num, 1, 0)), dest_buffer(num));
+        }
+        assert_eq!(shape_of(483, &a(483, 0, CSR_SYSCALL_CHECK)).args[1], Source);
+        assert_eq!(shape_of(483, &a(483, 0, 1)).args[1], Ptr, "get_active_config copies out");
+    }
+
+    // FW-1: the pointers retrace dereferences itself are the ones the pre-forward check must judge in full.
+    #[test]
+    fn the_serviced_pointers_are_the_ones_retrace_dereferences() {
+        for (num, i) in [(SYS_SIGACTION, 1), (SYS_SIGACTION, 2), (SYS_SIGALTSTACK, 0), (SYS_SIGALTSTACK, 1),
+                         (SYS_SIGPROCMASK, 1), (SYS_SIGPROCMASK, 2), (SYS_SIGPENDING, 0), (SYS_GETRLIMIT, 1)] {
+            assert!(serviced_pointer(num, i), "{num} arg {i}");
+        }
+        assert!(!serviced_pointer(SYS_FCNTL, 2) && !serviced_pointer(SYS_IOCTL, 2), "an int may ride there");
+        assert!(!serviced_pointer(SYS_SIGACTION, 0));
     }
 
     #[test]

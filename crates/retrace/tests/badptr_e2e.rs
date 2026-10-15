@@ -101,7 +101,19 @@ fn an_emulated_call_with_a_bad_pointer_returns_natives_error() {
                          // check agrees with it.
                          ("nonemmap", "nonemmap: rc=-1 errno=14\n"),
                          ("noneprotect", "noneprotect: rc=-1 errno=14\n"),
-                         ("straddle", "sigaltstack(straddle): rc=-1 errno=14\n")] {
+                         ("straddle", "sigaltstack(straddle): rc=-1 errno=14\n"),
+                         // FW-1: NULL plus a field offset, and a top-byte-tagged pointer, to the structs retrace
+                         // services itself. Native EFAULTs for all of them (a tagged VA is no TBI address to the
+                         // kernel's copyout, measured), where they used to reach the bug banner.
+                         ("oact10", "sigaction(oact 0x10): rc=-1 errno=14\n"),
+                         ("rawss10", "sigaltstack(ss 0x10): rc=-1 errno=14\n"),
+                         ("oacttag", "sigaction(oact tagged): rc=-1 errno=14\n"),
+                         ("rawsstag", "sigaltstack(oss tagged): rc=-1 errno=14\n"),
+                         ("sigmask10", "sigprocmask(set 0x10): rc=-1 errno=14\n"),
+                         // FW-2: proc_info SETCONTROL copies the name IN, so a literal in read-only __TEXT succeeds.
+                         ("setnamelit", "rc=0 name=\"worker\"\n"),
+                         // FW-3: F_SETOWN's argument is an integer pid; native reads it back negated.
+                         ("setown", "setown: rc=0 errno=0 own=-70000\n")] {
         let t = scratch(&format!("{mode}.bin"));
         let (out, _) = agree(mode, &t);
         assert_eq!(out, want, "{mode}");
@@ -124,5 +136,19 @@ fn a_recording_that_forwarded_a_pointer_replay_refuses_is_a_divergence() {
     let rp = util::run_bounded(util::bin(), &["replay", t.to_str().unwrap()], &[], BOUND);
     assert_eq!(rp.code, Some(3), "a divergence. stderr:\n{}", rp.stderr);
     assert!(rp.stderr.contains("replay refuses a pointer"), "the check's own compare names it. stderr:\n{}", rp.stderr);
+    let _ = std::fs::remove_file(&t);
+}
+
+/// FW-5: a handler that rewrites its frame's `uc_mcontext` to unmapped memory ends the recording at a wall
+/// (exit 4, the `unsupported` line), never at the bug banner (exit 70). Natively the kernel kills the process;
+/// retrace does not model that, and says so.
+#[test]
+fn a_handler_that_smashes_its_mcontext_pointer_is_a_wall_not_a_bug() {
+    let t = scratch("badmctx.bin");
+    let rec = util::run_bounded(util::bin(), &["record-dyn", P, "-o", t.to_str().unwrap(), "--", "badmctx"], &[], BOUND);
+    assert_eq!(rec.code, Some(4), "a wall. stderr:\n{}", rec.stderr);
+    assert!(rec.stderr.contains("retrace: unsupported:") && rec.stderr.contains("mcontext at 0x10"),
+        "the wall names the frame's mcontext. stderr:\n{}", rec.stderr);
+    assert!(!rec.stderr.contains("retrace's bug"), "no bug banner. stderr:\n{}", rec.stderr);
     let _ = std::fs::remove_file(&t);
 }

@@ -4338,7 +4338,7 @@ impl Box_ {
     /// Takes `args` as a parameter and stores nothing: `Box_` gets no new field for this. Reads
     /// guest memory for the `DerefU64` shape, which is the only reason it needs `&self`.
     fn dest_len_bytes(&self, num: u64, i: usize, args: &[u64; 8]) -> Option<usize> {
-        match retrace_arch::dest_buffer(num) {
+        match retrace_arch::dest_buffer_for(num, args) {
             Some((di, len)) if di == i => Some(match len {
                 retrace_arch::DestLen::Reg(n) => args[n] as usize,
                 // `*(size_t*)args[n]` — sysctl's oldlenp.
@@ -4645,7 +4645,7 @@ impl Box_ {
         // A `match` over `DestLen` rather than an `if let` on `Reg` alone: a future third variant
         // fails to compile here unless it is given an explicit arm, so it cannot be silently
         // skipped the way this clamp itself once could have been.
-        if let Some((di, dest_len)) = retrace_arch::dest_buffer(num) {
+        if let Some((di, dest_len)) = retrace_arch::dest_buffer_for(num, &args) {
             match dest_len {
                 // M34 fix wave: this arm had no channel. The `DerefU64` arm below has had
                 // `RETRACE_DEREFLEN` since M29, so M29 could state on measurement that its refusal
@@ -5254,7 +5254,13 @@ impl Box_ {
         let uc = self.read_guest(uctx_ipa, 56);
         let mask = u32::from_le_bytes(uc[4..8].try_into().unwrap());
         let mc_ipa = u64::from_le_bytes(uc[48..56].try_into().unwrap());
-        let mc = self.read_guest(mc_ipa, 816);
+        // FW-5: `uc_mcontext` is a pointer the handler can rewrite, so it is read the way the program could
+        // reach it. Natively the kernel kills the process for a frame it cannot read; a wall is the honest
+        // answer until that is measured.
+        let Some(mc) = self.read_va_checked(mc_ipa, 816) else {
+            retrace_arch::refuse!(Signals, "sigreturn: the handler's frame names an mcontext at {mc_ipa:#x} the program cannot reach. \
+             Natively the kernel kills the process for a frame it cannot read; retrace does not model that yet.");
+        };
         let ts = &mc[16..];
 
         for i in 0..29u32 {
@@ -6770,7 +6776,12 @@ impl Box_ {
                 Scalar | Fd | NestedDest => continue,
             };
             let v = args[i];
-            if v < GRANULE as u64 || v >> 56 != 0 { continue; }
+            // FW-1: a pointer retrace dereferences itself skips only NULL, whose meaning is "none"; a near-NULL
+            // or tagged value is judged below like any other (page 0 is unmapped and a tagged VA is past the
+            // 47-bit walk, so both answer EFAULT, as native measured for the tagged case). Every other
+            // position skips values below 16 KiB and tagged ones, which may be integers the host answers.
+            let serviced = retrace_arch::serviced_pointer(num, i);
+            if v == 0 || (!serviced && (v < GRANULE as u64 || v >> 56 != 0)) { continue; }
             if retrace_arch::region_address(num, i) || retrace_arch::ignores_bad_out_pointer(num, i) { continue; }
             if num == retrace_arch::SYS_IOCTL && i == 2
                 && (args[1] & (retrace_arch::IOC_IN | retrace_arch::IOC_OUT) == 0 || retrace_arch::iocparm_len(args[1]) == 0) {

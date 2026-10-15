@@ -16,6 +16,7 @@
 // t0 M5) whatever the wrapper does with it.
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <mach/mach.h>
 #include <mach/mach_traps.h>
 #include <mach/mach_vm.h>
@@ -90,6 +91,13 @@ static long raw_mach_msg2_3409(long data, mach_port_t reply) {
     return x0;
 }
 
+#include <sys/ucontext.h>
+// FW-5: a handler that rewrites its frame's uc_mcontext to an address nothing maps.
+static void smash_mcontext(int sig, siginfo_t *si, void *uc) {
+    (void)sig; (void)si;
+    ((ucontext_t *)uc)->uc_mcontext = (void *)0x10;
+}
+
 int main(int argc, char **argv) {
     const char *m = argc > 1 ? argv[1] : "";
     void *hole = mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -109,6 +117,51 @@ int main(int argc, char **argv) {
     } else if (!strcmp(m, "statbad")) { rc = stat("/", (struct stat *)hole); report("stat(hole)", rc, errno); }
     else if (!strcmp(m, "consolebad")) { rc = write(1, hole, 8); report("write(1, hole)", rc, errno); }
     else if (!strcmp(m, "altstackbad")) { rc = raw_sigaltstack(hole, NULL); report("sigaltstack(hole)", rc, errno); }
+    // FW-1: a near-NULL pointer (NULL plus a field offset) and a top-byte-tagged one to a serviced struct.
+    // Native answers EFAULT for all four (measured); sigaction goes through libc, whose wrapper does not
+    // dereference `oact`, and sigaltstack by raw svc for the reason `altstackbad` gives.
+    else if (!strcmp(m, "oact10")) { rc = sigaction(SIGUSR1, NULL, (struct sigaction *)0x10); report("sigaction(oact 0x10)", rc, errno); }
+    else if (!strcmp(m, "rawss10")) { rc = raw_sigaltstack((void *)0x10, NULL); report("sigaltstack(ss 0x10)", rc, errno); }
+    else if (!strcmp(m, "oacttag")) {
+        static struct sigaction valid_oact;
+        rc = sigaction(SIGUSR1, NULL, (void *)((1ULL << 56) | (uintptr_t)&valid_oact));
+        report("sigaction(oact tagged)", rc, errno);
+    }
+    else if (!strcmp(m, "rawsstag")) {
+        static stack_t valid_oss;
+        rc = raw_sigaltstack(NULL, (void *)((1ULL << 56) | (uintptr_t)&valid_oss));
+        report("sigaltstack(oss tagged)", rc, errno);
+    }
+    else if (!strcmp(m, "sigmask10")) { rc = raw3(48, 1, 0x10, 0); report("sigprocmask(set 0x10)", rc, errno); }
+    else if (!strcmp(m, "badmctx")) {
+        // Natively the kernel kills the process at the sigreturn; retrace ends the recording at a wall.
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = smash_mcontext;
+        sa.sa_flags = SA_SIGINFO;
+        sigaction(SIGUSR1, &sa, NULL);
+        raise(SIGUSR1);
+        say("badmctx: survived\n");
+    }
+    else if (!strcmp(m, "setnamelit")) {
+        // FW-2: a name in read-only __TEXT is copied IN by the kernel, so it must succeed.
+        char name[32] = "";
+        rc = pthread_setname_np("worker");
+        pthread_getname_np(pthread_self(), name, sizeof name);
+        char b[96];
+        int n = snprintf(b, sizeof b, "rc=%ld name=\"%s\"\n", rc, name);
+        write(1, b, n);
+    }
+    else if (!strcmp(m, "setown")) {
+        // FW-3: F_SETOWN's argument is a pid, an integer; one past 16 KiB must not be judged as an address.
+        int p[2];
+        pipe(p);
+        rc = fcntl(p[0], F_SETOWN, 70000);
+        int e = errno;
+        char b[96];
+        int n = snprintf(b, sizeof b, "setown: rc=%ld errno=%d own=%d\n", rc, rc < 0 ? e : 0, fcntl(p[0], F_GETOWN));
+        write(1, b, n);
+    }
     else if (!strcmp(m, "sigactionnew")) { rc = raw3(46, SIGUSR1, (long)hole, 0); report("sigaction(new hole)", rc, errno); }
     else if (!strcmp(m, "sigactionold")) { rc = raw3(46, SIGUSR1, 0, (long)hole); report("sigaction(old hole)", rc, errno); }
     else if (!strcmp(m, "sigprocmaskset")) { rc = raw3(48, 1, (long)hole, 0); report("sigprocmask(set hole)", rc, errno); }
