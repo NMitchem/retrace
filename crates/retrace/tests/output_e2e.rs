@@ -125,6 +125,22 @@ fn a_reader_that_goes_away_does_not_stop_the_recording() {
     let _ = std::fs::remove_file(&err);
 }
 
+/// FW-4: retrace's own `refused:` line goes through a writer that drops its error, as the program's
+/// output does. A program that survives a refusal (the exec fixture's `execve`) ends with its own code
+/// when stderr's reader has already gone, not at the bug banner (`eprintln!` panics on EPIPE).
+#[test]
+fn a_refusal_line_to_a_closed_stderr_does_not_become_a_bug() {
+    let t = scratch("refused.bin");
+    let mut child = Command::new(util::bin())
+        .args(["record-dyn", retrace_guest::EXEC_DYN, "-o", t.to_str().unwrap()])
+        .env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    // The reader goes away before dyld has finished starting the program, so the refusal's line has nowhere to go.
+    drop(child.stderr.take());
+    let code = wait_bounded(&mut child, BOUND);
+    assert_eq!(code, Some(0), "the program's own exit code, not exit 70");
+    let _ = std::fs::remove_file(&t);
+}
+
 /// Spec §4 "Quiet": `warn` printed `[retrace warn] anon PROT_EXEC mmap …` before M51, and every run
 /// printed `[retrace] fall-throughs: N`. A plain run prints neither, on record or replay.
 #[test]

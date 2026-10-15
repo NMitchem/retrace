@@ -13,6 +13,14 @@ pub use retrace_box::hypervisor_check;
 pub use retrace_box::Stream;
 pub use retrace_box::{start_args_bytes, START_ARGS_LIMIT};
 
+/// One of retrace's own lines on its stderr (a `refused:` line). A reader that went away is not
+/// retrace's failure, so a failed write is dropped rather than panicking, as `eprintln!` would (FW-4);
+/// the same discipline as the CLI's `say`.
+fn say_err(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
 /// M15: one row of the debugger's thread listing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadSummary { pub tid: u32, pub state: ThreadState, pub is_current: bool }
@@ -866,7 +874,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         // both the return and the (empty) write set are constants, which is what
                         // lets replay recompute and byte-compare them instead of trusting them.
                         // M50 §3b: a refusal the program survives, in the wall line's format.
-                        eprintln!("{}", retrace_arch::refused_line(&format!("mach_msg2 message-queue send \
+                        say_err(&retrace_arch::refused_line(&format!("mach_msg2 message-queue send \
                             (msgh_id {:#x} dest {:#x} send_size {})", m.msgh_id, m.dest, m.send_size),
                             "MACH_SEND_INVALID_DEST"));
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_SEND_INVALID_DEST, ret1: 0,
@@ -884,7 +892,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         // untouched — so both the return and the empty write set are constants
                         // replay recomputes (the RefuseMqSend posture).
                         // M50 §3b: a refusal the program survives, in the wall line's format.
-                        eprintln!("{}", retrace_arch::refused_line(&format!("mach_msg2 message-queue receive \
+                        say_err(&retrace_arch::refused_line(&format!("mach_msg2 message-queue receive \
                             (rcv_name {:#x} rcv_size {} options {:#x})", m.rcv_name, m.rcv_size, m.options),
                             "MACH_RCV_INVALID_NAME"));
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_RCV_REFUSAL, ret1: 0,
@@ -1637,7 +1645,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             Stop::Syscall { num, args } if retrace_arch::exec_refusal_errno(num).is_some() => {
                 let e = retrace_arch::exec_refusal_errno(num).unwrap();
                 // exec_refusal_errno is EFAULT (14) for both execve and posix_spawn (M38 R4).
-                eprintln!("{}", retrace_arch::refused_line(&retrace_arch::syscall_display(num), "EFAULT"));
+                say_err(&retrace_arch::refused_line(&retrace_arch::syscall_display(num), "EFAULT"));
                 w.append(&Event::Syscall { num, args, ret: e, ret1: 0, err: true, writes: vec![], thread })
                     .map_err(|e| format!("append exec refusal: {e}"))?; count += 1;
                 b.apply_and_return(e, true, &[]);
@@ -1650,7 +1658,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             Stop::Syscall { num, args } if retrace_arch::fork_refusal_errno(num).is_some() => {
                 let e = retrace_arch::fork_refusal_errno(num).unwrap();
                 // fork_refusal_errno is EAGAIN (35), fork's documented process-limit failure (M47 R2).
-                eprintln!("{}", retrace_arch::refused_line(&retrace_arch::syscall_display(num), "EAGAIN"));
+                say_err(&retrace_arch::refused_line(&retrace_arch::syscall_display(num), "EAGAIN"));
                 w.append(&Event::Syscall { num, args, ret: e, ret1: 0, err: true, writes: vec![], thread })
                     .map_err(|e| format!("append fork refusal: {e}"))?; count += 1;
                 b.apply_and_return(e, true, &[]);
