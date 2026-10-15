@@ -79,8 +79,19 @@ fn a_console_write_from_unmapped_memory_returns_efault() {
 /// (t0 M5: `EFAULT` for the raw `sigaltstack`, `KERN_MEMORY_ERROR` for the allocate trap).
 #[test]
 fn an_emulated_call_with_a_bad_pointer_returns_natives_error() {
+    // Each line is native's (t0 M6 and the fix round's own measurement). `sigprocmaskold` and
+    // `sigpendingbad` are swallowed natively: ret 0, and the new mask still applies. `mach2bad` is a
+    // forwarded task_info send, answered 0x10004002. `straddle` is a 24-byte struct whose second half is unmapped.
     for (mode, want) in [("altstackbad", "sigaltstack(hole): rc=-1 errno=14\n"),
-                         ("machbad", "mach_vm_allocate_trap(hole): kr=0xa\n")] {
+                         ("machbad", "mach_vm_allocate_trap(hole): kr=0xa\n"),
+                         ("sigactionnew", "sigaction(new hole): rc=-1 errno=14\n"),
+                         ("sigactionold", "sigaction(old hole): rc=-1 errno=14\n"),
+                         ("sigprocmaskset", "sigprocmask(set hole): rc=-1 errno=14\n"),
+                         ("sigprocmaskold", "sigprocmask(oldset hole): rc=0 errno=0\nblocked=1\n"),
+                         ("sigpendingbad", "sigpending(hole): rc=0 errno=0\n"),
+                         ("getrlimitbad", "getrlimit(hole): rc=-1 errno=14\n"),
+                         ("mach2bad", "mach_msg2(hole): ret=0x10004002\n"),
+                         ("straddle", "sigaltstack(straddle): rc=-1 errno=14\n")] {
         let t = scratch(&format!("{mode}.bin"));
         let (out, _) = agree(mode, &t);
         assert_eq!(out, want, "{mode}");

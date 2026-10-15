@@ -1188,6 +1188,19 @@ pub fn writes_through_ptr(num: u64, i: usize) -> bool {
     matches!((num, i), (SYS_SIGACTION, 2) | (SYS_SIGALTSTACK, 1))
 }
 
+/// M51 §3h (Ruling T7-straddle): the fixed `sizeof` the kernel copies through argument `i` of `num`, for
+/// the serviced calls whose struct size is part of the ABI: `sigaction`'s `act` (24) and `oact` (16),
+/// `sigaltstack`'s `ss` and `oss` (24 each). `Box_::prepare_forward_pointers` checks such a pointer over
+/// its whole span; a count-bearing buffer is checked at its first page only.
+pub fn fixed_span(num: u64, i: usize) -> Option<usize> {
+    match (num, i) {
+        (SYS_SIGACTION, 1) => Some(24),
+        (SYS_SIGACTION, 2) => Some(16),
+        (SYS_SIGALTSTACK, 0 | 1) => Some(24),
+        _ => None,
+    }
+}
+
 /// `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)` — the descriptor-producing fcntl commands, which
 /// `forward_and_diff` short-circuits into `guest_fcntl_dupfd` and replay mirrors with
 /// `FdTable::dup_from` (M38). `min` is a GUEST minimum and never reaches the host.
@@ -3124,6 +3137,9 @@ mod tests {
         assert!(ignores_bad_out_pointer(SYS_SIGPENDING, 0) && !ignores_bad_out_pointer(SYS_SIGACTION, 2));
         assert!(writes_through_ptr(SYS_SIGACTION, 2) && writes_through_ptr(SYS_SIGALTSTACK, 1));
         assert!(!writes_through_ptr(SYS_SIGACTION, 1) && !writes_through_ptr(SYS_SIGALTSTACK, 0));
+        assert_eq!((fixed_span(SYS_SIGACTION, 1), fixed_span(SYS_SIGACTION, 2), fixed_span(SYS_SIGALTSTACK, 1)),
+                   (Some(24), Some(16), Some(24)));
+        assert_eq!(fixed_span(SYS_READ, 1), None);
     }
 
     #[test]

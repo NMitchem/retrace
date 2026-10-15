@@ -283,21 +283,30 @@ fn reply_reachable(b: &mut Box_, writes: &[Region]) -> bool {
 /// M51 §3h (t0 M6, `mm2_kobj`): a `mach_msg2` whose message buffer the program could not have passed
 /// natively. Natively the answer is `MACH_MSG2_BAD_BUFFER` in x0, a `kern_return_t` with `err` false.
 /// For the routes the box services, the request at `m.data` must be readable and, for the two replies
-/// written with no prior read (the stub and `clock_get_time`), the buffer writable; a forwarded id is
-/// judged only when the box itself reads its body (`forward_body_is_checked`, `semaphore_destroy`,
-/// `host_get_clock_service`). A reply to a request just read is covered by that read. Record and replay
+/// written with no prior read (the stub and `clock_get_time`), the buffer writable; a forwarded id's
+/// header is judged for readability (the kernel reads it natively). Every reply is checked over its whole
+/// span, since it may be longer than the request. Record and replay
 /// call this with the same `(m, route)` before the route's arm.
 fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) -> bool {
     use machmsg::Route::*;
+    // The reply's whole span is checked too (Ruling T7-straddle): a reply longer than its request must
+    // not run into memory the program could not reach.
+    let reply_len = match route {
+        ServiceVmMap => machmsg::encode_vm_map_reply(0, 0).len(),
+        ServiceVmRemap => machmsg::encode_vm_remap_reply(0, 0, 0, 0).len(),
+        ServiceGetSpecialPort => machmsg::encode_get_special_port_reply(0, 0).len(),
+        ServiceSetSpecialPort | ServicePortsRegister | StubMigReply(_) => machmsg::encode_mig_error(0, 0, 0).len(),
+        ServiceClockGetTime => machmsg::encode_clock_get_time_reply(0, 0, 0).len(),
+        Forward(_) | RefuseMqSend | RefuseMqRecv | Unsupported(_) => 0,
+    };
     match route {
         ServiceVmMap | ServiceVmRemap | ServiceGetSpecialPort | ServiceSetSpecialPort | ServicePortsRegister =>
-            b.read_va_checked(m.data, m.send_size as usize).is_none(),
-        Forward(_) if machmsg::forward_body_is_checked(m.msgh_id) || m.msgh_id == machmsg::SEMAPHORE_DESTROY
-            || m.msgh_id == machmsg::HOST_GET_CLOCK_SERVICE =>
-            b.read_va_checked(m.data, m.send_size as usize).is_none(),
-        StubMigReply(_) => !b.prepare_reply(m.data, machmsg::encode_mig_error(0, 0, 0).len()),
-        ServiceClockGetTime => !b.prepare_reply(m.data, machmsg::encode_clock_get_time_reply(0, 0, 0).len()),
-        Forward(_) | RefuseMqSend | RefuseMqRecv | Unsupported(_) => false,
+            b.read_va_checked(m.data, m.send_size as usize).is_none() || !b.prepare_reply(m.data, reply_len),
+        // A forwarded send's header is read by the kernel natively, so one the program could not pass
+        // is the same answer (t0 M6 `mm2_kobj`, a task_info send).
+        Forward(_) => b.read_va_checked(m.data, m.send_size as usize).is_none(),
+        StubMigReply(_) | ServiceClockGetTime => !b.prepare_reply(m.data, reply_len),
+        RefuseMqSend | RefuseMqRecv | Unsupported(_) => false,
     }
 }
 

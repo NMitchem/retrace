@@ -5113,12 +5113,22 @@ impl Box_ {
     /// a watched range is a separate question from "which syscall wrote here", and conflating them
     /// would make a watchpoint fire with a syscall's provenance for a write no syscall made.
     fn write_guest(&mut self, ipa: u64, bytes: &[u8]) {
-        let (hp, avail) = self.host_span(ipa).unwrap_or_else(|| panic!("M51 §3h: write_guest at ipa {ipa:#x}, which \
-            nothing maps. Every pointer the program passes is checked before it gets here (prepare_forward_pointers, \
-            read_va_checked, prepare_reply), so this is retrace's bug, not the program's"));
-        assert!(bytes.len() <= avail, "M51 §3h: write_guest at {ipa:#x} ({} bytes) overruns its backing ({avail} \
-            available); retrace's bug, not the program's", bytes.len());
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), hp, bytes.len()); }
+        // M51 §3h: a span the program passed may cross from one backing into the next (a struct that
+        // straddles two pages), so it is written chunk by chunk. Every chunk is found before any is written.
+        let mut chunks = Vec::new();
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let a = ipa + done as u64;
+            let (hp, avail) = self.host_span(a).unwrap_or_else(|| panic!("M51 §3h: write_guest at ipa {a:#x}, which \
+                nothing maps. Every pointer the program passes is checked before it gets here (prepare_forward_pointers, \
+                read_va_checked, prepare_reply), so this is retrace's bug, not the program's"));
+            let n = avail.min(bytes.len() - done);
+            chunks.push((hp, done, n));
+            done += n;
+        }
+        for (hp, off, n) in chunks {
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr().add(off), hp, n); }
+        }
     }
 
     /// Is thread `tid` currently executing on ITS OWN alternate signal stack?
@@ -5506,6 +5516,16 @@ impl Box_ {
             let off = (ipa - bk.ipa) as usize;
             return unsafe { std::slice::from_raw_parts(bk.host.add(off), len) }.to_vec();
         }
+        // M51 §3h: a span that crosses from one backing into the next (a straddling struct) is read
+        // chunk by chunk, all or nothing.
+        let mut out = Vec::with_capacity(len.min(1 << 16));
+        while out.len() < len {
+            let a = ipa + out.len() as u64;
+            let Some((hp, avail)) = self.host_span(a) else { break };
+            let n = avail.min(len - out.len());
+            out.extend_from_slice(unsafe { std::slice::from_raw_parts(hp, n) });
+        }
+        if out.len() == len { return out; }
         panic!("M51 §3h: read_guest of {len} bytes at ipa {ipa:#x}, which nothing maps. Every pointer the program \
             passes is checked before it gets here (prepare_forward_pointers, read_va_checked, prepare_reply), so this \
             is retrace's bug, not the program's");
@@ -6719,7 +6739,9 @@ impl Box_ {
     /// the forward hands the kernel memory where the program will read it. Without this a pointer
     /// `host_span` does not map reached the host kernel raw, as a host address (F15).
     ///
-    /// The extents are deliberately the first page. A count is what the caller offers, not what the
+    /// A pointer whose struct size is fixed (`retrace_arch::fixed_span`) is checked over its whole span.
+    ///
+    /// The extents of every other argument are deliberately the first page. A count is what the caller offers, not what the
     /// kernel touches, so checking it would refuse calls native completes. The first page is what keeps a
     /// guest address from reaching the host, since `forward_and_diff`'s clamp keeps a write inside that
     /// page's backing.
@@ -6747,7 +6769,19 @@ impl Box_ {
                 && (args[1] & (retrace_arch::IOC_IN | retrace_arch::IOC_OUT) == 0 || retrace_arch::iocparm_len(args[1]) == 0) {
                 continue;
             }
-            if *kind == Path { self.present_path(v)?; } else { self.present_page(v, write)?; }
+            if *kind == Path {
+                self.present_path(v)?;
+            } else if let Some(size) = retrace_arch::fixed_span(num, i) {
+                // A struct of known size: every page it covers, since the kernel copies all of it.
+                let end = v.saturating_add(size as u64);
+                let mut a = v;
+                while a < end {
+                    self.present_page(a, write)?;
+                    a = (a | (GRANULE as u64 - 1)).saturating_add(1);
+                }
+            } else {
+                self.present_page(v, write)?;
+            }
         }
         Ok(())
     }
