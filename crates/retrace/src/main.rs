@@ -19,9 +19,10 @@ fn say(line: &str) {
 
 /// M51 §3e: the program's console writes, printed on retrace's own stdout and stderr as it makes
 /// them. stdout is flushed per write, so a terminal or a `2>&1` file interleaves the two streams in
-/// the program's order. R5: a write that fails (a reader that went away: Rust ignores SIGPIPE, so it
-/// is EPIPE) ends retrace's writes to that stream, and the recording goes on; the program's own write
-/// returned its length already, so nothing about this reaches the trace.
+/// the program's order. R5: a write that fails ends retrace's writes to that stream, and the
+/// recording goes on; the program's own write returned its length already, so nothing about this
+/// reaches the trace. A reader that went away (Rust ignores SIGPIPE, so it is EPIPE) is silent. Any
+/// other error is reported once per stream through `say`, since it is not the reader's choice.
 #[derive(Default)]
 struct LiveOutput { stdout_gone: bool, stderr_gone: bool }
 
@@ -40,9 +41,20 @@ impl retrace_core::OutputSink for LiveOutput {
             }
             retrace_core::Stream::Stderr => std::io::stderr().lock().write_all(bytes),
         };
-        if r.is_err() { *gone = true; }
+        if let Err(e) = r {
+            *gone = true;
+            if let Some(line) = write_failure_line(&e) { say(&line); }
+        }
     }
 }
+
+/// Only a vanished reader is silent. Any other failure (a full disk) is retrace failing to deliver
+/// the output, so it is said; the caller sets `gone` first, so that is once per stream.
+fn write_failure_line(e: &std::io::Error) -> Option<String> {
+    (e.kind() != std::io::ErrorKind::BrokenPipe)
+        .then(|| format!("retrace: cannot write the program's output: {e}"))
+}
+
 
 /// The options every CLI recording takes: the live sink.
 fn live() -> retrace_core::RecordOpts {
@@ -225,5 +237,21 @@ fn gdbserver_cmd(a: &[String]) -> i32 {
     match gdbserver::serve(Path::new(trace), port, exe) {
         Ok(()) => 0,
         Err(e) => { eprintln!("GDBSERVER ERROR: {e}"); 5 }
+    }
+}
+
+#[cfg(test)]
+mod live_output_tests {
+    use super::*;
+
+    /// Std treats EBADF on stdio as success and macOS has no /dev/full, so no CLI run can make the
+    /// sink's write fail for a reason other than EPIPE; the decision is pinned here instead.
+    #[test]
+    fn a_write_error_other_than_a_vanished_reader_is_reported() {
+        let epipe = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        assert_eq!(write_failure_line(&epipe), None, "a vanished reader is silent (R5)");
+        let full = std::io::Error::from_raw_os_error(28); // ENOSPC
+        let line = write_failure_line(&full).expect("a full disk is reported");
+        assert!(line.starts_with("retrace: cannot write the program's output: "), "{line}");
     }
 }
