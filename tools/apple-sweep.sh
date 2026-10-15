@@ -40,13 +40,18 @@
 #                               <dir>/<basename>.{rec.err,rp.err,bin} (identical faults included)
 #   RETRACE_SWEEP_KEEP_ALL=1   with KEEP: keep PASS rows too (the M37 audit's full-corpus baseline)
 #   RETRACE_SWEEP_TIMEOUT=<s>   per-phase watchdog, default 30
-#   RETRACE_SWEEP_NATIVE=1      M49: also run each row natively, outside retrace, first. A row then
-#                               passes only if the recording also exits as native did and prints
-#                               what native printed; one whose record and replay agree but differ
+#   RETRACE_SWEEP_NATIVE=0      M49, the default since M51 (spec R9): each row also runs natively, outside
+#                               retrace, first, and passes only if the recording exits as native did and
+#                               prints what native printed; one whose record and replay agree but differ
 #                               from native prints `FAIL … (differs from native: record=N native=…)`.
-#                               Every ROW line gains a tenth field, native: `<native rc>:same` or
-#                               `<native rc>:differs` (the recording's stdout against native's), or
-#                               `timeout:n/a`.
+#                               `=0` turns it off. With it on, every ROW line gains a tenth field, native:
+#                               `<native rc>:same` or `<native rc>:differs` (the recording's stdout against
+#                               native's), or `timeout:n/a`; and an eleventh, stderr: `same`, `differs` or
+#                               `n/a` (native timed out), the recording's stderr against native's after
+#                               `mask_err`.
+#   RETRACE_SWEEP_STDERR=1      M51 (spec §3j): a row whose stderr differs from native's fails,
+#                               `FAIL … (stderr differs from native)`. Tier 2 sets it; the Apple sweep's
+#                               rows were never curated for stderr, so it only logs the column.
 #
 # M49 (spec §3c): a list line may carry arguments after the path, each preceded by a TAB. They are
 # passed verbatim: the line is split on TAB only, with globbing off, and never evaluated by a shell,
@@ -58,6 +63,10 @@
 # M50 (spec §3g): a list line whose path starts `out:` is a row out of scope (charter §3). It passes by
 # matching native, like any row, or by refusing cleanly (REFUSED above); anything else fails it. The
 # mark is not part of the row's name, so its PASS/FAIL/ROW lines stay comparable with older sweeps.
+# M51 (spec §3j, R9): `TALLY-RR` follows `TALLY`: the same rows judged record against replay alone, as
+# before M51, so the charter's record-against-replay figure stays checkable. With native on, an
+# out-of-scope row is REFUSED only if what it printed before the wall, stdout and stderr, is a prefix of
+# what native printed (deferred #8).
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -69,7 +78,9 @@ LIST=$ROOT/tools/apple-sweep-binaries.txt
 LIST=${RETRACE_SWEEP_LIST:-$LIST}
 KEEP=${RETRACE_SWEEP_KEEP:-}
 KEEP_ALL=${RETRACE_SWEEP_KEEP_ALL:-}
-NATIVE=${RETRACE_SWEEP_NATIVE:-}
+NATIVE=${RETRACE_SWEEP_NATIVE:-1}
+[ "$NATIVE" = 0 ] && NATIVE=
+STDERR=${RETRACE_SWEEP_STDERR:-}
 if [ -n "$KEEP" ]; then mkdir -p "$KEEP" || { echo "TALLY ABORTED (cannot create $KEEP)"; exit 2; }; fi
 # M49: the loop `cd`s to the repo root before every row, so each path it uses after that is made
 # absolute here, against the caller's directory. ROOT and TMP are absolute already, and so is every
@@ -162,9 +173,10 @@ keep_row() {
         [ -e "$TMP/rp.out" ] && cp "$TMP/rp.out" "$KEEP/$b.rp.out"
         [ -f "$TMP/t.bin" ] && cp "$TMP/t.bin" "$KEEP/$b.bin"
         [ -n "$NATIVE" ] && [ -e "$TMP/nat.out" ] && cp "$TMP/nat.out" "$KEEP/$b.nat.out"
+        [ -n "$NATIVE" ] && [ -e "$TMP/nat.err" ] && cp "$TMP/nat.err" "$KEEP/$b.nat.err"
     fi
     if [ -n "$NATIVE" ]; then
-        printf 'ROW\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$row" "$1" "$rc" "$rp" "$recpid" "$landmark" "$rec_reason" "$rp_line" "$native"
+        printf 'ROW\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$row" "$1" "$rc" "$rp" "$recpid" "$landmark" "$rec_reason" "$rp_line" "$native" "$errcmp"
     else
         printf 'ROW\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$row" "$1" "$rc" "$rp" "$recpid" "$landmark" "$rec_reason" "$rp_line"
     fi
@@ -184,7 +196,20 @@ bug_reason() {
     fi
 }
 
-pass=0; refused=0; fail=0; skip=0; lno=0; OLDIFS=$IFS; TAB=$(printf '\t')
+# M51 §3j: a stderr file as compared with native's, on stdout: retrace's own lines (`retrace: …`, and this
+# script's `recpid=`) dropped, then t0 M7's pid masks, the same as firstcontact_e2e's `mask_pid`.
+mask_err() {
+    grep -av -e '^retrace: ' -e '^recpid=' "$1" \
+        | sed -E -e 's/^([A-Za-z0-9_.-]+)\[[0-9]+\]:/\1[<PID>]:/' -e 's/\(([0-9]+),0x[0-9a-f]+\)/(<PID>,<TID>)/g'
+}
+
+# M51 (deferred #8): is file $1 a prefix of file $2?
+is_prefix() {
+    n=$(wc -c < "$1")
+    head -c "$n" "$2" | cmp -s - "$1"
+}
+
+pass=0; refused=0; fail=0; skip=0; nd=0; lno=0; OLDIFS=$IFS; TAB=$(printf '\t')
 # The list is read on fd 3, not fd 0: several sweep guests (bash, csh, dash, ksh, sh,
 # tcsh, zsh) run with no arguments and, non-interactively, read a *script* from stdin.
 # If the loop's `read` shared fd 0 with those children, a shell guest would consume
@@ -235,7 +260,12 @@ while IFS= read -r g <&3; do
     # the CLI's own convention for a recorded one).
     if [ -n "$NATIVE" ]; then
         rm -f "$TMP/nat.out" "$TMP/nat.err"
-        run_timeout "$g" "$@" >"$TMP/nat.out" 2>"$TMP/nat.err" </dev/null; nrc=$?
+        # M51 (Ruling T8-yes): bounded to 32 MiB of output (`ulimit -f 32768`, 1024-byte blocks in sh; measured: nat.out stops at 33554432 bytes). Native
+        # comparison is on by default, and a native `/usr/bin/yes` ran its whole watchdog and wrote a
+        # 15 GB file, filling the disk. A run past the limit dies of SIGXFSZ (rc 153) and its row fails,
+        # as it always has. Only the native run is bounded: the recorder's trace is written by the
+        # same process.
+        ( ulimit -f 32768; run_timeout "$g" "$@" ) >"$TMP/nat.out" 2>"$TMP/nat.err" </dev/null; nrc=$?
         [ -e "$TMP/.timedout" ] && nrc=timeout
     fi
     if [ "$nargs" -eq 0 ]; then
@@ -250,6 +280,14 @@ while IFS= read -r g <&3; do
         if [ "$nrc" = timeout ]; then native="timeout:n/a"
         elif cmp -s "$TMP/rec.out" "$TMP/nat.out"; then native="$nrc:same"
         else native="$nrc:differs"; fi
+    fi
+    errcmp=n/a
+    if [ -n "$NATIVE" ]; then
+        mask_err "$TMP/rec.err" > "$TMP/rec.merr"
+        mask_err "$TMP/nat.err" > "$TMP/nat.merr"
+        if [ "$nrc" != timeout ]; then
+            if cmp -s "$TMP/rec.merr" "$TMP/nat.merr"; then errcmp=same; else errcmp=differs; fi
+        fi
     fi
     # M29 fix round 1 (Critical): the recorder's stderr goes to $TMP/rec.err, grepped only
     # for "panicked at" below and destroyed by this script's own EXIT trap — so a caller
@@ -316,7 +354,8 @@ while IFS= read -r g <&3; do
     if [ -n "$rec_wall" ]; then
         if [ "$scope" = out ] && [ "$(grep -ac '^retrace: unsupported: ' "$TMP/rec.err")" -eq 1 ] \
             && [ "$rc" -eq 4 ] && [ "$rp" -eq 4 ] && grep -qa '^retrace: incomplete recording: ' "$TMP/rp.err" \
-            && cmp -s "$TMP/rec.out" "$TMP/rp.out"; then
+            && cmp -s "$TMP/rec.out" "$TMP/rp.out" \
+            && { [ -z "$NATIVE" ] || { is_prefix "$TMP/rec.out" "$TMP/nat.out" && is_prefix "$TMP/rec.merr" "$TMP/nat.merr"; }; }; then
             echo "REFUSED $row ($rec_wall)"; refused=$((refused+1)); keep_row REFUSED; continue
         fi
         echo "FAIL $row (wall, rc=$rc: $rec_wall)"; fail=$((fail+1)); keep_row FAIL; continue
@@ -334,7 +373,10 @@ while IFS= read -r g <&3; do
         # M49: with RETRACE_SWEEP_NATIVE, agreeing with itself is not enough: the recording must
         # also exit as native did and print what native printed.
         if [ -n "$NATIVE" ] && [ "$native" != "$rc:same" ]; then
-            echo "FAIL $row (differs from native: record=$rc native=$native)"; fail=$((fail+1)); keep_row FAIL; continue
+            echo "FAIL $row (differs from native: record=$rc native=$native)"; fail=$((fail+1)); nd=$((nd+1)); keep_row FAIL; continue
+        fi
+        if [ -n "$STDERR" ] && [ "$errcmp" = differs ]; then
+            echo "FAIL $row (stderr differs from native)"; fail=$((fail+1)); nd=$((nd+1)); keep_row FAIL; continue
         fi
         if [ "$rc" -ge 128 ]; then
             # M36: an identical FAULT on both sides is still counted a pass (the tally stays
@@ -351,3 +393,5 @@ while IFS= read -r g <&3; do
 done 3< "$LIST"
 
 echo "TALLY pass=$pass refused=$refused fail=$fail skip=$skip"
+# M51 (R9): the rows that failed only against native pass when judged record against replay alone.
+echo "TALLY-RR pass=$((pass+nd)) refused=$refused fail=$((fail-nd)) skip=$skip"
