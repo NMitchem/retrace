@@ -126,10 +126,9 @@ fn commit_under_default_config_refuses_the_maintenance_fork_and_writes_the_nativ
     args.extend(["commit", "-q", "-m", "second"]);
     let rec = recorded(&d, &args);
     assert!(rec.stderr.contains("retrace: refused: fork (syscall 2), returned EAGAIN to the program"), "the recorder's refusal line: {}", rec.stderr);
-    // The guest's stderr is merged into the record's stdout (t0 M4; record_box's console arm), so
-    // git's own line arrives on stdout, while the recorder's line above is its own eprintln.
-    let out = String::from_utf8_lossy(&rec.stdout);
-    assert!(out.contains(CANNOT_FORK), "git's own line when its fork fails (t0 M3(c)): {out}");
+    // M51 §3e: git's own line is on the recording's stderr, where git wrote it, after the
+    // recorder's refusal line above.
+    assert!(rec.stderr.contains(CANNOT_FORK), "git's own line when its fork fails (t0 M3(c)): {}", rec.stderr);
     let mut twin_args = vec!["-c", "maintenance.auto=false"];
     twin_args.extend(&args);
     native(&twin, &twin_args);

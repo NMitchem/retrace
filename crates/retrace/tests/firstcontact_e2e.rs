@@ -40,7 +40,8 @@ enum Expect {
 struct Row { name: &'static str, bin: &'static str, args: &'static [&'static str], expect: Expect }
 
 /// The outcome table (spec §3b), pinned from t0 M1 (Task 1's addendum). A row flips only in the
-/// task that changes it (R10): the F rows in Task 3, the S rows in Task 5.
+/// task that changes it (R10): M49's F rows in its Task 3 and S rows in its Task 5; M51's fc_assert
+/// and fc_cpp_terminate in its Task 1, the brk rows in Task 3, fc_env in Task 5.
 const ROWS: &[Row] = &[
     // C (the hello_dyn recipe).
     Row { name: "fc_null_load", bin: retrace_guest::FC_NULL_LOAD, args: &[],
@@ -62,7 +63,7 @@ const ROWS: &[Row] = &[
           expect: Expect::Pass },
     Row { name: "fc_uaf", bin: retrace_guest::FC_UAF, args: &[], expect: Expect::Pass },
     Row { name: "fc_assert", bin: retrace_guest::FC_ASSERT, args: &[],
-          expect: Expect::Wall("MISMATCH record stdout at line 2: native <eof>, record \"Assertion failed:") },
+          expect: Expect::Pass },
     Row { name: "fc_sleep", bin: retrace_guest::FC_SLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_usleep", bin: retrace_guest::FC_USLEEP, args: &[],
@@ -78,7 +79,7 @@ const ROWS: &[Row] = &[
     Row { name: "fc_cpp_hello", bin: retrace_guest::FC_CPP_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_cpp_throw", bin: retrace_guest::FC_CPP_THROW, args: &[], expect: Expect::Pass },
     Row { name: "fc_cpp_terminate", bin: retrace_guest::FC_CPP_TERMINATE, args: &[],
-          expect: Expect::Wall("MISMATCH record stdout at line 2: native <eof>, record \"libc++abi: terminating") },
+          expect: Expect::Pass },
     Row { name: "fc_cpp_thread", bin: retrace_guest::FC_CPP_THREAD, args: &[], expect: Expect::Pass },
     Row { name: "fc_cpp_sleep", bin: retrace_guest::FC_CPP_SLEEP, args: &[],
           expect: Expect::Pass },

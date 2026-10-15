@@ -17,9 +17,9 @@ fn a_faulting_rust_guest_runs_its_own_handler_and_records_its_death() {
         "the guest must reach its OWN code, not die inside dyld; stdout:\n{out}");
     assert!(!out.contains("survived"),
         "the store must re-execute and kill it, not be skipped; stdout:\n{out}");
-    assert!(!out.contains("has overflowed its stack"),
+    assert!(!rec.stderr.contains("has overflowed its stack"),
         "libstd compares si_addr against its guard range — this message means si_addr is WRONG \
-         (and the guest would have exited 134, not 139); stdout:\n{out}");
+         (and the guest would have exited 134, not 139); stderr:\n{}", rec.stderr);
 
     let (events, torn) = retrace_trace::Reader::open_checked(&trace).unwrap();
     assert!(!torn, "a recorder killed mid-run leaves a torn trace — this must be complete");

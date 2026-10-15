@@ -50,9 +50,9 @@ fn fall_through_counts_match_between_record_and_replay() {
 /// Record and replay `guest`, require BOTH sides to report a count, and return it. `expect` pins the
 /// value when the caller knows it.
 fn check(name: &str, guest: &str, expect: Option<u64>) -> u64 {
-    let (rec, trace) = util::record_dynamic(guest);
+    let (rec, trace) = util::record_dynamic_env(guest, &[("RETRACE_VERBOSE", "1")]);
     assert_eq!(rec.code, 0, "{name}: record failed: {}", rec.stderr);
-    let rep = util::replay(&trace);
+    let rep = util::replay_env(&trace, &[("RETRACE_VERBOSE", "1")]);
     assert_eq!(rep.code, 0, "{name}: replay failed: {}", rep.stderr);
     let r = fall_throughs(&rec.stderr, "record");
     let p = fall_throughs(&rep.stderr, "replay");
@@ -63,6 +63,7 @@ fn check(name: &str, guest: &str, expect: Option<u64>) -> u64 {
 
 /// Both sides must *report* the count, not merely compute it — an unreported count is exactly as
 /// invisible as an uncounted one, so the absence of the line is itself a failure, never a zero.
+/// Since M51 the line is a diagnostic (R4), so both sides run under RETRACE_VERBOSE.
 fn fall_throughs(stderr: &str, side: &str) -> u64 {
     const TAG: &str = "[retrace] fall-throughs: ";
     let line = stderr.lines().find(|l| l.starts_with(TAG)).unwrap_or_else(|| panic!(

@@ -905,6 +905,10 @@ pub struct FdTable {
     host: Vec<Option<i32>>,
 }
 
+/// M51 §3e: which of the program's two console streams a write goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream { Stdout, Stderr }
+
 impl FdTable {
     /// Fresh table with 0/1/2 open as the console, mapped **identically onto retrace's own 0/1/2**.
     ///
@@ -4310,9 +4314,21 @@ impl Box_ {
     /// the trace-log echo. A write to any slot the table marks `Console(1|2)` — fd 1/2 themselves
     /// until the guest `dup2`s over them or closes them, and every alias `dup2` or `dup` created
     /// (the latter since the M37 fix wave) — is mirrored and faked.
-    pub fn is_console_write(&self, num: u64, gfd: u64) -> bool {
-        retrace_arch::is_write_syscall(num) && matches!(self.fds.console_of(gfd), Some(1 | 2))
+    ///
+    /// M51 §3e: it also says WHICH console, from the slot's kind, so a `dup2(2, 1)` write goes to
+    /// stderr as it does natively. Record's console arm and replay's mirror both route through this
+    /// one call (symmetry rule 1).
+    pub fn console_write_stream(&self, num: u64, gfd: u64) -> Option<Stream> {
+        if !retrace_arch::is_write_syscall(num) { return None; }
+        match self.fds.console_of(gfd) {
+            Some(1) => Some(Stream::Stdout),
+            Some(2) => Some(Stream::Stderr),
+            _ => None,
+        }
     }
+
+    /// `console_write_stream`'s yes or no, for the callers that need only that.
+    pub fn is_console_write(&self, num: u64, gfd: u64) -> bool { self.console_write_stream(num, gfd).is_some() }
     /// M37: a close of an IDENTITY console slot — 0/1/2 while its slot is still `Console(n)` at
     /// index n AND its host mapping is still retrace's own descriptor n — has its host half faked
     /// (M9: that host descriptor is retrace's own) and its slot retired by record's arm.

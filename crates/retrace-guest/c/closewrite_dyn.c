@@ -4,8 +4,8 @@
 // mirrored and succeeded) while replay retired the slot (so it was not) — two stdouts, rc 0 on
 // both, no divergence.
 //
-// Expected stdout (record == replay, bit for bit): before\nerr\n   (fd 1 and fd 2 fold into one
-// mirrored buffer). Exit 0 only if both post-close writes fail with EBADF.
+// Expected (record == replay, bit for bit): stdout before\n, stderr err\n (M51 §3e keeps the two
+// apart). Exit 0 only if both post-close writes fail with EBADF.
 #include <unistd.h>
 #include <errno.h>
 

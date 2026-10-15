@@ -85,25 +85,20 @@ fn the_launcher_records_and_replays_its_own_posix_spawn_failure() {
     // produce; only the guest's own error text proves it actually ran pythonw.c's err(1, ...)
     // path rather than failing for some unrelated reason that happens to also exit 1.
     //
-    // This text is on `rec.stdout`, not `rec.stderr`. retrace mirrors guest writes to BOTH fd 1
-    // and fd 2 into one buffer and prints it on retrace's own stdout (the `is_console_write` arm
-    // of `record_box` in crates/retrace-core/src/lib.rs; the predicate, `Box_::is_console_write`
-    // in crates/retrace-box/src/lib.rs, covers both fds). retrace's own `[retrace]` diagnostics go
-    // to retrace's stderr, so `rec.stderr` never carries guest text — asserting on it here would
-    // fail for a reason unrelated to the guest.
+    // M51 §3e: the text is on `rec.stderr`, where the program wrote it, beside the recorder's own
+    // `retrace: refused:` line. Before M51 retrace merged the program's fd 2 into its stdout.
     assert!(
-        rec.stdout.windows(b"posix_spawn".len()).any(|w| w == b"posix_spawn"),
-        "expected the guest's own posix_spawn error text on stdout (mirrored fd 1+2 writes), got: \
-         {:?}",
-        String::from_utf8_lossy(&rec.stdout)
+        rec.stderr.contains("posix_spawn"),
+        "expected the guest's own posix_spawn error text on stderr, got: {}",
+        rec.stderr
     );
 
-    // Replay must reproduce both the exit and the guest's mirrored fd-2 error text byte-for-byte.
-    // Because that text lives in the mirrored buffer alongside fd 1, this equality is proof that
-    // replay reproduced the guest's actual output, not merely that it exited the same way.
+    // Replay must reproduce the exit and the guest's fd-2 error text. Replay prints no refusal
+    // line (it never meets the refusal), so its stderr is the program's text alone.
     let rep = util::replay(&trace);
     assert_eq!(rep.code, rec.code, "replay exit code diverged from the recording");
     assert_eq!(rep.stdout, rec.stdout, "replay stdout diverged from the recording");
+    assert!(rep.stderr.contains("posix_spawn"), "replay must reproduce the guest's stderr text, got: {}", rep.stderr);
 
     // M38: the posix_spawn is REFUSED now, not forwarded — the refusal line is the only thing
     // that distinguishes the two, since the errno the guest reads was chosen to match (spec R4).

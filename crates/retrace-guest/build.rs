@@ -1057,6 +1057,18 @@ fn main() {
     let status = Command::new(&rustc).args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
         .status().expect("rustc cf_rs_fsync");
     assert!(status.success(), "cf_rs_fsync guest build failed");
+    // M51: the fidelity fixtures, the hello_dyn recipe. Named fid_, not fc_: firstcontact_e2e's
+    // one-row-per-fixture check reads every fc_ source.
+    // One name today; Tasks 3-7 append theirs, so the loop stays.
+    #[allow(clippy::single_element_loop)]
+    for name in ["fid_output"] {
+        let src = format!("{dir}/c/{name}.c");
+        let bin = format!("{out}/{name}");
+        println!("cargo:rerun-if-changed={src}");
+        let status = Command::new("clang").args(["-arch", "arm64", "-o", &bin, &src])
+            .status().expect("clang fidelity fixture");
+        assert!(status.success(), "{name} guest build failed");
+    }
     // Swift (R11): built only where `swiftc --version` runs; elsewhere each FC_SW_* constant names a
     // file that does not exist and firstcontact_e2e announces `SKIPPED (no swiftc)` for its row. The
     // target is pinned to arm64-apple-macosx26.0, what swiftc 6.3.3 chose on the probe host, so the

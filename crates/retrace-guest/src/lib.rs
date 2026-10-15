@@ -421,6 +421,8 @@ pub const CF_WALLS: &str = concat!(env!("OUT_DIR"), "/cf_walls");
 pub const CF_WALLS_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/c/cf_walls.c");
 /// M50 Review Focus 1: a Rust program that calls fsync(2).
 pub const CF_RS_FSYNC: &str = concat!(env!("OUT_DIR"), "/cf_rs_fsync");
+/// M51 (spec §3e): the output modes (see the source).
+pub const FID_OUTPUT: &str = concat!(env!("OUT_DIR"), "/fid_output");
 /// iostream hello.
 pub const FC_CPP_HELLO: &str = concat!(env!("OUT_DIR"), "/fc_cpp_hello");
 /// A C++ exception thrown and caught.

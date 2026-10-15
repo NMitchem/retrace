@@ -10,6 +10,7 @@ pub use retrace_box::thread::{BlockReason, ThreadState, ThreadCtx};
 pub use retrace_box::{Excl, SetBy};
 pub use retrace_box::EXE_BASE;
 pub use retrace_box::hypervisor_check;
+pub use retrace_box::Stream;
 
 /// M15: one row of the debugger's thread listing.
 #[derive(Clone, Debug, PartialEq)]
@@ -81,18 +82,65 @@ pub enum Outcome {
 /// than into the trace on purpose: an `Event` variant would renumber every landmark, which
 /// `Event::Sched`'s removal settled. `Box_::run()` is shared by record and replay, so each side
 /// computes its own and the GATE compares the two — no single process holds both numbers.
-pub struct RecordSummary { pub stdout: Vec<u8>, pub outcome: Outcome, pub events: usize,
+///
+/// M51 §3e: `stdout` and `stderr` are the program's two console streams, kept apart.
+pub struct RecordSummary { pub stdout: Vec<u8>, pub stderr: Vec<u8>, pub outcome: Outcome, pub events: usize,
                            pub fall_throughs: u64 }
 
+/// M51 §3e: somewhere the program's console writes go as it makes them. The CLI's prints them on
+/// retrace's own stdout and stderr; a test passes none and reads the summary's copies.
+pub trait OutputSink {
+    fn write(&mut self, stream: Stream, bytes: &[u8]);
+}
+
+/// M51: what a caller adds to a recording beyond the program and its arguments. `Default` is what
+/// `record` and `record_dynamic` pass: no live output, so the summary alone carries it.
+#[derive(Default)]
+pub struct RecordOpts {
+    /// Where the program's console writes go as it makes them (§3e). None captures them only.
+    pub sink: Option<Box<dyn OutputSink>>,
+}
+
+/// M51 §3e: one side's console output, record's or replay's. Both streams are captured, and each
+/// write is passed to the sink, if there is one, as it lands. Record's console arm and replay's
+/// mirror both write here, through the stream `Box_::console_write_stream` names.
+#[derive(Default)]
+struct Console {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    sink: Option<Box<dyn OutputSink>>,
+}
+
+impl Console {
+    fn write(&mut self, stream: Stream, bytes: &[u8]) {
+        match stream {
+            Stream::Stdout => self.stdout.extend_from_slice(bytes),
+            Stream::Stderr => self.stderr.extend_from_slice(bytes),
+        }
+        if let Some(s) = &mut self.sink { s.write(stream, bytes); }
+    }
+}
+
 pub fn record(loaded: &retrace_guest::Loaded, trace_path: &Path) -> Result<RecordSummary, String> {
-    record_box(Box_::load(loaded), trace_path)
+    record_opts(loaded, trace_path, RecordOpts::default())
+}
+
+/// M51: `record`, with a live sink.
+pub fn record_opts(loaded: &retrace_guest::Loaded, trace_path: &Path, opts: RecordOpts) -> Result<RecordSummary, String> {
+    record_box(Box_::load(loaded), trace_path, opts.sink)
 }
 
 /// Dynamic record: run the exe through real dyld (mapped via `load_dynamic`) and record. Same
 /// record loop as the static path — dyld's syscalls/mach-traps flow through the shared engine.
 pub fn record_dynamic(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded, argv: &[String],
                       trace_path: &Path) -> Result<RecordSummary, String> {
-    record_box(Box_::load_dynamic(exe, dyld, argv), trace_path)
+    record_dynamic_opts(exe, dyld, argv, trace_path, RecordOpts::default())
+}
+
+/// M51: `record_dynamic`, with a live sink.
+pub fn record_dynamic_opts(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded, argv: &[String],
+                           trace_path: &Path, opts: RecordOpts) -> Result<RecordSummary, String> {
+    record_box(Box_::load_dynamic(exe, dyld, argv), trace_path, opts.sink)
 }
 
 /// M16 Task 9: the decision made about a thread's pending set at an unmask (`sigprocmask`/
@@ -172,12 +220,12 @@ fn wall_or_bug(m: String) -> String {
     if Unsupported::from_marked(&m).is_some() { m } else { panic!("{m}") }
 }
 
-fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
+fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>) -> Result<RecordSummary, String> {
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
     w.append(&b.snapshot()).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
 
-    let mut stdout = Vec::new();
+    let mut console = Console { sink, ..Console::default() };
     // M50 §3c (C1): the record loop runs inside this catch. A wall ends it either as a marked `Err`
     // (a record arm, a box method) or as a marked panic (a `refuse!` in code record and replay share),
     // and both become `Outcome::Refused` here, so the guest's output so far travels in the summary and
@@ -189,6 +237,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
     // Bring-up diagnostic (RETRACE_TRACE=1): log every trap the record loop dispatches, so a
     // forwarded syscall/mach-trap that misbehaves is identifiable from the last line printed.
     let trace_log = std::env::var_os("RETRACE_TRACE").is_some();
+    let verbose = retrace_arch::verbose();
     // The guest's task-port NAME (the result of task_self_trap −28, still host-forwarded this
     // milestone): machmsg routing needs it to recognize task-destined kernel RPCs. Learned
     // identically on record (forwarded result) and replay (recorded result).
@@ -305,8 +354,11 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
             // record process's real stdout AND double the mirror; replay reproduces from the mirror.
             // `is_console_write` covers write AND write_nocancel — the shared predicate is what
             // keeps this arm and replay's mirror from drifting (M9; see its doc comment).
+            // M51 §3e: the bytes go to the console the slot names (Box_::console_write_stream), and
+            // to the live sink as they land.
             Stop::Syscall { num, args } if b.is_console_write(num, args[0]) => {
-                stdout.extend_from_slice(&b.read_guest(args[1], args[2] as usize));
+                let stream = b.console_write_stream(num, args[0]).expect("is_console_write said it is one");
+                console.write(stream, &b.read_guest(args[1], args[2] as usize));
                 let ret = args[2];
                 w.append(&Event::Syscall { num, args, ret, ret1: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append write: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, false);
@@ -355,7 +407,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                 // M48 §3f exempts MAP_JIT: the box keeps such a range and stamps the running thread's
                 // view over it, so it is executable whenever that thread is protected. Every other
                 // anonymous exec map keeps this warning (§11a item 2).
-                if args[2] & 0x4 != 0 && args[3] & retrace_arch::MAP_JIT == 0 {
+                if args[2] & 0x4 != 0 && args[3] & retrace_arch::MAP_JIT == 0 && verbose {
                     eprintln!("[retrace warn] anon PROT_EXEC mmap (len {:#x}) not promoted to exec (JIT out of M2 scope)", args[1]);
                 }
                 // A MAP_FIXED address the guest's own space cannot hold is refused with an errno —
@@ -465,7 +517,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
             // success (x0=0) and the out buffer (x2) cleared to 0 (= "not in a sandbox"). Recorded
             // as a normal syscall event so replay reproduces it via the generic apply path.
             Stop::Syscall { num, args } if num == MAC_SYSCALL_MAGIC => {
-                eprintln!("[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)");
+                if verbose { eprintln!("[retrace warn] dyld __mac_syscall(Sandbox) synthesized as success/unsandboxed (not forwarded; host would fault)"); }
                 // Clear the out-buffer (arg2) ONLY when it is a real mapped pointer — the on-disk
                 // dyld passes a query buffer there, but the cache-resident dyld's check passes a null
                 // arg2 (result is purely the x0 return). Writing 8 bytes to a null/unmapped arg2
@@ -483,7 +535,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                 let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                 let exec = prot & PROT_EXEC != 0;
-                if exec { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
+                if exec && verbose { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
                 let req = if b.is_mapped(addr_ptr) { b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
                 // cur_protection == 0 => a PROT_NONE address-space reservation (bookkeeping only,
                 // demand-committed page-by-page on first touch by commit_reserved_page); anything
@@ -734,7 +786,7 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
                         semaphore_destroy_guard(&b, &m).map_err(wall_or_bug)?;
                         let clock_id = clock_service_request(&b, &m)
                             .map_err(|e| wall_or_bug(retrace_arch::in_context("host_get_clock_service (206) decode", e)))?;
-                        eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id);
+                        if verbose { eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id); }
                         let (ret, _ret1, err, writes) = b.forward_and_diff(num, args);
                         learn_clock_service(&mut b, &m, clock_id, ret, err);
                         if trace_log {
@@ -1588,11 +1640,18 @@ fn record_box(mut b: Box_,trace_path: &Path) -> Result<RecordSummary, String> {
             None => std::panic::resume_unwind(payload),
         },
     };
-    Ok(RecordSummary { stdout, outcome, events: count, fall_throughs: b.fall_throughs() })
+    Ok(RecordSummary { stdout: console.stdout, stderr: console.stderr, outcome, events: count, fall_throughs: b.fall_throughs() })
 }
 
 #[derive(Debug)]
-pub struct ReplayReport { pub stdout: Vec<u8>, pub outcome: Outcome, pub fall_throughs: u64 }
+pub struct ReplayReport { pub stdout: Vec<u8>, pub stderr: Vec<u8>, pub outcome: Outcome, pub fall_throughs: u64 }
+
+/// M51 §3e: a replay's report, taking both captured streams. Every terminal arm builds its report
+/// here, from the console and the box as disjoint fields, so no arm holds `self` while it does.
+fn replay_report(console: &mut Console, b: &Box_, outcome: Outcome) -> ReplayReport {
+    ReplayReport { stdout: std::mem::take(&mut console.stdout), stderr: std::mem::take(&mut console.stderr),
+                   outcome, fall_throughs: b.fall_throughs() }
+}
 #[derive(Debug)]
 pub struct Divergence { pub landmark: usize, pub pc: u64, pub detail: String }
 
@@ -1667,7 +1726,7 @@ pub struct ReplaySession {
     b: Box_,
     events: Rc<[Event]>,
     idx: usize,
-    stdout: Vec<u8>,
+    console: Console,
     // Mirror of record's task-port learning (see record_box): learned from the RECORDED
     // task_self_trap (−28) result so routing decides identically on replay.
     guest_task_port: Option<u64>,
@@ -1723,8 +1782,7 @@ impl ReplaySession {
                 Some(u) => u.what,
                 None => format!("landmark {} (pc {:#x})", d.landmark, d.pc),
             };
-            return Ok(ReplayReport { stdout: std::mem::take(&mut self.stdout), outcome: Outcome::Incomplete(at),
-                                     fall_throughs: self.b.fall_throughs() });
+            return Ok(replay_report(&mut self.console, &self.b, Outcome::Incomplete(at)));
         }
         if let Some(u) = wall {
             d.detail = format!("refused on replay, though the recording continued past it: {}", u.what);
@@ -1753,7 +1811,7 @@ impl ReplaySession {
             _ => return Err("trace missing leading Snapshot".into()),
         };
         // events[0] is the initial snapshot; the first landmark to consume is events[1].
-        Ok(ReplaySession { b, events, idx: 1, stdout: Vec::new(), guest_task_port: None,
+        Ok(ReplaySession { b, events, idx: 1, console: Console::default(), guest_task_port: None,
                            truncated: trace.truncated })
     }
 
@@ -1940,10 +1998,8 @@ impl ReplaySession {
                                         if let Some(d) = self.b.diff_memory(final_mem) {
                                             return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
                                         }
-                                        return Ok(Advance::Exited(ReplayReport {
-                                            stdout: std::mem::take(&mut self.stdout),
-                                            outcome: Outcome::Exit { code: *code },
-                                            fall_throughs: self.b.fall_throughs() }));
+                                        return Ok(Advance::Exited(replay_report(&mut self.console, &self.b,
+                                            Outcome::Exit { code: *code })));
                                     }
                                     other => return Err(Divergence { landmark: self.idx + 1, pc,
                                         detail: format!("expected final memory Snapshot, got {other:?}") }),
@@ -2051,10 +2107,8 @@ impl ReplaySession {
                                             if let Some(d) = self.b.diff_memory(final_mem) {
                                                 return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
                                             }
-                                            return Ok(Advance::Exited(ReplayReport {
-                                                stdout: std::mem::take(&mut self.stdout),
-                                                outcome: Outcome::Signal { sig: *rsig },
-                                                fall_throughs: self.b.fall_throughs() }));
+                                            return Ok(Advance::Exited(replay_report(&mut self.console, &self.b,
+                                                Outcome::Signal { sig: *rsig })));
                                         }
                                         other => return Err(Divergence { landmark: self.idx + 1, pc,
                                             detail: format!("expected final memory Snapshot after Signal, got {other:?}") }),
@@ -2391,8 +2445,9 @@ impl ReplaySession {
                             // until the guest `dup2`s or closes them away (the buffer is already
                             // filled by prior applied reads). Same predicate as record's arm — see
                             // `Box_::is_console_write`.
-                            if self.b.is_console_write(num, args[0]) {
-                                self.stdout.extend_from_slice(&self.b.read_guest(args[1], args[2] as usize));
+                            if let Some(stream) = self.b.console_write_stream(num, args[0]) {
+                                let bytes = self.b.read_guest(args[1], args[2] as usize);
+                                self.console.write(stream, &bytes);
                             }
                             // mach_msg2: re-service (the mapping must exist on replay too), verify
                             // the recomputed reply byte-equals the recording (divergence landmark),
@@ -3284,10 +3339,8 @@ impl ReplaySession {
                                     if let Some(d) = self.b.diff_memory(final_mem) {
                                         return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
                                     }
-                                    return Ok(Advance::Exited(ReplayReport {
-                                        stdout: std::mem::take(&mut self.stdout),
-                                        outcome: Outcome::Crash { pc, esr, far },
-                                        fall_throughs: self.b.fall_throughs() }));
+                                    return Ok(Advance::Exited(replay_report(&mut self.console, &self.b,
+                                        Outcome::Crash { pc, esr, far })));
                                 }
                                 other => return Err(Divergence { landmark: self.idx + 1, pc,
                                     detail: format!("expected final memory Snapshot after Crash, got {other:?}") }),
@@ -3673,7 +3726,7 @@ impl ReplaySession {
     /// M40: `from_checkpoint` over an already-decoded trace.
     pub fn from_checkpoint_decoded(trace: &DecodedTrace, checkpoint: &SessionCheckpoint) -> Result<Self, String> {
         let b = Box_::from_checkpoint(&checkpoint.box_state);
-        Ok(ReplaySession { b, events: Rc::clone(&trace.events), idx: checkpoint.idx, stdout: Vec::new(),
+        Ok(ReplaySession { b, events: Rc::clone(&trace.events), idx: checkpoint.idx, console: Console::default(),
                             guest_task_port: checkpoint.guest_task_port, truncated: trace.truncated })
     }
 
@@ -3853,8 +3906,14 @@ pub fn seek(trace_path: &Path, n: usize, k: u64) -> Result<ReplaySession, String
 }
 
 pub fn replay(trace_path: &Path) -> Result<ReplayReport, Divergence> {
+    replay_opts(trace_path, None)
+}
+
+/// M51 §3e: `replay`, with a live sink. Seek, checkpoint and debug sessions never take one.
+pub fn replay_opts(trace_path: &Path, sink: Option<Box<dyn OutputSink>>) -> Result<ReplayReport, Divergence> {
     let mut s = ReplaySession::open(trace_path)
         .map_err(|e| Divergence { landmark: 0, pc: 0, detail: e })?;
+    s.console.sink = sink;
     loop {
         // M50 §3c (C2): a wall's panic in code record and replay share is caught here, as
         // `record_box` catches it, and every stop replay cannot continue past goes to `end_or_diverge`.

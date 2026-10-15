@@ -10,16 +10,15 @@ fn a_panicking_rust_guest_records_and_replays_its_own_death() {
     assert_eq!(rec.code, 134, "134 == 128 + SIGABRT; stderr:\n{}", rec.stderr);
     assert!(rec.stderr.contains("guest terminated by signal 6"), "stderr:\n{}", rec.stderr);
 
-    // `starts_with`, not equality: is_console_write folds fd 1 AND fd 2 into one recorded buffer
-    // (M9), so this also carries libstd's panic message — which embeds an absolute build path and
-    // would make an exact-match assertion brittle across machines. What must be pinned is that the
-    // guest reached its OWN code rather than dying inside dyld, and the first line proves that.
+    // The first stdout line pins that the guest reached its OWN code rather than dying inside dyld.
     let out = String::from_utf8_lossy(&rec.stdout);
     assert!(out.starts_with("about to panic\n"),
             "the guest must reach its OWN code, not die inside dyld; stdout:\n{out}");
-    // And that the panic actually ran, rather than the guest exiting some other way.
-    assert!(out.contains("panicked at") && out.contains("M11"),
-            "libstd's panic must have run; stdout:\n{out}");
+    // And that the panic actually ran, rather than the guest exiting some other way. libstd writes
+    // its message to fd 2, which M51 §3e keeps on stderr. It embeds an absolute build path, so the
+    // assertion is `contains`.
+    assert!(rec.stderr.contains("panicked at") && rec.stderr.contains("M11"),
+            "libstd's panic must have run; stderr:\n{}", rec.stderr);
 
     for i in 0..2 {
         let rep = util::replay(&trace);

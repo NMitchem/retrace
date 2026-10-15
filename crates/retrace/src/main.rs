@@ -10,6 +10,45 @@ const ISSUES_URL: &str = "https://github.com/NMitchem/retrace/issues";
 const USAGE: &str = "usage: retrace <record <guest> -o <trace> | record-dyn <exe> -o <trace> [-- <guest args...>] \
                      | replay <trace> | debug <trace> --script '...' | gdbserver <trace> [--port <n>] [--exe <path>]>";
 
+/// One of retrace's own lines on its stderr. A reader that went away is not retrace's failure, so a
+/// failed write is dropped rather than panicking, as `eprintln!` would (Review Focus 1).
+fn say(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+/// M51 §3e: the program's console writes, printed on retrace's own stdout and stderr as it makes
+/// them. stdout is flushed per write, so a terminal or a `2>&1` file interleaves the two streams in
+/// the program's order. R5: a write that fails (a reader that went away: Rust ignores SIGPIPE, so it
+/// is EPIPE) ends retrace's writes to that stream, and the recording goes on; the program's own write
+/// returned its length already, so nothing about this reaches the trace.
+#[derive(Default)]
+struct LiveOutput { stdout_gone: bool, stderr_gone: bool }
+
+impl retrace_core::OutputSink for LiveOutput {
+    fn write(&mut self, stream: retrace_core::Stream, bytes: &[u8]) {
+        use std::io::Write;
+        let gone = match stream {
+            retrace_core::Stream::Stdout => &mut self.stdout_gone,
+            retrace_core::Stream::Stderr => &mut self.stderr_gone,
+        };
+        if *gone { return; }
+        let r = match stream {
+            retrace_core::Stream::Stdout => {
+                let mut o = std::io::stdout().lock();
+                o.write_all(bytes).and_then(|()| o.flush())
+            }
+            retrace_core::Stream::Stderr => std::io::stderr().lock().write_all(bytes),
+        };
+        if r.is_err() { *gone = true; }
+    }
+}
+
+/// The options every CLI recording takes: the live sink.
+fn live() -> retrace_core::RecordOpts {
+    retrace_core::RecordOpts { sink: Some(Box::new(LiveOutput::default())) }
+}
+
 fn main() {
     // M50 §3c, C7: a panic that is not a wall is a bug in retrace. The hook prints the banner and
     // returns, and the catch below exits 70 (EX_SOFTWARE, R3: 101 is also what a Rust guest's own
@@ -109,12 +148,12 @@ fn record(a: &[String], dynamic: bool) -> i32 {
         let dyld_path = exe.dylinker.clone().unwrap_or_else(|| retrace_guest::DYLD_PATH.to_string());
         let dyld_bytes = std::fs::read(&dyld_path).unwrap_or_else(|e| panic!("read dyld {dyld_path}: {e}"));
         let dyld = retrace_guest::parse_macho(retrace_guest::slice_arm64e(&dyld_bytes));
-        retrace_core::record_dynamic(&exe, &dyld, &argv, Path::new(out))
+        retrace_core::record_dynamic_opts(&exe, &dyld, &argv, Path::new(out), live())
     } else {
-        retrace_core::record(&exe, Path::new(out))
+        retrace_core::record_opts(&exe, Path::new(out), live())
     };
     match summary {
-        Ok(s) => finish(&s.stdout, s.fall_throughs, &s.outcome),
+        Ok(s) => finish(s.fall_throughs, &s.outcome),
         Err(e) => bad_input(&format!("cannot write the trace {out}: {e}")),
     }
 }
@@ -124,8 +163,8 @@ fn replay(a: &[String]) -> i32 {
     let Some(trace) = a.get(2) else { return bad_input("usage: retrace replay <trace>") };
     if let Err(e) = std::fs::metadata(trace) { return bad_input(&format!("cannot read {trace}: {e}")); }
     if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
-    match retrace_core::replay(Path::new(trace)) {
-        Ok(r) => finish(&r.stdout, r.fall_throughs, &r.outcome),
+    match retrace_core::replay_opts(Path::new(trace), Some(Box::new(LiveOutput::default()))) {
+        Ok(r) => finish(r.fall_throughs, &r.outcome),
         Err(d) => {
             eprintln!("DIVERGENCE at landmark {} pc=0x{:x}: {}", d.landmark, d.pc, d.detail);
             eprintln!("repro: retrace replay {trace}");
@@ -134,33 +173,27 @@ fn replay(a: &[String]) -> i32 {
     }
 }
 
-/// Print what the guest wrote, then how it ended, and return the exit code (spec §3b).
-fn finish(stdout: &[u8], fall_throughs: u64, outcome: &retrace_core::Outcome) -> i32 {
-    use std::io::Write;
-    // A reader that went away (`| head`) is not a retrace bug; any other write error is.
-    if let Err(e) = std::io::stdout().write_all(stdout) {
-        if e.kind() != std::io::ErrorKind::BrokenPipe { panic!("write the guest's output: {e}"); }
-    }
+/// How the program ended, after its output (printed live), and the exit code (spec §3b).
+fn finish(fall_throughs: u64, outcome: &retrace_core::Outcome) -> i32 {
     // M23 t2: both sides report the EL1 vector fall-through count so the gate can compare them
     // (crates/retrace/tests/fallthrough_e2e.rs). It is not in the trace — an Event variant would
-    // renumber every landmark — so an UNREPORTED count is exactly as invisible as an uncounted one,
-    // which is what t1 exists to prevent. Printed before the outcome: every outcome owes it.
-    eprintln!("[retrace] fall-throughs: {fall_throughs}");
+    // renumber every landmark. M51 §3e (R4): it is a diagnostic, printed under RETRACE_VERBOSE.
+    if retrace_arch::verbose() { say(&format!("[retrace] fall-throughs: {fall_throughs}")); }
     match *outcome {
         retrace_core::Outcome::Exit { code } => code as i32,
         retrace_core::Outcome::Crash { pc, esr, far } => {
-            eprintln!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}");
+            say(&format!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"));
             139
         }
         retrace_core::Outcome::Signal { sig } => {
-            eprintln!("guest terminated by signal {sig}");
+            say(&format!("guest terminated by signal {sig}"));
             // 128 + sig: the convention M6 already uses for a crash (139 == 128 + SIGSEGV).
             // SIGABRT therefore exits 134.
             128 + sig as i32
         }
-        // M50 §3b: the guest's output is already printed above; the wall's line comes last.
-        retrace_core::Outcome::Refused(ref u) => { eprintln!("{}", u.line()); 4 }
-        retrace_core::Outcome::Incomplete(ref at) => { eprintln!("{}", retrace_arch::incomplete_line(at)); 4 }
+        // M50 §3b: the guest's output is already printed; the wall's line comes last.
+        retrace_core::Outcome::Refused(ref u) => { say(&u.line()); 4 }
+        retrace_core::Outcome::Incomplete(ref at) => { say(&retrace_arch::incomplete_line(at)); 4 }
     }
 }
 

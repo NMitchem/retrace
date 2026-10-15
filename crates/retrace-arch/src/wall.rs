@@ -124,6 +124,13 @@ pub fn refused_line(what: &str, returned: &str) -> String {
     format!("retrace: refused: {}, returned {returned} to the program", one_line(what))
 }
 
+/// M51 §3e (R4): whether retrace prints its own diagnostic lines (`[retrace warn] …`, `[retrace]
+/// forwarding …`, `[retrace] fall-throughs: N`). Off unless `RETRACE_VERBOSE` is set; `RETRACE_TRACE`
+/// turns it on too. The documented `retrace: ` lines print either way.
+pub fn verbose() -> bool {
+    std::env::var_os("RETRACE_VERBOSE").is_some() || std::env::var_os("RETRACE_TRACE").is_some()
+}
+
 /// `s` as one ASCII line (R1): each run of whitespace becomes one space, an en or em dash becomes
 /// `-`, and any other non-ASCII or control character becomes `?`, so a plain `grep` and a terminal
 /// both show the line whole.
