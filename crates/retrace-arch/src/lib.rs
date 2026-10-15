@@ -1163,6 +1163,31 @@ pub fn shape_of(num: u64, args: &[u64; 8]) -> &'static Shape {
     }
 }
 
+/// M51 §3h (C3): is argument `i` of `num` an address range the call acts on, rather than a buffer the
+/// kernel reads or writes? Natively an unmapped range there is `ENOMEM` or `EINVAL`, never `EFAULT`,
+/// so `Box_::prepare_forward_pointers` leaves it to the kernel. msync's `addr` is `Source` in its row
+/// for the canary decision (M30), but it is not a buffer. t0 M6 lists no other forwarded row.
+pub fn region_address(num: u64, i: usize) -> bool {
+    // msync (65) and msync_nocancel (405): `addr`.
+    matches!((num, i), (65 | 405, 0))
+}
+
+/// M51 §3h (t0 M6, Ruling T0-h): is argument `i` of `num` an out-pointer natively swallowed when bad:
+/// the call returns 0 and writes nothing? `sigpending`'s set is one (measured: ret 0 for a bad
+/// pointer), so `Box_::prepare_forward_pointers` skips it and the serviced arm skips the write.
+/// `sigprocmask`'s `oldset` behaves the same, but that arm never reaches the pre-forward check: it
+/// applies the new mask and checks the write itself.
+pub fn ignores_bad_out_pointer(num: u64, i: usize) -> bool {
+    matches!((num, i), (SYS_SIGPENDING, 0))
+}
+
+/// M51 §3h: is argument `i` of `num`, whose row marks it `Ptr`, a pointer the kernel WRITES through? Only
+/// the two serviced calls whose old-value out-parameters share the `Ptr` kind: `sigaction`'s `osa` and
+/// `sigaltstack`'s `oss`. A page the program may read but not write is `EFAULT` there, as natively.
+pub fn writes_through_ptr(num: u64, i: usize) -> bool {
+    matches!((num, i), (SYS_SIGACTION, 2) | (SYS_SIGALTSTACK, 1))
+}
+
 /// `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)` — the descriptor-producing fcntl commands, which
 /// `forward_and_diff` short-circuits into `guest_fcntl_dupfd` and replay mirrors with
 /// `FdTable::dup_from` (M38). `min` is a GUEST minimum and never reaches the host.
@@ -1207,6 +1232,8 @@ pub const RLIMIT_POSIX_FLAG: u64 = 0x1000;
 
 /// BSD errno: an argument the kernel rejects (a MAP_FIXED address outside the address space).
 pub const EINVAL: u64 = 22;
+/// `<sys/errno.h>`: bad address. M51 §3h: a pointer the program could not pass natively.
+pub const EFAULT: u64 = 14;
 /// `<sys/errno.h>`: no such process. M51 §3g: `__pthread_kill(port, 0)` for a port no live thread holds.
 pub const ESRCH: u64 = 3;
 /// `EINTR` (SDK `sys/errno.h:91`): an interrupted wait. M48's `psynch_cvwait` model names it.
@@ -3085,6 +3112,18 @@ mod tests {
         assert_eq!((SS_ONSTACK, SS_DISABLE), (0x1, 0x4));
         assert_eq!(UC_FLAVOR, 30, "measured in spikes/sigtramp.c as x1 on trampoline entry");
         assert_eq!(SI_USER, 0x10001, "measured by spikes/sigabi.c");
+    }
+
+    // M51 §3h (C3): msync's address is the range it syncs, not a buffer; its length and every
+    // buffer are not region addresses.
+    #[test]
+    fn region_address_names_ranges_and_no_buffer() {
+        assert!(region_address(65, 0) && region_address(405, 0), "msync's addr");
+        assert!(!region_address(65, 1) && !region_address(SYS_READ, 1) && !region_address(SYS_WRITE, 1));
+        // t0 M6: sigpending's set is swallowed when bad; sigaction's and sigaltstack's old values are written.
+        assert!(ignores_bad_out_pointer(SYS_SIGPENDING, 0) && !ignores_bad_out_pointer(SYS_SIGACTION, 2));
+        assert!(writes_through_ptr(SYS_SIGACTION, 2) && writes_through_ptr(SYS_SIGALTSTACK, 1));
+        assert!(!writes_through_ptr(SYS_SIGACTION, 1) && !writes_through_ptr(SYS_SIGALTSTACK, 0));
     }
 
     #[test]

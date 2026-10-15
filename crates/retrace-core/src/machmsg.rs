@@ -218,6 +218,14 @@ pub const MACH_RCV_TIMED_OUT: u64 = 0x1000_4003;
 pub const MACH_RCV_INVALID_NAME: u64 = 0x1000_4002;
 pub const MACH_RCV_PORT_DIED: u64 = 0x1000_4006;
 pub const MACH_RCV_REFUSAL: u64 = MACH_RCV_INVALID_NAME;
+/// M51 §3h (t0 M6, `mm2_kobj`): what `mach_msg2` answers natively, in x0, for a message header the
+/// program could not read or write. It is `MACH_RCV_INVALID_NAME`'s value (the receive half fails on
+/// the same unusable buffer), so the constant is an alias of it, not a second number.
+pub const MACH_MSG2_BAD_BUFFER: u64 = MACH_RCV_INVALID_NAME;
+/// `KERN_MEMORY_ERROR` (`mach/kern_return.h`): what `_kernelrpc_mach_vm_allocate_trap` and
+/// `_kernelrpc_mach_vm_map_trap` answer natively when the copyin or copyout of `*addr` fails (t0 M5
+/// `machbad`, Ruling T0-l).
+pub const KERN_MEMORY_ERROR: u64 = 0xa;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 
 /// A fixed sample port name. NOTE (M2-xpcport): its runtime role is RETIRED — the 3409 handler now

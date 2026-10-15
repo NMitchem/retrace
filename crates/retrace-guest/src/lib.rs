@@ -435,6 +435,8 @@ pub const FID_FRAMES: &str = concat!(env!("OUT_DIR"), "/fid_frames");
 pub const FID_ENV: &str = concat!(env!("OUT_DIR"), "/fid_env");
 /// M51 (spec §3g): a `signal()` handler, signal 0 and `abort_with_payload` (see the source).
 pub const FID_SIGNALS: &str = concat!(env!("OUT_DIR"), "/fid_signals");
+/// M51 (spec §3h): a pointer the program could not pass natively (see the source).
+pub const FID_BADPTR: &str = concat!(env!("OUT_DIR"), "/fid_badptr");
 /// M51 (spec §3g): a program whose dylib is gone, which dyld ends through `abort_with_payload`.
 pub const FID_MISSING: &str = concat!(env!("OUT_DIR"), "/fid_missing");
 /// iostream hello.

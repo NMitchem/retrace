@@ -4341,13 +4341,20 @@ impl Box_ {
         match retrace_arch::dest_buffer(num) {
             Some((di, len)) if di == i => Some(match len {
                 retrace_arch::DestLen::Reg(n) => args[n] as usize,
-                // `*(size_t*)args[n]` — sysctl's oldlenp. A null or unmapped pointer would be a
-                // guest bug; `read_u64` is the same accessor the rest of the box uses for guest
-                // scalars, so it behaves identically to every other guest-memory read here.
-                retrace_arch::DestLen::DerefU64(n) => self.read_u64(args[n]) as usize,
+                // `*(size_t*)args[n]` — sysctl's oldlenp.
+                retrace_arch::DestLen::DerefU64(n) => self.oldlen_at(args[n]),
             }),
             _ => None,
         }
+    }
+
+    /// M51 §3h: sysctl's `*oldlenp`, for sizing the diff window. A pointer the program could not read
+    /// natively (NULL, below the first page, unmapped) has no length to size by: 0, and the kernel
+    /// answers the call itself. `prepare_forward_pointers` has already refused an `oldlenp` it
+    /// could name with EFAULT (t0 M6: native hangs on one, `sysctl(3)` documents EFAULT), so a pointer
+    /// that reaches here is one the kernel is left to judge.
+    fn oldlen_at(&self, p: u64) -> usize {
+        self.read_va_checked(p, 8).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()) as usize)
     }
 
     /// How many bytes of the region behind `args[i]` to snapshot for the pre/post memory diff.
@@ -4478,7 +4485,9 @@ impl Box_ {
     fn translate_mwl_regions(&self, args: &[u64; 8]) -> Result<Vec<u8>, u64> {
         let count = args[1].min(retrace_arch::MWL_MAX_REGION_COUNT);
         let stride = retrace_arch::MWL_REGION_STRIDE;
-        let mut buf = self.read_guest(args[0], count as usize * stride);
+        // M51 §3h (t0 M6, Ruling T0-e): natively a plain process's every call answers EINVAL and the
+        // array is never examined, so a pointer the program could not read is EINVAL, not EFAULT.
+        let mut buf = self.read_va_checked(args[0], count as usize * stride).ok_or(retrace_arch::EINVAL)?;
         for r in 0..count as usize {
             let off = r * stride;
             let gfd = i32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
@@ -4711,7 +4720,7 @@ impl Box_ {
                     let gated = std::env::var_os("RETRACE_DEREFLEN").is_some();
                     match self.host_span(args[di]) {
                         Some((_, avail)) => {
-                            let want = self.read_u64(args[n]) as usize;
+                            let want = self.oldlen_at(args[n]);
                             if want > avail {
                                 if gated {
                                     let (bi, bl) = self.backing_of(args[di]).unwrap();
@@ -5104,11 +5113,11 @@ impl Box_ {
     /// a watched range is a separate question from "which syscall wrote here", and conflating them
     /// would make a watchpoint fire with a syscall's provenance for a write no syscall made.
     fn write_guest(&mut self, ipa: u64, bytes: &[u8]) {
-        let (hp, avail) = self.host_span(ipa)
-            .unwrap_or_else(|| retrace_arch::refuse!(Memory, "write_guest: ipa {ipa:#x} outside any mapped region"));
-        if bytes.len() > avail {
-            retrace_arch::refuse!(Memory, "write_guest at {ipa:#x} ({} bytes) overruns backing ({avail} avail)", bytes.len());
-        }
+        let (hp, avail) = self.host_span(ipa).unwrap_or_else(|| panic!("M51 §3h: write_guest at ipa {ipa:#x}, which \
+            nothing maps. Every pointer the program passes is checked before it gets here (prepare_forward_pointers, \
+            read_va_checked, prepare_reply), so this is retrace's bug, not the program's"));
+        assert!(bytes.len() <= avail, "M51 §3h: write_guest at {ipa:#x} ({} bytes) overruns its backing ({avail} \
+            available); retrace's bug, not the program's", bytes.len());
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), hp, bytes.len()); }
     }
 
@@ -5497,13 +5506,15 @@ impl Box_ {
             let off = (ipa - bk.ipa) as usize;
             return unsafe { std::slice::from_raw_parts(bk.host.add(off), len) }.to_vec();
         }
-        retrace_arch::refuse!(Memory, "read_guest: ipa 0x{ipa:x} len {len} not mapped");
+        panic!("M51 §3h: read_guest of {len} bytes at ipa {ipa:#x}, which nothing maps. Every pointer the program \
+            passes is checked before it gets here (prepare_forward_pointers, read_va_checked, prepare_reply), so this \
+            is retrace's bug, not the program's");
     }
 
     /// Like `read_guest`, but returns None instead of panicking when the full `[ipa, ipa+len)` span
     /// does not fit inside a single backing — deterministic all-or-nothing (no clamping, no partial
     /// read). For callers (the M3 debugger's memory reads) that must tolerate unmapped/partial spans;
-    /// `read_guest`'s panic stays load-bearing fail-loud for internal callers.
+    /// `read_guest`'s panic stays load-bearing fail-loud for internal callers. Since M51 that panic is retrace's bug, never a wall.
     ///
     /// M44 B1: by the index beside the Vec (backings.rs).
     pub fn read_guest_checked(&self, ipa: u64, len: usize) -> Option<Vec<u8>> {
@@ -6691,6 +6702,131 @@ impl Box_ {
             a = (a | (GRANULE as u64 - 1)).saturating_add(1);
         }
         Ok(())
+    }
+
+    /// M51 §3h (C3): the pre-forward pointer check. For a BSD call with a row, each declared `Path`,
+    /// `Source`, `NestedSource`, `Dest` or `Ptr` argument must name memory the program can reach natively:
+    /// a `Path` to its NUL (at most 1024 bytes), every other kind its first byte's page; readable by EL0,
+    /// and writable by it for a `Dest` (and for the two `Ptr` out-parameters `writes_through_ptr` names).
+    /// An argument below the first page, or with a nonzero top byte, or at a region address
+    /// (`retrace_arch::region_address`) or an out-pointer natively swallowed
+    /// (`retrace_arch::ignores_bad_out_pointer`), keeps today's path and the kernel answers it. So does
+    /// `ioctl`'s argument when the request carries neither `IOC_IN` nor `IOC_OUT`, and every
+    /// `map_with_linking_np` pointer, which a plain process never gets examined (EINVAL, t0 M6). The
+    /// first argument that fails is `Err(EFAULT)`.
+    ///
+    /// Each page that passes is made present: a reserved page is committed and a cache page paged in, so
+    /// the forward hands the kernel memory where the program will read it. Without this a pointer
+    /// `host_span` does not map reached the host kernel raw, as a host address (F15).
+    ///
+    /// The extents are deliberately the first page. A count is what the caller offers, not what the
+    /// kernel touches, so checking it would refuse calls native completes. The first page is what keeps a
+    /// guest address from reaching the host, since `forward_and_diff`'s clamp keeps a write inside that
+    /// page's backing.
+    ///
+    /// Record calls it before the forward and before the console write, `sigaction` and `sigaltstack`;
+    /// replay calls it at the same points, so both make the same pages present. It is idempotent. A page
+    /// made present before a later argument fails stays present, on both sides alike; the program cannot
+    /// tell, since a reserved page reads as the zeros it would have committed.
+    pub fn prepare_forward_pointers(&mut self, num: u64, args: &[u64; 8]) -> Result<(), u64> {
+        use retrace_arch::ArgKind::*;
+        if (num as i64) < 0 || retrace_arch::arg_kinds(num).is_none() { return Ok(()); }
+        if num == retrace_arch::SYS_MAP_WITH_LINKING_NP { return Ok(()); }
+        let shape = retrace_arch::shape_of(num, args);
+        for (i, kind) in shape.args.iter().enumerate() {
+            let write = match kind {
+                Path | Source | NestedSource => false,
+                Ptr => retrace_arch::writes_through_ptr(num, i),
+                Dest(_) => true,
+                Scalar | Fd | NestedDest => continue,
+            };
+            let v = args[i];
+            if v < GRANULE as u64 || v >> 56 != 0 { continue; }
+            if retrace_arch::region_address(num, i) || retrace_arch::ignores_bad_out_pointer(num, i) { continue; }
+            if num == retrace_arch::SYS_IOCTL && i == 2
+                && (args[1] & (retrace_arch::IOC_IN | retrace_arch::IOC_OUT) == 0 || retrace_arch::iocparm_len(args[1]) == 0) {
+                continue;
+            }
+            if *kind == Path { self.present_path(v)?; } else { self.present_page(v, write)?; }
+        }
+        Ok(())
+    }
+
+    /// One page of `prepare_forward_pointers`. A VA whose stage-1 walk lands elsewhere (an M39
+    /// alias) keeps today's path, untouched, because `forward_and_diff` translates by identity.
+    fn present_page(&mut self, va: u64, write: bool) -> Result<(), u64> {
+        let Some((ipa, leaf)) = self.va_leaf(va) else { return Err(retrace_arch::EFAULT) };
+        if ipa != va { return Ok(()); }
+        if let Some(l) = leaf {
+            let ap = (l >> 6) & 3;
+            if ap & 1 == 0 || (write && ap != 1) { return Err(retrace_arch::EFAULT); }
+        }
+        // `page_in_cache` only for a page nothing backs yet: on a backed page it counts a refault.
+        if self.host_span(ipa).is_some() || self.commit_reserved_page(ipa)
+            || ((SHARED_REGION_START..SHARED_REGION_END).contains(&ipa) && self.page_in_cache(ipa)) {
+            Ok(())
+        } else {
+            Err(retrace_arch::EFAULT)
+        }
+    }
+
+    /// `prepare_forward_pointers` for a `Path`: each page up to the NUL, at most `PATH_MAX` (1024)
+    /// bytes, as the kernel's `copyinstr` scans it.
+    fn present_path(&mut self, va: u64) -> Result<(), u64> {
+        let end = va.saturating_add(1024);
+        let mut a = va;
+        while a < end {
+            self.present_page(a, false)?;
+            let page_end = ((a | (GRANULE as u64 - 1)) + 1).min(end);
+            let want = (page_end - a) as usize;
+            let bytes = self.read_va_prefix(a, want);
+            if bytes.len() < want || bytes.contains(&0) { return Ok(()); }
+            a = page_end;
+        }
+        Ok(())
+    }
+
+    /// M51 §3h: `[va, va + len)` for an emulated call that reads the program's memory, or None where it
+    /// could not read it natively: a page that does not translate, that EL0 may not read, or that is
+    /// neither present nor reserved. A reserved page the program never touched reads as zeros, as
+    /// natively. A cache page not yet paged in reads as None; the emulated calls that read the
+    /// program's memory (t0 M6) read its own stack and heap, never an unfaulted cache page.
+    pub fn read_va_checked(&self, va: u64, len: usize) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(len.min(1 << 16));
+        let mut a = va;
+        while out.len() < len {
+            let (ipa, leaf) = self.va_leaf(a)?;
+            if leaf.is_some_and(|l| (l >> 6) & 1 == 0) { return None; }
+            let n = (((a | (GRANULE as u64 - 1)) + 1 - a) as usize).min(len - out.len());
+            match self.read_guest_checked(ipa, n) {
+                Some(b) => out.extend_from_slice(&b),
+                None if self.host_span(ipa).is_none() && self.in_reservation(ipa) => out.resize(out.len() + n, 0),
+                None => return None,
+            }
+            a = a.checked_add(n as u64)?;
+        }
+        Some(out)
+    }
+
+    /// M51 §3h: would the kernel's copyout of an emulated call's reply to `[va, va + len)` succeed
+    /// natively? Each page must translate, be writable by EL0, and be present or reserved. When all
+    /// pass, each reserved page is committed, as the kernel's write would commit it, and it returns
+    /// true; otherwise nothing changes. Record and the replay mirror both call it before the reply.
+    pub fn prepare_reply(&mut self, va: u64, len: usize) -> bool {
+        let end = va.saturating_add(len as u64);
+        let mut commit = Vec::new();
+        let mut a = va;
+        while a < end {
+            let Some((ipa, leaf)) = self.va_leaf(a) else { return false };
+            if leaf.is_some_and(|l| (l >> 6) & 3 != 1) { return false; }
+            if self.host_span(ipa).is_none() {
+                if !self.in_reservation(ipa) { return false; }
+                commit.push(ipa);
+            }
+            a = (a | (GRANULE as u64 - 1)).saturating_add(1);
+        }
+        for ipa in commit { self.commit_reserved_page(ipa); }
+        true
     }
 
     /// `workq_kernreturn(THREAD_KEVENT_RETURN, changelist, nchanges, 0)`: the event manager handing

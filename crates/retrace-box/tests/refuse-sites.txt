@@ -26,14 +26,11 @@ crates/retrace-box/src/lib.rs	guest_workq_reqthreads	Threads	M18 Stage 2b: REQTH
 crates/retrace-box/src/lib.rs	place_fixed	Memory	FIXED map at
 crates/retrace-box/src/lib.rs	place_fixed	Memory	FIXED map at
 crates/retrace-box/src/lib.rs	protect_none	Memory	protect_none: no backing for
-crates/retrace-box/src/lib.rs	read_guest	Memory	read_guest: ipa 0x
 crates/retrace-box/src/lib.rs	set_region_attr	Memory	set_region_attr: too many exec blocks; L
 crates/retrace-box/src/lib.rs	sigreturn_restore	Signals	sigreturn token mismatch: got
 crates/retrace-box/src/lib.rs	sleep_timed_out	Threads	M49: sleep of thread
 crates/retrace-box/src/lib.rs	wq_qos_index	Threads	M18 Stage 2b: REQTHREADS priority
 crates/retrace-box/src/lib.rs	wq_qos_index	Threads	M18 Stage 2b: REQTHREADS priority
-crates/retrace-box/src/lib.rs	write_guest	Memory	write_guest at
-crates/retrace-box/src/lib.rs	write_guest	Memory	write_guest: ipa
 crates/retrace-box/src/sig.rs	idx	Signals	signal
 crates/retrace-box/src/thread.rs	set_mask_of	Signals	sigprocmask how=
 crates/retrace-box/src/thread.rs	unpark	Threads	M46: unpark of parked workqueue thread

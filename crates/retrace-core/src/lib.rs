@@ -221,7 +221,10 @@ fn take_pending_delivery(b: &mut Box_, tid: usize) -> Option<(u64, u64)> {
 /// None for every other id. Both Forward arms call this with the same `m`, before the reply lands.
 fn clock_service_request(b: &Box_, m: &machmsg::Msg2) -> Result<Option<u32>, String> {
     if m.msgh_id != machmsg::HOST_GET_CLOCK_SERVICE { return Ok(None); }
-    machmsg::decode_clock_service_request(&b.read_guest(m.data, m.send_size as usize)).map(Some)
+    // M51 §3h: `mach2_unreachable` answered a request the program could not read before this runs.
+    let buf = b.read_va_checked(m.data, m.send_size as usize)
+        .ok_or("the request buffer is unreadable after mach2_unreachable passed it")?;
+    machmsg::decode_clock_service_request(&buf).map(Some)
 }
 
 /// M49 §3f S2: after a 206's reply has landed in guest memory (forwarded on record, applied on
@@ -231,7 +234,9 @@ fn clock_service_request(b: &Box_, m: &machmsg::Msg2) -> Result<Option<u32>, Str
 fn learn_clock_service(b: &mut Box_, m: &machmsg::Msg2, clock_id: Option<u32>, ret: u64, err: bool) {
     let Some(id) = clock_id else { return };
     if ret != machmsg::MACH_MSG_SUCCESS || err { return; }
-    if let Some(port) = machmsg::decode_clock_service_reply(&b.read_guest(m.data, machmsg::CLOCK_SERVICE_REPLY_LEN)) {
+    // The reply landed in the buffer `mach2_unreachable` already passed (a forward that succeeded).
+    let Some(reply) = b.read_va_checked(m.data, machmsg::CLOCK_SERVICE_REPLY_LEN) else { return };
+    if let Some(port) = machmsg::decode_clock_service_reply(&reply) {
         b.learn_clock_port(port as u64, id);
     }
 }
@@ -242,9 +247,58 @@ fn learn_clock_service(b: &mut Box_, m: &machmsg::Msg2, clock_id: Option<u32>, r
 /// `m`; record panics on an Err and replay reports it as a divergence.
 fn semaphore_destroy_guard(b: &Box_, m: &machmsg::Msg2) -> Result<(), String> {
     if m.msgh_id != machmsg::SEMAPHORE_DESTROY { return Ok(()); }
-    let port = machmsg::decode_semaphore_destroy(&b.read_guest(m.data, m.send_size as usize))
+    let buf = b.read_va_checked(m.data, m.send_size as usize)
+        .ok_or("the request buffer is unreadable after mach2_unreachable passed it")?;
+    let port = machmsg::decode_semaphore_destroy(&buf)
         .map_err(|e| retrace_arch::in_context("semaphore_destroy (3419) decode", e))?;
     b.check_sleep_semaphore("semaphore_destroy (3419)", port)
+}
+
+/// M51 §3h: the landmark of a call answered with an error before it did anything, as a pointer the
+/// program could not pass natively is: `ret` (an errno with `err`, or a `kern_return_t` without), no
+/// writes, and the program resumes past it. Never forwarded or serviced.
+#[allow(clippy::too_many_arguments)]
+fn append_refused(w: &mut Writer, b: &mut Box_, count: &mut usize, num: u64, args: [u64; 8], ret: u64, err: bool,
+                  thread: u32) -> Result<(), String> {
+    w.append(&Event::Syscall { num, args, ret, ret1: 0, err, writes: vec![], thread })
+        .map_err(|e| format!("append refused pointer: {e}"))?;
+    *count += 1;
+    b.set_x0_err_and_return(ret, err);
+    Ok(())
+}
+
+/// M51 §3h: does the recording carry the answer `append_refused` writes: `want_ret`, `want_err`, no
+/// writes? Replay's mirrors compare a refusal they recompute with this; anything else is a divergence.
+fn refusal_recorded(ret: u64, err: bool, writes: &[Region], want_ret: u64, want_err: bool) -> bool {
+    ret == want_ret && err == want_err && writes.is_empty()
+}
+
+/// M51 §3h: would the kernel's copyout of every region of an emulated call's reply succeed natively?
+/// (`Box_::prepare_reply` for each; the pages that pass are made present.) Record and the replay mirror
+/// call it with the same regions before the reply is applied.
+fn reply_reachable(b: &mut Box_, writes: &[Region]) -> bool {
+    writes.iter().all(|r| b.prepare_reply(r.ipa, r.bytes.len()))
+}
+
+/// M51 §3h (t0 M6, `mm2_kobj`): a `mach_msg2` whose message buffer the program could not have passed
+/// natively. Natively the answer is `MACH_MSG2_BAD_BUFFER` in x0, a `kern_return_t` with `err` false.
+/// For the routes the box services, the request at `m.data` must be readable and, for the two replies
+/// written with no prior read (the stub and `clock_get_time`), the buffer writable; a forwarded id is
+/// judged only when the box itself reads its body (`forward_body_is_checked`, `semaphore_destroy`,
+/// `host_get_clock_service`). A reply to a request just read is covered by that read. Record and replay
+/// call this with the same `(m, route)` before the route's arm.
+fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) -> bool {
+    use machmsg::Route::*;
+    match route {
+        ServiceVmMap | ServiceVmRemap | ServiceGetSpecialPort | ServiceSetSpecialPort | ServicePortsRegister =>
+            b.read_va_checked(m.data, m.send_size as usize).is_none(),
+        Forward(_) if machmsg::forward_body_is_checked(m.msgh_id) || m.msgh_id == machmsg::SEMAPHORE_DESTROY
+            || m.msgh_id == machmsg::HOST_GET_CLOCK_SERVICE =>
+            b.read_va_checked(m.data, m.send_size as usize).is_none(),
+        StubMigReply(_) => !b.prepare_reply(m.data, machmsg::encode_mig_error(0, 0, 0).len()),
+        ServiceClockGetTime => !b.prepare_reply(m.data, machmsg::encode_clock_get_time_reply(0, 0, 0).len()),
+        Forward(_) | RefuseMqSend | RefuseMqRecv | Unsupported(_) => false,
+    }
 }
 
 /// M50 §3c (B1): a box refusal reaching the record loop. A wall, marked at its site (Task 4 marks
@@ -299,7 +353,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // alias, `[fd1 (console 2)]` after `dup2(2, 1)` — what the mirror decided, not
                 // just the alias.
                 if b.is_console_write(*num, args[0]) {
-                    let bytes = b.read_guest(args[1], args[2] as usize);
+                    // M51 §3h: trace-only, so the readable prefix: the arm below owns the refusal.
+                    let bytes = b.read_va_prefix(args[1], args[2] as usize);
                     let console = b.fds().console_of(args[0]).expect("is_console_write implies a Console slot");
                     eprintln!("[fd{} (console {console})] {}", args[0], String::from_utf8_lossy(&bytes));
                 }
@@ -309,7 +364,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     eprintln!("[mach_msg2] msgh_id={} dest={:#x} reply={:#x} options={:#x} bits={:#x} send_size={} rcv_size={}",
                         args[4] >> 32, args[3] & 0xffff_ffff, args[3] >> 32, args[1],
                         args[2] & 0xffff_ffff, args[2] >> 32, args[6] & 0xffff_ffff);
-                    for (i, chunk) in b.read_guest(args[0], send_size).chunks(16).enumerate() {
+                    for (i, chunk) in b.read_va_prefix(args[0], send_size).chunks(16).enumerate() {
                         eprintln!("  send+{:03x}: {}", i * 16,
                             chunk.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "));
                     }
@@ -397,7 +452,14 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             // to the live sink as they land.
             Stop::Syscall { num, args } if b.is_console_write(num, args[0]) => {
                 let stream = b.console_write_stream(num, args[0]).expect("is_console_write said it is one");
-                console.write(stream, &b.read_guest(args[1], args[2] as usize));
+                // M51 §3h (C3): the buffer is checked as a forwarded write's would be, then read through
+                // the checked accessor; either failing is native's EFAULT, and nothing is printed.
+                let Some(bytes) = b.prepare_forward_pointers(num, &args).ok()
+                    .and_then(|()| b.read_va_checked(args[1], args[2] as usize)) else {
+                    append_refused(&mut w, &mut b, &mut count, num, args, retrace_arch::EFAULT, true, thread)?;
+                    continue;
+                };
+                console.write(stream, &bytes);
                 let ret = args[2];
                 w.append(&Event::Syscall { num, args, ret, ret1: 0, err: false, writes: vec![], thread }).map_err(|e| format!("append write: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, false);
@@ -501,6 +563,12 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SYSCTL
                 && is_usrstack64_mib(&b, args) => {
                 let writes = b.usrstack64_reply(args);
+                // M51 §3h (t0 M6): the reply goes through oldp and oldlenp, so a pointer the program
+                // could not write is native's EFAULT, with nothing written.
+                if !reply_reachable(&mut b, &writes) {
+                    append_refused(&mut w, &mut b, &mut count, num, args, retrace_arch::EFAULT, true, thread)?;
+                    continue;
+                }
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append sysctl usrstack64: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
@@ -514,6 +582,11 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             Stop::Syscall { num, args } if num == retrace_arch::SYS_GETRLIMIT
                 && (args[0] & !retrace_arch::RLIMIT_POSIX_FLAG) == retrace_arch::RLIMIT_STACK => {
                 let writes = b.rlimit_stack_reply(args);
+                // M51 §3h (t0 M6): the rlimit struct is written through x1; native is EFAULT.
+                if !reply_reachable(&mut b, &writes) {
+                    append_refused(&mut w, &mut b, &mut count, num, args, retrace_arch::EFAULT, true, thread)?;
+                    continue;
+                }
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread })
                     .map_err(|e| format!("append getrlimit stack: {e}"))?; count += 1;
                 b.apply_and_return(0, false, &writes);
@@ -575,7 +648,15 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                 let exec = prot & PROT_EXEC != 0;
                 if exec && verbose { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
-                let req = if b.is_mapped(addr_ptr) { b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
+                // M51 §3h (t0 M5 machbad, Ruling T0-l): the trap copies `*addr` in, then the address out.
+                // A pointer the program could not pass natively is KERN_MEMORY_ERROR (0xa), xnu's answer
+                // when that copyin fails, and nothing is mapped. A reserved page reads as its zeros, the
+                // hint 0 it always was; `prepare_reply` commits it for the copyout.
+                let Some(hint) = b.read_va_checked(addr_ptr, 8).filter(|_| b.prepare_reply(addr_ptr, 8)) else {
+                    append_refused(&mut w, &mut b, &mut count, num, args, machmsg::KERN_MEMORY_ERROR, false, thread)?;
+                    continue;
+                };
+                let req = u64::from_le_bytes(hint.try_into().unwrap()); // hint (honored when free)
                 // cur_protection == 0 => a PROT_NONE address-space reservation (bookkeeping only,
                 // demand-committed page-by-page on first touch by commit_reserved_page); anything
                 // else is an eagerly-backed map. Mirrors the MIG 4811 split below (guest_vm_reserve
@@ -618,7 +699,14 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     return Err(wall(WallCategory::MachMessages,
                         format!("mach_msg2 send_size {:#x} implausibly large", m.send_size)));
                 }
-                match machmsg::route(&m, guest_task_port) {
+                let route = machmsg::route(&m, guest_task_port);
+                // M51 §3h (t0 M6): a message buffer the program could not have passed natively is
+                // answered before any route reads or writes it; replay's mirror makes the same call.
+                if mach2_unreachable(&mut b, &m, &route) {
+                    append_refused(&mut w, &mut b, &mut count, num, args, machmsg::MACH_MSG2_BAD_BUFFER, false, thread)?;
+                    continue;
+                }
+                match route {
                     machmsg::Route::ServiceVmMap => {
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let req = machmsg::decode_vm_map(&buf)
@@ -959,6 +1047,12 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             // an ordinary Event::Syscall, so the divergence oracle still checks (num, args) and
             // RETRACE_TRACE=1 still shows the sequence. Replay mirrors these.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGACTION => {
+                // M51 §3h (C3): this landmark finishes in replay's generic tail, which makes the
+                // pre-forward check, so record makes it too; it is also native's EFAULT for a bad pointer.
+                if let Err(e) = b.prepare_forward_pointers(num, &args) {
+                    append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?;
+                    continue;
+                }
                 let sig = args[0];
                 let new = if args[1] != 0 {
                     Some(retrace_box::decode_act(&b.read_guest(args[1], 24)))
@@ -979,13 +1073,20 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 if num == retrace_arch::SYS_SIGPROCMASK || num == retrace_arch::SYS_PTHREAD_SIGMASK => {
                 // (how, set*, oldset*). A NULL `set` is a pure query — read the mask, change nothing.
                 // M16: the mask belongs to the CALLING thread, which is `thread` here.
+                // M51 §3h (t0 M6): a `set` the program could not read is native's EFAULT, before the mask
+                // changes. A bad `oldset` is swallowed natively: the new mask applies, nothing is written,
+                // the call returns 0. Replay's mirror makes the same two checks.
                 let old = if args[1] != 0 {
-                    let set = u32::from_le_bytes(b.read_guest(args[1], 4).try_into().unwrap());
+                    let Some(bytes) = b.read_va_checked(args[1], 4) else {
+                        append_refused(&mut w, &mut b, &mut count, num, args, retrace_arch::EFAULT, true, thread)?;
+                        continue;
+                    };
+                    let set = u32::from_le_bytes(bytes.try_into().unwrap());
                     b.threads_mut().set_mask_of(thread as usize, args[0], set)
                 } else {
                     b.threads().mask_of(thread as usize)
                 };
-                let writes = if args[2] != 0 {
+                let writes = if args[2] != 0 && b.prepare_reply(args[2], 4) {
                     vec![Region { ipa: args[2], bytes: old.to_le_bytes().to_vec() }]
                 } else { vec![] };
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread })
@@ -1039,7 +1140,9 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // thread's pending signals and the PROCESS's; retrace models no process-wide
                 // pending set (nothing pends one — `kill` targets the caller), so the union is the
                 // per-thread set and this is exact, not an approximation.
-                let writes = if args[0] != 0 {
+                // M51 §3h (t0 M6, Ruling T0-h): a bad out-set is swallowed natively (ret 0, nothing
+                // written), so it is not the pre-forward check's EFAULT; `prepare_reply` decides the write.
+                let writes = if args[0] != 0 && b.prepare_reply(args[0], 4) {
                     let pending = b.threads().pending_of(thread as usize);
                     vec![Region { ipa: args[0], bytes: pending.to_le_bytes().to_vec() }]
                 } else { vec![] };
@@ -1051,6 +1154,11 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // Fast-follow: decode/encode moved to `retrace_box::decode_stack`/`encode_oldstack`
                 // (one shared pair, like `decode_act`/`encode_oldact` for `sigaction`) — no
                 // behaviour change, this arm wrote the identical bytes by hand before.
+                // M51 §3h (C3): as the `sigaction` arm — a bad new or old pointer is native's EFAULT.
+                if let Err(e) = b.prepare_forward_pointers(num, &args) {
+                    append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?;
+                    continue;
+                }
                 let new = if args[0] != 0 {
                     Some(retrace_box::decode_stack(&b.read_guest(args[0], 24)))
                 } else { None };
@@ -1645,6 +1753,12 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                      forwarding it would hand the host kernel a guest address. Translating it needs \
                      the translate_mwl_regions treatment plus a measurement of the struct layout. \
                      Implement that before a guest needs this; do not forward it.");
+                // M51 §3h (C3): a pointer the program could not pass natively returns EFAULT here,
+                // never forwarded; a passing one has its pages made present first.
+                if let Err(e) = b.prepare_forward_pointers(num, &args) {
+                    append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?;
+                    continue;
+                }
                 // M10: `ret` is already a GUEST descriptor when this syscall produced one, and a
                 // successful close has already retired its slot — forward_and_diff owns both halves
                 // of the fd contract so no caller has to remember the second one.
@@ -2286,14 +2400,24 @@ impl ReplaySession {
                         // to re-perform the write.
                         let cur = self.current_thread() as usize;
                         let old = if args[1] != 0 {
-                            let set = u32::from_le_bytes(
-                                self.b.read_guest(args[1], 4).try_into().unwrap());
+                            // M51 §3h: record's check, with the same arguments; its refusal is recorded.
+                            let Some(bytes) = self.b.read_va_checked(args[1], 4) else {
+                                if !refusal_recorded(rret, rerr, &rwrites, retrace_arch::EFAULT, true) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "sigprocmask's set {:#x} is refused on replay, but the recording answered \
+                                         ret={rret:#x} err={rerr} with {} write(s)", args[1], rwrites.len()) });
+                                }
+                                self.b.apply_and_return(rret, rerr, &rwrites);
+                                return self.finish_event();
+                            };
+                            let set = u32::from_le_bytes(bytes.try_into().unwrap());
                             self.b.threads_mut().set_mask_of(cur, args[0], set)
                         } else {
                             self.b.threads().mask_of(cur)
                         };
                         if args[2] != 0 {
-                            let mine = old.to_le_bytes().to_vec();
+                            // M51 §3h: a bad oldset is swallowed (nothing written), as record decides.
+                            let mine = if self.b.prepare_reply(args[2], 4) { old.to_le_bytes().to_vec() } else { Vec::new() };
                             let recorded = rwrites.iter().find(|r| r.ipa == args[2])
                                 .map(|r| r.bytes.clone()).unwrap_or_default();
                             if mine != recorded {
@@ -2430,7 +2554,9 @@ impl ReplaySession {
                             // existing apply_and_return path, exactly as for any other syscall: the
                             // mirror's job is to keep the TABLE in step and prove the bytes match,
                             // not to re-perform the write.
-                            if num == retrace_arch::SYS_SIGACTION {
+                            // M51 §3h (C3): a refused call changed no table on record, so its mirror changes
+                            // none; the tail's check compares the refusal with the recording.
+                            if num == retrace_arch::SYS_SIGACTION && self.b.prepare_forward_pointers(num, &args).is_ok() {
                                 let new = if args[1] != 0 {
                                     Some(retrace_box::decode_act(&self.b.read_guest(args[1], 24)))
                                 } else { None };
@@ -2449,7 +2575,7 @@ impl ReplaySession {
                                     }
                                 }
                             }
-                            if num == retrace_arch::SYS_SIGALTSTACK {
+                            if num == retrace_arch::SYS_SIGALTSTACK && self.b.prepare_forward_pointers(num, &args).is_ok() {
                                 // Fast-follow: a real mirror of record's arm (`SYS_SIGALTSTACK` in
                                 // `record_box`, above), on the model of the `sigaction` mirror just
                                 // above this one. The table update stays guarded on `args[0]` —
@@ -2510,7 +2636,11 @@ impl ReplaySession {
                             if num == retrace_arch::SYS_SIGPENDING && args[0] != 0 {
                                 // The CALLING thread's set, exactly as record's arm takes it.
                                 let cur = self.current_thread() as usize;
-                                let mine = self.b.threads().pending_of(cur).to_le_bytes().to_vec();
+                                // M51 §3h: record writes the set only if `prepare_reply` passes, else it swallows
+                                // the bad pointer (nothing written, ret 0); recompute the same.
+                                let mine = if self.b.prepare_reply(args[0], 4) {
+                                    self.b.threads().pending_of(cur).to_le_bytes().to_vec()
+                                } else { Vec::new() };
                                 let recorded = writes.iter().find(|r| r.ipa == args[0])
                                     .map(|r| r.bytes.clone()).unwrap_or_default();
                                 if mine != recorded {
@@ -2526,15 +2656,29 @@ impl ReplaySession {
                             // filled by prior applied reads). Same predicate as record's arm — see
                             // `Box_::is_console_write`.
                             if let Some(stream) = self.b.console_write_stream(num, args[0]) {
-                                let bytes = self.b.read_guest(args[1], args[2] as usize);
-                                self.console.write(stream, &bytes);
+                                // M51 §3h: the same check and read as record's console arm.
+                                if let Some(bytes) = self.b.prepare_forward_pointers(num, &args).ok()
+                                    .and_then(|()| self.b.read_va_checked(args[1], args[2] as usize)) {
+                                    self.console.write(stream, &bytes);
+                                }
                             }
                             // mach_msg2: re-service (the mapping must exist on replay too), verify
                             // the recomputed reply byte-equals the recording (divergence landmark),
                             // then apply. Forwarded allowlist entries just apply recorded writes.
                             if num == MACH_MSG2 {
                                 let m = machmsg::Msg2::unpack(&args);
-                                match machmsg::route(&m, self.guest_task_port) {
+                                let route = machmsg::route(&m, self.guest_task_port);
+                                // M51 §3h: record's check, with the same arguments; its refusal is recorded.
+                                if mach2_unreachable(&mut self.b, &m, &route) {
+                                    if !refusal_recorded(*ret, *err, writes, machmsg::MACH_MSG2_BAD_BUFFER, false) {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "mach_msg2's message buffer {:#x} is refused on replay, but the recording \
+                                             answered ret={ret:#x} err={err} with {} write(s)", m.data, writes.len()) });
+                                    }
+                                    self.b.apply_and_return(*ret, *err, writes);
+                                    return self.finish_event();
+                                }
+                                match route {
                                     machmsg::Route::ServiceVmMap => {
                                         let buf = self.b.read_guest(m.data, m.send_size as usize);
                                         let req = machmsg::decode_vm_map(&buf).map_err(|e| Divergence {
@@ -2767,7 +2911,17 @@ impl ReplaySession {
                                 let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
                                 let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                                 let exec = prot & PROT_EXEC != 0;
-                                let req = if self.b.is_mapped(addr_ptr) { self.b.read_u64(addr_ptr) } else { 0 }; // hint (honored when free)
+                                // M51 §3h: record's check, with the same arguments; its refusal is recorded.
+                                let Some(hint) = self.b.read_va_checked(addr_ptr, 8).filter(|_| self.b.prepare_reply(addr_ptr, 8)) else {
+                                    if !refusal_recorded(*ret, *err, writes, machmsg::KERN_MEMORY_ERROR, false) {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "mach_vm_allocate's address pointer {addr_ptr:#x} is refused on replay, but the \
+                                             recording answered ret={ret:#x} with {} write(s)", writes.len()) });
+                                    }
+                                    self.b.apply_and_return(*ret, *err, writes);
+                                    return self.finish_event();
+                                };
+                                let req = u64::from_le_bytes(hint.try_into().unwrap()); // hint (honored when free)
                                 // Same reservation/commit split as record (cur_protection == 0 =>
                                 // reserve, else eagerly back); must reproduce the identical returned IPA
                                 // for the byte-equality check below.
@@ -3239,6 +3393,16 @@ impl ReplaySession {
                             // the static answer and a dynamic one the dynamic answer.
                             if num == retrace_arch::SYS_SYSCTL && is_usrstack64_mib(&self.b, args) {
                                 let recomputed = self.b.usrstack64_reply(args);
+                                // M51 §3h: record's check on the same regions; its refusal is recorded.
+                                if !reply_reachable(&mut self.b, &recomputed) {
+                                    if !refusal_recorded(*ret, *err, writes, retrace_arch::EFAULT, true) {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "sysctl usrstack64's reply is refused on replay, but the recording answered \
+                                             ret={ret:#x} err={err} with {} write(s)", writes.len()) });
+                                    }
+                                    self.b.apply_and_return(*ret, *err, writes);
+                                    return self.finish_event();
+                                }
                                 if recomputed != *writes {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(
@@ -3253,6 +3417,16 @@ impl ReplaySession {
                             if num == retrace_arch::SYS_GETRLIMIT
                                 && (args[0] & !retrace_arch::RLIMIT_POSIX_FLAG) == retrace_arch::RLIMIT_STACK {
                                 let recomputed = self.b.rlimit_stack_reply(args);
+                                // M51 §3h: record's check on the same regions; its refusal is recorded.
+                                if !reply_reachable(&mut self.b, &recomputed) {
+                                    if !refusal_recorded(*ret, *err, writes, retrace_arch::EFAULT, true) {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "getrlimit stack's reply is refused on replay, but the recording answered \
+                                             ret={ret:#x} err={err} with {} write(s)", writes.len()) });
+                                    }
+                                    self.b.apply_and_return(*ret, *err, writes);
+                                    return self.finish_event();
+                                }
                                 if recomputed != *writes {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(
@@ -3260,6 +3434,21 @@ impl ReplaySession {
                                 }
                                 self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
+                            }
+                            // M51 §3h (C3): the pre-forward check, at the point record made it. Record makes it in
+                            // its generic arm and in the three arms whose landmarks finish here (the console
+                            // write, sigaction, sigaltstack), whose blocks above made it once already, which
+                            // changes nothing. `sigpending` swallows a bad pointer and `sigprocmask` returns
+                            // early, so neither is here. Every other landmark that reaches this line has a row
+                            // with no pointer position, or none, so the call does nothing for it. It makes the
+                            // same pages present as record did, and a refusal the recording does not carry is a
+                            // divergence.
+                            if let Err(e) = self.b.prepare_forward_pointers(num, &args) {
+                                if !(*err && *ret == e && writes.is_empty()) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "syscall {num}: replay refuses a pointer (errno {e}) that the recording forwarded \
+                                         (ret={ret:#x} err={err})") });
+                                }
                             }
                             // M37 dup2 mirror: the table half is a pure function of the guest's
                             // sequence, so recompute (ret, err) and byte-compare — the same posture
