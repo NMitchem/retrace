@@ -15,7 +15,7 @@ won't reproduce, and there's no `fork` or `exec`. See [Limits](#limits).
 ## Example
 
 [`crashy.c`](crates/retrace-guest/c/crashy.c) overruns an array into the pointer stored next to it,
-then dereferences that pointer. Record it once (the recording exits 139, the crash) and serve it to
+then dereferences that pointer. Record it once (the recording exits 139, the crash's SIGSEGV) and serve it to
 lldb:
 
 ```sh
@@ -58,10 +58,8 @@ script.
   `std::thread`, GCD queues and timers, and kqueues with timeouts. Timed waits and `sleep()` run on
   a synthetic clock, so a 2-second timer or `sleep(2)` takes no wall-clock time.
 - Signals reach the thread they were sent to, through the handler the program installed.
-- A crash is an ordinary recording that ends at the fault, a NULL dereference included, and a
-  handler the program installed gets the signal, code and address it would get natively, except
-  after a jump into unbacked memory below 64 GiB, where it gets SIGBUS for native's SIGSEGV
-  ([Known limits](docs/current-state.md#known-limits) has this and the other edge cases).
+- A crash is an ordinary recording that ends at the fault, a NULL dereference or a Swift runtime trap included. It exits 128 + its signal, as natively, and a handler the program installed gets the signal, code and address it would get natively ([Known limits](docs/current-state.md#known-limits) has the edge cases).
+- The program's stdout and stderr stay apart and appear as it writes them, and it sees the environment you ran retrace in.
 - JIT code: retrace models Apple's per-thread JIT write protection, so you can reverse-continue into
   code V8 compiled at run time.
 - `retrace gdbserver` speaks gdb-remote to lldb: continue and step in both directions, breakpoints,
@@ -86,14 +84,14 @@ behind it. These are the ones you'll hit first:
   or an inherited descriptor runs.
 - A syscall or Mach message retrace has no model for stops the recording with one line naming
   it, `retrace: unsupported: …`, and exit status 4; [`docs/walls.md`](docs/walls.md) explains each
-  kind. In the latest sweeps, 49 of the 54 Apple binaries in the committed sample recorded and
-  replayed identically (three of them by reaching the refused `posix_spawn` on both sides), and a
-  50th does or does not from run to run with host state.
-- Of the 30 small C, C++, Rust and Swift programs in the first-contact corpus
-  (`firstcontact_e2e`), the kind a newcomer tries first, 20 record and replay as they run natively
-  (up from 7). Most of the rest stop because the program's stderr lands in the recorded stdout, its
-  environment is empty, it is a `cargo test` binary (a timed semaphore wait), or it is a Swift
-  program that traps.
+  kind. In the latest sweep, 40 of the 54 Apple binaries in the committed sample recorded and
+  replayed with native's stdout, stderr and exit status, and 47 recorded and replayed identically
+  (most of the rest start another process, which stops at a wall, or print host state).
+- Of the 32 small C, C++, Rust and Swift programs in the first-contact corpus
+  (`firstcontact_e2e`), the kind a newcomer tries first, 27 record and replay as they run natively
+  (up from 20). The rest stop at a `cargo test` binary's timed semaphore wait, a contended pthread
+  mutex, or a Swift program's libdispatch workloop.
+- A recording holds the program's environment, so a recording you share shares it; run retrace under env -i to pass only what the program needs.
 - Traces are big: tens of MiB to over a GiB, uncompressed. node's `console.log(1)` is about 501 MiB
   because retrace backs V8's address-space reservations in full. The format isn't stable, and
   recordings from an older retrace are rejected.

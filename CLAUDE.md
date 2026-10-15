@@ -41,12 +41,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
-  32 unit tests inside the `retrace` binary itself (20 in `crates/retrace/src/debug.rs`, 12 in
-  `crates/retrace/src/rsp.rs`) run in **none** of
+  34 unit tests inside the `retrace` binary itself (20 in `crates/retrace/src/debug.rs`, 13 in
+  `crates/retrace/src/rsp.rs`, 1 in `crates/retrace/src/main.rs`) run in **none** of
   the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
   with no `--test` filter, reaches them — which is why closes before M17 are not owed a
   correction. Leaving it out silently costs
-  32 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
+  34 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 
@@ -154,8 +154,8 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   `nullfault_e2e` (M49: NULL, unmapped and low-address faults recorded as crashes with native's
   signal, `si_code` and `si_addr`, with and without a handler, on a worker thread, as a stage-2
   instruction abort, a stack overflow on an alternate stack and one without, under single-step and
-  across a seek; the `jump1g` UXN deviation and the readable TSD page pinned by value as named
-  limits), `xrewrite_e2e` (M49: discarded-status store-exclusives rewritten at every dynamic staging
+  across a seek; the readable TSD page pinned by value as a named
+  limit, and a jump into unbacked memory as native's translation fault (M51 J1)), `xrewrite_e2e` (M49: discarded-status store-exclusives rewritten at every dynamic staging
   site — the executable, a `dlopen`ed dylib, and the census sites in dyld and libsystem_kernel —
   with the retry loop's documented limit pinned), `sleep_e2e` (M49: `sleep`, `usleep` and
   `nanosleep` on the synthetic clock, `clock_get_time` answered from the guest clock, two sleepers
@@ -165,7 +165,7 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
 each asserting the program's output first, exactly one `retrace: unsupported:` line naming the call
 with its docs anchor, exit 4, and a replay ending at the incomplete-recording line; plus bad input
 with exit 2, an incomplete recording refused by `debug` and `gdbserver`, the bug banner's control
-with exit 70, and `RUST_BACKTRACE=1` printing no frames for a wall). Run one with
+with exit 70, and `RUST_BACKTRACE=1` printing no frames for a wall), `output_e2e` (M51: stderr apart from stdout, both streamed as written and into a reader that goes away, no line of retrace's own on a plain run, `RETRACE_VERBOSE`, and the closing line), `traps_e2e` (M51: `brk`, `udf`, `hlt` and misaligned PC and SP as native's signal, `si_code`, `si_addr` and exit, with and without a handler, under single-step and across a seek; AMX and a trapped system register still walls), `framepush_e2e` (M51 T3-b: an unpushable handler frame, main or child thread, overflowed or bad alternate stack), `envp_e2e` (M51: the program's environment, `RETRACE_*` stripped, replay under another environment, the limit), `sigfidelity_e2e` (M51: `signal()` handlers, signal 0 for a pid and a thread, `abort_with_payload` from main, a thread and dyld), `badptr_e2e` (M51: native's error for a bad pointer, forwarded and emulated, and replay's compare). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -176,6 +176,7 @@ with exit 70, and `RUST_BACKTRACE=1` printing no frames for a wall). Run one wit
 - `RETRACE_TRACE=1` on a `record`/`record-dyn` run logs every dispatched trap (and decodes
   `mach_msg2` sends) — the first tool to reach for on a bring-up failure. **Record-only:** `ReplaySession`
   carries no trace instrumentation, so no `[trap]`/`[mach_msg2]`/`[fault]` line is ever printed on replay.
+- `RETRACE_VERBOSE=1` prints retrace's own diagnostic lines (fall-through counts, warnings), off by default since M51; `RETRACE_TRACE=1` implies it. Since M51 `util::run`, `run_env` and `run_bounded` start the child with an empty environment plus the test's own pairs, so a test that needs a variable passes it.
 
 The toolchain is pinned (`rust-toolchain.toml`: 1.95.0, target `aarch64-apple-darwin`). The
 `clippy.toml` denials are load-bearing, not style, and are **two separate rules**:
@@ -211,7 +212,7 @@ are gitignored); build/run recipes and findings are in `spikes/README.md`.
   the trampoline's vector padding without bumping, and a pre-M23 trace then restored its old padding
   under code that assumed the new — M24 bumped for it (to `RT\x00\x09` then; moved again by M38
   for `ret1`, by M47 for the `mach_vm_map` alignment mask, and by M49 for the store-exclusive
-  rewrite and native's `si_code`, so it is `RT\x00\x0c` now).
+  rewrite and native's `si_code`, and by M51 for `Event::Crash`'s `sig`, so it is `RT\x00\x0d` now).
   `open_checked` drops a torn/corrupt tail rather than panicking, and since M47 a trace whose header
   is another `RT` version is refused by name ("recorded by a different retrace trace format (not
   torn)") rather than as torn.
@@ -257,7 +258,8 @@ and threads.
    (as with the timebase MRS, the Apple-IMPDEF undef-MRS, the B-family FPAC strip, since M48
    the per-thread SPRR register `S3_6_C15_C1_5` with the `MAP_JIT` view it selects, and since M49
    the stage-2 fault conversion, the A-narrow tables and the discarded-status store-exclusive
-   rewrite): `run()` is
+   rewrite, and since M51 the trap conversion (an EL0 brk, udf, hlt or misaligned PC or SP entering
+   the guest's EL1 vector through enter_el1) and J1's translation fault): `run()` is
    shared by record and replay, so such an arm fires identically on both sides and never surfaces
    to the record/replay loop — determinism is then automatic.
 
@@ -273,6 +275,18 @@ checks against the source. Decide the class at the site, never by matching messa
 internal asserts share prefixes with walls. Anything else that stops retrace is a bug, which prints
 the bug banner and exits 70. Below the trace, a wall returns `Stop::Unsupported` from `run()` and
 `step()`.
+
+**A guest pointer is checked before it is used (M51).** A forwarded BSD call's pointer arguments go
+through `Box_::prepare_forward_pointers` first, which answers EFAULT for memory the program could
+not reach natively and makes a passing pointer's pages present. Record calls it in the generic arm
+and in the three arms whose landmarks replay finishes in its generic tail (the console write,
+`sigaction`, `sigaltstack`); replay calls it at the same points. `sigpending`'s out-set and
+`sigprocmask`'s oldset are written only if `prepare_reply` passes and return 0 either way, as
+natively (`retrace_arch::ignores_bad_out_pointer`). A new arm whose landmark
+falls through to replay's tail and whose call has a pointer in its row must call it too. An
+emulated call reads through `read_va_checked` and checks a reply with `prepare_reply`. A failed
+`read_guest` or `write_guest` is retrace's bug, and every call of an unchecked accessor is listed in
+`crates/retrace-box/tests/guest-ptr-sites.txt`, which `guest_ptr_audit.rs` checks against the source.
 
 ### Hard platform invariants (encoded in the box; violating them hangs or panics the machine)
 
@@ -400,9 +414,9 @@ does *not* materialise:
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (which bumped
-`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0c`, moved again by M24, then by M38 for
-`ret1`, by M47 for the `mach_vm_map` alignment mask, and by M49 for the store-exclusive rewrite and
-native's `si_code`, so every pre-M49 recording is unreadable)
+`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0d`, moved again by M24, then by M38 for
+`ret1`, by M47 for the `mach_vm_map` alignment mask, by M49 for the store-exclusive rewrite and
+native's `si_code`, and by M51 for `Event::Crash`'s `sig`, so every pre-M51 recording is unreadable)
 — and replay recomputes the current thread and compares it. `verify_thread` has **seven** call
 sites, one in each arm that consumes a landmark and `return`s, each placed *after* that arm's own
 field comparison so a genuine argument divergence still reports as itself; the `SignalDelivery`
@@ -410,7 +424,9 @@ landmark is checked by an eighth, inline comparison in `mirror_delivery`, delibe
 `verify_thread`, because its tag is the **receiving** thread rather than the current one. M48's
 `kevent` and psynch mirrors sit inside the `Syscall` chain after its arm-top check, so the count
 stays seven; `thread_oracle.rs` retags one landmark of each. M49's 334 mirror and 1000 route sit
-inside the same chain; `thread_oracle.rs` retags one landmark of each. That
+inside the same chain; `thread_oracle.rs` retags one landmark of each. M51's abort_with_payload
+terminal reaches the kill mirror's Signal consumption through ReplaySession::signal_terminal, which
+holds that site, so the count stays seven; thread_oracle.rs retags a payload landmark. That
 count is the thing to check when adding an arm: each site exists because a mirror `return`s
 before reaching the generic dispatch, so **every new mirror silently creates a new hole until its
 oracle call is added** — nothing structural couples the two. Without

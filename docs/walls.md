@@ -21,7 +21,7 @@ Please report it at https://github.com/NMitchem/retrace/issues with the line it 
 
 | Exit status | Meaning |
 |---|---|
-| the program's own | the program ran to its end; a program killed by a signal gives 128 + the signal |
+| the program's own | the program ran to its end; a program killed by a signal, a crash included, gives 128 + the signal, as it does natively |
 | 2 | retrace could not start: a bad argument, a file it cannot read or write, a file that is not an arm64 Mach-O program, or a missing hypervisor entitlement |
 | 3 | `replay` found the program behaving differently from its recording |
 | 4 | a wall, on `record`; or, on `replay`, the end of a recording that stopped at a wall |
@@ -31,6 +31,11 @@ Please report it at https://github.com/NMitchem/retrace/issues with the line it 
 Some calls retrace answers with an error the program can handle, rather than stopping at a wall.
 For those it prints `retrace: refused: <call>, returned <error> to the program` and keeps
 recording. Starting another program with `posix_spawn` or `execve`, and `fork`, are refused this way.
+
+A program that crashes or is killed by a signal ends with one line of retrace's own, after the
+program's output, such as `retrace: the program was killed by SIGSEGV (fault at 0x0, pc 0x100003f2c in main+0x2c)`.
+Set `RETRACE_VERBOSE=1` to see retrace's other diagnostic lines, such as the count of exceptions it
+handled for the program; they are off by default because they are not the program's output.
 
 ## Syscalls
 
@@ -58,13 +63,14 @@ up to it, and a shell that then waits for its child stops here.
 
 The program used a signal in a way retrace does not model yet. These reach it today:
 
-- a handler installed with `signal()`, which delivers without `SA_SIGINFO`;
-- `kill(getpid(), 0)`, which asks whether the process exists;
 - `pause()` or `sigsuspend()`, which wait for a signal;
 - a signal raised while blocked, whose default action ends the process when it is unblocked;
 - a hardware fault on a thread that has its signal blocked, such as a Rust stack overflow;
-- `kill` to another process;
-- `abort_with_payload` or `terminate_with_payload`, which dyld calls when a library is missing.
+- `kill` with a signal other than 0 to another process;
+- `terminate_with_payload`, which ends a process by its pid.
+
+Since M51 a handler installed with `signal()`, `kill(pid, 0)` and `pthread_kill(thread, 0)`, and
+`abort_with_payload` (which dyld calls when a library is missing) run as they do natively.
 
 ## Threads
 
@@ -92,15 +98,17 @@ wall clock, which would make recordings differ from run to run.
 The program asked for a kind of memory mapping retrace does not support yet, such as an unmodelled
 use of `MAP_JIT` memory, or a write to the per-thread JIT protection register with a value retrace
 does not admit. Other memory walls are a `vm_remap` or `mach_vm_map` option retrace does not model, a
-fixed mapping that straddles an existing one, and a bad pointer the program passes to a call, which
-retrace cannot read or write. If the pointer is one the program believes valid, this may be a bug in
-retrace, and it is worth reporting.
+fixed mapping that straddles an existing one. Since M51 a bad pointer the program passes to a call gets the error it gets natively, usually EFAULT, and the recording goes on.
 
 ## Exceptions
 
-The program ran an instruction that traps, and retrace does not record that trap as a crash yet.
-The commonest is `brk`, which Swift and Rust use to stop on a fatal error such as an array index out
-of range. The line names the instruction, its address and its exception class.
+The program ran an instruction retrace cannot run or record, such as one of Apple's AMX matrix
+instructions, or read a system register retrace does not model. The line names the instruction, its
+address and its exception class.
+
+Since M51 the traps a program uses to stop itself are recorded as crashes with native's signal and
+exit status: `brk` (Swift's and Rust's runtime checks, SIGTRAP, 133), `udf` and `hlt` (SIGILL, 132),
+and a misaligned PC or stack pointer (SIGBUS, 138).
 
 ## Incomplete recordings
 
@@ -112,7 +120,7 @@ then one line, and exits with status 4:
 
 The line names the wall when replay meets it itself, in code the recording and the replay share, such as:
 
-    retrace: incomplete recording: it ends at signal 0 out of range 1..32 - the guest passed a signal number the table cannot represent; widen NSIG or reject it at the syscall arm - see https://github.com/NMitchem/retrace/blob/main/docs/walls.md#incomplete-recordings
+    retrace: incomplete recording: it ends at <the refusal's own message> - see https://github.com/NMitchem/retrace/blob/main/docs/walls.md#incomplete-recordings
 
 Otherwise it names the last landmark it replayed and that landmark's address, as it does for a
 recording whose recorder was killed. A call that stops at the first form is `fsync`: the recording
