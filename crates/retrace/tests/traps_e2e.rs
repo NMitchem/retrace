@@ -126,6 +126,27 @@ fn a_seek_onto_a_converted_brk_reports_the_crash_at_its_pc() {
     let _ = std::fs::remove_file(&t);
 }
 
+/// A trap the EL1 vector takes (an undefined word, a misaligned SP), unlike the `brk` that goes
+/// straight to EL2, reaches the stepped `hvc` of `run_one_for_step`'s own trampoline arm. A step onto
+/// each reports the crash at its pc, with FAR 0.
+#[test]
+fn a_step_onto_a_trap_the_vector_takes_reports_the_crash_at_its_pc() {
+    for (mode, sig) in [("udf", 4), ("spalign", 10)] {
+        let t = scratch(&format!("seek-{mode}.bin"));
+        let rec = record(mode, &[], &t);
+        assert_eq!(rec.code, Some(128 + sig), "{mode}: {}", rec.stderr);
+        let ci = Reader::open(&t).unwrap().len() - 2;
+        let (pc, _, far, ..) = crash_of(&t);
+        assert_eq!(far, 0, "{mode}: FAR");
+        let n = retrace_core::seek(&t, ci, 0).unwrap().window_len_here().expect("the crash window ends at the trap");
+        let mut s = retrace_core::seek(&t, ci, n).unwrap();
+        assert_eq!(s.pc(), pc, "{mode}: ({ci}, {n}) is parked on the trapping instruction");
+        assert_eq!(s.step_insns(1), Err(format!("guest crashed at step 0/1: pc={pc:#x} far=0x0")), "{mode}");
+        drop(s); // one VM per process
+        let _ = std::fs::remove_file(&t);
+    }
+}
+
 /// A wall (R6, §3b): native runs the mode to `survived`; retrace stops at one line in `exceptions`
 /// naming `what`, and exits 4.
 fn assert_still_a_wall(mode: &str, what: &str) {
