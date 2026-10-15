@@ -334,21 +334,6 @@ fn a_mach_wait_until_stops_at_one_clean_line() {
         "mach_wait_until (mach trap -90)", "syscalls");
 }
 
-/// Spec §2c: `kill(getpid(), 0)`, the usual way to ask whether a process exists. Signal 0 is not one
-/// the signal table models.
-#[test]
-fn a_kill_with_signal_0_stops_at_one_clean_line() {
-    assert_guest_wall(retrace_guest::CF_WALLS, &["kill0"], "cf: kill0\n", "signal 0 out of range 1..32", "signals");
-}
-
-/// Spec §2c: `signal(SIGINT, h); raise(SIGINT)`. `signal()` installs its handler without
-/// `SA_SIGINFO`, a frame shape retrace does not deliver yet.
-#[test]
-fn a_handler_installed_with_signal_stops_at_one_clean_line_when_its_signal_is_raised() {
-    assert_guest_wall(retrace_guest::CF_WALLS, &["signal"], "cf: signal\n",
-        "a non-SA_SIGINFO handler is not modelled", "signals");
-}
-
 /// Spec §2c: block SIGUSR1, raise it, unblock it. Its default action ends the process at the unblock,
 /// which retrace does not record yet; dropping the signal would turn a death into a clean exit.
 #[test]
@@ -360,12 +345,13 @@ fn a_signal_raised_while_blocked_stops_at_one_clean_line_when_it_is_unblocked() 
 /// Review Focus 3: `RUST_BACKTRACE=1` is common among Rust developers. A wall reached by a `refuse!`
 /// panic still prints exactly one line and no backtrace, on record and on replay: the hook is silent
 /// for a wall, and Rust's default hook, which would print `panicked at` and the frames, is replaced.
+/// M51: the `unblock` wall (`take_pending_delivery`'s `refuse!`), since signal 0 is answered now.
 #[test]
 fn a_wall_prints_no_backtrace_even_with_rust_backtrace_set() {
     let t = scratch("bt.bin");
     let tp = t.to_str().unwrap();
     let env = [("RUST_BACKTRACE", "1")];
-    let rec = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::CF_WALLS, "-o", tp, "--", "kill0"], &env, BOUND);
+    let rec = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::CF_WALLS, "-o", tp, "--", "unblock"], &env, BOUND);
     let rp = util::run_bounded(util::bin(), &["replay", tp], &env, BOUND);
     for (r, side) in [(&rec, "record"), (&rp, "replay")] {
         assert_no_panic(r, side);

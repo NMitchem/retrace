@@ -34,7 +34,6 @@ crates/retrace-box/src/lib.rs	wq_qos_index	Threads	M18 Stage 2b: REQTHREADS prio
 crates/retrace-box/src/lib.rs	wq_qos_index	Threads	M18 Stage 2b: REQTHREADS priority
 crates/retrace-box/src/lib.rs	write_guest	Memory	write_guest at
 crates/retrace-box/src/lib.rs	write_guest	Memory	write_guest: ipa
-crates/retrace-box/src/sig.rs	build_frame	Signals	a non-SA_SIGINFO handler is not modelled
 crates/retrace-box/src/sig.rs	idx	Signals	signal
 crates/retrace-box/src/thread.rs	set_mask_of	Signals	sigprocmask how=
 crates/retrace-box/src/thread.rs	unpark	Threads	M46: unpark of parked workqueue thread

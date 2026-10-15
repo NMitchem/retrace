@@ -417,6 +417,8 @@ pub const FC_FILEIO: &str = concat!(env!("OUT_DIR"), "/fc_fileio");
 pub const FC_ENV: &str = concat!(env!("OUT_DIR"), "/fc_env");
 /// M51 (R8): `__builtin_trap()`; natively SIGTRAP (133) after one line.
 pub const FC_C_TRAP: &str = concat!(env!("OUT_DIR"), "/fc_c_trap");
+/// M51 (R8): a `signal()` handler raised twice; natively exits 0.
+pub const FC_SIGNAL: &str = concat!(env!("OUT_DIR"), "/fc_signal");
 /// M50 (spec §3f): one mode per newcomer-reachable wall, picked by argv[1] (see the source).
 pub const CF_WALLS: &str = concat!(env!("OUT_DIR"), "/cf_walls");
 /// The source of `CF_WALLS`, which cleanfail_e2e builds for x86_64 to test the arm64-only refusal.
@@ -431,6 +433,10 @@ pub const FID_TRAPS: &str = concat!(env!("OUT_DIR"), "/fid_traps");
 pub const FID_FRAMES: &str = concat!(env!("OUT_DIR"), "/fid_frames");
 /// M51 (spec §3f): prints its environment (see the source).
 pub const FID_ENV: &str = concat!(env!("OUT_DIR"), "/fid_env");
+/// M51 (spec §3g): a `signal()` handler, signal 0 and `abort_with_payload` (see the source).
+pub const FID_SIGNALS: &str = concat!(env!("OUT_DIR"), "/fid_signals");
+/// M51 (spec §3g): a program whose dylib is gone, which dyld ends through `abort_with_payload`.
+pub const FID_MISSING: &str = concat!(env!("OUT_DIR"), "/fid_missing");
 /// iostream hello.
 pub const FC_CPP_HELLO: &str = concat!(env!("OUT_DIR"), "/fc_cpp_hello");
 /// A C++ exception thrown and caught.
@@ -800,7 +806,7 @@ mod tests {
             assert_eq!(l.cpusubtype & 0x00ff_ffff, retrace_arch::CPU_SUBTYPE_ARM64_ALL, "{p} must be plain arm64");
         };
         for p in [FC_NULL_LOAD, FC_NULL_STORE, FC_NULL_CALL, FC_MUNMAPPED, FC_LOW_STORE, FC_STACK_OVERFLOW,
-                  FC_UAF, FC_ASSERT, FC_SLEEP, FC_USLEEP, FC_NANOSLEEP, FC_MUTEX, FC_FILEIO, FC_ENV, FC_C_TRAP,
+                  FC_UAF, FC_ASSERT, FC_SLEEP, FC_USLEEP, FC_NANOSLEEP, FC_MUTEX, FC_FILEIO, FC_ENV, FC_C_TRAP, FC_SIGNAL,
                   FC_CPP_HELLO, FC_CPP_THROW, FC_CPP_TERMINATE, FC_CPP_THREAD, FC_CPP_SLEEP,
                   FC_RS_NULL, FC_RS_SLEEP, FC_RS_TESTS, FC_RS_TESTS_FAIL] {
             built(p);

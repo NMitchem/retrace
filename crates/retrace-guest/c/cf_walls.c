@@ -1,7 +1,7 @@
 // M50 (spec §3f): one guest for every newcomer-reachable wall cleanfail_e2e pins. argv[1] picks the
 // mode. Each mode prints "cf: <mode>" and flushes BEFORE it reaches its wall, so a test can assert
 // that the output a program printed before a wall is printed ahead of retrace's line. Natively,
-// `pause` and `deadlock` hang forever, `amx` runs on, and `signal` and `unblock` die by a signal;
+// `pause` and `deadlock` hang forever, `amx` runs on, and `unblock` dies by a signal;
 // cleanfail_e2e never runs this natively. The "returned" line is what a mode prints if retrace ever
 // lets it past its wall.
 #include <mach/clock.h>
@@ -27,8 +27,6 @@ static void *forever(void *arg) {
     for (;;) pthread_cond_wait(&never, &lock);
     return NULL;
 }
-
-static void on_signal(int sig) { (void)sig; }
 
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "";
@@ -65,11 +63,6 @@ int main(int argc, char **argv) {
         pthread_t t;
         pthread_create(&t, NULL, forever, NULL);
         pthread_join(t, NULL);
-    } else if (!strcmp(mode, "kill0")) {
-        kill(getpid(), 0);
-    } else if (!strcmp(mode, "signal")) {
-        signal(SIGINT, on_signal);
-        raise(SIGINT);
     } else if (!strcmp(mode, "unblock")) {
         sigset_t s;
         sigemptyset(&s);

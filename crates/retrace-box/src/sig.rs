@@ -14,7 +14,7 @@
 //! its inputs alone, which is both why record and replay produce identical bytes and why the whole
 //! layout is testable in microseconds.
 
-use retrace_arch::{NSIG, SA_ONSTACK, SA_SIGINFO, SIG_DFL, SIG_IGN, SS_DISABLE, SS_ONSTACK, UC_FLAVOR};
+use retrace_arch::{NSIG, SA_ONSTACK, SA_SIGINFO, SIG_DFL, SIG_IGN, SS_DISABLE, SS_ONSTACK, UC_FLAVOR, UC_TRAD};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
@@ -308,17 +308,12 @@ pub fn build_frame(inp: &FrameInput) -> (Vec<u8>, EntryRegs) {
              to. The caller's disposition check is wrong."
         ),
     };
-    // infostyle: measured 0x1e (UC_FLAVOR) for an SA_SIGINFO handler and 0x1 for one without
-    // (Task 1 Step 0, spikes/sigtramp.c). Only the SA_SIGINFO shape is MODELLED — the frame layout
-    // is identical either way, but no guest in the gate set installs a non-SA_SIGINFO handler, so
-    // delivering to one would ship an untested path. Assert rather than guess.
-    if inp.act.flags & SA_SIGINFO == 0 {
-        retrace_arch::refuse!(Signals, "a non-SA_SIGINFO handler is not modelled. Its infostyle is 0x1 (measured, vs 0x1e for \
-             SA_SIGINFO) and the frame layout is identical, so supporting it is small — but no gate \
-             guest exercises it, so it is asserted rather than shipped untested.");
-    }
+    // infostyle: measured 0x1e (UC_FLAVOR) for an SA_SIGINFO handler and 0x1 (UC_TRAD) for one
+    // without, as signal() installs it (Task 1 Step 0, spikes/sigtramp.c). The frame layout is the
+    // same either way. M51 §3g delivers both.
+    let infostyle = if inp.act.flags & SA_SIGINFO != 0 { UC_FLAVOR } else { UC_TRAD };
     let regs = EntryRegs {
-        x: [catcher, UC_FLAVOR, inp.sig, base, uc, sigreturn_token(uc)],
+        x: [catcher, infostyle, inp.sig, base, uc, sigreturn_token(uc)],
         sp: base,
         pc: inp.act.tramp,
     };
@@ -555,6 +550,19 @@ mod tests {
     }
 
     // THE entry-contract test. Measured in spikes/sigtramp.c: sp IS the siginfo pointer.
+    // M51 §3g: a handler installed without SA_SIGINFO (`signal()`) is entered with infostyle 1
+    // (UC_TRAD), measured in spikes/sigtramp.c; the frame is the same.
+    #[test]
+    fn build_frame_passes_uc_trad_to_a_handler_without_sa_siginfo() {
+        let base = 0x7000_0000u64;
+        let mut inp = probe_input(base);
+        inp.act.flags &= !SA_SIGINFO;
+        let (frame, regs) = build_frame(&inp);
+        assert_eq!(regs.x[1], 1, "x1 = infostyle UC_TRAD");
+        assert_eq!(frame, build_frame(&probe_input(base)).0, "the frame's bytes do not depend on the infostyle");
+        assert_eq!((regs.x[0], regs.x[2], regs.sp), (0xabc0, 11, base), "the rest of the entry contract");
+    }
+
     #[test]
     fn build_frame_returns_the_measured_entry_registers() {
         let base = 0x7000_0000u64;

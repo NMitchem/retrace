@@ -41,7 +41,7 @@ struct Row { name: &'static str, bin: &'static str, args: &'static [&'static str
 
 /// The outcome table (spec §3b), pinned from t0 M1 (Task 1's addendum). A row flips only in the
 /// task that changes it (R10): M49's F rows in its Task 3 and S rows in its Task 5; M51's fc_assert
-/// and fc_cpp_terminate in its Task 1, the brk rows in Task 3 (fc_c_trap joins there), fc_env in Task 5.
+/// and fc_cpp_terminate in its Task 1, the brk rows in Task 3 (fc_c_trap joins there), fc_env in Task 5, and fc_signal joins in Task 6.
 const ROWS: &[Row] = &[
     // C (the hello_dyn recipe).
     Row { name: "fc_null_load", bin: retrace_guest::FC_NULL_LOAD, args: &[],
@@ -77,6 +77,8 @@ const ROWS: &[Row] = &[
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"], expect: Expect::Pass },
     // M51 (R8): __builtin_trap(), the brk class without swiftc. Joins in Task 3, where it passes (C9).
     Row { name: "fc_c_trap", bin: retrace_guest::FC_C_TRAP, args: &[], expect: Expect::Pass },
+    // M51 (R8): a signal() handler. Joins in Task 6, where it passes (C9).
+    Row { name: "fc_signal", bin: retrace_guest::FC_SIGNAL, args: &[], expect: Expect::Pass },
     // C++ (clang++ -std=c++17).
     Row { name: "fc_cpp_hello", bin: retrace_guest::FC_CPP_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_cpp_throw", bin: retrace_guest::FC_CPP_THROW, args: &[], expect: Expect::Pass },

@@ -1207,6 +1207,8 @@ pub const RLIMIT_POSIX_FLAG: u64 = 0x1000;
 
 /// BSD errno: an argument the kernel rejects (a MAP_FIXED address outside the address space).
 pub const EINVAL: u64 = 22;
+/// `<sys/errno.h>`: no such process. M51 §3g: `__pthread_kill(port, 0)` for a port no live thread holds.
+pub const ESRCH: u64 = 3;
 /// `EINTR` (SDK `sys/errno.h:91`): an interrupted wait. M48's `psynch_cvwait` model names it.
 pub const EINTR: u64 = 4;
 /// `ETIMEDOUT` (SDK `sys/errno.h:177`): a timed `psynch_cvwait` whose deadline passed. libpthread
@@ -2234,6 +2236,10 @@ pub const SS_DISABLE: u64 = 0x4;
 /// The `infostyle` the kernel passes in `x1` on `sa_tramp` entry for an `SA_SIGINFO` handler.
 /// Measured as `0x1e` by `spikes/sigtramp.c`; `UC_FLAVOR` is xnu's name for it.
 pub const UC_FLAVOR: u64 = 30;
+
+/// M51 §3g: the infostyle (`x1` on trampoline entry) for a handler installed without `SA_SIGINFO`,
+/// as `signal()` installs it. Measured as `0x1` by `spikes/sigtramp.c`; `UC_TRAD` is xnu's name.
+pub const UC_TRAD: u64 = 1;
 
 /// Classify a guest fault into the `(signal, si_code)` a real kernel would deliver.
 ///

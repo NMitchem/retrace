@@ -5720,6 +5720,13 @@ impl Box_ {
         self.try_thread_of_port(port).unwrap_or_else(|d| panic!("{d}"))
     }
 
+    /// M51 §3g (C4): the kernel's answer to `__pthread_kill(port, 0)`, which sends nothing and asks
+    /// whether `port` names a thread: `(0, false)` for a port a live guest thread holds, and
+    /// `(ESRCH, true)` for any other. Record's signal-0 arm and replay's compare both ask here.
+    pub fn thread_probe(&self, port: u32) -> (u64, bool) {
+        if self.try_thread_of_port(port).is_ok() { (0, false) } else { (retrace_arch::ESRCH, true) }
+    }
+
     /// The address the kernel enters a NEW thread at, learned from the guest's own
     /// `bsdthread_register` call — `None` until that call is observed.
     pub fn thread_start_pc(&self) -> Option<u64> { self.thread_start_pc }

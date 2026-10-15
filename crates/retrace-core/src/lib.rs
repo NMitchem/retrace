@@ -1071,6 +1071,28 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 b.apply_and_return(0, false, &writes);
             }
 
+            // M51 §3g (C4, R11): signal 0 sends nothing. It asks whether the target exists and may be
+            // signalled, so it is answered, not raised. `kill(pid, 0)` is forwarded whatever the pid:
+            // the program's pid is retrace's (M11), the answer depends on the host's process table,
+            // and that is what a forwarded return records. `__pthread_kill(port, 0)` names a guest
+            // thread, which only the box knows, so the box answers (`Box_::thread_probe`). This arm
+            // sits before the raise arm, which takes every other signal, and before the generic arm,
+            // which refuses every signal syscall. Replay's kill mirror leaves signal 0 to its generic
+            // dispatch, which applies the recorded answer.
+            Stop::Syscall { num, args }
+                if (num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL) && args[1] == 0 => {
+                let (ret, err, writes) = if num == retrace_arch::SYS_KILL {
+                    let (ret, _, err, writes) = b.forward_and_diff(num, args);
+                    (ret, err, writes)
+                } else {
+                    let (ret, err) = b.thread_probe(args[0] as u32);
+                    (ret, err, vec![])
+                };
+                w.append(&Event::Syscall { num, args, ret, ret1: 0, err, writes, thread })
+                    .map_err(|e| format!("append signal 0: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
+            }
+
             // The raise path. `kill(pid, sig)` and `__pthread_kill(port, sig)` differ only in how
             // the target is validated; the disposition decision below is shared.
             Stop::Syscall { num, args }
@@ -1210,12 +1232,23 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 if num == retrace_arch::SYS_SIGSUSPEND || num == retrace_arch::SYS_SIGWAIT =>
                 return Err(wall(WallCategory::Signals, format!("{} waits for a signal, and retrace cannot \
                     deliver one to a waiting program yet", retrace_arch::syscall_display(num)))),
-            Stop::Syscall { num, .. }
-                if num == retrace_arch::SYS_TERMINATE_WITH_PAYLOAD
-                || num == retrace_arch::SYS_ABORT_WITH_PAYLOAD =>
-                return Err(wall(WallCategory::Signals, format!("{} ends the process without a signal, which \
-                    retrace does not record yet (forwarded, it would kill the recorder)",
-                    retrace_arch::syscall_display(num)))),
+            // M51 §3g (R10): abort_with_payload ends the process with SIGABRT (t0 M4: 134), and dyld
+            // ends a launch that cannot load a dylib through it. Recorded as the terminal a raised
+            // SIGABRT is: Event::Signal with the caller as `thread`, then the final snapshot.
+            Stop::Syscall { num, .. } if num == retrace_arch::SYS_ABORT_WITH_PAYLOAD => {
+                let pc = b.position();
+                let final_snap = b.snapshot();
+                w.append(&Event::Signal { sig: retrace_arch::SIGABRT, pc, thread })
+                    .map_err(|e| format!("append signal: {e}"))?; count += 1;
+                w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
+                outcome = Outcome::Signal { sig: retrace_arch::SIGABRT };
+                break;
+            }
+            // terminate_with_payload names a process by pid, like kill; to any other it would end a
+            // real host process, and no measured program calls it on itself (t0 M4).
+            Stop::Syscall { num, .. } if num == retrace_arch::SYS_TERMINATE_WITH_PAYLOAD =>
+                return Err(wall(WallCategory::Signals, format!("{} ends a process by pid, which retrace does not \
+                    record (forwarded, it could end a real host process)", retrace_arch::syscall_display(num)))),
 
             // M18 t5: bsdthread_register is EMULATED, never forwarded (see
             // Box_::guest_bsdthread_register for both reasons — the guest's registration is the
@@ -1855,6 +1888,38 @@ impl ReplaySession {
                            truncated: trace.truncated })
     }
 
+    /// M51 §3g (C5): consume a terminal `Event::Signal` and the final snapshot, and end the replay.
+    /// The kill mirror's fatal raise and the `abort_with_payload` arm both end here, so this holds
+    /// that landmark's `verify_thread`, and the call-site count stays seven.
+    fn signal_terminal(&mut self, sig: u64, pc: u64) -> Result<Advance, Divergence> {
+        match self.events.get(self.idx) {
+            Some(Event::Signal { sig: rsig, pc: rpc, thread: rthread }) => {
+                let (rsig, rpc, rthread) = (*rsig, *rpc, *rthread);
+                if sig != rsig || pc != rpc {
+                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                        "signal mismatch: live (sig={sig}, pc={pc:#x}) != recorded (sig={rsig}, pc={rpc:#x})") });
+                }
+                // M16 Task 8: Event::Signal's `thread` is the RAISING thread, checked against the
+                // CALLER (`verify_thread`), not a kill's target: a terminal disposition kills the
+                // whole process, and the event pins down where it stopped. Placed after the sig/pc
+                // compare so a genuine divergence reports as itself.
+                self.verify_thread(rthread, pc)?;
+                match self.events.get(self.idx + 1) {
+                    Some(Event::Snapshot { mem: final_mem, .. }) => {
+                        if let Some(d) = self.b.diff_memory(final_mem) {
+                            return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
+                        }
+                        Ok(Advance::Exited(replay_report(&mut self.console, &self.b, Outcome::Signal { sig: rsig })))
+                    }
+                    other => Err(Divergence { landmark: self.idx + 1, pc,
+                        detail: format!("expected final memory Snapshot after Signal, got {other:?}") }),
+                }
+            }
+            other => Err(Divergence { landmark: self.idx, pc,
+                detail: format!("expected recorded Signal, got {other:?} (live: sig={sig})") }),
+        }
+    }
+
     /// M12: recompute a signal delivery and byte-compare the frame against the recorded landmark.
     /// That comparison **is** the divergence check (symmetry rule 1) — an asymmetry between
     /// record's delivery arms and these mirrors surfaces here as a named divergence instead of as
@@ -2060,7 +2125,8 @@ impl ReplaySession {
                     // mirrors below keep in step. That is what makes the sigign guest replay
                     // correctly: without the sigaction mirror this table would still read Dfl for
                     // SIGABRT and would wrongly terminate a guest that had ignored it.
-                    if num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL {
+                    // M51 §3g (C4): signal 0 is answered, not raised; the generic dispatch below applies the answer.
+                    if (num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL) && args[1] != 0 {
                         // M16 Task 8: resolve the TARGET by the same route record used — the same
                         // `Box_` methods with the same arguments (symmetry rule 1), which is what
                         // makes "both sides pick the same thread" true by construction. Recomputed,
@@ -2124,39 +2190,7 @@ impl ReplaySession {
                             self.b.threads_mut().pend(target, sig);
                         } else if matches!(act.disp, retrace_box::Disposition::Dfl)
                             && retrace_arch::default_action(sig) == retrace_arch::DefaultAction::Terminate {
-                            match self.events.get(self.idx) {
-                                Some(Event::Signal { sig: rsig, pc: rpc, thread: rthread }) => {
-                                    if sig != *rsig || pc != *rpc {
-                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
-                                            "signal mismatch: live (sig={sig}, pc={pc:#x}) != \
-                                             recorded (sig={rsig}, pc={rpc:#x})") });
-                                    }
-                                    // M16 Task 8: Event::Signal's `thread` is the RAISING thread —
-                                    // the trace format fixes it that way so it names the same event
-                                    // as `pc`, the raise site — so it is checked against the CALLER
-                                    // (`verify_thread`, i.e. the current thread), NOT against
-                                    // `target`. A terminal disposition kills the whole PROCESS, so
-                                    // which thread the raise named stops mattering; what the event
-                                    // pins down is where the process stopped. Do not "simplify"
-                                    // this to `target`. Placed after the sig/pc compare for the
-                                    // usual reason: report the specific divergence, not the thread
-                                    // mismatch it caused.
-                                    self.verify_thread(*rthread, pc)?;
-                                    match self.events.get(self.idx + 1) {
-                                        Some(Event::Snapshot { mem: final_mem, .. }) => {
-                                            if let Some(d) = self.b.diff_memory(final_mem) {
-                                                return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
-                                            }
-                                            return Ok(Advance::Exited(replay_report(&mut self.console, &self.b,
-                                                Outcome::Signal { sig: *rsig })));
-                                        }
-                                        other => return Err(Divergence { landmark: self.idx + 1, pc,
-                                            detail: format!("expected final memory Snapshot after Signal, got {other:?}") }),
-                                    }
-                                }
-                                other => return Err(Divergence { landmark: self.idx, pc,
-                                    detail: format!("expected recorded Signal, got {other:?} (live raise: sig={sig})") }),
-                            }
+                            return self.signal_terminal(sig, pc);
                         // M12: the CAUGHT counterpart of the terminal arm above. Record appended
                         // TWO events at this one stop — the ordinary Syscall, then the delivery —
                         // so both are consumed here. Letting the generic arm below take the first
@@ -2185,6 +2219,11 @@ impl ReplaySession {
                             self.b.complete_syscall_before_delivery(0, false);
                             return self.mirror_delivery(target, sig, retrace_arch::SI_USER, 0, 0, 0, pc);
                         }
+                    }
+                    // M51 §3g (R10, C5): the mirror of record's abort_with_payload arm. Its terminal
+                    // is the kill mirror's, through the same helper.
+                    if num == retrace_arch::SYS_ABORT_WITH_PAYLOAD {
+                        return self.signal_terminal(retrace_arch::SIGABRT, pc);
                     }
                     // M12 mirror of record's sigreturn arm. Its OWN arm rather than a hook inside
                     // the serviced block below, mirroring record: sigreturn returns no value, so it
@@ -3312,6 +3351,16 @@ impl ReplaySession {
                                 // mirror. Before M37 the two sides disagreed on a closed console
                                 // slot and nothing could see it.
                                 self.b.fds_mut().close(args[0]);
+                            }
+                            // M51 §3g (C4): record answered `__pthread_kill(port, 0)` from its thread
+                            // table; replay asks its own and compares (symmetry rule 1).
+                            if num == retrace_arch::SYS_PTHREAD_KILL && args[1] == 0 {
+                                let live = self.b.thread_probe(args[0] as u32);
+                                if live != (*ret, *err) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "__pthread_kill(port {:#x}, 0): the recording answered ({ret}, err={err}), the live \
+                                         thread table ({}, err={})", args[0], live.0, live.1) });
+                                }
                             }
                             // M38: the mirror of record's `set_ret1` — same predicate, same value.
                             if retrace_arch::returns_fd_pair(num) { self.b.set_ret1(*ret1); }
