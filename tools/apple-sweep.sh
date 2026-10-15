@@ -66,7 +66,8 @@
 # M51 (spec §3j, R9): `TALLY-RR` follows `TALLY`: the same rows judged record against replay alone, as
 # before M51, so the charter's record-against-replay figure stays checkable. With native on, an
 # out-of-scope row is REFUSED only if what it printed before the wall, stdout and stderr, is a prefix of
-# what native printed (deferred #8).
+# what native printed (deferred #8). A row that fails only on stderr (RETRACE_SWEEP_STDERR=1) still counts as
+# a pass in TALLY-RR, which is intended; a wall row that fails only the prefix rule stays a failure there.
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

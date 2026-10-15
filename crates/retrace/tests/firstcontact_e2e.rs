@@ -180,8 +180,13 @@ fn stderr_of(err: &str) -> String {
     canonical(kept.as_bytes())
 }
 
+/// The wall rule (M51 §3i): what a walled recording printed must be a prefix of what native printed.
+fn is_prefix_of(native: &str, recorded: &str) -> bool { native.starts_with(recorded) }
+
 /// t0 M7's pid shapes: `name[1234]:` at a line's start (dyld's prefix, and a tool's own), and
 /// `(1234,0x16f…)` (libmalloc's `name(pid,thread)`). Each becomes `<PID>`, and the thread `<TID>`.
+// Looks at a line's first `[` and first `(` only; the sweep's `sed` masks every paren occurrence. No corpus
+// row trips the difference.
 fn mask_pid(line: &str) -> String {
     let mut l = line.to_owned();
     if let (Some(open), Some(close)) = (l.find('['), l.find("]:")) {
@@ -282,10 +287,10 @@ fn refused(nout: &[u8], nerr: &str, rec: &util::Bounded, rcode: i32, line: &str,
     if n != 1 { return wall(format!("MISMATCH record printed {n} wall lines")); }
     if rcode != 4 { return wall(format!("MISMATCH record exit {rcode} after a wall line, not 4")); }
     // M51 §3i (deferred #8): what the program printed before the wall is what native printed first.
-    if !canonical(nout).starts_with(&canonical(&rec.stdout)) {
+    if !is_prefix_of(&canonical(nout), &canonical(&rec.stdout)) {
         return wall("MISMATCH record stdout before the wall is not a prefix of native's".into());
     }
-    if !stderr_of(nerr).starts_with(&stderr_of(&rec.stderr)) {
+    if !is_prefix_of(&stderr_of(nerr), &stderr_of(&rec.stderr)) {
         return wall("MISMATCH record stderr before the wall is not a prefix of native's".into());
     }
     for i in 1..=2 {
@@ -466,4 +471,9 @@ fn stderr_comparison_drops_retraces_lines_and_masks_only_a_pid() {
     assert_ne!(stderr_of(native), stderr_of("dyld[987]: Library not loaded: @rpath/liby.dylib\n"), "the message still counts");
     assert_eq!(stderr_of("x[1] y\n"), "x[1] y\n", "a bracketed number that is not a `name[pid]:` prefix stays");
     assert_eq!(stderr_of("retrace:x\n"), "retrace:x\n", "only `retrace: ` lines are retrace's");
+    // The wall rule's negative control: it can fail, and an empty or exact prefix passes.
+    assert!(!is_prefix_of("one\ntwo\n", "one\nTWO\n"), "output native did not print fails the rule");
+    assert!(!is_prefix_of("one\n", "one\ntwo\n"), "output past native's end fails the rule");
+    assert!(is_prefix_of("one\ntwo\n", ""), "an empty record stdout is a prefix of anything");
+    assert!(is_prefix_of("one\ntwo\n", "one\n"), "an exact prefix passes");
 }
