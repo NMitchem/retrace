@@ -126,7 +126,7 @@ fn main() {
         Err(payload) => match retrace_arch::Unsupported::from_panic(payload.as_ref()) {
             // C7: only `debug` and `gdbserver` drive replay without `replay()`'s own catch.
             Some(u) => {
-                eprintln!("{}", u.line());
+                say(&u.line());
                 if matches!(a.get(1).map(String::as_str), Some("debug" | "gdbserver")) { 5 } else { 4 }
             }
             None => 70,
@@ -156,7 +156,7 @@ fn run(a: &[String]) -> i32 {
 
 /// Bad input to retrace itself (R2): one `retrace:` line, and exit 2.
 fn bad_input(line: &str) -> i32 {
-    eprintln!("retrace: {line}");
+    say(&format!("retrace: {line}"));
     2
 }
 
@@ -225,8 +225,8 @@ fn replay(a: &[String]) -> i32 {
     match retrace_core::replay_opts(Path::new(trace), Some(Box::new(LiveOutput::default()))) {
         Ok(r) => finish(r.fall_throughs, &r.outcome),
         Err(d) => {
-            eprintln!("DIVERGENCE at landmark {} pc=0x{:x}: {}", d.landmark, d.pc, d.detail);
-            eprintln!("repro: retrace replay {trace}");
+            say(&format!("DIVERGENCE at landmark {} pc=0x{:x}: {}", d.landmark, d.pc, d.detail));
+            say(&format!("repro: retrace replay {trace}"));
             3
         }
     }
@@ -261,7 +261,7 @@ fn debug_cmd(a: &[String]) -> i32 {
     if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
     match debug::run_script(Path::new(trace), script, &mut std::io::stdout()) {
         Ok(()) => 0,
-        Err(e) => { eprintln!("DEBUG ERROR: {e}"); 5 }
+        Err(e) => { say(&format!("DEBUG ERROR: {e}")); 5 }
     }
 }
 
@@ -278,7 +278,7 @@ fn gdbserver_cmd(a: &[String]) -> i32 {
     if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
     match gdbserver::serve(Path::new(trace), port, exe) {
         Ok(()) => 0,
-        Err(e) => { eprintln!("GDBSERVER ERROR: {e}"); 5 }
+        Err(e) => { say(&format!("GDBSERVER ERROR: {e}")); 5 }
     }
 }
 

@@ -6736,9 +6736,11 @@ impl Box_ {
     /// `Source`, `NestedSource`, `Dest` or `Ptr` argument must name memory the program can reach natively:
     /// a `Path` to its NUL (at most 1024 bytes), every other kind its first byte's page; readable by EL0,
     /// and writable by it for a `Dest` (and for every `Ptr` the kernel writes through, `retrace_arch::ptr_use`).
-    /// An argument below the first page, or with a nonzero top byte, or at a region address
-    /// (`retrace_arch::region_address`) or an out-pointer natively swallowed
-    /// (`retrace_arch::ignores_bad_out_pointer`), keeps today's path and the kernel answers it. So does
+    /// An argument below the first page or with a nonzero top byte keeps today's path and the host kernel
+    /// answers it, but only at a position the host kernel does answer: a position retrace dereferences
+    /// itself (`retrace_arch::serviced_pointer`) skips only NULL and answers EFAULT for any other value
+    /// (FW-1). A region address (`retrace_arch::region_address`) or an out-pointer natively swallowed
+    /// (`retrace_arch::ignores_bad_out_pointer`) also keeps today's path. So does
     /// `ioctl`'s argument when the request carries neither `IOC_IN` nor `IOC_OUT`, and every
     /// `map_with_linking_np` pointer, which a plain process never gets examined (EINVAL, t0 M6). The
     /// first argument that fails is `Err(EFAULT)`.

@@ -141,6 +141,28 @@ fn a_refusal_line_to_a_closed_stderr_does_not_become_a_bug() {
     let _ = std::fs::remove_file(&t);
 }
 
+/// FW-R: the `DIVERGENCE` and `repro:` lines go through the same writer, so a diverging replay whose stderr
+/// reader has gone away still exits 3 and not at an abort.
+#[test]
+fn a_divergence_line_to_a_closed_stderr_does_not_become_a_bug() {
+    use retrace_trace::{Event, Reader, Writer};
+    let t = scratch("diverge.bin");
+    let tp = t.to_str().unwrap();
+    let rec = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::FID_BADPTR, "-o", tp, "--", "readunmapped"], &[], BOUND);
+    assert_eq!(rec.code, Some(0), "{}", rec.stderr);
+    let mut events = Reader::open(&t).unwrap();
+    let i = events.iter().rposition(|e| matches!(e, Event::Syscall { num: 3, err: true, .. })).expect("the refused read");
+    if let Event::Syscall { ret, err, .. } = &mut events[i] { *ret = 16; *err = false; }
+    let mut w = Writer::create(&t).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+    let mut child = Command::new(util::bin()).args(["replay", tp])
+        .env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    drop(child.stderr.take());
+    assert_eq!(wait_bounded(&mut child, BOUND), Some(3), "exit 3 for a divergence, not an abort");
+    let _ = std::fs::remove_file(&t);
+}
+
 /// Spec §4 "Quiet": `warn` printed `[retrace warn] anon PROT_EXEC mmap …` before M51, and every run
 /// printed `[retrace] fall-throughs: N`. A plain run prints neither, on record or replay.
 #[test]

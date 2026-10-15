@@ -152,6 +152,16 @@ int main(int argc, char **argv) {
         int n = snprintf(b, sizeof b, "rc=%ld name=\"%s\"\n", rc, name);
         write(1, b, n);
     }
+    else if (!strcmp(m, "fullfsync")) {
+        // FW-R: F_FULLFSYNC takes no argument, so libc passes whatever the third register held. A wild
+        // value there is not a pointer, and the call succeeds natively.
+        char path[] = "/tmp/retrace-fullfsync-XXXXXX";
+        int tfd = mkstemp(path);
+        rc = raw3(92, tfd, F_FULLFSYNC, 0x12345678);
+        int e = errno;
+        unlink(path);
+        report("fcntl(F_FULLFSYNC, 0x12345678)", rc, e);
+    }
     else if (!strcmp(m, "setown")) {
         // FW-3: F_SETOWN's argument is a pid, an integer; one past 16 KiB must not be judged as an address.
         int p[2];

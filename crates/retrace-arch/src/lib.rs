@@ -1164,13 +1164,18 @@ pub fn shape_of(num: u64, args: &[u64; 8]) -> &'static Shape {
     static CSRCTL_COPYIN: Shape = Shape { args: &[Scalar, Source, Scalar], ret: Ret::Plain };
     match num {
         SYS_FCNTL | SYS_FCNTL_NOCANCEL => match args[1] {
-            // FW-3: every `fcntl` command whose argument is an `int` (`sys/fcntl.h`): descriptor and file
-            // flags, the owner pid (F_SETOWN: a pid of 16 KiB or more must not be judged as an address),
-            // read-ahead, no-cache, single-writer, the SIGPIPE switch, the protection class and the
-            // dup commands. F_SETLKWTIMEOUT, F_PREALLOCATE, F_GETPATH and the rest take a pointer.
-            F_DUPFD | F_GETFD | F_SETFD | F_GETFL | F_SETFL | F_NOCACHE | F_DUPFD_CLOEXEC | F_SETOWN
-            | F_RDAHEAD | F_NODIRECT | F_SINGLE_WRITER | F_SETNOSIGPIPE | F_SETPROTECTIONCLASS => &FCNTL_INT,
-            _ => forwarded_shape(num),
+            // FW-R: the third argument is a pointer only for the commands whose argument is a struct or a
+            // buffer in `<sys/fcntl.h>` (the commands libc's `fcntl` hands `va_arg(ap, void *)` rather than
+            // `(long)va_arg(ap, int)`): the lock family, F_PREALLOCATE, F_SETSIZE, F_RDADVISE, the log2phys
+            // pair, the path getters, the signature commands, F_PUNCHHOLE, the lease and tag commands and
+            // the rest listed here. Every other command takes an int or nothing at all, and for the
+            // no-argument ones (F_GETOWN, F_FULLFSYNC, F_BARRIERFSYNC, F_FLUSH_DATA, ...) the third word is
+            // whatever the caller's register held, which must not be judged as an address. libc's source is
+            // not in the SDK; the list is from the header's comments, and errs toward `Ptr` where a command's
+            // argument is not stated.
+            7..=10 | 42..=44 | 49 | 50 | 52 | 59 | 61 | 65 | 66 | 70 | 71 | 72 | 75 | 78 | 83 | 90..=93
+            | 97..=111 | 113 => forwarded_shape(num),
+            _ => &FCNTL_INT,
         },
         336 => match args[0] {
             PROC_INFO_CALL_SETCONTROL => &PROC_INFO_COPYIN,
@@ -2976,8 +2981,12 @@ mod tests {
             assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Scalar, "fcntl cmd {cmd}");
             assert_eq!(shape_of(SYS_FCNTL_NOCANCEL, &args(cmd)).args[2], Scalar, "fcntl_nocancel cmd {cmd}");
         }
-        for cmd in [F_PREALLOCATE, F_GETPATH, F_ADDFILESIGS_RETURN, F_CHECK_LV, 999] {
+        for cmd in [F_PREALLOCATE, F_GETPATH, F_ADDFILESIGS_RETURN, F_CHECK_LV] {
             assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Ptr, "fcntl cmd {cmd}");
+        }
+        // FW-R: commands with no argument at all, and any command outside the pointer list, are integers.
+        for cmd in [5, 51, 85, 40, 999] {
+            assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Scalar, "fcntl cmd {cmd}");
         }
         for cmd in [FIOCLEX, FIONCLEX] {
             assert_eq!(shape_of(SYS_IOCTL, &args(cmd)).args[2], Scalar, "ioctl cmd {cmd:#x}");

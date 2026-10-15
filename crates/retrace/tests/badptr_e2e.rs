@@ -113,7 +113,9 @@ fn an_emulated_call_with_a_bad_pointer_returns_natives_error() {
                          // FW-2: proc_info SETCONTROL copies the name IN, so a literal in read-only __TEXT succeeds.
                          ("setnamelit", "rc=0 name=\"worker\"\n"),
                          // FW-3: F_SETOWN's argument is an integer pid; native reads it back negated.
-                         ("setown", "setown: rc=0 errno=0 own=-70000\n")] {
+                         // FW-R: a no-argument command's third word is not a pointer; native succeeds.
+                         ("fullfsync", "fcntl(F_FULLFSYNC, 0x12345678): rc=0 errno=0\n"),
+                         ("setown","setown: rc=0 errno=0 own=-70000\n")] {
         let t = scratch(&format!("{mode}.bin"));
         let (out, _) = agree(mode, &t);
         assert_eq!(out, want, "{mode}");
