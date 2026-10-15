@@ -11,6 +11,7 @@ pub use retrace_box::{Excl, SetBy};
 pub use retrace_box::EXE_BASE;
 pub use retrace_box::hypervisor_check;
 pub use retrace_box::Stream;
+pub use retrace_box::{start_args_bytes, START_ARGS_LIMIT};
 
 /// M15: one row of the debugger's thread listing.
 #[derive(Clone, Debug, PartialEq)]
@@ -129,6 +130,9 @@ pub trait OutputSink {
 pub struct RecordOpts {
     /// Where the program's console writes go as it makes them (§3e). None captures them only.
     pub sink: Option<Box<dyn OutputSink>>,
+    /// The program's environment (§3f), each entry one raw `name=value`, in order. The static
+    /// `record` path has none: its programs are the repo's own assembly fixtures.
+    pub envp: Vec<Vec<u8>>,
 }
 
 /// M51 §3e: one side's console output, record's or replay's. Both streams are captured, and each
@@ -170,7 +174,7 @@ pub fn record_dynamic(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded,
 /// M51: `record_dynamic`, with a live sink.
 pub fn record_dynamic_opts(exe: &retrace_guest::Loaded, dyld: &retrace_guest::Loaded, argv: &[String],
                            trace_path: &Path, opts: RecordOpts) -> Result<RecordSummary, String> {
-    record_box(Box_::load_dynamic(exe, dyld, argv), trace_path, opts.sink)
+    record_box(Box_::load_dynamic_env(exe, dyld, argv, &opts.envp), trace_path, opts.sink)
 }
 
 /// M16 Task 9: the decision made about a thread's pending set at an unmask (`sigprocmask`/

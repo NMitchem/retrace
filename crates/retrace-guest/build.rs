@@ -1061,7 +1061,7 @@ fn main() {
     // one-row-per-fixture check reads every fc_ source.
     // One name today; Tasks 3-7 append theirs, so the loop stays.
     #[allow(clippy::single_element_loop)]
-    for name in ["fid_output", "fid_traps", "fid_frames"] {
+    for name in ["fid_output", "fid_traps", "fid_frames", "fid_env"] {
         let src = format!("{dir}/c/{name}.c");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");

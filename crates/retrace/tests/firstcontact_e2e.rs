@@ -73,8 +73,8 @@ const ROWS: &[Row] = &[
     Row { name: "fc_mutex", bin: retrace_guest::FC_MUTEX, args: &[],
           expect: Expect::Wall("retrace: unsupported: M48: psynch psynch_mutexwait (301) is not modelled") },
     Row { name: "fc_fileio", bin: retrace_guest::FC_FILEIO, args: &[], expect: Expect::Pass },
-    Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"],
-          expect: Expect::Wall("MISMATCH record stdout at line 4: native \"FC_ENV_PROBE=firstcontact\\n\", record \"FC_ENV_PROBE=(unset)\\n\"") },
+    // M51 §3f: the program gets the recorder's environment, which is ENV, as native gets it.
+    Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"], expect: Expect::Pass },
     // M51 (R8): __builtin_trap(), the brk class without swiftc. Joins in Task 3, where it passes (C9).
     Row { name: "fc_c_trap", bin: retrace_guest::FC_C_TRAP, args: &[], expect: Expect::Pass },
     // C++ (clang++ -std=c++17).

@@ -56,9 +56,36 @@ fn write_failure_line(e: &std::io::Error) -> Option<String> {
 }
 
 
-/// The options every CLI recording takes: the live sink.
-fn live() -> retrace_core::RecordOpts {
-    retrace_core::RecordOpts { sink: Some(Box::new(LiveOutput::default())) }
+/// The options every CLI recording takes: the live sink, and the program's environment.
+fn live(envp: Vec<Vec<u8>>) -> retrace_core::RecordOpts {
+    retrace_core::RecordOpts { sink: Some(Box::new(LiveOutput::default())), envp }
+}
+
+/// M51 §3f (R2): the environment the program gets: retrace's own, as raw `name=value` bytes in the
+/// order it arrived, minus every `RETRACE_*` variable, which configures retrace and not the program.
+///
+/// It is read from the kernel's own envp, the array that follows argv's terminator, and not from
+/// `std::env`: a framework retrace links (CoreFoundation, under Hypervisor) `setenv`s
+/// `__CF_USER_TEXT_ENCODING` into the live `environ` at load when it is absent, a variable the
+/// program would then see though nothing passed it (measured by `envp_e2e`: native count 3, recorded 4).
+fn program_env() -> Vec<Vec<u8>> {
+    extern "C" {
+        fn _NSGetArgc() -> *mut i32;
+        fn _NSGetArgv() -> *mut *mut *const std::ffi::c_char;
+    }
+    let mut env = Vec::new();
+    // SAFETY: on macOS the kernel lays out argc, argv[argc], NULL, envp[..], NULL, and `setenv` only
+    // replaces `environ`'s array, never these strings or this one.
+    unsafe {
+        let argc = *_NSGetArgc() as usize;
+        let mut p = (*_NSGetArgv()).add(argc + 1);
+        while !(*p).is_null() {
+            let e = std::ffi::CStr::from_ptr(*p).to_bytes();
+            if !e.starts_with(b"RETRACE_") { env.push(e.to_vec()); }
+            p = p.add(1);
+        }
+    }
+    env
 }
 
 fn main() {
@@ -151,18 +178,25 @@ fn record(a: &[String], dynamic: bool) -> i32 {
         Ok(l) => l,
         Err(why) => return bad_input(&format!("{guest} {why}")),
     };
+    // Guest argv: argv[0] is the exe path (what the kernel passes and what dyld's
+    // `executable_path=` is derived from); everything after `--` is the guest's own.
+    let mut argv = vec![guest.clone()];
+    if let Some(i) = a.iter().position(|s| s == "--") { argv.extend_from_slice(&a[i + 1..]); }
+    let envp = if dynamic { program_env() } else { Vec::new() };
+    // M51 §3f (R3): refused before the VM exists, so nothing is written.
+    let size = retrace_core::start_args_bytes(&argv, &envp);
+    if size > retrace_core::START_ARGS_LIMIT {
+        return bad_input(&format!("the arguments and environment take {} KiB, more than retrace's limit of {} KiB - run it \
+            under `env -i` with only what the program needs", size.div_ceil(1024), retrace_core::START_ARGS_LIMIT / 1024));
+    }
     if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
     let summary = if dynamic {
-        // Guest argv: argv[0] is the exe path (what the kernel passes and what dyld's
-        // `executable_path=` is derived from); everything after `--` is the guest's own.
-        let mut argv = vec![guest.clone()];
-        if let Some(i) = a.iter().position(|s| s == "--") { argv.extend_from_slice(&a[i + 1..]); }
         let dyld_path = exe.dylinker.clone().unwrap_or_else(|| retrace_guest::DYLD_PATH.to_string());
         let dyld_bytes = std::fs::read(&dyld_path).unwrap_or_else(|e| panic!("read dyld {dyld_path}: {e}"));
         let dyld = retrace_guest::parse_macho(retrace_guest::slice_arm64e(&dyld_bytes));
-        retrace_core::record_dynamic_opts(&exe, &dyld, &argv, Path::new(out), live())
+        retrace_core::record_dynamic_opts(&exe, &dyld, &argv, Path::new(out), live(envp))
     } else {
-        retrace_core::record_opts(&exe, Path::new(out), live())
+        retrace_core::record_opts(&exe, Path::new(out), live(envp))
     };
     match summary {
         Ok(s) => finish(s.fall_throughs, &s.outcome),

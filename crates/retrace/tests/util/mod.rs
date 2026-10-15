@@ -58,7 +58,7 @@ pub fn announce(line: &str) {
 }
 
 fn run(args: &[&str]) -> RunOut {
-    let out = Command::new(bin()).args(args).output().unwrap();
+    let out = Command::new(bin()).args(args).env_clear().output().unwrap();
     RunOut {
         code: out.status.code().unwrap_or(-1),
         stdout: out.stdout,
@@ -69,13 +69,11 @@ fn run(args: &[&str]) -> RunOut {
 fn run_env(args: &[&str], env: &[(&str, &str)]) -> RunOut {
     let mut c = Command::new(bin());
     c.args(args);
-    // `Command` inherits this process's environment, so an exported RETRACE_TRACE=1 would
-    // reach the recorder and fire the [M28 BANDSHRINK] counter on its own -- greening
-    // sysbin_e2e's suppression assertion even with the RETRACE_BANDSHRINK limb deleted.
-    // Removing it first makes that assertion pass BECAUSE of the gate it is testing.
-    // Cleared before the explicit pairs below, so a caller that passes RETRACE_TRACE
-    // deliberately still wins.
-    c.env_remove("RETRACE_TRACE");
+    // M51 §3f (C6): the child starts with an empty environment plus `env`, so an exported
+    // RETRACE_TRACE (which fired [M28 BANDSHRINK] on its own and greened sysbin_e2e's suppression
+    // assertion), or anything else in the gate runner's environment, reaches neither retrace nor,
+    // since M51, the program it records.
+    c.env_clear();
     for (k, v) in env { c.env(k, v); }
     let out = c.output().unwrap();
     RunOut {
@@ -148,10 +146,10 @@ pub fn debug_bounded(trace: &str, script: &str, secs: u64) -> (Option<i32>, Stri
 /// (the shell's convention, and the CLI's for a recorded crash), or `None` when the bound fired.
 pub struct Bounded { pub code: Option<i32>, pub stdout: Vec<u8>, pub stderr: String }
 
-/// M49: run `prog` with `args` and with `env` added to this process's environment, stdin
+/// M49: run `prog` with `args` and with `env` as its whole environment, stdin
 /// `/dev/null`, killed after `secs` seconds. `debug_bounded`'s polling and temp files, for any
-/// program: `bin()` for the CLI, or a guest run natively. `RETRACE_TRACE` is cleared first, as
-/// `run_env` clears it.
+/// program: `bin()` for the CLI, or a guest run natively. The environment is cleared first, as
+/// `run_env` clears it, so `env` is all the child gets (M51 C6).
 pub fn run_bounded(prog: &str, args: &[&str], env: &[(&str, &str)], secs: u64) -> Bounded {
     use std::os::unix::process::ExitStatusExt;
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -159,7 +157,7 @@ pub fn run_bounded(prog: &str, args: &[&str], env: &[(&str, &str)], secs: u64) -
     let base = std::env::temp_dir().join(format!("retrace-bounded-{}-{n}", std::process::id()));
     let (out_p, err_p) = (base.with_extension("out"), base.with_extension("err"));
     let mut c = Command::new(prog);
-    c.args(args).env_remove("RETRACE_TRACE").stdin(std::process::Stdio::null())
+    c.args(args).env_clear().stdin(std::process::Stdio::null())
         .stdout(std::fs::File::create(&out_p).expect("create stdout file"))
         .stderr(std::fs::File::create(&err_p).expect("create stderr file"));
     for (k, v) in env { c.env(k, v); }

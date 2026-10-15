@@ -104,6 +104,20 @@ pub const DYLD_BASE: u64 = 0x1_4000_0000;      // 5 GiB slide for dyld
 // the guard page. That was equally true when the stack sat at 2 MiB.
 const DYN_STACK_TOP:  u64 = 0x0280_0000;       // 40 MiB — above PT_L3_CEIL by libpthread's 0x7fc000
 const DYN_STACK_SIZE: u64 = 0x0004_0000;       // 256 KiB
+/// M51 §3f (R3): the bytes `argv` and `envp` take in the start stack: each string with its NUL, one
+/// pointer each, and the two terminators. The CLI compares it with `START_ARGS_LIMIT` before it
+/// creates the VM.
+pub fn start_args_bytes(argv: &[String], envp: &[Vec<u8>]) -> usize {
+    argv.iter().map(|a| a.len() + 1 + 8).sum::<usize>() + envp.iter().map(|e| e.len() + 1 + 8).sum::<usize>() + 16
+}
+
+/// M51 §3f (R3, t0 M9): the most arguments and environment the 256 KiB start stack (`DYN_STACK_SIZE`)
+/// takes while leaving the program the stack its own code needs. Measured, not derived: under the
+/// base binary `fc_stack_overflow` still overflowed cleanly (139, the stack guard) with up to 240 KiB
+/// of argument strings; at 250 KiB the strings corrupted the layout (a crash in libc) and at 256 KiB
+/// `build_start_stack` panicked (`attempt to subtract with overflow`). 128 KiB is the largest power
+/// of two KiB below 240, and more than four times a developer's environment (3.3 KiB measured).
+pub const START_ARGS_LIMIT: usize = 128 * 1024;
 /// macOS 26 libpthread's main-thread stack size: 8 MiB minus one 16 KiB page. It calls
 /// `getrlimit(RLIMIT_STACK)` and then IGNORES the reply — M8 measured that answering 0x10000000
 /// instead of 0x40000 left libstd's computed guard address bit-identical, so retrace cannot
@@ -2493,6 +2507,13 @@ impl Box_ {
     /// passes and what dyld's `executable_path=` is derived from). M9 widened this from a lone
     /// `argv0`; an empty slice yields `argc=0`, which no caller does but the layout handles.
     pub fn load_dynamic(exe: &Loaded, dyld: &Loaded, argv: &[String]) -> Box_ {
+        Self::load_dynamic_env(exe, dyld, argv, &[])
+    }
+
+    /// M51 §3f: `load_dynamic`, with the program's environment: each entry one raw `name=value`,
+    /// laid out between `argv` and `apple[]` as the kernel does (`build_start_stack`). The start
+    /// stack is in the opening snapshot, so replay restores the environment and never reads one.
+    pub fn load_dynamic_env(exe: &Loaded, dyld: &Loaded, argv: &[String], envp: &[Vec<u8>]) -> Box_ {
         // M40: declared before `vm`/`vcpu` so an unwind mid-construction (a panic after some
         // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
         // backings, matching the field-order invariant on `pub struct Box_` above — never
@@ -2548,7 +2569,7 @@ impl Box_ {
             .map(|s| s.vaddr)
             .expect("load_dynamic: no exe segment carries the Mach-O header (MH_MAGIC_64)");
         // Build the XNU start stack in the (already-mapped, zeroed) stack backing; get guest SP.
-        let sp = Self::build_start_stack(&backings[stack_idx], argv, main_hdr);
+        let sp = Self::build_start_stack(&backings[stack_idx], argv, envp, main_hdr);
 
         // W^X exec ranges: trampoline + exe exec segs (unslid) + dyld exec segs (slid) + the shared
         // cache's executable regions. The cache text stage-1 MUST be ATTR_CODE BEFORE the guest ever
@@ -2607,7 +2628,7 @@ impl Box_ {
     //   [0]  mainExecutable  (pointer to the main exe's mach_header)
     //   [8]  argc
     //   [16] argv[0..argc], NULL
-    //        envp[..], NULL          (empty: dyld uses the standard shared region, demand-paged)
+    //        envp[..], NULL          (M51 §3f: the program's environment, raw bytes)
     //        apple[..], NULL
     // (mainExecutable is the dyld4 addition over the classic XNU `argc,argv,envp,apple` frame.)
     //
@@ -2618,20 +2639,23 @@ impl Box_ {
     // non-zero values (identical on record & replay — deterministic; these are opaque cookies the
     // guest only XORs/stores, never checks against anything external). `executable_path=` gives dyld
     // the main exe's path.
-    fn build_start_stack(stack: &Backing, argv: &[String], main_hdr: u64) -> u64 {
+    fn build_start_stack(stack: &Backing, argv: &[String], envp: &[Vec<u8>], main_hdr: u64) -> u64 {
         let base_ipa = stack.ipa;
         let top = stack.ipa + stack.len as u64;
         let argv0 = argv.first().map(String::as_str).unwrap_or("");
-        // strings[0..argc] = argv; the rest are apple[] entries (order irrelevant — parsed by key).
+        // strings: argv[0..argc], then envp[0..envc], then the apple[] entries (order irrelevant —
+        // parsed by key).
         let mut strings: Vec<Vec<u8>> = Vec::new();
-        let push = |s: String, out: &mut Vec<Vec<u8>>| { let mut v = s.into_bytes(); v.push(0); out.push(v); };
-        for a in argv { push(a.clone(), &mut strings); }                         // argv[0..argc]
-        push(format!("executable_path={argv0}"), &mut strings);                  // apple[0]
-        push("ptr_munge=0x1a2b3c4d5e6f7a8b".to_string(), &mut strings);          // libpthread cookie (nonzero)
-        push("stack_guard=0x000a0b0c0d0e0f00".to_string(), &mut strings);        // __stack_chk_guard (low byte 0)
-        push("malloc_entropy=0x00112233445566778899aabbccddeeff".to_string(), &mut strings); // libmalloc 2x64 entropy
+        let push = |mut v: Vec<u8>, out: &mut Vec<Vec<u8>>| { v.push(0); out.push(v); };
+        for a in argv { push(a.clone().into_bytes(), &mut strings); }            // argv[0..argc]
+        for e in envp { push(e.clone(), &mut strings); }                          // envp[0..envc]
+        push(format!("executable_path={argv0}").into_bytes(), &mut strings);     // apple[0]
+        push(b"ptr_munge=0x1a2b3c4d5e6f7a8b".to_vec(), &mut strings);            // libpthread cookie (nonzero)
+        push(b"stack_guard=0x000a0b0c0d0e0f00".to_vec(), &mut strings);          // __stack_chk_guard (low byte 0)
+        push(b"malloc_entropy=0x00112233445566778899aabbccddeeff".to_vec(), &mut strings); // libmalloc 2x64 entropy
         let argc = argv.len();
-        let n_apple = strings.len() - argc;
+        let envc = envp.len();
+        let n_apple = strings.len() - argc - envc;
 
         // Lay the strings down from the top of the stack; record each one's guest address.
         let mut p = top;
@@ -2641,12 +2665,13 @@ impl Box_ {
             addr[i] = p;
             unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), stack.host.add((p - base_ipa) as usize), s.len()); }
         }
-        // KernelArgs words: mainExecutable, argc, argv[0..argc], NULL, NULL(envp), apple[0..], NULL.
+        // KernelArgs words: mainExecutable, argc, argv[0..argc], NULL, envp[0..envc], NULL, apple[0..], NULL.
         let mut words = vec![main_hdr, argc as u64];
         words.extend((0..argc).map(|i| addr[i]));
         words.push(0);                                          // argv terminator
-        words.push(0);                                          // envp terminator (empty)
-        words.extend((0..n_apple).map(|i| addr[argc + i]));
+        words.extend((0..envc).map(|i| addr[argc + i]));
+        words.push(0);                                          // envp terminator
+        words.extend((0..n_apple).map(|i| addr[argc + envc + i]));
         words.push(0); // apple[] terminator
         let sp = (p - words.len() as u64 * 8) & !15u64;             // 16-byte aligned
         for (i, w) in words.iter().enumerate() {
@@ -8169,6 +8194,26 @@ mod stack_geometry_tests {
     fn derives_the_dynamic_geometry_from_a_dynamic_snapshot() {
         let regions = vec![region(DYN_STACK_TOP - DYN_STACK_SIZE, DYN_STACK_SIZE)];
         assert_eq!(stack_geometry_from_memory(&regions), (DYN_STACK_TOP, DYN_STACK_SIZE));
+    }
+
+    // M51 §3f: the environment sits between argv's terminator and apple[], each string byte for
+    // byte, as the kernel lays it out and dyld4 reads it.
+    #[test]
+    fn the_start_stack_carries_the_environment_between_argv_and_apple() {
+        let (host, len) = alloc_pages(DYN_STACK_SIZE as usize);
+        let stack = Backing { host, ipa: DYN_STACK_TOP - DYN_STACK_SIZE, len };
+        let argv = ["/bin/prog".to_owned(), "one".to_owned()];
+        let envp = [b"A=1".to_vec(), b"B=\xff=x".to_vec(), b"C=".to_vec()];
+        let sp = Box_::build_start_stack(&stack, &argv, &envp, EXE_BASE);
+        let at = |a: u64| unsafe { host.add((a - stack.ipa) as usize) };
+        let word = |a: u64| u64::from_le_bytes(unsafe { std::slice::from_raw_parts(at(a), 8) }.try_into().unwrap());
+        let cstr = |a: u64| unsafe { std::ffi::CStr::from_ptr(at(word(a)) as *const std::ffi::c_char) }.to_bytes().to_vec();
+        assert_eq!((word(sp), word(sp + 8)), (EXE_BASE, 2), "mainExecutable, argc");
+        assert_eq!((cstr(sp + 16), cstr(sp + 24), word(sp + 32)), (b"/bin/prog".to_vec(), b"one".to_vec(), 0), "argv, NULL");
+        assert_eq!([cstr(sp + 40), cstr(sp + 48), cstr(sp + 56)], envp, "envp, in order, byte for byte");
+        assert_eq!(word(sp + 64), 0, "envp's terminator");
+        assert_eq!(cstr(sp + 72), b"executable_path=/bin/prog".to_vec(), "apple[0] follows");
+        assert_eq!(start_args_bytes(&argv, &envp), (10 + 4 + 4 + 6 + 3) + 5 * 8 + 16, "strings with NULs, one pointer each, two terminators");
     }
 
     // Fail loud, never default: a snapshot naming no stack we recognize must not silently answer
