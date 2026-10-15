@@ -14,7 +14,7 @@
 //! its inputs alone, which is both why record and replay produce identical bytes and why the whole
 //! layout is testable in microseconds.
 
-use retrace_arch::{NSIG, SA_ONSTACK, SA_SIGINFO, SIG_DFL, SIG_IGN, SS_ONSTACK, UC_FLAVOR};
+use retrace_arch::{NSIG, SA_ONSTACK, SA_SIGINFO, SIG_DFL, SIG_IGN, SS_DISABLE, SS_ONSTACK, UC_FLAVOR};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
@@ -141,6 +141,20 @@ pub fn decode_stack(bytes: &[u8]) -> (u64, u64, u64) {
 /// One encoder called by both record and replay, exactly as `encode_oldact` already is for
 /// `sigaction`: if replay re-spelled this layout by hand, a byte-compare against record's hand-rolled
 /// copy would only be comparing a duplicate against itself, not proving the two sides agree.
+/// M51 (Ruling T4-ssdisable): what `sigaltstack` reports as the old stack. Natively (measured with a C
+/// probe) a thread with none reports `sp=0 size=0 flags=SS_DISABLE`, on main and on a child; one with a
+/// stack set reports it, with `SS_ONSTACK` added while the caller runs on it. libstd builds its
+/// overflow stack only when its query reports `SS_DISABLE`. A stored stack whose flags carry
+/// `SS_DISABLE` is the same as none. Both record and replay call this with the same arguments.
+pub fn oldstack_answer(stored: Option<(u64, u64, u64)>, on_alt: bool) -> (u64, u64, u64) {
+    match stored {
+        Some((sp, size, flags)) if flags & SS_DISABLE == 0 => {
+            (sp, size, if on_alt { flags | SS_ONSTACK } else { flags })
+        }
+        _ => (0, 0, SS_DISABLE),
+    }
+}
+
 pub fn encode_oldstack(ss: (u64, u64, u64)) -> [u8; 24] {
     let (sp, size, flags) = ss;
     let mut o = [0u8; 24];
@@ -231,6 +245,8 @@ pub fn choose_frame_base(
     on_alt: bool,
 ) -> (u64, bool) {
     let wants_alt = act.flags & SA_ONSTACK != 0;
+    // M51: a stack the program set with SS_DISABLE is no stack.
+    let altstack = altstack.filter(|&(_, _, fl)| fl & SS_DISABLE == 0);
     match (wants_alt, altstack, on_alt) {
         (true, Some((ss_sp, ss_size, _)), false) => {
             (((ss_sp + ss_size) - FRAME_LEN as u64) & !15, true)
@@ -589,6 +605,21 @@ mod tests {
             "already on it: keep growing DOWN from the current sp, do not reset to its top and \
              clobber the frame the outer handler is running on"
         );
+    }
+
+    #[test]
+    fn oldstack_answer_is_ss_disable_for_none_the_stored_stack_otherwise_and_onstack_when_on_it() {
+        assert_eq!(oldstack_answer(None, false), (0, 0, SS_DISABLE), "none");
+        assert_eq!(oldstack_answer(Some((0x9_0000, 0x1_0000, 0)), false), (0x9_0000, 0x1_0000, 0), "stored");
+        assert_eq!(oldstack_answer(Some((0x9_0000, 0x1_0000, 0)), true), (0x9_0000, 0x1_0000, SS_ONSTACK), "on it");
+        assert_eq!(oldstack_answer(Some((0x9_0000, 0x1_0000, SS_DISABLE)), false), (0, 0, SS_DISABLE), "stored disabled");
+    }
+
+    #[test]
+    fn choose_frame_base_does_not_choose_a_stack_set_with_ss_disable() {
+        let act = SigAction { disp: Disposition::Handler(1), tramp: 2, mask: 0, flags: SA_ONSTACK };
+        let (base, on_alt) = choose_frame_base(0x5_0000, act, Some((0x9_0000, 0x1_0000, SS_DISABLE)), false);
+        assert!(!on_alt && base < 0x5_0000, "the normal stack");
     }
 
     #[test]

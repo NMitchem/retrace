@@ -21,7 +21,7 @@ pub use excl::{Excl, SetBy};
 /// M49 §3e: the store-exclusive rewrite (X1, X2), applied where the box stages code (X3).
 mod xrewrite;
 pub use sig::{
-    build_frame, choose_frame_base, decode_act, decode_stack, encode_oldact, encode_oldstack,
+    build_frame, choose_frame_base, decode_act, decode_stack, encode_oldact, encode_oldstack, oldstack_answer,
     sigreturn_token, Disposition, EntryRegs, FrameInput, NeonState, SigAction, SigTable,
     ThreadState, FRAME_LEN, FRAME_MCONTEXT_OFF, FRAME_SIGINFO_OFF, FRAME_SLACK, FRAME_UCONTEXT_OFF,
 };

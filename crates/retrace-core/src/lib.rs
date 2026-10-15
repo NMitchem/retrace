@@ -1051,6 +1051,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     Some(retrace_box::decode_stack(&b.read_guest(args[0], 24)))
                 } else { None };
                 // M16: the alternate stack belongs to the CALLING thread.
+                let on_alt = b.on_altstack_of(thread as usize);
                 let old = match new {
                     Some(ss) => b.threads_mut().set_altstack_of(thread as usize, Some(ss)),
                     None => b.threads().altstack_of(thread as usize),
@@ -1058,7 +1059,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 let writes = if args[1] != 0 {
                     vec![Region {
                         ipa: args[1],
-                        bytes: retrace_box::encode_oldstack(old.unwrap_or((0, 0, 0))).to_vec(),
+                        bytes: retrace_box::encode_oldstack(retrace_box::oldstack_answer(old, on_alt)).to_vec(),
                     }]
                 } else { vec![] };
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread })
@@ -2423,12 +2424,13 @@ impl ReplaySession {
                                 // `old` comes from `set_altstack_of`'s RETURN value, exactly as
                                 // record takes it — by the time a read-back would run, the update
                                 // has already overwritten the table entry it would read.
+                                let on_alt = self.b.on_altstack_of(tid);
                                 let old = match new {
                                     Some(ss) => self.b.threads_mut().set_altstack_of(tid, Some(ss)),
                                     None => self.b.threads().altstack_of(tid),
                                 };
                                 if args[1] != 0 {
-                                    let mine = retrace_box::encode_oldstack(old.unwrap_or((0, 0, 0))).to_vec();
+                                    let mine = retrace_box::encode_oldstack(retrace_box::oldstack_answer(old, on_alt)).to_vec();
                                     let recorded = writes.iter().find(|r| r.ipa == args[1])
                                         .map(|r| r.bytes.clone()).unwrap_or_default();
                                     if mine != recorded {
