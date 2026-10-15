@@ -104,8 +104,9 @@ pub const DYLD_BASE: u64 = 0x1_4000_0000;      // 5 GiB slide for dyld
 // the guard page. That was equally true when the stack sat at 2 MiB.
 const DYN_STACK_TOP:  u64 = 0x0280_0000;       // 40 MiB — above PT_L3_CEIL by libpthread's 0x7fc000
 const DYN_STACK_SIZE: u64 = 0x0004_0000;       // 256 KiB
-/// M51 §3f (R3): the bytes `argv` and `envp` take in the start stack: each string with its NUL, one
-/// pointer each, and the two terminators. The CLI compares it with `START_ARGS_LIMIT` before it
+/// M51 §3f (R3): approximately the bytes `argv` and `envp` take in the start stack: each string with
+/// its NUL, one pointer each, and the two terminators. It excludes the apple[] strings and the word
+/// padding, which `START_ARGS_LIMIT`'s margin covers. The CLI compares it with the limit before it
 /// creates the VM.
 pub fn start_args_bytes(argv: &[String], envp: &[Vec<u8>]) -> usize {
     argv.iter().map(|a| a.len() + 1 + 8).sum::<usize>() + envp.iter().map(|e| e.len() + 1 + 8).sum::<usize>() + 16

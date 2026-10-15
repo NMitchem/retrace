@@ -68,15 +68,28 @@ fn live(envp: Vec<Vec<u8>>) -> retrace_core::RecordOpts {
 /// `std::env`: a framework retrace links (CoreFoundation, under Hypervisor) `setenv`s
 /// `__CF_USER_TEXT_ENCODING` into the live `environ` at load when it is absent, a variable the
 /// program would then see though nothing passed it (measured by `envp_e2e`: native count 3, recorded 4).
+///
+/// `main` calls this first and keeps the result (`PROGRAM_ENV`), so the read happens as early as it
+/// can; a load-time constructor in a linked framework still runs before it and is outside our reach.
+static PROGRAM_ENV: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+
 fn program_env() -> Vec<Vec<u8>> {
+    PROGRAM_ENV.get_or_init(read_kernel_envp).clone()
+}
+
+fn read_kernel_envp() -> Vec<Vec<u8>> {
     extern "C" {
         fn _NSGetArgc() -> *mut i32;
         fn _NSGetArgv() -> *mut *mut *const std::ffi::c_char;
     }
     let mut env = Vec::new();
-    // SAFETY: on macOS the kernel lays out argc, argv[argc], NULL, envp[..], NULL, and `setenv` only
-    // replaces `environ`'s array, never these strings or this one.
+    // SAFETY: on macOS the kernel lays out argc, argv[argc], NULL, envp[..], NULL. Darwin's libc
+    // leaves that array untouched when `setenv` adds a new name (the CoreFoundation case), but edits
+    // it in place when a variable is overwritten (`setenv(.., 1)`, `putenv`) and shifts it on
+    // `unsetenv`. So it is intact unless something in this process overwrites or unsets an existing
+    // variable before this read; nothing in retrace does today.
     unsafe {
+        // argc from the kernel is never negative, so the cast cannot wrap.
         let argc = *_NSGetArgc() as usize;
         let mut p = (*_NSGetArgv()).add(argc + 1);
         while !(*p).is_null() {
@@ -89,6 +102,7 @@ fn program_env() -> Vec<Vec<u8>> {
 }
 
 fn main() {
+    let _ = program_env();
     // M50 §3c, C7: a panic that is not a wall is a bug in retrace. The hook prints the banner and
     // returns, and the catch below exits 70 (EX_SOFTWARE, R3: 101 is also what a Rust guest's own
     // panic exits). A wall's panic is silent here: `record` and `replay` catch it themselves and print

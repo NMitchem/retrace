@@ -51,7 +51,13 @@ int main(int argc, char **argv) {
     } else if (!strcmp(mode, "waituntil")) {
         mach_wait_until(mach_absolute_time() + 1000);
     } else if (!strcmp(mode, "amx")) {
+        // The x86_64 build is cleanfail_e2e's thin-x86_64 row, refused at load, so it only has to
+        // compile: `.inst` is an ARM directive and clang rejects it for that target.
+#if defined(__aarch64__)
         __asm__ volatile(".inst 0x00201220"); // AMX: native runs it, HVF does not (M51 R6)
+#else
+        __asm__ volatile("nop");
+#endif
     } else if (!strcmp(mode, "iomain")) {
         mach_port_t port;
         host_get_io_main(mach_host_self(), &port);
