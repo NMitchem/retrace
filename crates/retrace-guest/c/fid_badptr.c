@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_traps.h>
+#include <mach/mach_vm.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -73,6 +74,22 @@ static long raw_mach_msg2(long data) {
     return x0;
 }
 
+// mach_msg2_trap by hand for a task_get_special_port (3409) request whose 36 bytes are at `data`; the
+// header is in the registers as well as the buffer. `reply` is the reply port the answer is received on.
+static long raw_mach_msg2_3409(long data, mach_port_t reply) {
+    register long x0 __asm__("x0") = data;
+    register long x1 __asm__("x1") = (long)(0x1ul | 0x2ul | 0x200000000ul);
+    register long x2 __asm__("x2") = (36l << 32) | 0x1513;
+    register long x3 __asm__("x3") = (long)mach_task_self() | ((long)reply << 32);
+    register long x4 __asm__("x4") = 3409l << 32;
+    register long x5 __asm__("x5") = (long)reply << 32;
+    register long x6 __asm__("x6") = 256;
+    register long x7 __asm__("x7") = 0;
+    register long x16 __asm__("x16") = -47;
+    __asm__ volatile("svc #0x80" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5), "r"(x6), "r"(x7), "r"(x16) : "memory", "cc");
+    return x0;
+}
+
 int main(int argc, char **argv) {
     const char *m = argc > 1 ? argv[1] : "";
     void *hole = mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -110,6 +127,50 @@ int main(int argc, char **argv) {
         char b[64];
         int n = snprintf(b, sizeof b, "mach_msg2(hole): ret=0x%lx\n", (unsigned long)raw_mach_msg2((long)hole));
         write(1, b, n);
+    }
+    else if (!strcmp(m, "statcode")) {
+        // stat("/", <the page holding main>): the out-struct would land in the program's own code.
+        unsigned char *code = (unsigned char *)((uintptr_t)&main & ~(uintptr_t)0x3fff);
+        unsigned char before[16], after[16];
+        memcpy(before, code, 16);
+        rc = stat("/", (struct stat *)code);
+        int e = errno;
+        memcpy(after, code, 16);
+        report("stat(code)", rc, e);
+        say(memcmp(before, after, 16) ? "unchanged=0\n" : "unchanged=1\n");
+    }
+    else if (!strcmp(m, "mach3409edge")) {
+        // A 36-byte task_get_special_port request ending exactly at a page edge, the next page unmapped:
+        // its 40-byte reply does not fit.
+        char *two = mmap(NULL, 32768, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        munmap(two + 16384, 16384);
+        uint32_t *msg = (uint32_t *)(two + 16384 - 36);
+        mach_port_t reply = mig_get_reply_port();
+        msg[0] = 0x1513; msg[1] = 36; msg[2] = mach_task_self(); msg[3] = reply; msg[4] = 0; msg[5] = 3409;
+        msg[6] = 0; msg[7] = 0x00000001; msg[8] = 10; // NDR record, then which_port
+        char b[64];
+        int n = snprintf(b, sizeof b, "mach_msg2(3409 at edge): ret=0x%lx\n", (unsigned long)raw_mach_msg2_3409((long)msg, reply));
+        write(1, b, n);
+    }
+    else if (!strcmp(m, "nonemmap") || !strcmp(m, "noneprotect") || !strcmp(m, "loadnone")) {
+        // A page the program has not made accessible: PROT_NONE from mmap, or a vm_allocate made PROT_NONE.
+        char *p;
+        if (!strcmp(m, "noneprotect")) {
+            mach_vm_address_t a = 0;
+            mach_vm_allocate(mach_task_self(), &a, 16384, VM_FLAGS_ANYWHERE);
+            mach_vm_protect(mach_task_self(), a, 16384, 0, VM_PROT_NONE);
+            p = (char *)a;
+        } else {
+            p = mmap(NULL, 16384, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        }
+        if (!strcmp(m, "loadnone")) {
+            volatile char c = *(volatile char *)p;
+            (void)c;
+            say("loaded\n");
+        } else {
+            rc = read(fd, p, 16);
+            report(m, rc, errno);
+        }
     }
     else if (!strcmp(m, "straddle")) {
         // A 24-byte stack_t that starts 8 bytes before the end of a mapped page whose next page is unmapped.

@@ -91,6 +91,16 @@ fn an_emulated_call_with_a_bad_pointer_returns_natives_error() {
                          ("sigpendingbad", "sigpending(hole): rc=0 errno=0\n"),
                          ("getrlimitbad", "getrlimit(hole): rc=-1 errno=14\n"),
                          ("mach2bad", "mach_msg2(hole): ret=0x10004002\n"),
+                         // I-1: a `Ptr` out-struct aimed at the program's own code page; nothing is written.
+                         ("statcode", "stat(code): rc=-1 errno=14\nunchanged=1\n"),
+                         // I-2/I-3: a 36-byte 3409 request ending at a page edge, the next page unmapped; the
+                         // 40-byte reply does not fit. Native is MACH_RCV_INVALID_DATA, measured.
+                         ("mach3409edge", "mach_msg2(3409 at edge): ret=0x10004008\n"),
+                         // I-4: a page the program has not made accessible is EFAULT natively, and under
+                         // retrace the program's own load from it faults too (SIGBUS, as natively), so the
+                         // check agrees with it.
+                         ("nonemmap", "nonemmap: rc=-1 errno=14\n"),
+                         ("noneprotect", "noneprotect: rc=-1 errno=14\n"),
                          ("straddle", "sigaltstack(straddle): rc=-1 errno=14\n")] {
         let t = scratch(&format!("{mode}.bin"));
         let (out, _) = agree(mode, &t);

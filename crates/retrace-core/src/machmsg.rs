@@ -222,6 +222,9 @@ pub const MACH_RCV_REFUSAL: u64 = MACH_RCV_INVALID_NAME;
 /// program could not read or write. It is `MACH_RCV_INVALID_NAME`'s value (the receive half fails on
 /// the same unusable buffer), so the constant is an alias of it, not a second number.
 pub const MACH_MSG2_BAD_BUFFER: u64 = MACH_RCV_INVALID_NAME;
+/// `MACH_RCV_INVALID_DATA` (`mach/message.h`): the copyout of a reply failed. Measured natively (the
+/// fix round's `mach3409edge`) for a task_get_special_port request whose buffer ends at a page edge.
+pub const MACH_RCV_INVALID_DATA: u64 = 0x1000_4008;
 /// `KERN_MEMORY_ERROR` (`mach/kern_return.h`): what `_kernelrpc_mach_vm_allocate_trap` and
 /// `_kernelrpc_mach_vm_map_trap` answer natively when the copyin or copyout of `*addr` fails (t0 M5
 /// `machbad`, Ruling T0-l).

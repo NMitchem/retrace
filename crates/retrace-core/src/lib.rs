@@ -280,34 +280,33 @@ fn reply_reachable(b: &mut Box_, writes: &[Region]) -> bool {
     writes.iter().all(|r| b.prepare_reply(r.ipa, r.bytes.len()))
 }
 
-/// M51 §3h (t0 M6, `mm2_kobj`): a `mach_msg2` whose message buffer the program could not have passed
-/// natively. Natively the answer is `MACH_MSG2_BAD_BUFFER` in x0, a `kern_return_t` with `err` false.
-/// For the routes the box services, the request at `m.data` must be readable and, for the two replies
-/// written with no prior read (the stub and `clock_get_time`), the buffer writable; a forwarded id's
-/// header is judged for readability (the kernel reads it natively). Every reply is checked over its whole
-/// span, since it may be longer than the request. Record and replay
-/// call this with the same `(m, route)` before the route's arm.
-fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) -> bool {
+/// M51 §3h (t0 M6, `mm2_kobj`; fix round 2, T7-I2/I3): the answer natively given to a `mach_msg2` whose
+/// message buffer the program could not have passed, or None when the box may go on. Two answers, both a
+/// `kern_return_t` in x0 with `err` false, both measured:
+/// - the request at `m.data` (`send_size` bytes) is unreadable: `MACH_MSG2_BAD_BUFFER` (t0 `mm2_kobj`);
+///   a forwarded id's header is judged the same way, since the kernel reads it natively;
+/// - the request is fine but the reply does not fit: it is written to the same buffer, so
+///   `max(send_size, reply_len)` bytes must be writable (`prepare_reply` knows the AP write bit), else
+///   `MACH_RCV_INVALID_DATA` (the fix round measured it natively for a 3409 request ending at a page edge).
+///
+/// `rcv_size` is not consulted: a reply longer than it is MACH_RCV_TOO_LARGE natively, unmeasured. Record
+/// and replay call this with the same `(m, route)` before the route's arm.
+fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) -> Option<u64> {
     use machmsg::Route::*;
-    // The reply's whole span is checked too (Ruling T7-straddle): a reply longer than its request must
-    // not run into memory the program could not reach.
     let reply_len = match route {
         ServiceVmMap => machmsg::encode_vm_map_reply(0, 0).len(),
         ServiceVmRemap => machmsg::encode_vm_remap_reply(0, 0, 0, 0).len(),
         ServiceGetSpecialPort => machmsg::encode_get_special_port_reply(0, 0).len(),
         ServiceSetSpecialPort | ServicePortsRegister | StubMigReply(_) => machmsg::encode_mig_error(0, 0, 0).len(),
         ServiceClockGetTime => machmsg::encode_clock_get_time_reply(0, 0, 0).len(),
-        Forward(_) | RefuseMqSend | RefuseMqRecv | Unsupported(_) => 0,
+        Forward(_) => 0,
+        RefuseMqSend | RefuseMqRecv | Unsupported(_) => return None,
     };
-    match route {
-        ServiceVmMap | ServiceVmRemap | ServiceGetSpecialPort | ServiceSetSpecialPort | ServicePortsRegister =>
-            b.read_va_checked(m.data, m.send_size as usize).is_none() || !b.prepare_reply(m.data, reply_len),
-        // A forwarded send's header is read by the kernel natively, so one the program could not pass
-        // is the same answer (t0 M6 `mm2_kobj`, a task_info send).
-        Forward(_) => b.read_va_checked(m.data, m.send_size as usize).is_none(),
-        StubMigReply(_) | ServiceClockGetTime => !b.prepare_reply(m.data, reply_len),
-        RefuseMqSend | RefuseMqRecv | Unsupported(_) => false,
+    if b.read_va_checked(m.data, m.send_size as usize).is_none() { return Some(machmsg::MACH_MSG2_BAD_BUFFER); }
+    if reply_len != 0 && !b.prepare_reply(m.data, reply_len.max(m.send_size as usize)) {
+        return Some(machmsg::MACH_RCV_INVALID_DATA);
     }
+    None
 }
 
 /// M50 §3c (B1): a box refusal reaching the record loop. A wall, marked at its site (Task 4 marks
@@ -463,7 +462,9 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 let stream = b.console_write_stream(num, args[0]).expect("is_console_write said it is one");
                 // M51 §3h (C3): the buffer is checked as a forwarded write's would be, then read through
                 // the checked accessor; either failing is native's EFAULT, and nothing is printed.
+                // M51 §3h (M-3): every page of the span is made present first, as a path's are.
                 let Some(bytes) = b.prepare_forward_pointers(num, &args).ok()
+                    .and_then(|()| b.present_read_span(args[1], args[2] as usize).ok())
                     .and_then(|()| b.read_va_checked(args[1], args[2] as usize)) else {
                     append_refused(&mut w, &mut b, &mut count, num, args, retrace_arch::EFAULT, true, thread)?;
                     continue;
@@ -711,8 +712,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 let route = machmsg::route(&m, guest_task_port);
                 // M51 §3h (t0 M6): a message buffer the program could not have passed natively is
                 // answered before any route reads or writes it; replay's mirror makes the same call.
-                if mach2_unreachable(&mut b, &m, &route) {
-                    append_refused(&mut w, &mut b, &mut count, num, args, machmsg::MACH_MSG2_BAD_BUFFER, false, thread)?;
+                if let Some(answer) = mach2_unreachable(&mut b, &m, &route) {
+                    append_refused(&mut w, &mut b, &mut count, num, args, answer, false, thread)?;
                     continue;
                 }
                 match route {
@@ -2667,6 +2668,7 @@ impl ReplaySession {
                             if let Some(stream) = self.b.console_write_stream(num, args[0]) {
                                 // M51 §3h: the same check and read as record's console arm.
                                 if let Some(bytes) = self.b.prepare_forward_pointers(num, &args).ok()
+                                    .and_then(|()| self.b.present_read_span(args[1], args[2] as usize).ok())
                                     .and_then(|()| self.b.read_va_checked(args[1], args[2] as usize)) {
                                     self.console.write(stream, &bytes);
                                 }
@@ -2678,8 +2680,8 @@ impl ReplaySession {
                                 let m = machmsg::Msg2::unpack(&args);
                                 let route = machmsg::route(&m, self.guest_task_port);
                                 // M51 §3h: record's check, with the same arguments; its refusal is recorded.
-                                if mach2_unreachable(&mut self.b, &m, &route) {
-                                    if !refusal_recorded(*ret, *err, writes, machmsg::MACH_MSG2_BAD_BUFFER, false) {
+                                if let Some(answer) = mach2_unreachable(&mut self.b, &m, &route) {
+                                    if !refusal_recorded(*ret, *err, writes, answer, false) {
                                         return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                             "mach_msg2's message buffer {:#x} is refused on replay, but the recording \
                                              answered ret={ret:#x} err={err} with {} write(s)", m.data, writes.len()) });

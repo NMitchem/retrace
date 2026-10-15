@@ -6727,7 +6727,7 @@ impl Box_ {
     /// M51 §3h (C3): the pre-forward pointer check. For a BSD call with a row, each declared `Path`,
     /// `Source`, `NestedSource`, `Dest` or `Ptr` argument must name memory the program can reach natively:
     /// a `Path` to its NUL (at most 1024 bytes), every other kind its first byte's page; readable by EL0,
-    /// and writable by it for a `Dest` (and for the two `Ptr` out-parameters `writes_through_ptr` names).
+    /// and writable by it for a `Dest` (and for every `Ptr` the kernel writes through, `retrace_arch::ptr_use`).
     /// An argument below the first page, or with a nonzero top byte, or at a region address
     /// (`retrace_arch::region_address`) or an out-pointer natively swallowed
     /// (`retrace_arch::ignores_bad_out_pointer`), keeps today's path and the kernel answers it. So does
@@ -6758,7 +6758,14 @@ impl Box_ {
         for (i, kind) in shape.args.iter().enumerate() {
             let write = match kind {
                 Path | Source | NestedSource => false,
-                Ptr => retrace_arch::writes_through_ptr(num, i),
+                // M51 §3h (I-1): `retrace_arch::ptr_use` classifies every `Ptr` position (a unit test keeps
+                // it total); a position the kernel writes through is write-checked like a `Dest`, a
+                // range the call acts on is left to the kernel.
+                Ptr => match retrace_arch::ptr_use(num, i) {
+                    Some(retrace_arch::PtrUse::Range) => continue,
+                    Some(retrace_arch::PtrUse::Writes) => true,
+                    _ => false,
+                },
                 Dest(_) => true,
                 Scalar | Fd | NestedDest => continue,
             };
@@ -6802,6 +6809,20 @@ impl Box_ {
         } else {
             Err(retrace_arch::EFAULT)
         }
+    }
+
+    /// M51 §3h (M-3): make every page of `[va, va + len)` present for a read the box itself performs (the
+    /// console write), as `present_path` does for a path: a cache page the program never touched is paged
+    /// in, a reserved one committed. `Err(EFAULT)` at the first page the program could not read. Record
+    /// and replay call it with the same arguments before the read.
+    pub fn present_read_span(&mut self, va: u64, len: usize) -> Result<(), u64> {
+        let end = va.saturating_add(len as u64);
+        let mut a = va;
+        while a < end {
+            self.present_page(a, false)?;
+            a = (a | (GRANULE as u64 - 1)).saturating_add(1);
+        }
+        Ok(())
     }
 
     /// `prepare_forward_pointers` for a `Path`: each page up to the NUL, at most `PATH_MAX` (1024)

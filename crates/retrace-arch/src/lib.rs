@@ -1181,11 +1181,84 @@ pub fn ignores_bad_out_pointer(num: u64, i: usize) -> bool {
     matches!((num, i), (SYS_SIGPENDING, 0))
 }
 
-/// M51 §3h: is argument `i` of `num`, whose row marks it `Ptr`, a pointer the kernel WRITES through? Only
-/// the two serviced calls whose old-value out-parameters share the `Ptr` kind: `sigaction`'s `osa` and
-/// `sigaltstack`'s `oss`. A page the program may read but not write is `EFAULT` there, as natively.
+/// What the kernel does through a `Ptr` position (M51 §3h, I-1): the classification
+/// `Box_::prepare_forward_pointers` needs to know whether a page the program may read but not write is
+/// `EFAULT`. `Dest`, `Source` and `Path` rows say it in their kind; `Ptr` does not, so `ptr_use` says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtrUse {
+    /// The kernel only reads through it (`copyin`).
+    Reads,
+    /// The kernel writes through it (`copyout`), alone or after reading it (an in/out length).
+    Writes,
+    /// Which one depends on a command or flag word the row cannot see (`fcntl`, `ioctl`, a futex word), so
+    /// the check is the weaker one, readability.
+    Either,
+    /// An address range the call acts on, not a buffer (`madvise`'s `addr`).
+    Range,
+}
+
+/// M51 §3h (I-1): the use of every `Ptr` position of every row, by `(num, i)`. `None` is an UNCLASSIFIED
+/// position, and `every_ptr_position_is_classified` fails on one, so a row cannot be added without
+/// saying. Sources: the C prototype in the row's comment (BSD `<sys/*.h>`, whose `const` marks a read),
+/// and for the xnu-private calls the kernel's own `copyin`/`copyout` (`bsd/kern/*`, `bsd/vm/vm_unix.c`,
+/// `bsd/kern/kern_event.c`, `bsd/kern/pthread_synch.c`). The ambiguous rows:
+/// - `fcntl`'s and `ioctl`'s argument, `workq_kernreturn`'s `item`, `bsdthread_ctl`'s `arg3`, the futex
+///   word of `__ulock_wait` and the psynch condition variable and mutex words: `Either`, because the
+///   command, operation or flag picks the direction;
+/// - `recvfrom`'s `addrlen`, `sysctl`'s `oldlenp`, `sendfile`'s `len`, `kevent_qos`'s `data_available`:
+///   `Writes`, because each is read and then written back;
+/// - `setrlimit`'s `rlp` shares `getrlimit`'s row and is `Reads` (the man pages: `const struct rlimit *`);
+/// - emulated calls (`bsdthread_*`, `workq_*`, `kevent*`, `shared_region_check_np`, `madvise`) never reach
+///   the check; they are classified by their xnu semantics all the same.
+pub fn ptr_use(num: u64, i: usize) -> Option<PtrUse> {
+    use PtrUse::*;
+    Some(match (num, i) {
+        // sendto|nocancel `to`; connect|nocancel `name`; setrlimit `rlp`; utimes `times`; mwl `regions`;
+        // csops_audittoken `audittoken`; sigaction `nsa`; sigprocmask and __pthread_sigmask `mask`;
+        // sigaltstack `nss`; bsdthread_register `pthread_init_data`; kevent_qos and kevent `changelist`;
+        // kevent `timeout`; sysctl and sysctlbyname `name` and `newp`; (f)getattrlist `alist`;
+        // getattrlistbulk `alist`; fsgetpath `fsid`.
+        (SYS_SENDTO | 413, 4) | (SYS_CONNECT | SYS_CONNECT_NOCANCEL, 1) | (195, 1) | (138, 1)
+        | (SYS_MAP_WITH_LINKING_NP, 0) | (170, 4) | (SYS_SIGACTION, 1)
+        | (SYS_SIGPROCMASK | SYS_PTHREAD_SIGMASK, 1) | (SYS_SIGALTSTACK, 0) | (SYS_BSDTHREAD_REGISTER, 3)
+        | (SYS_KEVENT_QOS, 1) | (SYS_KEVENT, 1 | 5) | (SYS_SYSCTL | SYS_SYSCTLBYNAME, 0 | 4)
+        | (SYS_FGETATTRLIST, 1) | (220, 1) | (SYS_GETATTRLISTBULK, 1) | (427, 2)
+        // The mach traps (negative numbers, which the pre-check never judges): port_construct `options`,
+        // host_create_mach_voucher `recipes`.
+        | (MACH_PORT_CONSTRUCT_TRAP, 1) | (MACH_HOST_CREATE_MACH_VOUCHER_TRAP, 1) => Reads,
+        // recvfrom|nocancel `from` and `fromlen`; sendfile `len`; fstat|fstat64, fstatfs64, fstatat64,
+        // statfs64, stat64|lstat64 out-structs; getdirentries64 `basep`; fgetattrlist and getattrlist
+        // `attributeBuffer`; sysctl `oldlenp`; gettid's two ids; getlogin `namebuf`; gettimeofday's three;
+        // getrusage `rusage`; getrlimit `rlp`; getentropy `buffer`; sigaction `osa`; sigprocmask and
+        // __pthread_sigmask `omask`; sigpending `osv`; sigaltstack `oss`; bsdthread_create `pthread`
+        // (the kernel stores the child's port); kevent_qos `eventlist`, `data_out`, `data_available`;
+        // kevent `eventlist`; readlink `buf`; shared_region_check_np `start_address`; csrctl `useraddr`;
+        // fsgetpath `buf`.
+        (SYS_RECVFROM | SYS_RECVFROM_NOCANCEL, 4 | 5) | (337, 3) | (SYS_FSTAT | SYS_FSTAT64, 1)
+        | (SYS_FSTATFS64, 1) | (SYS_FSTATAT64, 2) | (SYS_STATFS64, 1) | (338 | 340, 1)
+        | (SYS_GETDIRENTRIES64, 3) | (SYS_FGETATTRLIST, 2) | (220, 2) | (SYS_SYSCTL | SYS_SYSCTLBYNAME, 3)
+        | (286, 0 | 1) | (49, 0) | (116, 0..=2) | (117, 1) | (SYS_GETRLIMIT, 1) | (500, 0)
+        | (SYS_SIGACTION, 2) | (SYS_SIGPROCMASK | SYS_PTHREAD_SIGMASK, 2) | (SYS_SIGPENDING, 0)
+        | (SYS_SIGALTSTACK, 1) | (SYS_BSDTHREAD_CREATE, 3) | (SYS_KEVENT_QOS, 3 | 5 | 6) | (SYS_KEVENT, 3)
+        | (58, 1) | (SYS_SHARED_REGION_CHECK_NP, 0) | (483, 1) | (427, 0)
+        // task_read_for_pid `t` (4 bytes out, bsd/kern/kern_proc.c); posix_spawn `pid` (refused, M38).
+        | (539, 2) | (244, 0)
+        // The mach traps: vm_allocate and vm_map `address`, port_construct and host_create_mach_voucher
+        // `name` and `voucher`, mach_timebase_info `info`.
+        | (MACH_VM_ALLOCATE_TRAP, 1) | (MACH_VM_MAP_TRAP, 1) | (MACH_PORT_CONSTRUCT_TRAP, 3)
+        | (MACH_HOST_CREATE_MACH_VOUCHER_TRAP, 3) | (MACH_TIMEBASE_INFO_TRAP, 0) => Writes,
+        (SYS_FCNTL | SYS_FCNTL_NOCANCEL, 2) | (SYS_IOCTL, 2) | (SYS_WORKQ_KERNRETURN, 1) | (478, 3)
+        | (SYS_ULOCK_WAIT, 1) | (SYS_PSYNCH_CVBROAD, 0 | 4) | (SYS_PSYNCH_CVSIGNAL, 0 | 4)
+        | (SYS_PSYNCH_CVWAIT, 0 | 3) => Either,
+        (75, 0) => Range,
+        _ => return None,
+    })
+}
+
+/// M51 §3h: is argument `i` of `num` a pointer the kernel WRITES through (`PtrUse::Writes`)? A page the
+/// program may read but not write is `EFAULT` there, as natively.
 pub fn writes_through_ptr(num: u64, i: usize) -> bool {
-    matches!((num, i), (SYS_SIGACTION, 2) | (SYS_SIGALTSTACK, 1))
+    ptr_use(num, i) == Some(PtrUse::Writes)
 }
 
 /// M51 §3h (Ruling T7-straddle): the fixed `sizeof` the kernel copies through argument `i` of `num`, for
@@ -3140,6 +3213,27 @@ mod tests {
         assert_eq!((fixed_span(SYS_SIGACTION, 1), fixed_span(SYS_SIGACTION, 2), fixed_span(SYS_SIGALTSTACK, 1)),
                    (Some(24), Some(16), Some(24)));
         assert_eq!(fixed_span(SYS_READ, 1), None);
+    }
+
+    // M51 §3h (I-1): a `Ptr` row position says nothing about which way the kernel copies, so every one
+    // is classified in `ptr_use`, and a new row cannot be added without saying. The classified position
+    // must also be a `Ptr` (a stale entry for a changed row fails here too).
+    #[test]
+    fn every_ptr_position_is_classified_as_read_or_write() {
+        let (mut ptrs, mut bad) = (0, Vec::new());
+        for num in (0..1024u64).chain((1..=200u64).map(|n| (-(n as i64)) as u64)) {
+            let Some(shape) = arg_kinds(num) else { continue };
+            for (i, k) in shape.args.iter().enumerate() {
+                match (k, ptr_use(num, i)) {
+                    (ArgKind::Ptr, Some(_)) => ptrs += 1,
+                    (ArgKind::Ptr, None) => bad.push(format!("syscall {num} position {i} is a Ptr that ptr_use leaves unclassified")),
+                    (_, Some(u)) => bad.push(format!("syscall {num} position {i} is classified {u:?} but its row does not say Ptr")),
+                    _ => {}
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+        assert!(ptrs > 50, "the walk found the Ptr positions ({ptrs})");
     }
 
     #[test]
