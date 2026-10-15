@@ -3,7 +3,7 @@ pub mod symbols;
 
 use std::path::Path;
 use std::rc::Rc;
-use retrace_box::{Box_, Stage2, Stop};
+use retrace_box::{Box_, FaultAction, Stage2, Stop};
 use retrace_trace::{Writer, Event, Region};
 use retrace_arch::{wall, Unsupported, WallCategory, SYS_EXIT};
 pub use retrace_box::thread::{BlockReason, ThreadState, ThreadCtx};
@@ -347,10 +347,11 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             Stop::Fault { pc, esr, far } => {
                 // M51 §3b: native's signal, si_code and si_addr for every class the box converts.
                 let (sig, si_code, si_addr) = retrace_arch::siginfo_of(esr, pc, far);
-                // M49 Ruling T3-b: the box answers the disposition AND whether the handler's frame
-                // can be pushed. A frame on memory nothing backs is native's kill, so the fault is
-                // then a crash (`faultcase_dyn deeprec h`).
-                if let Some(handler) = b.fault_handler(thread as usize, sig) {
+                // M51 §3d (T3-b): the box answers the disposition AND whether the handler's frame can
+                // be pushed; a frame it cannot push is the kill native makes, with the signal it
+                // kills with (SIGILL, or the fault's own on the main thread's stack).
+                let sig = match b.fault_action(thread as usize, sig) {
+                    FaultAction::Deliver { handler } => {
                     if b.threads().is_blocked_for(thread as usize, sig) {
                         return Err(wall(WallCategory::Signals, format!("raising blocked signal {sig} \
                             synchronously is not modelled: a fault cannot be deferred, POSIX leaves it \
@@ -374,7 +375,9 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                                                       resume_pc, writes, thread })
                         .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
                     continue;
-                }
+                    }
+                    FaultAction::Crash { sig } => sig,
+                };
                 let final_snap = b.snapshot();
                 let site = crash_site_of(&final_snap, pc);
                 w.append(&Event::Crash { pc, esr, far, sig, thread }).map_err(|e| format!("append crash: {e}"))?; count += 1;
@@ -3349,10 +3352,11 @@ impl ReplaySession {
                     // permanently correct here, matching record's fault arm, which tags its
                     // SignalDelivery with the live `thread`.
                     let cur = self.b.threads().current();
-                    // M49 Ruling T3-b: the question record's arm asks, of the same box state.
-                    if self.b.fault_handler(cur, sig).is_some() {
-                        return self.mirror_delivery(cur, sig, si_code, si_addr, esr, far, pc);
-                    }
+                    // M49 Ruling T3-b, M51 §3d: the question record's arm asks, of the same box state.
+                    let sig = match self.b.fault_action(cur, sig) {
+                        FaultAction::Deliver { .. } => return self.mirror_delivery(cur, sig, si_code, si_addr, esr, far, pc),
+                        FaultAction::Crash { sig } => sig,
+                    };
                     // M6 mirror of record's crash arm. The triple compare IS the divergence check
                     // (symmetry rule 1); then the final-memory landmark, exactly like Exit.
                     match self.events.get(self.idx) {

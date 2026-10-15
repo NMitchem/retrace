@@ -11,7 +11,7 @@
 // So this uses the pattern every other box test uses — load the real static guest and run it to its
 // first syscall — which gives genuine ELR_EL1/SP_EL0/SPSR_EL1 state instead of a hand-set fiction.
 use retrace_box::{
-    Box_, Disposition, SigAction, FRAME_LEN, FRAME_MCONTEXT_OFF, FRAME_UCONTEXT_OFF,
+    Box_, Disposition, FaultAction, SigAction, FRAME_LEN, FRAME_MCONTEXT_OFF, FRAME_UCONTEXT_OFF,
     PSTATE_USER_MASK, sigreturn_token,
 };
 use retrace_guest::{parse_macho, HELLO};
@@ -144,6 +144,21 @@ fn on_altstack_is_false_when_the_guest_is_on_its_normal_stack() {
     assert!(!b.on_altstack(), "no alt stack installed at all");
     b.threads_mut().set_altstack_of(0, Some((0x1_c000, 0x100, 0)));
     assert!(!b.on_altstack(), "installed, but sp is not inside it");
+}
+
+/// M51 §3d (T3-b): what a fault's signal does. No handler is a crash with the fault's own signal; a
+/// handler whose frame lands in backing is delivered; one whose frame would go on an alternate stack
+/// nothing backs is the kill native makes, SIGILL.
+#[test]
+fn fault_action_kills_with_sigill_when_the_handlers_frame_cannot_be_pushed() {
+    let mut b = boxed();
+    assert_eq!(b.fault_action(0, 11), FaultAction::Crash { sig: 11 }, "no handler");
+    b.sigtable_mut().set_action(11, handler(retrace_arch::SA_SIGINFO | retrace_arch::SA_ONSTACK, 0));
+    assert_eq!(b.fault_action(0, 11), FaultAction::Deliver { handler: 0xabc0 }, "the normal stack is backed");
+    b.threads_mut().set_altstack_of(0, Some((0x1_c000, 0x2000, 0)));
+    assert_eq!(b.fault_action(0, 11), FaultAction::Deliver { handler: 0xabc0 }, "an alternate stack inside the guest's stack");
+    b.threads_mut().set_altstack_of(0, Some((0x8000_0000, 0x1_0000, 0)));
+    assert_eq!(b.fault_action(0, 11), FaultAction::Crash { sig: retrace_arch::SIGILL }, "an alternate stack nothing backs");
 }
 
 // ---- M12 t5: sigreturn ------------------------------------------------------------------------

@@ -427,6 +427,8 @@ pub const CF_RS_FSYNC: &str = concat!(env!("OUT_DIR"), "/cf_rs_fsync");
 pub const FID_OUTPUT: &str = concat!(env!("OUT_DIR"), "/fid_output");
 /// M51 (spec §3b): one trap per mode (see the source).
 pub const FID_TRAPS: &str = concat!(env!("OUT_DIR"), "/fid_traps");
+/// M51 (spec §3d): a fault whose handler's frame may not be pushable (see the source).
+pub const FID_FRAMES: &str = concat!(env!("OUT_DIR"), "/fid_frames");
 /// iostream hello.
 pub const FC_CPP_HELLO: &str = concat!(env!("OUT_DIR"), "/fc_cpp_hello");
 /// A C++ exception thrown and caught.

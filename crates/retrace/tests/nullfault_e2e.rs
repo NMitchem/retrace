@@ -249,23 +249,20 @@ fn a_converted_fault_on_a_child_thread_is_that_threads_crash() {
     let _ = std::fs::remove_file(&trace);
 }
 
-/// Review Focus 3, as measured at plan time. A jump to 1 GiB does NOT reach stage 2: stage 1 maps
-/// that address as a data block, whose UXN makes the fetch a stage-1 permission fault (ESR
-/// 0x8200000e, level 2). `signal_of_esr` answers a permission fault SIGBUS/BUS_ADRALN (M13), where
-/// native delivers SIGSEGV/SEGV_ACCERR. F does not touch a permission fault (spec §7), so this
-/// pins the deviation by value, green before and after Task 3; Task 9 names it under Known limits.
-/// `jumpgone`, in `CASES`, is the instruction abort that does reach stage 2, and it matches native.
+/// M51 §3d (J1): a jump to 1 GiB, which nothing backs. retrace's stage 1 maps that address as a data
+/// block, whose UXN made the fetch a stage-1 permission fault (ESR 0x8200000e) that this test pinned
+/// as a deviation until M51. Natively the page is unmapped and the fault is a translation fault at
+/// level 2, and J1 reports that: SIGSEGV/SEGV_ACCERR to a handler, ESR 0x82000006 and exit 139
+/// without one. `jumpgone`, in `CASES`, is the instruction abort that reaches stage 2.
 #[test]
-fn a_jump_into_unbacked_data_memory_is_still_a_stage1_permission_fault() {
+fn a_jump_into_unbacked_data_memory_is_the_translation_fault_native_takes() {
     let (want, ncode) = native(&["jump1g", "h"]);
     assert_eq!(ncode, 42);
     assert_eq!(String::from_utf8_lossy(&want),
         "case jump1g\nHANDLER sig=11 si_code=2 si_addr=0x40000000 ec=0x20 wnr=0 on=main\n");
     let (rec, trace) = util::record_dynamic_args(FAULTCASE_DYN, &["jump1g", "h"]);
     assert_eq!(rec.code, 42, "{}", rec.stderr);
-    assert_eq!(String::from_utf8_lossy(&rec.stdout),
-        "case jump1g\nHANDLER sig=10 si_code=1 si_addr=0x40000000 ec=0x20 wnr=0 on=main\n",
-        "retrace's SIGBUS/BUS_ADRALN, the deviation this test pins");
+    assert_eq!(rec.stdout, want, "native's SIGSEGV/SEGV_ACCERR");
     for i in 1..=2 {
         let rp = util::replay(&trace);
         assert_eq!(rp.code, 42, "replay {i}: {}", rp.stderr);
@@ -273,11 +270,26 @@ fn a_jump_into_unbacked_data_memory_is_still_a_stage1_permission_fault() {
     }
     let _ = std::fs::remove_file(&trace);
 
+    let (_, ncode) = native(&["jump1g"]);
+    assert_eq!(ncode, 139, "native");
     let (rec, trace) = util::record_dynamic_args(FAULTCASE_DYN, &["jump1g"]);
-    assert_eq!(rec.code, 138, "{}", rec.stderr); // M51 Task 2: a permission fault's SIGBUS, until J1 (Task 4)
+    assert_eq!(rec.code, 139, "{}", rec.stderr);
     let ev = Reader::open(&trace).unwrap();
     let (pc, esr, far, _) = terminal_crash("jump1g", &ev);
-    assert_eq!((pc, esr, far), (0x4000_0000, 0x8200_000e, 0x4000_0000), "a stage-1 permission fault at level 2");
+    assert_eq!((pc, esr, far), (0x4000_0000, 0x8200_0006, 0x4000_0000), "a translation fault at level 2, native's syndrome");
+    let rp = util::replay(&trace);
+    assert_eq!(rp.code, 139, "replay: {}", rp.stderr);
+    let _ = std::fs::remove_file(&trace);
+
+    // J1's other side: a jump into a page that IS backed (read-write heap) is a permission fault
+    // natively too (static `native-traps.txt`, `jumpheap`: ESR 0x8200000f, SIGBUS), and stays one.
+    let (_, ncode) = native(&["jumpheap"]);
+    assert_eq!(ncode, 138, "native");
+    let (rec, trace) = util::record_dynamic_args(FAULTCASE_DYN, &["jumpheap"]);
+    assert_eq!(rec.code, 138, "{}", rec.stderr);
+    let ev = Reader::open(&trace).unwrap();
+    let (pc, esr, far, _) = terminal_crash("jumpheap", &ev);
+    assert_eq!((esr & !0x3, pc), (0x8200_000c, far), "a permission fault at the page's own pc");
     let _ = std::fs::remove_file(&trace);
 }
 
@@ -334,7 +346,7 @@ fn the_tsd_page_is_still_readable_a_named_limit() {
 
 /// Ruling T3-b. With a handler but no alternate stack, the overflowing thread's handler frame would
 /// sit in the guard page, which nothing backs: native cannot push it and dies of the signal (139,
-/// measured). F2 brings this fault to the delivery arm, so `Box_::fault_handler` must answer
+/// measured). F2 brings this fault to the delivery arm, so `Box_::fault_action` must answer
 /// "terminal" rather than let `write_guest` panic on the frame.
 #[test]
 fn a_stack_overflow_with_a_handler_but_no_alternate_stack_dies_as_native_does() {

@@ -2,6 +2,7 @@
 # refuse_audit.rs fails unless this list and the source agree. Edit it in the same commit as a site.
 crates/retrace-box/src/lib.rs	assert_no_stranded_signals	Signals	thread
 crates/retrace-box/src/lib.rs	deliver_signal_to	Signals	thread
+crates/retrace-box/src/lib.rs	deliver_signal_to	Signals	a handler's signal frame at
 crates/retrace-box/src/lib.rs	guest_bsdthread_create	Threads	M14: bsdthread_create before bsdthread_r
 crates/retrace-box/src/lib.rs	guest_bsdthread_create	Threads	M14: bsdthread_create pthread struct
 crates/retrace-box/src/lib.rs	guest_mmap_file	Memory	guest_mmap_file: neither pread nor mmap

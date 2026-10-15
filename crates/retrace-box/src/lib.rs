@@ -832,6 +832,18 @@ pub enum Stop {
     Unsupported(Unsupported),
 }
 
+/// M51 §3d (T3-b): what a hardware fault's signal does to the thread that took it, as
+/// [`Box_::fault_action`] decides it. Record's fault arm and replay's mirror both ask, of the same
+/// box state (symmetry rule 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultAction {
+    /// Run the handler the guest installed.
+    Deliver { handler: u64 },
+    /// End the process with `sig`: the fault's own signal with no handler, or the kill native makes
+    /// when the handler's frame cannot be pushed.
+    Crash { sig: u64 },
+}
+
 /// M49 §3d F1: what [`Box_::resolve_stage2`] made of a `Stop::Other`. Record, replay and the four
 /// step loops in `retrace-core` all ask that one method, so they decide alike by construction
 /// (symmetry rule 1) rather than by six copies of a chain agreeing.
@@ -3482,6 +3494,8 @@ impl Box_ {
                             let far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
                             self.last_far = far;
+                            // M51 §3d (J1): native's syndrome for a jump into memory nothing backs.
+                            let esr1 = self.native_abort_syndrome(esr1, far);
                             return Stop::Fault { pc, esr: esr1, far };
                         }
                         _ => {
@@ -3790,6 +3804,8 @@ impl Box_ {
                             let far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
                             self.last_far = far;
+                            // M51 §3d (J1): native's syndrome for a jump into memory nothing backs.
+                            let esr1 = self.native_abort_syndrome(esr1, far);
                             return Stop::Fault { pc, esr: esr1, far };
                         }
                         _ => {
@@ -5093,34 +5109,64 @@ impl Box_ {
     /// must not — see `choose_frame_base`, which is the only real consumer.
     pub fn on_altstack(&self) -> bool { self.on_altstack_of(self.threads.current()) }
 
-    /// M49 Ruling T3-b: the handler a hardware fault on thread `tid` runs, or `None` when the fault
-    /// is terminal. A handler runs only if its frame can be pushed. When a page of
-    /// `[frame_base, frame_base + FRAME_LEN)` is neither backed nor inside a reservation, the kernel
-    /// cannot build the frame and the process dies of the signal. Native shows this:
-    /// `faultcase_dyn deeprec h`, a stack overflow with a handler and no alternate stack, exits 139.
-    /// Before M49 that fault never got here (it was a recorder error). F2 brings it, and
-    /// `deliver_signal_to` would panic in `write_guest` on the unbacked frame.
+    /// M51 §3d (T3-b), after M49's Ruling T3-b: what the fault's signal `sig` does on thread `tid`.
+    /// No handler: the process dies of `sig`. A handler whose frame can be pushed
+    /// (`frame_pushable`) runs. Otherwise the kernel cannot build the frame and kills the process
+    /// (t0 M2): with SIGILL, except for a frame on the main thread's own stack, where it dies of `sig`
+    /// (static `native-overflow-small.txt`: a main-stack overflow with a handler exits 139, a child's
+    /// 132; `native-badalt.txt`: an unusable alternate stack exits 132 on either thread).
     ///
-    /// `frame_base` is `choose_frame_base`'s, computed as `deliver_signal_to` computes it, from the
-    /// live SP_EL0 for the running thread and the saved one otherwise (`on_altstack_of`'s
-    /// discipline). A reservation page counts as pushable, which leaves `write_guest`'s existing
-    /// panic on an uncommitted one as it was: unmeasured, and unchanged by M49.
-    pub fn fault_handler(&self, tid: usize, sig: u64) -> Option<u64> {
+    /// The frame base is `choose_frame_base`'s, as `deliver_signal_to` computes it, from the live
+    /// SP_EL0 for the running thread and the saved one otherwise (`on_altstack_of`'s discipline).
+    pub fn fault_action(&self, tid: usize, sig: u64) -> FaultAction {
         let act = self.sigtable.action(sig);
-        let Disposition::Handler(handler) = act.disp else { return None };
+        let Disposition::Handler(handler) = act.disp else { return FaultAction::Crash { sig } };
         let sp = if tid == self.threads.current() {
             self.vcpu.get_sys(sysreg::SP_EL0).unwrap()
         } else {
             self.threads.ctx_of(tid).regs.sp_el0
         };
-        let (base, _) = choose_frame_base(sp, act, self.threads.altstack_of(tid), self.on_altstack_of(tid));
+        let (base, on_alt) = choose_frame_base(sp, act, self.threads.altstack_of(tid), self.on_altstack_of(tid));
+        if self.frame_pushable(base) { return FaultAction::Deliver { handler }; }
+        FaultAction::Crash { sig: if !on_alt && tid == 0 { sig } else { retrace_arch::SIGILL } }
+    }
+
+    /// M51 §3d: can the kernel push a signal frame at `[base, base + FRAME_LEN)`? Each page must
+    /// translate at stage 1, be present (backed, or inside a reservation, which the frame's write
+    /// commits as a guest store would), and be EL0-writable (`ATTR_DATA`). A `PROT_NONE` page or an
+    /// unmapped one is not. With the MMU off there is no leaf, so presence decides. C1: a page the
+    /// program made read-only is still `ATTR_DATA` here, so this cannot see it.
+    fn frame_pushable(&self, base: u64) -> bool {
         let g = GRANULE as u64;
         let mut page = base & !(g - 1);
         while page < base + FRAME_LEN as u64 {
-            if self.host_span(page).is_none() && !self.in_reservation(page) { return None; }
+            let Some((ipa, leaf)) = self.va_leaf(page) else { return false };
+            if self.host_span(ipa).is_none() && !self.in_reservation(ipa) { return false; }
+            if leaf.is_some_and(|l| !excl::el0_writable(l)) { return false; }
             page += g;
         }
-        Some(handler)
+        true
+    }
+
+    /// M51 §3d (J1): the syndrome native reports for an EL0 instruction abort. retrace's stage 1
+    /// maps every block it has not promoted as `ATTR_DATA` (EL0 read-write, UXN), so a jump to an
+    /// address nothing backs is a stage-1 PERMISSION fault here, where natively the page is not mapped
+    /// and the fault is a TRANSLATION fault (static `native-traps.txt`, `jump1g`: ESR 0x82000006,
+    /// SIGSEGV `SEGV_ACCERR`). When the page is not backed, not reserved and not in the shared-cache
+    /// window, and its leaf is `ATTR_DATA`, the IFSC becomes a translation fault at the leaf's level,
+    /// in the returned syndrome and in ESR_EL1. Every other syndrome is returned unchanged: a jump
+    /// into a backed data page is a permission fault natively too (`jumpheap`, 0x8200000f, SIGBUS).
+    /// Below the trace: `run()` and `run_one_for_step()` both call it, on record and replay alike.
+    fn native_abort_syndrome(&mut self, esr1: u64, far: u64) -> u64 {
+        if (esr1 >> 26) & 0x3f != 0x20 || !(0x0c..=0x0f).contains(&(esr1 & 0x3f)) { return esr1; }
+        if (SHARED_REGION_START..SHARED_REGION_END).contains(&far) { return esr1; }
+        let Some((ipa, Some(leaf))) = self.va_leaf(far) else { return esr1 };
+        if self.host_span(ipa).is_some() || self.in_reservation(ipa) { return esr1; }
+        if !excl::el0_writable(leaf) || leaf & UXN == 0 { return esr1; }
+        let level = if leaf & 0x3 == DESC_BLOCK { 2 } else { 3 };
+        let esr = (esr1 & !0x3f) | (0x04 + level);
+        self.vcpu.set_sys(sysreg::ESR_EL1, esr).unwrap();
+        esr
     }
 
     /// The saved PSTATE at the current trap (SPSR_EL1) — the sibling of `position()`'s ELR_EL1.
@@ -5333,7 +5379,14 @@ impl Box_ {
             act, frame_base, on_alt,
         };
         let (bytes, entry) = build_frame(&inp);
-        self.write_guest(frame_base, &bytes);
+        // M51 §3d (C12): the fault path asks `fault_action` first, so only a raised signal reaches
+        // here with a frame nothing can hold. Native kills with SIGILL there too; recording that for a
+        // raise is owed, so it stays a wall rather than a write into memory the guest does not have.
+        if !self.frame_pushable(frame_base) {
+            retrace_arch::refuse!(Signals, "a handler's signal frame at {frame_base:#x} cannot be pushed (a page is unmapped or not writable); native kills the process with SIGILL, which retrace does not record for a raised signal yet");
+        }
+        self.write_va_committing(frame_base, &bytes)
+            .unwrap_or_else(|m| panic!("M51: the frame frame_pushable passed: {m}"));
 
         // Block for the handler's duration, unless SA_NODEFER — on the RECEIVING thread.
         let mut newmask = self.threads.mask_of(tid) | act.mask;

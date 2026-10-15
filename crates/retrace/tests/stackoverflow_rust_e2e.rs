@@ -79,8 +79,13 @@ fn a_rust_stack_overflow_now_reaches_its_guard_page_and_a_different_wall() {
     assert!(!err.contains("(UNMAPPED)"),
         "M8 R3 regressed: the recursion ran off the backed stack into unbacked IPA again instead of \
          growing into the reservation; stderr:\n{err}");
-    assert!(err.contains("blocked signal 10"),
-        "the run must reach signal delivery for the guard-page fault — which it can only do by \
-         growing through the reservation and faulting at STAGE 1 on the guard — and stop at the \
-         signal-model wall named in the #[ignore] above; stderr:\n{err}");
+    // M51 §3d: the wall this pinned (`blocked signal 10`) is no longer reached. libstd's SIGBUS
+    // handler is SA_ONSTACK, but this recording shows no alternate stack set (one `sigaltstack`, a
+    // query), so the handler's frame would go on the overflowed main stack, which nothing backs;
+    // `fault_action` then ends the process with the fault's own signal, as native does for a frame
+    // on the main stack. The run still reaches the guard page at stage 1 (SIGBUS, a permission
+    // fault); it just no longer reaches the blocked-signal assert. Native's 134 is still owed.
+    assert!(err.contains("the program was killed by SIGBUS (fault at"),
+        "the run must reach the guard page and end in the SIGBUS crash `fault_action` records for a \
+         frame that cannot be pushed; stderr:\n{err}");
 }
