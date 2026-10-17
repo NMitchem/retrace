@@ -8,12 +8,12 @@ fn a_self_raised_sigabrt_records_and_replays_with_the_recorder_intact() {
     let (rec, trace) = util::record(retrace_guest::RAISE);
     // 134 == 128 + SIGABRT(6), the convention M6 established (139 == 128 + SIGSEGV).
     assert_eq!(rec.code, 134, "the GUEST died by signal 6; stderr: {}", rec.stderr);
-    assert!(rec.stderr.contains("guest terminated by signal 6"), "stderr: {}", rec.stderr);
+    assert!(rec.stderr.contains("retrace: the program was killed by SIGABRT"), "stderr: {}", rec.stderr);
 
     for i in 0..2 {
         let rep = util::replay(&trace);
         assert_eq!(rep.code, 134, "replay {i}; stderr: {}", rep.stderr);
-        assert!(rep.stderr.contains("guest terminated by signal 6"), "replay {i}: {}", rep.stderr);
+        assert!(rep.stderr.contains("retrace: the program was killed by SIGABRT"), "replay {i}: {}", rep.stderr);
         assert_eq!(rep.stdout, rec.stdout, "replay {i} stdout diverged");
     }
 }

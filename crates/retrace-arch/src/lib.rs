@@ -1129,6 +1129,12 @@ pub const F_PREALLOCATE: u64 = 42;
 pub const F_NOCACHE: u64 = 48;
 pub const F_GETPATH: u64 = 50;
 pub const F_DUPFD_CLOEXEC: u64 = 67;
+pub const F_SETOWN: u64 = 6;
+pub const F_NODIRECT: u64 = 62;
+pub const F_RDAHEAD: u64 = 45;
+pub const F_SINGLE_WRITER: u64 = 76;
+pub const F_SETNOSIGPIPE: u64 = 73;
+pub const F_SETPROTECTIONCLASS: u64 = 64;
 pub const F_ADDFILESIGS_RETURN: u64 = 97;
 pub const F_CHECK_LV: u64 = 98;
 pub const FIOCLEX: u64 = 0x2000_6601;
@@ -1150,17 +1156,198 @@ pub fn shape_of(num: u64, args: &[u64; 8]) -> &'static Shape {
     // and the row-identity argument want one address).
     static FCNTL_INT: Shape = Shape { args: &[Fd, Scalar, Scalar], ret: Ret::Plain };
     static IOCTL_INT: Shape = Shape { args: &[Fd, Scalar, Scalar], ret: Ret::Plain };
+    // FW-2: the rows whose buffer direction follows an op word, as the op's own shape.
+    static PROC_INFO_COPYIN: Shape = Shape { args: &[Scalar, Scalar, Scalar, Scalar, Source, Scalar], ret: Ret::Plain };
+    static PROC_INFO_NOBUF: Shape = Shape { args: &[Scalar, Scalar, Scalar, Scalar, Scalar, Scalar], ret: Ret::Plain };
+    static CSOPS_COPYIN: Shape = Shape { args: &[Scalar, Scalar, Source, Scalar], ret: Ret::Plain };
+    static CSOPS_AT_COPYIN: Shape = Shape { args: &[Scalar, Scalar, Source, Scalar, Ptr], ret: Ret::Plain };
+    static CSRCTL_COPYIN: Shape = Shape { args: &[Scalar, Source, Scalar], ret: Ret::Plain };
     match num {
         SYS_FCNTL | SYS_FCNTL_NOCANCEL => match args[1] {
-            F_DUPFD | F_GETFD | F_SETFD | F_GETFL | F_SETFL | F_NOCACHE | F_DUPFD_CLOEXEC => &FCNTL_INT,
+            // FW-R2, three ways. (a) Scalar: every `<sys/fcntl.h>` command whose argument is an int or
+            // nothing: the descriptor and file flags (0-4), the owner (5, 6), F_FLUSH_DATA and F_CHKCLEAN
+            // (40, 41), F_RDAHEAD, F_NOCACHE, F_FULLFSYNC, the freeze pair, F_GLOBAL_NOCACHE (45, 48, 51,
+            // 53-55), F_NODIRECT, the protection class pair, F_DUPFD_CLOEXEC, F_SETBACKINGSTORE (a flag),
+            // the SIGPIPE pair, F_SINGLE_WRITER, F_GETPROTECTIONLEVEL, F_BARRIERFSYNC, F_SETLEASE (an int),
+            // F_GETLEASE (no argument), F_TRANSFEREXTENTS (an fd) and F_NOCACHE_EXT. For a no-argument
+            // command the third word is whatever the caller's register held and is not an address.
+            0..=6 | 40 | 41 | 45 | 48 | 51 | 53..=55 | 62..=64 | 67 | 70 | 73 | 74 | 76 | 77 | 85 | 106 | 107
+            | 110 | 112 => &FCNTL_INT,
+            // (b) The file-system-specific base (0x10000 and up) follows the ioctl encoding rule, as the
+            // pre-forward check applies to `ioctl`: a pointer when the command carries IOC_IN or IOC_OUT and
+            // a length, else an integer.
+            c if c >= 0x1_0000 => {
+                if c & (IOC_IN | IOC_OUT) != 0 && iocparm_len(c) > 0 { forwarded_shape(num) } else { &FCNTL_INT }
+            }
+            // (c) Every other command keeps the row's `Ptr`: the header's struct and buffer commands, and any
+            // command the header does not list (xnu-private ones). An unknown command that writes through a
+            // pointer must never reach the host untranslated (a silent copyout into retrace's own memory);
+            // a false EFAULT on a private integer command is the visible, lesser failure, named in Known limits.
             _ => forwarded_shape(num),
         },
+        336 => match args[0] {
+            PROC_INFO_CALL_SETCONTROL => &PROC_INFO_COPYIN,
+            PROC_INFO_CALL_SET_DYLD_IMAGES => &PROC_INFO_NOBUF,
+            _ => forwarded_shape(num),
+        },
+        169 if csops_copies_in(args[1]) => &CSOPS_COPYIN,
+        170 if csops_copies_in(args[1]) => &CSOPS_AT_COPYIN,
+        483 if args[0] == CSR_SYSCALL_CHECK => &CSRCTL_COPYIN,
         SYS_IOCTL => match args[1] {
             FIOCLEX | FIONCLEX => &IOCTL_INT,
             _ => forwarded_shape(num),
         },
         _ => forwarded_shape(num),
     }
+}
+
+/// `sys/proc_info.h`: `PROC_INFO_CALL_SETCONTROL`. `proc_info_internal` copies the buffer IN for
+/// `PROC_SELFSET_THREADNAME` (`copyin(buffer, name, min(buffersize, MAXTHREADNAMESIZE - 1))`, bsd/kern/proc_info.c).
+pub const PROC_INFO_CALL_SETCONTROL: u64 = 5;
+/// `PROC_INFO_CALL_SET_DYLD_IMAGES`: "don't need to copyin the buffer. just setting the buffer range in the
+/// task struct" (`proc_set_dyld_images`): nothing is transferred.
+pub const PROC_INFO_CALL_SET_DYLD_IMAGES: u64 = 15;
+/// `sys/csr.h`: `CSR_SYSCALL_CHECK` is op 0, which `copyin`s a `csr_config_t`; op 1
+/// (`CSR_SYSCALL_GET_ACTIVE_CONFIG`) copies out. Measured native, a read-only buffer: op 0 passes the copyin
+/// (EPERM past it), op 1 answers EFAULT. The fix brief called the copy-in op 1; native says 0.
+pub const CSR_SYSCALL_CHECK: u64 = 0;
+
+/// `csops`' ops (`sys/codesign.h`) that copy their buffer IN: `CS_OPS_SET_STATUS` (1), a 4-byte flags word,
+/// and `CS_OPS_SETEXECSEG` (9), a `csops_exec_seg` struct (`csops_internal`, bsd/kern/kern_proc.c). Not
+/// measured natively: `SET_STATUS` on the probe's own pid killed the probe.
+pub fn csops_copies_in(op: u64) -> bool { matches!(op, 1 | 9) }
+
+/// `dest_buffer`, keyed on the op word the way `shape_of` is: the rows whose buffer the kernel only reads
+/// (proc_info `SETCONTROL`, csops `SET_STATUS`/`SETEXECSEG`) or never touches (proc_info `SET_DYLD_IMAGES`)
+/// have no destination to size a diff window by or to clamp a length against.
+pub fn dest_buffer_for(num: u64, args: &[u64; 8]) -> Option<(usize, DestLen)> {
+    let in_only = match num {
+        336 => matches!(args[0], PROC_INFO_CALL_SETCONTROL | PROC_INFO_CALL_SET_DYLD_IMAGES),
+        169 | 170 => csops_copies_in(args[1]),
+        _ => false,
+    };
+    if in_only { None } else { dest_buffer(num) }
+}
+
+/// M51 §3h (C3): is argument `i` of `num` an address range the call acts on, rather than a buffer the
+/// kernel reads or writes? Natively an unmapped range there is `ENOMEM` or `EINVAL`, never `EFAULT`,
+/// so `Box_::prepare_forward_pointers` leaves it to the kernel. msync's `addr` is `Source` in its row
+/// for the canary decision (M30), but it is not a buffer. t0 M6 lists no other forwarded row.
+pub fn region_address(num: u64, i: usize) -> bool {
+    // msync (65) and msync_nocancel (405): `addr`.
+    matches!((num, i), (65 | 405, 0))
+}
+
+/// M51 §3h (t0 M6, Ruling T0-h): is argument `i` of `num` an out-pointer natively swallowed when bad:
+/// the call returns 0 and writes nothing? `sigpending`'s set is one (measured: ret 0 for a bad
+/// pointer), so `Box_::prepare_forward_pointers` skips it and the serviced arm skips the write.
+/// `sigprocmask`'s `oldset` behaves the same, but that arm never reaches the pre-forward check: it
+/// applies the new mask and checks the write itself.
+pub fn ignores_bad_out_pointer(num: u64, i: usize) -> bool {
+    matches!((num, i), (SYS_SIGPENDING, 0))
+}
+
+/// What the kernel does through a `Ptr` position (M51 §3h, I-1): the classification
+/// `Box_::prepare_forward_pointers` needs to know whether a page the program may read but not write is
+/// `EFAULT`. `Dest`, `Source` and `Path` rows say it in their kind; `Ptr` does not, so `ptr_use` says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtrUse {
+    /// The kernel only reads through it (`copyin`).
+    Reads,
+    /// The kernel writes through it (`copyout`), alone or after reading it (an in/out length).
+    Writes,
+    /// Which one depends on a command or flag word the row cannot see (`fcntl`, `ioctl`, a futex word), so
+    /// the check is the weaker one, readability.
+    Either,
+    /// An address range the call acts on, not a buffer (`madvise`'s `addr`).
+    Range,
+}
+
+/// M51 §3h (I-1): the use of every `Ptr` position of every row, by `(num, i)`. `None` is an UNCLASSIFIED
+/// position, and `every_ptr_position_is_classified` fails on one, so a row cannot be added without
+/// saying. Sources: the C prototype in the row's comment (BSD `<sys/*.h>`, whose `const` marks a read),
+/// and for the xnu-private calls the kernel's own `copyin`/`copyout` (`bsd/kern/*`, `bsd/vm/vm_unix.c`,
+/// `bsd/kern/kern_event.c`, `bsd/kern/pthread_synch.c`). The ambiguous rows:
+/// - `fcntl`'s and `ioctl`'s argument, `workq_kernreturn`'s `item`, `bsdthread_ctl`'s `arg3`, the futex
+///   word of `__ulock_wait` and the psynch condition variable and mutex words: `Either`, because the
+///   command, operation or flag picks the direction;
+/// - `recvfrom`'s `addrlen`, `sysctl`'s `oldlenp`, `sendfile`'s `len`, `kevent_qos`'s `data_available`:
+///   `Writes`, because each is read and then written back;
+/// - `setrlimit`'s `rlp` shares `getrlimit`'s row and is `Reads` (the man pages: `const struct rlimit *`);
+/// - emulated calls (`bsdthread_*`, `workq_*`, `kevent*`, `shared_region_check_np`, `madvise`) never reach
+///   the check; they are classified by their xnu semantics all the same.
+pub fn ptr_use(num: u64, i: usize) -> Option<PtrUse> {
+    use PtrUse::*;
+    Some(match (num, i) {
+        // sendto|nocancel `to`; connect|nocancel `name`; setrlimit `rlp`; utimes `times`; mwl `regions`;
+        // csops_audittoken `audittoken`; sigaction `nsa`; sigprocmask and __pthread_sigmask `mask`;
+        // sigaltstack `nss`; bsdthread_register `pthread_init_data`; kevent_qos and kevent `changelist`;
+        // kevent `timeout`; sysctl and sysctlbyname `name` and `newp`; (f)getattrlist `alist`;
+        // getattrlistbulk `alist`; fsgetpath `fsid`.
+        (SYS_SENDTO | 413, 4) | (SYS_CONNECT | SYS_CONNECT_NOCANCEL, 1) | (195, 1) | (138, 1)
+        | (SYS_MAP_WITH_LINKING_NP, 0) | (170, 4) | (SYS_SIGACTION, 1)
+        | (SYS_SIGPROCMASK | SYS_PTHREAD_SIGMASK, 1) | (SYS_SIGALTSTACK, 0) | (SYS_BSDTHREAD_REGISTER, 3)
+        | (SYS_KEVENT_QOS, 1) | (SYS_KEVENT, 1 | 5) | (SYS_SYSCTL | SYS_SYSCTLBYNAME, 0 | 4)
+        | (SYS_FGETATTRLIST, 1) | (220, 1) | (SYS_GETATTRLISTBULK, 1) | (427, 2)
+        // The mach traps (negative numbers, which the pre-check never judges): port_construct `options`,
+        // host_create_mach_voucher `recipes`.
+        | (MACH_PORT_CONSTRUCT_TRAP, 1) | (MACH_HOST_CREATE_MACH_VOUCHER_TRAP, 1) => Reads,
+        // recvfrom|nocancel `from` and `fromlen`; sendfile `len`; fstat|fstat64, fstatfs64, fstatat64,
+        // statfs64, stat64|lstat64 out-structs; getdirentries64 `basep`; fgetattrlist and getattrlist
+        // `attributeBuffer`; sysctl `oldlenp`; gettid's two ids; getlogin `namebuf`; gettimeofday's three;
+        // getrusage `rusage`; getrlimit `rlp`; getentropy `buffer`; sigaction `osa`; sigprocmask and
+        // __pthread_sigmask `omask`; sigpending `osv`; sigaltstack `oss`; bsdthread_create `pthread`
+        // (the kernel stores the child's port); kevent_qos `eventlist`, `data_out`, `data_available`;
+        // kevent `eventlist`; readlink `buf`; shared_region_check_np `start_address`; csrctl `useraddr`;
+        // fsgetpath `buf`.
+        (SYS_RECVFROM | SYS_RECVFROM_NOCANCEL, 4 | 5) | (337, 3) | (SYS_FSTAT | SYS_FSTAT64, 1)
+        | (SYS_FSTATFS64, 1) | (SYS_FSTATAT64, 2) | (SYS_STATFS64, 1) | (338 | 340, 1)
+        | (SYS_GETDIRENTRIES64, 3) | (SYS_FGETATTRLIST, 2) | (220, 2) | (SYS_SYSCTL | SYS_SYSCTLBYNAME, 3)
+        | (286, 0 | 1) | (49, 0) | (116, 0..=2) | (117, 1) | (SYS_GETRLIMIT, 1) | (500, 0)
+        | (SYS_SIGACTION, 2) | (SYS_SIGPROCMASK | SYS_PTHREAD_SIGMASK, 2) | (SYS_SIGPENDING, 0)
+        | (SYS_SIGALTSTACK, 1) | (SYS_BSDTHREAD_CREATE, 3) | (SYS_KEVENT_QOS, 3 | 5 | 6) | (SYS_KEVENT, 3)
+        | (58, 1) | (SYS_SHARED_REGION_CHECK_NP, 0) | (483, 1) | (427, 0)
+        // task_read_for_pid `t` (4 bytes out, bsd/kern/kern_proc.c); posix_spawn `pid` (refused, M38).
+        | (539, 2) | (244, 0)
+        // The mach traps: vm_allocate and vm_map `address`, port_construct and host_create_mach_voucher
+        // `name` and `voucher`, mach_timebase_info `info`.
+        | (MACH_VM_ALLOCATE_TRAP, 1) | (MACH_VM_MAP_TRAP, 1) | (MACH_PORT_CONSTRUCT_TRAP, 3)
+        | (MACH_HOST_CREATE_MACH_VOUCHER_TRAP, 3) | (MACH_TIMEBASE_INFO_TRAP, 0) => Writes,
+        (SYS_FCNTL | SYS_FCNTL_NOCANCEL, 2) | (SYS_IOCTL, 2) | (SYS_WORKQ_KERNRETURN, 1) | (478, 3)
+        | (SYS_ULOCK_WAIT, 1) | (SYS_PSYNCH_CVBROAD, 0 | 4) | (SYS_PSYNCH_CVSIGNAL, 0 | 4)
+        | (SYS_PSYNCH_CVWAIT, 0 | 3) => Either,
+        (75, 0) => Range,
+        _ => return None,
+    })
+}
+
+/// M51 §3h: is argument `i` of `num` a pointer the kernel WRITES through (`PtrUse::Writes`)? A page the
+/// program may read but not write is `EFAULT` there, as natively.
+pub fn writes_through_ptr(num: u64, i: usize) -> bool {
+    ptr_use(num, i) == Some(PtrUse::Writes)
+}
+
+/// M51 §3h (Ruling T7-straddle): the fixed `sizeof` the kernel copies through argument `i` of `num`, for
+/// the serviced calls whose struct size is part of the ABI: `sigaction`'s `act` (24) and `oact` (16),
+/// `sigaltstack`'s `ss` and `oss` (24 each). `Box_::prepare_forward_pointers` checks such a pointer over
+/// its whole span; a count-bearing buffer is checked at its first page only.
+pub fn fixed_span(num: u64, i: usize) -> Option<usize> {
+    match (num, i) {
+        (SYS_SIGACTION, 1) => Some(24),
+        (SYS_SIGACTION, 2) => Some(16),
+        (SYS_SIGALTSTACK, 0 | 1) => Some(24),
+        _ => None,
+    }
+}
+
+/// Is position `i` of `num` a pointer retrace itself dereferences to answer the call (FW-1)? Those arms
+/// read or write through it with no host kernel behind them to answer a bad one, so
+/// `Box_::prepare_forward_pointers` must judge every nonzero value, near-NULL and tagged ones included.
+/// Everywhere else a value below 16 KiB or with a tag byte may be an integer argument (an `ioctl` or `fcntl`
+/// operand) and goes to the host, which answers it.
+pub fn serviced_pointer(num: u64, i: usize) -> bool {
+    fixed_span(num, i).is_some()
+        || matches!((num, i), (SYS_SIGPROCMASK, 1 | 2) | (SYS_SIGPENDING, 0) | (SYS_GETRLIMIT, 1))
 }
 
 /// `fcntl(fd, F_DUPFD | F_DUPFD_CLOEXEC, min)` — the descriptor-producing fcntl commands, which
@@ -1207,6 +1394,10 @@ pub const RLIMIT_POSIX_FLAG: u64 = 0x1000;
 
 /// BSD errno: an argument the kernel rejects (a MAP_FIXED address outside the address space).
 pub const EINVAL: u64 = 22;
+/// `<sys/errno.h>`: bad address. M51 §3h: a pointer the program could not pass natively.
+pub const EFAULT: u64 = 14;
+/// `<sys/errno.h>`: no such process. M51 §3g: `__pthread_kill(port, 0)` for a port no live thread holds.
+pub const ESRCH: u64 = 3;
 /// `EINTR` (SDK `sys/errno.h:91`): an interrupted wait. M48's `psynch_cvwait` model names it.
 pub const EINTR: u64 = 4;
 /// `ETIMEDOUT` (SDK `sys/errno.h:177`): a timed `psynch_cvwait` whose deadline passed. libpthread
@@ -2214,6 +2405,7 @@ pub const BUS_ADRALN: u64 = 1;
 pub const BUS_ADRERR: u64 = 2;
 pub const BUS_OBJERR: u64 = 3;
 pub const ILL_ILLOPC: u64 = 1;
+pub const ILL_ILLTRP: u64 = 2;
 pub const TRAP_BRKPT: u64 = 1;
 /// `si_code` a kernel-synthesized signal never has: it marks one raised by `kill`/`pthread_kill`
 /// instead of a hardware trap. Not yet consumed by `signal_of_esr` (that function only ever sees a
@@ -2233,6 +2425,10 @@ pub const SS_DISABLE: u64 = 0x4;
 /// The `infostyle` the kernel passes in `x1` on `sa_tramp` entry for an `SA_SIGINFO` handler.
 /// Measured as `0x1e` by `spikes/sigtramp.c`; `UC_FLAVOR` is xnu's name for it.
 pub const UC_FLAVOR: u64 = 30;
+
+/// M51 §3g: the infostyle (`x1` on trampoline entry) for a handler installed without `SA_SIGINFO`,
+/// as `signal()` installs it. Measured as `0x1` by `spikes/sigtramp.c`; `UC_TRAD` is xnu's name.
+pub const UC_TRAD: u64 = 1;
 
 /// Classify a guest fault into the `(signal, si_code)` a real kernel would deliver.
 ///
@@ -2274,9 +2470,11 @@ pub fn signal_of_esr(esr: u64) -> (u64, u64) {
             // with the closest access-error code, not a fail-loud abort.
             _ => (SIGSEGV, SEGV_ACCERR),
         },
-        0x26 => (SIGBUS, BUS_ADRALN),  // SP alignment fault
-        0x00 | 0x0e => (SIGILL, ILL_ILLOPC), // unknown reason / illegal execution state
-        0x3c => (SIGTRAP, TRAP_BRKPT), // BRK instruction
+        0x22 | 0x26 => (SIGBUS, BUS_ADRALN), // PC / SP alignment fault (M51 §3b, native's rows)
+        // M51 §3b: native gives ILL_ILLTRP for udf, hlt and 0xffffffff (static native-traps.txt),
+        // and si_code 0 for brk, not the Linux-shaped ILL_ILLOPC and TRAP_BRKPT before M51.
+        0x00 | 0x0e => (SIGILL, ILL_ILLTRP), // undefined instruction / illegal execution state
+        0x3c => (SIGTRAP, 0),                // BRK instruction
         // Unlike the DFSC fallback above, THIS one stays fail-loud: an unmodelled EC means retrace
         // cannot even name which signal this is, not merely which si_code — there is nothing
         // "closest" to default to without risking a plausible lie about the signal itself.
@@ -2284,6 +2482,48 @@ pub fn signal_of_esr(esr: u64) -> (u64, u64) {
             "signal_of_esr: EC {ec:#x} (esr={esr:#x}) has no modelled signal mapping. It reached \
              the fault path, so it is a real guest fault retrace cannot name — add the class here \
              deliberately rather than defaulting it to SIGSEGV, which would be a plausible lie."),
+    }
+}
+
+/// M51 §3b: a fault's `(signal, si_code, si_addr)` as native delivers it. `si_addr` is the FAR for
+/// an abort and for a misaligned pc (whose FAR is the pc), the pc for a trap (`brk`, an undefined
+/// instruction), and 0 for a misaligned SP (static `native-traps.txt`). An unmodelled class panics
+/// in `signal_of_esr`, its fail-loud rule (C10): the box converts only a class `convertible_trap`
+/// admits, so a class that reaches here unmodelled is a retrace bug.
+pub fn siginfo_of(esr: u64, pc: u64, far: u64) -> (u64, u64, u64) {
+    let (sig, si_code) = signal_of_esr(esr);
+    let si_addr = match (esr >> 26) & 0x3f {
+        0x00 | 0x0e | 0x3c => pc,
+        0x26 => 0,
+        _ => far,
+    };
+    (sig, si_code, si_addr)
+}
+
+/// M51 §3b (R6): whether an EL0 exception of this class is one native turns into a signal, so the
+/// box records it as the crash native reports rather than stopping at a wall. `brk` (0x3c) and the
+/// PC and SP alignment faults (0x22, 0x26) always are. An undefined instruction (0x00) is only when
+/// its word is one of the three native measured as SIGILL `ILL_ILLTRP`: `udf #imm`, `hlt #imm` and
+/// `0xffffffff`. Any other undefined word stays a wall (t0 M2: `rndr`'s word walls with EC 0x00; an
+/// AMX word arrives as EC 0x3f, not here).
+pub fn convertible_trap(esr: u64, word: Option<u32>) -> bool {
+    match (esr >> 26) & 0x3f {
+        0x3c | 0x22 | 0x26 => true,
+        0x00 => matches!(word, Some(w) if w >> 16 == 0 || (w & 0xffe0_001f) == 0xd440_0000 || w == 0xffff_ffff),
+        _ => false,
+    }
+}
+
+/// M51 §3c: Darwin's name for a signal (`<sys/signal.h>`), for the closing line. A number with no
+/// name is spelled `signal N`.
+pub fn signal_name(sig: u64) -> String {
+    const NAMES: [&str; 32] = ["", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGEMT",
+        "SIGFPE", "SIGKILL", "SIGBUS", "SIGSEGV", "SIGSYS", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGURG",
+        "SIGSTOP", "SIGTSTP", "SIGCONT", "SIGCHLD", "SIGTTIN", "SIGTTOU", "SIGIO", "SIGXCPU", "SIGXFSZ",
+        "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGINFO", "SIGUSR1", "SIGUSR2"];
+    match usize::try_from(sig).ok().and_then(|i| NAMES.get(i)) {
+        Some(n) if !n.is_empty() => (*n).to_owned(),
+        _ => format!("signal {sig}"),
     }
 }
 
@@ -2744,12 +2984,21 @@ mod tests {
     fn fcntl_and_ioctl_third_argument_kind_follows_the_command() {
         use ArgKind::*;
         let args = |cmd: u64| { let mut a = [0u64; 8]; a[1] = cmd; a };
-        for cmd in [F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_NOCACHE, F_DUPFD_CLOEXEC] {
+        for cmd in [F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_NOCACHE, F_DUPFD_CLOEXEC, F_SETOWN, F_RDAHEAD,
+                    F_NODIRECT, F_SINGLE_WRITER, F_SETNOSIGPIPE, F_SETPROTECTIONCLASS] {
             assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Scalar, "fcntl cmd {cmd}");
             assert_eq!(shape_of(SYS_FCNTL_NOCANCEL, &args(cmd)).args[2], Scalar, "fcntl_nocancel cmd {cmd}");
         }
-        for cmd in [F_PREALLOCATE, F_GETPATH, F_ADDFILESIGS_RETURN, F_CHECK_LV, 999] {
+        for cmd in [F_PREALLOCATE, F_GETPATH, F_ADDFILESIGS_RETURN, F_CHECK_LV] {
             assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Ptr, "fcntl cmd {cmd}");
+        }
+        // FW-R/FW-R2: the header's int and no-argument commands, and an FS-specific command carrying no data, are integers.
+        for cmd in [5, 51, 85, 40, 107, 106, 110, 70, 0x1_0000 | 0x2000_0000] {
+            assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Scalar, "fcntl cmd {cmd}");
+        }
+        // FW-R2: an unlisted command keeps the row's Ptr, and the FS-specific base follows the ioctl encoding.
+        for cmd in [56, 999, 0x1_0000 | IOC_IN | (8 << 16)] {
+            assert_eq!(shape_of(SYS_FCNTL, &args(cmd)).args[2], Ptr, "fcntl cmd {cmd:#x}");
         }
         for cmd in [FIOCLEX, FIONCLEX] {
             assert_eq!(shape_of(SYS_IOCTL, &args(cmd)).args[2], Scalar, "ioctl cmd {cmd:#x}");
@@ -2758,6 +3007,39 @@ mod tests {
         // Every position but the third is the row's, and a non-fcntl number is the row itself.
         assert_eq!(shape_of(SYS_FCNTL, &args(F_SETFD)).args[0], Fd);
         assert!(std::ptr::eq(shape_of(SYS_READ, &args(0)), forwarded_shape(SYS_READ)));
+    }
+
+    // FW-2: the buffer's direction follows the op word, in every view that names a destination.
+    #[test]
+    fn a_buffer_the_kernel_only_reads_is_not_a_destination() {
+        use ArgKind::*;
+        let a = |n: u64, w: usize, op: u64| { let mut a = [0u64; 8]; a[w] = op; let _ = n; a };
+        assert_eq!(shape_of(336, &a(336, 0, PROC_INFO_CALL_SETCONTROL)).args[4], Source);
+        assert_eq!(shape_of(336, &a(336, 0, PROC_INFO_CALL_SET_DYLD_IMAGES)).args[4], Scalar);
+        assert!(matches!(shape_of(336, &a(336, 0, 2)).args[4], Dest(_)), "PIDINFO still fills its buffer");
+        assert_eq!(dest_buffer_for(336, &a(336, 0, 5)), None);
+        assert_eq!(dest_buffer_for(336, &a(336, 0, 15)), None);
+        assert_eq!(dest_buffer_for(336, &a(336, 0, 2)), dest_buffer(336));
+        for num in [169, 170] {
+            assert_eq!(shape_of(num, &a(num, 1, 1)).args[2], Source, "csops {num} SET_STATUS");
+            assert_eq!(shape_of(num, &a(num, 1, 9)).args[2], Source, "csops {num} SETEXECSEG");
+            assert!(matches!(shape_of(num, &a(num, 1, 0)).args[2], Dest(_)), "csops {num} STATUS fills");
+            assert_eq!(dest_buffer_for(num, &a(num, 1, 1)), None);
+            assert_eq!(dest_buffer_for(num, &a(num, 1, 0)), dest_buffer(num));
+        }
+        assert_eq!(shape_of(483, &a(483, 0, CSR_SYSCALL_CHECK)).args[1], Source);
+        assert_eq!(shape_of(483, &a(483, 0, 1)).args[1], Ptr, "get_active_config copies out");
+    }
+
+    // FW-1: the pointers retrace dereferences itself are the ones the pre-forward check must judge in full.
+    #[test]
+    fn the_serviced_pointers_are_the_ones_retrace_dereferences() {
+        for (num, i) in [(SYS_SIGACTION, 1), (SYS_SIGACTION, 2), (SYS_SIGALTSTACK, 0), (SYS_SIGALTSTACK, 1),
+                         (SYS_SIGPROCMASK, 1), (SYS_SIGPROCMASK, 2), (SYS_SIGPENDING, 0), (SYS_GETRLIMIT, 1)] {
+            assert!(serviced_pointer(num, i), "{num} arg {i}");
+        }
+        assert!(!serviced_pointer(SYS_FCNTL, 2) && !serviced_pointer(SYS_IOCTL, 2), "an int may ride there");
+        assert!(!serviced_pointer(SYS_SIGACTION, 0));
     }
 
     #[test]
@@ -2952,10 +3234,49 @@ mod tests {
 
     #[test]
     fn signal_of_esr_maps_the_non_abort_classes() {
-        assert_eq!(signal_of_esr(0x9800_0000), (SIGBUS, BUS_ADRALN), "EC 0x26: SP alignment");
-        assert_eq!(signal_of_esr(0x0000_0000), (SIGILL, ILL_ILLOPC), "EC 0x00: unknown/undefined");
-        assert_eq!(signal_of_esr(0x3800_0000), (SIGILL, ILL_ILLOPC), "EC 0x0e: illegal execution state");
-        assert_eq!(signal_of_esr(0xf000_0000), (SIGTRAP, TRAP_BRKPT), "EC 0x3c: BRK");
+        // M51 §3b: native's rows (static native-traps.txt), not the Linux-shaped ones before M51.
+        assert_eq!(signal_of_esr(0x9a00_0000), (SIGBUS, BUS_ADRALN), "EC 0x26: SP alignment");
+        assert_eq!(signal_of_esr(0x8a00_0000), (SIGBUS, BUS_ADRALN), "EC 0x22: PC alignment");
+        assert_eq!(signal_of_esr(0x0200_0000), (SIGILL, ILL_ILLTRP), "EC 0x00: udf, hlt, 0xffffffff");
+        assert_eq!(signal_of_esr(0x3a00_0000), (SIGILL, ILL_ILLTRP), "EC 0x0e: illegal execution state");
+        assert_eq!(signal_of_esr(0xf200_f000), (SIGTRAP, 0), "EC 0x3c: brk, si_code 0 natively");
+    }
+
+    #[test]
+    fn siginfo_of_puts_si_addr_where_native_does() {
+        // M51 §3b: si_addr is the FAR for an abort and a misaligned pc, the pc for a trap, and 0 for a
+        // misaligned SP (static native-traps.txt).
+        let (pc, far) = (0x1_0000_0a0c, 0x4000_dead_0000);
+        assert_eq!(siginfo_of(0x9200_0007, pc, far), (SIGSEGV, SEGV_ACCERR, far), "a data abort");
+        assert_eq!(siginfo_of(0x8a00_0000, pc + 2, pc + 2), (SIGBUS, BUS_ADRALN, pc + 2), "a misaligned pc");
+        assert_eq!(siginfo_of(0x9a00_0000, pc, 0), (SIGBUS, BUS_ADRALN, 0), "a misaligned SP");
+        assert_eq!(siginfo_of(0x0200_0000, pc, 0), (SIGILL, ILL_ILLTRP, pc), "udf");
+        assert_eq!(siginfo_of(0xf200_f000, pc, 0), (SIGTRAP, 0, pc), "brk");
+    }
+
+    #[test]
+    fn convertible_trap_admits_only_what_native_defines() {
+        // M51 R6: brk, the alignment faults, and the three undefined words native gives SIGILL for.
+        for esr in [0xf200_0001, 0x8a00_0000, 0x9a00_0000] { assert!(convertible_trap(esr, None), "{esr:#x}"); }
+        for w in [0x0000_0000, 0x0000_1234, 0xd440_0000, 0xd45f_ffe0, 0xffff_ffff] {
+            assert!(convertible_trap(0x0200_0000, Some(w)), "{w:#010x}");
+        }
+        for w in [0x0020_1220, 0xd400_0001, 0xd440_0001] {
+            assert!(!convertible_trap(0x0200_0000, Some(w)), "{w:#010x}: native does not define it as SIGILL");
+        }
+        assert!(!convertible_trap(0x0200_0000, None), "an unreadable word is not judged");
+        assert!(!convertible_trap(0x6200_0000, None), "EC 0x18: a trapped system register stays a wall");
+    }
+
+    #[test]
+    fn signal_name_spells_darwins_names() {
+        // <sys/signal.h>: the closing line's names (M51 §3c).
+        for (sig, name) in [(4, "SIGILL"), (5, "SIGTRAP"), (6, "SIGABRT"), (7, "SIGEMT"), (8, "SIGFPE"),
+                            (10, "SIGBUS"), (11, "SIGSEGV"), (12, "SIGSYS"), (29, "SIGINFO"), (31, "SIGUSR2")] {
+            assert_eq!(signal_name(sig), name, "{sig}");
+        }
+        assert_eq!(signal_name(0), "signal 0", "no signal 0");
+        assert_eq!(signal_name(32), "signal 32", "past NSIG");
     }
 
     // The measured ESR from spikes/sigtramp.c, end to end. A store to an unmapped page.
@@ -2995,6 +3316,42 @@ mod tests {
         assert_eq!((SS_ONSTACK, SS_DISABLE), (0x1, 0x4));
         assert_eq!(UC_FLAVOR, 30, "measured in spikes/sigtramp.c as x1 on trampoline entry");
         assert_eq!(SI_USER, 0x10001, "measured by spikes/sigabi.c");
+    }
+
+    // M51 §3h (C3): msync's address is the range it syncs, not a buffer; its length and every
+    // buffer are not region addresses.
+    #[test]
+    fn region_address_names_ranges_and_no_buffer() {
+        assert!(region_address(65, 0) && region_address(405, 0), "msync's addr");
+        assert!(!region_address(65, 1) && !region_address(SYS_READ, 1) && !region_address(SYS_WRITE, 1));
+        // t0 M6: sigpending's set is swallowed when bad; sigaction's and sigaltstack's old values are written.
+        assert!(ignores_bad_out_pointer(SYS_SIGPENDING, 0) && !ignores_bad_out_pointer(SYS_SIGACTION, 2));
+        assert!(writes_through_ptr(SYS_SIGACTION, 2) && writes_through_ptr(SYS_SIGALTSTACK, 1));
+        assert!(!writes_through_ptr(SYS_SIGACTION, 1) && !writes_through_ptr(SYS_SIGALTSTACK, 0));
+        assert_eq!((fixed_span(SYS_SIGACTION, 1), fixed_span(SYS_SIGACTION, 2), fixed_span(SYS_SIGALTSTACK, 1)),
+                   (Some(24), Some(16), Some(24)));
+        assert_eq!(fixed_span(SYS_READ, 1), None);
+    }
+
+    // M51 §3h (I-1): a `Ptr` row position says nothing about which way the kernel copies, so every one
+    // is classified in `ptr_use`, and a new row cannot be added without saying. The classified position
+    // must also be a `Ptr` (a stale entry for a changed row fails here too).
+    #[test]
+    fn every_ptr_position_is_classified_as_read_or_write() {
+        let (mut ptrs, mut bad) = (0, Vec::new());
+        for num in (0..1024u64).chain((1..=200u64).map(|n| (-(n as i64)) as u64)) {
+            let Some(shape) = arg_kinds(num) else { continue };
+            for (i, k) in shape.args.iter().enumerate() {
+                match (k, ptr_use(num, i)) {
+                    (ArgKind::Ptr, Some(_)) => ptrs += 1,
+                    (ArgKind::Ptr, None) => bad.push(format!("syscall {num} position {i} is a Ptr that ptr_use leaves unclassified")),
+                    (_, Some(u)) => bad.push(format!("syscall {num} position {i} is classified {u:?} but its row does not say Ptr")),
+                    _ => {}
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+        assert!(ptrs > 50, "the walk found the Ptr positions ({ptrs})");
     }
 
     #[test]

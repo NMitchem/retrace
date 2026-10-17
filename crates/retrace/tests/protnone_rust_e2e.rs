@@ -21,12 +21,9 @@ fn a_rust_guest_faults_on_a_page_it_protected_itself() {
          permissive TLB entry looks like — protect_none stamped ATTR_NONE but the flush did not \
          take; stdout:\n{out}");
 
-    // 139, not 138, and the difference is architecture rather than an accident. Run NATIVELY this
-    // guest dies of SIGBUS and exits 138; under retrace a fault-derived death is `Outcome::Crash`,
-    // whose CLI convention is a flat `exit(139)` for every crash whatever signal it maps to
-    // (main.rs:21-23, M6). Only a signal the guest RAISES on itself takes the `128 + sig` path.
-    // So 139 here says nothing about SIGBUS — the trace assertions below are what pin that.
-    assert_eq!(rec.code, 139, "M6's crash convention is a flat 139; stderr:\n{}", rec.stderr);
+    // 138 == 128 + SIGBUS, native's code (M51 §3c). Before M51 every recorded crash exited a flat 139
+    // whatever its signal; the trace assertions below still pin the signal itself.
+    assert_eq!(rec.code, 138, "native's code for this SIGBUS; stderr:\n{}", rec.stderr);
 
     let (events, torn) = retrace_trace::Reader::open_checked(&trace).unwrap();
     assert!(!torn, "a recorder killed mid-run leaves a torn trace — this must be complete");
@@ -86,7 +83,7 @@ fn a_rust_guest_faults_on_a_page_it_protected_itself() {
     // (4) replay is byte-identical, twice.
     for i in 0..2 {
         let rep = util::replay(&trace);
-        assert_eq!(rep.code, 139, "replay {i}; stderr:\n{}", rep.stderr);
+        assert_eq!(rep.code, 138, "replay {i}; stderr:\n{}", rep.stderr);
         assert_eq!(rep.stdout, rec.stdout, "replay {i} stdout diverged");
     }
 }

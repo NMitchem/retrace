@@ -5,6 +5,7 @@
 //   cases: null10 null0st unmapped garbage call0 low8000 low1g tsd
 //          thread1g (low1g's load on a second thread, main blocked in pthread_join)
 //          jump1g   (a call through a function pointer equal to 0x40000000)
+//          jumpheap (a call into a zeroed read-write heap page: a permission fault natively too)
 //          jumpgone (a call into the case's own PROT_EXEC file mapping after munmap)
 //          deeprec  (unbounded recursion: a C stack overflow)
 //   h: an SA_SIGINFO handler for SIGSEGV and SIGBUS that prints one line and _exit(42)s
@@ -112,6 +113,13 @@ int main(int argc, char **argv) {
         pthread_join(t, 0);
     }
     else if (!strcmp(c, "jump1g")) { void (*volatile f)(void) = (void (*)(void))0x40000000UL; f(); }
+    else if (!strcmp(c, "jumpheap")) {
+        char *m = mmap(0, 0x4000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (m == MAP_FAILED) { puts("mmap failed"); return 2; }
+        memset(m, 0, 0x4000);
+        void (*volatile f)(void) = (void (*)(void))m;
+        f();
+    }
     else if (!strcmp(c, "jumpgone")) {
         char *m = map_own_text(argv[0]);
         if (m == MAP_FAILED) { puts("mmap failed"); return 2; }

@@ -310,6 +310,26 @@ fn a_wrong_thread_on_the_crash_landmark_is_a_divergence() {
         rep.stderr);
 }
 
+/// M51 §3g (C5): `abort_with_payload` from a child thread ends in an `Event::Signal` tagged with the
+/// child, consumed by `signal_terminal`, which holds that landmark's `verify_thread`. Retagged to
+/// main, replay must diverge as the schedule, not as the signal compare above it.
+#[test]
+fn a_wrong_thread_on_a_payload_landmark_is_a_divergence() {
+    let (rec, trace) = util::record_dynamic_args(retrace_guest::FID_SIGNALS, &["payloadthread"]);
+    assert_eq!(rec.code, 134, "{}", rec.stderr);
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let i = events.iter().position(|e| matches!(e, Event::Signal { .. })).expect("the payload's terminal Event::Signal");
+    let orig = match &events[i] { Event::Signal { thread, .. } => *thread, _ => unreachable!() };
+    assert_ne!(orig, 0, "the child must be the thread that called abort_with_payload");
+    if let Event::Signal { thread, .. } = &mut events[i] { *thread = 0; }
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+    assert!(rep.stderr.contains("the schedule diverged"), "the thread oracle's divergence; stderr:\n{}", rep.stderr);
+}
+
 /// M48 Task 10 (spec §3j as corrected by §11a item 1). The `kevent` mirror sits inside the
 /// `Syscall` chain after the arm-top `verify_thread`, so that one call is what guards it, and a
 /// `kevent` landmark retagged to another live thread must diverge as the schedule. `kq_dyn wake`:

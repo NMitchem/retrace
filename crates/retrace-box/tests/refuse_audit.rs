@@ -5,29 +5,10 @@
 //! Nothing but `wall.rs` may write the marker either: a hand-built marked string would be a wall that
 //! nobody classified at its site.
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// The repository root, two levels above this crate.
-fn repo() -> PathBuf { Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap() }
-
-/// Every `.rs` file under `dir`, recursively, in a stable order.
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut paths: Vec<PathBuf> = rd.map(|e| e.unwrap().path()).collect();
-    paths.sort();
-    for p in paths {
-        if p.is_dir() { rust_files(&p, out) } else if p.extension().is_some_and(|e| e == "rs") { out.push(p) }
-    }
-}
-
-/// The name a `fn` item line declares, or None for any other line.
-fn fn_name(t: &str) -> Option<String> {
-    let i = t.find("fn ")?;
-    let quals = ["pub", "pub(crate)", "pub(super)", "const", "unsafe", "extern", "\"C\""];
-    if !t[..i].split_whitespace().all(|w| quals.contains(&w)) { return None; }
-    let name: String = t[i + 3..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-    (!name.is_empty()).then_some(name)
-}
+mod audit;
+use audit::{repo, rust_files, source_lines};
 
 /// A message as the list spells it: the literal up to its first format argument, escape, line
 /// continuation or closing quote, at most 40 characters, trimmed. The list was first written from t0's
@@ -46,27 +27,18 @@ fn sites_in_source() -> Vec<String> {
         rust_files(&krate.unwrap().path().join("src"), &mut files);
     }
     let mut sites = Vec::new();
-    for f in files {
-        let rel = f.strip_prefix(&root).unwrap().display().to_string();
-        if rel == "crates/retrace-arch/src/wall.rs" { continue; } // the macro's own definition
-        let text = std::fs::read_to_string(&f).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        let mut func = String::from("<top level>");
-        for (i, line) in lines.iter().enumerate() {
-            let t = line.trim_start();
-            // The test module ends the source a guest can reach.
-            if t == "#[cfg(test)]" && lines.get(i + 1).is_some_and(|n| n.trim_start().starts_with("mod ")) { break; }
-            if t.starts_with("//") { continue; }
-            if let Some(name) = fn_name(t) { func = name; }
-            let mut rest = t;
-            while let Some(at) = rest.find("refuse!(") {
-                rest = &rest[at + "refuse!(".len()..];
-                let (category, msg) = rest.split_once(',')
-                    .unwrap_or_else(|| panic!("{rel}:{}: write `refuse!(<Category>, \"…\"` on one line", i + 1));
-                let literal = msg.trim_start().strip_prefix('"')
-                    .unwrap_or_else(|| panic!("{rel}:{}: a refuse! message starts with its literal on the refuse! line", i + 1));
-                sites.push(format!("{rel}\t{func}\t{}\t{}", category.trim(), prefix(literal)));
-            }
+    // The test module ends the source a guest can reach (`source_lines` stops there).
+    for l in source_lines(&root, &files) {
+        if l.rel == "crates/retrace-arch/src/wall.rs" { continue; } // the macro's own definition
+        let (rel, func) = (&l.rel, &l.func);
+        let mut rest = l.text.as_str();
+        while let Some(at) = rest.find("refuse!(") {
+            rest = &rest[at + "refuse!(".len()..];
+            let (category, msg) = rest.split_once(',')
+                .unwrap_or_else(|| panic!("{rel}:{}: write `refuse!(<Category>, \"…\"` on one line", l.no));
+            let literal = msg.trim_start().strip_prefix('"')
+                .unwrap_or_else(|| panic!("{rel}:{}: a refuse! message starts with its literal on the refuse! line", l.no));
+            sites.push(format!("{rel}\t{func}\t{}\t{}", category.trim(), prefix(literal)));
         }
     }
     sites.sort();

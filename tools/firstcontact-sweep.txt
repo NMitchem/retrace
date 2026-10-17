@@ -1,6 +1,6 @@
 # M49 tier 2 (spec §3c): the real tools a newcomer reaches for first. Not gated; swept by
 #   export RETRACE_SWEEP_LIST=tools/firstcontact-sweep.txt
-#   export RETRACE_SWEEP_NATIVE=1
+#   export RETRACE_SWEEP_STDERR=1   (M51: stderr is compared too; native comparison is the default)
 #   export RETRACE_SWEEP_TIMEOUT=600
 #   tools/apple-sweep.sh
 # One row per line: an absolute path, then each argument preceded by a TAB (never a space).

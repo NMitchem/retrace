@@ -340,6 +340,25 @@ impl Symbols {
     }
 }
 
+/// M51 §3c (C2): where a crash's pc is, for the closing line, from the recording's final snapshot.
+/// The executable's or dyld's symbol, `name+0xoff` (`name` at offset 0); `a system library` inside
+/// the shared-cache window, whose symbols the recording does not hold (`Symbols::from_snapshot`);
+/// otherwise empty, and the line leaves the place out rather than guess. ASCII only (R7): any other
+/// character of a symbol name becomes `?`.
+///
+/// Presentation only, like the rest of this module: it runs once per crash, after the run, and
+/// nothing it returns reaches the trace.
+pub fn crash_site(mem: &[Region], pc: u64) -> String {
+    if let Some((name, off)) = Symbols::from_snapshot(mem).resolve(pc) {
+        let name: String = name.chars().map(|c| if c.is_ascii_graphic() { c } else { '?' }).collect();
+        return if off == 0 { name } else { format!("{name}+{off:#x}") };
+    }
+    if (retrace_box::SHARED_REGION_START..retrace_box::SHARED_REGION_END).contains(&pc) {
+        return "a system library".to_owned();
+    }
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,5 +692,18 @@ mod tests {
         let t = table(&img);
         assert_eq!(t.addrs_of("_a_global"), vec![past_text], "name -> address reaches data");
         assert_eq!(t.resolve(past_text), None, "address -> name must still stop at text_end");
+    }
+
+    #[test]
+    fn a_crash_site_is_a_symbol_a_system_library_or_nothing() {
+        // M51 §3c (C2): the closing line's place.
+        let base = retrace_box::EXE_BASE;
+        let mem = Img::new(base, 0).sym(base + 0x460, "_main").sym(base + 0x500, "_caf\u{e9}").build();
+        assert_eq!(crash_site(&mem, base + 0x468), "_main+0x8");
+        assert_eq!(crash_site(&mem, base + 0x460), "_main", "at the symbol itself, no offset");
+        assert!(crash_site(&mem, base + 0x504).is_ascii(), "R7: the line is ASCII");
+        assert_eq!(crash_site(&mem, retrace_box::SHARED_REGION_START + 0x1234), "a system library",
+                   "the cache's symbols are not in the recording");
+        assert_eq!(crash_site(&mem, 0x4000_dead_0000), "", "nothing claims it, so nothing is guessed");
     }
 }

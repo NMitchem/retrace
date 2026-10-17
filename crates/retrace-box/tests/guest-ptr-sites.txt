@@ -1,0 +1,82 @@
+# M51 (spec §3h): every call of an unchecked guest-memory accessor in retrace-box's and retrace-core's non-test
+# source, <file>\t<fn>\t<accessor>\t<why>. guest_ptr_audit.rs fails unless this list and the source agree. A why is
+# `internal: <reason>` or `covered: <check> <reason>`, where <check> is called in the same function.
+# A `covered:` row asserts the check runs, not what it answers: `prepare_forward_pointers` skips only NULL for a
+# fixed-span or serviced position (FW-1) and values below 16 KiB or tagged for every other, which the host kernel answers.
+crates/retrace-box/src/lib.rs	apply_and_return	write_guest	internal: the loop applying each recorded or recomputed Region; callers are listed on their own rows
+crates/retrace-box/src/lib.rs	dbg_backtrace	read_u64	internal: a bring-up diagnostic walking the frame chain; host_span-guarded
+crates/retrace-box/src/lib.rs	dbg_backtrace	read_u64	internal: a bring-up diagnostic walking the frame chain; host_span-guarded
+crates/retrace-box/src/lib.rs	emulate_stx	write_guest	internal: a debugger-only store-exclusive emulation; the target was translated and checked by plan_stx first
+crates/retrace-box/src/lib.rs	guest_bsdthread_create	write_guest	internal: the pthread struct bsdthread_create was handed: va_to_ipa is checked at the site, and a failure is a Threads wall
+crates/retrace-box/src/lib.rs	guest_mmap_file	read_guest	internal: the bytes retrace just staged into the page guest_mmap_file mapped
+crates/retrace-box/src/lib.rs	poke_guest	write_guest	internal: a test seam (poke_guest)
+crates/retrace-box/src/lib.rs	read_u64	read_guest	internal: the accessor read_u64 itself (callers are listed on their own rows)
+crates/retrace-box/src/lib.rs	sigreturn_restore	read_guest	internal: the ucontext whose address passed the sigreturn token check (a pure function of that address) in the same function
+crates/retrace-box/src/lib.rs	synthesize_mach_time_out	write_guest	internal: gettimeofday's mach-time out-parameter: the host kernel has just written it (the forward succeeded), so the pointer is proven; the function asserts translation
+crates/retrace-box/src/lib.rs	try_emulate_fpac_auth	read_guest	internal: the instruction at ELR of an FPAC fault; mapped by definition
+crates/retrace-box/src/lib.rs	try_emulate_undef_mrs	read_guest	internal: the instruction at ELR, the program counter of the trap retrace is decoding; mapped by definition
+crates/retrace-box/src/lib.rs	write_va_committing	write_guest	internal: box-computed bytes written page by page after the stage-1 walk and the backing or reservation check
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: reply_reachable sysctl kern.usrstack64 reply into oldp and oldlenp
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: reply_reachable getrlimit RLIMIT_STACK reply into x1
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: is_mapped shared_region_check_np out pointer; the else branch answers EFAULT
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: __mac_syscall Sandbox out-buffer, written only when args[2] is_mapped in the same arm
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: prepare_reply mach_vm_allocate and mach_vm_map address reply, checked with the hint read
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable vm_map 4811 request
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable vm_map 4811 reply, in the buffer the request was read from
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable vm_remap 4813 request
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable vm_remap 4813 reply, in the buffer the request was read from
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable task_get_special_port 3409 request
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable task_get_special_port 3409 reply, in the buffer the request was read from
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable task_set_special_port 3410 request
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable task_set_special_port 3410 reply, in the buffer the request was read from
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable mach_ports_register 3403 request
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable mach_ports_register 3403 reply, in the buffer the request was read from
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable the stub reply, whose writable buffer it checks
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: MACH_SEND_INVALID_DEST refusal, no writes (empty region list)
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: MACH_RCV_REFUSAL refusal, no writes (empty region list)
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable clock_get_time 1000 reply, whose writable buffer it checks
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable the forwarded guard body read, only for the ids it judges
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: prepare_forward_pointers sigaction new action
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: prepare_forward_pointers sigaction old action write (a Ptr it checks writable)
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: prepare_reply sigprocmask oldset, written only when the page passes; a bad oldset is swallowed natively
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: prepare_reply sigpending out set, written only when the page passes; a bad set is swallowed natively
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: prepare_forward_pointers sigaltstack new stack
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: prepare_forward_pointers sigaltstack old stack write (a Ptr it checks writable)
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: execve and posix_spawn refusal, no writes
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: fork refusal, no writes
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: madvise MADV_ZERO regions, which guest_madvise validated the range for before computing them
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: __mac_syscall out_ipa, computed and validated by guest_mac_syscall; a refusal records no write
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies the recorded sigprocmask refusal, which carries no writes
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: prepare_forward_pointers replay mirror of the sigaction new action read
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: prepare_forward_pointers replay mirror of the sigaltstack new stack read
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable replay mirror of the vm_map request read
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable replay mirror of the vm_remap request read
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable replay mirror of the get_special_port request read
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable replay mirror of the set_special_port request read
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable replay mirror of the ports_register request read
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable replay mirror of the forwarded guard body read
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record

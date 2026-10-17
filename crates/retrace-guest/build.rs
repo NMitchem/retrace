@@ -1009,7 +1009,7 @@ fn main() {
     let dir = env!("CARGO_MANIFEST_DIR");
     for name in ["fc_null_load", "fc_null_store", "fc_null_call", "fc_munmapped", "fc_low_store",
                  "fc_stack_overflow", "fc_uaf", "fc_assert", "fc_sleep", "fc_usleep", "fc_nanosleep",
-                 "fc_mutex", "fc_fileio", "fc_env"] {
+                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal"] {
         let src = format!("{dir}/c/{name}.c");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");
@@ -1057,6 +1057,37 @@ fn main() {
     let status = Command::new(&rustc).args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
         .status().expect("rustc cf_rs_fsync");
     assert!(status.success(), "cf_rs_fsync guest build failed");
+    // M51: the fidelity fixtures, the hello_dyn recipe. Named fid_, not fc_: firstcontact_e2e's
+    // one-row-per-fixture check reads every fc_ source.
+    for name in ["fid_output", "fid_traps", "fid_frames", "fid_env", "fid_signals", "fid_badptr"] {
+        let src = format!("{dir}/c/{name}.c");
+        let bin = format!("{out}/{name}");
+        println!("cargo:rerun-if-changed={src}");
+        let status = Command::new("clang").args(["-arch", "arm64", "-o", &bin, &src])
+            .status().expect("clang fidelity fixture");
+        assert!(status.success(), "{name} guest build failed");
+    }
+    // M51 §3g: a program whose dylib is gone at launch, so dyld ends it through abort_with_payload.
+    // The dylib is built only to link against, in a directory of its own, and then deleted.
+    {
+        let gone = format!("{out}/fid-gone");
+        std::fs::create_dir_all(&gone).expect("create fid-gone");
+        let lib_src = format!("{gone}/fidgone.c");
+        std::fs::write(&lib_src, "int fid_gone_value(void) { return 7; }\n").expect("write fidgone.c");
+        let lib = format!("{gone}/libfidgone.dylib");
+        let src = format!("{dir}/c/fid_missing.c");
+        println!("cargo:rerun-if-changed={src}");
+        let status = Command::new("clang")
+            .args(["-arch", "arm64", "-dynamiclib", "-install_name", "@rpath/libfidgone.dylib", "-o", &lib, &lib_src])
+            .status().expect("clang fidgone dylib");
+        assert!(status.success(), "libfidgone build failed");
+        let status = Command::new("clang")
+            .args(["-arch", "arm64", "-o", &format!("{out}/fid_missing"), &src, "-L", &gone, "-lfidgone",
+                   &format!("-Wl,-rpath,{gone}")])
+            .status().expect("clang fid_missing");
+        assert!(status.success(), "fid_missing build failed");
+        std::fs::remove_file(&lib).expect("delete libfidgone.dylib");
+    }
     // Swift (R11): built only where `swiftc --version` runs; elsewhere each FC_SW_* constant names a
     // file that does not exist and firstcontact_e2e announces `SKIPPED (no swiftc)` for its row. The
     // target is pinned to arm64-apple-macosx26.0, what swiftc 6.3.3 chose on the probe host, so the

@@ -148,7 +148,7 @@ fn a_store_to_a_protected_jit_page_is_the_recorded_crash_native_takes() {
     assert!(nat.status.signal().is_some(), "natively the store kills the process with a signal: {:?}", nat.status);
     assert!(!String::from_utf8_lossy(&nat.stdout).contains("UNREACHED"));
     let (rec, trace) = util::record_dynamic_args(retrace_guest::JITWP_DYN, &["fault"]);
-    assert_eq!(rec.code, 139, "a recorded crash exits 139 (M6). stderr: {}", rec.stderr);
+    assert_eq!(rec.code, 138, "a store to a write-protected MAP_JIT page is SIGBUS natively (M51 §3c). stderr: {}", rec.stderr);
     let out = String::from_utf8_lossy(&rec.stdout).into_owned();
     assert!(!out.contains("UNREACHED"), "the store must not succeed:\n{out}");
     let p = page(&out);
@@ -164,7 +164,7 @@ fn a_store_to_a_protected_jit_page_is_the_recorded_crash_native_takes() {
         "the signal this crash maps to is the one native died of (a permission fault is SIGBUS, M13)");
     for n in 1..=2 {
         let rp = util::replay(&trace);
-        assert_eq!(rp.code, 139, "replay {n}: {}", rp.stderr);
+        assert_eq!(rp.code, 138, "a store to a write-protected MAP_JIT page is SIGBUS natively (M51 §3c). replay {n}: {}", rp.stderr);
         assert_eq!(rp.stdout, rec.stdout, "replay {n} stdout");
     }
 }

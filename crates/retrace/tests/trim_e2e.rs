@@ -81,7 +81,7 @@ fn the_trimmed_head_and_the_rounded_tail_are_gone() {
         for i in 1..=2 {
             let rp = util::replay(&trace);
             assert_eq!(rp.code, 139, "{mode} replay {i}: {}", rp.stderr);
-            assert!(rp.stderr.contains(&format!("far={target:#x} esr=0x92000007")), "{mode} replay {i}: {}", rp.stderr);
+            assert!(rp.stderr.contains(&format!("killed by SIGSEGV (fault at {target:#x}")), "{mode} replay {i}: {}", rp.stderr);
         }
         let _ = std::fs::remove_file(&trace);
     }

@@ -175,6 +175,10 @@ pub(crate) enum StopKind {
     HistoryEnd(String),
     /// A Mach `EXC_BAD_ACCESS` (`metype:1`): lldb's native crash display, reversible (t0 L4d).
     MachBadAccess { code: u64, far: u64 },
+    /// M51 §3b: a Mach exception other than a bad access, as debugserver reports a trap:
+    /// `EXC_BREAKPOINT` (`metype:6`) for a `brk`, `EXC_BAD_INSTRUCTION` (`metype:2`) for an undefined
+    /// instruction (static `lldb-brk.txt`, `lldb-udf.txt`). Reversible, like every terminal.
+    MachTrap { metype: u8, signal: u8, code: u64, subcode: u64 },
     /// `reason:exception` with a description. Reversible, unlike a plain signal stop (t0 L4d).
     Exception { signal: u8, text: String },
 }
@@ -186,6 +190,7 @@ impl StopKind {
                 | StopKind::HistoryEnd(_) => 5,
             StopKind::None => 0,
             StopKind::MachBadAccess { .. } => 0x0b,
+            StopKind::MachTrap { signal, .. } => *signal,
             StopKind::Exception { signal, .. } => *signal,
         }
     }
@@ -198,6 +203,7 @@ impl StopKind {
             StopKind::Trace => "reason:trace;".into(),
             StopKind::HistoryEnd(d) => format!("replaylog:end;description:{};", hex(d.as_bytes())),
             StopKind::MachBadAccess { code, far } => format!("metype:1;mecount:2;medata:{code:x};medata:{far:x};"),
+            StopKind::MachTrap { metype, code, subcode, .. } => format!("metype:{metype:x};mecount:2;medata:{code:x};medata:{subcode:x};"),
             StopKind::Exception { text, .. } => format!("reason:exception;description:{};", hex(text.as_bytes())),
         }
     }
@@ -208,14 +214,23 @@ impl StopKind {
 /// - a crash from an abort (EC `0x20`, `0x21`, `0x24`, `0x25`) is a Mach `EXC_BAD_ACCESS`, code 2
 ///   (`KERN_PROTECTION_FAILURE`) for a permission fault (FSC `0x0c..=0x0f`) and 1
 ///   (`KERN_INVALID_ADDRESS`) otherwise;
+/// - a `brk` or undefined-instruction crash is a Mach `EXC_BREAKPOINT` or `EXC_BAD_INSTRUCTION`, and a
+///   misaligned pc or SP an `EXC_BAD_ACCESS` with the alignment code (M51 §3b); `sp` is the stopped
+///   thread's stack pointer, which lldb shows as a misaligned SP's address (t0 M2, T0-k);
 /// - any other crash, and a fatal signal, is `reason:exception` with the CLI's own line.
-pub(crate) fn terminal_kind(o: &Outcome) -> StopKind {
+pub(crate) fn terminal_kind(o: &Outcome, sp: u64) -> StopKind {
     match *o {
         Outcome::Exit { code } => StopKind::HistoryEnd(format!("exited (code {code})")),
-        Outcome::Crash { pc, esr, far } => match (esr >> 26) & 0x3f {
+        Outcome::Crash { pc, esr, far, sig, .. } => match (esr >> 26) & 0x3f {
             0x20 | 0x21 | 0x24 | 0x25 => StopKind::MachBadAccess {
                 code: if (0x0c..=0x0f).contains(&(esr & 0x3f)) { 2 } else { 1 }, far },
-            _ => StopKind::Exception { signal: 0x0b,
+            // M51 §3b (F20): the trap classes as lldb shows them natively. 0x101 and 0x103 are
+            // EXC_ARM_DA_ALIGN (pc) and EXC_ARM_SP_ALIGN (SP).
+            0x3c => StopKind::MachTrap { metype: 6, signal: 5, code: 1, subcode: pc },
+            0x00 | 0x0e => StopKind::MachTrap { metype: 2, signal: 4, code: 1, subcode: 0 },
+            0x22 => StopKind::MachBadAccess { code: 0x101, far: pc },
+            0x26 => StopKind::MachBadAccess { code: 0x103, far: sp },
+            _ => StopKind::Exception { signal: sig as u8,
                 text: format!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}") },
         },
         Outcome::Signal { sig } => StopKind::Exception { signal: sig as u8,
@@ -454,20 +469,40 @@ mod tests {
     #[test] fn each_terminal_outcome_maps_to_its_measured_stop() {
         // §3c's terminal list. An ESR is EC << 26 | IL | ISS; the fault status code is ISS[5:0].
         const IL: u64 = 1 << 25;
-        let crash = |ec: u64, fsc: u64| Outcome::Crash { pc: 0x1_0000_0400, esr: (ec << 26) | IL | fsc, far: 0x4000_dead_0000 };
+        let crash = |ec: u64, fsc: u64| Outcome::Crash { pc: 0x1_0000_0400, esr: (ec << 26) | IL | fsc, far: 0x4000_dead_0000, sig: 11, site: String::new() };
         let bad_access = |code| StopKind::MachBadAccess { code, far: 0x4000_dead_0000 };
-        assert_eq!(terminal_kind(&Outcome::Exit { code: 3 }), StopKind::HistoryEnd("exited (code 3)".into()));
-        assert_eq!(terminal_kind(&crash(0x24, 0x07)), bad_access(1), "translation fault, level 3");
-        assert_eq!(terminal_kind(&crash(0x24, 0x0c)), bad_access(2), "permission fault, level 0");
-        assert_eq!(terminal_kind(&crash(0x24, 0x0f)), bad_access(2), "permission fault, level 3");
-        assert_eq!(terminal_kind(&crash(0x24, 0x10)), bad_access(1), "external abort: not a permission fault");
-        assert_eq!(terminal_kind(&crash(0x20, 0x04)), bad_access(1), "an instruction abort is an abort too");
-        let brk = (0x3c << 26) | IL;
-        assert_eq!(terminal_kind(&Outcome::Crash { pc: 0x1_0000_0400, esr: brk, far: 0 }),
-                   StopKind::Exception { signal: 0x0b,
-                       text: format!("guest crashed: pc=0x100000400 far=0x0 esr={brk:#x}") });
-        assert_eq!(terminal_kind(&Outcome::Signal { sig: 6 }),
+        assert_eq!(terminal_kind(&Outcome::Exit { code: 3 }, 0), StopKind::HistoryEnd("exited (code 3)".into()));
+        assert_eq!(terminal_kind(&crash(0x24, 0x07), 0), bad_access(1), "translation fault, level 3");
+        assert_eq!(terminal_kind(&crash(0x24, 0x0c), 0), bad_access(2), "permission fault, level 0");
+        assert_eq!(terminal_kind(&crash(0x24, 0x0f), 0), bad_access(2), "permission fault, level 3");
+        assert_eq!(terminal_kind(&crash(0x24, 0x10), 0), bad_access(1), "external abort: not a permission fault");
+        assert_eq!(terminal_kind(&crash(0x20, 0x04), 0), bad_access(1), "an instruction abort is an abort too");
+        let other = (0x07 << 26) | IL;
+        assert_eq!(terminal_kind(&Outcome::Crash { pc: 0x1_0000_0400, esr: other, far: 0, sig: 4, site: String::new() }, 0),
+                   StopKind::Exception { signal: 4,
+                       text: format!("guest crashed: pc=0x100000400 far=0x0 esr={other:#x}") });
+        assert_eq!(terminal_kind(&Outcome::Signal { sig: 6 }, 0),
                    StopKind::Exception { signal: 6, text: "guest terminated by signal 6".into() });
+    }
+
+    #[test] fn each_trap_class_maps_to_the_mach_exception_lldb_shows_natively() {
+        // M51 §3b, F20: static lldb-brk.txt, lldb-udf.txt and lldb-pcalign.txt, and t0 M2 (T0-k) for spalign.
+        const IL: u64 = 1 << 25;
+        let (pc, sp) = (0x1_0000_0a0c, 0x1_6fff_fff4);
+        let crash = |ec: u64, pc: u64, far: u64, sig: u64| Outcome::Crash { pc, esr: (ec << 26) | IL, far, sig, site: String::new() };
+        assert_eq!(terminal_kind(&crash(0x3c, pc, 0, 5), sp), StopKind::MachTrap { metype: 6, signal: 5, code: 1, subcode: pc },
+                   "EXC_BREAKPOINT (code=1, subcode=pc)");
+        assert_eq!(terminal_kind(&crash(0x00, pc, 0, 4), sp), StopKind::MachTrap { metype: 2, signal: 4, code: 1, subcode: 0 },
+                   "EXC_BAD_INSTRUCTION (code=1, subcode=0x0)");
+        assert_eq!(terminal_kind(&crash(0x22, pc + 2, pc + 2, 10), sp), StopKind::MachBadAccess { code: 0x101, far: pc + 2 },
+                   "EXC_BAD_ACCESS (code=257, address=pc)");
+        let spk = terminal_kind(&crash(0x26, pc, 0, 10), sp);
+        assert_eq!(spk, StopKind::MachBadAccess { code: 0x103, far: sp }, "EXC_BAD_ACCESS (code=259, address=sp), t0 M2 (T0-k)");
+        let ctx = ThreadCtx::zeroed();
+        let brk = stop_reply(1, &ctx, &[(1, 0)], &StopKind::MachTrap { metype: 6, signal: 5, code: 1, subcode: pc });
+        assert!(brk.starts_with("T05") && brk.ends_with(&format!("metype:6;mecount:2;medata:1;medata:{pc:x};")), "{brk}");
+        let spr = stop_reply(1, &ctx, &[(1, 0)], &spk);
+        assert!(spr.starts_with("T0b") && spr.ends_with(&format!("metype:1;mecount:2;medata:103;medata:{sp:x};")), "{spr}");
     }
 
     #[test] fn the_image_list_describes_a_real_binary_at_its_load_address() {

@@ -7,8 +7,11 @@
 //! - both replays reproduce the recording's exit status and stdout byte for byte;
 //! - when native dies by a signal, the trace's terminal event is of the right kind and carries that
 //!   signal (spec §3b, CLAUDE.md's distinction): `Event::Signal` only for SIGABRT (6, raised by
-//!   `abort`), `Event::Crash` (through `signal_of_esr`) for every other signal, which is a hardware
+//!   `abort`), `Event::Crash` (its `sig`, since M51) for every other signal, which is a hardware
 //!   fault. The wrong kind is a named `MISMATCH terminal kind`, never a pass.
+//!
+//! Since M51 `judge` compares stderr too, after dropping retrace's own lines and masking the pid, and a
+//! wall's output must be a prefix of native's.
 //!
 //! Otherwise the outcome is `Refused` (the recording ended at a clean wall line and both replays end
 //! at the same place, M50), `Bug` (the bug banner's message), or the first difference as one line
@@ -40,7 +43,8 @@ enum Expect {
 struct Row { name: &'static str, bin: &'static str, args: &'static [&'static str], expect: Expect }
 
 /// The outcome table (spec §3b), pinned from t0 M1 (Task 1's addendum). A row flips only in the
-/// task that changes it (R10): the F rows in Task 3, the S rows in Task 5.
+/// task that changes it (R10): M49's F rows in its Task 3 and S rows in its Task 5; M51's fc_assert
+/// and fc_cpp_terminate in its Task 1, the brk rows in Task 3 (fc_c_trap joins there), fc_env in Task 5, and fc_signal joins in Task 6.
 const ROWS: &[Row] = &[
     // C (the hello_dyn recipe).
     Row { name: "fc_null_load", bin: retrace_guest::FC_NULL_LOAD, args: &[],
@@ -62,7 +66,7 @@ const ROWS: &[Row] = &[
           expect: Expect::Pass },
     Row { name: "fc_uaf", bin: retrace_guest::FC_UAF, args: &[], expect: Expect::Pass },
     Row { name: "fc_assert", bin: retrace_guest::FC_ASSERT, args: &[],
-          expect: Expect::Wall("MISMATCH record stdout at line 2: native <eof>, record \"Assertion failed:") },
+          expect: Expect::Pass },
     Row { name: "fc_sleep", bin: retrace_guest::FC_SLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_usleep", bin: retrace_guest::FC_USLEEP, args: &[],
@@ -72,13 +76,17 @@ const ROWS: &[Row] = &[
     Row { name: "fc_mutex", bin: retrace_guest::FC_MUTEX, args: &[],
           expect: Expect::Wall("retrace: unsupported: M48: psynch psynch_mutexwait (301) is not modelled") },
     Row { name: "fc_fileio", bin: retrace_guest::FC_FILEIO, args: &[], expect: Expect::Pass },
-    Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"],
-          expect: Expect::Wall("MISMATCH record stdout at line 4: native \"FC_ENV_PROBE=firstcontact\\n\", record \"FC_ENV_PROBE=(unset)\\n\"") },
+    // M51 §3f: the program gets the recorder's environment, which is ENV, as native gets it.
+    Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"], expect: Expect::Pass },
+    // M51 (R8): __builtin_trap(), the brk class without swiftc. Joins in Task 3, where it passes (C9).
+    Row { name: "fc_c_trap", bin: retrace_guest::FC_C_TRAP, args: &[], expect: Expect::Pass },
+    // M51 (R8): a signal() handler. Joins in Task 6, where it passes (C9).
+    Row { name: "fc_signal", bin: retrace_guest::FC_SIGNAL, args: &[], expect: Expect::Pass },
     // C++ (clang++ -std=c++17).
     Row { name: "fc_cpp_hello", bin: retrace_guest::FC_CPP_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_cpp_throw", bin: retrace_guest::FC_CPP_THROW, args: &[], expect: Expect::Pass },
     Row { name: "fc_cpp_terminate", bin: retrace_guest::FC_CPP_TERMINATE, args: &[],
-          expect: Expect::Wall("MISMATCH record stdout at line 2: native <eof>, record \"libc++abi: terminating") },
+          expect: Expect::Pass },
     Row { name: "fc_cpp_thread", bin: retrace_guest::FC_CPP_THREAD, args: &[], expect: Expect::Pass },
     Row { name: "fc_cpp_sleep", bin: retrace_guest::FC_CPP_SLEEP, args: &[],
           expect: Expect::Pass },
@@ -94,10 +102,8 @@ const ROWS: &[Row] = &[
     // Swift (swiftc, only where it runs: R11).
     Row { name: "fc_sw_hello", bin: retrace_guest::FC_SW_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_throw", bin: retrace_guest::FC_SW_THROW, args: &[], expect: Expect::Pass },
-    Row { name: "fc_sw_oob", bin: retrace_guest::FC_SW_OOB, args: &[],
-          expect: Expect::Wall("retrace: unsupported: brk #0x1 at pc <addr> (exception class 0x3c, instruction 0x") },
-    Row { name: "fc_sw_unwrap", bin: retrace_guest::FC_SW_UNWRAP, args: &[],
-          expect: Expect::Wall("retrace: unsupported: brk #0x1 at pc <addr> (exception class 0x3c, instruction 0x") },
+    Row { name: "fc_sw_oob", bin: retrace_guest::FC_SW_OOB, args: &[], expect: Expect::Pass },
+    Row { name: "fc_sw_unwrap", bin: retrace_guest::FC_SW_UNWRAP, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_sleep", bin: retrace_guest::FC_SW_SLEEP, args: &[],
           expect: Expect::Pass },
     Row { name: "fc_sw_gcd", bin: retrace_guest::FC_SW_GCD, args: &[],
@@ -166,6 +172,41 @@ fn mask(line: &str) -> String {
     l
 }
 
+/// A run's stderr as the corpus compares it (spec §3i): retrace's own lines (`retrace: …`) dropped, the
+/// pid masked (`mask_pid`), then `canonical`'s masking, as for stdout. The recording's pid is retrace's
+/// and native's is its own, so neither can be pinned.
+fn stderr_of(err: &str) -> String {
+    let kept: String = err.split_inclusive('\n').filter(|l| !l.starts_with("retrace: ")).map(mask_pid).collect();
+    canonical(kept.as_bytes())
+}
+
+/// The wall rule (M51 §3i): what a walled recording printed must be a prefix of what native printed.
+fn is_prefix_of(native: &str, recorded: &str) -> bool { native.starts_with(recorded) }
+
+/// t0 M7's pid shapes: `name[1234]:` at a line's start (dyld's prefix, and a tool's own), and
+/// `(1234,0x16f…)` (libmalloc's `name(pid,thread)`). Each becomes `<PID>`, and the thread `<TID>`.
+// Looks at a line's first `[` and first `(` only; the sweep's `sed` masks every paren occurrence. No corpus
+// row trips the difference.
+fn mask_pid(line: &str) -> String {
+    let mut l = line.to_owned();
+    if let (Some(open), Some(close)) = (l.find('['), l.find("]:")) {
+        let named = open > 0 && l[..open].chars().all(|c| c.is_alphanumeric() || "_.-".contains(c));
+        if named && close > open + 1 && l[open + 1..close].bytes().all(|b| b.is_ascii_digit()) {
+            l.replace_range(open + 1..close, "<PID>");
+        }
+    }
+    if let Some(open) = l.find('(') {
+        if let Some(comma) = l[open..].find(",0x").map(|c| open + c) {
+            let pid_ok = comma > open + 1 && l[open + 1..comma].bytes().all(|b| b.is_ascii_digit());
+            let hex = l[comma + 3..].bytes().take_while(u8::is_ascii_hexdigit).count();
+            if pid_ok && hex > 0 && l[comma + 3 + hex..].starts_with(')') {
+                l.replace_range(open + 1..comma + 3 + hex, "<PID>,<TID>");
+            }
+        }
+    }
+    l
+}
+
 /// An outcome line with every address masked to `<addr>`: a hex number of 9 to 12 digits, the span
 /// of a 47-bit guest VA at or above 4 GiB (Ruling A3). Shared-cache addresses move with every macOS
 /// update and heap addresses with every allocator change, and a pinned outcome must move only when
@@ -220,8 +261,8 @@ fn terminal_mismatch(trace: &Path, want: i32) -> Option<String> {
     let (events, torn) = retrace_trace::Reader::open_checked(trace).expect("read the recording");
     let got = match events.iter().rev().find(|e| !matches!(e, Event::Snapshot { .. })) {
         _ if torn => "a torn trace".to_owned(),
-        Some(Event::Crash { esr, .. }) => {
-            let sig = retrace_arch::signal_of_esr(*esr).0;
+        Some(Event::Crash { esr, sig, .. }) => {
+            let sig = *sig;
             if raised { return Some(format!("MISMATCH terminal kind: native {want} (expected Signal), trace Crash {sig} esr={esr:#x}")); }
             if sig as i32 == want { return None; }
             format!("Crash {sig} esr={esr:#x}")
@@ -240,11 +281,18 @@ fn terminal_mismatch(trace: &Path, want: i32) -> Option<String> {
 /// A recording that ended at a clean wall line (spec §3e). It must exit 4 with exactly one such line,
 /// and both replays must end at the same place: the incomplete-recording line (C2), exit 4, and the
 /// recording's stdout. The first thing that fails is the row's outcome.
-fn refused(rec: &util::Bounded, rcode: i32, line: &str, trace: &str) -> Outcome {
+fn refused(nout: &[u8], nerr: &str, rec: &util::Bounded, rcode: i32, line: &str, trace: &str) -> Outcome {
     let wall = Outcome::Wall;
     let n = rec.stderr.lines().filter(|l| l.starts_with("retrace: unsupported: ")).count();
     if n != 1 { return wall(format!("MISMATCH record printed {n} wall lines")); }
     if rcode != 4 { return wall(format!("MISMATCH record exit {rcode} after a wall line, not 4")); }
+    // M51 §3i (deferred #8): what the program printed before the wall is what native printed first.
+    if !is_prefix_of(&canonical(nout), &canonical(&rec.stdout)) {
+        return wall("MISMATCH record stdout before the wall is not a prefix of native's".into());
+    }
+    if !is_prefix_of(&stderr_of(nerr), &stderr_of(&rec.stderr)) {
+        return wall("MISMATCH record stderr before the wall is not a prefix of native's".into());
+    }
     for i in 1..=2 {
         let rp = util::run_bounded(util::bin(), &["replay", trace], &[], PHASE_SECS);
         let Some(pcode) = rp.code else { return wall(format!("TIMEOUT replay {i}")) };
@@ -263,23 +311,28 @@ fn refused(rec: &util::Bounded, rcode: i32, line: &str, trace: &str) -> Outcome 
 }
 
 /// The first difference between native's run and the recording's, then the two replays' (spec §3b).
-fn judge(ncode: i32, nout: &[u8], rec: &util::Bounded, trace: &str) -> Outcome {
+fn judge(ncode: i32, nout: &[u8], nerr: &str, rec: &util::Bounded, trace: &str) -> Outcome {
     let wall = Outcome::Wall;
     let Some(rcode) = rec.code else { return wall("TIMEOUT record".into()) };
     if let Some(m) = bug_message(&rec.stderr).or_else(|| panic_message(&rec.stderr)) {
         return Outcome::Bug(format!("BUG record: {m}"));
     }
     if let Some(line) = rec.stderr.lines().find(|l| l.starts_with("retrace: unsupported: ")) {
-        return refused(rec, rcode, line, trace);
+        return refused(nout, nerr, rec, rcode, line, trace);
     }
     if rcode != ncode { return wall(format!("MISMATCH record exit {rcode}, native {ncode}")); }
     if let Some(d) = first_difference(&canonical(nout), &canonical(&rec.stdout), "native", "record") {
         return wall(format!("MISMATCH record stdout {d}"));
     }
+    // M51 §3i: stderr is compared as stdout is, now that it is the program's own (Task 1).
+    if let Some(d) = first_difference(&stderr_of(nerr), &stderr_of(&rec.stderr), "native", "record") {
+        return wall(format!("MISMATCH record stderr {d}"));
+    }
     if ncode >= 128 {
         if let Some(m) = terminal_mismatch(Path::new(trace), ncode - 128) { return wall(m); }
     }
     let rout = String::from_utf8_lossy(&rec.stdout);
+    let rerr = stderr_of(&rec.stderr);
     for i in 1..=2 {
         let rp = util::run_bounded(util::bin(), &["replay", trace], &[], PHASE_SECS);
         let Some(pcode) = rp.code else { return wall(format!("TIMEOUT replay {i}")) };
@@ -292,6 +345,9 @@ fn judge(ncode: i32, nout: &[u8], rec: &util::Bounded, trace: &str) -> Outcome {
         if pcode != rcode { return wall(format!("MISMATCH replay {i} exit {pcode}, record {rcode}")); }
         if let Some(d) = first_difference(&rout, &String::from_utf8_lossy(&rp.stdout), "record", "replay") {
             return wall(format!("MISMATCH replay {i} stdout {d}"));
+        }
+        if let Some(d) = first_difference(&rerr, &stderr_of(&rp.stderr), "record", "replay") {
+            return wall(format!("MISMATCH replay {i} stderr {d}"));
         }
     }
     Outcome::Pass
@@ -310,7 +366,7 @@ fn measure(row: &Row) -> Outcome {
     let mut argv = vec!["record-dyn", row.bin, "-o", t];
     if !row.args.is_empty() { argv.push("--"); argv.extend_from_slice(row.args); }
     let rec = util::run_bounded(util::bin(), &argv, ENV, PHASE_SECS);
-    let got = match judge(ncode, &native.stdout, &rec, t) {
+    let got = match judge(ncode, &native.stdout, &native.stderr, &rec, t) {
         Outcome::Wall(l) => Outcome::Wall(mask_addresses(&l)),
         Outcome::Refused(l) => Outcome::Refused(mask_addresses(&l)),
         Outcome::Bug(l) => Outcome::Bug(mask_addresses(&l)),
@@ -402,4 +458,22 @@ fn canonical_output_hides_only_libtests_run_dependent_figures() {
     assert_ne!(canonical(fail("30348290", 4).as_bytes()), canonical(fail("30348290", 3).as_bytes()));
     let c = tests(["adds ... FAILED", "sorts ... ok", "joins ... ok", "indexes_past_the_end - should panic ... ok"], "0.00");
     assert_ne!(canonical(a.as_bytes()), canonical(c.as_bytes()));
+}
+
+#[test]
+fn stderr_comparison_drops_retraces_lines_and_masks_only_a_pid() {
+    // M51 §3i: native's and the recording's stderr differ in the pid (the recording's is retrace's) and
+    // in retrace's own lines. Nothing else is hidden.
+    let native = "dyld[4242]: Library not loaded: @rpath/libx.dylib\nprog(4242,0x1f6c3a0c0) malloc: nano zone abandoned\n";
+    let recorded = "dyld[987]: Library not loaded: @rpath/libx.dylib\nprog(987,0x16f0bf000) malloc: nano zone abandoned\n\
+                    retrace: the program was killed by SIGABRT\n";
+    assert_eq!(stderr_of(native), stderr_of(recorded), "the pids, and retrace's closing line");
+    assert_ne!(stderr_of(native), stderr_of("dyld[987]: Library not loaded: @rpath/liby.dylib\n"), "the message still counts");
+    assert_eq!(stderr_of("x[1] y\n"), "x[1] y\n", "a bracketed number that is not a `name[pid]:` prefix stays");
+    assert_eq!(stderr_of("retrace:x\n"), "retrace:x\n", "only `retrace: ` lines are retrace's");
+    // The wall rule's negative control: it can fail, and an empty or exact prefix passes.
+    assert!(!is_prefix_of("one\ntwo\n", "one\nTWO\n"), "output native did not print fails the rule");
+    assert!(!is_prefix_of("one\n", "one\ntwo\n"), "output past native's end fails the rule");
+    assert!(is_prefix_of("one\ntwo\n", ""), "an empty record stdout is a prefix of anything");
+    assert!(is_prefix_of("one\ntwo\n", "one\n"), "an exact prefix passes");
 }

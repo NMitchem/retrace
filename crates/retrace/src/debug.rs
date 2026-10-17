@@ -734,7 +734,7 @@ impl<'a> Exec<'a> {
     fn park_at_terminal<W: Write>(&mut self, report: ReplayReport, out: &mut W) -> Result<Halt, String> {
         match &report.outcome {
             Outcome::Exit { code } => line(out, format_args!("exited (code {code})"))?,
-            Outcome::Crash { pc, esr, far } => {
+            Outcome::Crash { pc, esr, far, .. } => {
                 let a = self.annot(*pc);
                 line(out, format_args!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}{a}"))?
             }
@@ -1095,7 +1095,7 @@ impl<'a> Exec<'a> {
                 let by = self.sess().current_thread() + 1;
                 let what = match r.outcome {
                     Outcome::Exit { code } => format!("the guest exited (code {code}) on thread {by}"),
-                    Outcome::Crash { pc, esr, far } => format!("thread {by} crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"),
+                    Outcome::Crash { pc, esr, far, .. } => format!("thread {by} crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"),
                     Outcome::Signal { sig } => format!("the guest was terminated by signal {sig} on thread {by}"),
                     Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("M50 R5: a debugger opens only a complete recording, and replay never refuses one"),
                 };

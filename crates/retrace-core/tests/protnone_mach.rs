@@ -21,7 +21,7 @@ fn mach_vm_protect_is_routed_into_the_box_on_both_sides() {
         .join(format!("retrace-protnone-mach-{}.bin", std::process::id()));
 
     let rec = record(&loaded, &trace).expect("record must SUCCEED on a guest that faults");
-    let Outcome::Crash { esr, far, pc } = rec.outcome else {
+    let Outcome::Crash { esr, far, pc, .. } = rec.outcome else {
         panic!("the protected store must kill the guest, but it recorded {:?}. An Exit(7) here is \
                 precisely the pre-M13 behavior: mach_vm_protect answering KERN_SUCCESS without ever \
                 calling into the box.", rec.outcome);

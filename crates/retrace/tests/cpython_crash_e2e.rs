@@ -54,7 +54,7 @@ fn crash_and_marker_thread(trace: &Path) -> ((u64, u64, u64, u32), u32) {
             Event::Syscall { num, args, thread, .. } if (*num == 4 || *num == 397) && args[0] == 1 => {
                 last_write_thread = Some(*thread);
             }
-            Event::Crash { pc, esr, far, thread } => { crash = Some((*pc, *esr, *far, *thread)); }
+            Event::Crash { pc, esr, far, thread, .. } => { crash = Some((*pc, *esr, *far, *thread)); }
             _ => {}
         }
     }

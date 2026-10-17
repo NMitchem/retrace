@@ -16,7 +16,7 @@ fn load_and_path(guest: &str, tag: &str) -> (retrace_guest::Loaded, std::path::P
 fn data_abort_records_as_crash_and_replays() {
     let (loaded, trace) = load_and_path(retrace_guest::CRASH, "crash-da");
     let rec = record(&loaded, &trace).expect("record must SUCCEED on a guest crash");
-    let Outcome::Crash { pc, esr, far } = rec.outcome else {
+    let Outcome::Crash { pc, esr, far, .. } = rec.outcome else {
         panic!("expected crash outcome, got {:?}", rec.outcome);
     };
     assert_eq!(far, GARBAGE_VA);
@@ -37,7 +37,7 @@ fn data_abort_records_as_crash_and_replays() {
 fn instruction_abort_records_as_crash() {
     let (loaded, trace) = load_and_path(retrace_guest::CRASHJMP, "crash-ia");
     let rec = record(&loaded, &trace).unwrap();
-    let Outcome::Crash { pc, esr, far } = rec.outcome else { panic!("{:?}", rec.outcome) };
+    let Outcome::Crash { pc, esr, far, .. } = rec.outcome else { panic!("{:?}", rec.outcome) };
     assert_eq!((esr >> 26) & 0x3f, 0x20, "lower-EL instruction abort EC");
     assert_eq!(far, GARBAGE_VA);
     assert_eq!(pc, GARBAGE_VA, "instruction abort: the faulting pc IS the branch target");
@@ -56,8 +56,8 @@ fn perturbed_crash_triple_is_a_loud_divergence() {
     let mut w = Writer::create(&tampered).unwrap();
     for e in &events {
         match e {
-            Event::Crash { pc, esr, far, thread } =>
-                w.append(&Event::Crash { pc: *pc, esr: *esr, far: far + 8, thread: *thread }).unwrap(),
+            Event::Crash { pc, esr, far, sig, thread } =>
+                w.append(&Event::Crash { pc: *pc, esr: *esr, far: far + 8, sig: *sig, thread: *thread }).unwrap(),
             other => w.append(other).unwrap(),
         }
     }

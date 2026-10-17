@@ -10,7 +10,98 @@ const ISSUES_URL: &str = "https://github.com/NMitchem/retrace/issues";
 const USAGE: &str = "usage: retrace <record <guest> -o <trace> | record-dyn <exe> -o <trace> [-- <guest args...>] \
                      | replay <trace> | debug <trace> --script '...' | gdbserver <trace> [--port <n>] [--exe <path>]>";
 
+/// One of retrace's own lines on its stderr. A reader that went away is not retrace's failure, so a
+/// failed write is dropped rather than panicking, as `eprintln!` would (Review Focus 1).
+fn say(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+/// M51 §3e: the program's console writes, printed on retrace's own stdout and stderr as it makes
+/// them. stdout is flushed per write, so a terminal or a `2>&1` file interleaves the two streams in
+/// the program's order. R5: a write that fails ends retrace's writes to that stream, and the
+/// recording goes on; the program's own write returned its length already, so nothing about this
+/// reaches the trace. A reader that went away (Rust ignores SIGPIPE, so it is EPIPE) is silent. Any
+/// other error is reported once per stream through `say`, since it is not the reader's choice.
+#[derive(Default)]
+struct LiveOutput { stdout_gone: bool, stderr_gone: bool }
+
+impl retrace_core::OutputSink for LiveOutput {
+    fn write(&mut self, stream: retrace_core::Stream, bytes: &[u8]) {
+        use std::io::Write;
+        let gone = match stream {
+            retrace_core::Stream::Stdout => &mut self.stdout_gone,
+            retrace_core::Stream::Stderr => &mut self.stderr_gone,
+        };
+        if *gone { return; }
+        let r = match stream {
+            retrace_core::Stream::Stdout => {
+                let mut o = std::io::stdout().lock();
+                o.write_all(bytes).and_then(|()| o.flush())
+            }
+            retrace_core::Stream::Stderr => std::io::stderr().lock().write_all(bytes),
+        };
+        if let Err(e) = r {
+            *gone = true;
+            if let Some(line) = write_failure_line(&e) { say(&line); }
+        }
+    }
+}
+
+/// Only a vanished reader is silent. Any other failure (a full disk) is retrace failing to deliver
+/// the output, so it is said; the caller sets `gone` first, so that is once per stream.
+fn write_failure_line(e: &std::io::Error) -> Option<String> {
+    (e.kind() != std::io::ErrorKind::BrokenPipe)
+        .then(|| format!("retrace: cannot write the program's output: {e}"))
+}
+
+/// The options every CLI recording takes: the live sink, and the program's environment.
+fn live(envp: Vec<Vec<u8>>) -> retrace_core::RecordOpts {
+    retrace_core::RecordOpts { sink: Some(Box::new(LiveOutput::default())), envp }
+}
+
+/// M51 §3f (R2): the environment the program gets: retrace's own, as raw `name=value` bytes in the
+/// order it arrived, minus every `RETRACE_*` variable, which configures retrace and not the program.
+///
+/// It is read from the kernel's own envp, the array that follows argv's terminator, and not from
+/// `std::env`: a framework retrace links (CoreFoundation, under Hypervisor) `setenv`s
+/// `__CF_USER_TEXT_ENCODING` into the live `environ` at load when it is absent, a variable the
+/// program would then see though nothing passed it (measured by `envp_e2e`: native count 3, recorded 4).
+///
+/// `main` calls this first and keeps the result (`PROGRAM_ENV`), so the read happens as early as it
+/// can; a load-time constructor in a linked framework still runs before it and is outside our reach.
+static PROGRAM_ENV: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+
+fn program_env() -> Vec<Vec<u8>> {
+    PROGRAM_ENV.get_or_init(read_kernel_envp).clone()
+}
+
+fn read_kernel_envp() -> Vec<Vec<u8>> {
+    extern "C" {
+        fn _NSGetArgc() -> *mut i32;
+        fn _NSGetArgv() -> *mut *mut *const std::ffi::c_char;
+    }
+    let mut env = Vec::new();
+    // SAFETY: on macOS the kernel lays out argc, argv[argc], NULL, envp[..], NULL. Darwin's libc
+    // leaves that array untouched when `setenv` adds a new name (the CoreFoundation case), but edits
+    // it in place when a variable is overwritten (`setenv(.., 1)`, `putenv`) and shifts it on
+    // `unsetenv`. So it is intact unless something in this process overwrites or unsets an existing
+    // variable before this read; nothing in retrace does today.
+    unsafe {
+        // argc from the kernel is never negative, so the cast cannot wrap.
+        let argc = *_NSGetArgc() as usize;
+        let mut p = (*_NSGetArgv()).add(argc + 1);
+        while !(*p).is_null() {
+            let e = std::ffi::CStr::from_ptr(*p).to_bytes();
+            if !e.starts_with(b"RETRACE_") { env.push(e.to_vec()); }
+            p = p.add(1);
+        }
+    }
+    env
+}
+
 fn main() {
+    let _ = program_env();
     // M50 §3c, C7: a panic that is not a wall is a bug in retrace. The hook prints the banner and
     // returns, and the catch below exits 70 (EX_SOFTWARE, R3: 101 is also what a Rust guest's own
     // panic exits). A wall's panic is silent here: `record` and `replay` catch it themselves and print
@@ -35,7 +126,7 @@ fn main() {
         Err(payload) => match retrace_arch::Unsupported::from_panic(payload.as_ref()) {
             // C7: only `debug` and `gdbserver` drive replay without `replay()`'s own catch.
             Some(u) => {
-                eprintln!("{}", u.line());
+                say(&u.line());
                 if matches!(a.get(1).map(String::as_str), Some("debug" | "gdbserver")) { 5 } else { 4 }
             }
             None => 70,
@@ -65,7 +156,7 @@ fn run(a: &[String]) -> i32 {
 
 /// Bad input to retrace itself (R2): one `retrace:` line, and exit 2.
 fn bad_input(line: &str) -> i32 {
-    eprintln!("retrace: {line}");
+    say(&format!("retrace: {line}"));
     2
 }
 
@@ -100,21 +191,28 @@ fn record(a: &[String], dynamic: bool) -> i32 {
         Ok(l) => l,
         Err(why) => return bad_input(&format!("{guest} {why}")),
     };
+    // Guest argv: argv[0] is the exe path (what the kernel passes and what dyld's
+    // `executable_path=` is derived from); everything after `--` is the guest's own.
+    let mut argv = vec![guest.clone()];
+    if let Some(i) = a.iter().position(|s| s == "--") { argv.extend_from_slice(&a[i + 1..]); }
+    let envp = if dynamic { program_env() } else { Vec::new() };
+    // M51 §3f (R3): refused before the VM exists, so nothing is written.
+    let size = retrace_core::start_args_bytes(&argv, &envp);
+    if size > retrace_core::START_ARGS_LIMIT {
+        return bad_input(&format!("the arguments and environment take {} KiB, more than retrace's limit of {} KiB - run it \
+            under `env -i` with only what the program needs", size.div_ceil(1024), retrace_core::START_ARGS_LIMIT / 1024));
+    }
     if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
     let summary = if dynamic {
-        // Guest argv: argv[0] is the exe path (what the kernel passes and what dyld's
-        // `executable_path=` is derived from); everything after `--` is the guest's own.
-        let mut argv = vec![guest.clone()];
-        if let Some(i) = a.iter().position(|s| s == "--") { argv.extend_from_slice(&a[i + 1..]); }
         let dyld_path = exe.dylinker.clone().unwrap_or_else(|| retrace_guest::DYLD_PATH.to_string());
         let dyld_bytes = std::fs::read(&dyld_path).unwrap_or_else(|e| panic!("read dyld {dyld_path}: {e}"));
         let dyld = retrace_guest::parse_macho(retrace_guest::slice_arm64e(&dyld_bytes));
-        retrace_core::record_dynamic(&exe, &dyld, &argv, Path::new(out))
+        retrace_core::record_dynamic_opts(&exe, &dyld, &argv, Path::new(out), live(envp))
     } else {
-        retrace_core::record(&exe, Path::new(out))
+        retrace_core::record_opts(&exe, Path::new(out), live(envp))
     };
     match summary {
-        Ok(s) => finish(&s.stdout, s.fall_throughs, &s.outcome),
+        Ok(s) => finish(s.fall_throughs, &s.outcome),
         Err(e) => bad_input(&format!("cannot write the trace {out}: {e}")),
     }
 }
@@ -124,43 +222,32 @@ fn replay(a: &[String]) -> i32 {
     let Some(trace) = a.get(2) else { return bad_input("usage: retrace replay <trace>") };
     if let Err(e) = std::fs::metadata(trace) { return bad_input(&format!("cannot read {trace}: {e}")); }
     if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
-    match retrace_core::replay(Path::new(trace)) {
-        Ok(r) => finish(&r.stdout, r.fall_throughs, &r.outcome),
+    match retrace_core::replay_opts(Path::new(trace), Some(Box::new(LiveOutput::default()))) {
+        Ok(r) => finish(r.fall_throughs, &r.outcome),
         Err(d) => {
-            eprintln!("DIVERGENCE at landmark {} pc=0x{:x}: {}", d.landmark, d.pc, d.detail);
-            eprintln!("repro: retrace replay {trace}");
+            say(&format!("DIVERGENCE at landmark {} pc=0x{:x}: {}", d.landmark, d.pc, d.detail));
+            say(&format!("repro: retrace replay {trace}"));
             3
         }
     }
 }
 
-/// Print what the guest wrote, then how it ended, and return the exit code (spec §3b).
-fn finish(stdout: &[u8], fall_throughs: u64, outcome: &retrace_core::Outcome) -> i32 {
-    use std::io::Write;
-    // A reader that went away (`| head`) is not a retrace bug; any other write error is.
-    if let Err(e) = std::io::stdout().write_all(stdout) {
-        if e.kind() != std::io::ErrorKind::BrokenPipe { panic!("write the guest's output: {e}"); }
-    }
+/// How the program ended, after its output (printed live), and the exit code (spec §3b).
+fn finish(fall_throughs: u64, outcome: &retrace_core::Outcome) -> i32 {
     // M23 t2: both sides report the EL1 vector fall-through count so the gate can compare them
     // (crates/retrace/tests/fallthrough_e2e.rs). It is not in the trace — an Event variant would
-    // renumber every landmark — so an UNREPORTED count is exactly as invisible as an uncounted one,
-    // which is what t1 exists to prevent. Printed before the outcome: every outcome owes it.
-    eprintln!("[retrace] fall-throughs: {fall_throughs}");
+    // renumber every landmark. M51 §3e (R4): it is a diagnostic, printed under RETRACE_VERBOSE.
+    if retrace_arch::verbose() { say(&format!("[retrace] fall-throughs: {fall_throughs}")); }
     match *outcome {
         retrace_core::Outcome::Exit { code } => code as i32,
-        retrace_core::Outcome::Crash { pc, esr, far } => {
-            eprintln!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}");
-            139
-        }
-        retrace_core::Outcome::Signal { sig } => {
-            eprintln!("guest terminated by signal {sig}");
-            // 128 + sig: the convention M6 already uses for a crash (139 == 128 + SIGSEGV).
-            // SIGABRT therefore exits 134.
+        retrace_core::Outcome::Crash { sig, .. } | retrace_core::Outcome::Signal { sig } => {
+            // M51 §3c: the program's output is already printed; one closing line, and native's code.
+            if let Some(l) = retrace_core::closing_line(outcome) { say(&l); }
             128 + sig as i32
         }
-        // M50 §3b: the guest's output is already printed above; the wall's line comes last.
-        retrace_core::Outcome::Refused(ref u) => { eprintln!("{}", u.line()); 4 }
-        retrace_core::Outcome::Incomplete(ref at) => { eprintln!("{}", retrace_arch::incomplete_line(at)); 4 }
+        // M50 §3b: the guest's output is already printed; the wall's line comes last.
+        retrace_core::Outcome::Refused(ref u) => { say(&u.line()); 4 }
+        retrace_core::Outcome::Incomplete(ref at) => { say(&retrace_arch::incomplete_line(at)); 4 }
     }
 }
 
@@ -174,7 +261,7 @@ fn debug_cmd(a: &[String]) -> i32 {
     if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
     match debug::run_script(Path::new(trace), script, &mut std::io::stdout()) {
         Ok(()) => 0,
-        Err(e) => { eprintln!("DEBUG ERROR: {e}"); 5 }
+        Err(e) => { say(&format!("DEBUG ERROR: {e}")); 5 }
     }
 }
 
@@ -191,6 +278,22 @@ fn gdbserver_cmd(a: &[String]) -> i32 {
     if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
     match gdbserver::serve(Path::new(trace), port, exe) {
         Ok(()) => 0,
-        Err(e) => { eprintln!("GDBSERVER ERROR: {e}"); 5 }
+        Err(e) => { say(&format!("GDBSERVER ERROR: {e}")); 5 }
+    }
+}
+
+#[cfg(test)]
+mod live_output_tests {
+    use super::*;
+
+    /// Std treats EBADF on stdio as success and macOS has no /dev/full, so no CLI run can make the
+    /// sink's write fail for a reason other than EPIPE; the decision is pinned here instead.
+    #[test]
+    fn a_write_error_other_than_a_vanished_reader_is_reported() {
+        let epipe = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        assert_eq!(write_failure_line(&epipe), None, "a vanished reader is silent (R5)");
+        let full = std::io::Error::from_raw_os_error(28); // ENOSPC
+        let line = write_failure_line(&full).expect("a full disk is reported");
+        assert!(line.starts_with("retrace: cannot write the program's output: "), "{line}");
     }
 }

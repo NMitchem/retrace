@@ -21,7 +21,7 @@ pub use excl::{Excl, SetBy};
 /// M49 §3e: the store-exclusive rewrite (X1, X2), applied where the box stages code (X3).
 mod xrewrite;
 pub use sig::{
-    build_frame, choose_frame_base, decode_act, decode_stack, encode_oldact, encode_oldstack,
+    build_frame, choose_frame_base, decode_act, decode_stack, encode_oldact, encode_oldstack, oldstack_answer,
     sigreturn_token, Disposition, EntryRegs, FrameInput, NeonState, SigAction, SigTable,
     ThreadState, FRAME_LEN, FRAME_MCONTEXT_OFF, FRAME_SIGINFO_OFF, FRAME_SLACK, FRAME_UCONTEXT_OFF,
 };
@@ -104,6 +104,21 @@ pub const DYLD_BASE: u64 = 0x1_4000_0000;      // 5 GiB slide for dyld
 // the guard page. That was equally true when the stack sat at 2 MiB.
 const DYN_STACK_TOP:  u64 = 0x0280_0000;       // 40 MiB — above PT_L3_CEIL by libpthread's 0x7fc000
 const DYN_STACK_SIZE: u64 = 0x0004_0000;       // 256 KiB
+/// M51 §3f (R3): approximately the bytes `argv` and `envp` take in the start stack: each string with
+/// its NUL, one pointer each, and the two terminators. It excludes the apple[] strings and the word
+/// padding, which `START_ARGS_LIMIT`'s margin covers. The CLI compares it with the limit before it
+/// creates the VM.
+pub fn start_args_bytes(argv: &[String], envp: &[Vec<u8>]) -> usize {
+    argv.iter().map(|a| a.len() + 1 + 8).sum::<usize>() + envp.iter().map(|e| e.len() + 1 + 8).sum::<usize>() + 16
+}
+
+/// M51 §3f (R3, t0 M9): the most arguments and environment the 256 KiB start stack (`DYN_STACK_SIZE`)
+/// takes while leaving the program the stack its own code needs. Measured, not derived: under the
+/// base binary `fc_stack_overflow` still overflowed cleanly (139, the stack guard) with up to 240 KiB
+/// of argument strings; at 250 KiB the strings corrupted the layout (a crash in libc) and at 256 KiB
+/// `build_start_stack` panicked (`attempt to subtract with overflow`). 128 KiB is the largest power
+/// of two KiB below 240, and more than four times a developer's environment (3.3 KiB measured).
+pub const START_ARGS_LIMIT: usize = 128 * 1024;
 /// macOS 26 libpthread's main-thread stack size: 8 MiB minus one 16 KiB page. It calls
 /// `getrlimit(RLIMIT_STACK)` and then IGNORES the reply — M8 measured that answering 0x10000000
 /// instead of 0x40000 left libstd's computed guard address bit-identical, so retrace cannot
@@ -228,8 +243,9 @@ const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // `DC CIVAC`, `DC CVAC` and `DC CVAP`; a guest issuing them is harmless, since they run natively on
 // the vCPU and need no emulation. UCT(15) stays CLEAR: t0 M1(b) found no `CTR_EL0` read in
 // `sys_icache_invalidate`, so an EL0 `CTR_EL0` read still traps with EC 0x18 and fails loud, and
-// none was measured.
-const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000 | 0x0400_0000;
+// none was measured. SA0(4) is SET (M51 §3b, t0 M10): an EL0 load or store through a misaligned SP
+// faults with EC 0x26, as natively (SIGBUS); clear, the vCPU ran it.
+const SCTLR_MMU_ON_BASE: u64 = 0x30d0_0800 | 1 | 4 | 0x10 | 0x1000 | 0x4000 | 0x0400_0000;
 // EnIA(31) | EnIB(30) | EnDA(27) | EnDB(13)
 const SCTLR_PAC_EN: u64 = 0x8000_0000 | 0x4000_0000 | 0x0800_0000 | 0x2000;
 
@@ -831,6 +847,18 @@ pub enum Stop {
     Unsupported(Unsupported),
 }
 
+/// M51 §3d (T3-b): what a hardware fault's signal does to the thread that took it, as
+/// [`Box_::fault_action`] decides it. Record's fault arm and replay's mirror both ask, of the same
+/// box state (symmetry rule 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultAction {
+    /// Run the handler the guest installed.
+    Deliver { handler: u64 },
+    /// End the process with `sig`: the fault's own signal with no handler, or the kill native makes
+    /// when the handler's frame cannot be pushed.
+    Crash { sig: u64 },
+}
+
 /// M49 §3d F1: what [`Box_::resolve_stage2`] made of a `Stop::Other`. Record, replay and the four
 /// step loops in `retrace-core` all ask that one method, so they decide alike by construction
 /// (symmetry rule 1) rather than by six copies of a chain agreeing.
@@ -904,6 +932,10 @@ pub struct FdTable {
     slots: Vec<FdSlot>,
     host: Vec<Option<i32>>,
 }
+
+/// M51 §3e: which of the program's two console streams a write goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream { Stdout, Stderr }
 
 impl FdTable {
     /// Fresh table with 0/1/2 open as the console, mapped **identically onto retrace's own 0/1/2**.
@@ -2019,19 +2051,17 @@ impl Box_ {
     ///
     /// `esr` is the stop's own syndrome (HVF's ESR_EL2), which the box does not keep. Below the
     /// trace: every input is box state rebuilt identically on both sides, so nothing about the
-    /// decision is recorded.
+    /// decision is recorded. M51: a stop that is not an abort skips the pagers and goes to
+    /// `resolve_exception` (C13).
     pub fn resolve_stage2(&mut self, esr: u64) -> Stage2 {
+        // M51 C13: only an abort's FAR is an address the pagers may own. Any other class's FAR is
+        // UNKNOWN (a `brk`'s, an undefined instruction's), so paging at it would act on junk.
+        if !matches!(ec_of(esr), Ec::DataAbort | Ec::InstrAbort) {
+            return self.resolve_exception(esr);
+        }
         let ipa = self.fault_ipa();
         if self.page_in_cache(ipa) { return Stage2::Resolved { committed: false }; }
         if self.commit_reserved_page(ipa) { return Stage2::Resolved { committed: true }; }
-        // F2 looks only at aborts. Any other class is the guest's own exception (a wall, M50 D4) or
-        // one only retrace's own code takes (a bug), and keeps the text it had before M49 if a bug.
-        if !matches!(ec_of(esr), Ec::DataAbort | Ec::InstrAbort) {
-            return match self.exception_wall(esr) {
-                Some(u) => Stage2::Wall(u),
-                None => Stage2::Bug(self.describe_stop(esr)),
-            };
-        }
         match self.convert_stage2_abort(esr) {
             Ok(converted) => converted,
             // M50: a decline M2 classed a wall carries the marker from its site; every other is a bug.
@@ -2056,7 +2086,7 @@ impl Box_ {
     ///
     /// The next `run()` executes that slot's `hvc #0` and returns `Stop::Fault` through the arm a
     /// stage-1 fault takes, so `signal_of_esr`, `deliver_signal_to` and `Event::Crash` run as they
-    /// do for any stage-1 fault. `Err` names why the stop stays loud.
+    /// do for any stage-1 fault. `Err` names why the stop stays loud. M51: the writes are `enter_el1`'s.
     ///
     /// A FAR with a top-byte tag (a TBI0 pointer) is refused before the lookup (M49 final review
     /// M1). Both pagers were handed the raw FAR and decline a tagged address they would own
@@ -2076,6 +2106,17 @@ impl Box_ {
         if self.host_span(ipa).is_some() {
             return Err(format!("IPA {ipa:#x} is backed, so stage 2 and the box's backings disagree"));
         }
+        let pc = self.enter_el1(esr1, far);
+        Ok(Stage2::Converted { pc, esr: esr1, far })
+    }
+
+    /// The exception entry the hardware makes for an EL0 exception taken to EL1: ELR_EL1 the pc,
+    /// SPSR_EL1 the PSTATE with `PSTATE_SS` cleared, FAR_EL1, ESR_EL1, CPSR `EXC_ENTRY_CPSR`, and the
+    /// pc VBAR_EL1 + 0x400, the lower-EL synchronous vector. Returns the pc it entered from. M49's
+    /// stage-2 conversion and M51's `brk` (which `MDCR_EL2.TDE` sends to EL2 instead) share it; the
+    /// next `run()` executes that slot's `hvc #0`.
+    fn enter_el1(&mut self, esr1: u64, far: u64) -> u64 {
+        let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
         let pc = self.pc();
         let vbar = self.vcpu.get_sys(sysreg::VBAR_EL1).unwrap();
         self.vcpu.set_sys(sysreg::ELR_EL1, pc).unwrap();
@@ -2084,7 +2125,62 @@ impl Box_ {
         self.vcpu.set_sys(sysreg::ESR_EL1, esr1).unwrap();
         self.vcpu.set_reg(reg::CPSR, EXC_ENTRY_CPSR).unwrap();
         self.vcpu.set_reg(reg::PC, vbar + 0x400).unwrap();
-        Ok(Stage2::Converted { pc, esr: esr1, far })
+        pc
+    }
+
+    /// M51 §3b: a stop that is not an abort. An EL0 trap native defines that went straight to EL2
+    /// (a `brk`: `MDCR_EL2.TDE` routes it there) enters the guest's EL1 vector as it would have
+    /// without TDE, and the next `run()` returns it as the `Stop::Fault` every other converted trap
+    /// is (C7). Any other class taken from EL0 is the guest's own exception and a wall (M50 D4); one
+    /// taken from EL1 is retrace's own code, a bug.
+    fn resolve_exception(&mut self, esr: u64) -> Stage2 {
+        let (el0, direct) = self.exception_origin();
+        if el0 && direct {
+            let pc = self.pc();
+            let w = self.read_va_prefix(pc, 4);
+            if retrace_arch::convertible_trap(esr, <[u8; 4]>::try_from(&w[..]).ok().map(u32::from_le_bytes)) {
+                let far = if (esr >> 26) & 0x3f == 0x22 { pc } else { 0 };
+                let pc = self.enter_el1(esr, far);
+                return Stage2::Converted { pc, esr, far };
+            }
+        }
+        match self.exception_wall(esr) {
+            Some(u) if el0 => Stage2::Wall(u),
+            _ => Stage2::Bug(self.describe_stop(esr)),
+        }
+    }
+
+    /// M51 §3b: where the exception a non-abort stop reports was taken from, as `(el0, direct)`.
+    /// `direct` is a stop that went straight to EL2, leaving the vCPU in the guest's own context, so
+    /// CPSR holds the PSTATE it was taken from. Otherwise the EL1 vector took it, the trampoline's
+    /// `hvc` reported it (the pc is inside the vector table, as `exception_wall` reads it), and
+    /// SPSR_EL1 holds that PSTATE. `el0` is whether that PSTATE's EL is 0.
+    fn exception_origin(&self) -> (bool, bool) {
+        let direct = !(TRAMPOLINE_IPA..TRAMPOLINE_IPA + 0x800).contains(&self.pc());
+        let pstate = if direct {
+            self.vcpu.get_reg(reg::CPSR).unwrap()
+        } else {
+            self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap()
+        };
+        ((pstate >> 2) & 3 == 0, direct)
+    }
+
+    /// M51 §3b (C7): an EL0 exception the EL1 vector took that native defines (`convertible_trap`)
+    /// is the `Stop::Fault` a stage-1 abort is. Its pc is ELR_EL1, and its FAR is FAR_EL1 for a
+    /// misaligned pc and 0 otherwise: FAR_EL1 is UNKNOWN for the other classes, and native reports 0.
+    /// `None` leaves the stop the `Stop::Other` it was. `run()` and `run_one_for_step()` both ask
+    /// here, so record, replay and the step loops convert alike (symmetry rule 2).
+    fn trap_fault(&mut self, esr1: u64) -> Option<Stop> {
+        let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+        if (spsr >> 2) & 3 != 0 { return None; }
+        let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+        let w = self.read_va_prefix(pc, 4);
+        if !retrace_arch::convertible_trap(esr1, <[u8; 4]>::try_from(&w[..]).ok().map(u32::from_le_bytes)) {
+            return None;
+        }
+        let far = if (esr1 >> 26) & 0x3f == 0x22 { self.vcpu.get_sys(sysreg::FAR_EL1).unwrap() } else { 0 };
+        self.last_far = far;
+        Some(Stop::Fault { pc, esr: esr1, far })
     }
 
     /// The live stage-1 leaf descriptor for `ipa`, walking the L2/L3 the box maintains: an L3 page
@@ -2412,6 +2508,13 @@ impl Box_ {
     /// passes and what dyld's `executable_path=` is derived from). M9 widened this from a lone
     /// `argv0`; an empty slice yields `argc=0`, which no caller does but the layout handles.
     pub fn load_dynamic(exe: &Loaded, dyld: &Loaded, argv: &[String]) -> Box_ {
+        Self::load_dynamic_env(exe, dyld, argv, &[])
+    }
+
+    /// M51 §3f: `load_dynamic`, with the program's environment: each entry one raw `name=value`,
+    /// laid out between `argv` and `apple[]` as the kernel does (`build_start_stack`). The start
+    /// stack is in the opening snapshot, so replay restores the environment and never reads one.
+    pub fn load_dynamic_env(exe: &Loaded, dyld: &Loaded, argv: &[String], envp: &[Vec<u8>]) -> Box_ {
         // M40: declared before `vm`/`vcpu` so an unwind mid-construction (a panic after some
         // backing is already `vm.map`ped) drops in reverse declaration order vcpu -> vm ->
         // backings, matching the field-order invariant on `pub struct Box_` above — never
@@ -2467,7 +2570,7 @@ impl Box_ {
             .map(|s| s.vaddr)
             .expect("load_dynamic: no exe segment carries the Mach-O header (MH_MAGIC_64)");
         // Build the XNU start stack in the (already-mapped, zeroed) stack backing; get guest SP.
-        let sp = Self::build_start_stack(&backings[stack_idx], argv, main_hdr);
+        let sp = Self::build_start_stack(&backings[stack_idx], argv, envp, main_hdr);
 
         // W^X exec ranges: trampoline + exe exec segs (unslid) + dyld exec segs (slid) + the shared
         // cache's executable regions. The cache text stage-1 MUST be ATTR_CODE BEFORE the guest ever
@@ -2526,7 +2629,7 @@ impl Box_ {
     //   [0]  mainExecutable  (pointer to the main exe's mach_header)
     //   [8]  argc
     //   [16] argv[0..argc], NULL
-    //        envp[..], NULL          (empty: dyld uses the standard shared region, demand-paged)
+    //        envp[..], NULL          (M51 §3f: the program's environment, raw bytes)
     //        apple[..], NULL
     // (mainExecutable is the dyld4 addition over the classic XNU `argc,argv,envp,apple` frame.)
     //
@@ -2537,20 +2640,23 @@ impl Box_ {
     // non-zero values (identical on record & replay — deterministic; these are opaque cookies the
     // guest only XORs/stores, never checks against anything external). `executable_path=` gives dyld
     // the main exe's path.
-    fn build_start_stack(stack: &Backing, argv: &[String], main_hdr: u64) -> u64 {
+    fn build_start_stack(stack: &Backing, argv: &[String], envp: &[Vec<u8>], main_hdr: u64) -> u64 {
         let base_ipa = stack.ipa;
         let top = stack.ipa + stack.len as u64;
         let argv0 = argv.first().map(String::as_str).unwrap_or("");
-        // strings[0..argc] = argv; the rest are apple[] entries (order irrelevant — parsed by key).
+        // strings: argv[0..argc], then envp[0..envc], then the apple[] entries (order irrelevant —
+        // parsed by key).
         let mut strings: Vec<Vec<u8>> = Vec::new();
-        let push = |s: String, out: &mut Vec<Vec<u8>>| { let mut v = s.into_bytes(); v.push(0); out.push(v); };
-        for a in argv { push(a.clone(), &mut strings); }                         // argv[0..argc]
-        push(format!("executable_path={argv0}"), &mut strings);                  // apple[0]
-        push("ptr_munge=0x1a2b3c4d5e6f7a8b".to_string(), &mut strings);          // libpthread cookie (nonzero)
-        push("stack_guard=0x000a0b0c0d0e0f00".to_string(), &mut strings);        // __stack_chk_guard (low byte 0)
-        push("malloc_entropy=0x00112233445566778899aabbccddeeff".to_string(), &mut strings); // libmalloc 2x64 entropy
+        let push = |mut v: Vec<u8>, out: &mut Vec<Vec<u8>>| { v.push(0); out.push(v); };
+        for a in argv { push(a.clone().into_bytes(), &mut strings); }            // argv[0..argc]
+        for e in envp { push(e.clone(), &mut strings); }                          // envp[0..envc]
+        push(format!("executable_path={argv0}").into_bytes(), &mut strings);     // apple[0]
+        push(b"ptr_munge=0x1a2b3c4d5e6f7a8b".to_vec(), &mut strings);            // libpthread cookie (nonzero)
+        push(b"stack_guard=0x000a0b0c0d0e0f00".to_vec(), &mut strings);          // __stack_chk_guard (low byte 0)
+        push(b"malloc_entropy=0x00112233445566778899aabbccddeeff".to_vec(), &mut strings); // libmalloc 2x64 entropy
         let argc = argv.len();
-        let n_apple = strings.len() - argc;
+        let envc = envp.len();
+        let n_apple = strings.len() - argc - envc;
 
         // Lay the strings down from the top of the stack; record each one's guest address.
         let mut p = top;
@@ -2560,12 +2666,13 @@ impl Box_ {
             addr[i] = p;
             unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), stack.host.add((p - base_ipa) as usize), s.len()); }
         }
-        // KernelArgs words: mainExecutable, argc, argv[0..argc], NULL, NULL(envp), apple[0..], NULL.
+        // KernelArgs words: mainExecutable, argc, argv[0..argc], NULL, envp[0..envc], NULL, apple[0..], NULL.
         let mut words = vec![main_hdr, argc as u64];
         words.extend((0..argc).map(|i| addr[i]));
         words.push(0);                                          // argv terminator
-        words.push(0);                                          // envp terminator (empty)
-        words.extend((0..n_apple).map(|i| addr[argc + i]));
+        words.extend((0..envc).map(|i| addr[argc + i]));
+        words.push(0);                                          // envp terminator
+        words.extend((0..n_apple).map(|i| addr[argc + envc + i]));
         words.push(0); // apple[] terminator
         let sp = (p - words.len() as u64 * 8) & !15u64;             // 16-byte aligned
         for (i, w) in words.iter().enumerate() {
@@ -3392,6 +3499,8 @@ impl Box_ {
                         Ec::Other(0) => match self.try_emulate_undef_mrs() {
                             Ok(true) => continue,
                             Ok(false) => {
+                                // M51 §3b: an undefined word native defines is the crash native reports.
+                                if let Some(f) = self.trap_fault(esr1) { return f; }
                                 self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                                 return Stop::Other { esr: esr1 };
                             }
@@ -3411,9 +3520,14 @@ impl Box_ {
                             let far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
                             self.last_far = far;
+                            // M51 §3d (J1): native's syndrome for a jump into memory nothing backs.
+                            let esr1 = self.native_abort_syndrome(esr1, far);
                             return Stop::Fault { pc, esr: esr1, far };
                         }
                         _ => {
+                            // M51 §3b: a misaligned pc or SP, or a `brk` `resolve_exception` entered
+                            // EL1 for, is the crash native reports.
+                            if let Some(f) = self.trap_fault(esr1) { return f; }
                             self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             return Stop::Other { esr: esr1 };
                         }
@@ -3703,6 +3817,8 @@ impl Box_ {
                         Ec::Other(0) => match self.try_emulate_undef_mrs() {
                             Ok(true) => return Stop::Step,
                             Ok(false) => {
+                                // M51 §3b: an undefined word native defines is the crash native reports.
+                                if let Some(f) = self.trap_fault(esr1) { return f; }
                                 self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                                 return Stop::Other { esr: esr1 };
                             }
@@ -3714,9 +3830,14 @@ impl Box_ {
                             let far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
                             self.last_far = far;
+                            // M51 §3d (J1): native's syndrome for a jump into memory nothing backs.
+                            let esr1 = self.native_abort_syndrome(esr1, far);
                             return Stop::Fault { pc, esr: esr1, far };
                         }
                         _ => {
+                            // M51 §3b: a misaligned pc or SP, or a `brk` `resolve_exception` entered
+                            // EL1 for, is the crash native reports.
+                            if let Some(f) = self.trap_fault(esr1) { return f; }
                             self.last_far = self.vcpu.get_sys(sysreg::FAR_EL1).unwrap();
                             return Stop::Other { esr: esr1 };
                         }
@@ -4217,16 +4338,23 @@ impl Box_ {
     /// Takes `args` as a parameter and stores nothing: `Box_` gets no new field for this. Reads
     /// guest memory for the `DerefU64` shape, which is the only reason it needs `&self`.
     fn dest_len_bytes(&self, num: u64, i: usize, args: &[u64; 8]) -> Option<usize> {
-        match retrace_arch::dest_buffer(num) {
+        match retrace_arch::dest_buffer_for(num, args) {
             Some((di, len)) if di == i => Some(match len {
                 retrace_arch::DestLen::Reg(n) => args[n] as usize,
-                // `*(size_t*)args[n]` — sysctl's oldlenp. A null or unmapped pointer would be a
-                // guest bug; `read_u64` is the same accessor the rest of the box uses for guest
-                // scalars, so it behaves identically to every other guest-memory read here.
-                retrace_arch::DestLen::DerefU64(n) => self.read_u64(args[n]) as usize,
+                // `*(size_t*)args[n]` — sysctl's oldlenp.
+                retrace_arch::DestLen::DerefU64(n) => self.oldlen_at(args[n]),
             }),
             _ => None,
         }
+    }
+
+    /// M51 §3h: sysctl's `*oldlenp`, for sizing the diff window. A pointer the program could not read
+    /// natively (NULL, below the first page, unmapped) has no length to size by: 0, and the kernel
+    /// answers the call itself. `prepare_forward_pointers` has already refused an `oldlenp` it
+    /// could name with EFAULT (t0 M6: native hangs on one, `sysctl(3)` documents EFAULT), so a pointer
+    /// that reaches here is one the kernel is left to judge.
+    fn oldlen_at(&self, p: u64) -> usize {
+        self.read_va_checked(p, 8).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()) as usize)
     }
 
     /// How many bytes of the region behind `args[i]` to snapshot for the pre/post memory diff.
@@ -4310,9 +4438,21 @@ impl Box_ {
     /// the trace-log echo. A write to any slot the table marks `Console(1|2)` — fd 1/2 themselves
     /// until the guest `dup2`s over them or closes them, and every alias `dup2` or `dup` created
     /// (the latter since the M37 fix wave) — is mirrored and faked.
-    pub fn is_console_write(&self, num: u64, gfd: u64) -> bool {
-        retrace_arch::is_write_syscall(num) && matches!(self.fds.console_of(gfd), Some(1 | 2))
+    ///
+    /// M51 §3e: it also says WHICH console, from the slot's kind, so a `dup2(2, 1)` write goes to
+    /// stderr as it does natively. Record's console arm and replay's mirror both route through this
+    /// one call (symmetry rule 1).
+    pub fn console_write_stream(&self, num: u64, gfd: u64) -> Option<Stream> {
+        if !retrace_arch::is_write_syscall(num) { return None; }
+        match self.fds.console_of(gfd) {
+            Some(1) => Some(Stream::Stdout),
+            Some(2) => Some(Stream::Stderr),
+            _ => None,
+        }
     }
+
+    /// `console_write_stream`'s yes or no, for the callers that need only that.
+    pub fn is_console_write(&self, num: u64, gfd: u64) -> bool { self.console_write_stream(num, gfd).is_some() }
     /// M37: a close of an IDENTITY console slot — 0/1/2 while its slot is still `Console(n)` at
     /// index n AND its host mapping is still retrace's own descriptor n — has its host half faked
     /// (M9: that host descriptor is retrace's own) and its slot retired by record's arm.
@@ -4345,7 +4485,9 @@ impl Box_ {
     fn translate_mwl_regions(&self, args: &[u64; 8]) -> Result<Vec<u8>, u64> {
         let count = args[1].min(retrace_arch::MWL_MAX_REGION_COUNT);
         let stride = retrace_arch::MWL_REGION_STRIDE;
-        let mut buf = self.read_guest(args[0], count as usize * stride);
+        // M51 §3h (t0 M6, Ruling T0-e): natively a plain process's every call answers EINVAL and the
+        // array is never examined, so a pointer the program could not read is EINVAL, not EFAULT.
+        let mut buf = self.read_va_checked(args[0], count as usize * stride).ok_or(retrace_arch::EINVAL)?;
         for r in 0..count as usize {
             let off = r * stride;
             let gfd = i32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
@@ -4503,7 +4645,7 @@ impl Box_ {
         // A `match` over `DestLen` rather than an `if let` on `Reg` alone: a future third variant
         // fails to compile here unless it is given an explicit arm, so it cannot be silently
         // skipped the way this clamp itself once could have been.
-        if let Some((di, dest_len)) = retrace_arch::dest_buffer(num) {
+        if let Some((di, dest_len)) = retrace_arch::dest_buffer_for(num, &args) {
             match dest_len {
                 // M34 fix wave: this arm had no channel. The `DerefU64` arm below has had
                 // `RETRACE_DEREFLEN` since M29, so M29 could state on measurement that its refusal
@@ -4578,7 +4720,7 @@ impl Box_ {
                     let gated = std::env::var_os("RETRACE_DEREFLEN").is_some();
                     match self.host_span(args[di]) {
                         Some((_, avail)) => {
-                            let want = self.read_u64(args[n]) as usize;
+                            let want = self.oldlen_at(args[n]);
                             if want > avail {
                                 if gated {
                                     let (bi, bl) = self.backing_of(args[di]).unwrap();
@@ -4971,12 +5113,22 @@ impl Box_ {
     /// a watched range is a separate question from "which syscall wrote here", and conflating them
     /// would make a watchpoint fire with a syscall's provenance for a write no syscall made.
     fn write_guest(&mut self, ipa: u64, bytes: &[u8]) {
-        let (hp, avail) = self.host_span(ipa)
-            .unwrap_or_else(|| retrace_arch::refuse!(Memory, "write_guest: ipa {ipa:#x} outside any mapped region"));
-        if bytes.len() > avail {
-            retrace_arch::refuse!(Memory, "write_guest at {ipa:#x} ({} bytes) overruns backing ({avail} avail)", bytes.len());
+        // M51 §3h: a span the program passed may cross from one backing into the next (a struct that
+        // straddles two pages), so it is written chunk by chunk. Every chunk is found before any is written.
+        let mut chunks = Vec::new();
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let a = ipa + done as u64;
+            let (hp, avail) = self.host_span(a).unwrap_or_else(|| panic!("M51 §3h: write_guest at ipa {a:#x}, which \
+                nothing maps. Every pointer the program passes is checked before it gets here (prepare_forward_pointers, \
+                read_va_checked, prepare_reply), so this is retrace's bug, not the program's"));
+            let n = avail.min(bytes.len() - done);
+            chunks.push((hp, done, n));
+            done += n;
         }
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), hp, bytes.len()); }
+        for (hp, off, n) in chunks {
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr().add(off), hp, n); }
+        }
     }
 
     /// Is thread `tid` currently executing on ITS OWN alternate signal stack?
@@ -5002,34 +5154,66 @@ impl Box_ {
     /// must not — see `choose_frame_base`, which is the only real consumer.
     pub fn on_altstack(&self) -> bool { self.on_altstack_of(self.threads.current()) }
 
-    /// M49 Ruling T3-b: the handler a hardware fault on thread `tid` runs, or `None` when the fault
-    /// is terminal. A handler runs only if its frame can be pushed. When a page of
-    /// `[frame_base, frame_base + FRAME_LEN)` is neither backed nor inside a reservation, the kernel
-    /// cannot build the frame and the process dies of the signal. Native shows this:
-    /// `faultcase_dyn deeprec h`, a stack overflow with a handler and no alternate stack, exits 139.
-    /// Before M49 that fault never got here (it was a recorder error). F2 brings it, and
-    /// `deliver_signal_to` would panic in `write_guest` on the unbacked frame.
+    /// M51 §3d (T3-b), after M49's Ruling T3-b: what the fault's signal `sig` does on thread `tid`.
+    /// No handler: the process dies of `sig`. A handler whose frame can be pushed
+    /// (`frame_pushable`) runs. Otherwise the kernel cannot build the frame and kills the process
+    /// (t0 M2): with SIGILL, except for a frame on the main thread's own stack, where it dies of `sig`
+    /// (static `native-overflow-small.txt`: a main-stack overflow with a handler exits 139, a child's
+    /// 132; `native-badalt.txt`: an unusable alternate stack exits 132 on either thread).
     ///
-    /// `frame_base` is `choose_frame_base`'s, computed as `deliver_signal_to` computes it, from the
-    /// live SP_EL0 for the running thread and the saved one otherwise (`on_altstack_of`'s
-    /// discipline). A reservation page counts as pushable, which leaves `write_guest`'s existing
-    /// panic on an uncommitted one as it was: unmeasured, and unchanged by M49.
-    pub fn fault_handler(&self, tid: usize, sig: u64) -> Option<u64> {
+    /// The frame base is `choose_frame_base`'s, as `deliver_signal_to` computes it, from the live
+    /// SP_EL0 for the running thread and the saved one otherwise (`on_altstack_of`'s discipline).
+    pub fn fault_action(&self, tid: usize, sig: u64) -> FaultAction {
         let act = self.sigtable.action(sig);
-        let Disposition::Handler(handler) = act.disp else { return None };
+        let Disposition::Handler(handler) = act.disp else { return FaultAction::Crash { sig } };
         let sp = if tid == self.threads.current() {
             self.vcpu.get_sys(sysreg::SP_EL0).unwrap()
         } else {
             self.threads.ctx_of(tid).regs.sp_el0
         };
-        let (base, _) = choose_frame_base(sp, act, self.threads.altstack_of(tid), self.on_altstack_of(tid));
+        let (base, on_alt) = choose_frame_base(sp, act, self.threads.altstack_of(tid), self.on_altstack_of(tid));
+        if self.frame_pushable(base) { return FaultAction::Deliver { handler }; }
+        // Main is always thread index 0 (the only thread whose frame failure keeps the fault's signal); any other thread, or a fault on
+        // the alternate stack, ends in SIGILL.
+        FaultAction::Crash { sig: if !on_alt && tid == 0 { sig } else { retrace_arch::SIGILL } }
+    }
+
+    /// M51 §3d: can the kernel push a signal frame at `[base, base + FRAME_LEN)`? Each page must
+    /// translate at stage 1, be present (backed, or inside a reservation, which the frame's write
+    /// commits as a guest store would), and be EL0-writable (`ATTR_DATA`). A `PROT_NONE` page or an
+    /// unmapped one is not. With the MMU off there is no leaf, so presence decides. C1: a page the
+    /// program made read-only is still `ATTR_DATA` here, so this cannot see it.
+    fn frame_pushable(&self, base: u64) -> bool {
         let g = GRANULE as u64;
         let mut page = base & !(g - 1);
         while page < base + FRAME_LEN as u64 {
-            if self.host_span(page).is_none() && !self.in_reservation(page) { return None; }
+            let Some((ipa, leaf)) = self.va_leaf(page) else { return false };
+            if self.host_span(ipa).is_none() && !self.in_reservation(ipa) { return false; }
+            if leaf.is_some_and(|l| !excl::el0_writable(l)) { return false; }
             page += g;
         }
-        Some(handler)
+        true
+    }
+
+    /// M51 §3d (J1): the syndrome native reports for an EL0 instruction abort. retrace's stage 1
+    /// maps every block it has not promoted as `ATTR_DATA` (EL0 read-write, UXN), so a jump to an
+    /// address nothing backs is a stage-1 PERMISSION fault here, where natively the page is not mapped
+    /// and the fault is a TRANSLATION fault (static `native-traps.txt`, `jump1g`: ESR 0x82000006,
+    /// SIGSEGV `SEGV_ACCERR`). When the page is not backed, not reserved and not in the shared-cache
+    /// window, and its leaf is `ATTR_DATA`, the IFSC becomes a translation fault at the leaf's level,
+    /// in the returned syndrome and in ESR_EL1. Every other syndrome is returned unchanged: a jump
+    /// into a backed data page is a permission fault natively too (`jumpheap`, 0x8200000f, SIGBUS).
+    /// Below the trace: `run()` and `run_one_for_step()` both call it, on record and replay alike.
+    fn native_abort_syndrome(&mut self, esr1: u64, far: u64) -> u64 {
+        if (esr1 >> 26) & 0x3f != 0x20 || !(0x0c..=0x0f).contains(&(esr1 & 0x3f)) { return esr1; }
+        if (SHARED_REGION_START..SHARED_REGION_END).contains(&far) { return esr1; }
+        let Some((ipa, Some(leaf))) = self.va_leaf(far) else { return esr1 };
+        if self.host_span(ipa).is_some() || self.in_reservation(ipa) { return esr1; }
+        if !excl::el0_writable(leaf) || leaf & UXN == 0 { return esr1; }
+        let level = if leaf & 0x3 == DESC_BLOCK { 2 } else { 3 };
+        let esr = (esr1 & !0x3f) | (0x04 + level);
+        self.vcpu.set_sys(sysreg::ESR_EL1, esr).unwrap();
+        esr
     }
 
     /// The saved PSTATE at the current trap (SPSR_EL1) — the sibling of `position()`'s ELR_EL1.
@@ -5072,7 +5256,13 @@ impl Box_ {
         let uc = self.read_guest(uctx_ipa, 56);
         let mask = u32::from_le_bytes(uc[4..8].try_into().unwrap());
         let mc_ipa = u64::from_le_bytes(uc[48..56].try_into().unwrap());
-        let mc = self.read_guest(mc_ipa, 816);
+        // FW-5: `uc_mcontext` is a pointer the handler can rewrite, so it is read the way the program could
+        // reach it. Natively the kernel kills the process for a frame it cannot read; a wall is the honest
+        // answer until that is measured.
+        let Some(mc) = self.read_va_checked(mc_ipa, 816) else {
+            retrace_arch::refuse!(Signals, "sigreturn: the handler's frame names an mcontext at {mc_ipa:#x} the program cannot reach. \
+             Natively the kernel kills the process for a frame it cannot read; retrace does not model that yet.");
+        };
         let ts = &mc[16..];
 
         for i in 0..29u32 {
@@ -5242,7 +5432,14 @@ impl Box_ {
             act, frame_base, on_alt,
         };
         let (bytes, entry) = build_frame(&inp);
-        self.write_guest(frame_base, &bytes);
+        // M51 §3d (C12): the fault path asks `fault_action` first, so only a raised signal reaches
+        // here with a frame nothing can hold. Native kills with SIGILL there too; recording that for a
+        // raise is owed, so it stays a wall rather than a write into memory the guest does not have.
+        if !self.frame_pushable(frame_base) {
+            retrace_arch::refuse!(Signals, "a handler's signal frame at {frame_base:#x} cannot be pushed (a page is unmapped or not writable); native kills the process with SIGILL, which retrace does not record for a raised signal yet");
+        }
+        self.write_va_committing(frame_base, &bytes)
+            .unwrap_or_else(|m| panic!("M51: the frame frame_pushable passed: {m}"));
 
         // Block for the handler's duration, unless SA_NODEFER — on the RECEIVING thread.
         let mut newmask = self.threads.mask_of(tid) | act.mask;
@@ -5327,13 +5524,25 @@ impl Box_ {
             let off = (ipa - bk.ipa) as usize;
             return unsafe { std::slice::from_raw_parts(bk.host.add(off), len) }.to_vec();
         }
-        retrace_arch::refuse!(Memory, "read_guest: ipa 0x{ipa:x} len {len} not mapped");
+        // M51 §3h: a span that crosses from one backing into the next (a straddling struct) is read
+        // chunk by chunk, all or nothing.
+        let mut out = Vec::with_capacity(len.min(1 << 16));
+        while out.len() < len {
+            let a = ipa + out.len() as u64;
+            let Some((hp, avail)) = self.host_span(a) else { break };
+            let n = avail.min(len - out.len());
+            out.extend_from_slice(unsafe { std::slice::from_raw_parts(hp, n) });
+        }
+        if out.len() == len { return out; }
+        panic!("M51 §3h: read_guest of {len} bytes at ipa {ipa:#x}, which nothing maps. Every pointer the program \
+            passes is checked before it gets here (prepare_forward_pointers, read_va_checked, prepare_reply), so this \
+            is retrace's bug, not the program's");
     }
 
     /// Like `read_guest`, but returns None instead of panicking when the full `[ipa, ipa+len)` span
     /// does not fit inside a single backing — deterministic all-or-nothing (no clamping, no partial
     /// read). For callers (the M3 debugger's memory reads) that must tolerate unmapped/partial spans;
-    /// `read_guest`'s panic stays load-bearing fail-loud for internal callers.
+    /// `read_guest`'s panic stays load-bearing fail-loud for internal callers. Since M51 that panic is retrace's bug, never a wall.
     ///
     /// M44 B1: by the index beside the Vec (backings.rs).
     pub fn read_guest_checked(&self, ipa: u64, len: usize) -> Option<Vec<u8>> {
@@ -5548,6 +5757,13 @@ impl Box_ {
     /// `try_thread_of_port` for why replay takes the fallible one instead.
     pub fn thread_of_port(&self, port: u32) -> usize {
         self.try_thread_of_port(port).unwrap_or_else(|d| panic!("{d}"))
+    }
+
+    /// M51 §3g (C4): the kernel's answer to `__pthread_kill(port, 0)`, which sends nothing and asks
+    /// whether `port` names a thread: `(0, false)` for a port a live guest thread holds, and
+    /// `(ESRCH, true)` for any other. Record's signal-0 arm and replay's compare both ask here.
+    pub fn thread_probe(&self, port: u32) -> (u64, bool) {
+        if self.try_thread_of_port(port).is_ok() { (0, false) } else { (retrace_arch::ESRCH, true) }
     }
 
     /// The address the kernel enters a NEW thread at, learned from the guest's own
@@ -6516,6 +6732,173 @@ impl Box_ {
         Ok(())
     }
 
+    /// M51 §3h (C3): the pre-forward pointer check. For a BSD call with a row, each declared `Path`,
+    /// `Source`, `NestedSource`, `Dest` or `Ptr` argument must name memory the program can reach natively:
+    /// a `Path` to its NUL (at most 1024 bytes), every other kind its first byte's page; readable by EL0,
+    /// and writable by it for a `Dest` (and for every `Ptr` the kernel writes through, `retrace_arch::ptr_use`).
+    /// An argument below the first page or with a nonzero top byte keeps today's path and the host kernel
+    /// answers it, but only at a position the host kernel does answer: a position retrace dereferences
+    /// itself (`retrace_arch::serviced_pointer`) skips only NULL and answers EFAULT for any other value
+    /// (FW-1). A region address (`retrace_arch::region_address`) or an out-pointer natively swallowed
+    /// (`retrace_arch::ignores_bad_out_pointer`) also keeps today's path. So does
+    /// `ioctl`'s argument when the request carries neither `IOC_IN` nor `IOC_OUT`, and every
+    /// `map_with_linking_np` pointer, which a plain process never gets examined (EINVAL, t0 M6). The
+    /// first argument that fails is `Err(EFAULT)`.
+    ///
+    /// Each page that passes is made present: a reserved page is committed and a cache page paged in, so
+    /// the forward hands the kernel memory where the program will read it. Without this a pointer
+    /// `host_span` does not map reached the host kernel raw, as a host address (F15).
+    ///
+    /// A pointer whose struct size is fixed (`retrace_arch::fixed_span`) is checked over its whole span.
+    ///
+    /// The extents of every other argument are deliberately the first page. A count is what the caller offers, not what the
+    /// kernel touches, so checking it would refuse calls native completes. The first page is what keeps a
+    /// guest address from reaching the host, since `forward_and_diff`'s clamp keeps a write inside that
+    /// page's backing.
+    ///
+    /// Record calls it before the forward and before the console write, `sigaction` and `sigaltstack`;
+    /// replay calls it at the same points, so both make the same pages present. It is idempotent. A page
+    /// made present before a later argument fails stays present, on both sides alike; the program cannot
+    /// tell, since a reserved page reads as the zeros it would have committed.
+    pub fn prepare_forward_pointers(&mut self, num: u64, args: &[u64; 8]) -> Result<(), u64> {
+        use retrace_arch::ArgKind::*;
+        if (num as i64) < 0 || retrace_arch::arg_kinds(num).is_none() { return Ok(()); }
+        if num == retrace_arch::SYS_MAP_WITH_LINKING_NP { return Ok(()); }
+        let shape = retrace_arch::shape_of(num, args);
+        for (i, kind) in shape.args.iter().enumerate() {
+            let write = match kind {
+                Path | Source | NestedSource => false,
+                // M51 §3h (I-1): `retrace_arch::ptr_use` classifies every `Ptr` position (a unit test keeps
+                // it total); a position the kernel writes through is write-checked like a `Dest`, a
+                // range the call acts on is left to the kernel.
+                Ptr => match retrace_arch::ptr_use(num, i) {
+                    Some(retrace_arch::PtrUse::Range) => continue,
+                    Some(retrace_arch::PtrUse::Writes) => true,
+                    _ => false,
+                },
+                Dest(_) => true,
+                Scalar | Fd | NestedDest => continue,
+            };
+            let v = args[i];
+            // FW-1: a pointer retrace dereferences itself skips only NULL, whose meaning is "none"; a near-NULL
+            // or tagged value is judged below like any other (page 0 is unmapped and a tagged VA is past the
+            // 47-bit walk, so both answer EFAULT, as native measured for the tagged case). Every other
+            // position skips values below 16 KiB and tagged ones, which may be integers the host answers.
+            let serviced = retrace_arch::serviced_pointer(num, i);
+            if v == 0 || (!serviced && (v < GRANULE as u64 || v >> 56 != 0)) { continue; }
+            if retrace_arch::region_address(num, i) || retrace_arch::ignores_bad_out_pointer(num, i) { continue; }
+            if num == retrace_arch::SYS_IOCTL && i == 2
+                && (args[1] & (retrace_arch::IOC_IN | retrace_arch::IOC_OUT) == 0 || retrace_arch::iocparm_len(args[1]) == 0) {
+                continue;
+            }
+            if *kind == Path {
+                self.present_path(v)?;
+            } else if let Some(size) = retrace_arch::fixed_span(num, i) {
+                // A struct of known size: every page it covers, since the kernel copies all of it.
+                let end = v.saturating_add(size as u64);
+                let mut a = v;
+                while a < end {
+                    self.present_page(a, write)?;
+                    a = (a | (GRANULE as u64 - 1)).saturating_add(1);
+                }
+            } else {
+                self.present_page(v, write)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One page of `prepare_forward_pointers`. A VA whose stage-1 walk lands elsewhere (an M39
+    /// alias) keeps today's path, untouched, because `forward_and_diff` translates by identity.
+    fn present_page(&mut self, va: u64, write: bool) -> Result<(), u64> {
+        let Some((ipa, leaf)) = self.va_leaf(va) else { return Err(retrace_arch::EFAULT) };
+        if ipa != va { return Ok(()); }
+        if let Some(l) = leaf {
+            let ap = (l >> 6) & 3;
+            if ap & 1 == 0 || (write && ap != 1) { return Err(retrace_arch::EFAULT); }
+        }
+        // `page_in_cache` only for a page nothing backs yet: on a backed page it counts a refault.
+        if self.host_span(ipa).is_some() || self.commit_reserved_page(ipa)
+            || ((SHARED_REGION_START..SHARED_REGION_END).contains(&ipa) && self.page_in_cache(ipa)) {
+            Ok(())
+        } else {
+            Err(retrace_arch::EFAULT)
+        }
+    }
+
+    /// M51 §3h (M-3): make every page of `[va, va + len)` present for a read the box itself performs (the
+    /// console write), as `present_path` does for a path: a cache page the program never touched is paged
+    /// in, a reserved one committed. `Err(EFAULT)` at the first page the program could not read. Record
+    /// and replay call it with the same arguments before the read.
+    pub fn present_read_span(&mut self, va: u64, len: usize) -> Result<(), u64> {
+        let end = va.saturating_add(len as u64);
+        let mut a = va;
+        while a < end {
+            self.present_page(a, false)?;
+            a = (a | (GRANULE as u64 - 1)).saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// `prepare_forward_pointers` for a `Path`: each page up to the NUL, at most `PATH_MAX` (1024)
+    /// bytes, as the kernel's `copyinstr` scans it.
+    fn present_path(&mut self, va: u64) -> Result<(), u64> {
+        let end = va.saturating_add(1024);
+        let mut a = va;
+        while a < end {
+            self.present_page(a, false)?;
+            let page_end = ((a | (GRANULE as u64 - 1)) + 1).min(end);
+            let want = (page_end - a) as usize;
+            let bytes = self.read_va_prefix(a, want);
+            if bytes.len() < want || bytes.contains(&0) { return Ok(()); }
+            a = page_end;
+        }
+        Ok(())
+    }
+
+    /// M51 §3h: `[va, va + len)` for an emulated call that reads the program's memory, or None where it
+    /// could not read it natively: a page that does not translate, that EL0 may not read, or that is
+    /// neither present nor reserved. A reserved page the program never touched reads as zeros, as
+    /// natively. A cache page not yet paged in reads as None; the emulated calls that read the
+    /// program's memory (t0 M6) read its own stack and heap, never an unfaulted cache page.
+    pub fn read_va_checked(&self, va: u64, len: usize) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(len.min(1 << 16));
+        let mut a = va;
+        while out.len() < len {
+            let (ipa, leaf) = self.va_leaf(a)?;
+            if leaf.is_some_and(|l| (l >> 6) & 1 == 0) { return None; }
+            let n = (((a | (GRANULE as u64 - 1)) + 1 - a) as usize).min(len - out.len());
+            match self.read_guest_checked(ipa, n) {
+                Some(b) => out.extend_from_slice(&b),
+                None if self.host_span(ipa).is_none() && self.in_reservation(ipa) => out.resize(out.len() + n, 0),
+                None => return None,
+            }
+            a = a.checked_add(n as u64)?;
+        }
+        Some(out)
+    }
+
+    /// M51 §3h: would the kernel's copyout of an emulated call's reply to `[va, va + len)` succeed
+    /// natively? Each page must translate, be writable by EL0, and be present or reserved. When all
+    /// pass, each reserved page is committed, as the kernel's write would commit it, and it returns
+    /// true; otherwise nothing changes. Record and the replay mirror both call it before the reply.
+    pub fn prepare_reply(&mut self, va: u64, len: usize) -> bool {
+        let end = va.saturating_add(len as u64);
+        let mut commit = Vec::new();
+        let mut a = va;
+        while a < end {
+            let Some((ipa, leaf)) = self.va_leaf(a) else { return false };
+            if leaf.is_some_and(|l| (l >> 6) & 3 != 1) { return false; }
+            if self.host_span(ipa).is_none() {
+                if !self.in_reservation(ipa) { return false; }
+                commit.push(ipa);
+            }
+            a = (a | (GRANULE as u64 - 1)).saturating_add(1);
+        }
+        for ipa in commit { self.commit_reserved_page(ipa); }
+        true
+    }
+
     /// `workq_kernreturn(THREAD_KEVENT_RETURN, changelist, nchanges, 0)`: the event manager handing
     /// back its change list (M46 §3d; libpthread `pthread.c:2581-2635`, xnu
     /// `pthread_workqueue.c:3641-3745`).
@@ -7477,8 +7860,9 @@ impl Box_ {
 
     /// M50 (spec §3c, D4): a guest's own synchronous exception that retrace does not record yet, as
     /// a wall in `exceptions`; None for one only retrace's own code takes (a same-EL abort, a debug
-    /// exception outside the debugger), which stays a bug. Trap instructions are walls until M51
-    /// records them as the crashes native has. The line names the instruction word and its pc. A
+    /// exception outside the debugger), which stays a bug. Since M51 an EL0 trap instruction the program
+    /// executes converts to the crash native has before it gets here, so the trap rows are backstops; AMX
+    /// (0x3f) and 0x18 remain walls. The line names the instruction word and its pc. A
     /// vector-relayed exception's pc is ELR_EL1, because the live PC is parked in the trampoline.
     fn exception_wall(&self, esr: u64) -> Option<Unsupported> {
         let ec = (esr >> 26) & 0x3f;
@@ -7493,6 +7877,7 @@ impl Box_ {
             0x26 => "a misaligned stack pointer".to_owned(),
             0x2c => "a trapped floating-point exception".to_owned(),
             0x3c => format!("brk #{:#x}", esr & 0xffff),
+            0x3f => "an implementation-defined instruction (such as Apple's AMX)".to_owned(),
             _ => return None,
         };
         let pc = self.pc();
@@ -7978,14 +8363,15 @@ mod sctlr_dze_tests {
     // value, because a bit set speculatively is the "right conclusion resting on an unmeasured
     // supporting fact" this repo keeps catching.
     #[test]
-    fn sctlr_enables_dc_zva_and_ic_ivau_for_el0_and_nothing_else() {
+    fn sctlr_enables_dc_zva_ic_ivau_and_sp_alignment_for_el0_and_nothing_else() {
         for pac_enabled in [false, true] {
             let sctlr = sctlr_mmu_on(pac_enabled);
+            assert!(sctlr & 0x10 != 0, "SA0 (bit 4) must be SET: {sctlr:#x}");
             assert!(sctlr & 0x4000 != 0, "DZE (bit 14) must be SET: {sctlr:#x}");
             assert!(sctlr & 0x0400_0000 != 0, "UCI (bit 26) must be SET: {sctlr:#x}");
             assert!(sctlr & 0x8000 == 0, "UCT (bit 15) must stay CLEAR: {sctlr:#x}");
-            assert_eq!(sctlr & !SCTLR_PAC_EN, 0x30d0_0800 | 1 | 4 | 0x1000 | 0x4000 | 0x0400_0000,
-                "the base is M, C, I, DZE and UCI over 0x30d00800, and nothing else: {sctlr:#x}");
+            assert_eq!(sctlr & !SCTLR_PAC_EN, 0x30d0_0800 | 1 | 4 | 0x10 | 0x1000 | 0x4000 | 0x0400_0000,
+                "the base is M, C, SA0, I, DZE and UCI over 0x30d00800, and nothing else: {sctlr:#x}");
         }
     }
 }
@@ -8023,6 +8409,26 @@ mod stack_geometry_tests {
     fn derives_the_dynamic_geometry_from_a_dynamic_snapshot() {
         let regions = vec![region(DYN_STACK_TOP - DYN_STACK_SIZE, DYN_STACK_SIZE)];
         assert_eq!(stack_geometry_from_memory(&regions), (DYN_STACK_TOP, DYN_STACK_SIZE));
+    }
+
+    // M51 §3f: the environment sits between argv's terminator and apple[], each string byte for
+    // byte, as the kernel lays it out and dyld4 reads it.
+    #[test]
+    fn the_start_stack_carries_the_environment_between_argv_and_apple() {
+        let (host, len) = alloc_pages(DYN_STACK_SIZE as usize);
+        let stack = Backing { host, ipa: DYN_STACK_TOP - DYN_STACK_SIZE, len };
+        let argv = ["/bin/prog".to_owned(), "one".to_owned()];
+        let envp = [b"A=1".to_vec(), b"B=\xff=x".to_vec(), b"C=".to_vec()];
+        let sp = Box_::build_start_stack(&stack, &argv, &envp, EXE_BASE);
+        let at = |a: u64| unsafe { host.add((a - stack.ipa) as usize) };
+        let word = |a: u64| u64::from_le_bytes(unsafe { std::slice::from_raw_parts(at(a), 8) }.try_into().unwrap());
+        let cstr = |a: u64| unsafe { std::ffi::CStr::from_ptr(at(word(a)) as *const std::ffi::c_char) }.to_bytes().to_vec();
+        assert_eq!((word(sp), word(sp + 8)), (EXE_BASE, 2), "mainExecutable, argc");
+        assert_eq!((cstr(sp + 16), cstr(sp + 24), word(sp + 32)), (b"/bin/prog".to_vec(), b"one".to_vec(), 0), "argv, NULL");
+        assert_eq!([cstr(sp + 40), cstr(sp + 48), cstr(sp + 56)], envp, "envp, in order, byte for byte");
+        assert_eq!(word(sp + 64), 0, "envp's terminator");
+        assert_eq!(cstr(sp + 72), b"executable_path=/bin/prog".to_vec(), "apple[0] follows");
+        assert_eq!(start_args_bytes(&argv, &envp), (10 + 4 + 4 + 6 + 3) + 5 * 8 + 16, "strings with NULs, one pointer each, two terminators");
     }
 
     // Fail loud, never default: a snapshot naming no stack we recognize must not silently answer

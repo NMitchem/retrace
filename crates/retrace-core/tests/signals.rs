@@ -190,7 +190,7 @@ fn an_uncaught_fault_is_still_a_crash() {
 #[test]
 fn a_wild_store_below_the_ipa_ceiling_records_and_replays_as_a_crash() {
     let (outcome, trace) = record_asm(retrace_guest::WILDSTORE);
-    let Outcome::Crash { pc, esr, far } = outcome else { panic!("expected a crash, got {outcome:?}") };
+    let Outcome::Crash { esr, far, .. } = outcome else { panic!("expected a crash, got {outcome:?}") };
     assert_eq!((esr, far), (0x9200_0047, 0xB_0000_0000), "a level-3 translation fault, a store, at the wild address");
     let (events, torn) = retrace_trace::Reader::open_checked(&trace).unwrap();
     assert!(!torn, "the recording must be complete");
@@ -198,7 +198,7 @@ fn a_wild_store_below_the_ipa_ceiling_records_and_replays_as_a_crash() {
     assert!(matches!(events[events.len() - 1], retrace_trace::Event::Snapshot { .. }));
     for _ in 0..2 {
         let rep = retrace_core::replay(&trace).expect("the crash replays");
-        assert_eq!(rep.outcome, Outcome::Crash { pc, esr, far });
+        assert_eq!(rep.outcome, outcome);
     }
     std::fs::remove_file(&trace).ok();
 }
