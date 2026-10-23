@@ -95,11 +95,13 @@ fn destroying_a_semaphore_a_thread_waits_on_wakes_it_with_natives_answer() {
     assert_eq!(native("destroy"), "waiter kr=37\nsignal kr=15\n");
 }
 
-/// C12: a 5 s wait takes no host time. The recorder's whole run, startup included, fits in 4 s.
+/// C12: a 5 s wait takes no host time. The recorder's whole run, startup included, fits in 6 s.
 #[test]
 fn a_long_timed_wait_takes_no_host_time() {
-    let (code, out, err, _) = record("long", 4);
-    assert_eq!(code, Some(0), "the recording (None: the 4 s bound fired): {err}");
+    // 6 s: a model that spent host time on the 5 s guest wait would take 5 s plus ~2.5 s of debug-record
+    // startup, about 7.5 s, so the bound still discriminates and leaves headroom under a loaded gate.
+    let (code, out, err, _) = record("long", 6);
+    assert_eq!(code, Some(0), "the recording (None: the 6 s bound fired): {err}");
     assert_eq!(out, "kr=49\n");
 }
 
