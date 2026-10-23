@@ -7299,6 +7299,12 @@ impl Box_ {
         idx
     }
 
+    /// M52 §3c: `thread_selfid` (372), per guest thread. Record's arm and replay's mirror both call
+    /// this, so the answer is a pure function of the thread table.
+    pub fn guest_thread_selfid(&self) -> u64 {
+        self.threads.id_of(self.threads.current())
+    }
+
     /// `bsdthread_create(func, arg, stack, pthread, flags)`, emulated.
     ///
     /// **Never forwarded.** The host would create a real thread inside retrace's own process
@@ -7307,12 +7313,6 @@ impl Box_ {
     ///
     /// The stack is the guest's own: libpthread `mach_vm_map`s it and `mach_vm_protect`s its guard
     /// page PROT_NONE (M13's first real caller) two traps before this one. M14 places no IPAs.
-    /// M52 §3c: `thread_selfid` (372), per guest thread. Record's arm and replay's mirror both call
-    /// this, so the answer is a pure function of the thread table.
-    pub fn guest_thread_selfid(&self) -> u64 {
-        self.threads.id_of(self.threads.current())
-    }
-
     pub fn guest_bsdthread_create(&mut self, args: [u64; 8]) -> u64 {
         let (func, arg, stack, pthread, flags) = (args[0], args[1], args[2], args[3], args[4]);
         let start = self.thread_start_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "M14: bsdthread_create before bsdthread_register — refusing to invent a thread entry \

@@ -40,7 +40,6 @@ static void *trylocker(void *arg) {
     r->rc = pthread_mutex_trylock(r->m);
     return 0;
 }
-static int yes(int b) { return b; }
 
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "routes";
@@ -94,8 +93,8 @@ int main(int argc, char **argv) {
         for (int j = i + 1; j < 4; j++) distinct &= c[i].np != c[j].np;
         if (i < 3) reused |= c[3].np == c[i].np;
     }
-    printf("routes agree=%s\n", yes(agree && np_of_child) ? "yes" : "no");
-    printf("distinct=%s\n", yes(distinct && main_not_child) ? "yes" : "no");
+    printf("routes agree=%s\n", (agree && np_of_child) ? "yes" : "no");
+    printf("distinct=%s\n", (distinct && main_not_child) ? "yes" : "no");
     printf("nonzero=%s\n", nonzero ? "yes" : "no");
     printf("main_is_not_a_child=%s\n", main_not_child ? "yes" : "no");
     printf("reused=%s\n", reused ? "yes" : "no");

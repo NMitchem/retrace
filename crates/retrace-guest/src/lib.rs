@@ -288,6 +288,9 @@ pub const SBXPATH_DYN: &str = concat!(env!("OUT_DIR"), "/sbxpath_dyn");
 pub const VMALIGN_DYN: &str = concat!(env!("OUT_DIR"), "/vmalign_dyn");
 /// M52 §3b: FIXED Mach VM requests without `VM_FLAGS_OVERWRITE` — modes `cases`, `overwrite`, `windows`.
 pub const VMFIXED_DYN: &str = concat!(env!("OUT_DIR"), "/vmfixed_dyn");
+/// M52 §3c: per-thread ids — modes `routes` (every answered route agrees, ids distinct and never reused),
+/// `raw` (each id in decimal, pinned against the replay), `mutex` (recursive trylock EBUSY, errorcheck
+/// relock EDEADLK) and `pidinfo` (PROC_PIDTHREADID64INFO, refused by value).
 pub const TID_DYN: &str = concat!(env!("OUT_DIR"), "/tid_dyn");
 /// M52 §3b: an xzone huge chunk grown by realloc — modes `page` and `grow`.
 pub const HUGEREALLOC_DYN: &str = concat!(env!("OUT_DIR"), "/hugerealloc_dyn");
