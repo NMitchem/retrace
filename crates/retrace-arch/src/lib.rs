@@ -1106,6 +1106,22 @@ pub fn refusal_before_forward(num: u64) -> Option<Unsupported> {
     }
 }
 
+/// `proc_info`'s `PROC_INFO_CALL_PIDINFO` and its `PROC_PIDTHREADID64INFO` flavor (`sys/proc_info.h`):
+/// a thread looked up by id. Natively it answers a live tid; the ids a guest holds are synthetic
+/// (M52 §3c, ruling T2-pidinfo), so a forward would answer a different question in silence.
+pub const PROC_INFO_CALL_PIDINFO: u64 = 2;
+pub const PROC_PIDTHREADID64INFO: u64 = 15;
+
+/// M52 §3c (T2-pidinfo): the one `proc_info` shape refused before the forward. Other flavors are
+/// unchanged. `args` is `proc_info(callnum, pid, flavor, arg, buffer, buffersize)`.
+pub fn proc_info_refusal(num: u64, args: &[u64; 8]) -> Option<Unsupported> {
+    if num == 336 && args[0] == PROC_INFO_CALL_PIDINFO && args[2] == PROC_PIDTHREADID64INFO {
+        return Some(Unsupported::new(WallCategory::Threads,
+            "proc_info (syscall 336) PROC_PIDTHREADID64INFO, a thread looked up by id: guest thread ids are synthetic"));
+    }
+    None
+}
+
 /// The wall an unrowed number is (spec §3b). Waiting for another process, or starting one without
 /// `fork`'s refusal, is `process-creation`: wait4 (7), vfork (66) and waitid (173), from the SDK's
 /// `sys/syscall.h`. Anything else is a syscall retrace has no row for yet.

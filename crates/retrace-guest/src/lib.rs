@@ -288,6 +288,7 @@ pub const SBXPATH_DYN: &str = concat!(env!("OUT_DIR"), "/sbxpath_dyn");
 pub const VMALIGN_DYN: &str = concat!(env!("OUT_DIR"), "/vmalign_dyn");
 /// M52 §3b: FIXED Mach VM requests without `VM_FLAGS_OVERWRITE` — modes `cases`, `overwrite`, `windows`.
 pub const VMFIXED_DYN: &str = concat!(env!("OUT_DIR"), "/vmfixed_dyn");
+pub const TID_DYN: &str = concat!(env!("OUT_DIR"), "/tid_dyn");
 /// M52 §3b: an xzone huge chunk grown by realloc — modes `page` and `grow`.
 pub const HUGEREALLOC_DYN: &str = concat!(env!("OUT_DIR"), "/hugerealloc_dyn");
 /// M52 §3b: `mach_vm_copy` by case (`disjoint`, `overlap_fwd`, `overlap_back`, `unmapped_src`, `none_dst`,

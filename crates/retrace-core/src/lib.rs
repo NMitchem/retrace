@@ -1698,6 +1698,16 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 b.apply_and_return(0, false, &zeros);
             }
 
+            // M52 §3c: thread_selfid is MODELLED per guest thread, never forwarded: the host answers
+            // the recorder's one thread id for every guest thread. The id is a pure function of the
+            // thread table, so nothing is recorded but the return (the replay mirror recomputes it).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_THREAD_SELFID => {
+                let id = b.guest_thread_selfid();
+                w.append(&Event::Syscall { num, args, ret: id, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append thread_selfid: {e}"))?; count += 1;
+                b.set_x0_err_and_return(id, false);
+            }
+
             // M47 §3d: __mac_syscall is MODELLED per (policy, call), never forwarded: a policy may
             // write through a pointer INSIDE `arg` (AMFI's outFlags), which a forward hands the host
             // as a host address (NestedDest). This arm refuses an unmodelled pair by value
@@ -1755,6 +1765,10 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // kqueue retrace never created, and a filter that blocks would block the RECORDER.
                 // This assert makes "never forwarded" a checked fact (the bsdthread_create gap M37
                 // measured).
+                // M52 §3c: thread_selfid is answered per guest thread above. Forwarded, every thread
+                // reads the recorder's one host id and main's 0 breaks recursive mutexes.
+                assert!(num != retrace_arch::SYS_THREAD_SELFID,
+                    "thread_selfid (372) reached the generic forward arm — it must be answered above (M52 §3c).");
                 assert!(num != retrace_arch::SYS_KEVENT,
                     "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c).");
                 // M48 §3e: every psynch call is handled above, modelled or refused by value. Forwarded,
@@ -1785,6 +1799,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // which guard arms that must exist, and before the M27 assert below, which is now a
                 // backstop, like `forwarded_shape`'s panic inside `forward_and_diff`.
                 if let Some(u) = retrace_arch::refusal_before_forward(num) { return Err(u.marked()); }
+                // M52 §3c (T2-pidinfo): a thread looked up by id names an id the host never issued.
+                if let Some(u) = retrace_arch::proc_info_refusal(num, &args) { return Err(u.marked()); }
                 // M27: the destination sits behind a pointer INSIDE a guest struct, which
                 // forward_and_diff never translates — so forwarding hands the host kernel a guest
                 // IPA as a host address. No guest in the gate calls these (measured: absent from
@@ -2557,6 +2573,23 @@ impl ReplaySession {
                                          the model records 0, 0, false and none (R3)", writes.len()) });
                                 }
                                 self.b.apply_and_return(0, false, &zeros);
+                                return self.finish_event();
+                            }
+                            // M52 §3c: the thread_selfid arm's mirror (symmetry rule 1): the same
+                            // box method, its answer compared with the recording. It inherits the
+                            // arm-top `verify_thread` and adds none.
+                            if num == retrace_arch::SYS_THREAD_SELFID {
+                                let id = self.b.guest_thread_selfid();
+                                if id != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("thread_selfid mismatch: replay {id:#x} != recorded {ret:#x}") });
+                                }
+                                if *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "thread_selfid recorded ret1={ret1:#x} err={err} with {} write(s); the model \
+                                         records 0, false and none", writes.len()) });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
                             }
                             // M47 §3d: the __mac_syscall arm's mirror (symmetry rule 1). The

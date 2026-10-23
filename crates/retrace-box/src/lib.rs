@@ -717,6 +717,13 @@ pub struct Box_ {
 /// without it** — see `Box_::guest_bsdthread_create` for the disassembly and the host probe.
 const PTHREAD_KPORT_OFF: u64 = 0xf8;
 
+/// M52 §3c: offset of the thread id inside `pthread` (`pthread_threadid_np(NULL)` loads
+/// `[TPIDRRO_EL0 - 0xe0 + 0xd8]` with no syscall; `_pthread_start` stores `thread_selfid`'s result
+/// there for a child). Main's struct is the TSD page's, `TSD_IPA - 0xe0`, and nothing writes its
+/// field (t0 M4: a watch over a whole recording saw no store), so `load_dynamic` writes
+/// `MAIN_THREAD_ID` into it before the first snapshot.
+const PTHREAD_TID_OFF: u64 = 0xd8;
+
 /// M48 §3c: `kqueue` and the `writev` pair (SDK `sys/syscall.h`), which `Box_::note_fd_effects`
 /// reads. `writev` is forwarded (its row is `NestedSource`), so its return moves a pipe's count as
 /// `write`'s does. `readv` needs no entry: its row is `NestedDest`, which the generic arm refuses
@@ -2561,7 +2568,12 @@ impl Box_ {
         }
         // Thread-pointer TSD region (see TSD_IPA): a zeroed region spanning below+above the thread
         // pointer (TPIDRRO_EL0 = TSD_IPA sits in its middle) so both TSD-key and pthread-field accesses land in it.
-        map(&vm, &mut backings, TSD_REGION_BASE, &[], TSD_REGION_SIZE as usize);
+        // M52 §3c: main's thread id sits in this region's pthread struct, written before the first
+        // snapshot so record and replay both restore it.
+        let tid_at = (TSD_IPA - 0xe0 + PTHREAD_TID_OFF - TSD_REGION_BASE) as usize;
+        let mut tsd_init = vec![0u8; tid_at + 8];
+        tsd_init[tid_at..].copy_from_slice(&thread::MAIN_THREAD_ID.to_le_bytes());
+        map(&vm, &mut backings, TSD_REGION_BASE, &tsd_init, TSD_REGION_SIZE as usize);
 
         // The main executable's mach-header address (dyld4's KernelArgs.mainExecutable): the exe
         // segment whose bytes begin with MH_MAGIC_64. dyld dereferences this to parse the main exe.
@@ -7295,6 +7307,12 @@ impl Box_ {
     ///
     /// The stack is the guest's own: libpthread `mach_vm_map`s it and `mach_vm_protect`s its guard
     /// page PROT_NONE (M13's first real caller) two traps before this one. M14 places no IPAs.
+    /// M52 §3c: `thread_selfid` (372), per guest thread. Record's arm and replay's mirror both call
+    /// this, so the answer is a pure function of the thread table.
+    pub fn guest_thread_selfid(&self) -> u64 {
+        self.threads.id_of(self.threads.current())
+    }
+
     pub fn guest_bsdthread_create(&mut self, args: [u64; 8]) -> u64 {
         let (func, arg, stack, pthread, flags) = (args[0], args[1], args[2], args[3], args[4]);
         let start = self.thread_start_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "M14: bsdthread_create before bsdthread_register — refusing to invent a thread entry \

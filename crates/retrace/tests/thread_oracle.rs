@@ -340,6 +340,14 @@ fn a_wrong_thread_on_a_kevent_landmark_is_a_divergence() {
     retag_fixture_and_expect_divergence(retrace_guest::KQ_DYN, &["wake"], retrace_arch::SYS_KEVENT);
 }
 
+/// M52 Task 2 (spec §3c): the `thread_selfid` mirror sits inside the `Syscall` chain after the
+/// arm-top `verify_thread`, so a 372 landmark retagged to another live thread must diverge as the
+/// schedule. `tid_dyn routes` runs four threads, each issuing 372.
+#[test]
+fn a_wrong_thread_on_a_thread_id_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::TID_DYN, &["routes"], retrace_arch::SYS_THREAD_SELFID);
+}
+
 /// M48 Task 10: the same for `psynch_cvwait`, on `condvar_dyn pingpong`, whose two threads each wait.
 #[test]
 fn a_wrong_thread_on_a_psynch_cvwait_landmark_is_a_divergence() {

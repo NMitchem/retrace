@@ -145,8 +145,14 @@ pub enum ThreadState {
     Exited(u64),
 }
 
+/// M52 §3c: the synthetic id `thread_selfid` answers for the main thread. Natively ids run around
+/// 49 490 000; any nonzero constant serves, and this one is plainly not a host id.
+pub const MAIN_THREAD_ID: u64 = 0x10_0000;
+
 #[derive(Clone, Debug)]
 pub struct Thread {
+    /// M52 §3c: this thread's `thread_selfid`, assigned at creation, never reused.
+    pub id: u64,
     pub ctx: ThreadCtx,
     pub state: ThreadState,
     /// `(base, len)` of the guest-allocated stack. The guest maps its own thread stacks, so M14
@@ -175,6 +181,8 @@ pub struct Thread {
 pub struct ThreadTable {
     threads: Vec<Thread>,
     current: usize,
+    /// M52 §3c: the id the next `spawn` assigns; an exited thread's id is never reused.
+    next_id: u64,
 }
 
 impl ThreadTable {
@@ -183,6 +191,7 @@ impl ThreadTable {
     pub fn new(main: ThreadCtx) -> Self {
         Self {
             threads: vec![Thread {
+                id: MAIN_THREAD_ID,
                 ctx: main,
                 state: ThreadState::Runnable,
                 stack: (0, 0),
@@ -193,10 +202,12 @@ impl ThreadTable {
                 sprr: 0,
             }],
             current: 0,
+            next_id: MAIN_THREAD_ID + 1,
         }
     }
 
     pub fn current(&self) -> usize { self.current }
+    pub fn id_of(&self, tid: usize) -> u64 { self.threads[tid].id }
     pub fn len(&self) -> usize { self.threads.len() }
     pub fn is_empty(&self) -> bool { self.threads.is_empty() }
     pub fn state_of(&self, tid: usize) -> ThreadState { self.threads[tid].state }
@@ -350,7 +361,10 @@ impl ThreadTable {
     /// alternate stack is NOT inherited — a new thread starts with none.
     pub fn spawn(&mut self, ctx: ThreadCtx, stack: (u64, u64)) -> usize {
         let mask = self.threads[self.current].mask;
+        let id = self.next_id;
+        self.next_id += 1;
         self.threads.push(Thread {
+            id,
             ctx,
             state: ThreadState::Runnable,
             stack,
@@ -556,6 +570,20 @@ impl ThreadTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_thread_gets_a_distinct_id_never_reused() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        assert_eq!(t.id_of(0), MAIN_THREAD_ID);
+        let a = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        let b = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        let c = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        assert_eq!((t.id_of(a), t.id_of(b), t.id_of(c)), (MAIN_THREAD_ID + 1, MAIN_THREAD_ID + 2, MAIN_THREAD_ID + 3));
+        t.switch_to(b);
+        t.exit_current(0);
+        let d = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        assert_eq!(t.id_of(d), MAIN_THREAD_ID + 4, "an exited thread's id is not reused");
+    }
 
     #[test]
     fn a_spawned_thread_inherits_the_creators_mask_by_value() {
