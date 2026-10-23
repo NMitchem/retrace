@@ -262,6 +262,42 @@ fn semaphore_destroy_guard(b: &Box_, m: &machmsg::Msg2) -> Result<(), String> {
     b.check_sleep_semaphore("semaphore_destroy (3419)", port)
 }
 
+/// M52 §3d: what a forwarded semaphore RPC asked, read from the guest's own request before the
+/// forward (record) or before the recorded reply lands (replay).
+enum SemRequest { Create(u32), Destroy(u32) }
+
+fn semaphore_request(b: &Box_, m: &machmsg::Msg2) -> Result<Option<SemRequest>, String> {
+    if m.msgh_id != machmsg::SEMAPHORE_CREATE && m.msgh_id != machmsg::SEMAPHORE_DESTROY { return Ok(None); }
+    let buf = b.read_va_checked(m.data, m.send_size as usize)
+        .ok_or("the request buffer is unreadable after mach2_unreachable passed it")?;
+    if m.msgh_id == machmsg::SEMAPHORE_CREATE {
+        return machmsg::decode_semaphore_create_request(&buf).map(|v| Some(SemRequest::Create(v)));
+    }
+    machmsg::decode_semaphore_destroy(&buf).map(|p| Some(SemRequest::Destroy(p)))
+}
+
+/// M52 §3d: after a 3418 or 3419 reply has landed (forwarded on record, applied on replay), teach the
+/// box the count of the semaphore the create named, or end the one the destroy killed. A failed call
+/// changes nothing. Both Forward arms call this with the same arguments, so both sides learn the
+/// same name (the host's, recorded in the reply and applied verbatim on replay). `Err` is a refusal
+/// by value (record: `wall_or_bug`; replay: a divergence).
+fn learn_semaphore(b: &mut Box_, m: &machmsg::Msg2, req: Option<SemRequest>, ret: u64, err: bool) -> Result<(), String> {
+    let Some(req) = req else { return Ok(()) };
+    if ret != machmsg::MACH_MSG_SUCCESS || err { return Ok(()); }
+    match req {
+        SemRequest::Create(value) => {
+            let Some(reply) = b.read_va_checked(m.data, machmsg::CLOCK_SERVICE_REPLY_LEN) else { return Ok(()) };
+            if let Some(port) = machmsg::decode_semaphore_create_reply(&reply) { b.note_semaphore_created(port, value); }
+            Ok(())
+        }
+        SemRequest::Destroy(port) => {
+            let Some(reply) = b.read_va_checked(m.data, 36) else { return Ok(()) };
+            if machmsg::semaphore_destroy_reply_succeeded(&reply) { b.note_semaphore_destroyed(port)?; }
+            Ok(())
+        }
+    }
+}
+
 /// M51 §3h: the landmark of a call answered with an error before it did anything, as a pointer the
 /// program could not pass natively is: `ret` (an errno with `err`, or a `kern_return_t` without), no
 /// writes, and the program resumes past it. Never forwarded or serviced.
@@ -956,8 +992,11 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         let clock_id = clock_service_request(&b, &m)
                             .map_err(|e| wall_or_bug(retrace_arch::in_context("host_get_clock_service (206) decode", e)))?;
                         if verbose { eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id); }
+                        let sem_req = semaphore_request(&b, &m)
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("semaphore RPC (3418/3419) decode", e)))?;
                         let (ret, _ret1, err, writes) = b.forward_and_diff(num, args);
                         learn_clock_service(&mut b, &m, clock_id, ret, err);
+                        learn_semaphore(&mut b, &m, sem_req, ret, err).map_err(wall_or_bug)?;
                         if trace_log {
                             eprintln!("[mach_msg2] host ret={ret:#x} err={err}");
                             for w_ in &writes {
@@ -1005,6 +1044,17 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 let rc = b.guest_sem_wait(args);
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append sem_wait: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
+            // M52 §3d: the mach semaphore TIMED wait (-38), box-answered like -36 and never
+            // forwarded: it has no `arg_kinds` row, so this arm's place BEFORE the generic negative
+            // arm is what keeps it from being a wall there (C1's backstop, `refusal_before_forward`).
+            // `ret` 0, `err` false and no writes: the real answer (49) comes at the wake into a
+            // context both sides rebuild. A refusal ends the recording at a wall before the append.
+            Stop::Syscall { num, args } if num == retrace_arch::MACH_SEMAPHORE_TIMEDWAIT => {
+                let rc = b.guest_sem_timedwait(args).map_err(wall_or_bug)?;
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append sem_timedwait: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
             // M18 Stage 2b: the mach semaphore SIGNAL (see `Box_::guest_sem_signal`). Never
@@ -2947,8 +2997,14 @@ impl ReplaySession {
                                         // two calls around the reply landing.
                                         let clock_id = clock_service_request(&self.b, &m).map_err(|e| Divergence {
                                             landmark: self.idx, pc, detail: format!("replay host_get_clock_service decode: {e}") })?;
+                                        let sem_req = semaphore_request(&self.b, &m).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay semaphore RPC decode: {e}") })?;
                                         self.b.apply_and_return(*ret, *err, writes);
                                         learn_clock_service(&mut self.b, &m, clock_id, *ret, *err);
+                                        learn_semaphore(&mut self.b, &m, sem_req, *ret, *err).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!(
+                                                "semaphore RPC refused on replay, though the recording accepted it \
+                                                 — replay diverged before this landmark: {e}") })?;
                                     }
                                     machmsg::Route::Unsupported(why) => {
                                         return Err(Divergence { landmark: self.idx, pc,
@@ -3426,6 +3482,28 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(
                                             "sem_wait mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M52 §3d: the -38 record arm's mirror, in the psynch mirror's shape: the
+                            // same call with the same arguments, the return compared, a refusal a
+                            // divergence naming the call. It inherits the arm-top `verify_thread`.
+                            if num == retrace_arch::MACH_SEMAPHORE_TIMEDWAIT {
+                                let rc = match self.b.guest_sem_timedwait(args) {
+                                    Ok(rc) => rc,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "semaphore_timedwait_trap refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("semaphore_timedwait_trap rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                if *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "semaphore_timedwait_trap recorded ret1={ret1:#x} err={err} with {} write(s); the emulation \
+                                         records 0, false and none", writes.len()) });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();

@@ -95,10 +95,10 @@ const ROWS: &[Row] = &[
           expect: Expect::Pass },
     Row { name: "fc_rs_sleep", bin: retrace_guest::FC_RS_SLEEP, args: &[],
           expect: Expect::Pass },
-    Row { name: "fc_rs_tests", bin: retrace_guest::FC_RS_TESTS, args: &[],
-          expect: Expect::Wall("retrace: unsupported: semaphore_timedwait_trap (mach trap -38)") },
-    Row { name: "fc_rs_tests_fail", bin: retrace_guest::FC_RS_TESTS_FAIL, args: &[],
-          expect: Expect::Wall("retrace: unsupported: semaphore_timedwait_trap (mach trap -38)") },
+    // M52 t3: libtest's `recv_timeout` is `semaphore_timedwait_trap` (-38), box-answered since, so both
+    // harnesses run through and match native (the output comparison is `canonical`'s).
+    Row { name: "fc_rs_tests", bin: retrace_guest::FC_RS_TESTS, args: &[], expect: Expect::Pass },
+    Row { name: "fc_rs_tests_fail", bin: retrace_guest::FC_RS_TESTS_FAIL, args: &[], expect: Expect::Pass },
     // Swift (swiftc, only where it runs: R11).
     Row { name: "fc_sw_hello", bin: retrace_guest::FC_SW_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_throw", bin: retrace_guest::FC_SW_THROW, args: &[], expect: Expect::Pass },
@@ -438,8 +438,8 @@ fn the_table_has_one_row_per_corpus_fixture() {
 
 #[test]
 fn canonical_output_hides_only_libtests_run_dependent_figures() {
-    // No row reaches the comparison through libtest yet: both harnesses stop at record (t0 M1). So
-    // this pins `canonical` on what native printed at plan time. Two runs of `fc_rs_tests` differ in
+    // Since M52 t3 both libtest rows reach the comparison (before it they stopped at record, t0 M1).
+    // This pins `canonical` on what native printed at plan time. Two runs of `fc_rs_tests` differ in
     // their result lines' order and their `finished in`, and two of `fc_rs_tests_fail` in the panic
     // line's thread id.
     let tests = |order: [&str; 4], secs: &str| format!(

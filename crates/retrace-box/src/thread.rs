@@ -81,7 +81,11 @@ pub enum BlockReason {
     ///
     /// Numeric collision with a `Wait` address is possible and harmless: the variants are distinct,
     /// so `unblock_waiters_on` and `unblock_sem_waiters_on` cannot wake each other's sleepers.
-    Sem { port: u64 },
+    ///
+    /// M52 §3d: `deadline` is `None` for `semaphore_wait_trap` (-36) and a guest-clock value, in
+    /// `Kevent`'s domain, for `semaphore_timedwait_trap` (-38), which `Box_::sem_timed_out` answers
+    /// `KERN_OPERATION_TIMED_OUT`. A signal or a destroy ends either wait first.
+    Sem { port: u64, deadline: Option<u64> },
     /// M18 Stage 2b: a workqueue worker parked in `workq_kernreturn(0x4)`, waiting for the kernel
     /// to hand it more work.
     ///
@@ -128,10 +132,10 @@ impl BlockReason {
     /// primitive must say here whether it carries one.
     pub fn deadline(&self) -> Option<u64> {
         match *self {
-            BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. } => deadline,
+            BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. }
+            | BlockReason::Sem { deadline, .. } => deadline,
             BlockReason::Sleep { deadline } => Some(deadline),
-            BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Sem { .. }
-            | BlockReason::Parked => None,
+            BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Parked => None,
         }
     }
 }
@@ -482,7 +486,7 @@ impl ThreadTable {
     pub fn unblock_sem_waiters_on(&mut self, port: u64) -> Vec<usize> {
         let mut woken = Vec::new();
         for (tid, t) in self.threads.iter_mut().enumerate() {
-            if let ThreadState::Blocked(BlockReason::Sem { port: p }) = t.state {
+            if let ThreadState::Blocked(BlockReason::Sem { port: p, .. }) = t.state {
                 if p == port {
                     t.state = ThreadState::Runnable;
                     woken.push(tid);
@@ -490,6 +494,14 @@ impl ThreadTable {
             }
         }
         woken
+    }
+
+    /// M52 §3d: every thread blocked on the mach semaphore `port`, timed or not, in table order. Pure.
+    pub fn sem_waiters_on(&self, port: u64) -> Vec<usize> {
+        self.threads.iter().enumerate()
+            .filter(|(_, t)| matches!(t.state, ThreadState::Blocked(BlockReason::Sem { port: p, .. }) if p == port))
+            .map(|(tid, _)| tid)
+            .collect()
     }
 
     /// M48 §3c–§3d: make `tid`, blocked in a timed-wait primitive, runnable. Its caller writes the
@@ -510,7 +522,8 @@ impl ThreadTable {
                  as blockedctx.rs does for __ulock_wait, before modelling it.");
         }
         assert!(matches!(self.threads[tid].state,
-                ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. })),
+                ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. }
+                    | BlockReason::Sem { .. })),
             "M48: wake of thread {tid}, which is {:?}, not blocked in a timed-wait primitive",
             self.threads[tid].state);
         self.threads[tid].state = ThreadState::Runnable;

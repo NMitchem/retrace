@@ -7,6 +7,7 @@ crates/retrace-box/src/lib.rs	guest_bsdthread_create	Threads	M14: bsdthread_crea
 crates/retrace-box/src/lib.rs	guest_bsdthread_create	Threads	M14: bsdthread_create pthread struct
 crates/retrace-box/src/lib.rs	guest_mmap_file	Memory	guest_mmap_file: neither pread nor mmap
 crates/retrace-box/src/lib.rs	guest_sem_signal	Threads	semaphore_signal_trap (-33) on port
+crates/retrace-box/src/lib.rs	guest_sem_wait	Threads	M52: semaphore_wait_trap (-36) on port
 crates/retrace-box/src/lib.rs	guest_thread_kport	Threads	M46: a box-spawned thread id past 0x3ff
 crates/retrace-box/src/lib.rs	guest_ulock_wait	Threads	guest_ulock_wait: unmeasured operation w
 crates/retrace-box/src/lib.rs	guest_ulock_wake	Threads	guest_ulock_wake: unmeasured operation w

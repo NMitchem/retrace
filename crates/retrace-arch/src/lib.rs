@@ -1634,6 +1634,18 @@ pub const MACH_SEMAPHORE_WAIT: u64 = (-36i64) as u64;
 /// no landmark: the park/wake seam must not assume a signal trap always appears. Return `0`.
 pub const MACH_SEMAPHORE_SIGNAL: u64 = (-33i64) as u64;
 
+/// The mach semaphore **timed wait** trap, `-38` (M52 §3d): `semaphore_timedwait(s, {sec, nsec})`,
+/// which Rust's `mpsc::recv_timeout` and libdispatch's `dispatch_semaphore_wait` with a deadline
+/// reach. Box-answered like `-36`, with a deadline on the synthetic clock; it has no `arg_kinds`
+/// row, so a misplaced arm is a wall, never a forward (C1).
+pub const MACH_SEMAPHORE_TIMEDWAIT: u64 = (-38i64) as u64;
+
+/// `kern_return_t` values the semaphore family answers (`mach/kern_return.h`).
+pub const KERN_INVALID_NAME: u64 = 15;
+pub const KERN_INVALID_VALUE: u64 = 18;
+pub const KERN_TERMINATED: u64 = 37;
+pub const KERN_OPERATION_TIMED_OUT: u64 = 49;
+
 /// Mach traps the corpora dispatch (M33 census, `tests/census.rs`), keyed as the two's-complement
 /// `u64` the trap carries. Numbers per xnu `osfmk/mach/syscall_sw.h` (xnu-12377.1.9) — the SDK
 /// does not ship that header — cross-checked against retrace-core's private `MACH_VM_ALLOCATE`
@@ -2619,6 +2631,12 @@ mod tests {
         for n in (0..600u64).chain((1..=128i64).map(|t| (-t) as u64)) {
             if refusal_before_forward(n).is_none() { let _ = forwarded_shape(n); }
         }
+    }
+
+    /// M52 §3d (C1): no row for -38, -59 or -61, so a misplaced record arm is a wall, never a forward.
+    #[test]
+    fn the_m52_semaphore_and_yield_traps_cannot_reach_the_generic_forward() {
+        for t in [-38i64, -59, -61] { assert!(refusal_before_forward(t as u64).is_some(), "{t}"); }
     }
 
     #[test]

@@ -207,6 +207,7 @@ version = "0.0.0"
 dependencies = [
  "bincode",
  "retrace-arch",
+ "retrace-box",
  "retrace-core",
  "retrace-guest",
  "retrace-sim",

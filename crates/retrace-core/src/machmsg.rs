@@ -511,6 +511,36 @@ pub fn decode_semaphore_destroy(buf: &[u8]) -> Result<u32, String> {
     Ok(u32_at(buf, 28))
 }
 
+/// `semaphore_create` (task subsystem base 3400, slot 18), forwarded (`FORWARD_ALLOWLIST`); since M52
+/// its request's `value` and its reply's port seed the box's count.
+pub const SEMAPHORE_CREATE: u32 = 3418;
+
+/// M52 §3d (t0 M5): the initial `value` a `semaphore_create` (3418) request carries: not complex,
+/// `send_size` 40, header(24) + NDR(8) + `policy`(4) at offset 32 + `value`(4) at offset 36.
+pub fn decode_semaphore_create_request(buf: &[u8]) -> Result<u32, String> {
+    if buf.len() < 40 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("semaphore_create request is {} bytes, < 40", buf.len()))); }
+    if u32_at(buf, 20) != SEMAPHORE_CREATE {
+        return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("msgh_id {} is not semaphore_create (3418)", u32_at(buf, 20))));
+    }
+    Ok(u32_at(buf, 36))
+}
+
+/// M52 §3d (t0 M5): the port a successful 3418 reply carries: COMPLEX, `msgh_id` 3518, size 40, one
+/// PORT descriptor (type byte 0 at offset 39) whose name is at offset 28. None for anything else,
+/// such as the 36-byte mig_reply_error a failed create answers with.
+pub fn decode_semaphore_create_reply(buf: &[u8]) -> Option<u32> {
+    if buf.len() < CLOCK_SERVICE_REPLY_LEN { return None; }
+    let ok = u32_at(buf, 0) & MACH_MSGH_BITS_COMPLEX != 0 && u32_at(buf, 20) == SEMAPHORE_CREATE + 100
+        && u32_at(buf, 24) == 1 && buf[39] == 0;
+    ok.then(|| u32_at(buf, 28))
+}
+
+/// M52 §3d: does this reply say `semaphore_destroy` (3419) succeeded? A success is the simple
+/// 36-byte reply, `msgh_id` 3519, with `RetCode` 0 at offset 32.
+pub fn semaphore_destroy_reply_succeeded(buf: &[u8]) -> bool {
+    buf.len() >= 36 && u32_at(buf, 20) == SEMAPHORE_DESTROY + 100 && u32_at(buf, 32) == 0
+}
+
 /// M49 S2: the clock port a successful 206 reply carries: COMPLEX, `msgh_id` 306, one PORT
 /// descriptor (type byte 0 at offset 39) whose name is at offset 28. None for anything else, such
 /// as the 36-byte mig_reply_error a failed 206 answers with.
@@ -638,6 +668,31 @@ mod tests {
         assert!(decode_semaphore_destroy(&with(3, 0)).unwrap_err().contains("not one PORT descriptor"));
         assert!(decode_semaphore_destroy(&with(24, 2)).unwrap_err().contains("count 2"));
         assert!(decode_semaphore_destroy(&with(39, 1)).unwrap_err().contains("type 1"));
+    }
+    /// M52 §3d (t0 M5): the 3418 request as measured (value 2 at offset 36) and its COMPLEX reply.
+    #[test]
+    fn decode_semaphore_create_reads_the_measured_value_offset() {
+        let mut req = [0u8; 40];
+        req[20..24].copy_from_slice(&3418u32.to_le_bytes());
+        req[36..40].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(decode_semaphore_create_request(&req), Ok(2));
+        assert!(decode_semaphore_create_request(&req[..39]).unwrap_err().contains("39 bytes, < 40"));
+        req[20] = 0x5b;
+        assert!(decode_semaphore_create_request(&req).unwrap_err().contains("is not semaphore_create"));
+        let mut rep = [0u8; 40];
+        rep[0..4].copy_from_slice(&0x8000_1200u32.to_le_bytes());
+        rep[20..24].copy_from_slice(&3518u32.to_le_bytes());
+        rep[24..28].copy_from_slice(&1u32.to_le_bytes());
+        rep[28..32].copy_from_slice(&0xa03u32.to_le_bytes());
+        rep[38] = 0x11;
+        assert_eq!(decode_semaphore_create_reply(&rep), Some(0xa03));
+        rep[20] = 0x5b;
+        assert_eq!(decode_semaphore_create_reply(&rep), None, "a different reply id");
+        let mut ok = [0u8; 36];
+        ok[20..24].copy_from_slice(&3519u32.to_le_bytes());
+        assert!(semaphore_destroy_reply_succeeded(&ok));
+        ok[32] = 4;
+        assert!(!semaphore_destroy_reply_succeeded(&ok), "a nonzero RetCode");
     }
     #[test]
     fn everything_else_fails_loudly() {

@@ -370,6 +370,14 @@ fn a_wrong_thread_on_a_clock_get_time_landmark_is_a_divergence() {
         |num, args| num == (-47i64) as u64 && args[4] >> 32 == 1000);
 }
 
+/// M52 Task 3: the same for `semaphore_timedwait_trap` (-38), on `semtimed_dyn signalled`, whose main
+/// waits and whose child signals. Its mirror sits inside the `Syscall` chain after the arm-top
+/// `verify_thread`, so the site count stays seven.
+#[test]
+fn a_wrong_thread_on_a_timed_semaphore_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::SEMTIMED_DYN, &["signalled"], retrace_arch::MACH_SEMAPHORE_TIMEDWAIT);
+}
+
 /// `retag_and_expect_divergence` over any fixture and argv: retag the first `Syscall` landmark for
 /// `num_wanted` to another thread id that genuinely appears in the same trace, and assert replay
 /// refuses it as the schedule. The reasoning for a live id, not a constant, is

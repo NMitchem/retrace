@@ -16,6 +16,7 @@ pub mod jit;
 pub mod gkq;
 pub mod psynch;
 pub mod sleep;
+pub mod sema;
 mod excl;
 pub use excl::{Excl, SetBy};
 /// M49 §3e: the store-exclusive rewrite (X1, X2), applied where the box stages code (X3).
@@ -207,7 +208,7 @@ const TSD_REGION_SIZE: u64 = 0x0001_0000; // 4 granules; tp = TSD_IPA sits 0x800
 // (both re-execute the same reads from the same entry), so timing dyld folds into memory can't
 // diverge. Monotonic and nonzero so a delta is always positive.
 const SYNTH_TSC_START:  u64 = 0x0000_0001_0000_0000;
-const SYNTH_TSC_STRIDE: u64 = 0x2400; // ~ one 24 MHz-ish tick step per read (value is arbitrary)
+pub const SYNTH_TSC_STRIDE: u64 = 0x2400; // ~ one 24 MHz-ish tick step per read (value is arbitrary)
 
 pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (one level below the L1 TTBR0 target); one 16 KiB page = 2048 entries
 pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under the 47-bit VA); one
@@ -710,6 +711,10 @@ pub struct Box_ {
     /// guest's own calls and carried through every rebuild path (`BoxState`). Declared after
     /// `vcpu`/`vm`, so the drop order is unaffected.
     sleep: sleep::SleepModel,
+    /// M52 §3d: the kernel's count for each mach semaphore the guest created, and the names a destroy
+    /// killed (`sema.rs`). Box state, rebuilt on both sides from the guest's own calls and carried
+    /// through every rebuild path (`BoxState`).
+    sems: sema::Semaphores,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -1230,6 +1235,10 @@ pub struct BoxState {
     // `clock_get_time` would be refused on replay though the recording accepted it (sleep_e2e's seek
     // test; box test `sleep.rs`).
     pub sleep: sleep::SleepModel,
+    // M52 §3d: carried because a mid-run capture cannot re-derive it: the creates and signals
+    // happened behind the checkpoint. Dropped, a seek past a counted signal would restore a wait
+    // that blocks where the kernel's count would have let it through (semtimed_e2e's seek test).
+    pub sems: sema::Semaphores,
 }
 
 /// M40: bytes of guest backing currently mapped by `alloc_pages` and not yet released — a
@@ -1823,7 +1832,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default() }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -2626,7 +2635,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default() };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -4108,7 +4117,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default() };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -7069,6 +7078,7 @@ impl Box_ {
                 thread::ThreadState::Blocked(thread::BlockReason::Kevent { kq, .. }) => self.kevent_timed_out(tid, kq),
                 thread::ThreadState::Blocked(thread::BlockReason::Cv { addr, .. }) => self.cv_timed_out(tid, addr),
                 thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. }) => self.sleep_timed_out(tid),
+                thread::ThreadState::Blocked(thread::BlockReason::Sem { .. }) => self.sem_timed_out(tid),
                 s => unreachable!("M48: due_waiters returned thread {tid} in {s:?}, which has no deadline"),
             }
         }
@@ -7666,9 +7676,71 @@ impl Box_ {
             .unwrap_or_else(|m| panic!("{m}"));
         // M49 S4: a port the semaphore traps touched is a semaphore a signal could wake early, so
         // `__semwait_signal` refuses it (`SleepModel::admit`).
+        // M52 §3d (T3-dead-name): only a signal on a destroyed name was measured (it answers
+        // KERN_INVALID_NAME); a wait on one is refused by value before anything moves.
+        if self.sems.is_dead(args[0]) {
+            retrace_arch::refuse!(Threads, "M52: semaphore_wait_trap (-36) on port {:#x}, a semaphore \
+                 semaphore_destroy ended: only a signal on a destroyed name was measured \
+                 (KERN_INVALID_NAME), not a wait.", args[0]);
+        }
         self.sleep.note_semaphore(args[0] as u32);
-        self.threads.block(thread::BlockReason::Sem { port: args[0] });
+        // M52 §3d: the kernel's count first. A signal that found no waiter is kept, and so is
+        // `semaphore_create`'s initial value, so the wait it satisfies returns 0 without blocking.
+        if !self.sems.take(args[0]) {
+            self.threads.block(thread::BlockReason::Sem { port: args[0], deadline: None });
+        }
         0
+    }
+
+    /// M52 §3d: `semaphore_timedwait_trap(port, sec, nsec)` — mach trap `-38`, box-answered and never
+    /// forwarded (the host would sleep the recorder for real on a semaphore only the guest could
+    /// signal). Returns the call's own `x0`: 0 for a wait that took the kernel's count or blocks
+    /// (whose real answer, `KERN_OPERATION_TIMED_OUT`, comes at its wake, `sem_timed_out`), and
+    /// `KERN_INVALID_VALUE` (18) for `nsec >= 10^9`, which blocks nothing (t0 M5). `{0, 0}` blocks
+    /// with the deadline `now`, which the timed wake answers 49 at once, as native does.
+    ///
+    /// `Err` is a refusal by value (`check_sleep_semaphore`, or a destroyed name, which is
+    /// unmeasured): record passes it to `wall_or_bug`, replay reports a `Divergence`. Both sides
+    /// call this with the same `args` (symmetry rule 1) and nothing is recorded.
+    pub fn guest_sem_timedwait(&mut self, args: [u64; 8]) -> Result<u64, String> {
+        self.sleep.check_sleep_semaphore("semaphore_timedwait_trap (-38)", args[0] as u32)?;
+        if self.sems.is_dead(args[0]) {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+                "M52: semaphore_timedwait_trap (-38) on port {:#x}, a semaphore semaphore_destroy ended: only \
+                 a signal on a destroyed name was measured (KERN_INVALID_NAME), not a wait.", args[0])));
+        }
+        self.sleep.note_semaphore(args[0] as u32);
+        let (sec, nsec) = (args[1] as u32, args[2] as u32);
+        if nsec >= 1_000_000_000 { return Ok(retrace_arch::KERN_INVALID_VALUE); }
+        if self.sems.take(args[0]) { return Ok(0); }
+        let ticks = sleep::ns_to_ticks(sec as u64 * 1_000_000_000 + nsec as u64);
+        let deadline = self.now_guest().saturating_add(ticks);
+        self.threads.block(thread::BlockReason::Sem { port: args[0], deadline: Some(deadline) });
+        Ok(0)
+    }
+
+    /// M52 §3d: `tid`'s `semaphore_timedwait_trap` reached its deadline: the kernel answers
+    /// `KERN_OPERATION_TIMED_OUT` in `x0`, carry clear. Below the trace, so K8's refusal (a signal
+    /// pending on the thread) panics with its text on both sides.
+    fn sem_timed_out(&mut self, tid: usize) {
+        self.deliver_wake(tid, retrace_arch::KERN_OPERATION_TIMED_OUT, false, &[]).unwrap_or_else(|m| panic!("{m}"));
+    }
+
+    /// M52 §3d: a successful `semaphore_create` (3418) named `port` and started it at `value`. Both
+    /// Forward arms call this after the reply lands, with the value read from the request and the
+    /// port from the reply (`learn_clock_service`'s shape).
+    pub fn note_semaphore_created(&mut self, port: u32, value: u32) { self.sems.create(port as u64, value); }
+
+    /// M52 §3d (T0-M5, T3-dead-name): a successful `semaphore_destroy` (3419) on `port`. Every guest
+    /// thread blocked on it wakes with `KERN_TERMINATED` (37), through `deliver_wake` so K8 holds;
+    /// then the count is dropped and the name is dead: a later signal answers `KERN_INVALID_NAME`.
+    /// Both Forward arms call this after the destroy lands.
+    pub fn note_semaphore_destroyed(&mut self, port: u32) -> Result<(), String> {
+        for tid in self.threads.sem_waiters_on(port as u64) {
+            self.deliver_wake(tid, retrace_arch::KERN_TERMINATED, false, &[])?;
+        }
+        self.sems.destroy(port as u64);
+        Ok(())
     }
 
     /// `semaphore_signal_trap(port)` — mach trap `-33`. `args[0]` is the port name; returns the
@@ -7695,6 +7767,8 @@ impl Box_ {
         // M49 Ruling T5-I2 and S4, as in `guest_sem_wait`.
         self.sleep.check_sleep_semaphore("semaphore_signal_trap (-33)", args[0] as u32)
             .unwrap_or_else(|m| panic!("{m}"));
+        // M52 §3d (T3-dead-name): native answers KERN_INVALID_NAME for a signal on a destroyed name.
+        if self.sems.is_dead(args[0]) { return (retrace_arch::KERN_INVALID_NAME, vec![]); }
         self.sleep.note_semaphore(args[0] as u32);
         let woken = self.threads.unblock_sem_waiters_on(args[0]);
         // **`-33` wakes exactly ONE waiter; the plural case is a DIFFERENT TRAP.** Task 1 §3a read
@@ -7727,6 +7801,8 @@ impl Box_ {
              semaphore before modelling this.",
             args[0], woken.len());
         }
+        // M52 §3d: a signal that woke nobody is the kernel's to keep: the next wait takes it.
+        if woken.is_empty() { self.sems.signal(args[0]); }
         (0, woken)
     }
 
@@ -8059,6 +8135,7 @@ impl Box_ {
             psynch: self.psynch.clone(),
             jit: self.jit.clone(),
             sleep: self.sleep.clone(),
+            sems: self.sems.clone(),
         }
     }
 
@@ -8186,6 +8263,7 @@ impl Box_ {
             psynch: state.psynch.clone(),
             jit: state.jit.clone(),
             sleep: state.sleep.clone(),
+            sems: state.sems.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b.assert_jit_stamped();
@@ -8210,10 +8288,10 @@ impl Box_ {
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?} sems={:?}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
             self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
-            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep)
+            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep, self.sems)
     }
 
     /// Test-only (M46): the workqueue kqueue, for `checkpointparity.rs` and the box-level manager

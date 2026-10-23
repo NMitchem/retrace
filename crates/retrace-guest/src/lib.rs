@@ -308,6 +308,9 @@ pub const CONDVAR_DYN: &str = concat!(env!("OUT_DIR"), "/condvar_dyn");
 /// `onens`, `raw`, `twosleepers`, `pollloop`, `pollzero`, `sleepwhilework`, `sigsleeper` and
 /// `refuse <what>` (spec §3f, §4; see the source's header).
 pub const SLEEP_DYN: &str = concat!(env!("OUT_DIR"), "/sleep_dyn");
+/// M52: mach semaphores with a deadline and the kernel's count by mode — `timeout`, `signalled`,
+/// `badnsec`, `count`, `initial`, `destroy` and `long` (spec §3d; see the source's header).
+pub const SEMTIMED_DYN: &str = concat!(env!("OUT_DIR"), "/semtimed_dyn");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
