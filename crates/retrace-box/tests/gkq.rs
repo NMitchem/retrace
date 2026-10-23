@@ -142,10 +142,11 @@ fn a_trigger_from_another_thread_wakes_the_waiter_with_its_event() {
     assert!(!b.dbg_gkq().has_events(KQ), "EV_CLEAR reset the knote at the delivery");
 }
 
-/// F7: with no event list the call applies its changes and returns 0, whatever its timeout. A zero
-/// timeout polls.
+/// F7: with no event list the call applies its changes and returns 0, whatever its timeout, and does
+/// not block. A zero timeout that finds nothing is Task 4's due poll: it blocks with a due deadline
+/// and is woken in the same settle, so it yields to the thread it polls for.
 #[test]
-fn a_call_with_no_event_list_applies_its_changes_and_never_blocks() {
+fn a_call_with_no_event_list_applies_its_changes_and_yields_as_a_due_poll() {
     let mut b = tb();
     let base = setup(&mut b);
     let add = kev(7, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0);

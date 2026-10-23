@@ -6339,6 +6339,8 @@ impl Box_ {
             // other timeout, so the settle that woke it yields to the thread it polls for. Returning
             // at once handed the CPU straight back to the poller. A thread with a signal pending still
             // returns at once: its timed wake would be K8's refusal (`ThreadTable::wake`).
+            // `pending` counts masked signals too, so a poller with a MASKED pending signal keeps the old
+            // spin shape (reachable; a livelock beside a producer, reported in the t4 fix round).
             Some((0, 0)) if self.threads.pending_of(self.threads.current()) != 0 => return Ok((0, false)),
             // Deadline 0 is due at any clock, so the poll reads no clock of its own.
             Some((0, 0)) => Some(0),
@@ -7738,14 +7740,14 @@ impl Box_ {
     /// Both sides call this with the same `num` and `args` (symmetry rule 1); nothing is recorded.
     pub fn guest_yield(&mut self, num: u64, args: [u64; 8]) -> Result<u64, String> {
         if num == retrace_arch::MACH_THREAD_SWITCH {
-            let option = args[1] as u32 as u64;
+            let (port, option) = (args[0] as u32, args[1] as u32 as u64);
             let measured = matches!(option, retrace_arch::SWITCH_OPTION_NONE | retrace_arch::SWITCH_OPTION_DEPRESS
                 | retrace_arch::SWITCH_OPTION_WAIT);
-            if args[0] != 0 || !measured {
+            if port != 0 || !measured {
                 return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
                     "M52: thread_switch (mach trap -61) with thread {:#x}, option {} ({}): only MACH_PORT_NULL with \
                      SWITCH_OPTION_NONE (0), DEPRESS (1) and WAIT (2) are modelled, the options real callers pass (t0 M6)",
-                    args[0], args[1] as u32,
+                    port, option as u32,
                     match option { 0 => "NONE", 1 => "DEPRESS", 2 => "WAIT", _ => "not in mach/thread_switch.h" })));
             }
         }
