@@ -1394,6 +1394,14 @@ pub const RLIMIT_POSIX_FLAG: u64 = 0x1000;
 
 /// BSD errno: an argument the kernel rejects (a MAP_FIXED address outside the address space).
 pub const EINVAL: u64 = 22;
+/// `<mach/vm_statistics.h>`: `mach_vm_map`/`mach_vm_allocate` flags. FIXED is the absence of ANYWHERE.
+pub const VM_FLAGS_ANYWHERE: u64 = 0x1;
+/// `VM_FLAGS_OVERWRITE`: a FIXED request replaces what it covers instead of answering `KERN_NO_SPACE` (M52 §3b).
+pub const VM_FLAGS_OVERWRITE: u64 = 0x4000;
+/// `<mach/kern_return.h>`: `KERN_INVALID_ADDRESS`, `KERN_PROTECTION_FAILURE`, `KERN_NO_SPACE` (M52 §3b, t0 M2/M3).
+pub const KERN_INVALID_ADDRESS: u64 = 1;
+pub const KERN_PROTECTION_FAILURE: u64 = 2;
+pub const KERN_NO_SPACE: u64 = 3;
 /// `<sys/errno.h>`: bad address. M51 §3h: a pointer the program could not pass natively.
 pub const EFAULT: u64 = 14;
 /// `<sys/errno.h>`: no such process. M51 §3g: `__pthread_kill(port, 0)` for a port no live thread holds.

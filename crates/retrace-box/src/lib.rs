@@ -2688,8 +2688,32 @@ impl Box_ {
     /// fix); otherwise map at the requested `addr` (MAP_FIXED-like). `exec` promotes the region to
     /// RO+exec. Returns the chosen IPA. Deterministic: identical call sequence => identical IPAs on
     /// replay.
+    ///
+    /// `anywhere == false` means FIXED|OVERWRITE here, which never refuses: the box-internal callers
+    /// replace what they cover. A guest's FIXED request goes through `guest_vm_map_masked` with its flags.
     pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
-        self.guest_vm_map_masked(addr, size, 0, anywhere, exec)
+        let flags = if anywhere { retrace_arch::VM_FLAGS_ANYWHERE } else { retrace_arch::VM_FLAGS_OVERWRITE };
+        self.guest_vm_map_masked(addr, size, 0, flags, exec).expect("ANYWHERE and FIXED|OVERWRITE never refuse")
+    }
+
+    /// M52 §3b (t0 M2, Ruling T0-M2): what xnu answers a FIXED request without `VM_FLAGS_OVERWRITE`.
+    /// Checked in this order, before anything is allocated. A start below 4 GiB is `KERN_INVALID_ADDRESS`
+    /// (`__PAGEZERO` and the box's own low windows). The shared-region window, either commpage page, and
+    /// any backing or reservation the page-rounded range overlaps are `KERN_NO_SPACE`; adjacency is free
+    /// (half-open intervals). Free is `Ok`; a range past the 36-bit IPA keeps `place_fixed`'s wall (R3).
+    fn fixed_answer(&self, addr: u64, size: u64) -> Result<(), u64> {
+        let g = GRANULE as u64;
+        let end = addr.saturating_add(size).saturating_add(g - 1) & !(g - 1);
+        let (lo, hi) = (addr & !(g - 1), end.max(addr & !(g - 1)));
+        if addr < 1 << 32 { return Err(retrace_arch::KERN_INVALID_ADDRESS); }
+        let hits = |s: u64, e: u64| lo < e && s < hi;
+        if hits(SHARED_REGION_START, SHARED_REGION_END)
+            || hits(COMMPAGE_IPA, COMMPAGE_IPA + g) || hits(COMMPAGE2_IPA, COMMPAGE2_IPA + g)
+            || self.backings.iter().any(|b| hits(b.ipa, b.ipa + b.len as u64))
+            || self.reservations.iter().any(|&(s, l)| hits(s, s + l)) {
+            return Err(retrace_arch::KERN_NO_SPACE);
+        }
+        Ok(())
     }
 
     /// `guest_vm_map` with `mach_vm_map`'s alignment `mask`: an ANYWHERE placement returns an
@@ -2706,7 +2730,12 @@ impl Box_ {
     /// only for a nonzero mask, and `first_fit` with `GRANULE - 1` is the old granule rounding.
     /// FIXED ignores `mask`: `vm_map_enter` checks a FIXED address against it rather than choosing
     /// one, every measured masked call is ANYWHERE, and that check is not modelled.
-    pub fn guest_vm_map_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool, exec: bool) -> u64 {
+    ///
+    /// M52 §3b: `flags` are the guest's `vm_flags`. A FIXED request without `VM_FLAGS_OVERWRITE` is
+    /// answered by `fixed_answer` before anything is allocated; `Err` is the `kern_return_t`.
+    pub fn guest_vm_map_masked(&mut self, addr: u64, size: u64, mask: u64, flags: u64, exec: bool) -> Result<u64, u64> {
+        let anywhere = flags & retrace_arch::VM_FLAGS_ANYWHERE != 0;
+        if !anywhere && flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(addr, size)?; }
         let (host, rlen) = alloc_pages(size as usize);
         let m = mask | (GRANULE as u64 - 1);
         let ipa = if anywhere {
@@ -2735,21 +2764,26 @@ impl Box_ {
                 }
             }
         } else {
-            // FIXED (dyld/libmalloc often pass VM_FLAGS_OVERWRITE): the guest may be replacing a
-            // region it previously bump-allocated, so classify the overlap exactly as the BSD mmap
+            // FIXED|OVERWRITE (a plain FIXED over occupied memory was answered above, M52 §3b; t0 found
+            // the old "dyld/libmalloc often pass OVERWRITE" claim here unmeasured): the guest may be
+            // replacing a region it previously bump-allocated, so classify the overlap exactly as the BSD mmap
             // path does — `place_fixed` is shared with `map_mmap_region`. A request CONTAINED in a
             // live backing reuses it in place and is already complete (returning early is safe: on
             // that path `place_fixed` itself promotes-and-flushes when `exec` is set — M9 — so the
             // `set_region_exec` below, which never runs on this path, is already done). Anything
             // else leaves the range clear for the fresh stage-2 map, which hv_vm_map would otherwise
             // reject for overlapping.
-            if let Some(a) = self.place_fixed(host, rlen, addr, exec) { return a; }
+            if let Some(a) = self.place_fixed(host, rlen, addr, exec) {
+                self.mmap_next = self.mmap_next.max((a + rlen as u64 + (GRANULE as u64 - 1)) & !(GRANULE as u64 - 1));
+                return Ok(a);
+            }
+            self.mmap_next = self.mmap_next.max((addr + rlen as u64 + (GRANULE as u64 - 1)) & !(GRANULE as u64 - 1));
             addr
         };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_vm_map)");
         self.backings.push(Backing { host, ipa, len: rlen });
         if exec { self.set_region_exec(ipa, size); }
-        ipa
+        Ok(ipa)
     }
 
     /// Service a PROT_NONE address-space RESERVATION (mach_vm_map with cur_protection == 0):
@@ -2760,12 +2794,16 @@ impl Box_ {
     /// fresh deterministic bump address (advancing `mmap_next` so nothing later collides).
     /// Deterministic: identical call sequence => identical returned address on replay.
     pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
-        self.guest_vm_reserve_masked(addr, size, 0, anywhere)
+        let flags = if anywhere { retrace_arch::VM_FLAGS_ANYWHERE } else { retrace_arch::VM_FLAGS_OVERWRITE };
+        self.guest_vm_reserve_masked(addr, size, 0, flags).expect("ANYWHERE and FIXED|OVERWRITE never refuse")
     }
 
     /// `guest_vm_reserve` with `mach_vm_map`'s alignment `mask`, honoured on ANYWHERE as
     /// `guest_vm_map_masked` honours it: `mask == 0` and FIXED place exactly as before.
-    pub fn guest_vm_reserve_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool) -> u64 {
+    /// M52 §3b: `flags` as in `guest_vm_map_masked`; a plain FIXED over occupied memory is `Err(kr)`.
+    pub fn guest_vm_reserve_masked(&mut self, addr: u64, size: u64, mask: u64, flags: u64) -> Result<u64, u64> {
+        let anywhere = flags & retrace_arch::VM_FLAGS_ANYWHERE != 0;
+        if !anywhere && flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(addr, size)?; }
         // Page-granular extent: commit_reserved_page backs whole pages, so track whole pages.
         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
         let base = if anywhere {
@@ -2784,20 +2822,34 @@ impl Box_ {
             self.mmap_next = end;
             a
         } else {
-            // Defensive: if the bump cursor sits inside a FIXED reservation, jump it past the
-            // reserved band so no later ANYWHERE bump can hand out an IPA the guest believes is
-            // its private reserved range. (With MMAP_BASE above the nano band this never fires for
-            // that band, but it keeps guest_vm_reserve sound for any FIXED reservation.)
-            let end = addr.saturating_add(size);
-            if self.mmap_next >= addr && self.mmap_next < end {
-                self.mmap_next = end;
-            }
+            // M52 §3b: the cursor floats past every FIXED reservation, not only one it sits inside,
+            // so no later ANYWHERE bump hands out an IPA the guest believes is its reserved range.
+            self.mmap_next = self.mmap_next.max(addr.saturating_add(rounded));
             addr
         };
         // Record the extent so commit_reserved_page can demand-commit its pages on first touch.
         // Deterministic: the same call sequence records the same (base, rounded) on record & replay.
         self.reservations.push((base, rounded));
-        base
+        Ok(base)
+    }
+
+    /// M52 §3b (t0 M3): `mach_vm_copy(src, size, dst)` as a box-side copy, returning the `kern_return_t`.
+    /// An unreadable source or an unwritable destination is `KERN_INVALID_ADDRESS`, as measured natively
+    /// (never `KERN_PROTECTION_FAILURE`), and nothing is written. The source is read whole before the
+    /// destination is written, so an overlapping copy is a memmove. Size 0 copies nothing; an unaligned
+    /// size copies exactly its bytes. A reserved, never-touched source page reads as zeros
+    /// (`read_va_checked`), and a reserved destination page is committed by `prepare_reply`.
+    ///
+    /// Named limit: a `PROT_READ` destination answers 1 natively but is not enforced here (M51 C1).
+    /// Deterministic: a pure function of guest state, so replay recomputes it and nothing is recorded.
+    pub fn guest_vm_copy(&mut self, src: u64, size: u64, dst: u64) -> u64 {
+        if size == 0 { return 0; }
+        let Some(bytes) = usize::try_from(size).ok().and_then(|n| self.read_va_checked(src, n)) else {
+            return retrace_arch::KERN_INVALID_ADDRESS;
+        };
+        if !self.prepare_reply(dst, bytes.len()) { return retrace_arch::KERN_INVALID_ADDRESS; }
+        self.write_va_committing(dst, &bytes).expect("prepare_reply admitted every page of the destination");
+        0
     }
 
     /// The live L3 descriptor for `va`'s page, or None if its 32 MiB block is still an
@@ -3036,7 +3088,10 @@ impl Box_ {
             }
             return Some(addr);
         }
-        // Case 3: overlaps something but is neither contained nor covering.
+        // Case 3: overlaps something but is neither contained nor covering. Reached by a FIXED|OVERWRITE
+        // straddle only: a plain FIXED over a backing was answered KERN_NO_SPACE before it got here
+        // (M52 §3b), and the BSD path's MAP_FIXED replaces by definition. t0 found the old claim that
+        // no guest exercises it unmeasured; the wall stays for a genuine OVERWRITE straddle.
         retrace_arch::refuse!(Memory, "FIXED map at {addr:#x}..{end:#x} partially straddles a live backing: splitting a \
                 backing is unimplemented (no guest exercises it) and dropping it wholesale would \
                 destroy guest memory the kernel keeps");
@@ -3194,10 +3249,14 @@ impl Box_ {
             // contained request is silently left accessible. (Measured in Task 2: libstd's guard is
             // NOT installed this way — it mmaps RW MAP_FIXED and then mprotects — so this path is
             // covered for completeness, not because a live gate takes it.)
+            // M52 §3b: the cursor floats past every FIXED placement, at both exits.
+            let fixed_end = (addr + rlen as u64 + (GRANULE as u64 - 1)) & !(GRANULE as u64 - 1);
             if let Some(a) = self.place_fixed(host, rlen, addr, prot & Self::PROT_EXEC != 0) {
+                self.mmap_next = self.mmap_next.max(fixed_end);
                 if prot == 0 { self.protect_none(a, rlen as u64); }
                 return Ok(a);
             }
+            self.mmap_next = self.mmap_next.max(fixed_end);
             addr
         } else { self.mmap_next };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");

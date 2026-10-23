@@ -56,7 +56,8 @@ impl Msg2 {
     }
 }
 
-/// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; ServiceVmRemap likewise
+/// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; ServiceVmCopy (mach_vm_copy,
+/// 4807, M52 §3b) is a box-side copy answered with a mig_reply_error; ServiceVmRemap likewise
 /// (a stage-1 alias, never forwarded — see the 4813 arm in `route()`); ServiceGetSpecialPort
 /// answers task_get_special_port(BOOTSTRAP) with a synthetic port right (complex reply);
 /// ServiceSetSpecialPort answers task_set_special_port(DEBUG_CONTROL_PORT) with a mig_reply_error
@@ -68,7 +69,7 @@ impl Msg2 {
 /// RefuseMqRecv is a message-queue RECEIVE; the box hosts no senders, so nothing can ever arrive
 /// on it, and it is answered `MACH_RCV_REFUSAL` — deterministic, no host contact (M38 t5).
 #[derive(Debug)]
-pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceGetSpecialPort, ServiceSetSpecialPort, ServicePortsRegister,
+pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceVmCopy, ServiceGetSpecialPort, ServiceSetSpecialPort, ServicePortsRegister,
                  ServiceClockGetTime,
                  StubMigReply(i32), RefuseMqSend, RefuseMqRecv, Forward(&'static str), Unsupported(String) }
 
@@ -147,6 +148,8 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     if guest_task_port == Some(m.dest as u64) {
         match m.msgh_id {
             4811 => return Route::ServiceVmMap,
+            // mach_vm_copy (4807): a box-side copy, never forwarded (M52 §3b, t0 M3).
+            4807 => return Route::ServiceVmCopy,
             // mach_vm_remap (4813): libffi's Apple trampoline table aliases the freshly-loaded
             // libffi-trampolines.dylib __TEXT into a vm_allocate'd region, shared, on every
             // `import ctypes` (M39 t0). Serviced as a stage-1 alias (Box_::guest_vm_remap) —
@@ -272,6 +275,15 @@ pub fn decode_vm_map(buf: &[u8]) -> Result<VmMapReq, String> {
         cur_protection: u32_at(buf, 88), max_protection: u32_at(buf, 92),
         inheritance: u32_at(buf, 96),
     })
+}
+
+/// mach_vm_copy (4807) request, not complex, 56 bytes (t0 M3): header(24) + NDR(8), then
+/// `src` @32, `size` @40, `dest` @48. Returns `(src, size, dst)`.
+pub fn decode_vm_copy(buf: &[u8]) -> Result<(u64, u64, u64), String> {
+    if buf.len() < 56 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("vm_copy request short: {} < 56", buf.len()))); }
+    let id = u32_at(buf, 20);
+    if id != 4807 { return Err(format!("msgh_id {id} != 4807")); }
+    Ok((u64_at(buf, 32), u64_at(buf, 40), u64_at(buf, 48)))
 }
 
 /// _kernelrpc_mach_vm_remap (4813) request body: header(24) + desc_count(4) + port
@@ -555,6 +567,19 @@ mod tests {
     // Live-captured _kernelrpc_mach_vm_map (4811) mach_msg2 register file (libmalloc nano wall).
     const VM_MAP_ARGS: [u64; 8] = [0x1fb638, 0x2_0000_0003, 0x64_8000_1513,
                                    0x1603_0000_0203, 0x12cb_0000_0000, 0x1603_0000_0001, 0x34, 0];
+    #[test]
+    fn decode_vm_copy_reads_the_measured_request() {
+        let mut buf = vec![0u8; 56];
+        buf[20..24].copy_from_slice(&4807u32.to_le_bytes());
+        buf[32..40].copy_from_slice(&0x1111_0000u64.to_le_bytes());
+        buf[40..48].copy_from_slice(&0x2_0000u64.to_le_bytes());
+        buf[48..56].copy_from_slice(&0x3333_4000u64.to_le_bytes());
+        assert_eq!(decode_vm_copy(&buf).unwrap(), (0x1111_0000, 0x2_0000, 0x3333_4000));
+        buf[20..24].copy_from_slice(&4811u32.to_le_bytes());
+        assert!(decode_vm_copy(&buf).is_err());
+        assert!(decode_vm_copy(&buf[..55]).is_err());
+    }
+
     #[test]
     fn unpacks_the_packed_register_abi() {
         let m = Msg2::unpack(&VM_MAP_ARGS);

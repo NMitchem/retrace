@@ -556,6 +556,43 @@ fn main() {
         .status().expect("clang vmalign_dyn");
     assert!(status.success(), "vmalign_dyn guest build failed");
 
+    // vmfixed_dyn: M52 t1 (spec §3b) fixture. Same recipe as hello_dyn.
+    let src = format!("{}/c/vmfixed_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/vmfixed_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang vmfixed_dyn");
+    assert!(status.success(), "vmfixed_dyn guest build failed");
+
+    // hugerealloc_dyn: M52 t1 (spec §3b) fixture. Same recipe as hello_dyn.
+    let src = format!("{}/c/hugerealloc_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/hugerealloc_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang hugerealloc_dyn");
+    assert!(status.success(), "hugerealloc_dyn guest build failed");
+
+    // vmcopy_dyn: M52 t1 (spec §3b) fixture. Same recipe as hello_dyn.
+    let src = format!("{}/c/vmcopy_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/vmcopy_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang vmcopy_dyn");
+    assert!(status.success(), "vmcopy_dyn guest build failed");
+
+    // vecgrow: M52 t1 (spec §3b) — a Vec grown past 2 MiB, then a thread spawn. Same recipe as hello_rust.
+    let src = format!("{}/rs/vecgrow.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/vecgrow");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc vecgrow");
+    assert!(status.success(), "vecgrow guest build failed");
+
     // forkfail_dyn: the M47 fork fixture — fork() with RLIMIT_NPROC lowered to 1; prints the errno.
     // Same recipe as hello_dyn.
     let src = format!("{}/c/forkfail_dyn.c", env!("CARGO_MANIFEST_DIR"));

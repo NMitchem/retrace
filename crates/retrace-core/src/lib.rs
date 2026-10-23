@@ -46,7 +46,7 @@ const MACH_VM_PROTECT:    u64 = (-14i64) as u64; // _kernelrpc_mach_vm_protect_t
 const MACH_VM_MAP:        u64 = (-15i64) as u64; // _kernelrpc_mach_vm_map_trap(target,&addr,size,mask,flags,prot)
 const MACH_MSG2: u64 = (-47i64) as u64; // mach_msg2_trap(data, options, bits|send_size, dest|reply, voucher|id, desc|rcv_name, rcv_size|prio, timeout)
 const MACH_TASK_SELF: u64 = (-28i64) as u64; // task_self_trap: its result names the guest's task port
-const VM_FLAGS_ANYWHERE:  u64 = 0x1;
+use retrace_arch::VM_FLAGS_ANYWHERE;
 const PROT_EXEC:          u64 = 0x4;
 
 // Extract (address-pointer, size, mask, flags, cur_prot) for an anonymous mach_vm_map/allocate
@@ -304,6 +304,7 @@ fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) ->
     let reply_len = match route {
         ServiceVmMap => machmsg::encode_vm_map_reply(0, 0).len(),
         ServiceVmRemap => machmsg::encode_vm_remap_reply(0, 0, 0, 0).len(),
+        ServiceVmCopy => machmsg::encode_mig_error(0, 0, 0).len(),
         ServiceGetSpecialPort => machmsg::encode_get_special_port_reply(0, 0).len(),
         ServiceSetSpecialPort | ServicePortsRegister | StubMigReply(_) => machmsg::encode_mig_error(0, 0, 0).len(),
         ServiceClockGetTime => machmsg::encode_clock_get_time_reply(0, 0, 0).len(),
@@ -663,7 +664,6 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             // and store it there, returning KERN_SUCCESS.
             Stop::Syscall { num, args } if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP => {
                 let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
-                let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                 let exec = prot & PROT_EXEC != 0;
                 if exec && verbose { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
                 // M51 §3h (t0 M5 machbad, Ruling T0-l): the trap copies `*addr` in, then the address out.
@@ -681,10 +681,16 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // vs guest_vm_map) so a reservation arriving via the trap route genuinely reserves
                 // and is never eager-backed (fatal at 24 GiB). MACH_VM_ALLOCATE always carries RW.
                 // Both honour `mask` (see guest_vm_map_masked); replay passes the same one.
-                let ipa = if prot == 0 {
-                    b.guest_vm_reserve_masked(req, size, mask, anywhere)
+                // M52 §3b: a FIXED request without OVERWRITE over occupied memory is the kernel's
+                // `kern_return_t`, returned in x0 with nothing written (the address stays as it was).
+                let placed = if prot == 0 {
+                    b.guest_vm_reserve_masked(req, size, mask, flags)
                 } else {
-                    b.guest_vm_map_masked(req, size, mask, anywhere, exec)
+                    b.guest_vm_map_masked(req, size, mask, flags, exec)
+                };
+                let ipa = match placed {
+                    Ok(ipa) => ipa,
+                    Err(kr) => { append_refused(&mut w, &mut b, &mut count, num, args, kr, false, thread)?; continue; }
                 };
                 let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
@@ -729,21 +735,39 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let req = machmsg::decode_vm_map(&buf)
                             .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_map (4811) decode", e)))?;
-                        let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
                         // cur_protection == 0 => a PROT_NONE address-space reservation (no backing,
                         // e.g. libmalloc's 24 GiB nano pointer range); anything else is a real
                         // backed map. See guest_vm_reserve / guest_vm_map. Both honour `mask`.
-                        let ipa = if req.cur_protection == 0 {
-                            b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
+                        let placed = if req.cur_protection == 0 {
+                            b.guest_vm_reserve_masked(req.address, req.size, req.mask, req.flags as u64)
                         } else {
                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                            b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
+                            b.guest_vm_map_masked(req.address, req.size, req.mask, req.flags as u64, exec)
                         };
-                        let writes = vec![Region { ipa: m.data,
-                            bytes: machmsg::encode_vm_map_reply(m.reply_port, ipa) }];
+                        // M52 §3b: the kernel's refusal is the 44-byte mig_reply_error (id 4911), the
+                        // only write of the landmark; replay byte-compares the same encoding.
+                        let reply = match placed {
+                            Ok(ipa) => machmsg::encode_vm_map_reply(m.reply_port, ipa),
+                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                        };
+                        let writes = vec![Region { ipa: m.data, bytes: reply }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
                             err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 vm_map: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
+                    machmsg::Route::ServiceVmCopy => {
+                        // M52 §3b: mach_vm_copy is recomputed, never recorded: the copy runs in the
+                        // box on both sides, and the 44-byte reply is the landmark's only write.
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let (src, size, dst) = machmsg::decode_vm_copy(&buf)
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_copy (4807) decode", e)))?;
+                        let kr = b.guest_vm_copy(src, size, dst);
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 vm_copy: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
                     machmsg::Route::ServiceVmRemap => {
@@ -2702,19 +2726,35 @@ impl ReplaySession {
                                         let buf = self.b.read_guest(m.data, m.send_size as usize);
                                         let req = machmsg::decode_vm_map(&buf).map_err(|e| Divergence {
                                             landmark: self.idx, pc, detail: format!("replay vm_map decode: {e}") })?;
-                                        let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
                                         // Same reservation/commit split as record (must reproduce the
                                         // identical returned address for the byte-equality check below).
-                                        let ipa = if req.cur_protection == 0 {
-                                            self.b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
+                                        let placed = if req.cur_protection == 0 {
+                                            self.b.guest_vm_reserve_masked(req.address, req.size, req.mask, req.flags as u64)
                                         } else {
                                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                                            self.b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
+                                            self.b.guest_vm_map_masked(req.address, req.size, req.mask, req.flags as u64, exec)
                                         };
-                                        let reply = machmsg::encode_vm_map_reply(m.reply_port, ipa);
+                                        let (reply, shown) = match placed {
+                                            Ok(ipa) => (machmsg::encode_vm_map_reply(m.reply_port, ipa), format!("{ipa:#x}")),
+                                            Err(kr) => (machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32), format!("kr {kr}")),
+                                        };
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
-                                                detail: format!("mach_vm_map reply mismatch: replay ipa {ipa:#x}") });
+                                                detail: format!("mach_vm_map reply mismatch: replay ipa {shown}") });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::ServiceVmCopy => {
+                                        // Mirror of record's arm: same decode, same Box_ call, then the
+                                        // byte-equality of the reply that IS the oracle.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        let (src, size, dst) = machmsg::decode_vm_copy(&buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay vm_copy decode: {e}") })?;
+                                        let kr = self.b.guest_vm_copy(src, size, dst);
+                                        let reply = machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32);
+                                        if writes.len() != 1 || writes[0].bytes != reply {
+                                            return Err(Divergence { landmark: self.idx, pc,
+                                                detail: format!("mach_vm_copy reply mismatch: replay kr {kr}") });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
@@ -2928,7 +2968,6 @@ impl ReplaySession {
                             // equal what was recorded (bump allocator is deterministic).
                             if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP {
                                 let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
-                                let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                                 let exec = prot & PROT_EXEC != 0;
                                 // M51 §3h: record's check, with the same arguments; its refusal is recorded.
                                 let Some(hint) = self.b.read_va_checked(addr_ptr, 8).filter(|_| self.b.prepare_reply(addr_ptr, 8)) else {
@@ -2944,10 +2983,23 @@ impl ReplaySession {
                                 // Same reservation/commit split as record (cur_protection == 0 =>
                                 // reserve, else eagerly back); must reproduce the identical returned IPA
                                 // for the byte-equality check below.
-                                let ipa = if prot == 0 {
-                                    self.b.guest_vm_reserve_masked(req, size, mask, anywhere)
+                                let placed = if prot == 0 {
+                                    self.b.guest_vm_reserve_masked(req, size, mask, flags)
                                 } else {
-                                    self.b.guest_vm_map_masked(req, size, mask, anywhere, exec)
+                                    self.b.guest_vm_map_masked(req, size, mask, flags, exec)
+                                };
+                                // M52 §3b: record's refusal, recomputed; the recording must carry the same kr.
+                                let ipa = match placed {
+                                    Ok(ipa) => ipa,
+                                    Err(kr) => {
+                                        if !refusal_recorded(*ret, *err, writes, kr, false) {
+                                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                                "mach_vm_map is refused on replay with kr {kr}, but the recording \
+                                                 answered ret={ret:#x} err={err} with {} write(s)", writes.len()) });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                        return self.finish_event();
+                                    }
                                 };
                                 let recorded_ipa = writes.first()
                                     .map(|w| u64::from_le_bytes(w.bytes[..8].try_into().unwrap())).unwrap_or(ipa);

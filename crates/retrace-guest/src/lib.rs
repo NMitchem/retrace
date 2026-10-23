@@ -286,6 +286,15 @@ pub const SBXPATH_DYN: &str = concat!(env!("OUT_DIR"), "/sbxpath_dyn");
 /// route the box services (trap, MIG 4811, both reservation forms, a hinted one), each line saying
 /// whether the answer was aligned. libmalloc's xzone allocator maps its segments this way.
 pub const VMALIGN_DYN: &str = concat!(env!("OUT_DIR"), "/vmalign_dyn");
+/// M52 §3b: FIXED Mach VM requests without `VM_FLAGS_OVERWRITE` — modes `cases`, `overwrite`, `windows`.
+pub const VMFIXED_DYN: &str = concat!(env!("OUT_DIR"), "/vmfixed_dyn");
+/// M52 §3b: an xzone huge chunk grown by realloc — modes `page` and `grow`.
+pub const HUGEREALLOC_DYN: &str = concat!(env!("OUT_DIR"), "/hugerealloc_dyn");
+/// M52 §3b: `mach_vm_copy` by case (`disjoint`, `overlap_fwd`, `overlap_back`, `unmapped_src`, `none_dst`,
+/// `unaligned`, `zero`, `reserved`).
+pub const VMCOPY_DYN: &str = concat!(env!("OUT_DIR"), "/vmcopy_dyn");
+/// M52 §3b: a `Vec<u8>` grown to 24 MiB, then a thread spawned and joined.
+pub const VECGROW: &str = concat!(env!("OUT_DIR"), "/vecgrow");
 /// M47: `fork()` with `RLIMIT_NPROC` lowered to 1; prints the errno the fork failed with.
 pub const FORKFAIL_DYN: &str = concat!(env!("OUT_DIR"), "/forkfail_dyn");
 /// M48: psynch condition variables by mode — `pingpong`, `broadcast`, `timedout`, `timedsignal`,

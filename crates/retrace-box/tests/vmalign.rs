@@ -20,7 +20,7 @@ fn a_masked_anywhere_map_from_the_bump_cursor_is_aligned() {
     let mut b = boxed();
     let page = b.guest_vm_map(0, 0x4000, true, false);
     assert_eq!(page, MMAP_BASE, "the first ANYWHERE map bumps from MMAP_BASE");
-    let seg = b.guest_vm_map_masked(0, SEG, MASK, true, false);
+    let seg = b.guest_vm_map_masked(0, SEG, MASK, retrace_arch::VM_FLAGS_ANYWHERE, false).unwrap();
     assert_eq!(seg & MASK, 0, "mask 0x3fffff must give a 4 MiB-aligned address, got {seg:#x}");
     assert!(seg >= page + 0x4000, "it must not overlap the page before it");
     let next = b.guest_vm_map(0, 0x4000, true, false);
@@ -31,7 +31,7 @@ fn a_masked_anywhere_map_from_the_bump_cursor_is_aligned() {
 fn a_masked_anywhere_reservation_is_aligned() {
     let mut b = boxed();
     let _ = b.guest_vm_map(0, 0x4000, true, false);
-    let r = b.guest_vm_reserve_masked(0, SEG, MASK, true);
+    let r = b.guest_vm_reserve_masked(0, SEG, MASK, retrace_arch::VM_FLAGS_ANYWHERE).unwrap();
     assert_eq!(r & MASK, 0, "a reservation honours the mask too, got {r:#x}");
     assert_eq!(b.reservations().last(), Some(&(r, SEG)));
 }
@@ -42,7 +42,7 @@ fn a_masked_hinted_map_is_aligned_and_clears_the_occupied_hint() {
     let page = b.guest_vm_map(0, 0x4000, true, false);
     let _ = b.guest_vm_map(0, 0x4000, true, false);
     // Hint at a page that is taken: first-fit must search forward to an ALIGNED free range.
-    let seg = b.guest_vm_map_masked(page, SEG, MASK, true, false);
+    let seg = b.guest_vm_map_masked(page, SEG, MASK, retrace_arch::VM_FLAGS_ANYWHERE, false).unwrap();
     assert_eq!(seg & MASK, 0, "the hinted first-fit path honours the mask, got {seg:#x}");
     assert!(seg >= page + 0x8000, "and lands clear of both pages, got {seg:#x}");
 }
@@ -51,8 +51,8 @@ fn a_masked_hinted_map_is_aligned_and_clears_the_occupied_hint() {
 fn mask_zero_keeps_the_old_contiguous_placement() {
     let mut b = boxed();
     let a = b.guest_vm_map(0, 0x4000, true, false);
-    let c = b.guest_vm_map_masked(0, 0x4000, 0, true, false);
+    let c = b.guest_vm_map_masked(0, 0x4000, 0, retrace_arch::VM_FLAGS_ANYWHERE, false).unwrap();
     assert_eq!(c, a + 0x4000, "an unmasked map is still the next page");
-    let r = b.guest_vm_reserve_masked(0, 0x4000, 0, true);
+    let r = b.guest_vm_reserve_masked(0, 0x4000, 0, retrace_arch::VM_FLAGS_ANYWHERE).unwrap();
     assert_eq!(r, c + 0x4000, "an unmasked reservation is still the next page");
 }
