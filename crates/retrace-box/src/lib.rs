@@ -2696,6 +2696,15 @@ impl Box_ {
         self.guest_vm_map_masked(addr, size, 0, flags, exec).expect("ANYWHERE and FIXED|OVERWRITE never refuse")
     }
 
+    /// Ruling T1-float-ceiling: float `mmap_next` past a FIXED range only when its granule-rounded end is at
+    /// or below `COMMPAGE2_IPA`; the bump region ends below the box's high windows, so a cursor past them can
+    /// only produce a placement that fails.
+    fn float_cursor_past(&mut self, addr: u64, len: u64) {
+        let g = GRANULE as u64;
+        let end = addr.saturating_add(len).saturating_add(g - 1) & !(g - 1);
+        if end <= COMMPAGE2_IPA { self.mmap_next = self.mmap_next.max(end); }
+    }
+
     /// M52 §3b (t0 M2, Ruling T0-M2): what xnu answers a FIXED request without `VM_FLAGS_OVERWRITE`.
     /// Checked in this order, before anything is allocated. A start below 4 GiB is `KERN_INVALID_ADDRESS`
     /// (`__PAGEZERO` and the box's own low windows). The shared-region window, either commpage page, and
@@ -2774,10 +2783,10 @@ impl Box_ {
             // else leaves the range clear for the fresh stage-2 map, which hv_vm_map would otherwise
             // reject for overlapping.
             if let Some(a) = self.place_fixed(host, rlen, addr, exec) {
-                self.mmap_next = self.mmap_next.max((a + rlen as u64 + (GRANULE as u64 - 1)) & !(GRANULE as u64 - 1));
+                self.float_cursor_past(a, rlen as u64);
                 return Ok(a);
             }
-            self.mmap_next = self.mmap_next.max((addr + rlen as u64 + (GRANULE as u64 - 1)) & !(GRANULE as u64 - 1));
+            self.float_cursor_past(addr, rlen as u64);
             addr
         };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_vm_map)");
@@ -2824,7 +2833,7 @@ impl Box_ {
         } else {
             // M52 §3b: the cursor floats past every FIXED reservation, not only one it sits inside,
             // so no later ANYWHERE bump hands out an IPA the guest believes is its reserved range.
-            self.mmap_next = self.mmap_next.max(addr.saturating_add(rounded));
+            self.float_cursor_past(addr, rounded);
             addr
         };
         // Record the extent so commit_reserved_page can demand-commit its pages on first touch.
@@ -3250,13 +3259,12 @@ impl Box_ {
             // NOT installed this way — it mmaps RW MAP_FIXED and then mprotects — so this path is
             // covered for completeness, not because a live gate takes it.)
             // M52 §3b: the cursor floats past every FIXED placement, at both exits.
-            let fixed_end = (addr + rlen as u64 + (GRANULE as u64 - 1)) & !(GRANULE as u64 - 1);
             if let Some(a) = self.place_fixed(host, rlen, addr, prot & Self::PROT_EXEC != 0) {
-                self.mmap_next = self.mmap_next.max(fixed_end);
+                self.float_cursor_past(addr, rlen as u64);
                 if prot == 0 { self.protect_none(a, rlen as u64); }
                 return Ok(a);
             }
-            self.mmap_next = self.mmap_next.max(fixed_end);
+            self.float_cursor_past(addr, rlen as u64);
             addr
         } else { self.mmap_next };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");

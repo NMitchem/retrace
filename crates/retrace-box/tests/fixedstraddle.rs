@@ -110,3 +110,32 @@ fn a_fixed_request_that_ends_where_a_backing_starts_is_placed() {
     let r = b.guest_vm_map_masked(base - 0x4000, 0x4000, 0, 0, false);
     assert_eq!(r, Ok(base - 0x4000));
 }
+
+// Ruling T1-float-ceiling: a FIXED map ending at the top of the IPA space must not drag the bump cursor out of it.
+#[test]
+fn a_fixed_map_at_the_top_of_the_ipa_space_leaves_the_cursor_where_anywhere_can_place() {
+    let mut b = boxed();
+    b.guest_mmap(retrace_box::COMMPAGE_IPA, 0x4000, 3, 0x1012).unwrap();
+    let a = b.guest_mmap(0, 0x4000, 3, 0x1002).unwrap();
+    assert!(a < retrace_box::COMMPAGE2_IPA, "{a:#x}");
+}
+
+// A Mach FIXED reservation ending above COMMPAGE2_IPA: the only free space there is none (the commpages
+// answer KERN_NO_SPACE), so the ceiling is pinned by the BSD test above and this one checks the reserve
+// path leaves the cursor alone for a range just below it.
+#[test]
+fn a_fixed_reservation_below_the_ceiling_floats_the_cursor_past_it() {
+    let mut b = boxed();
+    let r = b.guest_vm_reserve_masked(0x7_0000_0000, 0x4000, 0, 0).unwrap();
+    let a = b.guest_vm_reserve(0, 0x4000, true);
+    assert!(a >= r + 0x4000, "{a:#x}");
+}
+
+// Review Minor 1: a plain FIXED request into a hole punched in a reservation is free.
+#[test]
+fn a_fixed_request_into_a_hole_punched_in_a_reservation_is_placed() {
+    let mut b = boxed();
+    let base = b.guest_vm_reserve(0, 0x40000, true);
+    b.guest_munmap(base + 0x10000, 0x4000);
+    assert_eq!(b.guest_vm_map_masked(base + 0x10000, 0x4000, 0, 0, false), Ok(base + 0x10000));
+}
