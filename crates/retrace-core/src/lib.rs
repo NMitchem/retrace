@@ -1057,6 +1057,16 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     .map_err(|e| format!("append sem_timedwait: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
+            // M52 §3e: `swtch_pri` (-59) and `thread_switch` (-61), box-answered like -38 and for its
+            // reason: no `arg_kinds` row (C1), so this arm's place before the generic negative arm is
+            // what keeps them from being a wall there. A yield records `ret` 0 and nothing else; the
+            // switch is the settle's, below the trace. A refusal ends the recording before the append.
+            Stop::Syscall { num, args } if num == retrace_arch::MACH_SWTCH_PRI || num == retrace_arch::MACH_THREAD_SWITCH => {
+                let rc = b.guest_yield(num, args).map_err(wall_or_bug)?;
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append yield: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
             // M18 Stage 2b: the mach semaphore SIGNAL (see `Box_::guest_sem_signal`). Never
             // forwarded, for the wait arm's reason exactly.
             //
@@ -3504,6 +3514,29 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                         "semaphore_timedwait_trap recorded ret1={ret1:#x} err={err} with {} write(s); the emulation \
                                          records 0, false and none", writes.len()) });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M52 §3e: the yield arm's mirror, in the -38 mirror's shape. It inherits the
+                            // arm-top `verify_thread`.
+                            if num == retrace_arch::MACH_SWTCH_PRI || num == retrace_arch::MACH_THREAD_SWITCH {
+                                let rc = match self.b.guest_yield(num, args) {
+                                    Ok(rc) => rc,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{} refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}",
+                                        retrace_arch::syscall_display(num)) }),
+                                };
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{} rc mismatch: replay {rc:#x} != recorded {ret:#x}",
+                                        retrace_arch::syscall_display(num)) });
+                                }
+                                if *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{} recorded ret1={ret1:#x} err={err} with {} write(s); the emulation records 0, false and none",
+                                        retrace_arch::syscall_display(num), writes.len()) });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();

@@ -646,6 +646,27 @@ fn main() {
         .status().expect("clang semtimed_dyn");
     assert!(status.success(), "semtimed_dyn guest build failed");
 
+    // yield_dyn: the M52 yield fixture — sched_yield, pthread_yield_np, thread_switch and the zero-timeout
+    // polls that would spin, by mode (see its header). Same recipe as sleep_dyn.
+    let src = format!("{}/c/yield_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/yield_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang yield_dyn");
+    assert!(status.success(), "yield_dyn guest build failed");
+
+    // yieldspin: M52 §3e — a full-std Rust binary whose child yields ten times and then parks with a
+    // timeout while main waits 60 s on a channel. Same rustc recipe as watchthread.
+    let src = format!("{}/rs/yieldspin.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/yieldspin");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc yieldspin");
+    assert!(status.success(), "yieldspin guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));

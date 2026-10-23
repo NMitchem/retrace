@@ -155,8 +155,12 @@ fn a_call_with_no_event_list_applies_its_changes_and_never_blocks() {
     assert!(b.dbg_gkq().has_events(KQ), "the trigger is applied, waiting for a scan");
     let zero = timespec(&mut b, base + 0x200, 0, 0);
     assert_eq!(kevent(&mut b, base, &[], 1, zero), Ok((1, false)));
-    assert_eq!(kevent(&mut b, base, &[], 1, zero), Ok((0, false)), "a zero timeout returns 0 without blocking");
-    assert_eq!(b.threads().state_of(0), ThreadState::Runnable);
+    // M52 §3e (R7): a {0, 0} poll that finds nothing blocks with the deadline `now`, so the settle
+    // that wakes it (yield_e2e's `kqpoll`; this box has no clock to run it) can yield to the thread it polls
+    // for. It still answers 0.
+    assert_eq!(kevent(&mut b, base, &[], 1, zero), Ok((0, false)), "a zero timeout answers 0");
+    assert!(matches!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Kevent { deadline: Some(_), .. })),
+        "an empty zero-timeout poll blocks with a due deadline");
 }
 
 /// K5: the kernel copies the timeout in first, so an unmapped one is EFAULT with nothing applied;

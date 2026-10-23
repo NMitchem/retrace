@@ -40,8 +40,8 @@ int main(int argc, char **argv) {
         pthread_join(t, NULL);
     } else if (!strcmp(mode, "pause")) {
         pause();
-    } else if (!strcmp(mode, "yield")) {
-        for (int i = 0; i < 3; i++) sched_yield();
+    } else if (!strcmp(mode, "symlink")) {
+        symlink("cf_target", "/private/tmp/claude-501/cf-symlink");
     } else if (!strcmp(mode, "clocksleep")) {
         clock_serv_t clk;
         host_get_clock_service(mach_host_self(), SYSTEM_CLOCK, &clk);

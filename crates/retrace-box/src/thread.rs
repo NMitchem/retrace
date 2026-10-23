@@ -124,6 +124,10 @@ pub enum BlockReason {
     /// on one an admitted sleep used (`SleepModel::check_sleep_semaphore`, Ruling T5-I2). So the
     /// deadline is the only wake (`Box_::sleep_timed_out`), and a sleep always has one.
     Sleep { deadline: u64 },
+    /// M52 §3e: the thread yielded (`swtch_pri` -59, `thread_switch` -61). Blocked only for the
+    /// instant between the trap and the settle that ends it (`ThreadTable::end_yield`, called by
+    /// `Box_::schedule_after_block`), so it carries nothing and no other event can see it.
+    Yield,
 }
 
 impl BlockReason {
@@ -135,7 +139,7 @@ impl BlockReason {
             BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. }
             | BlockReason::Sem { deadline, .. } => deadline,
             BlockReason::Sleep { deadline } => Some(deadline),
-            BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Parked => None,
+            BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Parked | BlockReason::Yield => None,
         }
     }
 }
@@ -530,6 +534,14 @@ impl ThreadTable {
         Ok(())
     }
 
+    /// M52 §3e: end `tid`'s yield, making it runnable again. Called by `Box_::schedule_after_block`
+    /// in the settle that blocked it, so a yield is never observable as a blocked thread.
+    pub fn end_yield(&mut self, tid: usize) {
+        assert_eq!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Yield),
+            "M52: end_yield of thread {tid}, which is {:?}, not yielding", self.threads[tid].state);
+        self.threads[tid].state = ThreadState::Runnable;
+    }
+
     /// M48 §3d: every blocked thread whose deadline `now` has reached, in deadline order with ties
     /// by thread index (R7). Pure: it wakes nobody.
     pub fn due_waiters(&self, now: u64) -> Vec<usize> {
@@ -791,6 +803,22 @@ mod tests {
         t.switch_to(1);
         t.block(BlockReason::Wait { addr: 8 });
         assert_eq!(t.pick_after(2), Some(2), "the poller itself only when nothing else can run");
+    }
+
+    // M52 §3e: a yield ends in the settle that blocked it, and the pick after it is another runnable
+    // thread, wrapping, with the yielder itself last.
+    #[test]
+    fn a_yield_ends_in_the_settle_that_blocked_it() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        let child = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        t.block(BlockReason::Yield);
+        assert!(t.needs_reschedule(), "a yielder is not runnable until its settle");
+        t.end_yield(0);
+        assert_eq!(t.state_of(0), ThreadState::Runnable);
+        assert_eq!(t.pick_after(0), Some(child), "another runnable thread runs first, though main is lowest");
+        t.switch_to(child);
+        t.exit_current(0);
+        assert_eq!(t.pick_after(0), Some(0), "a sole yielder picks itself");
     }
 
     #[test]

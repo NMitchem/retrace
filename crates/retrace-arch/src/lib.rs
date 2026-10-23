@@ -1640,6 +1640,16 @@ pub const MACH_SEMAPHORE_SIGNAL: u64 = (-33i64) as u64;
 /// row, so a misplaced arm is a wall, never a forward (C1).
 pub const MACH_SEMAPHORE_TIMEDWAIT: u64 = (-38i64) as u64;
 
+/// `swtch_pri`, mach trap `-59` (M52 §3e): `sched_yield`, `pthread_yield_np` and Rust's
+/// `thread::yield_now` (t0 M6). Box-answered, no `arg_kinds` row (C1); returns 0 for any priority.
+pub const MACH_SWTCH_PRI: u64 = (-59i64) as u64;
+/// `thread_switch`, mach trap `-61` (M52 §3e): `thread_switch(port, option, time)`.
+pub const MACH_THREAD_SWITCH: u64 = (-61i64) as u64;
+/// `mach/thread_switch.h`'s options, the only three this SDK defines (t0 M6).
+pub const SWITCH_OPTION_NONE: u64 = 0;
+pub const SWITCH_OPTION_DEPRESS: u64 = 1;
+pub const SWITCH_OPTION_WAIT: u64 = 2;
+
 /// `kern_return_t` values the semaphore family answers (`mach/kern_return.h`).
 pub const KERN_INVALID_NAME: u64 = 15;
 pub const KERN_INVALID_VALUE: u64 = 18;

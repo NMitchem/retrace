@@ -6335,7 +6335,13 @@ impl Box_ {
         }
         // 6. None found: poll, or block.
         let deadline = match timeout {
-            Some((0, 0)) => return Ok((0, false)),
+            // M52 §3e (R7): a {0, 0} poll that found nothing blocks with a due deadline, like any
+            // other timeout, so the settle that woke it yields to the thread it polls for. Returning
+            // at once handed the CPU straight back to the poller. A thread with a signal pending still
+            // returns at once: its timed wake would be K8's refusal (`ThreadTable::wake`).
+            Some((0, 0)) if self.threads.pending_of(self.threads.current()) != 0 => return Ok((0, false)),
+            // Deadline 0 is due at any clock, so the poll reads no clock of its own.
+            Some((0, 0)) => Some(0),
             None => None,
             // F6: 24 MHz, so ns * 3 / 125 ticks, truncating. 1 ns is 0 ticks, so node's 1 ns wait is
             // due as it blocks, and this landmark's own settle wakes it (§11b item 8).
@@ -7719,6 +7725,35 @@ impl Box_ {
         Ok(0)
     }
 
+    /// M52 §3e: `swtch_pri` (-59) and `thread_switch` (-61), box-answered and never forwarded (t0
+    /// M6). -59 admits any priority; -61 admits the thread port `MACH_PORT_NULL` and
+    /// `SWITCH_OPTION_NONE`, `DEPRESS` and `WAIT`, any time (the options real callers pass: libdispatch's
+    /// `_dispatch_preemption_yield` and `_dispatch_contention_usleep`). WAIT returns after one stride
+    /// rather than `t` ms, the safer error of §3h. Every admitted call is a zero-tick yield: it adds
+    /// one `SYNTH_TSC_STRIDE` (R11, so a sole yielder beside a sleeper walks to the sleeper's deadline
+    /// with no idle jump), blocks `Yield`, and `schedule_after_block` ends the yield and picks the
+    /// next runnable thread after it. Returns 0 either way, as native does.
+    ///
+    /// `Err` is a refusal by value: record passes it to `wall_or_bug`, replay reports a `Divergence`.
+    /// Both sides call this with the same `num` and `args` (symmetry rule 1); nothing is recorded.
+    pub fn guest_yield(&mut self, num: u64, args: [u64; 8]) -> Result<u64, String> {
+        if num == retrace_arch::MACH_THREAD_SWITCH {
+            let option = args[1] as u32 as u64;
+            let measured = matches!(option, retrace_arch::SWITCH_OPTION_NONE | retrace_arch::SWITCH_OPTION_DEPRESS
+                | retrace_arch::SWITCH_OPTION_WAIT);
+            if args[0] != 0 || !measured {
+                return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+                    "M52: thread_switch (mach trap -61) with thread {:#x}, option {} ({}): only MACH_PORT_NULL with \
+                     SWITCH_OPTION_NONE (0), DEPRESS (1) and WAIT (2) are modelled, the options real callers pass (t0 M6)",
+                    args[0], args[1] as u32,
+                    match option { 0 => "NONE", 1 => "DEPRESS", 2 => "WAIT", _ => "not in mach/thread_switch.h" })));
+            }
+        }
+        self.synthetic_tsc = self.synthetic_tsc.wrapping_add(SYNTH_TSC_STRIDE);
+        self.threads.block(thread::BlockReason::Yield);
+        Ok(0)
+    }
+
     /// M52 §3d: `tid`'s `semaphore_timedwait_trap` reached its deadline: the kernel answers
     /// `KERN_OPERATION_TIMED_OUT` in `x0`, carry clear. Below the trace, so K8's refusal (a signal
     /// pending on the thread) panics with its text on both sides.
@@ -7833,12 +7868,15 @@ impl Box_ {
     ///    deadline wakes, in deadline order with ties by thread index, with its primitive's timeout
     ///    answer. A deadline already past at the call (node's 1 ns waits) wakes here, in the settle
     ///    that blocked it.
-    /// 3. **The pick.** One exception (M49 Ruling T5-I1): a thread whose sleep
-    ///    (`BlockReason::Sleep`) was due in the very settle that blocked it, a 0-tick or past
-    ///    deadline, yields. The pick is then the next runnable thread after it in index order,
-    ///    wrapping around (`pick_after`), and the sleeper itself only when nothing else can run.
-    ///    Without it, a polling loop on a 0-tick sleep re-picks the poller forever and the thread it
-    ///    waits on never runs (sleep_e2e's `pollzero`). Kevent and Cv waits keep M48's pick.
+    /// 3. **The pick.** One exception (M49 Ruling T5-I1, widened by M52 §3e and R7): a thread that
+    ///    yielded (`BlockReason::Yield`, ended first, before rule 1) or whose TIMED wait (any reason
+    ///    with a deadline: sleep, kevent, cv, semaphore) was due in the very settle that blocked it,
+    ///    a 0-tick or past deadline, yields. The pick is then the next runnable thread after it in
+    ///    index order, wrapping around (`pick_after`), and the thread itself only when nothing else
+    ///    can run. Without it, a polling loop on a 0-tick wait re-picks the poller forever and the
+    ///    thread it waits on never runs (sleep_e2e's `pollzero`, M52's `sempoll` and `kqpoll`). A
+    ///    sole yielder gets no idle jump: it is runnable, so its clock moved one stride in
+    ///    `guest_yield` instead (R11).
     /// 4. **The idle jump.** If nothing is runnable and any deadline exists, `synthetic_tsc` jumps so
     ///    that the guest clock reads the earliest of ALL deadlines, workqueue timers and thread
     ///    deadlines alike. Rules 1–2 then run again, and the pick is retried, exactly once. The
@@ -7850,13 +7888,18 @@ impl Box_ {
     /// lets a timer fire or a timed wait end. This is the cooperative scheduler's limit, extended to
     /// time (`docs/current-state.md`).
     pub fn schedule_after_block(&mut self) -> Result<(), Unsupported> {
-        // M49 Ruling T5-I1 (rule 3): the thread that blocked was asleep, and rule 2 woke it in this
-        // same settle, so it yields.
+        // M49 Ruling T5-I1 and M52 §3e (rule 3): the thread that blocked yielded, or its timed wait
+        // was already due and rule 2 wakes it in this same settle, so the pick goes past it.
         let cur = self.threads.current();
-        let asleep = matches!(self.threads.state_of(cur), thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. }));
+        let mut timed = false;
+        match self.threads.state_of(cur) {
+            thread::ThreadState::Blocked(thread::BlockReason::Yield) => { self.threads.end_yield(cur); timed = true; }
+            thread::ThreadState::Blocked(r) => timed = r.deadline().is_some(),
+            _ => {}
+        }
         self.fire_due_timers();
         self.wake_due_threads();
-        let yields = asleep && self.threads.state_of(cur) == thread::ThreadState::Runnable;
+        let yields = timed && self.threads.state_of(cur) == thread::ThreadState::Runnable;
         let mut next = if yields { self.threads.pick_after(cur) } else { self.threads.pick_next() };
         if next.is_none() {
             let earliest = [self.kq.earliest_deadline(), self.threads.earliest_deadline()].into_iter().flatten().min();
