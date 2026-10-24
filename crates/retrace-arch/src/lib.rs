@@ -2325,6 +2325,10 @@ pub const SYS_KEVENT: u64 = 363;
 /// `setsockopt` (SDK `SYS_setsockopt 105`). Forwarded: libuv's `uv__stream_open` issues
 /// `SO_OOBINLINE` on the inherited stdout pipe, which the host answers `ENOTSOCK` and libuv ignores.
 pub const SYS_SETSOCKOPT: u64 = 105;
+/// `psynch_mutexwait` (SDK `SYS_psynch_mutexwait 301`). Modelled for firstfit since M52 (§3f), never forwarded.
+pub const SYS_PSYNCH_MUTEXWAIT: u64 = 301;
+/// `psynch_mutexdrop` (SDK `SYS_psynch_mutexdrop 302`). Modelled for firstfit since M52 (§3f), never forwarded.
+pub const SYS_PSYNCH_MUTEXDROP: u64 = 302;
 /// `psynch_cvbroad` (SDK `SYS_psynch_cvbroad 303`). Modelled since M48 (§3e), never forwarded.
 pub const SYS_PSYNCH_CVBROAD: u64 = 303;
 /// `psynch_cvsignal` (SDK `SYS_psynch_cvsignal 304`). Modelled since M48 (§3e), never forwarded.
@@ -2335,7 +2339,7 @@ pub const SYS_PSYNCH_CVWAIT: u64 = 305;
 /// Is `num` one of the SDK's `SYS_psynch_*` — 297 through 309 and 312, fourteen numbers? These are
 /// the calls that must NEVER be forwarded: forwarded, a psynch call acts on the HOST's psynch state,
 /// keyed by retrace's own addresses, and can block or wake the recorder. M48 models 303–305 (the
-/// condition-variable calls) and refuses every other by value; the record arm, the replay mirror and
+/// condition-variable calls), M52 301 and 302 (firstfit mutexes), and every other is refused by value; the record arm, the replay mirror and
 /// the generic forward arm's assert all share this predicate, as `is_fcntl_dupfd` is shared.
 pub fn is_psynch(num: u64) -> bool { matches!(num, 297..=309 | 312) }
 

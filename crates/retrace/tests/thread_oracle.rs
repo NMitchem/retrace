@@ -385,6 +385,13 @@ fn a_wrong_thread_on_a_yield_landmark_is_a_divergence() {
     retag_fixture_and_expect_divergence(retrace_guest::YIELD_DYN, &["peer"], retrace_arch::MACH_SWTCH_PRI);
 }
 
+/// M52 Task 5: the same for `psynch_mutexwait` (301), on `mutex_dyn two`, whose contenders each block in
+/// it. Its mirror is the psynch mirror, inside the `Syscall` chain after the arm-top `verify_thread`.
+#[test]
+fn a_wrong_thread_on_a_mutex_wait_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::MUTEX_DYN, &["two"], 301);
+}
+
 /// `retag_and_expect_divergence` over any fixture and argv: retag the first `Syscall` landmark for
 /// `num_wanted` to another thread id that genuinely appears in the same trace, and assert replay
 /// refuses it as the schedule. The reasoning for a live id, not a constant, is

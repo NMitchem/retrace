@@ -623,6 +623,16 @@ fn main() {
         .status().expect("clang condvar_dyn");
     assert!(status.success(), "condvar_dyn guest build failed");
 
+    // mutex_dyn: the M52 §3f contended-mutex fixture — modes two, four, relock, recursive,
+    // errorcheck, cond and fairshare (see its header). Same recipe as condvar_dyn.
+    let src = format!("{}/c/mutex_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/mutex_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang mutex_dyn");
+    assert!(status.success(), "mutex_dyn guest build failed");
+
     // sleep_dyn: the M49 sleep fixture — sleep, usleep and nanosleep on the synthetic clock, two
     // sleepers, a polling loop, a sleep beside a runnable thread, a signalled sleeper and the refused
     // shapes, by mode (see its header). Same recipe as condvar_dyn; the raw `__semwait_signal` stubs
@@ -1096,7 +1106,8 @@ fn main() {
             .status().expect("clang first-contact fixture");
         assert!(status.success(), "{name} guest build failed");
     }
-    for name in ["fc_cpp_hello", "fc_cpp_throw", "fc_cpp_terminate", "fc_cpp_thread", "fc_cpp_sleep"] {
+    for name in ["fc_cpp_hello", "fc_cpp_throw", "fc_cpp_terminate", "fc_cpp_thread", "fc_cpp_sleep",
+                 "mutex_cpp"] {
         let src = format!("{dir}/cpp/{name}.cpp");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");

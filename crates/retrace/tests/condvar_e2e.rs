@@ -166,20 +166,27 @@ fn a_cvwait_refused_on_replay_is_a_divergence_naming_it_not_a_panic() {
             && d.detail.contains(&format!("thread 7 already waits at sequence {lockseq:#x}")), "{}", d.detail);
 }
 
-/// Spec §1 part 5 for the port. The mutex pair is out of scope (plan F3), so a contended mutex,
-/// which libpthread's firstfit lock takes to `psynch_mutexwait` (301), stops the recorder by value
-/// before anything reaches the host. Natively the same program completes.
+/// Spec §1 part 5 for the port, converted by M52 Task 5 (§3f): the mutex pair is modelled. A contended
+/// mutex, which libpthread's firstfit lock takes to `psynch_mutexwait` (301), is now emulated, and
+/// never forwarded: the guest equals native, its trace holds 301 and 302 with no writes, and no
+/// line says `not modelled`.
 #[test]
-fn the_mutex_pair_is_refused_by_value_and_never_forwarded() {
+fn the_mutex_pair_is_modelled_and_never_forwarded() {
     let (code, out) = native(&["mutex"]);
     assert_eq!((code, String::from_utf8_lossy(&out).into_owned()), (0, "mutex ok flag=1\n".to_string()), "native completes");
     let (rec, trace) = util::record_dynamic_args(retrace_guest::CONDVAR_DYN, &["mutex"]);
-    assert_eq!(rec.code, 4, "the recorder must stop at the wall. stderr:\n{}", rec.stderr);
-    let line = rec.stderr.lines().find(|l| l.starts_with("retrace: unsupported: ")).unwrap_or_else(|| panic!("no wall line:\n{}", rec.stderr));
-    assert!(line.contains("M48: psynch psynch_mutexwait (301) is not modelled"), "wall line: {line}");
-    assert!(!String::from_utf8_lossy(&rec.stdout).contains("mutex ok"), "the guest must not run past the refusal");
-    // The refused call appends no landmark; main's timed wait, which let the locker run, did.
-    assert!(calls(&trace, 301).is_empty(), "a refused call is never recorded");
-    let waits = calls(&trace, retrace_arch::SYS_PSYNCH_CVWAIT);
-    assert!(waits.len() == 1 && waits[0].1 == 0, "main's timed wait preceded the refusal: {waits:x?}");
+    assert_eq!(rec.code, 0, "the recorder must complete. stderr:\n{}", rec.stderr);
+    assert_eq!(String::from_utf8_lossy(&rec.stdout), "mutex ok flag=1\n");
+    assert!(!rec.stderr.contains("not modelled"), "no refusal line:\n{}", rec.stderr);
+    for num in [301, 302] {
+        let lm = calls(&trace, num);
+        assert!(!lm.is_empty(), "the trace holds psynch call {num}");
+    }
+    for e in retrace_trace::Reader::open(&trace).unwrap() {
+        if let Event::Syscall { num: 301 | 302, ret1, err, writes, .. } = e {
+            assert!(ret1 == 0 && !err && writes.is_empty(), "a mutex landmark writes nothing");
+        }
+    }
+    let rp = util::replay(&trace);
+    assert_eq!((rp.code, String::from_utf8_lossy(&rp.stdout).into_owned()), (0, "mutex ok flag=1\n".to_string()), "replay: {}", rp.stderr);
 }

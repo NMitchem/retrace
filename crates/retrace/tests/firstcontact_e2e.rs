@@ -36,6 +36,8 @@ use std::path::Path;
 enum Expect {
     Pass,
     Refused(&'static str),
+    // No row pins a wall since M52 Task 5 moved `fc_mutex` to `Pass`; the pin stays for the next wall.
+    #[allow(dead_code)]
     Wall(&'static str),
     Toolchain,
 }
@@ -73,8 +75,8 @@ const ROWS: &[Row] = &[
           expect: Expect::Pass },
     Row { name: "fc_nanosleep", bin: retrace_guest::FC_NANOSLEEP, args: &[],
           expect: Expect::Pass },
-    Row { name: "fc_mutex", bin: retrace_guest::FC_MUTEX, args: &[],
-          expect: Expect::Wall("retrace: unsupported: M48: psynch psynch_mutexwait (301) is not modelled") },
+    // M52 §3f: the firstfit mutex pair is modelled, so the contended lock is a pass (was the 301 wall).
+    Row { name: "fc_mutex", bin: retrace_guest::FC_MUTEX, args: &[], expect: Expect::Pass },
     Row { name: "fc_fileio", bin: retrace_guest::FC_FILEIO, args: &[], expect: Expect::Pass },
     // M51 §3f: the program gets the recorder's environment, which is ENV, as native gets it.
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"], expect: Expect::Pass },

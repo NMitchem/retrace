@@ -6443,6 +6443,11 @@ impl Box_ {
     /// `M48: psynch …` (T5-d) or `M48: a signal is pending on thread …` (T5-e), raised before the
     /// model or the thread table changes. Both dispatch arms call this with the same `(num, args)`
     /// (symmetry rule 1), and nothing is recorded (R3): every word is a pure function of box state.
+    ///
+    /// M52 §3f adds the firstfit mutex pair: a `psynch_mutexwait` that queues blocks as
+    /// `BlockReason::Mutex` (its answer, like a `cvwait`'s, comes at the wake), and a
+    /// `psynch_mutexdrop` answers 0 and wakes the head of the queue, if any. Nothing is written into
+    /// the mutex: its words reach the guest only as returns.
     pub fn guest_psynch(&mut self, num: u64, args: [u64; 8]) -> Result<u64, String> {
         let tid = self.threads.current();
         let mut next = self.psynch.clone();
@@ -6454,11 +6459,16 @@ impl Box_ {
                 let out = next.cvwait(args, tid)?;
                 (out, ticks.map(|t| self.now_guest().saturating_add(t)))
             }
+            // M52 §3f: the firstfit mutex pair. A wait that queues blocks on the mutex's address with
+            // no deadline; a drop wakes the head of the queue or preposts (`Psynch::mutexdrop`).
+            retrace_arch::SYS_PSYNCH_MUTEXWAIT => (next.mutexwait(args, tid)?, None),
+            retrace_arch::SYS_PSYNCH_MUTEXDROP => (next.mutexdrop(args)?, None),
             retrace_arch::SYS_PSYNCH_CVSIGNAL => (next.cvsignal(args)?, None),
             retrace_arch::SYS_PSYNCH_CVBROAD => (next.cvbroad(args, self.threads.len())?, None),
             _ => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M48: psynch {} ({num}) is not modelled: only psynch_cvwait, psynch_cvsignal and \
-                 psynch_cvbroad are, the calls the walks measured (plan P4). args {}",
+                "M48: psynch {} ({num}) is not modelled: only psynch_cvwait, psynch_cvsignal, \
+                 psynch_cvbroad and (M52) the firstfit psynch_mutexwait/psynch_mutexdrop are, the calls the \
+                 walks measured (plan P4). args {}",
                 psynch::call_name(num), Self::fmt_args(args)))),
         };
         // T5-e: a woken thread with a signal pending would leave it where assert_no_stranded_signals
@@ -6469,7 +6479,7 @@ impl Box_ {
             if pending != 0 {
                 return Err(retrace_arch::wall(retrace_arch::WallCategory::Signals, format!(
                     "M48: a signal is pending on thread {} (set {pending:#x}), which this {} would wake. The \
-                     saved context of a thread blocked in psynch_cvwait is unmeasured, so a delivery there \
+                     saved context of a thread blocked in psynch_cvwait or psynch_mutexwait is unmeasured, so a delivery there \
                      would be a guess; measure it (the blockedctx.rs shape) before allowing this.",
                     w.tid, psynch::call_name(num))));
             }
@@ -6481,7 +6491,11 @@ impl Box_ {
         match out.ret {
             psynch::Ret::Word(word) => Ok(word as u64),
             psynch::Ret::Block => {
-                self.threads.block(thread::BlockReason::Cv { addr: args[0], deadline });
+                self.threads.block(if num == retrace_arch::SYS_PSYNCH_MUTEXWAIT {
+                    thread::BlockReason::Mutex { addr: args[0] }
+                } else {
+                    thread::BlockReason::Cv { addr: args[0], deadline }
+                });
                 Ok(0)
             }
         }

@@ -10,7 +10,8 @@
 //!
 //! **Ported, not invented.** Each function names the kernel function it ports. Left out:
 //! - `kw_cvkernelseq`, `kw_lowseq` and `kw_highseq`, which the cv paths write and never read;
-//! - `kw_prepost` and `kw_intr`, which belong to the mutex and rwlock paths;
+//! - `kw_prepost` and `kw_intr`, which belong to the mutex and rwlock paths (M52 §3f ports
+//!   `kw_prepost`'s firstfit use below; `kw_intr` stays out, since nothing interrupts a wait);
 //! - cancellation (`__pthread_testcancel`, the queue scans' cancelled-thread skips): retrace models
 //!   none, so no waiter is ever cancelled.
 //!
@@ -29,6 +30,22 @@ use retrace_arch::{ECVCLEARED, ECVPREPOST, ETIMEDOUT, PTHRW_COUNT_MASK, PTHRW_CO
 /// keyed by its VM object (`ksyn_findobj`), not its address.
 const PSHARED_MASK: u32 = 0x30;
 const PSHARED: u32 = 0x10;
+
+/// `pthread_mutex_options_s` (types_internal.h:194), as `mtxopts.value` reaches the syscall: protocol
+/// bits 0-1, type bits 2-3 (0 normal, 4 errorcheck, 8 recursive), pshared 4-5, policy 6-8, notify 12
+/// (`_PTHREAD_MTX_OPT_NOTIFY`), mutex 13 (`_PTHREAD_MTX_OPT_MUTEX`) and `lock_count` in bits 16-31.
+/// Every measured firstfit mutex is `0x20a0` once the type, notify and lock count are set aside:
+/// mutex 0x2000, firstfit 0x80, `PTHREAD_PROCESS_PRIVATE` 0x20 (t0 M7; `tid_dyn`/`mutex_dyn` add the
+/// type and count). `kern_synch.c` itself reads only the pshared, policy and mutex fields.
+const MTX_FIRSTFIT_PRIVATE: u32 = 0x20a0;
+/// The fields `admit_mutex` sets aside: notify, the type and the 16-bit lock count.
+const MTX_VARIABLE: u32 = 0x1000 | 0xc | 0xffff_0000;
+const MTX_TYPE_MASK: u32 = 0xc;
+const MTX_POLICY_MASK: u32 = 0x1c0;
+const MTX_POLICY_FAIRSHARE: u32 = 0x40;
+/// `PTH_RWL_KBIT` and `PTH_RWL_EBIT` (synch_internal.h:46-47): the bits a mutex wake answers with.
+const PTH_RWL_KBIT: u32 = 0x01;
+const PTH_RWL_EBIT: u32 = 0x02;
 /// `_psynch_cvwait` masks `nsec` before testing it (kern_synch.c:1273).
 const NSEC_MASK: u32 = 0x3fff_ffff;
 
@@ -365,16 +382,86 @@ impl Kwq {
     }
 }
 
-/// Every cv with a nonempty queue, by guest address.
+/// One mutex's `ksyn_wait_queue` (kern_synch.c:125), for the fields the firstfit paths read: the
+/// `KSYN_QUEUE_WRITE` queue in arrival order (`FIRSTFIT` inserts at the tail), `kw_highseq`, the
+/// queue's `ksynq_lastnum` that `find_nexthighseq` falls back on, and `kw_prepost.count`. Its `lseq`
+/// is written and never read on a firstfit path, so it is left out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Mkwq {
+    /// Waiting threads (thread-table index) and their `kwe_lockseq`, in arrival order.
+    pub queue: Vec<(usize, u32)>,
+    pub highseq: u32,
+    lastnum: u32,
+    /// `kw_prepost.count`: the drops that found no queued waiter, each owed one wait.
+    pub prepost: u32,
+}
+
+impl Mkwq {
+    /// `ksyn_queue_insert` with `FIRSTFIT` (kern_synch.c:2358) and `update_low_high` (:2599).
+    fn insert(&mut self, tid: usize, lockseq: u32) {
+        if self.queue.is_empty() || is_seqhigher(lockseq, self.lastnum) {
+            self.lastnum = lockseq;
+        }
+        self.queue.push((tid, lockseq));
+        if self.queue.len() == 1 || is_seqhigher(lockseq, self.highseq) {
+            self.highseq = lockseq;
+        }
+    }
+
+    /// `ksyn_queue_remove_item` of the head (kern_synch.c:2434): `ksynq_lastnum` follows the tail, and
+    /// `kw_highseq` falls back to it when the leaver held it.
+    fn remove_first(&mut self) -> (usize, u32) {
+        let (tid, seq) = self.queue.remove(0);
+        self.lastnum = self.queue.last().map_or(0, |&(_, s)| s);
+        if self.queue.is_empty() {
+            self.highseq = 0;
+        } else if self.highseq == seq {
+            self.highseq = self.lastnum;
+        }
+        (tid, seq)
+    }
+
+    /// The word a wake or a preposted wait answers: `(kw_highseq & PTHRW_COUNT_MASK) | K | E`.
+    fn updatebits(&self) -> u32 {
+        (self.highseq & PTHRW_COUNT_MASK) | PTH_RWL_KBIT | PTH_RWL_EBIT
+    }
+}
+
+/// M52 §3f (C5): admit one measured shape of `psynch_mutexwait`/`psynch_mutexdrop`, or refuse it by
+/// value before anything changes. Only a private firstfit mutex is ported; a process-shared mutex is
+/// keyed by its VM object, fairshare needs `_psynch_mutexdrop_internal`'s sequence-matched wake, and
+/// any other bit (a protocol, hold, misalign or ulock field) is a shape no walk measured. The type,
+/// notify and lock count vary freely: user space owns them and the kernel never reads them.
+fn admit_mutex(call: &str, mutex: u64, flags: u32) -> Result<(), String> {
+    let wall = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Threads,
+        format!("M52: psynch {call} on mutex {mutex:#x} with flags {flags:#x}: {why}"));
+    if flags & PSHARED_MASK == PSHARED {
+        return Err(wall("a process-shared mutex is keyed by its VM object (ksyn_findobj), not its address".into()));
+    }
+    if flags & MTX_POLICY_MASK == MTX_POLICY_FAIRSHARE {
+        return Err(wall("a fairshare mutex needs the sequence-matched wake of _psynch_mutexdrop_internal, which M52 \
+                         does not port (C5); only the default firstfit policy is modelled".into()));
+    }
+    if flags & !MTX_VARIABLE != MTX_FIRSTFIT_PRIVATE || flags & MTX_TYPE_MASK == MTX_TYPE_MASK {
+        return Err(wall(format!("only a private firstfit mutex is modelled: {MTX_FIRSTFIT_PRIVATE:#x} once the type, \
+                                 notify and lock count are set aside (t0 M7)")));
+    }
+    Ok(())
+}
+
+/// Every cv with a nonempty queue, and every mutex with a waiter or a prepost, by guest address.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Psynch {
     kwqs: BTreeMap<u64, Kwq>,
+    mutexes: BTreeMap<u64, Mkwq>,
 }
 
 impl Psynch {
-    pub fn is_empty(&self) -> bool { self.kwqs.is_empty() }
+    pub fn is_empty(&self) -> bool { self.kwqs.is_empty() && self.mutexes.is_empty() }
 
     pub fn kwq(&self, cv: u64) -> Option<&Kwq> { self.kwqs.get(&cv) }
+
+    pub fn mutex_kwq(&self, mutex: u64) -> Option<&Mkwq> { self.mutexes.get(&mutex) }
 
     /// `ksyn_wqfind`'s lookup, or a fresh queue from the call's words. A copy: every operation
     /// works on it and stores it back only on success, so a refusal changes nothing.
@@ -389,6 +476,56 @@ impl Psynch {
         } else {
             self.kwqs.insert(cv, kwq);
         }
+    }
+
+    /// `ksyn_wqrelease`'s free of a mutex queue nothing uses: no waiter and no prepost.
+    fn store_mutex(&mut self, mutex: u64, kwq: Mkwq) {
+        if kwq.queue.is_empty() && kwq.prepost == 0 {
+            self.mutexes.remove(&mutex);
+        } else {
+            self.mutexes.insert(mutex, kwq);
+        }
+    }
+
+    /// `_psynch_mutexwait` (kern_synch.c:659), firstfit, for thread `tid`. `args` is the syscall's:
+    /// `mutex, mgen, ugen, tid, flags`; `ugen` and the owner hint `tid` feed only the turnstile
+    /// owner, which retrace does not model. A prepost left by a drop that found no waiter is
+    /// consumed at once and answers `(highseq or lseq) | K | E`; otherwise the caller queues at the
+    /// tail and blocks, and its word comes with the drop that wakes it.
+    pub fn mutexwait(&mut self, args: [u64; 8], tid: usize) -> Result<Outcome, String> {
+        let (mutex, lseq, flags) = (args[0], args[1] as u32 & PTHRW_COUNT_MASK, args[4] as u32);
+        admit_mutex("psynch_mutexwait", mutex, flags)?;
+        let mut kwq = self.mutexes.get(&mutex).cloned().unwrap_or_default();
+        let ret = if kwq.prepost > 0 {
+            kwq.prepost -= 1;
+            let bits = if kwq.queue.is_empty() { lseq | PTH_RWL_KBIT | PTH_RWL_EBIT } else { kwq.updatebits() };
+            Ret::Word(bits & !PTH_RWL_MTX_WAIT)
+        } else {
+            kwq.insert(tid, lseq);
+            Ret::Block
+        };
+        self.store_mutex(mutex, kwq);
+        Ok(Outcome { ret, woken: Vec::new() })
+    }
+
+    /// `_psynch_mutexdrop_internal` (kern_synch.c:536), firstfit. `args`: `mutex, mgen, ugen, tid,
+    /// flags`. With no queued waiter the drop counts a prepost (the kernel keeps `mgen`'s sequence,
+    /// which no firstfit path reads); otherwise the head of the queue is woken with
+    /// `(kw_highseq & PTHRW_COUNT_MASK) | E | K`, read before it leaves. The call itself answers 0.
+    pub fn mutexdrop(&mut self, args: [u64; 8]) -> Result<Outcome, String> {
+        let (mutex, flags) = (args[0], args[4] as u32);
+        admit_mutex("psynch_mutexdrop", mutex, flags)?;
+        let mut kwq = self.mutexes.get(&mutex).cloned().unwrap_or_default();
+        let mut woken = Vec::new();
+        if kwq.queue.is_empty() {
+            kwq.prepost += 1;
+        } else {
+            let word = kwq.updatebits() & !PTH_RWL_MTX_WAIT;
+            let (tid, _) = kwq.remove_first();
+            woken.push(Wake { tid, word });
+        }
+        self.store_mutex(mutex, kwq);
+        Ok(Outcome { ret: Ret::Word(0), woken })
     }
 
     /// `_psynch_cvwait` (kern_synch.c:1171) for thread `tid`. `args` is the syscall's: `cv, cvlsgen,
@@ -741,5 +878,131 @@ mod tests {
             assert!(e.starts_with("M48: psynch ") && e.contains(want), "{want}: {e}");
         }
         assert_eq!(p, before, "a refusal leaves the model untouched");
+    }
+
+    const MX: u64 = 0x1_0000_8038;
+
+    /// `mutexwait`'s arguments as libpthread builds them: `mutex, mgen, ugen, tid hint, mtxopts`.
+    /// `mgen` is the lock word after the contender's increment: one `PTHRW_INC` per attempt over E.
+    fn mwait(mgen: u32) -> [u64; 8] { [MX, mgen as u64, 0, 0, 0x20a0, 0, 0, 0] }
+
+    /// `mutexdrop`'s: `ugen`, then the unlock's flags with NOTIFY set (t0 M7: `0x30a0`).
+    fn mdrop() -> [u64; 8] { [MX, 0x102, 0x100, 0, 0x30a0, 0, 0, 0] }
+
+    fn mwoke(tid: usize, word: u32) -> Wake { Wake { tid, word } }
+
+    /// T0(M7) against the port: one contender at `mgen 0x102` blocks, the drop wakes it with the
+    /// word native answered (`0x103`), and a second contender at `0x202` is answered `0x203`, the
+    /// two shapes the lldb runs read (`psynch-returns.txt`).
+    #[test]
+    fn a_drop_wakes_the_waiter_with_its_sequence_over_the_k_and_e_bits() {
+        let mut p = Psynch::default();
+        assert_eq!(p.mutexwait(mwait(0x102), 1).unwrap(), Outcome { ret: Ret::Block, woken: vec![] });
+        let d = p.mutexdrop(mdrop()).unwrap();
+        assert_eq!(d, Outcome { ret: Ret::Word(0), woken: vec![mwoke(1, 0x103)] }, "T0(M7): the drop answers 0, the waiter 0x103");
+        assert!(p.is_empty(), "a mutex with no waiter and no prepost is freed (ksyn_wqrelease)");
+        p.mutexwait(mwait(0x202), 2).unwrap();
+        assert_eq!(p.mutexdrop(mdrop()).unwrap().woken, vec![mwoke(2, 0x203)], "T0(M7): `0x203` in other runs");
+    }
+
+    /// `ksyn_queue_insert` with FIRSTFIT is arrival order, whatever the sequences say, and
+    /// `_psynch_mutexdrop_internal` wakes the head with the highest queued sequence over K and E.
+    #[test]
+    fn a_drop_wakes_the_waiters_in_queue_order() {
+        let mut p = Psynch::default();
+        for (tid, mgen) in [(3, 0x102), (1, 0x202), (2, 0x302), (4, 0x402)] {
+            assert_eq!(p.mutexwait(mwait(mgen), tid).unwrap().ret, Ret::Block, "thread {tid}");
+        }
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            let d = p.mutexdrop(mdrop()).unwrap();
+            assert_eq!(d.woken.len(), 1);
+            order.push(d.woken[0]);
+        }
+        assert_eq!(order, vec![mwoke(3, 0x403), mwoke(1, 0x403), mwoke(2, 0x403), mwoke(4, 0x403)],
+            "arrival order; the word is kw_highseq, read before the head leaves");
+        assert!(p.is_empty());
+    }
+
+    /// `kw_highseq` follows `find_nexthighseq` (the tail's sequence) when the head that held it leaves,
+    /// which is arrival order, not the highest remaining.
+    #[test]
+    fn the_highest_sequence_falls_back_to_the_tail_when_its_holder_leaves() {
+        let mut p = Psynch::default();
+        p.mutexwait(mwait(0x502), 1).unwrap();
+        p.mutexwait(mwait(0x302), 2).unwrap();
+        p.mutexwait(mwait(0x402), 3).unwrap();
+        assert_eq!(p.mutex_kwq(MX).unwrap().highseq, 0x500);
+        assert_eq!(p.mutexdrop(mdrop()).unwrap().woken, vec![mwoke(1, 0x503)]);
+        assert_eq!(p.mutex_kwq(MX).unwrap().highseq, 0x400, "ksynq_lastnum, the tail, not the highest of the rest");
+        assert_eq!(p.mutexdrop(mdrop()).unwrap().woken, vec![mwoke(2, 0x403)]);
+    }
+
+    /// Ruling T0-M7-prepost: a drop that finds no queued waiter counts a prepost, and exactly one
+    /// wait consumes each count, at once, with `lseq | K | E` and no block.
+    #[test]
+    fn a_prepost_is_consumed_by_exactly_one_wait() {
+        let mut p = Psynch::default();
+        assert_eq!(p.mutexdrop(mdrop()).unwrap(), Outcome { ret: Ret::Word(0), woken: vec![] });
+        assert_eq!(p.mutex_kwq(MX).unwrap().prepost, 1);
+        assert_eq!(p.mutexwait(mwait(0x102), 1).unwrap(), Outcome { ret: Ret::Word(0x103), woken: vec![] },
+            "source: `lseq | K | E` with an empty queue; no block");
+        assert!(p.is_empty(), "the prepost is spent");
+        assert_eq!(p.mutexwait(mwait(0x202), 2).unwrap().ret, Ret::Block, "the next wait finds nothing and blocks");
+        // Two drops on an empty queue are two preposts (firstfit counts, `kw_prepost.count + 1`).
+        let mut p = Psynch::default();
+        p.mutexdrop(mdrop()).unwrap();
+        p.mutexdrop(mdrop()).unwrap();
+        assert_eq!(p.mutex_kwq(MX).unwrap().prepost, 2);
+        assert_eq!(p.mutexwait(mwait(0x102), 1).unwrap().ret, Ret::Word(0x103));
+        assert_eq!(p.mutexwait(mwait(0x202), 2).unwrap().ret, Ret::Word(0x203));
+        assert_eq!(p.mutexwait(mwait(0x302), 3).unwrap().ret, Ret::Block, "exactly two were owed");
+    }
+
+    /// A prepost beside a queued waiter answers `kw_highseq | K | E` instead (kern_synch.c:711).
+    #[test]
+    fn a_preposted_wait_beside_a_queued_waiter_answers_the_highest_queued_sequence() {
+        let mut p = Psynch::default();
+        p.mutexdrop(mdrop()).unwrap();
+        // The queued waiter cannot come before the prepost it would consume, so plant the state a
+        // drop-then-wait-then-drop leaves: a queued waiter and a count.
+        p.mutexes.get_mut(&MX).unwrap().insert(9, 0x700);
+        assert_eq!(p.mutexwait(mwait(0x202), 1).unwrap().ret, Ret::Word(0x703));
+    }
+
+    /// C5 and the rest of the flags: every shape the model does not port is refused by value, naming
+    /// the policy, and the model is left as it was. One row per refusal.
+    #[test]
+    fn fairshare_pshared_and_unmeasured_mutexes_are_refused_by_value_and_change_nothing() {
+        let mut p = Psynch::default();
+        p.mutexwait(mwait(0x102), 1).unwrap();
+        let before = p.clone();
+        let with = |flags: u64| { let mut a = mwait(0x202); a[4] = flags; a };
+        let cases: [(&str, Result<Outcome, String>); 7] = [
+            ("fairshare mutex", p.mutexwait(with(0x2060), 2)),
+            ("fairshare mutex", p.mutexdrop(with(0x3060))),
+            ("process-shared mutex", p.mutexwait(with(0x2090), 2)),
+            ("only a private firstfit mutex", p.mutexwait(with(0x20a1), 2)),
+            ("only a private firstfit mutex", p.mutexdrop(with(0x20a0 | 0x800))),
+            ("only a private firstfit mutex", p.mutexwait(with(0x20ac), 2)),
+            ("only a private firstfit mutex", p.mutexwait(with(0x00a0), 2)),
+        ];
+        for (want, got) in cases {
+            let e = got.expect_err(want).unmark();
+            assert!(e.starts_with("M52: psynch psynch_mutex") && e.contains(want), "{want}: {e}");
+        }
+        assert_eq!(p, before, "a refusal leaves the model untouched");
+    }
+
+    /// The type, the notify bit and the lock count vary without changing what the kernel does
+    /// (recursive `0x120a8`, errorcheck `0x20a4`, and a wait that carries NOTIFY).
+    #[test]
+    fn the_mutex_type_notify_and_lock_count_are_admitted() {
+        let mut p = Psynch::default();
+        for (flags, tid) in [(0x120a8u64, 1), (0x20a4, 2), (0x30a0, 3), (0x20a0 | 0x5_0000, 4)] {
+            let mut a = mwait(0x102 + 0x100 * tid as u32);
+            a[4] = flags;
+            assert_eq!(p.mutexwait(a, tid).unwrap().ret, Ret::Block, "flags {flags:#x}");
+        }
     }
 }

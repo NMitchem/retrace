@@ -116,6 +116,11 @@ pub enum BlockReason {
     /// it (`Box_::guest_psynch`), or at `deadline`, a guest-clock value in `Kevent`'s domain, which
     /// is `None` for an untimed wait (`Box_::cv_timed_out`).
     Cv { addr: u64, deadline: Option<u64> },
+    /// M52 §3f: blocked in `psynch_mutexwait` on the mutex at guest address `addr`, for the reason
+    /// `Cv`'s key is an address: the kernel keys a private mutex's wait queue by it, and so does
+    /// `psynch.rs`. Never timed. Woken by a `psynch_mutexdrop` the port says reaches it
+    /// (`Box_::guest_psynch`), in queue order, with the word the drop computed.
+    Mutex { addr: u64 },
     /// M49 §3f S3: asleep in `__semwait_signal`'s relative-timeout shape until `deadline`, a
     /// guest-clock value in `Kevent`'s domain (R6). **Keyed by thread, not by port**: every sleeper
     /// passes libc's one `clock_sem`, so a port key would make every sleeper one waiter. Nothing
@@ -139,7 +144,8 @@ impl BlockReason {
             BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. }
             | BlockReason::Sem { deadline, .. } => deadline,
             BlockReason::Sleep { deadline } => Some(deadline),
-            BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Parked | BlockReason::Yield => None,
+            BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Parked | BlockReason::Yield
+            | BlockReason::Mutex { .. } => None,
         }
     }
 }
@@ -527,8 +533,8 @@ impl ThreadTable {
         }
         assert!(matches!(self.threads[tid].state,
                 ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. }
-                    | BlockReason::Sem { .. })),
-            "M48: wake of thread {tid}, which is {:?}, not blocked in a timed-wait primitive",
+                    | BlockReason::Sem { .. } | BlockReason::Mutex { .. })),
+            "M48: wake of thread {tid}, which is {:?}, not blocked in a psynch, kevent, sleep or semaphore wait",
             self.threads[tid].state);
         self.threads[tid].state = ThreadState::Runnable;
         Ok(())

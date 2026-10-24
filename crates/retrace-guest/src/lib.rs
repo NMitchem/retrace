@@ -304,6 +304,11 @@ pub const FORKFAIL_DYN: &str = concat!(env!("OUT_DIR"), "/forkfail_dyn");
 /// M48: psynch condition variables by mode — `pingpong`, `broadcast`, `timedout`, `timedsignal`,
 /// `onens` and `mutex` (spec §3h, Ruling T5-a; see the source's header).
 pub const CONDVAR_DYN: &str = concat!(env!("OUT_DIR"), "/condvar_dyn");
+/// M52 §3f: contended `pthread_mutex`es by mode — `two`, `four`, `relock`, `recursive`, `errorcheck`, `cond`
+/// and `fairshare` (see the source's header).
+pub const MUTEX_DYN: &str = concat!(env!("OUT_DIR"), "/mutex_dyn");
+/// M52 §3f: four `std::thread`s on one contended `std::mutex`.
+pub const MUTEX_CPP: &str = concat!(env!("OUT_DIR"), "/mutex_cpp");
 /// M49: sleep on the synthetic clock by mode — `sleep1`, `usleep`, `nanosleep_null`, `usleep1`,
 /// `onens`, `raw`, `twosleepers`, `pollloop`, `pollzero`, `sleepwhilework`, `sigsleeper` and
 /// `refuse <what>` (spec §3f, §4; see the source's header).

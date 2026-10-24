@@ -5,7 +5,8 @@
 //! timed, because a deadline reads the guest clock and a static box has no commpage; `condvar_e2e`
 //! covers deadlines end to end.
 use retrace_arch::Unmark;
-use retrace_arch::{PSTATE_C, SYS_PSYNCH_CVBROAD, SYS_PSYNCH_CVSIGNAL, SYS_PSYNCH_CVWAIT};
+use retrace_arch::{PSTATE_C, SYS_PSYNCH_CVBROAD, SYS_PSYNCH_CVSIGNAL, SYS_PSYNCH_CVWAIT, SYS_PSYNCH_MUTEXDROP,
+                   SYS_PSYNCH_MUTEXWAIT};
 use retrace_box::thread::{BlockReason, ThreadCtx, ThreadState};
 use retrace_box::Box_;
 
@@ -90,8 +91,7 @@ fn every_unmodelled_psynch_call_is_refused_by_value_with_nothing_changed() {
     let mut b = with_threads(1);
     block_in_cvwait(&mut b, 0x100, 1);
     let model = b.dbg_psynch().clone();
-    for (num, name) in [(301, "psynch_mutexwait"), (302, "psynch_mutexdrop"), (312, "psynch_cvclrprepost"),
-                        (306, "psynch_rw_rdlock"), (297, "psynch_rw_longrdlock")] {
+    for (num, name) in [(312, "psynch_cvclrprepost"), (306, "psynch_rw_rdlock"), (297, "psynch_rw_longrdlock")] {
         let e = b.guest_psynch(num, [CV, 0x100, 0, 0, 0, 0, 0, 0]).unwrap_err().unmark();
         assert!(e.starts_with(&format!("M48: psynch {name} ({num}) is not modelled")), "{e}");
     }
@@ -121,4 +121,58 @@ fn a_blocked_cvwait_survives_a_checkpoint_and_is_woken_after_restore() {
     assert_eq!(r.guest_psynch(SYS_PSYNCH_CVSIGNAL, signal(0x100, 0, 0)), Ok(0x101),
         "a restored box without the queue would prepost (the P bit, 0x2) and wake nobody");
     assert_eq!(r.threads().state_of(0), ThreadState::Runnable);
+}
+
+const MX: u64 = 0x1_0000_8038;
+
+/// `mutexwait`'s arguments at `mgen` (`mtxopts` 0x20a0, the measured firstfit flags).
+fn mwait(mgen: u64) -> [u64; 8] { [MX, mgen, 0, 0, 0x20a0, 0, 0, 0] }
+
+/// `mutexdrop`'s, with NOTIFY (0x30a0).
+fn mdrop() -> [u64; 8] { [MX, 0x102, 0x100, 0, 0x30a0, 0, 0, 0] }
+
+/// M52 §3f at the box: two threads block in `psynch_mutexwait` (each as `BlockReason::Mutex`, its
+/// landmark answering 0), and the drop wakes the FIRST in queue order, writing the kernel's word,
+/// `(highseq << 8) | K | E`, into its saved context with carry clear, while the second stays blocked.
+#[test]
+fn a_mutexdrop_wakes_the_first_waiter_and_writes_its_word_into_its_saved_context() {
+    let mut b = with_threads(3);
+    for (k, mgen) in [(0usize, 0x102u64), (1, 0x202)] {
+        assert_eq!(b.threads().current(), k);
+        assert_eq!(b.guest_psynch(SYS_PSYNCH_MUTEXWAIT, mwait(mgen)), Ok(0), "a blocking wait answers 0");
+        b.set_x0_err_and_return(0, false);
+        assert_eq!(b.threads().state_of(k), ThreadState::Blocked(BlockReason::Mutex { addr: MX }));
+        b.settle_schedule().unwrap();
+    }
+    assert_eq!(b.threads().current(), 2, "both waiters blocked, so the third thread holds the vCPU");
+    for t in 0..2 { stale(&mut b, t); }
+    assert_eq!(b.guest_psynch(SYS_PSYNCH_MUTEXDROP, mdrop()), Ok(0), "the drop answers 0");
+    assert_eq!(b.threads().state_of(0), ThreadState::Runnable, "the head of the queue is woken");
+    assert_eq!(b.threads().state_of(1), ThreadState::Blocked(BlockReason::Mutex { addr: MX }), "the second keeps waiting");
+    let c = b.threads().ctx_of(0);
+    assert_eq!((c.regs.x[0], c.regs.cpsr & PSTATE_C), (0x203, 0), "kw_highseq 0x200 over K and E, carry clear");
+    assert_eq!(b.threads().ctx_of(1).regs.x[0], 0xdead, "the other waiter's context is untouched");
+    assert_eq!(b.threads().current(), 2, "a wake does not switch");
+    // A second drop wakes the second; a third finds no waiter and preposts, which a later wait consumes.
+    assert_eq!(b.guest_psynch(SYS_PSYNCH_MUTEXDROP, mdrop()), Ok(0));
+    assert_eq!(b.threads().ctx_of(1).regs.x[0], 0x203);
+    assert_eq!(b.guest_psynch(SYS_PSYNCH_MUTEXDROP, mdrop()), Ok(0));
+    assert_eq!(b.guest_psynch(SYS_PSYNCH_MUTEXWAIT, mwait(0x302)), Ok(0x303), "the prepost answers the wait at once");
+    assert_eq!(b.threads().state_of(2), ThreadState::Runnable, "and the caller never blocks");
+    assert!(b.dbg_psynch().is_empty());
+}
+
+/// A woken waiter with a signal pending is refused before anything changes (T5-e), for a mutex too.
+#[test]
+fn a_mutexdrop_that_would_wake_a_thread_with_a_pending_signal_is_refused_and_changes_nothing() {
+    let mut b = with_threads(1);
+    assert_eq!(b.guest_psynch(SYS_PSYNCH_MUTEXWAIT, mwait(0x102)), Ok(0));
+    b.set_x0_err_and_return(0, false);
+    b.settle_schedule().unwrap();
+    let model = b.dbg_psynch().clone();
+    b.threads_mut().pend(0, 30);
+    let e = b.guest_psynch(SYS_PSYNCH_MUTEXDROP, mdrop()).unwrap_err().unmark();
+    assert!(e.starts_with("M48: a signal is pending on thread 0"), "{e}");
+    assert_eq!(b.dbg_psynch(), &model);
+    assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Mutex { addr: MX }));
 }
