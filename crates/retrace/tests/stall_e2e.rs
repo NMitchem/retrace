@@ -35,8 +35,8 @@ fn a_thread_that_spins_while_another_waits_to_run_is_named_once() {
 #[test]
 fn replaying_a_stalled_recording_never_prints_the_stall_line() {
     // T7-replay-spin: the recording ends mid-spin, so its replay spins as the recording did and
-    // never reaches the incomplete-recording line (a known limit, for Task 9's docs). The bound outlasts the 20 s threshold, so a
-    // replay that watched would have printed its line by then.
+    // never reaches the incomplete-recording line (a known limit, documented by Task 9). The bound
+    // outlasts the 20 s threshold, so a replay that watched would have printed its line by then.
     let (_, _, trace) = record_stalled("replay");
     let r = util::run_bounded(util::bin(), &["replay", trace.to_str().unwrap()], &[], 25);
     assert_eq!(r.code, None, "the replay spins and the bound ends it: {}", r.stderr);

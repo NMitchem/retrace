@@ -90,8 +90,9 @@ program would hang forever, so the line says so. If the same program does not ha
 retrace, that is a bug in retrace; please report it.
 
 A program that spins forever waiting for another thread, without blocking, is not a wall: it hangs
-under retrace as it would natively. retrace cannot tell a spin from slow work without reading the
-wall clock, which would make recordings differ from run to run.
+under retrace as it would natively. retrace cannot tell a spin from slow work by anything in the
+recording, and reading the wall clock into it would make recordings differ from run to run; the
+line below is the one thing it does with the clock.
 
 Since M52 the recorder does read the host clock for one thing, a single stderr line. A thread that
 runs for 20 seconds of real time without blocking, while other threads are ready to run, prints

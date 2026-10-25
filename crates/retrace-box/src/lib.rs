@@ -227,7 +227,6 @@ pub const SYNTH_TSC_STRIDE: u64 = 5;
 /// M52 §3i: how long a thread may run without blocking, while others are ready, before the
 /// recorder names it on stderr.
 pub const STALL_AFTER_SECS: u64 = 20;
-const HOST_TICKS_PER_SEC: u64 = 24_000_000;
 
 extern "C" { fn mach_absolute_time() -> u64; }
 
@@ -7977,7 +7976,7 @@ impl Box_ {
     /// M52 §3i: start watching for a stall. Record calls this once, after the initial snapshot;
     /// replay never does. Every pick `schedule_after_block` makes then restarts the watch.
     pub fn watch_for_stalls(&mut self) {
-        self.stall = Some(stall::StallWatch::new(STALL_AFTER_SECS * HOST_TICKS_PER_SEC));
+        self.stall = Some(stall::StallWatch::new(STALL_AFTER_SECS * stall::TICKS_PER_SEC));
         self.stall_switched_in();
     }
 
@@ -8012,7 +8011,12 @@ impl Box_ {
         let cur = self.threads.current();
         let runnable = self.threads.runnable_except(cur);
         let w = self.stall.as_mut().unwrap();
-        if let Some(line) = w.check(now, cur, &runnable) { eprintln!("{line}"); }
+        if let Some(line) = w.check(now, cur, &runnable) {
+            // Not `eprintln!`, which panics once stderr's reader is gone: a diagnostic line must
+            // never end a recording with the bug banner.
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "{line}");
+        }
     }
 
     /// Switch the vCPU from the running thread to `tid`.

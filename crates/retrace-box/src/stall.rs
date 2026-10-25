@@ -2,7 +2,8 @@
 //! timer. It decides one thing: whether the thread that has run since its switch-in, with others
 //! ready, gets C8's line. Control-plane only: nothing here reaches the trace.
 
-const TICKS_PER_SEC: u64 = 24_000_000;
+/// Host ticks per second (the 24 MHz mach timebase).
+pub(crate) const TICKS_PER_SEC: u64 = 24_000_000;
 
 pub struct StallWatch {
     threshold: u64,
