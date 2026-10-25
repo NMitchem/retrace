@@ -7,8 +7,11 @@ mod util;
 
 use std::path::PathBuf;
 
-/// The recording's bound, in seconds. The line is due at 20 s of host time.
-const BOUND: u64 = 40;
+/// The recording's bound, in seconds. The line is due 20 s of host time after the spin starts, which
+/// is about 0.4 s into the recording. The close2 gate measured host-side startup well past that: one
+/// recording printed its line at 35.3 s, and one printed nothing inside a 40 s bound. So the bound
+/// leaves 60 s for startup. It is a margin only: every assertion is unchanged.
+const BOUND: u64 = 80;
 
 fn record_stalled(name: &str) -> (Option<i32>, String, PathBuf) { record_stalled_with(name, &[]) }
 
@@ -22,7 +25,9 @@ fn record_stalled_with(name: &str, guest_args: &[&str]) -> (Option<i32>, String,
 
 #[test]
 fn a_thread_that_spins_while_another_waits_to_run_is_named_once() {
-    let native = util::run_bounded(retrace_guest::STALL_DYN, &[], &[], 20);
+    // Natively it exits in about 10 ms. The close2 gate saw a first exec of a freshly built binary
+    // outlast a 20 s bound, so this bound is a margin, not a measurement.
+    let native = util::run_bounded(retrace_guest::STALL_DYN, &[], &[], 120);
     assert_eq!(native.code, Some(0), "native exit");
     assert_eq!(String::from_utf8_lossy(&native.stdout), "stall_dyn done\n");
 
