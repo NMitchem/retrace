@@ -24,13 +24,17 @@ mod util;
 use retrace_trace::Event;
 
 const NODE: &str = "/opt/homebrew/bin/node";
-/// 2000 ms, not spec §1 part 2's 10 (§11b item 12, P8): `SYNTH_TSC_STRIDE` carries the clock past a
-/// 10 ms deadline before the loop's first poll, so a 10 ms timer never blocks and nothing jumps.
+/// 2000 ms, not spec §1 part 2's 10 (§11b item 12, P8). Recomputed at M52's stride of 5 ticks: 10 ms
+/// is 240 000 ticks, which took 240 000 / 9216 = 26 reads to pass at the old stride and takes
+/// 240 000 / 5 = 48 000 now. Whether node makes that many before its loop's first poll is not
+/// measured here, so the 10 ms timer might now block and jump; 2000 ms is kept because it cannot
+/// be passed by reads (it would need 9.6 M) and the idle-jump arithmetic below needs a deadline of
+/// at least `ONE_SECOND`.
 const TIMER_JS: &str = "setTimeout(() => console.log(2), 2000)";
 /// One second at the guest's 24 MHz timebase (plan F6).
 const ONE_SECOND: u64 = 24_000_000;
-/// What one timebase read moves the synthetic clock: `SYNTH_TSC_STRIDE` in `retrace-box`.
-const STRIDE: u64 = 0x2400;
+/// What one timebase read moves the synthetic clock.
+const STRIDE: u64 = retrace_box::SYNTH_TSC_STRIDE;
 
 /// The Cellar binary behind Homebrew's symlink, or `None` after announcing the skip past libtest's
 /// capture (CLAUDE.md: a skipped test must announce itself).

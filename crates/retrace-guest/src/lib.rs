@@ -322,6 +322,9 @@ pub const YIELD_DYN: &str = concat!(env!("OUT_DIR"), "/yield_dyn");
 /// M52 §3e: a full-`std` Rust binary whose child yields ten times then `park_timeout`s 20 ms while
 /// main waits 60 s on a channel.
 pub const YIELDSPIN: &str = concat!(env!("OUT_DIR"), "/yieldspin");
+/// M52 §3h: a full-`std` Rust binary that reads `Instant::now()` 4 000 000 times and prints
+/// `under_one_guest_second=<yes|no>` from its own first and last readings.
+pub const CLOCKREADS: &str = concat!(env!("OUT_DIR"), "/clockreads");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");

@@ -212,7 +212,7 @@ are gitignored); build/run recipes and findings are in `spikes/README.md`.
   the trampoline's vector padding without bumping, and a pre-M23 trace then restored its old padding
   under code that assumed the new — M24 bumped for it (to `RT\x00\x09` then; moved again by M38
   for `ret1`, by M47 for the `mach_vm_map` alignment mask, and by M49 for the store-exclusive
-  rewrite and native's `si_code`, and by M51 for `Event::Crash`'s `sig`, so it is `RT\x00\x0d` now).
+  rewrite and native's `si_code`, and by M51 for `Event::Crash`'s `sig`, and by M52 for the synthetic clock's stride, so it is `RT\x00\x0e` now).
   `open_checked` drops a torn/corrupt tail rather than panicking, and since M47 a trace whose header
   is another `RT` version is refused by name ("recorded by a different retrace trace format (not
   torn)") rather than as torn.
@@ -414,9 +414,9 @@ does *not* materialise:
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (which bumped
-`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0d`, moved again by M24, then by M38 for
+`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0e`, moved again by M24, then by M38 for
 `ret1`, by M47 for the `mach_vm_map` alignment mask, by M49 for the store-exclusive rewrite and
-native's `si_code`, and by M51 for `Event::Crash`'s `sig`, so every pre-M51 recording is unreadable)
+native's `si_code`, by M51 for `Event::Crash`'s `sig`, and by M52 for the synthetic clock's stride, so every pre-M52 recording is unreadable)
 — and replay recomputes the current thread and compares it. `verify_thread` has **seven** call
 sites, one in each arm that consumes a landmark and `return`s, each placed *after* that arm's own
 field comparison so a genuine argument divergence still reports as itself; the `SignalDelivery`

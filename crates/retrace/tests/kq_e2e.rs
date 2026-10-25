@@ -85,7 +85,7 @@ fn session_at_svc(trace: &Path, i: usize) -> ReplaySession {
 }
 
 /// Advance `s` until one landmark moves the clock by more than 60000 ticks (2.5 ms; a timebase read
-/// moves it 9216). Returns (that landmark, the clock after it).
+/// moves it 5 ticks since M52, 9216 before). Returns (that landmark, the clock after it).
 fn the_idle_jump(mut s: ReplaySession) -> (usize, u64, ReplaySession) {
     loop {
         let (n, before) = (s.landmark(), synthetic_tsc(&s.dbg_internal_state()));

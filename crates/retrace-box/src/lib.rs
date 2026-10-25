@@ -208,7 +208,20 @@ const TSD_REGION_SIZE: u64 = 0x0001_0000; // 4 granules; tp = TSD_IPA sits 0x800
 // (both re-execute the same reads from the same entry), so timing dyld folds into memory can't
 // diverge. Monotonic and nonzero so a delta is always positive.
 const SYNTH_TSC_START:  u64 = 0x0000_0001_0000_0000;
-pub const SYNTH_TSC_STRIDE: u64 = 0x2400; // ~ one 24 MHz-ish tick step per read (value is arbitrary)
+/// What one emulated timebase read moves the synthetic clock, in ticks of the guest's 24 MHz timebase:
+/// 5, about 208 ns. M52 §3h, C9's rule: no measured binary's guest time may outrun its native wall
+/// time. The binding row is memchr's test suite under `--test-threads=1`, 23 459 070 reads against
+/// 5.759 s native (min of 7; re-timed alone at 5.87-6.00 s), so the largest admissible stride is
+/// `floor(5.759 * 24e6 / 23 459 070) = 5`; at 5 its guest time is 4.89 s. Every other measured binary
+/// has at least 4.6x headroom (rand 23, serde 32, builder 35, the rest 64 or more). It was 0x2400 =
+/// 9216 ticks (about 384 us), which made a suite that reads the clock often see time run hundreds of
+/// times fast (libtest's "running for over 60 seconds" warning).
+///
+/// The safer error (spec §3h): a smaller stride undercounts the time compute takes between reads, so
+/// a timeout fires later than native's, never earlier. The cost: a guest that busy-waits on the
+/// clock makes one VM exit per 5 ticks, so a 100 ms wait is about 480 000 reads, roughly 0.5 s of
+/// host time. That is the documented speed limit, and §3h says speed never overrides the rule.
+pub const SYNTH_TSC_STRIDE: u64 = 5;
 
 pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (one level below the L1 TTBR0 target); one 16 KiB page = 2048 entries
 pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under the 47-bit VA); one

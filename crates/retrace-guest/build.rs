@@ -677,6 +677,18 @@ fn main() {
         .status().expect("rustc yieldspin");
     assert!(status.success(), "yieldspin guest build failed");
 
+    // clockreads: M52 §3h — a full-std Rust binary that reads Instant::now() 4 000 000 times and
+    // prints whether its own first and last readings are under one second apart. Same rustc recipe
+    // as yieldspin.
+    let src = format!("{}/rs/clockreads.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/clockreads");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-O", "-o", &bin, &src])
+        .status().expect("rustc clockreads");
+    assert!(status.success(), "clockreads guest build failed");
+
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
     let src = format!("{}/c/closewrite_dyn.c", env!("CARGO_MANIFEST_DIR"));

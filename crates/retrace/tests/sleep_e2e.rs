@@ -152,7 +152,7 @@ fn session_at_svc(trace: &Path, i: usize) -> ReplaySession {
 }
 
 /// Advance `s` until one landmark moves the clock by more than 60000 ticks (a timebase read moves
-/// it 9216). Returns (that landmark, the clock after it, the session).
+/// it 5 ticks since M52, 9216 before). Returns (that landmark, the clock after it, the session).
 fn the_idle_jump(mut s: ReplaySession) -> (usize, u64, ReplaySession) {
     loop {
         let (n, before) = (s.landmark(), synthetic_tsc(&s.dbg_internal_state()));
@@ -458,9 +458,9 @@ fn a_polling_loop_on_a_zero_tick_sleep_yields_to_its_worker_and_terminates() {
 /// Review Focus 5: a sleep while a sibling thread is runnable. Main sleeps 1 s; the worker runs
 /// (it prints and exits without blocking) before the clock jumps, so `worker ran` precedes main's
 /// line. The guest's delta across main's sleep is still exactly 1 s: the deadline is fixed at the
-/// call, the worker's timebase reads move the clock by 9216 ticks each and only before the jump,
-/// and the jump lands on the deadline itself. Only a worker reading the clock more than
-/// 24000000 / 9216 = 2604 times could carry it past the deadline; this one makes one write.
+/// call, the worker's timebase reads move the clock by 5 ticks each (M52; 9216 before) and only
+/// before the jump, and the jump lands on the deadline itself. Only a worker reading the clock
+/// more than 24000000 / 5 = 4 800 000 times could carry it past the deadline; this one makes one write.
 #[test]
 fn a_sleep_beside_a_runnable_thread_lets_it_run_and_still_lasts_exactly_one_second() {
     let (out, trace) = records_and_replays_as_native(&["sleepwhilework"], &[1_000_000_000]);
@@ -471,4 +471,23 @@ fn a_sleep_beside_a_runnable_thread_lets_it_run_and_still_lasts_exactly_one_seco
     let worker_write = events(&trace).into_iter().position(|(_, e)| matches!(e,
         Event::Syscall { num: 4, thread, .. } if thread != 0)).expect("the worker's write");
     assert!(worker_write > sleeps[0].0, "the worker writes while main sleeps");
+}
+
+/// M52 §3h, C9: a program that reads the clock 4 000 000 times, about one native second of the
+/// densest measured suite (memchr's), must see less than one second pass in its own readings, as it
+/// does natively. At the old 0x2400 ticks per read that is 1536 guest seconds and it prints `no`.
+/// Run bounded, because 4 M reads are 4 M VM exits (about 4 s of host time per record or replay).
+#[test]
+fn a_program_that_reads_the_clock_as_often_as_a_long_test_suite_stays_under_one_guest_second() {
+    let want = "under_one_guest_second=yes\n";
+    let r = util::run_bounded(retrace_guest::CLOCKREADS, &[], &[], BOUND);
+    assert_eq!(String::from_utf8_lossy(&r.stdout), want, "native");
+    let trace = std::env::temp_dir().join(format!("retrace-clockreads-{}.bin", std::process::id()));
+    let (code, out, err) = cli(&["record-dyn", retrace_guest::CLOCKREADS, "-o", trace.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "record (None: the {BOUND} s bound fired): {err}");
+    assert_eq!(String::from_utf8(out).unwrap(), want, "recorded");
+    let (code, rp, err) = cli(&["replay", trace.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "replay (None: the bound fired): {err}");
+    assert_eq!(String::from_utf8(rp).unwrap(), want, "replayed");
+    std::fs::remove_file(&trace).ok();
 }
