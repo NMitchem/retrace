@@ -1,4 +1,4 @@
-// M52 t1 (spec §3b): a Rust Vec grown past 2 MiB (an xzone huge chunk, grown in place by realloc),
+// M52 t1 (spec §3b): a Rust Vec grown past 2 MiB into an in-place huge chunk, to 24 MiB (an xzone huge chunk, grown by realloc),
 // then a thread spawned (libstd mmaps the new thread's sigaltstack with mmap(NULL, ..)). Before the
 // bump cursor floated past FIXED placements this was the bug banner. Adopted from the t0 vecgrow.rs.
 fn main() {

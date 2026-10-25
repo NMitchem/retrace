@@ -16,9 +16,8 @@
 //! Otherwise the outcome is `Refused` (the recording ended at a clean wall line and both replays end
 //! at the same place, M50), `Bug` (the bug banner's message), or the first difference as one line
 //! (`judge`): `DIVERGENCE` and a replay's detail, `TIMEOUT`, or `MISMATCH` and what differed, with
-//! its addresses masked (`mask_addresses`), or `Toolchain`. `Expect::Wall` pins a prefix of that
-//! line, an in-scope row's clean wall line included; `Expect::Refused` is for an out-of-scope row
-//! (charter §6).
+//! its addresses masked (`mask_addresses`), or `Toolchain`. `Expect::Refused` pins a prefix of
+//! that line for an out-of-scope row (charter §6).
 //!
 //! The gate asserts every row's outcome equals its pinned outcome (R10): a wall that is fixed, or
 //! that moves, fails here until the task that moved it edits its row. One `#[test]` runs the whole
@@ -36,9 +35,6 @@ use std::path::Path;
 enum Expect {
     Pass,
     Refused(&'static str),
-    // No row pins a wall since M52 Task 5 moved `fc_mutex` to `Pass`; the pin stays for the next wall.
-    #[allow(dead_code)]
-    Wall(&'static str),
     Toolchain,
 }
 
@@ -395,8 +391,6 @@ fn every_corpus_row_meets_its_pinned_outcome() {
         let ok = match (&got, want) {
             (Outcome::Pass, Expect::Pass) | (Outcome::Toolchain, Expect::Toolchain) => true,
             (Outcome::Refused(line), Expect::Refused(prefix)) => line.starts_with(prefix),
-            // An in-scope wall pins its first difference, which since M50 may be a clean wall line.
-            (Outcome::Wall(line) | Outcome::Refused(line), Expect::Wall(prefix)) => line.starts_with(prefix),
             _ => false,
         };
         match (&got, want) {

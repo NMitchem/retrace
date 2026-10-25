@@ -97,11 +97,12 @@ fn four_contenders_count_exactly() {
     assert_records_nothing(&trace);
 }
 
-/// Main's re-locks count the woken-but-not-yet-run waiter, so a later unlock drops against an empty
-/// kernel queue: the prepost, which the next wait consumes at once. Without it the contender's
-/// re-run lock blocks forever and the recorder reports the deadlock.
+/// Main re-locks across a woken waiter that has not run yet; the output and the landmarks match native.
+/// This does not pin the prepost: the test stays green with it removed (T5's control (a)), because
+/// retrace's `relock` does not take that path. `psynch::tests::a_prepost_is_consumed_by_exactly_one_wait`
+/// is the test that pins the prepost.
 #[test]
-fn a_relock_before_the_woken_waiter_runs_preposts_and_passes() {
+fn a_relock_across_a_woken_waiter_matches_native() {
     let (trace, out) = matches_native(retrace_guest::MUTEX_DYN, &["relock"]);
     assert_eq!(out, "relock ok\n");
     assert!(!landmarks(&trace, DROP).is_empty());

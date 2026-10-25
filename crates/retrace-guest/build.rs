@@ -602,7 +602,7 @@ fn main() {
         .status().expect("clang vmcopy_dyn");
     assert!(status.success(), "vmcopy_dyn guest build failed");
 
-    // vecgrow: M52 t1 (spec §3b) — a Vec grown past 2 MiB, then a thread spawn. Same recipe as hello_rust.
+    // vecgrow: M52 t1 (spec §3b) — a Vec grown past 2 MiB into an in-place huge chunk (to 24 MiB), then a thread spawn. Same recipe as hello_rust.
     let src = format!("{}/rs/vecgrow.rs", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/vecgrow");
     println!("cargo:rerun-if-changed={src}");
@@ -1138,7 +1138,7 @@ fn main() {
             .status().expect("clang++ first-contact fixture");
         assert!(status.success(), "{name} guest build failed");
     }
-    // Rust takes the hello_rust recipe (cargo's own RUSTC, plain aarch64-apple-darwin). The two
+    // Rust takes the hello_rust recipe (cargo's own RUSTC, plain aarch64-apple-darwin). The three
     // harnesses are `rustc --test` builds, which firstcontact_e2e runs with no arguments, as `cargo
     // test` runs the binary it builds.
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());

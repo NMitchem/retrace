@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(mode, "pause")) {
         pause();
     } else if (!strcmp(mode, "symlink")) {
-        symlink("cf_target", "/private/tmp/claude-501/cf-symlink");
+        symlink("cf_target", "cf-symlink");
     } else if (!strcmp(mode, "clocksleep")) {
         clock_serv_t clk;
         host_get_clock_service(mach_host_self(), SYSTEM_CLOCK, &clk);

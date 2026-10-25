@@ -838,7 +838,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         }
                         // Final-review I1: FIXED without OVERWRITE over occupied VA is KERN_NO_SPACE
                         // (measured natively), refused as 4811 is: the 44-byte mig_reply_error.
-                        let reply = match b.guest_vm_remap(req.target, req.size, req.src, req.flags as u64) {
+                        let reply = match b.guest_vm_remap_checked(req.target, req.size, req.src, req.flags as u64) {
                             Ok((target, cur, max)) => machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max),
                             Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
                         };
@@ -2871,7 +2871,7 @@ impl ReplaySession {
                                         assert!(req.target + req.size <= req.src || req.src + req.size <= req.target,
                                             "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
                                             req.target, req.size, req.src);
-                                        let placed = self.b.guest_vm_remap(req.target, req.size, req.src, req.flags as u64);
+                                        let placed = self.b.guest_vm_remap_checked(req.target, req.size, req.src, req.flags as u64);
                                         let reply = match placed {
                                             Ok((target, cur, max)) => machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max),
                                             Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),

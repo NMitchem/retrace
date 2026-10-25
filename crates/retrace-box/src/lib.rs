@@ -2937,6 +2937,17 @@ impl Box_ {
         l3[((va % BLK) / GRANULE as u64) as usize] = desc;
     }
 
+    /// M52 final-review I1: both dispatch arms call this. A FIXED request without
+    /// `VM_FLAGS_OVERWRITE` is answered by `fixed_answer` before anything is aliased, as
+    /// `mach_vm_map` is (measured natively: `kr=3` and the old bytes survive); `Err` is the
+    /// `kern_return_t`. With `OVERWRITE` (libffi's shape) the target is replaced.
+    pub fn guest_vm_remap_checked(&mut self, target: u64, size: u64, src: u64, flags: u64)
+        -> Result<(u64, u32, u32), u64>
+    {
+        if flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(target, size)?; }
+        Ok(self.guest_vm_remap(target, size, src))
+    }
+
     /// mach_vm_remap (4813), shared (`copy == FALSE`), at a FIXED target: alias `size` bytes at
     /// `target` to the memory `src` maps, page by page — the first NON-identity stage-1 entries
     /// the box writes. Each target page's L3 descriptor becomes a verbatim copy of the source
@@ -2971,19 +2982,7 @@ impl Box_ {
     /// of memory anything remaps as code, and copying a BLOCK descriptor into an L3 slot would
     /// be silent garbage); a source attribute that is none of the three named; source pages that
     /// differ in protection. `copy`, `ANYWHERE` and a foreign `src_task` are dispatch's asserts.
-    /// M52 final-review I1: both dispatch arms call this. A FIXED request without
-    /// `VM_FLAGS_OVERWRITE` is answered by `fixed_answer` before anything is aliased, as
-    /// `mach_vm_map` is (measured natively: `kr=3` and the old bytes survive); `Err` is the
-    /// `kern_return_t`. With `OVERWRITE` (libffi's shape) the target is replaced.
-    pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64, flags: u64)
-        -> Result<(u64, u32, u32), u64>
-    {
-        if flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(target, size)?; }
-        Ok(self.alias_remap(target, size, src))
-    }
-
-    /// The alias itself; see `guest_vm_remap` for the FIXED answer that precedes it.
-    fn alias_remap(&mut self, target: u64, size: u64, src: u64) -> (u64, u32, u32) {
+    pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64) -> (u64, u32, u32) {
         let g = GRANULE as u64;
         if size == 0 || !size.is_multiple_of(g) {
             retrace_arch::refuse!(Memory, "vm_remap: size {size:#x} is not a page multiple");
@@ -7734,6 +7733,8 @@ impl Box_ {
     /// seven of the family's stubs off libsystem_kernel and they are seven distinct numbers — and
     /// `args[0]` is the port. There is no operation word here to guard.
     pub fn guest_sem_wait(&mut self, args: [u64; 8]) -> u64 {
+        // Final-review M7: a semaphore name is 32 bits; the register's upper half is not part of it.
+        let port = args[0] as u32 as u64;
         // M49 Ruling T5-I2: a port an admitted sleep used as its cond_sem is refused, by value and
         // before anything moves, panicking below the trace like this trap's other refusals.
         self.sleep.check_sleep_semaphore("semaphore_wait_trap (-36)", args[0] as u32)
@@ -7742,16 +7743,16 @@ impl Box_ {
         // `__semwait_signal` refuses it (`SleepModel::admit`).
         // M52 §3d (T3-dead-name): only a signal on a destroyed name was measured (it answers
         // KERN_INVALID_NAME); a wait on one is refused by value before anything moves.
-        if self.sems.is_dead(args[0]) {
+        if self.sems.is_dead(port) {
             retrace_arch::refuse!(Threads, "M52: semaphore_wait_trap (-36) on port {:#x}, a semaphore \
                  semaphore_destroy ended: only a signal on a destroyed name was measured \
-                 (KERN_INVALID_NAME), not a wait.", args[0]);
+                 (KERN_INVALID_NAME), not a wait.", port);
         }
         self.sleep.note_semaphore(args[0] as u32);
         // M52 §3d: the kernel's count first. A signal that found no waiter is kept, and so is
         // `semaphore_create`'s initial value, so the wait it satisfies returns 0 without blocking.
-        if !self.sems.take(args[0]) {
-            self.threads.block(thread::BlockReason::Sem { port: args[0], deadline: None });
+        if !self.sems.take(port) {
+            self.threads.block(thread::BlockReason::Sem { port, deadline: None });
         }
         0
     }
@@ -7767,19 +7768,21 @@ impl Box_ {
     /// unmeasured): record passes it to `wall_or_bug`, replay reports a `Divergence`. Both sides
     /// call this with the same `args` (symmetry rule 1) and nothing is recorded.
     pub fn guest_sem_timedwait(&mut self, args: [u64; 8]) -> Result<u64, String> {
+        // Final-review M7: a semaphore name is 32 bits; the register's upper half is not part of it.
+        let port = args[0] as u32 as u64;
         self.sleep.check_sleep_semaphore("semaphore_timedwait_trap (-38)", args[0] as u32)?;
-        if self.sems.is_dead(args[0]) {
+        if self.sems.is_dead(port) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
                 "M52: semaphore_timedwait_trap (-38) on port {:#x}, a semaphore semaphore_destroy ended: only \
-                 a signal on a destroyed name was measured (KERN_INVALID_NAME), not a wait.", args[0])));
+                 a signal on a destroyed name was measured (KERN_INVALID_NAME), not a wait.", port)));
         }
         self.sleep.note_semaphore(args[0] as u32);
         let (sec, nsec) = (args[1] as u32, args[2] as u32);
         if nsec >= 1_000_000_000 { return Ok(retrace_arch::KERN_INVALID_VALUE); }
-        if self.sems.take(args[0]) { return Ok(0); }
+        if self.sems.take(port) { return Ok(0); }
         let ticks = sleep::ns_to_ticks(sec as u64 * 1_000_000_000 + nsec as u64);
         let deadline = self.now_guest().saturating_add(ticks);
-        self.threads.block(thread::BlockReason::Sem { port: args[0], deadline: Some(deadline) });
+        self.threads.block(thread::BlockReason::Sem { port, deadline: Some(deadline) });
         Ok(0)
     }
 
@@ -7857,13 +7860,15 @@ impl Box_ {
     /// Reads and writes no guest memory, so the recorded event carries no writes and replay's mirror
     /// recomputes this identically from the same `(num, args)`.
     pub fn guest_sem_signal(&mut self, args: [u64; 8]) -> (u64, Vec<usize>) {
+        // Final-review M7: a semaphore name is 32 bits; the register's upper half is not part of it.
+        let port = args[0] as u32 as u64;
         // M49 Ruling T5-I2 and S4, as in `guest_sem_wait`.
         self.sleep.check_sleep_semaphore("semaphore_signal_trap (-33)", args[0] as u32)
             .unwrap_or_else(|m| panic!("{m}"));
         // M52 §3d (T3-dead-name): native answers KERN_INVALID_NAME for a signal on a destroyed name.
-        if self.sems.is_dead(args[0]) { return (retrace_arch::KERN_INVALID_NAME, vec![]); }
+        if self.sems.is_dead(port) { return (retrace_arch::KERN_INVALID_NAME, vec![]); }
         self.sleep.note_semaphore(args[0] as u32);
-        let woken = self.threads.unblock_sem_waiters_on(args[0]);
+        let woken = self.threads.unblock_sem_waiters_on(port);
         // **`-33` wakes exactly ONE waiter; the plural case is a DIFFERENT TRAP.** Task 1 §3a read
         // the whole family off libsystem_kernel's own stubs, and `-34` is `_semaphore_signal_all_trap`
         // — a separate selector, still refused by `is_mach_semaphore_trap`'s guard because no run has
@@ -7892,10 +7897,10 @@ impl Box_ {
              BOTH dispatch loops and a measured answer to WHICH waiter -33 wakes when several are \
              parked; table order is arbitrary. Measure a guest that parks two threads on one \
              semaphore before modelling this.",
-            args[0], woken.len());
+            port, woken.len());
         }
         // M52 §3d: a signal that woke nobody is the kernel's to keep: the next wait takes it.
-        if woken.is_empty() { self.sems.signal(args[0]); }
+        if woken.is_empty() { self.sems.signal(port); }
         (0, woken)
     }
 

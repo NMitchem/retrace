@@ -1,7 +1,7 @@
 // M52 §3b: FIXED Mach VM requests answer as xnu does. Without VM_FLAGS_OVERWRITE, a FIXED
 // mach_vm_map or mach_vm_allocate over occupied memory is KERN_NO_SPACE and the old bytes survive;
 // before M52 the box replaced them silently. libmalloc relies on that answer when it grows a huge
-// chunk in place (the regex crash, and a Rust Vec grown past 2 MiB then a thread spawn, which was the
+// chunk in place (the regex crash, and a Rust Vec grown past 2 MiB into an in-place huge chunk, to 24 MiB, then a thread spawn, which was the
 // bug banner because the bump cursor did not float past a FIXED placement). `mach_vm_copy` (MIG 4807)
 // is the box-side copy libmalloc falls back to. Every row runs natively first, so the expected output
 // is native's and not a hand-written guess.
