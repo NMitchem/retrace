@@ -508,6 +508,16 @@ fn main() {
         .status().expect("clang stall_dyn");
     assert!(status.success(), "stall_dyn guest build failed");
 
+    // tvloop_dyn: the M52 fast-follow's fixture — 1000 gettimeofday calls with the timeval on the
+    // stack. Same recipe as hello_dyn.
+    let src = format!("{}/c/tvloop_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/tvloop_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang tvloop_dyn");
+    assert!(status.success(), "tvloop_dyn guest build failed");
+
     // rpath_dyn + librpath_dyn.dylib: the M47 AMFI fixture. The dylib's install name is @rpath/…
     // and the exe's LC_RPATH is @executable_path, so dyld expands @rpath only if AMFI's dyld policy
     // allows it. Both land in OUT_DIR side by side.

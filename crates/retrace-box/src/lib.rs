@@ -4364,6 +4364,31 @@ impl Box_ {
         !pre_guard.is_empty() && pre_guard != post_guard
     }
 
+    /// M52 fast-follow (windiff): the part of a diff window that one call changed, as offsets into
+    /// the window. It runs from the first differing byte rounded down to an 8-byte word to the last
+    /// differing byte rounded up to one, clamped to the window. `None` when nothing changed.
+    ///
+    /// Until the fast-follow the recorder stored the whole window whenever anything in it changed.
+    /// A pointer whose row gives no size has a window that runs to the end of its backing, up to
+    /// `PTR_WINDOW_CAP`. So a `gettimeofday` recorded the rest of its stack, 18 KB in `tvloop_dyn`
+    /// and about 24 KB on a parking_lot thread's stack, for the 16 bytes the kernel wrote, and each
+    /// other probed register whose window reached the `timeval` recorded its own copy. parking_lot's
+    /// queue test filled the disk (M52 Ruling T8-pl-limit). Outside the span the window's bytes did not change, so replay, which applies
+    /// the span to memory that already holds them, leaves the guest the same memory the whole
+    /// window would. The words are counted from the window's start, so a write that begins at the
+    /// pointer is still recorded at the pointer.
+    ///
+    /// Same caller guarantee as `overran_window`: both slices are one region sampled across exactly
+    /// one `host_svc`, so a difference is the kernel's write.
+    pub fn changed_span(pre: &[u8], post: &[u8]) -> Option<std::ops::Range<usize>> {
+        debug_assert_eq!(pre.len(), post.len(), "one window, sampled twice");
+        // The common case, an unchanged window, at `memcmp`'s cost, as the old capture paid it.
+        if pre == post { return None; }
+        let first = pre.iter().zip(post).position(|(a, b)| a != b)?;
+        let last = pre.iter().zip(post).rposition(|(a, b)| a != b).expect("a first difference implies a last");
+        Some(first & !7..((last | 7) + 1).min(post.len()))
+    }
+
     /// M28: shrink a guard band to exclude the bytes another window of this call already covers.
     ///
     /// A changed band byte proves a kernel write in that range — but not that the write was this
@@ -5055,8 +5080,9 @@ impl Box_ {
                          here is M27's pre/post comparison: these bytes changed across the call, \
                          and nothing but the kernel could have changed them."
                     });
-                if post != pre.as_slice() {
-                    writes.push(Region { ipa, bytes: post.to_vec() });
+                // M52 fast-follow: the span the call changed, never the whole window (`changed_span`).
+                if let Some(span) = Self::changed_span(pre, post) {
+                    writes.push(Region { ipa: ipa + span.start as u64, bytes: post[span].to_vec() });
                 }
             }
         }

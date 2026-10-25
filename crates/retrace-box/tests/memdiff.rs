@@ -69,3 +69,50 @@ fn forward_and_diff_captures_a_read_larger_than_the_window() {
         }
     }
 }
+
+// M52 fast-follow (windiff): what `forward_and_diff` records of a window is the span the call
+// changed, rounded out to 8-byte words counted from the window's start, never the whole window.
+// No VM: `changed_span` is the pure policy; windiff_e2e pins it on a real recording.
+#[test]
+fn an_unchanged_window_records_nothing() {
+    assert_eq!(Box_::changed_span(&[7u8; 40], &[7u8; 40]), None);
+    assert_eq!(Box_::changed_span(&[], &[]), None);
+}
+
+#[test]
+fn one_changed_byte_records_its_word() {
+    let pre = [0u8; 64];
+    let mut post = pre;
+    post[13] = 1;
+    assert_eq!(Box_::changed_span(&pre, &post), Some(8..16));
+}
+
+#[test]
+fn changes_far_apart_record_one_span_from_the_first_word_to_the_last() {
+    let pre = [0u8; 4096];
+    let mut post = pre;
+    post[3] = 1;
+    post[2001] = 1;
+    assert_eq!(Box_::changed_span(&pre, &post), Some(0..2008));
+}
+
+#[test]
+fn a_change_in_the_last_partial_word_is_clamped_to_the_window() {
+    let pre = [0u8; 21];
+    let mut post = pre;
+    post[20] = 9;
+    assert_eq!(Box_::changed_span(&pre, &post), Some(16..21));
+    let (pre, mut post) = ([0u8; 5], [0u8; 5]);
+    post[0] = 1;
+    assert_eq!(Box_::changed_span(&pre, &post), Some(0..5));
+}
+
+#[test]
+fn a_timeval_on_a_long_stack_window_records_sixteen_bytes() {
+    // The parking_lot shape: a 16-byte timeval at the start of a window that runs ~24 KB to the end
+    // of its backing. The old capture stored all of it.
+    let pre = vec![0xa5u8; 24 * 1024];
+    let mut post = pre.clone();
+    post[..16].copy_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(Box_::changed_span(&pre, &post), Some(0..16));
+}

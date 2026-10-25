@@ -275,6 +275,8 @@ pub const KQ_DYN: &str = concat!(env!("OUT_DIR"), "/kq_dyn");
 /// M52 §3i: main spins on a flag a created thread would set; natively it exits 0 at once, under
 /// retrace's cooperative scheduler it never finishes (see the source's header).
 pub const STALL_DYN: &str = concat!(env!("OUT_DIR"), "/stall_dyn");
+/// M52 fast-follow: 1000 `gettimeofday` calls with the timeval on the stack, then `tvloop 1000`.
+pub const TVLOOP_DYN: &str = concat!(env!("OUT_DIR"), "/tvloop_dyn");
 /// M47: links `librpath_dyn.dylib` by `@rpath`, so it loads only if AMFI allows `@`-path expansion.
 pub const RPATH_DYN: &str = concat!(env!("OUT_DIR"), "/rpath_dyn");
 /// M49: a discarded-status exclusive pair with a trapped timebase read between its halves (spec
@@ -726,6 +728,13 @@ mod tests {
     fn stall_dyn_guest_parses() {
         // M52: proves the build.rs wiring and the path constant; behaviour is stall_e2e's.
         let l = parse_macho(&std::fs::read(STALL_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn tvloop_dyn_guest_parses() {
+        // M52 fast-follow: proves the build.rs wiring and the path constant; behaviour is windiff_e2e's.
+        let l = parse_macho(&std::fs::read(TVLOOP_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 

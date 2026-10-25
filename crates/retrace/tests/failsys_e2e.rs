@@ -28,6 +28,22 @@ fn captured(writes: &[retrace_trace::Region], ipa: u64, len: usize) -> Option<Ve
     })
 }
 
+/// `[ipa, ipa + len)` as replay leaves it: `pre`, with every captured region that reaches into the
+/// range laid over it in order. Since the M52 fast-follow a region is the span its window changed, so
+/// bytes the kernel left as they were (zero over zero) are in no region and come from `pre`.
+fn overlaid(writes: &[retrace_trace::Region], ipa: u64, pre: Vec<u8>) -> Vec<u8> {
+    let mut out = pre;
+    let end = ipa + out.len() as u64;
+    for r in writes {
+        let (lo, hi) = (r.ipa.max(ipa), (r.ipa + r.bytes.len() as u64).min(end));
+        if lo < hi {
+            out[(lo - ipa) as usize..(hi - ipa) as usize]
+                .copy_from_slice(&r.bytes[(lo - r.ipa) as usize..(hi - r.ipa) as usize]);
+        }
+    }
+    out
+}
+
 /// The one `sysctl` landmark in `trace`: `(args, err, writes)`.
 fn the_sysctl(trace: &std::path::Path) -> ([u64; 8], bool, Vec<retrace_trace::Region>) {
     let (events, torn) = retrace_trace::Reader::open_checked(trace).unwrap();
@@ -69,9 +85,11 @@ fn a_failing_proc_list_replays_bit_for_bit() {
 
     let (args, err, writes) = the_sysctl(&trace);
     assert!(err, "kern.proc.all into one record's worth of buffer must FAIL (ENOMEM) on record");
-    // The data half: 648 bytes of kinfo_proc copied out BEFORE the failure, and *oldlenp -> 0.
-    let data = captured(&writes, args[2], 648)
-        .expect("the landmark must carry the 648-byte record the kernel copied out on its way to ENOMEM");
+    // The data half: a 648-byte kinfo_proc copied out BEFORE the failure, and *oldlenp -> 0. No byte
+    // of the record at or past offset 576 changes (measured at the M52 fast-follow): its tail is zero
+    // written over the fixture's zeroed `.space`, so since then it is in no region. The landmark is
+    // read as replay applies it, the regions laid over the 648 zero bytes `buf` starts as.
+    let data = overlaid(&writes, args[2], vec![0u8; 648]);
     assert_eq!(&data[..8], &rec.stdout[..],
         "the captured record's first 8 bytes are what the guest printed");
     assert_ne!(data, vec![0u8; 648],

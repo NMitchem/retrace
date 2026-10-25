@@ -4,7 +4,9 @@
 // xnu's kern.proc handlers (bsd/kern/kern_sysctl.c: sysdoproc_callback copies out each record
 // while it fits; sysctl_prochandle returns ENOMEM when `needed > oldlen`) write what fits and
 // THEN fail. Measured on the host before this guest was written: with *oldlenp = 648 =
-// sizeof(kinfo_proc), ret=-1 errno=12, 648 bytes changed, nothing past them, *oldlenp -> 0.
+// sizeof(kinfo_proc), ret=-1 errno=12, one 648-byte record copied out, nothing past it, *oldlenp -> 0.
+// (Measured at the M52 fast-follow: no byte of the record at or past offset 576 changes. Its tail is zero
+// written over this fixture's zeroed buffer.)
 //
 // The guest then writes the first 8 bytes of the record to stdout, so a capture that misses
 // them is visible as OUTPUT (the bigread shape) and not only at the terminal memory compare.
