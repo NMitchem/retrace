@@ -93,6 +93,14 @@ A program that spins forever waiting for another thread, without blocking, is no
 under retrace as it would natively. retrace cannot tell a spin from slow work without reading the
 wall clock, which would make recordings differ from run to run.
 
+Since M52 the recorder does read the host clock for one thing, a single stderr line. A thread that
+runs for 20 seconds of real time without blocking, while other threads are ready to run, prints
+`retrace: thread N has run for 20 s without blocking while thread(s) … are ready to run`, once per
+time that thread was picked to run. The line is control-plane only: it is in no recording, replay
+never prints it, and the recording goes on. It means the program is probably waiting for one of
+those threads, which retrace will not run until this one blocks. The fix is preemption, which is
+not planned.
+
 ## Memory
 
 The program asked for a kind of memory mapping retrace does not support yet, such as an unmodelled

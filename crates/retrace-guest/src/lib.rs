@@ -272,6 +272,9 @@ pub const FAULTCASE_DYN: &str = concat!(env!("OUT_DIR"), "/faultcase_dyn");
 /// M48: the guest's own kqueues by mode — `probe`, `wake`, `timeout`, `tryselect`, `pipe`,
 /// `oneshot`, `bad filter`, `bad notkq` (spec §3h; see the source's header).
 pub const KQ_DYN: &str = concat!(env!("OUT_DIR"), "/kq_dyn");
+/// M52 §3i: main spins on a flag a created thread would set; natively it exits 0 at once, under
+/// retrace's cooperative scheduler it never finishes (see the source's header).
+pub const STALL_DYN: &str = concat!(env!("OUT_DIR"), "/stall_dyn");
 /// M47: links `librpath_dyn.dylib` by `@rpath`, so it loads only if AMFI allows `@`-path expansion.
 pub const RPATH_DYN: &str = concat!(env!("OUT_DIR"), "/rpath_dyn");
 /// M49: a discarded-status exclusive pair with a trapped timebase read between its halves (spec
@@ -714,6 +717,13 @@ mod tests {
     fn kq_dyn_guest_parses() {
         // M48: proves the build.rs wiring and the path constant; behaviour is kq_e2e's.
         let l = parse_macho(&std::fs::read(KQ_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn stall_dyn_guest_parses() {
+        // M52: proves the build.rs wiring and the path constant; behaviour is stall_e2e's.
+        let l = parse_macho(&std::fs::read(STALL_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 

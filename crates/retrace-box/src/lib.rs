@@ -18,6 +18,7 @@ pub mod psynch;
 pub mod sleep;
 pub mod sema;
 mod excl;
+pub mod stall;
 pub use excl::{Excl, SetBy};
 /// M49 §3e: the store-exclusive rewrite (X1, X2), applied where the box stages code (X3).
 mod xrewrite;
@@ -222,6 +223,19 @@ const SYNTH_TSC_START:  u64 = 0x0000_0001_0000_0000;
 /// clock makes one VM exit per 5 ticks, so a 100 ms wait is about 480 000 reads, roughly 0.5 s of
 /// host time. That is the documented speed limit, and §3h says speed never overrides the rule.
 pub const SYNTH_TSC_STRIDE: u64 = 5;
+
+/// M52 §3i: how long a thread may run without blocking, while others are ready, before the
+/// recorder names it on stderr.
+pub const STALL_AFTER_SECS: u64 = 20;
+const HOST_TICKS_PER_SEC: u64 = 24_000_000;
+
+extern "C" { fn mach_absolute_time() -> u64; }
+
+/// The host clock, for the stall watch alone. Control-plane only: the value never reaches the
+/// trace, a guest register or guest memory, and it decides only whether one stderr line prints,
+/// on record (the founding design's vtimer row). `clippy.toml` bans `Instant::now`; this call is
+/// the one deliberate, documented exception. Replay has no stall watch and never calls it.
+fn host_ticks() -> u64 { unsafe { mach_absolute_time() } }
 
 pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (one level below the L1 TTBR0 target); one 16 KiB page = 2048 entries
 pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under the 47-bit VA); one
@@ -706,6 +720,9 @@ pub struct Box_ {
     /// It holds a `Vec`, so it has Drop, but it is declared after `vcpu`/`vm`, so the load-bearing
     /// vcpu-before-vm drop order is unaffected.
     excl: Option<Excl>,
+    /// M52 §3i: the stall watch. Control-plane and record-only, so it is in no `BoxState`: only
+    /// `watch_for_stalls` sets it, and replay never calls that.
+    stall: Option<stall::StallWatch>,
     /// M48 §3c (K1): the guest's own kqueues and its pipes' byte counts. Box state, not trace state:
     /// record and replay rebuild it from the guest's own syscalls, and every rebuild path carries it
     /// (`BoxState`). Declared after `vcpu`/`vm`, so the drop order is unaffected.
@@ -1845,7 +1862,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), stall: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -2648,7 +2665,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), stall: None };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -3546,6 +3563,7 @@ impl Box_ {
             // a native stop cannot infer a load-exclusive at or before a point after it.
             let entry_pc = self.pc();
             let e = self.vcpu.run().expect("hv_vcpu_run");
+            self.check_stall();
             if e.reason != EXIT_EXCEPTION { self.note_exit(false); continue; } // vtimer/canceled: control-plane only
             match ec_of(e.syndrome) {
                 Ec::Hvc => {
@@ -4130,7 +4148,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), stall: None };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -7940,7 +7958,7 @@ impl Box_ {
             }
         }
         match next {
-            Some(tid) => { self.switch_to_thread(tid); Ok(()) }
+            Some(tid) => { self.switch_to_thread(tid); self.stall_switched_in(); Ok(()) }
             // M50 D1: a wall, not a panic. Both causes are possible (a real deadlock in the guest, or
             // a wake retrace does not model), so the line names both.
             None => Err(Unsupported::new(WallCategory::Threads, format!(
@@ -7954,6 +7972,47 @@ impl Box_ {
                 self.gkq
             ))),
         }
+    }
+
+    /// M52 §3i: start watching for a stall. Record calls this once, after the initial snapshot;
+    /// replay never does. Every pick `schedule_after_block` makes then restarts the watch.
+    pub fn watch_for_stalls(&mut self) {
+        self.stall = Some(stall::StallWatch::new(STALL_AFTER_SECS * HOST_TICKS_PER_SEC));
+        self.stall_switched_in();
+    }
+
+    /// A switch-in (C8): every pick `schedule_after_block` makes, a re-pick of the same thread
+    /// included. `run()`'s entry is never one: it is re-entered after every landmark.
+    fn stall_switched_in(&mut self) {
+        let Some(w) = self.stall.as_mut() else { return };
+        w.switched_in(host_ticks());
+        let at = w.fire_at();
+        self.arm_stall_timer(at);
+    }
+
+    /// Arm the guest's virtual timer to exit at host tick `at`. The virtual count is the host's
+    /// minus the vCPU's offset. Unmasking is what re-arms it after HVF masked it on its last exit.
+    fn arm_stall_timer(&self, at: u64) {
+        let off = self.vcpu.vtimer_offset().expect("vtimer offset");
+        self.vcpu.set_sys(sysreg::CNTV_CVAL_EL0, at.wrapping_sub(off)).expect("arm CNTV_CVAL");
+        self.vcpu.set_sys(sysreg::CNTV_CTL_EL0, 1).expect("arm CNTV_CTL");
+        self.vcpu.set_vtimer_mask(false).expect("unmask vtimer");
+    }
+
+    /// After every `hv_vcpu_run` on record: print C8's line if the running thread has stalled.
+    /// HVF masks the vtimer on its exit and it stays masked until the next switch-in re-arms it,
+    /// so a stalled thread costs one exit. No re-arm is needed after a vtimer exit that names
+    /// nothing: the ready set cannot change without a VM exit (a thread becomes runnable only by a
+    /// wake from the running thread's own traps or by a deadline, which moves only on timebase
+    /// reads, themselves exits), and this runs after every `vcpu.run()`.
+    fn check_stall(&mut self) {
+        let Some(w) = self.stall.as_mut() else { return };
+        let now = host_ticks();
+        if !w.elapsed(now) { return; }
+        let cur = self.threads.current();
+        let runnable = self.threads.runnable_except(cur);
+        let w = self.stall.as_mut().unwrap();
+        if let Some(line) = w.check(now, cur, &runnable) { eprintln!("{line}"); }
     }
 
     /// Switch the vCPU from the running thread to `tid`.
@@ -8331,6 +8390,7 @@ impl Box_ {
             // M42: RESTORED from the capture, never reset (spec §3f); see the `BoxState` field.
             kq: state.kq.clone(),
             excl: state.excl.clone(),
+            stall: None,
             gkq: state.gkq.clone(),
             psynch: state.psynch.clone(),
             jit: state.jit.clone(),

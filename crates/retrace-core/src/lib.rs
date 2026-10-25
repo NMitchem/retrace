@@ -365,6 +365,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
     w.append(&b.snapshot()).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
+    // M52 §3i: after the snapshot, so no timer register is in it. Record only.
+    b.watch_for_stalls();
 
     let mut console = Console { sink, ..Console::default() };
     // M50 §3c (C1): the record loop runs inside this catch. A wall ends it either as a marked `Err`

@@ -587,6 +587,11 @@ impl ThreadTable {
         self.threads.iter().position(|t| matches!(t.state, ThreadState::Runnable))
     }
 
+    /// M52 §3i: the runnable threads other than `cur`, ascending. The stall line names them.
+    pub fn runnable_except(&self, cur: usize) -> Vec<usize> {
+        (0..self.threads.len()).filter(|&i| i != cur && matches!(self.threads[i].state, ThreadState::Runnable)).collect()
+    }
+
     /// M49 Ruling T5-I1: the next runnable thread AFTER `tid` in index order, wrapping around, with
     /// `tid` itself last. `Box_::schedule_after_block` picks with this, not `pick_next`, when `tid`'s
     /// sleep was due in the very settle that blocked it: a poller on a 0-tick sleep is the

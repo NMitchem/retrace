@@ -69,6 +69,9 @@ pub mod sysreg {
     pub const MAIR_EL1:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_MAIR_EL1);
     pub const TPIDR_EL0: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_TPIDR_EL0);
     pub const MDSCR_EL1: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_MDSCR_EL1);
+    // M52 §3i: the guest's virtual timer, armed only by the recorder's stall watch.
+    pub const CNTV_CTL_EL0:  SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_CNTV_CTL_EL0);
+    pub const CNTV_CVAL_EL0: SysReg = SysReg(hv_sys_reg_t_HV_SYS_REG_CNTV_CVAL_EL0);
     // Hardware instruction-breakpoint slots (6 comparators on Apple Silicon). DBGBVRn holds the
     // match VA; DBGBCRn is the control word. Verified in the M3 sstep spike (F3): a match delivers
     // direct to EL2 with ESR_EL2 EC=0x30 at pc==BVR, before the instruction retires.
@@ -162,6 +165,12 @@ impl Vcpu {
         }
         check(ret as u32 as i32 as hv_return_t)
     }
+    /// M52 §3i: mask or unmask the virtual timer's interrupt line. HVF masks it itself on an
+    /// `EXIT_VTIMER`; the caller unmasks to re-arm.
+    pub fn set_vtimer_mask(&self, masked: bool) -> Result<(), HvError> { check(unsafe { hv_vcpu_set_vtimer_mask(self.id, masked) }) }
+    /// M52 §3i: the vCPU's virtual-count offset. The guest's virtual count is the host's
+    /// `mach_absolute_time()` minus this.
+    pub fn vtimer_offset(&self) -> Result<u64, HvError> { let mut v = 0; check(unsafe { hv_vcpu_get_vtimer_offset(self.id, &mut v) })?; Ok(v) }
     pub fn set_trap_debug_exceptions(&self, on: bool) -> Result<(), HvError> { check(unsafe { hv_vcpu_set_trap_debug_exceptions(self.id, on) }) }
     /// Run until VMEXIT. Returns (reason, esr_el2, far/ipa) copied out of the exit struct.
     pub fn run(&mut self) -> Result<Exit, HvError> {
