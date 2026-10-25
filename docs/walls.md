@@ -75,11 +75,14 @@ Since M51 a handler installed with `signal()`, `kill(pid, 0)` and `pthread_kill(
 ## Threads
 
 The program's threads reached a state retrace cannot schedule, or a wait retrace does not model.
-A contended `pthread_mutex` (`psynch_mutexwait`) is one, and so are the mach semaphore traps
-retrace has no model of: `semaphore_signal_all_trap` (-34), `semaphore_signal_thread_trap` (-35),
-`semaphore_wait_signal_trap` (-37), `semaphore_timedwait_trap` (-38), which Rust's test harness
-uses, and `semaphore_timedwait_signal_trap` (-39). A `dup` of a kqueue the program made also stops
-here.
+Since M52 a contended `pthread_mutex` (`psynch_mutexwait`), `semaphore_timedwait_trap` (-38, which
+Rust's test harness uses), `swtch_pri` (-59) and `thread_switch` (-61) are modelled. What still stops
+here: a contended `os_unfair_lock` or any `__ulock_wait2` (544), the mach semaphore traps
+`semaphore_signal_all_trap` (-34), `semaphore_signal_thread_trap` (-35), `semaphore_wait_signal_trap`
+(-37) and `semaphore_timedwait_signal_trap` (-39), a wait on a semaphore that was destroyed, a
+`pthread_mutex` with the fairshare policy, a condition-variable wait that carries a mutex, a
+`thread_switch` with an option other than none, depress or wait, and a `proc_pidinfo` thread lookup
+by thread id. A `dup` of a kqueue the program made also stops here.
 
 A signal that arrives while a thread waits on a timer, in a timed sleep, a timed condition-variable
 wait or a timed `kevent`, stops the recording here too. A signal that is pending at any other wake
@@ -90,8 +93,17 @@ program would hang forever, so the line says so. If the same program does not ha
 retrace, that is a bug in retrace; please report it.
 
 A program that spins forever waiting for another thread, without blocking, is not a wall: it hangs
-under retrace as it would natively. retrace cannot tell a spin from slow work without reading the
-wall clock, which would make recordings differ from run to run.
+under retrace, where natively the other thread would run on another core. retrace cannot tell a spin from slow work by anything in the
+recording, and reading the wall clock into it would make recordings differ from run to run; the
+line below is the one thing it does with the clock.
+
+Since M52 the recorder does read the host clock for one thing, a single stderr line. A thread that
+runs for 20 seconds of real time without blocking, while other threads are ready to run, prints
+`retrace: thread N has run for 20 s without blocking while thread(s) … are ready to run`, once per
+time that thread was picked to run. The line is control-plane only: it is in no recording, replay
+never prints it, and the recording goes on. It means the program is probably waiting for one of
+those threads, which retrace will not run until this one blocks. The fix is preemption, which is
+not planned.
 
 ## Memory
 

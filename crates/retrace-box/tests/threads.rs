@@ -143,7 +143,7 @@ fn switch_to_clears_redirected_for_the_thread_it_switches_to() {
 fn a_thread_blocked_on_a_semaphore_is_woken_by_that_ports_signal() {
     let mut t = ThreadTable::new(ctx(0x1000));
     t.spawn(ctx(0x2000), (0x30200000, 0x8000));
-    t.block(BlockReason::Sem { port: 0x1403 });
+    t.block(BlockReason::Sem { port: 0x1403, deadline: None });
     assert_eq!(t.pick_next(), Some(1), "main parked on the semaphore, so the worker runs");
     assert_eq!(t.unblock_sem_waiters_on(0x1403), vec![0]);
     assert_eq!(t.state_of(0), ThreadState::Runnable);
@@ -153,11 +153,11 @@ fn a_thread_blocked_on_a_semaphore_is_woken_by_that_ports_signal() {
 fn a_semaphore_signal_wakes_only_its_own_port() {
     let mut t = ThreadTable::new(ctx(0x1000));
     t.spawn(ctx(0x2000), (0x30200000, 0x8000));
-    t.block(BlockReason::Sem { port: 0x1403 });
+    t.block(BlockReason::Sem { port: 0x1403, deadline: None });
     // A DIFFERENT port must not wake it. Port names are dense small integers in retrace's own
     // IPC space, so a wake that ignored the key would look correct in a one-semaphore fixture.
     assert!(t.unblock_sem_waiters_on(0x1404).is_empty());
-    assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
+    assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Sem { port: 0x1403, deadline: None }));
 }
 
 #[test]
@@ -179,9 +179,9 @@ fn a_semaphore_block_does_not_disturb_the_ulock_wake_seam() {
     // A port name of 0x1403 and a guest address of 0x1403 must never wake each other.
     let mut t = ThreadTable::new(ctx(0x1000));
     t.spawn(ctx(0x2000), (0x30200000, 0x8000));
-    t.block(BlockReason::Sem { port: 0x1403 });
+    t.block(BlockReason::Sem { port: 0x1403, deadline: None });
     assert!(t.unblock_waiters_on(0x1403).is_empty(), "an address wake must not wake a port waiter");
-    assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
+    assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Sem { port: 0x1403, deadline: None }));
     // …and the converse, so neither direction is left to inspection: a ulock waiter on the numerically
     // identical address must survive a semaphore signal on that "port".
     t.switch_to(1);
@@ -1334,7 +1334,7 @@ fn sem_wait_blocks_the_caller_on_the_port_in_arg0() {
     let rc = b.guest_sem_wait([0x1403, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(rc, 0);
     assert_eq!(b.threads().state_of(0),
-        ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
+        ThreadState::Blocked(BlockReason::Sem { port: 0x1403, deadline: None }));
     assert_eq!(b.threads().pick_next(), Some(1), "the worker is now the only runnable thread");
 }
 
@@ -1391,8 +1391,8 @@ fn sem_signal_refuses_to_wake_more_than_one_waiter() {
     b.guest_sem_wait([0x1403, 0, 0, 0, 0, 0, 0, 0]);
     b.switch_to_thread(1);
     b.guest_sem_wait([0x1403, 0, 0, 0, 0, 0, 0, 0]);
-    assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
-    assert_eq!(b.threads().state_of(1), ThreadState::Blocked(BlockReason::Sem { port: 0x1403 }));
+    assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Sem { port: 0x1403, deadline: None }));
+    assert_eq!(b.threads().state_of(1), ThreadState::Blocked(BlockReason::Sem { port: 0x1403, deadline: None }));
     // One `-33`. The plural wake belongs to `-34`, so this must name that rather than wake both.
     b.guest_sem_signal([0x1403, 0, 0, 0, 0, 0, 0, 0]);
 }

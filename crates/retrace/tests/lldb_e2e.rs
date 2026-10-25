@@ -336,12 +336,25 @@ fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_n
     }).expect("the other thread runs again");
     let mut bb = to_svc(svc, m);
     bb.extend([format!("thread select {other}"), "thread step-inst".into(), "thread list".into()]);
-    let (code, out, err) = session(tr, &bb);
-    let tb = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
-    assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {tb}");
-    assert_eq!(code, Some(0), "{tb}");
-    let row = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tb}"));
-    assert_eq!((row.1, row.2), (other, want_b), "{tb}");
+    // lldb-2100 races itself here: on a loaded machine, 1 to 3 runs in 100, it prints the stepped
+    // thread's frame and its later `thread list` row at the pc it had BEFORE the step, though the
+    // server's reply named the new one (measured with the server's replies logged: `vCont;s:2`
+    // answered `thread-pcs:…,1804ecc18` and `20:` the same, and lldb still listed `…ecc14`; the
+    // packet sequences of passing and failing runs are identical). It happens at ff2dd84, before
+    // M52, so it is not a server or recording change. B6(b) undone is deterministic: the step is
+    // refused in place and EVERY session lists the old pc. So one repeat tells the two apart, and
+    // the row must be wrong in both sessions to fail.
+    let mut last = String::new();
+    for attempt in 0..2 {
+        let (code, out, err) = session(tr, &bb);
+        let tb = format!("attempt {attempt}: exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+        assert!(out.lines().any(|l| l.trim() == "END"), "the batch ran to its end — no re-step loop: {tb}");
+        assert_eq!(code, Some(0), "{tb}");
+        let row = thread_rows(&out).into_iter().find(|r| r.0).unwrap_or_else(|| panic!("a selected thread: {tb}"));
+        if (row.1, row.2) == (other, want_b) { return; }
+        last = format!("{tb}\nrow {row:?}, want ({other}, {want_b:#x})");
+    }
+    panic!("the stepped thread's row was wrong in two sessions: {last}");
 }
 
 #[test]

@@ -56,7 +56,8 @@ impl Msg2 {
     }
 }
 
-/// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; ServiceVmRemap likewise
+/// Where a mach_msg2 goes. ServiceVmMap is emulated against the guest; ServiceVmCopy (mach_vm_copy,
+/// 4807, M52 §3b) is a box-side copy answered with a mig_reply_error; ServiceVmRemap likewise
 /// (a stage-1 alias, never forwarded — see the 4813 arm in `route()`); ServiceGetSpecialPort
 /// answers task_get_special_port(BOOTSTRAP) with a synthetic port right (complex reply);
 /// ServiceSetSpecialPort answers task_set_special_port(DEBUG_CONTROL_PORT) with a mig_reply_error
@@ -68,7 +69,7 @@ impl Msg2 {
 /// RefuseMqRecv is a message-queue RECEIVE; the box hosts no senders, so nothing can ever arrive
 /// on it, and it is answered `MACH_RCV_REFUSAL` — deterministic, no host contact (M38 t5).
 #[derive(Debug)]
-pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceGetSpecialPort, ServiceSetSpecialPort, ServicePortsRegister,
+pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceVmCopy, ServiceGetSpecialPort, ServiceSetSpecialPort, ServicePortsRegister,
                  ServiceClockGetTime,
                  StubMigReply(i32), RefuseMqSend, RefuseMqRecv, Forward(&'static str), Unsupported(String) }
 
@@ -147,6 +148,8 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
     if guest_task_port == Some(m.dest as u64) {
         match m.msgh_id {
             4811 => return Route::ServiceVmMap,
+            // mach_vm_copy (4807): a box-side copy, never forwarded (M52 §3b, t0 M3).
+            4807 => return Route::ServiceVmCopy,
             // mach_vm_remap (4813): libffi's Apple trampoline table aliases the freshly-loaded
             // libffi-trampolines.dylib __TEXT into a vm_allocate'd region, shared, on every
             // `import ctypes` (M39 t0). Serviced as a stage-1 alias (Box_::guest_vm_remap) —
@@ -272,6 +275,15 @@ pub fn decode_vm_map(buf: &[u8]) -> Result<VmMapReq, String> {
         cur_protection: u32_at(buf, 88), max_protection: u32_at(buf, 92),
         inheritance: u32_at(buf, 96),
     })
+}
+
+/// mach_vm_copy (4807) request, not complex, 56 bytes (t0 M3): header(24) + NDR(8), then
+/// `src` @32, `size` @40, `dest` @48. Returns `(src, size, dst)`.
+pub fn decode_vm_copy(buf: &[u8]) -> Result<(u64, u64, u64), String> {
+    if buf.len() < 56 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("vm_copy request short: {} < 56", buf.len()))); }
+    let id = u32_at(buf, 20);
+    if id != 4807 { return Err(format!("msgh_id {id} != 4807")); }
+    Ok((u64_at(buf, 32), u64_at(buf, 40), u64_at(buf, 48)))
 }
 
 /// _kernelrpc_mach_vm_remap (4813) request body: header(24) + desc_count(4) + port
@@ -499,6 +511,36 @@ pub fn decode_semaphore_destroy(buf: &[u8]) -> Result<u32, String> {
     Ok(u32_at(buf, 28))
 }
 
+/// `semaphore_create` (task subsystem base 3400, slot 18), forwarded (`FORWARD_ALLOWLIST`); since M52
+/// its request's `value` and its reply's port seed the box's count.
+pub const SEMAPHORE_CREATE: u32 = 3418;
+
+/// M52 §3d (t0 M5): the initial `value` a `semaphore_create` (3418) request carries: not complex,
+/// `send_size` 40, header(24) + NDR(8) + `policy`(4) at offset 32 + `value`(4) at offset 36.
+pub fn decode_semaphore_create_request(buf: &[u8]) -> Result<u32, String> {
+    if buf.len() < 40 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("semaphore_create request is {} bytes, < 40", buf.len()))); }
+    if u32_at(buf, 20) != SEMAPHORE_CREATE {
+        return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("msgh_id {} is not semaphore_create (3418)", u32_at(buf, 20))));
+    }
+    Ok(u32_at(buf, 36))
+}
+
+/// M52 §3d (t0 M5): the port a successful 3418 reply carries: COMPLEX, `msgh_id` 3518, size 40, one
+/// PORT descriptor (type byte 0 at offset 39) whose name is at offset 28. None for anything else,
+/// such as the 36-byte mig_reply_error a failed create answers with.
+pub fn decode_semaphore_create_reply(buf: &[u8]) -> Option<u32> {
+    if buf.len() < CLOCK_SERVICE_REPLY_LEN { return None; }
+    let ok = u32_at(buf, 0) & MACH_MSGH_BITS_COMPLEX != 0 && u32_at(buf, 20) == SEMAPHORE_CREATE + 100
+        && u32_at(buf, 24) == 1 && buf[39] == 0;
+    ok.then(|| u32_at(buf, 28))
+}
+
+/// M52 §3d: does this reply say `semaphore_destroy` (3419) succeeded? A success is the simple
+/// 36-byte reply, `msgh_id` 3519, with `RetCode` 0 at offset 32.
+pub fn semaphore_destroy_reply_succeeded(buf: &[u8]) -> bool {
+    buf.len() >= 36 && u32_at(buf, 20) == SEMAPHORE_DESTROY + 100 && u32_at(buf, 32) == 0
+}
+
 /// M49 S2: the clock port a successful 206 reply carries: COMPLEX, `msgh_id` 306, one PORT
 /// descriptor (type byte 0 at offset 39) whose name is at offset 28. None for anything else, such
 /// as the 36-byte mig_reply_error a failed 206 answers with.
@@ -555,6 +597,19 @@ mod tests {
     // Live-captured _kernelrpc_mach_vm_map (4811) mach_msg2 register file (libmalloc nano wall).
     const VM_MAP_ARGS: [u64; 8] = [0x1fb638, 0x2_0000_0003, 0x64_8000_1513,
                                    0x1603_0000_0203, 0x12cb_0000_0000, 0x1603_0000_0001, 0x34, 0];
+    #[test]
+    fn decode_vm_copy_reads_the_measured_request() {
+        let mut buf = vec![0u8; 56];
+        buf[20..24].copy_from_slice(&4807u32.to_le_bytes());
+        buf[32..40].copy_from_slice(&0x1111_0000u64.to_le_bytes());
+        buf[40..48].copy_from_slice(&0x2_0000u64.to_le_bytes());
+        buf[48..56].copy_from_slice(&0x3333_4000u64.to_le_bytes());
+        assert_eq!(decode_vm_copy(&buf).unwrap(), (0x1111_0000, 0x2_0000, 0x3333_4000));
+        buf[20..24].copy_from_slice(&4811u32.to_le_bytes());
+        assert!(decode_vm_copy(&buf).is_err());
+        assert!(decode_vm_copy(&buf[..55]).is_err());
+    }
+
     #[test]
     fn unpacks_the_packed_register_abi() {
         let m = Msg2::unpack(&VM_MAP_ARGS);
@@ -613,6 +668,31 @@ mod tests {
         assert!(decode_semaphore_destroy(&with(3, 0)).unwrap_err().contains("not one PORT descriptor"));
         assert!(decode_semaphore_destroy(&with(24, 2)).unwrap_err().contains("count 2"));
         assert!(decode_semaphore_destroy(&with(39, 1)).unwrap_err().contains("type 1"));
+    }
+    /// M52 §3d (t0 M5): the 3418 request as measured (value 2 at offset 36) and its COMPLEX reply.
+    #[test]
+    fn decode_semaphore_create_reads_the_measured_value_offset() {
+        let mut req = [0u8; 40];
+        req[20..24].copy_from_slice(&3418u32.to_le_bytes());
+        req[36..40].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(decode_semaphore_create_request(&req), Ok(2));
+        assert!(decode_semaphore_create_request(&req[..39]).unwrap_err().contains("39 bytes, < 40"));
+        req[20] = 0x5b;
+        assert!(decode_semaphore_create_request(&req).unwrap_err().contains("is not semaphore_create"));
+        let mut rep = [0u8; 40];
+        rep[0..4].copy_from_slice(&0x8000_1200u32.to_le_bytes());
+        rep[20..24].copy_from_slice(&3518u32.to_le_bytes());
+        rep[24..28].copy_from_slice(&1u32.to_le_bytes());
+        rep[28..32].copy_from_slice(&0xa03u32.to_le_bytes());
+        rep[38] = 0x11;
+        assert_eq!(decode_semaphore_create_reply(&rep), Some(0xa03));
+        rep[20] = 0x5b;
+        assert_eq!(decode_semaphore_create_reply(&rep), None, "a different reply id");
+        let mut ok = [0u8; 36];
+        ok[20..24].copy_from_slice(&3519u32.to_le_bytes());
+        assert!(semaphore_destroy_reply_succeeded(&ok));
+        ok[32] = 4;
+        assert!(!semaphore_destroy_reply_succeeded(&ok), "a nonzero RetCode");
     }
     #[test]
     fn everything_else_fails_loudly() {

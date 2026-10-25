@@ -16,9 +16,8 @@
 //! Otherwise the outcome is `Refused` (the recording ended at a clean wall line and both replays end
 //! at the same place, M50), `Bug` (the bug banner's message), or the first difference as one line
 //! (`judge`): `DIVERGENCE` and a replay's detail, `TIMEOUT`, or `MISMATCH` and what differed, with
-//! its addresses masked (`mask_addresses`), or `Toolchain`. `Expect::Wall` pins a prefix of that
-//! line, an in-scope row's clean wall line included; `Expect::Refused` is for an out-of-scope row
-//! (charter §6).
+//! its addresses masked (`mask_addresses`), or `Toolchain`. `Expect::Refused` pins a prefix of
+//! that line for an out-of-scope row (charter §6).
 //!
 //! The gate asserts every row's outcome equals its pinned outcome (R10): a wall that is fixed, or
 //! that moves, fails here until the task that moved it edits its row. One `#[test]` runs the whole
@@ -36,7 +35,6 @@ use std::path::Path;
 enum Expect {
     Pass,
     Refused(&'static str),
-    Wall(&'static str),
     Toolchain,
 }
 
@@ -73,8 +71,8 @@ const ROWS: &[Row] = &[
           expect: Expect::Pass },
     Row { name: "fc_nanosleep", bin: retrace_guest::FC_NANOSLEEP, args: &[],
           expect: Expect::Pass },
-    Row { name: "fc_mutex", bin: retrace_guest::FC_MUTEX, args: &[],
-          expect: Expect::Wall("retrace: unsupported: M48: psynch psynch_mutexwait (301) is not modelled") },
+    // M52 §3f: the firstfit mutex pair is modelled, so the contended lock is a pass (was the 301 wall).
+    Row { name: "fc_mutex", bin: retrace_guest::FC_MUTEX, args: &[], expect: Expect::Pass },
     Row { name: "fc_fileio", bin: retrace_guest::FC_FILEIO, args: &[], expect: Expect::Pass },
     // M51 §3f: the program gets the recorder's environment, which is ENV, as native gets it.
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"], expect: Expect::Pass },
@@ -95,10 +93,12 @@ const ROWS: &[Row] = &[
           expect: Expect::Pass },
     Row { name: "fc_rs_sleep", bin: retrace_guest::FC_RS_SLEEP, args: &[],
           expect: Expect::Pass },
-    Row { name: "fc_rs_tests", bin: retrace_guest::FC_RS_TESTS, args: &[],
-          expect: Expect::Wall("retrace: unsupported: semaphore_timedwait_trap (mach trap -38)") },
-    Row { name: "fc_rs_tests_fail", bin: retrace_guest::FC_RS_TESTS_FAIL, args: &[],
-          expect: Expect::Wall("retrace: unsupported: semaphore_timedwait_trap (mach trap -38)") },
+    // M52 t3: libtest's `recv_timeout` is `semaphore_timedwait_trap` (-38), box-answered since, so both
+    // harnesses run through and match native (the output comparison is `canonical`'s).
+    Row { name: "fc_rs_tests", bin: retrace_guest::FC_RS_TESTS, args: &[], expect: Expect::Pass },
+    Row { name: "fc_rs_tests_fail", bin: retrace_guest::FC_RS_TESTS_FAIL, args: &[], expect: Expect::Pass },
+    // M52 t8: a harness whose tests contend, wait, park, yield and read thread ids.
+    Row { name: "fc_rs_threads", bin: retrace_guest::FC_RS_THREADS, args: &[], expect: Expect::Pass },
     // Swift (swiftc, only where it runs: R11).
     Row { name: "fc_sw_hello", bin: retrace_guest::FC_SW_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_throw", bin: retrace_guest::FC_SW_THROW, args: &[], expect: Expect::Pass },
@@ -391,8 +391,6 @@ fn every_corpus_row_meets_its_pinned_outcome() {
         let ok = match (&got, want) {
             (Outcome::Pass, Expect::Pass) | (Outcome::Toolchain, Expect::Toolchain) => true,
             (Outcome::Refused(line), Expect::Refused(prefix)) => line.starts_with(prefix),
-            // An in-scope wall pins its first difference, which since M50 may be a clean wall line.
-            (Outcome::Wall(line) | Outcome::Refused(line), Expect::Wall(prefix)) => line.starts_with(prefix),
             _ => false,
         };
         match (&got, want) {
@@ -438,8 +436,8 @@ fn the_table_has_one_row_per_corpus_fixture() {
 
 #[test]
 fn canonical_output_hides_only_libtests_run_dependent_figures() {
-    // No row reaches the comparison through libtest yet: both harnesses stop at record (t0 M1). So
-    // this pins `canonical` on what native printed at plan time. Two runs of `fc_rs_tests` differ in
+    // Since M52 t3 both libtest rows reach the comparison (before it they stopped at record, t0 M1).
+    // This pins `canonical` on what native printed at plan time. Two runs of `fc_rs_tests` differ in
     // their result lines' order and their `finished in`, and two of `fc_rs_tests_fail` in the panic
     // line's thread id.
     let tests = |order: [&str; 4], secs: &str| format!(

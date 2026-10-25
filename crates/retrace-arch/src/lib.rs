@@ -1106,6 +1106,22 @@ pub fn refusal_before_forward(num: u64) -> Option<Unsupported> {
     }
 }
 
+/// `proc_info`'s `PROC_INFO_CALL_PIDINFO` and its `PROC_PIDTHREADID64INFO` flavor (`sys/proc_info.h`):
+/// a thread looked up by id. Natively it answers a live tid; the ids a guest holds are synthetic
+/// (M52 §3c, ruling T2-pidinfo), so a forward would answer a different question in silence.
+pub const PROC_INFO_CALL_PIDINFO: u64 = 2;
+pub const PROC_PIDTHREADID64INFO: u64 = 15;
+
+/// M52 §3c (T2-pidinfo): the one `proc_info` shape refused before the forward. Other flavors are
+/// unchanged. `args` is `proc_info(callnum, pid, flavor, arg, buffer, buffersize)`.
+pub fn proc_info_refusal(num: u64, args: &[u64; 8]) -> Option<Unsupported> {
+    if num == 336 && args[0] == PROC_INFO_CALL_PIDINFO && args[2] == PROC_PIDTHREADID64INFO {
+        return Some(Unsupported::new(WallCategory::Threads,
+            "proc_info (syscall 336) PROC_PIDTHREADID64INFO, a thread looked up by id: guest thread ids are synthetic"));
+    }
+    None
+}
+
 /// The wall an unrowed number is (spec §3b). Waiting for another process, or starting one without
 /// `fork`'s refusal, is `process-creation`: wait4 (7), vfork (66) and waitid (173), from the SDK's
 /// `sys/syscall.h`. Anything else is a syscall retrace has no row for yet.
@@ -1394,6 +1410,14 @@ pub const RLIMIT_POSIX_FLAG: u64 = 0x1000;
 
 /// BSD errno: an argument the kernel rejects (a MAP_FIXED address outside the address space).
 pub const EINVAL: u64 = 22;
+/// `<mach/vm_statistics.h>`: `mach_vm_map`/`mach_vm_allocate` flags. FIXED is the absence of ANYWHERE.
+pub const VM_FLAGS_ANYWHERE: u64 = 0x1;
+/// `VM_FLAGS_OVERWRITE`: a FIXED request replaces what it covers instead of answering `KERN_NO_SPACE` (M52 §3b).
+pub const VM_FLAGS_OVERWRITE: u64 = 0x4000;
+/// `<mach/kern_return.h>`: `KERN_INVALID_ADDRESS`, `KERN_PROTECTION_FAILURE`, `KERN_NO_SPACE` (M52 §3b, t0 M2/M3).
+pub const KERN_INVALID_ADDRESS: u64 = 1;
+pub const KERN_PROTECTION_FAILURE: u64 = 2;
+pub const KERN_NO_SPACE: u64 = 3;
 /// `<sys/errno.h>`: bad address. M51 §3h: a pointer the program could not pass natively.
 pub const EFAULT: u64 = 14;
 /// `<sys/errno.h>`: no such process. M51 §3g: `__pthread_kill(port, 0)` for a port no live thread holds.
@@ -1609,6 +1633,28 @@ pub const MACH_SEMAPHORE_WAIT: u64 = (-36i64) as u64;
 /// (`ldaddl` on `sem+0x30`, §3c), so a worker signalling a semaphore nobody is waiting on produces
 /// no landmark: the park/wake seam must not assume a signal trap always appears. Return `0`.
 pub const MACH_SEMAPHORE_SIGNAL: u64 = (-33i64) as u64;
+
+/// The mach semaphore **timed wait** trap, `-38` (M52 §3d): `semaphore_timedwait(s, {sec, nsec})`,
+/// which Rust's `mpsc::recv_timeout` and libdispatch's `dispatch_semaphore_wait` with a deadline
+/// reach. Box-answered like `-36`, with a deadline on the synthetic clock; it has no `arg_kinds`
+/// row, so a misplaced arm is a wall, never a forward (C1).
+pub const MACH_SEMAPHORE_TIMEDWAIT: u64 = (-38i64) as u64;
+
+/// `swtch_pri`, mach trap `-59` (M52 §3e): `sched_yield`, `pthread_yield_np` and Rust's
+/// `thread::yield_now` (t0 M6). Box-answered, no `arg_kinds` row (C1); returns 0 for any priority.
+pub const MACH_SWTCH_PRI: u64 = (-59i64) as u64;
+/// `thread_switch`, mach trap `-61` (M52 §3e): `thread_switch(port, option, time)`.
+pub const MACH_THREAD_SWITCH: u64 = (-61i64) as u64;
+/// `mach/thread_switch.h`'s options, the only three this SDK defines (t0 M6).
+pub const SWITCH_OPTION_NONE: u64 = 0;
+pub const SWITCH_OPTION_DEPRESS: u64 = 1;
+pub const SWITCH_OPTION_WAIT: u64 = 2;
+
+/// `kern_return_t` values the semaphore family answers (`mach/kern_return.h`).
+pub const KERN_INVALID_NAME: u64 = 15;
+pub const KERN_INVALID_VALUE: u64 = 18;
+pub const KERN_TERMINATED: u64 = 37;
+pub const KERN_OPERATION_TIMED_OUT: u64 = 49;
 
 /// Mach traps the corpora dispatch (M33 census, `tests/census.rs`), keyed as the two's-complement
 /// `u64` the trap carries. Numbers per xnu `osfmk/mach/syscall_sw.h` (xnu-12377.1.9) — the SDK
@@ -2279,6 +2325,10 @@ pub const SYS_KEVENT: u64 = 363;
 /// `setsockopt` (SDK `SYS_setsockopt 105`). Forwarded: libuv's `uv__stream_open` issues
 /// `SO_OOBINLINE` on the inherited stdout pipe, which the host answers `ENOTSOCK` and libuv ignores.
 pub const SYS_SETSOCKOPT: u64 = 105;
+/// `psynch_mutexwait` (SDK `SYS_psynch_mutexwait 301`). Modelled for firstfit since M52 (§3f), never forwarded.
+pub const SYS_PSYNCH_MUTEXWAIT: u64 = 301;
+/// `psynch_mutexdrop` (SDK `SYS_psynch_mutexdrop 302`). Modelled for firstfit since M52 (§3f), never forwarded.
+pub const SYS_PSYNCH_MUTEXDROP: u64 = 302;
 /// `psynch_cvbroad` (SDK `SYS_psynch_cvbroad 303`). Modelled since M48 (§3e), never forwarded.
 pub const SYS_PSYNCH_CVBROAD: u64 = 303;
 /// `psynch_cvsignal` (SDK `SYS_psynch_cvsignal 304`). Modelled since M48 (§3e), never forwarded.
@@ -2289,7 +2339,7 @@ pub const SYS_PSYNCH_CVWAIT: u64 = 305;
 /// Is `num` one of the SDK's `SYS_psynch_*` — 297 through 309 and 312, fourteen numbers? These are
 /// the calls that must NEVER be forwarded: forwarded, a psynch call acts on the HOST's psynch state,
 /// keyed by retrace's own addresses, and can block or wake the recorder. M48 models 303–305 (the
-/// condition-variable calls) and refuses every other by value; the record arm, the replay mirror and
+/// condition-variable calls), M52 301 and 302 (firstfit mutexes), and every other is refused by value; the record arm, the replay mirror and
 /// the generic forward arm's assert all share this predicate, as `is_fcntl_dupfd` is shared.
 pub fn is_psynch(num: u64) -> bool { matches!(num, 297..=309 | 312) }
 
@@ -2595,6 +2645,12 @@ mod tests {
         for n in (0..600u64).chain((1..=128i64).map(|t| (-t) as u64)) {
             if refusal_before_forward(n).is_none() { let _ = forwarded_shape(n); }
         }
+    }
+
+    /// M52 §3d (C1): no row for -38, -59 or -61, so a misplaced record arm is a wall, never a forward.
+    #[test]
+    fn the_m52_semaphore_and_yield_traps_cannot_reach_the_generic_forward() {
+        for t in [-38i64, -59, -61] { assert!(refusal_before_forward(t as u64).is_some(), "{t}"); }
     }
 
     #[test]

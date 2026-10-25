@@ -85,7 +85,7 @@ fn session_at_svc(trace: &Path, i: usize) -> ReplaySession {
 }
 
 /// Advance `s` until one landmark moves the clock by more than 60000 ticks (2.5 ms; a timebase read
-/// moves it 9216). Returns (that landmark, the clock after it).
+/// moves it 5 ticks since M52, 9216 before). Returns (that landmark, the clock after it).
 fn the_idle_jump(mut s: ReplaySession) -> (usize, u64, ReplaySession) {
     loop {
         let (n, before) = (s.landmark(), synthetic_tsc(&s.dbg_internal_state()));
@@ -200,7 +200,10 @@ fn a_timeout_on_the_only_thread_answers_on_the_vcpu() {
     let at_call = synthetic_tsc(&s.dbg_internal_state());
     s.advance().unwrap_or_else(|d| panic!("diverged at landmark {}: {}", d.landmark, d.detail));
     assert_eq!((s.landmark(), s.current_thread()), (i + 1, 0), "woken in its own settle, on the only thread");
-    assert_eq!(synthetic_tsc(&s.dbg_internal_state()), at_call, "no idle jump: the deadline was due at the call");
+    // Final-review I2: a due timed wait that re-picks itself moves the clock exactly one stride
+    // (was `at_call`: 4294967551 -> 4294967556). Still no idle jump, which would be a deadline's worth.
+    assert_eq!(synthetic_tsc(&s.dbg_internal_state()), at_call + retrace_box::SYNTH_TSC_STRIDE,
+        "one stride and no idle jump: the deadline was due at the call");
     assert!(s.dbg_regs().contains("x0 =0x0000000000000000"), "x0 on the vCPU:\n{}", s.dbg_regs());
 }
 

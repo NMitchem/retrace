@@ -340,6 +340,14 @@ fn a_wrong_thread_on_a_kevent_landmark_is_a_divergence() {
     retag_fixture_and_expect_divergence(retrace_guest::KQ_DYN, &["wake"], retrace_arch::SYS_KEVENT);
 }
 
+/// M52 Task 2 (spec §3c): the `thread_selfid` mirror sits inside the `Syscall` chain after the
+/// arm-top `verify_thread`, so a 372 landmark retagged to another live thread must diverge as the
+/// schedule. `tid_dyn routes` runs four threads, each issuing 372.
+#[test]
+fn a_wrong_thread_on_a_thread_id_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::TID_DYN, &["routes"], retrace_arch::SYS_THREAD_SELFID);
+}
+
 /// M48 Task 10: the same for `psynch_cvwait`, on `condvar_dyn pingpong`, whose two threads each wait.
 #[test]
 fn a_wrong_thread_on_a_psynch_cvwait_landmark_is_a_divergence() {
@@ -360,6 +368,28 @@ fn a_wrong_thread_on_a_semwait_landmark_is_a_divergence() {
 fn a_wrong_thread_on_a_clock_get_time_landmark_is_a_divergence() {
     retag_fixture_where_and_expect_divergence(retrace_guest::SLEEP_DYN, &["twosleepers"], "mach_msg2 msgh_id 1000",
         |num, args| num == (-47i64) as u64 && args[4] >> 32 == 1000);
+}
+
+/// M52 Task 3: the same for `semaphore_timedwait_trap` (-38), on `semtimed_dyn signalled`, whose main
+/// waits and whose child signals. Its mirror sits inside the `Syscall` chain after the arm-top
+/// `verify_thread`, so the site count stays seven.
+#[test]
+fn a_wrong_thread_on_a_timed_semaphore_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::SEMTIMED_DYN, &["signalled"], retrace_arch::MACH_SEMAPHORE_TIMEDWAIT);
+}
+
+/// M52 Task 4: the same for `swtch_pri` (-59), on `yield_dyn peer`, whose main yields beside a child.
+/// The yield mirror sits inside the `Syscall` chain after the arm-top `verify_thread`.
+#[test]
+fn a_wrong_thread_on_a_yield_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::YIELD_DYN, &["peer"], retrace_arch::MACH_SWTCH_PRI);
+}
+
+/// M52 Task 5: the same for `psynch_mutexwait` (301), on `mutex_dyn two`, whose contenders each block in
+/// it. Its mirror is the psynch mirror, inside the `Syscall` chain after the arm-top `verify_thread`.
+#[test]
+fn a_wrong_thread_on_a_mutex_wait_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::MUTEX_DYN, &["two"], 301);
 }
 
 /// `retag_and_expect_divergence` over any fixture and argv: retag the first `Syscall` landmark for

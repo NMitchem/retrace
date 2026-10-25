@@ -9,6 +9,7 @@
 // wholesale would destroy live guest memory the real kernel keeps. That destruction is invisible to
 // the determinism oracle, since record and replay would destroy the same bytes and no divergence
 // would fire, so retrace would record a WRONG execution faithfully.
+use retrace_arch::{KERN_NO_SPACE, VM_FLAGS_OVERWRITE};
 use retrace_box::Box_;
 use retrace_guest::{parse_macho, HELLO};
 use retrace_trace::Region;
@@ -38,7 +39,7 @@ fn partial_straddle_map_fixed_fails_loud() {
 fn partial_straddle_vm_map_overwrite_fails_loud() {
     let mut b = boxed();
     let base = b.guest_vm_map(0, 0x10000, true, false);          // ANYWHERE: a 4-page region
-    let _ = b.guest_vm_map(base + 0xC000, 0x8000, false, false); // FIXED, straddling its end
+    let _ = b.guest_vm_map_masked(base + 0xC000, 0x8000, 0, VM_FLAGS_OVERWRITE, false); // FIXED|OVERWRITE, straddling its end
 }
 
 #[test]
@@ -56,7 +57,7 @@ fn contained_vm_map_overwrite_reuses_the_backing_and_keeps_the_surrounding_bytes
     ]);
 
     // OVERWRITE page 1, wholly inside the region.
-    let ret = b.guest_vm_map(base + 0x4000, 0x4000, false, false);
+    let ret = b.guest_vm_map_masked(base + 0x4000, 0x4000, 0, VM_FLAGS_OVERWRITE, false).unwrap();
     assert_eq!(ret, base + 0x4000, "a contained FIXED vm_map must return the requested address");
 
     // The enclosing backing is reused: none added, none dropped.
@@ -81,8 +82,60 @@ fn covering_vm_map_overwrite_still_replaces_the_backing() {
     let base = b.guest_vm_map(0, 0x4000, true, false);
     b.apply_and_return(0, false, &[Region { ipa: base, bytes: vec![0x55] }]);
 
-    let ret = b.guest_vm_map(base, 0x4000, false, false);        // exactly covers it
+    let ret = b.guest_vm_map_masked(base, 0x4000, 0, VM_FLAGS_OVERWRITE, false).unwrap(); // exactly covers it
     assert_eq!(ret, base);
     assert_eq!(b.read_guest(base, 1), vec![0x00],
         "a fully-covering FIXED map must install a fresh zeroed region");
+}
+
+// M52 §3b: without OVERWRITE a FIXED request over a live backing is xnu's KERN_NO_SPACE, and nothing
+// is mapped or written.
+#[test]
+fn a_fixed_request_without_overwrite_over_a_live_backing_is_kern_no_space_and_maps_nothing() {
+    let mut b = boxed();
+    let base = b.guest_vm_map(0, 0x10000, true, false);
+    b.apply_and_return(0, false, &[Region { ipa: base + 0xC000, bytes: vec![0x44] }]);
+    let mapped_before = b.mapped_len();
+    let r = b.guest_vm_map_masked(base + 0xC000, 0x8000, 0, 0, false);
+    assert_eq!(r, Err(KERN_NO_SPACE));
+    assert_eq!(b.mapped_len(), mapped_before, "a refused FIXED request maps nothing");
+    assert_eq!(b.read_guest(base + 0xC000, 1), vec![0x44], "the marker survives");
+}
+
+// Adjacency is free (half-open intervals): a request ending where a backing starts is placed.
+#[test]
+fn a_fixed_request_that_ends_where_a_backing_starts_is_placed() {
+    let mut b = boxed();
+    let base = b.guest_vm_map(0, 0x10000, true, false);
+    let r = b.guest_vm_map_masked(base - 0x4000, 0x4000, 0, 0, false);
+    assert_eq!(r, Ok(base - 0x4000));
+}
+
+// Ruling T1-float-ceiling: a FIXED map ending at the top of the IPA space must not drag the bump cursor out of it.
+#[test]
+fn a_fixed_map_at_the_top_of_the_ipa_space_leaves_the_cursor_where_anywhere_can_place() {
+    let mut b = boxed();
+    b.guest_mmap(retrace_box::COMMPAGE_IPA, 0x4000, 3, 0x1012).unwrap();
+    let a = b.guest_mmap(0, 0x4000, 3, 0x1002).unwrap();
+    assert!(a < retrace_box::COMMPAGE2_IPA, "{a:#x}");
+}
+
+// A Mach FIXED reservation ending above COMMPAGE2_IPA: the only free space there is none (the commpages
+// answer KERN_NO_SPACE), so the ceiling is pinned by the BSD test above and this one checks the reserve
+// path leaves the cursor alone for a range just below it.
+#[test]
+fn a_fixed_reservation_below_the_ceiling_floats_the_cursor_past_it() {
+    let mut b = boxed();
+    let r = b.guest_vm_reserve_masked(0x7_0000_0000, 0x4000, 0, 0).unwrap();
+    let a = b.guest_vm_reserve(0, 0x4000, true);
+    assert!(a >= r + 0x4000, "{a:#x}");
+}
+
+// Review Minor 1: a plain FIXED request into a hole punched in a reservation is free.
+#[test]
+fn a_fixed_request_into_a_hole_punched_in_a_reservation_is_placed() {
+    let mut b = boxed();
+    let base = b.guest_vm_reserve(0, 0x40000, true);
+    b.guest_munmap(base + 0x10000, 0x4000);
+    assert_eq!(b.guest_vm_map_masked(base + 0x10000, 0x4000, 0, 0, false), Ok(base + 0x10000));
 }

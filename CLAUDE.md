@@ -165,7 +165,7 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
 each asserting the program's output first, exactly one `retrace: unsupported:` line naming the call
 with its docs anchor, exit 4, and a replay ending at the incomplete-recording line; plus bad input
 with exit 2, an incomplete recording refused by `debug` and `gdbserver`, the bug banner's control
-with exit 70, and `RUST_BACKTRACE=1` printing no frames for a wall), `output_e2e` (M51: stderr apart from stdout, both streamed as written and into a reader that goes away, no line of retrace's own on a plain run, `RETRACE_VERBOSE`, and the closing line), `traps_e2e` (M51: `brk`, `udf`, `hlt` and misaligned PC and SP as native's signal, `si_code`, `si_addr` and exit, with and without a handler, under single-step and across a seek; AMX and a trapped system register still walls), `framepush_e2e` (M51 T3-b: an unpushable handler frame, main or child thread, overflowed or bad alternate stack), `envp_e2e` (M51: the program's environment, `RETRACE_*` stripped, replay under another environment, the limit), `sigfidelity_e2e` (M51: `signal()` handlers, signal 0 for a pid and a thread, `abort_with_payload` from main, a thread and dyld), `badptr_e2e` (M51: native's error for a bad pointer, forwarded and emulated, and replay's compare). Run one with
+with exit 70, and `RUST_BACKTRACE=1` printing no frames for a wall), `output_e2e` (M51: stderr apart from stdout, both streamed as written and into a reader that goes away, no line of retrace's own on a plain run, `RETRACE_VERBOSE`, and the closing line), `traps_e2e` (M51: `brk`, `udf`, `hlt` and misaligned PC and SP as native's signal, `si_code`, `si_addr` and exit, with and without a handler, under single-step and across a seek; AMX and a trapped system register still walls), `framepush_e2e` (M51 T3-b: an unpushable handler frame, main or child thread, overflowed or bad alternate stack), `envp_e2e` (M51: the program's environment, `RETRACE_*` stripped, replay under another environment, the limit), `sigfidelity_e2e` (M51: `signal()` handlers, signal 0 for a pid and a thread, `abort_with_payload` from main, a thread and dyld), `badptr_e2e` (M51: native's error for a bad pointer, forwarded and emulated, and replay's compare), `vmfixed_e2e` (M52: a FIXED Mach VM request without OVERWRITE over occupied memory answers `KERN_NO_SPACE` as xnu does, native's own code per private window, the bump cursor floating past every FIXED placement, `mach_vm_copy` as a box-side copy), `threadid_e2e` (M52: each guest thread has its own synthetic id from `thread_selfid`, never forwarded, and the thread-lookup flavor of `proc_pidinfo` refused by value), `semtimed_e2e` (M52: `semaphore_timedwait_trap` with the kernel's count from create to destroy, a destroy waking its waiter with 37, each mode compared with native), `yield_e2e` (M52: `swtch_pri` and `thread_switch` yielding with one clock stride, and every due poll yielding first, so a zero-timeout poller beside a producer does not spin), `mutex_e2e` (M52: firstfit `psynch_mutexwait`/`mutexdrop` as a per-address FIFO with the kernel's word and its prepost, fairshare refused by value), `stall_e2e` (M52: a thread that runs 20 s without blocking while others are ready prints the one stall line, on record only, and the replay of such a recording is pinned as never printing it). Run one with
   `cargo test -p retrace --test <name> -- --test-threads=1`.
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
@@ -212,7 +212,7 @@ are gitignored); build/run recipes and findings are in `spikes/README.md`.
   the trampoline's vector padding without bumping, and a pre-M23 trace then restored its old padding
   under code that assumed the new — M24 bumped for it (to `RT\x00\x09` then; moved again by M38
   for `ret1`, by M47 for the `mach_vm_map` alignment mask, and by M49 for the store-exclusive
-  rewrite and native's `si_code`, and by M51 for `Event::Crash`'s `sig`, so it is `RT\x00\x0d` now).
+  rewrite and native's `si_code`, and by M51 for `Event::Crash`'s `sig`, and by M52 for the synthetic clock's stride, so it is `RT\x00\x0e` now).
   `open_checked` drops a torn/corrupt tail rather than panicking, and since M47 a trace whose header
   is another `RT` version is refused by name ("recorded by a different retrace trace format (not
   torn)") rather than as torn.
@@ -335,7 +335,7 @@ recorded** and no trace-format change — symmetry rule 2 doing its job. Since M
 boundary shows the thread that runs next: `finish_event` settles the switch
 (`Box_::settle_schedule`) instead of leaving it to the next `run()`/`step()` entry. The switch
 reuses the save/restore discipline the PAC signing oracle and `flush_guest_tlb` already
-established. A thread blocks for **six** reasons, and the correlation key is not the same for
+established. A thread blocks for **nine** reasons (`BlockReason`: `Join`, `Wait`, `Sem`, `Parked`, `Kevent`, `Cv`, `Mutex`, `Sleep`, `Yield`), and the correlation key is not the same for
 all of them: `__ulock_wait` (515) / `__ulock_wake` (516) are correlated by **address equality**
 on `pthread + 0x34` — measured in both `__pthread_join` and `__pthread_joiner_wake`, so no
 address→thread-index mapping is needed; the mach semaphore pair `semaphore_wait_trap` (`-36`) / `semaphore_signal_trap`
@@ -348,7 +348,11 @@ guest kqueue (`BlockReason::Kevent`), woken by a knote activation or its deadlin
 `psynch_cvwait` (`BlockReason::Cv`), correlated by the condition variable's **guest address** and
 woken by `cvsignal`/`cvbroad` or its deadline. Since M49 a thread also blocks in
 `__semwait_signal`'s relative-timeout shape (`BlockReason::Sleep`), correlated by **thread** (every
-sleeper shares libc's one `clock_sem`) and woken only by its deadline. Every deadline is on
+sleeper shares libc's one `clock_sem`) and woken only by its deadline. Since M52 `Sem` carries an optional deadline and the box keeps the
+kernel's semaphore count (`Semaphores`, `semaphore_timedwait_trap` -38), `Yield` (`swtch_pri` -59 and
+`thread_switch` -61) has no waker and ends in the settle that blocked it after one clock stride, and
+`Mutex` is a contended `psynch_mutexwait` keyed by the mutex's **guest address** and woken by
+`psynch_mutexdrop`, first waiter first. Every deadline is on
 `synthetic_tsc`,
 `schedule_after_block` makes one idle jump to the earliest of all of them, and a woken thread's
 return is written at the wake (`deliver_wake`). Forwarding `bsdthread_create` would be not merely
@@ -356,13 +360,13 @@ wrong but whole-process fatal (the host would start a real thread on retrace's o
 which PAC-fails on the guest's pthread struct) — and **nothing asserts against it**: the emulating
 arm in `record_box` (`crates/retrace-core/src/lib.rs`) sits before the generic forward arm and that ordering is
 the only guard. The generic arm's asserts are `is_signal_syscall`, the workq pair, `kevent_qos`
-(M45), `writes_via_nested_pointer`, since M47 `madvise` and `fork`, since M48 `kevent` (363)
+(M45), since M52 `thread_selfid` (372), `writes_via_nested_pointer`, since M47 `madvise` and `fork`, since M48 `kevent` (363)
 and every SDK psynch number (`retrace_arch::is_psynch`), and since M49 `__semwait_signal` (334)
 and its `_nocancel` twin (423) only; since M50 both generic arms call
 `retrace_arch::refusal_before_forward`, which ends the recording at a wall for an unrowed number, a
 nested-pointer write or an unmodelled semaphore trap. In the mach arm it is the first statement, so
 the M18 semaphore assert and `forwarded_shape`'s panic are backstops no guest reaches; in the BSD arm
-it sits after the eight "never forwarded" asserts (they guard arms that must exist) and before the M27
+it sits after the nine "never forwarded" asserts (they guard arms that must exist) and before the M27
 assert, which with `forwarded_shape`'s panic is the backstop there; the claim that it
 "asserts" stood here from M14 to M37 and was measured false at M37. Since M45 libdispatch's
 workqueue-kqueue init, `kevent_qos` (374) with `KEVENT_FLAG_WORKQ`, is emulated beside the workq
@@ -414,9 +418,9 @@ does *not* materialise:
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (which bumped
-`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0d`, moved again by M24, then by M38 for
+`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0e`, moved again by M24, then by M38 for
 `ret1`, by M47 for the `mach_vm_map` alignment mask, by M49 for the store-exclusive rewrite and
-native's `si_code`, and by M51 for `Event::Crash`'s `sig`, so every pre-M51 recording is unreadable)
+native's `si_code`, by M51 for `Event::Crash`'s `sig`, and by M52 for the synthetic clock's stride, so every pre-M52 recording is unreadable)
 — and replay recomputes the current thread and compares it. `verify_thread` has **seven** call
 sites, one in each arm that consumes a landmark and `return`s, each placed *after* that arm's own
 field comparison so a genuine argument divergence still reports as itself; the `SignalDelivery`

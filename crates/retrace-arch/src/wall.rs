@@ -171,6 +171,7 @@ fn mach_trap_name(n: i64) -> Option<&'static str> {
         -38 => "semaphore_timedwait_trap",
         -39 => "semaphore_timedwait_signal_trap",
         -59 => "swtch_pri",
+        -61 => "thread_switch",
         -62 => "clock_sleep_trap",
         -90 => "mach_wait_until",
         _ => return None,

@@ -166,8 +166,8 @@ fn synthetic_tsc(state: &str) -> u64 {
 /// that same landmark's settle fires it, because main is already blocked and the manager has just
 /// parked (Review Focus 3). No landmark boundary ever sees the timer armed.
 fn the_idle_jump(trace: &Path) -> usize {
-    // 0x10_0000 ticks is ~44 ms at 24 MHz. A timebase read moves the counter 0x2400 (384 µs), so
-    // this is ~113 reads inside one window. The jump itself is the 100 ms deadline minus the few
+    // 0x10_0000 ticks is ~44 ms at 24 MHz. A timebase read moves the counter 5 ticks (M52; it was
+    // 0x2400 = 384 µs), so one window holds ~200 000 reads' worth of clock, far more than a window makes. The jump itself is the 100 ms deadline minus the few
     // reads between `dispatch_time` and the park.
     const JUMP: u64 = 0x10_0000;
     let mut s = retrace_core::ReplaySession::open(trace).unwrap();

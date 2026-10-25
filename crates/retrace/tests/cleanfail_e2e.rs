@@ -304,10 +304,10 @@ fn a_program_that_pauses_for_a_signal_stops_at_one_clean_line() {
         "sigsuspend (syscall 111) waits for a signal", "signals");
 }
 
-/// `sched_yield()` is the mach trap `swtch_pri`, which has no row.
+/// `symlink` has no row. (M52 §3e made `sched_yield` a modelled call, so this row replaced its wall, C7.)
 #[test]
-fn a_sched_yield_stops_at_one_clean_line() {
-    assert_guest_wall(retrace_guest::CF_WALLS, &["yield"], "cf: yield\n", "swtch_pri (mach trap -59)", "syscalls");
+fn a_symlink_stops_at_one_clean_line() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["symlink"], "cf: symlink\n", "symlink (syscall 57)", "syscalls");
 }
 
 /// D1: every thread blocked with nothing left to wake one. Natively this program hangs forever; under

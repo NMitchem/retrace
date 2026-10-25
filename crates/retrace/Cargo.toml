@@ -21,6 +21,8 @@ retrace-arch = { path = "../retrace-arch" }
 retrace-guest = { path = "../retrace-guest" }
 retrace-trace = { path = "../retrace-trace" }
 retrace-sim = { path = "../retrace-sim" }
+# M52: semtimed_e2e states its timing bounds in the box's own clock stride and tick conversion.
+retrace-box = { path = "../retrace-box" }
 # M10: fdtable_e2e reads recorded events and asks `allocates_fd` which of them produced a
 # descriptor, so the assertion tracks the shared table rather than restating syscall numbers.
 retrace-arch = { path = "../retrace-arch" }

@@ -498,6 +498,16 @@ fn main() {
         .status().expect("clang kq_dyn");
     assert!(status.success(), "kq_dyn guest build failed");
 
+    // stall_dyn: the M52 §3i fixture — main spins on a flag a created thread would set. Same recipe
+    // as hello_dyn; pthreads are in libSystem.
+    let src = format!("{}/c/stall_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/stall_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang stall_dyn");
+    assert!(status.success(), "stall_dyn guest build failed");
+
     // rpath_dyn + librpath_dyn.dylib: the M47 AMFI fixture. The dylib's install name is @rpath/…
     // and the exe's LC_RPATH is @executable_path, so dyld expands @rpath only if AMFI's dyld policy
     // allows it. Both land in OUT_DIR side by side.
@@ -556,6 +566,52 @@ fn main() {
         .status().expect("clang vmalign_dyn");
     assert!(status.success(), "vmalign_dyn guest build failed");
 
+    // vmfixed_dyn: M52 t1 (spec §3b) fixture. Same recipe as hello_dyn.
+    let src = format!("{}/c/vmfixed_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/vmfixed_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang vmfixed_dyn");
+    assert!(status.success(), "vmfixed_dyn guest build failed");
+
+    // tid_dyn: M52 t2 (spec §3c) fixture. Same recipe as hello_dyn.
+    let src = format!("{}/c/tid_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/tid_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang tid_dyn");
+    assert!(status.success(), "tid_dyn guest build failed");
+
+    // hugerealloc_dyn: M52 t1 (spec §3b) fixture. Same recipe as hello_dyn.
+    let src = format!("{}/c/hugerealloc_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/hugerealloc_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang hugerealloc_dyn");
+    assert!(status.success(), "hugerealloc_dyn guest build failed");
+
+    // vmcopy_dyn: M52 t1 (spec §3b) fixture. Same recipe as hello_dyn.
+    let src = format!("{}/c/vmcopy_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/vmcopy_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang vmcopy_dyn");
+    assert!(status.success(), "vmcopy_dyn guest build failed");
+
+    // vecgrow: M52 t1 (spec §3b) — a Vec grown past 2 MiB into an in-place huge chunk (to 24 MiB), then a thread spawn. Same recipe as hello_rust.
+    let src = format!("{}/rs/vecgrow.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/vecgrow");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc vecgrow");
+    assert!(status.success(), "vecgrow guest build failed");
+
     // forkfail_dyn: the M47 fork fixture — fork() with RLIMIT_NPROC lowered to 1; prints the errno.
     // Same recipe as hello_dyn.
     let src = format!("{}/c/forkfail_dyn.c", env!("CARGO_MANIFEST_DIR"));
@@ -577,6 +633,16 @@ fn main() {
         .status().expect("clang condvar_dyn");
     assert!(status.success(), "condvar_dyn guest build failed");
 
+    // mutex_dyn: the M52 §3f contended-mutex fixture — modes two, four, relock, recursive,
+    // errorcheck, cond and fairshare (see its header). Same recipe as condvar_dyn.
+    let src = format!("{}/c/mutex_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/mutex_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang mutex_dyn");
+    assert!(status.success(), "mutex_dyn guest build failed");
+
     // sleep_dyn: the M49 sleep fixture — sleep, usleep and nanosleep on the synthetic clock, two
     // sleepers, a polling loop, a sleep beside a runnable thread, a signalled sleeper and the refused
     // shapes, by mode (see its header). Same recipe as condvar_dyn; the raw `__semwait_signal` stubs
@@ -588,6 +654,50 @@ fn main() {
         .args(["-arch","arm64","-o",&bin,&src])
         .status().expect("clang sleep_dyn");
     assert!(status.success(), "sleep_dyn guest build failed");
+
+    // semtimed_dyn: the M52 semaphore fixture — semaphore_timedwait and the kernel's count (a signal
+    // with no waiter, a create's initial value, a destroy under a waiter), by mode (see its header).
+    // Same recipe as sleep_dyn.
+    let src = format!("{}/c/semtimed_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/semtimed_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang semtimed_dyn");
+    assert!(status.success(), "semtimed_dyn guest build failed");
+
+    // yield_dyn: the M52 yield fixture — sched_yield, pthread_yield_np, thread_switch and the zero-timeout
+    // polls that would spin, by mode (see its header). Same recipe as sleep_dyn.
+    let src = format!("{}/c/yield_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/yield_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang yield_dyn");
+    assert!(status.success(), "yield_dyn guest build failed");
+
+    // yieldspin: M52 §3e — a full-std Rust binary whose child yields ten times and then parks with a
+    // timeout while main waits 60 s on a channel. Same rustc recipe as watchthread.
+    let src = format!("{}/rs/yieldspin.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/yieldspin");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
+        .status().expect("rustc yieldspin");
+    assert!(status.success(), "yieldspin guest build failed");
+
+    // clockreads: M52 §3h — a full-std Rust binary that reads Instant::now() 4 000 000 times and
+    // prints whether its own first and last readings are under one second apart. Same rustc recipe
+    // as yieldspin.
+    let src = format!("{}/rs/clockreads.rs", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/clockreads");
+    println!("cargo:rerun-if-changed={src}");
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let status = Command::new(rustc)
+        .args(["--target", "aarch64-apple-darwin", "-O", "-o", &bin, &src])
+        .status().expect("rustc clockreads");
+    assert!(status.success(), "clockreads guest build failed");
 
     // closewrite_dyn: the M37 console-close fixture — closes fd 1 and fd 2, then writes to each;
     // exits 0 only if both writes are EBADF. Same recipe as hello_dyn.
@@ -1018,7 +1128,8 @@ fn main() {
             .status().expect("clang first-contact fixture");
         assert!(status.success(), "{name} guest build failed");
     }
-    for name in ["fc_cpp_hello", "fc_cpp_throw", "fc_cpp_terminate", "fc_cpp_thread", "fc_cpp_sleep"] {
+    for name in ["fc_cpp_hello", "fc_cpp_throw", "fc_cpp_terminate", "fc_cpp_thread", "fc_cpp_sleep",
+                 "mutex_cpp"] {
         let src = format!("{dir}/cpp/{name}.cpp");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");
@@ -1027,12 +1138,12 @@ fn main() {
             .status().expect("clang++ first-contact fixture");
         assert!(status.success(), "{name} guest build failed");
     }
-    // Rust takes the hello_rust recipe (cargo's own RUSTC, plain aarch64-apple-darwin). The two
+    // Rust takes the hello_rust recipe (cargo's own RUSTC, plain aarch64-apple-darwin). The three
     // harnesses are `rustc --test` builds, which firstcontact_e2e runs with no arguments, as `cargo
     // test` runs the binary it builds.
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     for (name, harness) in [("fc_rs_null", false), ("fc_rs_sleep", false),
-                            ("fc_rs_tests", true), ("fc_rs_tests_fail", true)] {
+                            ("fc_rs_tests", true), ("fc_rs_tests_fail", true), ("fc_rs_threads", true)] {
         let src = format!("{dir}/rs/{name}.rs");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");

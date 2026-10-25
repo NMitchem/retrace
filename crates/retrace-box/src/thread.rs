@@ -81,7 +81,11 @@ pub enum BlockReason {
     ///
     /// Numeric collision with a `Wait` address is possible and harmless: the variants are distinct,
     /// so `unblock_waiters_on` and `unblock_sem_waiters_on` cannot wake each other's sleepers.
-    Sem { port: u64 },
+    ///
+    /// M52 §3d: `deadline` is `None` for `semaphore_wait_trap` (-36) and a guest-clock value, in
+    /// `Kevent`'s domain, for `semaphore_timedwait_trap` (-38), which `Box_::sem_timed_out` answers
+    /// `KERN_OPERATION_TIMED_OUT`. A signal or a destroy ends either wait first.
+    Sem { port: u64, deadline: Option<u64> },
     /// M18 Stage 2b: a workqueue worker parked in `workq_kernreturn(0x4)`, waiting for the kernel
     /// to hand it more work.
     ///
@@ -112,6 +116,11 @@ pub enum BlockReason {
     /// it (`Box_::guest_psynch`), or at `deadline`, a guest-clock value in `Kevent`'s domain, which
     /// is `None` for an untimed wait (`Box_::cv_timed_out`).
     Cv { addr: u64, deadline: Option<u64> },
+    /// M52 §3f: blocked in `psynch_mutexwait` on the mutex at guest address `addr`, for the reason
+    /// `Cv`'s key is an address: the kernel keys a private mutex's wait queue by it, and so does
+    /// `psynch.rs`. Never timed. Woken by a `psynch_mutexdrop` the port says reaches it
+    /// (`Box_::guest_psynch`), in queue order, with the word the drop computed.
+    Mutex { addr: u64 },
     /// M49 §3f S3: asleep in `__semwait_signal`'s relative-timeout shape until `deadline`, a
     /// guest-clock value in `Kevent`'s domain (R6). **Keyed by thread, not by port**: every sleeper
     /// passes libc's one `clock_sem`, so a port key would make every sleeper one waiter. Nothing
@@ -120,6 +129,10 @@ pub enum BlockReason {
     /// on one an admitted sleep used (`SleepModel::check_sleep_semaphore`, Ruling T5-I2). So the
     /// deadline is the only wake (`Box_::sleep_timed_out`), and a sleep always has one.
     Sleep { deadline: u64 },
+    /// M52 §3e: the thread yielded (`swtch_pri` -59, `thread_switch` -61). Blocked only for the
+    /// instant between the trap and the settle that ends it (`ThreadTable::end_yield`, called by
+    /// `Box_::schedule_after_block`), so it carries nothing and no other event can see it.
+    Yield,
 }
 
 impl BlockReason {
@@ -128,10 +141,11 @@ impl BlockReason {
     /// primitive must say here whether it carries one.
     pub fn deadline(&self) -> Option<u64> {
         match *self {
-            BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. } => deadline,
+            BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. }
+            | BlockReason::Sem { deadline, .. } => deadline,
             BlockReason::Sleep { deadline } => Some(deadline),
-            BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Sem { .. }
-            | BlockReason::Parked => None,
+            BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Parked | BlockReason::Yield
+            | BlockReason::Mutex { .. } => None,
         }
     }
 }
@@ -145,8 +159,14 @@ pub enum ThreadState {
     Exited(u64),
 }
 
+/// M52 §3c: the synthetic id `thread_selfid` answers for the main thread. Natively ids run around
+/// 49 490 000; any nonzero constant serves, and this one is plainly not a host id.
+pub const MAIN_THREAD_ID: u64 = 0x10_0000;
+
 #[derive(Clone, Debug)]
 pub struct Thread {
+    /// M52 §3c: this thread's `thread_selfid`, assigned at creation, never reused.
+    pub id: u64,
     pub ctx: ThreadCtx,
     pub state: ThreadState,
     /// `(base, len)` of the guest-allocated stack. The guest maps its own thread stacks, so M14
@@ -175,6 +195,8 @@ pub struct Thread {
 pub struct ThreadTable {
     threads: Vec<Thread>,
     current: usize,
+    /// M52 §3c: the id the next `spawn` assigns; an exited thread's id is never reused.
+    next_id: u64,
 }
 
 impl ThreadTable {
@@ -183,6 +205,7 @@ impl ThreadTable {
     pub fn new(main: ThreadCtx) -> Self {
         Self {
             threads: vec![Thread {
+                id: MAIN_THREAD_ID,
                 ctx: main,
                 state: ThreadState::Runnable,
                 stack: (0, 0),
@@ -193,10 +216,12 @@ impl ThreadTable {
                 sprr: 0,
             }],
             current: 0,
+            next_id: MAIN_THREAD_ID + 1,
         }
     }
 
     pub fn current(&self) -> usize { self.current }
+    pub fn id_of(&self, tid: usize) -> u64 { self.threads[tid].id }
     pub fn len(&self) -> usize { self.threads.len() }
     pub fn is_empty(&self) -> bool { self.threads.is_empty() }
     pub fn state_of(&self, tid: usize) -> ThreadState { self.threads[tid].state }
@@ -350,7 +375,10 @@ impl ThreadTable {
     /// alternate stack is NOT inherited — a new thread starts with none.
     pub fn spawn(&mut self, ctx: ThreadCtx, stack: (u64, u64)) -> usize {
         let mask = self.threads[self.current].mask;
+        let id = self.next_id;
+        self.next_id += 1;
         self.threads.push(Thread {
+            id,
             ctx,
             state: ThreadState::Runnable,
             stack,
@@ -468,7 +496,7 @@ impl ThreadTable {
     pub fn unblock_sem_waiters_on(&mut self, port: u64) -> Vec<usize> {
         let mut woken = Vec::new();
         for (tid, t) in self.threads.iter_mut().enumerate() {
-            if let ThreadState::Blocked(BlockReason::Sem { port: p }) = t.state {
+            if let ThreadState::Blocked(BlockReason::Sem { port: p, .. }) = t.state {
                 if p == port {
                     t.state = ThreadState::Runnable;
                     woken.push(tid);
@@ -476,6 +504,14 @@ impl ThreadTable {
             }
         }
         woken
+    }
+
+    /// M52 §3d: every thread blocked on the mach semaphore `port`, timed or not, in table order. Pure.
+    pub fn sem_waiters_on(&self, port: u64) -> Vec<usize> {
+        self.threads.iter().enumerate()
+            .filter(|(_, t)| matches!(t.state, ThreadState::Blocked(BlockReason::Sem { port: p, .. }) if p == port))
+            .map(|(tid, _)| tid)
+            .collect()
     }
 
     /// M48 §3c–§3d: make `tid`, blocked in a timed-wait primitive, runnable. Its caller writes the
@@ -496,11 +532,20 @@ impl ThreadTable {
                  as blockedctx.rs does for __ulock_wait, before modelling it.");
         }
         assert!(matches!(self.threads[tid].state,
-                ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. })),
-            "M48: wake of thread {tid}, which is {:?}, not blocked in a timed-wait primitive",
+                ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. }
+                    | BlockReason::Sem { .. } | BlockReason::Mutex { .. })),
+            "M48: wake of thread {tid}, which is {:?}, not blocked in a psynch, kevent, sleep or semaphore wait",
             self.threads[tid].state);
         self.threads[tid].state = ThreadState::Runnable;
         Ok(())
+    }
+
+    /// M52 §3e: end `tid`'s yield, making it runnable again. Called by `Box_::schedule_after_block`
+    /// in the settle that blocked it, so a yield is never observable as a blocked thread.
+    pub fn end_yield(&mut self, tid: usize) {
+        assert_eq!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Yield),
+            "M52: end_yield of thread {tid}, which is {:?}, not yielding", self.threads[tid].state);
+        self.threads[tid].state = ThreadState::Runnable;
     }
 
     /// M48 §3d: every blocked thread whose deadline `now` has reached, in deadline order with ties
@@ -542,6 +587,19 @@ impl ThreadTable {
         self.threads.iter().position(|t| matches!(t.state, ThreadState::Runnable))
     }
 
+    /// M52 §3i: the runnable threads other than `cur`, ascending. The stall line names them.
+    pub fn runnable_except(&self, cur: usize) -> Vec<usize> {
+        (0..self.threads.len()).filter(|&i| i != cur && matches!(self.threads[i].state, ThreadState::Runnable)).collect()
+    }
+
+    /// Final-review I3: the threads other than `cur` blocked with a deadline (`Sleep`, and `Sem`, `Cv`
+    /// and `Kevent` with a timeout), ascending. They become runnable only in `wake_due_threads`, which a
+    /// spinner that never blocks does not reach, so the stall line names them beside the ready ones.
+    pub fn timed_blocked_except(&self, cur: usize) -> Vec<usize> {
+        (0..self.threads.len()).filter(|&i| i != cur
+            && matches!(&self.threads[i].state, ThreadState::Blocked(r) if r.deadline().is_some())).collect()
+    }
+
     /// M49 Ruling T5-I1: the next runnable thread AFTER `tid` in index order, wrapping around, with
     /// `tid` itself last. `Box_::schedule_after_block` picks with this, not `pick_next`, when `tid`'s
     /// sleep was due in the very settle that blocked it: a poller on a 0-tick sleep is the
@@ -556,6 +614,20 @@ impl ThreadTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_thread_gets_a_distinct_id_never_reused() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        assert_eq!(t.id_of(0), MAIN_THREAD_ID);
+        let a = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        let b = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        let c = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        assert_eq!((t.id_of(a), t.id_of(b), t.id_of(c)), (MAIN_THREAD_ID + 1, MAIN_THREAD_ID + 2, MAIN_THREAD_ID + 3));
+        t.switch_to(b);
+        t.exit_current(0);
+        let d = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        assert_eq!(t.id_of(d), MAIN_THREAD_ID + 4, "an exited thread's id is not reused");
+    }
 
     #[test]
     fn a_spawned_thread_inherits_the_creators_mask_by_value() {
@@ -750,6 +822,22 @@ mod tests {
         t.switch_to(1);
         t.block(BlockReason::Wait { addr: 8 });
         assert_eq!(t.pick_after(2), Some(2), "the poller itself only when nothing else can run");
+    }
+
+    // M52 §3e: a yield ends in the settle that blocked it, and the pick after it is another runnable
+    // thread, wrapping, with the yielder itself last.
+    #[test]
+    fn a_yield_ends_in_the_settle_that_blocked_it() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        let child = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        t.block(BlockReason::Yield);
+        assert!(t.needs_reschedule(), "a yielder is not runnable until its settle");
+        t.end_yield(0);
+        assert_eq!(t.state_of(0), ThreadState::Runnable);
+        assert_eq!(t.pick_after(0), Some(child), "another runnable thread runs first, though main is lowest");
+        t.switch_to(child);
+        t.exit_current(0);
+        assert_eq!(t.pick_after(0), Some(0), "a sole yielder picks itself");
     }
 
     #[test]

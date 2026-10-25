@@ -16,7 +16,9 @@ pub mod jit;
 pub mod gkq;
 pub mod psynch;
 pub mod sleep;
+pub mod sema;
 mod excl;
+pub mod stall;
 pub use excl::{Excl, SetBy};
 /// M49 §3e: the store-exclusive rewrite (X1, X2), applied where the box stages code (X3).
 mod xrewrite;
@@ -203,11 +205,36 @@ pub const TSD_IPA: u64 = 0x0003_0000;
 const TSD_REGION_BASE: u64 = 0x0002_8000; // 0x8000 below tp
 const TSD_REGION_SIZE: u64 = 0x0001_0000; // 4 granules; tp = TSD_IPA sits 0x8000 into it
 // Deterministic synthetic timebase: an emulated timebase MRS (Apple fast counter / CNTVCT)
-// returns SYNTH_TSC_START + k*SYNTH_TSC_STRIDE for the k-th read. Identical on record & replay
+// advances SYNTH_TSC_START by SYNTH_TSC_STRIDE per read (yields and idle jumps move it too). Identical on record & replay
 // (both re-execute the same reads from the same entry), so timing dyld folds into memory can't
 // diverge. Monotonic and nonzero so a delta is always positive.
 const SYNTH_TSC_START:  u64 = 0x0000_0001_0000_0000;
-const SYNTH_TSC_STRIDE: u64 = 0x2400; // ~ one 24 MHz-ish tick step per read (value is arbitrary)
+/// What one emulated timebase read moves the synthetic clock, in ticks of the guest's 24 MHz timebase:
+/// 5, about 208 ns. M52 §3h, C9's rule: no measured binary's guest time may outrun its native wall
+/// time. The binding row is memchr's test suite under `--test-threads=1`, 23 459 070 reads against
+/// 5.759 s native (min of 7; re-timed alone at 5.87-6.00 s), so the largest admissible stride is
+/// `floor(5.759 * 24e6 / 23 459 070) = 5`; at 5 its guest time is 4.89 s. Every other measured binary
+/// has at least 4.6x headroom (rand 23, serde 32, builder 35, the rest 64 or more). It was 0x2400 =
+/// 9216 ticks (about 384 us), which made a suite that reads the clock often see time run hundreds of
+/// times fast (libtest's "running for over 60 seconds" warning).
+///
+/// The safer error (spec §3h): a smaller stride undercounts the time compute takes between reads, so
+/// a timeout fires later than native's on the monotonic clock, never earlier. The cost: a guest that busy-waits on the
+/// clock makes one VM exit per 5 ticks, so a 100 ms wait is about 480 000 reads, roughly 0.5 s of
+/// host time. That is the documented speed limit, and §3h says speed never overrides the rule.
+pub const SYNTH_TSC_STRIDE: u64 = 5;
+
+/// M52 §3i: how long a thread may run without blocking, while others are ready, before the
+/// recorder names it on stderr.
+pub const STALL_AFTER_SECS: u64 = 20;
+
+extern "C" { fn mach_absolute_time() -> u64; }
+
+/// The host clock, for the stall watch alone. Control-plane only: the value never reaches the
+/// trace, a guest register or guest memory, and it decides only whether one stderr line prints,
+/// on record (the founding design's vtimer row). `clippy.toml` bans `Instant::now`; this call is
+/// the one deliberate, documented exception. Replay has no stall watch and never calls it.
+fn host_ticks() -> u64 { unsafe { mach_absolute_time() } }
 
 pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (one level below the L1 TTBR0 target); one 16 KiB page = 2048 entries
 pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under the 47-bit VA); one
@@ -692,6 +719,9 @@ pub struct Box_ {
     /// It holds a `Vec`, so it has Drop, but it is declared after `vcpu`/`vm`, so the load-bearing
     /// vcpu-before-vm drop order is unaffected.
     excl: Option<Excl>,
+    /// M52 §3i: the stall watch. Control-plane and record-only, so it is in no `BoxState`: only
+    /// `watch_for_stalls` sets it, and replay never calls that.
+    stall: Option<stall::StallWatch>,
     /// M48 §3c (K1): the guest's own kqueues and its pipes' byte counts. Box state, not trace state:
     /// record and replay rebuild it from the guest's own syscalls, and every rebuild path carries it
     /// (`BoxState`). Declared after `vcpu`/`vm`, so the drop order is unaffected.
@@ -710,12 +740,23 @@ pub struct Box_ {
     /// guest's own calls and carried through every rebuild path (`BoxState`). Declared after
     /// `vcpu`/`vm`, so the drop order is unaffected.
     sleep: sleep::SleepModel,
+    /// M52 §3d: the kernel's count for each mach semaphore the guest created, and the names a destroy
+    /// killed (`sema.rs`). Box state, rebuilt on both sides from the guest's own calls and carried
+    /// through every rebuild path (`BoxState`).
+    sems: sema::Semaphores,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
 /// on macOS 26. **The kernel writes this during `bsdthread_create`, and `pthread_join` is unusable
 /// without it** — see `Box_::guest_bsdthread_create` for the disassembly and the host probe.
 const PTHREAD_KPORT_OFF: u64 = 0xf8;
+
+/// M52 §3c: offset of the thread id inside `pthread` (`pthread_threadid_np(NULL)` loads
+/// `[TPIDRRO_EL0 - 0xe0 + 0xd8]` with no syscall; `_pthread_start` stores `thread_selfid`'s result
+/// there for a child). Main's struct is the TSD page's, `TSD_IPA - 0xe0`, and nothing writes its
+/// field (t0 M4: a watch over a whole recording saw no store), so `load_dynamic` writes
+/// `MAIN_THREAD_ID` into it before the first snapshot.
+const PTHREAD_TID_OFF: u64 = 0xd8;
 
 /// M48 §3c: `kqueue` and the `writev` pair (SDK `sys/syscall.h`), which `Box_::note_fd_effects`
 /// reads. `writev` is forwarded (its row is `NestedSource`), so its return moves a pipe's count as
@@ -1223,6 +1264,10 @@ pub struct BoxState {
     // `clock_get_time` would be refused on replay though the recording accepted it (sleep_e2e's seek
     // test; box test `sleep.rs`).
     pub sleep: sleep::SleepModel,
+    // M52 §3d: carried because a mid-run capture cannot re-derive it: the creates and signals
+    // happened behind the checkpoint. Dropped, a seek past a counted signal would restore a wait
+    // that blocks where the kernel's count would have let it through (semtimed_e2e's seek test).
+    pub sems: sema::Semaphores,
 }
 
 /// M40: bytes of guest backing currently mapped by `alloc_pages` and not yet released — a
@@ -1816,7 +1861,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default() }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), stall: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -2561,7 +2606,12 @@ impl Box_ {
         }
         // Thread-pointer TSD region (see TSD_IPA): a zeroed region spanning below+above the thread
         // pointer (TPIDRRO_EL0 = TSD_IPA sits in its middle) so both TSD-key and pthread-field accesses land in it.
-        map(&vm, &mut backings, TSD_REGION_BASE, &[], TSD_REGION_SIZE as usize);
+        // M52 §3c: main's thread id sits in this region's pthread struct, written before the first
+        // snapshot so record and replay both restore it.
+        let tid_at = (TSD_IPA - 0xe0 + PTHREAD_TID_OFF - TSD_REGION_BASE) as usize;
+        let mut tsd_init = vec![0u8; tid_at + 8];
+        tsd_init[tid_at..].copy_from_slice(&thread::MAIN_THREAD_ID.to_le_bytes());
+        map(&vm, &mut backings, TSD_REGION_BASE, &tsd_init, TSD_REGION_SIZE as usize);
 
         // The main executable's mach-header address (dyld4's KernelArgs.mainExecutable): the exe
         // segment whose bytes begin with MH_MAGIC_64. dyld dereferences this to parse the main exe.
@@ -2614,7 +2664,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), stall: None };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -2688,8 +2738,41 @@ impl Box_ {
     /// fix); otherwise map at the requested `addr` (MAP_FIXED-like). `exec` promotes the region to
     /// RO+exec. Returns the chosen IPA. Deterministic: identical call sequence => identical IPAs on
     /// replay.
+    ///
+    /// `anywhere == false` means FIXED|OVERWRITE here, which never refuses: the box-internal callers
+    /// replace what they cover. A guest's FIXED request goes through `guest_vm_map_masked` with its flags.
     pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
-        self.guest_vm_map_masked(addr, size, 0, anywhere, exec)
+        let flags = if anywhere { retrace_arch::VM_FLAGS_ANYWHERE } else { retrace_arch::VM_FLAGS_OVERWRITE };
+        self.guest_vm_map_masked(addr, size, 0, flags, exec).expect("ANYWHERE and FIXED|OVERWRITE never refuse")
+    }
+
+    /// Ruling T1-float-ceiling: float `mmap_next` past a FIXED range only when its granule-rounded end is at
+    /// or below `COMMPAGE2_IPA`; the bump region ends below the box's high windows, so a cursor past them can
+    /// only produce a placement that fails.
+    fn float_cursor_past(&mut self, addr: u64, len: u64) {
+        let g = GRANULE as u64;
+        let end = addr.saturating_add(len).saturating_add(g - 1) & !(g - 1);
+        if end <= COMMPAGE2_IPA { self.mmap_next = self.mmap_next.max(end); }
+    }
+
+    /// M52 §3b (t0 M2, Ruling T0-M2): what xnu answers a FIXED request without `VM_FLAGS_OVERWRITE`.
+    /// Checked in this order, before anything is allocated. A start below 4 GiB is `KERN_INVALID_ADDRESS`
+    /// (`__PAGEZERO` and the box's own low windows). The shared-region window, either commpage page, and
+    /// any backing or reservation the page-rounded range overlaps are `KERN_NO_SPACE`; adjacency is free
+    /// (half-open intervals). Free is `Ok`; a range past the 36-bit IPA keeps `place_fixed`'s wall (R3).
+    fn fixed_answer(&self, addr: u64, size: u64) -> Result<(), u64> {
+        let g = GRANULE as u64;
+        let end = addr.saturating_add(size).saturating_add(g - 1) & !(g - 1);
+        let (lo, hi) = (addr & !(g - 1), end.max(addr & !(g - 1)));
+        if addr < 1 << 32 { return Err(retrace_arch::KERN_INVALID_ADDRESS); }
+        let hits = |s: u64, e: u64| lo < e && s < hi;
+        if hits(SHARED_REGION_START, SHARED_REGION_END)
+            || hits(COMMPAGE_IPA, COMMPAGE_IPA + g) || hits(COMMPAGE2_IPA, COMMPAGE2_IPA + g)
+            || self.backings.iter().any(|b| hits(b.ipa, b.ipa + b.len as u64))
+            || self.reservations.iter().any(|&(s, l)| hits(s, s + l)) {
+            return Err(retrace_arch::KERN_NO_SPACE);
+        }
+        Ok(())
     }
 
     /// `guest_vm_map` with `mach_vm_map`'s alignment `mask`: an ANYWHERE placement returns an
@@ -2706,7 +2789,12 @@ impl Box_ {
     /// only for a nonzero mask, and `first_fit` with `GRANULE - 1` is the old granule rounding.
     /// FIXED ignores `mask`: `vm_map_enter` checks a FIXED address against it rather than choosing
     /// one, every measured masked call is ANYWHERE, and that check is not modelled.
-    pub fn guest_vm_map_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool, exec: bool) -> u64 {
+    ///
+    /// M52 §3b: `flags` are the guest's `vm_flags`. A FIXED request without `VM_FLAGS_OVERWRITE` is
+    /// answered by `fixed_answer` before anything is allocated; `Err` is the `kern_return_t`.
+    pub fn guest_vm_map_masked(&mut self, addr: u64, size: u64, mask: u64, flags: u64, exec: bool) -> Result<u64, u64> {
+        let anywhere = flags & retrace_arch::VM_FLAGS_ANYWHERE != 0;
+        if !anywhere && flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(addr, size)?; }
         let (host, rlen) = alloc_pages(size as usize);
         let m = mask | (GRANULE as u64 - 1);
         let ipa = if anywhere {
@@ -2735,21 +2823,26 @@ impl Box_ {
                 }
             }
         } else {
-            // FIXED (dyld/libmalloc often pass VM_FLAGS_OVERWRITE): the guest may be replacing a
-            // region it previously bump-allocated, so classify the overlap exactly as the BSD mmap
+            // FIXED|OVERWRITE (a plain FIXED over occupied memory was answered above, M52 §3b; t0 found
+            // the old "dyld/libmalloc often pass OVERWRITE" claim here unmeasured): the guest may be
+            // replacing a region it previously bump-allocated, so classify the overlap exactly as the BSD mmap
             // path does — `place_fixed` is shared with `map_mmap_region`. A request CONTAINED in a
             // live backing reuses it in place and is already complete (returning early is safe: on
             // that path `place_fixed` itself promotes-and-flushes when `exec` is set — M9 — so the
             // `set_region_exec` below, which never runs on this path, is already done). Anything
             // else leaves the range clear for the fresh stage-2 map, which hv_vm_map would otherwise
             // reject for overlapping.
-            if let Some(a) = self.place_fixed(host, rlen, addr, exec) { return a; }
+            if let Some(a) = self.place_fixed(host, rlen, addr, exec) {
+                self.float_cursor_past(a, rlen as u64);
+                return Ok(a);
+            }
+            self.float_cursor_past(addr, rlen as u64);
             addr
         };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (guest_vm_map)");
         self.backings.push(Backing { host, ipa, len: rlen });
         if exec { self.set_region_exec(ipa, size); }
-        ipa
+        Ok(ipa)
     }
 
     /// Service a PROT_NONE address-space RESERVATION (mach_vm_map with cur_protection == 0):
@@ -2760,12 +2853,16 @@ impl Box_ {
     /// fresh deterministic bump address (advancing `mmap_next` so nothing later collides).
     /// Deterministic: identical call sequence => identical returned address on replay.
     pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
-        self.guest_vm_reserve_masked(addr, size, 0, anywhere)
+        let flags = if anywhere { retrace_arch::VM_FLAGS_ANYWHERE } else { retrace_arch::VM_FLAGS_OVERWRITE };
+        self.guest_vm_reserve_masked(addr, size, 0, flags).expect("ANYWHERE and FIXED|OVERWRITE never refuse")
     }
 
     /// `guest_vm_reserve` with `mach_vm_map`'s alignment `mask`, honoured on ANYWHERE as
     /// `guest_vm_map_masked` honours it: `mask == 0` and FIXED place exactly as before.
-    pub fn guest_vm_reserve_masked(&mut self, addr: u64, size: u64, mask: u64, anywhere: bool) -> u64 {
+    /// M52 §3b: `flags` as in `guest_vm_map_masked`; a plain FIXED over occupied memory is `Err(kr)`.
+    pub fn guest_vm_reserve_masked(&mut self, addr: u64, size: u64, mask: u64, flags: u64) -> Result<u64, u64> {
+        let anywhere = flags & retrace_arch::VM_FLAGS_ANYWHERE != 0;
+        if !anywhere && flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(addr, size)?; }
         // Page-granular extent: commit_reserved_page backs whole pages, so track whole pages.
         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
         let base = if anywhere {
@@ -2784,20 +2881,34 @@ impl Box_ {
             self.mmap_next = end;
             a
         } else {
-            // Defensive: if the bump cursor sits inside a FIXED reservation, jump it past the
-            // reserved band so no later ANYWHERE bump can hand out an IPA the guest believes is
-            // its private reserved range. (With MMAP_BASE above the nano band this never fires for
-            // that band, but it keeps guest_vm_reserve sound for any FIXED reservation.)
-            let end = addr.saturating_add(size);
-            if self.mmap_next >= addr && self.mmap_next < end {
-                self.mmap_next = end;
-            }
+            // M52 §3b: the cursor floats past every FIXED reservation, not only one it sits inside,
+            // so no later ANYWHERE bump hands out an IPA the guest believes is its reserved range.
+            self.float_cursor_past(addr, rounded);
             addr
         };
         // Record the extent so commit_reserved_page can demand-commit its pages on first touch.
         // Deterministic: the same call sequence records the same (base, rounded) on record & replay.
         self.reservations.push((base, rounded));
-        base
+        Ok(base)
+    }
+
+    /// M52 §3b (t0 M3): `mach_vm_copy(src, size, dst)` as a box-side copy, returning the `kern_return_t`.
+    /// An unreadable source or an unwritable destination is `KERN_INVALID_ADDRESS`, as measured natively
+    /// (never `KERN_PROTECTION_FAILURE`), and nothing is written. The source is read whole before the
+    /// destination is written, so an overlapping copy is a memmove. Size 0 copies nothing; an unaligned
+    /// size copies exactly its bytes. A reserved, never-touched source page reads as zeros
+    /// (`read_va_checked`), and a reserved destination page is committed by `prepare_reply`.
+    ///
+    /// Named limit: a `PROT_READ` destination answers 1 natively but is not enforced here (M51 C1).
+    /// Deterministic: a pure function of guest state, so replay recomputes it and nothing is recorded.
+    pub fn guest_vm_copy(&mut self, src: u64, size: u64, dst: u64) -> u64 {
+        if size == 0 { return 0; }
+        let Some(bytes) = usize::try_from(size).ok().and_then(|n| self.read_va_checked(src, n)) else {
+            return retrace_arch::KERN_INVALID_ADDRESS;
+        };
+        if !self.prepare_reply(dst, bytes.len()) { return retrace_arch::KERN_INVALID_ADDRESS; }
+        self.write_va_committing(dst, &bytes).expect("prepare_reply admitted every page of the destination");
+        0
     }
 
     /// The live L3 descriptor for `va`'s page, or None if its 32 MiB block is still an
@@ -2824,6 +2935,17 @@ impl Box_ {
             .expect("write_l3_desc: promoted L3 table backing not found");
         let l3 = unsafe { std::slice::from_raw_parts_mut(host as *mut u64, 2048) };
         l3[((va % BLK) / GRANULE as u64) as usize] = desc;
+    }
+
+    /// M52 final-review I1: both dispatch arms call this. A FIXED request without
+    /// `VM_FLAGS_OVERWRITE` is answered by `fixed_answer` before anything is aliased, as
+    /// `mach_vm_map` is (measured natively: `kr=3` and the old bytes survive); `Err` is the
+    /// `kern_return_t`. With `OVERWRITE` (libffi's shape) the target is replaced.
+    pub fn guest_vm_remap_checked(&mut self, target: u64, size: u64, src: u64, flags: u64)
+        -> Result<(u64, u32, u32), u64>
+    {
+        if flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(target, size)?; }
+        Ok(self.guest_vm_remap(target, size, src))
     }
 
     /// mach_vm_remap (4813), shared (`copy == FALSE`), at a FIXED target: alias `size` bytes at
@@ -3036,7 +3158,10 @@ impl Box_ {
             }
             return Some(addr);
         }
-        // Case 3: overlaps something but is neither contained nor covering.
+        // Case 3: overlaps something but is neither contained nor covering. Reached by a FIXED|OVERWRITE
+        // straddle only: a plain FIXED over a backing was answered KERN_NO_SPACE before it got here
+        // (M52 §3b), and the BSD path's MAP_FIXED replaces by definition. t0 found the old claim that
+        // no guest exercises it unmeasured; the wall stays for a genuine OVERWRITE straddle.
         retrace_arch::refuse!(Memory, "FIXED map at {addr:#x}..{end:#x} partially straddles a live backing: splitting a \
                 backing is unimplemented (no guest exercises it) and dropping it wholesale would \
                 destroy guest memory the kernel keeps");
@@ -3194,10 +3319,13 @@ impl Box_ {
             // contained request is silently left accessible. (Measured in Task 2: libstd's guard is
             // NOT installed this way — it mmaps RW MAP_FIXED and then mprotects — so this path is
             // covered for completeness, not because a live gate takes it.)
+            // M52 §3b: the cursor floats past every FIXED placement, at both exits.
             if let Some(a) = self.place_fixed(host, rlen, addr, prot & Self::PROT_EXEC != 0) {
+                self.float_cursor_past(addr, rlen as u64);
                 if prot == 0 { self.protect_none(a, rlen as u64); }
                 return Ok(a);
             }
+            self.float_cursor_past(addr, rlen as u64);
             addr
         } else { self.mmap_next };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
@@ -3445,6 +3573,7 @@ impl Box_ {
             // a native stop cannot infer a load-exclusive at or before a point after it.
             let entry_pc = self.pc();
             let e = self.vcpu.run().expect("hv_vcpu_run");
+            self.check_stall();
             if e.reason != EXIT_EXCEPTION { self.note_exit(false); continue; } // vtimer/canceled: control-plane only
             match ec_of(e.syndrome) {
                 Ec::Hvc => {
@@ -4029,7 +4158,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default() };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), stall: None };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -6247,7 +6376,15 @@ impl Box_ {
         }
         // 6. None found: poll, or block.
         let deadline = match timeout {
-            Some((0, 0)) => return Ok((0, false)),
+            // M52 §3e (R7): a {0, 0} poll that found nothing blocks with a due deadline, like any
+            // other timeout, so the settle that woke it yields to the thread it polls for. Returning
+            // at once handed the CPU straight back to the poller. A thread with a signal pending still
+            // returns at once: its timed wake would be K8's refusal (`ThreadTable::wake`).
+            // `pending` counts masked signals too, so a poller with a MASKED pending signal keeps the old
+            // spin shape (reachable; a livelock beside a producer, reported in the t4 fix round).
+            Some((0, 0)) if self.threads.pending_of(self.threads.current()) != 0 => return Ok((0, false)),
+            // Deadline 0 is due at any clock, so the poll reads no clock of its own.
+            Some((0, 0)) => Some(0),
             None => None,
             // F6: 24 MHz, so ns * 3 / 125 ticks, truncating. 1 ns is 0 ticks, so node's 1 ns wait is
             // due as it blocks, and this landmark's own settle wakes it (§11b item 8).
@@ -6347,6 +6484,11 @@ impl Box_ {
     /// `M48: psynch …` (T5-d) or `M48: a signal is pending on thread …` (T5-e), raised before the
     /// model or the thread table changes. Both dispatch arms call this with the same `(num, args)`
     /// (symmetry rule 1), and nothing is recorded (R3): every word is a pure function of box state.
+    ///
+    /// M52 §3f adds the firstfit mutex pair: a `psynch_mutexwait` that queues blocks as
+    /// `BlockReason::Mutex` (its answer, like a `cvwait`'s, comes at the wake), and a
+    /// `psynch_mutexdrop` answers 0 and wakes the head of the queue, if any. Nothing is written into
+    /// the mutex: its words reach the guest only as returns.
     pub fn guest_psynch(&mut self, num: u64, args: [u64; 8]) -> Result<u64, String> {
         let tid = self.threads.current();
         let mut next = self.psynch.clone();
@@ -6358,11 +6500,16 @@ impl Box_ {
                 let out = next.cvwait(args, tid)?;
                 (out, ticks.map(|t| self.now_guest().saturating_add(t)))
             }
+            // M52 §3f: the firstfit mutex pair. A wait that queues blocks on the mutex's address with
+            // no deadline; a drop wakes the head of the queue or preposts (`Psynch::mutexdrop`).
+            retrace_arch::SYS_PSYNCH_MUTEXWAIT => (next.mutexwait(args, tid)?, None),
+            retrace_arch::SYS_PSYNCH_MUTEXDROP => (next.mutexdrop(args)?, None),
             retrace_arch::SYS_PSYNCH_CVSIGNAL => (next.cvsignal(args)?, None),
             retrace_arch::SYS_PSYNCH_CVBROAD => (next.cvbroad(args, self.threads.len())?, None),
             _ => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M48: psynch {} ({num}) is not modelled: only psynch_cvwait, psynch_cvsignal and \
-                 psynch_cvbroad are, the calls the walks measured (plan P4). args {}",
+                "M48: psynch {} ({num}) is not modelled: only psynch_cvwait, psynch_cvsignal, \
+                 psynch_cvbroad and (M52) the firstfit psynch_mutexwait/psynch_mutexdrop are, the calls the \
+                 walks measured (plan P4). args {}",
                 psynch::call_name(num), Self::fmt_args(args)))),
         };
         // T5-e: a woken thread with a signal pending would leave it where assert_no_stranded_signals
@@ -6373,7 +6520,7 @@ impl Box_ {
             if pending != 0 {
                 return Err(retrace_arch::wall(retrace_arch::WallCategory::Signals, format!(
                     "M48: a signal is pending on thread {} (set {pending:#x}), which this {} would wake. The \
-                     saved context of a thread blocked in psynch_cvwait is unmeasured, so a delivery there \
+                     saved context of a thread blocked in psynch_cvwait or psynch_mutexwait is unmeasured, so a delivery there \
                      would be a guess; measure it (the blockedctx.rs shape) before allowing this.",
                     w.tid, psynch::call_name(num))));
             }
@@ -6385,7 +6532,11 @@ impl Box_ {
         match out.ret {
             psynch::Ret::Word(word) => Ok(word as u64),
             psynch::Ret::Block => {
-                self.threads.block(thread::BlockReason::Cv { addr: args[0], deadline });
+                self.threads.block(if num == retrace_arch::SYS_PSYNCH_MUTEXWAIT {
+                    thread::BlockReason::Mutex { addr: args[0] }
+                } else {
+                    thread::BlockReason::Cv { addr: args[0], deadline }
+                });
                 Ok(0)
             }
         }
@@ -6990,6 +7141,7 @@ impl Box_ {
                 thread::ThreadState::Blocked(thread::BlockReason::Kevent { kq, .. }) => self.kevent_timed_out(tid, kq),
                 thread::ThreadState::Blocked(thread::BlockReason::Cv { addr, .. }) => self.cv_timed_out(tid, addr),
                 thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. }) => self.sleep_timed_out(tid),
+                thread::ThreadState::Blocked(thread::BlockReason::Sem { .. }) => self.sem_timed_out(tid),
                 s => unreachable!("M48: due_waiters returned thread {tid} in {s:?}, which has no deadline"),
             }
         }
@@ -7218,6 +7370,12 @@ impl Box_ {
              this refuses by value instead of shipping a worker at a priority nobody asked for.");
         }
         idx
+    }
+
+    /// M52 §3c: `thread_selfid` (372), per guest thread. Record's arm and replay's mirror both call
+    /// this, so the answer is a pure function of the thread table.
+    pub fn guest_thread_selfid(&self) -> u64 {
+        self.threads.id_of(self.threads.current())
     }
 
     /// `bsdthread_create(func, arg, stack, pthread, flags)`, emulated.
@@ -7575,15 +7733,110 @@ impl Box_ {
     /// seven of the family's stubs off libsystem_kernel and they are seven distinct numbers — and
     /// `args[0]` is the port. There is no operation word here to guard.
     pub fn guest_sem_wait(&mut self, args: [u64; 8]) -> u64 {
+        // Final-review M7: a semaphore name is 32 bits; the register's upper half is not part of it.
+        let port = args[0] as u32 as u64;
         // M49 Ruling T5-I2: a port an admitted sleep used as its cond_sem is refused, by value and
         // before anything moves, panicking below the trace like this trap's other refusals.
         self.sleep.check_sleep_semaphore("semaphore_wait_trap (-36)", args[0] as u32)
             .unwrap_or_else(|m| panic!("{m}"));
         // M49 S4: a port the semaphore traps touched is a semaphore a signal could wake early, so
         // `__semwait_signal` refuses it (`SleepModel::admit`).
+        // M52 §3d (T3-dead-name): only a signal on a destroyed name was measured (it answers
+        // KERN_INVALID_NAME); a wait on one is refused by value before anything moves.
+        if self.sems.is_dead(port) {
+            retrace_arch::refuse!(Threads, "M52: semaphore_wait_trap (-36) on port {:#x}, a semaphore \
+                 semaphore_destroy ended: only a signal on a destroyed name was measured \
+                 (KERN_INVALID_NAME), not a wait.", port);
+        }
         self.sleep.note_semaphore(args[0] as u32);
-        self.threads.block(thread::BlockReason::Sem { port: args[0] });
+        // M52 §3d: the kernel's count first. A signal that found no waiter is kept, and so is
+        // `semaphore_create`'s initial value, so the wait it satisfies returns 0 without blocking.
+        if !self.sems.take(port) {
+            self.threads.block(thread::BlockReason::Sem { port, deadline: None });
+        }
         0
+    }
+
+    /// M52 §3d: `semaphore_timedwait_trap(port, sec, nsec)` — mach trap `-38`, box-answered and never
+    /// forwarded (the host would sleep the recorder for real on a semaphore only the guest could
+    /// signal). Returns the call's own `x0`: 0 for a wait that took the kernel's count or blocks
+    /// (whose real answer, `KERN_OPERATION_TIMED_OUT`, comes at its wake, `sem_timed_out`), and
+    /// `KERN_INVALID_VALUE` (18) for `nsec >= 10^9`, which blocks nothing (t0 M5). `{0, 0}` blocks
+    /// with the deadline `now`, which the timed wake answers 49 at once, as native does.
+    ///
+    /// `Err` is a refusal by value (`check_sleep_semaphore`, or a destroyed name, which is
+    /// unmeasured): record passes it to `wall_or_bug`, replay reports a `Divergence`. Both sides
+    /// call this with the same `args` (symmetry rule 1) and nothing is recorded.
+    pub fn guest_sem_timedwait(&mut self, args: [u64; 8]) -> Result<u64, String> {
+        // Final-review M7: a semaphore name is 32 bits; the register's upper half is not part of it.
+        let port = args[0] as u32 as u64;
+        self.sleep.check_sleep_semaphore("semaphore_timedwait_trap (-38)", args[0] as u32)?;
+        if self.sems.is_dead(port) {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+                "M52: semaphore_timedwait_trap (-38) on port {:#x}, a semaphore semaphore_destroy ended: only \
+                 a signal on a destroyed name was measured (KERN_INVALID_NAME), not a wait.", port)));
+        }
+        self.sleep.note_semaphore(args[0] as u32);
+        let (sec, nsec) = (args[1] as u32, args[2] as u32);
+        if nsec >= 1_000_000_000 { return Ok(retrace_arch::KERN_INVALID_VALUE); }
+        if self.sems.take(port) { return Ok(0); }
+        let ticks = sleep::ns_to_ticks(sec as u64 * 1_000_000_000 + nsec as u64);
+        let deadline = self.now_guest().saturating_add(ticks);
+        self.threads.block(thread::BlockReason::Sem { port, deadline: Some(deadline) });
+        Ok(0)
+    }
+
+    /// M52 §3e: `swtch_pri` (-59) and `thread_switch` (-61), box-answered and never forwarded (t0
+    /// M6). -59 admits any priority; -61 admits the thread port `MACH_PORT_NULL` and
+    /// `SWITCH_OPTION_NONE`, `DEPRESS` and `WAIT`, any time (the options real callers pass: libdispatch's
+    /// `_dispatch_preemption_yield` and `_dispatch_contention_usleep`). WAIT returns after one stride
+    /// rather than `t` ms, the safer error of §3h. Every admitted call is a zero-tick yield: it adds
+    /// one `SYNTH_TSC_STRIDE` (R11, so a sole yielder beside a sleeper walks to the sleeper's deadline
+    /// with no idle jump), blocks `Yield`, and `schedule_after_block` ends the yield and picks the
+    /// next runnable thread after it. Returns 0 either way, as native does.
+    ///
+    /// `Err` is a refusal by value: record passes it to `wall_or_bug`, replay reports a `Divergence`.
+    /// Both sides call this with the same `num` and `args` (symmetry rule 1); nothing is recorded.
+    pub fn guest_yield(&mut self, num: u64, args: [u64; 8]) -> Result<u64, String> {
+        if num == retrace_arch::MACH_THREAD_SWITCH {
+            let (port, option) = (args[0] as u32, args[1] as u32 as u64);
+            let measured = matches!(option, retrace_arch::SWITCH_OPTION_NONE | retrace_arch::SWITCH_OPTION_DEPRESS
+                | retrace_arch::SWITCH_OPTION_WAIT);
+            if port != 0 || !measured {
+                return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+                    "M52: thread_switch (mach trap -61) with thread {:#x}, option {} ({}): only MACH_PORT_NULL with \
+                     SWITCH_OPTION_NONE (0), DEPRESS (1) and WAIT (2) are modelled, the options real callers pass (t0 M6)",
+                    port, option as u32,
+                    match option { 0 => "NONE", 1 => "DEPRESS", 2 => "WAIT", _ => "not in mach/thread_switch.h" })));
+            }
+        }
+        self.synthetic_tsc = self.synthetic_tsc.wrapping_add(SYNTH_TSC_STRIDE);
+        self.threads.block(thread::BlockReason::Yield);
+        Ok(0)
+    }
+
+    /// M52 §3d: `tid`'s `semaphore_timedwait_trap` reached its deadline: the kernel answers
+    /// `KERN_OPERATION_TIMED_OUT` in `x0`, carry clear. Below the trace, so K8's refusal (a signal
+    /// pending on the thread) panics with its text on both sides.
+    fn sem_timed_out(&mut self, tid: usize) {
+        self.deliver_wake(tid, retrace_arch::KERN_OPERATION_TIMED_OUT, false, &[]).unwrap_or_else(|m| panic!("{m}"));
+    }
+
+    /// M52 §3d: a successful `semaphore_create` (3418) named `port` and started it at `value`. Both
+    /// Forward arms call this after the reply lands, with the value read from the request and the
+    /// port from the reply (`learn_clock_service`'s shape).
+    pub fn note_semaphore_created(&mut self, port: u32, value: u32) { self.sems.create(port as u64, value); }
+
+    /// M52 §3d (T0-M5, T3-dead-name): a successful `semaphore_destroy` (3419) on `port`. Every guest
+    /// thread blocked on it wakes with `KERN_TERMINATED` (37), through `deliver_wake` so K8 holds;
+    /// then the count is dropped and the name is dead: a later signal answers `KERN_INVALID_NAME`.
+    /// Both Forward arms call this after the destroy lands.
+    pub fn note_semaphore_destroyed(&mut self, port: u32) -> Result<(), String> {
+        for tid in self.threads.sem_waiters_on(port as u64) {
+            self.deliver_wake(tid, retrace_arch::KERN_TERMINATED, false, &[])?;
+        }
+        self.sems.destroy(port as u64);
+        Ok(())
     }
 
     /// `semaphore_signal_trap(port)` — mach trap `-33`. `args[0]` is the port name; returns the
@@ -7607,11 +7860,15 @@ impl Box_ {
     /// Reads and writes no guest memory, so the recorded event carries no writes and replay's mirror
     /// recomputes this identically from the same `(num, args)`.
     pub fn guest_sem_signal(&mut self, args: [u64; 8]) -> (u64, Vec<usize>) {
+        // Final-review M7: a semaphore name is 32 bits; the register's upper half is not part of it.
+        let port = args[0] as u32 as u64;
         // M49 Ruling T5-I2 and S4, as in `guest_sem_wait`.
         self.sleep.check_sleep_semaphore("semaphore_signal_trap (-33)", args[0] as u32)
             .unwrap_or_else(|m| panic!("{m}"));
+        // M52 §3d (T3-dead-name): native answers KERN_INVALID_NAME for a signal on a destroyed name.
+        if self.sems.is_dead(port) { return (retrace_arch::KERN_INVALID_NAME, vec![]); }
         self.sleep.note_semaphore(args[0] as u32);
-        let woken = self.threads.unblock_sem_waiters_on(args[0]);
+        let woken = self.threads.unblock_sem_waiters_on(port);
         // **`-33` wakes exactly ONE waiter; the plural case is a DIFFERENT TRAP.** Task 1 §3a read
         // the whole family off libsystem_kernel's own stubs, and `-34` is `_semaphore_signal_all_trap`
         // — a separate selector, still refused by `is_mach_semaphore_trap`'s guard because no run has
@@ -7640,8 +7897,10 @@ impl Box_ {
              BOTH dispatch loops and a measured answer to WHICH waiter -33 wakes when several are \
              parked; table order is arbitrary. Measure a guest that parks two threads on one \
              semaphore before modelling this.",
-            args[0], woken.len());
+            port, woken.len());
         }
+        // M52 §3d: a signal that woke nobody is the kernel's to keep: the next wait takes it.
+        if woken.is_empty() { self.sems.signal(port); }
         (0, woken)
     }
 
@@ -7672,12 +7931,15 @@ impl Box_ {
     ///    deadline wakes, in deadline order with ties by thread index, with its primitive's timeout
     ///    answer. A deadline already past at the call (node's 1 ns waits) wakes here, in the settle
     ///    that blocked it.
-    /// 3. **The pick.** One exception (M49 Ruling T5-I1): a thread whose sleep
-    ///    (`BlockReason::Sleep`) was due in the very settle that blocked it, a 0-tick or past
-    ///    deadline, yields. The pick is then the next runnable thread after it in index order,
-    ///    wrapping around (`pick_after`), and the sleeper itself only when nothing else can run.
-    ///    Without it, a polling loop on a 0-tick sleep re-picks the poller forever and the thread it
-    ///    waits on never runs (sleep_e2e's `pollzero`). Kevent and Cv waits keep M48's pick.
+    /// 3. **The pick.** One exception (M49 Ruling T5-I1, widened by M52 §3e and R7): a thread that
+    ///    yielded (`BlockReason::Yield`, ended first, before rule 1) or whose TIMED wait (any reason
+    ///    with a deadline: sleep, kevent, cv, semaphore) was due in the very settle that blocked it,
+    ///    a 0-tick or past deadline, yields. The pick is then the next runnable thread after it in
+    ///    index order, wrapping around (`pick_after`), and the thread itself only when nothing else
+    ///    can run. Without it, a polling loop on a 0-tick wait re-picks the poller forever and the
+    ///    thread it waits on never runs (sleep_e2e's `pollzero`, M52's `sempoll` and `kqpoll`). A
+    ///    sole yielder gets no idle jump: it is runnable, so its clock moved one stride in
+    ///    `guest_yield` instead (R11).
     /// 4. **The idle jump.** If nothing is runnable and any deadline exists, `synthetic_tsc` jumps so
     ///    that the guest clock reads the earliest of ALL deadlines, workqueue timers and thread
     ///    deadlines alike. Rules 1–2 then run again, and the pick is retried, exactly once. The
@@ -7689,14 +7951,27 @@ impl Box_ {
     /// lets a timer fire or a timed wait end. This is the cooperative scheduler's limit, extended to
     /// time (`docs/current-state.md`).
     pub fn schedule_after_block(&mut self) -> Result<(), Unsupported> {
-        // M49 Ruling T5-I1 (rule 3): the thread that blocked was asleep, and rule 2 woke it in this
-        // same settle, so it yields.
+        // M49 Ruling T5-I1 and M52 §3e (rule 3): the thread that blocked yielded, or its timed wait
+        // was already due and rule 2 wakes it in this same settle, so the pick goes past it.
         let cur = self.threads.current();
-        let asleep = matches!(self.threads.state_of(cur), thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. }));
+        let mut timed = false;
+        let mut due_poll = false;
+        match self.threads.state_of(cur) {
+            thread::ThreadState::Blocked(thread::BlockReason::Yield) => { self.threads.end_yield(cur); timed = true; }
+            thread::ThreadState::Blocked(r) => { timed = r.deadline().is_some(); due_poll = timed; }
+            _ => {}
+        }
         self.fire_due_timers();
         self.wake_due_threads();
-        let yields = asleep && self.threads.state_of(cur) == thread::ThreadState::Runnable;
+        let yields = timed && self.threads.state_of(cur) == thread::ThreadState::Runnable;
         let mut next = if yields { self.threads.pick_after(cur) } else { self.threads.pick_next() };
+        // Final-review I2 (R11, R15): a timed wait that was already due and finds nothing else runnable
+        // re-picks itself. Like `guest_yield` it moves the clock one stride and takes no idle jump, so a
+        // `{0,0}` poller beside a sleeper walks to the sleeper's deadline. A real `Yield` already paid
+        // its stride in `guest_yield`. Box state on both sides: this path is shared by record and replay.
+        if yields && due_poll && next == Some(cur) {
+            self.synthetic_tsc = self.synthetic_tsc.wrapping_add(SYNTH_TSC_STRIDE);
+        }
         if next.is_none() {
             let earliest = [self.kq.earliest_deadline(), self.threads.earliest_deadline()].into_iter().flatten().min();
             if let Some(deadline) = earliest {
@@ -7707,7 +7982,7 @@ impl Box_ {
             }
         }
         match next {
-            Some(tid) => { self.switch_to_thread(tid); Ok(()) }
+            Some(tid) => { self.switch_to_thread(tid); self.stall_switched_in(); Ok(()) }
             // M50 D1: a wall, not a panic. Both causes are possible (a real deadlock in the guest, or
             // a wake retrace does not model), so the line names both.
             None => Err(Unsupported::new(WallCategory::Threads, format!(
@@ -7720,6 +7995,53 @@ impl Box_ {
                 self.kq,
                 self.gkq
             ))),
+        }
+    }
+
+    /// M52 §3i: start watching for a stall. Record calls this once, after the initial snapshot;
+    /// replay never does. Every pick `schedule_after_block` makes then restarts the watch.
+    pub fn watch_for_stalls(&mut self) {
+        self.stall = Some(stall::StallWatch::new(STALL_AFTER_SECS * stall::TICKS_PER_SEC));
+        self.stall_switched_in();
+    }
+
+    /// A switch-in (C8): every pick `schedule_after_block` makes, a re-pick of the same thread
+    /// included. `run()`'s entry is never one: it is re-entered after every landmark.
+    fn stall_switched_in(&mut self) {
+        let Some(w) = self.stall.as_mut() else { return };
+        w.switched_in(host_ticks());
+        let at = w.fire_at();
+        self.arm_stall_timer(at);
+    }
+
+    /// Arm the guest's virtual timer to exit at host tick `at`. The virtual count is the host's
+    /// minus the vCPU's offset. Unmasking is what re-arms it after HVF masked it on its last exit.
+    fn arm_stall_timer(&self, at: u64) {
+        let off = self.vcpu.vtimer_offset().expect("vtimer offset");
+        self.vcpu.set_sys(sysreg::CNTV_CVAL_EL0, at.wrapping_sub(off)).expect("arm CNTV_CVAL");
+        self.vcpu.set_sys(sysreg::CNTV_CTL_EL0, 1).expect("arm CNTV_CTL");
+        self.vcpu.set_vtimer_mask(false).expect("unmask vtimer");
+    }
+
+    /// After every `hv_vcpu_run` on record: print C8's line if the running thread has stalled.
+    /// HVF masks the vtimer on its exit and it stays masked until the next switch-in re-arms it,
+    /// so a stalled thread costs one exit. No re-arm is needed after a vtimer exit that names
+    /// nothing: the ready set cannot change without a VM exit (a thread becomes runnable only by a
+    /// wake from the running thread's own traps or by a deadline, which moves only on timebase
+    /// reads, themselves exits), and this runs after every `vcpu.run()`.
+    fn check_stall(&mut self) {
+        let Some(w) = self.stall.as_mut() else { return };
+        let now = host_ticks();
+        if !w.elapsed(now) { return; }
+        let cur = self.threads.current();
+        let runnable = self.threads.runnable_except(cur);
+        let timed = self.threads.timed_blocked_except(cur);
+        let w = self.stall.as_mut().unwrap();
+        if let Some(line) = w.check(now, cur, &runnable, &timed) {
+            // Not `eprintln!`, which panics once stderr's reader is gone: a diagnostic line must
+            // never end a recording with the bug banner.
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "{line}");
         }
     }
 
@@ -7974,6 +8296,7 @@ impl Box_ {
             psynch: self.psynch.clone(),
             jit: self.jit.clone(),
             sleep: self.sleep.clone(),
+            sems: self.sems.clone(),
         }
     }
 
@@ -8097,10 +8420,12 @@ impl Box_ {
             // M42: RESTORED from the capture, never reset (spec §3f); see the `BoxState` field.
             kq: state.kq.clone(),
             excl: state.excl.clone(),
+            stall: None,
             gkq: state.gkq.clone(),
             psynch: state.psynch.clone(),
             jit: state.jit.clone(),
             sleep: state.sleep.clone(),
+            sems: state.sems.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b.assert_jit_stamped();
@@ -8125,10 +8450,10 @@ impl Box_ {
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?} sems={:?}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
             self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
-            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep)
+            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep, self.sems)
     }
 
     /// Test-only (M46): the workqueue kqueue, for `checkpointparity.rs` and the box-level manager

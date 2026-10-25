@@ -272,6 +272,9 @@ pub const FAULTCASE_DYN: &str = concat!(env!("OUT_DIR"), "/faultcase_dyn");
 /// M48: the guest's own kqueues by mode — `probe`, `wake`, `timeout`, `tryselect`, `pipe`,
 /// `oneshot`, `bad filter`, `bad notkq` (spec §3h; see the source's header).
 pub const KQ_DYN: &str = concat!(env!("OUT_DIR"), "/kq_dyn");
+/// M52 §3i: main spins on a flag a created thread would set; natively it exits 0 at once, under
+/// retrace's cooperative scheduler it never finishes (see the source's header).
+pub const STALL_DYN: &str = concat!(env!("OUT_DIR"), "/stall_dyn");
 /// M47: links `librpath_dyn.dylib` by `@rpath`, so it loads only if AMFI allows `@`-path expansion.
 pub const RPATH_DYN: &str = concat!(env!("OUT_DIR"), "/rpath_dyn");
 /// M49: a discarded-status exclusive pair with a trapped timebase read between its halves (spec
@@ -286,15 +289,45 @@ pub const SBXPATH_DYN: &str = concat!(env!("OUT_DIR"), "/sbxpath_dyn");
 /// route the box services (trap, MIG 4811, both reservation forms, a hinted one), each line saying
 /// whether the answer was aligned. libmalloc's xzone allocator maps its segments this way.
 pub const VMALIGN_DYN: &str = concat!(env!("OUT_DIR"), "/vmalign_dyn");
+/// M52 §3b: FIXED Mach VM requests without `VM_FLAGS_OVERWRITE` — modes `cases`, `overwrite`, `windows`.
+pub const VMFIXED_DYN: &str = concat!(env!("OUT_DIR"), "/vmfixed_dyn");
+/// M52 §3c: per-thread ids — modes `routes` (every answered route agrees, ids distinct and never reused),
+/// `raw` (each id in decimal, pinned against the replay), `mutex` (recursive trylock EBUSY, errorcheck
+/// relock EDEADLK) and `pidinfo` (PROC_PIDTHREADID64INFO, refused by value).
+pub const TID_DYN: &str = concat!(env!("OUT_DIR"), "/tid_dyn");
+/// M52 §3b: an xzone huge chunk grown by realloc — modes `page` and `grow`.
+pub const HUGEREALLOC_DYN: &str = concat!(env!("OUT_DIR"), "/hugerealloc_dyn");
+/// M52 §3b: `mach_vm_copy` by case (`disjoint`, `overlap_fwd`, `overlap_back`, `unmapped_src`, `none_dst`,
+/// `unaligned`, `zero`, `reserved`).
+pub const VMCOPY_DYN: &str = concat!(env!("OUT_DIR"), "/vmcopy_dyn");
+/// M52 §3b: a `Vec<u8>` grown to 24 MiB, then a thread spawned and joined.
+pub const VECGROW: &str = concat!(env!("OUT_DIR"), "/vecgrow");
 /// M47: `fork()` with `RLIMIT_NPROC` lowered to 1; prints the errno the fork failed with.
 pub const FORKFAIL_DYN: &str = concat!(env!("OUT_DIR"), "/forkfail_dyn");
 /// M48: psynch condition variables by mode — `pingpong`, `broadcast`, `timedout`, `timedsignal`,
 /// `onens` and `mutex` (spec §3h, Ruling T5-a; see the source's header).
 pub const CONDVAR_DYN: &str = concat!(env!("OUT_DIR"), "/condvar_dyn");
+/// M52 §3f: contended `pthread_mutex`es by mode — `two`, `four`, `relock`, `recursive`, `errorcheck`, `cond`
+/// and `fairshare` (see the source's header).
+pub const MUTEX_DYN: &str = concat!(env!("OUT_DIR"), "/mutex_dyn");
+/// M52 §3f: four `std::thread`s on one contended `std::mutex`.
+pub const MUTEX_CPP: &str = concat!(env!("OUT_DIR"), "/mutex_cpp");
 /// M49: sleep on the synthetic clock by mode — `sleep1`, `usleep`, `nanosleep_null`, `usleep1`,
 /// `onens`, `raw`, `twosleepers`, `pollloop`, `pollzero`, `sleepwhilework`, `sigsleeper` and
 /// `refuse <what>` (spec §3f, §4; see the source's header).
 pub const SLEEP_DYN: &str = concat!(env!("OUT_DIR"), "/sleep_dyn");
+/// M52: mach semaphores with a deadline and the kernel's count by mode — `timeout`, `signalled`,
+/// `badnsec`, `count`, `initial`, `destroy` and `long` (spec §3d; see the source's header).
+pub const SEMTIMED_DYN: &str = concat!(env!("OUT_DIR"), "/semtimed_dyn");
+/// M52: yields and the polls that would spin by mode — `peer`, `sleeper`, `np`, `badopt`, `sempoll`
+/// and `kqpoll` (spec §3e; see the source's header).
+pub const YIELD_DYN: &str = concat!(env!("OUT_DIR"), "/yield_dyn");
+/// M52 §3e: a full-`std` Rust binary whose child yields ten times then `park_timeout`s 20 ms while
+/// main waits 60 s on a channel.
+pub const YIELDSPIN: &str = concat!(env!("OUT_DIR"), "/yieldspin");
+/// M52 §3h: a full-`std` Rust binary that reads `Instant::now()` 4 000 000 times and prints
+/// `under_one_guest_second=<yes|no>` from its own first and last readings.
+pub const CLOCKREADS: &str = concat!(env!("OUT_DIR"), "/clockreads");
 /// M39: the rung-8 script and its data file. Python needs no compile step, so these are repo
 /// paths, not `OUT_DIR` products (spec R1); the script finds `crash.json` beside itself.
 pub const CRASH_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/py/crash.py");
@@ -457,6 +490,8 @@ pub const FC_RS_SLEEP: &str = concat!(env!("OUT_DIR"), "/fc_rs_sleep");
 pub const FC_RS_TESTS: &str = concat!(env!("OUT_DIR"), "/fc_rs_tests");
 /// A `rustc --test` harness with one failing test: exit 101.
 pub const FC_RS_TESTS_FAIL: &str = concat!(env!("OUT_DIR"), "/fc_rs_tests_fail");
+/// A `rustc --test` harness whose tests contend, wait, park, yield and read thread ids (M52).
+pub const FC_RS_THREADS: &str = concat!(env!("OUT_DIR"), "/fc_rs_threads");
 /// Swift hello. This and every `FC_SW_*` file exists only where `swiftc` ran (R11).
 pub const FC_SW_HELLO: &str = concat!(env!("OUT_DIR"), "/fc_sw_hello");
 /// A Swift error thrown and caught.
@@ -688,6 +723,13 @@ mod tests {
     }
 
     #[test]
+    fn stall_dyn_guest_parses() {
+        // M52: proves the build.rs wiring and the path constant; behaviour is stall_e2e's.
+        let l = parse_macho(&std::fs::read(STALL_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
     fn rpath_guest_parses() {
         // M47: proves the build.rs wiring and the path constant; behaviour is gitprims_e2e's.
         let l = parse_macho(&std::fs::read(RPATH_DYN).unwrap());
@@ -810,7 +852,7 @@ mod tests {
         for p in [FC_NULL_LOAD, FC_NULL_STORE, FC_NULL_CALL, FC_MUNMAPPED, FC_LOW_STORE, FC_STACK_OVERFLOW,
                   FC_UAF, FC_ASSERT, FC_SLEEP, FC_USLEEP, FC_NANOSLEEP, FC_MUTEX, FC_FILEIO, FC_ENV, FC_C_TRAP, FC_SIGNAL,
                   FC_CPP_HELLO, FC_CPP_THROW, FC_CPP_TERMINATE, FC_CPP_THREAD, FC_CPP_SLEEP,
-                  FC_RS_NULL, FC_RS_SLEEP, FC_RS_TESTS, FC_RS_TESTS_FAIL] {
+                  FC_RS_NULL, FC_RS_SLEEP, FC_RS_TESTS, FC_RS_TESTS_FAIL, FC_RS_THREADS] {
             built(p);
         }
         let swift = [FC_SW_HELLO, FC_SW_THROW, FC_SW_OOB, FC_SW_UNWRAP, FC_SW_SLEEP, FC_SW_GCD, FC_SW_ASYNC];

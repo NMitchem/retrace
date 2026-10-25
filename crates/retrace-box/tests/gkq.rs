@@ -142,10 +142,11 @@ fn a_trigger_from_another_thread_wakes_the_waiter_with_its_event() {
     assert!(!b.dbg_gkq().has_events(KQ), "EV_CLEAR reset the knote at the delivery");
 }
 
-/// F7: with no event list the call applies its changes and returns 0, whatever its timeout. A zero
-/// timeout polls.
+/// F7: with no event list the call applies its changes and returns 0, whatever its timeout, and does
+/// not block. A zero timeout that finds nothing is Task 4's due poll: it blocks with a due deadline
+/// and is woken in the same settle, so it yields to the thread it polls for.
 #[test]
-fn a_call_with_no_event_list_applies_its_changes_and_never_blocks() {
+fn a_call_with_no_event_list_applies_its_changes_and_yields_as_a_due_poll() {
     let mut b = tb();
     let base = setup(&mut b);
     let add = kev(7, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, 0);
@@ -155,8 +156,12 @@ fn a_call_with_no_event_list_applies_its_changes_and_never_blocks() {
     assert!(b.dbg_gkq().has_events(KQ), "the trigger is applied, waiting for a scan");
     let zero = timespec(&mut b, base + 0x200, 0, 0);
     assert_eq!(kevent(&mut b, base, &[], 1, zero), Ok((1, false)));
-    assert_eq!(kevent(&mut b, base, &[], 1, zero), Ok((0, false)), "a zero timeout returns 0 without blocking");
-    assert_eq!(b.threads().state_of(0), ThreadState::Runnable);
+    // M52 §3e (R7): a {0, 0} poll that finds nothing blocks with the deadline `now`, so the settle
+    // that wakes it (yield_e2e's `kqpoll`; this box has no clock to run it) can yield to the thread it polls
+    // for. It still answers 0.
+    assert_eq!(kevent(&mut b, base, &[], 1, zero), Ok((0, false)), "a zero timeout answers 0");
+    assert!(matches!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Kevent { deadline: Some(_), .. })),
+        "an empty zero-timeout poll blocks with a due deadline");
 }
 
 /// K5: the kernel copies the timeout in first, so an unmapped one is EFAULT with nothing applied;
@@ -227,7 +232,10 @@ fn a_one_nanosecond_wait_is_woken_in_the_same_settle_without_a_jump() {
     assert_eq!(b.threads().current(), 0);
     assert_eq!((b.vcpu_get_x(0), b.regs_snapshot().cpsr & PSTATE_C), (0, 0),
         "the deadline's reply, 0 with the carry clear, was delivered to the vCPU, over the sentinel");
-    assert_eq!(synthetic_tsc(&b), before, "no idle jump: the deadline queue's own pass woke it");
+    // Final-review I2: a due timed wait that re-picks itself moves the clock exactly one stride
+    // (was `before`: 4294967296 -> 4294967301). Still no idle jump, which would be a deadline's worth.
+    assert_eq!(synthetic_tsc(&b), before + retrace_box::SYNTH_TSC_STRIDE,
+        "one stride and no idle jump: the deadline queue's own pass woke it");
     assert_eq!(b.dbg_gkq().waiter(KQ), None);
 }
 

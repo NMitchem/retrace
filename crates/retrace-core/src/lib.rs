@@ -46,7 +46,7 @@ const MACH_VM_PROTECT:    u64 = (-14i64) as u64; // _kernelrpc_mach_vm_protect_t
 const MACH_VM_MAP:        u64 = (-15i64) as u64; // _kernelrpc_mach_vm_map_trap(target,&addr,size,mask,flags,prot)
 const MACH_MSG2: u64 = (-47i64) as u64; // mach_msg2_trap(data, options, bits|send_size, dest|reply, voucher|id, desc|rcv_name, rcv_size|prio, timeout)
 const MACH_TASK_SELF: u64 = (-28i64) as u64; // task_self_trap: its result names the guest's task port
-const VM_FLAGS_ANYWHERE:  u64 = 0x1;
+use retrace_arch::VM_FLAGS_ANYWHERE;
 const PROT_EXEC:          u64 = 0x4;
 
 // Extract (address-pointer, size, mask, flags, cur_prot) for an anonymous mach_vm_map/allocate
@@ -262,6 +262,42 @@ fn semaphore_destroy_guard(b: &Box_, m: &machmsg::Msg2) -> Result<(), String> {
     b.check_sleep_semaphore("semaphore_destroy (3419)", port)
 }
 
+/// M52 §3d: what a forwarded semaphore RPC asked, read from the guest's own request before the
+/// forward (record) or before the recorded reply lands (replay).
+enum SemRequest { Create(u32), Destroy(u32) }
+
+fn semaphore_request(b: &Box_, m: &machmsg::Msg2) -> Result<Option<SemRequest>, String> {
+    if m.msgh_id != machmsg::SEMAPHORE_CREATE && m.msgh_id != machmsg::SEMAPHORE_DESTROY { return Ok(None); }
+    let buf = b.read_va_checked(m.data, m.send_size as usize)
+        .ok_or("the request buffer is unreadable after mach2_unreachable passed it")?;
+    if m.msgh_id == machmsg::SEMAPHORE_CREATE {
+        return machmsg::decode_semaphore_create_request(&buf).map(|v| Some(SemRequest::Create(v)));
+    }
+    machmsg::decode_semaphore_destroy(&buf).map(|p| Some(SemRequest::Destroy(p)))
+}
+
+/// M52 §3d: after a 3418 or 3419 reply has landed (forwarded on record, applied on replay), teach the
+/// box the count of the semaphore the create named, or end the one the destroy killed. A failed call
+/// changes nothing. Both Forward arms call this with the same arguments, so both sides learn the
+/// same name (the host's, recorded in the reply and applied verbatim on replay). `Err` is a refusal
+/// by value (record: `wall_or_bug`; replay: a divergence).
+fn learn_semaphore(b: &mut Box_, m: &machmsg::Msg2, req: Option<SemRequest>, ret: u64, err: bool) -> Result<(), String> {
+    let Some(req) = req else { return Ok(()) };
+    if ret != machmsg::MACH_MSG_SUCCESS || err { return Ok(()); }
+    match req {
+        SemRequest::Create(value) => {
+            let Some(reply) = b.read_va_checked(m.data, machmsg::CLOCK_SERVICE_REPLY_LEN) else { return Ok(()) };
+            if let Some(port) = machmsg::decode_semaphore_create_reply(&reply) { b.note_semaphore_created(port, value); }
+            Ok(())
+        }
+        SemRequest::Destroy(port) => {
+            let Some(reply) = b.read_va_checked(m.data, 36) else { return Ok(()) };
+            if machmsg::semaphore_destroy_reply_succeeded(&reply) { b.note_semaphore_destroyed(port)?; }
+            Ok(())
+        }
+    }
+}
+
 /// M51 §3h: the landmark of a call answered with an error before it did anything, as a pointer the
 /// program could not pass natively is: `ret` (an errno with `err`, or a `kern_return_t` without), no
 /// writes, and the program resumes past it. Never forwarded or serviced.
@@ -304,6 +340,7 @@ fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) ->
     let reply_len = match route {
         ServiceVmMap => machmsg::encode_vm_map_reply(0, 0).len(),
         ServiceVmRemap => machmsg::encode_vm_remap_reply(0, 0, 0, 0).len(),
+        ServiceVmCopy => machmsg::encode_mig_error(0, 0, 0).len(),
         ServiceGetSpecialPort => machmsg::encode_get_special_port_reply(0, 0).len(),
         ServiceSetSpecialPort | ServicePortsRegister | StubMigReply(_) => machmsg::encode_mig_error(0, 0, 0).len(),
         ServiceClockGetTime => machmsg::encode_clock_get_time_reply(0, 0, 0).len(),
@@ -328,6 +365,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
     w.append(&b.snapshot()).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
+    // M52 §3i: after the snapshot, so no timer register is in it. Record only.
+    b.watch_for_stalls();
 
     let mut console = Console { sink, ..Console::default() };
     // M50 §3c (C1): the record loop runs inside this catch. A wall ends it either as a marked `Err`
@@ -663,7 +702,6 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             // and store it there, returning KERN_SUCCESS.
             Stop::Syscall { num, args } if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP => {
                 let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
-                let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                 let exec = prot & PROT_EXEC != 0;
                 if exec && verbose { eprintln!("[retrace warn] mach_vm exec mapping (prot={prot:#x}) promoted to RO+exec"); }
                 // M51 §3h (t0 M5 machbad, Ruling T0-l): the trap copies `*addr` in, then the address out.
@@ -681,10 +719,16 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // vs guest_vm_map) so a reservation arriving via the trap route genuinely reserves
                 // and is never eager-backed (fatal at 24 GiB). MACH_VM_ALLOCATE always carries RW.
                 // Both honour `mask` (see guest_vm_map_masked); replay passes the same one.
-                let ipa = if prot == 0 {
-                    b.guest_vm_reserve_masked(req, size, mask, anywhere)
+                // M52 §3b: a FIXED request without OVERWRITE over occupied memory is the kernel's
+                // `kern_return_t`, returned in x0 with nothing written (the address stays as it was).
+                let placed = if prot == 0 {
+                    b.guest_vm_reserve_masked(req, size, mask, flags)
                 } else {
-                    b.guest_vm_map_masked(req, size, mask, anywhere, exec)
+                    b.guest_vm_map_masked(req, size, mask, flags, exec)
+                };
+                let ipa = match placed {
+                    Ok(ipa) => ipa,
+                    Err(kr) => { append_refused(&mut w, &mut b, &mut count, num, args, kr, false, thread)?; continue; }
                 };
                 let writes = vec![Region { ipa: addr_ptr, bytes: ipa.to_le_bytes().to_vec() }];
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: writes.clone(), thread }).map_err(|e| format!("append mach_vm_map: {e}"))?; count += 1;
@@ -729,21 +773,39 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         let buf = b.read_guest(m.data, m.send_size as usize);
                         let req = machmsg::decode_vm_map(&buf)
                             .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_map (4811) decode", e)))?;
-                        let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
                         // cur_protection == 0 => a PROT_NONE address-space reservation (no backing,
                         // e.g. libmalloc's 24 GiB nano pointer range); anything else is a real
                         // backed map. See guest_vm_reserve / guest_vm_map. Both honour `mask`.
-                        let ipa = if req.cur_protection == 0 {
-                            b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
+                        let placed = if req.cur_protection == 0 {
+                            b.guest_vm_reserve_masked(req.address, req.size, req.mask, req.flags as u64)
                         } else {
                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                            b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
+                            b.guest_vm_map_masked(req.address, req.size, req.mask, req.flags as u64, exec)
                         };
-                        let writes = vec![Region { ipa: m.data,
-                            bytes: machmsg::encode_vm_map_reply(m.reply_port, ipa) }];
+                        // M52 §3b: the kernel's refusal is the 44-byte mig_reply_error (id 4911), the
+                        // only write of the landmark; replay byte-compares the same encoding.
+                        let reply = match placed {
+                            Ok(ipa) => machmsg::encode_vm_map_reply(m.reply_port, ipa),
+                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                        };
+                        let writes = vec![Region { ipa: m.data, bytes: reply }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
                             err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 vm_map: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
+                    machmsg::Route::ServiceVmCopy => {
+                        // M52 §3b: mach_vm_copy is recomputed, never recorded: the copy runs in the
+                        // box on both sides, and the 44-byte reply is the landmark's only write.
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let (src, size, dst) = machmsg::decode_vm_copy(&buf)
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_copy (4807) decode", e)))?;
+                        let kr = b.guest_vm_copy(src, size, dst);
+                        let writes = vec![Region { ipa: m.data,
+                            bytes: machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32) }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 vm_copy: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
                     machmsg::Route::ServiceVmRemap => {
@@ -774,9 +836,13 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                                 "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
                                 req.target, req.size, req.src)));
                         }
-                        let (target, cur, max) = b.guest_vm_remap(req.target, req.size, req.src);
-                        let writes = vec![Region { ipa: m.data, bytes: machmsg::encode_vm_remap_reply(
-                            m.reply_port, target, cur, max) }];
+                        // Final-review I1: FIXED without OVERWRITE over occupied VA is KERN_NO_SPACE
+                        // (measured natively), refused as 4811 is: the 44-byte mig_reply_error.
+                        let reply = match b.guest_vm_remap_checked(req.target, req.size, req.src, req.flags as u64) {
+                            Ok((target, cur, max)) => machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max),
+                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                        };
+                        let writes = vec![Region { ipa: m.data, bytes: reply }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
                             err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 vm_remap: {e}"))?; count += 1;
@@ -932,8 +998,11 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         let clock_id = clock_service_request(&b, &m)
                             .map_err(|e| wall_or_bug(retrace_arch::in_context("host_get_clock_service (206) decode", e)))?;
                         if verbose { eprintln!("[retrace] forwarding mach_msg2 {name} (msgh_id {}) to host (decided allowlist)", m.msgh_id); }
+                        let sem_req = semaphore_request(&b, &m)
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("semaphore RPC (3418/3419) decode", e)))?;
                         let (ret, _ret1, err, writes) = b.forward_and_diff(num, args);
                         learn_clock_service(&mut b, &m, clock_id, ret, err);
+                        learn_semaphore(&mut b, &m, sem_req, ret, err).map_err(wall_or_bug)?;
                         if trace_log {
                             eprintln!("[mach_msg2] host ret={ret:#x} err={err}");
                             for w_ in &writes {
@@ -981,6 +1050,27 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 let rc = b.guest_sem_wait(args);
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append sem_wait: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
+            // M52 §3d: the mach semaphore TIMED wait (-38), box-answered like -36 and never
+            // forwarded: it has no `arg_kinds` row, so this arm's place BEFORE the generic negative
+            // arm is what keeps it from being a wall there (C1's backstop, `refusal_before_forward`).
+            // `ret` 0, `err` false and no writes: the real answer (49) comes at the wake into a
+            // context both sides rebuild. A refusal ends the recording at a wall before the append.
+            Stop::Syscall { num, args } if num == retrace_arch::MACH_SEMAPHORE_TIMEDWAIT => {
+                let rc = b.guest_sem_timedwait(args).map_err(wall_or_bug)?;
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append sem_timedwait: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, false);
+            }
+            // M52 §3e: `swtch_pri` (-59) and `thread_switch` (-61), box-answered like -38 and for its
+            // reason: no `arg_kinds` row (C1), so this arm's place before the generic negative arm is
+            // what keeps them from being a wall there. A yield records `ret` 0 and nothing else; the
+            // switch is the settle's, below the trace. A refusal ends the recording before the append.
+            Stop::Syscall { num, args } if num == retrace_arch::MACH_SWTCH_PRI || num == retrace_arch::MACH_THREAD_SWITCH => {
+                let rc = b.guest_yield(num, args).map_err(wall_or_bug)?;
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append yield: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
             }
             // M18 Stage 2b: the mach semaphore SIGNAL (see `Box_::guest_sem_signal`). Never
@@ -1674,6 +1764,16 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 b.apply_and_return(0, false, &zeros);
             }
 
+            // M52 §3c: thread_selfid is MODELLED per guest thread, never forwarded: the host answers
+            // the recorder's one thread id for every guest thread. The id is a pure function of the
+            // thread table, so nothing is recorded but the return (the replay mirror recomputes it).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_THREAD_SELFID => {
+                let id = b.guest_thread_selfid();
+                w.append(&Event::Syscall { num, args, ret: id, ret1: 0, err: false, writes: vec![], thread })
+                    .map_err(|e| format!("append thread_selfid: {e}"))?; count += 1;
+                b.set_x0_err_and_return(id, false);
+            }
+
             // M47 §3d: __mac_syscall is MODELLED per (policy, call), never forwarded: a policy may
             // write through a pointer INSIDE `arg` (AMFI's outFlags), which a forward hands the host
             // as a host address (NestedDest). This arm refuses an unmodelled pair by value
@@ -1731,6 +1831,10 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // kqueue retrace never created, and a filter that blocks would block the RECORDER.
                 // This assert makes "never forwarded" a checked fact (the bsdthread_create gap M37
                 // measured).
+                // M52 §3c: thread_selfid is answered per guest thread above. Forwarded, every thread
+                // reads the recorder's one host id and main's 0 breaks recursive mutexes.
+                assert!(num != retrace_arch::SYS_THREAD_SELFID,
+                    "thread_selfid (372) reached the generic forward arm — it must be answered above (M52 §3c).");
                 assert!(num != retrace_arch::SYS_KEVENT,
                     "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c).");
                 // M48 §3e: every psynch call is handled above, modelled or refused by value. Forwarded,
@@ -1761,6 +1865,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // which guard arms that must exist, and before the M27 assert below, which is now a
                 // backstop, like `forwarded_shape`'s panic inside `forward_and_diff`.
                 if let Some(u) = retrace_arch::refusal_before_forward(num) { return Err(u.marked()); }
+                // M52 §3c (T2-pidinfo): a thread looked up by id names an id the host never issued.
+                if let Some(u) = retrace_arch::proc_info_refusal(num, &args) { return Err(u.marked()); }
                 // M27: the destination sits behind a pointer INSIDE a guest struct, which
                 // forward_and_diff never translates — so forwarding hands the host kernel a guest
                 // IPA as a host address. No guest in the gate calls these (measured: absent from
@@ -2535,6 +2641,23 @@ impl ReplaySession {
                                 self.b.apply_and_return(0, false, &zeros);
                                 return self.finish_event();
                             }
+                            // M52 §3c: the thread_selfid arm's mirror (symmetry rule 1): the same
+                            // box method, its answer compared with the recording. It inherits the
+                            // arm-top `verify_thread` and adds none.
+                            if num == retrace_arch::SYS_THREAD_SELFID {
+                                let id = self.b.guest_thread_selfid();
+                                if id != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("thread_selfid mismatch: replay {id:#x} != recorded {ret:#x}") });
+                                }
+                                if *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "thread_selfid recorded ret1={ret1:#x} err={err} with {} write(s); the model \
+                                         records 0, false and none", writes.len()) });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
                             // M47 §3d: the __mac_syscall arm's mirror (symmetry rule 1). The
                             // classification is recomputed from guest memory. AMFI's answer is host
                             // data, so the recorded write is applied rather than recomputed, once its
@@ -2702,19 +2825,35 @@ impl ReplaySession {
                                         let buf = self.b.read_guest(m.data, m.send_size as usize);
                                         let req = machmsg::decode_vm_map(&buf).map_err(|e| Divergence {
                                             landmark: self.idx, pc, detail: format!("replay vm_map decode: {e}") })?;
-                                        let anywhere = req.flags as u64 & VM_FLAGS_ANYWHERE != 0;
                                         // Same reservation/commit split as record (must reproduce the
                                         // identical returned address for the byte-equality check below).
-                                        let ipa = if req.cur_protection == 0 {
-                                            self.b.guest_vm_reserve_masked(req.address, req.size, req.mask, anywhere)
+                                        let placed = if req.cur_protection == 0 {
+                                            self.b.guest_vm_reserve_masked(req.address, req.size, req.mask, req.flags as u64)
                                         } else {
                                             let exec = req.cur_protection as u64 & PROT_EXEC != 0;
-                                            self.b.guest_vm_map_masked(req.address, req.size, req.mask, anywhere, exec)
+                                            self.b.guest_vm_map_masked(req.address, req.size, req.mask, req.flags as u64, exec)
                                         };
-                                        let reply = machmsg::encode_vm_map_reply(m.reply_port, ipa);
+                                        let (reply, shown) = match placed {
+                                            Ok(ipa) => (machmsg::encode_vm_map_reply(m.reply_port, ipa), format!("{ipa:#x}")),
+                                            Err(kr) => (machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32), format!("kr {kr}")),
+                                        };
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
-                                                detail: format!("mach_vm_map reply mismatch: replay ipa {ipa:#x}") });
+                                                detail: format!("mach_vm_map reply mismatch: replay ipa {shown}") });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::ServiceVmCopy => {
+                                        // Mirror of record's arm: same decode, same Box_ call, then the
+                                        // byte-equality of the reply that IS the oracle.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        let (src, size, dst) = machmsg::decode_vm_copy(&buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay vm_copy decode: {e}") })?;
+                                        let kr = self.b.guest_vm_copy(src, size, dst);
+                                        let reply = machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32);
+                                        if writes.len() != 1 || writes[0].bytes != reply {
+                                            return Err(Divergence { landmark: self.idx, pc,
+                                                detail: format!("mach_vm_copy reply mismatch: replay kr {kr}") });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
@@ -2732,11 +2871,14 @@ impl ReplaySession {
                                         assert!(req.target + req.size <= req.src || req.src + req.size <= req.target,
                                             "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
                                             req.target, req.size, req.src);
-                                        let (target, cur, max) = self.b.guest_vm_remap(req.target, req.size, req.src);
-                                        let reply = machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max);
+                                        let placed = self.b.guest_vm_remap_checked(req.target, req.size, req.src, req.flags as u64);
+                                        let reply = match placed {
+                                            Ok((target, cur, max)) => machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max),
+                                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                                        };
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
-                                                detail: format!("mach_vm_remap reply mismatch: replay target {target:#x}") });
+                                                detail: format!("mach_vm_remap reply mismatch: replay {placed:?}") });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
@@ -2874,8 +3016,14 @@ impl ReplaySession {
                                         // two calls around the reply landing.
                                         let clock_id = clock_service_request(&self.b, &m).map_err(|e| Divergence {
                                             landmark: self.idx, pc, detail: format!("replay host_get_clock_service decode: {e}") })?;
+                                        let sem_req = semaphore_request(&self.b, &m).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay semaphore RPC decode: {e}") })?;
                                         self.b.apply_and_return(*ret, *err, writes);
                                         learn_clock_service(&mut self.b, &m, clock_id, *ret, *err);
+                                        learn_semaphore(&mut self.b, &m, sem_req, *ret, *err).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!(
+                                                "semaphore RPC refused on replay, though the recording accepted it \
+                                                 — replay diverged before this landmark: {e}") })?;
                                     }
                                     machmsg::Route::Unsupported(why) => {
                                         return Err(Divergence { landmark: self.idx, pc,
@@ -2928,7 +3076,6 @@ impl ReplaySession {
                             // equal what was recorded (bump allocator is deterministic).
                             if num == MACH_VM_ALLOCATE || num == MACH_VM_MAP {
                                 let (addr_ptr, size, mask, flags, prot) = vm_map_args(num, &args);
-                                let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
                                 let exec = prot & PROT_EXEC != 0;
                                 // M51 §3h: record's check, with the same arguments; its refusal is recorded.
                                 let Some(hint) = self.b.read_va_checked(addr_ptr, 8).filter(|_| self.b.prepare_reply(addr_ptr, 8)) else {
@@ -2944,10 +3091,23 @@ impl ReplaySession {
                                 // Same reservation/commit split as record (cur_protection == 0 =>
                                 // reserve, else eagerly back); must reproduce the identical returned IPA
                                 // for the byte-equality check below.
-                                let ipa = if prot == 0 {
-                                    self.b.guest_vm_reserve_masked(req, size, mask, anywhere)
+                                let placed = if prot == 0 {
+                                    self.b.guest_vm_reserve_masked(req, size, mask, flags)
                                 } else {
-                                    self.b.guest_vm_map_masked(req, size, mask, anywhere, exec)
+                                    self.b.guest_vm_map_masked(req, size, mask, flags, exec)
+                                };
+                                // M52 §3b: record's refusal, recomputed; the recording must carry the same kr.
+                                let ipa = match placed {
+                                    Ok(ipa) => ipa,
+                                    Err(kr) => {
+                                        if !refusal_recorded(*ret, *err, writes, kr, false) {
+                                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                                "mach_vm_map is refused on replay with kr {kr}, but the recording \
+                                                 answered ret={ret:#x} err={err} with {} write(s)", writes.len()) });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                        return self.finish_event();
+                                    }
                                 };
                                 let recorded_ipa = writes.first()
                                     .map(|w| u64::from_le_bytes(w.bytes[..8].try_into().unwrap())).unwrap_or(ipa);
@@ -3341,6 +3501,51 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc,
                                         detail: format!(
                                             "sem_wait mismatch: replay ({rc:#x},{rerr}) != recorded ({ret:#x},{err})") });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M52 §3d: the -38 record arm's mirror, in the psynch mirror's shape: the
+                            // same call with the same arguments, the return compared, a refusal a
+                            // divergence naming the call. It inherits the arm-top `verify_thread`.
+                            if num == retrace_arch::MACH_SEMAPHORE_TIMEDWAIT {
+                                let rc = match self.b.guest_sem_timedwait(args) {
+                                    Ok(rc) => rc,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "semaphore_timedwait_trap refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc,
+                                        detail: format!("semaphore_timedwait_trap rc mismatch: replay {rc:#x} != recorded {ret:#x}") });
+                                }
+                                if *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "semaphore_timedwait_trap recorded ret1={ret1:#x} err={err} with {} write(s); the emulation \
+                                         records 0, false and none", writes.len()) });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M52 §3e: the yield arm's mirror, in the -38 mirror's shape. It inherits the
+                            // arm-top `verify_thread`.
+                            if num == retrace_arch::MACH_SWTCH_PRI || num == retrace_arch::MACH_THREAD_SWITCH {
+                                let rc = match self.b.guest_yield(num, args) {
+                                    Ok(rc) => rc,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{} refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}",
+                                        retrace_arch::syscall_display(num)) }),
+                                };
+                                if rc != *ret {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{} rc mismatch: replay {rc:#x} != recorded {ret:#x}",
+                                        retrace_arch::syscall_display(num)) });
+                                }
+                                if *ret1 != 0 || *err || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{} recorded ret1={ret1:#x} err={err} with {} write(s); the emulation records 0, false and none",
+                                        retrace_arch::syscall_display(num), writes.len()) });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
