@@ -411,14 +411,17 @@ fn a_seek_across_a_sleep_matches_a_cold_seek() {
 fn a_one_microsecond_and_a_zero_tick_sleep_wake_exactly_and_on_the_vcpu() {
     let (_, trace) = records_and_replays_as_native(&["usleep1"], &[1_000]);
     assert_sleep_landmark(&semwaits(&trace)[0], 0, 1_000);
-    let (_, trace) = records_and_replays_as_native(&["onens"], &[0]);
+    // Final-review I2: a zero-tick sleep on the only thread is a due poll, which moves the guest clock
+    // one stride (5 ticks = 208 ns) where it moved it 0 before.
+    let (_, trace) = records_and_replays_as_native(&["onens"], &[208]);
     let sleeps = semwaits(&trace);
     assert_sleep_landmark(&sleeps[0], 0, 1);
     let mut s = session_at_svc(&trace, sleeps[0].0);
     let at_call = synthetic_tsc(&s.dbg_internal_state());
     s.advance().unwrap_or_else(|d| panic!("diverged at landmark {}: {}", d.landmark, d.detail));
     assert_eq!((s.landmark(), s.current_thread()), (sleeps[0].0 + 1, 0), "woken in its own settle");
-    assert_eq!(synthetic_tsc(&s.dbg_internal_state()), at_call, "no idle jump: the deadline was due at the call");
+    assert_eq!(synthetic_tsc(&s.dbg_internal_state()), at_call + retrace_box::SYNTH_TSC_STRIDE,
+        "one stride and no idle jump: the deadline was due at the call");
     assert_woken_with_etimedout(&s, 0);
 }
 

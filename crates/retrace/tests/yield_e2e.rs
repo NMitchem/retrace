@@ -118,3 +118,16 @@ fn a_zero_timeout_semaphore_poll_beside_a_producer_finishes() { matches_native(r
 
 #[test]
 fn a_zero_timeout_kevent_poll_beside_a_writer_finishes() { matches_native(retrace_guest::YIELD_DYN, &["kqpoll"]); }
+
+// Final-review I2: a due `{0,0}` poll beside a thread that is timed-blocked (the child usleeps 10 ms
+// first). Nothing else is runnable, so the poll re-picks itself; before the fix it added no stride and
+// took no idle jump, so the clock never reached the sleeper's deadline and the loop spun forever.
+#[test]
+fn a_zero_timeout_semaphore_poll_beside_a_sleeping_producer_finishes() {
+    matches_native(retrace_guest::YIELD_DYN, &["sempoll-sleeper"]);
+}
+
+#[test]
+fn a_zero_timeout_kevent_poll_beside_a_sleeping_writer_finishes() {
+    matches_native(retrace_guest::YIELD_DYN, &["kqpoll-sleeper"]);
+}

@@ -205,7 +205,7 @@ pub const TSD_IPA: u64 = 0x0003_0000;
 const TSD_REGION_BASE: u64 = 0x0002_8000; // 0x8000 below tp
 const TSD_REGION_SIZE: u64 = 0x0001_0000; // 4 granules; tp = TSD_IPA sits 0x8000 into it
 // Deterministic synthetic timebase: an emulated timebase MRS (Apple fast counter / CNTVCT)
-// returns SYNTH_TSC_START + k*SYNTH_TSC_STRIDE for the k-th read. Identical on record & replay
+// advances SYNTH_TSC_START by SYNTH_TSC_STRIDE per read (yields and idle jumps move it too). Identical on record & replay
 // (both re-execute the same reads from the same entry), so timing dyld folds into memory can't
 // diverge. Monotonic and nonzero so a delta is always positive.
 const SYNTH_TSC_START:  u64 = 0x0000_0001_0000_0000;
@@ -219,7 +219,7 @@ const SYNTH_TSC_START:  u64 = 0x0000_0001_0000_0000;
 /// times fast (libtest's "running for over 60 seconds" warning).
 ///
 /// The safer error (spec §3h): a smaller stride undercounts the time compute takes between reads, so
-/// a timeout fires later than native's, never earlier. The cost: a guest that busy-waits on the
+/// a timeout fires later than native's on the monotonic clock, never earlier. The cost: a guest that busy-waits on the
 /// clock makes one VM exit per 5 ticks, so a 100 ms wait is about 480 000 reads, roughly 0.5 s of
 /// host time. That is the documented speed limit, and §3h says speed never overrides the rule.
 pub const SYNTH_TSC_STRIDE: u64 = 5;
@@ -7950,15 +7950,23 @@ impl Box_ {
         // was already due and rule 2 wakes it in this same settle, so the pick goes past it.
         let cur = self.threads.current();
         let mut timed = false;
+        let mut due_poll = false;
         match self.threads.state_of(cur) {
             thread::ThreadState::Blocked(thread::BlockReason::Yield) => { self.threads.end_yield(cur); timed = true; }
-            thread::ThreadState::Blocked(r) => timed = r.deadline().is_some(),
+            thread::ThreadState::Blocked(r) => { timed = r.deadline().is_some(); due_poll = timed; }
             _ => {}
         }
         self.fire_due_timers();
         self.wake_due_threads();
         let yields = timed && self.threads.state_of(cur) == thread::ThreadState::Runnable;
         let mut next = if yields { self.threads.pick_after(cur) } else { self.threads.pick_next() };
+        // Final-review I2 (R11, R15): a timed wait that was already due and finds nothing else runnable
+        // re-picks itself. Like `guest_yield` it moves the clock one stride and takes no idle jump, so a
+        // `{0,0}` poller beside a sleeper walks to the sleeper's deadline. A real `Yield` already paid
+        // its stride in `guest_yield`. Box state on both sides: this path is shared by record and replay.
+        if yields && due_poll && next == Some(cur) {
+            self.synthetic_tsc = self.synthetic_tsc.wrapping_add(SYNTH_TSC_STRIDE);
+        }
         if next.is_none() {
             let earliest = [self.kq.earliest_deadline(), self.threads.earliest_deadline()].into_iter().flatten().min();
             if let Some(deadline) = earliest {

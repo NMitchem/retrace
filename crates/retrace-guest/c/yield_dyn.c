@@ -12,6 +12,9 @@
 //             signals -> "done"
 //   kqpoll    main loops kevent(kq, ..., &{0,0}) on a pipe's read end; a child computes, then writes
 //             the pipe -> "done"
+//   sempoll-sleeper / kqpoll-sleeper
+//             the same polls, but the child usleep(10000)s before it signals or writes: the poller's
+//             only peer is timed-blocked, so a due poll must move the clock -> "done" (final-review I2)
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/semaphore.h>
@@ -43,6 +46,10 @@ static void compute(void) {
 }
 
 static void *sem_producer(void *arg) { (void)arg; compute(); semaphore_signal(sem); return 0; }
+
+static void *sem_sleeper(void *arg) { (void)arg; usleep(10000); semaphore_signal(sem); return 0; }
+
+static void *pipe_sleeper(void *arg) { (void)arg; usleep(10000); (void)!write(pfd[1], "x", 1); return 0; }
 
 static void *pipe_producer(void *arg) { (void)arg; compute(); (void)!write(pfd[1], "x", 1); return 0; }
 
@@ -77,20 +84,20 @@ int main(int argc, char **argv) {
         printf("done\n");
     } else if (!strcmp(mode, "badopt")) {
         printf("rc=%d\n", (int)thread_switch(MACH_PORT_NULL, 4, 0));
-    } else if (!strcmp(mode, "sempoll")) {
+    } else if (!strcmp(mode, "sempoll") || !strcmp(mode, "sempoll-sleeper")) {
         semaphore_create(mach_task_self(), &sem, SYNC_POLICY_FIFO, 0);
-        pthread_create(&t, 0, sem_producer, 0);
+        pthread_create(&t, 0, !strcmp(mode, "sempoll") ? sem_producer : sem_sleeper, 0);
         mach_timespec_t zero = {0, 0};
         while (semaphore_timedwait(sem, zero) != KERN_SUCCESS) {}
         pthread_join(t, 0);
         printf("done\n");
-    } else if (!strcmp(mode, "kqpoll")) {
+    } else if (!strcmp(mode, "kqpoll") || !strcmp(mode, "kqpoll-sleeper")) {
         (void)!pipe(pfd);
         int kq = kqueue();
         struct kevent ch, ev;
         EV_SET(&ch, pfd[0], EVFILT_READ, EV_ADD, 0, 0, 0);
         kevent(kq, &ch, 1, NULL, 0, NULL);
-        pthread_create(&t, 0, pipe_producer, 0);
+        pthread_create(&t, 0, !strcmp(mode, "kqpoll") ? pipe_producer : pipe_sleeper, 0);
         struct timespec zero = {0, 0};
         while (kevent(kq, NULL, 0, &ev, 1, &zero) != 1) {}
         pthread_join(t, 0);
