@@ -1143,7 +1143,7 @@ fn main() {
     // test` runs the binary it builds.
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     for (name, harness) in [("fc_rs_null", false), ("fc_rs_sleep", false),
-                            ("fc_rs_tests", true), ("fc_rs_tests_fail", true)] {
+                            ("fc_rs_tests", true), ("fc_rs_tests_fail", true), ("fc_rs_threads", true)] {
         let src = format!("{dir}/rs/{name}.rs");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");

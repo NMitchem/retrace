@@ -101,6 +101,8 @@ const ROWS: &[Row] = &[
     // harnesses run through and match native (the output comparison is `canonical`'s).
     Row { name: "fc_rs_tests", bin: retrace_guest::FC_RS_TESTS, args: &[], expect: Expect::Pass },
     Row { name: "fc_rs_tests_fail", bin: retrace_guest::FC_RS_TESTS_FAIL, args: &[], expect: Expect::Pass },
+    // M52 t8: a harness whose tests contend, wait, park, yield and read thread ids.
+    Row { name: "fc_rs_threads", bin: retrace_guest::FC_RS_THREADS, args: &[], expect: Expect::Pass },
     // Swift (swiftc, only where it runs: R11).
     Row { name: "fc_sw_hello", bin: retrace_guest::FC_SW_HELLO, args: &[], expect: Expect::Pass },
     Row { name: "fc_sw_throw", bin: retrace_guest::FC_SW_THROW, args: &[], expect: Expect::Pass },

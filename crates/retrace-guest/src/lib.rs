@@ -490,6 +490,8 @@ pub const FC_RS_SLEEP: &str = concat!(env!("OUT_DIR"), "/fc_rs_sleep");
 pub const FC_RS_TESTS: &str = concat!(env!("OUT_DIR"), "/fc_rs_tests");
 /// A `rustc --test` harness with one failing test: exit 101.
 pub const FC_RS_TESTS_FAIL: &str = concat!(env!("OUT_DIR"), "/fc_rs_tests_fail");
+/// A `rustc --test` harness whose tests contend, wait, park, yield and read thread ids (M52).
+pub const FC_RS_THREADS: &str = concat!(env!("OUT_DIR"), "/fc_rs_threads");
 /// Swift hello. This and every `FC_SW_*` file exists only where `swiftc` ran (R11).
 pub const FC_SW_HELLO: &str = concat!(env!("OUT_DIR"), "/fc_sw_hello");
 /// A Swift error thrown and caught.
@@ -850,7 +852,7 @@ mod tests {
         for p in [FC_NULL_LOAD, FC_NULL_STORE, FC_NULL_CALL, FC_MUNMAPPED, FC_LOW_STORE, FC_STACK_OVERFLOW,
                   FC_UAF, FC_ASSERT, FC_SLEEP, FC_USLEEP, FC_NANOSLEEP, FC_MUTEX, FC_FILEIO, FC_ENV, FC_C_TRAP, FC_SIGNAL,
                   FC_CPP_HELLO, FC_CPP_THROW, FC_CPP_TERMINATE, FC_CPP_THREAD, FC_CPP_SLEEP,
-                  FC_RS_NULL, FC_RS_SLEEP, FC_RS_TESTS, FC_RS_TESTS_FAIL] {
+                  FC_RS_NULL, FC_RS_SLEEP, FC_RS_TESTS, FC_RS_TESTS_FAIL, FC_RS_THREADS] {
             built(p);
         }
         let swift = [FC_SW_HELLO, FC_SW_THROW, FC_SW_OOB, FC_SW_UNWRAP, FC_SW_SLEEP, FC_SW_GCD, FC_SW_ASYNC];
