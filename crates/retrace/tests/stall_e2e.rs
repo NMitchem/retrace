@@ -10,10 +10,13 @@ use std::path::PathBuf;
 /// The recording's bound, in seconds. The line is due at 20 s of host time.
 const BOUND: u64 = 40;
 
-fn record_stalled(name: &str) -> (Option<i32>, String, PathBuf) {
+fn record_stalled(name: &str) -> (Option<i32>, String, PathBuf) { record_stalled_with(name, &[]) }
+
+fn record_stalled_with(name: &str, guest_args: &[&str]) -> (Option<i32>, String, PathBuf) {
     let trace = std::env::temp_dir().join(format!("retrace-stall-{}-{name}.bin", std::process::id()));
-    let r = util::run_bounded(util::bin(),
-        &["record-dyn", retrace_guest::STALL_DYN, "-o", trace.to_str().unwrap()], &[], BOUND);
+    let mut args = vec!["record-dyn", retrace_guest::STALL_DYN, "-o", trace.to_str().unwrap()];
+    if !guest_args.is_empty() { args.push("--"); args.extend(guest_args); }
+    let r = util::run_bounded(util::bin(), &args, &[], BOUND);
     (r.code, r.stderr, trace)
 }
 
@@ -29,6 +32,20 @@ fn a_thread_that_spins_while_another_waits_to_run_is_named_once() {
     assert_eq!(lines.len(), 1, "exactly one line of retrace's own: {err}");
     assert!(lines[0].starts_with("retrace: thread 0 has run for 20 s"), "{}", lines[0]);
     assert!(lines[0].contains("thread(s) 1 are ready to run"), "{}", lines[0]);
+    assert!(lines[0].contains("docs/walls.md#threads"), "{}", lines[0]);
+}
+
+#[test]
+fn a_spinner_beside_a_sleeping_thread_names_it_as_waiting_on_a_timeout() {
+    // Final-review I3: the child sleeps an hour, so it is timed-blocked and never Runnable; the spinner
+    // never reaches the settle that would wake it. The line must still name it. No native run: the
+    // native program takes the hour.
+    let (code, err, _) = record_stalled_with("sleeper", &["sleeper"]);
+    assert_eq!(code, None, "the alarm ends the recording; stderr: {err}");
+    let lines: Vec<&str> = err.lines().filter(|l| l.starts_with("retrace:")).collect();
+    assert_eq!(lines.len(), 1, "exactly one line of retrace's own: {err}");
+    assert!(lines[0].starts_with("retrace: thread 0 has run for 20 s"), "{}", lines[0]);
+    assert!(lines[0].contains("thread(s) 1 are ready to run or waiting on a timeout."), "{}", lines[0]);
     assert!(lines[0].contains("docs/walls.md#threads"), "{}", lines[0]);
 }
 

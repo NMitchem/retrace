@@ -8030,8 +8030,9 @@ impl Box_ {
         if !w.elapsed(now) { return; }
         let cur = self.threads.current();
         let runnable = self.threads.runnable_except(cur);
+        let timed = self.threads.timed_blocked_except(cur);
         let w = self.stall.as_mut().unwrap();
-        if let Some(line) = w.check(now, cur, &runnable) {
+        if let Some(line) = w.check(now, cur, &runnable, &timed) {
             // Not `eprintln!`, which panics once stderr's reader is gone: a diagnostic line must
             // never end a recording with the bug banner.
             use std::io::Write;

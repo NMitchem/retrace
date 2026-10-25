@@ -592,6 +592,14 @@ impl ThreadTable {
         (0..self.threads.len()).filter(|&i| i != cur && matches!(self.threads[i].state, ThreadState::Runnable)).collect()
     }
 
+    /// Final-review I3: the threads other than `cur` blocked with a deadline (`Sleep`, and `Sem`, `Cv`
+    /// and `Kevent` with a timeout), ascending. They become runnable only in `wake_due_threads`, which a
+    /// spinner that never blocks does not reach, so the stall line names them beside the ready ones.
+    pub fn timed_blocked_except(&self, cur: usize) -> Vec<usize> {
+        (0..self.threads.len()).filter(|&i| i != cur
+            && matches!(&self.threads[i].state, ThreadState::Blocked(r) if r.deadline().is_some())).collect()
+    }
+
     /// M49 Ruling T5-I1: the next runnable thread AFTER `tid` in index order, wrapping around, with
     /// `tid` itself last. `Box_::schedule_after_block` picks with this, not `pick_next`, when `tid`'s
     /// sleep was due in the very settle that blocked it: a poller on a 0-tick sleep is the

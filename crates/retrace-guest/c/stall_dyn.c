@@ -4,11 +4,19 @@
 // documented threads limit, and retrace's stall line names it.
 #include <pthread.h>
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 static volatile int flag;
 static void *setter(void *a) { flag = 1; return 0; }
-int main(void) {
+// `sleeper` (final-review I3): the child sleeps an hour before it sets the flag, so it is timed-blocked, not
+// ready (main's own usleep(1000) is what lets it start and block). It only wakes in a settle that main's spin never reaches; the line must still name it.
+static void *sleeping_setter(void *a) { sleep(3600); flag = 1; return 0; }
+int main(int argc, char **argv) {
     pthread_t t;
-    pthread_create(&t, 0, setter, 0);
+    int sleeper = argc > 1 && !strcmp(argv[1], "sleeper");
+    pthread_create(&t, 0, sleeper ? sleeping_setter : setter, 0);
+    // The child only runs once main blocks; a short sleep lets it start and block in its own sleep.
+    if (sleeper) usleep(1000);
     while (!flag) { /* spin: no syscall, no landmark */ }
     pthread_join(t, 0);
     printf("stall_dyn done\n");
