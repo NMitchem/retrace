@@ -232,7 +232,10 @@ fn a_one_nanosecond_wait_is_woken_in_the_same_settle_without_a_jump() {
     assert_eq!(b.threads().current(), 0);
     assert_eq!((b.vcpu_get_x(0), b.regs_snapshot().cpsr & PSTATE_C), (0, 0),
         "the deadline's reply, 0 with the carry clear, was delivered to the vCPU, over the sentinel");
-    assert_eq!(synthetic_tsc(&b), before, "no idle jump: the deadline queue's own pass woke it");
+    // Final-review I2: a due timed wait that re-picks itself moves the clock exactly one stride
+    // (was `before`: 4294967296 -> 4294967301). Still no idle jump, which would be a deadline's worth.
+    assert_eq!(synthetic_tsc(&b), before + retrace_box::SYNTH_TSC_STRIDE,
+        "one stride and no idle jump: the deadline queue's own pass woke it");
     assert_eq!(b.dbg_gkq().waiter(KQ), None);
 }
 
