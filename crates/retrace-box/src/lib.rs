@@ -4370,9 +4370,10 @@ impl Box_ {
     ///
     /// Until the fast-follow the recorder stored the whole window whenever anything in it changed.
     /// A pointer whose row gives no size has a window that runs to the end of its backing, up to
-    /// `PTR_WINDOW_CAP`. So a `gettimeofday` on a thread's stack recorded about 24 KB for the 16
-    /// bytes the kernel wrote, and parking_lot's queue test filled the disk (M52 Ruling
-    /// T8-pl-limit). Outside the span the window's bytes did not change, so replay, which applies
+    /// `PTR_WINDOW_CAP`. So a `gettimeofday` recorded the rest of its stack, 18 KB in `tvloop_dyn`
+    /// and about 24 KB on a parking_lot thread's stack, for the 16 bytes the kernel wrote, and each
+    /// other probed register whose window reached the `timeval` recorded its own copy. parking_lot's
+    /// queue test filled the disk (M52 Ruling T8-pl-limit). Outside the span the window's bytes did not change, so replay, which applies
     /// the span to memory that already holds them, leaves the guest the same memory the whole
     /// window would. The words are counted from the window's start, so a write that begins at the
     /// pointer is still recorded at the pointer.
@@ -4381,6 +4382,8 @@ impl Box_ {
     /// one `host_svc`, so a difference is the kernel's write.
     pub fn changed_span(pre: &[u8], post: &[u8]) -> Option<std::ops::Range<usize>> {
         debug_assert_eq!(pre.len(), post.len(), "one window, sampled twice");
+        // The common case, an unchanged window, at `memcmp`'s cost, as the old capture paid it.
+        if pre == post { return None; }
         let first = pre.iter().zip(post).position(|(a, b)| a != b)?;
         let last = pre.iter().zip(post).rposition(|(a, b)| a != b).expect("a first difference implies a last");
         Some(first & !7..((last | 7) + 1).min(post.len()))
