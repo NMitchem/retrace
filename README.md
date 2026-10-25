@@ -77,7 +77,7 @@ behind it. These are the ones you'll hit first:
   replayable without recording it, but races that need preemption won't reproduce and parallel
   programs run serially. A thread that spins waiting for another one, without ever blocking, hangs
   the run; after 20 seconds of that the recorder prints one `retrace: thread N has run for 20 s`
-  line naming the threads it is starving.
+  line naming the threads it is starving (ready to run, or waiting on a timeout).
 - No `fork`, `exec` or `posix_spawn`. `exec` and `posix_spawn` are refused with a message; `fork`
   fails with `EAGAIN`. Record the program that does the work, not a launcher: Homebrew's `python3`
   re-executes the real interpreter, and `/usr/bin/git` is an `xcrun` shim for Xcode's `git`.

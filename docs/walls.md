@@ -93,7 +93,7 @@ program would hang forever, so the line says so. If the same program does not ha
 retrace, that is a bug in retrace; please report it.
 
 A program that spins forever waiting for another thread, without blocking, is not a wall: it hangs
-under retrace as it would natively. retrace cannot tell a spin from slow work by anything in the
+under retrace, where natively the other thread would run on another core. retrace cannot tell a spin from slow work by anything in the
 recording, and reading the wall clock into it would make recordings differ from run to run; the
 line below is the one thing it does with the clock.
 
