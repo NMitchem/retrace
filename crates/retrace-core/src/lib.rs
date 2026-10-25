@@ -836,9 +836,13 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                                 "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
                                 req.target, req.size, req.src)));
                         }
-                        let (target, cur, max) = b.guest_vm_remap(req.target, req.size, req.src);
-                        let writes = vec![Region { ipa: m.data, bytes: machmsg::encode_vm_remap_reply(
-                            m.reply_port, target, cur, max) }];
+                        // Final-review I1: FIXED without OVERWRITE over occupied VA is KERN_NO_SPACE
+                        // (measured natively), refused as 4811 is: the 44-byte mig_reply_error.
+                        let reply = match b.guest_vm_remap(req.target, req.size, req.src, req.flags as u64) {
+                            Ok((target, cur, max)) => machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max),
+                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                        };
+                        let writes = vec![Region { ipa: m.data, bytes: reply }];
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
                             err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 vm_remap: {e}"))?; count += 1;
@@ -2867,11 +2871,14 @@ impl ReplaySession {
                                         assert!(req.target + req.size <= req.src || req.src + req.size <= req.target,
                                             "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
                                             req.target, req.size, req.src);
-                                        let (target, cur, max) = self.b.guest_vm_remap(req.target, req.size, req.src);
-                                        let reply = machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max);
+                                        let placed = self.b.guest_vm_remap(req.target, req.size, req.src, req.flags as u64);
+                                        let reply = match placed {
+                                            Ok((target, cur, max)) => machmsg::encode_vm_remap_reply(m.reply_port, target, cur, max),
+                                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                                        };
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
-                                                detail: format!("mach_vm_remap reply mismatch: replay target {target:#x}") });
+                                                detail: format!("mach_vm_remap reply mismatch: replay {placed:?}") });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }

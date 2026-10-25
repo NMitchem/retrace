@@ -2971,7 +2971,19 @@ impl Box_ {
     /// of memory anything remaps as code, and copying a BLOCK descriptor into an L3 slot would
     /// be silent garbage); a source attribute that is none of the three named; source pages that
     /// differ in protection. `copy`, `ANYWHERE` and a foreign `src_task` are dispatch's asserts.
-    pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64) -> (u64, u32, u32) {
+    /// M52 final-review I1: both dispatch arms call this. A FIXED request without
+    /// `VM_FLAGS_OVERWRITE` is answered by `fixed_answer` before anything is aliased, as
+    /// `mach_vm_map` is (measured natively: `kr=3` and the old bytes survive); `Err` is the
+    /// `kern_return_t`. With `OVERWRITE` (libffi's shape) the target is replaced.
+    pub fn guest_vm_remap(&mut self, target: u64, size: u64, src: u64, flags: u64)
+        -> Result<(u64, u32, u32), u64>
+    {
+        if flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(target, size)?; }
+        Ok(self.alias_remap(target, size, src))
+    }
+
+    /// The alias itself; see `guest_vm_remap` for the FIXED answer that precedes it.
+    fn alias_remap(&mut self, target: u64, size: u64, src: u64) -> (u64, u32, u32) {
         let g = GRANULE as u64;
         if size == 0 || !size.is_multiple_of(g) {
             retrace_arch::refuse!(Memory, "vm_remap: size {size:#x} is not a page multiple");

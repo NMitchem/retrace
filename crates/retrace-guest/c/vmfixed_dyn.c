@@ -3,6 +3,7 @@
 // fixedextra.c and fixedwin.c. Output has no addresses, so it compares with native byte for byte.
 //   vmfixed_dyn cases      contained, covering, straddling, reservation, allocate, mig, adjacent, free
 //   vmfixed_dyn overwrite  the contained case with VM_FLAGS_OVERWRITE: replaced, marker lost
+//   vmfixed_dyn remap      mach_vm_remap FIXED onto its own allocation, without and with OVERWRITE
 //   vmfixed_dyn windows    FIXED at the low, shared-region and commpage windows (and one free address)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -58,6 +59,23 @@ int main(int argc, char **argv) {
     volatile char *a, *m;
     if (strcmp(mode, "overwrite") == 0) {
         contained("overwrite", VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+    } else if (strcmp(mode, "remap") == 0) {
+        // M52 final-review I1: mach_vm_remap (4813) FIXED over an occupied target. Without OVERWRITE
+        // native answers KERN_NO_SPACE and keeps the old bytes; with it the target is replaced.
+        for (int ow = 0; ow < 2; ow++) {
+            w = window(8);
+            a = live(w, 2);                     // the source, one page of 'S'
+            a[0] = 'S';
+            m = live(w + 4 * PG, 1);            // the target, which is occupied
+            *m = 'M';
+            mach_vm_address_t t = w + 4 * PG;
+            vm_prot_t cur, max;
+            kern_return_t kr = mach_vm_remap(mach_task_self(), &t, PG, 0,
+                                             VM_FLAGS_FIXED | (ow ? VM_FLAGS_OVERWRITE : 0),
+                                             mach_task_self(), (mach_vm_address_t)a, FALSE, &cur, &max,
+                                             VM_INHERIT_DEFAULT);
+            printf("remap%s kr=%d target=%s\n", ow ? "-overwrite" : "", kr, *m == 'S' ? "aliased" : *m == 'M' ? "intact" : "other");
+        }
     } else if (strcmp(mode, "windows") == 0) {
         // 0x300000000 is free natively and in the box; the rest are __PAGEZERO, the shared region and
         // the commpages. None is a wall under M52 §3b: native's code is the box's code.

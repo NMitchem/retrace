@@ -91,3 +91,13 @@ fn a_fixed_request_into_retraces_own_windows_answers_as_native_does() {
         assert!(out.contains(&format!("window {addr} kr={kr}\n")), "{addr}:\n{out}");
     }
 }
+
+#[test]
+fn a_remap_fixed_without_overwrite_over_occupied_memory_answers_kern_no_space() {
+    // Final-review I1: mach_vm_remap (4813) was the one FIXED route that aliased over an occupied
+    // target silently. Native says kr=3 and the target keeps its bytes; with OVERWRITE (libffi's
+    // shape) the target becomes the alias.
+    let out = as_native(retrace_guest::VMFIXED_DYN, &["remap"]);
+    assert!(out.contains("remap kr=3 target=intact\n"), "{out}");
+    assert!(out.contains("remap-overwrite kr=0 target=aliased\n"), "{out}");
+}
