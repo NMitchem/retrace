@@ -259,7 +259,7 @@ and threads.
    the per-thread SPRR register `S3_6_C15_C1_5` with the `MAP_JIT` view it selects, and since M49
    the stage-2 fault conversion, the A-narrow tables and the discarded-status store-exclusive
    rewrite, and since M51 the trap conversion (an EL0 brk, udf, hlt or misaligned PC or SP entering
-   the guest's EL1 vector through enter_el1) J1's translation fault, and since M53 the interval timer's fire, framed at a landmark finish or an idle jump with no `SignalDelivery` recorded): `run()` is
+   the guest's EL1 vector through enter_el1) and J1's translation fault, and since M53 the interval timer's fire, framed at a landmark finish or an idle jump with no `SignalDelivery` recorded): `run()` is
    shared by record and replay, so such an arm fires identically on both sides and never surfaces
    to the record/replay loop — determinism is then automatic.
 

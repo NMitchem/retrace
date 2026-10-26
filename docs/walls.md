@@ -54,6 +54,10 @@ work:
 - a `readv` or `writev` on a guest pipe whose later iovec entry is unreachable (`... with an unreachable
   entry after the first, on guest pipe fd N`; natively measured for `readv`, and a `writev` is refused the
   same way), and an iovec array that splits into more than 1024 host entries;
+- a length argument larger than the memory behind its buffer, for example a `sysctl` `*oldlenp` or a
+  `stat64_extended` `*xsecurity_size` past its buffer's backing (`syscall 341 was given a length of …`).
+  Natively the call may succeed, because the kernel writes only what it needs, but retrace cannot size the
+  memory it must watch. Pass the buffer's real size;
 - `chroot`, which is privileged and stays out of scope for good, and `socketpair`, which is why tokio's
   runtime stops (`socketpair (syscall 135)`).
 
