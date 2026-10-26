@@ -272,6 +272,16 @@ pub const FAULTCASE_DYN: &str = concat!(env!("OUT_DIR"), "/faultcase_dyn");
 /// M48: the guest's own kqueues by mode — `probe`, `wake`, `timeout`, `tryselect`, `pipe`,
 /// `oneshot`, `bad filter`, `bad notkq` (spec §3h; see the source's header).
 pub const KQ_DYN: &str = concat!(env!("OUT_DIR"), "/kq_dyn");
+/// M53 t3: a duplicated guest kqueue by mode — `shared`, `outlives`, `fdclose`, `mio` (see the
+/// source's header).
+pub const KQDUP_DYN: &str = concat!(env!("OUT_DIR"), "/kqdup_dyn");
+/// M53 t4: poll, select and pselect over guest pipes by mode — `states`, `nval`, `sleep`, `cross`,
+/// `timeout`, `select`, `pselect`, `pollfile`, `pselmask` (see the source's header).
+pub const POLLSEL_DYN: &str = concat!(env!("OUT_DIR"), "/pollsel_dyn");
+/// M53 t5: ITIMER_REAL, alarm, pause, sigsuspend and an interrupted sleep by mode — `pause`, `interval`,
+/// `get`, `alarm`, `ignored`, `nohandler`, `target`, `suspend`, `pending`, `sleeper`, `masked`, `einval`,
+/// `long`, `virtual` (see the source's header).
+pub const ALARM_DYN: &str = concat!(env!("OUT_DIR"), "/alarm_dyn");
 /// M52 §3i: main spins on a flag a created thread would set; natively it exits 0 at once, under
 /// retrace's cooperative scheduler it never finishes (see the source's header).
 pub const STALL_DYN: &str = concat!(env!("OUT_DIR"), "/stall_dyn");
@@ -458,8 +468,16 @@ pub const FC_SIGNAL: &str = concat!(env!("OUT_DIR"), "/fc_signal");
 pub const CF_WALLS: &str = concat!(env!("OUT_DIR"), "/cf_walls");
 /// The source of `CF_WALLS`, which cleanfail_e2e builds for x86_64 to test the arm64-only refusal.
 pub const CF_WALLS_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/c/cf_walls.c");
-/// M50 Review Focus 1: a Rust program that calls fsync(2).
-pub const CF_RS_FSYNC: &str = concat!(env!("OUT_DIR"), "/cf_rs_fsync");
+/// M50 Review Focus 1: a Rust program that calls chroot(2) (M53 C1; it was fsync(2) until fsync got a row).
+pub const CF_RS_CHROOT: &str = concat!(env!("OUT_DIR"), "/cf_rs_chroot");
+/// M53 (spec §3b): the POSIX file and process calls, one mode each, picked by argv[1] (see the source).
+pub const POSIX_DYN: &str = concat!(env!("OUT_DIR"), "/posix_dyn");
+/// M53 (spec §3c): the iovec calls, one mode each, picked by argv[1] (see the source).
+pub const IOVEC_DYN: &str = concat!(env!("OUT_DIR"), "/iovec_dyn");
+/// M53: `posix_dyn`'s modes in sequence, one directory, as a first-contact C program.
+pub const FC_POSIX: &str = concat!(env!("OUT_DIR"), "/fc_posix");
+/// M53: `std::fs` end to end, as a first-contact Rust program.
+pub const FC_RS_FS: &str = concat!(env!("OUT_DIR"), "/fc_rs_fs");
 /// M51 (spec §3e): the output modes (see the source).
 pub const FID_OUTPUT: &str = concat!(env!("OUT_DIR"), "/fid_output");
 /// M51 (spec §3b): one trap per mode (see the source).
@@ -721,6 +739,27 @@ mod tests {
     fn kq_dyn_guest_parses() {
         // M48: proves the build.rs wiring and the path constant; behaviour is kq_e2e's.
         let l = parse_macho(&std::fs::read(KQ_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn alarm_dyn_guest_parses() {
+        // M53 t5: proves the build.rs wiring and the path constant; behaviour is alarm_e2e's.
+        let l = parse_macho(&std::fs::read(ALARM_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn pollsel_dyn_guest_parses() {
+        // M53 t4: proves the build.rs wiring and the path constant; behaviour is pollsel_e2e's.
+        let l = parse_macho(&std::fs::read(POLLSEL_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn kqdup_dyn_guest_parses() {
+        // M53 t3: proves the build.rs wiring and the path constant; behaviour is kqdup_e2e's.
+        let l = parse_macho(&std::fs::read(KQDUP_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 

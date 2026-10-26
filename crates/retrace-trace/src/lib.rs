@@ -72,7 +72,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0e"; // "RT" + format version 0x000e. M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0f"; // "RT" + format version 0x000f. M53 bumped it because `readv`, `writev`, `preadv` and `pwritev` are translated (a console `writev` is a console write; a forwarded iovec lands as per-entry writes), so a pre-M53 recording of one holds an EFAULT or a wall where this retrace records the transfer. 0x000e was M52's: M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -344,7 +344,8 @@ mod tests {
         // instruction abort's IFSC (the M24 kind).
         // M52: the synthetic clock's stride moved from 0x2400 to 5 ticks per timebase read, so what a
         // recording's clock-derived values mean changed (the M24 kind of change).
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0e");
+        // M53: the iovec calls are translated (a console writev prints, a forwarded one lands its entries).
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0f");
     }
 
     #[test]
@@ -398,6 +399,17 @@ mod tests {
         std::fs::write(&p, b"RT\x00\x0drest-of-a-pre-M52-trace").unwrap();
         let msg = Reader::format_skew(&p).unwrap().expect(r"a pre-M52 RT\x00\x0d header is version skew");
         assert!(msg.contains(r"RT\x00\x0d") && msg.contains(&format!(r"RT\x{:02x}\x{:02x}", TRACE_MAGIC[2], TRACE_MAGIC[3])), "{msg}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_pre_m53_trace_is_refused_by_name() {
+        // M53's bump: an M52 recording (RT\x00\x0e) holds an EFAULT where a `writev` was forwarded
+        // untranslated, and a wall where a `readv` was refused. It is refused as an older format.
+        let p = named_tempfile("m52magic");
+        std::fs::write(&p, b"RT\x00\x0erest-of-a-pre-M53-trace").unwrap();
+        let msg = Reader::format_skew(&p).unwrap().expect(r"a pre-M53 RT\x00\x0e header is version skew");
+        assert!(msg.contains(r"RT\x00\x0e") && msg.contains(&format!(r"RT\x{:02x}\x{:02x}", TRACE_MAGIC[2], TRACE_MAGIC[3])), "{msg}");
         std::fs::remove_file(&p).ok();
     }
 

@@ -14,9 +14,11 @@ pub mod thread;
 pub mod kq;
 pub mod jit;
 pub mod gkq;
+pub mod iov;
 pub mod psynch;
 pub mod sleep;
 pub mod sema;
+pub mod timer;
 mod excl;
 pub mod stall;
 pub use excl::{Excl, SetBy};
@@ -744,6 +746,10 @@ pub struct Box_ {
     /// killed (`sema.rs`). Box state, rebuilt on both sides from the guest's own calls and carried
     /// through every rebuild path (`BoxState`).
     sems: sema::Semaphores,
+    /// M53 §3f: the process's one `ITIMER_REAL` on the guest clock (`timer.rs`). Box state, rebuilt on
+    /// both sides from the guest's own `setitimer` calls and carried through every rebuild path
+    /// (`BoxState`).
+    itimer: timer::RealTimer,
 }
 
 /// Byte offset of the thread's mach port name (the "kport") inside libpthread's `pthread` struct,
@@ -759,12 +765,13 @@ const PTHREAD_KPORT_OFF: u64 = 0xf8;
 const PTHREAD_TID_OFF: u64 = 0xd8;
 
 /// M48 §3c: `kqueue` and the `writev` pair (SDK `sys/syscall.h`), which `Box_::note_fd_effects`
-/// reads. `writev` is forwarded (its row is `NestedSource`), so its return moves a pipe's count as
-/// `write`'s does. `readv` needs no entry: its row is `NestedDest`, which the generic arm refuses
-/// (`writes_via_nested_pointer`), so it never completes.
+/// reads. M53 §3c translates the iovec calls (`Box_::guest_iovec`), so `writev`'s return moves a
+/// pipe's count as `write`'s does and `readv`'s as `read`'s.
 const SYS_KQUEUE: u64 = 362;
 const SYS_WRITEV: u64 = 121;
 const SYS_WRITEV_NOCANCEL: u64 = 412;
+const SYS_READV: u64 = 120;
+const SYS_READV_NOCANCEL: u64 = 411;
 
 /// Byte offset of the thread-specific-data base inside libpthread's `pthread` struct. The kernel
 /// sets `TPIDRRO_EL0 = pthread + 0xe0` when it starts a thread; libpthread reads it back the other
@@ -888,6 +895,24 @@ pub enum Stop {
     Unsupported(Unsupported),
 }
 
+/// M53 §3f: the most idle jumps one `schedule_after_block` makes before it reports the deadlock.
+const IDLE_JUMPS_MAX: usize = 1 << 22;
+
+/// M53 §3f: what raising a signal on a thread does (`Box_::classify_raise`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaiseKind {
+    /// The mask blocks it, or the thread is blocked where a signal waits for its wake: it pends.
+    Pend,
+    /// Ignored, or it defaults to ignore: nothing happens.
+    Ignore,
+    /// Defaults to ending the process.
+    Terminate,
+    /// A runnable thread runs its handler.
+    Deliver,
+    /// A sleeping or `sigsuspend`ing thread is ended with `EINTR`, then runs its handler.
+    Interrupt,
+}
+
 /// M51 §3d (T3-b): what a hardware fault's signal does to the thread that took it, as
 /// [`Box_::fault_action`] decides it. Record's fault arm and replay's mirror both ask, of the same
 /// box state (symmetry rule 1).
@@ -973,6 +998,21 @@ pub struct FdTable {
     slots: Vec<FdSlot>,
     host: Vec<Option<i32>>,
 }
+
+/// M53 §3c: what `Box_::iovec_prepare` decided for an iovec call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IovPrep {
+    /// Answered before anything is forwarded: this errno.
+    Answer(u64),
+    /// A write to a console slot: print `bytes` on `stream`, answer `(ret, err)`, forward nothing.
+    Console { stream: Stream, bytes: Vec<u8>, ret: u64, err: bool },
+    /// Forward `spans` once. `partial`: an entry after these was unreachable, so a full transfer
+    /// (`total` bytes) answers `EFAULT`. `reader`: the kernel stores into the spans.
+    Forward { spans: Vec<(u64, usize)>, partial: bool, total: u64, reader: bool },
+}
+
+/// `Box_::guest_iovec`'s answer: `(ret, err, writes, console write)`.
+pub type IovDone = (u64, bool, Vec<Region>, Option<(Stream, Vec<u8>)>);
 
 /// M51 §3e: which of the program's two console streams a write goes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1268,6 +1308,10 @@ pub struct BoxState {
     // happened behind the checkpoint. Dropped, a seek past a counted signal would restore a wait
     // that blocks where the kernel's count would have let it through (semtimed_e2e's seek test).
     pub sems: sema::Semaphores,
+    // M53 §3f: carried because a mid-run capture cannot re-derive it: the `setitimer` happened behind
+    // the checkpoint. Dropped, a seek past an `alarm` would restore a guest whose pause waits for a
+    // signal nothing sends (alarm_e2e's seek test).
+    pub itimer: timer::RealTimer,
 }
 
 /// M40: bytes of guest backing currently mapped by `alloc_pages` and not yet released — a
@@ -1445,6 +1489,8 @@ pub fn subtract_range_for_test(table: &mut Vec<(u64, u64)>, addr: u64, len: u64)
 /// M27 guard band past the window, M28/M30 shrunk band length). Factored out at M30 because the
 /// fifth field pushed the inline tuple over clippy's type-complexity threshold.
 type Window = (u64, usize, Vec<u8>, Vec<u8>, usize);
+/// M53 §3e: `(ret, err, writes)` of a `poll` or `select` answer, the writes being `(guest VA, bytes)`.
+type PollAnswer = (u64, bool, Vec<(u64, Vec<u8>)>);
 
 /// M50 (spec §3b, R2): whether this process may create a VM. The CLI asks before it loads a guest
 /// or opens a trace, so a missing `com.apple.security.hypervisor` entitlement is one line and exit
@@ -1861,7 +1907,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), stall: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -2664,7 +2710,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
         vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), stall: None };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -3541,7 +3587,9 @@ impl Box_ {
         // the schedule fires identically on both sides and nothing about it is recorded. A
         // single-threaded guest has a one-entry table whose only thread is `Runnable`, so
         // `needs_reschedule()` is false and every M0–M13 path is untouched.
+        if let Some(stop) = self.timer_terminal_stop() { return stop; }
         if let Err(u) = self.settle_schedule() { return Stop::Unsupported(u); }
+        if let Some(stop) = self.timer_terminal_stop() { return stop; }
         // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
         // already happened before the first instruction of this window retires. Pin it: after this
         // point, no path may change `current` until this window's trap is consumed, where
@@ -3715,7 +3763,9 @@ impl Box_ {
         // window that ends after 0 instructions. It looks like it works.
         // `step_reschedules_off_a_blocked_thread_before_arming_the_step_bit` asserts the retired PC
         // precisely so that variant fails.
+        if let Some(stop) = self.timer_terminal_stop() { return stop; }
         if let Err(u) = self.settle_schedule() { return Stop::Unsupported(u); }
+        if let Some(stop) = self.timer_terminal_stop() { return stop; }
         // M15 R1: everything M15 says about "the thread at (N, K)" depends on the switch having
         // already happened before the first instruction of this window retires. Pin it: after this
         // point, no path may change `current` until this window's trap is consumed, where
@@ -4158,7 +4208,7 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), stall: None };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -4205,6 +4255,9 @@ impl Box_ {
     /// CPSR from `err` (carry set => the syscall failed and x0 = errno). This lets a
     /// deliberately-failing syscall replay identically to how it was recorded.
     pub fn set_x0_err_and_return(&mut self, ret: u64, err: bool) {
+        // M53 §3f: every landmark's return lands here (directly or through `apply_and_return`), on
+        // both sides, so this is the "landmark finish" at which `ITIMER_REAL` is next checked.
+        self.itimer.note_landmark();
         let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
         let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
         let spsr = (spsr & !retrace_arch::PSTATE_C) | if err { retrace_arch::PSTATE_C } else { 0 };
@@ -4528,8 +4581,9 @@ impl Box_ {
 
     /// Rewrite every guest fd operand of `num` in `args` to its host fd, in place.
     ///
-    /// `translate_fds` has exactly ONE caller, `forward_and_diff`, and is the first statement of
-    /// its forwarding path — which is what makes it M33's one loud site. (Since M37 the function's
+    /// `translate_fds` has two callers, `forward_and_diff` (M33's one loud site, where it is the
+    /// first statement of the forwarding path) and, since M53, `guest_iovec`, which forwards the
+    /// translated prefix of an iovec call itself. (Since M37 the function's
     /// literal first statement is the `SYS_DUP2` short-circuit into `guest_dup2`, which forwards
     /// nothing and consults no view; `dup2` has a row regardless. M38 adds the `F_DUPFD`
     /// short-circuit into `guest_fcntl_dupfd` beside it, on the same terms.) `guest_mmap_file` never calls it: file-backed
@@ -4897,15 +4951,13 @@ impl Box_ {
                             // sweep, jq and CPython at M29 (Task 4): 826 dispatches, zero oversized,
                             // so every legitimate call forwards untouched and this only catches the
                             // unmodelled case.
-                            assert!(
-                                Self::deref_len_fits(want, avail),
-                                "unmodelled: syscall {} asked for {want} bytes at ipa {:#x} whose \
-                                 backing holds only {avail} — forwarding it would let the host \
-                                 kernel write past the backing. See the M29 spec, Component 1. If \
-                                 this buffer might legitimately continue into an adjacent backing, \
-                                 re-run with RETRACE_DEREFLEN=1 to print the backing span and check.",
-                                num as i64, args[di],
-                            );
+                            // Final-review T6-derefassert: a guest reaches this with a natively-valid
+                            // call (the kernel writes at most 44 bytes into an `xsecurity` buffer
+                            // whatever size the guest names), so it is a wall, not a panic: retrace
+                            // cannot size the diff window for a length that runs past the backing.
+                            if !Self::deref_len_fits(want, avail) {
+                                retrace_arch::refuse!(Syscalls, "syscall {} was given a length of {want} bytes at {:#x}, but the memory behind that buffer holds only {avail}; retrace cannot size the window it records for the call, and forwarding it could let the host kernel write past the buffer. If the buffer might legitimately continue into an adjacent mapping, re-run with RETRACE_DEREFLEN=1 to print the backing span.", num as i64, args[di]);
+                            }
                         }
                         // `host_span` returns `None` for two different reasons that must not be
                         // conflated: `oldp == NULL` is a legal "just tell me the size" sysctl with
@@ -5570,7 +5622,14 @@ impl Box_ {
             // must come back to. Likewise spsr, not regs.cpsr.
             sp: ctx.regs.sp_el0,
             pc: ctx.elr,
-            cpsr: ctx.spsr,
+            // Final-review I1: a target that is not running but whose context is a COMPLETED return
+            // (a woken `poll`/`kevent`/wait) keeps the return's carry in `regs.cpsr`; `ctx.spsr` is
+            // still the `svc` entry's. A never-run thread has `regs.cpsr == spsr`, so it is unchanged.
+            cpsr: if tid != cur && ctx.regs.pc == ctx.elr {
+                (ctx.spsr & !retrace_arch::PSTATE_C) | (ctx.regs.cpsr & retrace_arch::PSTATE_C)
+            } else {
+                ctx.spsr
+            },
         };
         let ns = NeonState { v: ctx.fp, fpsr: ctx.fpsr as u32, fpcr: ctx.fpcr as u32 };
 
@@ -5581,9 +5640,12 @@ impl Box_ {
         // `on_alt` is FED BACK from `choose_frame_base` rather than recomputed here, so the frame's
         // `uc_onstack` cannot disagree with the stack the frame was actually placed on — this is
         // the whole reason `choose_frame_base` returns a second value at all.
+        // M53 §3f: a `sigsuspend`'s frame records the mask the call FOUND (xnu's `uu_oldmask`), not the
+        // argument mask the handler is about to run under.
+        let frame_mask = self.threads.take_frame_mask(tid);
         let inp = FrameInput {
             sig, si_code, si_addr, esr, far, ts, ns,
-            mask: self.threads.mask_of(tid),   // the PRE-signal mask: what sigreturn restores
+            mask: frame_mask.unwrap_or_else(|| self.threads.mask_of(tid)),   // the PRE-signal mask: what sigreturn restores
             act, frame_base, on_alt,
         };
         let (bytes, entry) = build_frame(&inp);
@@ -6419,7 +6481,7 @@ impl Box_ {
                 Some(self.now_guest().saturating_add(u64::try_from(ns * 3 / 125).unwrap_or(u64::MAX)))
             }
         };
-        self.gkq.set_waiter(kq, gkq::Waiter { tid: cur, events: elist, nevents });
+        self.gkq.set_waiter(kq, gkq::Waiter { tid: cur, fd: kq, events: elist, nevents });
         self.threads.block(thread::BlockReason::Kevent { kq, deadline });
         Ok((0, false))
     }
@@ -6434,7 +6496,7 @@ impl Box_ {
     /// its fd set:
     /// - `kqueue` creates the returned fd's table, and `pipe` (`Ret::FdPair`) the pair's count (R4);
     /// - `close`/`close_nocancel` drop a table, the closed fd's knotes and a pipe end;
-    /// - `dup`, `dup2` and `F_DUPFD`/`F_DUPFD_CLOEXEC` copy a pipe end, and refuse a kqueue;
+    /// - `dup`, `dup2` and `F_DUPFD`/`F_DUPFD_CLOEXEC` copy a pipe end or share a kqueue;
     /// - `read`, `read_nocancel`, the `write` pair and the `writev` pair move a pipe's count by
     ///   their return.
     ///
@@ -6460,14 +6522,16 @@ impl Box_ {
             n if retrace_arch::is_close_syscall(n) => self.gkq.close(args[0]),
             n if n == retrace_arch::SYS_DUP || n == retrace_arch::SYS_DUP2 || retrace_arch::is_fcntl_dupfd(n, &args) =>
                 self.gkq.dup(args[0], ret),
-            retrace_arch::SYS_READ | retrace_arch::SYS_READ_NOCANCEL => self.gkq.note_read(args[0], ret),
+            retrace_arch::SYS_READ | retrace_arch::SYS_READ_NOCANCEL | SYS_READV | SYS_READV_NOCANCEL =>
+                self.gkq.note_read(args[0], ret),
             n if retrace_arch::is_write_syscall(n) || n == SYS_WRITEV || n == SYS_WRITEV_NOCANCEL =>
                 self.gkq.note_write(args[0], ret),
             // Not in the fd set: no effect, and no wake (see the doc above).
             _ => return Ok(()),
         };
         effect.map_err(fail)?;
-        self.wake_kevent_waiters().map_err(fail)
+        self.wake_kevent_waiters().map_err(fail)?;
+        self.wake_poll_waiters().map_err(fail)
     }
 
     /// M48 (header, "Delivery happens at the wake"; §11a item 6): make `tid`, blocked in a timed-wait
@@ -6496,6 +6560,205 @@ impl Box_ {
             ctx.regs.cpsr = (ctx.regs.cpsr & !retrace_arch::PSTATE_C) | c;
         }
         Ok(())
+    }
+
+    /// M53 §3e: `poll`, `select` and `pselect` (and their `_nocancel` twins) over guest pipes,
+    /// **modelled, never forwarded**. Forwarded, the host kernel would poll its own descriptors by
+    /// the guest's numbers and a wait would block the recorder; the arms that call this sit before
+    /// the generic arm, whose assert makes that a checked fact. Every descriptor the call names must
+    /// be a guest pipe end (`GuestKqueues::pipe_state`); a closed one answers `POLLNVAL` (poll) or
+    /// `EBADF` (select), and any other is refused by value, naming the call and the descriptor.
+    ///
+    /// In order:
+    /// 1. The arguments are validated and the array or sets read through `read_va_checked`. The
+    ///    reply's pages are checked with `prepare_reply`.
+    /// 2. Each descriptor is answered from the pipe's state (`poll_ready`, or `select`'s own rule).
+    /// 3. If anything is ready, or the timeout is 0, the answers are written and their count
+    ///    returned.
+    /// 4. Otherwise the caller blocks as `BlockReason::Poll`, with a deadline of `now_guest()` plus
+    ///    the timeout in ticks (none for an infinite one: a NULL `select` timeout or any negative
+    ///    `poll` timeout), and the landmark returns 0. The real answer is written at the wake
+    ///    (`deliver_wake`): by `wake_poll_waiters` when a pipe change readies a descriptor, or by
+    ///    `poll_timed_out` at the deadline, which answers 0 and clears every `revents` or set.
+    ///
+    /// `pselect` with a signal mask is refused until the mask swap is modelled (§3e). Returns
+    /// `(ret, err)`. Both dispatch arms call this with the same `(num, args)` (symmetry rule 1) and
+    /// nothing is recorded (R3): the answers are functions of guest memory, the guest clock and box
+    /// state.
+    pub fn guest_poll(&mut self, num: u64, args: [u64; 8]) -> Result<(u64, bool), String> {
+        const EBADF: u64 = 9;
+        const EFAULT: u64 = 14;
+        const EINVAL: u64 = 22;
+        // The longest pollfd array refused rather than guessed: unmeasured past it.
+        const MAX_POLL_FDS: u32 = 4096;
+        // `FD_SETSIZE`: `select` takes `nfds` up to it (t0 M7: 1025 is EINVAL).
+        const FD_SETSIZE: i32 = 1024;
+        let name = retrace_arch::syscall_display(num);
+        let wall = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M53: {name} {why}"));
+        let fail = |why: String| format!("{why}. args=[{}]", Self::fmt_args(args));
+        let is_poll = matches!(num, retrace_arch::SYS_POLL | retrace_arch::SYS_POLL_NOCANCEL);
+        // 1. The arguments, and the timeout in nanoseconds (None: infinite).
+        let (spec, timeout_ns) = if is_poll {
+            let (va, nfds, ms) = (args[0], args[1] as u32, args[2] as u32 as i32);
+            if nfds > i32::MAX as u32 { return Ok((EINVAL, true)); }
+            if nfds > MAX_POLL_FDS {
+                return Err(fail(wall(format!("with nfds {nfds}: a longer array than the {MAX_POLL_FDS} entries \
+                                              measured is not modelled"))));
+            }
+            let len = nfds as usize * 8;
+            let raw = if len == 0 { vec![] } else {
+                match self.read_va_checked(va, len) { Some(b) => b, None => return Ok((EFAULT, true)) }
+            };
+            if len > 0 && !self.prepare_reply(va, len) { return Ok((EFAULT, true)); }
+            // Any negative timeout is infinite (t0 M7).
+            (gkq::PollWait::Poll { va, raw }, (ms >= 0).then(|| ms as u64 * 1_000_000))
+        } else {
+            let nfds = args[0] as u32 as i32;
+            let is_pselect = matches!(num, retrace_arch::SYS_PSELECT | retrace_arch::SYS_PSELECT_NOCANCEL);
+            if is_pselect && args[5] != 0 {
+                return Err(fail(wall(format!("with a signal mask at {:#x}: swapping the mask for the wait is not \
+                                              modelled", args[5]))));
+            }
+            if !(0..=FD_SETSIZE).contains(&nfds) { return Ok((EINVAL, true)); }
+            let timeout_ns: Option<u64> = if args[4] == 0 { None } else {
+                let Some(t) = self.read_va_checked(args[4], 16) else { return Ok((EFAULT, true)) };
+                let sec = i64::from_le_bytes(t[..8].try_into().unwrap());
+                // A timeval's microseconds are 32 bits wide, a timespec's nanoseconds 64.
+                // Ruling T4-timeout (pselbound.c, seltimeoutprobe.c): the kernel's own bounds. A
+                // timeval is valid for 0 <= sec <= 100,000,000 and 0 <= usec < 1,000,000; a timespec
+                // for 0 <= sec <= i32::MAX and 0 <= nsec <= 1,000,000,000 (1e9 itself is accepted).
+                let (sub, unit, max_sec, max_sub) = if is_pselect {
+                    (i64::from_le_bytes(t[8..].try_into().unwrap()), 1, i32::MAX as i64, 1_000_000_000)
+                } else {
+                    (i32::from_le_bytes(t[8..12].try_into().unwrap()) as i64, 1_000, 100_000_000, 999_999)
+                };
+                if !(0..=max_sec).contains(&sec) || !(0..=max_sub).contains(&sub) { return Ok((EINVAL, true)); }
+                (sec as u64).checked_mul(1_000_000_000).and_then(|n| n.checked_add(sub as u64 * unit))
+                    .ok_or_else(|| fail(wall("with a timeout that overflows nanoseconds".to_string())))
+                    .map(Some)?
+            };
+            let nfds = nfds as usize;
+            let len = nfds.div_ceil(32) * 4;
+            let mut sets: [Vec<u8>; 3] = Default::default();
+            for (i, set) in sets.iter_mut().enumerate() {
+                let va = args[1 + i];
+                if va == 0 { continue; }
+                *set = match self.read_va_checked(va, len) { Some(b) => b, None => return Ok((EFAULT, true)) };
+            }
+            for i in 0..3 {
+                if args[1 + i] != 0 && len > 0 && !self.prepare_reply(args[1 + i], len) { return Ok((EFAULT, true)); }
+            }
+            // The except set is never reported, but its descriptors must be valid (EBADF, sets untouched).
+            for fd in 0..nfds {
+                if Self::set_has(&sets[2], fd) && !self.fds.is_open(fd as u64) { return Ok((EBADF, true)); }
+            }
+            let [rset, wset, _] = sets;
+            (gkq::PollWait::Select { nfds, vas: [args[1], args[2], args[3]], rset, wset }, timeout_ns)
+        };
+        // 2. The answers.
+        let (rc, err, writes) = self.poll_answer(&name, &spec)?;
+        if err { return Ok((rc, true)); }
+        // 3. Ready, or a poll that does not wait.
+        if rc > 0 || timeout_ns == Some(0) {
+            for (va, bytes) in &writes {
+                self.write_va_committing(*va, bytes).map_err(|m| fail(format!("{name}: reply at {va:#x}: {m}")))?;
+            }
+            return Ok((rc, false));
+        }
+        // 4. Block. 24 MHz, so ns * 3 / 125 ticks (F6).
+        let deadline = timeout_ns.map(|ns| self.now_guest().saturating_add(sleep::ns_to_ticks(ns)));
+        self.gkq.set_poll_waiter(self.threads.current(), spec);
+        self.threads.block(thread::BlockReason::Poll { deadline });
+        Ok((0, false))
+    }
+
+    /// Is bit `fd` of the little-endian `fd_set` bytes `set` on? An empty (NULL) set has none.
+    fn set_has(set: &[u8], fd: usize) -> bool { set.get(fd / 8).is_some_and(|b| b >> (fd % 8) & 1 != 0) }
+
+    /// M53 §3e: what `spec` is answered now: `(ret, err, writes)`, the writes being `(guest VA, bytes)`
+    /// for the array or sets. `err` is `select`'s `EBADF` for a closed descriptor, with no writes (the
+    /// sets stay as passed). `Err` is the refusal of a descriptor that is not a guest pipe end, or of a
+    /// `select` set that asks a pipe end for the other direction. Pure: it changes nothing.
+    fn poll_answer(&self, name: &str, spec: &gkq::PollWait) -> Result<PollAnswer, String> {
+        let not_pipe = |fd: u64, tail: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+            "{name} on fd {fd}, {tail}"));
+        match spec {
+            gkq::PollWait::Poll { va, raw } => {
+                let mut out = raw.clone();
+                let mut count = 0;
+                for (i, e) in raw.chunks_exact(8).enumerate() {
+                    let fd = i32::from_le_bytes(e[..4].try_into().unwrap());
+                    let events = u16::from_le_bytes(e[4..6].try_into().unwrap());
+                    // A negative descriptor is skipped, and its revents rewritten to 0 (t0 M7).
+                    let revents = if fd < 0 { 0 } else if !self.fds.is_open(fd as u64) { retrace_arch::POLLNVAL } else {
+                        self.gkq.poll_ready(fd as u64, events).map_err(|t| not_pipe(fd as u64, t))?
+                    };
+                    if revents != 0 { count += 1; }
+                    out[i * 8 + 6..i * 8 + 8].copy_from_slice(&revents.to_le_bytes());
+                }
+                Ok((count, false, if raw.is_empty() { vec![] } else { vec![(*va, out)] }))
+            }
+            gkq::PollWait::Select { nfds, vas, rset, wset } => {
+                let len = nfds.div_ceil(32) * 4;
+                let mut rout = vec![0u8; len];
+                let mut wout = vec![0u8; len];
+                let mut count = 0;
+                for fd in 0..*nfds {
+                    let (inr, inw) = (Self::set_has(rset, fd), Self::set_has(wset, fd));
+                    if !inr && !inw { continue; }
+                    if !self.fds.is_open(fd as u64) { return Ok((9, true, vec![])); }
+                    let st = self.gkq.pipe_state(fd as u64).map_err(|t| not_pipe(fd as u64, t))?;
+                    if inr {
+                        if st.write_end {
+                            return Err(not_pipe(fd as u64, "a write end in the read set: not modelled".to_string()));
+                        }
+                        if st.readable { rout[fd / 8] |= 1 << (fd % 8); count += 1; }
+                    }
+                    if inw {
+                        if !st.write_end {
+                            return Err(not_pipe(fd as u64, "a read end in the write set: not modelled".to_string()));
+                        }
+                        // Unlike poll, a write end whose reader closed is writable (t0 M7).
+                        if st.writable || st.other_closed { wout[fd / 8] |= 1 << (fd % 8); count += 1; }
+                    }
+                }
+                let mut writes = vec![];
+                for (i, bytes) in [rout, wout, vec![0u8; len]].into_iter().enumerate() {
+                    if vas[i] != 0 && len > 0 { writes.push((vas[i], bytes)); }
+                }
+                Ok((count, false, writes))
+            }
+        }
+    }
+
+    /// M53 §3e: wake every thread blocked in `poll` or `select` that a pipe change made ready, in
+    /// thread order, each with its answer written at the wake. After every call `note_fd_effects`
+    /// models. A descriptor closed under a `select` wakes it with `EBADF`.
+    fn wake_poll_waiters(&mut self) -> Result<(), String> {
+        for (tid, spec) in self.gkq.poll_waiters() {
+            let (rc, err, writes) = self.poll_answer("poll or select", &spec)?;
+            if rc == 0 && !err { continue; }
+            self.gkq.take_poll_waiter(tid);
+            self.deliver_wake(tid, rc, err, &writes)?;
+        }
+        Ok(())
+    }
+
+    /// M53 §3e: `tid`'s `poll` or `select` reached its deadline: it answers 0, and the array's
+    /// `revents` or the sets are cleared, as the kernel leaves them. Below the trace, so a refusal
+    /// (K8's pending signal) panics with its text on both sides alike (R5).
+    fn poll_timed_out(&mut self, tid: usize) {
+        let spec = self.gkq.take_poll_waiter(tid).unwrap_or_else(|| panic!(
+            "M53: thread {tid} is blocked in poll or select, which records no such waiter"));
+        let writes = match spec {
+            gkq::PollWait::Poll { va, mut raw } => {
+                for e in raw.chunks_exact_mut(8) { e[6..8].fill(0); }
+                if raw.is_empty() { vec![] } else { vec![(va, raw)] }
+            }
+            gkq::PollWait::Select { nfds, vas, .. } => (0..3).filter(|&i| vas[i] != 0 && nfds > 0)
+                .map(|i| (vas[i], vec![0u8; nfds.div_ceil(32) * 4])).collect(),
+        };
+        self.deliver_wake(tid, 0, false, &writes).unwrap_or_else(|m| panic!("{m}"));
     }
 
     /// M48 §3e (P1): the psynch condition-variable calls, emulated and never forwarded. Forwarded, a
@@ -6604,6 +6867,222 @@ impl Box_ {
         Ok(0)
     }
 
+    /// M53 §3f: `setitimer` (83), **modelled, never forwarded**: forwarded, it would arm the
+    /// RECORDER's own timer and its SIGALRM would end the recording (C5). Only `ITIMER_REAL` exists;
+    /// `ITIMER_VIRTUAL` and `ITIMER_PROF` count CPU time, which the synthetic clock does not have, so
+    /// they are refused by value though native accepts them (t0 M8). Answers, from t0 M8:
+    /// - `which` > 2 is `EINVAL` for both calls, before anything is read;
+    /// - the new value is read through `read_va_checked` (`EFAULT`), and xnu's `itimerfix` bounds apply
+    ///   to both halves (`EINVAL`: seconds outside 0..=100,000,000 or microseconds outside 0..1,000,000);
+    /// - the old value is written through `prepare_reply` (`EFAULT`, checked before the timer changes);
+    /// - a NULL new value is `getitimer` on the old pointer, as 4.4BSD's and xnu's `setitimer` do
+    ///   (inferred from that source, unmeasured: no probe passes a NULL `itv`).
+    ///
+    /// Returns `(ret, err)`. Both dispatch arms call this with the same `(num, args)` (symmetry rule 1)
+    /// and nothing is recorded (halt H5): the timer is box state rebuilt from the guest's own calls.
+    pub fn guest_setitimer(&mut self, args: [u64; 8]) -> Result<(u64, bool), String> {
+        let which = args[0] as u32;
+        if which as u64 > retrace_arch::ITIMER_PROF { return Ok((EINVAL, true)); }
+        self.itimer_which(which, "setitimer (syscall 83)")?;
+        if args[1] == 0 { return self.guest_getitimer([args[0], args[2], 0, 0, 0, 0, 0, 0]); }
+        let Some(raw) = self.read_va_checked(args[1], timer::ITIMERVAL_BYTES) else { return Ok((retrace_arch::EFAULT, true)) };
+        let tv = |at: usize| (i64::from_le_bytes(raw[at..at + 8].try_into().unwrap()),
+                              i32::from_le_bytes(raw[at + 8..at + 12].try_into().unwrap()));
+        let (Some(interval), Some(value)) = (timer::timeval_ticks(tv(0).0, tv(0).1), timer::timeval_ticks(tv(16).0, tv(16).1))
+            else { return Ok((EINVAL, true)) };
+        if args[2] != 0 && !self.prepare_reply(args[2], timer::ITIMERVAL_BYTES) { return Ok((retrace_arch::EFAULT, true)); }
+        let now = self.now_guest();
+        let (old_value, old_interval) = self.itimer.arm(now, value, interval);
+        if args[2] != 0 {
+            self.write_va_committing(args[2], &timer::itimerval_bytes(old_interval, old_value))
+                .map_err(|m| format!("setitimer: the old value at {:#x}, which prepare_reply passed: {m}", args[2]))?;
+        }
+        Ok((0, false))
+    }
+
+    /// M53 §3f: `getitimer` (86): the time left and the interval as set, written to `args[1]`. See
+    /// `guest_setitimer` for the refusals and the symmetry argument.
+    pub fn guest_getitimer(&mut self, args: [u64; 8]) -> Result<(u64, bool), String> {
+        let which = args[0] as u32;
+        if which as u64 > retrace_arch::ITIMER_PROF { return Ok((EINVAL, true)); }
+        self.itimer_which(which, "getitimer (syscall 86)")?;
+        if !self.prepare_reply(args[1], timer::ITIMERVAL_BYTES) { return Ok((retrace_arch::EFAULT, true)); }
+        let (value, interval) = self.itimer.remaining(self.now_guest());
+        self.write_va_committing(args[1], &timer::itimerval_bytes(interval, value))
+            .map_err(|m| format!("getitimer: the value at {:#x}, which prepare_reply passed: {m}", args[1]))?;
+        Ok((0, false))
+    }
+
+    /// `which` is 0..=2 here: `ITIMER_REAL` passes; the CPU-time timers are a wall by value.
+    fn itimer_which(&self, which: u32, call: &str) -> Result<(), String> {
+        if which as u64 == retrace_arch::ITIMER_REAL { return Ok(()); }
+        let name = if which as u64 == retrace_arch::ITIMER_VIRTUAL { "ITIMER_VIRTUAL" } else { "ITIMER_PROF" };
+        Err(retrace_arch::wall(retrace_arch::WallCategory::Signals, format!(
+            "M53: {call} with {name}: it counts CPU time, which the synthetic clock does not have; only \
+             ITIMER_REAL is modelled")))
+    }
+
+    /// M53 §3f: `sigsuspend` (111, 410): install the call's mask (BY VALUE in `x0`, t0 M8) and remember
+    /// the mask the call found, as the frame mask the handler's `sigreturn` restores (xnu's
+    /// `uu_oldmask`). Nothing blocks yet: the caller first asks whether a pending signal the new mask
+    /// lets through returns at once, and otherwise calls `sigsuspend_block`. Both arms make both calls
+    /// in the same order with the same arguments (symmetry rule 1).
+    pub fn guest_sigsuspend(&mut self, args: [u64; 8]) -> Result<(), String> {
+        let cur = self.threads.current();
+        let old = self.threads.set_mask_of(cur, retrace_arch::SIG_SETMASK, args[0] as u32);
+        self.threads.set_frame_mask(cur, old);
+        Ok(())
+    }
+
+    /// M53 §3f: block the current thread in the `sigsuspend` `guest_sigsuspend` started. The landmark
+    /// returns 0 and the real answer, `EINTR` after the handler, comes at the wake.
+    pub fn sigsuspend_block(&mut self) {
+        let cur = self.threads.current();
+        let saved_mask = self.threads.frame_mask_of(cur)
+            .expect("M53: sigsuspend_block without guest_sigsuspend: the frame mask is the pre-call mask");
+        self.threads.block(thread::BlockReason::SigSuspend { saved_mask });
+    }
+
+    /// M53 §3f (Ruling T0-H4, t0 M8): the thread a process-directed signal reaches. Native delivers
+    /// `kill(getpid(), sig)` and the timer's SIGALRM to the MAIN thread, never to the caller, whenever
+    /// main does not mask it (every shape of t0 M8 and `alarm_dyn target`). xnu scans the process's
+    /// threads oldest first for one that does not block the signal (`get_signalthread`), so a main
+    /// that masks it hands it to the first worker that does not (`alarm_dyn target`, a worker created
+    /// BEFORE main masked: the handler runs on the worker; the t0 probe's rows that read "pending on
+    /// main with an unmasked worker running" had made that worker after the mask, so it inherited it).
+    /// When every live thread masks it the signal stays pending on main (M16's masked pend). If main
+    /// has exited and every other thread masks it, native's process-wide pending set is unmodelled, so
+    /// that is refused by value.
+    pub fn process_signal_target(&self, sig: u64) -> usize {
+        let candidate = (0..self.threads.len()).find(|&t|
+            !matches!(self.threads.state_of(t), thread::ThreadState::Exited(_)) && !self.threads.is_blocked_for(t, sig));
+        if let Some(t) = candidate { return t; }
+        if matches!(self.threads.state_of(0), thread::ThreadState::Exited(_)) {
+            retrace_arch::refuse!(Signals, "M53: a process-directed signal ({}) with the main thread exited and every other \
+                thread masking it: natively it stays pending on the process, which retrace does not model",
+                retrace_arch::signal_name(sig));
+        }
+        0
+    }
+
+    /// M53 §3f (Ruling T5-badsig, t0 badsigprobe): `kill` and `__pthread_kill` answer `EINVAL` for a
+    /// signal outside 0..=31 (`int` in `x1`: -1 arrives as 0xffffffff), before any target logic. Both
+    /// dispatch arms ask this one function (symmetry rule 1).
+    pub fn invalid_signal(sig: u64) -> bool { sig as u32 > 31 }
+
+    /// M53 §3f: what raising `sig` on `tid` does, as the one answer the `kill` and `__pthread_kill` arms
+    /// (record and replay) and the timer share. The mask is asked first (M16), then the state:
+    /// - a thread blocked in a sleep or `sigsuspend` is ended by a signal with a handler (`Interrupt`),
+    ///   and ignores one that is ignored or defaults to ignore, as a sleeper does natively (C2);
+    /// - any other blocked thread pends the signal until its wake (M17);
+    /// - a runnable one takes it by its disposition.
+    pub fn classify_raise(&self, tid: usize, sig: u64) -> RaiseKind {
+        let by_disposition = |interrupts: bool| match self.sigtable.action(sig).disp {
+            Disposition::Handler(_) => if interrupts { RaiseKind::Interrupt } else { RaiseKind::Deliver },
+            Disposition::Ign => RaiseKind::Ignore,
+            Disposition::Dfl => match retrace_arch::default_action(sig) {
+                retrace_arch::DefaultAction::Ignore => RaiseKind::Ignore,
+                retrace_arch::DefaultAction::Terminate => RaiseKind::Terminate,
+            },
+        };
+        if self.threads.is_blocked_for(tid, sig) { return RaiseKind::Pend; }
+        match self.threads.state_of(tid) {
+            thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. } | thread::BlockReason::SigSuspend { .. }) =>
+                by_disposition(true),
+            thread::ThreadState::Blocked(_) => RaiseKind::Pend,
+            _ => by_disposition(false),
+        }
+    }
+
+    /// M53 §3f (C2): end `tid`'s sleep or `sigsuspend` for a signal about to be delivered to it. The
+    /// thread's return becomes `-1`/`EINTR` (`x0` 4, carry set; t0 M8) in the context the handler's
+    /// frame is then built from, so `sigreturn` lands on that return. Called by the `Interrupt` arms of
+    /// the raise paths and the timer, ahead of `deliver_signal_to`, on both sides alike.
+    pub fn interrupt_for_signal(&mut self, tid: usize) {
+        self.threads.interrupt(tid);
+        if tid == self.threads.current() {
+            self.complete_syscall_before_delivery(retrace_arch::EINTR, true);
+        } else {
+            let ctx = self.threads.ctx_mut(tid);
+            ctx.regs.x[0] = retrace_arch::EINTR;
+            ctx.regs.cpsr |= retrace_arch::PSTATE_C;
+            self.complete_saved_syscall_before_delivery(tid, true);
+        }
+    }
+
+    /// M53 §3f: raise `ITIMER_REAL`'s SIGALRM if it has expired. Called where the clock is next
+    /// consulted, never mid-window: at a landmark finish (`settle_schedule`) and in
+    /// `schedule_after_block`, before and after its idle jump. A box with no timer armed reads no
+    /// clock. Below the trace (symmetry rule 2): the decision is a pure function of box state, so
+    /// record and replay raise it at the same point and nothing is recorded. The handler's frame is
+    /// built by `deliver_signal_to` exactly as a caught `kill`'s is.
+    ///
+    /// Limit: there is no preemption, so a thread that spins without a landmark never lets it fire.
+    fn fire_itimer(&mut self) {
+        if self.itimer.deadline().is_none() { return; }
+        let now = self.now_guest();
+        if !self.itimer.is_due(now) { return; }
+        let sig = retrace_arch::SIGALRM;
+        let target = self.process_signal_target(sig);
+        // Final-review I2: a landmark that has just redirected the running thread into a handler (a
+        // caught self-raise, a `sigprocmask` unmask that materialises a pending signal, `sigsuspend`'s
+        // immediate path) leaves the live PC at the handler's trampoline while ELR_EL1 is still the
+        // post-`svc` address. A second frame built from ELR would drop that handler. So the expiry is
+        // left unconsumed and the check re-armed: SIGALRM fires at the NEXT landmark. Natively the
+        // kernel nests SIGALRM's frame over the first handler at that return; here SIGALRM's handler
+        // runs after the first handler's next landmark, so its order relative to the first handler can
+        // differ. It cannot loop: the re-armed check is consumed by the next settle, and a plain return
+        // has PC == ELR.
+        if target == self.threads.current() && self.classify_raise(target, sig) == RaiseKind::Deliver {
+            let pc = self.vcpu.get_reg(reg::PC).unwrap();
+            let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+            if pc != elr {
+                self.itimer.note_landmark();
+                return;
+            }
+        }
+        self.itimer.due(now);
+        match self.classify_raise(target, sig) {
+            RaiseKind::Pend => self.threads.pend(target, sig),
+            RaiseKind::Ignore => {}
+            RaiseKind::Terminate => self.itimer.set_terminal(sig),
+            RaiseKind::Interrupt => {
+                self.interrupt_for_signal(target);
+                self.deliver_signal_to(target, sig, retrace_arch::SI_USER, 0, 0, 0);
+            }
+            RaiseKind::Deliver => {
+                // The running thread has just returned from its landmark: its frame must say so. The
+                // return's carry is in the live CPSR, and `deliver_signal_to` reads SPSR_EL1.
+                if target == self.threads.current() {
+                    let cpsr = self.vcpu.get_reg(reg::CPSR).unwrap();
+                    let spsr = self.vcpu.get_sys(sysreg::SPSR_EL1).unwrap();
+                    self.vcpu.set_sys(sysreg::SPSR_EL1, (spsr & !retrace_arch::PSTATE_C) | (cpsr & retrace_arch::PSTATE_C)).unwrap();
+                }
+                self.deliver_signal_to(target, sig, retrace_arch::SI_USER, 0, 0, 0);
+            }
+        }
+    }
+
+    /// M53 §3f: a timer fire whose default action ends the process is handed to the recorder as the
+    /// `kill(getpid(), sig)` it is: a `Stop::Syscall` that retires nothing, which record's raise arm
+    /// ends the recording at (`Event::Signal`) and replay's mirror consumes the same way. `run()` and
+    /// `step()` both return it ahead of the guest's next instruction.
+    fn timer_terminal_stop(&mut self) -> Option<Stop> {
+        let sig = self.itimer.take_terminal()?;
+        let mut args = [0u64; 8];
+        args[0] = std::process::id() as u64;
+        args[1] = sig;
+        Some(Stop::Syscall { num: retrace_arch::SYS_KILL, args })
+    }
+
+    /// C6: D1's clause for each thread blocked in `sigsuspend`, which nothing can now signal.
+    fn sigsuspend_clause(&self) -> String {
+        (0..self.threads.len())
+            .filter(|&t| matches!(self.threads.state_of(t), thread::ThreadState::Blocked(thread::BlockReason::SigSuspend { .. })))
+            .map(|t| format!("; thread {t} waits in sigsuspend for a signal nothing can send"))
+            .collect()
+    }
+
     /// M49 §3f S2: `port` answers for clock `clock_id`, learned from a successful
     /// `host_get_clock_service` (206) reply. Both Forward arms call this after the reply lands, with
     /// the clock id read from the request before the forward and the port read from the reply.
@@ -6640,14 +7119,201 @@ impl Box_ {
     /// M48's psynch waits do: the saved context of a thread blocked in `__semwait_signal` is
     /// unmeasured, and EINTR is M50's. Below the trace, so it panics on both sides alike.
     fn sleep_timed_out(&mut self, tid: usize) {
-        let pending = self.threads.pending_of(tid);
+        // M53 §3f (C2): a deliverable signal ends the sleep when it arrives (`interrupt_for_signal`), so
+        // none can be pending here; a MASKED one stays pending and the timeout answers as usual (t0 M8).
+        let pending = self.threads.pending_of(tid) & !self.threads.mask_of(tid);
         if pending != 0 {
-            retrace_arch::refuse!(Threads, "M49: sleep of thread {tid} reached its deadline with a signal pending (set \
-                    {pending:#x}), which this wake would deliver. The saved context of a thread \
-                    blocked in __semwait_signal is unmeasured, and the EINTR answer with the time \
-                    left is M50's (R9); measure it (the blockedctx.rs shape) before allowing this.");
+            retrace_arch::refuse!(Threads, "M49: sleep of thread {tid} reached its deadline with a deliverable signal \
+                    pending (set {pending:#x}), which ending the sleep should have taken at its arrival. \
+                    A signal pended in a handler and unmasked by its `sigreturn` is not materialised there (M16), and a \
+                    later sleep of this thread then reaches its deadline with it still pending; that case is unmodelled.");
         }
         self.deliver_wake(tid, retrace_arch::ETIMEDOUT, true, &[]).unwrap_or_else(|m| panic!("{m}"));
+    }
+
+    /// M53 §3g: `flock(fd, op)` (131), forwarded with `LOCK_NB` added, so the recorder never waits for
+    /// a lock. The host kernel answers as it would for the program (`EWOULDBLOCK`, 35, when another
+    /// descriptor holds the lock), and a call that did not itself ask for `LOCK_NB` and got that
+    /// answer is one that natively WAITS, which is a wall (R6): the one holder that could release it
+    /// is another descriptor of this program, and a wait is a block no schedule here models.
+    ///
+    /// The descriptor is translated by `forward_and_diff`, as for every forwarded call. Returns
+    /// `(ret, err)`; the record arm appends it under the guest's own `args` (C4), which is all replay's
+    /// generic dispatch needs. `Err` is the wall, for `wall_or_bug`.
+    pub fn forward_flock(&mut self, args: [u64; 8]) -> Result<(u64, bool), String> {
+        let mut host = args;
+        host[1] |= retrace_arch::LOCK_NB;
+        let (ret, _ret1, err, _writes) = self.forward_and_diff(retrace_arch::SYS_FLOCK, host);
+        if err && ret == retrace_arch::EWOULDBLOCK && args[1] & retrace_arch::LOCK_NB == 0 {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
+                "flock (syscall 131) on fd {} would wait for a lock another descriptor or process holds", args[0] as u32)));
+        }
+        Ok((ret, err))
+    }
+
+    /// M53 §3c: what `readv`, `writev`, `preadv` and `pwritev` do, decided from the guest's memory and
+    /// the box's tables, before anything is forwarded. Record and replay both call it, with the same
+    /// arguments (symmetry rule 1): record goes on to forward what `Forward` names; replay compares
+    /// the answers it can recompute and applies the recording for the rest. It makes every page the
+    /// call touches present, on both sides alike.
+    ///
+    /// The order follows xnu's `readv`/`writev`/`preadv`/`pwritev` (`bsd/kern/sys_generic.c`; inferred
+    /// from source, t0 M3 measured the answers and not their order): the count (`EINVAL`), the iovec
+    /// `copyin` (`EFAULT`), the residual-length check (a negative `iov_len`, or a total past `INT_MAX`,
+    /// `EINVAL`), then the descriptor (`EBADF`), and only then the entries, which the kernel touches as
+    /// it transfers. A zero-length entry is dropped before it is examined (t0 M3 item 2).
+    ///
+    /// An unreachable entry (t0 M3 item 3): the first non-empty entry answers `EFAULT` with nothing
+    /// forwarded; a later one forwards the reachable prefix and answers `EFAULT` if the prefix
+    /// transferred in full (a short transfer stops before the kernel reaches the bad entry). On a guest
+    /// pipe end that is a wall: natively a pipe `readv` fills entry 0 and drains nothing, which the
+    /// pipe-count model cannot reproduce.
+    pub fn iovec_prepare(&mut self, num: u64, args: [u64; 8]) -> Result<IovPrep, String> {
+        use retrace_arch::{EFAULT, EINVAL};
+        let what = retrace_arch::syscall_display(num);
+        let writer = matches!(num, 121 | 412 | 541 | 543);
+        let cnt = args[2] as i32;
+        if cnt <= 0 || cnt as u64 > retrace_arch::IOV_MAX { return Ok(IovPrep::Answer(EINVAL)); }
+        let n = cnt as usize * 16;
+        let Some(arr) = self.present_read_span(args[1], n).ok().and_then(|()| self.read_va_checked(args[1], n)) else {
+            return Ok(IovPrep::Answer(EFAULT));
+        };
+        let entries = iov::decode(&arr);
+        let mut total: u128 = 0;
+        for &(_, len) in &entries {
+            if (len as i64) < 0 { return Ok(IovPrep::Answer(EINVAL)); }
+            total += len as u128;
+        }
+        if total > i32::MAX as u128 { return Ok(IovPrep::Answer(EINVAL)); }
+        // `is_open`, not `host`: replay's table has the slots and no host descriptors.
+        if (args[0] as i32) < 0 || !self.fds.is_open(args[0]) { return Ok(IovPrep::Answer(EBADF)); }
+        let write = !writer;
+        let (reach, partial) = match iov::plan(&entries, |b, l| self.iov_span(b, l, write)) {
+            Ok(_) => (&entries[..], false),
+            Err(i) => (&entries[..i], true),
+        };
+        let spans = iov::plan(reach, |b, l| self.iov_span(b, l, write))
+            .expect("the entries before the first unreachable one are reachable");
+        if spans.is_empty() && partial { return Ok(IovPrep::Answer(EFAULT)); }
+        let reach_total: u64 = reach.iter().map(|e| e.1).sum();
+        let kind = self.gkq.kind_of(args[0]);
+        if partial && matches!(kind, gkq::FdKind::PipeRead(_) | gkq::FdKind::PipeWrite(_)) {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
+                "{what} with an unreachable entry after the first, on guest pipe fd {}: natively measured for \
+                 `readv`, a pipe transfers only into entry 0 and drains nothing, which the pipe model cannot reproduce; a \
+                 `writev` with a later unreachable entry is refused the same way", args[0] as u32)));
+        }
+        // Only `writev` is a console write. `pwritev` on a console descriptor takes the forward, whose
+        // answer is native's (ESPIPE on a pipe, ENXIO on a tty; pwvprobe.c, Ruling T2-pwritev), as `pwrite`'s does.
+        if matches!(num, 121 | 412) {
+            let stream = match self.fds.console_of(args[0]) {
+                Some(1) => Some(Stream::Stdout),
+                Some(2) => Some(Stream::Stderr),
+                _ => None,
+            };
+            if let Some(stream) = stream {
+                let mut bytes = Vec::with_capacity(reach_total as usize);
+                for &(base, len) in reach {
+                    bytes.extend(self.read_va_checked(base, len as usize)
+                        .expect("iov_span made this entry present and readable"));
+                }
+                let (ret, err) = if partial { (EFAULT, true) } else { (reach_total, false) };
+                return Ok(IovPrep::Console { stream, bytes, ret, err });
+            }
+        }
+        if spans.len() as u64 > retrace_arch::IOV_MAX {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
+                "{what} splits into more than {} host entries (the guest's {} entries cross backings)",
+                retrace_arch::IOV_MAX, entries.len())));
+        }
+        Ok(IovPrep::Forward { spans, partial, total: reach_total, reader: !writer })
+    }
+
+    /// `[va, va + len)` as host-contiguous `(ipa, len)` spans, each page made present first and
+    /// checked for the access the call makes (`write`: the kernel stores into it). `None` if the
+    /// program could not reach all of it natively. An entry that crosses a backing boundary, or one
+    /// whose pages are not ipa-contiguous (an M39 alias), comes back as more than one span.
+    fn iov_span(&mut self, va: u64, len: u64, write: bool) -> Option<Vec<(u64, usize)>> {
+        let end = va.checked_add(len)?;
+        let g = GRANULE as u64;
+        let mut out: Vec<(u64, usize)> = Vec::new();
+        let mut a = va;
+        while a < end {
+            self.present_page(a, write).ok()?;
+            let (mut ipa, _) = self.va_leaf(a)?;
+            let piece = (((a | (g - 1)) + 1).min(end) - a) as usize;
+            let mut left = piece;
+            while left > 0 {
+                let (_, avail) = self.host_span(ipa)?;
+                let m = left.min(avail);
+                let joins = match out.last() {
+                    Some(&(lipa, llen)) => lipa + llen as u64 == ipa && self.host_span(lipa)?.1 >= llen + m,
+                    None => false,
+                };
+                if joins { out.last_mut().unwrap().1 += m; } else { out.push((ipa, m)); }
+                ipa += m as u64;
+                left -= m;
+            }
+            a += piece as u64;
+        }
+        Some(out)
+    }
+
+    /// M53 §3c: `readv`, `writev`, `preadv` and `pwritev` on record: `iovec_prepare`'s answer, with a
+    /// `Forward` carried out. Returns `(ret, err, writes, console)`; a console write is printed by the
+    /// caller and forwards nothing.
+    ///
+    /// A forward hands the host kernel one iovec array of host pointers into the spans, once. A reader's
+    /// writes are each span's `changed_span` against its pre-image, so an entry of any size is covered
+    /// whole: the array bounds the kernel, so no window, clamp or guard band is needed. The descriptor
+    /// is translated as every forwarded call's is.
+    pub fn guest_iovec(&mut self, num: u64, args: [u64; 8])
+        -> Result<IovDone, String> {
+        match self.iovec_prepare(num, args)? {
+            IovPrep::Answer(e) => Ok((e, true, Vec::new(), None)),
+            IovPrep::Console { stream, bytes, ret, err } => Ok((ret, err, Vec::new(), Some((stream, bytes)))),
+            IovPrep::Forward { spans, partial, total, reader } => {
+                let mut host = args;
+                if let Err(e) = self.translate_fds(num, &mut host) { return Ok((e, true, Vec::new(), None)); }
+                // Every entry zero-length: forward one zero-length entry (a valid host base) so the
+                // host applies its descriptor and offset checks (preadv on a pipe is ESPIPE) (T2-m1).
+                let dummy = 0u8;
+                let mut array = Vec::with_capacity(spans.len() * 16);
+                let mut pres: Vec<Vec<u8>> = Vec::new();
+                for &(ipa, len) in &spans {
+                    let (hp, avail) = self.host_span(ipa).expect("iov_span made this span present");
+                    assert!(avail >= len, "iov_span returned a span longer than its backing");
+                    array.extend_from_slice(&(hp as u64).to_le_bytes());
+                    array.extend_from_slice(&(len as u64).to_le_bytes());
+                    if reader { pres.push(unsafe { std::slice::from_raw_parts(hp, len) }.to_vec()); }
+                }
+                if spans.is_empty() {
+                    array.extend_from_slice(&(&dummy as *const u8 as u64).to_le_bytes());
+                    array.extend_from_slice(&0u64.to_le_bytes());
+                }
+                let mut sa = [0u64; 8];
+                sa[0] = host[0];
+                sa[1] = array.as_ptr() as u64;
+                sa[2] = spans.len().max(1) as u64;
+                if matches!(num, 540..=543) { sa[3] = args[3]; }
+                let (mut ret, _ret1, mut err) = unsafe { host_svc(num, sa) };
+                let mut writes = Vec::new();
+                if reader {
+                    for (&(ipa, len), pre) in spans.iter().zip(&pres) {
+                        let (hp, _) = self.host_span(ipa).expect("present above");
+                        let post = unsafe { std::slice::from_raw_parts(hp, len) };
+                        if let Some(span) = Self::changed_span(pre, post) {
+                            writes.push(Region { ipa: ipa + span.start as u64, bytes: post[span].to_vec() });
+                        }
+                    }
+                }
+                if partial && !err && ret == total {
+                    ret = retrace_arch::EFAULT;
+                    err = true;
+                }
+                Ok((ret, err, writes, None))
+            }
+        }
     }
 
     /// M47 §3c: `madvise(addr, len, behav)` (75), **modelled, never forwarded**. Forwarded, the
@@ -7168,6 +7834,7 @@ impl Box_ {
                 thread::ThreadState::Blocked(thread::BlockReason::Cv { addr, .. }) => self.cv_timed_out(tid, addr),
                 thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. }) => self.sleep_timed_out(tid),
                 thread::ThreadState::Blocked(thread::BlockReason::Sem { .. }) => self.sem_timed_out(tid),
+                thread::ThreadState::Blocked(thread::BlockReason::Poll { .. }) => self.poll_timed_out(tid),
                 s => unreachable!("M48: due_waiters returned thread {tid} in {s:?}, which has no deadline"),
             }
         }
@@ -7183,7 +7850,7 @@ impl Box_ {
         self.deliver_kevent(kq, w).unwrap_or_else(|m| panic!("{m}"));
     }
 
-    /// M48 §3c: wake every thread blocked in `kevent` whose kqueue now holds an event, in kqueue fd
+    /// M48 §3c: wake every thread blocked in `kevent` whose kqueue now holds an event, in kqueue creation
     /// order: after a call's changes (a `NOTE_TRIGGER`), and after a pipe changed.
     fn wake_kevent_waiters(&mut self) -> Result<(), String> {
         for kq in self.gkq.ready_waiters() {
@@ -7936,6 +8603,12 @@ impl Box_ {
     /// stays a pure function of it (symmetry rule 2). `ReplaySession::finish_event` calls it, so a
     /// debugger position (n, 0) after a blocking event already shows the thread that runs next.
     pub fn settle_schedule(&mut self) -> Result<(), Unsupported> {
+        // M53 §3f: a landmark has just returned, so `ITIMER_REAL` is checked here, ahead of the pick (a
+        // timer that ends the blocked thread's wait makes it runnable before the pick is made).
+        if self.itimer.take_check() { self.fire_itimer(); }
+        // A fire that ends the process is handed to the recorder by the next `run()`/`step()`, ahead of
+        // any pick: there is no thread left to schedule.
+        if self.itimer.has_terminal() { return Ok(()); }
         if self.threads.needs_reschedule() {
             self.schedule_after_block()?;
         }
@@ -7968,8 +8641,11 @@ impl Box_ {
     ///    `guest_yield` instead (R11).
     /// 4. **The idle jump.** If nothing is runnable and any deadline exists, `synthetic_tsc` jumps so
     ///    that the guest clock reads the earliest of ALL deadlines, workqueue timers and thread
-    ///    deadlines alike. Rules 1–2 then run again, and the pick is retried, exactly once. The
-    ///    clock never moves backwards (`kq::tsc_for_deadline`).
+    ///    deadlines alike. Rules 1–2 then run again, and the pick is retried. Since M53 §3f that
+    ///    repeats while nothing is runnable and a deadline remains, because a jump to an `ITIMER_REAL`
+    ///    expiry whose signal is ignored, masked or still pending wakes nobody (`IDLE_JUMPS_MAX`
+    ///    bounds it). The timer fires in rule 1, beside the workqueue timers. The clock never moves
+    ///    backwards (`kq::tsc_for_deadline`).
     /// 5. **Otherwise it is a deadlock**, a wall in `threads` since M50 (D1). Its text lists every thread's
     ///    state (each blocked reason with its deadline), the knote table and the guest kqueues.
     ///
@@ -7988,6 +8664,8 @@ impl Box_ {
             _ => {}
         }
         self.fire_due_timers();
+        self.fire_itimer();
+        if self.itimer.has_terminal() { return Ok(()); }
         self.wake_due_threads();
         let yields = timed && self.threads.state_of(cur) == thread::ThreadState::Runnable;
         let mut next = if yields { self.threads.pick_after(cur) } else { self.threads.pick_next() };
@@ -7998,14 +8676,22 @@ impl Box_ {
         if yields && due_poll && next == Some(cur) {
             self.synthetic_tsc = self.synthetic_tsc.wrapping_add(SYNTH_TSC_STRIDE);
         }
-        if next.is_none() {
-            let earliest = [self.kq.earliest_deadline(), self.threads.earliest_deadline()].into_iter().flatten().min();
-            if let Some(deadline) = earliest {
-                self.synthetic_tsc = kq::tsc_for_deadline(self.synthetic_tsc, self.timebase_offset(), deadline);
-                self.fire_due_timers();
-                self.wake_due_threads();
-                next = self.threads.pick_next();
-            }
+        // M53 §3f: a jump to a deadline that wakes nobody (an ignored or masked SIGALRM, an interval
+        // timer between two expiries) is followed by the next, so the idle jump repeats while nothing
+        // is runnable and a deadline remains. Each pass moves the clock to a strictly later deadline.
+        // The pass count is capped, so an interval timer whose signal nothing takes ends at D1 rather
+        // than spinning the recorder for ever (natively that program hangs).
+        for _ in 0..IDLE_JUMPS_MAX {
+            if next.is_some() { break; }
+            let earliest = [self.kq.earliest_deadline(), self.threads.earliest_deadline(), self.itimer.deadline()]
+                .into_iter().flatten().min();
+            let Some(deadline) = earliest else { break };
+            self.synthetic_tsc = kq::tsc_for_deadline(self.synthetic_tsc, self.timebase_offset(), deadline);
+            self.fire_due_timers();
+            self.fire_itimer();
+            if self.itimer.has_terminal() { return Ok(()); }
+            self.wake_due_threads();
+            next = self.threads.pick_next();
         }
         match next {
             Some(tid) => { self.switch_to_thread(tid); self.stall_switched_in(); Ok(()) }
@@ -8020,7 +8706,7 @@ impl Box_ {
                 (0..self.threads.len()).map(|i| self.threads.state_of(i)).collect::<Vec<_>>(),
                 self.kq,
                 self.gkq
-            ))),
+            ) + &self.sigsuspend_clause())),
         }
     }
 
@@ -8323,6 +9009,7 @@ impl Box_ {
             jit: self.jit.clone(),
             sleep: self.sleep.clone(),
             sems: self.sems.clone(),
+            itimer: self.itimer.clone(),
         }
     }
 
@@ -8452,6 +9139,7 @@ impl Box_ {
             jit: state.jit.clone(),
             sleep: state.sleep.clone(),
             sems: state.sems.clone(),
+            itimer: state.itimer.clone(),
         };
         if state.cache_installed { b.install_cache_pager(); }
         b.assert_jit_stamped();
@@ -8476,10 +9164,10 @@ impl Box_ {
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?} sems={:?}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?} sems={:?} itimer={:?}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
             self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
-            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep, self.sems)
+            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep, self.sems, self.itimer)
     }
 
     /// Test-only (M46): the workqueue kqueue, for `checkpointparity.rs` and the box-level manager

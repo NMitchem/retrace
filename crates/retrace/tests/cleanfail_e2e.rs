@@ -6,7 +6,7 @@
 //!
 //! An exit code is never the only evidence (CLAUDE.md): `record` passes the guest's own code
 //! through, so every assertion pins the line too. Fixtures: `cf_walls` (one mode per wall),
-//! `cf_rs_fsync`, and `tests/fixtures/cf_script.sh`.
+//! `cf_rs_chroot`, and `tests/fixtures/cf_script.sh`.
 mod util;
 use retrace_trace::Event;
 use std::path::{Path, PathBuf};
@@ -81,7 +81,7 @@ fn a_thin_x86_64_binary_is_refused_by_name() {
         return;
     }
     let t = scratch("x86_64.bin");
-    let r = cli(&["record-dyn", exe.to_str().unwrap(), "-o", t.to_str().unwrap(), "--", "fsync"]);
+    let r = cli(&["record-dyn", exe.to_str().unwrap(), "-o", t.to_str().unwrap(), "--", "chroot"]);
     assert_bad_input(&r, "x86_64", &["is an x86_64 program, and retrace runs arm64 programs only"]);
     let _ = std::fs::remove_file(&exe);
 }
@@ -110,7 +110,7 @@ fn a_retrace_without_the_hypervisor_entitlement_says_how_to_sign_it() {
     assert!(signed.status.success(), "codesign: {}", String::from_utf8_lossy(&signed.stderr));
     let t = scratch("unentitled.bin");
     let r = util::run_bounded(copy.to_str().unwrap(),
-        &["record-dyn", retrace_guest::CF_WALLS, "-o", t.to_str().unwrap(), "--", "fsync"], &[], BOUND);
+        &["record-dyn", retrace_guest::CF_WALLS, "-o", t.to_str().unwrap(), "--", "chroot"], &[], BOUND);
     assert_bad_input(&r, "unentitled", &["cannot create a VM", "com.apple.security.hypervisor", "codesign"]);
     assert!(!t.exists(), "the check comes before the trace is created");
     let _ = std::fs::remove_file(&copy);
@@ -123,7 +123,7 @@ fn a_retrace_without_the_hypervisor_entitlement_says_how_to_sign_it() {
 fn a_retrace_bug_prints_the_banner_and_exits_70() {
     let t = scratch("bug.bin");
     let r = util::run_bounded(util::bin(),
-        &["record-dyn", retrace_guest::CF_WALLS, "-o", t.to_str().unwrap(), "--", "fsync"],
+        &["record-dyn", retrace_guest::CF_WALLS, "-o", t.to_str().unwrap(), "--", "chroot"],
         &[("RETRACE_DEBUG_PANIC", "1")], BOUND);
     assert_no_panic(&r, "banner");
     let lines: Vec<&str> = r.stderr.lines().collect();
@@ -208,7 +208,7 @@ fn killed_recording() -> PathBuf {
 /// Review Focus 5: a newcomer's typo in `-o` was a recorder error before M50; it is bad input.
 #[test]
 fn an_unwritable_trace_path_is_one_clean_line() {
-    let r = cli(&["record-dyn", retrace_guest::CF_WALLS, "-o", "/no/such/dir/t.bin", "--", "fsync"]);
+    let r = cli(&["record-dyn", retrace_guest::CF_WALLS, "-o", "/no/such/dir/t.bin", "--", "chroot"]);
     assert_bad_input(&r, "unwritable", &["cannot write the trace /no/such/dir/t.bin"]);
 }
 
@@ -271,10 +271,10 @@ fn a_mach_message_retrace_does_not_answer_is_a_wall_in_mach_messages() {
 /// Spec §3b's own example shape: an unrowed syscall is one line naming it by the SDK's name and
 /// number. Before M50 it was the M33 panic.
 #[test]
-fn a_program_that_calls_fsync_stops_at_one_clean_line() {
-    let (line, replay) = assert_guest_wall_both(retrace_guest::CF_WALLS, &["fsync"], "cf: fsync\n",
-        "fsync (syscall 95)", "syscalls");
-    assert_eq!(line, format!("retrace: unsupported: fsync (syscall 95) - see {WALLS}#syscalls"));
+fn a_program_that_calls_chroot_stops_at_one_clean_line() {
+    let (line, replay) = assert_guest_wall_both(retrace_guest::CF_WALLS, &["chroot"], "cf: chroot\n",
+        "chroot (syscall 61)", "syscalls");
+    assert_eq!(line, format!("retrace: unsupported: chroot (syscall 61) - see {WALLS}#syscalls"));
     // The wall is raised by a record arm, so replay has nothing to meet and names the last landmark
     // (walls.md's Incomplete recordings section quotes this form).
     assert!(replay.contains("it ends at landmark"), "{replay}");
@@ -283,31 +283,50 @@ fn a_program_that_calls_fsync_stops_at_one_clean_line() {
 /// Review Focus 2: the wall on a thread that is not main. The output main printed still comes first,
 /// and the line is the same line: it names the call, never the thread.
 #[test]
-fn a_worker_threads_fsync_stops_the_recording_cleanly() {
-    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["threadfsync"], "cf: threadfsync\n",
-        "fsync (syscall 95)", "syscalls");
-    assert_eq!(line, format!("retrace: unsupported: fsync (syscall 95) - see {WALLS}#syscalls"));
+fn a_worker_threads_chroot_stops_the_recording_cleanly() {
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["threadchroot"], "cf: threadchroot\n",
+        "chroot (syscall 61)", "syscalls");
+    assert_eq!(line, format!("retrace: unsupported: chroot (syscall 61) - see {WALLS}#syscalls"));
 }
 
 /// Review Focus 1: a Rust program, whose runtime installs SIGSEGV and SIGBUS handlers and an
 /// alternate stack before main, stops at the same one line.
 #[test]
-fn a_rust_program_that_calls_fsync_stops_at_one_clean_line() {
-    let line = assert_guest_wall(retrace_guest::CF_RS_FSYNC, &[], "cf: rs_fsync\n", "fsync (syscall 95)", "syscalls");
-    assert_eq!(line, format!("retrace: unsupported: fsync (syscall 95) - see {WALLS}#syscalls"));
+fn a_rust_program_that_calls_chroot_stops_at_one_clean_line() {
+    let line = assert_guest_wall(retrace_guest::CF_RS_CHROOT, &[], "cf: rs_chroot\n", "chroot (syscall 61)", "syscalls");
+    assert_eq!(line, format!("retrace: unsupported: chroot (syscall 61) - see {WALLS}#syscalls"));
 }
 
-/// `pause()` waits for a signal nothing in retrace can deliver to a waiting program.
+/// `pause()` with nothing to signal it is the deadlock wall (M53 C6): D1's line, with a clause naming the
+/// thread that waits in `sigsuspend`. Natively this program hangs forever.
 #[test]
 fn a_program_that_pauses_for_a_signal_stops_at_one_clean_line() {
-    assert_guest_wall(retrace_guest::CF_WALLS, &["pause"], "cf: pause\n",
-        "sigsuspend (syscall 111) waits for a signal", "signals");
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["pause"], "cf: pause\n",
+        "M14: DEADLOCK - every thread is blocked and nothing is left to wake one", "threads");
+    assert!(line.contains("; thread 0 waits in sigsuspend for a signal nothing can send - see "), "{line}");
 }
 
-/// `symlink` has no row. (M52 §3e made `sched_yield` a modelled call, so this row replaced its wall, C7.)
+/// `socketpair` has no row. (M52 §3e made `sched_yield` a modelled call, so this row replaced its wall, C7.)
 #[test]
-fn a_symlink_stops_at_one_clean_line() {
-    assert_guest_wall(retrace_guest::CF_WALLS, &["symlink"], "cf: symlink\n", "symlink (syscall 57)", "syscalls");
+fn a_socketpair_stops_at_one_clean_line() {
+    assert_guest_wall(retrace_guest::CF_WALLS, &["socketpair"], "cf: socketpair\n", "socketpair (syscall 135)", "syscalls");
+}
+
+/// M53 t4 (C1): `poll` on a regular file is outside the pipe model and refused by value, naming the
+/// call and the descriptor (the guest's number for it, 4 under retrace).
+#[test]
+fn a_poll_on_a_file_stops_at_one_clean_line() {
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["pollfile"], "cf: pollfile\n",
+        "poll (syscall 230) on fd 4, not a guest pipe end", "threads");
+    assert_eq!(line, format!("retrace: unsupported: poll (syscall 230) on fd 4, not a guest pipe end - see {WALLS}#threads"));
+}
+
+/// M53 t4 (Ruling T4-closepolled): another thread closing the descriptor a blocked poller watches is
+/// unmeasured, so it is refused by value, as Task 3's close of a waited kqueue is.
+#[test]
+fn a_close_under_a_blocked_poll_stops_at_one_clean_line() {
+    assert_guest_wall(retrace_guest::POLLSEL_DYN, &["pollclose"], "pollsel: pollclose\n",
+        "M53: close of descriptor ", "threads");
 }
 
 /// D1: every thread blocked with nothing left to wake one. Natively this program hangs forever; under
@@ -364,10 +383,11 @@ fn a_wall_prints_no_backtrace_even_with_rust_backtrace_set() {
     let _ = std::fs::remove_file(&t);
 }
 
-/// T4-c: a wall raised after record appended its landmark, through `note_fd_effects` (a dup of a
-/// guest kqueue). Replay meets it at the recording's last landmark, so it must reach the incomplete
-/// line, which needs the mirror to pass the marked refusal through unchanged.
+/// T3-closewait: the close of the kqueue descriptor a thread waits in `kevent` on is refused, because
+/// natively the waiter wakes at once with EBADF. The refusal is raised through `note_fd_effects`
+/// after record appended the close's landmark, so replay must reach the incomplete line.
 #[test]
-fn a_dup_of_a_kqueue_stops_at_one_clean_line_and_replays_to_its_end() {
-    assert_guest_wall(retrace_guest::CF_WALLS, &["kqdup"], "cf: kqdup\n", "M48: kevent on fd ", "threads");
+fn closing_a_kqueue_descriptor_a_thread_waits_on_stops_at_one_clean_line_and_replays_to_its_end() {
+    assert_guest_wall(retrace_guest::KQDUP_DYN, &["closewait"], "closewait: closing\n",
+        "M53: close of kqueue descriptor ", "threads");
 }

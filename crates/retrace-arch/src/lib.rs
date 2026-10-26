@@ -872,6 +872,113 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // (bsd/vfs/vfs_syscalls.c `getutimes`, one `copyin` of `sizeof(tv)`), the cited bound —
         // Ptr. NULL means "now".
         138 => row!(P, [Path, Ptr]),
+        // ---- M53 §3b rows: the census's filesystem and process calls and their neighbours (t0 M2,
+        // `docs/sweep-evidence/2026-10-25-m53-t0/m2-rows.tsv`; the prototypes are the SDK's). Every
+        // `Path` stops at PATH_MAX (1024); a descriptor is a `Fd`; the rest are values. -----------
+        // unlinkat(int fd, const char *path, int flag)
+        472 => row!(P, [Fd, Path, Scalar]),
+        // rmdir(const char *path)
+        137 => row!(P, [Path]),
+        // symlink(const char *path1, const char *path2): the target is stored as a string, capped at
+        // MAXPATHLEN by `symlinkat_internal` (the readlink comment above).
+        57 => row!(P, [Path, Path]),
+        // symlinkat(const char *path1, int fd, const char *path2)
+        474 => row!(P, [Path, Fd, Path]),
+        // linkat(int fd1, const char *name1, int fd2, const char *name2, int flag)
+        471 => row!(P, [Fd, Path, Fd, Path, Scalar]),
+        // renameat(int fromfd, const char *from, int tofd, const char *to)
+        465 => row!(P, [Fd, Path, Fd, Path]),
+        // renameatx_np(int fromfd, const char *from, int tofd, const char *to, unsigned int flags):
+        // RENAME_SWAP 2, RENAME_EXCL 4 (sys/stdio.h).
+        488 => row!(P, [Fd, Path, Fd, Path, Scalar]),
+        // clonefileat(int src_dirfd, const char *src, int dst_dirfd, const char *dst, uint32_t flags)
+        462 => row!(P, [Fd, Path, Fd, Path, Scalar]),
+        // fclonefileat(int srcfd, int dst_dirfd, const char *dst, uint32_t flags): the FIRST
+        // descriptor is the source FILE, the second the destination directory.
+        517 => row!(P, [Fd, Fd, Path, Scalar]),
+        // mkdirat(int fd, const char *path, mode_t mode)
+        475 => row!(P, [Fd, Path, Scalar]),
+        // faccessat(int fd, const char *path, int amode, int flag)
+        466 => row!(P, [Fd, Path, Scalar, Scalar]),
+        // readlinkat(int fd, const char *path, char *buf, size_t bufsize): readlink's (58) buf bound.
+        473 => row!(P, [Fd, Path, Ptr, Scalar]),
+        // mkfifo(const char *path, mode_t mode)
+        132 => row!(P, [Path, Scalar]),
+        // chmod(const char *path, mode_t mode) / fchmod(int fd, mode_t mode) /
+        // fchmodat(int fd, const char *path, mode_t mode, int flag)
+        15 => row!(P, [Path, Scalar]),
+        124 => row!(P, [Fd, Scalar]),
+        467 => row!(P, [Fd, Path, Scalar, Scalar]),
+        // chown(const char *path, uid_t, gid_t) / lchown (364) / fchown(int fd, uid_t, gid_t) /
+        // fchownat(int fd, const char *path, uid_t, gid_t, int flag)
+        16 | 364 => row!(P, [Path, Scalar, Scalar]),
+        123 => row!(P, [Fd, Scalar, Scalar]),
+        468 => row!(P, [Fd, Path, Scalar, Scalar, Scalar]),
+        // chflags(const char *path, __uint32_t flags) / fchflags(int fd, __uint32_t flags)
+        34 => row!(P, [Path, Scalar]),
+        35 => row!(P, [Fd, Scalar]),
+        // truncate(const char *path, off_t length) / ftruncate(int fd, off_t length)
+        200 => row!(P, [Path, Scalar]),
+        201 => row!(P, [Fd, Scalar]),
+        // fsync(int fd) and its `_nocancel` twin (408); fdatasync(int fd) has no libc wrapper.
+        95 | 408 => row!(P, [Fd]),
+        187 => row!(P, [Fd]),
+        // fpathconf(int fd, int name): the result is in the return register.
+        192 => row!(P, [Fd, Scalar]),
+        // flock(int fd, int operation): LOCK_SH 1, LOCK_EX 2, LOCK_NB 4, LOCK_UN 8. Forwarded only
+        // through `Box_::forward_flock`, which refuses an operation that would wait (M53 §3g).
+        SYS_FLOCK => row!(P, [Fd, Scalar]),
+        // futimes(int fd, const struct timeval *times): two timevals = 32 bytes (`getutimes`, as
+        // utimes (138) above); NULL means now.
+        139 => row!(P, [Fd, Ptr]),
+        // setattrlist(const char *path, struct attrlist *alist, void *attributeBuffer, size_t
+        //             bufferSize, unsigned long options) / fsetattrlist(int fd, …) /
+        // setattrlistat(int fd, const char *path, …, uint32_t options): alist is a fixed 24 bytes.
+        // attributeBuffer is READ, and `setattrlist_internal` answers ENOMEM before any copyin past
+        // ATTR_MAX_BUFFER_LONGPATHS (15,360), the cap rows 220 and 577 cite — Ptr with the bound
+        // cited, not Source (t0 M2).
+        221 => row!(P, [Path, Ptr, Ptr, Scalar, Scalar]),
+        229 => row!(P, [Fd, Ptr, Ptr, Scalar, Scalar]),
+        524 => row!(P, [Fd, Path, Ptr, Ptr, Scalar, Scalar]),
+        // getgroups(int gidsetsize, gid_t grouplist[]): the kernel copies out cr_ngroups * 4 bytes,
+        // cr_ngroups <= NGROUPS_MAX 16, so at most 64 (bsd/kern/kern_prot.c `getgroups`); a
+        // gidsetsize of 0 writes nothing.
+        79 => row!(P, [Scalar, Ptr]),
+        // getpgid(pid_t pid) / getsid(pid_t pid) / getpriority(int which, id_t who)
+        151 | 310 => row!(P, [Scalar]),
+        100 => row!(P, [Scalar, Scalar]),
+        // setpriority(int which, id_t who, int prio) (bsd/kern/kern_resource.c, syscalls.master 96):
+        // three values, no pointer. Added with getpriority (100, above) by M53 t6.
+        96 => row!(P, [Scalar, Scalar, Scalar]),
+        // stat64_extended(user_addr_t path, user_addr_t ub, user_addr_t xsecurity, user_addr_t
+        // xsecurity_size) (341) and lstat64_extended (342); fstat64_extended(int fd, ub, xsecurity,
+        // xsecurity_size) (343) (syscalls.master). `ub` is a struct stat64, a fixed 144 bytes
+        // (sys/stat.h) the kernel always writes on success. `xsecurity` is a kauth_filesec buffer
+        // bounded by the size_t at `xsecurity_size`, which is read and written back: Dest with its
+        // length behind x3, sysctl's `oldp`/`oldlenp` shape. MEASURED, not read (no xnu source on the
+        // machine; t6): a NULL xsecurity and size pointer writes only `ub`; a 1024-byte buffer gets the
+        // 44-byte filesec of a file with no ACL and 44 is written back; a size of 8 still succeeds and
+        // writes 44 back. A NULL length pointer reads as 0 (`oldlen_at`), a window of the heuristic's size.
+        341 | 342 => row!(P, [Path, Ptr, Dest(DerefU64(3)), Ptr]),
+        343 => row!(P, [Fd, Ptr, Dest(DerefU64(3)), Ptr]),
+        // The xattr family (sys/xattr.h). `name` is copied into char[XATTR_MAXNAMELEN + 1 = 128], so
+        // at most 128 bytes (bsd/vfs/vfs_syscalls.c). A value or name list is as long as the caller
+        // says (the kernel clamps at XATTR_MAXSIZE = INT32_MAX, above the window): Dest to read,
+        // Source to set. A size of 0 (or the -1 length query) writes nothing.
+        // getxattr(const char *path, const char *name, void *value, size_t size, u_int32_t position,
+        //          int options) / fgetxattr(int fd, …)
+        234 => row!(P, [Path, Ptr, Dest(Reg(3)), Scalar, Scalar, Scalar]),
+        235 => row!(P, [Fd, Ptr, Dest(Reg(3)), Scalar, Scalar, Scalar]),
+        // setxattr(const char *path, const char *name, const void *value, size_t size,
+        //          u_int32_t position, int options) / fsetxattr(int fd, …)
+        236 => row!(P, [Path, Ptr, Source, Scalar, Scalar, Scalar]),
+        237 => row!(P, [Fd, Ptr, Source, Scalar, Scalar, Scalar]),
+        // removexattr(const char *path, const char *name, int options) / fremovexattr(int fd, …)
+        238 => row!(P, [Path, Ptr, Scalar]),
+        239 => row!(P, [Fd, Ptr, Scalar]),
+        // listxattr(const char *path, char *namebuff, size_t size, int options) / flistxattr(int fd, …)
+        240 => row!(P, [Path, Dest(Reg(2)), Scalar, Scalar]),
+        241 => row!(P, [Fd, Dest(Reg(2)), Scalar, Scalar]),
         // fork(void): REFUSED since M47, never forwarded. The record arm ahead of the generic
         // forward answers `fork_refusal_errno` (EAGAIN) and writes nothing, on both sides, and the
         // generic arm asserts it never arrives: this row makes `forwarded_shape` accept 2, so the
@@ -1048,6 +1155,10 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         //                                     mach_port_name_t *name): a fixed 24-byte options
         // struct in, 4 bytes out (osfmk/ipc/mach_kernelrpc.c, `mach_copyin(…, sizeof(options))`).
         MACH_PORT_CONSTRUCT_TRAP => row!(P, [Scalar, Ptr, Scalar, Ptr]),
+        // _kernelrpc_mach_port_destruct_trap(target, name, srdelta, uint64_t guard): four values, no
+        // pointer (osfmk/kern/syscall_sw.c, `munge_wwwl`). A WRONG guard is a fatal EXC_GUARD on the
+        // host, so a guest's own guard is the one forwarded (t0 M2: the probe died with 137).
+        MACH_PORT_DESTRUCT_TRAP => row!(P, [Scalar, Scalar, Scalar, Scalar]),
         // mach_reply_port() / thread_self_trap() / task_self_trap() / host_self_trap() /
         // thread_get_special_reply_port(): the result is a port name in x0.
         MACH_REPLY_PORT_TRAP | MACH_THREAD_SELF_TRAP | MACH_TASK_SELF_TRAP | MACH_HOST_SELF_TRAP
@@ -1305,6 +1416,9 @@ pub fn ptr_use(num: u64, i: usize) -> Option<PtrUse> {
         | (SYS_SIGPROCMASK | SYS_PTHREAD_SIGMASK, 1) | (SYS_SIGALTSTACK, 0) | (SYS_BSDTHREAD_REGISTER, 3)
         | (SYS_KEVENT_QOS, 1) | (SYS_KEVENT, 1 | 5) | (SYS_SYSCTL | SYS_SYSCTLBYNAME, 0 | 4)
         | (SYS_FGETATTRLIST, 1) | (220, 1) | (SYS_GETATTRLISTBULK, 1) | (427, 2)
+        // M53 §3b: futimes `times`; setattrlist and fsetattrlist `alist` and `attributeBuffer`, setattrlistat
+        // the same one operand later; the xattr calls' `name`.
+        | (139, 1) | (221 | 229, 1 | 2) | (524, 2 | 3) | (234..=239, 1)
         // The mach traps (negative numbers, which the pre-check never judges): port_construct `options`,
         // host_create_mach_voucher `recipes`.
         | (MACH_PORT_CONSTRUCT_TRAP, 1) | (MACH_HOST_CREATE_MACH_VOUCHER_TRAP, 1) => Reads,
@@ -1317,11 +1431,13 @@ pub fn ptr_use(num: u64, i: usize) -> Option<PtrUse> {
         // kevent `eventlist`; readlink `buf`; shared_region_check_np `start_address`; csrctl `useraddr`;
         // fsgetpath `buf`.
         (SYS_RECVFROM | SYS_RECVFROM_NOCANCEL, 4 | 5) | (337, 3) | (SYS_FSTAT | SYS_FSTAT64, 1)
-        | (SYS_FSTATFS64, 1) | (SYS_FSTATAT64, 2) | (SYS_STATFS64, 1) | (338 | 340, 1)
+        | (SYS_FSTATFS64, 1) | (SYS_FSTATAT64, 2) | (SYS_STATFS64, 1) | (338 | 340, 1) | (341..=343, 1 | 3)
         | (SYS_GETDIRENTRIES64, 3) | (SYS_FGETATTRLIST, 2) | (220, 2) | (SYS_SYSCTL | SYS_SYSCTLBYNAME, 3)
         | (286, 0 | 1) | (49, 0) | (116, 0..=2) | (117, 1) | (SYS_GETRLIMIT, 1) | (500, 0)
         | (SYS_SIGACTION, 2) | (SYS_SIGPROCMASK | SYS_PTHREAD_SIGMASK, 2) | (SYS_SIGPENDING, 0)
         | (SYS_SIGALTSTACK, 1) | (SYS_BSDTHREAD_CREATE, 3) | (SYS_KEVENT_QOS, 3 | 5 | 6) | (SYS_KEVENT, 3)
+        // M53 §3b: getgroups `grouplist`; readlinkat `buf`.
+        | (79, 1) | (473, 2)
         | (58, 1) | (SYS_SHARED_REGION_CHECK_NP, 0) | (483, 1) | (427, 0)
         // task_read_for_pid `t` (4 bytes out, bsd/kern/kern_proc.c); posix_spawn `pid` (refused, M38).
         | (539, 2) | (244, 0)
@@ -1526,11 +1642,28 @@ pub fn is_fallthrough_barrier(insn: u32) -> bool {
 // zero-count is the evidence each assert in record's dispatch rests on.
 pub const SYS_GETPID: u64 = 20;
 pub const SYS_KILL: u64 = 37;
+/// flock(2) (sys/fcntl.h): `LOCK_NB` makes the call fail with `EWOULDBLOCK` instead of waiting (M53 §3g).
+pub const SYS_FLOCK: u64 = 131;
+pub const LOCK_NB: u64 = 4;
+pub const EWOULDBLOCK: u64 = 35;
 pub const SYS_SIGACTION: u64 = 46;
 pub const SYS_SIGPROCMASK: u64 = 48;
 pub const SYS_SIGPENDING: u64 = 52;
 pub const SYS_SIGALTSTACK: u64 = 53;
 pub const SYS_SIGSUSPEND: u64 = 111;
+/// `sigsuspend_nocancel` (M53 §3f): `pause()` and `sigsuspend()` issue one or the other.
+pub const SYS_SIGSUSPEND_NOCANCEL: u64 = 410;
+/// `setitimer(which, itv, oitv)` and `getitimer(which, itv)` (M53 §3f). **Never forwarded**: the
+/// host would arm retrace's own timer and its SIGALRM would end the recorder (C5).
+pub const SYS_SETITIMER: u64 = 83;
+pub const SYS_GETITIMER: u64 = 86;
+/// `which` of `setitimer`/`getitimer` (`sys/time.h`). Only `ITIMER_REAL` is modelled; the other two
+/// count CPU time, which the synthetic clock does not have.
+pub const ITIMER_REAL: u64 = 0;
+pub const ITIMER_VIRTUAL: u64 = 1;
+pub const ITIMER_PROF: u64 = 2;
+/// `SIGALRM`, the signal `ITIMER_REAL` raises.
+pub const SIGALRM: u64 = 14;
 pub const SYS_SIGRETURN: u64 = 184;
 pub const SYS_PTHREAD_KILL: u64 = 328;
 pub const SYS_PTHREAD_SIGMASK: u64 = 329;
@@ -1669,6 +1802,7 @@ pub const MACH_VM_MAP_TRAP: u64 = (-15i64) as u64;
 pub const MACH_PORT_DEALLOCATE_TRAP: u64 = (-18i64) as u64;
 pub const MACH_PORT_MOD_REFS_TRAP: u64 = (-19i64) as u64;
 pub const MACH_PORT_CONSTRUCT_TRAP: u64 = (-24i64) as u64;
+pub const MACH_PORT_DESTRUCT_TRAP: u64 = (-25i64) as u64;
 pub const MACH_REPLY_PORT_TRAP: u64 = (-26i64) as u64;
 pub const MACH_THREAD_SELF_TRAP: u64 = (-27i64) as u64;
 pub const MACH_TASK_SELF_TRAP: u64 = (-28i64) as u64;
@@ -1743,6 +1877,7 @@ pub fn is_signal_syscall(num: u64) -> bool {
             | SYS_SIGPENDING
             | SYS_SIGALTSTACK
             | SYS_SIGSUSPEND
+            | SYS_SIGSUSPEND_NOCANCEL
             | SYS_SIGRETURN
             | SYS_PTHREAD_KILL
             | SYS_PTHREAD_SIGMASK
@@ -2318,6 +2453,38 @@ pub fn sandbox_check_continuity(operation: &[u8]) -> Result<u64, String> {
 // `tests/nodeshapes.rs` re-reads both at test time. The psynch values are libpthread-539.100.4's
 // (the guest's own version, M48 plan fact F1): `kern/synch_internal.h` and `kern/kern_internal.h`.
 
+/// M53 §3c: the iovec calls, `readv` (120), `writev` (121), their `_nocancel` twins (411, 412) and
+/// `preadv`, `pwritev` with theirs (540-543). Translated by `Box_::guest_iovec`, never forwarded as
+/// the guest issued them: each `iov_base` is a guest address the host kernel would reject.
+pub fn is_iovec(num: u64) -> bool {
+    matches!(num, 120 | 121 | 411 | 412 | 540..=543)
+}
+/// M53 §3e: `poll` (230) and `_nocancel` (417), `select` (93, 407), `pselect` (394, 395). Emulated in the
+/// box over guest pipes (`Box_::guest_poll`), never forwarded: the host kernel would poll its own
+/// descriptors, and a wait would block the recorder. None has an `arg_kinds` row (C5).
+pub const SYS_POLL: u64 = 230;
+pub const SYS_POLL_NOCANCEL: u64 = 417;
+pub const SYS_SELECT: u64 = 93;
+pub const SYS_SELECT_NOCANCEL: u64 = 407;
+pub const SYS_PSELECT: u64 = 394;
+pub const SYS_PSELECT_NOCANCEL: u64 = 395;
+pub fn is_poll_family(num: u64) -> bool {
+    matches!(num, SYS_POLL | SYS_POLL_NOCANCEL | SYS_SELECT | SYS_SELECT_NOCANCEL | SYS_PSELECT | SYS_PSELECT_NOCANCEL)
+}
+/// The SDK's `poll.h` event bits (`POLLWRNORM` is `POLLOUT`).
+pub const POLLIN: u16 = 0x0001;
+pub const POLLPRI: u16 = 0x0002;
+pub const POLLOUT: u16 = 0x0004;
+pub const POLLERR: u16 = 0x0008;
+pub const POLLHUP: u16 = 0x0010;
+pub const POLLNVAL: u16 = 0x0020;
+pub const POLLRDNORM: u16 = 0x0040;
+pub const POLLRDBAND: u16 = 0x0080;
+pub const POLLWRNORM: u16 = POLLOUT;
+pub const POLLWRBAND: u16 = 0x0100;
+/// `IOV_MAX` (`sys/syslimits.h`): the most entries one iovec call takes (t0 M3: 1024 is accepted, 1025 is EINVAL).
+pub const IOV_MAX: u64 = 1024;
+
 /// `kevent` (SDK `SYS_kevent 363`). Emulated since M48 (§3b), never forwarded: forwarded, it acts
 /// on a kqueue retrace never created, and a filter that blocks would block the RECORDER. The
 /// generic forward arm asserts it away, as it does `kevent_qos`.
@@ -2628,12 +2795,20 @@ pub fn stage2_abort_as_stage1(esr_el2: u64, guest_cpsr: u64) -> Result<u64, Stri
 mod tests {
     use super::*;
 
+    /// M53 §3c: the iovec set is the eight SDK numbers, and `IOV_MAX` is the measured limit.
+    #[test]
+    fn is_iovec_names_the_eight_iovec_numbers() {
+        for n in [120, 121, 411, 412, 540, 541, 542, 543] { assert!(is_iovec(n), "{n}"); }
+        for n in [3, 4, 27, 28, 119, 122, 410, 413, 539, 544] { assert!(!is_iovec(n), "{n}"); }
+        assert_eq!(IOV_MAX, 1024);
+    }
+
     /// M50 §3c (B3): the check refuses exactly the numbers `forwarded_shape` cannot forward, and
     /// nothing it can, so its panic is unreachable from a guest.
     #[test]
     fn refusal_before_forward_refuses_exactly_what_cannot_be_forwarded() {
         assert_eq!(refusal_before_forward(3), None, "read (3) has a row and forwards");
-        assert_eq!(refusal_before_forward(95), Some(Unsupported::new(WallCategory::Syscalls, "fsync (syscall 95)")));
+        assert_eq!(refusal_before_forward(61), Some(Unsupported::new(WallCategory::Syscalls, "chroot (syscall 61)")));
         assert_eq!(refusal_before_forward(7).map(|u| u.category), Some(WallCategory::ProcessCreation), "wait4");
         assert_eq!(refusal_before_forward((-38i64) as u64),
             Some(Unsupported::new(WallCategory::Threads, "semaphore_timedwait_trap (mach trap -38)")));
@@ -2651,6 +2826,32 @@ mod tests {
     #[test]
     fn the_m52_semaphore_and_yield_traps_cannot_reach_the_generic_forward() {
         for t in [-38i64, -59, -61] { assert!(refusal_before_forward(t as u64).is_some(), "{t}"); }
+    }
+
+    /// M53 §3b (t0 M2): every number of `m2-rows.tsv` forwards, and the one `_nocancel` twin among
+    /// them (408) has exactly its plain form's row.
+    #[test]
+    fn every_m53_row_is_forwardable_and_shares_its_twins_row() {
+        let nums: [i64; 46] = [
+            472, 201, 57, 95, 408, 192, 471, 465, 488, 462, 517, 474, 475, 137, 466, 131, 79, 151, 310, 100,
+            229, 221, 524, 15, 124, 467, 16, 123, 364, 468, 200, 473, 139, 187, 132, 34, 35,
+            234, 235, 236, 237, 238, 239, 240, 241, -25,
+        ];
+        for n in nums { assert_eq!(refusal_before_forward(n as u64), None, "{n}"); }
+        assert_eq!(arg_kinds(408), arg_kinds(95), "fsync_nocancel shares fsync's row");
+    }
+
+    /// M53 §3b: `chroot` has no row and stays the standard wall the cleanfail tests use.
+    #[test]
+    fn chroot_stays_refused_as_the_standard_wall() {
+        assert_eq!(refusal_before_forward(61), Some(Unsupported::new(WallCategory::Syscalls, "chroot (syscall 61)")));
+    }
+
+    /// M53 C5: the calls M53 emulates have no row, so a misplaced arm is a wall, never a forward
+    /// (`setitimer` forwarded would arm retrace's own timer). Guards Tasks 4 and 5.
+    #[test]
+    fn the_calls_m53_emulates_have_no_row() {
+        for n in [83u64, 86, 111, 410, 230, 417, 93, 407, 394, 395] { assert!(arg_kinds(n).is_none(), "{n}"); }
     }
 
     #[test]
@@ -2755,7 +2956,7 @@ mod tests {
 
     #[test]
     fn is_signal_syscall_covers_every_intercepted_number_and_nothing_else() {
-        for n in [37u64, 46, 48, 52, 53, 111, 184, 328, 329, 330, 520, 521] {
+        for n in [37u64, 46, 48, 52, 53, 111, 410, 184, 328, 329, 330, 520, 521] {
             assert!(is_signal_syscall(n), "{n} must be intercepted");
         }
         // getpid is NOT intercepted — it keeps forwarding, and the raise arm's self-check relies on
@@ -3009,10 +3210,10 @@ mod tests {
     // two the retrace-core dispatch already carried privately (-28 task_self, -10 vm_allocate).
     #[test]
     fn mach_trap_constants_match_syscall_sw_h() {
-        let expect: [(u64, i64); 14] = [
+        let expect: [(u64, i64); 15] = [
             (MACH_VM_ALLOCATE_TRAP, -10), (MACH_VM_DEALLOCATE_TRAP, -12), (MACH_VM_PROTECT_TRAP, -14),
             (MACH_VM_MAP_TRAP, -15), (MACH_PORT_DEALLOCATE_TRAP, -18), (MACH_PORT_MOD_REFS_TRAP, -19),
-            (MACH_PORT_CONSTRUCT_TRAP, -24), (MACH_REPLY_PORT_TRAP, -26), (MACH_THREAD_SELF_TRAP, -27),
+            (MACH_PORT_CONSTRUCT_TRAP, -24), (MACH_PORT_DESTRUCT_TRAP, -25), (MACH_REPLY_PORT_TRAP, -26), (MACH_THREAD_SELF_TRAP, -27),
             (MACH_TASK_SELF_TRAP, -28), (MACH_HOST_SELF_TRAP, -29),
             (MACH_THREAD_GET_SPECIAL_REPLY_PORT_TRAP, -50), (MACH_HOST_CREATE_MACH_VOUCHER_TRAP, -70),
             (MACH_TIMEBASE_INFO_TRAP, -89),

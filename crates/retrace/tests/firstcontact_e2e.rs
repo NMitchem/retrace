@@ -74,6 +74,8 @@ const ROWS: &[Row] = &[
     // M52 §3f: the firstfit mutex pair is modelled, so the contended lock is a pass (was the 301 wall).
     Row { name: "fc_mutex", bin: retrace_guest::FC_MUTEX, args: &[], expect: Expect::Pass },
     Row { name: "fc_fileio", bin: retrace_guest::FC_FILEIO, args: &[], expect: Expect::Pass },
+    // M53 t1: the filesystem and process calls the census's rows cover, in one directory.
+    Row { name: "fc_posix", bin: retrace_guest::FC_POSIX, args: &[], expect: Expect::Pass },
     // M51 §3f: the program gets the recorder's environment, which is ENV, as native gets it.
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"], expect: Expect::Pass },
     // M51 (R8): __builtin_trap(), the brk class without swiftc. Joins in Task 3, where it passes (C9).
@@ -93,6 +95,8 @@ const ROWS: &[Row] = &[
           expect: Expect::Pass },
     Row { name: "fc_rs_sleep", bin: retrace_guest::FC_RS_SLEEP, args: &[],
           expect: Expect::Pass },
+    // M53 t1: `std::fs` end to end.
+    Row { name: "fc_rs_fs", bin: retrace_guest::FC_RS_FS, args: &[], expect: Expect::Pass },
     // M52 t3: libtest's `recv_timeout` is `semaphore_timedwait_trap` (-38), box-answered since, so both
     // harnesses run through and match native (the output comparison is `canonical`'s).
     Row { name: "fc_rs_tests", bin: retrace_guest::FC_RS_TESTS, args: &[], expect: Expect::Pass },

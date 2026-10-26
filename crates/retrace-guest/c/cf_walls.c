@@ -7,18 +7,20 @@
 #include <mach/clock.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/event.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t never = PTHREAD_COND_INITIALIZER;
 
-static void *fsync_worker(void *arg) { (void)arg; fsync(1); return NULL; }
+static void *chroot_worker(void *arg) { (void)arg; chroot("/nonexistent-cf"); return NULL; }
 
 // `deadlock`: waits on a condition nothing signals, while main joins it. Natively a hang.
 static void *forever(void *arg) {
@@ -32,16 +34,21 @@ int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "";
     printf("cf: %s\n", mode);
     fflush(stdout);
-    if (!strcmp(mode, "fsync")) {
-        fsync(1);
-    } else if (!strcmp(mode, "threadfsync")) {
+    if (!strcmp(mode, "chroot")) {
+        chroot("/nonexistent-cf");
+    } else if (!strcmp(mode, "threadchroot")) {
         pthread_t t;
-        pthread_create(&t, NULL, fsync_worker, NULL);
+        pthread_create(&t, NULL, chroot_worker, NULL);
         pthread_join(t, NULL);
     } else if (!strcmp(mode, "pause")) {
         pause();
-    } else if (!strcmp(mode, "symlink")) {
-        symlink("cf_target", "cf-symlink");
+    } else if (!strcmp(mode, "socketpair")) {
+        int sv[2];
+        socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    } else if (!strcmp(mode, "pollfile")) {
+        // M53 t4 (C1): poll on a regular file is outside the pipe model, refused by value.
+        struct pollfd f = {open("/etc/hosts", O_RDONLY), POLLIN, 0};
+        poll(&f, 1, 0);
     } else if (!strcmp(mode, "clocksleep")) {
         clock_serv_t clk;
         host_get_clock_service(mach_host_self(), SYSTEM_CLOCK, &clk);
@@ -70,9 +77,6 @@ int main(int argc, char **argv) {
         sigprocmask(SIG_BLOCK, &s, NULL);
         raise(SIGUSR1);
         sigprocmask(SIG_UNBLOCK, &s, NULL);
-    } else if (!strcmp(mode, "kqdup")) {
-        int kq = kqueue();
-        dup(kq);
     } else {
         printf("cf: unknown mode\n");
         return 2;

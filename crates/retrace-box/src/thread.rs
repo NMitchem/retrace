@@ -133,6 +133,16 @@ pub enum BlockReason {
     /// instant between the trap and the settle that ends it (`ThreadTable::end_yield`, called by
     /// `Box_::schedule_after_block`), so it carries nothing and no other event can see it.
     Yield,
+    /// M53 §3e: blocked in `poll`, `select` or `pselect` over guest pipes. `deadline` is on the guest
+    /// clock, or `None` for an infinite timeout. The descriptors and the reply's address live in
+    /// `gkq`, not here, so the variant stays `Copy`. Woken by a pipe change that makes one ready
+    /// (`Box_::wake_poll_waiters`) or by its deadline (`Box_::poll_timed_out`).
+    Poll { deadline: Option<u64> },
+    /// M53 §3f: blocked in `sigsuspend` (`pause` is libc's `sigsuspend` of the current mask), the
+    /// thread's mask now the call's argument and `saved_mask` the mask the call found. Never timed.
+    /// Woken only by a signal the argument mask lets through (`ThreadTable::interrupt`), which runs
+    /// its handler and returns `EINTR`. With no signal source left it is the deadlock wall (D1).
+    SigSuspend { saved_mask: u32 },
 }
 
 impl BlockReason {
@@ -142,10 +152,10 @@ impl BlockReason {
     pub fn deadline(&self) -> Option<u64> {
         match *self {
             BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. }
-            | BlockReason::Sem { deadline, .. } => deadline,
+            | BlockReason::Sem { deadline, .. } | BlockReason::Poll { deadline } => deadline,
             BlockReason::Sleep { deadline } => Some(deadline),
             BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Parked | BlockReason::Yield
-            | BlockReason::Mutex { .. } => None,
+            | BlockReason::Mutex { .. } | BlockReason::SigSuspend { .. } => None,
         }
     }
 }
@@ -189,6 +199,11 @@ pub struct Thread {
     /// inherited: native starts a thread protected even when its creator is write-enabled. Only
     /// `Box_::sprr_write` changes it, with an admitted value.
     pub sprr: u64,
+    /// M53 §3f: the mask the NEXT signal frame built for this thread records as the one `sigreturn`
+    /// restores, in place of its current mask. Set by `sigsuspend` to the pre-call mask (xnu's
+    /// `uu_oldmask`: the handler runs under the argument mask, and returns to the mask the call
+    /// found). Consumed by `Box_::deliver_signal_to`.
+    pub frame_mask: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -214,6 +229,7 @@ impl ThreadTable {
                 altstack: None,
                 redirected: false,
                 sprr: 0,
+                frame_mask: None,
             }],
             current: 0,
             next_id: MAIN_THREAD_ID + 1,
@@ -387,6 +403,7 @@ impl ThreadTable {
             altstack: None,
             redirected: false,
             sprr: 0,
+            frame_mask: None,
         });
         self.threads.len() - 1
     }
@@ -524,7 +541,15 @@ impl ThreadTable {
     /// it, with record and replay agreeing: `unpark`'s posture, as a `Result` because a wake can
     /// be reached above the trace (a trigger) as well as below it (a deadline).
     pub fn wake(&mut self, tid: usize) -> Result<(), String> {
-        let pending = self.threads[tid].pending;
+        // M53 §3f (t0 M8): a signal pending on a sleeper but MASKED does not interrupt it, and does
+        // not make its timeout a wall: `sleep(2)` with SIGALRM blocked returns 0 and the handler
+        // runs at the unmask (M16's masked pend). A signal that is deliverable cannot be pending
+        // here, because it would have ended the sleep (`interrupt`).
+        let pending = if matches!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Sleep { .. })) {
+            self.threads[tid].pending & !self.threads[tid].mask
+        } else {
+            self.threads[tid].pending
+        };
         if pending != 0 {
             retrace_arch::refuse!(Threads, "M48: a signal is pending on thread {tid} (set {pending:#x}; bit n is signal n+1, \
                  masked or not), and this wake would write its reply over the blocked context. \
@@ -533,12 +558,34 @@ impl ThreadTable {
         }
         assert!(matches!(self.threads[tid].state,
                 ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. }
-                    | BlockReason::Sem { .. } | BlockReason::Mutex { .. })),
-            "M48: wake of thread {tid}, which is {:?}, not blocked in a psynch, kevent, sleep or semaphore wait",
+                    | BlockReason::Sem { .. } | BlockReason::Mutex { .. } | BlockReason::Poll { .. })),
+            "M48: wake of thread {tid}, which is {:?}, not blocked in a psynch, kevent, poll, sleep or semaphore wait",
             self.threads[tid].state);
         self.threads[tid].state = ThreadState::Runnable;
         Ok(())
     }
+
+    /// M53 §3f (C2): a signal ends `tid`'s sleep or `sigsuspend`: make it runnable. The caller writes
+    /// the `EINTR` return and builds the handler's frame. A `sigsuspend` leaves its pre-call mask as
+    /// the next frame's `frame_mask`. Only these two reasons are interrupted: any other blocked
+    /// thread keeps K8's posture (the signal pends and the wake refuses).
+    pub fn interrupt(&mut self, tid: usize) {
+        match self.threads[tid].state {
+            ThreadState::Blocked(BlockReason::Sleep { .. }) => {}
+            ThreadState::Blocked(BlockReason::SigSuspend { saved_mask }) => self.threads[tid].frame_mask = Some(saved_mask),
+            s => panic!("M53: interrupt of thread {tid}, which is {s:?}, not asleep or in sigsuspend"),
+        }
+        self.threads[tid].state = ThreadState::Runnable;
+    }
+
+    /// M53 §3f: remember the mask the next signal frame for `tid` restores (`Thread::frame_mask`).
+    pub fn set_frame_mask(&mut self, tid: usize, mask: u32) { self.threads[tid].frame_mask = Some(mask); }
+
+    /// M53 §3f: `Thread::frame_mask`, unconsumed.
+    pub fn frame_mask_of(&self, tid: usize) -> Option<u32> { self.threads[tid].frame_mask }
+
+    /// M53 §3f: consume `Thread::frame_mask`.
+    pub fn take_frame_mask(&mut self, tid: usize) -> Option<u32> { self.threads[tid].frame_mask.take() }
 
     /// M52 §3e: end `tid`'s yield, making it runnable again. Called by `Box_::schedule_after_block`
     /// in the settle that blocked it, so a yield is never observable as a blocked thread.

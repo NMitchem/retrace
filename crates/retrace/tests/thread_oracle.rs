@@ -340,6 +340,31 @@ fn a_wrong_thread_on_a_kevent_landmark_is_a_divergence() {
     retag_fixture_and_expect_divergence(retrace_guest::KQ_DYN, &["wake"], retrace_arch::SYS_KEVENT);
 }
 
+/// M53 Task 4 (spec §3e): the poll family's mirror sits inside the `Syscall` chain after the arm-top
+/// `verify_thread`, so a `poll` landmark retagged to another live thread must diverge as the
+/// schedule. `pollsel_dyn cross`: main blocks in `poll` while a writer thread sleeps and writes, so
+/// two live threads issue syscalls and the retag target is real.
+#[test]
+fn a_wrong_thread_on_a_poll_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::POLLSEL_DYN, &["cross"], retrace_arch::SYS_POLL);
+}
+
+/// M53 Task 5 (spec §3f): the `sigsuspend` mirror sits inside the `Syscall` chain after the arm-top
+/// `verify_thread`, so a 111 (or 410) landmark retagged to another live thread must diverge as the
+/// schedule. `alarm_dyn suspend`: main blocks in `sigsuspend` while a worker sleeps and signals it.
+#[test]
+fn a_wrong_thread_on_a_sigsuspend_landmark_is_a_divergence() {
+    retag_fixture_where_and_expect_divergence(retrace_guest::ALARM_DYN, &["suspend"], "sigsuspend",
+        |num, _| num == retrace_arch::SYS_SIGSUSPEND || num == retrace_arch::SYS_SIGSUSPEND_NOCANCEL);
+}
+
+/// M53 Task 5 (spec §3f): the same for `setitimer`'s mirror. `alarm_dyn target` arms the timer on main
+/// with a worker alive, so two live threads issue syscalls and the retag target is real.
+#[test]
+fn a_wrong_thread_on_a_setitimer_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::ALARM_DYN, &["target"], retrace_arch::SYS_SETITIMER);
+}
+
 /// M52 Task 2 (spec §3c): the `thread_selfid` mirror sits inside the `Syscall` chain after the
 /// arm-top `verify_thread`, so a 372 landmark retagged to another live thread must diverge as the
 /// schedule. `tid_dyn routes` runs four threads, each issuing 372.

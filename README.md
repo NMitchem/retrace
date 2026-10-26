@@ -56,7 +56,7 @@ script.
   breakpoint or watchpoint hit. Checkpoints keep backward seeks fast.
 - Multi-threaded programs record and replay, including pthreads and their condition variables,
   `std::thread`, contended mutexes, GCD queues and timers, kqueues with timeouts, and the harness
-  `cargo test` builds. Timed waits and `sleep()` run on a synthetic clock, so a 2-second timer or `sleep(2)` takes no wall-clock time.
+  `cargo test` builds. Timed waits, `sleep()` and `alarm()` run on a synthetic clock, so a 2-second timer or `sleep(2)` takes no wall-clock time.
 - Signals reach the thread they were sent to, through the handler the program installed.
 - A crash is an ordinary recording that ends at the fault, a NULL dereference or a Swift runtime trap included. It exits 128 + its signal, as natively, and a handler the program installed gets the signal, code and address it would get natively ([Known limits](docs/current-state.md#known-limits) has the edge cases).
 - The program's stdout and stderr stay apart and appear as it writes them, and it sees the environment you ran retrace in.
@@ -77,21 +77,22 @@ behind it. These are the ones you'll hit first:
   replayable without recording it, but races that need preemption won't reproduce and parallel
   programs run serially. A thread that spins waiting for another one, without ever blocking, hangs
   the run; after 20 seconds of that the recorder prints one `retrace: thread N has run for 20 s`
-  line naming the threads it is starving (ready to run, or waiting on a timeout).
+  line naming the threads it is starving (ready to run, or waiting on a timeout). A program that spins
+  without a system call never reaches its `alarm` either.
 - No `fork`, `exec` or `posix_spawn`. `exec` and `posix_spawn` are refused with a message; `fork`
   fails with `EAGAIN`. Record the program that does the work, not a launcher: Homebrew's `python3`
   re-executes the real interpreter, and `/usr/bin/git` is an `xcrun` shim for Xcode's `git`.
 - Command-line programs only. XPC service lookups, I/O Kit and GUI frameworks aren't modelled, and
-  kqueue readiness covers only a program's own pipes, so nothing that waits on a socket, a terminal
+  kqueue, `poll` and `select` readiness cover only a program's own pipes, so nothing that waits on a socket, a terminal
   or an inherited descriptor runs.
 - A syscall or Mach message retrace has no model for stops the recording with one line naming
   it, `retrace: unsupported: …`, and exit status 4; [`docs/walls.md`](docs/walls.md) explains each
   kind. In the latest sweep, 41 of the 54 Apple binaries in the committed sample recorded and
   replayed with native's stdout, stderr and exit status, and 47 recorded and replayed identically
   (most of the rest start another process, which stops at a wall, or print host state).
-- Of the 33 small C, C++, Rust and Swift programs in the first-contact corpus
-  (`firstcontact_e2e`), the kind a newcomer tries first, 31 record and replay as they run natively
-  (up from 27). The other two are Swift programs that stop at a libdispatch call retrace does not model (a workloop, a workqueue opcode).
+- Of the 35 small C, C++, Rust and Swift programs in the first-contact corpus
+  (`firstcontact_e2e`), the kind a newcomer tries first, 33 record and replay as they run natively
+  (up from 31). The other two are Swift programs that stop at a libdispatch call retrace does not model (a workloop, a workqueue opcode).
 - A recording holds the program's environment, so a recording you share shares it; run retrace under env -i to pass only what the program needs.
 - Traces are big: tens of MiB to over a GiB, uncompressed. node's `console.log(1)` is about 501 MiB
   because retrace backs V8's address-space reservations in full. The format isn't stable, and
