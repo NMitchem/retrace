@@ -124,7 +124,7 @@ fn iovcnt_limits_answer_natives_errnos() {
         "readv(iovcnt 0) rc=-1 errno=22", "writev(iovcnt 0) rc=-1 errno=22",
         "writev(iovcnt 1024) rc=1024 errno=0", "writev(iovcnt 1025) rc=-1 errno=22", "writev(iovcnt -1) rc=-1 errno=22",
         "readv(iovcnt 1024) rc=1024 errno=0", "readv(iovcnt 1025) rc=-1 errno=22", "readv(iovcnt -1) rc=-1 errno=22",
-        "pwritev(iovcnt 1025) rc=-1 errno=22",
+        "pwritev(iovcnt 1025) rc=-1 errno=22", "writev(iovcnt 0, unmapped array) rc=-1 errno=22",
     ]);
     let _ = std::fs::remove_file(&r.trace);
 }

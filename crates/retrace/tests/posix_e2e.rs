@@ -24,7 +24,7 @@ fn as_natively(mode: &str, pinned: &[&str]) -> String {
     }
     let out = String::from_utf8_lossy(&native.stdout).into_owned();
     for line in pinned { assert!(out.lines().any(|l| l == *line), "{mode}: no line {line:?} in:\n{out}"); }
-    assert!(out.lines().last() == Some("removed=yes"), "{mode}: the directory is removed:\n{out}");
+    assert_eq!(out.lines().last(), Some("removed=yes"),"{mode}: the directory is removed:\n{out}");
     let _ = std::fs::remove_file(&trace);
     out
 }
@@ -143,6 +143,25 @@ fn a_mach_port_destruct_answers_as_natively() {
 }
 
 #[test]
+fn an_oversized_xsecurity_length_ends_at_one_clean_wall() {
+    // Final-review T6-derefassert. Natively the kernel writes at most the 44-byte filesec, so the call
+    // succeeds whatever size the guest names; retrace cannot size the diff window and refuses it.
+    let t = std::env::temp_dir().join(format!("retrace-posix-{}-extbig.bin", std::process::id()));
+    let tp = t.to_str().unwrap();
+    let native = util::run_bounded(retrace_guest::POSIX_DYN, &["extbig"], &[], BOUND);
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "stat64_extended(oversized length) rc=0 errno=0\nremoved=yes\n", "native succeeds");
+    let rec = util::run_bounded(util::bin(),
+        &["record-dyn", retrace_guest::POSIX_DYN, "-o", tp, "--", "extbig"], &[], BOUND);
+    assert!(!rec.stderr.contains("panicked at") && !rec.stderr.contains("BUG"), "no bug banner. stderr:\n{}", rec.stderr);
+    let lines: Vec<&str> = rec.stderr.lines().filter(|l| l.starts_with("retrace:")).collect();
+    assert_eq!(lines.len(), 1, "exactly one retrace: line. stderr:\n{}", rec.stderr);
+    assert!(lines[0].starts_with("retrace: unsupported: syscall 341 was given a length of 1048576 bytes at "), "{}", lines[0]);
+    assert!(lines[0].ends_with(&format!(" - see {WALLS}#syscalls")), "{}", lines[0]);
+    assert_eq!(rec.code, Some(4), "a wall exits 4. stderr:\n{}", rec.stderr);
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
 fn a_flock_that_would_wait_ends_the_recording_at_one_clean_line() {
     let t = std::env::temp_dir().join(format!("retrace-posix-{}-flockwait.bin", std::process::id()));
     let tp = t.to_str().unwrap();
@@ -155,7 +174,7 @@ fn a_flock_that_would_wait_ends_the_recording_at_one_clean_line() {
     let lines: Vec<&str> = rec.stderr.lines().filter(|l| l.starts_with("retrace:")).collect();
     assert_eq!(lines.len(), 1, "exactly one retrace: line. stderr:\n{}", rec.stderr);
     let (head, tail) = ("retrace: unsupported: flock (syscall 131) on fd ",
-        &format!(" would wait for a lock another descriptor holds - see {WALLS}#syscalls"));
+        &format!(" would wait for a lock another descriptor or process holds - see {WALLS}#syscalls"));
     assert!(lines[0].starts_with(head) && lines[0].ends_with(tail.as_str()), "{}", lines[0]);
     let fd = &lines[0][head.len()..lines[0].len() - tail.len()];
     assert!(!fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()), "the descriptor is a number: {}", lines[0]);

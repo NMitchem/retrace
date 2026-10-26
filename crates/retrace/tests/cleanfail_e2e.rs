@@ -317,8 +317,8 @@ fn a_socketpair_stops_at_one_clean_line() {
 #[test]
 fn a_poll_on_a_file_stops_at_one_clean_line() {
     let line = assert_guest_wall(retrace_guest::CF_WALLS, &["pollfile"], "cf: pollfile\n",
-        "poll (syscall 230) on fd 4, a file, not a guest pipe", "threads");
-    assert_eq!(line, format!("retrace: unsupported: poll (syscall 230) on fd 4, a file, not a guest pipe - see {WALLS}#threads"));
+        "poll (syscall 230) on fd 4, not a guest pipe end", "threads");
+    assert_eq!(line, format!("retrace: unsupported: poll (syscall 230) on fd 4, not a guest pipe end - see {WALLS}#threads"));
 }
 
 /// M53 t4 (Ruling T4-closepolled): another thread closing the descriptor a blocked poller watches is

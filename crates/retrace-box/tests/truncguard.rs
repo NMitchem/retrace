@@ -337,7 +337,7 @@ fn a_recorded_region_longer_than_its_replay_backing_is_a_divergence() {
 // second sysctl" into "drive to the first sysctl twice" (`failsys.rs`/`the_band_fires...` above
 // establish this pattern).
 #[test]
-#[should_panic(expected = "syscall 202 asked for")]
+#[should_panic(expected = "syscall 202 was given a length of")]
 fn an_oldlenp_past_its_backing_is_refused() {
     let loaded = retrace_guest::parse_macho(&std::fs::read(retrace_guest::OLDLENSYSCTL).unwrap());
     let mut b = Box_::load(&loaded);

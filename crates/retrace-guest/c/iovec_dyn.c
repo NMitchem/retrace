@@ -155,6 +155,10 @@ static void mode_limits(void) {
     errno = 0; rc = readv(fd, v, 1025);  printf("readv(iovcnt 1025) rc=%ld errno=%d\n", SHOW(rc));
     errno = 0; rc = readv(fd, v, -1);    printf("readv(iovcnt -1) rc=%ld errno=%d\n", SHOW(rc));
     errno = 0; rc = pwritev(fd, v, 1025, 0); printf("pwritev(iovcnt 1025) rc=%ld errno=%d\n", SHOW(rc));
+    // Final-review M1: a count of 0 is EINVAL before the array is read, so an unmapped array pointer
+    // (above the 16 KiB floor) is never examined; replay must not examine it either.
+    errno = 0; rc = writev(fd, (const struct iovec *)0x7000000000UL, 0);
+    printf("writev(iovcnt 0, unmapped array) rc=%ld errno=%d\n", SHOW(rc));
     rm_file(fd);
 }
 

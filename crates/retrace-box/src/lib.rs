@@ -4581,8 +4581,9 @@ impl Box_ {
 
     /// Rewrite every guest fd operand of `num` in `args` to its host fd, in place.
     ///
-    /// `translate_fds` has exactly ONE caller, `forward_and_diff`, and is the first statement of
-    /// its forwarding path — which is what makes it M33's one loud site. (Since M37 the function's
+    /// `translate_fds` has two callers, `forward_and_diff` (M33's one loud site, where it is the
+    /// first statement of the forwarding path) and, since M53, `guest_iovec`, which forwards the
+    /// translated prefix of an iovec call itself. (Since M37 the function's
     /// literal first statement is the `SYS_DUP2` short-circuit into `guest_dup2`, which forwards
     /// nothing and consults no view; `dup2` has a row regardless. M38 adds the `F_DUPFD`
     /// short-circuit into `guest_fcntl_dupfd` beside it, on the same terms.) `guest_mmap_file` never calls it: file-backed
@@ -4950,15 +4951,13 @@ impl Box_ {
                             // sweep, jq and CPython at M29 (Task 4): 826 dispatches, zero oversized,
                             // so every legitimate call forwards untouched and this only catches the
                             // unmodelled case.
-                            assert!(
-                                Self::deref_len_fits(want, avail),
-                                "unmodelled: syscall {} asked for {want} bytes at ipa {:#x} whose \
-                                 backing holds only {avail} — forwarding it would let the host \
-                                 kernel write past the backing. See the M29 spec, Component 1. If \
-                                 this buffer might legitimately continue into an adjacent backing, \
-                                 re-run with RETRACE_DEREFLEN=1 to print the backing span and check.",
-                                num as i64, args[di],
-                            );
+                            // Final-review T6-derefassert: a guest reaches this with a natively-valid
+                            // call (the kernel writes at most 44 bytes into an `xsecurity` buffer
+                            // whatever size the guest names), so it is a wall, not a panic: retrace
+                            // cannot size the diff window for a length that runs past the backing.
+                            if !Self::deref_len_fits(want, avail) {
+                                retrace_arch::refuse!(Syscalls, "syscall {} was given a length of {want} bytes at {:#x}, but the memory behind that buffer holds only {avail}; retrace cannot size the window it records for the call, and forwarding it could let the host kernel write past the buffer. If the buffer might legitimately continue into an adjacent mapping, re-run with RETRACE_DEREFLEN=1 to print the backing span.", num as i64, args[di]);
+                            }
                         }
                         // `host_span` returns `None` for two different reasons that must not be
                         // conflated: `oldp == NULL` is a legal "just tell me the size" sysctl with
@@ -5623,7 +5622,14 @@ impl Box_ {
             // must come back to. Likewise spsr, not regs.cpsr.
             sp: ctx.regs.sp_el0,
             pc: ctx.elr,
-            cpsr: ctx.spsr,
+            // Final-review I1: a target that is not running but whose context is a COMPLETED return
+            // (a woken `poll`/`kevent`/wait) keeps the return's carry in `regs.cpsr`; `ctx.spsr` is
+            // still the `svc` entry's. A never-run thread has `regs.cpsr == spsr`, so it is unchanged.
+            cpsr: if tid != cur && ctx.regs.pc == ctx.elr {
+                (ctx.spsr & !retrace_arch::PSTATE_C) | (ctx.regs.cpsr & retrace_arch::PSTATE_C)
+            } else {
+                ctx.spsr
+            },
         };
         let ns = NeonState { v: ctx.fp, fpsr: ctx.fpsr as u32, fpcr: ctx.fpcr as u32 };
 
@@ -7015,9 +7021,27 @@ impl Box_ {
     fn fire_itimer(&mut self) {
         if self.itimer.deadline().is_none() { return; }
         let now = self.now_guest();
-        if !self.itimer.due(now) { return; }
+        if !self.itimer.is_due(now) { return; }
         let sig = retrace_arch::SIGALRM;
         let target = self.process_signal_target(sig);
+        // Final-review I2: a landmark that has just redirected the running thread into a handler (a
+        // caught self-raise, a `sigprocmask` unmask that materialises a pending signal, `sigsuspend`'s
+        // immediate path) leaves the live PC at the handler's trampoline while ELR_EL1 is still the
+        // post-`svc` address. A second frame built from ELR would drop that handler. So the expiry is
+        // left unconsumed and the check re-armed: SIGALRM fires at the NEXT landmark. Natively the
+        // kernel nests SIGALRM's frame over the first handler at that return; here SIGALRM's handler
+        // runs after the first handler's next landmark, so its order relative to the first handler can
+        // differ. It cannot loop: the re-armed check is consumed by the next settle, and a plain return
+        // has PC == ELR.
+        if target == self.threads.current() && self.classify_raise(target, sig) == RaiseKind::Deliver {
+            let pc = self.vcpu.get_reg(reg::PC).unwrap();
+            let elr = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
+            if pc != elr {
+                self.itimer.note_landmark();
+                return;
+            }
+        }
+        self.itimer.due(now);
         match self.classify_raise(target, sig) {
             RaiseKind::Pend => self.threads.pend(target, sig),
             RaiseKind::Ignore => {}
@@ -7101,7 +7125,8 @@ impl Box_ {
         if pending != 0 {
             retrace_arch::refuse!(Threads, "M49: sleep of thread {tid} reached its deadline with a deliverable signal \
                     pending (set {pending:#x}), which ending the sleep should have taken at its arrival. \
-                    This is retrace's bug, not the guest's: report it.");
+                    A signal pended in a handler and unmasked by its `sigreturn` is not materialised there (M16), and a \
+                    later sleep of this thread then reaches its deadline with it still pending; that case is unmodelled.");
         }
         self.deliver_wake(tid, retrace_arch::ETIMEDOUT, true, &[]).unwrap_or_else(|m| panic!("{m}"));
     }
@@ -7121,7 +7146,7 @@ impl Box_ {
         let (ret, _ret1, err, _writes) = self.forward_and_diff(retrace_arch::SYS_FLOCK, host);
         if err && ret == retrace_arch::EWOULDBLOCK && args[1] & retrace_arch::LOCK_NB == 0 {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
-                "flock (syscall 131) on fd {} would wait for a lock another descriptor holds", args[0] as u32)));
+                "flock (syscall 131) on fd {} would wait for a lock another descriptor or process holds", args[0] as u32)));
         }
         Ok((ret, err))
     }
@@ -7174,8 +7199,9 @@ impl Box_ {
         let kind = self.gkq.kind_of(args[0]);
         if partial && matches!(kind, gkq::FdKind::PipeRead(_) | gkq::FdKind::PipeWrite(_)) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
-                "{what} with an unreachable entry after the first, on guest pipe fd {}: natively a pipe transfers \
-                 only into entry 0 and drains nothing, which the pipe model cannot reproduce", args[0] as u32)));
+                "{what} with an unreachable entry after the first, on guest pipe fd {}: natively measured for \
+                 `readv`, a pipe transfers only into entry 0 and drains nothing, which the pipe model cannot reproduce; a \
+                 `writev` with a later unreachable entry is refused the same way", args[0] as u32)));
         }
         // Only `writev` is a console write. `pwritev` on a console descriptor takes the forward, whose
         // answer is native's (ESPIPE on a pipe, ENXIO on a tty; pwvprobe.c, Ruling T2-pwritev), as `pwrite`'s does.

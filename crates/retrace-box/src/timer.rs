@@ -61,6 +61,9 @@ impl RealTimer {
         true
     }
 
+    /// Is the timer due at `now`? Does not consume the expiry.
+    pub fn is_due(&self, now: u64) -> bool { self.deadline.is_some_and(|d| now >= d) }
+
     /// The tick the idle jump may go to, or None while disarmed.
     pub fn deadline(&self) -> Option<u64> { self.deadline }
 

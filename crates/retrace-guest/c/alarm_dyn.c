@@ -17,11 +17,17 @@
 //   masked     SIGALRM blocked, alarm(1), sleep(2) returns 0 and the handler runs at the unmask
 //   einval     setitimer and getitimer with a bad `which`, and a microsecond field out of range
 //   long       alarm(60) and pause(): under retrace this takes no host time (alarm_e2e bounds it)
+//   pollwake   (final-review I1) main issues `poll` by hand, entered with C set, on a pipe a worker
+//              writes and then signals main with kill(getpid()): x0/carry as native leaves them
+//   unmasktimer (final-review I2) a pending signal materialised by a sigprocmask unmask while a
+//              one-shot timer is already due: both handlers run once and sigprocmask returns 0
 //   virtual    setitimer(ITIMER_VIRTUAL): natively accepted, under retrace the wall
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
+#include <mach/mach_time.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
@@ -32,6 +38,32 @@ static volatile sig_atomic_t on_main;
 static volatile sig_atomic_t on_worker;
 static volatile sig_atomic_t stop;
 static pthread_t main_thread;
+static volatile sig_atomic_t h1, h2;
+static int poll_pipe[2];
+
+static void handler1(int sig) { (void)sig; h1++; }
+static void handler2(int sig) { (void)sig; h2++; }
+
+// poll (230) issued by hand with the carry set going in, so the carry coming out is the kernel's own.
+static void raw_poll(struct pollfd *p, long *x0, long *c) {
+    register long r0 __asm__("x0") = (long)p;
+    register long r1 __asm__("x1") = 1;
+    register long r2 __asm__("x2") = -1;
+    register long r16 __asm__("x16") = 230;
+    long cc;
+    __asm__ volatile("cmp xzr, xzr\n\tsvc #0x80\n\tcset %1, cs"
+                     : "+r"(r0), "=r"(cc), "+r"(r1), "+r"(r2) : "r"(r16) : "memory", "cc");
+    *x0 = r0;
+    *c = cc;
+}
+
+static void *write_then_kill(void *arg) {
+    (void)arg;
+    usleep(30000);
+    write(poll_pipe[1], "x", 1);
+    kill(getpid(), SIGUSR1);
+    return NULL;
+}
 
 static void handler(int sig) {
     (void)sig;
@@ -127,7 +159,8 @@ static int mode_target(void) {
     stop = 1;
     pthread_join(w, NULL);
     report("alarm, neither masks");
-    // Main masks it, the worker does not: it stays pending on main even while the worker runs.
+    // Main masks it, the worker does not: the worker takes it (the first
+    // thread that does not mask it, main first), and what it has not taken waits for main's unmask.
     clear();
     pthread_create(&w, NULL, lingering, NULL);
     block(SIGALRM);
@@ -277,6 +310,36 @@ int main(int argc, char **argv) {
         errno = 0;
         int rc = pause();
         printf("rc=%d errno=%d handled=%d\n", rc, errno, (int)hits);
+    } else if (!strcmp(mode, "pollwake")) {
+        pipe(poll_pipe);
+        pthread_t w;
+        pthread_create(&w, NULL, write_then_kill, NULL);
+        struct pollfd pfd = {poll_pipe[0], POLLIN, 0};
+        long x0, c;
+        raw_poll(&pfd, &x0, &c);
+        pthread_join(w, NULL);
+        // Native leaves either the ready answer (1, carry clear) or EINTR (4, carry set): never a mix.
+        printf("consistent=%s x0=%ld c=%ld\n", (x0 == 1 && c == 0) || (x0 == 4 && c == 1) ? "yes" : "no", x0, c);
+    } else if (!strcmp(mode, "unmasktimer")) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sigemptyset(&sa.sa_mask);
+        sa.sa_handler = handler1;
+        sigaction(SIGUSR1, &sa, NULL);
+        sa.sa_handler = handler2;
+        sigaction(SIGALRM, &sa, NULL);
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGUSR1);
+        sigprocmask(SIG_BLOCK, &set, NULL);
+        raise(SIGUSR1);
+        timer(0, 1, 0, 0);
+        for (int i = 0; i < 1000; i++) (void)mach_absolute_time();
+        int rc = sigprocmask(SIG_UNBLOCK, &set, NULL);
+        // Native measured h2=0 at this point (the 1 us timer's signal is not yet taken), so the
+        // counts are read after a sleep, by which time it has been.
+        usleep(20000);
+        printf("rc=%d h1=%d h2=%d\n", rc, (int)h1, (int)h2);
     } else if (!strcmp(mode, "virtual")) {
         struct itimerval it = {{0, 0}, {5, 0}};
         errno = 0;

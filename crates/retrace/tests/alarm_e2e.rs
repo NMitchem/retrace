@@ -1,6 +1,6 @@
 // M53 t5 gate (spec §3f; t0 §M8). `setitimer`/`getitimer` (so `alarm`) run `ITIMER_REAL` on the
 // synthetic clock, `sigsuspend` (so `pause`) waits for a signal, a signal ends a sleep with `EINTR`,
-// and a process-directed signal reaches the main thread, all in the box and never forwarded: each
+// and a process-directed signal reaches the first live thread that does not mask it (main first), all in the box and never forwarded: each
 // mode of `crates/retrace-guest/c/alarm_dyn.c` is run natively, recorded and replayed twice, and the
 // guest's own lines are the assertion. Before M53 `setitimer` and `sigsuspend` were walls at their
 // first call. Every run is bounded: a wake that never comes leaves the guest blocked forever, which
@@ -201,4 +201,36 @@ fn a_seek_across_the_timers_fire_matches_a_cold_seek() {
     assert_eq!(warm.1, cold.dbg_regs(), "registers: checkpointed vs cold");
     assert_eq!(warm.2, cold.dbg_internal_state(), "box state: checkpointed vs cold");
     assert!(cold.diff_memory(&warm.3).is_none(), "memory: checkpointed vs cold");
+}
+
+#[test]
+fn a_signal_to_a_woken_poller_keeps_the_polls_carry() {
+    // Final-review I1: main is woken from a hand-issued `poll` by a worker's write and is then sent
+    // SIGUSR1 before it runs. The handler's frame must restore the poll's carry, not the one the call
+    // was entered with. Native leaves (x0 1, c 0) or (x0 4, c 1) from run to run, so the line pins the
+    // consistency, not the pair.
+    let (_, nout) = native("pollwake");
+    assert!(nout.starts_with("alarm pollwake\nconsistent=yes "), "native: {nout}");
+    let (out, _) = records_consistent("pollwake");
+    assert!(out == "alarm pollwake\nconsistent=yes x0=1 c=0\n" || out == "alarm pollwake\nconsistent=yes x0=4 c=1\n", "{out}");
+}
+
+#[test]
+fn a_timer_due_at_an_unmask_waits_for_the_next_landmark() {
+    // Final-review I2: SIGALRM comes due at the landmark that has just redirected the thread into
+    // SIGUSR1's handler. Both handlers run once and the caller returns 0.
+    let (out, _) = records_as_native("unmasktimer");
+    assert_eq!(out, "alarm unmasktimer\nrc=0 h1=1 h2=1\n");
+}
+
+/// Record and two replays agree with each other; native may differ by run, so the caller compares
+/// only the shape against it.
+fn records_consistent(mode: &str) -> (String, PathBuf) {
+    let (rec, trace) = record(mode, BOUND);
+    assert!(!rec.stderr.contains("retrace: unsupported:"), "{mode}: no wall. stderr:\n{}", rec.stderr);
+    for k in 1..=2 {
+        let rp = util::run_bounded(util::bin(), &["replay", trace.to_str().unwrap()], &[], BOUND);
+        assert_eq!((rp.code, rp.stdout.as_slice()), (rec.code, rec.stdout.as_slice()), "{mode}: replay {k}: {}", rp.stderr);
+    }
+    (String::from_utf8_lossy(&rec.stdout).into_owned(), trace)
 }

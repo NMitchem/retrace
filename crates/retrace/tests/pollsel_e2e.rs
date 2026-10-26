@@ -137,7 +137,7 @@ fn a_poll_on_a_file_is_refused_by_value() {
     let line = refused("pollfile");
     // The descriptor's number is the guest's (4 under retrace, 3 natively), so it is not pinned.
     assert!(line.starts_with("retrace: unsupported: poll (syscall 230) on fd "), "{line}");
-    assert!(line.contains(", a file, not a guest pipe - see "), "{line}");
+    assert!(line.contains(", not a guest pipe end - see "), "{line}");
     assert!(line.ends_with("#threads"), "{line}");
 }
 

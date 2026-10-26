@@ -1353,9 +1353,10 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // matching rules has a blast radius of "every aborting guest", not just SIGTHREAD.
                 //
                 // M16: __pthread_kill names a TARGET THREAD; kill names the process. M53 §3f (Ruling
-                // T0-H4, t0 M8): natively a process-directed signal reaches the MAIN thread, whoever
-                // sends it, and stays pending on main while main masks it. Until M53 retrace picked
-                // the caller, which is the same thread for every single-threaded guest.
+                // T0-H4, t0 M8 and its Correction): natively a process-directed signal reaches the first
+                // live thread, main first, that does not mask it, whoever sends it, and pends on main
+                // when every thread masks it. Until M53 retrace picked the caller, which is the same
+                // thread for every single-threaded guest.
                 let sig = args[1];
                 let target = if num == retrace_arch::SYS_PTHREAD_KILL {
                     b.thread_of_port(args[0] as u32)
@@ -2507,7 +2508,8 @@ impl ReplaySession {
                             }
                         } else {
                             // kill names the process, not a thread. M53 §3f: a process-directed
-                            // signal reaches the main thread (t0 M8), exactly as record picks it.
+                            // signal reaches the first live thread that does not mask it, main first (t0 M8
+                            // and its Correction), exactly as record picks it.
                             self.b.process_signal_target(args[1])
                         };
                         let sig = args[1];
@@ -3888,11 +3890,16 @@ impl ReplaySession {
                             // with no pointer position, or none, so the call does nothing for it. It makes the
                             // same pages present as record did, and a refusal the recording does not carry is a
                             // divergence.
-                            if let Err(e) = self.b.prepare_forward_pointers(num, &args) {
-                                if !(*err && *ret == e && writes.is_empty()) {
-                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
-                                        "syscall {num}: replay refuses a pointer (errno {e}) that the recording forwarded \
-                                         (ret={ret:#x} err={err})") });
+                            // Final-review M1: not for an iovec call. Record's iovec arm checks its own pointers
+                            // in `iovec_prepare` (an invalid count answers EINVAL before the array is read), so
+                            // a check here would refuse, or commit pages, where record did neither.
+                            if !retrace_arch::is_iovec(num) {
+                                if let Err(e) = self.b.prepare_forward_pointers(num, &args) {
+                                    if !(*err && *ret == e && writes.is_empty()) {
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "syscall {num}: replay refuses a pointer (errno {e}) that the recording forwarded \
+                                             (ret={ret:#x} err={err})") });
+                                    }
                                 }
                             }
                             // M37 dup2 mirror: the table half is a pure function of the guest's

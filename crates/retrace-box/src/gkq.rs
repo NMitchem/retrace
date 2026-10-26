@@ -503,7 +503,7 @@ impl GuestKqueues {
                                other_closed: p.readers == 0 })
             }
             FdKind::Kqueue => Err("a kqueue, not a guest pipe".to_string()),
-            FdKind::Other => Err("a file, not a guest pipe".to_string()),
+            FdKind::Other => Err("not a guest pipe end".to_string()),
         }
     }
 
@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn poll_ready_refuses_a_descriptor_that_is_not_a_guest_pipe_end() {
         let mut g = kq();
-        assert_eq!(g.poll_ready(9, 1).unwrap_err(), "a file, not a guest pipe");
+        assert_eq!(g.poll_ready(9, 1).unwrap_err(), "not a guest pipe end");
         assert_eq!(g.poll_ready(KQ, 1).unwrap_err(), "a kqueue, not a guest pipe");
         g.pipe(5, 6).unwrap();
         g.note_read(5, 1).unwrap();

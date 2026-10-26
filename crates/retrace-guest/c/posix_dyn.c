@@ -445,6 +445,21 @@ static void mode_ext(void) {
     clear_dir(dir);
 }
 
+// Final-review T6-derefassert: stat64_extended with a 64-byte stack buffer and a size of 1 MiB, far
+// more than the stack's backing holds above the buffer. Natively the kernel writes at most the 44-byte
+// filesec, so the call succeeds; retrace cannot size the diff window and ends at a wall.
+static void mode_extbig(void) {
+    char p[256], buf[64];
+    struct stat st;
+    path(p, sizeof p, "f1");
+    close(make_file("f1", "hello"));
+    size_t sz = 1 << 20;
+    errno = 0;
+    long rc = raw4(341, (long)p, (long)&st, (long)buf, (long)&sz);
+    printf("stat64_extended(oversized length) rc=%ld errno=%d\n", rc, rc < 0 ? errno : 0);
+    clear_dir(dir);
+}
+
 static void run_mode(const char *mode) {
     if (!strcmp(mode, "files")) mode_files();
     else if (!strcmp(mode, "links")) mode_links();
@@ -458,6 +473,7 @@ static void run_mode(const char *mode) {
     else if (!strcmp(mode, "flockwait")) mode_flockwait();
     else if (!strcmp(mode, "prio")) mode_prio();
     else if (!strcmp(mode, "ext")) mode_ext();
+    else if (!strcmp(mode, "extbig")) mode_extbig();
     else { printf("posix: unknown mode\n"); exit(2); }
 }
 

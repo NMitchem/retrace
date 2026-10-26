@@ -49,10 +49,11 @@ filesystem and process calls the census ranked (`unlinkat`, `symlink`, `ftruncat
 neighbours) and `readv`, `writev`, `preadv` and `pwritev` are modelled. What still stops here from that
 work:
 
-- a `flock` that would wait for a lock another descriptor holds (`flock (syscall 131) on fd N would wait
-  for a lock another descriptor holds`);
-- a `readv` on a guest pipe whose later iovec entry is unreachable (`... with an unreachable entry after
-  the first, on guest pipe fd N`), and an iovec array that splits into more than 1024 host entries;
+- a `flock` that would wait for a lock another descriptor or process holds (`flock (syscall 131) on fd N
+  would wait for a lock another descriptor or process holds`);
+- a `readv` or `writev` on a guest pipe whose later iovec entry is unreachable (`... with an unreachable
+  entry after the first, on guest pipe fd N`; natively measured for `readv`, and a `writev` is refused the
+  same way), and an iovec array that splits into more than 1024 host entries;
 - `chroot`, which is privileged and stays out of scope for good, and `socketpair`, which is why tokio's
   runtime stops (`socketpair (syscall 135)`).
 
@@ -117,7 +118,9 @@ One case is special: every thread is blocked and nothing is left to wake any of 
 program would hang forever, so the line says so. Since M53 it also names a thread blocked in `sigsuspend`
 (`thread N waits in sigsuspend for a signal nothing can send`), which is what a `pause()` with no timer and no
 sender is. If the same program does not hang outside
-retrace, that is a bug in retrace; please report it.
+retrace, that is a bug in retrace; please report it. One exception is a known limit, not a bug: a thread
+blocked in `poll`, `kevent` or a wait while it holds a signal it cannot take (K8), for example `alarm(n)`
+followed by an infinite `poll`, also ends here. Natively that call returns `EINTR`.
 
 A program that spins forever waiting for another thread, without blocking, is not a wall: it hangs
 under retrace, where natively the other thread would run on another core. retrace cannot tell a spin from slow work by anything in the
