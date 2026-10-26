@@ -44,7 +44,17 @@ the macOS SDK does, with its number, for example `fsync (syscall 95)`, or a Mach
 negative number, for example `swtch_pri (mach trap -59)`. A program that waits in a call retrace
 does not model may also stop here: `sched_yield`, `clock_sleep_trap` and `mach_wait_until` do.
 
-Which calls have models grows milestone by milestone, ranked by what real programs call.
+Which calls have models grows milestone by milestone, ranked by what real programs call. Since M53 the
+filesystem and process calls the census ranked (`unlinkat`, `symlink`, `ftruncate`, `fsync` and their
+neighbours) and `readv`, `writev`, `preadv` and `pwritev` are modelled. What still stops here from that
+work:
+
+- a `flock` that would wait for a lock another descriptor holds (`flock (syscall 131) on fd N would wait
+  for a lock another descriptor holds`);
+- a `readv` on a guest pipe whose later iovec entry is unreachable (`... with an unreachable entry after
+  the first, on guest pipe fd N`), and an iovec array that splits into more than 1024 host entries;
+- `chroot`, which is privileged and stays out of scope for good, and `socketpair`, which is why tokio's
+  runtime stops (`socketpair (syscall 135)`).
 
 ## Mach messages
 
@@ -63,11 +73,17 @@ up to it, and a shell that then waits for its child stops here.
 
 The program used a signal in a way retrace does not model yet. These reach it today:
 
-- `pause()` or `sigsuspend()`, which wait for a signal;
 - a signal raised while blocked, whose default action ends the process when it is unblocked;
 - a hardware fault on a thread that has its signal blocked, which the program did not survive natively either;
 - `kill` with a signal other than 0 to another process;
-- `terminate_with_payload`, which ends a process by its pid.
+- `terminate_with_payload`, which ends a process by its pid;
+- `setitimer` or `getitimer` on `ITIMER_VIRTUAL` or `ITIMER_PROF`, which count CPU time the synthetic clock does not have (`only ITIMER_REAL is modelled`);
+- a signal sent to the process (`kill(getpid(), …)`, a timer's `SIGALRM`) when the main thread has exited and every other thread masks it.
+
+Since M53 `pause()` and `sigsuspend()` wait for a signal and return `EINTR` after its handler, `ITIMER_REAL` (so
+`alarm`) runs on the synthetic clock, a signal ends a `sleep` early, and `kill` with a signal number outside 0 to 31
+returns `EINVAL`, as natively. A `pause()` that nothing can ever signal is the deadlock case under
+[Threads](#threads).
 
 Since M51 a handler installed with `signal()`, `kill(pid, 0)` and `pthread_kill(thread, 0)`, and
 `abort_with_payload` (which dyld calls when a library is missing) run as they do natively.
@@ -82,14 +98,25 @@ here: a contended `os_unfair_lock` or any `__ulock_wait2` (544), the mach semaph
 (-37) and `semaphore_timedwait_signal_trap` (-39), a wait on a semaphore that was destroyed, a
 `pthread_mutex` with the fairshare policy, a condition-variable wait that carries a mutex, a
 `thread_switch` with an option other than none, depress or wait, and a `proc_pidinfo` thread lookup
-by thread id. A `dup` of a kqueue the program made also stops here.
+by thread id.
 
-A signal that arrives while a thread waits on a timer, in a timed sleep, a timed condition-variable
-wait or a timed `kevent`, stops the recording here too. A signal that is pending at any other wake
+Since M53 a duplicated kqueue is one kqueue, and `poll`, `select` and `pselect` over a program's own pipes are
+modelled. What stops here: `poll`, `select` or `pselect` on a descriptor that is not a guest pipe end (a file,
+a terminal, a socket), `pselect` with a signal mask, a write end in a `select` read set or a read end in a write
+set, a `poll` over 4096 entries, closing a descriptor a blocked `poll` or `select` watches, closing the kqueue
+descriptor a `kevent` waiter blocks on, and an `EVFILT_USER` add that carries both `EV_DISABLE` and
+`NOTE_TRIGGER`. Each line starts `M53:` or names the call and its descriptor. A program that reaches `socketpair`
+(tokio's runtime) stops under [Syscalls](#syscalls).
+
+A signal that arrives while a thread waits in `poll`, a timed condition-variable wait, a timed `kevent`, a
+semaphore or a mutex stops the recording here too. A signal that ends a `sleep` or a `sigsuspend` does not: it
+runs its handler and the call returns `EINTR`. A signal that is pending at any other wake
 is listed under [Signals](#signals).
 
 One case is special: every thread is blocked and nothing is left to wake any of them. Natively that
-program would hang forever, so the line says so. If the same program does not hang outside
+program would hang forever, so the line says so. Since M53 it also names a thread blocked in `sigsuspend`
+(`thread N waits in sigsuspend for a signal nothing can send`), which is what a `pause()` with no timer and no
+sender is. If the same program does not hang outside
 retrace, that is a bug in retrace; please report it.
 
 A program that spins forever waiting for another thread, without blocking, is not a wall: it hangs
